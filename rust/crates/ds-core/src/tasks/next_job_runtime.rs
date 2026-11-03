@@ -132,6 +132,89 @@ impl NextJobs {
         self.pane_lock(pane).lock_owned().await
     }
 
+    /// Bind a sent handoff to the producer generation observed for its pane.
+    ///
+    /// The sender owns this lock while it writes the delivery receipt, so an
+    /// observation arriving during that window is bound by the sender's final
+    /// `bind_turn_locked` call instead of waiting here.
+    #[allow(dead_code)] // Wired by the turn observation/dispatch runtime leaves.
+    pub(crate) async fn bind_turn(&self, pane: String) -> Result<(), DunkError> {
+        let lock = self.pane_lock(&pane);
+        let Ok(_guard) = lock.try_lock_owned() else {
+            return Ok(());
+        };
+        self.bind_turn_locked(&pane).await
+    }
+
+    /// Bind while the caller already owns this pane's async lock.
+    #[allow(dead_code)] // Called by delivery while it owns the pane lock.
+    async fn bind_turn_locked(&self, pane: &str) -> Result<(), DunkError> {
+        let stores = self.flock.stores();
+        let tasks = stores
+            .tasks
+            .ok_or_else(|| DunkError::Refused("task store unavailable".into()))?;
+        let inbox = stores
+            .inbox
+            .ok_or_else(|| DunkError::Refused("inbox store unavailable".into()))?;
+
+        for handoff in tasks.next_job_handoffs(Some(pane)).await? {
+            if handoff.get("state").and_then(Value::as_str) != Some("sent")
+                || handoff
+                    .get("delivered_at")
+                    .and_then(Value::as_f64)
+                    .is_none_or(|at| at == 0.0)
+            {
+                continue;
+            }
+            let Some(message_id) = handoff.get("message_id").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(turn) = handoff.get("observed_turn").and_then(Value::as_object) else {
+                continue;
+            };
+            let Some(turn_id) = turn
+                .get("turn_id")
+                .and_then(Value::as_str)
+                .filter(|turn_id| !turn_id.is_empty())
+            else {
+                continue;
+            };
+            if turn.get("handoff_id").and_then(Value::as_str) != Some(message_id) {
+                continue;
+            }
+            let Some(started_at) = turn.get("started_at").and_then(Value::as_f64) else {
+                continue;
+            };
+            let Some(attempt_at) = handoff.get("attempt_at").and_then(Value::as_f64) else {
+                continue;
+            };
+            if started_at < attempt_at {
+                continue;
+            }
+
+            let receipt =
+                crate::inbox::status(inbox.read_pool(), message_id, crate::clock::now_s())?;
+            if receipt.notify_state.as_deref() != Some("sent") {
+                continue;
+            }
+
+            let mut changes = serde_json::Map::new();
+            changes.insert("state".into(), Value::String("started".into()));
+            changes.insert("turn_id".into(), Value::String(turn_id.to_owned()));
+            changes.insert("turn_started_at".into(), Value::from(started_at));
+            changes.insert(
+                "turn_source".into(),
+                turn.get("source").cloned().unwrap_or(Value::Null),
+            );
+            changes.insert(
+                "turn_caller".into(),
+                turn.get("caller").cloned().unwrap_or(Value::Null),
+            );
+            tasks.update_next_job(&handoff, None, changes).await?;
+        }
+        Ok(())
+    }
+
     /// Dispatch permission is distinct from task allocation: registration never bypasses
     /// the global switch and an unreadable dependency cannot become permission.
     #[allow(dead_code)] // Consumed by the next-job transition leaves.
@@ -550,6 +633,196 @@ mod tests {
         let first_guard = first.try_lock_owned().expect("first pane lock available");
         let second_guard = second.try_lock_owned().expect("second pane lock available");
         drop((first_guard, second_guard));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn next_jobs_bind_turn_requires_sent_receipt_and_matching_generation() {
+        let (_dir, jobs, tasks, inbox) = materialise_fixture().await;
+
+        #[derive(Clone, Copy)]
+        struct HandoffSeed<'a> {
+            pane: &'a str,
+            message_id: &'a str,
+            notify_state: &'a str,
+            turn_id: &'a str,
+            handoff_id: &'a str,
+            started_at: f64,
+        }
+
+        async fn seed_handoff(
+            tasks: &crate::tasks::Tasks,
+            inbox: &Arc<crate::inbox_store::Store>,
+            seed: HandoffSeed<'_>,
+        ) {
+            let HandoffSeed {
+                pane,
+                message_id,
+                notify_state,
+                turn_id,
+                handoff_id,
+                started_at,
+            } = seed;
+            let task = tasks.add("global", "Bind turn", "body").await.unwrap();
+            let inbox = Arc::clone(inbox);
+            let message_id = message_id.to_owned();
+            let pane = pane.to_owned();
+            let notify_state = notify_state.to_owned();
+            let receipt_message_id = message_id.clone();
+            let receipt_pane = pane.clone();
+            let receipt_notify_id = message_id.clone();
+            tokio::task::spawn_blocking(move || {
+                inbox.ensure_next_job(
+                    &receipt_message_id,
+                    &receipt_pane,
+                    &receipt_pane,
+                    "body",
+                    "subject",
+                )?;
+                inbox.record_notify(
+                    &receipt_notify_id,
+                    &notify_state,
+                    None,
+                    Some("transport"),
+                    Some(1),
+                )
+            })
+            .await
+            .unwrap()
+            .unwrap();
+            let details = json!({
+                "state": "sent",
+                "attempt_at": 100.0,
+                "delivered_at": 200.0,
+                "observed_turn": {
+                    "turn_id": turn_id,
+                    "started_at": started_at,
+                    "source": "producer",
+                    "caller": "worker",
+                    "handoff_id": handoff_id
+                }
+            })
+            .as_object()
+            .unwrap()
+            .clone();
+            tasks
+                .record_next_job_handoff(
+                    &task.id,
+                    &pane,
+                    None,
+                    Some(&message_id),
+                    1,
+                    None,
+                    Some(201.0),
+                    Some(details),
+                )
+                .await
+                .unwrap();
+        }
+
+        seed_handoff(
+            &tasks,
+            &inbox,
+            HandoffSeed {
+                pane: "%valid",
+                message_id: "nj-bind-valid",
+                notify_state: "sent",
+                turn_id: "turn-1",
+                handoff_id: "nj-bind-valid",
+                started_at: 101.0,
+            },
+        )
+        .await;
+        let lock = jobs.pane_lock("%valid");
+        let held = lock.clone().try_lock_owned().unwrap();
+        jobs.bind_turn("%valid".into()).await.unwrap();
+        let busy_result = tasks.next_job_handoffs(Some("%valid")).await.unwrap();
+        assert_eq!(
+            busy_result[0].get("state").and_then(Value::as_str),
+            Some("sent")
+        );
+        assert!(busy_result[0].get("turn_id").is_none());
+        drop(held);
+
+        jobs.bind_turn("%valid".into()).await.unwrap();
+        let valid = tasks.next_job_handoffs(Some("%valid")).await.unwrap();
+        assert_eq!(
+            valid[0].get("state").and_then(Value::as_str),
+            Some("started")
+        );
+        assert_eq!(
+            valid[0].get("turn_id").and_then(Value::as_str),
+            Some("turn-1")
+        );
+        assert_eq!(
+            valid[0].get("turn_started_at").and_then(Value::as_f64),
+            Some(101.0)
+        );
+        assert_eq!(
+            valid[0].get("turn_source").and_then(Value::as_str),
+            Some("producer")
+        );
+        assert_eq!(
+            valid[0].get("turn_caller").and_then(Value::as_str),
+            Some("worker")
+        );
+
+        for (pane, message_id, notify, turn_id, observed_id, started_at) in [
+            (
+                "%pending",
+                "nj-bind-pending",
+                "queued",
+                "turn-2",
+                "nj-bind-pending",
+                101.0,
+            ),
+            (
+                "%wrong",
+                "nj-bind-wrong",
+                "sent",
+                "turn-3",
+                "nj-other",
+                101.0,
+            ),
+            (
+                "%early",
+                "nj-bind-early",
+                "sent",
+                "turn-4",
+                "nj-bind-early",
+                99.0,
+            ),
+            (
+                "%empty",
+                "nj-bind-empty",
+                "sent",
+                "",
+                "nj-bind-empty",
+                101.0,
+            ),
+        ] {
+            seed_handoff(
+                &tasks,
+                &inbox,
+                HandoffSeed {
+                    pane,
+                    message_id,
+                    notify_state: notify,
+                    turn_id,
+                    handoff_id: observed_id,
+                    started_at,
+                },
+            )
+            .await;
+            jobs.bind_turn(pane.to_owned()).await.unwrap();
+            let rows = tasks.next_job_handoffs(Some(pane)).await.unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].get("state").and_then(Value::as_str), Some("sent"));
+            assert!(rows[0].get("turn_id").is_none());
+        }
+
+        tokio::task::spawn_blocking(move || drop((jobs, inbox)))
+            .await
+            .unwrap();
     }
 
     async fn configured_jobs() -> (tempfile::TempDir, NextJobs, Arc<crate::tasks::Tasks>) {
