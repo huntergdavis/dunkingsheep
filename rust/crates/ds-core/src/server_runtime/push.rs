@@ -77,6 +77,7 @@ impl LoopRuntimeAdapter {
         pane_id: &'a str,
     ) -> LoopFuture<'a, bool> {
         let pane_id = pane_id.to_owned();
+        let worker_pane_id = pane_id.clone();
         let worker = self.with_loop_terminal(move |flock, terminal| {
             let Some(store) = flock.stores().inbox.clone() else {
                 return false;
@@ -84,7 +85,7 @@ impl LoopRuntimeAdapter {
             let mailbox = match flock.own_mailbox_from_sources(
                 terminal,
                 || store.read_pool(),
-                &pane_id,
+                &worker_pane_id,
                 || {
                     std::env::var("DUNKINGSHEEP_MAILBOX")
                         .ok()
@@ -101,7 +102,7 @@ impl LoopRuntimeAdapter {
             ) {
                 Ok(mailbox) => mailbox,
                 Err(error) => {
-                    eprintln!("push: unread mail check failed pane={pane_id}: {error}");
+                    eprintln!("push: unread mail check failed pane={worker_pane_id}: {error}");
                     return false;
                 }
             };
@@ -109,7 +110,7 @@ impl LoopRuntimeAdapter {
             let unread = match crate::inbox::count(store.read_pool(), &mailbox, &[], now) {
                 Ok(counts) => counts.unread,
                 Err(error) => {
-                    eprintln!("push: unread mail count failed pane={pane_id}: {error}");
+                    eprintln!("push: unread mail count failed pane={worker_pane_id}: {error}");
                     return false;
                 }
             };
@@ -126,7 +127,7 @@ impl LoopRuntimeAdapter {
                     })
                     .collect::<Vec<_>>(),
                 Err(error) => {
-                    eprintln!("push: unread mail read failed pane={pane_id}: {error}");
+                    eprintln!("push: unread mail read failed pane={worker_pane_id}: {error}");
                     return false;
                 }
             };
@@ -157,6 +158,7 @@ impl LoopRuntimeAdapter {
         let pane_id = pane_id.to_owned();
         let task = task.clone();
         let task_id = task.id.clone();
+        let worker_task_id = task_id.clone();
         let subject = format!("TASK {}: {}", task.id, task.title);
         let dependencies =
             serde_json::from_str::<Vec<String>>(&task.depends_on).unwrap_or_default();
@@ -197,7 +199,7 @@ impl LoopRuntimeAdapter {
                 );
                 let outbox = super::outbox_runtime::OutboxRuntime::new(
                     Arc::clone(&flock),
-                    runtime,
+                    runtime.clone(),
                     terminal_factory,
                 )?;
                 let inbox = super::inbox_data::InboxRuntimeView::new(
@@ -215,9 +217,9 @@ impl LoopRuntimeAdapter {
                 flock_ref.inbox_send(&inbox, &args).map(|_| ())
             })();
             if let Err(error) = result {
-                eprintln!("could not announce task {task_id} to {pane_id}: {error}");
+                eprintln!("could not announce task {worker_task_id} to {pane_id}: {error}");
             }
-            flock_ref.set_last_message(format!("Pushed task {task_id} to {pane_id}"));
+            flock_ref.set_last_message(format!("Pushed task {worker_task_id} to {pane_id}"));
         });
         Box::pin(async move {
             if let Err(error) = worker.await {
