@@ -42,14 +42,17 @@ pub type Plan = Map<String, Value>;
 /// `dunk_dispatch.next_job_plan`, injected.
 pub type Planner = dyn Fn(&PlanInput<'_>) -> Plan + Send + Sync;
 
+/// The locked allowlist's pane authorization predicate.
+pub type AllowlistPredicate = dyn Fn(&str, Option<&Value>) -> bool;
+
+/// Callback run while the allowlist lock is held.
+pub type AllowlistCallback = dyn FnMut(&AllowlistPredicate) -> Result<(), DunkError>;
+
 /// The superusers allowlist. `with_locked` holds the lock while `body` runs and hands it a
 /// matcher `(pane_id, pane_info) -> allowed`. An `Err` (corrupt or unreadable allowlist)
 /// grants nothing.
 pub trait Allowlist: Send + Sync {
-    fn with_locked(
-        &self,
-        body: &mut dyn FnMut(&dyn Fn(&str, Option<&Value>) -> bool) -> Result<(), DunkError>,
-    ) -> Result<(), DunkError>;
+    fn with_locked(&self, body: &mut AllowlistCallback) -> Result<(), DunkError>;
 }
 
 /// `operator_proof`: the claim that `pane_id` is an operator.
