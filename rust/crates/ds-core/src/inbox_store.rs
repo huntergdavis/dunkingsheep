@@ -104,6 +104,81 @@ fn refuse(text: impl Into<String>) -> DunkError {
     DunkError::Refused(text.into())
 }
 
+fn owner_wire_attachments_truthy(attachments: Option<&JsonValue>) -> bool {
+    match attachments {
+        None | Some(JsonValue::Null) | Some(JsonValue::Bool(false)) => false,
+        Some(JsonValue::Bool(true)) => true,
+        Some(JsonValue::Number(number)) => number.as_f64().is_some_and(|number| number != 0.0),
+        Some(JsonValue::String(paths)) => paths.split(',').any(|path| !path.trim().is_empty()),
+        Some(JsonValue::Array(paths)) => !paths.is_empty(),
+        Some(JsonValue::Object(paths)) => !paths.is_empty(),
+    }
+}
+
+fn owner_wire_attachment_paths(attachments: Option<&JsonValue>) -> Result<Vec<PathBuf>, DunkError> {
+    let Some(value) = attachments else {
+        return Ok(Vec::new());
+    };
+    let paths: Vec<String> = match value {
+        JsonValue::Null | JsonValue::Bool(false) => Vec::new(),
+        JsonValue::String(paths) => paths
+            .split(',')
+            .filter(|path| !path.trim().is_empty())
+            .map(str::to_string)
+            .collect(),
+        JsonValue::Array(paths) => paths.iter().map(owner_wire_python_string).collect(),
+        JsonValue::Object(paths) => paths.keys().cloned().collect(),
+        JsonValue::Bool(true) => return Err(refuse("'bool' object is not iterable")),
+        JsonValue::Number(number) if number.as_f64() == Some(0.0) => Vec::new(),
+        JsonValue::Number(number) => {
+            let kind = if number.is_f64() { "float" } else { "int" };
+            return Err(refuse(format!("'{kind}' object is not iterable")));
+        }
+    };
+    Ok(paths.into_iter().map(PathBuf::from).collect())
+}
+
+fn owner_wire_python_string(value: &JsonValue) -> String {
+    match value {
+        JsonValue::Null => "None".to_string(),
+        JsonValue::Bool(true) => "True".to_string(),
+        JsonValue::Bool(false) => "False".to_string(),
+        JsonValue::String(value) => value.clone(),
+        JsonValue::Number(value) => value.to_string(),
+        JsonValue::Array(_) | JsonValue::Object(_) => value.to_string(),
+    }
+}
+
+fn owner_sqlite_subject(subject: Option<&JsonValue>) -> Result<rusqlite::types::Value, DunkError> {
+    use rusqlite::types::Value as SqlValue;
+    let Some(subject) = subject else {
+        return Ok(SqlValue::Null);
+    };
+    match subject {
+        JsonValue::Null => Ok(SqlValue::Null),
+        JsonValue::Bool(value) => Ok(SqlValue::Integer(i64::from(*value))),
+        JsonValue::String(value) => Ok(SqlValue::Text(value.clone())),
+        JsonValue::Number(value) if value.is_i64() => {
+            Ok(SqlValue::Integer(value.as_i64().expect("is_i64")))
+        }
+        JsonValue::Number(value) if value.is_u64() => value
+            .as_u64()
+            .and_then(|number| i64::try_from(number).ok())
+            .map(SqlValue::Integer)
+            .ok_or_else(|| refuse("Python int too large to convert to SQLite INTEGER")),
+        JsonValue::Number(value) => value
+            .as_f64()
+            .map(SqlValue::Real)
+            .ok_or_else(|| refuse("Python int too large to convert to SQLite INTEGER")),
+        JsonValue::Array(_) => Err(refuse(
+            "Error binding parameter 6: type 'list' is not supported",
+        )),
+        JsonValue::Object(_) => Err(refuse(
+            "Error binding parameter 6: type 'dict' is not supported",
+        )),
+    }
+}
+
 impl Store {
     /// Open (creating) the database and the blob directory. A new database gets the
     /// verbatim schema; an existing one is left alone.

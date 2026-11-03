@@ -206,7 +206,7 @@ impl<'a> OwnerConversations<'a> {
         let store = self.inbox_store()?;
         if external_id.as_deref().is_some_and(|id| !id.is_empty()) {
             if let Some(message) =
-                store.find_by_external_id(OWNER_MAILBOX, external_id.as_deref().unwrap())?
+                store.find_by_external_id(OWNER_MAILBOX, external_id.as_deref())?
             {
                 return Ok(Ingested {
                     message,
