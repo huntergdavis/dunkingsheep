@@ -20,18 +20,35 @@ impl LoopRuntimeAdapter {
 
     #[allow(dead_code)] // The complete PushEnv implementation belongs to its assembly leaf.
     pub(crate) fn helper_pushenv_lane_agent_alive(&self, pane_id: &str) -> Option<bool> {
-        let pane_pid = self
+        let Some(registered_pane_pid) = self
             .flock
             .with_roles(|roles, _| {
-                Ok(roles.entry(pane_id)?.and_then(|entry| {
+                Ok(roles.entry(pane_id)?.map(|entry| {
                     entry.get("pane_pid").and_then(|pid| {
                         pid.as_i64()
                             .or_else(|| pid.as_str().and_then(|text| text.parse().ok()))
                     })
                 }))
             })
-            .ok()
-            .flatten()?;
+            .ok()?
+        else {
+            return None;
+        };
+        let pane_pid = registered_pane_pid.or_else(|| {
+            let terminal_factory = Arc::clone(&self.terminal_factory);
+            let pane_id = pane_id.to_owned();
+            std::thread::Builder::new()
+                .name("push-lane-pane-info".into())
+                .spawn(move || {
+                    (terminal_factory)()
+                        .get_pane(&pane_id)
+                        .and_then(|pane| pane.pane_pid)
+                })
+                .ok()?
+                .join()
+                .ok()
+                .flatten()
+        })?;
         super::delivery::lane_agent_alive_for_pane_pid(pane_pid)
     }
 }
@@ -121,6 +138,7 @@ mod tests {
             adapter.helper_pushenv_lane_agent_alive("w3:p3"),
             Some(false)
         );
+        assert!(adapter.helper_pushenv_lane_agent_alive("w1:p1").is_some());
         assert_eq!(adapter.helper_pushenv_lane_agent_alive("w9:p9"), None);
         let active_agent = [crate::push::ChildProc {
             comm: "codex".into(),
