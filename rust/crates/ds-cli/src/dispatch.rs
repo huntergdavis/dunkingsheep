@@ -466,7 +466,7 @@ fn mcp_map(ns: &Map<String, Value>) -> Outcome {
         output.extend([
             "# MCP tool map (t8 grouping audit)".to_string(),
             String::new(),
-            "The declared MCP surface is one namespaced tool per domain, each taking an `action`. Nothing was removed: every flat name still resolves, and each command stays on the CLI/socket API.".to_string(),
+            "The declared MCP surface is one namespaced tool per domain, each taking an `action`. Nothing was removed: every flat name still resolves, and every command stays on the CLI/socket API.".to_string(),
             String::new(),
             format!("- declared tools: **{}** grouped (was **{}** flat)", GROUPS.len(), flat.len()),
             format!("- grouped schema bytes: **{grouped_bytes}** (was **{flat_bytes}**, -{:.1}%)", 100.0 * (1.0 - grouped_bytes as f64 / flat_bytes as f64)),
