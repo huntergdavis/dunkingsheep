@@ -197,6 +197,167 @@ impl SendPreparationEnv for Pane {
 
 const P: &str = "w2:p1";
 
+#[test]
+fn direct_key_send_serializes_keys_and_immediate_mode_delivers_without_queueing() {
+    use std::sync::Arc;
+
+    struct Wake;
+    impl OutboxWake for Wake {
+        fn ensure_worker(&self, _: &Arc<Flock>, _: &str) -> Result<(), crate::error::DunkError> {
+            panic!("immediate send must not start an outbox worker")
+        }
+    }
+    struct Store;
+    impl SnapshotStore for Store {
+        fn save(&self, _: &Flock) -> Result<(), crate::error::DunkError> {
+            Ok(())
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Arc::new(Flock::new(
+        dir.path().join("launches.json"),
+        dir.path(),
+        false,
+    ));
+    let mut pane = Pane::default();
+    pane.panes = vec![serde_json::json!({"pane_id": P, "tab_label": "Agent A"})];
+    let result = flock
+        .send_keys_now(
+            &serde_json::json!(P),
+            &["Escape".into(), "".into()],
+            DirectSendOptions {
+                hold_while_typing: false,
+                ..DirectSendOptions::default()
+            },
+            &mut pane,
+            &Wake,
+            &Store,
+            || None,
+        )
+        .unwrap();
+
+    assert_eq!("Escape", result["text"]);
+    assert_eq!("send_keys", result["source"]);
+    assert_eq!("sent", result["status"]);
+    assert_eq!("Escape", pane.keys[0].1);
+    assert!(flock.outbox_snapshot().is_empty());
+}
+
+#[test]
+fn direct_text_send_preserves_metadata_and_queues_by_default() {
+    use std::sync::Arc;
+
+    struct Wake;
+    impl OutboxWake for Wake {
+        fn ensure_worker(&self, _: &Arc<Flock>, _: &str) -> Result<(), crate::error::DunkError> {
+            Ok(())
+        }
+    }
+    struct Store;
+    impl SnapshotStore for Store {
+        fn save(&self, _: &Flock) -> Result<(), crate::error::DunkError> {
+            Ok(())
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Arc::new(Flock::new(
+        dir.path().join("launches.json"),
+        dir.path(),
+        false,
+    ));
+    let mut pane = Pane::default();
+    pane.panes = vec![serde_json::json!({"pane_id": P, "tab_label": "Agent A"})];
+    let result = flock
+        .send_now(
+            &serde_json::json!(P),
+            "[inbox] hello",
+            DirectSendOptions::default(),
+            DirectTextMetadata {
+                press_enter: false,
+                notify_for: Some("i42"),
+                source: "test",
+                ..DirectTextMetadata::default()
+            },
+            &mut pane,
+            &Wake,
+            &Store,
+            || None,
+        )
+        .unwrap();
+
+    assert_eq!("queued", result["status"]);
+    let queued = flock.outbox_snapshot();
+    let message = &queued[P][0];
+    assert_eq!("test", message.source);
+    assert!(!message.press_enter);
+    assert!(message.is_notice);
+    assert_eq!(vec!["i42"], message.notify_for);
+}
+
+#[test]
+fn completion_waiter_timeout_is_bounded_and_observes_release() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Flock::new(dir.path().join("launches.json"), dir.path(), false);
+    let message = Message::new("m1", P, "Agent A", "hello", "test");
+    assert!(!message.done.wait_timeout(std::time::Duration::ZERO));
+    flock.record_delivery_outcome(&message, true, None, "ok", None);
+    assert!(message.done.wait_timeout(std::time::Duration::ZERO));
+}
+
+#[test]
+fn direct_send_methods_reject_blank_text_and_key_sequences() {
+    use std::sync::Arc;
+
+    struct Wake;
+    impl OutboxWake for Wake {
+        fn ensure_worker(&self, _: &Arc<Flock>, _: &str) -> Result<(), crate::error::DunkError> {
+            Ok(())
+        }
+    }
+    struct Store;
+    impl SnapshotStore for Store {
+        fn save(&self, _: &Flock) -> Result<(), crate::error::DunkError> {
+            Ok(())
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Arc::new(Flock::new(
+        dir.path().join("launches.json"),
+        dir.path(),
+        false,
+    ));
+    let mut pane = Pane::default();
+    pane.panes = vec![serde_json::json!({"pane_id": P, "tab_label": "Agent A"})];
+    let text_error = flock
+        .send_now(
+            &serde_json::json!(P),
+            "  ",
+            DirectSendOptions::default(),
+            DirectTextMetadata::default(),
+            &mut pane,
+            &Wake,
+            &Store,
+            || None,
+        )
+        .unwrap_err();
+    assert!(text_error.to_string().contains("text is required"));
+    let keys_error = flock
+        .send_keys_now(
+            &serde_json::json!(P),
+            &["  ".into()],
+            DirectSendOptions::default(),
+            &mut pane,
+            &Wake,
+            &Store,
+            || None,
+        )
+        .unwrap_err();
+    assert!(keys_error.to_string().contains("keys are required"));
+}
+
 // Single producer makes these lock probes a deterministic proof: wake runs while enqueue owns
 // the lock, then save runs after enqueue releases it. The concurrent test below checks only
 // producer/FIFO/callback counts because cross-producer contention is legitimate there.
