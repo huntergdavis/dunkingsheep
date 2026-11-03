@@ -179,12 +179,29 @@ impl OutboxWake for NoopOutboxWake {
 fn fire_env(fail_send: bool) -> FireEnv {
     FireEnv {
         panes: vec![json!({"pane_id": "w1:p2", "tab_label": "Agent"})],
-        screen: include_str!("../../tests/fixtures/screen/codex-pane17-transcript-plus-hint.ansi")
-            .replace("tab to queue message", "Ask Codex to do anything"),
+        screen: idle_codex_screen(),
         typed: Vec::new(),
         keys: Vec::new(),
         fail_send,
     }
+}
+
+fn idle_codex_screen() -> String {
+    let esc = "\x1b[";
+    let background = format!("{esc}48;2;30;30;30m");
+    let hint = format!(
+        "{esc}0m{esc}1m{background}›{esc}0m{esc}38;2;49;49;49m{background}⠁{esc}0m{esc}2m{background}Ask Codex to do anything{esc}0m{background}   {esc}0m"
+    );
+    [
+        format!("{esc}0m{esc}2m  done 6:03 PM{esc}0m"),
+        String::new(),
+        format!("{esc}0m{esc}38;2;40;40;40m{background}⠁{esc}0m{background}   {esc}0m{esc}38;2;70;70;70m{background}⠈{esc}0m"),
+        hint,
+        format!("{esc}0m{background}       {esc}0m{esc}38;2;56;56;56m{background}⢀{esc}0m{background}        {esc}0m"),
+        format!("  {esc}0m{esc}38;2;246;226;183mgpt-6-astra xhigh{esc}0m{esc}2m · {esc}0m{esc}38;2;171;223;167m~/workspace/fire-tests{esc}0m"),
+    ]
+    .join("\r\n")
+        + "\r\n"
 }
 
 fn load_one_fire_dunk(flock: &Flock, text: &str, max_sends: Option<i64>) {
