@@ -11,7 +11,7 @@ use crate::error::DunkError;
 
 use super::{
     iso_timestamp, list_reports, prose_problems, render, shorten_path, write_report, ReportError,
-    ReportFile, ReportListing, ReportPaths, ReportSources,
+    ReportFile, ReportListing, ReportSources,
 };
 
 const WINDOW_S: f64 = 24.0 * 60.0 * 60.0;
