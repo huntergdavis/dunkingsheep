@@ -7,6 +7,29 @@ use crate::server_runtime::RequestRuntimeAdapter;
 
 impl RequestRuntimeAdapter<'_> {
     #[allow(dead_code)] // The complete VerifyBackend assembly belongs to its dependent leaf.
+    fn helper_verifybackend_agent_child_pids(&mut self, pane_pid: i64) -> Option<Vec<Value>> {
+        crate::proc::pane_agent_pids(Some(pane_pid)).map(|entries| {
+            entries
+                .into_iter()
+                .map(|entry| {
+                    serde_json::json!({
+                        "pid": entry.pid,
+                        "comm": entry.comm,
+                        "state": entry.state,
+                        "start": entry.start,
+                        "argv": entry.argv,
+                    })
+                })
+                .collect()
+        })
+    }
+
+    #[allow(dead_code)] // The complete VerifyBackend assembly belongs to its dependent leaf.
+    fn helper_verifybackend_process_start(&self, pid: i64) -> Option<i64> {
+        crate::proc::process_start(pid)?.parse().ok()
+    }
+
+    #[allow(dead_code)] // The complete VerifyBackend assembly belongs to its dependent leaf.
     fn helper_verifybackend_get_pane(&self, pane_id: &str) -> Option<Value> {
         self.terminal
             .with_env(|env| PaneInfoEnv::get_pane(env, pane_id))
@@ -28,6 +51,40 @@ mod tests {
     use crate::flock::Flock;
     use crate::server::RequestCtx;
     use crate::terminal::{fakes::FakeTerminal, Terminal};
+
+    #[test]
+    fn production_verify_backend_uses_process_ancestry_when_available() {
+        let dir = crate::testsupport::dir("verify-process-runtime");
+        let flock = Flock::new(
+            dir.path().join("launches.json"),
+            dir.path().join("lanes.json"),
+            false,
+        );
+        let request = RequestCtx::default();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let terminal: Mutex<Box<dyn Terminal>> = Mutex::new(Box::new(FakeTerminal::new()));
+        let mut adapter = RequestRuntimeAdapter::new(&flock, &request, runtime.handle(), &terminal);
+        let pid = i64::from(std::process::id());
+        let entries = adapter
+            .helper_verifybackend_agent_child_pids(pid)
+            .expect("Linux process table available");
+        let own = entries
+            .iter()
+            .find(|entry| entry["pid"] == pid)
+            .expect("own process included");
+        assert!(own["comm"].as_str().is_some_and(|comm| !comm.is_empty()));
+        assert!(own["state"].as_str().is_some_and(|state| !state.is_empty()));
+        assert!(own["argv"].is_array());
+        assert_eq!(
+            own["start"].as_str().and_then(|s| s.parse::<i64>().ok()),
+            adapter.helper_verifybackend_process_start(pid)
+        );
+        assert_eq!(None, adapter.helper_verifybackend_agent_child_pids(0));
+        assert_eq!(None, adapter.helper_verifybackend_process_start(0));
+    }
 
     #[test]
     fn production_verify_backend_reads_pane_and_screen_without_fabrication() {
