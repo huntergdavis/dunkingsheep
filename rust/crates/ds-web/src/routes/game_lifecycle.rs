@@ -191,6 +191,8 @@ fn game_start_bool(value: &Value) -> Option<bool> {
         Value::Bool(value) => Some(*value),
         Value::Number(value) if value.as_i64() == Some(0) => Some(false),
         Value::Number(value) if value.as_i64() == Some(1) => Some(true),
+        Value::Number(value) if value.as_f64() == Some(0.0) => Some(false),
+        Value::Number(value) if value.as_f64() == Some(1.0) => Some(true),
         Value::String(value) => match value.to_ascii_lowercase().as_str() {
             "0" | "f" | "false" | "n" | "no" | "off" => Some(false),
             "1" | "t" | "true" | "y" | "yes" | "on" => Some(true),
@@ -559,6 +561,16 @@ mod tests {
         )))
         .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+        for (body, expected) in [(r#"{"fresh":0.0}"#, false), (r#"{"fresh":1.0}"#, true)] {
+            let response = block_on(service.clone().oneshot(request(
+                "POST",
+                "/api/game/start",
+                Body::from(body),
+            )))
+            .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(game.fresh_values.lock().unwrap().last(), Some(&expected));
+        }
         let response = block_on(service.clone().oneshot(request(
             "POST",
             "/api/game/start",
@@ -566,7 +578,10 @@ mod tests {
         )))
         .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(*game.fresh_values.lock().unwrap(), vec![false, true, true]);
+        assert_eq!(
+            *game.fresh_values.lock().unwrap(),
+            vec![false, true, false, true, true]
+        );
         let response = block_on(service.clone().oneshot(request(
             "POST",
             "/api/game/start",
