@@ -205,4 +205,53 @@ mod tests {
             assert!(flock.status_state().is_err());
         }
     }
+    #[test]
+    fn turn_send_wait_returns_real_decided_delivery() {
+        let dir = tempfile::tempdir().unwrap();
+        let flock = Arc::new(Flock::new(
+            dir.path().join("launches"),
+            dir.path().join("lanes"),
+            false,
+        ));
+        let inbox =
+            Arc::new(Store::open(dir.path().join("inbox.db"), dir.path().join("blobs")).unwrap());
+        flock.attach_stores(Stores {
+            inbox: Some(inbox),
+            ..Stores::default()
+        });
+        flock
+            .attach_status_state(StatusState::at_start(
+                "test",
+                dir.path().join("state"),
+                dir.path().join("daemon"),
+                Env::from_pairs(&[("DUNKINGSHEEP_TURN_END_WAIT_S", "8")]),
+            ))
+            .unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let owner = OutboxRuntime::new(
+            Arc::clone(&flock),
+            runtime.handle().clone(),
+            Arc::new(|| Box::new(FakeTerminal::new())),
+        )
+        .unwrap();
+        let terminal: Mutex<Box<dyn Terminal>> = Mutex::new(Box::new(FakeTerminal::new()));
+        let request = RequestCtx::default();
+        let adapter = RequestRuntimeAdapter::new(&flock, &request, runtime.handle(), &terminal)
+            .with_outbox(&owner)
+            .unwrap();
+        let result = adapter
+            .helper_turndispatchenv_send_now("w1:p1", "completed message")
+            .unwrap();
+        assert_eq!(
+            result["queued"], false,
+            "expected a decided real worker result: {result}"
+        );
+        assert_eq!(result["source"], "turn_end");
+        assert!(result["message_id"].as_str().is_some());
+        assert!(result["outcome"].as_str().is_some());
+        owner.stop_and_join();
+    }
 }
