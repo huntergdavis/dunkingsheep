@@ -12,9 +12,11 @@ use tokio::runtime::Handle;
 use super::RequestRuntimeAdapter;
 use crate::api;
 use crate::error::DunkError;
+use crate::flock::panes::PaneInfoEnv;
 use crate::flock::Flock;
 use crate::metrics::Event;
 use crate::server::{Dispatcher, PaneInfo, RequestCtx};
+use crate::server_runtime::TerminalCallAdapter;
 use crate::terminal::Terminal;
 
 #[allow(dead_code)] // The server startup assembly is outside this dispatcher leaf.
@@ -27,6 +29,31 @@ pub(crate) struct RuntimeDispatcher {
     runtime: Handle,
     terminal_factory: TerminalFactory,
     handlers: api::Dispatcher,
+}
+
+struct RolePaneQuery<'a> {
+    list_panes_grouped: &'a dyn Fn() -> Result<Vec<Value>, DunkError>,
+    get_pane: &'a dyn Fn(&str) -> Option<Value>,
+    list_error: Mutex<Option<DunkError>>,
+}
+
+impl PaneInfoEnv for RolePaneQuery<'_> {
+    fn list_panes_grouped(&self) -> Vec<Value> {
+        match (self.list_panes_grouped)() {
+            Ok(panes) => panes,
+            Err(error) => {
+                *self
+                    .list_error
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error);
+                Vec::new()
+            }
+        }
+    }
+
+    fn get_pane(&self, pane_id: &str) -> Option<Value> {
+        (self.get_pane)(pane_id)
+    }
 }
 
 impl RuntimeDispatcher {
@@ -43,6 +70,41 @@ impl RuntimeDispatcher {
             terminal_factory,
             handlers,
         }
+    }
+
+    fn pane_info_at(&self, pane_id: &str, now: f64) -> Result<Option<PaneInfo>, DunkError> {
+        if pane_id.is_empty() {
+            return Ok(None);
+        }
+        let terminal = Mutex::new((self.terminal_factory)());
+        let terminal = TerminalCallAdapter {
+            flock: &self.flock,
+            terminal: &terminal,
+            runtime: &self.runtime,
+        };
+        let list_panes_grouped = || terminal.try_list_panes_grouped();
+        let get_pane = |id| PaneInfoEnv::get_pane(&terminal, id);
+        let query = RolePaneQuery {
+            list_panes_grouped: &list_panes_grouped,
+            get_pane: &get_pane,
+            list_error: Mutex::new(None),
+        };
+        let pane = self.flock.role_pane_info(&query, pane_id, now);
+        if pane.is_none() {
+            if let Some(error) = query
+                .list_error
+                .into_inner()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+            {
+                return Err(error);
+            }
+        }
+        Ok(pane.map(|pane| PaneInfo {
+            pane_pid: pane.get("pane_pid").and_then(|pid| {
+                pid.as_i64()
+                    .or_else(|| pid.as_str().and_then(|text| text.parse().ok()))
+            }),
+        }))
     }
 }
 
@@ -62,22 +124,7 @@ impl Dispatcher for RuntimeDispatcher {
     }
 
     fn pane_info(&self, pane_id: &str) -> Result<Option<PaneInfo>, DunkError> {
-        if pane_id.is_empty() {
-            return Ok(None);
-        }
-        let terminal = (self.terminal_factory)();
-        let groups = terminal
-            .try_list_panes_grouped()
-            .map_err(|error| DunkError::Refused(error.to_string()))?;
-        let pane = groups
-            .values()
-            .flatten()
-            .find(|pane| pane.pane_id == pane_id)
-            .cloned()
-            .or_else(|| terminal.get_pane(pane_id));
-        Ok(pane.map(|pane| PaneInfo {
-            pane_pid: pane.pane_pid,
-        }))
+        self.pane_info_at(pane_id, crate::clock::now_s())
     }
 
     fn record_identity_mismatch(&self, pane_id: &str, reason: &str) {

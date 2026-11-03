@@ -130,7 +130,8 @@ fn pane_lookup_preserves_absence_and_backend_failure_and_metrics_are_best_effort
         terminal.panes[0].pane_pid = None;
         Box::new(terminal)
     });
-    let no_pid = make_dispatcher(Arc::clone(&flock), runtime.handle(), no_pid_factory);
+    let (_no_pid_dir, no_pid_flock) = make_flock("pane-no-pid", None);
+    let no_pid = make_dispatcher(Arc::clone(&no_pid_flock), runtime.handle(), no_pid_factory);
     assert!(no_pid
         .pane_info("w1:p1")
         .unwrap()
@@ -138,12 +139,18 @@ fn pane_lookup_preserves_absence_and_backend_failure_and_metrics_are_best_effort
         .pane_pid
         .is_none());
 
+    let (_failure_dir, failure_flock) = make_flock("pane-failure", None);
+    let failing_factory: TerminalFactory = Arc::new(|| {
+        let mut terminal = FakeTerminal::new();
+        terminal.panes.clear();
+        terminal.fail_grouped_panes =
+            Some(TerminalError::unavailable("fixture pane listing failed"));
+        Box::new(terminal)
+    });
     let failing = make_dispatcher(
-        Arc::clone(&flock),
+        Arc::clone(&failure_flock),
         runtime.handle(),
-        factory(Some(TerminalError::unavailable(
-            "fixture pane listing failed",
-        ))),
+        failing_factory,
     );
     assert_eq!(
         failing.pane_info("w1:p1").unwrap_err().to_string(),
@@ -166,4 +173,26 @@ fn pane_lookup_preserves_absence_and_backend_failure_and_metrics_are_best_effort
         factory(None),
     );
     no_metrics.record_identity_mismatch("w1:p1", "pane_not_in_ancestry");
+}
+
+#[test]
+fn pane_lookup_uses_last_good_role_record_after_empty_backend_answer() {
+    let (_dir, flock) = make_flock("pane-info-cache", None);
+    let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+    let empty = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let factory_empty = Arc::clone(&empty);
+    let terminal_factory: TerminalFactory = Arc::new(move || {
+        let mut terminal = FakeTerminal::new();
+        if factory_empty.load(std::sync::atomic::Ordering::Relaxed) {
+            terminal.panes.clear();
+        }
+        Box::new(terminal)
+    });
+    let dispatcher = make_dispatcher(Arc::clone(&flock), runtime.handle(), terminal_factory);
+
+    let initial = dispatcher.pane_info_at("w1:p1", 100.0).unwrap().unwrap();
+    assert_eq!(initial.pane_pid, Some(1101));
+    empty.store(true, std::sync::atomic::Ordering::Relaxed);
+    let held = dispatcher.pane_info_at("w1:p1", 103.0).unwrap().unwrap();
+    assert_eq!(held.pane_pid, Some(1101));
 }
