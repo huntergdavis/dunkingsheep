@@ -11,7 +11,7 @@ use crate::metrics::MetricsStore;
 use crate::proc::Caller;
 use crate::roles::Roles;
 use crate::server::{Dispatcher, RequestCtx};
-use crate::terminal::{fakes::FakeTerminal, Terminal, TerminalError};
+use crate::terminal::{fakes::FakeTerminal, TerminalError};
 
 fn handlers() -> api::Dispatcher {
     let mut handlers = api::Dispatcher::new();
