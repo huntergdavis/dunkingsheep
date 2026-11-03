@@ -6,8 +6,8 @@
 //!
 //! The Python reaches the backend, the lease table and the clock through `self`; here they are
 //! [`SendEnv`], so every decision is testable with a scripted pane. NOT in this slice (next
-//! NOT in these slices (later t801 work): `send_now`/`send_keys_now`, `_enqueue`/`_deliver`,
-//! the per-pane outbox task, and public `clear_box`.
+//! Later T33 slices add the public `send_now`/`send_keys_now` routes on the accepted outbox and
+//! confirmation seams; the per-pane worker and public `clear_box` remain separate integrations.
 //!
 //! POLICY (owner, 2026-10-23/24) kept verbatim: a busy agent is NOT a hold reason, and there
 //! is NO "a human is typing" hold - every message goes through this daemon, so a non-empty box
@@ -2191,6 +2191,19 @@ impl CompletionWaiter {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
         }
     }
+
+    /// Wait for completion up to `timeout`, returning whether the event was set.
+    pub fn wait_timeout(&self, timeout: Duration) -> bool {
+        let state = lock_unpoison(&self.state);
+        if state.settled {
+            return true;
+        }
+        let (state, _) = self
+            .changed
+            .wait_timeout_while(state, timeout, |state| !state.settled)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.settled
+    }
 }
 
 impl PartialEq for CompletionWaiter {
@@ -2855,6 +2868,44 @@ pub trait SnapshotStore: Send + Sync {
 /// the outbox during this call.
 pub trait OutboxWake: Send + Sync {
     fn ensure_worker(&self, flock: &Arc<Flock>, pane_id: &str) -> Result<(), DunkError>;
+}
+
+/// Arguments shared by the public direct-send entry points.
+#[derive(Debug, Clone)]
+pub struct DirectSendOptions<'a> {
+    pub self_pane_id: Option<&'a str>,
+    pub hold_while_typing: bool,
+    pub wait_s: f64,
+}
+
+impl Default for DirectSendOptions<'_> {
+    fn default() -> Self {
+        Self {
+            self_pane_id: None,
+            hold_while_typing: true,
+            wait_s: 0.0,
+        }
+    }
+}
+
+/// Additional text-message metadata accepted by `Flock::send_now`.
+#[derive(Debug, Clone)]
+pub struct DirectTextMetadata<'a> {
+    pub press_enter: bool,
+    pub is_notice: bool,
+    pub notify_for: Option<&'a str>,
+    pub source: &'a str,
+}
+
+impl Default for DirectTextMetadata<'_> {
+    fn default() -> Self {
+        Self {
+            press_enter: true,
+            is_notice: false,
+            notify_for: None,
+            source: "send_text",
+        }
+    }
 }
 
 /// Runtime-owned environment adapter that executes the real `outbox_worker` loop.
@@ -4121,6 +4172,217 @@ impl Flock {
             wake.ensure_worker(self, &pane_id)?;
         }
         store.save(self)
+    }
+
+    /// Send one text message through the shared guarded delivery path. With the default hold
+    /// behavior it enters the per-pane FIFO; disabling holds performs one immediate attempt.
+    #[allow(clippy::too_many_arguments)]
+    pub fn send_now(
+        self: &Arc<Self>,
+        target: &Value,
+        text: &str,
+        options: DirectSendOptions<'_>,
+        metadata: DirectTextMetadata<'_>,
+        env: &mut dyn SendPreparationEnv,
+        wake: &dyn OutboxWake,
+        store: &dyn SnapshotStore,
+        mut permission: impl FnMut() -> Option<String>,
+    ) -> Result<Value, DunkError> {
+        let panes = env.list_panes_grouped();
+        let pane = if target.is_object() {
+            resolve_target_dict(&panes, target)?.clone()
+        } else {
+            let spec = match target {
+                Value::Null => String::new(),
+                Value::String(spec) => spec.clone(),
+                Value::Bool(value) => if *value { "True" } else { "False" }.into(),
+                other => other.to_string(),
+            };
+            resolve_target(
+                &panes,
+                &spec,
+                options.self_pane_id,
+                &env.server_error_hint(),
+            )?
+            .clone()
+        };
+        if text.trim().is_empty() {
+            return Err(DunkError::Refused("text is required".into()));
+        }
+        let pane_id = pane
+            .get("pane_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let label = pane
+            .get("tab_label")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(pane_id);
+        let mut message = self.new_message(pane_id, label, text, metadata.source)?;
+        message.press_enter = metadata.press_enter;
+        message.is_notice = metadata.is_notice || text.starts_with(NOTICE_PREFIX);
+        if let Some(id) = metadata.notify_for.filter(|id| !id.is_empty()) {
+            message.notify_for.push(id.to_owned());
+        }
+        if options.hold_while_typing {
+            self.enqueue(message.clone(), wake, store)?;
+            if options.wait_s > 0.0 {
+                message
+                    .done
+                    .wait_timeout(Duration::from_secs_f64(options.wait_s.min(3600.0)));
+            }
+            return Ok(self.direct_message_result(&message));
+        }
+        message.hold_while_typing = false;
+        let message = self.deliver_direct(message, env, &mut permission);
+        let result = self.direct_message_result(&message);
+        let _ = store.save(self);
+        Ok(result)
+    }
+
+    /// Send a normalized key sequence as a direct message, preserving its wire text and `keys`
+    /// kind while using the same outbox ordering and immediate-attempt behavior as text sends.
+    #[allow(clippy::too_many_arguments)]
+    pub fn send_keys_now(
+        self: &Arc<Self>,
+        target: &Value,
+        keys: &[String],
+        options: DirectSendOptions<'_>,
+        env: &mut dyn SendPreparationEnv,
+        wake: &dyn OutboxWake,
+        store: &dyn SnapshotStore,
+        mut permission: impl FnMut() -> Option<String>,
+    ) -> Result<Value, DunkError> {
+        let panes = env.list_panes_grouped();
+        let pane = if target.is_object() {
+            resolve_target_dict(&panes, target)?.clone()
+        } else {
+            let spec = match target {
+                Value::Null => String::new(),
+                Value::String(spec) => spec.clone(),
+                Value::Bool(value) => if *value { "True" } else { "False" }.into(),
+                other => other.to_string(),
+            };
+            resolve_target(
+                &panes,
+                &spec,
+                options.self_pane_id,
+                &env.server_error_hint(),
+            )?
+            .clone()
+        };
+        let normalized: Vec<String> = keys
+            .iter()
+            .filter(|key| !key.trim().is_empty())
+            .cloned()
+            .collect();
+        if normalized.is_empty() {
+            return Err(DunkError::Refused(
+                "keys are required, e.g. 'Enter' or 'ctrl+c'".into(),
+            ));
+        }
+        let text = normalized.join(" ");
+        let pane_id = pane
+            .get("pane_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let label = pane
+            .get("tab_label")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(pane_id);
+        let mut message = self.new_message(pane_id, label, &text, "send_keys")?;
+        message.kind = "keys".into();
+        if options.hold_while_typing {
+            self.enqueue(message.clone(), wake, store)?;
+            if options.wait_s > 0.0 {
+                message
+                    .done
+                    .wait_timeout(Duration::from_secs_f64(options.wait_s.min(3600.0)));
+            }
+            return Ok(self.direct_message_result(&message));
+        }
+        message.hold_while_typing = false;
+        let message = self.deliver_direct(message, env, &mut permission);
+        let result = self.direct_message_result(&message);
+        let _ = store.save(self);
+        Ok(result)
+    }
+
+    fn direct_message_result(&self, message: &Message) -> Value {
+        let history = self
+            .message_history
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        history
+            .iter()
+            .find(|row| row.id == message.id)
+            .unwrap_or(message)
+            .to_dict()
+    }
+
+    fn deliver_direct(
+        &self,
+        mut message: Message,
+        env: &mut dyn SendPreparationEnv,
+        permission: &mut impl FnMut() -> Option<String>,
+    ) -> Message {
+        message.attempt_generation = env.attempt_generation(&message.pane_id);
+        let pane_id = message.pane_id.clone();
+        let options = SendGuardOptions {
+            hold_while_typing: false,
+            allow_modal: message.kind == "keys",
+            preserve_draft: false,
+        };
+        let (sent, ok, detail, _) =
+            send_guarded_with_reason(self, env, &pane_id, options, permission, |env, guard| {
+                if message.kind == "keys" {
+                    let keys: Vec<String> =
+                        message.text.split_whitespace().map(str::to_owned).collect();
+                    Ok(press_keys(env, &pane_id, &keys, guard))
+                } else {
+                    Ok(submit_text_with_options(
+                        self,
+                        env,
+                        &pane_id,
+                        &message.text,
+                        SubmitOptions {
+                            press_enter: message.press_enter,
+                            check_box: false,
+                            attempt_generation: AttemptGeneration::Captured(
+                                message.attempt_generation.as_deref(),
+                            ),
+                        },
+                        Some(guard),
+                    ))
+                }
+            });
+        message.status = if sent && ok.unwrap_or(false) {
+            "sent"
+        } else {
+            "failed"
+        }
+        .into();
+        message.detail = Some(detail.clone());
+        message.finished_at = Some(clock::now_s());
+        self.set_last_message(if message.status == "sent" {
+            format!("Sent to {}", message.target_label)
+        } else {
+            format!("Send failed: {detail}")
+        });
+        self.remember(&message);
+        self.record_delivery_outcome(
+            &message,
+            message.status == "sent",
+            Some(&detail),
+            if message.status == "sent" {
+                "ok"
+            } else {
+                "failed"
+            },
+            Some("message.sent"),
+        );
+        message
     }
 
     /// Current pane queues for the snapshot-store seam and deterministic tests.
