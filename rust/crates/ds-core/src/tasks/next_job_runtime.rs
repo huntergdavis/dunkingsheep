@@ -507,6 +507,7 @@ impl NextJobs {
         let permission_factory = Arc::clone(&terminal_factory);
         let permission_jobs = NextJobs::new(Arc::clone(&self.flock));
         let permission_env_provider = Arc::clone(&env_provider);
+        let permission_runtime = tokio::runtime::Handle::current();
         let adapter = LoopRuntimeAdapter::new(Arc::clone(&self.flock), terminal_factory);
         let sent = adapter
             .with_loop_terminal(
@@ -525,7 +526,6 @@ impl NextJobs {
                         preserve_draft: true,
                     };
                     let pane_for_permission = pane_for_send.clone();
-                    let permission_runtime = terminal.runtime.clone();
                     let permission = move || {
                         let env = match permission_env_provider() {
                             Ok(env) => env,
