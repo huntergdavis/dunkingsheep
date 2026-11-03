@@ -639,16 +639,29 @@ mod tests {
     async fn next_jobs_bind_turn_requires_sent_receipt_and_matching_generation() {
         let (_dir, jobs, tasks, inbox) = materialise_fixture().await;
 
+        #[derive(Clone, Copy)]
+        struct HandoffSeed<'a> {
+            pane: &'a str,
+            message_id: &'a str,
+            notify_state: &'a str,
+            turn_id: &'a str,
+            handoff_id: &'a str,
+            started_at: f64,
+        }
+
         async fn seed_handoff(
             tasks: &crate::tasks::Tasks,
             inbox: &Arc<crate::inbox_store::Store>,
-            pane: &str,
-            message_id: &str,
-            notify_state: &str,
-            turn_id: &str,
-            handoff_id: &str,
-            started_at: f64,
+            seed: HandoffSeed<'_>,
         ) {
+            let HandoffSeed {
+                pane,
+                message_id,
+                notify_state,
+                turn_id,
+                handoff_id,
+                started_at,
+            } = seed;
             let task = tasks.add("global", "Bind turn", "body").await.unwrap();
             let inbox = Arc::clone(inbox);
             let message_id = message_id.to_owned();
@@ -709,12 +722,14 @@ mod tests {
         seed_handoff(
             &tasks,
             &inbox,
-            "%valid",
-            "nj-bind-valid",
-            "sent",
-            "turn-1",
-            "nj-bind-valid",
-            101.0,
+            HandoffSeed {
+                pane: "%valid",
+                message_id: "nj-bind-valid",
+                notify_state: "sent",
+                turn_id: "turn-1",
+                handoff_id: "nj-bind-valid",
+                started_at: 101.0,
+            },
         )
         .await;
         let lock = jobs.pane_lock("%valid");
@@ -788,12 +803,14 @@ mod tests {
             seed_handoff(
                 &tasks,
                 &inbox,
-                pane,
-                message_id,
-                notify,
-                turn_id,
-                observed_id,
-                started_at,
+                HandoffSeed {
+                    pane,
+                    message_id,
+                    notify_state: notify,
+                    turn_id,
+                    handoff_id: observed_id,
+                    started_at,
+                },
             )
             .await;
             jobs.bind_turn(pane.to_owned()).await.unwrap();
