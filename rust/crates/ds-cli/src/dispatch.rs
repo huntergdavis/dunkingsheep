@@ -1625,11 +1625,11 @@ fn command_output_timeout(
         .ok_or_else(|| "guard check stderr was not captured".to_string())?;
     let stdout_reader = std::thread::spawn(move || {
         let mut output = Vec::new();
-        stdout.read_to_end(&mut output).map(|()| output)
+        stdout.read_to_end(&mut output).map(|_| output)
     });
     let stderr_reader = std::thread::spawn(move || {
         let mut output = Vec::new();
-        stderr.read_to_end(&mut output).map(|()| output)
+        stderr.read_to_end(&mut output).map(|_| output)
     });
     let started = Instant::now();
     let status = loop {
