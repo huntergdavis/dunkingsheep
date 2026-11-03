@@ -597,7 +597,7 @@ mod tests {
             )
             .unwrap_err()
             .to_string();
-        assert!(role_denied.contains("target_mismatch"));
+        assert!(role_denied.contains("send_text to another pane requires a superuser"));
         let observed = observations.lock().unwrap();
         assert!(observed
             .text
