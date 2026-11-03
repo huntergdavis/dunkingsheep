@@ -61,6 +61,20 @@ pub trait CommandEnv: PaneInfoEnv {
         Err(DunkError::Refused("turn hooks are not wired".into()))
     }
 
+    /// The accepted T52 Poolrad sync service used by the T39 command adapter.
+    fn poolrad_sync(&self, _limit: usize, _dry_run: bool) -> Result<Value, DunkError> {
+        Err(DunkError::Refused(
+            "poolrad sync adapter is not wired".into(),
+        ))
+    }
+
+    /// The accepted T52 Poolrad progress service used by the T39 command adapter.
+    fn poolrad_progress(&self) -> Result<Value, DunkError> {
+        Err(DunkError::Refused(
+            "poolrad progress adapter is not wired".into(),
+        ))
+    }
+
     /// The retired-pane archive used by `retire_pane`.
     fn retired_panes_path(&self) -> Result<PathBuf, DunkError> {
         crate::panes::default_path(&crate::config::Env::from_process())
@@ -357,6 +371,12 @@ impl Dispatcher {
     /// Register only the T39 GitHub App token handler.
     pub fn register_gh_token(&mut self) {
         self.register("gh_token", h_gh_token);
+    }
+
+    /// Register only the T39 Poolrad sync and progress handlers.
+    pub fn register_poolrad_sync_progress(&mut self) {
+        self.register("poolrad_sync", h_poolrad_sync);
+        self.register("poolrad_progress", h_poolrad_progress);
     }
 
     /// Register only the T39 task-following API leaf.
@@ -818,6 +838,201 @@ pub fn h_token_revoke(context: &HandlerContext<'_>, args: Args) -> Result<Value,
         .token_revoke(label, context.self_pane_id(), context.env)
 }
 
+fn poolrad_limit(args: &Args) -> Result<usize, DunkError> {
+    let Some(value) = args.get("limit").filter(|value| truthy(value)) else {
+        return Ok(6);
+    };
+    match value {
+        Value::Number(number) => python_number_limit(number),
+        Value::Bool(value) => Ok(usize::from(*value)),
+        Value::String(value) => parse_python_decimal_limit(value).ok_or_else(|| {
+            DunkError::Refused(format!(
+                "invalid literal for int() with base 10: {}",
+                py_repr(value)
+            ))
+        }),
+        Value::Array(_) => Err(DunkError::Refused(
+            "int() argument must be a string, a bytes-like object or a real number, not 'list'"
+                .into(),
+        )),
+        Value::Object(_) => Err(DunkError::Refused(
+            "int() argument must be a string, a bytes-like object or a real number, not 'dict'"
+                .into(),
+        )),
+        Value::Null => unreachable!("falsey limit uses the default"),
+    }
+}
+
+fn python_number_limit(number: &serde_json::Number) -> Result<usize, DunkError> {
+    if let Some(value) = number.as_i64() {
+        return Ok(if value <= 0 {
+            1
+        } else {
+            usize::try_from(value).unwrap_or(usize::MAX)
+        });
+    }
+    if let Some(value) = number.as_u64() {
+        return Ok(usize::try_from(value).unwrap_or(usize::MAX));
+    }
+    if let Some(value) = number.as_f64() {
+        let integer = value.trunc();
+        return Ok(if integer <= 0.0 {
+            1
+        } else if integer >= usize::MAX as f64 {
+            usize::MAX
+        } else {
+            integer as usize
+        });
+    }
+    Err(DunkError::Refused("cannot convert value to int".into()))
+}
+
+fn parse_python_decimal_limit(value: &str) -> Option<usize> {
+    let literal = value.trim();
+    let sign_len = usize::from(matches!(literal.as_bytes().first(), Some(b'+' | b'-')));
+    let negative = literal.as_bytes().first() == Some(&b'-');
+    let (_, digits) = literal.split_at(sign_len);
+    if digits.is_empty() {
+        return None;
+    }
+
+    let mut previous_was_digit = false;
+    let mut magnitude = 0usize;
+    let mut chars = digits.chars().peekable();
+    while let Some(character) = chars.next() {
+        if let Some(digit) = python_decimal_digit(character) {
+            magnitude = magnitude
+                .saturating_mul(10)
+                .saturating_add(usize::from(digit));
+            previous_was_digit = true;
+        } else if character == '_'
+            && previous_was_digit
+            && chars
+                .peek()
+                .and_then(|next| python_decimal_digit(*next))
+                .is_some()
+        {
+            previous_was_digit = false;
+        } else {
+            return None;
+        }
+    }
+    if !previous_was_digit {
+        return None;
+    }
+    if negative || magnitude == 0 {
+        // Python's candidates() appends a row before comparing len(picked) to limit,
+        // so any nonpositive converted limit still selects one eligible row.
+        Some(1)
+    } else {
+        Some(magnitude)
+    }
+}
+
+fn python_decimal_digit(character: char) -> Option<u8> {
+    // Unicode 16.0 Decimal_Number ranges, matching the Python 3.14 runtime used by this port.
+    // The two multi-set ranges are mathematical styled digits and segmented digits.
+    const DECIMAL_RANGES: &[(u32, u32)] = &[
+        (0x0030, 0x0039),
+        (0x0660, 0x0669),
+        (0x06F0, 0x06F9),
+        (0x07C0, 0x07C9),
+        (0x0966, 0x096F),
+        (0x09E6, 0x09EF),
+        (0x0A66, 0x0A6F),
+        (0x0AE6, 0x0AEF),
+        (0x0B66, 0x0B6F),
+        (0x0BE6, 0x0BEF),
+        (0x0C66, 0x0C6F),
+        (0x0CE6, 0x0CEF),
+        (0x0D66, 0x0D6F),
+        (0x0DE6, 0x0DEF),
+        (0x0E50, 0x0E59),
+        (0x0ED0, 0x0ED9),
+        (0x0F20, 0x0F29),
+        (0x1040, 0x1049),
+        (0x1090, 0x1099),
+        (0x17E0, 0x17E9),
+        (0x1810, 0x1819),
+        (0x1946, 0x194F),
+        (0x19D0, 0x19D9),
+        (0x1A80, 0x1A89),
+        (0x1A90, 0x1A99),
+        (0x1B50, 0x1B59),
+        (0x1BB0, 0x1BB9),
+        (0x1C40, 0x1C49),
+        (0x1C50, 0x1C59),
+        (0xA620, 0xA629),
+        (0xA8D0, 0xA8D9),
+        (0xA900, 0xA909),
+        (0xA9D0, 0xA9D9),
+        (0xA9F0, 0xA9F9),
+        (0xAA50, 0xAA59),
+        (0xABF0, 0xABF9),
+        (0xFF10, 0xFF19),
+        (0x104A0, 0x104A9),
+        (0x10D30, 0x10D39),
+        (0x10D40, 0x10D49),
+        (0x11066, 0x1106F),
+        (0x110F0, 0x110F9),
+        (0x11136, 0x1113F),
+        (0x111D0, 0x111D9),
+        (0x112F0, 0x112F9),
+        (0x11450, 0x11459),
+        (0x114D0, 0x114D9),
+        (0x11650, 0x11659),
+        (0x116C0, 0x116C9),
+        (0x116D0, 0x116E3),
+        (0x11730, 0x11739),
+        (0x118E0, 0x118E9),
+        (0x11950, 0x11959),
+        (0x11BF0, 0x11BF9),
+        (0x11C50, 0x11C59),
+        (0x11D50, 0x11D59),
+        (0x11DA0, 0x11DA9),
+        (0x11F50, 0x11F59),
+        (0x16130, 0x16139),
+        (0x16A60, 0x16A69),
+        (0x16AC0, 0x16AC9),
+        (0x16B50, 0x16B59),
+        (0x16D70, 0x16D79),
+        (0x1CCF0, 0x1CCF9),
+        (0x1D7CE, 0x1D7FF),
+        (0x1E140, 0x1E149),
+        (0x1E2F0, 0x1E2F9),
+        (0x1E4F0, 0x1E4F9),
+        (0x1E5F1, 0x1E5FA),
+        (0x1E950, 0x1E959),
+        (0x1FBF0, 0x1FBF9),
+    ];
+
+    let codepoint = character as u32;
+    DECIMAL_RANGES.iter().find_map(|&(start, end)| {
+        if (start..=end).contains(&codepoint) {
+            Some(((codepoint - start) % 10) as u8)
+        } else {
+            None
+        }
+    })
+}
+
+fn poolrad_dry_run(value: Option<&Value>) -> bool {
+    match value {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(value)) => *value,
+        Some(Value::String(value)) => python_bool_string(value),
+        Some(Value::Number(value)) => python_bool_string(&value.to_string()),
+        Some(Value::Array(_) | Value::Object(_)) => false,
+    }
+}
+
+fn python_bool_string(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "y" | "on"
+    )
+}
+
 /// `dunk_core.Flock.gh_token` through the accepted T52 token cache.
 pub fn h_gh_token(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
     let role = context
@@ -882,6 +1097,19 @@ pub fn h_gh_token(context: &HandlerContext<'_>, args: Args) -> Result<Value, Dun
         "cached": entry.get("cached").cloned().unwrap_or(Value::Bool(false)),
     }))
 }
+
+/// `dunk_api.h_poolrad_sync` through the accepted T52 Poolrad service.
+pub fn h_poolrad_sync(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let limit = poolrad_limit(&args)?;
+    let dry_run = poolrad_dry_run(args.get("dry_run"));
+    context.env.poolrad_sync(limit, dry_run)
+}
+
+/// `dunk_api.h_poolrad_progress` through the accepted T52 Poolrad service.
+pub fn h_poolrad_progress(context: &HandlerContext<'_>, _args: Args) -> Result<Value, DunkError> {
+    context.env.poolrad_progress()
+}
+
 pub fn h_lanes(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
     let action = args
         .get("action")
