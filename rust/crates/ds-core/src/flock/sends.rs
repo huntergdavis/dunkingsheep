@@ -3593,11 +3593,26 @@ impl Flock {
             preserve_draft: false,
         };
         let is_keys = message.kind == "keys";
-        let message_text = message.text.clone();
         let press_enter = message.press_enter;
         let attempt_generation = message.attempt_generation.clone();
         let (sent, ok, detail, blocker_reason) =
             send_guarded_with_reason(self, env, &pane_id, options, permission, |env, guard| {
+                // A queued inbox notice can be folded while this send waits for the pane lock.
+                // Refresh the live row only after acquiring that lock so the text entered is the
+                // latest text Python's delayed delivery closure observes.
+                let latest_payload = outbox_lock(&self.outbox)
+                    .get(&pane_id)
+                    .and_then(|queue| {
+                        queue
+                            .iter()
+                            .find(|row| row.status == "queued" && row.same_lifetime(&message))
+                    })
+                    .map(|row| (row.text.clone(), row.notify_for.clone()));
+                if let Some((text, notify_for)) = latest_payload {
+                    message.text = text;
+                    message.notify_for = notify_for;
+                }
+                let message_text = message.text.clone();
                 if is_keys {
                     let keys: Vec<String> =
                         message_text.split_whitespace().map(str::to_owned).collect();
