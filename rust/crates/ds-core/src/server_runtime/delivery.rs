@@ -477,7 +477,11 @@ mod tests {
         flock.attach_roles(role_store, None);
         flock.remember_lane("w2:p2", "worker two", true);
 
-        let terminal: Mutex<Box<dyn Terminal>> = Mutex::new(Box::new(FakeTerminal::new()));
+        let mut fake_terminal = FakeTerminal::new();
+        fake_terminal
+            .screens
+            .insert("w2:p2".into(), "Context is full - please /clear\n".into());
+        let terminal: Mutex<Box<dyn Terminal>> = Mutex::new(Box::new(fake_terminal));
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
