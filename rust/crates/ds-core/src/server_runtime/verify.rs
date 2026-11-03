@@ -2,11 +2,12 @@
 
 use serde_json::Value;
 
+use crate::flock::agent_verify::VerifyBackend;
 use crate::flock::panes::PaneInfoEnv;
 use crate::server_runtime::RequestRuntimeAdapter;
 
 impl RequestRuntimeAdapter<'_> {
-    #[allow(dead_code)] // The complete VerifyBackend assembly belongs to its dependent leaf.
+    #[allow(dead_code)] // The assembled backend is wired into runtime by a dependent leaf.
     fn helper_verifybackend_agent_child_pids(&mut self, pane_pid: i64) -> Option<Vec<Value>> {
         crate::proc::pane_agent_pids(Some(pane_pid)).map(|entries| {
             entries
@@ -24,22 +25,40 @@ impl RequestRuntimeAdapter<'_> {
         })
     }
 
-    #[allow(dead_code)] // The complete VerifyBackend assembly belongs to its dependent leaf.
+    #[allow(dead_code)] // The assembled backend is wired into runtime by a dependent leaf.
     fn helper_verifybackend_process_start(&self, pid: i64) -> Option<i64> {
         crate::proc::process_start(pid)?.parse().ok()
     }
 
-    #[allow(dead_code)] // The complete VerifyBackend assembly belongs to its dependent leaf.
+    #[allow(dead_code)] // The assembled backend is wired into runtime by a dependent leaf.
     fn helper_verifybackend_get_pane(&self, pane_id: &str) -> Option<Value> {
         self.terminal
             .with_env(|env| PaneInfoEnv::get_pane(env, pane_id))
     }
 
-    #[allow(dead_code)] // The complete VerifyBackend assembly belongs to its dependent leaf.
+    #[allow(dead_code)] // The assembled backend is wired into runtime by a dependent leaf.
     fn helper_verifybackend_read_pane(&mut self, pane_id: &str, lines: usize) -> Option<String> {
         let lines = i64::try_from(lines).unwrap_or(i64::MAX);
         self.terminal
             .with_terminal(|terminal| terminal.read_pane(pane_id, lines, false).ok().flatten())
+    }
+}
+
+impl VerifyBackend for RequestRuntimeAdapter<'_> {
+    fn get_pane(&self, pane_id: &str) -> Option<Value> {
+        self.helper_verifybackend_get_pane(pane_id)
+    }
+
+    fn read_pane(&mut self, pane_id: &str, lines: usize) -> Option<String> {
+        self.helper_verifybackend_read_pane(pane_id, lines)
+    }
+
+    fn agent_child_pids(&mut self, pane_pid: i64) -> Option<Vec<Value>> {
+        self.helper_verifybackend_agent_child_pids(pane_pid)
+    }
+
+    fn process_start(&self, pid: i64) -> Option<i64> {
+        self.helper_verifybackend_process_start(pid)
     }
 }
 
@@ -51,6 +70,49 @@ mod tests {
     use crate::flock::Flock;
     use crate::server::RequestCtx;
     use crate::terminal::{fakes::FakeTerminal, Terminal};
+
+    #[test]
+    fn assembled_verify_backend_delegates_on_request_thread() {
+        std::thread::spawn(|| {
+            let dir = crate::testsupport::dir("verify-assembly");
+            let flock = Flock::new(
+                dir.path().join("launches.json"),
+                dir.path().join("lanes.json"),
+                false,
+            );
+            let request = RequestCtx::default();
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let mut fake = FakeTerminal::new();
+            fake.screens.insert("w1:p1".into(), "first\nsecond".into());
+            let terminal: Mutex<Box<dyn Terminal>> = Mutex::new(Box::new(fake));
+            let mut adapter =
+                RequestRuntimeAdapter::new(&flock, &request, runtime.handle(), &terminal);
+            let backend: &mut dyn VerifyBackend = &mut adapter;
+            assert_eq!(backend.get_pane("w1:p1").unwrap()["pane_id"], "w1:p1");
+            assert_eq!(backend.read_pane("w1:p1", 1).as_deref(), Some("second"));
+            assert!(backend.get_pane("missing").is_none());
+            assert!(backend.read_pane("missing", 1).is_none());
+            let pid = i64::from(std::process::id());
+            let entries = backend
+                .agent_child_pids(pid)
+                .expect("process table available");
+            let own = entries
+                .iter()
+                .find(|entry| entry["pid"] == pid)
+                .expect("own process included");
+            assert_eq!(
+                own["start"].as_str().and_then(|s| s.parse::<i64>().ok()),
+                backend.process_start(pid)
+            );
+            assert!(backend.agent_child_pids(0).is_none());
+            assert!(backend.process_start(0).is_none());
+        })
+        .join()
+        .unwrap();
+    }
 
     #[test]
     fn production_verify_backend_uses_process_ancestry_when_available() {
