@@ -247,9 +247,10 @@ mod tests {
                 for pane in &mut terminal.panes {
                     pane.pane_pid = None;
                 }
-                terminal
-                    .screens
-                    .insert("w1:p1".into(), "│ ❯ fixture text\n──────────\n".into());
+                terminal.screens.insert(
+                    "w1:p1".into(),
+                    "Context is full - please /clear\n│ ❯ fixture text\n──────────\n".into(),
+                );
                 Box::new(ObservedTerminal {
                     inner: terminal,
                     observations: Arc::clone(&terminal_observations),
@@ -508,6 +509,7 @@ mod tests {
         let delivery = dispatcher
             .dispatch("delivery", &json!({"target":"w1:p1"}), &request("w3:p3"))
             .unwrap();
+        assert_eq!(delivery["state"], "blocked");
         assert_eq!(delivery["foreign_text"], true);
         assert_eq!(delivery["foreign_excerpt"], "fixture text");
         let clear = dispatcher
@@ -519,6 +521,7 @@ mod tests {
             .unwrap();
         assert_eq!(clear["pane_id"], "w1:p1");
         assert_eq!(clear["flushed"], true);
+        assert_eq!(clear["before"]["state"], "blocked");
         assert_eq!(clear["before"]["foreign_excerpt"], "fixture text");
         let observed = observations.lock().unwrap();
         assert_eq!(
