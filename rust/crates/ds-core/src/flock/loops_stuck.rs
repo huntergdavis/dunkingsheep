@@ -45,16 +45,16 @@ pub trait StuckEnv: Send + Sync {
     /// `self.herdr.list_panes()`.
     fn list_panes(&self) -> LoopFuture<'_, Result<Vec<Value>, DunkError>>;
     /// `self.read_screen(pane)`; `None` when unreadable.
-    fn read_screen(&self, pane_id: &str) -> LoopFuture<'_, Option<String>>;
+    fn read_screen<'a>(&'a self, pane_id: &'a str) -> LoopFuture<'a, Option<String>>;
     /// `self._pane_generation(pane)`.
-    fn pane_generation(&self, pane_id: &str) -> LoopFuture<'_, Option<String>>;
+    fn pane_generation<'a>(&'a self, pane_id: &'a str) -> LoopFuture<'a, Option<String>>;
     /// `self._note_stale_panel(pane, ("modal", text), since)`.
-    fn note_stale_panel(
-        &self,
-        pane_id: &str,
-        signature_text: &str,
+    fn note_stale_panel<'a>(
+        &'a self,
+        pane_id: &'a str,
+        signature_text: &'a str,
         since: f64,
-    ) -> LoopFuture<'_, ()>;
+    ) -> LoopFuture<'a, ()>;
     /// `self.closed`.
     fn closed(&self) -> bool {
         false
@@ -344,20 +344,20 @@ impl StuckEnv for crate::server_runtime::LoopRuntimeAdapter {
         self.helper_stuckenv_list_panes()
     }
 
-    fn read_screen(&self, pane_id: &str) -> LoopFuture<'_, Option<String>> {
+    fn read_screen<'a>(&'a self, pane_id: &'a str) -> LoopFuture<'a, Option<String>> {
         self.helper_stuckenv_read_screen(pane_id)
     }
 
-    fn pane_generation(&self, pane_id: &str) -> LoopFuture<'_, Option<String>> {
+    fn pane_generation<'a>(&'a self, pane_id: &'a str) -> LoopFuture<'a, Option<String>> {
         self.helper_stuckenv_pane_generation(pane_id)
     }
 
-    fn note_stale_panel(
-        &self,
-        pane_id: &str,
-        signature_text: &str,
+    fn note_stale_panel<'a>(
+        &'a self,
+        pane_id: &'a str,
+        signature_text: &'a str,
         since: f64,
-    ) -> LoopFuture<'_, ()> {
+    ) -> LoopFuture<'a, ()> {
         self.helper_stuckenv_note_stale_panel(pane_id, signature_text, since)
     }
 

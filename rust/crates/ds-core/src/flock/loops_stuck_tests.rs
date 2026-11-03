@@ -153,17 +153,22 @@ impl StuckEnv for Fake {
             .map_err(DunkError::Refused);
         Box::pin(ready(result))
     }
-    fn read_screen(&self, pane_id: &str) -> LoopFuture<'_, Option<String>> {
+    fn read_screen<'a>(&'a self, pane_id: &'a str) -> LoopFuture<'a, Option<String>> {
         self.observed.lock().unwrap().push("screen");
         let screen = self.screens.lock().unwrap().get(pane_id).cloned();
         Box::pin(ready(screen))
     }
-    fn pane_generation(&self, pane_id: &str) -> LoopFuture<'_, Option<String>> {
+    fn pane_generation<'a>(&'a self, pane_id: &'a str) -> LoopFuture<'a, Option<String>> {
         self.observed.lock().unwrap().push("generation");
         let generation = self.generations.lock().unwrap().get(pane_id).cloned();
         Box::pin(ready(generation))
     }
-    fn note_stale_panel(&self, pane_id: &str, text: &str, since: f64) -> LoopFuture<'_, ()> {
+    fn note_stale_panel<'a>(
+        &'a self,
+        pane_id: &'a str,
+        text: &'a str,
+        since: f64,
+    ) -> LoopFuture<'a, ()> {
         self.observed.lock().unwrap().push("note");
         let pane_id = pane_id.to_owned();
         let text = text.to_owned();
