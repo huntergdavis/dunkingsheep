@@ -184,7 +184,8 @@ impl RuntimeServices {
 
     /// Build the stuck observer adapter with the canonical Flock, outbox, and reporter.
     /// The ordinary loop-adapter constructor intentionally does not imply these services.
-    pub fn stuck_loop_adapter(self: &Arc<Self>) -> Result<LoopRuntimeAdapter, DunkError> {
+    #[allow(dead_code)] // The dependent startup integration consumes this staged binder.
+    pub(crate) fn stuck_loop_adapter(self: &Arc<Self>) -> Result<LoopRuntimeAdapter, DunkError> {
         LoopRuntimeAdapter::new(Arc::clone(&self.flock), Arc::clone(&self.terminal_factory))
             .with_stuck_services(Arc::clone(self))
     }
