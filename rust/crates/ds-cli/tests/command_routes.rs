@@ -258,12 +258,14 @@ fn cli_route_55_mcp() {
         .as_array()
         .is_some_and(|tools| !tools.is_empty()));
     assert_eq!(9, replies[2]["id"]);
+    let tool_text: Value =
+        serde_json::from_str(replies[2]["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(
-        "{\n  \"label\": \"inherited caller\",\n  \"role\": \"worker\"\n}",
-        replies[2]["result"]["content"][0]["text"]
+        json!({"role":"worker","label":"inherited caller"}),
+        tool_text
     );
     assert_eq!(
-        json!({"label":"inherited caller","role":"worker"}),
+        json!({"role":"worker","label":"inherited caller"}),
         replies[2]["result"]["structuredContent"]
     );
     assert_eq!(false, replies[2]["result"]["isError"]);
