@@ -1733,8 +1733,8 @@ async fn run_refreshes_verdicts_during_github_listing_and_reads_history_past_one
         github_response(200, json!({"body": "review details"})),
     ]);
     transport.complete_review_after_matching_requests(
-        "/pulls/7",
-        1,
+        "",
+        2,
         effect_tasks,
         &first.id,
         "%1",
