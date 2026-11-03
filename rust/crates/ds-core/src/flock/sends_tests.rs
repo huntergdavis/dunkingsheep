@@ -8,6 +8,7 @@
 use super::sends::*;
 use super::Flock;
 use crate::flock::panes::PaneInfoEnv;
+use crate::terminal::screen::{box_text, AMBIGUOUS_COMPOSER};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 
