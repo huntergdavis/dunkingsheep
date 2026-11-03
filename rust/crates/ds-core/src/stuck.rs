@@ -21,6 +21,7 @@
 use std::collections::BTreeMap;
 
 use serde_json::{Map, Number, Value};
+use sha2::{Digest, Sha256};
 
 /// The fields one pane's record carries, in the order the Python's schema lists them.
 pub const SCHEMA_FIELDS: [&str; 7] = [
@@ -47,7 +48,10 @@ pub const BLOCKED_STATUSES: [&str; 4] = ["blocked", "dead", "unknown", "working"
 
 /// The composer's own wrapping is not content: compare on collapsed text.
 pub fn collapse(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
+    text.split(|c: char| c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c))
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Stable identity of the COMPLETE composer text.
@@ -55,12 +59,18 @@ pub fn collapse(text: &str) -> String {
 /// Exact, not prefix: if a person appended one word to our nudge, this changes and
 /// the recovery resets. That is the whole guard against submitting a continuation.
 pub fn fingerprint(text: &str) -> String {
-    // FNV-1a over the collapsed text: the Python uses sha256, but the value is only
-    // ever compared for equality inside one tracker, and a 64-bit hash keeps the
-    // record readable in a state file. (Named, so nobody mistakes it for the sha256
-    // the Python stores in `fingerprint` and compares across processes.)
+    let digest = Sha256::digest(collapse(text).as_bytes());
+    digest[..8]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// Pre-parity Rust's exact fingerprint, used only to recognize old durable budgets.
+fn legacy_fingerprint(text: &str) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in collapse(text).as_bytes() {
+    let legacy = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    for byte in legacy.as_bytes() {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
@@ -475,6 +485,49 @@ impl Tracker {
             return self.reset(obs, format!("target is {}", obs.status));
         }
         let current = fingerprint(text);
+        let legacy = legacy_fingerprint(text);
+        // The 64-bit keys carry no algorithm version. An old Rust spend or attempted
+        // record cannot safely be distinguished from every possible collision. Retain
+        // the original ledger and exhaust the canonical key rather than refunding it.
+        let legacy_used =
+            self.legacy_attempt_seen(&obs.pane_id, message_id, obs.generation.as_deref(), text);
+        if legacy_used {
+            let key = ledger_key(
+                &obs.pane_id,
+                message_id,
+                obs.generation.as_deref(),
+                &current,
+            );
+            self.spent.insert(key, u32::MAX);
+        }
+        let reserved = self.reserved(
+            &obs.pane_id,
+            message_id,
+            obs.generation.as_deref(),
+            &current,
+        );
+        if let Some(record) = self.records.get_mut(&obs.pane_id) {
+            if record.message_id.as_deref() == Some(message_id)
+                && record.generation == obs.generation
+                && record.fingerprint.as_deref() == Some(&legacy)
+                && legacy != current
+            {
+                record.fingerprint = Some(current.clone());
+            }
+            if legacy_used
+                && record.message_id.as_deref() == Some(message_id)
+                && record.generation == obs.generation
+                && record.fingerprint.as_deref() == Some(&current)
+            {
+                record.attempts = u32::MAX;
+            }
+            if record.message_id.as_deref() == Some(message_id)
+                && record.generation == obs.generation
+                && record.fingerprint.as_deref() == Some(&current)
+            {
+                record.attempts = record.attempts.max(reserved);
+            }
+        }
         let existing = self.records.get(&obs.pane_id).cloned();
         if let Some(record) = &existing {
             if record.generation.is_some()
@@ -632,6 +685,26 @@ impl Tracker {
             .unwrap_or(&0)
     }
 
+    /// Whether this exact intent has an old Rust FNV budget or attempted record.
+    /// The caller must preserve the old entry and refuse remaining attempts.
+    pub fn legacy_attempt_seen(
+        &self,
+        pane_id: &str,
+        message_id: &str,
+        generation: Option<&str>,
+        text: &str,
+    ) -> bool {
+        let legacy = legacy_fingerprint(text);
+        let key = ledger_key(pane_id, message_id, generation, &legacy);
+        self.spent.get(&key).is_some_and(|count| *count > 0)
+            || self.records.get(pane_id).is_some_and(|record| {
+                record.message_id.as_deref() == Some(message_id)
+                    && record.generation.as_deref() == generation
+                    && record.fingerprint.as_deref() == Some(&legacy)
+                    && record.attempts > 0
+            })
+    }
+
     pub fn mark_terminal(&mut self, pane_id: &str, reason: &str) {
         if let Some(record) = self.records.get_mut(pane_id) {
             record.terminal = Some(reason.to_string());
@@ -651,6 +724,145 @@ mod tests {
         let mut observation = Observation::new("w1:p1", Some("m1"), Some(now_text), "idle");
         observation.generation = Some("pid:12:start:345".into());
         observation
+    }
+
+    #[test]
+    fn fingerprint_and_collapse_match_python_whitespace_and_sha_oracle() {
+        let samples = [
+            "stuck body",
+            " a\u{1c}b\u{1f} c ",
+            "\u{a0}Ω\t雪\n",
+            "",
+            "same  words",
+        ];
+        let output = std::process::Command::new("python3")
+            .args(["-c", "import hashlib,json,re,sys; print(json.dumps([[re.sub(r'\\s+', ' ', s.strip()), hashlib.sha256(re.sub(r'\\s+', ' ', s.strip()).encode()).hexdigest()[:16]] for s in json.load(sys.stdin)]))"])
+            .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).spawn().unwrap();
+        let mut child = output;
+        use std::io::Write;
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(serde_json::to_string(&samples).unwrap().as_bytes())
+            .unwrap();
+        let result = child.wait_with_output().unwrap();
+        assert!(result.status.success());
+        let oracle: Vec<(String, String)> = serde_json::from_slice(&result.stdout).unwrap();
+        for (text, (expected_collapse, expected_hash)) in samples.iter().zip(oracle) {
+            assert_eq!(collapse(text), expected_collapse);
+            assert_eq!(fingerprint(text), expected_hash);
+        }
+        assert_eq!(fingerprint("stuck body"), "b2d4ddd55ad59b5e");
+        assert_eq!(legacy_fingerprint("stuck body"), "dbe71a6e223b4ec1");
+    }
+
+    #[test]
+    fn legacy_fnv_ledger_and_record_fail_closed_across_restart_without_refunding() {
+        let text = "a\u{1c}b";
+        let obs = observation(text);
+        let config = Config {
+            threshold_s: 1.0,
+            max_attempts: 2,
+            ..Config::default()
+        };
+        let legacy_key = ledger_key(
+            &obs.pane_id,
+            "m1",
+            obs.generation.as_deref(),
+            &legacy_fingerprint(text),
+        );
+        let canonical_key = ledger_key(
+            &obs.pane_id,
+            "m1",
+            obs.generation.as_deref(),
+            &fingerprint(text),
+        );
+        for has_record in [false, true] {
+            let mut tracker = Tracker::default();
+            tracker.spent.insert(legacy_key.clone(), 1);
+            tracker.spent.insert(canonical_key.clone(), 1);
+            if has_record {
+                tracker.records.insert(
+                    obs.pane_id.clone(),
+                    Record {
+                        message_id: obs.message_id.clone(),
+                        generation: obs.generation.clone(),
+                        fingerprint: Some(legacy_fingerprint(text)),
+                        first_seen: Some(0.0),
+                        last_attempt_at: Some(0.5),
+                        attempts: 1,
+                        terminal: None,
+                    },
+                );
+            }
+            let first = tracker.decide(&obs, &config, 10.0);
+            assert!(!first.recovers());
+            assert_eq!(tracker.spent[&legacy_key], 1);
+            assert_eq!(tracker.spent[&canonical_key], u32::MAX);
+            let mut restored = Tracker::from_state(&tracker.to_state()).unwrap();
+            restored.forget(&obs.pane_id);
+            assert!(!restored.decide(&obs, &config, 20.0).recovers());
+            assert_eq!(restored.decide(&obs, &config, 22.0).action, "terminal");
+        }
+    }
+
+    #[test]
+    fn python_sha_budget_is_respected_and_fresh_identity_can_recover() {
+        let obs = observation("stuck body");
+        let config = Config {
+            threshold_s: 1.0,
+            max_attempts: 1,
+            ..Config::default()
+        };
+        let key = ledger_key(
+            &obs.pane_id,
+            "m1",
+            obs.generation.as_deref(),
+            "b2d4ddd55ad59b5e",
+        );
+        let mut tracker = Tracker::default();
+        tracker.spent.insert(key, 1);
+        assert!(!tracker.decide(&obs, &config, 1.0).recovers());
+        assert_eq!(tracker.decide(&obs, &config, 3.0).action, "terminal");
+        tracker.forget(&obs.pane_id);
+        let mut fresh = obs.clone();
+        fresh.message_id = Some("m2".into());
+        assert!(!tracker.decide(&fresh, &config, 5.0).recovers());
+        assert!(tracker.decide(&fresh, &config, 7.0).recovers());
+    }
+
+    #[test]
+    fn attempted_legacy_record_without_ledger_still_refuses() {
+        let obs = observation("stuck body");
+        let mut tracker = Tracker::default();
+        tracker.records.insert(
+            obs.pane_id.clone(),
+            Record {
+                message_id: obs.message_id.clone(),
+                generation: obs.generation.clone(),
+                fingerprint: Some(legacy_fingerprint("stuck body")),
+                first_seen: Some(0.0),
+                last_attempt_at: Some(1.0),
+                attempts: 1,
+                terminal: None,
+            },
+        );
+        let config = Config {
+            threshold_s: 1.0,
+            max_attempts: 2,
+            ..Config::default()
+        };
+        assert_eq!(tracker.decide(&obs, &config, 10.0).action, "terminal");
+        assert_eq!(
+            tracker.reserved(
+                &obs.pane_id,
+                "m1",
+                obs.generation.as_deref(),
+                &fingerprint("stuck body")
+            ),
+            u32::MAX
+        );
     }
 
     #[test]

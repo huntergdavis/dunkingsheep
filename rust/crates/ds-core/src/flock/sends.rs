@@ -596,10 +596,12 @@ impl Flock {
             if native.is_some() {
                 let fingerprint = crate::stuck::fingerprint(content);
                 let old = tracker.reserved(pane_id, &identity, Some(&generation), &fingerprint);
+                let legacy_used =
+                    tracker.legacy_attempt_seen(pane_id, &identity, Some(&generation), content);
                 let key =
                     crate::stuck::ledger_key(pane_id, &budget_id, Some(&generation), &fingerprint);
                 let spent = tracker.spent.entry(key).or_default();
-                *spent = (*spent).max(old);
+                *spent = (*spent).max(if legacy_used { u32::MAX } else { old });
                 config.max_attempts = 1;
             }
             if !tracker.records.contains_key(pane_id) {

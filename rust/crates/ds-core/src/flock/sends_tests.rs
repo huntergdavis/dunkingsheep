@@ -2732,6 +2732,34 @@ fn scheduled_recovery_requires_current_schedule_for_styled_and_real_native_evide
                 "native={native} running={running} template={template} now={now}"
             );
             if native && expected {
+                env.screens.insert("%1".into(), screen.clone());
+                let generation = message.attempt_generation.as_deref().unwrap();
+                let legacy_key =
+                    crate::stuck::ledger_key("%1", "m1", Some(generation), "dbe71a6e223b4ec1");
+                flock
+                    .stuck_tracker
+                    .lock()
+                    .unwrap()
+                    .spent
+                    .insert(legacy_key, 1);
+                assert!(!flock.unwedge(
+                    &mut env,
+                    "%1",
+                    "stuck body",
+                    Some(1.0),
+                    Some(&message),
+                    101.0,
+                    None,
+                    true
+                ));
+                let canonical = crate::stuck::fingerprint("stuck body");
+                let migrated =
+                    crate::stuck::ledger_key("%1", "m1@100.0", Some(generation), &canonical);
+                assert_eq!(
+                    flock.stuck_tracker.lock().unwrap().spent[&migrated],
+                    u32::MAX
+                );
+                assert!(env.keys.is_empty());
                 assert!(flock
                     .owned_recovery_evidence(&env, "%1", "› human edit\n\n  model · /tmp/test\n")
                     .is_none());
