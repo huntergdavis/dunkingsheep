@@ -5176,7 +5176,7 @@ fn api_t39_nonfinite_leases_remain_numeric_through_task_wire_and_events() {
             .as_number()
             .expect("nonfinite lease remains a JSON number")
             .to_string();
-        assert_eq!(token, "1e999");
+        assert_eq!(token, "1e+999");
         assert!(token.parse::<f64>().unwrap().is_infinite());
     }
 
@@ -5189,7 +5189,7 @@ fn api_t39_nonfinite_leases_remain_numeric_through_task_wire_and_events() {
             .as_number()
             .unwrap()
             .to_string(),
-        "1e999"
+        "1e+999"
     );
     assert_eq!(full.wire["leases"].as_array().unwrap().len(), 1);
     assert_eq!(
@@ -5197,7 +5197,7 @@ fn api_t39_nonfinite_leases_remain_numeric_through_task_wire_and_events() {
             .as_number()
             .unwrap()
             .to_string(),
-        "1e999"
+        "1e+999"
     );
 
     let connection = rusqlite::Connection::open(tasks.path()).expect("read task DB");
@@ -5220,7 +5220,7 @@ fn api_t39_nonfinite_leases_remain_numeric_through_task_wire_and_events() {
     let event_meta: Value = serde_json::from_str(&event_meta).expect("valid event JSON");
     assert_eq!(
         event_meta["lease_seconds"].as_number().unwrap().to_string(),
-        "1e999"
+        "1e+999"
     );
 
     let heartbeat_args: Value =
@@ -5238,11 +5238,11 @@ fn api_t39_nonfinite_leases_remain_numeric_through_task_wire_and_events() {
     .expect("numeric exponent heartbeat stores infinity");
     assert_eq!(
         heartbeat["lease_seconds"].as_number().unwrap().to_string(),
-        "1e999"
+        "1e+999"
     );
     assert_eq!(
         heartbeat["expires_at"].as_number().unwrap().to_string(),
-        "1e999"
+        "1e+999"
     );
 
     let negative_infinity = dispatch_task_mutation(
