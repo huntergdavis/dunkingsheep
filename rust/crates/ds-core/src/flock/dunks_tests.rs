@@ -5,8 +5,7 @@ use super::panes::PaneInfoEnv;
 use super::send_keys::KeyPressEnv;
 use super::sends::FlushEnv;
 use super::sends::{
-    outbox_step, send_submit_key, OutboxStep, OutboxWorkerPool, OutboxWorkerRunner, SendEnv,
-    SendPreparationEnv, SnapshotStore, SubmitEnv,
+    send_submit_key, OutboxWake, SendEnv, SendPreparationEnv, SnapshotStore, SubmitEnv,
 };
 use super::Flock;
 use crate::error::DunkError;
@@ -169,36 +168,11 @@ impl SendPreparationEnv for FireEnv {
     }
 }
 
-struct FireRunner(Arc<Mutex<FireEnv>>);
+struct NoopOutboxWake;
 
-impl OutboxWorkerRunner for FireRunner {
-    fn run(&self, flock: Arc<Flock>, pane_id: &str, stopped: &std::sync::atomic::AtomicBool) {
-        loop {
-            if stopped.load(std::sync::atomic::Ordering::Acquire) {
-                return;
-            }
-            let mut env = self.0.lock().unwrap();
-            let mut permission = || None;
-            let outcome = outbox_step(
-                &flock,
-                &mut *env,
-                pane_id,
-                crate::clock::now_s(),
-                stopped,
-                &|seconds| {
-                    std::thread::sleep(std::time::Duration::from_secs_f64(seconds));
-                    stopped.load(std::sync::atomic::Ordering::Acquire)
-                },
-                &mut permission,
-            );
-            if matches!(outcome, OutboxStep::Empty | OutboxStep::Stopped) {
-                return;
-            }
-            if matches!(outcome, OutboxStep::Held | OutboxStep::Due) {
-                drop(env);
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-        }
+impl OutboxWake for NoopOutboxWake {
+    fn ensure_worker(&self, _flock: &Arc<Flock>, _pane_id: &str) -> Result<(), DunkError> {
+        Ok(())
     }
 }
 
@@ -231,28 +205,23 @@ fn fire_sends_expanded_text_synchronously_through_guarded_direct_send() {
     load_one_fire_dunk(&flock, "hello from {id}", None);
     let flock = Arc::new(flock);
     let store = CapturingSnapshotStore::default();
-    let runner_env = Arc::new(Mutex::new(fire_env(false)));
-    let pool = OutboxWorkerPool::new(Arc::new(FireRunner(runner_env.clone())));
     let mut env = fire_env(false);
 
-    let result = flock.fire("d1", &mut env, &pool, &store, || None).unwrap();
-    pool.stop_outbox_workers(&flock);
+    let result = flock
+        .fire("d1", &mut env, &NoopOutboxWake, &store, || None)
+        .unwrap();
 
     assert_eq!(json!(true), result["ok"]);
     assert_eq!(json!(false), result["queued"]);
     assert_eq!(json!("d1"), result["id"]);
-    let delivered = runner_env.lock().unwrap();
-    assert_eq!(
-        vec![("w1:p2".into(), "hello from d1".into())],
-        delivered.typed
-    );
-    assert!(delivered.keys.iter().any(|(_, key)| key == "Enter"));
+    assert_eq!(vec![("w1:p2".into(), "hello from d1".into())], env.typed);
+    assert!(env.keys.iter().any(|(_, key)| key == "Enter"));
     let dunk = flock.dunks.get("d1").unwrap();
     assert_eq!(json!(1), dunk["send_count"]);
     assert_eq!(json!("hello from d1"), dunk["last_sent_text"]);
     assert_eq!(json!(true), dunk["awaiting_consumption"]);
     assert!(dunk["status"].as_str().unwrap().starts_with("Tested "));
-    assert_eq!(2, store.calls.load(Ordering::SeqCst));
+    assert_eq!(1, store.calls.load(Ordering::SeqCst));
 }
 
 #[test]
@@ -261,19 +230,15 @@ fn fire_reports_guarded_send_failure_and_records_last_error() {
     load_one_fire_dunk(&flock, "continue", None);
     let flock = Arc::new(flock);
     let store = CapturingSnapshotStore::default();
-    let runner_env = Arc::new(Mutex::new(fire_env(true)));
-    let pool = OutboxWorkerPool::new(Arc::new(FireRunner(runner_env.clone())));
-    let mut env = fire_env(false);
+    let mut env = fire_env(true);
 
-    let result = flock.fire("d1", &mut env, &pool, &store, || None).unwrap();
-    pool.stop_outbox_workers(&flock);
+    let result = flock
+        .fire("d1", &mut env, &NoopOutboxWake, &store, || None)
+        .unwrap();
 
     assert_eq!(json!(false), result["ok"]);
     assert_eq!(json!("boom"), result["message"]);
-    assert!(
-        runner_env.lock().unwrap().keys.is_empty(),
-        "a refused type must not submit Enter"
-    );
+    assert!(env.keys.is_empty(), "a refused type must not submit Enter");
     let dunk = flock.dunks.get("d1").unwrap();
     assert_eq!(json!(0), dunk["send_count"]);
     assert_eq!(json!("boom"), dunk["last_error"]);

@@ -12,7 +12,8 @@ use regex::Regex;
 use serde_json::{json, Map, Value};
 
 use super::sends::{
-    DirectSendOptions, DirectTextMetadata, OutboxWake, SendPreparationEnv, SnapshotStore,
+    send_guarded, submit_text, DirectSendOptions, DirectTextMetadata, OutboxWake, SendGuardOptions,
+    SendPreparationEnv, SnapshotStore,
 };
 use super::Flock;
 use crate::clock;
@@ -902,56 +903,65 @@ impl Flock {
             }));
         }
 
-        let delivery = self.send_now(
-            &json!(pane_id),
-            &text,
-            DirectSendOptions {
-                hold_while_typing: dunker.hold_while_typing,
-                wait_s: 5.0,
-                ..DirectSendOptions::default()
-            },
-            DirectTextMetadata {
-                source: &dunker.id,
-                ..DirectTextMetadata::default()
-            },
+        let mut permission = permission;
+        let (sent, send_ok, detail) = send_guarded(
+            self,
             env,
-            wake,
-            store,
-            permission,
+            pane_id,
+            SendGuardOptions {
+                hold_while_typing: dunker.hold_while_typing,
+                allow_modal: false,
+                preserve_draft: false,
+            },
+            &mut permission,
+            |env, guard| {
+                Ok(submit_text(
+                    self,
+                    env,
+                    pane_id,
+                    &text,
+                    true,
+                    false,
+                    Some(guard),
+                ))
+            },
         );
-        let (ok, detail) = match delivery {
-            Ok(result) => {
-                if result.get("status").and_then(Value::as_str) == Some("queued") {
-                    self.dunks.queue_fire(&dunker.id);
-                    let message_id = result
-                        .get("message_id")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default();
-                    let message = format!(
-                        "queued: the box in {} would not clear",
-                        dunker.target_label()
-                    );
-                    store.save(self)?;
-                    return Ok(json!({
-                        "id": dunker.id,
-                        "ok": Value::Null,
-                        "queued": true,
-                        "message_id": message_id,
-                        "message": message,
-                    }));
-                }
-                let detail = result
-                    .get("detail")
-                    .and_then(Value::as_str)
-                    .unwrap_or("send failed")
-                    .to_owned();
-                (
-                    result.get("status").and_then(Value::as_str) == Some("sent"),
-                    detail,
-                )
-            }
-            Err(error) => (false, error.to_string()),
-        };
+        if !sent && dunker.hold_while_typing {
+            let result = self.send_now(
+                &json!(pane_id),
+                &text,
+                DirectSendOptions {
+                    hold_while_typing: true,
+                    ..DirectSendOptions::default()
+                },
+                DirectTextMetadata {
+                    source: &dunker.id,
+                    ..DirectTextMetadata::default()
+                },
+                env,
+                wake,
+                store,
+                &mut permission,
+            )?;
+            self.dunks.queue_fire(&dunker.id);
+            let message_id = result
+                .get("message_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let message = format!(
+                "queued: the box in {} would not clear",
+                dunker.target_label()
+            );
+            store.save(self)?;
+            return Ok(json!({
+                "id": dunker.id,
+                "ok": Value::Null,
+                "queued": true,
+                "message_id": message_id,
+                "message": message,
+            }));
+        }
+        let ok = sent && send_ok.unwrap_or(false);
 
         self.dunks
             .finish_fire(&dunker.id, ok.then_some(text.as_str()), ok, &detail);
