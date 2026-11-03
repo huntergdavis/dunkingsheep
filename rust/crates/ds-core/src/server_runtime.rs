@@ -555,7 +555,10 @@ mod tests {
             "Ops",
             backend.rename("tab", "w1", "Ops").unwrap()["tab"]["label"]
         );
-        assert_eq!(json!({}), backend.focus("pane", "w1:p1").unwrap());
+        assert_eq!(
+            serde_json::json!({}),
+            backend.focus("pane", "w1:p1").unwrap()
+        );
     }
 
     #[test]
