@@ -10,7 +10,7 @@ use serde_json::{json, Map, Value};
 pub const OWNER_MAILBOX_CHANNELS: &[&str] = &["cos"];
 
 /// Optional caller-supplied authority check used for configured channels.
-pub type CanMessage = dyn FnMut(Option<&Value>) -> bool;
+pub type CanMessage<'a> = dyn for<'pane> FnMut(Option<&'pane Value>) -> bool + 'a;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RosterError(pub String);
@@ -176,7 +176,7 @@ pub fn presence(raw_status: Option<&Value>) -> Result<&'static str, RosterError>
     })
 }
 
-type Authority<'a> = Option<&'a mut CanMessage>;
+type Authority<'a> = Option<&'a mut CanMessage<'a>>;
 
 fn can_message(pane: Option<&Value>, authority: &mut Authority<'_>) -> Result<bool, RosterError> {
     if let Some(authority) = authority.as_mut() {
@@ -195,7 +195,7 @@ pub fn build_roster(
     configured: &[Value],
     panes: &[Value],
     include_terminals: bool,
-    mut authority: Option<&mut CanMessage>,
+    mut authority: Option<&mut CanMessage<'_>>,
 ) -> Result<Vec<Value>, RosterError> {
     let mut rows: Vec<(Value, Option<Value>)> = Vec::new();
     let mut used: Vec<Value> = Vec::new();
@@ -244,17 +244,17 @@ pub fn build_roster(
 
     let mut output = Vec::with_capacity(rows.len());
     for (config, pane) in rows {
-        let config_fields = object(&config, "config")?;
-        let id = required(config_fields, "id", "config")?;
-        let name = required(config_fields, "name", "config")?;
-        let kind = required(config_fields, "kind", "config")?;
-        let id_hashable = ensure_hashable(id, "config.id");
         let status = if let Some(pane) = &pane {
             let fields = object(pane, "pane")?;
             presence(fields.get("agent_status"))?.to_owned()
         } else {
             "offline".to_owned()
         };
+        let config_fields = object(&config, "config")?;
+        let id = required(config_fields, "id", "config")?;
+        let name = required(config_fields, "name", "config")?;
+        let kind = required(config_fields, "kind", "config")?;
+        let id_hashable = ensure_hashable(id, "config.id");
 
         let activity_allowed = can_message(pane.as_ref(), &mut authority)?;
         let activity_group = if activity_allowed && matches!(status.as_str(), "working" | "waiting")
