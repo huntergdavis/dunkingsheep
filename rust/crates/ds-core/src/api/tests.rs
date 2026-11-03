@@ -4647,10 +4647,49 @@ fn api_t39_task_update_and_assign_preserve_dispatch_roles_values_and_full_wire()
     )
     .unwrap_err()
     .to_string();
-    assert!(invalid_raw_reason.contains("Error binding parameter 5: type 'dict' is not supported"));
+    assert!(invalid_raw_reason.contains("Error binding parameter 2: type 'dict' is not supported"));
     let after_failed_raw_reason = runtime.block_on(tasks.get(&task.id)).unwrap();
     assert_eq!(after_failed_raw_reason.title, "after");
     assert_eq!(after_failed_raw_reason.block_reason.as_deref(), Some("1"));
+
+    for (fields, ordinal) in [
+        (json!({}), 1),
+        (json!({"body": "rollback", "priority": "high"}), 3),
+        (json!({"status": "cancelled"}), 3),
+        (json!({"status": "blocked"}), 5),
+        (json!({"title": "rollback", "status": "done"}), 6),
+        (
+            json!({"parent_id": null, "assignees": [], "multi_assignee": false, "depends_on": []}),
+            5,
+        ),
+    ] {
+        let before = runtime.block_on(tasks.events(&task.id));
+        let mut input = fields.as_object().unwrap().clone();
+        input.insert("id".into(), json!(task.id));
+        input.insert("block_reason".into(), json!([]));
+        let error = dispatch_task_mutation(
+            &dispatcher,
+            &flock,
+            &runtime,
+            "task_update",
+            Value::Object(input),
+            Some("w1:p2"),
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains(&format!(
+                "Error binding parameter {ordinal}: type 'list' is not supported"
+            )),
+            "{error}"
+        );
+        assert_eq!(runtime.block_on(tasks.events(&task.id)), before);
+        assert_eq!(
+            runtime.block_on(tasks.get(&task.id)).unwrap().title,
+            "after"
+        );
+    }
 
     let role_refusal = dispatch_task_mutation(
         &dispatcher,
@@ -4879,7 +4918,7 @@ fn api_t39_task_block_cancel_bind_raw_reasons_after_guards_and_return_dependents
         .unwrap_err()
         .to_string();
         assert!(composite.contains(&format!(
-            "Error binding parameter 5: type '{kind}' is not supported"
+            "Error binding parameter 3: type '{kind}' is not supported"
         )));
         assert_eq!(
             runtime.block_on(tasks.get(&task.id)).unwrap().status,

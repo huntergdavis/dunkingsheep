@@ -528,7 +528,10 @@ impl Tasks {
                         value.clone().map(|value| json!({"reason": value}).to_string()),
                     ),
                     StatusReason::Raw(value) => (
-                        Some(crate::sqlite_scalar::python_sqlite_scalar(value.as_ref(), 5)?),
+                        Some(crate::sqlite_scalar::python_sqlite_scalar(
+                            value.as_ref(),
+                            if status == "cancelled" { 3 } else { 5 },
+                        )?),
                         None,
                     ),
                 };
@@ -1330,8 +1333,25 @@ impl Tasks {
                     }
                 }
                 if let Some(raw_reason) = raw_block_reason {
-                    // Python's combined update binds the raw block_reason as parameter five.
-                    let reason = crate::sqlite_scalar::python_sqlite_scalar(raw_reason.as_ref(), 5)?;
+                    // Python builds one ordered SET mapping. Replacing block_reason after
+                    // a status edit retains its position in that mapping.
+                    let preceding_fields = [
+                        edit_for_call.title.is_some(),
+                        edit_for_call.body.is_some(),
+                        edit_for_call.priority.is_some(),
+                        edit_for_call.parent_id.is_some(),
+                        edit_for_call.assignees.is_some(),
+                        edit_for_call.multi_assignee.is_some(),
+                        edit_for_call.depends_on.is_some(),
+                    ].into_iter().filter(|present| *present).count();
+                    let status_fields = match status_after.as_deref() {
+                        None => 0,
+                        Some("cancelled") => 2,
+                        Some(_) => 4,
+                    };
+                    let reason = crate::sqlite_scalar::python_sqlite_scalar(
+                        raw_reason.as_ref(), preceding_fields + status_fields + 1,
+                    )?;
                     tx.execute(
                         "UPDATE tasks SET block_reason = ? WHERE id = ?",
                         params![reason, id],
