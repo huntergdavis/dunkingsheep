@@ -291,6 +291,29 @@ def post_status(repo, sha, state, token, description, target_url=None):
                     payload=payload)
 
 
+def review_status(repo, sha, token):
+    """Latest review context for this commit, or None if no context exists."""
+    try:
+        _status, combined = _request("GET", f"{API}/repos/{repo}/commits/{sha}/status", token=token)
+    except ValueError as error:
+        raise GitHubError(f"GitHub commit status: invalid JSON: {error}") from None
+    if not isinstance(combined, dict) or not isinstance(combined.get("statuses"), list):
+        raise GitHubError("GitHub commit status: expected a statuses list")
+    review = None
+    for status in combined["statuses"]:
+        if not isinstance(status, dict):
+            raise GitHubError("GitHub commit status: expected a status object")
+        if not isinstance(status.get("context"), str) or not status["context"]:
+            raise GitHubError("GitHub commit status: missing status context")
+        if status.get("state") not in ("pending", "success", "failure", "error"):
+            raise GitHubError("GitHub commit status: invalid status state")
+        if status.get("context") == REVIEW_CONTEXT:
+            if review is not None:
+                raise GitHubError("GitHub commit status: duplicate review context")
+            review = status["state"]
+    return review
+
+
 def merge_pull(repo, number, token, sha=None):
     """Merge an accepted PR as the reviewer App once branch protection is satisfied.
     GitHub answers 405 while a required check or review is still missing; the
