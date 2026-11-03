@@ -128,6 +128,16 @@ fn run_local_cli(
 }
 
 fn run_daemon_cli(command: &[&str], rpc: &str, args: Value, result: Value) -> Output {
+    run_daemon_cli_with_env(command, rpc, args, result, &[])
+}
+
+fn run_daemon_cli_with_env(
+    command: &[&str],
+    rpc: &str,
+    args: Value,
+    result: Value,
+    env: &[(&str, &str)],
+) -> Output {
     let temp = tempfile::tempdir().unwrap();
     let socket = temp.path().join("daemon.sock");
     let socket_text = socket.display().to_string();
@@ -152,7 +162,7 @@ fn run_daemon_cli(command: &[&str], rpc: &str, args: Value, result: Value) -> Ou
                 .unwrap();
         }
     });
-    let output = run_cli(&socket_text, command);
+    let output = run_cli_with_env(&socket_text, command, env);
     daemon.join().unwrap();
     output
 }
@@ -3697,4 +3707,211 @@ fn cli_route_37_memory_c() {
         String::from_utf8(status.stdout).unwrap()
     );
     assert!(status.stderr.is_empty());
+}
+
+#[test]
+fn cli_route_38_health() {
+    let temp = tempfile::tempdir().unwrap();
+    let report = temp.path().join("reports/health.json");
+    let report_text = report.to_str().unwrap();
+    let result = json!({
+        "ok": true,
+        "duration_ms": 12,
+        "problems": ["p"],
+        "repairs": ["r"],
+        "checks": {
+            "memory": {"ok": true, "sources": 1, "sessions": 2, "chunks": 3, "queue_depth": 0},
+            "integrity": "ok", "stale_leases": 0, "wal_bytes": 9,
+            "disk_free_bytes": 8, "tasks": 4,
+            "dispatch": {"status": "ok", "age_s": 120, "dry_run": true}
+        }
+    });
+    let written = run_daemon_cli_with_env(
+        &["health", "--repair", "--deep", "--write", report_text],
+        "health",
+        json!({"repair": true, "deep": true}),
+        result.clone(),
+        &[("HOME", temp.path().to_str().unwrap())],
+    );
+    assert_eq!(Some(0), written.status.code());
+    assert_eq!(
+        format!(
+            "health ok  duration 12 ms\n  problem: p\n  repaired: r\n  memory ok=True sources=1 sessions=2 chunks=3 queue=0\n  integrity=ok stale=0 wal=9 disk_free=8 tasks=4\n  dispatcher=ok last_tick=2.0m ago (120s) (dry run)\n  report written to {report_text}\n"
+        ),
+        String::from_utf8(written.stdout).unwrap()
+    );
+    assert!(written.stderr.is_empty());
+    assert_eq!(
+        result,
+        serde_json::from_slice::<Value>(&std::fs::read(&report).unwrap()).unwrap()
+    );
+
+    let default_report = temp.path().join(".config/dunkingsheep/health.json");
+    let default_report_text = default_report.to_str().unwrap();
+    let default_written = run_daemon_cli_with_env(
+        &["health", "--write"],
+        "health",
+        json!({"repair": false, "deep": false}),
+        result.clone(),
+        &[("HOME", temp.path().to_str().unwrap())],
+    );
+    assert_eq!(Some(0), default_written.status.code());
+    assert!(String::from_utf8(default_written.stdout)
+        .unwrap()
+        .ends_with(&format!("  report written to {default_report_text}\n")));
+    assert!(default_written.stderr.is_empty());
+    assert_eq!(
+        result,
+        serde_json::from_slice::<Value>(&std::fs::read(&default_report).unwrap()).unwrap()
+    );
+
+    let json_output = run_daemon_cli(
+        &["health", "--json"],
+        "health",
+        json!({"repair": false, "deep": false}),
+        json!({"ok": true}),
+    );
+    assert_eq!(Some(0), json_output.status.code());
+    assert_eq!(
+        "{\n  \"ok\": true\n}\n",
+        String::from_utf8(json_output.stdout).unwrap()
+    );
+    assert!(json_output.stderr.is_empty());
+}
+
+#[test]
+fn cli_route_39_capability() {
+    let output = run_daemon_cli(
+        &["capabilities", "%42"],
+        "delivery_capability",
+        json!({"target": "%42"}),
+        json!({
+            "pane_id": "%42", "mailbox": "worker", "declared": true,
+            "agent": "codex", "drains": true, "send": "immediate",
+            "drain_evidence": "probe", "expect": "type safely"
+        }),
+    );
+    assert_eq!(Some(0), output.status.code());
+    assert_eq!(
+        "%42  mailbox='worker'  declared=yes  agent=codex\n  drains=yes  send=immediate  evidence=probe\n  type safely\n",
+        String::from_utf8(output.stdout).unwrap()
+    );
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn cli_route_40_lane_a() {
+    let listed = run_daemon_cli(&["lanes"], "lanes", json!({}), json!({"lanes": []}));
+    assert_eq!(Some(0), listed.status.code());
+    assert_eq!(
+        "the lane registry is empty\n",
+        String::from_utf8(listed.stdout).unwrap()
+    );
+    assert!(listed.stderr.is_empty());
+
+    let registered = run_daemon_cli(
+        &[
+            "lane",
+            "register",
+            "--role",
+            "worker",
+            "--pane",
+            "%42",
+            "--provider",
+            "codex",
+            "--model",
+            "gpt",
+            "--label",
+            "fixture",
+        ],
+        "lane_register",
+        json!({
+            "pane": "%42", "role": "worker", "provider": "codex", "model": "gpt",
+            "label": "fixture"
+        }),
+        json!({"pane_id": "%42", "role": "worker", "pane_pid": 123}),
+    );
+    assert_eq!(Some(0), registered.status.code());
+    assert_eq!(
+        "registered %42 as worker (pid 123)\n",
+        String::from_utf8(registered.stdout).unwrap()
+    );
+    assert!(registered.stderr.is_empty());
+
+    let set = run_daemon_cli(
+        &["lane", "set", "%42", "ops"],
+        "lane_set",
+        json!({"pane": "%42", "mailbox": "ops"}),
+        json!({"pane_id": "%42", "mailbox": "ops"}),
+    );
+    assert_eq!(Some(0), set.status.code());
+    assert_eq!(
+        "%42 is 'ops' (declared)\n",
+        String::from_utf8(set.stdout).unwrap()
+    );
+    assert!(set.stderr.is_empty());
+}
+
+#[test]
+fn cli_route_41_lane_b() {
+    let output = run_daemon_cli(
+        &["lane", "unregister", "%42"],
+        "lane_unregister",
+        json!({"pane": "%42"}),
+        json!({"pane_id": "%42", "removed": true}),
+    );
+    assert_eq!(Some(0), output.status.code());
+    assert_eq!(
+        "unregistered %42: True\n",
+        String::from_utf8(output.stdout).unwrap()
+    );
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn cli_route_42_retired() {
+    let listed = run_daemon_cli(
+        &["retired", "list"],
+        "retire_pane",
+        json!({"action": "list", "pane": null, "reason": null}),
+        json!({"retired": []}),
+    );
+    assert_eq!(Some(0), listed.status.code());
+    assert_eq!(
+        "no retired panes\n",
+        String::from_utf8(listed.stdout).unwrap()
+    );
+    assert!(listed.stderr.is_empty());
+
+    let retired = run_daemon_cli(
+        &[
+            "retired",
+            "retire",
+            "%42",
+            "--reason",
+            "superseded-by:wW:p7",
+        ],
+        "retire_pane",
+        json!({"action": "retire", "pane": "%42", "reason": "superseded-by:wW:p7"}),
+        json!({"pane_id": "%42", "reason": "superseded-by:wW:p7", "unread_kept": 0}),
+    );
+    assert_eq!(Some(0), retired.status.code());
+    assert_eq!(
+        "retired %42 (superseded-by:wW:p7); 0 unread message(s) kept as the record\n",
+        String::from_utf8(retired.stdout).unwrap()
+    );
+    assert!(retired.stderr.is_empty());
+
+    let unretired = run_daemon_cli(
+        &["retired", "unretire", "%42"],
+        "retire_pane",
+        json!({"action": "unretire", "pane": "%42", "reason": null}),
+        json!({"pane_id": "%42"}),
+    );
+    assert_eq!(Some(0), unretired.status.code());
+    assert_eq!(
+        "unretired %42\n",
+        String::from_utf8(unretired.stdout).unwrap()
+    );
+    assert!(unretired.stderr.is_empty());
 }

@@ -47,7 +47,7 @@ fn action_of(arg: &Arg) -> Action<'_> {
         options: arg.flags.to_vec(),
         dest: arg.dest,
         nargs: match arg.nargs {
-            Nargs::Opt => Some('?'),
+            Nargs::Opt | Nargs::OptEmpty => Some('?'),
             Nargs::Plus => Some('+'),
             Nargs::Star => Some('*'),
             Nargs::One | Nargs::Zero => None,

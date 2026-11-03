@@ -90,7 +90,8 @@ fn recorded_context_steps_run_end_to_end_through_the_parser_and_dispatch() {
 
 #[test]
 fn commands_without_a_body_say_so_and_exit_1() {
-    for argv in [vec!["dunkingsheep", "health"]] {
+    // Health is now a daemon-backed route. TUI remains outside this CLI batch and unported.
+    for argv in [vec!["dunkingsheep", "tui"]] {
         let ns = try_parse(&argv).unwrap();
         let out = run(&ns);
         assert_eq!(1, out.code, "{argv:?}");

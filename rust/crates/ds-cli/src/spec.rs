@@ -20,6 +20,7 @@ pub enum Ty {
 pub enum Nargs {
     One,
     Opt,
+    OptEmpty,
     Plus,
     Star,
     Zero,
