@@ -2215,9 +2215,9 @@ mod tests {
         let pane = "%1";
         add_assigned_task(&tasks, pane).await;
         let metrics = Arc::new(
-            tokio::task::spawn_blocking(|| crate::metrics::MetricsStore::open(":memory:"))
-                .await
-                .expect("metrics store worker")
+            std::thread::spawn(|| crate::metrics::MetricsStore::open(":memory:"))
+                .join()
+                .expect("metrics store thread")
                 .expect("metrics store"),
         );
         jobs.flock.attach_stores(crate::flock::panes::Stores {
@@ -2259,12 +2259,12 @@ mod tests {
         let handoffs = tasks.next_job_handoffs(Some(pane)).await.unwrap();
         assert_eq!(handoffs.len(), 1);
         assert_eq!(handoffs[0]["state"], "pending");
-        let events = tokio::task::spawn_blocking({
+        let events = std::thread::spawn({
             let metrics = Arc::clone(&metrics);
             move || metrics.events_between(0.0, f64::MAX)
         })
-        .await
-        .expect("metrics events worker")
+        .join()
+        .expect("metrics events thread")
         .unwrap();
         assert!(events.iter().any(|event| {
             event.kind == "next_job.decision"
