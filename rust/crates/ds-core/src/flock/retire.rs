@@ -30,7 +30,7 @@ pub trait RetireEnv {
     /// A read failure propagates after the retirement record has been written.
     fn unread(&self, pane_id: &str) -> Result<Option<i64>, DunkError>;
     /// The retired-panes file (`retired-panes.json`).
-    fn retired_path(&self) -> PathBuf;
+    fn retired_path(&self) -> Result<PathBuf, DunkError>;
 }
 
 fn text<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
@@ -55,14 +55,16 @@ pub fn h_retire_pane(
     let action = text(args, "action")
         .filter(|a| !a.is_empty())
         .unwrap_or("list");
-    let path = env.retired_path();
     match action {
         "list" => {
+            let path = env.retired_path()?;
             let retired = panes::all_retired(&path);
             return Ok(json!({"count": retired.len(), "retired": retired}));
         }
         "unretire" => {
-            let record = panes::unretire(&pane_arg(args)?, &path)?;
+            let pane = pane_arg(args)?;
+            let path = env.retired_path()?;
+            let record = panes::unretire(&pane, &path)?;
             return serde_json::to_value(record).map_err(|e| DunkError::Refused(e.to_string()));
         }
         "retire" => {}
@@ -103,6 +105,7 @@ pub fn h_retire_pane(
     let boxes = env.mailboxes_of_pane(&pane_id);
     let reason =
         text(args, "reason").ok_or_else(|| DunkError::Refused("'reason' is required".into()))?;
+    let path = env.retired_path()?;
     let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
     let box_refs: Vec<&str> = boxes.iter().map(String::as_str).collect();
     let record = panes::retire(
@@ -163,8 +166,8 @@ mod tests {
                 None => Ok(self.unread),
             }
         }
-        fn retired_path(&self) -> PathBuf {
-            self.path.clone()
+        fn retired_path(&self) -> Result<PathBuf, DunkError> {
+            Ok(self.path.clone())
         }
     }
 

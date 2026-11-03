@@ -985,7 +985,6 @@ pub fn h_flush_box(context: &HandlerContext<'_>, args: Args) -> Result<Value, Du
 
 struct ApiRetireEnv<'ctx, 'request> {
     context: &'ctx HandlerContext<'request>,
-    retired_path: PathBuf,
 }
 
 impl crate::flock::retire::RetireEnv for ApiRetireEnv<'_, '_> {
@@ -1024,18 +1023,15 @@ impl crate::flock::retire::RetireEnv for ApiRetireEnv<'_, '_> {
         }
     }
 
-    fn retired_path(&self) -> PathBuf {
-        self.retired_path.clone()
+    fn retired_path(&self) -> Result<PathBuf, DunkError> {
+        self.context.env.retired_panes_path()
     }
 }
 
 /// `dunk_api.h_retire_pane`: the flock handler owns the state transition; this adapter supplies
 /// request-scoped pane, role, inbox and config dependencies.
 pub fn h_retire_pane(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
-    let env = ApiRetireEnv {
-        context,
-        retired_path: context.env.retired_panes_path()?,
-    };
+    let env = ApiRetireEnv { context };
     crate::flock::retire::h_retire_pane(
         &env,
         &Value::Object(args),

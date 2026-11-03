@@ -2717,6 +2717,7 @@ struct PaneApiEnv {
 struct RetirePaneApiEnv {
     inner: PaneApiEnv,
     retired_path: PathBuf,
+    fail_path: bool,
 }
 
 impl PaneInfoEnv for RetirePaneApiEnv {
@@ -2739,6 +2740,9 @@ impl CommandEnv for RetirePaneApiEnv {
     }
 
     fn retired_panes_path(&self) -> Result<PathBuf, DunkError> {
+        if self.fail_path {
+            return Err(DunkError::Refused("archive configuration missing".into()));
+        }
         Ok(self.retired_path.clone())
     }
 }
@@ -2823,6 +2827,7 @@ fn retire_pane_dispatch_is_owner_only_and_requires_a_reason_before_recording() {
     let env = RetirePaneApiEnv {
         inner: pane_api_env(),
         retired_path: retired_path.clone(),
+        fail_path: false,
     };
     let mut dispatcher = Dispatcher::new();
     dispatcher.register_retire_pane();
@@ -2876,6 +2881,55 @@ fn retire_pane_dispatch_is_owner_only_and_requires_a_reason_before_recording() {
     assert!(denied
         .to_string()
         .contains("retire_pane is not permitted for role worker"));
+}
+
+#[test]
+fn retire_api_defers_path_failure_until_action_needs_archive() {
+    let (dir, flock) = staffed_flock("api-retire-path-error");
+    let env = RetirePaneApiEnv {
+        inner: pane_api_env(),
+        retired_path: dir.path().join("unused"),
+        fail_path: true,
+    };
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_retire_pane();
+    let call = |args: serde_json::Map<String, Value>| {
+        dispatch_as_flock_role(
+            &dispatcher,
+            &flock,
+            &env,
+            Some("w1:p1"),
+            "retire_pane",
+            Some(args),
+        )
+    };
+    let invalid = call(serde_json::Map::from_iter([(
+        "action".into(),
+        json!("bad"),
+    )]))
+    .unwrap_err();
+    assert!(invalid.to_string().contains("retire action"));
+    let missing_pane = call(serde_json::Map::from_iter([(
+        "action".into(),
+        json!("unretire"),
+    )]))
+    .unwrap_err();
+    assert!(missing_pane.to_string().contains("'pane' is required"));
+    let missing_reason = call(serde_json::Map::from_iter([
+        ("action".into(), json!("retire")),
+        ("pane".into(), json!("w1:p1")),
+    ]))
+    .unwrap_err();
+    assert!(missing_reason.to_string().contains("'reason' is required"));
+    let list_error = call(serde_json::Map::from_iter([(
+        "action".into(),
+        json!("list"),
+    )]))
+    .unwrap_err();
+    assert!(list_error
+        .to_string()
+        .contains("archive configuration missing"));
+    assert!(!env.retired_path.exists());
 }
 
 #[test]
