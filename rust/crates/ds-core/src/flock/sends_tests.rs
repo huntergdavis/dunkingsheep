@@ -449,7 +449,7 @@ fn run_inflight_fold(interleaving: FoldInterleaving, send_ok: bool) -> FoldResul
             .message_history
             .lock()
             .unwrap()
-            .last()
+            .back()
             .and_then(|message| message.attempt_generation.clone()),
         typed: pane.typed.clone(),
         done: waiter.is_set(),
