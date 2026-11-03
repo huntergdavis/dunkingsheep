@@ -5,8 +5,8 @@ use super::panes::PaneInfoEnv;
 use super::send_keys::KeyPressEnv;
 use super::sends::FlushEnv;
 use super::sends::{
-    outbox_step, send_submit_key, DirectSendOptions, DirectTextMetadata, OutboxStep,
-    OutboxWorkerPool, OutboxWorkerRunner, SendEnv, SendPreparationEnv, SnapshotStore, SubmitEnv,
+    outbox_step, send_submit_key, OutboxStep, OutboxWorkerPool, OutboxWorkerRunner, SendEnv,
+    SendPreparationEnv, SnapshotStore, SubmitEnv,
 };
 use super::Flock;
 use crate::error::DunkError;
@@ -178,7 +178,7 @@ impl OutboxWorkerRunner for FireRunner {
             let mut permission = || None;
             let outcome = outbox_step(
                 &flock,
-                &mut env,
+                &mut *env,
                 pane_id,
                 crate::clock::now_s(),
                 stopped,
