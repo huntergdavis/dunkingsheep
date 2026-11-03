@@ -16,12 +16,14 @@ impl RequestRuntimeAdapter<'_> {
     }
 
     #[allow(dead_code)] // The complete RetireEnv implementation belongs to its assembly leaf.
-    pub(crate) fn helper_retireenv_unread(&self, pane_id: &str) -> Option<i64> {
-        self.terminal
-            .flock
-            .stores()
-            .inbox
-            .and_then(|store| store.unread_for_pane(pane_id).ok())
+    pub(crate) fn helper_retireenv_unread(
+        &self,
+        pane_id: &str,
+    ) -> Result<Option<i64>, crate::error::DunkError> {
+        match self.terminal.flock.stores().inbox {
+            Some(store) => store.unread_for_pane(pane_id).map(Some),
+            None => Ok(None),
+        }
     }
 
     #[allow(dead_code)] // The complete RetireEnv implementation belongs to its assembly leaf.
@@ -88,7 +90,7 @@ mod tests {
             adapter.helper_retireenv_mailboxes_of_pane("%4"),
             vec!["%4", "writer-mailbox"]
         );
-        assert_eq!(adapter.helper_retireenv_unread("%4"), Some(1));
+        assert_eq!(adapter.helper_retireenv_unread("%4").unwrap(), Some(1));
         assert_eq!(
             adapter.helper_retireenv_retired_path(),
             crate::panes::default_path(&Env::from_process()).unwrap()
@@ -114,6 +116,36 @@ mod tests {
         assert!(adapter
             .helper_retireenv_mailboxes_of_pane("%404")
             .is_empty());
-        assert_eq!(adapter.helper_retireenv_unread("%404"), None);
+        assert_eq!(adapter.helper_retireenv_unread("%404").unwrap(), None);
+    }
+
+    #[test]
+    fn retire_inbox_unread_errors_propagate() {
+        let dir = tempfile::tempdir().unwrap();
+        let inbox_path = dir.path().join("inbox.db");
+        let inbox = Arc::new(Store::open(&inbox_path, dir.path().join("blobs")).unwrap());
+        rusqlite::Connection::open(&inbox_path)
+            .unwrap()
+            .execute("DROP TABLE messages", [])
+            .unwrap();
+
+        let flock = Flock::new(
+            dir.path().join("launches.json"),
+            dir.path().join("lanes.json"),
+            false,
+        );
+        flock.attach_stores(Stores {
+            inbox: Some(inbox),
+            ..Stores::default()
+        });
+        let terminal: Mutex<Box<dyn Terminal>> = Mutex::new(Box::new(FakeTerminal::new()));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let request = RequestCtx::default();
+        let adapter = RequestRuntimeAdapter::new(&flock, &request, runtime.handle(), &terminal);
+
+        assert!(adapter.helper_retireenv_unread("%404").is_err());
     }
 }
