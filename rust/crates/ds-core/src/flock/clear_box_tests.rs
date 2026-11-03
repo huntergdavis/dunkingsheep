@@ -231,7 +231,7 @@ fn clear_box_authorizes_before_resolution_and_sends_only_the_ordered_pair() {
     assert_eq!(backend.keys, ["C-u", "Escape"]);
     assert_eq!(result["flushed"], true);
     assert_eq!(result["target_label"], "tab first");
-    assert_eq!(result["before"]["foreign_text"], true);
+    assert_eq!(result["before"]["state"], "blocked");
     assert_eq!(result["by"], OWNER);
     assert_eq!(result["reason"], "cleanup");
 }
