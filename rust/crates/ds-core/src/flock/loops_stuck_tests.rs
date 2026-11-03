@@ -689,6 +689,76 @@ fn strict_stuck_scan_leaves_queued_pane_to_its_outbox_worker() {
 }
 
 #[test]
+fn strict_stuck_scan_repairs_consumed_receipt_even_when_pane_is_queued() {
+    use crate::flock::panes::Stores;
+    use crate::inbox_store::Outgoing;
+    use rusqlite::Connection;
+
+    let dir = tempfile::tempdir().unwrap();
+    let inbox_path = dir.path().join("inbox.db");
+    let inbox = Arc::new(Store::open(&inbox_path, dir.path().join("blobs")).unwrap());
+    let inbox_id = inbox
+        .send(&Outgoing {
+            mailbox: "writer",
+            body: Some("notice"),
+            ..Outgoing::default()
+        })
+        .unwrap();
+    let observer = Connection::open(&inbox_path).unwrap();
+    let flock = persisted_flock(&dir);
+    flock.attach_stores(Stores {
+        inbox: Some(inbox),
+        ..Stores::default()
+    });
+
+    let mut consumed = Message::new("m1", "%1", "lane", "earlier", "send_text");
+    consumed.status = "sent".into();
+    consumed.attempt_generation = Some("old-generation".into());
+    consumed.notify_for.push(inbox_id.clone());
+    flock.note_stuck_candidate(&consumed);
+    {
+        let mut candidates = flock.stuck_candidates.lock().unwrap();
+        let candidate = candidates.get_mut("%1").unwrap();
+        candidate.status = "consumed".into();
+        candidate.eligible = false;
+        candidate.recovery_outcome = Some("consumed".into());
+        candidate.recovery_detail = Some("composer cleared".into());
+        candidate.receipts_reconciled = Some(false);
+    }
+
+    let mut queued = Message::new("m2", "%1", "lane", "later", "send_text");
+    queued.status = "queued".into();
+    flock
+        .outbox
+        .lock()
+        .unwrap()
+        .insert("%1".into(), vec![queued]);
+
+    let mut probe = federated_probe();
+    probe.federated = false;
+    assert_eq!(
+        0,
+        strict_stuck_observer_scan(&flock, &mut probe, 221.0).unwrap()
+    );
+
+    let (notify_state, notify_reason): (Option<String>, Option<String>) = observer
+        .query_row(
+            "SELECT notify_state, notify_reason FROM messages WHERE id = ?1",
+            [&inbox_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(Some("sent".into()), notify_state);
+    assert_eq!(Some("recovered: composer cleared".into()), notify_reason);
+    assert_eq!(
+        Some(true),
+        flock.stuck_candidates.lock().unwrap()["%1"].receipts_reconciled
+    );
+    assert_eq!("queued", flock.outbox.lock().unwrap()["%1"][0].status);
+    assert!(probe.keys.lock().unwrap().is_empty());
+}
+
+#[test]
 fn federated_recovery_refuses_no_enter_intent_and_queued_panes() {
     let dir = tempfile::tempdir().unwrap();
     let flock = Flock::new(

@@ -113,9 +113,6 @@ pub(crate) fn strict_stuck_observer_scan<E: SendEnv + PaneInfoEnv>(
         .collect::<Vec<_>>();
     let mut acted = 0;
     for (pane_id, entry) in candidates {
-        if outbox_owns_pane(flock, &pane_id) {
-            continue;
-        }
         let screen = sends::read_screen(env, &pane_id, None, true);
         if screen
             .as_deref()
@@ -132,6 +129,9 @@ pub(crate) fn strict_stuck_observer_scan<E: SendEnv + PaneInfoEnv>(
             {
                 flock.publish_stuck_receipt(&pane_id, &entry);
             }
+            continue;
+        }
+        if outbox_owns_pane(flock, &pane_id) {
             continue;
         }
         let Some(generation) = sends::pane_generation(env, &pane_id) else {
