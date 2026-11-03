@@ -179,19 +179,64 @@ async fn authenticate(
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "));
-    let cookie = headers
-        .get(header::COOKIE)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| {
-            value.split(';').find_map(|part| {
-                let (name, value) = part.trim().split_once('=')?;
-                (name.trim() == "vp_session").then(|| value.trim())
-            })
-        });
-    auth.identity(bearer, cookie)
+    let cookie = cookie_value(headers, "vp_session");
+    auth.identity(bearer, cookie.as_deref())
         .await
         .map(|_| ())
         .map_err(auth_error_response)
+}
+
+fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    let mut cookie = None;
+    for header in headers.get_all(header::COOKIE).iter() {
+        let value = header
+            .as_bytes()
+            .iter()
+            .map(|byte| char::from(*byte))
+            .collect::<String>();
+        for part in value.split(';') {
+            let (key, value) = part.split_once('=').unwrap_or(("", part));
+            if key.trim() == name {
+                cookie = Some(unquote_cookie_value(value.trim()));
+            }
+        }
+    }
+    cookie
+}
+
+fn unquote_cookie_value(value: &str) -> String {
+    let Some(value) = value
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+    else {
+        return value.to_owned();
+    };
+
+    let chars = value.chars().collect::<Vec<_>>();
+    let mut unquoted = String::with_capacity(value.len());
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index] == '\\' && index + 1 < chars.len() {
+            if index + 3 < chars.len()
+                && matches!(chars[index + 1], '0'..='3')
+                && matches!(chars[index + 2], '0'..='7')
+                && matches!(chars[index + 3], '0'..='7')
+            {
+                let octal = (chars[index + 1] as u32 - '0' as u32) * 64
+                    + (chars[index + 2] as u32 - '0' as u32) * 8
+                    + (chars[index + 3] as u32 - '0' as u32);
+                unquoted.push(char::from(octal as u8));
+                index += 4;
+            } else {
+                unquoted.push(chars[index + 1]);
+                index += 2;
+            }
+        } else {
+            unquoted.push(chars[index]);
+            index += 1;
+        }
+    }
+    unquoted
 }
 
 fn cross_origin() -> Response {
@@ -532,5 +577,77 @@ mod tests {
             *backend.calls.lock().unwrap(),
             vec!["report:SLOT_A_ROW6_COL38_PRINTER_PAGE.md"]
         );
+    }
+
+    #[test]
+    fn cookie_value_matches_starlette_last_duplicate_and_quoted_values() {
+        let mut headers = HeaderMap::new();
+        headers.append(
+            header::COOKIE,
+            HeaderValue::from_static(
+                r#"vp_session=first; theme=dark; vp_session="session\-token""#,
+            ),
+        );
+
+        assert_eq!(
+            Some("session-token".to_owned()),
+            cookie_value(&headers, "vp_session")
+        );
+    }
+
+    #[test]
+    fn cookie_value_matches_starlette_across_cookie_header_fields() {
+        let mut headers = HeaderMap::new();
+        headers.append(
+            header::COOKIE,
+            HeaderValue::from_static("vp_session=first-header"),
+        );
+        headers.append(
+            header::COOKIE,
+            HeaderValue::from_static(r#"vp_session="second-header""#),
+        );
+
+        assert_eq!(
+            Some("second-header".to_owned()),
+            cookie_value(&headers, "vp_session")
+        );
+    }
+
+    #[test]
+    fn auth_uses_last_duplicate_cookie_without_bearer() {
+        let backend = Arc::new(FakeDashboard::ready());
+        let mut request = request("GET", "/api/poolrad-dashboard/dashboard.html", false);
+        request.headers_mut().append(
+            header::COOKIE,
+            HeaderValue::from_static("vp_session=owner-token; vp_session=invalid"),
+        );
+        let response = block_on(app(backend.clone()).oneshot(request)).unwrap();
+
+        assert_eq!(
+            json_response(response),
+            (
+                StatusCode::UNAUTHORIZED,
+                json!({"detail":"Sign in required"})
+            )
+        );
+        assert!(backend.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn auth_accepts_quoted_cookie_from_later_cookie_header() {
+        let backend = Arc::new(FakeDashboard::ready());
+        let mut request = request("GET", "/api/poolrad-dashboard/dashboard.html", false);
+        request.headers_mut().append(
+            header::COOKIE,
+            HeaderValue::from_static("vp_session=invalid"),
+        );
+        request.headers_mut().append(
+            header::COOKIE,
+            HeaderValue::from_static(r#"vp_session="owner-token""#),
+        );
+        let response = block_on(app(backend.clone()).oneshot(request)).unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(backend.calls.lock().unwrap().len(), 1);
     }
 }
