@@ -2353,6 +2353,107 @@ fn persistent_recovery_flock(dir: &std::path::Path, state_path: &std::path::Path
 }
 
 #[test]
+fn unwedge_reserves_before_one_key_and_does_not_claim_unchanged_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state.json");
+    let flock = persistent_recovery_flock(dir.path(), &state);
+    {
+        let mut config = flock.stuck_config.lock().unwrap();
+        config.threshold_s = 1.0;
+        config.observation_interval_s = 0.1;
+        config.max_attempts = 1;
+    }
+    let mut env = Pane::default();
+    env.panes
+        .push(serde_json::json!({"pane_id": "%1", "pane_pid": std::process::id()}));
+    env.statuses.insert("%1".into(), "idle".into());
+    env.screens
+        .insert("%1".into(), "│ ❯ stuck body\n────────────\n".into());
+    flock
+        .sent_text_by_pane
+        .lock()
+        .unwrap()
+        .insert("%1".into(), vec!["stuck body".into()]);
+    let mut message = Message::new("m1", "%1", "writer", "stuck body", "send_text");
+    message.created_at = 1.0;
+    message.status = "failed".into();
+    message.attempt_generation = pane_generation(&env, "%1");
+    flock.note_stuck_candidate(&message);
+
+    assert!(!flock.unwedge(
+        &mut env,
+        "%1",
+        "stuck body",
+        Some(98.0),
+        Some(&message),
+        100.0,
+        None,
+        true
+    ));
+    assert_eq!(vec![("%1".into(), "Enter".into())], env.keys);
+    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap();
+    assert!(saved.to_string().contains("spent"));
+    assert!(!flock.unwedge(
+        &mut env,
+        "%1",
+        "stuck body",
+        None,
+        Some(&message),
+        102.0,
+        None,
+        true
+    ));
+    assert_eq!(1, env.keys.len());
+}
+
+#[test]
+fn unwedge_refuses_disabled_persistence_and_edited_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Flock::new(dir.path().join("launches"), dir.path().join("lanes"), false);
+    let mut env = Pane::default();
+    env.panes
+        .push(serde_json::json!({"pane_id": "%1", "pane_pid": std::process::id()}));
+    env.statuses.insert("%1".into(), "idle".into());
+    env.screens.insert(
+        "%1".into(),
+        "│ ❯ stuck body plus edit\n────────────\n".into(),
+    );
+    flock
+        .sent_text_by_pane
+        .lock()
+        .unwrap()
+        .insert("%1".into(), vec!["stuck body".into()]);
+    let mut message = Message::new("m1", "%1", "writer", "stuck body", "send_text");
+    message.status = "failed".into();
+    message.attempt_generation = pane_generation(&env, "%1");
+    flock.note_stuck_candidate(&message);
+    assert!(!flock.unwedge(
+        &mut env,
+        "%1",
+        "stuck body plus edit",
+        Some(1.0),
+        Some(&message),
+        200.0,
+        None,
+        true
+    ));
+    assert!(env.keys.is_empty());
+    env.screens
+        .insert("%1".into(), "│ ❯ stuck body\n────────────\n".into());
+    assert!(!flock.unwedge(
+        &mut env,
+        "%1",
+        "stuck body",
+        Some(1.0),
+        Some(&message),
+        400.0,
+        None,
+        true
+    ));
+    assert!(env.keys.is_empty());
+}
+
+#[test]
 fn reconcile_stuck_requires_the_live_message_and_created_at_identity() {
     let dir = tempfile::tempdir().unwrap();
     let flock = Flock::new(dir.path().join("launches.json"), dir.path(), false);
