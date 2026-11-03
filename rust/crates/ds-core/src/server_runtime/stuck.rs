@@ -190,7 +190,12 @@ mod tests {
         (LoopRuntimeAdapter::new(flock, factory), dir)
     }
 
-    fn make_runtime_services(dir: &Path, runtime: tokio::runtime::Runtime) -> Arc<RuntimeServices> {
+    fn make_runtime_services(
+        dir: &Path,
+        runtime: tokio::runtime::Runtime,
+        persist_enabled: bool,
+        terminal_factory: Option<crate::flock::loop_env::LoopTerminalFactory>,
+    ) -> Arc<RuntimeServices> {
         let env = Env::from_pairs(&[(
             "DUNKINGSHEEP_DIR",
             dir.to_str().expect("test directory is UTF-8"),
@@ -229,26 +234,28 @@ mod tests {
             .expect("VP role");
         let executable = dir.join("daemon-executable");
         std::fs::write(&executable, b"test daemon identity").expect("executable fixture");
-        let factory: crate::flock::loop_env::LoopTerminalFactory = Arc::new(|| {
-            let mut terminal = FakeTerminal::new();
-            terminal.panes.push(Pane {
-                pane_id: "%stuck-test".into(),
-                pane_pid: Some(i64::from(std::process::id())),
-                command: "codex".into(),
-                ..Pane::default()
-            });
-            terminal.panes.push(Pane {
-                pane_id: "w9:pH".into(),
-                command: "codex".into(),
-                ..Pane::default()
-            });
-            Box::new(terminal)
+        let factory = terminal_factory.unwrap_or_else(|| {
+            Arc::new(|| {
+                let mut terminal = FakeTerminal::new();
+                terminal.panes.push(Pane {
+                    pane_id: "%stuck-test".into(),
+                    pane_pid: Some(i64::from(std::process::id())),
+                    command: "codex".into(),
+                    ..Pane::default()
+                });
+                terminal.panes.push(Pane {
+                    pane_id: "w9:pH".into(),
+                    command: "codex".into(),
+                    ..Pane::default()
+                });
+                Box::new(terminal)
+            })
         });
         let state_dir = dir.join("state-dir");
         RuntimeServices::new(RuntimeServiceInputs {
             launches_file: dir.join("launches.json"),
             lane_registry_file: dir.join("lanes.json"),
-            persist_enabled: false,
+            persist_enabled,
             stores: Stores {
                 tasks: Some(tasks),
                 inbox: Some(inbox),
@@ -363,7 +370,7 @@ mod tests {
             .enable_all()
             .build()
             .expect("runtime");
-        let services = make_runtime_services(dir.path(), runtime);
+        let services = make_runtime_services(dir.path(), runtime, false, None);
         let adapter = services
             .stuck_loop_adapter()
             .expect("canonical stuck adapter");
@@ -495,5 +502,136 @@ mod tests {
         );
         services.shutdown();
         assert!(adapter.helper_stuckenv_closed());
+    }
+
+    #[test]
+    fn production_env_stuck_recovery_uses_concrete_services() {
+        use std::process::Command;
+
+        const CHILD: &str = "DS_STUCK_RECOVERY_TEST_CHILD";
+        const TEST_NAME: &str =
+            "server_runtime::stuck::tests::production_env_stuck_recovery_uses_concrete_services";
+        if std::env::var_os(CHILD).is_none() {
+            let config = tempfile::tempdir().expect("isolated recovery config");
+            let output = Command::new(std::env::current_exe().expect("test binary"))
+                .args(["--exact", TEST_NAME, "--nocapture"])
+                .env(CHILD, "1")
+                .env("DUNKINGSHEEP_DIR", config.path())
+                .env("DUNKINGSHEEP_FEDERATED_INPUT", "1")
+                .output()
+                .expect("isolated child test");
+            assert!(
+                output.status.success(),
+                "child test failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let dir = tempfile::tempdir().expect("runtime state");
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let pane_id = "%stuck-test".to_owned();
+        let strict_pane_id = "%strict-test".to_owned();
+        let pid = i64::from(std::process::id());
+        let generation = format!(
+            "pid:{pid}:start:{}",
+            crate::proc::process_start(pid).expect("current process start")
+        );
+        let frame = "  >_ OpenAI Codex (v0.165.0)\n\n\x1b[1m› pending text\x1b[0m\n\n  GPT-6-Astra high · ~/workspace/x\n  ? for shortcuts\n";
+        let strict_empty_frame = format!(
+            "synthetic transcript\n{}› Ask Codex to do anything\n\n\n{}\n",
+            "\n".repeat(17),
+            "  model · /tmp/synthetic-fixture · task"
+        );
+        let factory: crate::flock::loop_env::LoopTerminalFactory = Arc::new(move || {
+            let mut terminal = FakeTerminal::new();
+            terminal.panes = [pane_id.clone(), strict_pane_id.clone()]
+                .into_iter()
+                .map(|pane_id| Pane {
+                    pane_id,
+                    pane_pid: Some(pid),
+                    command: "codex".into(),
+                    ..Pane::default()
+                })
+                .collect();
+            terminal.screens.insert(pane_id.clone(), frame.to_owned());
+            terminal
+                .screens
+                .insert(strict_pane_id.clone(), strict_empty_frame.clone());
+            Box::new(terminal)
+        });
+        let services = make_runtime_services(dir.path(), runtime, true, Some(factory));
+        let adapter: Arc<dyn crate::flock::loops_stuck::StuckEnv> = Arc::new(
+            services
+                .stuck_loop_adapter()
+                .expect("canonical stuck adapter"),
+        );
+        let now = crate::clock::now_s();
+        let mut message = crate::flock::sends::Message::new(
+            "m1",
+            "%stuck-test",
+            "lane",
+            "pending text",
+            "send_text",
+        );
+        message.status = "failed".into();
+        message.attempt_generation = Some(generation.clone());
+        services.flock.note_stuck_candidate(&message);
+        let mut strict_message = crate::flock::sends::Message::new(
+            "m2",
+            "%strict-test",
+            "lane",
+            "strict pending text",
+            "send_text",
+        );
+        strict_message.status = "failed".into();
+        strict_message.attempt_generation = Some(generation.clone());
+        services.flock.note_stuck_candidate(&strict_message);
+        services.flock.stuck_tracker.lock().unwrap().records.insert(
+            "%stuck-test".into(),
+            crate::stuck::Record {
+                message_id: Some("federated:m1".into()),
+                generation: Some(generation.clone()),
+                fingerprint: Some(crate::stuck::fingerprint("pending text")),
+                first_seen: Some(now - 121.0),
+                ..crate::stuck::Record::default()
+            },
+        );
+        services.flock.stuck_tracker.lock().unwrap().records.insert(
+            "%strict-test".into(),
+            crate::stuck::Record {
+                message_id: Some("m2".into()),
+                generation: Some(generation),
+                fingerprint: Some(crate::stuck::fingerprint("strict pending text")),
+                first_seen: Some(now - 121.0),
+                ..crate::stuck::Record::default()
+            },
+        );
+
+        let recovery_started_at = crate::clock::now_s();
+        let acted =
+            services
+                .runtime
+                .block_on(crate::flock::loops_stuck::StuckEnv::stuck_observer_step(
+                    adapter.as_ref(),
+                ));
+        let recovery_finished_at = crate::clock::now_s();
+        assert_eq!(1, acted);
+        let tracker = services.flock.stuck_tracker.lock().unwrap();
+        assert_eq!(1, tracker.records["%stuck-test"].attempts);
+        assert!(tracker.records["%stuck-test"].last_attempt_at.is_some());
+        let candidates = services.flock.stuck_candidates.lock().unwrap();
+        let strict_candidate = &candidates["%strict-test"];
+        let consumed_at = strict_candidate
+            .consumed_at
+            .expect("strict empty-composer receipt is consumed");
+        assert!(consumed_at.is_finite());
+        assert!((recovery_started_at..=recovery_finished_at).contains(&consumed_at));
+        assert!(strict_candidate.retired_at.is_none());
     }
 }
