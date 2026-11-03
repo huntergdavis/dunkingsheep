@@ -6,6 +6,8 @@ import tempfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(__file__))
+import _bootstrap  # noqa: E402,F401
 
 # web.app fixes its data dir at first import, so every test in the process shares ONE.
 os.environ.setdefault("VP_DATA_DIR", tempfile.mkdtemp(prefix="desk-test-"))
@@ -41,6 +43,97 @@ class Fake:
         if verb == "owner_conversation":
             return {"messages": self.conversation, "waiting": []}
         return {}
+
+
+class OwnerIngestWireOracle(unittest.TestCase):
+    """Pin the raw values and error ordering used by the Rust dispatcher adapter."""
+
+    def setUp(self):
+        from dunk_core import Flock
+        from dunk_inbox import Inbox
+        from dunk_roles import Roles
+        from dunk_tasks import Tasks
+        from fakes import FakeHerdr
+
+        self.tmp = tempfile.TemporaryDirectory()
+        root = self.tmp.name
+        self.inbox = Inbox(path=os.path.join(root, "inbox.db"),
+                           blob_dir=os.path.join(root, "blobs"))
+        self.flock = Flock(
+            herdr=FakeHerdr(), state_file=os.path.join(root, "dunks.json"),
+            persist=False, restore=False, inbox=self.inbox,
+            tasks=Tasks(path=os.path.join(root, "tasks.db")),
+            roles=Roles(path=os.path.join(root, "roles.json"),
+                        tokens_path=os.path.join(root, "tokens.json")),
+        )
+
+    def tearDown(self):
+        self.flock.close()
+        self.inbox.close()
+        self.flock.tasks.close()
+        self.tmp.cleanup()
+
+    def test_scalar_subjects_use_sqlite_text_affinity(self):
+        cases = [("integer", 42, "42"), ("true", True, "1"),
+                 ("false", False, "0"), ("string", " spaced ", " spaced "),
+                 ("null", None, None)]
+        for label, subject, expected in cases:
+            message = self.flock.owner_ingest(
+                "body", "web", external_id=f"scalar-{label}", subject=subject
+            )["message"]
+            self.assertEqual(expected, message["subject"])
+        omitted = self.flock.owner_ingest(
+            "body", "web", external_id="scalar-omitted"
+        )["message"]
+        self.assertIsNone(omitted["subject"])
+
+    def test_duplicate_returns_before_malformed_attachments_and_subject(self):
+        first = self.flock.owner_ingest(
+            "first", "web", external_id="duplicate-wire"
+        )["message"]
+        duplicate = self.flock.owner_ingest(
+            "retry", "web", external_id="duplicate-wire", attachments=17,
+            subject=["unsupported"],
+        )
+        self.assertTrue(duplicate["duplicate"])
+        self.assertEqual(first["message_id"], duplicate["message"]["message_id"])
+        with self.assertRaisesRegex(Exception, "transport must be one of"):
+            self.flock.owner_ingest(
+                "retry", "invalid", external_id="duplicate-wire", attachments=17,
+                subject={"unsupported": True},
+            )
+
+    def test_fresh_errors_follow_body_attachment_then_subject_order(self):
+        from dunk_core import DunkError
+
+        with self.assertRaisesRegex(Exception, "a message needs a body or an attachment"):
+            self.flock.owner_ingest("  ", "web", external_id="empty-body", attachments=[])
+        with self.assertRaisesRegex(TypeError, "not iterable"):
+            self.flock.owner_ingest("body", "web", external_id="bad-attach", attachments=17)
+
+        missing = os.path.join(self.tmp.name, "missing.txt")
+        with self.assertRaisesRegex(DunkError, "no such file to attach"):
+            self.flock.owner_ingest("body", "web", external_id="missing-before-subject",
+                                    attachments=[missing], subject=[])
+
+        attachment = os.path.join(self.tmp.name, "existing.txt")
+        with open(attachment, "wb") as handle:
+            handle.write(b"staged before subject bind")
+        for subject, kind in [([], "list"), ({"unsupported": True}, "dict")]:
+            with self.subTest(subject=subject), self.assertRaises(Exception) as caught:
+                self.flock.owner_ingest("body", "web", external_id=f"bad-subject-{type(subject).__name__}",
+                                        attachments=[attachment], subject=subject)
+            self.assertEqual(
+                f"Error binding parameter 6: type '{kind}' is not supported",
+                str(caught.exception),
+            )
+        self.assertTrue(os.listdir(self.inbox.blob_dir), "attachments stage before subject binding")
+
+        rows = self.inbox.conversation("owner")
+        ids = {row["external_id"] for row in rows}
+        for failed in ("empty-body", "bad-attach", "missing-before-subject",
+                       "bad-subject-list", "bad-subject-dict"):
+            self.assertNotIn(failed, ids)
 
 
 @unittest.skipUnless(importlib.util.find_spec("fastapi"), "web.app needs fastapi")

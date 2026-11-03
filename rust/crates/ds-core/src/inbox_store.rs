@@ -17,6 +17,7 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
 
 use crate::clock::now_s;
@@ -327,6 +328,85 @@ impl Store {
             for (index, blob) in stored.iter().enumerate() {
                 // The attachment ROW id is per message; the blob stays content-addressed
                 // and shared (re-attaching one file to another message must not collide).
+                transaction
+                    .execute(
+                        "INSERT INTO attachments (id, message_id, filename, media_type, \
+                         size, sha256, created_at) VALUES (?,?,?,?,?,?,?)",
+                        rusqlite::params![
+                            format!("{message_id}-{}", index + 1),
+                            message_id,
+                            blob.filename,
+                            blob.media_type,
+                            blob.size as i64,
+                            blob.sha256,
+                            now_s()
+                        ],
+                    )
+                    .map_err(map_sqlite)?;
+            }
+            transaction.commit().map_err(map_sqlite)?;
+            Ok(message_id)
+        })
+    }
+
+    /// The raw subject/attachment boundary used only by owner_ingest's wire adapter.
+    /// Existing callers keep using the typed [`Outgoing`] and [`Store::send`] API.
+    pub fn send_owner_ingest_wire(
+        &self,
+        body: &str,
+        subject: Option<&JsonValue>,
+        attachments: Option<&JsonValue>,
+        transport: &str,
+        external_id: Option<&str>,
+    ) -> Result<String, DunkError> {
+        let body = body.to_string();
+        check_sizes(body.len(), "", 0, 0).map_err(refuse)?;
+        let has_attachments = owner_wire_attachments_truthy(attachments);
+        if body.trim().is_empty() && !has_attachments {
+            return Err(refuse("a message needs a body or an attachment"));
+        }
+
+        // Python's API comma-splits strings before Inbox.send. Other values arrive
+        // unchanged, and their iteration/conversion errors occur here, after body check.
+        let paths = owner_wire_attachment_paths(attachments)?;
+        let mut stored = Vec::new();
+        for path in paths {
+            stored.push(self.store_blob(&path)?);
+        }
+        // The Python sqlite3 subject bind happens after all attachment staging.
+        let subject = owner_sqlite_subject(subject)?;
+        let transport = validate_transport(Some(transport)).map_err(refuse)?;
+        let mailbox = OWNER_MAILBOX.to_string();
+        let label = mailbox.clone();
+        let pane_id: Option<String> = None;
+        let sender: Option<String> = None;
+        let reply_to: Option<String> = None;
+        let external_id = external_id.filter(|id| !id.is_empty()).map(str::to_string);
+        self.writer.call(move |connection| {
+            let transaction = connection.transaction().map_err(map_sqlite)?;
+            let message_id = next_message_id(&transaction)?;
+            let created = now_s();
+            transaction
+                .execute(
+                    "INSERT INTO messages (id, mailbox, mailbox_label, pane_id, sender, \
+                     subject, body, state, created_at, transport, reply_to, external_id) \
+                     VALUES (?,?,?,?,?,?,?,'queued',?,?,?,?)",
+                    rusqlite::params![
+                        message_id,
+                        mailbox,
+                        label,
+                        pane_id,
+                        sender,
+                        subject,
+                        body,
+                        created,
+                        transport,
+                        reply_to,
+                        external_id
+                    ],
+                )
+                .map_err(map_sqlite)?;
+            for (index, blob) in stored.iter().enumerate() {
                 transaction
                     .execute(
                         "INSERT INTO attachments (id, message_id, filename, media_type, \

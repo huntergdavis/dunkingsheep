@@ -1113,55 +1113,15 @@ fn owner_message_value(message: &crate::inbox_store::Message) -> Value {
     })
 }
 
-fn owner_ingest_attachments(args: &Args) -> Result<Vec<PathBuf>, DunkError> {
-    let Some(value) = args.get("attach").filter(|value| truthy(value)) else {
-        return Ok(Vec::new());
-    };
-    let paths: Vec<String> = match value {
-        Value::String(paths) => paths
-            .split(',')
-            .filter(|path| !path.trim().is_empty())
-            .map(str::to_string)
-            .collect(),
-        Value::Array(paths) => paths.iter().map(python_value_string).collect(),
-        // Python's `for path in attachments` iterates object keys.
-        Value::Object(paths) => paths.keys().cloned().collect(),
-        Value::Bool(_) => return Err(DunkError::Refused("'bool' object is not iterable".into())),
-        Value::Number(number) => {
-            let kind = if number.is_f64() { "float" } else { "int" };
-            return Err(DunkError::Refused(format!(
-                "'{kind}' object is not iterable"
-            )));
-        }
-        Value::Null => unreachable!("falsey attachment value"),
-    };
-    Ok(paths.into_iter().map(PathBuf::from).collect())
-}
-
 /// `dunk_api.h_owner_ingest`.
 pub fn h_owner_ingest(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
-    let transport = args.get("transport").map(python_value_string);
-    let external_id = args
-        .get("external_id")
-        .filter(|value| truthy(value))
-        .map(python_value_string);
-    let subject = match args.get("subject") {
-        None | Some(Value::Null) => None,
-        Some(Value::String(subject)) => Some(subject.as_str()),
-        Some(_) => {
-            return Err(DunkError::Refused(
-                "owner_ingest subject must be a string".into(),
-            ));
-        }
-    };
-    let attachments = owner_ingest_attachments(&args)?;
-    let ingested = crate::owner::OwnerConversations::new(context.flock, context.env).ingest(
-        crate::owner::conversations::OwnerIngest {
+    let ingested = crate::owner::OwnerConversations::new(context.flock, context.env).ingest_wire(
+        crate::owner::conversations::OwnerIngestWire {
             body: args.get("body"),
-            transport: transport.as_deref(),
-            external_id: external_id.as_deref(),
-            subject,
-            attachments: &attachments,
+            transport: args.get("transport"),
+            external_id: args.get("external_id"),
+            subject: args.get("subject"),
+            attachments: args.get("attach"),
         },
         context.self_pane_id(),
     )?;

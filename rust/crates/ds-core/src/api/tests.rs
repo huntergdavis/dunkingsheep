@@ -4101,6 +4101,39 @@ fn h_owner_ingest_matches_python() {
         "attachment with spaces.txt"
     );
 
+    for (subject, expected) in [
+        (json!(42), json!("42")),
+        (json!(true), json!("1")),
+        (json!(false), json!("0")),
+        (Value::Null, Value::Null),
+    ] {
+        let scalar = dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_ingest",
+            args(json!({
+                "body": "scalar subject",
+                "transport": "web",
+                "external_id": format!("scalar:{}", expected),
+                "subject": subject,
+            })),
+            Some("w1:p1"),
+        )
+        .expect("scalar SQLite subject binding");
+        assert_eq!(scalar["message"]["subject"], expected);
+    }
+    let omitted = dispatch_owner_api(
+        &dispatcher,
+        &flock,
+        &env,
+        "owner_ingest",
+        args(json!({"body": "no subject", "transport": "web", "external_id": "scalar:omitted"})),
+        Some("w1:p1"),
+    )
+    .expect("omitted subject");
+    assert_eq!(omitted["message"]["subject"], Value::Null);
+
     let duplicate = dispatch_owner_api(
         &dispatcher,
         &flock,
@@ -4296,4 +4329,141 @@ fn h_owner_outbox_matches_python() {
         ),
         Err(DunkError::Refused(message)) if message == "owner_outbox: missing required argument(s): transport"
     ));
+}
+
+#[test]
+fn h_owner_ingest_duplicate_preserves_raw_wire_order() {
+    let (_dir, flock, env) = owner_api_fixture("owner-ingest-duplicate-wire-order");
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_owner_reply_ingest_outbox();
+    let first = dispatch_owner_api(
+        &dispatcher,
+        &flock,
+        &env,
+        "owner_ingest",
+        args(json!({"body": "original", "transport": "web", "external_id": "wire-duplicate"})),
+        Some("w1:p1"),
+    )
+    .unwrap();
+    let message_id = first["message"]["message_id"].clone();
+
+    for subject in [json!(["unsupported"]), json!({"unsupported": true})] {
+        let duplicate = dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_ingest",
+            args(json!({
+                "body": "redelivery",
+                "transport": "web",
+                "external_id": "wire-duplicate",
+                "attach": 17,
+                "subject": subject,
+            })),
+            Some("w1:p1"),
+        )
+        .expect("duplicate must return before raw attachment/subject handling");
+        assert_eq!(duplicate["duplicate"], true);
+        assert_eq!(duplicate["message"]["message_id"], message_id);
+    }
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_ingest",
+            args(json!({
+                "body": "redelivery",
+                "transport": "bogus",
+                "external_id": "wire-duplicate",
+                "attach": 17,
+                "subject": [],
+            })),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "transport must be one of web, telegram, report; got 'bogus'"
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_ingest",
+            args(json!({"body": "redelivery", "transport": "bogus", "external_id": "wire-duplicate", "attach": 17})),
+            Some("w1:p2"),
+        ),
+        Err(DunkError::Refused(message)) if message.contains("not permitted for role worker")
+    ));
+}
+
+#[test]
+fn h_owner_ingest_raw_errors_match_python_order() {
+    let (dir, flock, env) = owner_api_fixture("owner-ingest-raw-errors");
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_owner_reply_ingest_outbox();
+    let inbox = flock.stores().inbox.unwrap();
+    let missing = dir.path().join("missing-before-subject-bind.txt");
+    let attachment = dir.path().join("staged-before-subject-bind.txt");
+    std::fs::write(&attachment, b"attachment fixture").unwrap();
+
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher, &flock, &env, "owner_ingest",
+            args(json!({"body": "  ", "transport": "web", "external_id": "raw-empty-body", "attach": []})),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "a message needs a body or an attachment"
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher, &flock, &env, "owner_ingest",
+            args(json!({"body": "  ", "transport": "web", "external_id": "raw-noniterable", "attach": 17})),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "'int' object is not iterable"
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher, &flock, &env, "owner_ingest",
+            args(json!({"body": "x", "transport": "web", "external_id": "raw-missing-path", "attach": [missing.to_string_lossy()], "subject": []})),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message.starts_with("no such file to attach:")
+    ));
+    for (external_id, subject, expected) in [
+        (
+            "raw-list-subject",
+            json!([]),
+            "Error binding parameter 6: type 'list' is not supported",
+        ),
+        (
+            "raw-dict-subject",
+            json!({"x": 1}),
+            "Error binding parameter 6: type 'dict' is not supported",
+        ),
+    ] {
+        assert!(matches!(
+            dispatch_owner_api(
+                &dispatcher, &flock, &env, "owner_ingest",
+                args(json!({"body": "x", "transport": "web", "external_id": external_id, "attach": [attachment.to_string_lossy()], "subject": subject})),
+                Some("w1:p1"),
+            ),
+            Err(DunkError::Refused(message)) if message == expected
+        ));
+    }
+    for external_id in [
+        "raw-empty-body",
+        "raw-noniterable",
+        "raw-missing-path",
+        "raw-list-subject",
+        "raw-dict-subject",
+    ] {
+        assert!(
+            inbox
+                .find_by_external_id("owner", external_id)
+                .unwrap()
+                .is_none(),
+            "failed request inserted {external_id}"
+        );
+    }
 }
