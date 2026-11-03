@@ -124,7 +124,8 @@ fn unreadable_and_modal_delivery_states_preserve_wire_shape() {
         Some("Press Enter to confirm or Esc to cancel\n".into()),
     );
     let modal = flock.delivery_state(&backend, WORKER, None, None, None);
-    assert_eq!(modal["state"], "ready");
+    // The modal itself is not composer text, while its Escape affordance classifies as working.
+    assert_eq!(modal["state"], "working");
     assert_eq!(modal["foreign_text"], false);
     assert_eq!(modal["foreign_excerpt"], Value::Null);
 }
@@ -173,7 +174,7 @@ fn delivery_state_marks_ambiguous_composer_unknown_and_collapses_foreign_excerpt
         .unwrap()
         .starts_with("ambiguous composer/transcript:"));
 
-    let text = "  one\n two   three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty twenty-one ";
+    let text = "  one   two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty twenty-one ";
     let screen = pending_screen(text);
     let foreign = flock.delivery_state(
         &Backend::default(),
@@ -204,9 +205,10 @@ fn clear_box_authorizes_before_resolution_and_sends_only_the_ordered_pair() {
     let (flock, _dir) = flock("clear-success", true);
     let mut backend = Backend::default();
     backend.panes.push(pane("tab first"));
-    backend
-        .screens
-        .insert(WORKER.into(), Some(pending_screen("stuck text")));
+    backend.screens.insert(
+        WORKER.into(),
+        Some("Context is full - please /clear\n".into()),
+    );
 
     let refused = flock
         .clear_box(&mut backend, &json!("missing pane"), Some(WORKER), None)
@@ -241,6 +243,7 @@ fn clear_box_noops_for_ready_and_working_and_stops_after_first_key_failure() {
     backend
         .panes
         .push(json!({"pane_id": WORKER, "agent_status":"busy"}));
+    backend.statuses.insert(WORKER.into(), "busy".into());
     backend.screens.insert(WORKER.into(), Some(ready_screen()));
     let working = flock
         .clear_box(&mut backend, &json!({"pane_id": WORKER}), Some(OWNER), None)
@@ -253,6 +256,7 @@ fn clear_box_noops_for_ready_and_working_and_stops_after_first_key_failure() {
     assert!(backend.keys.is_empty());
 
     backend.panes[0]["agent_status"] = json!("idle");
+    backend.statuses.insert(WORKER.into(), "idle".into());
     let ready = flock
         .clear_box(&mut backend, &json!({"pane_id": WORKER}), Some(OWNER), None)
         .unwrap();
@@ -266,9 +270,10 @@ fn clear_box_noops_for_ready_and_working_and_stops_after_first_key_failure() {
         "nothing to clear: the input box is already clear"
     );
 
-    backend
-        .screens
-        .insert(WORKER.into(), Some(pending_screen("stuck")));
+    backend.screens.insert(
+        WORKER.into(),
+        Some("Context is full - please /clear\n".into()),
+    );
     backend.fail_at = Some(1);
     let error = flock
         .clear_box(&mut backend, &json!({"pane_id": WORKER}), Some(OWNER), None)
