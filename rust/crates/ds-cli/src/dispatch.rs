@@ -3157,12 +3157,23 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
         "guide" | "help" | "docs" => guide(ns),
         "commands" => commands(json),
         "mcp-map" => mcp_map(ns),
-        // MCP owns stdout for JSON-RPC even when the CLI's global --json flag is present.
-        "mcp" => Outcome {
-            stdout: String::new(),
-            stderr: String::new(),
-            code: ds_mcp::run_stdio(),
-        },
+        // Match the Python dispatcher: MCP inherits these CLI overrides through its environment.
+        // The shared server still resolves identity normally, including TMUX_PANE precedence and
+        // its terminal verification; HERDR_PANE_ID is only set when the caller supplied it.
+        "mcp" => {
+            if let Some(socket) = text(ns, "socket").filter(|value| !value.is_empty()) {
+                std::env::set_var("DUNKINGSHEEP_SOCKET", socket);
+            }
+            if let Some(self_pane) = text(ns, "self_pane").filter(|value| !value.is_empty()) {
+                std::env::set_var("HERDR_PANE_ID", self_pane);
+            }
+            // MCP owns stdout for JSON-RPC even when the CLI's global --json flag is present.
+            Outcome {
+                stdout: String::new(),
+                stderr: String::new(),
+                code: ds_mcp::run_stdio(),
+            }
+        }
         "install" => install_launcher(ns, json),
         "mcp-setup" => mcp_setup(ns),
         "context" => context(ns, json),
