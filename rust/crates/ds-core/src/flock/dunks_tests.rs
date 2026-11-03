@@ -66,7 +66,7 @@ impl SendEnv for FireEnv {
     fn read_pane(&self, _pane_id: &str, _lines: i64, _ansi: bool) -> Option<String> {
         Some(
             include_str!("../../tests/fixtures/screen/codex-idle-footer-pane17.ansi")
-                .replace("tab to queue message", "type a message"),
+                .replace("tab to queue message", "Ask Codex to do anything"),
         )
     }
     fn pane_harness(&self, _pane_id: &str) -> Option<String> {
