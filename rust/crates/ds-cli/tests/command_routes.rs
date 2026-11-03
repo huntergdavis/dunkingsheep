@@ -1,7 +1,7 @@
 //! Generic `--json` daemon output through the actual Rust CLI process and an isolated fake socket.
 
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixListener;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
@@ -34,6 +34,74 @@ fn run_cli_with_env(socket: &str, command: &[&str], env: &[(&str, &str)]) -> Out
         cli.env(key, value);
     }
     cli.output().expect("run Rust CLI")
+}
+
+fn run_binary_without_command(args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_dunkingsheep"))
+        .args(args)
+        .env_remove("DUNKINGSHEEP_SOCKET")
+        .env_remove("DUNKINGSHEEP_SERVICE_TOKEN")
+        .env_remove("DUNKINGSHEEP_SERVICE_TOKEN_FILE")
+        .output()
+        .expect("run Rust CLI")
+}
+
+fn run_python_reference(args: &[&str]) -> Output {
+    Command::new("python3")
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../dunkingsheep"
+        ))
+        .args(args)
+        .env_remove("DUNKINGSHEEP_SOCKET")
+        .env_remove("DUNKINGSHEEP_SERVICE_TOKEN")
+        .env_remove("DUNKINGSHEEP_SERVICE_TOKEN_FILE")
+        .output()
+        .expect("run Python CLI reference")
+}
+
+fn assert_matches_python(args: &[&str]) {
+    let rust = run_binary_without_command(args);
+    let python = run_python_reference(args);
+    assert_eq!(rust.status.code(), python.status.code(), "args: {args:?}");
+    if rust.stdout != python.stdout {
+        let first = rust
+            .stdout
+            .iter()
+            .zip(&python.stdout)
+            .take_while(|(left, right)| left == right)
+            .count();
+        let start = first.saturating_sub(100);
+        let rust_end = (first + 180).min(rust.stdout.len());
+        let python_end = (first + 180).min(python.stdout.len());
+        panic!(
+            "stdout differs for args {args:?} at byte {first}; lengths Rust={} Python={}; Rust={:?}; Python={:?}",
+            rust.stdout.len(),
+            python.stdout.len(),
+            String::from_utf8_lossy(&rust.stdout[start..rust_end]),
+            String::from_utf8_lossy(&python.stdout[start..python_end]),
+        );
+    }
+    assert_eq!(rust.stderr, python.stderr, "stderr for args: {args:?}");
+}
+
+#[cfg(unix)]
+fn write_guard_fixture(path: &Path, contents: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, contents).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[cfg(unix)]
+fn run_guard_fixture(home: &Path, config: &Path, path: &Path, args: &[&str]) -> Output {
+    let empty_socket = home.join("unused.sock");
+    let env = [
+        ("HOME", home.to_str().unwrap()),
+        ("DUNKINGSHEEP_DIR", config.to_str().unwrap()),
+        ("PATH", path.to_str().unwrap()),
+    ];
+    run_cli_with_env(empty_socket.to_str().unwrap(), args, &env)
 }
 
 fn run_local_context_cli(
@@ -88,6 +156,229 @@ fn run_cli_with_stdin(socket: &str, command: &[&str], input: &str) -> Output {
         .write_all(input.as_bytes())
         .unwrap();
     child.wait_with_output().expect("wait for Rust CLI")
+}
+
+#[cfg(unix)]
+fn accept_fake_daemon(listener: &UnixListener) -> UnixStream {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => return stream,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(error) => panic!("fake daemon did not receive a request: {error}"),
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_route_55_mcp() {
+    let temp = tempfile::tempdir().unwrap();
+    let socket = temp.path().join("mcp-daemon.sock");
+    let decoy_socket = temp.path().join("decoy-daemon.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let fake_launcher = temp.path().join("dunkingsheep");
+    write_guard_fixture(&fake_launcher, "#!/bin/sh\nexit 1\n");
+    let expected_pane = std::env::var("TMUX_PANE")
+        .ok()
+        .filter(|pane| !pane.trim().is_empty())
+        .or_else(|| {
+            std::env::var("HERDR_PANE_ID")
+                .ok()
+                .filter(|pane| !pane.trim().is_empty())
+        });
+    let daemon = std::thread::spawn(move || {
+        let mut commands = Vec::new();
+        for (expected_cmd, result) in [
+            ("status", json!({})),
+            (
+                "whoami",
+                json!({"role": "worker", "label": "inherited caller"}),
+            ),
+            ("status", json!({})),
+            (
+                "whoami",
+                json!({"role": "worker", "label": "inherited caller"}),
+            ),
+        ] {
+            let stream = accept_fake_daemon(&listener);
+            let mut line = String::new();
+            BufReader::new(&stream).read_line(&mut line).unwrap();
+            let request: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(expected_cmd, request["cmd"]);
+            assert_eq!(expected_pane.as_deref(), request["self_pane_id"].as_str());
+            assert!(request.get("service_token").is_none());
+            commands.push(request["cmd"].as_str().unwrap().to_string());
+            let mut writer = &stream;
+            writer
+                .write_all(format!("{}\n", json!({"ok": true, "result": result})).as_bytes())
+                .unwrap();
+        }
+        commands
+    });
+
+    let requests = [
+        json!({"jsonrpc":"2.0","id":"init-7","method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"route-test","version":"1"}}}),
+        json!({"jsonrpc":"2.0","id":8,"method":"tools/list","params":{}}),
+        json!({"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"whoami","arguments":{}}}),
+    ];
+    let input = requests
+        .iter()
+        .map(Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    let mut child = Command::new(env!("CARGO_BIN_EXE_dunkingsheep"))
+        .args(["--socket"])
+        .arg(&socket)
+        .args(["mcp", "--json"])
+        .env("HOME", temp.path())
+        .env("DUNKINGSHEEP_DIR", temp.path().join("config"))
+        .env("DUNKINGSHEEP_SOCKET", &decoy_socket)
+        .env("DUNKINGSHEEP_BIN", &fake_launcher)
+        .env_remove("DUNKINGSHEEP_SERVICE_TOKEN")
+        .env_remove("DUNKINGSHEEP_SERVICE_TOKEN_FILE")
+        .env_remove("DUNKINGSHEEP_CLIENT_TIMEOUT")
+        .env_remove("DUNKINGSHEEP_SEND_TIMEOUT_S")
+        .env_remove("DUNKINGSHEEP_TMUX_SOCKET")
+        .env_remove("DUNKINGSHEEP_TERMINAL_BACKEND")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn Rust CLI MCP route");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!output.stdout.is_empty());
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("dunkingsheep MCP server"));
+    let replies: Vec<Value> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(3, replies.len());
+    assert_eq!("init-7", replies[0]["id"]);
+    assert_eq!("2025-06-18", replies[0]["result"]["protocolVersion"]);
+    assert_eq!("dunkingsheep", replies[0]["result"]["serverInfo"]["name"]);
+    assert_eq!(
+        ds_mcp::SERVER_VERSION,
+        replies[0]["result"]["serverInfo"]["version"]
+    );
+    assert_eq!(ds_mcp::INSTRUCTIONS, replies[0]["result"]["instructions"]);
+    assert_eq!(8, replies[1]["id"]);
+    assert!(replies[1]["result"]["tools"]
+        .as_array()
+        .is_some_and(|tools| !tools.is_empty()));
+    assert_eq!(9, replies[2]["id"]);
+    let tool_text: Value =
+        serde_json::from_str(replies[2]["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        json!({"role":"worker","label":"inherited caller"}),
+        tool_text
+    );
+    assert_eq!(
+        json!({"role":"worker","label":"inherited caller"}),
+        replies[2]["result"]["structuredContent"]
+    );
+    assert_eq!(false, replies[2]["result"]["isError"]);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("MCP server"));
+    assert_eq!(
+        vec!["status", "whoami", "status", "whoami"],
+        daemon.join().unwrap()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_route_57_mcp_self_pane_override() {
+    let temp = tempfile::tempdir().unwrap();
+    let socket = temp.path().join("mcp-daemon.sock");
+    let decoy_socket = temp.path().join("decoy-daemon.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let fake_launcher = temp.path().join("dunkingsheep");
+    write_guard_fixture(&fake_launcher, "#!/bin/sh\nexit 1\n");
+    // This synthetic pane label is only a CLI-option payload sent to the isolated fake socket;
+    // it conveys no real daemon authority and is never used with a live service.
+    let test_pane = "%mcp-cli-override-test";
+    let daemon = std::thread::spawn(move || {
+        for expected_cmd in ["status", "whoami"] {
+            let stream = accept_fake_daemon(&listener);
+            let mut line = String::new();
+            BufReader::new(&stream).read_line(&mut line).unwrap();
+            let request: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(expected_cmd, request["cmd"]);
+            assert_eq!(test_pane, request["self_pane_id"]);
+            assert!(request.get("service_token").is_none());
+            let result = if expected_cmd == "whoami" {
+                json!({"role": "worker", "label": "isolated fake daemon"})
+            } else {
+                json!({})
+            };
+            let mut writer = &stream;
+            writer
+                .write_all(format!("{}\n", json!({"ok": true, "result": result})).as_bytes())
+                .unwrap();
+        }
+    });
+    let input = json!({
+        "jsonrpc":"2.0", "id": 1, "method":"tools/list", "params":{}
+    })
+    .to_string()
+        + "\n";
+    let mut child = Command::new(env!("CARGO_BIN_EXE_dunkingsheep"))
+        .args(["--socket"])
+        .arg(&socket)
+        .args(["--self-pane", test_pane, "mcp", "--json"])
+        .env("HOME", temp.path())
+        .env("DUNKINGSHEEP_DIR", temp.path().join("config"))
+        .env("DUNKINGSHEEP_SOCKET", &decoy_socket)
+        .env("DUNKINGSHEEP_BIN", &fake_launcher)
+        .env("DUNKINGSHEEP_TTY_IDENTITY", "0")
+        .env_remove("TMUX_PANE")
+        .env_remove("DUNKINGSHEEP_SERVICE_TOKEN")
+        .env_remove("DUNKINGSHEEP_SERVICE_TOKEN_FILE")
+        .env_remove("DUNKINGSHEEP_TMUX_SOCKET")
+        .env_remove("DUNKINGSHEEP_TERMINAL_BACKEND")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn Rust CLI MCP self-pane override route");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("dunkingsheep MCP server"));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let reply: Value = serde_json::from_str(stdout.lines().next().unwrap()).unwrap();
+    assert_eq!(1, reply["id"]);
+    assert!(!reply["result"]["tools"].as_array().unwrap().is_empty());
+    daemon.join().unwrap();
 }
 
 fn run_local_cli(
@@ -1141,7 +1432,18 @@ fn cli_route_56_mcp_setup() {
         .join("quoted space \"double\" 'single' \\backslash");
     std::fs::create_dir_all(&quoted_dir).unwrap();
     let quoted_executable = quoted_dir.join("dunkingsheep");
-    std::fs::copy(env!("CARGO_BIN_EXE_dunkingsheep"), &quoted_executable).unwrap();
+    let source_executable = env!("CARGO_BIN_EXE_dunkingsheep");
+    let staged_executable = tempfile::NamedTempFile::new_in(&quoted_dir).unwrap();
+    std::fs::copy(source_executable, staged_executable.path()).unwrap();
+    std::fs::set_permissions(
+        staged_executable.path(),
+        std::fs::metadata(source_executable).unwrap().permissions(),
+    )
+    .unwrap();
+    staged_executable
+        .into_temp_path()
+        .persist(&quoted_executable)
+        .unwrap();
     let run_quoted = |harness: &str| {
         Command::new(&quoted_executable)
             .args(["mcp-setup", harness])
@@ -4258,4 +4560,494 @@ fn cli_route_46_messages() {
         String::from_utf8(metrics.stdout).unwrap()
     );
     assert!(metrics.stderr.is_empty());
+}
+
+#[test]
+fn cli_route_47_workspace() {
+    let workspace = run_daemon_cli(
+        &[
+            "workspace",
+            "--as",
+            "lane-42",
+            "-l",
+            "My workspace",
+            "--cwd",
+            "/tmp/project",
+            "-r",
+            "codex --model opus",
+            "--focus",
+            "--role",
+            "worker",
+            "--provider",
+            "codex",
+            "--model",
+            "gpt-6",
+        ],
+        "create_workspace",
+        json!({
+            "label": "My workspace",
+            "cwd": "/tmp/project",
+            "command": "codex --model opus",
+            "focus": true,
+            "mailbox": "lane-42",
+            "role": "worker",
+            "provider": "codex",
+            "model": "gpt-6"
+        }),
+        json!({
+            "ok": true,
+            "workspace": {"workspace_id": "w1", "label": "My workspace"},
+            "tab": {"tab_id": "t1", "label": "main"},
+            "pane": {"pane_id": "%41"},
+            "ran": "codex --model opus",
+            "error": "pane launch pending"
+        }),
+    );
+    assert_eq!(Some(0), workspace.status.code());
+    assert_eq!(
+        "created workspace w1 'My workspace', tab t1 'main', pane %41; running 'codex --model opus'\n",
+        String::from_utf8(workspace.stdout).unwrap()
+    );
+    assert_eq!(
+        "pane launch pending\n",
+        String::from_utf8(workspace.stderr).unwrap()
+    );
+
+    let tab = run_daemon_cli(
+        &["tab", "-w", "w1", "-l", "docs"],
+        "create_tab",
+        json!({
+            "workspace": "w1",
+            "label": "docs",
+            "cwd": null,
+            "command": null,
+            "focus": false
+        }),
+        json!({"ok": true, "tab": {"tab_id": "t2", "label": "docs"}, "pane": {"pane_id": "%42"}}),
+    );
+    assert_eq!(Some(0), tab.status.code());
+    assert_eq!(
+        "created tab t2 'docs', pane %42\n",
+        String::from_utf8(tab.stdout).unwrap()
+    );
+    assert!(tab.stderr.is_empty());
+
+    let split = run_daemon_cli(
+        &[
+            "split",
+            "%42",
+            "--down",
+            "--cwd",
+            "/tmp/project",
+            "-r",
+            "sh -lc pwd",
+            "--focus",
+        ],
+        "split_pane",
+        json!({
+            "target": "%42",
+            "direction": "down",
+            "cwd": "/tmp/project",
+            "command": "sh -lc pwd",
+            "focus": true
+        }),
+        json!({"ok": true, "pane": {"pane_id": "%43"}, "ran": "sh -lc pwd"}),
+    );
+    assert_eq!(Some(0), split.status.code());
+    assert_eq!(
+        "created pane %43; running 'sh -lc pwd'\n",
+        String::from_utf8(split.stdout).unwrap()
+    );
+    assert!(split.stderr.is_empty());
+}
+
+#[test]
+fn cli_route_48_agent() {
+    let agent = run_daemon_cli(
+        &[
+            "agent",
+            "writer",
+            "-w",
+            "Site",
+            "--tab",
+            "t4",
+            "--split",
+            "down",
+            "--cwd",
+            "/tmp/site",
+            "--focus",
+            "--role",
+            "worker",
+            "--provider",
+            "codex",
+            "--model",
+            "gpt-6",
+            "--",
+            "codex",
+            "--model",
+            "opus four",
+            "it's",
+        ],
+        "start_agent",
+        json!({
+            "name": "writer",
+            "command": r#"codex --model 'opus four' 'it'"'"'s'"#,
+            "workspace": "Site",
+            "tab": "t4",
+            "split": "down",
+            "cwd": "/tmp/site",
+            "focus": true,
+            "role": "worker",
+            "provider": "codex",
+            "model": "gpt-6"
+        }),
+        json!({"ok": true, "name": "writer", "pane_id": "%51", "argv": ["codex", "--model", "opus four", "it's"]}),
+    );
+    assert_eq!(Some(0), agent.status.code());
+    assert_eq!(
+        concat!(
+            "started agent writer in %51: ",
+            r#"codex --model 'opus four' 'it'"'"'s'"#,
+            "\n"
+        ),
+        String::from_utf8(agent.stdout).unwrap()
+    );
+    assert!(agent.stderr.is_empty());
+
+    let respawn = run_daemon_cli(
+        &[
+            "respawn",
+            "%52",
+            "--expected-pid",
+            "123",
+            "--expected-start",
+            "456789",
+            "--confirm-idle",
+            "--reason",
+            "refresh",
+            "--command-json",
+            "[\"codex\",\"--resume\"]",
+            "--rollback-json",
+            "[\"bash\"]",
+        ],
+        "respawn_pane",
+        json!({
+            "pane": "%52",
+            "argv": ["codex", "--resume"],
+            "rollback_argv": ["bash"],
+            "expected_pid": 123,
+            "expected_start": "456789",
+            "confirm_idle": true,
+            "reason": "refresh"
+        }),
+        json!({"ok": true, "pane_id": "%52", "old_pid": 123, "pane_pid": 124, "reason": "refresh"}),
+    );
+    assert_eq!(Some(0), respawn.status.code());
+    assert_eq!(
+        "respawned pane %52 (123 -> 124); reason=refresh\n",
+        String::from_utf8(respawn.stdout).unwrap()
+    );
+    assert!(respawn.stderr.is_empty());
+
+    let rename = run_daemon_cli(
+        &["rename", "pane", "%52", "writer's pane"],
+        "rename",
+        json!({"kind": "pane", "target": "%52", "label": "writer's pane"}),
+        json!({"ok": true, "kind": "pane", "id": "%52", "label": "writer's pane"}),
+    );
+    assert_eq!(Some(0), rename.status.code());
+    assert_eq!(
+        "renamed pane %52 -> \"writer's pane\"\n",
+        String::from_utf8(rename.stdout).unwrap()
+    );
+    assert!(rename.stderr.is_empty());
+
+    let temp = tempfile::tempdir().unwrap();
+    let missing_socket = temp.path().join("never-created.sock");
+    let malformed = Command::new(env!("CARGO_BIN_EXE_dunkingsheep"))
+        .args([
+            "--socket",
+            missing_socket.to_str().unwrap(),
+            "--self-pane",
+            "%99",
+            "respawn-pane",
+            "%52",
+            "--expected-pid",
+            "123",
+            "--expected-start",
+            "456789",
+            "--command-json",
+            "not-json",
+        ])
+        .env_remove("DUNKINGSHEEP_SOCKET")
+        .env_remove("DUNKINGSHEEP_SERVICE_TOKEN")
+        .env_remove("DUNKINGSHEEP_SERVICE_TOKEN_FILE")
+        .output()
+        .unwrap();
+    assert_eq!(Some(2), malformed.status.code());
+    assert!(malformed.stdout.is_empty());
+    assert!(String::from_utf8(malformed.stderr)
+        .unwrap()
+        .starts_with("--command-json/--rollback-json must be JSON arrays:"));
+}
+
+#[test]
+fn cli_route_49_terminal() {
+    let focused = run_daemon_cli(
+        &["focus", "--json", "pane", "%61"],
+        "focus",
+        json!({"kind": "pane", "target": "%61"}),
+        json!({"ok": true, "kind": "pane", "id": "%61"}),
+    );
+    assert_eq!(Some(0), focused.status.code());
+    assert_eq!(
+        "{\n  \"ok\": true,\n  \"kind\": \"pane\",\n  \"id\": \"%61\"\n}\n",
+        String::from_utf8(focused.stdout).unwrap()
+    );
+    assert!(focused.stderr.is_empty());
+
+    let closed = run_daemon_cli(
+        &["close", "pane", "%61", "--force"],
+        "close",
+        json!({"kind": "pane", "target": "%61", "force": true}),
+        json!({
+            "ok": true,
+            "kind": "pane",
+            "id": "%61",
+            "closed_panes": ["%61", "%62"],
+            "stopped_dunks": ["d1", "d2"]
+        }),
+    );
+    assert_eq!(Some(0), closed.status.code());
+    assert_eq!(
+        "closed pane %61; panes %61, %62; stopped dunks d1, d2\n",
+        String::from_utf8(closed.stdout).unwrap()
+    );
+    assert!(closed.stderr.is_empty());
+
+    let shutdown = run_daemon_cli(
+        &["shutdown", "--stop-all"],
+        "shutdown",
+        json!({"stop_all": true}),
+        json!({"ok": true, "stopped_all": true}),
+    );
+    assert_eq!(Some(0), shutdown.status.code());
+    assert_eq!(
+        "daemon shutting down (all dunks stopped)\n",
+        String::from_utf8(shutdown.stdout).unwrap()
+    );
+    assert!(shutdown.stderr.is_empty());
+}
+
+#[test]
+fn cli_route_50_terminal_io() {
+    let herdr = run_daemon_cli(
+        &["herdr", "pane", "zoom", "w9:p2", "--on"],
+        "herdr",
+        json!({"command": "pane zoom w9:p2 --on"}),
+        json!({"ok": true, "error": "backend warning", "result": {"zoom": true}, "text": "ignored"}),
+    );
+    assert_eq!(Some(0), herdr.status.code());
+    assert_eq!(
+        "{\n  \"zoom\": true\n}\n",
+        String::from_utf8(herdr.stdout).unwrap()
+    );
+    assert_eq!(
+        "herdr error: backend warning\n",
+        String::from_utf8(herdr.stderr).unwrap()
+    );
+
+    let help = run_daemon_cli(
+        &["herdr-help"],
+        "herdr_help",
+        json!({"topic": null}),
+        json!({"ok": true, "text": "herdr usage"}),
+    );
+    assert_eq!(Some(0), help.status.code());
+    assert_eq!("herdr usage\n", String::from_utf8(help.stdout).unwrap());
+    assert!(help.stderr.is_empty());
+
+    let read = run_daemon_cli(
+        &["read", "%71", "-l", "2"],
+        "read_pane",
+        json!({"target": "%71", "lines": 2}),
+        json!({"ok": true, "text": "line one\nline two"}),
+    );
+    assert_eq!(Some(0), read.status.code());
+    assert_eq!(
+        "line one\nline two\n",
+        String::from_utf8(read.stdout).unwrap()
+    );
+    assert!(read.stderr.is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_route_guard_actions_1() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let config = temp.path().join("config");
+    let bin = temp.path().join("fake-bin");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(
+        home.join(".bashrc"),
+        format!(
+            "# dunkingsheep herdr guard\nexport PATH=\"{}:$PATH\"\n",
+            config.join("bin").display()
+        ),
+    )
+    .unwrap();
+    write_guard_fixture(&bin.join("herdr"), "#!/bin/sh\nexit 0\n");
+    let status = run_guard_fixture(&home, &config, &bin, &["guard", "status", "--json"]);
+    assert!(
+        status.status.success(),
+        "{}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let value: Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(value["installed"], false);
+    assert_eq!(value["shell_configured"], true);
+    assert_eq!(
+        value["herdr_resolves_to"],
+        bin.join("herdr").to_str().unwrap()
+    );
+    assert_eq!(value["tmux_guard"]["installed"], false);
+
+    let physical_config = temp.path().join("physical-config");
+    let config_alias = temp.path().join("config-alias");
+    let physical_guard_bin = physical_config.join("bin");
+    write_guard_fixture(
+        &physical_guard_bin.join("herdr"),
+        "#!/bin/sh\n# dunkingsheep-herdr-guard\nexit 0\n",
+    );
+    std::os::unix::fs::symlink(&physical_config, &config_alias).unwrap();
+    let aliased_status = run_guard_fixture(
+        &home,
+        &config_alias,
+        &physical_guard_bin,
+        &["guard", "status", "--json"],
+    );
+    assert!(
+        aliased_status.status.success(),
+        "{}",
+        String::from_utf8_lossy(&aliased_status.stderr)
+    );
+    let value: Value = serde_json::from_slice(&aliased_status.stdout).unwrap();
+    assert_eq!(value["active_in_this_shell"], true);
+
+    let missing = run_guard_fixture(&home, &config, &bin, &["guard", "check", "--json"]);
+    assert_eq!(missing.status.code(), Some(1));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&missing.stdout).unwrap(),
+        json!({
+            "ok": false, "detail": "guard is not installed"
+        })
+    );
+
+    let guard = config.join("bin/herdr");
+    write_guard_fixture(&guard, "#!/bin/sh\n# dunkingsheep-herdr-guard\nexit 0\n");
+    let log = temp.path().join("python.log");
+    write_guard_fixture(
+        &bin.join("python3"),
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" > '{}'\necho 'no pane matches'\n",
+            log.display()
+        ),
+    );
+    let checked = run_guard_fixture(&home, &config, &bin, &["guard", "check", "--json"]);
+    assert!(
+        checked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&checked.stderr)
+    );
+    let value: Value = serde_json::from_slice(&checked.stdout).unwrap();
+    assert_eq!(value["ok"], true);
+    assert_eq!(
+        std::fs::read_to_string(log).unwrap().trim(),
+        format!("{} pane run no-such-pane-xyz echo hi", guard.display())
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_route_guard_actions_2() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let config = temp.path().join("config");
+    let bin = temp.path().join("fake-bin");
+    std::fs::create_dir_all(&home).unwrap();
+    write_guard_fixture(&bin.join("herdr"), "#!/bin/sh\necho real-herdr\n");
+    std::fs::write(
+        home.join(".bashrc"),
+        format!(
+            "before\n# dunkingsheep herdr guard\n \t export PATH=\"{}:$PATH\"  \t\nafter\n",
+            config.join("bin").display()
+        ),
+    )
+    .unwrap();
+
+    let shadowed = run_guard_fixture(&home, &config, &bin, &["guard", "shadow", "--json"]);
+    assert!(
+        shadowed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&shadowed.stderr)
+    );
+    let shadowed: Value = serde_json::from_slice(&shadowed.stdout).unwrap();
+    assert_eq!(shadowed["shadowed"], true);
+    assert_eq!(shadowed["shadowing_herdr"], true);
+    assert!(bin.join("herdr-real").exists());
+    assert!(std::fs::read_to_string(bin.join("herdr"))
+        .unwrap()
+        .contains("dunkingsheep-herdr-guard"));
+
+    let unshadowed = run_guard_fixture(&home, &config, &bin, &["guard", "unshadow", "--json"]);
+    assert!(
+        unshadowed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&unshadowed.stderr)
+    );
+    let unshadowed: Value = serde_json::from_slice(&unshadowed.stdout).unwrap();
+    assert_eq!(unshadowed["restored"], true);
+    assert_eq!(unshadowed["shadowing_herdr"], false);
+    assert_eq!(
+        std::fs::read_to_string(bin.join("herdr")).unwrap(),
+        "#!/bin/sh\necho real-herdr\n"
+    );
+
+    let removed = run_guard_fixture(&home, &config, &bin, &["guard", "uninstall", "--json"]);
+    assert!(
+        removed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    let removed: Value = serde_json::from_slice(&removed.stdout).unwrap();
+    assert_eq!(removed["wrapper_removed"], true);
+    assert_eq!(removed["bashrc_cleaned"], true);
+    assert!(!config.join("bin/herdr").exists());
+    assert_eq!(
+        std::fs::read_to_string(home.join(".bashrc")).unwrap(),
+        "before\nafter\n"
+    );
+}
+
+#[test]
+fn cli_route_guide_and_empty_argv() {
+    assert_matches_python(&[]);
+    assert_matches_python(&["guide"]);
+    assert_matches_python(&["guide", "--markdown"]);
+    assert_matches_python(&["help"]);
+    assert_matches_python(&["help", "--markdown"]);
+    assert_matches_python(&["docs"]);
+    assert_matches_python(&["docs", "--markdown"]);
+}
+
+#[test]
+fn cli_route_58_commands_map() {
+    assert_matches_python(&["commands"]);
+    assert_matches_python(&["commands", "--json"]);
+    assert_matches_python(&["--json", "commands"]);
+    assert_matches_python(&["mcp-map"]);
+    assert_matches_python(&["mcp-map", "--json"]);
+    assert_matches_python(&["--json", "mcp-map"]);
+    assert_matches_python(&["mcp-map", "--markdown"]);
 }

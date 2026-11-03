@@ -17,11 +17,13 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
 
 use crate::clock::now_s;
 use crate::db::{map_sqlite, ReadPool, SyncWriter, DEFAULT_READ_POOL};
 use crate::error::DunkError;
+use crate::flock::mailbox::OWNER_MAILBOX;
 use crate::inbox::{
     check_sizes, mailbox_where, next_message_number, normalise_mailbox, receipt_of,
     retention_cutoff, validate_transport, Summary, COUNTER_UPSERT, MAX_BLOB_BYTES, PURGE_SELECTION,
@@ -101,6 +103,90 @@ pub struct Undeliverable {
 
 fn refuse(text: impl Into<String>) -> DunkError {
     DunkError::Refused(text.into())
+}
+
+fn owner_wire_attachments_truthy(attachments: Option<&JsonValue>) -> bool {
+    match attachments {
+        None | Some(JsonValue::Null) | Some(JsonValue::Bool(false)) => false,
+        Some(JsonValue::Bool(true)) => true,
+        Some(JsonValue::Number(number)) => number.as_f64().is_some_and(|number| number != 0.0),
+        Some(JsonValue::String(paths)) => paths.split(',').any(|path| !path.trim().is_empty()),
+        Some(JsonValue::Array(paths)) => !paths.is_empty(),
+        Some(JsonValue::Object(paths)) => !paths.is_empty(),
+    }
+}
+
+fn owner_wire_attachment_paths(attachments: Option<&JsonValue>) -> Result<Vec<PathBuf>, DunkError> {
+    let Some(value) = attachments else {
+        return Ok(Vec::new());
+    };
+    let paths: Vec<String> = match value {
+        JsonValue::Null | JsonValue::Bool(false) => Vec::new(),
+        JsonValue::String(paths) => paths
+            .split(',')
+            .filter(|path| !path.trim().is_empty())
+            .map(str::to_string)
+            .collect(),
+        JsonValue::Array(paths) => paths.iter().map(owner_wire_python_string).collect(),
+        JsonValue::Object(paths) => paths.keys().cloned().collect(),
+        JsonValue::Bool(true) => return Err(refuse("'bool' object is not iterable")),
+        JsonValue::Number(number) if number.as_f64() == Some(0.0) => Vec::new(),
+        JsonValue::Number(number) => {
+            let kind = if number.is_f64() { "float" } else { "int" };
+            return Err(refuse(format!("'{kind}' object is not iterable")));
+        }
+    };
+    Ok(paths.into_iter().map(PathBuf::from).collect())
+}
+
+fn owner_wire_python_string(value: &JsonValue) -> String {
+    match value {
+        JsonValue::Null => "None".to_string(),
+        JsonValue::Bool(true) => "True".to_string(),
+        JsonValue::Bool(false) => "False".to_string(),
+        JsonValue::String(value) => value.clone(),
+        JsonValue::Number(value) => value.to_string(),
+        JsonValue::Array(_) | JsonValue::Object(_) => crate::api::python_value_repr(value),
+    }
+}
+
+fn owner_sqlite_subject(subject: Option<&JsonValue>) -> Result<rusqlite::types::Value, DunkError> {
+    use rusqlite::types::Value as SqlValue;
+    let Some(subject) = subject else {
+        return Ok(SqlValue::Null);
+    };
+    match subject {
+        JsonValue::Null => Ok(SqlValue::Null),
+        JsonValue::Bool(value) => Ok(SqlValue::Integer(i64::from(*value))),
+        JsonValue::String(value) => Ok(SqlValue::Text(value.clone())),
+        JsonValue::Number(value) if value.is_i64() => {
+            Ok(SqlValue::Integer(value.as_i64().expect("is_i64")))
+        }
+        JsonValue::Number(value) if value.is_u64() => value
+            .as_u64()
+            .and_then(|number| i64::try_from(number).ok())
+            .map(SqlValue::Integer)
+            .ok_or_else(|| refuse("Python int too large to convert to SQLite INTEGER")),
+        JsonValue::Number(value) => {
+            let raw = value.to_string();
+            if !raw
+                .chars()
+                .any(|character| matches!(character, '.' | 'e' | 'E'))
+            {
+                return Err(refuse("Python int too large to convert to SQLite INTEGER"));
+            }
+            value
+                .as_f64()
+                .map(SqlValue::Real)
+                .ok_or_else(|| refuse("Python int too large to convert to SQLite INTEGER"))
+        }
+        JsonValue::Array(_) => Err(refuse(
+            "Error binding parameter 6: type 'list' is not supported",
+        )),
+        JsonValue::Object(_) => Err(refuse(
+            "Error binding parameter 6: type 'dict' is not supported",
+        )),
+    }
 }
 
 impl Store {
@@ -348,6 +434,85 @@ impl Store {
         })
     }
 
+    /// The raw subject/attachment boundary used only by owner_ingest's wire adapter.
+    /// Existing callers keep using the typed [`Outgoing`] and [`Store::send`] API.
+    pub fn send_owner_ingest_wire(
+        &self,
+        body: &str,
+        subject: Option<&JsonValue>,
+        attachments: Option<&JsonValue>,
+        transport: &str,
+        external_id: Option<&str>,
+    ) -> Result<String, DunkError> {
+        let body = body.to_string();
+        check_sizes(body.len(), "", 0, 0).map_err(refuse)?;
+        let has_attachments = owner_wire_attachments_truthy(attachments);
+        if body.trim().is_empty() && !has_attachments {
+            return Err(refuse("a message needs a body or an attachment"));
+        }
+
+        // Python's API comma-splits strings before Inbox.send. Other values arrive
+        // unchanged, and their iteration/conversion errors occur here, after body check.
+        let paths = owner_wire_attachment_paths(attachments)?;
+        let mut stored = Vec::new();
+        for path in paths {
+            stored.push(self.store_blob(&path)?);
+        }
+        // The Python sqlite3 subject bind happens after all attachment staging.
+        let subject = owner_sqlite_subject(subject)?;
+        let transport = validate_transport(Some(transport)).map_err(refuse)?;
+        let mailbox = OWNER_MAILBOX.to_string();
+        let label = mailbox.clone();
+        let pane_id: Option<String> = None;
+        let sender: Option<String> = None;
+        let reply_to: Option<String> = None;
+        let external_id = external_id.filter(|id| !id.is_empty()).map(str::to_string);
+        self.writer.call(move |connection| {
+            let transaction = connection.transaction().map_err(map_sqlite)?;
+            let message_id = next_message_id(&transaction)?;
+            let created = now_s();
+            transaction
+                .execute(
+                    "INSERT INTO messages (id, mailbox, mailbox_label, pane_id, sender, \
+                     subject, body, state, created_at, transport, reply_to, external_id) \
+                     VALUES (?,?,?,?,?,?,?,'queued',?,?,?,?)",
+                    rusqlite::params![
+                        message_id,
+                        mailbox,
+                        label,
+                        pane_id,
+                        sender,
+                        subject,
+                        body,
+                        created,
+                        transport,
+                        reply_to,
+                        external_id
+                    ],
+                )
+                .map_err(map_sqlite)?;
+            for (index, blob) in stored.iter().enumerate() {
+                transaction
+                    .execute(
+                        "INSERT INTO attachments (id, message_id, filename, media_type, \
+                         size, sha256, created_at) VALUES (?,?,?,?,?,?,?)",
+                        rusqlite::params![
+                            format!("{message_id}-{}", index + 1),
+                            message_id,
+                            blob.filename,
+                            blob.media_type,
+                            blob.size as i64,
+                            blob.sha256,
+                            now_s()
+                        ],
+                    )
+                    .map_err(map_sqlite)?;
+            }
+            transaction.commit().map_err(map_sqlite)?;
+            Ok(message_id)
+        })
+    }
+
     /// Materialise one committed next-job intent without replacing its recipient or receipt.
     pub fn ensure_next_job(
         &self,
@@ -539,6 +704,22 @@ impl Store {
             };
             transaction.commit().map_err(map_sqlite)?;
             Ok(message_id)
+        })
+    }
+
+    /// Whether a stable PM digest already has a row. Python checks this before its upsert to
+    /// report `created` versus `updated`; failures are left to the caller's best-effort policy.
+    pub fn digest_exists(&self, digest_id: &str) -> Result<bool, DunkError> {
+        let digest_id = digest_id.to_string();
+        self.writer.call(move |connection| {
+            let exists: i64 = connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM messages WHERE digest_id = ?)",
+                    [&digest_id],
+                    |row| row.get(0),
+                )
+                .map_err(map_sqlite)?;
+            Ok(exists != 0)
         })
     }
 

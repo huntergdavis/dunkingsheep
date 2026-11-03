@@ -253,14 +253,8 @@ fn test_routing_defaults_and_refusals() {
 
 #[test]
 fn test_parse_payload() {
-    assert_eq!(
-        parse_payload(Some("  ")).expect_err("empty").0,
-        "a digest needs a body on stdin"
-    );
-    assert_eq!(
-        parse_payload(None).expect_err("none").0,
-        "a digest needs a body on stdin"
-    );
+    assert_eq!(parse_payload(Some("  ")).expect("empty note")["note"], "");
+    assert_eq!(parse_payload(None).expect("missing note")["note"], "");
     assert_eq!(
         parse_payload(Some(" plain body ")).expect("note")["note"],
         "plain body"
@@ -269,9 +263,9 @@ fn test_parse_payload() {
         parse_payload(Some(r#"{"changed": ["x"]}"#)).expect("json")["changed"],
         json!(["x"])
     );
-    assert!(parse_payload(Some("{nope"))
-        .expect_err("bad")
-        .0
-        .starts_with("digest payload is not valid JSON: "));
+    assert_eq!(
+        parse_payload(Some("{nope")).expect("invalid JSON fallback")["note"],
+        "{nope"
+    );
     assert_eq!(digest_id("poolrad"), "pm-digest:poolrad");
 }

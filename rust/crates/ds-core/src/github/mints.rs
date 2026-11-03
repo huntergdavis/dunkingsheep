@@ -149,7 +149,7 @@ pub fn author_from_mints(
 }
 
 #[derive(Debug)]
-enum FloatError {
+pub(super) enum FloatError {
     Invalid,
     Overflow,
 }
@@ -400,7 +400,7 @@ fn string_end(bytes: &[u8], start: usize) -> Option<usize> {
 fn integer(raw: &str) -> bool {
     !raw.contains(['.', 'e', 'E']) && !matches!(raw, "NaN" | "Infinity" | "-Infinity")
 }
-fn parse_float(raw: &str) -> Result<f64, FloatError> {
+pub(super) fn parse_float(raw: &str) -> Result<f64, FloatError> {
     let converted: String = raw
         .trim()
         .chars()

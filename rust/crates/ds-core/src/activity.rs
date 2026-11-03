@@ -254,8 +254,13 @@ pub fn claude_activity(probe: ClaudeProbe<'_>, waiting_for: Option<&str>) -> Act
 /// version of this port dropped the knob entirely - `activity()` always passed the
 /// constant - which quietly killed the only tunable (t984 finding 4). The caller now
 /// passes `idle_claim_s` and reads the default from here.
-pub fn idle_claim_s_from(env: &crate::config::Env) -> f64 {
-    env.float("DUNKINGSHEEP_IDLE_CLAIM_S", IDLE_CLAIM_S)
+pub fn idle_claim_s_from(env: &crate::config::Env) -> Result<f64, crate::error::DunkError> {
+    match env.get("DUNKINGSHEEP_IDLE_CLAIM_S") {
+        None => Ok(IDLE_CLAIM_S),
+        Some(value) => crate::github::parse_python_float(value).ok_or_else(|| {
+            crate::error::DunkError::Refused("invalid DUNKINGSHEEP_IDLE_CLAIM_S float".into())
+        }),
+    }
 }
 
 /// Seconds-ago as hours, never negative (`now_hours` in the Python).

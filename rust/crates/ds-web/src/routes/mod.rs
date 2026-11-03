@@ -7,6 +7,12 @@ pub mod owner;
 pub mod game_lifecycle;
 #[rustfmt::skip]
 pub mod game_input;
+pub mod activity_poolrad;
+pub mod dash;
+pub mod messages_read;
 pub mod messages_write;
 pub mod panes;
+pub mod poolrad_dashboard;
 pub mod system;
+#[rustfmt::skip]
+pub mod game_state;

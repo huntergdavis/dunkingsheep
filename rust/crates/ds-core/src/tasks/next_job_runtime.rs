@@ -14,12 +14,14 @@ use tokio::sync::OwnedMutexGuard;
 use super::next_job::Handoff;
 use crate::config::Env;
 use crate::error::DunkError;
+use crate::flock::commands_turns::TurnState;
 use crate::flock::loop_env::{configured_loop_terminal_factory, LoopTerminalFactory};
+use crate::flock::sends::{self, Message, SendGuardOptions};
 use crate::flock::Flock;
 use crate::server_runtime::LoopRuntimeAdapter;
 
 /// A paused dispatch must remain distinguishable from a materialisation failure.
-#[allow(dead_code)] // The next-job transition consumes these variants in a dependent leaf.
+#[allow(dead_code)] // The next-job worker consumes this typed result from delivery.
 #[derive(Debug)]
 pub(crate) enum MaterialiseError {
     DispatchPaused(String),
@@ -34,9 +36,46 @@ impl From<DunkError> for MaterialiseError {
 
 pub struct NextJobs {
     // Later runtime leaves use the shared Flock for dispatch, tasks, and inbox work.
-    #[allow(dead_code)]
     flock: Arc<Flock>,
+    #[allow(dead_code)] // The next-job worker leaves call delivery and turn binding.
     locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+#[allow(dead_code)] // The next-job worker consumes these outcomes after this leaf.
+enum TransportResult {
+    Held(String),
+    Sent {
+        transport_id: String,
+        delivered_at: f64,
+    },
+    Undeliverable {
+        transport_id: String,
+        reason: String,
+    },
+}
+
+type GateEnvProvider = Arc<dyn Fn() -> Result<Env, ()> + Send + Sync + 'static>;
+
+#[allow(dead_code)] // Delivery and turn binding use the blocking receipt bridge.
+async fn record_next_job_notify(
+    inbox: Arc<crate::inbox_store::Store>,
+    message_id: String,
+    state: &'static str,
+    reason: Option<String>,
+    transport_id: Option<String>,
+    attempt: Option<i64>,
+) -> Result<(), DunkError> {
+    tokio::task::spawn_blocking(move || {
+        inbox.record_notify(
+            &message_id,
+            state,
+            reason.as_deref(),
+            transport_id.as_deref(),
+            attempt,
+        )
+    })
+    .await
+    .map_err(|error| DunkError::Refused(format!("inbox worker failed: {error}")))?
 }
 
 impl NextJobs {
@@ -115,6 +154,547 @@ impl NextJobs {
         .map_err(Into::into)
     }
 
+    /// Advance one durable handoff through its bounded send/recovery state machine.
+    #[allow(dead_code)] // Wired by the following next-job tick/recovery leaf.
+    pub(crate) async fn deliver(
+        &self,
+        handoff: Handoff,
+        restart: bool,
+    ) -> Result<Option<Handoff>, DunkError> {
+        self.deliver_with_provider(handoff, restart, Arc::new(process_gate_env), None)
+            .await
+    }
+
+    #[allow(dead_code)] // Wired by the following next-job tick/recovery leaf.
+    async fn deliver_with(
+        &self,
+        handoff: Handoff,
+        restart: bool,
+        env: Result<Env, ()>,
+        factory: Option<LoopTerminalFactory>,
+    ) -> Result<Option<Handoff>, DunkError> {
+        self.deliver_with_provider(handoff, restart, Arc::new(move || env.clone()), factory)
+            .await
+    }
+
+    async fn deliver_with_provider(
+        &self,
+        handoff: Handoff,
+        restart: bool,
+        env_provider: GateEnvProvider,
+        factory: Option<LoopTerminalFactory>,
+    ) -> Result<Option<Handoff>, DunkError> {
+        let field = |row: &Handoff, name: &str| {
+            row.get(name)
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| DunkError::Refused(format!("missing next-job {name}")))
+        };
+        let pane = field(&handoff, "pane_id")?;
+        let message_id = field(&handoff, "message_id")?;
+        let _pane_guard = self.lock_pane(&pane).await;
+        let stores = self.flock.stores();
+        let tasks = stores
+            .tasks
+            .ok_or_else(|| DunkError::Refused("task store unavailable".into()))?;
+        let inbox = stores
+            .inbox
+            .ok_or_else(|| DunkError::Refused("inbox store unavailable".into()))?;
+        let Some(mut handoff) = tasks
+            .next_job_handoffs(Some(&pane))
+            .await?
+            .into_iter()
+            .find(|row| row.get("message_id").and_then(Value::as_str) == Some(&message_id))
+        else {
+            return Ok(None);
+        };
+        let state = handoff.get("state").and_then(Value::as_str).unwrap_or("");
+        if matches!(state, "started" | "undeliverable" | "cancelled") {
+            return Ok(Some(handoff));
+        }
+        let task_id = field(&handoff, "task_id")?;
+        let task = tasks.decorate(&task_id, Some(&pane)).await?;
+        if matches!(task.task.status.as_str(), "done" | "cancelled") {
+            let changes = serde_json::Map::from_iter([
+                ("state".into(), Value::String("cancelled".into())),
+                ("reason".into(), Value::String("task_finished".into())),
+            ]);
+            return tasks.update_next_job(&handoff, None, changes).await;
+        }
+
+        if state == "sending" {
+            if !restart {
+                return Ok(Some(handoff));
+            }
+            let owner = handoff.get("transport_owner");
+            let live = owner
+                .and_then(|owner| owner.get("pid"))
+                .and_then(Value::as_i64)
+                .is_some_and(|pid| {
+                    crate::proc::process_alive(
+                        pid,
+                        owner
+                            .and_then(|owner| owner.get("start"))
+                            .and_then(Value::as_str),
+                    )
+                });
+            if live {
+                return Ok(Some(handoff));
+            }
+            let receipt =
+                crate::inbox::status(inbox.read_pool(), &message_id, crate::clock::now_s());
+            let receipt = match receipt {
+                Ok(receipt) => receipt,
+                Err(_) => {
+                    let changes = serde_json::Map::from_iter([
+                        ("state".into(), Value::String("pending".into())),
+                        (
+                            "reason".into(),
+                            Value::String("interrupted_before_inbox".into()),
+                        ),
+                    ]);
+                    return tasks.update_next_job(&handoff, None, changes).await;
+                }
+            };
+            let attempt = handoff.get("attempt").and_then(Value::as_i64).unwrap_or(0);
+            if receipt.notify_attempt != Some(attempt) {
+                let changes = serde_json::Map::from_iter([
+                    ("state".into(), Value::String("pending".into())),
+                    (
+                        "reason".into(),
+                        Value::String("interrupted_before_transport".into()),
+                    ),
+                ]);
+                return tasks.update_next_job(&handoff, None, changes).await;
+            }
+            if receipt.notify_state.as_deref() == Some("sent") {
+                let mut changes = serde_json::Map::new();
+                changes.insert("state".into(), Value::String("sent".into()));
+                changes.insert("reason".into(), Value::Null);
+                changes.insert(
+                    "transport_id".into(),
+                    receipt
+                        .notify_transport_id
+                        .clone()
+                        .map_or(Value::Null, Value::String),
+                );
+                changes.insert(
+                    "delivered_at".into(),
+                    receipt.notify_at.map_or(Value::Null, Value::from),
+                );
+                handoff = match tasks.update_next_job(&handoff, None, changes).await? {
+                    Some(handoff) => handoff,
+                    None => return Ok(None),
+                };
+                self.bind_turn_locked(&pane).await?;
+                return Ok(Some(handoff));
+            }
+            record_next_job_notify(
+                Arc::clone(&inbox),
+                message_id.clone(),
+                "undeliverable",
+                Some("delivery_interrupted".into()),
+                None,
+                Some(attempt),
+            )
+            .await?;
+            let changes = serde_json::Map::from_iter([
+                ("state".into(), Value::String("undeliverable".into())),
+                (
+                    "reason".into(),
+                    Value::String("delivery_interrupted".into()),
+                ),
+            ]);
+            return tasks.update_next_job(&handoff, None, changes).await;
+        }
+        if state == "sent" {
+            self.bind_turn_locked(&pane).await?;
+            return Ok(Some(handoff));
+        }
+
+        let dispatch_reason = match env_provider() {
+            Ok(env) => self.gate_with(&pane, None, env, factory.clone()).await,
+            Err(()) => Some("readiness_unknown".into()),
+        };
+        if let Some(reason) = dispatch_reason {
+            if handoff.get("reason").and_then(Value::as_str) == Some(reason.as_str()) {
+                return Ok(Some(handoff));
+            }
+            record_next_job_notify(
+                Arc::clone(&inbox),
+                message_id,
+                "queued",
+                Some(reason.clone()),
+                None,
+                handoff.get("attempt").and_then(Value::as_i64),
+            )
+            .await?;
+            let changes = serde_json::Map::from_iter([("reason".into(), Value::String(reason))]);
+            return tasks.update_next_job(&handoff, None, changes).await;
+        }
+
+        if self.flock.turn_active(&pane) {
+            return Ok(Some(handoff));
+        }
+        let attempt = handoff
+            .get("attempt")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| DunkError::Refused("missing next-job attempt".into()))?;
+        let attempt_at = handoff.get("attempt_at").and_then(Value::as_f64);
+        let retry = crate::dispatch::delivery_retry_plan(
+            attempt,
+            attempt_at,
+            crate::clock::now_s(),
+            sends::SUBMIT_ATTEMPTS as i64,
+            None,
+        );
+        match retry.get("action").and_then(Value::as_str) {
+            Some("wait") => return Ok(Some(handoff)),
+            Some("stop") => {
+                let reason = retry
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("retry_exhausted")
+                    .to_owned();
+                record_next_job_notify(
+                    Arc::clone(&inbox),
+                    message_id,
+                    "undeliverable",
+                    Some(reason.clone()),
+                    None,
+                    Some(attempt),
+                )
+                .await?;
+                let changes = serde_json::Map::from_iter([
+                    ("state".into(), Value::String("undeliverable".into())),
+                    ("reason".into(), Value::String(reason)),
+                ]);
+                return tasks.update_next_job(&handoff, None, changes).await;
+            }
+            _ => {}
+        }
+        if !task.assignees.contains(&pane)
+            || task.task.block_reason.is_some()
+            || !task.deps.blocked_by.is_empty()
+            || !task.claimed_by.contains(&pane)
+        {
+            let reason = "claim_no_longer_valid".to_owned();
+            record_next_job_notify(
+                Arc::clone(&inbox),
+                message_id,
+                "undeliverable",
+                Some(reason.clone()),
+                None,
+                Some(attempt),
+            )
+            .await?;
+            let changes = serde_json::Map::from_iter([
+                ("state".into(), Value::String("undeliverable".into())),
+                ("reason".into(), Value::String(reason)),
+            ]);
+            return tasks.update_next_job(&handoff, None, changes).await;
+        }
+
+        let now = crate::clock::now_s();
+        let pid = i64::from(std::process::id());
+        let mut reservation = serde_json::Map::new();
+        reservation.insert("state".into(), Value::String("sending".into()));
+        reservation.insert("attempt".into(), Value::from(attempt.saturating_add(1)));
+        reservation.insert("attempt_at".into(), Value::from(now));
+        reservation.insert(
+            "transport_owner".into(),
+            serde_json::json!({"pid":pid,"start":crate::proc::process_start(pid)}),
+        );
+        let expected = serde_json::Map::from_iter([
+            (
+                "state".into(),
+                handoff.get("state").cloned().unwrap_or(Value::Null),
+            ),
+            ("attempt".into(), Value::from(attempt)),
+        ]);
+        let Some(reserved) = tasks
+            .update_next_job(&handoff, Some(expected), reservation)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let materialised = match env_provider() {
+            Ok(env) => self.materialise_with(&reserved, env, factory.clone()).await,
+            Err(()) => Err(MaterialiseError::DispatchPaused("readiness_unknown".into())),
+        };
+        let mail = match materialised {
+            Ok(mail) => mail,
+            Err(MaterialiseError::DispatchPaused(reason)) => {
+                record_next_job_notify(
+                    Arc::clone(&inbox),
+                    message_id,
+                    "queued",
+                    Some(reason.clone()),
+                    None,
+                    Some(attempt.saturating_add(1)),
+                )
+                .await?;
+                let changes = serde_json::Map::from_iter([
+                    ("state".into(), Value::String("pending".into())),
+                    ("reason".into(), Value::String(reason)),
+                ]);
+                return tasks.update_next_job(&reserved, None, changes).await;
+            }
+            Err(MaterialiseError::Other(error)) => {
+                let reason = format!("delivery_error: {error}");
+                record_next_job_notify(
+                    Arc::clone(&inbox),
+                    message_id,
+                    "undeliverable",
+                    Some(reason.clone()),
+                    None,
+                    Some(attempt.saturating_add(1)),
+                )
+                .await?;
+                let changes = serde_json::Map::from_iter([
+                    ("state".into(), Value::String("undeliverable".into())),
+                    ("reason".into(), Value::String(reason)),
+                ]);
+                return tasks.update_next_job(&reserved, None, changes).await;
+            }
+        };
+
+        let final_reason = match env_provider() {
+            Ok(env) => self.gate_with(&pane, None, env, factory.clone()).await,
+            Err(()) => Some("readiness_unknown".into()),
+        };
+        if let Some(reason) = final_reason {
+            record_next_job_notify(
+                Arc::clone(&inbox),
+                message_id,
+                "queued",
+                Some(reason.clone()),
+                None,
+                Some(attempt.saturating_add(1)),
+            )
+            .await?;
+            let changes = serde_json::Map::from_iter([
+                ("state".into(), Value::String("pending".into())),
+                ("reason".into(), Value::String(reason)),
+            ]);
+            return tasks.update_next_job(&reserved, None, changes).await;
+        }
+
+        let attempt = attempt.saturating_add(1);
+        let transport_id = format!("{message_id}:{attempt}");
+        let text = format!(
+            "[inbox] TASK {task_id} is already claimed for you. Read dunkingsheep inbox read and execute it now. Handoff {message_id}."
+        );
+        let mailbox = mail.mailbox;
+        let pane_for_send = pane.clone();
+        let inbox_for_send = Arc::clone(&inbox);
+        let receipt_id = message_id.clone();
+        let notify_attempt = attempt;
+        let transport_id_for_send = transport_id.clone();
+        record_next_job_notify(
+            Arc::clone(&inbox),
+            message_id.clone(),
+            "queued",
+            None,
+            Some(transport_id.clone()),
+            Some(attempt),
+        )
+        .await?;
+        let terminal_factory = match factory {
+            Some(factory) => factory,
+            None => configured_loop_terminal_factory()?,
+        };
+        let permission_factory = Arc::clone(&terminal_factory);
+        let permission_jobs = NextJobs::new(Arc::clone(&self.flock));
+        let permission_env_provider = Arc::clone(&env_provider);
+        let permission_runtime = tokio::runtime::Handle::current();
+        let adapter = LoopRuntimeAdapter::new(Arc::clone(&self.flock), terminal_factory);
+        let sent = adapter
+            .with_loop_terminal(
+                move |flock, terminal| -> Result<TransportResult, DunkError> {
+                    let mut message = Message::new(
+                        &transport_id_for_send,
+                        &pane_for_send,
+                        &mailbox,
+                        &text,
+                        "next_job",
+                    );
+                    message.notify_for.push(receipt_id.clone());
+                    let options = SendGuardOptions {
+                        hold_while_typing: true,
+                        allow_modal: false,
+                        preserve_draft: true,
+                    };
+                    let pane_for_permission = pane_for_send.clone();
+                    let permission = move || {
+                        let env = match permission_env_provider() {
+                            Ok(env) => env,
+                            Err(()) => return Some("readiness_unknown".into()),
+                        };
+                        permission_runtime.block_on(permission_jobs.gate_with(
+                            &pane_for_permission,
+                            None,
+                            env,
+                            Some(Arc::clone(&permission_factory)),
+                        ))
+                    };
+                    let (delivered, ok, detail) = sends::send_guarded(
+                        flock,
+                        terminal,
+                        &pane_for_send,
+                        options,
+                        permission,
+                        |env, guard| {
+                            Ok(sends::submit_text(
+                                flock,
+                                env,
+                                &pane_for_send,
+                                &text,
+                                true,
+                                false,
+                                Some(guard),
+                            ))
+                        },
+                    );
+                    if !delivered {
+                        inbox_for_send.record_notify(
+                            &receipt_id,
+                            "queued",
+                            Some(&detail),
+                            Some(&transport_id_for_send),
+                            Some(notify_attempt),
+                        )?;
+                        return Ok(TransportResult::Held(detail));
+                    }
+                    message.detail = Some(detail.clone());
+                    message.finished_at = Some(crate::clock::now_s());
+                    if ok == Some(true) {
+                        inbox_for_send.record_notify(
+                            &receipt_id,
+                            "sent",
+                            None,
+                            Some(&transport_id_for_send),
+                            Some(notify_attempt),
+                        )?;
+                        message.notify_for.clear();
+                        message.status = "sent".into();
+                        flock.remember(&message);
+                        flock.record_delivery_outcome(
+                            &message,
+                            true,
+                            None,
+                            "ok",
+                            Some("message.sent"),
+                        );
+                        Ok(TransportResult::Sent {
+                            transport_id: message.id,
+                            delivered_at: message.finished_at.unwrap_or_else(crate::clock::now_s),
+                        })
+                    } else {
+                        inbox_for_send.record_notify(
+                            &receipt_id,
+                            "undeliverable",
+                            Some(&detail),
+                            Some(&transport_id_for_send),
+                            Some(notify_attempt),
+                        )?;
+                        message.status = "failed".into();
+                        message.notify_for.clear();
+                        flock.remember(&message);
+                        flock.record_delivery_outcome(
+                            &message,
+                            false,
+                            Some(&detail),
+                            "undeliverable",
+                            Some("message.sent"),
+                        );
+                        Ok(TransportResult::Undeliverable {
+                            transport_id: message.id,
+                            reason: detail,
+                        })
+                    }
+                },
+            )
+            .await;
+        let result = match sent {
+            Ok(Ok(result)) => result,
+            Ok(Err(error)) => {
+                let reason = format!("delivery_error: {error}");
+                record_next_job_notify(
+                    Arc::clone(&inbox),
+                    message_id,
+                    "undeliverable",
+                    Some(reason.clone()),
+                    Some(transport_id),
+                    Some(attempt),
+                )
+                .await?;
+                let changes = serde_json::Map::from_iter([
+                    ("state".into(), Value::String("undeliverable".into())),
+                    ("reason".into(), Value::String(reason)),
+                ]);
+                return tasks.update_next_job(&reserved, None, changes).await;
+            }
+            Err(error) => {
+                let reason = format!("delivery_error: terminal worker failed: {error}");
+                record_next_job_notify(
+                    Arc::clone(&inbox),
+                    message_id,
+                    "undeliverable",
+                    Some(reason.clone()),
+                    Some(transport_id),
+                    Some(attempt),
+                )
+                .await?;
+                let changes = serde_json::Map::from_iter([
+                    ("state".into(), Value::String("undeliverable".into())),
+                    ("reason".into(), Value::String(reason)),
+                ]);
+                return tasks.update_next_job(&reserved, None, changes).await;
+            }
+        };
+        let (state, reason, transport_id, delivered_at) = match result {
+            TransportResult::Held(reason) => ("pending", reason, None, None),
+            TransportResult::Sent {
+                transport_id,
+                delivered_at,
+            } => (
+                "sent",
+                String::new(),
+                Some(transport_id),
+                Some(delivered_at),
+            ),
+            TransportResult::Undeliverable {
+                transport_id,
+                reason,
+            } => ("undeliverable", reason, Some(transport_id), None),
+        };
+        let mut changes = serde_json::Map::new();
+        changes.insert("state".into(), Value::String(state.into()));
+        changes.insert(
+            "reason".into(),
+            if reason.is_empty() {
+                Value::Null
+            } else {
+                Value::String(reason.clone())
+            },
+        );
+        changes.insert(
+            "transport_id".into(),
+            transport_id.map_or(Value::Null, Value::String),
+        );
+        changes.insert(
+            "delivered_at".into(),
+            delivered_at.map_or(Value::Null, Value::from),
+        );
+        let updated = tasks.update_next_job(&reserved, None, changes).await?;
+        if state == "sent" {
+            self.bind_turn_locked(&pane).await?;
+        }
+        Ok(updated)
+    }
+
+    #[allow(dead_code)] // Delivery and turn observation use this lock after worker wiring.
     fn pane_lock(&self, pane: &str) -> Arc<tokio::sync::Mutex<()>> {
         let mut locks = self
             .locks
@@ -127,9 +707,151 @@ impl NextJobs {
         )
     }
 
-    #[allow(dead_code)] // Used by the next-job methods added in following runtime leaves.
+    #[allow(dead_code)] // Used by delivery while the next-job worker leaf is being wired.
     async fn lock_pane(&self, pane: &str) -> OwnedMutexGuard<()> {
         self.pane_lock(pane).lock_owned().await
+    }
+
+    /// Bind a sent handoff to the producer generation observed for its pane.
+    ///
+    /// The sender owns this lock while it writes the delivery receipt, so an
+    /// observation arriving during that window is bound by the sender's final
+    /// `bind_turn_locked` call instead of waiting here.
+    #[allow(dead_code)] // Wired by the following next-job tick/recovery leaf.
+    pub(crate) async fn bind_turn(&self, pane: String) -> Result<(), DunkError> {
+        let lock = self.pane_lock(&pane);
+        let Ok(_guard) = lock.try_lock_owned() else {
+            return Ok(());
+        };
+        self.bind_turn_locked(&pane).await
+    }
+
+    /// Bind while the caller already owns this pane's async lock.
+    #[allow(dead_code)] // Delivery uses this while the next-job worker leaf is being wired.
+    async fn bind_turn_locked(&self, pane: &str) -> Result<(), DunkError> {
+        let stores = self.flock.stores();
+        let tasks = stores
+            .tasks
+            .ok_or_else(|| DunkError::Refused("task store unavailable".into()))?;
+        let inbox = stores
+            .inbox
+            .ok_or_else(|| DunkError::Refused("inbox store unavailable".into()))?;
+
+        for handoff in tasks.next_job_handoffs(Some(pane)).await? {
+            if handoff.get("state").and_then(Value::as_str) != Some("sent")
+                || handoff
+                    .get("delivered_at")
+                    .and_then(Value::as_f64)
+                    .is_none_or(|at| at == 0.0)
+            {
+                continue;
+            }
+            let Some(message_id) = handoff.get("message_id").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(turn) = handoff.get("observed_turn").and_then(Value::as_object) else {
+                continue;
+            };
+            let Some(turn_id) = turn
+                .get("turn_id")
+                .and_then(Value::as_str)
+                .filter(|turn_id| !turn_id.is_empty())
+            else {
+                continue;
+            };
+            if turn.get("handoff_id").and_then(Value::as_str) != Some(message_id) {
+                continue;
+            }
+            let Some(started_at) = turn.get("started_at").and_then(Value::as_f64) else {
+                continue;
+            };
+            let Some(attempt_at) = handoff.get("attempt_at").and_then(Value::as_f64) else {
+                continue;
+            };
+            if started_at < attempt_at {
+                continue;
+            }
+
+            let receipt =
+                crate::inbox::status(inbox.read_pool(), message_id, crate::clock::now_s())?;
+            if receipt.notify_state.as_deref() != Some("sent") {
+                continue;
+            }
+
+            let mut changes = serde_json::Map::new();
+            changes.insert("state".into(), Value::String("started".into()));
+            changes.insert("turn_id".into(), Value::String(turn_id.to_owned()));
+            changes.insert("turn_started_at".into(), Value::from(started_at));
+            changes.insert(
+                "turn_source".into(),
+                turn.get("source").cloned().unwrap_or(Value::Null),
+            );
+            changes.insert(
+                "turn_caller".into(),
+                turn.get("caller").cloned().unwrap_or(Value::Null),
+            );
+            tasks.update_next_job(&handoff, None, changes).await?;
+        }
+        Ok(())
+    }
+
+    /// Persist a matching producer generation before trying the pane lock. A sender may
+    /// currently hold that lock while waiting for this producer callback to return, so the
+    /// observation itself must remain nonblocking with respect to pane serialization.
+    #[allow(dead_code)] // Wired by the following producer-turn callback leaf.
+    pub(crate) async fn observe_turn(
+        &self,
+        pane: String,
+        turn: TurnState,
+    ) -> Result<(), DunkError> {
+        let Some(handoff_id) = turn.handoff_id.as_deref().filter(|id| !id.is_empty()) else {
+            return Ok(());
+        };
+        let tasks = self
+            .flock
+            .stores()
+            .tasks
+            .ok_or_else(|| DunkError::Refused("task store unavailable".into()))?;
+        for handoff in tasks.next_job_handoffs(Some(&pane)).await? {
+            if handoff.get("message_id").and_then(Value::as_str) != Some(handoff_id)
+                || !matches!(
+                    handoff.get("state").and_then(Value::as_str),
+                    Some("sending" | "sent")
+                )
+                || handoff
+                    .get("attempt_at")
+                    .and_then(Value::as_f64)
+                    .is_none_or(|attempt_at| turn.started_at < attempt_at)
+            {
+                continue;
+            }
+            let Some(attempt) = handoff.get("attempt").and_then(Value::as_i64) else {
+                continue;
+            };
+            let mut observed = serde_json::Map::new();
+            observed.insert("turn_id".into(), Value::String(turn.turn_id.clone()));
+            observed.insert("started_at".into(), Value::from(turn.started_at));
+            observed.insert(
+                "source".into(),
+                turn.source.clone().map_or(Value::Null, Value::String),
+            );
+            observed.insert("caller".into(), turn.caller.clone().unwrap_or(Value::Null));
+            observed.insert("handoff_id".into(), Value::String(handoff_id.to_owned()));
+            let expected = serde_json::Map::from_iter([
+                ("attempt".into(), Value::from(attempt)),
+                ("observed_turn".into(), Value::Null),
+            ]);
+            let changes =
+                serde_json::Map::from_iter([("observed_turn".into(), Value::Object(observed))]);
+            if tasks
+                .update_next_job(&handoff, Some(expected), changes)
+                .await?
+                .is_some()
+            {
+                self.flock.wake_push();
+            }
+        }
+        self.bind_turn(pane).await
     }
 
     /// Dispatch permission is distinct from task allocation: registration never bypasses
@@ -238,7 +960,7 @@ impl NextJobs {
 
 /// Read one snapshot so an unreadable or corrupt retirement registry cannot become
 /// permission. A missing file has the shared store's accepted empty semantics.
-fn retirement_status(pane: &str, path: &std::path::Path) -> Result<bool, ()> {
+pub(crate) fn retirement_status(pane: &str, path: &std::path::Path) -> Result<bool, ()> {
     let records: BTreeMap<String, Value> =
         crate::atomic_json::read_or_default(path).map_err(|_| ())?;
     let Some(record) = records.get(pane.trim()) else {
@@ -248,7 +970,7 @@ fn retirement_status(pane: &str, path: &std::path::Path) -> Result<bool, ()> {
     Ok(true)
 }
 
-fn process_gate_env() -> Result<Env, ()> {
+pub(crate) fn process_gate_env() -> Result<Env, ()> {
     let mut values = Vec::new();
     for key in [
         "DUNKINGSHEEP_TURN_END_DISPATCH",
@@ -278,7 +1000,7 @@ fn process_gate_env() -> Result<Env, ()> {
 }
 
 /// Config file precedes the environment; an empty/missing list falls back to the environment.
-fn dispatch_entries(env: &Env) -> Result<Vec<String>, ()> {
+pub(crate) fn dispatch_entries(env: &Env) -> Result<Vec<String>, ()> {
     let path = crate::config::config_dir(env)
         .map_err(|_| ())?
         .join("dispatch_lanes.json");
@@ -338,7 +1060,7 @@ fn dispatch_entries(env: &Env) -> Result<Vec<String>, ()> {
     Ok(entries)
 }
 
-fn dispatch_allowlist(entries: &[String], lanes: &[Value]) -> BTreeSet<String> {
+pub(crate) fn dispatch_allowlist(entries: &[String], lanes: &[Value]) -> BTreeSet<String> {
     let mut resolved = BTreeSet::new();
     for entry in entries {
         let wanted = entry.to_lowercase();
@@ -550,6 +1272,628 @@ mod tests {
         let first_guard = first.try_lock_owned().expect("first pane lock available");
         let second_guard = second.try_lock_owned().expect("second pane lock available");
         drop((first_guard, second_guard));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn next_jobs_bind_turn_requires_sent_receipt_and_matching_generation() {
+        let (_dir, jobs, tasks, inbox) = materialise_fixture().await;
+
+        #[derive(Clone, Copy)]
+        struct HandoffSeed<'a> {
+            pane: &'a str,
+            message_id: &'a str,
+            notify_state: &'a str,
+            turn_id: &'a str,
+            handoff_id: &'a str,
+            started_at: f64,
+        }
+
+        async fn seed_handoff(
+            tasks: &crate::tasks::Tasks,
+            inbox: &Arc<crate::inbox_store::Store>,
+            seed: HandoffSeed<'_>,
+        ) {
+            let HandoffSeed {
+                pane,
+                message_id,
+                notify_state,
+                turn_id,
+                handoff_id,
+                started_at,
+            } = seed;
+            let task = tasks.add("global", "Bind turn", "body").await.unwrap();
+            let inbox = Arc::clone(inbox);
+            let message_id = message_id.to_owned();
+            let pane = pane.to_owned();
+            let notify_state = notify_state.to_owned();
+            let receipt_message_id = message_id.clone();
+            let receipt_pane = pane.clone();
+            let receipt_notify_id = message_id.clone();
+            tokio::task::spawn_blocking(move || {
+                inbox.ensure_next_job(
+                    &receipt_message_id,
+                    &receipt_pane,
+                    &receipt_pane,
+                    "body",
+                    "subject",
+                )?;
+                inbox.record_notify(
+                    &receipt_notify_id,
+                    &notify_state,
+                    None,
+                    Some("transport"),
+                    Some(1),
+                )
+            })
+            .await
+            .unwrap()
+            .unwrap();
+            let details = json!({
+                "state": "sent",
+                "attempt_at": 100.0,
+                "delivered_at": 200.0,
+                "observed_turn": {
+                    "turn_id": turn_id,
+                    "started_at": started_at,
+                    "source": "producer",
+                    "caller": "worker",
+                    "handoff_id": handoff_id
+                }
+            })
+            .as_object()
+            .unwrap()
+            .clone();
+            tasks
+                .record_next_job_handoff(
+                    &task.id,
+                    &pane,
+                    None,
+                    Some(&message_id),
+                    1,
+                    None,
+                    Some(201.0),
+                    Some(details),
+                )
+                .await
+                .unwrap();
+        }
+
+        seed_handoff(
+            &tasks,
+            &inbox,
+            HandoffSeed {
+                pane: "%valid",
+                message_id: "nj-bind-valid",
+                notify_state: "sent",
+                turn_id: "turn-1",
+                handoff_id: "nj-bind-valid",
+                started_at: 101.0,
+            },
+        )
+        .await;
+        let lock = jobs.pane_lock("%valid");
+        let held = lock.clone().try_lock_owned().unwrap();
+        jobs.bind_turn("%valid".into()).await.unwrap();
+        let busy_result = tasks.next_job_handoffs(Some("%valid")).await.unwrap();
+        assert_eq!(
+            busy_result[0].get("state").and_then(Value::as_str),
+            Some("sent")
+        );
+        assert!(busy_result[0].get("turn_id").is_none());
+        drop(held);
+
+        jobs.bind_turn("%valid".into()).await.unwrap();
+        let valid = tasks.next_job_handoffs(Some("%valid")).await.unwrap();
+        assert_eq!(
+            valid[0].get("state").and_then(Value::as_str),
+            Some("started")
+        );
+        assert_eq!(
+            valid[0].get("turn_id").and_then(Value::as_str),
+            Some("turn-1")
+        );
+        assert_eq!(
+            valid[0].get("turn_started_at").and_then(Value::as_f64),
+            Some(101.0)
+        );
+        assert_eq!(
+            valid[0].get("turn_source").and_then(Value::as_str),
+            Some("producer")
+        );
+        assert_eq!(
+            valid[0].get("turn_caller").and_then(Value::as_str),
+            Some("worker")
+        );
+
+        for (pane, message_id, notify, turn_id, observed_id, started_at) in [
+            (
+                "%pending",
+                "nj-bind-pending",
+                "queued",
+                "turn-2",
+                "nj-bind-pending",
+                101.0,
+            ),
+            (
+                "%wrong",
+                "nj-bind-wrong",
+                "sent",
+                "turn-3",
+                "nj-other",
+                101.0,
+            ),
+            (
+                "%early",
+                "nj-bind-early",
+                "sent",
+                "turn-4",
+                "nj-bind-early",
+                99.0,
+            ),
+            (
+                "%empty",
+                "nj-bind-empty",
+                "sent",
+                "",
+                "nj-bind-empty",
+                101.0,
+            ),
+        ] {
+            seed_handoff(
+                &tasks,
+                &inbox,
+                HandoffSeed {
+                    pane,
+                    message_id,
+                    notify_state: notify,
+                    turn_id,
+                    handoff_id: observed_id,
+                    started_at,
+                },
+            )
+            .await;
+            jobs.bind_turn(pane.to_owned()).await.unwrap();
+            let rows = tasks.next_job_handoffs(Some(pane)).await.unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].get("state").and_then(Value::as_str), Some("sent"));
+            assert!(rows[0].get("turn_id").is_none());
+        }
+
+        tokio::task::spawn_blocking(move || drop((jobs, inbox)))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn next_jobs_observe_turn_records_state_and_wakes_after_busy_bind() {
+        let (_dir, jobs, tasks, inbox) = materialise_fixture().await;
+        let pane = "%observed".to_owned();
+        let message_id = "nj-observed";
+        let task = tasks.add("global", "Observe turn", "body").await.unwrap();
+        let inbox_store = Arc::clone(&inbox);
+        let receipt_id = message_id.to_owned();
+        let receipt_pane = pane.clone();
+        tokio::task::spawn_blocking(move || {
+            inbox_store.ensure_next_job(
+                &receipt_id,
+                &receipt_pane,
+                &receipt_pane,
+                "body",
+                "subject",
+            )?;
+            inbox_store.record_notify(&receipt_id, "queued", None, Some("attempt"), Some(1))
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        let details = json!({"state":"sending", "attempt_at":100.0, "observed_turn":null})
+            .as_object()
+            .unwrap()
+            .clone();
+        tasks
+            .record_next_job_handoff(
+                &task.id,
+                &pane,
+                None,
+                Some(message_id),
+                1,
+                None,
+                Some(101.0),
+                Some(details),
+            )
+            .await
+            .unwrap();
+
+        let wake = jobs.flock.push_wake();
+        let held = jobs.pane_lock(&pane).try_lock_owned().unwrap();
+        let turn = TurnState {
+            started_at: 101.0,
+            expires_at: 200.0,
+            ended_at: None,
+            ttl_s: 99.0,
+            turn_id: "turn-observed".into(),
+            source: Some("producer".into()),
+            caller: Some(json!("worker")),
+            handoff_id: Some(message_id.into()),
+        };
+        tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            jobs.observe_turn(pane.clone(), turn),
+        )
+        .await
+        .expect("observation must not wait for a busy pane lock")
+        .unwrap();
+
+        let rows = tasks.next_job_handoffs(Some(&pane)).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].get("state").and_then(Value::as_str),
+            Some("sending")
+        );
+        assert_eq!(
+            rows[0]["observed_turn"],
+            json!({
+                "turn_id":"turn-observed",
+                "started_at":101.0,
+                "source":"producer",
+                "caller":"worker",
+                "handoff_id":message_id
+            })
+        );
+        tokio::time::timeout(std::time::Duration::from_millis(100), wake.notified())
+            .await
+            .expect("a persisted observation must wake the worker");
+        drop(held);
+
+        tokio::task::spawn_blocking(move || drop((jobs, inbox, tasks)))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn next_jobs_delivery_reserves_before_transport_and_reconciles_receipts() {
+        let (dir, jobs, tasks, inbox) = materialise_fixture().await;
+        let pane = "w1:p1";
+        let task = tasks
+            .add("global", "Deliver next job", "body")
+            .await
+            .unwrap();
+        tasks.assign(&task.id, &[pane], "set").await.unwrap();
+        tasks.claim_for_test(&task.id, pane).await;
+        let details = json!({
+            "state":"pending",
+            "attempt":0,
+            "attempt_at":0.0,
+            "observed_turn":null,
+            "trigger":"completion"
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        tasks
+            .record_next_job_handoff(
+                &task.id,
+                pane,
+                Some("t-source"),
+                Some("nj-deliver"),
+                0,
+                None,
+                Some(1.0),
+                Some(details),
+            )
+            .await
+            .unwrap();
+        let handoff = tasks.next_job_handoffs(Some(pane)).await.unwrap().remove(0);
+        let delivered = jobs
+            .deliver_with(
+                handoff,
+                false,
+                Ok(test_env(dir.path(), "1", pane)),
+                Some(fake_factory()),
+            )
+            .await
+            .unwrap()
+            .expect("reserved handoff remains journalled");
+        assert_eq!(delivered.get("state").and_then(Value::as_str), Some("sent"));
+        assert_eq!(delivered.get("attempt").and_then(Value::as_i64), Some(1));
+        assert_eq!(
+            delivered.get("transport_id").and_then(Value::as_str),
+            Some("nj-deliver:1")
+        );
+        let receipt =
+            crate::inbox::status(inbox.read_pool(), "nj-deliver", crate::clock::now_s()).unwrap();
+        assert_eq!(receipt.notify_state.as_deref(), Some("sent"));
+        assert_eq!(receipt.notify_attempt, Some(1));
+        assert_eq!(receipt.notify_transport_id.as_deref(), Some("nj-deliver:1"));
+        assert!(jobs.flock.outbox_snapshot().is_empty());
+
+        tokio::task::spawn_blocking(move || drop((jobs, inbox, tasks)))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn next_jobs_delivery_distinguishes_materialise_pause_from_error() {
+        for (message_id, fail_factory_call, expected_state, expected_notify) in [
+            ("nj-materialise-pause", 2usize, "pending", "queued"),
+            (
+                "nj-materialise-error",
+                3usize,
+                "undeliverable",
+                "undeliverable",
+            ),
+        ] {
+            let (dir, jobs, tasks, inbox) = materialise_fixture().await;
+            let pane = "w1:p1";
+            let task = tasks
+                .add("global", "Materialise next job", "body")
+                .await
+                .unwrap();
+            tasks.assign(&task.id, &[pane], "set").await.unwrap();
+            tasks.claim_for_test(&task.id, pane).await;
+            let details = json!({
+                "state":"pending",
+                "attempt":0,
+                "attempt_at":0.0,
+                "observed_turn":null,
+                "trigger":"completion"
+            })
+            .as_object()
+            .unwrap()
+            .clone();
+            tasks
+                .record_next_job_handoff(
+                    &task.id,
+                    pane,
+                    Some("t-source"),
+                    Some(message_id),
+                    0,
+                    None,
+                    Some(1.0),
+                    Some(details),
+                )
+                .await
+                .unwrap();
+            let handoff = tasks.next_job_handoffs(Some(pane)).await.unwrap().remove(0);
+            let inbox_store = Arc::clone(&inbox);
+            let receipt_id = message_id.to_owned();
+            let receipt_pane = pane.to_owned();
+            tokio::task::spawn_blocking(move || {
+                inbox_store.ensure_next_job(
+                    &receipt_id,
+                    &receipt_pane,
+                    &receipt_pane,
+                    "body",
+                    "subject",
+                )
+            })
+            .await
+            .unwrap()
+            .unwrap();
+
+            let factory_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let calls = Arc::clone(&factory_calls);
+            let factory: LoopTerminalFactory = Arc::new(move || {
+                let call = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                let mut terminal = crate::terminal::fakes::FakeTerminal::new();
+                if call == fail_factory_call {
+                    terminal.panes.clear();
+                }
+                Box::new(terminal)
+            });
+            let delivered = jobs
+                .deliver_with(
+                    handoff,
+                    false,
+                    Ok(test_env(dir.path(), "1", pane)),
+                    Some(factory),
+                )
+                .await
+                .unwrap()
+                .expect("reserved handoff remains journalled");
+
+            assert_eq!(
+                delivered.get("state").and_then(Value::as_str),
+                Some(expected_state)
+            );
+            assert_eq!(delivered.get("attempt").and_then(Value::as_i64), Some(1));
+            assert_eq!(
+                factory_calls.load(std::sync::atomic::Ordering::SeqCst),
+                fail_factory_call,
+                "transport must not be attempted after materialisation fails"
+            );
+            if expected_state == "undeliverable" {
+                assert!(delivered
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .is_some_and(|reason| reason.starts_with("delivery_error:")));
+            } else {
+                assert_eq!(
+                    delivered.get("reason").and_then(Value::as_str),
+                    Some("unavailable_lane")
+                );
+            }
+            let receipt =
+                crate::inbox::status(inbox.read_pool(), message_id, crate::clock::now_s()).unwrap();
+            assert_eq!(receipt.notify_state.as_deref(), Some(expected_notify));
+            assert_eq!(receipt.notify_attempt, Some(1));
+            assert!(jobs.flock.outbox_snapshot().is_empty());
+
+            tokio::task::spawn_blocking(move || drop((jobs, inbox, tasks)))
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn next_jobs_delivery_rejects_dependency_added_after_handoff() {
+        let (dir, jobs, tasks, inbox) = materialise_fixture().await;
+        let pane = "w1:p1";
+        let dependency = tasks
+            .add("global", "Open prerequisite", "body")
+            .await
+            .unwrap();
+        let task = tasks
+            .add("global", "Deliver dependent task", "body")
+            .await
+            .unwrap();
+        tasks.assign(&task.id, &[pane], "set").await.unwrap();
+        tasks.claim_for_test(&task.id, pane).await;
+        let details = json!({
+            "state":"pending",
+            "attempt":0,
+            "attempt_at":0.0,
+            "observed_turn":null,
+            "trigger":"completion"
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        tasks
+            .record_next_job_handoff(
+                &task.id,
+                pane,
+                Some("t-source"),
+                Some("nj-new-dependency"),
+                0,
+                None,
+                Some(1.0),
+                Some(details),
+            )
+            .await
+            .unwrap();
+        tasks
+            .update(
+                &task.id,
+                crate::tasks::FieldEdit {
+                    depends_on: Some(vec![dependency.id.clone()]),
+                    ..Default::default()
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        let decorated = tasks.decorate(&task.id, Some(pane)).await.unwrap();
+        assert_eq!(decorated.deps.blocked_by, vec![dependency.id]);
+
+        let inbox_for_seed = Arc::clone(&inbox);
+        tokio::task::spawn_blocking(move || {
+            inbox_for_seed.ensure_next_job("nj-new-dependency", pane, pane, "body", "subject")
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        let handoff = tasks.next_job_handoffs(Some(pane)).await.unwrap().remove(0);
+        let delivered = jobs
+            .deliver_with(
+                handoff,
+                false,
+                Ok(test_env(dir.path(), "1", pane)),
+                Some(fake_factory()),
+            )
+            .await
+            .unwrap()
+            .expect("invalid handoff remains journalled");
+
+        assert_eq!(
+            delivered.get("state").and_then(Value::as_str),
+            Some("undeliverable")
+        );
+        assert_eq!(
+            delivered.get("reason").and_then(Value::as_str),
+            Some("claim_no_longer_valid")
+        );
+        assert_eq!(delivered.get("attempt").and_then(Value::as_i64), Some(0));
+        let receipt = crate::inbox::status(
+            inbox.read_pool(),
+            "nj-new-dependency",
+            crate::clock::now_s(),
+        )
+        .unwrap();
+        assert_eq!(receipt.notify_state.as_deref(), Some("undeliverable"));
+        assert_eq!(receipt.notify_attempt, Some(0));
+        assert!(jobs.flock.outbox_snapshot().is_empty());
+
+        tokio::task::spawn_blocking(move || drop((jobs, inbox, tasks)))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn next_jobs_delivery_rechecks_permission_inside_send_guard() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let (dir, jobs, tasks, inbox) = materialise_fixture().await;
+        let pane = "w1:p1";
+        let task = tasks
+            .add("global", "Guarded next job", "body")
+            .await
+            .unwrap();
+        tasks.assign(&task.id, &[pane], "set").await.unwrap();
+        tasks.claim_for_test(&task.id, pane).await;
+        let details = json!({
+            "state":"pending",
+            "attempt":0,
+            "attempt_at":0.0,
+            "observed_turn":null,
+            "trigger":"completion"
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        tasks
+            .record_next_job_handoff(
+                &task.id,
+                pane,
+                Some("t-source"),
+                Some("nj-final-permission"),
+                0,
+                None,
+                Some(1.0),
+                Some(details),
+            )
+            .await
+            .unwrap();
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider_calls = Arc::clone(&calls);
+        let env_dir = dir.path().to_owned();
+        let provider: GateEnvProvider = Arc::new(move || {
+            let call = provider_calls.fetch_add(1, Ordering::SeqCst) + 1;
+            let switch = if call == 4 { "off" } else { "1" };
+            Ok(test_env(&env_dir, switch, pane))
+        });
+        let handoff = tasks.next_job_handoffs(Some(pane)).await.unwrap().remove(0);
+        let delivered = jobs
+            .deliver_with_provider(handoff, false, provider, Some(fake_factory()))
+            .await
+            .unwrap()
+            .expect("held handoff remains journalled");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
+        assert_eq!(
+            delivered.get("state").and_then(Value::as_str),
+            Some("pending")
+        );
+        assert_eq!(
+            delivered.get("reason").and_then(Value::as_str),
+            Some("disabled")
+        );
+        assert_eq!(delivered.get("attempt").and_then(Value::as_i64), Some(1));
+        let receipt = crate::inbox::status(
+            inbox.read_pool(),
+            "nj-final-permission",
+            crate::clock::now_s(),
+        )
+        .unwrap();
+        assert_eq!(receipt.notify_state.as_deref(), Some("queued"));
+        assert_eq!(receipt.notify_attempt, Some(1));
+        assert!(jobs.flock.outbox_snapshot().is_empty());
+
+        tokio::task::spawn_blocking(move || drop((jobs, inbox, tasks)))
+            .await
+            .unwrap();
     }
 
     async fn configured_jobs() -> (tempfile::TempDir, NextJobs, Arc<crate::tasks::Tasks>) {

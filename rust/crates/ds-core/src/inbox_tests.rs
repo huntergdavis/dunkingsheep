@@ -710,3 +710,60 @@ fn mailboxes_for_pane_lists_each_name_a_pane_owns_once() {
         "an unknown pane owns nothing"
     );
 }
+
+#[test]
+fn seen_latencies_filters_reads_caps_newest_rows_and_clamps_negative_delays() {
+    let (_dir, path) = seeded();
+    let writer = crate::db::open_writer(&path).expect("writer");
+    for n in 1..=205 {
+        writer
+            .execute(
+                "INSERT INTO messages (id, mailbox, mailbox_label, sender, body, state, created_at, read_at) \
+                 VALUES (?, 'latency-box', 'latency-box', 'reader', 'body', 'read', 0.0, ?)",
+                rusqlite::params![format!("lat-{n}"), n as f64],
+            )
+            .expect("insert read sample");
+    }
+    writer
+        .execute(
+            "INSERT INTO messages (id, mailbox, mailbox_label, sender, body, state, created_at, read_at) \
+             VALUES ('negative', 'latency-box', 'latency-box', 'reader', 'body', 'read', 20000.0, 10000.0)",
+            [],
+        )
+        .expect("insert negative-delay sample");
+    writer
+        .execute(
+            "INSERT INTO messages (id, mailbox, mailbox_label, sender, body, state, created_at) \
+             VALUES ('unread', 'latency-box', 'latency-box', 'reader', 'body', 'queued', 0.0)",
+            [],
+        )
+        .expect("insert unread row");
+    writer
+        .execute(
+            "INSERT INTO messages (id, mailbox, mailbox_label, sender, body, state, created_at, read_at) \
+             VALUES ('other-box', 'other', 'other', 'reader', 'body', 'read', 0.0, 44.0)",
+            [],
+        )
+        .expect("insert other mailbox row");
+    drop(writer);
+
+    let pool = crate::db::ReadPool::open(&path, 1).expect("pool");
+    let newest = seen_latencies(&pool, "latency-box", 200).expect("newest samples");
+    assert_eq!(200, newest.len());
+    assert_eq!(0.0, newest[0], "negative delays clamp to zero");
+    assert_eq!(7.0, newest[1], "the oldest of the newest 200 is retained");
+    assert_eq!(205.0, newest[199]);
+
+    let all = seen_latencies(&pool, "latency-box", 300).expect("all samples");
+    assert_eq!(206, all.len(), "unread messages are excluded");
+    assert_eq!(0.0, all[0]);
+    assert_eq!(1.0, all[1]);
+    assert_eq!(205.0, all[205]);
+    assert_eq!(
+        vec![44.0],
+        seen_latencies(&pool, "other", 200).expect("other mailbox samples")
+    );
+    assert!(seen_latencies(&pool, "latency-box", 0)
+        .expect("zero limit")
+        .is_empty());
+}

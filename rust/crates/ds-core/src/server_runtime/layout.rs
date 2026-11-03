@@ -2,6 +2,7 @@
 
 use serde_json::{json, Value};
 
+use crate::flock::commands_layout::CloseBackend;
 use crate::flock::mailbox::MailboxEnv;
 use crate::flock::panes::PaneInfoEnv;
 use crate::server_runtime::RequestRuntimeAdapter;
@@ -36,13 +37,13 @@ fn pane_value(terminal: &dyn Terminal, pane: &Pane) -> Value {
 }
 
 impl RequestRuntimeAdapter<'_> {
-    #[allow(dead_code)] // The complete LayoutBackend assembly belongs to its dependent leaf.
+    #[allow(dead_code)] // Production LayoutBackend dispatch is assembled in t1605.
     pub(crate) fn helper_layoutbackend_list_panes(&self) -> Vec<Value> {
         self.terminal
             .with_env(|env| MailboxEnv::list_panes_grouped(env))
     }
 
-    #[allow(dead_code)] // The complete LayoutBackend assembly belongs to its dependent leaf.
+    #[allow(dead_code)] // Production LayoutBackend dispatch is assembled in t1605.
     pub(crate) fn helper_layoutbackend_list_tabs(&self) -> Vec<Value> {
         self.terminal.with_terminal(|terminal| {
             terminal
@@ -61,7 +62,7 @@ impl RequestRuntimeAdapter<'_> {
         })
     }
 
-    #[allow(dead_code)] // The complete LayoutBackend assembly belongs to its dependent leaf.
+    #[allow(dead_code)] // Production LayoutBackend dispatch is assembled in t1605.
     pub(crate) fn helper_layoutbackend_list_workspaces(&self) -> Vec<Value> {
         self.terminal.with_terminal(|terminal| {
             let tabs = terminal.list_tabs();
@@ -84,19 +85,19 @@ impl RequestRuntimeAdapter<'_> {
         })
     }
 
-    #[allow(dead_code)] // The complete LayoutBackend assembly belongs to its dependent leaf.
+    #[allow(dead_code)] // Production LayoutBackend dispatch is assembled in t1605.
     pub(crate) fn helper_layoutbackend_get_pane(&self, pane_id: &str) -> Option<Value> {
         self.terminal
             .with_env(|env| PaneInfoEnv::get_pane(env, pane_id))
     }
 
-    #[allow(dead_code)] // The complete LayoutBackend assembly belongs to its dependent leaf.
+    #[allow(dead_code)] // Production LayoutBackend dispatch is assembled in t1605.
     pub(crate) fn helper_layoutbackend_server_error_hint(&self) -> String {
         self.terminal
             .with_terminal(|terminal| terminal.server_error_hint())
     }
 
-    #[allow(dead_code)] // The complete LayoutBackend assembly belongs to its dependent leaf.
+    #[allow(dead_code)] // Production LayoutBackend dispatch is assembled in t1605.
     pub(crate) fn helper_layoutbackend_create_workspace(
         &mut self,
         label: Option<&str>,
@@ -126,7 +127,7 @@ impl RequestRuntimeAdapter<'_> {
         })
     }
 
-    #[allow(dead_code)] // The complete LayoutBackend assembly belongs to its dependent leaf.
+    #[allow(dead_code)] // Production LayoutBackend dispatch is assembled in t1605.
     pub(crate) fn helper_layoutbackend_create_tab(
         &mut self,
         workspace_id: Option<&str>,
@@ -153,7 +154,7 @@ impl RequestRuntimeAdapter<'_> {
         })
     }
 
-    #[allow(dead_code)] // The complete LayoutBackend assembly belongs to its dependent leaf.
+    #[allow(dead_code)] // Production LayoutBackend dispatch is assembled in t1605.
     pub(crate) fn helper_layoutbackend_split_pane(
         &mut self,
         pane_id: &str,
@@ -175,7 +176,7 @@ impl RequestRuntimeAdapter<'_> {
         })
     }
 
-    #[allow(dead_code)] // The complete LayoutBackend assembly belongs to its dependent leaf.
+    #[allow(dead_code)] // Production LayoutBackend dispatch is assembled in t1605.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn helper_layoutbackend_start_agent(
         &mut self,
@@ -214,7 +215,7 @@ impl RequestRuntimeAdapter<'_> {
         })
     }
 
-    #[allow(dead_code)] // The complete LayoutBackend assembly belongs to its dependent leaf.
+    #[allow(dead_code)] // Production LayoutBackend dispatch is assembled in t1605.
     pub(crate) fn helper_layoutbackend_rename(
         &mut self,
         kind: &str,
@@ -252,7 +253,7 @@ impl RequestRuntimeAdapter<'_> {
         })
     }
 
-    #[allow(dead_code)] // The complete LayoutBackend assembly belongs to its dependent leaf.
+    #[allow(dead_code)] // Production LayoutBackend dispatch is assembled in t1605.
     pub(crate) fn helper_layoutbackend_focus(
         &mut self,
         kind: &str,
@@ -264,6 +265,25 @@ impl RequestRuntimeAdapter<'_> {
                 .map_err(|error| error.message)?;
             Ok(json!({}))
         })
+    }
+
+    pub(crate) fn helper_closebackend_close(
+        &mut self,
+        kind: &str,
+        target_id: &str,
+    ) -> Result<Value, String> {
+        self.terminal.with_terminal_mut(|terminal| {
+            terminal
+                .close(kind, target_id)
+                .map_err(|error| error.message)?;
+            Ok(json!({}))
+        })
+    }
+}
+
+impl CloseBackend for RequestRuntimeAdapter<'_> {
+    fn close(&mut self, kind: &str, target_id: &str) -> Result<Value, String> {
+        self.helper_closebackend_close(kind, target_id)
     }
 }
 
@@ -463,6 +483,27 @@ mod tests {
                 Err("focus refused".to_owned()),
                 adapter.helper_layoutbackend_focus("pane", "w1:p1")
             );
+        });
+    }
+
+    #[test]
+    fn production_env_close_backend_uses_concrete_services() {
+        with_adapter(FakeTerminal::new(), |adapter| {
+            let backend: &mut dyn CloseBackend = adapter;
+            assert!(backend.get_pane("w1:p1").is_some());
+            assert_eq!(Ok(json!({})), backend.close("pane", "w1:p1"));
+            assert!(backend.get_pane("w1:p1").is_none());
+        });
+
+        let mut refusing = FakeTerminal::new();
+        refusing.fail_layout = Some("terminal close refused".into());
+        with_adapter(refusing, |adapter| {
+            let backend: &mut dyn CloseBackend = adapter;
+            assert_eq!(
+                Err("terminal close refused".into()),
+                backend.close("tab", "w1")
+            );
+            assert!(backend.list_tabs().iter().any(|tab| tab["tab_id"] == "w1"));
         });
     }
 }

@@ -17,6 +17,7 @@ use super::proc::{
 use super::session::session_of;
 
 type Env = BTreeMap<String, String>;
+type ActiveReader = dyn Fn(Option<&str>, Option<f64>) -> (Option<String>, usize);
 
 struct Fake {
     ticks: Box<dyn Fn(i64) -> Option<i64>>,
@@ -24,7 +25,7 @@ struct Fake {
     env: Box<dyn Fn(i64) -> Env>,
     open: Box<dyn Fn(i64) -> Option<String>>,
     proc_start: Box<dyn Fn(i64) -> Option<f64>>,
-    active: Box<dyn Fn(Option<&str>, Option<f64>) -> (Option<String>, usize)>,
+    active: Box<ActiveReader>,
 }
 
 impl Fake {

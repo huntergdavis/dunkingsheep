@@ -9,10 +9,13 @@ use std::cell::Cell;
 use std::sync::Mutex;
 
 use crate::config::Env;
+use crate::flock::commands_inbox::{InboxEnv, Nudge, RouteEntry};
 use crate::flock::commands_turns::{TurnHooks, TurnState};
 use crate::flock::dunks::DunkList;
+use crate::flock::mailbox::MailboxEnv;
 use crate::flock::panes::{PaneInfoEnv, Stores};
 use crate::flock::status::{StatusEnv, ViewCache};
+use crate::inbox_store::Store;
 use crate::proc::Caller;
 use crate::report::{ReportPaths, ReportSources};
 use crate::roles::Roles;
@@ -606,6 +609,388 @@ fn dispatch_as_flock_role(
     dispatcher.dispatch(&context, &FlockGate(&context), name, args)
 }
 
+struct PmApiEnv {
+    terminal: Mutex<Box<dyn Terminal>>,
+    store: Store,
+    config: Env,
+    config_error: Option<String>,
+    panes: Vec<Value>,
+    fail_notify: bool,
+    notices: Mutex<Vec<String>>,
+    now: f64,
+    _dir: tempfile::TempDir,
+}
+
+impl PmApiEnv {
+    fn new(config: Env, fail_notify: bool) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("inbox.sqlite3"), dir.path().join("blobs"))
+            .expect("inbox store");
+        Self {
+            terminal: Mutex::new(Box::new(FakeTerminal::default())),
+            store,
+            config,
+            config_error: None,
+            panes: vec![
+                json!({"pane_id":"w2:p2", "label":"worker", "tab_label":"worker", "workspace_label":"work", "agent":"codex"}),
+                json!({"pane_id":"w9:pH", "label":"VP", "tab_label":"VP", "workspace_label":"lead", "agent":"codex"}),
+            ],
+            fail_notify,
+            notices: Mutex::new(Vec::new()),
+            now: 2_000_000_000.0,
+            _dir: dir,
+        }
+    }
+}
+
+impl PaneInfoEnv for PmApiEnv {
+    fn list_panes_grouped(&self) -> Vec<Value> {
+        self.panes.clone()
+    }
+
+    fn get_pane(&self, pane_id: &str) -> Option<Value> {
+        self.panes
+            .iter()
+            .find(|pane| pane["pane_id"] == pane_id)
+            .cloned()
+    }
+}
+
+impl MailboxEnv for PmApiEnv {
+    fn list_panes(&self) -> Vec<Value> {
+        self.panes.clone()
+    }
+
+    fn list_panes_grouped(&self) -> Vec<Value> {
+        self.panes.clone()
+    }
+
+    fn registered_pane(&self, _pane_id: &str) -> (bool, bool, Option<String>) {
+        (false, false, None)
+    }
+}
+
+impl InboxEnv for PmApiEnv {
+    fn caller_role(&self, _pane_id: &str) -> Result<String, DunkError> {
+        Ok("worker".into())
+    }
+
+    fn mailbox_override(&self) -> Option<String> {
+        None
+    }
+
+    fn backend_name(&self) -> Result<String, DunkError> {
+        Ok("test terminal".into())
+    }
+
+    fn lane_panes(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn pool(&self) -> &crate::db::ReadPool {
+        self.store.read_pool()
+    }
+
+    fn store(&self) -> &Store {
+        &self.store
+    }
+
+    fn now(&self) -> f64 {
+        self.now
+    }
+
+    fn record_metric(
+        &self,
+        _kind: &str,
+        _pane_id: Option<&str>,
+        _mailbox: &str,
+        _sender: Option<&str>,
+        _duration_ms: Option<i64>,
+        _bytes: Option<i64>,
+    ) {
+    }
+
+    fn pm_routing(&self) -> Vec<RouteEntry> {
+        Vec::new()
+    }
+
+    fn fold_into_queued_notice(
+        &self,
+        _pane_id: &str,
+        _text: &str,
+        _message_id: &str,
+    ) -> Option<String> {
+        None
+    }
+
+    fn send_now(&self, _pane_id: &str, text: &str, _message_id: &str) -> Result<Nudge, DunkError> {
+        if self.fail_notify {
+            return Err(DunkError::Refused("test notification failure".into()));
+        }
+        self.notices.lock().unwrap().push(text.to_string());
+        Ok(Nudge::default())
+    }
+
+    fn record_sent(
+        &self,
+        _pane_id: Option<&str>,
+        _mailbox: &str,
+        _sender: Option<&str>,
+        _bytes: usize,
+        _attachments: usize,
+    ) {
+    }
+
+    fn tasks_for_pane(&self, _pane_id: &str) -> Result<Value, DunkError> {
+        Ok(json!({"tasks": []}))
+    }
+}
+
+impl crate::pm::PmEnv for PmApiEnv {
+    fn config(&self) -> Result<&Env, DunkError> {
+        if let Some(message) = &self.config_error {
+            return Err(DunkError::Refused(message.clone()));
+        }
+        Ok(&self.config)
+    }
+}
+
+impl CommandEnv for PmApiEnv {
+    fn terminal(&self) -> &Mutex<Box<dyn Terminal>> {
+        &self.terminal
+    }
+
+    fn now_s(&self) -> f64 {
+        self.now
+    }
+
+    fn pm_env(&self) -> Result<&dyn crate::pm::PmEnv, DunkError> {
+        Ok(self)
+    }
+}
+
+fn pm_dispatcher() -> Dispatcher {
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_pm_digest_routing();
+    dispatcher
+}
+
+#[test]
+fn h_pm_routing_matches_python_defaults_and_propagates_bad_config() {
+    let (_dir, flock) = staffed_flock("pm-routing");
+    let dir = tempfile::tempdir().unwrap();
+    let routing_path = dir.path().join("routing.json");
+    std::fs::write(
+        &routing_path,
+        r#"{"poolrad":{"pm":"w2:p2","members":["w2:p2"],"mode":"flag"}}"#,
+    )
+    .unwrap();
+    let routing_path = routing_path.to_string_lossy().into_owned();
+    let home = dir.path().to_string_lossy().into_owned();
+    let env = PmApiEnv::new(
+        Env::from_pairs(&[
+            ("HOME", &home),
+            ("DUNKINGSHEEP_PM_ROUTING", &routing_path),
+            ("DUNKINGSHEEP_VP_PANE", "w9:pH"),
+        ]),
+        false,
+    );
+    let dispatcher = pm_dispatcher();
+    let result =
+        dispatch_as_flock_role(&dispatcher, &flock, &env, Some("w2:p2"), "pm_routing", None)
+            .unwrap();
+    assert_eq!(
+        result["routing"]["poolrad"],
+        json!({"pm":"w2:p2", "members":["w2:p2"], "mode":"flag", "vp_pane":"w9:pH"})
+    );
+    assert_eq!(result["registry"], routing_path);
+    assert_eq!(result["vp_pane"], "w9:pH");
+
+    let default_env = PmApiEnv::new(Env::from_pairs(&[("HOME", &home)]), false);
+    let defaults =
+        dispatch_as_flock_role(&dispatcher, &flock, &default_env, None, "pm_routing", None)
+            .unwrap();
+    assert_eq!(defaults["routing"], json!({}));
+    assert_eq!(defaults["vp_pane"], "w9:pH");
+    assert_eq!(
+        defaults["registry"],
+        dir.path()
+            .join(".config/dunkingsheep/pm-routing.json")
+            .to_string_lossy()
+            .as_ref()
+    );
+
+    let invalid_path = dir.path().join("invalid.json");
+    std::fs::write(&invalid_path, "{broken").unwrap();
+    let invalid_path = invalid_path.to_string_lossy().into_owned();
+    let invalid_env = PmApiEnv::new(
+        Env::from_pairs(&[("HOME", &home), ("DUNKINGSHEEP_PM_ROUTING", &invalid_path)]),
+        false,
+    );
+    let error = dispatch_as_flock_role(&dispatcher, &flock, &invalid_env, None, "pm_routing", None)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("PM routing"));
+    assert!(error.contains("not readable JSON"));
+
+    let empty_env = PmApiEnv::new(
+        Env::from_pairs(&[("HOME", &home), ("DUNKINGSHEEP_PM_ROUTING", "")]),
+        false,
+    );
+    let empty_path_error =
+        dispatch_as_flock_role(&dispatcher, &flock, &empty_env, None, "pm_routing", None)
+            .unwrap_err()
+            .to_string();
+    assert!(empty_path_error.contains("not readable JSON"));
+}
+
+#[test]
+fn h_pm_digest_matches_python_store_update_checkpoint_and_notify_contract() {
+    let (_dir, flock) = staffed_flock("pm-digest");
+    let dir = tempfile::tempdir().unwrap();
+    let checkpoint = dir.path().join("checkpoint.json");
+    std::fs::write(
+        &checkpoint,
+        r#"{"strict_full_c_originals":42,"verified_game_identities":60,"reviewed_change":{"reviewed_commit":"abc123"}}"#,
+    )
+    .unwrap();
+    let home = dir.path().to_string_lossy().into_owned();
+    let checkpoint = checkpoint.to_string_lossy().into_owned();
+    let env = PmApiEnv::new(
+        Env::from_pairs(&[
+            ("HOME", &home),
+            ("DUNKINGSHEEP_VP_PANE", "w9:pH"),
+            ("POOLRAD_CHECKPOINT", &checkpoint),
+        ]),
+        false,
+    );
+    let dispatcher = pm_dispatcher();
+    let first = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w2:p2"),
+        "pm_digest",
+        args(json!({"project":"poolrad", "payload":"{\"demo\":true,\"changed\":[\"new source\"],\"numbers\":[{\"name\":\"strict C bodies\",\"value\":1,\"unit\":\"/old\"}]}"})),
+    )
+    .unwrap();
+    assert_eq!(first["action"], "created");
+    assert_eq!(first["digest_id"], "pm-digest:poolrad");
+    assert_eq!(first["subject"], "PM digest (DEMO): poolrad");
+    assert_eq!(first["mailbox"], "VP");
+    assert_eq!(first["notified"], true);
+    assert_eq!(first["attachments"], json!([]));
+    assert!(first["body"].as_str().unwrap().contains("new source"));
+    assert!(first["body"]
+        .as_str()
+        .unwrap()
+        .contains("strict C bodies: 42 /60"));
+    assert!(!first["body"].as_str().unwrap().contains("/old"));
+    assert_eq!(env.notices.lock().unwrap().len(), 1);
+
+    let second = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w2:p2"),
+        "pm_digest",
+        args(json!({"project":"poolrad", "payload":"{broken"})),
+    )
+    .unwrap();
+    assert_eq!(second["action"], "updated");
+    assert_eq!(second["message_id"], first["message_id"]);
+    assert!(second["body"].as_str().unwrap().contains("{broken"));
+    assert_eq!(second["subject"], "PM digest: poolrad");
+    let row_count: i64 = env
+        .pool()
+        .with(|connection| {
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM messages WHERE digest_id = 'pm-digest:poolrad'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(crate::db::map_sqlite)
+        })
+        .unwrap();
+    assert_eq!(row_count, 1);
+
+    let fallback = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w2:p2"),
+        "pm_digest",
+        args(json!({"project":"alpha", "payload":"{\"numbers\":[{\"name\":\"payload value\",\"value\":7}]}"})),
+    )
+    .unwrap();
+    assert!(fallback["body"]
+        .as_str()
+        .unwrap()
+        .contains("payload value: 7"));
+
+    let object_sections = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w2:p2"),
+        "pm_digest",
+        args(json!({"project":"objects", "payload":"{\"changed\":{\"module\":\"routing\"},\"blocked\":{\"ticket\":\"stale\"},\"owner_decisions\":{\"owner\":\"decision\"},\"numbers\":{\"latest\":{\"value\":9}}}"})),
+    )
+    .unwrap();
+    let object_body = object_sections["body"].as_str().unwrap();
+    assert!(
+        object_body.contains("## Changed\n- module\n"),
+        "{object_body}"
+    );
+    assert!(
+        object_body.contains("## Blocked\n- ticket\n"),
+        "{object_body}"
+    );
+    assert!(
+        object_body.contains("## Owner decisions\n- owner\n"),
+        "{object_body}"
+    );
+    assert!(
+        object_body.contains("## Numbers\n- latest\n"),
+        "{object_body}"
+    );
+
+    let failed_notify = PmApiEnv::new(
+        Env::from_pairs(&[("HOME", &home), ("DUNKINGSHEEP_VP_PANE", "w9:pH")]),
+        true,
+    );
+    let stored = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &failed_notify,
+        Some("w2:p2"),
+        "pm_digest",
+        args(json!({"project":"beta", "payload":"brief"})),
+    )
+    .unwrap();
+    assert_eq!(stored["notified"], false);
+    assert_eq!(stored["action"], "created");
+    assert!(failed_notify
+        .store
+        .digest_exists("pm-digest:beta")
+        .expect("stored before notification"));
+}
+
+#[test]
+fn pm_commands_refuse_unwired_and_failed_config_adapters() {
+    let (_dir, flock) = staffed_flock("pm-config-errors");
+    let dispatcher = pm_dispatcher();
+    let env = PmApiEnv {
+        config_error: Some("PM config unavailable".into()),
+        ..PmApiEnv::new(Env::default(), false)
+    };
+    let error = dispatch_as_flock_role(&dispatcher, &flock, &env, None, "pm_routing", None)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("PM config unavailable"));
+}
+
 struct ReportApiSources {
     paths: ReportPaths,
     config_dir: PathBuf,
@@ -726,6 +1111,76 @@ fn dispatcher_report_run_list_handlers_use_sources_and_preserve_role_gates() {
         dispatch_as_flock_role(&dispatcher, &flock, &env, Some("w2:p2"), "report_run", None)
             .unwrap_err();
     assert!(denied.to_string().contains("not permitted for role worker"));
+}
+
+#[test]
+fn h_report_list_matches_python() {
+    use std::fs;
+    use std::time::{Duration, SystemTime};
+
+    let temp = tempfile::tempdir().unwrap();
+    let (_flock_dir, flock) = staffed_flock("report-list-api");
+    let home = temp.path().join("home");
+    let output_dir = home.join("reports");
+    fs::create_dir_all(&output_dir).unwrap();
+    let older = output_dir.join("older.md");
+    let newer = output_dir.join("newer.md");
+    fs::write(&older, "old report").unwrap();
+    fs::write(&newer, "new report").unwrap();
+    fs::write(output_dir.join("ignored.txt"), "not a report").unwrap();
+    fs::File::open(&older)
+        .unwrap()
+        .set_times(
+            std::fs::FileTimes::new()
+                .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(100)),
+        )
+        .unwrap();
+    fs::File::open(&newer)
+        .unwrap()
+        .set_times(
+            std::fs::FileTimes::new()
+                .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(200)),
+        )
+        .unwrap();
+
+    let env = ReportApiEnv {
+        terminal: Mutex::new(Box::new(FakeTerminal::default())),
+        sources: ReportApiSources {
+            paths: ReportPaths::new(&output_dir, &home),
+            config_dir: temp.path().join("config"),
+        },
+    };
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_report_list();
+    let result = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w2:p2"),
+        "report_list",
+        args(json!({"out_dir": ""})),
+    )
+    .expect("report list via dispatcher");
+
+    assert_eq!(result["dir"], "~/reports");
+    assert_eq!(result["count"], 2);
+    assert_eq!(
+        result["reports"],
+        json!([
+            {
+                "name": "newer.md",
+                "path": newer,
+                "size": 10,
+                "at": 200.0
+            },
+            {
+                "name": "older.md",
+                "path": older,
+                "size": 10,
+                "at": 100.0
+            }
+        ])
+    );
 }
 
 #[test]
@@ -3863,6 +4318,329 @@ fn dispatch_owner_api(
     dispatcher.dispatch(&context, &FlockGate(&context), command, args)
 }
 
+#[derive(Default)]
+struct FakeSendCommands {
+    calls: Mutex<Vec<Value>>,
+    failure: Mutex<Option<String>>,
+}
+
+impl FakeSendCommands {
+    fn record(&self, call: Value) -> Result<Value, DunkError> {
+        self.calls.lock().unwrap().push(call.clone());
+        if let Some(message) = self.failure.lock().unwrap().clone() {
+            Err(DunkError::Refused(message))
+        } else {
+            Ok(json!({"operation": call["operation"], "pane_id": call["target"]["pane_id"]}))
+        }
+    }
+}
+
+impl SendCommandEnv for FakeSendCommands {
+    fn send_text(
+        &self,
+        target: &Value,
+        text: &str,
+        self_pane_id: Option<&str>,
+        hold_while_typing: bool,
+        wait_s: f64,
+        press_enter: bool,
+    ) -> Result<Value, DunkError> {
+        self.record(
+            json!({"operation":"send_text", "target":target, "text":text,
+            "self_pane_id":self_pane_id, "hold_while_typing":hold_while_typing,
+            "wait_s":wait_s, "press_enter":press_enter}),
+        )
+    }
+
+    fn send_keys(
+        &self,
+        target: &Value,
+        keys: &str,
+        self_pane_id: Option<&str>,
+        hold_while_typing: bool,
+        wait_s: f64,
+    ) -> Result<Value, DunkError> {
+        self.record(
+            json!({"operation":"send_keys", "target":target, "keys":keys,
+            "self_pane_id":self_pane_id, "hold_while_typing":hold_while_typing,
+            "wait_s":wait_s}),
+        )
+    }
+
+    fn flush_box(&self, target: &Value, self_pane_id: Option<&str>) -> Result<Value, DunkError> {
+        self.record(json!({"operation":"flush_box", "target":target,
+            "self_pane_id":self_pane_id}))
+    }
+}
+
+struct SendApiEnv {
+    terminal: Mutex<Box<dyn Terminal>>,
+    send: FakeSendCommands,
+    panes: Vec<Value>,
+}
+
+impl SendApiEnv {
+    fn new() -> Self {
+        Self {
+            terminal: Mutex::new(Box::new(FakeTerminal::default())),
+            send: FakeSendCommands::default(),
+            panes: vec![
+                json!({"pane_id":"w1:p1", "agent":"owner", "tab_label":"owner"}),
+                json!({"pane_id":"w2:p2", "agent":"worker", "tab_label":"worker"}),
+                json!({"pane_id":"w3:p3", "agent":"reviewer", "tab_label":"reviewer"}),
+                json!({"pane_id":"w4:p4", "agent":"planner", "tab_label":"planner"}),
+            ],
+        }
+    }
+}
+
+impl PaneInfoEnv for SendApiEnv {
+    fn list_panes_grouped(&self) -> Vec<Value> {
+        self.panes.clone()
+    }
+
+    fn get_pane(&self, pane_id: &str) -> Option<Value> {
+        self.panes
+            .iter()
+            .find(|pane| pane.get("pane_id").and_then(Value::as_str) == Some(pane_id))
+            .cloned()
+    }
+}
+
+impl CommandEnv for SendApiEnv {
+    fn terminal(&self) -> &Mutex<Box<dyn Terminal>> {
+        &self.terminal
+    }
+
+    fn now_s(&self) -> f64 {
+        1_800_000_000.0
+    }
+
+    fn send_commands(&self) -> Result<&dyn SendCommandEnv, DunkError> {
+        Ok(&self.send)
+    }
+}
+
+fn send_api_fixture(tag: &str) -> (tempfile::TempDir, Flock, SendApiEnv, Dispatcher) {
+    let (dir, flock) = flock();
+    let mut roles = Roles::new(
+        &Env::default(),
+        Some(dir.path().join(format!("{tag}-roles.json"))),
+        Some(dir.path().join(format!("{tag}-tokens.json"))),
+        None,
+    )
+    .unwrap();
+    for (pane, role) in [
+        ("w1:p1", "owner"),
+        ("w2:p2", "worker"),
+        ("w3:p3", "reviewer"),
+        ("w4:p4", "planner"),
+    ] {
+        roles
+            .register(pane, role, None, None, None, None, None, None)
+            .unwrap();
+    }
+    flock.attach_roles(roles, None);
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_send_text_keys_flush_box();
+    (dir, flock, SendApiEnv::new(), dispatcher)
+}
+
+#[test]
+fn send_text_dispatch_preserves_defaults_and_adapter_result() {
+    let (_dir, flock, env, dispatcher) = send_api_fixture("send-text");
+    let result = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p1"),
+        "send_text",
+        args(json!({"target":"worker", "text":"hello"})),
+    )
+    .unwrap();
+    assert_eq!(result, json!({"operation":"send_text", "pane_id":"w2:p2"}));
+    let calls = env.send.calls.lock().unwrap();
+    assert_eq!(calls[0]["hold_while_typing"], true);
+    assert_eq!(calls[0]["wait_s"], 3.0);
+    assert_eq!(calls[0]["press_enter"], true);
+    assert_eq!(calls[0]["self_pane_id"], "w1:p1");
+}
+
+#[test]
+fn send_text_and_keys_forward_explicit_options() {
+    let (_dir, flock, env, dispatcher) = send_api_fixture("send-options");
+    dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p1"),
+        "send_text",
+        args(
+            json!({"target":"worker", "text":"draft", "hold_while_typing":false,
+            "wait_s":"0.25", "press_enter":false}),
+        ),
+    )
+    .unwrap();
+    dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p1"),
+        "send_keys",
+        args(
+            json!({"target":"worker", "keys":"ctrl+c", "hold_while_typing":false,
+            "wait_s":0}),
+        ),
+    )
+    .unwrap();
+    let calls = env.send.calls.lock().unwrap();
+    assert_eq!(calls[0]["press_enter"], false);
+    assert_eq!(calls[0]["wait_s"], 0.25);
+    assert_eq!(calls[1]["operation"], "send_keys");
+    assert_eq!(calls[1]["hold_while_typing"], false);
+    assert_eq!(calls[1]["wait_s"], 0.0);
+}
+
+#[test]
+fn send_keys_and_flush_dispatch_to_their_named_operations() {
+    let (_dir, flock, env, dispatcher) = send_api_fixture("send-operations");
+    for (command, call) in [
+        ("send_keys", json!({"target":"worker", "keys":"Enter"})),
+        ("flush_box", json!({"target":"worker"})),
+    ] {
+        dispatch_as_flock_role(
+            &dispatcher,
+            &flock,
+            &env,
+            Some("w1:p1"),
+            command,
+            args(call),
+        )
+        .unwrap();
+    }
+    let calls = env.send.calls.lock().unwrap();
+    assert_eq!(calls[0]["operation"], "send_keys");
+    assert_eq!(calls[0]["hold_while_typing"], true);
+    assert_eq!(calls[0]["wait_s"], 3.0);
+    assert_eq!(calls[1]["operation"], "flush_box");
+}
+
+#[test]
+fn worker_and_reviewer_send_gates_allow_self_and_refuse_other_panes() {
+    let (_dir, flock, env, dispatcher) = send_api_fixture("send-role-gate");
+    dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w2:p2"),
+        "send_text",
+        args(json!({"target":"self", "text":"hello"})),
+    )
+    .unwrap();
+    let error = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w2:p2"),
+        "send_keys",
+        args(json!({"target":"owner", "keys":"Enter"})),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("send_keys to another pane requires a superuser"));
+    let reviewer_error = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w3:p3"),
+        "flush_box",
+        args(json!({"target":"owner"})),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(reviewer_error.contains("flush_box to another pane requires a superuser"));
+    assert_eq!(env.send.calls.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn dispatcher_role_gate_precedes_retired_token_handler_gate() {
+    let (_dir, flock, env, dispatcher) = send_api_fixture("send-role-order");
+    let error = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w4:p4"),
+        "send_text",
+        args(json!({"target":"worker", "text":"hello", "desk_token":"old"})),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("send_text is not permitted for role planner"));
+    assert!(!error.contains("desk_token is retired"));
+    assert!(env.send.calls.lock().unwrap().is_empty());
+}
+
+#[test]
+fn send_rejects_retired_desk_token_invalid_wait_and_propagates_operation_error() {
+    let (_dir, flock, env, dispatcher) = send_api_fixture("send-errors");
+    let retired = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p1"),
+        "send_text",
+        args(json!({"target":"worker", "text":"hello", "desk_token":"old"})),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(retired.contains("desk_token is retired"));
+
+    let retired_before_self_gate = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w2:p2"),
+        "send_text",
+        args(json!({"target":"owner", "text":"hello", "desk_token":"old"})),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(retired_before_self_gate.contains("desk_token is retired"));
+
+    let invalid_wait = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p1"),
+        "send_keys",
+        args(json!({"target":"worker", "keys":"Enter", "wait_s":3601})),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(invalid_wait.contains("wait_s must be between 0 and 3600"));
+    assert!(env.send.calls.lock().unwrap().is_empty());
+
+    *env.send.failure.lock().unwrap() = Some("send backend failed".into());
+    for (command, call) in [
+        ("send_text", json!({"target":"worker", "text":"hello"})),
+        ("send_keys", json!({"target":"worker", "keys":"Enter"})),
+        ("flush_box", json!({"target":"worker"})),
+    ] {
+        let operation_error = dispatch_as_flock_role(
+            &dispatcher,
+            &flock,
+            &env,
+            Some("w1:p1"),
+            command,
+            args(call),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(operation_error.contains("send backend failed"));
+    }
+    assert_eq!(env.send.calls.lock().unwrap().len(), 3);
+}
+
 #[test]
 fn h_owner_stats_matches_python() {
     let (_dir, flock, env) = owner_api_fixture("owner-stats");
@@ -3904,6 +4682,399 @@ fn h_owner_receipts_matches_python() {
     assert_eq!(out["receipts"][0]["id"], id);
     assert_eq!(out["receipts"][0].get("body"), None);
     assert_eq!(env.owner_push.pending(None).unwrap().len(), 1);
+}
+
+#[test]
+fn h_owner_delivered_matches_python() {
+    let (_dir, flock, env) = owner_api_fixture("owner-delivered");
+    let inbox = flock.stores().inbox.unwrap();
+    let message_id = inbox
+        .send(&crate::inbox_store::Outgoing {
+            mailbox: crate::flock::mailbox::OWNER_MAILBOX,
+            body: Some("question"),
+            mailbox_label: Some(crate::flock::mailbox::OWNER_MAILBOX),
+            transport: Some("telegram"),
+            ..crate::inbox_store::Outgoing::default()
+        })
+        .unwrap();
+    let dispatcher = owner_view_dispatcher();
+
+    let out = dispatch_owner_api(
+        &dispatcher,
+        &flock,
+        &env,
+        "owner_delivered",
+        args(json!({
+            "message_id": message_id,
+            "transport": "telegram",
+            "external_id": "telegram-123"
+        })),
+        Some("w1:p1"),
+    )
+    .expect("owner delivery receipt via dispatcher");
+
+    assert_eq!(out["message"]["message_id"], message_id);
+    assert_eq!(out["message"]["external_id"], "telegram-123");
+    assert_eq!(out["message"]["delivery_transport"], "telegram");
+    assert!(out["delivered_at"].as_f64().is_some_and(|at| at > 0.0));
+    assert_eq!(out["transport"], "telegram");
+
+    let delivered_at = out["delivered_at"].clone();
+    let retry = dispatch_owner_api(
+        &dispatcher,
+        &flock,
+        &env,
+        "owner_delivered",
+        args(json!({
+            "message_id": message_id,
+            "transport": "telegram",
+            "external_id": "telegram-retry"
+        })),
+        Some("w1:p1"),
+    )
+    .expect("idempotent owner delivery receipt");
+    assert_eq!(retry["delivered_at"], delivered_at);
+    assert_eq!(retry["message"]["external_id"], "telegram-123");
+
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_delivered",
+            args(json!({
+                "message_id": message_id,
+                "transport": "telegram"
+            })),
+            Some("w1:p2"),
+        ),
+        Err(DunkError::Refused(message)) if message.contains("not permitted for role worker")
+    ));
+}
+
+struct FakeOwnerViews {
+    app_db: PathBuf,
+    inbox_rows: std::collections::HashMap<String, Value>,
+    stats: Vec<Value>,
+    latencies: std::collections::HashMap<String, Vec<f64>>,
+    now: f64,
+    inbox_error: Option<String>,
+    stats_error: Option<String>,
+    latency_error: Option<String>,
+    latency_calls: Mutex<Vec<(String, usize)>>,
+}
+
+impl Default for FakeOwnerViews {
+    fn default() -> Self {
+        Self {
+            app_db: PathBuf::from("/nonexistent/application-messages.sqlite3"),
+            inbox_rows: std::collections::HashMap::new(),
+            stats: Vec::new(),
+            latencies: std::collections::HashMap::new(),
+            now: 2_000.0,
+            inbox_error: None,
+            stats_error: None,
+            latency_error: None,
+            latency_calls: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl OwnerViewEnv for FakeOwnerViews {
+    fn app_db_path(&self) -> Result<PathBuf, DunkError> {
+        Ok(self.app_db.clone())
+    }
+
+    fn inbox_status(&self, message_id: &str, _now: f64) -> Result<Option<Value>, DunkError> {
+        if let Some(error) = &self.inbox_error {
+            return Err(DunkError::Refused(error.clone()));
+        }
+        Ok(self.inbox_rows.get(message_id).cloned())
+    }
+
+    fn inbox_stats(&self, _now: f64) -> Result<Vec<Value>, DunkError> {
+        if let Some(error) = &self.stats_error {
+            return Err(DunkError::Refused(error.clone()));
+        }
+        Ok(self.stats.clone())
+    }
+
+    fn seen_latencies(&self, mailbox: &str, limit: usize) -> Result<Vec<f64>, DunkError> {
+        self.latency_calls
+            .lock()
+            .unwrap()
+            .push((mailbox.to_string(), limit));
+        if let Some(error) = &self.latency_error {
+            return Err(DunkError::Refused(error.clone()));
+        }
+        Ok(self.latencies.get(mailbox).cloned().unwrap_or_default())
+    }
+
+    fn now(&self) -> f64 {
+        self.now
+    }
+}
+
+struct OwnerViewApiEnv {
+    terminal: Mutex<Box<dyn Terminal>>,
+    views: FakeOwnerViews,
+}
+
+impl OwnerViewApiEnv {
+    fn new(views: FakeOwnerViews) -> Self {
+        Self {
+            terminal: Mutex::new(Box::new(FakeTerminal::default())),
+            views,
+        }
+    }
+}
+
+impl PaneInfoEnv for OwnerViewApiEnv {
+    fn list_panes_grouped(&self) -> Vec<Value> {
+        Vec::new()
+    }
+
+    fn get_pane(&self, _pane_id: &str) -> Option<Value> {
+        None
+    }
+}
+
+impl CommandEnv for OwnerViewApiEnv {
+    fn terminal(&self) -> &Mutex<Box<dyn Terminal>> {
+        &self.terminal
+    }
+
+    fn now_s(&self) -> f64 {
+        self.views.now
+    }
+
+    fn owner_views(&self) -> Result<&dyn OwnerViewEnv, DunkError> {
+        Ok(&self.views)
+    }
+}
+
+fn owner_view_dispatcher() -> Dispatcher {
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_owner_delivered_message_state_reply_stats();
+    dispatcher
+}
+
+#[test]
+fn h_message_state_matches_python() {
+    let (_dir, flock) = staffed_flock("message-state");
+    let dir = tempfile::tempdir().unwrap();
+    let app_db = dir.path().join("messages.sqlite3");
+    let connection = rusqlite::Connection::open(&app_db).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE messages (id INTEGER PRIMARY KEY, role TEXT, channel TEXT, body TEXT, delivery TEXT, delivery_detail TEXT, created_at TEXT, answer_id INTEGER, answered_at TEXT);
+             INSERT INTO messages VALUES (10, 'owner', 'vp', 'question', 'sent', NULL, '2026-11-03T01:00:00Z', NULL, NULL);",
+        )
+        .unwrap();
+    drop(connection);
+
+    let mut views = FakeOwnerViews {
+        app_db,
+        ..FakeOwnerViews::default()
+    };
+    views.inbox_rows.insert(
+        "i42".into(),
+        json!({"id":"i42", "mailbox":"worker", "sender":"owner", "created_at":1900.0,
+            "notify_state":"notified", "notify_reason":null, "read_at":1950.0,
+            "acked_at":1960.0, "state":"acked"}),
+    );
+    let env = OwnerViewApiEnv::new(views);
+    let dispatcher = owner_view_dispatcher();
+    let result = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p1"),
+        "message_state",
+        args(json!({"message_ids":"10, i42, 99, absent"})),
+    )
+    .unwrap();
+    let messages = result["messages"].as_array().unwrap();
+    assert_eq!(messages[0]["source"], "application");
+    assert_eq!(messages[0]["id"], 10);
+    assert_eq!(messages[0]["delivered"]["transport"], "sent");
+    assert_eq!(messages[1]["source"], "inbox");
+    assert_eq!(messages[1]["delivered"]["ok"], true);
+    assert_eq!(messages[1]["seen"]["acked_at"], "1970-01-01T00:32:40Z");
+    assert_eq!(messages[2]["found"], false);
+    assert_eq!(messages[2]["source"], "application");
+    assert_eq!(messages[3], json!({"id":"absent", "found":false}));
+}
+
+#[test]
+fn h_message_state_keeps_missing_unreadable_and_nonnumeric_ids_distinct() {
+    let (_dir, flock) = staffed_flock("message-state-missing");
+    let env = OwnerViewApiEnv::new(FakeOwnerViews::default());
+    let dispatcher = owner_view_dispatcher();
+    let result = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p1"),
+        "message_state",
+        args(json!({"message_ids":"7, no-such-inbox"})),
+    )
+    .unwrap();
+    assert_eq!(result["messages"][0]["found"], false);
+    assert_eq!(result["messages"][0]["source"], "application");
+    assert_eq!(
+        result["messages"][0],
+        json!({"id":"7", "found":false, "source":"application", "reason":"no application row with this id"})
+    );
+    assert_eq!(
+        result["messages"][1],
+        json!({"id":"no-such-inbox", "found":false})
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let unreadable = dir.path().join("not-a-database.sqlite3");
+    std::fs::write(&unreadable, "not sqlite").unwrap();
+    let env = OwnerViewApiEnv::new(FakeOwnerViews {
+        app_db: unreadable,
+        ..FakeOwnerViews::default()
+    });
+    let unreadable_result = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p1"),
+        "message_state",
+        args(json!({"message_ids":"8"})),
+    )
+    .unwrap();
+    assert_eq!(
+        unreadable_result["messages"][0],
+        json!({"id":"8", "found":false, "source":"application", "reason":"no application row with this id"})
+    );
+
+    let query_error = dir.path().join("wrong-schema.sqlite3");
+    rusqlite::Connection::open(&query_error)
+        .unwrap()
+        .execute_batch("CREATE TABLE unrelated (id INTEGER);")
+        .unwrap();
+    let env = OwnerViewApiEnv::new(FakeOwnerViews {
+        app_db: query_error,
+        ..FakeOwnerViews::default()
+    });
+    let query_error_result = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p1"),
+        "message_state",
+        args(json!({"message_ids":"9"})),
+    )
+    .unwrap();
+    assert_eq!(
+        query_error_result["messages"][0],
+        json!({"id":"9", "found":false, "source":"application", "reason":"no application row with this id"})
+    );
+}
+
+#[test]
+fn h_reply_stats_matches_python() {
+    let (_dir, flock) = staffed_flock("reply-stats");
+    let mut views = FakeOwnerViews {
+        stats: vec![
+            json!({"mailbox":"b"}),
+            json!({"mailbox":"a"}),
+            json!({"mailbox":"c"}),
+        ],
+        latencies: std::collections::HashMap::from([
+            ("a".into(), vec![1.0, 3.0, 5.0]),
+            ("c".into(), vec![7.0]),
+        ]),
+        ..FakeOwnerViews::default()
+    };
+    views.now = 2_000.0;
+    let env = OwnerViewApiEnv::new(views);
+    let dispatcher = owner_view_dispatcher();
+    let result = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p1"),
+        "reply_stats",
+        args(json!({"mailboxes":"b, a"})),
+    )
+    .unwrap();
+    let boxes = result["mailboxes"].as_array().unwrap();
+    assert_eq!(boxes.len(), 2);
+    assert_eq!(boxes[0]["mailbox"], "a");
+    assert_eq!(boxes[0]["seen_latency_s"]["value"], 3.0);
+    assert_eq!(boxes[0]["seen_latency_last_s"]["value"], 5.0);
+    assert_eq!(boxes[1]["mailbox"], "b");
+    assert_eq!(
+        boxes[1]["seen_latency_s"]["reason"],
+        "no message has been read yet"
+    );
+    assert_eq!(
+        env.views.latency_calls.lock().unwrap().as_slice(),
+        [("b".into(), 200), ("a".into(), 200)]
+    );
+}
+
+#[test]
+fn message_state_maps_inbox_lookup_failure_to_missing_row() {
+    let (_dir, flock) = staffed_flock("owner-view-errors");
+    let dispatcher = owner_view_dispatcher();
+    let env = OwnerViewApiEnv::new(FakeOwnerViews {
+        inbox_error: Some("inbox lookup failed".into()),
+        ..FakeOwnerViews::default()
+    });
+    let result = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p1"),
+        "message_state",
+        args(json!({"message_ids":"i1"})),
+    )
+    .unwrap();
+    assert_eq!(result["messages"][0], json!({"id":"i1", "found":false}));
+}
+
+#[test]
+fn reply_stats_propagates_inbox_query_failures() {
+    let (_dir, flock) = staffed_flock("reply-stats-errors");
+    let dispatcher = owner_view_dispatcher();
+    let env = OwnerViewApiEnv::new(FakeOwnerViews {
+        stats_error: Some("inbox stats failed".into()),
+        ..FakeOwnerViews::default()
+    });
+    let error = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p1"),
+        "reply_stats",
+        None,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("inbox stats failed"));
+
+    let env = OwnerViewApiEnv::new(FakeOwnerViews {
+        stats: vec![json!({"mailbox":"a"})],
+        latency_error: Some("latency query failed".into()),
+        ..FakeOwnerViews::default()
+    });
+    let error = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p1"),
+        "reply_stats",
+        None,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("latency query failed"));
 }
 
 #[test]
@@ -3973,4 +5144,683 @@ fn h_owner_conversation_matches_python() {
         ),
         Err(DunkError::Refused(message)) if message == "could not convert string to float: 'not a timestamp'"
     ));
+}
+
+#[test]
+fn h_owner_reply_matches_python() {
+    let (_dir, flock, env) = owner_api_fixture("owner-reply-api");
+    let inbox = flock.stores().inbox.unwrap();
+    let question = inbox
+        .send(&crate::inbox_store::Outgoing {
+            mailbox: crate::flock::mailbox::OWNER_MAILBOX,
+            body: Some("question"),
+            sender: Some("web"),
+            mailbox_label: Some(crate::flock::mailbox::OWNER_MAILBOX),
+            transport: Some("telegram"),
+            ..crate::inbox_store::Outgoing::default()
+        })
+        .unwrap();
+    let other = inbox
+        .send(&crate::inbox_store::Outgoing {
+            mailbox: "other-mailbox",
+            body: Some("not an owner question"),
+            ..crate::inbox_store::Outgoing::default()
+        })
+        .unwrap();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_owner_reply_ingest_outbox();
+
+    let out = dispatch_owner_api(
+        &dispatcher,
+        &flock,
+        &env,
+        "owner_reply",
+        args(json!({"message_id": question, "body": 42})),
+        Some("w1:p1"),
+    )
+    .expect("owner reply through dispatcher");
+    assert_eq!(out["question"], question);
+    assert_eq!(out["acked"], question);
+    assert_eq!(out["transport"], "telegram");
+    assert_eq!(out["reply"]["body"], "42");
+    assert_eq!(out["reply"]["sender"], "w1:p1");
+    assert_eq!(out["reply"]["transport"], "telegram");
+    assert_eq!(out["reply"]["reply_to"], question);
+    assert_eq!(inbox.get_message(&question).unwrap().summary.state, "acked");
+
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_reply",
+            args(json!({"message_id": question, "body": "again"})),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message.contains("was already answered by")
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_reply",
+            args(json!({"message_id": other, "body": "answer"})),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message.contains("is not an owner message")
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_reply",
+            None,
+            Some("w1:p2"),
+        ),
+        Err(DunkError::Refused(message)) if message.contains("not permitted for role worker")
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_reply",
+            None,
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "owner_reply: missing required argument(s): message_id, body"
+    ));
+}
+
+#[test]
+fn h_owner_ingest_matches_python() {
+    let (dir, flock, env) = owner_api_fixture("owner-ingest-api");
+    let attachment = dir.path().join("attachment with spaces.txt");
+    std::fs::write(&attachment, b"fixture attachment").unwrap();
+    let attach = format!(",{}, ,{}", attachment.display(), attachment.display());
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_owner_reply_ingest_outbox();
+
+    let out = dispatch_owner_api(
+        &dispatcher,
+        &flock,
+        &env,
+        "owner_ingest",
+        args(json!({
+            "body": "incoming question",
+            "transport": " TELEGRAM ",
+            "external_id": "telegram:88",
+            "subject": " original subject ",
+            "attach": attach,
+        })),
+        Some("w1:p1"),
+    )
+    .expect("owner ingest through dispatcher");
+    let id = out["message"]["message_id"].as_str().unwrap().to_string();
+    assert_eq!(out["duplicate"], false);
+    assert_eq!(out["transport"], "telegram");
+    assert_eq!(out["message"]["body"], "incoming question");
+    assert_eq!(out["message"]["subject"], " original subject ");
+    assert_eq!(out["message"]["external_id"], "telegram:88");
+    assert_eq!(out["message"]["transport"], "telegram");
+    assert_eq!(out["message"]["sender"], Value::Null);
+    assert_eq!(out["message"]["attachments"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        out["message"]["attachments"][0]["filename"],
+        "attachment with spaces.txt"
+    );
+
+    for (subject, expected) in [
+        (json!(42), json!("42")),
+        (json!(true), json!("1")),
+        (json!(false), json!("0")),
+        (Value::Null, Value::Null),
+    ] {
+        let scalar = dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_ingest",
+            args(json!({
+                "body": "scalar subject",
+                "transport": "web",
+                "external_id": format!("scalar:{}", expected),
+                "subject": subject,
+            })),
+            Some("w1:p1"),
+        )
+        .expect("scalar SQLite subject binding");
+        assert_eq!(scalar["message"]["subject"], expected);
+    }
+    let omitted = dispatch_owner_api(
+        &dispatcher,
+        &flock,
+        &env,
+        "owner_ingest",
+        args(json!({"body": "no subject", "transport": "web", "external_id": "scalar:omitted"})),
+        Some("w1:p1"),
+    )
+    .expect("omitted subject");
+    assert_eq!(omitted["message"]["subject"], Value::Null);
+
+    let oversized: Value = serde_json::from_str(
+        r#"{"body":"too large","transport":"web","external_id":"raw-overflow-subject","subject":18446744073709551616}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_ingest",
+            args(oversized),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "Python int too large to convert to SQLite INTEGER"
+    ));
+    let oversized_negative: Value = serde_json::from_str(
+        r#"{"body":"too small","transport":"web","external_id":"raw-overflow-negative-subject","subject":-9223372036854775809}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_ingest",
+            args(oversized_negative),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "Python int too large to convert to SQLite INTEGER"
+    ));
+    for (wire, expected) in [
+        (
+            r#"{"body":"float","transport":"web","external_id":"float-decimal-pos","subject":18446744073709551616.0}"#,
+            "1.84467440737096e+19",
+        ),
+        (
+            r#"{"body":"float","transport":"web","external_id":"float-exponent-pos","subject":1.8446744073709552e19}"#,
+            "1.84467440737096e+19",
+        ),
+        (
+            r#"{"body":"float","transport":"web","external_id":"float-decimal-neg","subject":-9223372036854775809.0}"#,
+            "-9.22337203685478e+18",
+        ),
+        (
+            r#"{"body":"float","transport":"web","external_id":"float-exponent-neg","subject":-9.223372036854776e18}"#,
+            "-9.22337203685478e+18",
+        ),
+    ] {
+        let wire: Value = serde_json::from_str(wire).unwrap();
+        let out = dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_ingest",
+            args(wire),
+            Some("w1:p1"),
+        )
+        .expect("floating-point subjects remain SQLite REAL binds");
+        assert_eq!(out["message"]["subject"], expected);
+    }
+    assert!(flock
+        .stores()
+        .inbox
+        .unwrap()
+        .find_by_external_id("owner", Some("raw-overflow-subject"))
+        .unwrap()
+        .is_none());
+    assert!(flock
+        .stores()
+        .inbox
+        .unwrap()
+        .find_by_external_id("owner", Some("raw-overflow-negative-subject"))
+        .unwrap()
+        .is_none());
+
+    let duplicate = dispatch_owner_api(
+        &dispatcher,
+        &flock,
+        &env,
+        "owner_ingest",
+        args(json!({
+            "body": "redelivery",
+            "transport": "telegram",
+            "external_id": "telegram:88",
+            "attach": "missing-file-must-not-be-opened",
+        })),
+        Some("w1:p1"),
+    )
+    .expect("duplicate returns the original message before attachment IO");
+    assert_eq!(duplicate["duplicate"], true);
+    assert_eq!(duplicate["message"]["message_id"], id);
+    assert_eq!(duplicate["message"]["body"], "incoming question");
+
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_ingest",
+            args(json!({"body": "x", "transport": "bogus"})),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "transport must be one of web, telegram, report; got 'bogus'"
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_ingest",
+            args(json!({"body": "x", "transport": "web", "attach": [attachment, 17]})),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "no such file to attach: 17"
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_ingest",
+            args(json!({"body": "x", "transport": "web", "attach": 17})),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "'int' object is not iterable"
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_ingest",
+            args(json!({"body": "denied", "transport": "web"})),
+            Some("w1:p2"),
+        ),
+        Err(DunkError::Refused(message)) if message.contains("not permitted for role worker")
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_ingest",
+            None,
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "owner_ingest: missing required argument(s): body, transport"
+    ));
+}
+
+#[test]
+fn h_owner_outbox_matches_python() {
+    let (_dir, flock, env) = owner_api_fixture("owner-outbox-api");
+    let inbox = flock.stores().inbox.unwrap();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_owner_reply_ingest_outbox();
+    let mut telegram_questions = Vec::new();
+    for body in ["first", "second"] {
+        let question = inbox
+            .send(&crate::inbox_store::Outgoing {
+                mailbox: crate::flock::mailbox::OWNER_MAILBOX,
+                body: Some(body),
+                transport: Some("telegram"),
+                ..crate::inbox_store::Outgoing::default()
+            })
+            .unwrap();
+        telegram_questions.push(question);
+    }
+    let web_question = inbox
+        .send(&crate::inbox_store::Outgoing {
+            mailbox: crate::flock::mailbox::OWNER_MAILBOX,
+            body: Some("web question"),
+            transport: Some("web"),
+            ..crate::inbox_store::Outgoing::default()
+        })
+        .unwrap();
+    for question in telegram_questions
+        .iter()
+        .chain(std::iter::once(&web_question))
+    {
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_reply",
+            args(json!({"message_id": question, "body": "answer"})),
+            Some("w1:p1"),
+        )
+        .unwrap();
+    }
+
+    let one = dispatch_owner_api(
+        &dispatcher,
+        &flock,
+        &env,
+        "owner_outbox",
+        args(json!({"transport": " TELEGRAM ", "limit": "1"})),
+        Some("w1:p1"),
+    )
+    .unwrap();
+    assert_eq!(one["transport"], " TELEGRAM ");
+    assert_eq!(one["count"], 1);
+    assert_eq!(one["messages"][0]["reply_to"], telegram_questions[0]);
+    assert_eq!(one["messages"][0]["sender"], "w1:p1");
+    assert_eq!(one["messages"][0]["transport"], "telegram");
+    assert_eq!(one["messages"][0]["read_at"], Value::Null);
+
+    let all = dispatch_owner_api(
+        &dispatcher,
+        &flock,
+        &env,
+        "owner_outbox",
+        args(json!({"transport": "telegram", "limit": -1})),
+        Some("w1:p1"),
+    )
+    .unwrap();
+    assert_eq!(all["count"], 2);
+    let zero = dispatch_owner_api(
+        &dispatcher,
+        &flock,
+        &env,
+        "owner_outbox",
+        args(json!({"transport": "telegram", "limit": 0})),
+        Some("w1:p1"),
+    )
+    .unwrap();
+    assert_eq!(zero["count"], 0);
+    let defaulted = dispatch_owner_api(
+        &dispatcher,
+        &flock,
+        &env,
+        "owner_outbox",
+        args(json!({"transport": "telegram", "limit": null})),
+        Some("w1:p1"),
+    )
+    .unwrap();
+    assert_eq!(defaulted["count"], 2);
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_outbox",
+            args(json!({"transport": "telegram", "limit": "bad"})),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "invalid literal for int() with base 10: 'bad'"
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_outbox",
+            args(json!({"transport": "telegram", "limit": 9223372036854775808_u64})),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "Python int too large to convert to SQLite INTEGER"
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_outbox",
+            args(serde_json::from_str(
+                r#"{"transport":"web","limit":-9223372036854775809}"#
+            )
+            .unwrap()),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "Python int too large to convert to SQLite INTEGER"
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_outbox",
+            args(json!({"transport": "bogus", "limit": 18446744073709551616_u128})),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "transport must be one of web, telegram, report; got 'bogus'"
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_outbox",
+            args(json!({"transport": null, "limit": 18446744073709551616_u128})),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "owner_outbox: missing required argument(s): transport"
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_outbox",
+            args(json!({"transport": null, "limit": "bad"})),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "owner_outbox: missing required argument(s): transport"
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_outbox",
+            args(json!({"transport": "web", "limit": 18446744073709551616_u128})),
+            Some("w1:p2"),
+        ),
+        Err(DunkError::Refused(message)) if message.contains("not permitted for role worker")
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_outbox",
+            args(json!({"transport": "web", "limit": "bad"})),
+            Some("w1:p2"),
+        ),
+        Err(DunkError::Refused(message)) if message.contains("not permitted for role worker")
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_outbox",
+            args(json!({"transport": null, "limit": 20})),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "owner_outbox: missing required argument(s): transport"
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_outbox",
+            args(json!({"transport": "telegram", "limit": "9223372036854775808"})),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "Python int too large to convert to SQLite INTEGER"
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_outbox",
+            None,
+            Some("w1:p2"),
+        ),
+        Err(DunkError::Refused(message)) if message.contains("not permitted for role worker")
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_outbox",
+            None,
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "owner_outbox: missing required argument(s): transport"
+    ));
+}
+
+#[test]
+fn h_owner_ingest_duplicate_preserves_raw_wire_order() {
+    let (_dir, flock, env) = owner_api_fixture("owner-ingest-duplicate-wire-order");
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_owner_reply_ingest_outbox();
+    let first = dispatch_owner_api(
+        &dispatcher,
+        &flock,
+        &env,
+        "owner_ingest",
+        args(json!({"body": "original", "transport": "web", "external_id": "wire-duplicate"})),
+        Some("w1:p1"),
+    )
+    .unwrap();
+    let message_id = first["message"]["message_id"].clone();
+
+    for subject in [json!(["unsupported"]), json!({"unsupported": true})] {
+        let duplicate = dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_ingest",
+            args(json!({
+                "body": "redelivery",
+                "transport": "web",
+                "external_id": "wire-duplicate",
+                "attach": 17,
+                "subject": subject,
+            })),
+            Some("w1:p1"),
+        )
+        .expect("duplicate must return before raw attachment/subject handling");
+        assert_eq!(duplicate["duplicate"], true);
+        assert_eq!(duplicate["message"]["message_id"], message_id);
+    }
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_ingest",
+            args(json!({
+                "body": "redelivery",
+                "transport": "bogus",
+                "external_id": "wire-duplicate",
+                "attach": 17,
+                "subject": [],
+            })),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "transport must be one of web, telegram, report; got 'bogus'"
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_ingest",
+            args(json!({"body": "redelivery", "transport": "bogus", "external_id": "wire-duplicate", "attach": 17})),
+            Some("w1:p2"),
+        ),
+        Err(DunkError::Refused(message)) if message.contains("not permitted for role worker")
+    ));
+}
+
+#[test]
+fn h_owner_ingest_raw_errors_match_python_order() {
+    let (dir, flock, env) = owner_api_fixture("owner-ingest-raw-errors");
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_owner_reply_ingest_outbox();
+    let inbox = flock.stores().inbox.unwrap();
+    let missing = dir.path().join("missing-before-subject-bind.txt");
+    let attachment = dir.path().join("staged-before-subject-bind.txt");
+    std::fs::write(&attachment, b"attachment fixture").unwrap();
+
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher, &flock, &env, "owner_ingest",
+            args(json!({"body": "  ", "transport": "web", "external_id": "raw-empty-body", "attach": []})),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "a message needs a body or an attachment"
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher, &flock, &env, "owner_ingest",
+            args(json!({"body": "  ", "transport": "web", "external_id": "raw-noniterable", "attach": 17})),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "'int' object is not iterable"
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher, &flock, &env, "owner_ingest",
+            args(json!({"body": "x", "transport": "web", "external_id": "raw-missing-path", "attach": [missing.to_string_lossy()], "subject": []})),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message.starts_with("no such file to attach:")
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher, &flock, &env, "owner_ingest",
+            args(json!({"body": "x", "transport": "web", "external_id": "raw-python-dict-path", "attach": [{"x": true}]})),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "no such file to attach: {'x': True}"
+    ));
+    for (external_id, subject, expected) in [
+        (
+            "raw-list-subject",
+            json!([]),
+            "Error binding parameter 6: type 'list' is not supported",
+        ),
+        (
+            "raw-dict-subject",
+            json!({"x": 1}),
+            "Error binding parameter 6: type 'dict' is not supported",
+        ),
+    ] {
+        assert!(matches!(
+            dispatch_owner_api(
+                &dispatcher, &flock, &env, "owner_ingest",
+                args(json!({"body": "x", "transport": "web", "external_id": external_id, "attach": [attachment.to_string_lossy()], "subject": subject})),
+                Some("w1:p1"),
+            ),
+            Err(DunkError::Refused(message)) if message == expected
+        ));
+    }
+    for external_id in [
+        "raw-empty-body",
+        "raw-noniterable",
+        "raw-missing-path",
+        "raw-python-dict-path",
+        "raw-list-subject",
+        "raw-dict-subject",
+    ] {
+        assert!(
+            inbox
+                .find_by_external_id("owner", Some(external_id))
+                .unwrap()
+                .is_none(),
+            "failed request inserted {external_id}"
+        );
+    }
 }

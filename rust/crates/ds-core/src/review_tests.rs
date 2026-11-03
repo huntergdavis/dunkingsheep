@@ -4,10 +4,22 @@ use super::*;
 use serde_json::{json, Value};
 use std::cell::RefCell;
 use std::collections::VecDeque;
-use std::sync::Mutex;
+use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 const PARTIAL: &str =
     "id,status\nOVL_0038_0775,partial\nOVL_0001_0001, FULL \n,partial\nOVL_0002_0002\n";
+
+type FollowupTaskIdentity = (
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<i64>,
+    Option<String>,
+    String,
+);
 
 #[test]
 fn only_the_partial_status_is_refused_not_presence() {
@@ -280,8 +292,85 @@ struct FakeReviewPolicy {
 }
 
 impl ReviewPolicy for FakeReviewPolicy {
-    fn required_verdicts(&self, _repo: &str) -> usize {
-        self.required.max(1)
+    fn required_verdicts(&self, _repo: &str) -> Result<usize, String> {
+        Ok(self.required.max(1))
+    }
+}
+
+struct FailingReviewPolicy;
+
+impl ReviewPolicy for FailingReviewPolicy {
+    fn required_verdicts(&self, _repo: &str) -> Result<usize, String> {
+        Err("invalid required_verdicts config".into())
+    }
+}
+
+impl ReviewRepoConfig for FailingReviewPolicy {
+    fn repos(&self) -> Result<Vec<String>, String> {
+        Ok(vec!["o/r".into()])
+    }
+
+    fn author_from_mints(&self, _since: f64) -> Result<Option<String>, String> {
+        Ok(None)
+    }
+}
+
+impl ReviewRepoConfig for FakeReviewPolicy {
+    fn repos(&self) -> Result<Vec<String>, String> {
+        Ok(vec!["o/r".into()])
+    }
+
+    fn author_from_mints(&self, _since: f64) -> Result<Option<String>, String> {
+        Ok(None)
+    }
+}
+
+struct FakeReviewTokens(Result<String, String>);
+
+impl ReviewTokenSource for FakeReviewTokens {
+    fn reviewer_token(&self) -> ReviewFuture<'_, Result<String, String>> {
+        Box::pin(async move { self.0.clone() })
+    }
+}
+
+#[derive(Clone)]
+struct FakeAccountingTokens {
+    reviewer: Result<String, String>,
+    author: Result<String, String>,
+    calls: Arc<Mutex<Vec<&'static str>>>,
+}
+
+impl FakeAccountingTokens {
+    fn new(reviewer: Result<&str, &str>, author: Result<&str, &str>) -> Self {
+        Self {
+            reviewer: reviewer.map(str::to_owned).map_err(str::to_owned),
+            author: author.map(str::to_owned).map_err(str::to_owned),
+            calls: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+}
+
+impl ReviewTokenSource for FakeAccountingTokens {
+    fn reviewer_token(&self) -> ReviewFuture<'_, Result<String, String>> {
+        self.calls.lock().unwrap().push("reviewer");
+        let result = self.reviewer.clone();
+        Box::pin(async move { result })
+    }
+
+    fn author_token(&self) -> ReviewFuture<'_, Result<String, String>> {
+        self.calls.lock().unwrap().push("author");
+        let result = self.author.clone();
+        Box::pin(async move { result })
+    }
+}
+
+impl ReviewRunContext for Tasks {
+    fn lane_labels(&self) -> Result<Vec<(String, String)>, String> {
+        Ok(Vec::new())
+    }
+
+    fn author_token_mints(&self) -> Result<Vec<(String, f64)>, String> {
+        Ok(Vec::new())
     }
 }
 
@@ -293,6 +382,7 @@ struct FakeReviewActor {
     notes_error: RefCell<Option<String>>,
     setter_error: RefCell<Option<String>>,
     note_error: RefCell<Option<String>>,
+    followup_error: RefCell<Option<String>>,
     writes: RefCell<Vec<(String, Value)>>,
 }
 
@@ -342,6 +432,46 @@ impl ReviewTaskActor for FakeReviewActor {
         })
     }
 
+    fn task_status<'a>(&'a self, id: &'a str) -> ReviewFuture<'a, Result<String, String>> {
+        Box::pin(async move {
+            self.rows
+                .borrow()
+                .iter()
+                .find(|row| row.id == id)
+                .map(|row| row.status.clone())
+                .ok_or_else(|| format!("no task with id {id:?}"))
+        })
+    }
+
+    fn cancel_review<'a>(
+        &'a self,
+        id: &'a str,
+        _reason: &'a str,
+    ) -> ReviewFuture<'a, Result<(), crate::error::DunkError>> {
+        Box::pin(async move {
+            let mut rows = self.rows.borrow_mut();
+            let row = rows.iter_mut().find(|row| row.id == id).ok_or_else(|| {
+                crate::error::DunkError::Refused(format!("no task with id {id:?}"))
+            })?;
+            if matches!(row.status.as_str(), "done" | "cancelled") {
+                return Err(crate::error::DunkError::Refused(format!(
+                    "cannot cancel {id} because it is {}",
+                    row.status
+                )));
+            }
+            row.status = "cancelled".into();
+            Ok(())
+        })
+    }
+
+    fn authors_of<'a>(
+        &'a self,
+        _repo: &'a str,
+        _number: i64,
+    ) -> ReviewFuture<'a, Result<Vec<String>, String>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
     fn notes<'a>(&'a self, _id: &'a str) -> ReviewFuture<'a, Result<Vec<TaskNote>, String>> {
         Box::pin(async move {
             if let Some(error) = self.notes_error.borrow().clone() {
@@ -350,12 +480,68 @@ impl ReviewTaskActor for FakeReviewActor {
             Ok(self.notes.borrow().clone())
         })
     }
+
+    fn add_followup_task<'a>(
+        &'a self,
+        title: &'a str,
+        body: &'a str,
+        author: Option<&'a str>,
+        repo: &'a str,
+        number: i64,
+        head: &'a str,
+    ) -> ReviewFuture<'a, Result<String, String>> {
+        Box::pin(async move {
+            self.writes.borrow_mut().push((
+                "add_followup_task".into(),
+                json!({"title":title,"body":body,"author":author,"repo":repo,"number":number,"head":head}),
+            ));
+            match self.followup_error.borrow().clone() {
+                Some(error) => Err(error),
+                None => Ok("t-followup".into()),
+            }
+        })
+    }
+}
+
+impl ReviewTaskCreator for FakeReviewActor {
+    fn add_review_task<'a>(
+        &'a self,
+        request: ReviewTaskRequest<'a>,
+    ) -> ReviewFuture<'a, Result<Option<String>, String>> {
+        Box::pin(async move {
+            self.writes.borrow_mut().push((
+                "add_review_task".into(),
+                json!({
+                    "title":request.title,
+                    "body":request.body,
+                    "author":request.author,
+                    "repo":request.repo,
+                    "number":request.number,
+                    "head":request.head,
+                    "expected_verdict_ids":request.expected_verdict_ids,
+                }),
+            ));
+            Ok(Some("t-second-review".into()))
+        })
+    }
 }
 
 #[derive(Default)]
 struct FakeReviewTransport {
     requests: Mutex<Vec<crate::github::GitHubRequest>>,
     responses: Mutex<VecDeque<Result<crate::github::GitHubResponse, String>>>,
+    completion_on_request: Mutex<Option<CompletionOnRequest>>,
+    completion_on_request_index: Mutex<Option<CompletionOnRequestIndex>>,
+}
+
+type CompletionOnRequest = (String, usize, Arc<Tasks>, String, String, String);
+struct CompletionOnRequestIndex {
+    index: usize,
+    tasks: Arc<Tasks>,
+    number: i64,
+    head: String,
+    by: String,
+    verdict: String,
 }
 
 impl FakeReviewTransport {
@@ -365,7 +551,46 @@ impl FakeReviewTransport {
         Self {
             requests: Mutex::new(Vec::new()),
             responses: Mutex::new(responses.into_iter().collect()),
+            completion_on_request: Mutex::new(None),
+            completion_on_request_index: Mutex::new(None),
         }
+    }
+
+    fn complete_review_on_request(
+        &self,
+        url_fragment: &str,
+        tasks: Arc<Tasks>,
+        id: &str,
+        by: &str,
+        verdict: &str,
+    ) {
+        *self.completion_on_request.lock().unwrap() = Some((
+            url_fragment.to_string(),
+            0,
+            tasks,
+            id.to_string(),
+            by.to_string(),
+            verdict.to_string(),
+        ));
+    }
+
+    fn complete_new_review_on_request_index(
+        &self,
+        index: usize,
+        tasks: Arc<Tasks>,
+        number: i64,
+        head: &str,
+        by: &str,
+        verdict: &str,
+    ) {
+        *self.completion_on_request_index.lock().unwrap() = Some(CompletionOnRequestIndex {
+            index,
+            tasks,
+            number,
+            head: head.to_string(),
+            by: by.to_string(),
+            verdict: verdict.to_string(),
+        });
     }
 }
 
@@ -375,8 +600,14 @@ impl GitHubTransport for FakeReviewTransport {
         request: crate::github::GitHubRequest,
     ) -> crate::github::PinBoxFuture<'a, Result<crate::github::GitHubResponse, String>> {
         Box::pin(async move {
-            self.requests.lock().unwrap().push(request);
-            self.responses
+            let url = request.url.clone();
+            let request_index = {
+                let mut requests = self.requests.lock().unwrap();
+                requests.push(request);
+                requests.len()
+            };
+            let response = self
+                .responses
                 .lock()
                 .unwrap()
                 .pop_front()
@@ -386,7 +617,53 @@ impl GitHubTransport for FakeReviewTransport {
                         reason: "OK".into(),
                         body: b"{}".to_vec(),
                     })
-                })
+                });
+            let effect = {
+                let mut effect = self.completion_on_request.lock().unwrap();
+                let should_run = effect.as_mut().is_some_and(|(fragment, skip, ..)| {
+                    if !url.contains(fragment.as_str()) {
+                        return false;
+                    }
+                    if *skip > 0 {
+                        *skip -= 1;
+                        return false;
+                    }
+                    true
+                });
+                should_run.then(|| effect.take()).flatten()
+            };
+            if let Some((_, _, tasks, id, by, verdict)) = effect {
+                tasks
+                    .set_verdict(&id, &verdict, Some(&by))
+                    .await
+                    .map_err(|error| error.to_string())?;
+                tasks
+                    .task_complete(&id, Some(&by), true)
+                    .await
+                    .map_err(|error| error.to_string())?;
+            }
+            let body_fetch_effect = {
+                let mut effect = self.completion_on_request_index.lock().unwrap();
+                if effect
+                    .as_ref()
+                    .is_some_and(|effect| effect.index == request_index)
+                {
+                    effect.take()
+                } else {
+                    None
+                }
+            };
+            if let Some(effect) = body_fetch_effect {
+                let task = add_actual_review(
+                    &effect.tasks,
+                    effect.number,
+                    &effect.head,
+                    "peer review completed during body fetch",
+                )
+                .await;
+                finish_review(&effect.tasks, &task.id, &effect.by, &effect.verdict).await;
+            }
+            response
         })
     }
 }
@@ -397,6 +674,306 @@ fn github_response(status: u16, value: Value) -> Result<crate::github::GitHubRes
         reason: if status == 200 { "OK" } else { "Forbidden" }.into(),
         body: serde_json::to_vec(&value).unwrap(),
     })
+}
+
+fn open_pull(number: i64, head: &str, branch: &str) -> Value {
+    json!([{
+        "number": number,
+        "title": "candidate",
+        "html_url": format!("https://example.test/pull/{number}"),
+        "draft": false,
+        "head": {"sha": head, "ref": branch},
+        "base": {"ref": "main"},
+        "created_at": "2026-11-02T22:00:00Z",
+        "updated_at": "2026-11-02T22:01:00Z",
+        "user": {"login": "author"}
+    }])
+}
+
+fn status_pull_detail(head: &str, state: &str) -> Value {
+    json!({
+        "state": state,
+        "head": {"sha": head},
+        "mergeable": true,
+        "mergeable_state": "clean"
+    })
+}
+
+fn combined_review_status(state: &str) -> Value {
+    json!({"statuses": [{"context": "dunkingsheep/review", "state": state}]})
+}
+
+async fn add_actual_review(
+    tasks: &Tasks,
+    number: i64,
+    head: &str,
+    title: &str,
+) -> crate::tasks::Task {
+    tasks
+        .add_with(
+            "global",
+            title,
+            "",
+            crate::tasks::AddOptions {
+                kind: Some("review".into()),
+                repo: Some("o/r".into()),
+                pr: Some(number.to_string()),
+                head: Some(head.into()),
+                priority: Some("high".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+}
+
+async fn finish_review(tasks: &Tasks, id: &str, lane: &str, verdict: &str) {
+    tasks.set_verdict(id, verdict, Some(lane)).await.unwrap();
+    tasks.task_complete(id, Some(lane), true).await.unwrap();
+}
+
+async fn add_poolrad_review(tasks: &Tasks, title: &str) -> (crate::tasks::Task, Value) {
+    add_poolrad_review_at(tasks, title, "body-head-123456").await
+}
+
+async fn add_poolrad_review_at(
+    tasks: &Tasks,
+    title: &str,
+    head: &str,
+) -> (crate::tasks::Task, Value) {
+    let task = tasks
+        .add_with(
+            "global",
+            title,
+            "",
+            crate::tasks::AddOptions {
+                kind: Some("review".into()),
+                author: Some("%2".into()),
+                repo: Some("huntergdavis/poolrad-decomp".into()),
+                pr: Some("7".into()),
+                head: Some(head.into()),
+                priority: Some("high".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let value = json!({
+        "id": task.id,
+        "title": task.title,
+        "repo": "huntergdavis/poolrad-decomp",
+        "pr": 7,
+        "head": head,
+        "author": "%2"
+    });
+    (task, value)
+}
+
+fn review_event_meta(db_path: &Path, task_id: &str, event: &str) -> Value {
+    let conn = rusqlite::Connection::open(db_path).unwrap();
+    let raw: String = conn
+        .query_row(
+            "SELECT COALESCE((SELECT meta FROM task_events WHERE task_id = ? AND event = ? ORDER BY id DESC LIMIT 1), '{}')",
+            rusqlite::params![task_id, event],
+            |row| row.get(0),
+        )
+        .unwrap();
+    serde_json::from_str(&raw).ok().unwrap_or_else(|| json!({}))
+}
+
+fn github_file_response(text: &str) -> Result<crate::github::GitHubResponse, String> {
+    github_response(
+        200,
+        json!({
+            "encoding": "base64",
+            "content": encode_test_base64(text),
+            "sha": "blob-sha"
+        }),
+    )
+}
+
+fn encode_test_base64(text: &str) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let bytes = text.as_bytes();
+    let mut encoded = String::new();
+    for chunk in bytes.chunks(3) {
+        let first = chunk[0];
+        let second = chunk.get(1).copied();
+        let third = chunk.get(2).copied();
+        encoded.push(TABLE[(first >> 2) as usize] as char);
+        encoded.push(
+            TABLE[(((first & 0b11) << 4) | (second.unwrap_or_default() >> 4)) as usize] as char,
+        );
+        encoded.push(second.map_or('=', |second| {
+            TABLE[(((second & 0b1111) << 2) | (third.unwrap_or_default() >> 6)) as usize] as char
+        }));
+        encoded.push(third.map_or('=', |third| TABLE[(third & 0b11_1111) as usize] as char));
+    }
+    encoded
+}
+
+type ActualReviewSync = ReviewSync<Tasks, FakeReviewTokens, FakeReviewPolicy, FakeReviewTransport>;
+
+async fn run_actual_review_sync(
+    tasks: Tasks,
+    transport: FakeReviewTransport,
+    required: usize,
+) -> (ActualReviewSync, Value) {
+    let sync = ReviewSync::with_transport(
+        tasks,
+        FakeReviewTokens(Ok("test-token".into())),
+        FakeReviewPolicy { required },
+        "https://api.example.test",
+        transport,
+    );
+    let report = sync.run(false).await.unwrap();
+    (sync, report)
+}
+
+#[derive(Clone, Copy)]
+enum CancelRaceMode {
+    FinishBeforeRefusal,
+    RefuseLive,
+}
+
+struct CancelRaceActor {
+    tasks: Arc<Tasks>,
+    mode: CancelRaceMode,
+}
+
+impl ReviewTaskActor for CancelRaceActor {
+    fn set_accounting_pr<'a>(
+        &'a self,
+        id: &'a str,
+        number: i64,
+    ) -> ReviewFuture<'a, Result<(), String>> {
+        let tasks = self.tasks.clone();
+        Box::pin(async move {
+            tasks
+                .set_accounting_pr(id, number)
+                .await
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    fn note_with_meta<'a>(
+        &'a self,
+        id: &'a str,
+        event: &'a str,
+        actor: &'a str,
+        meta: &'a Value,
+    ) -> ReviewFuture<'a, Result<(), String>> {
+        let tasks = self.tasks.clone();
+        Box::pin(async move {
+            let reason = meta.get("reason").and_then(Value::as_str);
+            tasks
+                .note_with_meta(id, event, actor, reason, meta)
+                .await
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    fn list_review_rows(
+        &self,
+    ) -> ReviewFuture<'_, Result<Vec<crate::tasks::ReviewTaskRow>, String>> {
+        let tasks = self.tasks.clone();
+        Box::pin(async move {
+            tasks
+                .list_review_rows_visible()
+                .await
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    fn task_status<'a>(&'a self, id: &'a str) -> ReviewFuture<'a, Result<String, String>> {
+        let tasks = self.tasks.clone();
+        Box::pin(async move {
+            tasks
+                .get(id)
+                .await
+                .map(|task| task.status)
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    fn cancel_review<'a>(
+        &'a self,
+        id: &'a str,
+        _reason: &'a str,
+    ) -> ReviewFuture<'a, Result<(), crate::error::DunkError>> {
+        let tasks = self.tasks.clone();
+        let mode = self.mode;
+        Box::pin(async move {
+            match mode {
+                CancelRaceMode::FinishBeforeRefusal => {
+                    tasks.set_verdict(id, "accept", Some("%9")).await?;
+                    tasks.task_complete(id, Some("%9"), true).await?;
+                    Err(crate::error::DunkError::Refused(
+                        "concurrent completion won the cancel race".into(),
+                    ))
+                }
+                CancelRaceMode::RefuseLive => Err(crate::error::DunkError::Refused(
+                    "synthetic refusal for a still-live review".into(),
+                )),
+            }
+        })
+    }
+
+    fn authors_of<'a>(
+        &'a self,
+        repo: &'a str,
+        number: i64,
+    ) -> ReviewFuture<'a, Result<Vec<String>, String>> {
+        let tasks = self.tasks.clone();
+        Box::pin(async move {
+            tasks
+                .authors_of(repo, number)
+                .await
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    fn notes<'a>(&'a self, id: &'a str) -> ReviewFuture<'a, Result<Vec<TaskNote>, String>> {
+        let tasks = self.tasks.clone();
+        Box::pin(async move { tasks.notes(id).await.map_err(|error| error.to_string()) })
+    }
+
+    fn add_followup_task<'a>(
+        &'a self,
+        title: &'a str,
+        body: &'a str,
+        author: Option<&'a str>,
+        repo: &'a str,
+        number: i64,
+        head: &'a str,
+    ) -> ReviewFuture<'a, Result<String, String>> {
+        let tasks = self.tasks.clone();
+        Box::pin(async move {
+            ReviewTaskActor::add_followup_task(&*tasks, title, body, author, repo, number, head)
+                .await
+        })
+    }
+}
+
+impl ReviewTaskCreator for CancelRaceActor {
+    fn add_review_task<'a>(
+        &'a self,
+        request: ReviewTaskRequest<'a>,
+    ) -> ReviewFuture<'a, Result<Option<String>, String>> {
+        let tasks = self.tasks.clone();
+        Box::pin(async move { ReviewTaskCreator::add_review_task(&*tasks, request).await })
+    }
+}
+
+impl ReviewRunContext for CancelRaceActor {
+    fn lane_labels(&self) -> Result<Vec<(String, String)>, String> {
+        Ok(Vec::new())
+    }
+
+    fn author_token_mints(&self) -> Result<Vec<(String, f64)>, String> {
+        Ok(Vec::new())
+    }
 }
 
 fn review_sync(
@@ -439,7 +1016,7 @@ fn live_reviews_requests_the_review_task_set_and_keeps_last_duplicate_value() {
     assert_eq!("t4", live[0].1["id"]);
     assert_eq!(Some(&json!(9)), live[1].0 .1.as_ref());
     assert_eq!(
-        vec![(None, true, 1000, "review".to_string())],
+        vec![(None, true, usize::MAX, "review".to_string())],
         *sync.flock.queries.borrow()
     );
 }
@@ -740,6 +1317,790 @@ async fn accounting_and_review_bodies_match_exact_multiline_source_text() {
         "Needs fix per t42 (reviewer lane %7) at head abc123.\n\nThe reviewer's evidence, verbatim:\n\nevidence\n\nA verdict is bound to this head: a new push files a new review.",
         sync._review_body(&task, Some("%7"), "abc123", "evidence")
     );
+}
+
+#[tokio::test]
+async fn verdict_text_joins_all_notes_and_treats_actor_read_errors_as_empty() {
+    let actor = FakeReviewActor {
+        notes: RefCell::new(vec![
+            TaskNote {
+                at: 1.0,
+                actor: Some("%1".into()),
+                text: "first observation".into(),
+            },
+            TaskNote {
+                at: 2.0,
+                actor: Some("%1".into()),
+                text: String::new(),
+            },
+            TaskNote {
+                at: 3.0,
+                actor: Some("%2".into()),
+                text: "OVL_007F_0F7E".into(),
+            },
+        ]),
+        ..FakeReviewActor::default()
+    };
+    let sync = review_sync(actor, FakeReviewTransport::default());
+    assert_eq!(
+        "first observation\nOVL_007F_0F7E",
+        sync._verdict_text(&json!({"id":"t1"})).await
+    );
+    *sync.flock.notes_error.borrow_mut() = Some("notes unavailable".into());
+    assert_eq!("", sync._verdict_text(&json!({"id":"t1"})).await);
+}
+
+#[tokio::test]
+async fn account_fetches_reviewer_then_author_tokens_before_http_and_returns_token_error() {
+    let dir = crate::testsupport::dir("review-account-token-order");
+    let tasks = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    let (_, task) = add_poolrad_review(&tasks, "OVL_007F_0F7E body").await;
+    let tokens = FakeAccountingTokens::new(Err("reviewer token denied"), Ok("author-token"));
+    let calls = tokens.calls.clone();
+    let transport = FakeReviewTransport::default();
+    let sync = ReviewSync::with_transport(
+        tasks,
+        tokens,
+        FakeReviewPolicy::default(),
+        "https://api.example.test",
+        transport,
+    );
+
+    let out = sync.account(&task, None, false).await.unwrap();
+
+    assert_eq!(json!(["tokens: reviewer token denied"]), out["errors"]);
+    assert_eq!(vec!["reviewer"], *calls.lock().unwrap());
+    assert!(sync.transport.requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn account_refuses_an_already_credited_row_and_records_the_reason() {
+    let dir = crate::testsupport::dir("review-account-ledger-refusal");
+    let tasks = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    let (stored, task) = add_poolrad_review(&tasks, "body without a row id").await;
+    tasks
+        .note(&stored.id, "note", "%2", Some("OVL_007F_0F7E"))
+        .await
+        .unwrap();
+    let transport = FakeReviewTransport::with_responses([
+        github_response(200, json!({"object":{"sha":"base-sha"}})),
+        github_file_response("id,evidence_doc\nOVL_007F_0F7E,docs/re/old-U7F_0F7E.md\n"),
+        github_response(
+            200,
+            json!([{"filename":"docs/re/U7F_STATE_FLAGS_0F7E.md","status":"added"}]),
+        ),
+        github_response(200, json!({"body":""})),
+    ]);
+    let sync = ReviewSync::with_transport(
+        tasks,
+        FakeAccountingTokens::new(Ok("reviewer-token"), Ok("author-token")),
+        FakeReviewPolicy::default(),
+        "https://api.example.test",
+        transport,
+    );
+
+    let out = sync.account(&task, Some("%2"), false).await.unwrap();
+
+    assert_eq!(
+        "OVL_007F_0F7E is already credited as docs/re/old-U7F_0F7E.md",
+        out["reason"]
+    );
+    assert!(out["accounting_pr"].is_null());
+    assert_eq!(4, sync.transport.requests.lock().unwrap().len());
+    let accounting = review_event_meta(&dir.path().join("tasks.db"), &stored.id, "accounting");
+    assert!(accounting["reason"]
+        .as_str()
+        .unwrap()
+        .contains("no accounting PR for body PR #7"));
+}
+
+#[tokio::test]
+async fn account_refuses_an_evidence_document_missing_from_base() {
+    let dir = crate::testsupport::dir("review-account-evidence-refusal");
+    let tasks = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    let (stored, task) = add_poolrad_review(&tasks, "OVL_007F_0F7E").await;
+    let transport = FakeReviewTransport::with_responses([
+        github_response(200, json!({"object":{"sha":"base-sha"}})),
+        github_file_response("id,evidence_doc\n"),
+        github_response(
+            200,
+            json!([{"filename":"docs/re/U7F_STATE_FLAGS_0F7E.md","status":"added"}]),
+        ),
+        github_response(200, json!({"body":""})),
+        github_file_response("id,status\n"),
+        github_file_response("id,kind\nOVL_007F_0F7E,overlay\n"),
+        github_response(404, json!({"message":"Not Found"})),
+    ]);
+    let sync = ReviewSync::with_transport(
+        tasks,
+        FakeAccountingTokens::new(Ok("reviewer-token"), Ok("author-token")),
+        FakeReviewPolicy::default(),
+        "https://api.example.test",
+        transport,
+    );
+
+    let out = sync.account(&task, Some("%2"), false).await.unwrap();
+
+    assert_eq!("the evidence document docs/re/U7F_STATE_FLAGS_0F7E.md does not exist on main: the body PR #7 is not merged, so this row would credit a document that is not there (t833)", out["reason"]);
+    assert!(out["accounting_pr"].is_null());
+    assert_eq!(7, sync.transport.requests.lock().unwrap().len());
+    let accounting = review_event_meta(&dir.path().join("tasks.db"), &stored.id, "accounting");
+    assert!(accounting["reason"]
+        .as_str()
+        .unwrap()
+        .contains("not merged"));
+}
+
+#[tokio::test]
+async fn account_opens_approves_and_queues_a_deterministic_ledger_pr() {
+    let dir = crate::testsupport::dir("review-account-success");
+    let tasks = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    let (stored, task) = add_poolrad_review(&tasks, "OVL_007F_0F7E").await;
+    tasks
+        .note(&stored.id, "note", "%2", Some("OVL_007F_0F7E"))
+        .await
+        .unwrap();
+    let transport = FakeReviewTransport::with_responses([
+        github_response(200, json!({"object":{"sha":"base-sha"}})),
+        github_file_response("id,evidence_doc\n"),
+        github_response(
+            200,
+            json!([{"filename":"docs/re/U7F_STATE_FLAGS_0F7E.md","status":"added"}]),
+        ),
+        github_response(200, json!({"body":""})),
+        github_file_response("id,status\nOVL_007F_0F7E,full\n"),
+        github_file_response("id,kind\nOVL_007F_0F7E,overlay\n"),
+        github_file_response("evidence exists on base\n"),
+        github_response(404, json!({"message":"Not Found"})),
+        github_response(200, json!({"tree":{"sha":"base-tree"}})),
+        github_response(201, json!({"sha":"new-tree"})),
+        github_response(201, json!({"sha":"new-commit"})),
+        github_response(201, json!({"object":{"sha":"new-commit"}})),
+        github_response(
+            201,
+            json!({"number":82,"html_url":"https://example.test/pr/82","node_id":"PR_node"}),
+        ),
+        github_response(200, json!({"id":1})),
+        github_response(200, json!({"node_id":"PR_node"})),
+        github_response(
+            200,
+            json!({"data":{"enablePullRequestAutoMerge":{"pullRequest":{"number":82}}}}),
+        ),
+        github_response(
+            200,
+            json!({"state":"open","merged":false,"merged_at":null,"mergeable_state":"blocked","auto_merge":true}),
+        ),
+    ]);
+    let sync = ReviewSync::with_transport(
+        tasks,
+        FakeAccountingTokens::new(Ok("reviewer-token"), Ok("author-token")),
+        FakeReviewPolicy::default(),
+        "https://api.example.test",
+        transport,
+    );
+    let token_calls = sync.tokens.calls.clone();
+
+    let out = sync.account(&task, Some("%2"), false).await.unwrap();
+
+    assert_eq!("OVL_007F_0F7E,docs/re/U7F_STATE_FLAGS_0F7E.md", out["row"]);
+    assert_eq!(82, out["accounting_pr"]);
+    assert_eq!("approved_by_author_app", out["review"]);
+    assert_eq!("enabled", out["auto_merge"]);
+    assert_eq!("open", out["state"]["state"]);
+    assert_eq!(vec!["reviewer", "author"], *token_calls.lock().unwrap());
+    let requests = sync.transport.requests.lock().unwrap();
+    assert_eq!(17, requests.len());
+    assert_eq!("token reviewer-token", requests[0].headers["Authorization"]);
+    assert_eq!("POST", requests[13].method);
+    assert_eq!("token author-token", requests[13].headers["Authorization"]);
+    let review: Value = serde_json::from_slice(requests[13].body.as_ref().unwrap()).unwrap();
+    assert_eq!("APPROVE", review["event"]);
+    assert!(review["body"]
+        .as_str()
+        .unwrap()
+        .contains("accepted content in #7"));
+    assert_eq!("POST", requests[15].method);
+    assert!(requests[15].url.ends_with("/graphql"));
+    let accounting = review_event_meta(&dir.path().join("tasks.db"), &stored.id, "accounting");
+    assert!(accounting["reason"]
+        .as_str()
+        .unwrap()
+        .contains("accounting PR #82 for body PR #7"));
+}
+
+#[tokio::test]
+async fn held_accept_files_second_review_without_approving_or_fetching_author_token() {
+    let dir = crate::testsupport::dir("review-on-verdict-held");
+    let tasks = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    let first = add_actual_review(&tasks, 7, "held-head", "first accept").await;
+    finish_review(&tasks, &first.id, "%1", "accept").await;
+    let task = json!({"id":first.id.clone(),"repo":"o/r","pr":7,"head":"held-head","author":"%1"});
+    let transport =
+        FakeReviewTransport::with_responses([github_response(200, json!({"state":"pending"}))]);
+    let tokens =
+        FakeAccountingTokens::new(Ok("reviewer-token"), Err("author should not be requested"));
+    let token_calls = tokens.calls.clone();
+    let sync = ReviewSync::with_transport(
+        tasks,
+        tokens,
+        FakeReviewPolicy { required: 2 },
+        "https://api.example.test",
+        transport,
+    );
+
+    let out = sync.on_verdict(&task, "accept", Some("%1")).await.unwrap();
+
+    assert_eq!("pending", out["status"]);
+    assert_eq!(false, out["merged"]);
+    assert_eq!(
+        "not final: a second DISTINCT reviewer lane must accept",
+        out["held"]["reason"]
+    );
+    assert_eq!(vec!["reviewer"], *token_calls.lock().unwrap());
+    let reviews = sync.flock.list_review_rows_visible().await.unwrap();
+    let second = reviews
+        .iter()
+        .find(|row| row.id == out["second_review"].as_str().unwrap())
+        .unwrap();
+    assert_eq!("open", second.status);
+    assert_eq!(Some("o/r"), second.repo.as_deref());
+    assert_eq!(Some(7), second.pr);
+    assert_eq!(Some("held-head"), second.head.as_deref());
+    let requests = sync.transport.requests.lock().unwrap();
+    assert_eq!(1, requests.len());
+    assert_eq!(
+        "pending",
+        serde_json::from_slice::<Value>(requests[0].body.as_ref().unwrap()).unwrap()["state"]
+    );
+    let held = review_event_meta(&dir.path().join("tasks.db"), &first.id, "verdict_held");
+    assert!(held["reason"]
+        .as_str()
+        .unwrap()
+        .contains("a second distinct lane must accept"));
+}
+
+#[tokio::test]
+async fn final_accept_accounts_only_after_merge_confirmation() {
+    for (merge_status, expect_author_token) in [(405, false), (200, true)] {
+        let dir = crate::testsupport::dir(&format!("review-on-verdict-final-{merge_status}"));
+        let tasks = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+        let (first, _) = add_poolrad_review_at(&tasks, "first accept", "final-head").await;
+        finish_review(&tasks, &first.id, "%1", "accept").await;
+        let (second, _) = add_poolrad_review_at(&tasks, "second accept", "final-head").await;
+        finish_review(&tasks, &second.id, "%2", "accept").await;
+        let task =
+            json!({"id":second.id,"repo":"huntergdavis/poolrad-decomp","pr":7,"head":"final-head"});
+        let transport = FakeReviewTransport::with_responses([
+            github_response(200, json!({"state":"success"})),
+            github_response(200, json!({"id":1})),
+            github_response(
+                merge_status,
+                if merge_status == 405 {
+                    json!({"message":"protected"})
+                } else {
+                    json!({"merged":true})
+                },
+            ),
+        ]);
+        let tokens = FakeAccountingTokens::new(Ok("reviewer-token"), Err("author unavailable"));
+        let token_calls = tokens.calls.clone();
+        let sync = ReviewSync::with_transport(
+            tasks,
+            tokens,
+            FakeReviewPolicy { required: 2 },
+            "https://api.example.test",
+            transport,
+        );
+
+        let out = sync.on_verdict(&task, "accept", Some("%2")).await.unwrap();
+
+        assert_eq!(expect_author_token, out["merged"] == Value::Bool(true));
+        if expect_author_token {
+            assert_eq!(
+                json!(["tokens: author unavailable"]),
+                out["accounting"]["errors"]
+            );
+            assert_eq!(
+                vec!["reviewer", "reviewer", "author"],
+                *token_calls.lock().unwrap()
+            );
+        } else {
+            assert!(out["accounting"]["skipped"]
+                .as_str()
+                .unwrap()
+                .contains("body PR is not merged"));
+            assert_eq!(vec!["reviewer"], *token_calls.lock().unwrap());
+        }
+    }
+}
+
+#[tokio::test]
+async fn merge_uses_full_task_snapshot_accounts_after_success_and_marks_landed_last() {
+    let dir = crate::testsupport::dir("review-merge-account-landed-order");
+    let tasks = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    let (stored, _) = add_poolrad_review_at(&tasks, "OVL_007F_0F7E", "reviewed-head-123456").await;
+    finish_review(&tasks, &stored.id, "%2", "accept").await;
+    rusqlite::Connection::open(dir.path().join("tasks.db"))
+        .unwrap()
+        .execute("UPDATE tasks SET landed = 0 WHERE id = ?", [&stored.id])
+        .unwrap();
+
+    let transport = FakeReviewTransport::with_responses([
+        github_response(200, json!({"merged":true})),
+        github_response(200, json!({"object":{"sha":"base-sha"}})),
+        github_file_response("id,evidence_doc\n"),
+        github_response(
+            200,
+            json!([{"filename":"docs/re/U7F_STATE_FLAGS_0F7E.md","status":"added"}]),
+        ),
+        github_response(200, json!({"body":""})),
+        github_file_response("id,status\nOVL_007F_0F7E,full\n"),
+        github_file_response("id,kind\nOVL_007F_0F7E,overlay\n"),
+        github_file_response("evidence exists on base\n"),
+        github_response(404, json!({"message":"Not Found"})),
+        github_response(200, json!({"tree":{"sha":"base-tree"}})),
+        github_response(201, json!({"sha":"new-tree"})),
+        github_response(201, json!({"sha":"new-commit"})),
+        github_response(201, json!({"object":{"sha":"new-commit"}})),
+        github_response(
+            201,
+            json!({"number":82,"html_url":"https://example.test/pr/82","node_id":"PR_node"}),
+        ),
+        github_response(200, json!({"id":1})),
+        github_response(200, json!({"node_id":"PR_node"})),
+        github_response(
+            200,
+            json!({"data":{"enablePullRequestAutoMerge":{"pullRequest":{"number":82}}}}),
+        ),
+        github_response(
+            200,
+            json!({"state":"open","merged":false,"merged_at":null,"mergeable_state":"blocked","auto_merge":true}),
+        ),
+    ]);
+    let tokens = FakeAccountingTokens::new(Ok("reviewer-token"), Ok("author-token"));
+    let token_calls = tokens.calls.clone();
+    let sync = ReviewSync::with_transport(
+        tasks,
+        tokens,
+        FakeReviewPolicy::default(),
+        "https://api.example.test",
+        transport,
+    );
+    let mut report = json!({"errors": []});
+
+    assert!(
+        sync._merge(
+            "huntergdavis/poolrad-decomp",
+            7,
+            "reviewed-head-123456",
+            "reviewer-token",
+            &mut report,
+            Some(&stored.id),
+        )
+        .await
+    );
+
+    assert_eq!("reviewed-hea", report["merged"][0]["head"]);
+    assert_eq!(stored.id, report["merged"][0]["task"]);
+    assert_eq!(82, report["accounting"][0]["accounting_pr"]);
+    assert_eq!(json!([]), report["accounting"][0]["errors"]);
+    assert_eq!(json!([stored.id]), report["landed"]);
+    assert_eq!(vec!["reviewer", "author"], *token_calls.lock().unwrap());
+
+    {
+        let requests = sync.transport.requests.lock().unwrap();
+        assert_eq!(18, requests.len());
+        assert!(requests[0].url.ends_with("/pulls/7/merge"));
+        let merge_body: Value = serde_json::from_slice(requests[0].body.as_ref().unwrap()).unwrap();
+        assert_eq!("reviewed-head-123456", merge_body["sha"]);
+        assert!(requests[1].url.ends_with("/git/ref/heads/main"));
+        assert_eq!("POST", requests[13].method);
+        assert!(requests[13].url.ends_with("/pulls"));
+        let accounting_body: Value =
+            serde_json::from_slice(requests[13].body.as_ref().unwrap()).unwrap();
+        assert!(accounting_body["body"]
+            .as_str()
+            .unwrap()
+            .contains("verdict `accept` by %2"));
+    }
+
+    let full = sync.flock.get_full_wire(&stored.id, None).await.unwrap();
+    assert_eq!("huntergdavis/poolrad-decomp", full.wire["repo"]);
+    assert_eq!(7, full.wire["pr"]);
+    assert_eq!("%2", full.wire["completed_by"]);
+    assert_eq!(82, full.wire["accounting_pr"]);
+    assert_eq!(Some(true), sync.flock.landed_of(&stored.id).await.unwrap());
+    let event_rows: Vec<(String, Option<String>, String)> =
+        rusqlite::Connection::open(dir.path().join("tasks.db"))
+        .unwrap()
+        .prepare("SELECT event, actor, meta FROM task_events WHERE task_id = ? AND event IN ('accounting','landed') ORDER BY id")
+        .unwrap()
+        .query_map([&stored.id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(3, event_rows.len());
+    assert_eq!("accounting", event_rows[0].0);
+    assert_eq!("accounting", event_rows[1].0);
+    assert_eq!("landed", event_rows[2].0);
+    assert_eq!(None, event_rows[0].1.as_deref());
+    let setter_meta: Value = serde_json::from_str(&event_rows[0].2).unwrap();
+    assert_eq!(json!({"accounting_pr": 82, "body_pr": 7}), setter_meta);
+    assert_eq!(Some("review-sync"), event_rows[1].1.as_deref());
+    let summary_meta: Value = serde_json::from_str(&event_rows[1].2).unwrap();
+    assert_eq!("accounting PR #82 for body PR #7", summary_meta["reason"]);
+    assert_eq!(82, summary_meta["accounting_pr"]);
+    assert_eq!(7, summary_meta["body_pr"]);
+    assert_eq!(Some("review-sync"), event_rows[2].1.as_deref());
+}
+
+#[tokio::test]
+async fn merge_405_is_ignored_and_skips_accounting_and_landed_writes() {
+    let dir = crate::testsupport::dir("review-merge-405-no-account");
+    let tasks = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    let (stored, _) = add_poolrad_review_at(&tasks, "OVL_007F_0F7E", "reviewed-head").await;
+    finish_review(&tasks, &stored.id, "%2", "accept").await;
+    rusqlite::Connection::open(dir.path().join("tasks.db"))
+        .unwrap()
+        .execute("UPDATE tasks SET landed = 0 WHERE id = ?", [&stored.id])
+        .unwrap();
+    let tokens = FakeAccountingTokens::new(Ok("reviewer-token"), Ok("author-token"));
+    let token_calls = tokens.calls.clone();
+    let sync = ReviewSync::with_transport(
+        tasks,
+        tokens,
+        FakeReviewPolicy::default(),
+        "https://api.example.test",
+        FakeReviewTransport::with_responses([github_response(405, json!({"message":"protected"}))]),
+    );
+    let mut report = json!({"errors": []});
+
+    assert!(
+        !sync
+            ._merge(
+                "huntergdavis/poolrad-decomp",
+                7,
+                "reviewed-head",
+                "reviewer-token",
+                &mut report,
+                Some(&stored.id),
+            )
+            .await
+    );
+
+    assert!(report["errors"].as_array().unwrap().is_empty());
+    assert!(report.get("accounting").is_none());
+    assert!(report.get("landed").is_none());
+    assert!(token_calls.lock().unwrap().is_empty());
+    assert_eq!(Some(false), sync.flock.landed_of(&stored.id).await.unwrap());
+
+    let failed = ReviewSync::with_transport(
+        FakeReviewActor::default(),
+        FakeAccountingTokens::new(Ok("reviewer-token"), Ok("author-token")),
+        FakeReviewPolicy::default(),
+        "https://api.example.test",
+        FakeReviewTransport::with_responses([github_response(
+            500,
+            json!({"message":"merge backend failed"}),
+        )]),
+    );
+    let mut failed_report = json!({"errors": []});
+    assert!(
+        !failed
+            ._merge(
+                "o/r",
+                7,
+                "reviewed-head",
+                "reviewer-token",
+                &mut failed_report,
+                None,
+            )
+            .await
+    );
+    assert!(failed_report["errors"][0]
+        .as_str()
+        .unwrap()
+        .starts_with("merge o/r#7:"));
+    assert!(failed_report.get("merged").is_none());
+}
+
+#[tokio::test]
+async fn merge_without_task_id_skips_accounting_but_still_marks_landed() {
+    let dir = crate::testsupport::dir("review-merge-no-task-id");
+    let tasks = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    let (stored, _) = add_poolrad_review(&tasks, "body review").await;
+    finish_review(&tasks, &stored.id, "%2", "accept").await;
+    rusqlite::Connection::open(dir.path().join("tasks.db"))
+        .unwrap()
+        .execute("UPDATE tasks SET landed = 0 WHERE id = ?", [&stored.id])
+        .unwrap();
+    let tokens = FakeAccountingTokens::new(Ok("reviewer-token"), Ok("author-token"));
+    let token_calls = tokens.calls.clone();
+    let sync = ReviewSync::with_transport(
+        tasks,
+        tokens,
+        FakeReviewPolicy::default(),
+        "https://api.example.test",
+        FakeReviewTransport::with_responses([github_response(200, json!({"merged":true}))]),
+    );
+    let mut report = json!({"errors": []});
+
+    assert!(
+        sync._merge(
+            "huntergdavis/poolrad-decomp",
+            7,
+            "body-head-123456",
+            "reviewer-token",
+            &mut report,
+            None,
+        )
+        .await
+    );
+
+    assert_eq!(Value::Null, report["merged"][0]["task"]);
+    assert!(report.get("accounting").is_none());
+    assert_eq!(json!([stored.id]), report["landed"]);
+    assert!(token_calls.lock().unwrap().is_empty());
+    assert_eq!(Some(true), sync.flock.landed_of(&stored.id).await.unwrap());
+}
+
+#[tokio::test]
+async fn post_merge_accounting_refuses_wrong_and_missing_full_task_rows() {
+    let dir = crate::testsupport::dir("review-post-merge-task-identity-refusal");
+    let tasks = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    let (stored, _) = add_poolrad_review(&tasks, "body review").await;
+    let sync = ReviewSync::with_transport(
+        tasks,
+        FakeAccountingTokens::new(Ok("reviewer-token"), Ok("author-token")),
+        FakeReviewPolicy::default(),
+        "https://api.example.test",
+        FakeReviewTransport::default(),
+    );
+    let mut wrong = json!({"errors": []});
+
+    sync._account_after_merge("o/other", 9, "head", &stored.id, &mut wrong)
+        .await;
+
+    assert_eq!(
+        json!([format!(
+            "accounting o/other#9: {} is huntergdavis/poolrad-decomp#7, not this PR",
+            stored.id
+        )]),
+        wrong["errors"]
+    );
+    assert!(wrong.get("accounting").is_none());
+
+    let mut missing = json!({"errors": []});
+    sync._account_after_merge("o/r", 7, "head", "t404", &mut missing)
+        .await;
+    assert!(missing["errors"][0]
+        .as_str()
+        .unwrap()
+        .starts_with("accounting o/r#7: read t404: no task with id"));
+}
+
+#[tokio::test]
+async fn merge_success_survives_full_row_and_landed_writer_failures() {
+    let actor = FakeReviewActor::default();
+    let sync = ReviewSync::with_transport(
+        actor,
+        FakeAccountingTokens::new(Ok("reviewer-token"), Ok("author-token")),
+        FakeReviewPolicy::default(),
+        "https://api.example.test",
+        FakeReviewTransport::with_responses([github_response(200, json!({"merged":true}))]),
+    );
+    let mut report = json!({"errors": []});
+
+    assert!(
+        sync._merge(
+            "o/r",
+            7,
+            "exact-head",
+            "reviewer-token",
+            &mut report,
+            Some("t9")
+        )
+        .await
+    );
+
+    assert_eq!("exact-head", report["merged"][0]["head"]);
+    assert_eq!(
+        json!([
+            "accounting o/r#7: read t9: full task wire snapshot is unavailable",
+            "landed o/r#7: landed task writer is unavailable"
+        ]),
+        report["errors"]
+    );
+}
+
+#[tokio::test]
+async fn needs_fix_preserves_standing_accept_and_reports_followup_writer_errors() {
+    let actor = FakeReviewActor::default();
+    actor.rows.borrow_mut().extend([
+        ReviewTaskRow {
+            id: "t-needs".into(),
+            status: "done".into(),
+            completed_by: Some("%1".into()),
+            repo: Some("o/r".into()),
+            pr: Some(7),
+            head: Some("head".into()),
+            verdict: Some("needs-fix".into()),
+        },
+        ReviewTaskRow {
+            id: "t-accept".into(),
+            status: "done".into(),
+            completed_by: Some("%2".into()),
+            repo: Some("o/r".into()),
+            pr: Some(7),
+            head: Some("head".into()),
+            verdict: Some("accept".into()),
+        },
+    ]);
+    actor.notes.borrow_mut().push(TaskNote {
+        at: 1.0,
+        actor: Some("%1".into()),
+        text: "reproduced crash".into(),
+    });
+    *actor.followup_error.borrow_mut() = Some("follow-up writer refused".into());
+    let transport = FakeReviewTransport::with_responses([
+        github_response(200, json!({"state":"failure"})),
+        github_response(200, json!({"id":2})),
+    ]);
+    let sync = ReviewSync::with_transport(
+        actor,
+        FakeAccountingTokens::new(Ok("reviewer-token"), Err("unused")),
+        FakeReviewPolicy::default(),
+        "https://api.example.test",
+        transport,
+    );
+    let task = json!({"id":"t-needs","repo":"o/r","pr":7,"head":"head","author":"%3"});
+
+    let out = sync
+        .on_verdict(&task, "needs-fix", Some("%1"))
+        .await
+        .unwrap();
+
+    assert_eq!("skipped_standing_accept", out["status"]);
+    assert_eq!("t-accept", out["standing_accept"]);
+    assert!(out["errors"][0]
+        .as_str()
+        .unwrap()
+        .contains("failure status not posted"));
+    assert_eq!("changes_requested", out["review"]);
+    assert_eq!("followup: follow-up writer refused", out["errors"][1]);
+    assert!(out["followup"].is_null());
+    let writes = sync.flock.writes.borrow();
+    let followup = writes
+        .iter()
+        .find(|(name, _)| name == "add_followup_task")
+        .unwrap();
+    assert_eq!(
+        "r",
+        followup.1["title"]
+            .as_str()
+            .unwrap()
+            .split_whitespace()
+            .nth(1)
+            .unwrap()
+    );
+    assert_eq!("%3", followup.1["author"]);
+    assert_eq!("o/r", followup.1["repo"]);
+    assert_eq!(7, followup.1["number"]);
+    assert_eq!("head", followup.1["head"]);
+    let requests = sync.transport.requests.lock().unwrap();
+    assert_eq!(
+        1,
+        requests.len(),
+        "standing accept suppresses only the failure status"
+    );
+    let review: Value = serde_json::from_slice(requests[0].body.as_ref().unwrap()).unwrap();
+    assert_eq!("REQUEST_CHANGES", review["event"]);
+    assert!(review["body"]
+        .as_str()
+        .unwrap()
+        .contains("reproduced crash"));
+}
+
+#[tokio::test]
+async fn needs_fix_followup_uses_real_tasks_writer_and_keeps_review_identity() {
+    let dir = crate::testsupport::dir("review-on-verdict-followup-writer");
+    let tasks = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    let review = add_actual_review(&tasks, 7, "needs-head", "needs-fix review").await;
+    finish_review(&tasks, &review.id, "%1", "needs-fix").await;
+    tasks
+        .note(&review.id, "note", "%1", Some("reproduced the crash"))
+        .await
+        .unwrap();
+    let task = json!({
+        "id": review.id,
+        "repo": "o/r",
+        "pr": 7,
+        "head": "needs-head",
+        "author": "%3"
+    });
+    let sync = ReviewSync::with_transport(
+        tasks,
+        FakeAccountingTokens::new(Ok("reviewer-token"), Err("author is not needed")),
+        FakeReviewPolicy::default(),
+        "https://api.example.test",
+        FakeReviewTransport::with_responses([
+            github_response(200, json!({"state":"failure"})),
+            github_response(200, json!({"id":3})),
+        ]),
+    );
+
+    let out = sync
+        .on_verdict(&task, "needs-fix", Some("%1"))
+        .await
+        .unwrap();
+
+    let followup_id = out["followup"].as_str().unwrap();
+    let connection = rusqlite::Connection::open(sync.flock.path()).unwrap();
+    let (title, body, kind, author, repo, pr, head, assignees): FollowupTaskIdentity = connection
+        .query_row(
+            "SELECT title, body, kind, author, repo, pr, head, assignees FROM tasks WHERE id = ?",
+            [followup_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        "Fix r PR #7 per",
+        title
+            .split_whitespace()
+            .take(5)
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    assert!(body.contains("Reviewer verdict needs-fix on o/r#7 @ needs-head"));
+    assert!(body.contains("reproduced the crash"));
+    assert_eq!("work", kind);
+    assert_eq!(Some("%3".into()), author);
+    assert_eq!(Some("o/r".into()), repo);
+    assert_eq!(Some(7), pr);
+    assert_eq!(Some("needs-head".into()), head);
+    assert_eq!(
+        json!(["%3"]),
+        serde_json::from_str::<Value>(&assignees).unwrap()
+    );
+    let requests = sync.transport.requests.lock().unwrap();
+    assert_eq!(2, requests.len());
+    let changes: Value = serde_json::from_slice(requests[1].body.as_ref().unwrap()).unwrap();
+    assert_eq!("REQUEST_CHANGES", changes["event"]);
+    assert!(changes["body"]
+        .as_str()
+        .unwrap()
+        .contains("reproduced the crash"));
 }
 
 #[tokio::test]
@@ -1088,4 +2449,759 @@ async fn second_review_insertion_refusal_returns_no_id_and_appends_source_error(
     let rows = sync.flock.list_review_rows_visible().await.unwrap();
     assert_eq!(1, rows.len());
     assert_eq!(existing.id, rows[0].id);
+}
+
+#[tokio::test]
+async fn second_review_needs_fix_blocks_another_review_on_the_same_head() {
+    let dir = crate::testsupport::dir("review-sync-second-review-needs-fix");
+    let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    let first = store
+        .add_with(
+            "global",
+            "first review",
+            "",
+            crate::tasks::AddOptions {
+                kind: Some("review".into()),
+                repo: Some("o/r".into()),
+                pr: Some("7".into()),
+                head: Some("exact-head".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .set_verdict(&first.id, "needs-fix", Some("%1"))
+        .await
+        .unwrap();
+    store
+        .task_complete(&first.id, Some("%1"), true)
+        .await
+        .unwrap();
+
+    let sync = ReviewSync::with_tokens(store, (), FakeReviewPolicy { required: 2 });
+    assert_eq!(
+        None,
+        sync._second_review("o/r", 7, "exact-head", "%2", None)
+            .await
+    );
+    let rows = sync.flock.list_review_rows_visible().await.unwrap();
+    assert_eq!(1, rows.len());
+    assert_eq!(first.id, rows[0].id);
+}
+
+#[tokio::test]
+async fn run_keeps_an_open_same_head_and_an_open_conflicted_review() {
+    let dir = crate::testsupport::dir("review-sync-run-open-review");
+    let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    let same_head = add_actual_review(&store, 7, "head-a", "same head").await;
+    let transport = FakeReviewTransport::with_responses([
+        github_response(200, open_pull(7, "head-a", "work/topic")),
+        github_response(200, json!({"mergeable": true, "state": "open"})),
+    ]);
+    let (sync, report) = run_actual_review_sync(store, transport, 2).await;
+    assert_eq!("open", sync.flock.get(&same_head.id).await.unwrap().status);
+    assert!(report["cancelled"].as_array().unwrap().is_empty());
+
+    let dir = crate::testsupport::dir("review-sync-run-conflicted-open");
+    let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    let conflicted = add_actual_review(&store, 8, "head-b", "conflicted open").await;
+    let transport = FakeReviewTransport::with_responses([
+        github_response(200, open_pull(8, "head-b", "work/topic")),
+        github_response(200, json!({"mergeable": false, "state": "open"})),
+        github_response(200, json!({"state": "open", "head": {"sha": "head-b"}})),
+    ]);
+    let (sync, report) = run_actual_review_sync(store, transport, 2).await;
+    assert_eq!("open", sync.flock.get(&conflicted.id).await.unwrap().status);
+    assert!(report["cancelled"].as_array().unwrap().is_empty());
+    assert_eq!(3, sync.transport.requests.lock().unwrap().len());
+}
+
+#[tokio::test]
+async fn run_failed_repo_list_skips_cleanup_and_unknown_or_malformed_detail_preserves_task() {
+    let dir = crate::testsupport::dir("review-sync-run-failed-list");
+    let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    let task = add_actual_review(&store, 7, "head-a", "failed list").await;
+    let transport = FakeReviewTransport::with_responses([github_response(
+        500,
+        json!({"message": "list unavailable"}),
+    )]);
+    let (sync, report) = run_actual_review_sync(store, transport, 2).await;
+    assert_eq!("open", sync.flock.get(&task.id).await.unwrap().status);
+    assert_eq!(1, sync.transport.requests.lock().unwrap().len());
+    assert_eq!(1, report["errors"].as_array().unwrap().len());
+
+    for (tag, detail) in [
+        ("unknown", json!({"state": "draft"})),
+        ("malformed", json!({"head": {"sha": "head-a"}})),
+    ] {
+        let dir = crate::testsupport::dir(&format!("review-sync-run-state-{tag}"));
+        let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+        let task = add_actual_review(&store, 7, "head-a", "unknown state").await;
+        let transport = FakeReviewTransport::with_responses([
+            github_response(200, json!([])),
+            github_response(200, detail),
+        ]);
+        let (sync, report) = run_actual_review_sync(store, transport, 2).await;
+        assert_eq!("open", sync.flock.get(&task.id).await.unwrap().status);
+        assert_eq!(1, report["errors"].as_array().unwrap().len());
+        assert!(report["errors"][0]
+            .as_str()
+            .unwrap()
+            .contains("cleanup: unknown PR state"));
+    }
+
+    let dir = crate::testsupport::dir("review-sync-run-detail-error");
+    let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    let task = add_actual_review(&store, 7, "head-a", "detail error").await;
+    let transport = FakeReviewTransport::with_responses([
+        github_response(200, json!([])),
+        github_response(500, json!({"message": "detail unavailable"})),
+    ]);
+    let (sync, report) = run_actual_review_sync(store, transport, 2).await;
+    assert_eq!("open", sync.flock.get(&task.id).await.unwrap().status);
+    assert_eq!(1, report["errors"].as_array().unwrap().len());
+    assert!(report["errors"][0].as_str().unwrap().contains("cleanup:"));
+}
+
+#[tokio::test]
+async fn run_cancel_race_ignores_terminal_winner_and_propagates_live_refusal() {
+    for (tag, mode, expected_status, expect_error) in [
+        (
+            "terminal-won",
+            CancelRaceMode::FinishBeforeRefusal,
+            "done",
+            false,
+        ),
+        ("live-refused", CancelRaceMode::RefuseLive, "open", true),
+    ] {
+        let dir = crate::testsupport::dir(&format!("review-sync-cancel-race-{tag}"));
+        let tasks = Arc::new(Tasks::open(dir.path().join("tasks.db")).await.unwrap());
+        let task = add_actual_review(&tasks, 7, "head-a", "cancel race").await;
+        let actor = CancelRaceActor {
+            tasks: tasks.clone(),
+            mode,
+        };
+        let transport = FakeReviewTransport::with_responses([
+            github_response(200, json!([])),
+            github_response(200, json!({"state": "closed", "head": {"sha": "head-a"}})),
+        ]);
+        let sync = ReviewSync::with_transport(
+            actor,
+            FakeReviewTokens(Ok("test-token".into())),
+            FakeReviewPolicy { required: 2 },
+            "https://api.example.test",
+            transport,
+        );
+        let result = sync.run(false).await;
+        assert_eq!(expected_status, tasks.get(&task.id).await.unwrap().status);
+        if expect_error {
+            assert!(result.unwrap_err().contains("synthetic refusal"));
+        } else {
+            assert!(result.unwrap()["errors"].as_array().unwrap().is_empty());
+        }
+    }
+}
+
+#[tokio::test]
+async fn run_cancelled_duplicate_pending_is_repaired_before_merge() {
+    let dir = crate::testsupport::dir("review-sync-cancelled-duplicate-status-repair");
+    let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    let first = add_actual_review(&store, 7, "head-a", "first accept").await;
+    finish_review(&store, &first.id, "%1", "accept").await;
+    let second = add_actual_review(&store, 7, "head-a", "second accept").await;
+    finish_review(&store, &second.id, "%2", "accept").await;
+    let duplicate = add_actual_review(&store, 7, "head-a", "old duplicate").await;
+    store.cancel(&duplicate.id, "duplicate").await.unwrap();
+    let transport = FakeReviewTransport::with_responses([
+        github_response(200, open_pull(7, "head-a", "work/topic")),
+        github_response(200, json!({"mergeable": true, "mergeable_state": "clean"})),
+        github_response(200, status_pull_detail("head-a", "open")),
+        github_response(200, combined_review_status("pending")),
+        github_response(201, json!({"state": "success"})),
+        github_response(405, json!({"message": "required review is expected"})),
+    ]);
+    let (sync, report) = run_actual_review_sync(store, transport, 2).await;
+    let requests = sync.transport.requests.lock().unwrap();
+    assert_eq!(6, requests.len());
+    assert_eq!("GET", requests[3].method);
+    assert!(requests[3].url.ends_with("/commits/head-a/status"));
+    assert_eq!("POST", requests[4].method);
+    assert!(requests[4].url.ends_with("/statuses/head-a"));
+    assert_eq!("PUT", requests[5].method);
+    assert!(requests[5].url.ends_with("/pulls/7/merge"));
+    drop(requests);
+    assert!(report["errors"].as_array().unwrap().is_empty());
+    assert!(report["statuses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| { row["state"] == "success" && row["head"] == "head-a" }));
+}
+
+#[tokio::test]
+async fn run_terminal_status_requires_distinct_threshold_and_honors_veto() {
+    let dir = crate::testsupport::dir("review-sync-terminal-status-distinct-threshold");
+    let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    let first = add_actual_review(&store, 7, "head-a", "first accept").await;
+    finish_review(&store, &first.id, "%1", "accept").await;
+    let duplicate = add_actual_review(&store, 7, "head-a", "same lane accept").await;
+    finish_review(&store, &duplicate.id, "%1", "accept").await;
+    let transport = FakeReviewTransport::with_responses([
+        github_response(200, open_pull(7, "head-a", "work/topic")),
+        github_response(200, json!({"mergeable": true, "mergeable_state": "clean"})),
+        github_response(200, status_pull_detail("head-a", "open")),
+        github_response(200, combined_review_status("success")),
+        github_response(201, json!({"state": "pending"})),
+    ]);
+    let (sync, report) = run_actual_review_sync(store, transport, 2).await;
+    assert!(report["errors"].as_array().unwrap().is_empty());
+    assert_eq!("pending", report["statuses"][0]["state"]);
+    assert!(sync
+        .transport
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|request| !request.url.ends_with("/merge")));
+    assert!(sync
+        .flock
+        .list_review_rows_visible()
+        .await
+        .unwrap()
+        .iter()
+        .any(|row| row.status == "open" && row.head.as_deref() == Some("head-a")));
+
+    let dir = crate::testsupport::dir("review-sync-terminal-status-veto");
+    let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    for (lane, verdict) in [("%1", "accept"), ("%2", "accept"), ("%3", "needs-fix")] {
+        let task = add_actual_review(&store, 7, "head-a", "terminal verdict").await;
+        finish_review(&store, &task.id, lane, verdict).await;
+    }
+    let transport = FakeReviewTransport::with_responses([
+        github_response(200, open_pull(7, "head-a", "work/topic")),
+        github_response(200, json!({"mergeable": true, "mergeable_state": "clean"})),
+        github_response(200, status_pull_detail("head-a", "open")),
+        github_response(200, combined_review_status("success")),
+        github_response(201, json!({"state": "failure"})),
+    ]);
+    let (sync, report) = run_actual_review_sync(store, transport, 2).await;
+    assert!(report["errors"].as_array().unwrap().is_empty());
+    assert_eq!("failure", report["statuses"][0]["state"]);
+    assert!(sync
+        .transport
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|request| !request.url.ends_with("/merge")));
+}
+
+#[tokio::test]
+async fn run_needed_second_review_restores_stale_success_to_pending() {
+    let dir = crate::testsupport::dir("review-sync-needed-second-restores-pending");
+    let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    let first = add_actual_review(&store, 7, "head-a", "first accept").await;
+    finish_review(&store, &first.id, "%1", "accept").await;
+    let second = add_actual_review(&store, 7, "head-a", "needed second").await;
+    let transport = FakeReviewTransport::with_responses([
+        github_response(200, open_pull(7, "head-a", "work/topic")),
+        github_response(200, json!({"mergeable": true, "mergeable_state": "clean"})),
+        github_response(200, status_pull_detail("head-a", "open")),
+        github_response(200, combined_review_status("success")),
+        github_response(201, json!({"state": "pending"})),
+    ]);
+    let (sync, report) = run_actual_review_sync(store, transport, 2).await;
+    assert!(report["errors"].as_array().unwrap().is_empty());
+    assert_eq!("pending", report["statuses"][0]["state"]);
+    assert_eq!("open", sync.flock.get(&second.id).await.unwrap().status);
+    assert!(sync
+        .transport
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|request| !request.url.ends_with("/merge")));
+}
+
+#[tokio::test]
+async fn run_terminal_status_does_not_repair_stale_or_unreadable_head() {
+    for (tag, detail) in [
+        ("changed", status_pull_detail("head-b", "open")),
+        ("missing", json!({"state": "open", "head": null})),
+        ("closed", status_pull_detail("head-a", "closed")),
+        ("malformed", json!(["not", "an", "object"])),
+    ] {
+        let dir = crate::testsupport::dir(&format!("review-sync-terminal-head-{tag}"));
+        let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+        let accepted = add_actual_review(&store, 7, "head-a", "accepted").await;
+        finish_review(&store, &accepted.id, "%1", "accept").await;
+        let transport = FakeReviewTransport::with_responses([
+            github_response(200, open_pull(7, "head-a", "work/topic")),
+            github_response(200, json!({"mergeable": true, "mergeable_state": "clean"})),
+            github_response(200, detail),
+        ]);
+        let (sync, report) = run_actual_review_sync(store, transport, 1).await;
+        assert!(!report["errors"].as_array().unwrap().is_empty());
+        assert!(sync
+            .transport
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|request| !request.url.contains("/commits/")
+                && !request.url.contains("/statuses/")
+                && !request.url.ends_with("/merge")));
+    }
+}
+
+#[tokio::test]
+async fn run_terminal_status_rechecks_verdict_after_github_io() {
+    let dir = crate::testsupport::dir("review-sync-terminal-status-verdict-race");
+    let tasks = Arc::new(Tasks::open(dir.path().join("tasks.db")).await.unwrap());
+    let accepted = add_actual_review(&tasks, 7, "head-a", "accepted").await;
+    finish_review(&tasks, &accepted.id, "%1", "accept").await;
+    let transport = FakeReviewTransport::with_responses([
+        github_response(200, open_pull(7, "head-a", "work/topic")),
+        github_response(200, json!({"mergeable": true, "mergeable_state": "clean"})),
+        github_response(200, status_pull_detail("head-a", "open")),
+        github_response(200, combined_review_status("pending")),
+        github_response(201, json!({"state": "failure"})),
+    ]);
+    transport.complete_new_review_on_request_index(
+        4,
+        tasks.clone(),
+        7,
+        "head-a",
+        "%3",
+        "needs-fix",
+    );
+    let sync = ReviewSync::with_transport(
+        CancelRaceActor {
+            tasks: tasks.clone(),
+            mode: CancelRaceMode::RefuseLive,
+        },
+        FakeReviewTokens(Ok("test-token".into())),
+        FakeReviewPolicy { required: 1 },
+        "https://api.example.test",
+        transport,
+    );
+    let report = sync.run(false).await.unwrap();
+    assert!(report["errors"].as_array().unwrap().is_empty());
+    assert_eq!("failure", report["statuses"][0]["state"]);
+    assert!(tasks
+        .list_review_rows_visible()
+        .await
+        .unwrap()
+        .iter()
+        .any(|row| row.verdict.as_deref() == Some("needs-fix")));
+    assert!(sync
+        .transport
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|request| !request.url.ends_with("/merge")));
+}
+
+#[tokio::test]
+async fn run_terminal_status_lookup_or_publish_failure_defers_merge() {
+    for publish_failure in [false, true] {
+        let tag = if publish_failure { "publish" } else { "lookup" };
+        let dir = crate::testsupport::dir(&format!("review-sync-terminal-status-{tag}-failure"));
+        let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+        for (lane, title) in [("%1", "first accept"), ("%2", "second accept")] {
+            let task = add_actual_review(&store, 7, "head-a", title).await;
+            finish_review(&store, &task.id, lane, "accept").await;
+        }
+        let mut responses = vec![
+            github_response(200, open_pull(7, "head-a", "work/topic")),
+            github_response(200, json!({"mergeable": true, "mergeable_state": "clean"})),
+            github_response(200, status_pull_detail("head-a", "open")),
+        ];
+        if publish_failure {
+            responses.push(github_response(200, combined_review_status("pending")));
+            responses.push(github_response(
+                403,
+                json!({"message": "status permission denied"}),
+            ));
+        } else {
+            responses.push(github_response(
+                403,
+                json!({"message": "status lookup unavailable"}),
+            ));
+        }
+        let transport = FakeReviewTransport::with_responses(responses);
+        let (sync, report) = run_actual_review_sync(store, transport, 2).await;
+        assert!(!report["errors"].as_array().unwrap().is_empty());
+        assert!(sync
+            .transport
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|request| !request.url.ends_with("/merge")));
+    }
+}
+
+#[tokio::test]
+async fn run_malformed_status_object_cannot_publish_success_or_merge() {
+    let dir = crate::testsupport::dir("review-sync-malformed-status-object");
+    let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    for (lane, title) in [("%1", "first accept"), ("%2", "second accept")] {
+        let task = add_actual_review(&store, 7, "head-a", title).await;
+        finish_review(&store, &task.id, lane, "accept").await;
+    }
+    let transport = FakeReviewTransport::with_responses([
+        github_response(200, open_pull(7, "head-a", "work/topic")),
+        github_response(200, json!({"mergeable": true, "mergeable_state": "clean"})),
+        github_response(200, status_pull_detail("head-a", "open")),
+        github_response(200, json!({"statuses": [{}]})),
+    ]);
+    let (sync, report) = run_actual_review_sync(store, transport, 2).await;
+    assert!(report["errors"][0]
+        .as_str()
+        .unwrap()
+        .contains("GitHub commit status: missing status context"));
+    assert!(sync
+        .transport
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|request| !request.url.contains("/statuses/") && !request.url.ends_with("/merge")));
+}
+
+#[tokio::test]
+async fn run_terminal_status_success_does_not_republish_every_tick() {
+    let dir = crate::testsupport::dir("review-sync-terminal-status-idempotent");
+    let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    for (lane, title) in [("%1", "first accept"), ("%2", "second accept")] {
+        let task = add_actual_review(&store, 7, "head-a", title).await;
+        finish_review(&store, &task.id, lane, "accept").await;
+    }
+    let transport = FakeReviewTransport::with_responses([
+        github_response(200, open_pull(7, "head-a", "work/topic")),
+        github_response(200, json!({"mergeable": true, "mergeable_state": "clean"})),
+        github_response(200, status_pull_detail("head-a", "open")),
+        github_response(200, combined_review_status("success")),
+        github_response(405, json!({"message": "required check is expected"})),
+        github_response(200, open_pull(7, "head-a", "work/topic")),
+        github_response(200, json!({"mergeable": true, "mergeable_state": "clean"})),
+        github_response(200, status_pull_detail("head-a", "open")),
+        github_response(200, combined_review_status("success")),
+        github_response(405, json!({"message": "required check is expected"})),
+    ]);
+    let sync = ReviewSync::with_transport(
+        store,
+        FakeReviewTokens(Ok("test-token".into())),
+        FakeReviewPolicy { required: 2 },
+        "https://api.example.test",
+        transport,
+    );
+    for _ in 0..2 {
+        let report = sync.run(false).await.unwrap();
+        assert!(report["errors"].as_array().unwrap().is_empty());
+    }
+    let requests = sync.transport.requests.lock().unwrap();
+    assert_eq!(10, requests.len());
+    assert_eq!(
+        2,
+        requests
+            .iter()
+            .filter(|request| request.method == "PUT")
+            .count()
+    );
+    assert!(requests
+        .iter()
+        .all(|request| !(request.method == "POST" && request.url.contains("/statuses/"))));
+}
+
+#[tokio::test]
+async fn run_needs_fix_blocks_second_review_and_final_merge_even_with_later_accept() {
+    let dir = crate::testsupport::dir("review-sync-run-needs-fix-blocks");
+    let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    let needs_fix = add_actual_review(&store, 7, "head-a", "needs fix").await;
+    finish_review(&store, &needs_fix.id, "%1", "needs-fix").await;
+    let later_accept = add_actual_review(&store, 7, "head-a", "later accept").await;
+    finish_review(&store, &later_accept.id, "%2", "accept").await;
+    let transport = FakeReviewTransport::with_responses([
+        github_response(200, open_pull(7, "head-a", "work/topic")),
+        github_response(200, json!({"mergeable": true, "state": "open"})),
+        github_response(200, status_pull_detail("head-a", "open")),
+        github_response(200, combined_review_status("pending")),
+        github_response(201, json!({"state": "failure"})),
+    ]);
+    let (sync, report) = run_actual_review_sync(store, transport, 2).await;
+    assert!(sync
+        .transport
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|request| !request.url.ends_with("/merge")));
+    assert!(sync
+        .flock
+        .list_review_rows_visible()
+        .await
+        .unwrap()
+        .iter()
+        .all(|row| row.status == "done"));
+    assert!(report["errors"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn run_routes_final_accept_through_real_merge_and_landed_writer() {
+    let dir = crate::testsupport::dir("review-run-real-merge");
+    let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    let first = add_actual_review(&store, 7, "exact-head", "first accept").await;
+    finish_review(&store, &first.id, "%1", "accept").await;
+    let second = add_actual_review(&store, 7, "exact-head", "second accept").await;
+    finish_review(&store, &second.id, "%2", "accept").await;
+    rusqlite::Connection::open(dir.path().join("tasks.db"))
+        .unwrap()
+        .execute(
+            "UPDATE tasks SET landed = 0 WHERE repo = 'o/r' AND pr = 7",
+            [],
+        )
+        .unwrap();
+    let transport = FakeReviewTransport::with_responses([
+        github_response(200, open_pull(7, "exact-head", "work/topic")),
+        github_response(200, json!({"mergeable":true,"mergeable_state":"clean"})),
+        github_response(200, status_pull_detail("exact-head", "open")),
+        github_response(200, combined_review_status("pending")),
+        github_response(201, json!({"state": "success"})),
+        github_response(200, json!({"merged":true})),
+    ]);
+    let sync = ReviewSync::with_transport(
+        store,
+        FakeReviewTokens(Ok("test-token".into())),
+        FakeReviewPolicy { required: 2 },
+        "https://api.example.test",
+        transport,
+    );
+
+    let report = sync.run(false).await.unwrap();
+
+    assert_eq!(1, report["merged"].as_array().unwrap().len());
+    assert_eq!("exact-head", report["merged"][0]["head"]);
+    assert_eq!(second.id, report["merged"][0]["task"]);
+    assert_eq!(
+        "no accounting ledger is configured for o/r",
+        report["accounting"][0]["reason"]
+    );
+    let mut landed = report["landed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|id| id.as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    landed.sort();
+    let mut expected_landed = vec![first.id, second.id];
+    expected_landed.sort();
+    assert_eq!(expected_landed, landed);
+    let requests = sync.transport.requests.lock().unwrap();
+    assert!(requests[0].url.contains("/pulls?state=open"));
+    assert!(requests[1].url.ends_with("/pulls/7"));
+    assert!(requests[2].url.ends_with("/pulls/7"));
+    assert!(requests[3].url.ends_with("/commits/exact-head/status"));
+    assert!(requests[4].url.ends_with("/statuses/exact-head"));
+    assert!(requests[5].url.ends_with("/pulls/7/merge"));
+    let merge_body: Value = serde_json::from_slice(requests[5].body.as_ref().unwrap()).unwrap();
+    assert_eq!("exact-head", merge_body["sha"]);
+}
+
+#[tokio::test]
+async fn run_fails_closed_when_required_verdict_policy_is_invalid() {
+    let dir = crate::testsupport::dir("review-sync-run-invalid-required-verdicts");
+    let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    let accept = add_actual_review(&store, 7, "head-a", "first accept").await;
+    finish_review(&store, &accept.id, "%1", "accept").await;
+    let transport = FakeReviewTransport::with_responses([
+        github_response(200, open_pull(7, "head-a", "work/topic")),
+        github_response(200, json!({"mergeable": true, "state": "open"})),
+        github_response(200, status_pull_detail("head-a", "open")),
+        github_response(200, combined_review_status("pending")),
+    ]);
+    let sync = ReviewSync::with_transport(
+        store,
+        FakeReviewTokens(Ok("test-token".into())),
+        FailingReviewPolicy,
+        "https://api.example.test",
+        transport,
+    );
+    let error = sync.run(false).await.unwrap_err();
+
+    assert!(error.contains("invalid required_verdicts config"));
+}
+
+#[tokio::test]
+async fn run_closed_and_merged_details_cancel_only_after_authoritative_state() {
+    for state in ["closed", "merged"] {
+        let dir = crate::testsupport::dir(&format!("review-sync-run-{state}"));
+        let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+        let task = add_actual_review(&store, 7, "head-a", "closed review").await;
+        let transport = FakeReviewTransport::with_responses([
+            github_response(200, json!([])),
+            github_response(200, json!({"state": state, "head": {"sha": "head-a"}})),
+        ]);
+        let (sync, report) = run_actual_review_sync(store, transport, 2).await;
+        assert_eq!("cancelled", sync.flock.get(&task.id).await.unwrap().status);
+        assert_eq!(json!([task.id]), report["cancelled"]);
+    }
+}
+
+#[tokio::test]
+async fn run_preserves_the_needed_second_review_and_retires_stale_head_before_refiling() {
+    let dir = crate::testsupport::dir("review-sync-run-second-review-ticks");
+    let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    let first = add_actual_review(&store, 7, "head-current", "first accept").await;
+    finish_review(&store, &first.id, "%1", "accept").await;
+    let second = add_actual_review(&store, 7, "head-current", "needed second").await;
+    let transport = FakeReviewTransport::with_responses([
+        github_response(200, open_pull(7, "head-current", "work/topic")),
+        github_response(200, json!({"mergeable": true, "state": "open"})),
+        github_response(200, status_pull_detail("head-current", "open")),
+        github_response(200, combined_review_status("success")),
+        github_response(201, json!({"state": "pending"})),
+        github_response(200, open_pull(7, "head-current", "work/topic")),
+        github_response(200, json!({"mergeable": true, "state": "open"})),
+        github_response(200, status_pull_detail("head-current", "open")),
+        github_response(200, combined_review_status("pending")),
+    ]);
+    let (sync, first_report) = run_actual_review_sync(store, transport, 2).await;
+    assert!(first_report["cancelled"].as_array().unwrap().is_empty());
+    let second_report = sync.run(false).await.unwrap();
+    assert!(second_report["cancelled"].as_array().unwrap().is_empty());
+    assert_eq!("open", sync.flock.get(&second.id).await.unwrap().status);
+
+    let dir = crate::testsupport::dir("review-sync-run-stale-head-before-second");
+    let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    let accepted = add_actual_review(&store, 7, "head-current", "current accept").await;
+    finish_review(&store, &accepted.id, "%1", "accept").await;
+    let stale = add_actual_review(&store, 7, "head-old", "stale live review").await;
+    let transport = FakeReviewTransport::with_responses([
+        github_response(200, open_pull(7, "head-current", "work/topic")),
+        github_response(200, json!({"mergeable": true, "state": "open"})),
+        github_response(200, status_pull_detail("head-current", "open")),
+        github_response(200, combined_review_status("pending")),
+        github_response(200, open_pull(7, "head-current", "work/topic")),
+        github_response(200, json!({"mergeable": true, "state": "open"})),
+        github_response(200, status_pull_detail("head-current", "open")),
+        github_response(200, combined_review_status("pending")),
+    ]);
+    let (sync, report) = run_actual_review_sync(store, transport, 2).await;
+    assert_eq!("cancelled", sync.flock.get(&stale.id).await.unwrap().status);
+    assert_eq!(json!([stale.id]), report["cancelled"]);
+    let current = sync.flock.list_review_rows_visible().await.unwrap();
+    let second = current
+        .iter()
+        .find(|row| {
+            row.repo.as_deref() == Some("o/r")
+                && row.pr == Some(7)
+                && row.head.as_deref() == Some("head-current")
+                && row.status == "open"
+        })
+        .unwrap();
+    let second_id = second.id.clone();
+    assert!(sync
+        .flock
+        .get(&second_id)
+        .await
+        .unwrap()
+        .title
+        .contains("second reviewer"));
+    let next_report = sync.run(false).await.unwrap();
+    assert!(next_report["cancelled"].as_array().unwrap().is_empty());
+    assert_eq!("open", sync.flock.get(&second_id).await.unwrap().status);
+}
+
+#[tokio::test]
+async fn run_refreshes_verdicts_during_github_listing_and_reads_history_past_one_thousand() {
+    let dir = crate::testsupport::dir("review-sync-run-verdict-during-list");
+    let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    let first = add_actual_review(&store, 7, "head-current", "first during listing").await;
+    let effect_tasks = Arc::new(Tasks::open(dir.path().join("tasks.db")).await.unwrap());
+    let transport = FakeReviewTransport::with_responses([
+        github_response(200, open_pull(7, "head-current", "work/topic")),
+        github_response(200, json!({"mergeable": true, "state": "open"})),
+        github_response(200, status_pull_detail("head-current", "open")),
+        github_response(200, combined_review_status("pending")),
+    ]);
+    transport.complete_review_on_request(
+        "/pulls?state=open",
+        effect_tasks,
+        &first.id,
+        "%1",
+        "accept",
+    );
+    let (sync, report) = run_actual_review_sync(store, transport, 2).await;
+    assert_eq!("done", sync.flock.get(&first.id).await.unwrap().status);
+    let rows = sync.flock.list_review_rows_visible().await.unwrap();
+    assert_eq!(2, rows.len());
+    assert!(rows.iter().any(|row| {
+        row.pr == Some(7) && row.head.as_deref() == Some("head-current") && row.status == "open"
+    }));
+    assert!(report["errors"].as_array().unwrap().is_empty());
+
+    let dir = crate::testsupport::dir("review-sync-run-verdict-during-body-fetch");
+    let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    let effect_tasks = Arc::new(Tasks::open(dir.path().join("tasks.db")).await.unwrap());
+    let transport = FakeReviewTransport::with_responses([
+        github_response(200, open_pull(7, "head-current", "work/topic")),
+        github_response(200, json!({"mergeable": true, "state": "open"})),
+        github_response(200, json!({"body": "review details"})),
+    ]);
+    transport.complete_new_review_on_request_index(
+        3,
+        effect_tasks,
+        7,
+        "head-current",
+        "%1",
+        "accept",
+    );
+    let (sync, report) = run_actual_review_sync(store, transport, 2).await;
+    let rows = sync.flock.list_review_rows_visible().await.unwrap();
+    assert_eq!(1, rows.len());
+    assert_eq!("done", rows[0].status);
+    assert_eq!("accept", rows[0].verdict.as_deref().unwrap());
+    assert!(report["filed"].as_array().unwrap().is_empty());
+
+    let dir = crate::testsupport::dir("review-sync-run-history-over-1000");
+    let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    let connection = rusqlite::Connection::open(dir.path().join("tasks.db")).unwrap();
+    for index in 0..1005 {
+        let id = format!("old{index:04}");
+        connection
+            .execute(
+                "INSERT INTO tasks (id, scope, title, body, status, priority, completed_by, assignees, depends_on, created_at, updated_at, kind, repo, pr, head, verdict) VALUES (?, 'global', ?, '', 'done', 'urgent', '%1', '[]', '[]', ?, ?, 'review', 'o/r', ?, 'old-head', 'accept')",
+                rusqlite::params![id, id, index as f64, index as f64, index],
+            )
+            .unwrap();
+    }
+    let first = add_actual_review(&store, 7, "head-current", "first after history").await;
+    finish_review(&store, &first.id, "%1", "accept").await;
+    let transport = FakeReviewTransport::with_responses([
+        github_response(200, open_pull(7, "head-current", "work/topic")),
+        github_response(200, json!({"mergeable": true, "state": "open"})),
+        github_response(200, status_pull_detail("head-current", "open")),
+        github_response(200, combined_review_status("pending")),
+    ]);
+    let (sync, _) = run_actual_review_sync(store, transport, 2).await;
+    let rows = sync.flock.list_review_rows_visible().await.unwrap();
+    assert_eq!(1007, rows.len());
+    let second = rows
+        .iter()
+        .find(|row| {
+            row.pr == Some(7) && row.head.as_deref() == Some("head-current") && row.status == "open"
+        })
+        .unwrap();
+    let second_id = second.id.clone();
+    assert!(sync
+        .flock
+        .get(&second_id)
+        .await
+        .unwrap()
+        .title
+        .contains("second reviewer"));
 }
