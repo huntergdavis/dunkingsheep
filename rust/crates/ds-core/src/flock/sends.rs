@@ -961,6 +961,15 @@ pub struct SendAction {
     pub detail: String,
     confirmation: Option<SubmitConfirmation>,
     key_confirmation: Option<(String, String)>,
+    dunk_attempt: Option<DunkAttempt>,
+}
+
+#[derive(Clone)]
+struct DunkAttempt {
+    action: Arc<DunkDeliveryAction>,
+    message: Message,
+    text: String,
+    detector_fallback: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -979,6 +988,7 @@ impl SendAction {
             detail: detail.into(),
             confirmation: None,
             key_confirmation: None,
+            dunk_attempt: None,
         }
     }
 }
@@ -1188,6 +1198,7 @@ fn submit_text_with_options(
                 guarded,
             }),
             key_confirmation: None,
+            dunk_attempt: None,
         })
     });
 
@@ -1279,6 +1290,7 @@ pub fn press_keys(
             detail: result.1,
             confirmation: None,
             key_confirmation: Some((pane_id.to_owned(), text)),
+            dunk_attempt: None,
         }
     } else {
         SendAction::completed(result.0, result.1)
@@ -1364,9 +1376,115 @@ fn send_guarded_with_reason(
         Ok(mut action) => {
             // Keep the per-pane lock across confirmation, but release the global typing lock.
             confirm_send_action(env, &mut action);
+            finish_dunk_attempt(flock, &mut action);
             (true, Some(action.ok), action.detail, None)
         }
         Err(detail) => (true, Some(false), detail, None),
+    }
+}
+
+/// Run the shared Dunk do-send transition under a guard acquired by either immediate fire or
+/// the normal outbox worker. The attempt frame stays attached to SendAction until confirmation
+/// has finished and `send_guarded_with_reason` calls `finish_dunk_attempt`.
+fn submit_dunk_action(
+    flock: &Flock,
+    action: &Arc<DunkDeliveryAction>,
+    env: &mut dyn SendPreparationEnv,
+    guard: &TypingGuard<'_>,
+) -> Result<SendAction, String> {
+    let dunk = super::dunks::DunkList::send_snapshot(&action.dunker);
+    if dunk.text.is_empty() {
+        return Ok(SendAction::completed(true, "empty text, nothing sent"));
+    }
+    let mut message = flock
+        .new_message(&dunk.pane_id, &dunk.target_label, &dunk.text, &dunk.id)
+        .map_err(|error| error.to_string())?;
+    message.scheduled = true;
+    message.schedule_template = Some(dunk.template);
+    message.attempt_generation = env.attempt_generation(&dunk.pane_id);
+    let attempt_generation = message.attempt_generation.clone();
+    let mut result = submit_text_with_options(
+        flock,
+        env,
+        &dunk.pane_id,
+        &dunk.text,
+        SubmitOptions {
+            press_enter: true,
+            check_box: false,
+            attempt_generation: AttemptGeneration::Captured(attempt_generation),
+            message: Some(&mut message),
+        },
+        Some(guard),
+    );
+    result.dunk_attempt = Some(DunkAttempt {
+        action: Arc::clone(action),
+        message,
+        text: dunk.text,
+        detector_fallback: dunk.detector_fallback,
+    });
+    Ok(result)
+}
+
+/// Immediate `Flock.fire` entry into the same guarded do-send action used by the outbox worker.
+pub(super) fn send_dunk_now(
+    flock: &Flock,
+    action: &Arc<DunkDeliveryAction>,
+    env: &mut dyn SendPreparationEnv,
+    permission: impl FnMut() -> Option<String>,
+) -> (bool, Option<bool>, String, Option<String>) {
+    let dunk = super::dunks::DunkList::send_snapshot(&action.dunker);
+    send_guarded_with_reason(
+        flock,
+        env,
+        &dunk.pane_id,
+        SendGuardOptions {
+            hold_while_typing: dunk.hold_while_typing,
+            allow_modal: false,
+            preserve_draft: false,
+        },
+        permission,
+        |env, guard| submit_dunk_action(flock, action, env, guard),
+    )
+}
+
+fn finish_dunk_attempt(flock: &Flock, result: &mut SendAction) {
+    let Some(mut attempt) = result.dunk_attempt.take() else {
+        return;
+    };
+    attempt.message.status = if result.ok { "sent" } else { "failed" }.into();
+    attempt.message.detail = Some(result.detail.clone());
+    attempt.message.finished_at = Some(clock::now_s());
+    super::dunks::DunkList::finish_do_send(
+        &attempt.action.dunker,
+        &attempt.text,
+        result.ok,
+        &result.detail,
+        attempt.detector_fallback,
+    );
+    flock.note_stuck_candidate(&attempt.message);
+    flock.set_last_message(if result.ok {
+        format!("Sent to {}", attempt.message.target_label)
+    } else {
+        format!("Send failed: {}", result.detail)
+    });
+    if let Some(metrics) = flock.stores().metrics.as_ref() {
+        metrics.record(&crate::metrics::Event {
+            at: 0.0,
+            kind: "dunk.sent".into(),
+            pane_id: Some(attempt.message.pane_id.clone()),
+            mailbox: Some(attempt.message.target_label.clone()),
+            sender: None,
+            source: Some(attempt.message.source.clone()),
+            outcome: Some(if result.ok { "ok" } else { "failed" }.into()),
+            reason: (!result.ok).then(|| result.detail.clone()),
+            duration_ms: None,
+            attempts: None,
+            bytes: Some(attempt.text.len() as i64),
+        });
+    }
+    if let Err(error) = attempt.action.store.save(flock) {
+        result.ok = false;
+        result.detail = error.to_string();
     }
 }
 
@@ -2293,6 +2411,44 @@ pub struct Message {
     /// Transient identity and receipt frame shared only by clones of this exact message.
     /// It is deliberately omitted from snapshots; a restored message starts a new lifetime.
     attempt_state: Arc<MessageAttemptState>,
+    /// Transient Dunk send behavior. It deliberately does not participate in the wire/snapshot
+    /// form; restoring a row creates an ordinary text delivery with no Dunk authority.
+    dunk_delivery: Option<Arc<DunkDeliveryAction>>,
+}
+
+pub(crate) struct DunkDeliveryAction {
+    dunker: super::dunks::DunkerHandle,
+    store: Arc<dyn SnapshotStore>,
+}
+
+impl DunkDeliveryAction {
+    pub(super) fn new(
+        dunker: super::dunks::DunkerHandle,
+        store: Arc<dyn SnapshotStore>,
+    ) -> Arc<Self> {
+        Arc::new(Self { dunker, store })
+    }
+}
+
+impl std::fmt::Debug for DunkDeliveryAction {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DunkDeliveryAction")
+            .field("dunker", &Arc::as_ptr(&self.dunker))
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for DunkDeliveryAction {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.dunker, &other.dunker) && Arc::ptr_eq(&self.store, &other.store)
+    }
+}
+
+impl Message {
+    pub(super) fn set_dunk_delivery(&mut self, action: Arc<DunkDeliveryAction>) {
+        self.dunk_delivery = Some(action);
+    }
 }
 
 #[derive(Debug, Default)]
@@ -2335,6 +2491,7 @@ impl Message {
             finished_at: None,
             done: Arc::new(CompletionWaiter::default()),
             attempt_state: Arc::new(MessageAttemptState::default()),
+            dunk_delivery: None,
         }
     }
 
@@ -3616,8 +3773,27 @@ impl Flock {
         let is_keys = message.kind == "keys";
         let press_enter = message.press_enter;
         let attempt_generation = message.attempt_generation.clone();
+        let has_dunk_action = message.dunk_delivery.is_some();
         let (sent, ok, detail, blocker_reason) =
             send_guarded_with_reason(self, env, &pane_id, options, permission, |env, guard| {
+                if has_dunk_action {
+                    let still_queued = {
+                        let outbox = outbox_lock(&self.outbox);
+                        outbox
+                            .get(&pane_id)
+                            .and_then(|queue| queue.iter().find(|row| row.same_lifetime(&message)))
+                            .is_some_and(|row| row.status == "queued")
+                    };
+                    if !still_queued {
+                        return Ok(SendAction::completed(
+                            false,
+                            "dunk delivery cancelled before attempt",
+                        ));
+                    }
+                }
+                if let Some(action) = message.dunk_delivery.clone() {
+                    return submit_dunk_action(self, &action, env, guard);
+                }
                 // The exact message frame survives cancellation and same-ID replacement.
                 // Read folded text after acquiring the pane and typing guards.
                 let message_text = message.folded_text();
@@ -3642,6 +3818,19 @@ impl Flock {
                     ))
                 }
             });
+
+        if has_dunk_action {
+            let still_queued = {
+                let outbox = outbox_lock(&self.outbox);
+                outbox
+                    .get(&pane_id)
+                    .and_then(|queue| queue.iter().find(|row| row.same_lifetime(&message)))
+                    .is_some_and(|row| row.status == "queued")
+            };
+            if !still_queued {
+                return DeliveryOutcome::AlreadyDecided;
+            }
+        }
 
         if !sent {
             let hold_signature = hold_signature(self, env, &pane_id);

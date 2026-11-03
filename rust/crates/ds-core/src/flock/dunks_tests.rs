@@ -62,6 +62,8 @@ struct FireEnv {
     typed: Vec<(String, String)>,
     keys: Vec<(String, String)>,
     fail_send: bool,
+    fail_attempt_receipt: bool,
+    attempts: Vec<(String, bool, Option<String>, Option<String>)>,
 }
 
 impl SendEnv for FireEnv {
@@ -158,13 +160,21 @@ impl SendPreparationEnv for FireEnv {
     }
     fn persist_typed_attempt(
         &mut self,
-        _message: Option<&mut super::sends::Message>,
+        message: Option<&mut super::sends::Message>,
         _pane_id: &str,
         _text: &str,
         _press_enter: bool,
         _generation: Option<&str>,
     ) -> bool {
-        true
+        if let Some(message) = message {
+            self.attempts.push((
+                message.source.clone(),
+                message.scheduled,
+                message.schedule_template.clone(),
+                message.attempt_generation.clone(),
+            ));
+        }
+        !self.fail_attempt_receipt
     }
 }
 
@@ -183,6 +193,8 @@ fn fire_env(fail_send: bool) -> FireEnv {
         typed: Vec::new(),
         keys: Vec::new(),
         fail_send,
+        fail_attempt_receipt: false,
+        attempts: Vec::new(),
     }
 }
 
@@ -223,11 +235,11 @@ fn fire_sends_expanded_text_synchronously_through_guarded_direct_send() {
     let (_dir, flock) = flock();
     load_one_fire_dunk(&flock, "hello from {id}", None);
     let flock = Arc::new(flock);
-    let store = CapturingSnapshotStore::default();
+    let store = Arc::new(CapturingSnapshotStore::default());
     let mut env = fire_env(false);
 
     let result = flock
-        .fire("d1", &mut env, &NoopOutboxWake, &store, || None)
+        .fire("d1", &mut env, &NoopOutboxWake, Arc::clone(&store), || None)
         .unwrap();
 
     assert_eq!(json!(true), result["ok"], "fire result: {result}");
@@ -241,6 +253,15 @@ fn fire_sends_expanded_text_synchronously_through_guarded_direct_send() {
     assert_eq!(json!(true), dunk["awaiting_consumption"]);
     assert!(dunk["status"].as_str().unwrap().starts_with("Tested "));
     assert_eq!(1, store.calls.load(Ordering::SeqCst));
+    assert_eq!(
+        vec![(
+            "d1".into(),
+            true,
+            Some("hello from {id}".into()),
+            Some("pid-1:start-1".into())
+        )],
+        env.attempts
+    );
 }
 
 #[test]
@@ -248,11 +269,11 @@ fn fire_reports_guarded_send_failure_and_records_last_error() {
     let (_dir, flock) = flock();
     load_one_fire_dunk(&flock, "continue", None);
     let flock = Arc::new(flock);
-    let store = CapturingSnapshotStore::default();
+    let store = Arc::new(CapturingSnapshotStore::default());
     let mut env = fire_env(true);
 
     let result = flock
-        .fire("d1", &mut env, &NoopOutboxWake, &store, || None)
+        .fire("d1", &mut env, &NoopOutboxWake, Arc::clone(&store), || None)
         .unwrap();
 
     assert_eq!(json!(false), result["ok"], "fire result: {result}");
@@ -265,19 +286,21 @@ fn fire_reports_guarded_send_failure_and_records_last_error() {
 }
 
 #[test]
-fn queued_fire_expands_at_drain_and_does_not_update_same_id_replacement() {
+fn queued_fire_uses_live_template_and_updates_only_captured_same_id_dunker() {
     let (_dir, flock) = flock();
     load_one_fire_dunk(&flock, "first {id}", None);
     let flock = Arc::new(flock);
-    let store = CapturingSnapshotStore::default();
+    let store = Arc::new(CapturingSnapshotStore::default());
     let mut env = fire_env(false);
+    env.screen = "Press Enter to confirm or Esc to cancel".into();
 
     let result = flock
-        .fire("d1", &mut env, &NoopOutboxWake, &store, || {
-            Some("test hold".into())
-        })
+        .fire("d1", &mut env, &NoopOutboxWake, Arc::clone(&store), || None)
         .unwrap();
     assert_eq!(json!(true), result["queued"]);
+    let captured = flock.dunks.begin_fire("d1").unwrap();
+    // Restore the queued volatile status after taking the stable object handle for assertions.
+    super::dunks::DunkList::queue_fire(&captured);
 
     flock
         .dunks
@@ -316,11 +339,171 @@ fn queued_fire_expands_at_drain_and_does_not_update_same_id_replacement() {
 
     assert_eq!(OutboxStep::Delivered, drained);
     assert_eq!(
+        OutboxStep::Empty,
+        outbox_step(
+            &flock,
+            &mut env,
+            "w1:p2",
+            crate::clock::now_s(),
+            &stopped,
+            &|_| false,
+            &mut permission,
+        )
+    );
+    assert_eq!(
         vec![("w1:p2".into(), "updated d1".into())],
         env.typed,
         "the queued fire expands its current template when drained"
     );
     assert_eq!(json!(0), flock.dunks.get("d1").unwrap()["send_count"]);
+    let captured = captured.lock().unwrap_or_else(|e| e.into_inner());
+    assert_eq!(1, captured.send_count);
+    assert_eq!(Some("updated d1"), captured.last_sent_text.as_deref());
+    assert_eq!(
+        vec![(
+            "d1".into(),
+            true,
+            Some("updated {id}".into()),
+            Some("pid-1:start-1".into())
+        )],
+        env.attempts
+    );
+    assert_eq!(2, store.calls.load(Ordering::SeqCst));
+}
+
+#[test]
+fn empty_text_skips_inner_attempt_and_post_send_snapshot_error_does_not_rollback() {
+    let (_dir, flock) = flock();
+    load_one_fire_dunk(&flock, "   ", None);
+    let flock = Arc::new(flock);
+    let store = Arc::new(CapturingSnapshotStore::default());
+    let mut env = fire_env(false);
+    let empty = flock
+        .fire("d1", &mut env, &NoopOutboxWake, Arc::clone(&store), || None)
+        .unwrap();
+    assert_eq!(json!(true), empty["ok"]);
+    assert_eq!(0, store.calls.load(Ordering::SeqCst));
+    assert!(env.attempts.is_empty());
+    assert!(env.keys.is_empty());
+
+    let (_other_dir, other) = flock();
+    load_one_fire_dunk(&other, "continue", None);
+    let other = Arc::new(other);
+    let failed = other
+        .fire(
+            "d1",
+            &mut env,
+            &NoopOutboxWake,
+            Arc::new(OfflineSnapshotStore),
+            || None,
+        )
+        .unwrap();
+    assert_eq!(json!(false), failed["ok"]);
+    let dunk = other.dunks.get("d1").unwrap();
+    assert_eq!(json!(1), dunk["send_count"]);
+    assert_eq!(json!("offline"), dunk["last_error"]);
+    assert!(env.keys.iter().any(|(_, key)| key == "Enter"));
+}
+
+#[test]
+fn attempt_receipt_failure_prevents_enter_and_does_not_increment_count() {
+    let (_dir, flock) = flock();
+    load_one_fire_dunk(&flock, "continue", None);
+    let flock = Arc::new(flock);
+    let store = Arc::new(CapturingSnapshotStore::default());
+    let mut env = fire_env(false);
+    env.fail_attempt_receipt = true;
+
+    let result = flock
+        .fire("d1", &mut env, &NoopOutboxWake, store, || None)
+        .unwrap();
+    assert_eq!(json!(false), result["ok"]);
+    assert!(!env.keys.iter().any(|(_, key)| key == "Enter"));
+    assert_eq!(json!(0), flock.dunks.get("d1").unwrap()["send_count"]);
+    assert_eq!(1, env.attempts.len());
+}
+
+#[test]
+fn deferred_empty_expansion_skips_inner_attempt_and_restored_queue_is_plain_text() {
+    let (_dir, flock) = flock();
+    load_one_fire_dunk(&flock, "first {id}", None);
+    let flock = Arc::new(flock);
+    let store = Arc::new(CapturingSnapshotStore::default());
+    let mut held_env = fire_env(false);
+    held_env.screen = "Press Enter to confirm or Esc to cancel".into();
+    let queued = flock
+        .fire(
+            "d1",
+            &mut held_env,
+            &NoopOutboxWake,
+            Arc::clone(&store),
+            || None,
+        )
+        .unwrap();
+    assert_eq!(json!(true), queued["queued"]);
+
+    let saved = flock.snapshot();
+    let (_restore_dir, restored) = flock();
+    restored.restore_outbox(saved["outbox"].as_array().unwrap());
+    let mut plain_env = fire_env(false);
+    let stopped = AtomicBool::new(false);
+    let mut permission = || None;
+    assert_eq!(
+        OutboxStep::Delivered,
+        outbox_step(
+            &restored,
+            &mut plain_env,
+            "w1:p2",
+            crate::clock::now_s(),
+            &stopped,
+            &|_| false,
+            &mut permission,
+        )
+    );
+    assert_eq!(vec![("w1:p2".into(), "first {id}".into())], plain_env.typed);
+
+    let (_empty_dir, empty_flock) = flock();
+    load_one_fire_dunk(&empty_flock, "first {id}", None);
+    let empty_flock = Arc::new(empty_flock);
+    let empty_store = Arc::new(CapturingSnapshotStore::default());
+    let mut env = fire_env(false);
+    env.screen = "Press Enter to confirm or Esc to cancel".into();
+    empty_flock
+        .fire(
+            "d1",
+            &mut env,
+            &NoopOutboxWake,
+            Arc::clone(&empty_store),
+            || None,
+        )
+        .unwrap();
+    empty_flock
+        .dunks
+        .update(
+            "d1",
+            None,
+            &UpdateArgs {
+                text: Some("   ".into()),
+                ..UpdateArgs::default()
+            },
+        )
+        .unwrap();
+    env.screen = idle_codex_screen();
+    assert_eq!(
+        OutboxStep::Delivered,
+        outbox_step(
+            &empty_flock,
+            &mut env,
+            "w1:p2",
+            crate::clock::now_s(),
+            &stopped,
+            &|_| false,
+            &mut permission,
+        )
+    );
+    assert!(env.typed.is_empty());
+    assert!(env.attempts.is_empty());
+    assert_eq!(json!(0), empty_flock.dunks.get("d1").unwrap()["send_count"]);
 }
 
 #[test]
@@ -328,11 +511,11 @@ fn manual_fire_with_max_sends_does_not_remove_the_dunk() {
     let (_dir, flock) = flock();
     load_one_fire_dunk(&flock, "continue", Some(1));
     let flock = Arc::new(flock);
-    let store = CapturingSnapshotStore::default();
+    let store = Arc::new(CapturingSnapshotStore::default());
     let mut env = fire_env(false);
 
     let result = flock
-        .fire("d1", &mut env, &NoopOutboxWake, &store, || None)
+        .fire("d1", &mut env, &NoopOutboxWake, Arc::clone(&store), || None)
         .unwrap();
 
     assert_eq!(json!(true), result["ok"]);

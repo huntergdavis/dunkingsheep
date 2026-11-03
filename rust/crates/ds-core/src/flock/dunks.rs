@@ -11,10 +11,7 @@ use std::sync::{Arc, OnceLock};
 use regex::Regex;
 use serde_json::{json, Map, Value};
 
-use super::sends::{
-    send_guarded, submit_text, DirectSendOptions, DirectTextMetadata, OutboxWake, SendGuardOptions,
-    SendPreparationEnv, SnapshotStore,
-};
+use super::sends::{DunkDeliveryAction, OutboxWake, SendPreparationEnv, SnapshotStore};
 use super::Flock;
 use crate::clock;
 use crate::error::DunkError;
@@ -478,6 +475,16 @@ pub struct DunkList {
 /// queued fire work can therefore keep updating its original Dunker after removal.
 pub(super) type DunkerHandle = Arc<std::sync::Mutex<Dunker>>;
 
+pub(super) struct DunkSendSnapshot {
+    pub id: String,
+    pub pane_id: String,
+    pub target_label: String,
+    pub text: String,
+    pub template: String,
+    pub detector_fallback: bool,
+    pub hold_while_typing: bool,
+}
+
 #[derive(Debug)]
 struct ListState {
     dunkers: Vec<DunkerHandle>,
@@ -530,18 +537,9 @@ impl DunkList {
 
     /// Apply the synchronous fire outcome to the dunk if it still exists. Removing a dunk
     /// concurrently with its send leaves the in-flight transition operating on its own handle.
-    fn finish_fire(handle: &DunkerHandle, sent_text: Option<&str>, ok: bool, detail: &str) {
+    fn finish_fire(handle: &DunkerHandle, ok: bool, detail: &str) {
         let mut dunker = Self::lock_dunker(handle);
         if ok {
-            if let Some(text) = sent_text {
-                dunker.send_count += 1;
-                dunker.skip_count = 0;
-                dunker.last_sent_at = Some(clock::now_s());
-                dunker.last_error = None;
-                dunker.last_sent_text = Some(text.to_owned());
-                dunker.awaiting_consumption = true;
-                dunker.unknown_skips = 0;
-            }
             dunker.status = format!("Tested {}", chrono::Local::now().format("%H:%M:%S"));
         } else {
             dunker.status = "Test failed".into();
@@ -549,7 +547,48 @@ impl DunkList {
         }
     }
 
-    fn queue_fire(handle: &DunkerHandle) {
+    pub(super) fn send_snapshot(handle: &DunkerHandle) -> DunkSendSnapshot {
+        let dunker = Self::lock_dunker(handle);
+        let template = dunker.text.clone();
+        DunkSendSnapshot {
+            id: dunker.id.clone(),
+            pane_id: dunker.target_pane_id.clone().unwrap_or_default(),
+            target_label: dunker.target_label(),
+            text: expand_template(&template, &dunker).trim().to_owned(),
+            template,
+            detector_fallback: dunker.detector_fallback,
+            hold_while_typing: dunker.hold_while_typing,
+        }
+    }
+
+    pub(super) fn finish_do_send(
+        handle: &DunkerHandle,
+        text: &str,
+        ok: bool,
+        detail: &str,
+        detector_fallback: bool,
+    ) {
+        let mut dunker = Self::lock_dunker(handle);
+        if ok {
+            dunker.send_count += 1;
+            dunker.skip_count = 0;
+            dunker.last_sent_at = Some(clock::now_s());
+            dunker.last_error = None;
+            dunker.last_sent_text = Some(text.to_owned());
+            dunker.awaiting_consumption = true;
+            dunker.unknown_skips = 0;
+            if detector_fallback {
+                dunker.last_error = Some(
+                    "input box not recognised on this pane; sent anyway after repeated skips (detector fallback)".into(),
+                );
+                dunker.detector_fallback = false;
+            }
+        } else {
+            dunker.last_error = Some(detail.to_owned());
+        }
+    }
+
+    pub(super) fn queue_fire(handle: &DunkerHandle) {
         Self::lock_dunker(handle).status = "Queued (typing)".into();
     }
 
@@ -917,76 +956,30 @@ impl Flock {
         dunk_id: &str,
         env: &mut dyn SendPreparationEnv,
         wake: &dyn OutboxWake,
-        store: &dyn SnapshotStore,
+        store: Arc<dyn SnapshotStore>,
         permission: impl FnMut() -> Option<String>,
     ) -> Result<Value, DunkError> {
         let handle = self.dunks.begin_fire(dunk_id)?;
         let dunker = DunkList::lock_dunker(&handle).clone();
-        let pane_id = dunker
-            .target_pane_id
-            .as_deref()
-            .expect("begin_fire requires a target");
-        let text = expand_template(&dunker.text, &dunker).trim().to_owned();
-        if text.is_empty() {
-            DunkList::finish_fire(&handle, None, true, "");
-            return Ok(json!({
-                "id": dunker.id,
-                "ok": true,
-                "queued": false,
-                "message": "empty text, nothing sent",
-            }));
-        }
-
-        let mut permission = permission;
-        let (sent, send_ok, detail) = send_guarded(
-            self,
-            env,
-            pane_id,
-            SendGuardOptions {
-                hold_while_typing: dunker.hold_while_typing,
-                allow_modal: false,
-                preserve_draft: false,
-            },
-            &mut permission,
-            |env, guard| {
-                Ok(submit_text(
-                    self,
-                    env,
-                    pane_id,
-                    &text,
-                    true,
-                    false,
-                    Some(guard),
-                ))
-            },
-        );
-        if !sent && dunker.hold_while_typing {
-            let result = self.send_now(
-                &json!(pane_id),
-                &text,
-                DirectSendOptions {
-                    hold_while_typing: true,
-                    ..DirectSendOptions::default()
-                },
-                DirectTextMetadata {
-                    source: &dunker.id,
-                    ..DirectTextMetadata::default()
-                },
-                env,
-                wake,
-                store,
-                &mut permission,
+        let snapshot = DunkList::send_snapshot(&handle);
+        let action = DunkDeliveryAction::new(Arc::clone(&handle), Arc::clone(&store));
+        let (sent, send_ok, detail, blocker) =
+            super::sends::send_dunk_now(self, &action, env, permission);
+        if !sent && blocker.is_some() && snapshot.hold_while_typing {
+            let mut outer = self.new_message(
+                &snapshot.pane_id,
+                &snapshot.target_label,
+                &dunker.text,
+                &dunker.id,
             )?;
+            outer.set_dunk_delivery(action);
             DunkList::queue_fire(&handle);
-            let message_id = result
-                .get("message_id")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
+            let message_id = outer.id.clone();
+            self.enqueue(outer, wake, store.as_ref())?;
             let message = format!(
                 "queued: the box in {} would not clear",
-                dunker.target_label()
+                snapshot.target_label
             );
-            store.save(self)?;
             return Ok(json!({
                 "id": dunker.id,
                 "ok": Value::Null,
@@ -996,17 +989,7 @@ impl Flock {
             }));
         }
         let ok = sent && send_ok.unwrap_or(false);
-
-        DunkList::finish_fire(&handle, ok.then_some(text.as_str()), ok, &detail);
-        if let Err(error) = store.save(self) {
-            DunkList::finish_fire(&handle, None, false, &error.to_string());
-            return Ok(json!({
-                "id": dunker.id,
-                "ok": false,
-                "queued": false,
-                "message": error.to_string(),
-            }));
-        }
+        DunkList::finish_fire(&handle, ok, &detail);
         Ok(json!({
             "id": dunker.id,
             "ok": ok,
