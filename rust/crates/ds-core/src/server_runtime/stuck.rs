@@ -81,11 +81,11 @@ mod tests {
     use crate::terminal::fakes::FakeTerminal;
     use crate::terminal::{Pane, Terminal};
 
-    fn make_adapter(pid: i64, unreadable: bool) -> LoopRuntimeAdapter {
-        let base = std::env::temp_dir().join(format!("ds-stuck-test-{}", std::process::id()));
+    fn make_adapter(pid: i64, unreadable: bool) -> (LoopRuntimeAdapter, tempfile::TempDir) {
+        let dir = crate::testsupport::dir("stuck-observe");
         let flock = Arc::new(Flock::new(
-            base.join("launches.json"),
-            base.join("lanes.json"),
+            dir.path().join("launches.json"),
+            dir.path().join("lanes.json"),
             false,
         ));
         let pane_id = "%stuck-test".to_owned();
@@ -104,7 +104,7 @@ mod tests {
             }
             Box::new(fake)
         });
-        LoopRuntimeAdapter::new(flock, factory)
+        (LoopRuntimeAdapter::new(flock, factory), dir)
     }
 
     #[test]
@@ -114,7 +114,7 @@ mod tests {
             .build()
             .unwrap();
         let live_pid = std::process::id() as i64;
-        let adapter = make_adapter(live_pid, false);
+        let (adapter, _adapter_dir) = make_adapter(live_pid, false);
         let panes = runtime
             .block_on(adapter.helper_stuckenv_list_panes())
             .unwrap();
@@ -129,13 +129,13 @@ mod tests {
             .expect("the current process has a generation");
         assert!(generation.starts_with(&format!("pid:{live_pid}:start:")));
 
-        let unreadable = make_adapter(live_pid, true);
+        let (unreadable, _unreadable_dir) = make_adapter(live_pid, true);
         assert_eq!(
             runtime.block_on(unreadable.helper_stuckenv_read_screen("%stuck-test")),
             None
         );
 
-        let missing_process = make_adapter(i64::MAX, false);
+        let (missing_process, _missing_process_dir) = make_adapter(i64::MAX, false);
         assert_eq!(
             runtime.block_on(missing_process.helper_stuckenv_pane_generation("%stuck-test")),
             None
