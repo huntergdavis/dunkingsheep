@@ -136,14 +136,14 @@ impl MailboxEnv for AlertInbox {
 }
 
 impl InboxEnv for AlertInbox {
-    fn caller_role(&self, _: &str) -> String {
-        "owner".into()
+    fn caller_role(&self, _: &str) -> Result<String, DunkError> {
+        Ok("owner".into())
     }
     fn mailbox_override(&self) -> Option<String> {
         None
     }
-    fn backend_name(&self) -> String {
-        "fixture".into()
+    fn backend_name(&self) -> Result<String, DunkError> {
+        Ok("fixture".into())
     }
     fn lane_panes(&self) -> Vec<String> {
         Vec::new()
