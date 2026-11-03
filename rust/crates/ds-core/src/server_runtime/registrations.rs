@@ -70,7 +70,13 @@ mod tests {
     struct SendObservations {
         factory_threads: Vec<ThreadId>,
         text: Vec<(String, String)>,
-        keys: Vec<(String, Vec<String>)>,
+        keys: Vec<KeyObservation>,
+    }
+
+    #[derive(Debug)]
+    struct KeyObservation {
+        pane: String,
+        keys: Vec<String>,
     }
 
     #[derive(Debug)]
@@ -182,10 +188,10 @@ mod tests {
             self.inner.send_text_and_enter(pane_id, text)
         }
         fn send_keys(&mut self, pane_id: &str, keys: &[&str]) -> Result<(), TerminalError> {
-            self.observations.lock().unwrap().keys.push((
-                pane_id.to_owned(),
-                keys.iter().map(|key| (*key).to_owned()).collect(),
-            ));
+            self.observations.lock().unwrap().keys.push(KeyObservation {
+                pane: pane_id.to_owned(),
+                keys: keys.iter().map(|key| (*key).to_owned()).collect(),
+            });
             self.inner.send_keys(pane_id, keys)
         }
         fn read_pane(
@@ -597,8 +603,11 @@ mod tests {
             .text
             .iter()
             .any(|(pane, text)| pane == "w1:p1" && text == "assembly smoke"));
-        assert!(observed.keys.iter().any(|(pane, keys)| {
-            pane == "w1:p1" && keys == &["ctrl+c".to_owned(), "Enter".to_owned()]
+        assert!(observed.keys.iter().any(|observation| {
+            observation.pane == "w1:p1"
+                && observation.keys.len() == 2
+                && observation.keys[0] == "ctrl+c"
+                && observation.keys[1] == "Enter"
         }));
         assert!(
             observed
