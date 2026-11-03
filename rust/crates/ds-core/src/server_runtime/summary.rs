@@ -27,7 +27,7 @@ impl SummaryEnv for RequestRuntimeAdapter<'_> {
             None,
             include_done,
             500,
-            self.request.self_pane_id.as_deref(),
+            None,
             None,
             false,
         ));
@@ -42,6 +42,8 @@ impl SummaryEnv for RequestRuntimeAdapter<'_> {
                         "status": task.status,
                         "priority": task.priority,
                         "assignees": row.assignees,
+                        "completed_at": task.completed_at,
+                        "completed_by": task.completed_by,
                     })
                 })
                 .collect(),
@@ -83,17 +85,20 @@ mod tests {
                 .unwrap(),
         );
         runtime.block_on(async {
-            tasks
+            let completed = tasks
                 .add_with(
                     "global",
                     "completed task",
                     "done",
                     AddOptions {
-                        status: Some("done".into()),
                         priority: Some("urgent".into()),
                         ..AddOptions::default()
                     },
                 )
+                .await
+                .unwrap();
+            tasks
+                .set_status(&completed.id, "done", None, Some("%worker"))
                 .await
                 .unwrap();
             for index in 0..500 {
@@ -102,13 +107,29 @@ mod tests {
                     .await
                     .unwrap();
             }
+            tasks
+                .add_with(
+                    "w1:p1",
+                    "pane-private task",
+                    "private to pane",
+                    AddOptions {
+                        status: Some("in_progress".into()),
+                        priority: Some("urgent".into()),
+                        ..AddOptions::default()
+                    },
+                )
+                .await
+                .unwrap();
         });
         flock.attach_stores(Stores {
             tasks: Some(tasks),
             ..Stores::default()
         });
 
-        let request = RequestCtx::default();
+        let request = RequestCtx {
+            self_pane_id: Some("w1:p1".into()),
+            ..RequestCtx::default()
+        };
         let terminal: Mutex<Box<dyn Terminal>> = Mutex::new(Box::new(FakeTerminal::new()));
         let adapter = crate::server_runtime::RequestRuntimeAdapter::new(
             &flock,
@@ -124,9 +145,33 @@ mod tests {
         let open = SummaryEnv::task_list(&adapter, false);
         assert_eq!(500, open.len(), "uses the project-summary task limit");
         assert!(open.iter().all(|task| task["status"] != "done"));
+        assert!(open.iter().all(|task| task["title"] != "pane-private task"));
 
         let all = SummaryEnv::task_list(&adapter, true);
         assert_eq!(500, all.len(), "done rows share the same limit");
-        assert!(all.iter().any(|task| task["title"] == "completed task"));
+        let completed = all
+            .iter()
+            .find(|task| task["title"] == "completed task")
+            .expect("urgent completed row survives the limit");
+        assert!(completed["completed_at"].as_f64().is_some());
+        assert_eq!("%worker", completed["completed_by"]);
+
+        let summary = crate::flock::project_summary::project_summary(
+            &adapter,
+            "global",
+            None,
+            &[],
+            1_800_000_000.0,
+        );
+        assert_eq!(1, summary["history"].as_array().unwrap().len());
+        assert_eq!("%worker", summary["history"][0]["by"]);
+        assert_ne!(
+            "no completed task has a timestamp yet",
+            summary["history_note"]
+        );
+        assert!(summary["now"]["tasks_in_flight"]
+            .as_array()
+            .unwrap()
+            .is_empty());
     }
 }
