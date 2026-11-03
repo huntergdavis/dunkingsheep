@@ -213,11 +213,17 @@ async fn request_json(request: Request) -> Result<Option<Value>, Response> {
     }
     serde_json::from_slice(&bytes).map(Some).map_err(|error| {
         let error_text = error.to_string();
+        let invalid_escape_offset = error_text
+            .starts_with("invalid escape")
+            .then(|| python_invalid_escape_offset(&bytes))
+            .flatten();
         let trailing_comma = error_text
             .starts_with("trailing comma")
             .then(|| python_trailing_comma(&bytes))
             .flatten();
-        let offset = if error_text.starts_with("EOF while parsing an object") {
+        let offset = if let Some(offset) = invalid_escape_offset {
+            offset
+        } else if error_text.starts_with("EOF while parsing an object") {
             String::from_utf8_lossy(&bytes).chars().count()
         } else if error_text.starts_with("EOF while parsing a string") {
             python_unterminated_string_offset(&bytes)
@@ -235,7 +241,11 @@ async fn request_json(request: Request) -> Result<Option<Value>, Response> {
             "JSON decode error",
             json!({}),
             Some(json!({
-                "error": python_json_error(&error_text, trailing_comma.map(|(_, kind)| kind))
+                "error": python_json_error(
+                    &error_text,
+                    trailing_comma.map(|(_, kind)| kind),
+                    invalid_escape_offset.is_some(),
+                )
             })),
         )
     })
@@ -279,13 +289,44 @@ fn python_unterminated_string_offset(bytes: &[u8]) -> Option<usize> {
     string_start.map(|byte_offset| text[..byte_offset].chars().count())
 }
 
+fn python_invalid_escape_offset(bytes: &[u8]) -> Option<usize> {
+    let text = String::from_utf8_lossy(bytes);
+    let mut in_string = false;
+    let mut escape_offset = None;
+
+    for (character_offset, character) in text.chars().enumerate() {
+        if !in_string {
+            if character == '"' {
+                in_string = true;
+            }
+            continue;
+        }
+
+        if let Some(offset) = escape_offset.take() {
+            if !matches!(character, '"' | '\\' | '/' | 'b' | 'f' | 'n' | 'r' | 't' | 'u') {
+                return Some(offset);
+            }
+        } else if character == '\\' {
+            escape_offset = Some(character_offset);
+        } else if character == '"' {
+            in_string = false;
+        }
+    }
+
+    None
+}
+
 #[derive(Clone, Copy)]
 enum JsonContainer {
     Object,
     Array,
 }
 
-fn python_json_error(error: &str, trailing_container: Option<JsonContainer>) -> &'static str {
+fn python_json_error(
+    error: &str,
+    trailing_container: Option<JsonContainer>,
+    invalid_escape: bool,
+) -> &'static str {
     if error.starts_with("key must be a string")
         || error.starts_with("EOF while parsing an object")
     {
@@ -298,6 +339,8 @@ fn python_json_error(error: &str, trailing_container: Option<JsonContainer>) -> 
         }
     } else if error.starts_with("EOF while parsing a string") {
         "Unterminated string starting at"
+    } else if error.starts_with("invalid escape") && invalid_escape {
+        "Invalid \\escape"
     } else if error.starts_with("EOF while parsing") || error.starts_with("expected value") {
         "Expecting value"
     } else if error.starts_with("expected `:`") {
@@ -1014,6 +1057,25 @@ mod tests {
                 "ctx":{"error":"Expecting property name enclosed in double quotes"}}]}),
             value
         );
+        assert!(game.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn game_state_model_routes_map_invalid_json_escape_to_python_decode_error() {
+        let game = Arc::new(FakeGame::new(Value::Null));
+        for path in ["/api/game/savestate", "/api/game/loadstate"] {
+            let (status, _body, value) = response(
+                app(game.clone(), authorized()),
+                request("POST", path, r#"{"tag":"\q"}"#),
+            );
+            assert_eq!(StatusCode::UNPROCESSABLE_ENTITY, status);
+            assert_eq!(
+                json!({"detail":[{"type":"json_invalid","loc":["body",8],
+                    "msg":"JSON decode error","input":{},
+                    "ctx":{"error":"Invalid \\escape"}}]}),
+                value
+            );
+        }
         assert!(game.calls.lock().unwrap().is_empty());
     }
 
