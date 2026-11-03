@@ -71,9 +71,13 @@ mod tests {
         pane: serde_json::Value,
     }
 
+    use crate::flock::loop_env::LoopFuture;
+
     impl PushEnv for PushEligibilityEnv<'_> {
-        fn list_panes(&self) -> Result<Vec<serde_json::Value>, crate::error::DunkError> {
-            Ok(vec![self.pane.clone()])
+        fn list_panes<'a>(
+            &'a self,
+        ) -> LoopFuture<'a, Result<Vec<serde_json::Value>, crate::error::DunkError>> {
+            Box::pin(async move { Ok(vec![self.pane.clone()]) })
         }
 
         fn caller_role(&self, pane_id: &str, pane_info: Option<&serde_json::Value>) -> String {
@@ -96,11 +100,13 @@ mod tests {
             self.adapter.helper_pushenv_lane_agent_alive(pane_id)
         }
 
-        fn unread_mail(&self, _: &str) -> bool {
-            false
+        fn unread_mail<'a>(&'a self, _: &'a str) -> LoopFuture<'a, bool> {
+            Box::pin(async move { false })
         }
 
-        fn announce_task(&self, _: &str, _: &Task, _: f64) {}
+        fn announce_task<'a>(&'a self, _: &'a str, _: &'a Task, _: f64) -> LoopFuture<'a, ()> {
+            Box::pin(async move {})
+        }
     }
 
     #[test]
