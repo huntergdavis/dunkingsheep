@@ -13,7 +13,9 @@ impl InboxRuntimeView<'_> {
             .iter_mut()
             .find(|m| m.status == "queued" && m.is_notice)?;
         message.text = text.to_owned();
-        message.notify_for.push(id.to_owned());
+        if !message.append_notify_for(id) {
+            return None;
+        }
         Some(message.id.clone())
     }
     pub(super) fn send_notice(
@@ -60,7 +62,7 @@ impl InboxRuntimeView<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::flock::{panes::Stores, sends::Message, Flock};
+    use crate::flock::{commands_inbox::InboxEnv, panes::Stores, sends::Message, Flock};
     use crate::inbox_store::Store;
     use crate::server::RequestCtx;
     use crate::server_runtime::{outbox_runtime::OutboxRuntime, RequestRuntimeAdapter};
@@ -106,6 +108,10 @@ mod tests {
         let adapter = RequestRuntimeAdapter::new(&flock, &request, runtime.handle(), &terminal);
         let view =
             InboxRuntimeView::new(adapter, Arc::clone(&flock), Arc::clone(&owner.pool)).unwrap();
+        assert!(view.caller_role("%1").is_err());
+        assert!(view.backend_name().is_ok());
+        assert!(view.tasks_for_pane("%1").is_err());
+        assert!(std::ptr::eq(view.pool(), view.store().read_pool()));
         let normal = Message::new("m1", "%1", "lane", "normal", "test");
         let mut notice = Message::new("m2", "%1", "lane", "old", "test");
         notice.is_notice = true;
