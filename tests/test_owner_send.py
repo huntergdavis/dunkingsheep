@@ -182,10 +182,14 @@ class OwnerIngestWireOracle(unittest.TestCase):
         self.flock.roles.register(owner, role="owner", by=owner)
         self.flock.roles.register(worker, role="worker", by=owner)
         huge = 18446744073709551616
+        from dunk_api import dispatch
 
-        # int() is evaluated by the API wrapper before Flock performs its role gate.
+        # Direct handler calls parse int() before Flock performs its role gate.
         with self.assertRaisesRegex(ValueError, r"^invalid literal for int\(\) with base 10: 'bad'$"):
             h_owner_outbox(self.flock, {"transport": "web", "limit": "bad"}, worker)
+        # The real dispatcher gates the role before invoking that handler.
+        with self.assertRaisesRegex(DunkError, "owner_outbox is not permitted for role worker"):
+            dispatch(self.flock, "owner_outbox", {"transport": "web", "limit": "bad"}, worker)
 
         with self.assertRaisesRegex(
             DunkError,

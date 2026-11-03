@@ -4449,7 +4449,7 @@ fn h_owner_outbox_matches_python() {
             args(json!({"transport": "web", "limit": "bad"})),
             Some("w1:p2"),
         ),
-        Err(DunkError::Refused(message)) if message == "invalid literal for int() with base 10: 'bad'"
+        Err(DunkError::Refused(message)) if message.contains("not permitted for role worker")
     ));
     assert!(matches!(
         dispatch_owner_api(
