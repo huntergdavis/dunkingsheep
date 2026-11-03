@@ -324,7 +324,7 @@ mod tests {
                 crate::clock::now_s(),
             )
             .unwrap();
-        assert_eq!(activity["state"], Value::Null);
+        assert_eq!(activity["state"], "unknown");
         assert!(activity["reason"]
             .as_str()
             .unwrap()
