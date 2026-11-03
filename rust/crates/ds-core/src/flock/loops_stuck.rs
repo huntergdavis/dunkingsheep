@@ -25,6 +25,7 @@ use serde_json::Value;
 
 use crate::error::DunkError;
 use crate::flock::commands_inbox::InboxEnv;
+use crate::flock::loop_env::LoopFuture;
 use crate::flock::Flock;
 use crate::metrics::Event;
 use crate::terminal::screen::{collapse, modal_open, strip_ansi};
@@ -42,20 +43,18 @@ const SIGNATURE_CHARS: usize = 4000;
 /// What the observers reach through `self`.
 pub trait StuckEnv: Send + Sync {
     /// `self.herdr.list_panes()`.
-    fn list_panes(&self) -> Result<Vec<Value>, DunkError>;
+    fn list_panes(&self) -> LoopFuture<'_, Result<Vec<Value>, DunkError>>;
     /// `self.read_screen(pane)`; `None` when unreadable.
-    fn read_screen(&self, pane_id: &str) -> Option<String>;
+    fn read_screen(&self, pane_id: &str) -> LoopFuture<'_, Option<String>>;
     /// `self._pane_generation(pane)`.
-    fn pane_generation(&self, pane_id: &str) -> Option<String>;
-    /// `self._note_stale_panel(pane, ("modal", text), since)`, with the current pane generation
-    /// captured by this same observation.
+    fn pane_generation(&self, pane_id: &str) -> LoopFuture<'_, Option<String>>;
+    /// `self._note_stale_panel(pane, ("modal", text), since)`.
     fn note_stale_panel(
         &self,
         pane_id: &str,
-        generation: Option<&str>,
         signature_text: &str,
         since: f64,
-    );
+    ) -> LoopFuture<'_, ()>;
     /// `self.closed`.
     fn closed(&self) -> bool {
         false
@@ -65,9 +64,7 @@ pub trait StuckEnv: Send + Sync {
         false
     }
     /// `self._stuck_observer_step()`: how many recoveries it acted on. Not ported (needs T33).
-    fn stuck_observer_step(&self) -> usize {
-        0
-    }
+    fn stuck_observer_step(&self) -> LoopFuture<'_, usize>;
 }
 
 /// One pane's observation: `(generation, signature_text, since)`.
@@ -223,12 +220,12 @@ impl DialogObserver {
 
     /// `_dialog_observer_step(now)`: scan live agent dialogs every 30 s even without queued mail.
     /// No keys. Returns how many panes currently show a modal.
-    pub fn step(&mut self, env: &dyn StuckEnv, now: f64) -> usize {
+    pub async fn step(&mut self, env: &dyn StuckEnv, now: f64) -> usize {
         if now < self.scan_at {
             return 0;
         }
         self.scan_at = now + DIALOG_SCAN_PERIOD_S;
-        let panes = match env.list_panes() {
+        let panes = match env.list_panes().await {
             Ok(panes) => panes,
             Err(error) => {
                 eprintln!("dialog observer could not list panes: {error}");
@@ -247,14 +244,14 @@ impl DialogObserver {
             if !pane.get("agent").is_some_and(truthy) {
                 continue;
             }
-            let Some(screen) = env.read_screen(pane_id) else {
+            let Some(screen) = env.read_screen(pane_id).await else {
                 continue;
             };
             if !modal_open(&screen) {
                 continue;
             }
             let signature = tail_chars(&collapse(&strip_ansi(&screen)), SIGNATURE_CHARS);
-            let generation = env.pane_generation(pane_id);
+            let generation = env.pane_generation(pane_id).await;
             let since = match self.observations.get(pane_id) {
                 Some((previous_generation, previous_signature, since))
                     if *previous_generation == generation && *previous_signature == signature =>
@@ -267,7 +264,7 @@ impl DialogObserver {
                 pane_id.to_string(),
                 (generation.clone(), signature.clone(), since),
             );
-            env.note_stale_panel(pane_id, generation.as_deref(), &signature, since);
+            env.note_stale_panel(pane_id, &signature, since).await;
         }
         // Absent/nonmodal/replaced panes start a fresh stability interval.
         self.observations = current;
@@ -308,10 +305,10 @@ pub async fn run_stuck_observer(
             return;
         }
         // Dialog reporting is independent of automatic key recovery.
-        dialogs.step(env.as_ref(), crate::clock::now_s());
+        dialogs.step(env.as_ref(), crate::clock::now_s()).await;
         if !env.stuck_recovery_enabled() {
             continue; // key recovery disabled
         }
-        env.stuck_observer_step();
+        env.stuck_observer_step().await;
     }
 }

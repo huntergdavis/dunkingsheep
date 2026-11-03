@@ -10,6 +10,7 @@ mod inbox_metrics;
 mod inbox_stores;
 mod layout;
 mod status;
+mod stuck;
 mod submit;
 
 use std::collections::BTreeSet;
