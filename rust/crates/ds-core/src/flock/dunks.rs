@@ -474,9 +474,13 @@ pub struct DunkList {
     inner: std::sync::Mutex<ListState>,
 }
 
+/// Shared identity for one in-memory Dunker lifetime. Replacing a list row creates a new handle;
+/// queued fire work can therefore keep updating its original Dunker after removal.
+pub(super) type DunkerHandle = Arc<std::sync::Mutex<Dunker>>;
+
 #[derive(Debug)]
 struct ListState {
-    dunkers: Vec<Dunker>,
+    dunkers: Vec<DunkerHandle>,
     next_id: i64,
 }
 
@@ -502,27 +506,32 @@ impl DunkList {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    fn lock_dunker(handle: &DunkerHandle) -> std::sync::MutexGuard<'_, Dunker> {
+        handle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// Snapshot a dunk for one explicit fire transition, marking its volatile status first.
-    fn begin_fire(&self, dunk_id: &str) -> Result<Dunker, DunkError> {
+    pub(super) fn begin_fire(&self, dunk_id: &str) -> Result<DunkerHandle, DunkError> {
         let mut state = self.state();
         let index = Self::find(&state, dunk_id)?;
-        let dunker = &mut state.dunkers[index];
+        let handle = Arc::clone(&state.dunkers[index]);
+        let mut dunker = Self::lock_dunker(&handle);
         if dunker.target_pane_id.as_deref().is_none_or(str::is_empty) {
             dunker.status = "No target - press c".into();
             return Err(DunkError::Refused(format!("{} has no target", dunker.id)));
         }
         dunker.status = "Sending...".into();
-        Ok(dunker.clone())
+        drop(dunker);
+        drop(state);
+        Ok(handle)
     }
 
     /// Apply the synchronous fire outcome to the dunk if it still exists. Removing a dunk
-    /// concurrently with its send leaves the in-flight transition operating on its snapshot.
-    fn finish_fire(&self, dunk_id: &str, sent_text: Option<&str>, ok: bool, detail: &str) -> bool {
-        let mut state = self.state();
-        let Ok(index) = Self::find(&state, dunk_id) else {
-            return false;
-        };
-        let dunker = &mut state.dunkers[index];
+    /// concurrently with its send leaves the in-flight transition operating on its own handle.
+    fn finish_fire(handle: &DunkerHandle, sent_text: Option<&str>, ok: bool, detail: &str) {
+        let mut dunker = Self::lock_dunker(handle);
         if ok {
             if let Some(text) = sent_text {
                 dunker.send_count += 1;
@@ -538,14 +547,10 @@ impl DunkList {
             dunker.status = "Test failed".into();
             dunker.last_error = Some(detail.to_owned());
         }
-        true
     }
 
-    fn queue_fire(&self, dunk_id: &str) {
-        let mut state = self.state();
-        if let Ok(index) = Self::find(&state, dunk_id) {
-            state.dunkers[index].status = "Queued (typing)".into();
-        }
+    fn queue_fire(handle: &DunkerHandle) {
+        Self::lock_dunker(handle).status = "Queued (typing)".into();
     }
 
     /// `_load` (the dunk part): `next_id` and every row that parses; a corrupt row is
@@ -569,10 +574,14 @@ impl DunkList {
             };
             dunker.status = "Restored".into();
             state.next_id = state.next_id.max(numeric_id(&dunker.id) + 1);
-            state.dunkers.push(dunker);
+            state.dunkers.push(Arc::new(std::sync::Mutex::new(dunker)));
         }
         let now = clock::now_s();
-        for dunker in state.dunkers.iter_mut().filter(|d| d.running) {
+        for handle in &state.dunkers {
+            let mut dunker = Self::lock_dunker(handle);
+            if !dunker.running {
+                continue;
+            }
             if dunker.next_send_at.is_none_or(|at| at == 0.0 || at < now) {
                 dunker.next_send_at = Some(now + RESTORE_GRACE_S);
             }
@@ -584,7 +593,11 @@ impl DunkList {
         let state = self.state();
         (
             state.next_id,
-            state.dunkers.iter().map(Dunker::persisted_pairs).collect(),
+            state
+                .dunkers
+                .iter()
+                .map(|handle| Self::lock_dunker(handle).persisted_pairs())
+                .collect(),
         )
     }
 
@@ -594,7 +607,7 @@ impl DunkList {
         let position = state
             .dunkers
             .iter()
-            .position(|d| d.id == wanted)
+            .position(|handle| Self::lock_dunker(handle).id == wanted)
             .or_else(|| {
                 let numeric = !wanted.is_empty() && wanted.chars().all(|c| c.is_ascii_digit());
                 numeric
@@ -602,7 +615,7 @@ impl DunkList {
                         state
                             .dunkers
                             .iter()
-                            .position(|d| d.id == format!("d{wanted}"))
+                            .position(|handle| Self::lock_dunker(handle).id == format!("d{wanted}"))
                     })
                     .flatten()
             });
@@ -611,11 +624,16 @@ impl DunkList {
 
     pub fn get(&self, dunk_id: &str) -> Result<Map<String, Value>, DunkError> {
         let state = self.state();
-        Ok(state.dunkers[Self::find(&state, dunk_id)?].to_dict())
+        Ok(Self::lock_dunker(&state.dunkers[Self::find(&state, dunk_id)?]).to_dict())
     }
 
     pub fn list(&self) -> Vec<Map<String, Value>> {
-        self.state().dunkers.iter().map(Dunker::to_dict).collect()
+        let state = self.state();
+        state
+            .dunkers
+            .iter()
+            .map(|handle| Self::lock_dunker(handle).to_dict())
+            .collect()
     }
 
     /// Clear stale missing-pane errors for running dunks whose exact target is live.
@@ -629,7 +647,8 @@ impl DunkList {
         }
         let mut state = self.state();
         let mut changed = false;
-        for dunker in &mut state.dunkers {
+        for handle in &state.dunkers {
+            let mut dunker = Self::lock_dunker(handle);
             let target_is_live = dunker
                 .target_pane_id
                 .as_ref()
@@ -702,7 +721,7 @@ impl DunkList {
             }
         }
         let out = dunker.to_dict();
-        state.dunkers.push(dunker);
+        state.dunkers.push(Arc::new(std::sync::Mutex::new(dunker)));
         Ok(out)
     }
 
@@ -734,7 +753,8 @@ impl DunkList {
             .transpose()?;
         let mut state = self.state();
         let index = Self::find(&state, dunk_id)?;
-        let dunker = &mut state.dunkers[index];
+        let handle = Arc::clone(&state.dunkers[index]);
+        let mut dunker = Self::lock_dunker(&handle);
         let mut changed: Vec<&str> = Vec::new();
         if let Some(pane) = pane {
             dunker.set_target(pane);
@@ -792,7 +812,8 @@ impl DunkList {
     pub fn remove(&self, dunk_id: &str) -> Result<Map<String, Value>, DunkError> {
         let mut state = self.state();
         let index = Self::find(&state, dunk_id)?;
-        let mut dunker = state.dunkers.remove(index);
+        let handle = state.dunkers.remove(index);
+        let mut dunker = Self::lock_dunker(&handle);
         dunker.running = false;
         Ok(dunker.to_dict())
     }
@@ -801,8 +822,9 @@ impl DunkList {
     pub fn start(&self, dunk_id: &str) -> Result<Map<String, Value>, DunkError> {
         let mut state = self.state();
         let index = Self::find(&state, dunk_id)?;
-        let dunker = &mut state.dunkers[index];
-        start_fields(dunker)?;
+        let handle = Arc::clone(&state.dunkers[index]);
+        let mut dunker = Self::lock_dunker(&handle);
+        start_fields(&mut dunker)?;
         Ok(dunker.to_dict())
     }
 
@@ -810,8 +832,9 @@ impl DunkList {
     pub fn stop(&self, dunk_id: &str) -> Result<Map<String, Value>, DunkError> {
         let mut state = self.state();
         let index = Self::find(&state, dunk_id)?;
-        let dunker = &mut state.dunkers[index];
-        stop_fields(dunker);
+        let handle = Arc::clone(&state.dunkers[index]);
+        let mut dunker = Self::lock_dunker(&handle);
+        stop_fields(&mut dunker);
         Ok(dunker.to_dict())
     }
 
@@ -819,7 +842,7 @@ impl DunkList {
     pub fn toggle(&self, dunk_id: &str) -> Result<Map<String, Value>, DunkError> {
         let running = {
             let state = self.state();
-            state.dunkers[Self::find(&state, dunk_id)?].running
+            Self::lock_dunker(&state.dunkers[Self::find(&state, dunk_id)?]).running
         };
         if running {
             self.stop(dunk_id)
@@ -836,7 +859,8 @@ impl DunkList {
     pub fn halt_aimed_at(&self, doomed: &[String]) -> Vec<String> {
         let mut state = self.state();
         let mut stopped = Vec::new();
-        for dunker in state.dunkers.iter_mut() {
+        for handle in &state.dunkers {
+            let mut dunker = Self::lock_dunker(handle);
             let aimed = dunker
                 .target_pane_id
                 .as_deref()
@@ -854,10 +878,17 @@ impl DunkList {
     /// `Flock.stop_all`.
     pub fn stop_all(&self) -> Vec<Map<String, Value>> {
         let mut state = self.state();
-        for dunker in state.dunkers.iter_mut().filter(|d| d.running) {
-            stop_fields(dunker);
+        for handle in &state.dunkers {
+            let mut dunker = Self::lock_dunker(handle);
+            if dunker.running {
+                stop_fields(&mut dunker);
+            }
         }
-        state.dunkers.iter().map(Dunker::to_dict).collect()
+        state
+            .dunkers
+            .iter()
+            .map(|handle| Self::lock_dunker(handle).to_dict())
+            .collect()
     }
 }
 
@@ -887,14 +918,15 @@ impl Flock {
         store: &dyn SnapshotStore,
         permission: impl FnMut() -> Option<String>,
     ) -> Result<Value, DunkError> {
-        let dunker = self.dunks.begin_fire(dunk_id)?;
+        let handle = self.dunks.begin_fire(dunk_id)?;
+        let dunker = DunkList::lock_dunker(&handle).clone();
         let pane_id = dunker
             .target_pane_id
             .as_deref()
             .expect("begin_fire requires a target");
         let text = expand_template(&dunker.text, &dunker).trim().to_owned();
         if text.is_empty() {
-            self.dunks.finish_fire(&dunker.id, None, true, "");
+            DunkList::finish_fire(&handle, None, true, "");
             return Ok(json!({
                 "id": dunker.id,
                 "ok": true,
@@ -943,7 +975,7 @@ impl Flock {
                 store,
                 &mut permission,
             )?;
-            self.dunks.queue_fire(&dunker.id);
+            DunkList::queue_fire(&handle);
             let message_id = result
                 .get("message_id")
                 .and_then(Value::as_str)
@@ -963,11 +995,9 @@ impl Flock {
         }
         let ok = sent && send_ok.unwrap_or(false);
 
-        self.dunks
-            .finish_fire(&dunker.id, ok.then_some(text.as_str()), ok, &detail);
+        DunkList::finish_fire(&handle, ok.then_some(text.as_str()), ok, &detail);
         if let Err(error) = store.save(self) {
-            self.dunks
-                .finish_fire(&dunker.id, None, false, &error.to_string());
+            DunkList::finish_fire(&handle, None, false, &error.to_string());
             return Ok(json!({
                 "id": dunker.id,
                 "ok": false,

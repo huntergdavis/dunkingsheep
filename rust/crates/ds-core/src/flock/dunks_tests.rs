@@ -340,6 +340,47 @@ fn manual_fire_with_max_sends_does_not_remove_the_dunk() {
 }
 
 #[test]
+fn captured_dunker_handle_survives_remove_and_same_id_reload() {
+    let (_dir, flock) = flock();
+    load_one_fire_dunk(&flock, "first {id}", None);
+    let captured = flock.dunks.begin_fire("d1").unwrap();
+    flock
+        .dunks
+        .update(
+            "d1",
+            None,
+            &UpdateArgs {
+                text: Some("updated {id}".into()),
+                ..UpdateArgs::default()
+            },
+        )
+        .unwrap();
+
+    flock.dunks.remove("d1").unwrap();
+    flock._load_dunks(&map(json!({
+        "next_id": 2,
+        "dunkers": [{
+            "id": "d1",
+            "target_pane_id": "w1:p2",
+            "target_tab": "Agent",
+            "text": "replacement {id}",
+            "created_at": 100.0
+        }]
+    })));
+    let replacement = flock.dunks.begin_fire("d1").unwrap();
+
+    assert!(!Arc::ptr_eq(&captured, &replacement));
+    assert_eq!(
+        "updated {id}",
+        captured.lock().unwrap_or_else(|e| e.into_inner()).text
+    );
+    assert_eq!(
+        "replacement {id}",
+        replacement.lock().unwrap_or_else(|e| e.into_inner()).text
+    );
+}
+
+#[test]
 fn save_dunks_invokes_the_whole_flock_snapshot_store_with_extracted_fields() {
     let (_dir, flock) = flock();
     flock._load_dunks(&map(json!({
