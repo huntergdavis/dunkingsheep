@@ -2882,6 +2882,22 @@ impl OutboxWorkerPool {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn retired_worker_counts_for_test(&self) -> (usize, usize) {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (
+            state.retired.len(),
+            state
+                .retired
+                .iter()
+                .filter(|(_, handle)| handle.is_finished())
+                .count(),
+        )
+    }
+
     /// Stop and join every worker for this flock. Call this before closing terminal/store
     /// services; after this call, enqueue refuses to start another worker for the same flock.
     pub fn stop_outbox_workers(&self, flock: &Flock) {
@@ -2927,6 +2943,7 @@ impl OutboxWorkerPool {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reap_finished_retired(&mut workers);
         if workers.closed_flocks.contains(&flock_id) {
             return Err(DunkError::Refused("outbox workers are stopping".into()));
         }
@@ -3026,6 +3043,18 @@ impl OutboxWorkerPool {
     }
 }
 
+fn reap_finished_retired(state: &mut OutboxWorkerPoolState) {
+    let mut pending = Vec::with_capacity(state.retired.len());
+    for (flock_id, handle) in state.retired.drain(..) {
+        if handle.is_finished() {
+            let _ = handle.join();
+        } else {
+            pending.push((flock_id, handle));
+        }
+    }
+    state.retired = pending;
+}
+
 impl OutboxWake for OutboxWorkerPool {
     fn ensure_worker(&self, flock: &Arc<Flock>, pane_id: &str) -> Result<(), DunkError> {
         OutboxWorkerPool::ensure_worker(self, flock, pane_id)
@@ -3106,7 +3135,7 @@ pub(crate) fn outbox_step<E: SendPreparationEnv + PaneInfoEnv>(
     }
 
     let interrupted = std::cell::Cell::new(false);
-    let _clear = if head.hold_while_typing {
+    let clear = if head.hold_while_typing {
         clear_to_send(env, pane_id, &|seconds| {
             let was_interrupted = wait(seconds);
             interrupted.set(was_interrupted);
@@ -3120,6 +3149,27 @@ pub(crate) fn outbox_step<E: SendPreparationEnv + PaneInfoEnv>(
     }
     if stopped.load(Ordering::Acquire) {
         return OutboxStep::Stopped;
+    }
+    if !clear {
+        let (kind, reason) = send_blocker(env, pane_id).unwrap_or(("unknown", "unknown".into()));
+        if kind != "dead" {
+            let signature = hold_signature(flock, env, pane_id);
+            return match flock.record_outbox_hold(
+                &head.id,
+                pane_id,
+                now,
+                false,
+                Some(&reason),
+                None,
+                signature,
+            ) {
+                DeliveryOutcome::Held | DeliveryOutcome::Undeliverable => OutboxStep::Held,
+                DeliveryOutcome::Missing => OutboxStep::Empty,
+                DeliveryOutcome::Sent
+                | DeliveryOutcome::Failed
+                | DeliveryOutcome::AlreadyDecided => OutboxStep::Delivered,
+            };
+        }
     }
     {
         let mut outbox = outbox_lock(&flock.outbox);
@@ -3228,6 +3278,106 @@ pub(crate) fn outbox_lock(
 }
 
 impl Flock {
+    fn record_outbox_hold(
+        &self,
+        message_id: &str,
+        pane_id: &str,
+        now: f64,
+        permanent: bool,
+        reason: Option<&str>,
+        refused_detail: Option<&str>,
+        signature: HoldSignature,
+    ) -> DeliveryOutcome {
+        let (message, attempts, terminal) = {
+            let mut outbox = outbox_lock(&self.outbox);
+            let Some(queue) = outbox.get_mut(pane_id) else {
+                return DeliveryOutcome::Missing;
+            };
+            let Some(stored) = queue.iter_mut().find(|row| row.id == message_id) else {
+                return DeliveryOutcome::Missing;
+            };
+            if stored.status != "queued" {
+                return DeliveryOutcome::AlreadyDecided;
+            }
+            stored.holds = stored.holds.saturating_add(1);
+            let attempts = stored.holds.min(HOLD_ATTEMPT_LIMIT);
+            let terminal = permanent && attempts >= HOLD_ATTEMPT_LIMIT;
+            let reason_label = reason.unwrap_or("unknown");
+            if terminal {
+                stored.status = "undeliverable".into();
+                stored.detail = Some(format!(
+                    "undeliverable after {attempts} deferred attempts ({reason_label}); the target cannot accept"
+                ));
+                stored.finished_at = Some(now);
+            } else {
+                let delay = hold_backoff_s(attempts);
+                stored.next_attempt_at = Some(now + delay);
+                stored.hold_signature_kind = Some(signature.0);
+                stored.hold_signature = Some(signature.1);
+                stored.detail = Some(refused_detail.map_or_else(
+                    || {
+                        format!("deferred ({reason_label}); attempt {attempts} of {HOLD_ATTEMPT_LIMIT}, next attempt in {delay:.0}s")
+                    },
+                    str::to_owned,
+                ));
+            }
+            let message = stored.clone();
+            if terminal {
+                queue.retain(|row| row.id != message_id);
+                if queue.is_empty() {
+                    outbox.remove(pane_id);
+                }
+            }
+            (message, attempts, terminal)
+        };
+
+        if let Some(metrics) = self.stores().metrics {
+            metrics.record(&crate::metrics::Event {
+                at: 0.0,
+                kind: "message.held".into(),
+                pane_id: Some(message.pane_id.clone()),
+                mailbox: Some(message.target_label.clone()),
+                sender: None,
+                source: Some(message.source.clone()),
+                outcome: Some("held".into()),
+                reason: reason.map(str::to_owned),
+                duration_ms: None,
+                attempts: Some(attempts),
+                bytes: Some(message.text.len() as i64),
+            });
+        }
+        if terminal {
+            if let Some(metrics) = self.stores().metrics {
+                metrics.record(&crate::metrics::Event {
+                    at: 0.0,
+                    kind: "message.undeliverable".into(),
+                    pane_id: Some(message.pane_id.clone()),
+                    mailbox: Some(message.target_label.clone()),
+                    sender: None,
+                    source: Some(message.source.clone()),
+                    outcome: Some("undeliverable".into()),
+                    reason: reason.map(str::to_owned),
+                    duration_ms: None,
+                    attempts: Some(attempts),
+                    bytes: Some(message.text.len() as i64),
+                });
+            }
+            self.remember(&message);
+            let _ = self.save();
+            self.record_delivery_outcome(
+                &message,
+                false,
+                message.detail.as_deref(),
+                "undeliverable",
+                None,
+            );
+            DeliveryOutcome::Undeliverable
+        } else {
+            let _ = self.save();
+            DeliveryOutcome::Held
+        }
+    }
+
     /// Deliver one queued message, persisting every hold and decided transition.
     /// The outbox lock protects only state selection and mutation; terminal I/O always runs
     /// after it has been released.
@@ -3310,95 +3460,19 @@ impl Flock {
             });
 
         if !sent {
-            let terminal;
-            let attempts;
-            let last_reason = blocker_reason.as_deref().unwrap_or("unknown");
             let hold_signature = hold_signature(self, env, &pane_id);
-            {
-                let mut outbox = outbox_lock(&self.outbox);
-                let Some(queue) = outbox.get_mut(&pane_id) else {
-                    return DeliveryOutcome::Missing;
-                };
-                let Some(stored) = queue.iter_mut().find(|row| row.id == message_id) else {
-                    return DeliveryOutcome::Missing;
-                };
-                stored.holds = stored.holds.saturating_add(1);
-                attempts = stored.holds.min(HOLD_ATTEMPT_LIMIT);
-                terminal = stored.holds >= HOLD_ATTEMPT_LIMIT;
-                if terminal {
-                    stored.status = "undeliverable".into();
-                    stored.detail = Some(format!(
-                        "undeliverable after {attempts} refused attempts (last reason: {}); not retried again",
-                        last_reason
-                    ));
-                    stored.finished_at = Some(clock::now_s());
-                } else {
-                    let delay = hold_backoff_s(attempts);
-                    stored.next_attempt_at = Some(now + delay);
-                    stored.hold_signature_kind = Some(hold_signature.0);
-                    stored.hold_signature = Some(hold_signature.1);
-                    stored.detail = Some(if detail.is_empty() { "held" } else { &detail }.into());
-                }
-                message = stored.clone();
-                let empty = if terminal {
-                    queue.retain(|row| row.id != message_id);
-                    queue.is_empty()
-                } else {
-                    false
-                };
-                if empty {
-                    outbox.remove(&pane_id);
-                }
-            }
-            if let Some(metrics) = self.stores().metrics {
-                metrics.record(&crate::metrics::Event {
-                    at: 0.0,
-                    kind: "message.held".into(),
-                    pane_id: Some(message.pane_id.clone()),
-                    mailbox: Some(message.target_label.clone()),
-                    sender: None,
-                    source: Some(message.source.clone()),
-                    outcome: Some("held".into()),
-                    reason: blocker_reason.clone(),
-                    duration_ms: None,
-                    attempts: Some(attempts),
-                    bytes: Some(message.text.len() as i64),
-                });
-            }
-            if terminal {
-                message.detail = Some(format!(
-                    "undeliverable after {attempts} refused attempts (last reason: {}); not retried again",
-                    last_reason
-                ));
-                if let Some(metrics) = self.stores().metrics {
-                    metrics.record(&crate::metrics::Event {
-                        at: 0.0,
-                        kind: "message.undeliverable".into(),
-                        pane_id: Some(message.pane_id.clone()),
-                        mailbox: Some(message.target_label.clone()),
-                        sender: None,
-                        source: Some(message.source.clone()),
-                        outcome: Some("undeliverable".into()),
-                        reason: blocker_reason.clone(),
-                        duration_ms: None,
-                        attempts: Some(attempts),
-                        bytes: Some(message.text.len() as i64),
-                    });
-                }
-                self.remember(&message);
-                let _ = self.save();
-                self.record_delivery_outcome(
-                    &message,
-                    false,
-                    message.detail.as_deref(),
-                    "undeliverable",
-                    None,
-                );
-                DeliveryOutcome::Undeliverable
-            } else {
-                let _ = self.save();
-                DeliveryOutcome::Held
-            }
+            let reason = blocker_reason.as_deref();
+            let permanent = detail.starts_with("dead session (")
+                || detail == "the lane's recorded process is gone";
+            self.record_outbox_hold(
+                message_id,
+                &pane_id,
+                now,
+                permanent,
+                reason,
+                Some(&detail),
+                hold_signature,
+            )
         } else {
             message.status = if ok.unwrap_or(false) {
                 "sent"
