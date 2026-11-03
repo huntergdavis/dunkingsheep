@@ -190,6 +190,11 @@ class OwnerIngestWireOracle(unittest.TestCase):
         # The real dispatcher gates the role before invoking that handler.
         with self.assertRaisesRegex(DunkError, "owner_outbox is not permitted for role worker"):
             dispatch(self.flock, "owner_outbox", {"transport": "web", "limit": "bad"}, worker)
+        missing_transport = r"^owner_outbox: missing required argument\(s\): transport$"
+        with self.assertRaisesRegex(DunkError, missing_transport):
+            dispatch(self.flock, "owner_outbox", {"transport": None, "limit": huge}, owner)
+        with self.assertRaisesRegex(DunkError, missing_transport):
+            dispatch(self.flock, "owner_outbox", {"transport": None, "limit": "bad"}, owner)
 
         with self.assertRaisesRegex(
             DunkError,

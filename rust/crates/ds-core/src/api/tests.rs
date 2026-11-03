@@ -4427,7 +4427,18 @@ fn h_owner_outbox_matches_python() {
             args(json!({"transport": null, "limit": 18446744073709551616_u128})),
             Some("w1:p1"),
         ),
-        Err(DunkError::Refused(message)) if message == "an outbox needs a transport"
+        Err(DunkError::Refused(message)) if message == "owner_outbox: missing required argument(s): transport"
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_outbox",
+            args(json!({"transport": null, "limit": "bad"})),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "owner_outbox: missing required argument(s): transport"
     ));
     assert!(matches!(
         dispatch_owner_api(
@@ -4460,7 +4471,7 @@ fn h_owner_outbox_matches_python() {
             args(json!({"transport": null, "limit": 20})),
             Some("w1:p1"),
         ),
-        Err(DunkError::Refused(message)) if message == "an outbox needs a transport"
+        Err(DunkError::Refused(message)) if message == "owner_outbox: missing required argument(s): transport"
     ));
     assert!(matches!(
         dispatch_owner_api(

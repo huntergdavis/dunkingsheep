@@ -554,10 +554,6 @@ impl Dispatcher {
             .copied()
             .filter(|key| match args.get(*key) {
                 None => true,
-                // Python h_owner_outbox indexes the required key, then passes an
-                // explicit None through to validate_transport. Preserve that wire
-                // distinction without changing null handling for other commands.
-                Some(Value::Null) if name == "owner_outbox" && *key == "transport" => false,
                 Some(Value::Null) => true,
                 Some(Value::String(s)) => s.is_empty(),
                 _ => false,
