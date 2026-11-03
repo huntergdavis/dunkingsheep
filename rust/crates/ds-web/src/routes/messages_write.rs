@@ -1099,7 +1099,7 @@ mod tests {
         .unwrap();
         let (status, body) = response(accepted);
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["id"], huge);
+        assert_eq!(body["id"].to_string(), huge);
         assert_eq!(*backend.calls.lock().unwrap(), vec![format!("send:{huge}")]);
     }
 
