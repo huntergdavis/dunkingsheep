@@ -1009,8 +1009,6 @@ where
 impl<S, T, G, X> ReviewSync<S, T, G, X>
 where
     S: ReviewTaskActor,
-    T: ReviewTokenSource,
-    X: GitHubTransport,
 {
     /// Join all note text on the review task in event order; a missing note store is empty.
     pub async fn _verdict_text(&self, task: &Value) -> String {
@@ -1028,7 +1026,14 @@ where
             })
             .unwrap_or_default()
     }
+}
 
+impl<S, T, G, X> ReviewSync<S, T, G, X>
+where
+    S: ReviewTaskActor,
+    T: ReviewTokenSource,
+    X: GitHubTransport,
+{
     /// Open and queue the accounting PR for an accepted body, refusing any row whose
     /// evidence is ambiguous, incomplete, already credited, or not yet on the base branch.
     pub async fn account(
