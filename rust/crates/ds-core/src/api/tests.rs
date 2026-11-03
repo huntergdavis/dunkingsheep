@@ -4003,6 +4003,7 @@ impl SendApiEnv {
                 json!({"pane_id":"w1:p1", "agent":"owner", "tab_label":"owner"}),
                 json!({"pane_id":"w2:p2", "agent":"worker", "tab_label":"worker"}),
                 json!({"pane_id":"w3:p3", "agent":"reviewer", "tab_label":"reviewer"}),
+                json!({"pane_id":"w4:p4", "agent":"planner", "tab_label":"planner"}),
             ],
         }
     }
@@ -4048,6 +4049,7 @@ fn send_api_fixture(tag: &str) -> (tempfile::TempDir, Flock, SendApiEnv, Dispatc
         ("w1:p1", "owner"),
         ("w2:p2", "worker"),
         ("w3:p3", "reviewer"),
+        ("w4:p4", "planner"),
     ] {
         roles
             .register(pane, role, None, None, None, None, None, None)
@@ -4176,6 +4178,24 @@ fn worker_and_reviewer_send_gates_allow_self_and_refuse_other_panes() {
 }
 
 #[test]
+fn dispatcher_role_gate_precedes_retired_token_handler_gate() {
+    let (_dir, flock, env, dispatcher) = send_api_fixture("send-role-order");
+    let error = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w4:p4"),
+        "send_text",
+        args(json!({"target":"worker", "text":"hello", "desk_token":"old"})),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("send_text is not permitted for role planner"));
+    assert!(!error.contains("desk_token is retired"));
+    assert!(env.send.calls.lock().unwrap().is_empty());
+}
+
+#[test]
 fn send_rejects_retired_desk_token_invalid_wait_and_propagates_operation_error() {
     let (_dir, flock, env, dispatcher) = send_api_fixture("send-errors");
     let retired = dispatch_as_flock_role(
@@ -4216,17 +4236,24 @@ fn send_rejects_retired_desk_token_invalid_wait_and_propagates_operation_error()
     assert!(env.send.calls.lock().unwrap().is_empty());
 
     *env.send.failure.lock().unwrap() = Some("send backend failed".into());
-    let operation_error = dispatch_as_flock_role(
-        &dispatcher,
-        &flock,
-        &env,
-        Some("w1:p1"),
-        "flush_box",
-        args(json!({"target":"worker"})),
-    )
-    .unwrap_err()
-    .to_string();
-    assert!(operation_error.contains("send backend failed"));
+    for (command, call) in [
+        ("send_text", json!({"target":"worker", "text":"hello"})),
+        ("send_keys", json!({"target":"worker", "keys":"Enter"})),
+        ("flush_box", json!({"target":"worker"})),
+    ] {
+        let operation_error = dispatch_as_flock_role(
+            &dispatcher,
+            &flock,
+            &env,
+            Some("w1:p1"),
+            command,
+            args(call),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(operation_error.contains("send backend failed"));
+    }
+    assert_eq!(env.send.calls.lock().unwrap().len(), 3);
 }
 
 #[test]
