@@ -146,6 +146,244 @@ impl CommandEnv for GithubTokenApiEnv {
     }
 }
 
+struct ReviewApiTransport {
+    requests: Mutex<Vec<crate::github::GitHubRequest>>,
+    responses: Mutex<std::collections::VecDeque<crate::github::GitHubResponse>>,
+}
+
+impl ReviewApiTransport {
+    fn with_json_responses(responses: impl IntoIterator<Item = Value>) -> Self {
+        Self {
+            requests: Mutex::new(Vec::new()),
+            responses: Mutex::new(
+                responses
+                    .into_iter()
+                    .map(|value| crate::github::GitHubResponse {
+                        status: 200,
+                        reason: "OK".into(),
+                        body: serde_json::to_vec(&value).unwrap(),
+                    })
+                    .collect(),
+            ),
+        }
+    }
+}
+
+impl crate::github::GitHubTransport for ReviewApiTransport {
+    fn send<'a>(
+        &'a self,
+        request: crate::github::GitHubRequest,
+    ) -> crate::github::PinBoxFuture<'a, Result<crate::github::GitHubResponse, String>> {
+        Box::pin(async move {
+            self.requests.lock().unwrap().push(request);
+            self.responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .ok_or_else(|| "unexpected review API request".into())
+        })
+    }
+}
+
+struct ReviewApiEnv {
+    terminal: Mutex<Box<dyn Terminal>>,
+    now_s: f64,
+    tokens: crate::github::Tokens,
+    transport: ReviewApiTransport,
+}
+
+impl PaneInfoEnv for ReviewApiEnv {
+    fn list_panes_grouped(&self) -> Vec<Value> {
+        Vec::new()
+    }
+
+    fn get_pane(&self, _: &str) -> Option<Value> {
+        None
+    }
+}
+
+impl CommandEnv for ReviewApiEnv {
+    fn terminal(&self) -> &Mutex<Box<dyn Terminal>> {
+        &self.terminal
+    }
+
+    fn now_s(&self) -> f64 {
+        self.now_s
+    }
+
+    fn github_tokens(&self) -> Result<&crate::github::Tokens, DunkError> {
+        Ok(&self.tokens)
+    }
+
+    fn review_transport(&self) -> Result<&dyn crate::github::GitHubTransport, DunkError> {
+        Ok(&self.transport)
+    }
+}
+
+fn review_api_env(dir: &Path, responses: impl IntoIterator<Item = Value>) -> ReviewApiEnv {
+    let config_dir = dir.join("github-config");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(config_dir.join("github-repos.json"), r#"{"repos":["o/r"]}"#).unwrap();
+    let cache_path = dir.join("github-tokens.json");
+    std::fs::write(
+        &cache_path,
+        serde_json::to_vec(&json!({
+            "tokens": {
+                "reviewer": {
+                    "token": "fake-reviewer-token",
+                    "expires_at": 4_102_444_800.0,
+                    "slug": "reviewer-app"
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    ReviewApiEnv {
+        terminal: Mutex::new(Box::new(FakeTerminal::default())),
+        now_s: 1_800_000_000.0,
+        tokens: crate::github::Tokens::new(
+            Some(cache_path),
+            config_dir,
+            Box::new(NoNetworkGithubTransport),
+            Some("https://github.invalid".into()),
+        ),
+        transport: ReviewApiTransport::with_json_responses(responses),
+    }
+}
+
+fn review_dispatch_context<'a>(
+    flock: &'a Flock,
+    request: &'a RequestCtx,
+    env: &'a dyn CommandEnv,
+    runtime: &'a tokio::runtime::Runtime,
+) -> HandlerContext<'a> {
+    HandlerContext {
+        flock,
+        request,
+        env,
+        runtime: runtime.handle(),
+    }
+}
+
+#[test]
+fn review_sync_handler_dispatches_to_the_canonical_engine_with_python_dry_run_default() {
+    let (dir, flock) = staffed_flock("review-sync-api");
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let tasks = Arc::new(
+        runtime
+            .block_on(crate::tasks::Tasks::open(dir.path().join("tasks.db")))
+            .unwrap(),
+    );
+    flock.attach_stores(Stores {
+        tasks: Some(tasks),
+        ..Default::default()
+    });
+    let env = review_api_env(dir.path(), [json!([])]);
+    {
+        let request = RequestCtx::default();
+        let context = review_dispatch_context(&flock, &request, &env, &runtime);
+        let mut dispatcher = Dispatcher::new();
+        dispatcher.register_review_sync_list();
+
+        let report = dispatcher
+            .dispatch(&context, &FixedRole("owner", true), "review_sync", None)
+            .unwrap();
+
+        assert_eq!(json!([{"repo":"o/r", "open":0}]), report["repos"]);
+        assert!(report["errors"].as_array().unwrap().is_empty());
+        let requests = env.transport.requests.lock().unwrap();
+        assert_eq!(1, requests.len());
+        assert!(requests[0].url.starts_with("https://github.invalid/"));
+        assert!(requests[0]
+            .url
+            .ends_with("/repos/o/r/pulls?state=open&per_page=100&page=1"));
+    }
+    drop(flock);
+    drop(runtime);
+}
+
+#[test]
+fn review_list_handler_dispatches_to_the_full_tasks_snapshot() {
+    let (dir, flock) = flock();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let tasks = Arc::new(
+        runtime
+            .block_on(crate::tasks::Tasks::open(dir.path().join("tasks.db")))
+            .unwrap(),
+    );
+    flock.attach_stores(Stores {
+        tasks: Some(tasks.clone()),
+        ..Default::default()
+    });
+    runtime
+        .block_on(tasks.add_with(
+            "global",
+            "review title",
+            "",
+            crate::tasks::AddOptions {
+                kind: Some("review".into()),
+                repo: Some("o/r".into()),
+                pr: Some("7".into()),
+                head: Some("123456789abcde".into()),
+                assignees: vec!["%9".into()],
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+    {
+        let env = TestEnv::default();
+        let request = RequestCtx {
+            self_pane_id: Some("%2".into()),
+            ..RequestCtx::default()
+        };
+        let context = review_dispatch_context(&flock, &request, &env, &runtime);
+        let mut dispatcher = Dispatcher::new();
+        dispatcher.register_review_sync_list();
+
+        let result = dispatcher
+            .dispatch(&context, &FixedRole("reviewer", true), "review_list", None)
+            .unwrap();
+
+        assert_eq!(1, result["count"]);
+        assert_eq!("123456789abc", result["reviews"][0]["head"]);
+        assert_eq!(json!(["%9"]), result["reviews"][0]["reviewer"]);
+        assert_eq!("review title", result["reviews"][0]["title"]);
+    }
+    drop(tasks);
+    drop(flock);
+    drop(runtime);
+}
+
+#[test]
+fn review_sync_dispatch_preserves_the_owner_gate_before_service_access() {
+    let (dir, flock) = staffed_flock("review-sync-denied");
+    let env = review_api_env(dir.path(), []);
+    let request = RequestCtx::default();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let context = review_dispatch_context(&flock, &request, &env, &runtime);
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_review_sync_list();
+
+    let error = dispatcher
+        .dispatch(&context, &FixedRole("worker", false), "review_sync", None)
+        .unwrap_err()
+        .to_string();
+
+    assert_eq!("review_sync needs a superuser", error);
+    assert!(env.transport.requests.lock().unwrap().is_empty());
+}
+
 #[derive(Default)]
 struct PoolradApiStore {
     tasks: Mutex<Vec<Value>>,

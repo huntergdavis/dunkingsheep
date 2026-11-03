@@ -81,6 +81,14 @@ pub trait CommandEnv: PaneInfoEnv {
         ))
     }
 
+    /// HTTP transport for the canonical review synchronization service. The default is the
+    /// shared real reqwest client; tests can inject a deterministic fake.
+    fn review_transport(&self) -> Result<&dyn crate::github::GitHubTransport, DunkError> {
+        static TRANSPORT: std::sync::OnceLock<crate::github::ReqwestTransport> =
+            std::sync::OnceLock::new();
+        Ok(TRANSPORT.get_or_init(crate::github::ReqwestTransport::default))
+    }
+
     /// Status sources for the `status` handler. Existing fixtures may stage this adapter, but
     /// production dispatch must supply the real daemon snapshot.
     fn status_env(&self) -> Result<&dyn crate::flock::status::StatusEnv, DunkError> {
@@ -525,6 +533,12 @@ impl Dispatcher {
     /// Register only the T39 GitHub App token handler.
     pub fn register_gh_token(&mut self) {
         self.register("gh_token", h_gh_token);
+    }
+
+    /// Register only the T39 review synchronization and list handlers.
+    pub fn register_review_sync_list(&mut self) {
+        self.register("review_sync", h_review_sync);
+        self.register("review_list", h_review_list);
     }
 
     /// Register only the T39 Poolrad sync and progress handlers.
@@ -1790,6 +1804,32 @@ fn poolrad_dry_run(value: Option<&Value>) -> bool {
         Some(Value::Number(value)) => python_bool_string(&value.to_string()),
         Some(Value::Array(_) | Value::Object(_)) => false,
     }
+}
+
+/// `dunk_api.h_review` sync action through the canonical ReviewSync engine.
+pub fn h_review_sync(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let tokens = context.env.github_tokens()?;
+    let transport = context.env.review_transport()?;
+    let policy = crate::review::ConfiguredReviewPolicy {
+        config_dir: tokens.config_dir().to_path_buf(),
+    };
+    let result = context.block_on(context.flock.review_sync(
+        tokens,
+        policy,
+        tokens.api_root(),
+        crate::flock::commands_review::BorrowedGitHubTransport(transport),
+        python_bool_arg(&args, "dry_run", false),
+    ))?;
+    result.map_err(DunkError::Refused)
+}
+
+/// `dunk_api.h_review` list action through the attached Tasks actor.
+pub fn h_review_list(context: &HandlerContext<'_>, _: Args) -> Result<Value, DunkError> {
+    context.block_on(
+        context
+            .flock
+            .review_list(context.self_pane_id(), context.env.now_s()),
+    )?
 }
 
 fn python_bool_string(value: &str) -> bool {
