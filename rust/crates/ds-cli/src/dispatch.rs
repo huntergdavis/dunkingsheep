@@ -23,6 +23,142 @@ use ds_core::context::digest::{digest_both, select_stores, DEFAULT_CAP};
 use ds_core::context::ledger::Ledger;
 use ds_core::context::store::Store;
 
+// The generated registry sorts its rows by name for reproducible generation. The Python CLI's
+// `commands` and `mcp-map` printers use declaration order, so keep that presentation order here.
+const PYTHON_COMMAND_ORDER: &[&str] = &[
+    "owner_push",
+    "owner_poll",
+    "owner_take",
+    "owner_stats",
+    "owner_receipts",
+    "state_capture",
+    "state_latest",
+    "roster",
+    "message_state",
+    "reply_stats",
+    "project_summary",
+    "lanes",
+    "lane_set",
+    "retire_pane",
+    "dispatch",
+    "clear_box",
+    "delivery",
+    "help",
+    "status",
+    "turn_start",
+    "turn_end",
+    "poll",
+    "list_dunks",
+    "get_dunk",
+    "add_dunk",
+    "update_dunk",
+    "remove_dunk",
+    "start_dunk",
+    "stop_dunk",
+    "toggle_dunk",
+    "stop_all",
+    "fire_dunk",
+    "send_text",
+    "send_keys",
+    "flush_box",
+    "list_messages",
+    "get_message",
+    "cancel_message",
+    "report_run",
+    "report_list",
+    "owner_conversation",
+    "owner_reply",
+    "owner_ingest",
+    "owner_outbox",
+    "owner_delivered",
+    "inbox_send",
+    "inbox_count",
+    "pm_digest",
+    "pm_routing",
+    "inbox_list",
+    "inbox_read",
+    "inbox_status",
+    "inbox_ack",
+    "inbox_recover",
+    "inbox_archive",
+    "inbox_cancel",
+    "inbox_delete",
+    "inbox_stats",
+    "inbox_fetch",
+    "allocation",
+    "task_add",
+    "task_list",
+    "task_read",
+    "task_update",
+    "task_assign",
+    "task_complete",
+    "task_block",
+    "task_unblock",
+    "task_cancel",
+    "task_delete",
+    "task_note",
+    "task_next",
+    "task_heartbeat",
+    "task_release",
+    "task_follow",
+    "task_unfollow",
+    "task_followers",
+    "task_stats",
+    "task_metrics",
+    "task_reap",
+    "memory_recall",
+    "memory_context",
+    "memory_search",
+    "memory_stats",
+    "memory_status",
+    "memory_backfill",
+    "memory_ingest",
+    "health",
+    "doctor",
+    "recover",
+    "metrics",
+    "list_panes",
+    "read_pane",
+    "delivery_capability",
+    "list_workspaces",
+    "create_workspace",
+    "create_tab",
+    "split_pane",
+    "start_agent",
+    "respawn_pane",
+    "rename",
+    "focus",
+    "close",
+    "herdr",
+    "herdr_help",
+    "shutdown",
+    "gh_token",
+    "review_sync",
+    "review_list",
+    "context_add",
+    "context_promote",
+    "context_supersede",
+    "context_retire",
+    "poolrad_sync",
+    "poolrad_progress",
+    "whoami",
+    "lane_register",
+    "lane_unregister",
+    "token_issue",
+    "token_revoke",
+    "superuser_status",
+    "superuser_add",
+    "superuser_remove",
+    "superuser_recover",
+];
+
+fn commands_in_python_order() -> Vec<&'static ds_core::registry::Command> {
+    PYTHON_COMMAND_ORDER
+        .iter()
+        .map(|name| ds_core::registry::command(name).expect("Python CLI command is registered"))
+        .collect()
+}
+
 fn text<'a>(ns: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
     ns.get(key).and_then(Value::as_str)
 }
@@ -140,10 +276,10 @@ fn guide(ns: &Map<String, Value>) -> Outcome {
 }
 
 fn commands(json: bool) -> Outcome {
-    use ds_core::registry::COMMANDS;
+    let commands = commands_in_python_order();
 
     if json {
-        let rows = COMMANDS
+        let rows = commands
             .iter()
             .map(|command| {
                 serde_json::json!({
@@ -163,7 +299,7 @@ fn commands(json: bool) -> Outcome {
     }
 
     let mut output = String::new();
-    for command in COMMANDS {
+    for command in commands {
         let params = command
             .params
             .iter()
@@ -235,11 +371,13 @@ fn python_json_len(value: &Value) -> usize {
 }
 
 fn mcp_map(ns: &Map<String, Value>) -> Outcome {
-    use ds_core::registry::{self, COMMANDS, GROUPS};
+    use ds_core::registry::{self, GROUPS};
 
     let markdown = matches!(ns.get("markdown"), Some(Value::Bool(true)));
-    let flat = COMMANDS
+    let commands = commands_in_python_order();
+    let flat = commands
         .iter()
+        .copied()
         .filter(|command| command.mcp)
         .collect::<Vec<_>>();
     let schema_rows = |commands: &[&ds_core::registry::Command], include_description: bool| {
@@ -377,7 +515,7 @@ fn mcp_map(ns: &Map<String, Value>) -> Outcome {
                 .unwrap_or(("None", "None"));
             output.push(format!("{} -> {group}(action={action})", command.name));
         }
-        for command in COMMANDS.iter().filter(|command| !command.mcp) {
+        for command in commands.iter().filter(|command| !command.mcp) {
             output.push(format!("{} -> (CLI/socket only)", command.name));
         }
     }
