@@ -218,7 +218,11 @@ class PureTests(unittest.TestCase):
             self.assertEqual("pending", dunk_github.review_status("o/r", "a" * 40, "token"))
         with patch.object(dunk_github, "_request", return_value=(200, {"statuses": []})):
             self.assertIsNone(dunk_github.review_status("o/r", "a" * 40, "token"))
-        for bad in (None, {}, {"statuses": [None]}, {"statuses": [
+        for bad in (None, {}, {"statuses": [None]}, {"statuses": [{}]},
+                    {"statuses": [{"context": dunk_github.REVIEW_CONTEXT, "state": "success"}, {}]},
+                    {"statuses": [{"context": dunk_github.REVIEW_CONTEXT, "state": "success"},
+                                  {"context": dunk_github.REVIEW_CONTEXT, "state": "pending"}]},
+                    {"statuses": [{"context": "other"}]}, {"statuses": [
                 {"context": dunk_github.REVIEW_CONTEXT, "state": "unknown"}]}):
             with patch.object(dunk_github, "_request", return_value=(200, bad)):
                 with self.assertRaises(dunk_github.GitHubError):
@@ -404,6 +408,16 @@ class TimerTests(unittest.TestCase):
         self.github.fail_status = True
         report = self.sync.run()
         self.assertTrue(report["errors"])
+        self.assertEqual([], getattr(self.github, "merged", []))
+
+    def test_malformed_status_object_cannot_publish_success_or_merge(self):
+        self._review("accept")
+        with patch.object(self.github, "review_status", side_effect=lambda repo, sha, token:
+                          dunk_github.review_status(repo, sha, token)):
+            with patch.object(dunk_github, "_request", return_value=(200, {"statuses": [{}]})):
+                report = self.sync.run()
+        self.assertTrue(report["errors"])
+        self.assertEqual([], self.github.statuses)
         self.assertEqual([], getattr(self.github, "merged", []))
 
     def test_terminal_status_success_does_not_republish_every_tick(self):

@@ -299,15 +299,19 @@ def review_status(repo, sha, token):
         raise GitHubError(f"GitHub commit status: invalid JSON: {error}") from None
     if not isinstance(combined, dict) or not isinstance(combined.get("statuses"), list):
         raise GitHubError("GitHub commit status: expected a statuses list")
+    review = None
     for status in combined["statuses"]:
         if not isinstance(status, dict):
             raise GitHubError("GitHub commit status: expected a status object")
+        if not isinstance(status.get("context"), str) or not status["context"]:
+            raise GitHubError("GitHub commit status: missing status context")
+        if status.get("state") not in ("pending", "success", "failure", "error"):
+            raise GitHubError("GitHub commit status: invalid status state")
         if status.get("context") == REVIEW_CONTEXT:
-            state = status.get("state")
-            if state not in ("pending", "success", "failure", "error"):
-                raise GitHubError("GitHub commit status: invalid review state")
-            return state
-    return None
+            if review is not None:
+                raise GitHubError("GitHub commit status: duplicate review context")
+            review = status["state"]
+    return review
 
 
 def merge_pull(repo, number, token, sha=None):
