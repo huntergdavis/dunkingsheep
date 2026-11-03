@@ -11,10 +11,26 @@ use std::sync::{Arc, Mutex};
 use serde_json::Value;
 use tokio::sync::OwnedMutexGuard;
 
+use super::next_job::Handoff;
 use crate::config::Env;
+use crate::error::DunkError;
 use crate::flock::loop_env::{configured_loop_terminal_factory, LoopTerminalFactory};
 use crate::flock::Flock;
 use crate::server_runtime::LoopRuntimeAdapter;
+
+/// A paused dispatch must remain distinguishable from a materialisation failure.
+#[allow(dead_code)] // The next-job transition consumes these variants in a dependent leaf.
+#[derive(Debug)]
+pub(crate) enum MaterialiseError {
+    DispatchPaused(String),
+    Other(DunkError),
+}
+
+impl From<DunkError> for MaterialiseError {
+    fn from(error: DunkError) -> Self {
+        Self::Other(error)
+    }
+}
 
 pub struct NextJobs {
     // Later runtime leaves use the shared Flock for dispatch, tasks, and inbox work.
@@ -29,6 +45,74 @@ impl NextJobs {
             flock,
             locks: Mutex::new(HashMap::new()),
         }
+    }
+
+    #[allow(dead_code)] // Used by the dependent next-job transition leaves.
+    pub(crate) async fn materialise(
+        &self,
+        handoff: &Handoff,
+    ) -> Result<crate::inbox::Status, MaterialiseError> {
+        let env = process_gate_env()
+            .map_err(|_| MaterialiseError::DispatchPaused("readiness_unknown".into()))?;
+        self.materialise_with(handoff, env, None).await
+    }
+
+    async fn materialise_with(
+        &self,
+        handoff: &Handoff,
+        env: Env,
+        factory: Option<LoopTerminalFactory>,
+    ) -> Result<crate::inbox::Status, MaterialiseError> {
+        let field = |name: &str| {
+            handoff
+                .get(name)
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| DunkError::Refused(format!("missing next-job {name}")))
+        };
+        let pane = field("pane_id")?;
+        if let Some(reason) = self.gate_with(&pane, None, env, factory.clone()).await {
+            return Err(MaterialiseError::DispatchPaused(reason));
+        }
+        let factory = match factory {
+            Some(factory) => factory,
+            None => configured_loop_terminal_factory()?,
+        };
+        let adapter = LoopRuntimeAdapter::new(Arc::clone(&self.flock), factory);
+        let requested = pane.clone();
+        let (mailbox, _, actual_pane) = adapter
+            .with_loop_terminal(move |flock, terminal| {
+                flock.resolve_mailbox(terminal, &requested, None, true, "")
+            })
+            .await
+            .map_err(|error| DunkError::Refused(format!("terminal worker failed: {error}")))??;
+        if actual_pane.as_deref() != Some(pane.as_str()) {
+            return Err(DunkError::Refused("next-job pane changed".into()).into());
+        }
+        let task_id = field("task_id")?;
+        let message_id = field("message_id")?;
+        let stores = self.flock.stores();
+        let tasks = stores
+            .tasks
+            .ok_or_else(|| DunkError::Refused("task store unavailable".into()))?;
+        let task = tasks.get(&task_id).await?;
+        let source = handoff
+            .get("from_task")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .or_else(|| handoff.get("trigger").and_then(Value::as_str))
+            .unwrap_or("None");
+        let body = format!("TASK {} [{}] {}\n\n{}\n\nAlready atomically claimed for {}; start this job now.\nheartbeat: dunkingsheep task heartbeat {}\ncomplete: dunkingsheep task complete {}\nhandoff: {} from {}", task.id, task.priority, task.title, task.body, pane, task.id, task.id, message_id, source);
+        let subject = format!("TASK {}: {}", task.id, task.title);
+        let inbox = stores
+            .inbox
+            .ok_or_else(|| DunkError::Refused("inbox store unavailable".into()))?;
+        tokio::task::spawn_blocking(move || {
+            inbox.ensure_next_job(&message_id, &mailbox, &pane, &body, &subject)
+        })
+        .await
+        .map_err(|error| DunkError::Refused(format!("inbox worker failed: {error}")))?
+        .map_err(Into::into)
     }
 
     fn pane_lock(&self, pane: &str) -> Arc<tokio::sync::Mutex<()>> {
@@ -284,6 +368,155 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::path::PathBuf;
+
+    async fn materialise_fixture() -> (
+        tempfile::TempDir,
+        NextJobs,
+        Arc<crate::tasks::Tasks>,
+        Arc<crate::inbox_store::Store>,
+    ) {
+        let (dir, jobs, tasks) = configured_jobs().await;
+        let db = dir.path().join("inbox.db");
+        let blobs = dir.path().join("blobs");
+        let inbox = Arc::new(
+            tokio::task::spawn_blocking(move || crate::inbox_store::Store::open(db, blobs))
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+        jobs.flock.attach_stores(crate::flock::panes::Stores {
+            tasks: Some(Arc::clone(&tasks)),
+            inbox: Some(Arc::clone(&inbox)),
+            ..Default::default()
+        });
+        (dir, jobs, tasks, inbox)
+    }
+
+    fn fake_factory() -> LoopTerminalFactory {
+        Arc::new(|| Box::new(crate::terminal::fakes::FakeTerminal::new()))
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn next_jobs_materialise_is_idempotent_and_preserves_body() {
+        let (dir, jobs, tasks, inbox) = materialise_fixture().await;
+        let task = tasks
+            .add("global", "Fix the gate", "First line\nSecond line")
+            .await
+            .unwrap();
+        let h = json!({"pane_id":"w1:p1", "task_id":task.id, "message_id":"nj-test", "from_task":"t-old", "trigger":"completion"}).as_object().unwrap().clone();
+        let env = || test_env(dir.path(), "1", "w1:p1");
+        let first = jobs
+            .materialise_with(&h, env(), Some(fake_factory()))
+            .await
+            .unwrap();
+        assert_eq!(first.message_id, "nj-test");
+        assert_eq!(first.pane_id.as_deref(), Some("w1:p1"));
+        let receipt_store = Arc::clone(&inbox);
+        tokio::task::spawn_blocking(move || {
+            receipt_store.record_notify(
+                "nj-test",
+                "sent",
+                Some("accepted"),
+                Some("receipt-1"),
+                Some(1),
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        let second = jobs
+            .materialise_with(&h, env(), Some(fake_factory()))
+            .await
+            .unwrap();
+        assert_eq!(first.created_at, second.created_at);
+        assert_eq!(first.mailbox, second.mailbox);
+        assert_eq!(second.notify_state.as_deref(), Some("sent"));
+        assert_eq!(second.notify_transport_id.as_deref(), Some("receipt-1"));
+        let pool = crate::db::ReadPool::open(dir.path().join("inbox.db"), 1).unwrap();
+        let (summary, body) = crate::inbox::get(&pool, "nj-test", crate::clock::now_s()).unwrap();
+        assert_eq!(
+            summary.subject.as_deref(),
+            Some(format!("TASK {}: Fix the gate", task.id).as_str())
+        );
+        assert_eq!(body, format!("TASK {} [low] Fix the gate\n\nFirst line\nSecond line\n\nAlready atomically claimed for w1:p1; start this job now.\nheartbeat: dunkingsheep task heartbeat {}\ncomplete: dunkingsheep task complete {}\nhandoff: nj-test from t-old", task.id, task.id, task.id));
+        let count: i64 = rusqlite::Connection::open(dir.path().join("inbox.db"))
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+        tokio::task::spawn_blocking(move || drop((jobs, inbox)))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn next_jobs_materialise_refuses_changed_or_unavailable_pane() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let (dir, jobs, tasks, inbox) = materialise_fixture().await;
+        let task = tasks.add("global", "Example", "body").await.unwrap();
+        let h = json!({"pane_id":"w1:p1", "task_id":task.id, "message_id":"nj-unavailable", "trigger":"restart"}).as_object().unwrap().clone();
+        let disabled = jobs
+            .materialise_with(
+                &h,
+                test_env(dir.path(), "off", "w1:p1"),
+                Some(fake_factory()),
+            )
+            .await;
+        assert!(
+            matches!(disabled, Err(MaterialiseError::DispatchPaused(ref reason)) if reason == "disabled")
+        );
+        let missing_task = json!({"pane_id":"w1:p1", "task_id":"t999999999", "message_id":"nj-missing", "trigger":"restart"}).as_object().unwrap().clone();
+        let result = jobs
+            .materialise_with(
+                &missing_task,
+                test_env(dir.path(), "1", "w1:p1"),
+                Some(fake_factory()),
+            )
+            .await;
+        assert!(
+            matches!(result, Err(MaterialiseError::Other(DunkError::Refused(ref reason))) if reason == "no task with id \"t999999999\"")
+        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&calls);
+        let unavailable: LoopTerminalFactory = Arc::new(move || {
+            let mut fake = crate::terminal::fakes::FakeTerminal::new();
+            if counter.fetch_add(1, Ordering::SeqCst) > 0 {
+                fake.panes.clear();
+            }
+            Box::new(fake)
+        });
+        let result = jobs
+            .materialise_with(&h, test_env(dir.path(), "1", "w1:p1"), Some(unavailable))
+            .await;
+        assert!(matches!(result, Err(MaterialiseError::Other(_))));
+        let h = json!({"pane_id":"worker", "task_id":task.id, "message_id":"nj-changed", "trigger":"restart"}).as_object().unwrap().clone();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&calls);
+        let changed: LoopTerminalFactory = Arc::new(move || {
+            let mut fake = crate::terminal::fakes::FakeTerminal::new();
+            fake.panes.truncate(1);
+            if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                fake.panes[0].pane_id = "worker".into();
+            } else {
+                fake.panes[0].label = "worker".into();
+            }
+            Box::new(fake)
+        });
+        let result = jobs
+            .materialise_with(&h, test_env(dir.path(), "1", "worker"), Some(changed))
+            .await;
+        assert!(
+            matches!(result, Err(MaterialiseError::Other(DunkError::Refused(ref reason))) if reason == "next-job pane changed")
+        );
+        let count: i64 = rusqlite::Connection::open(dir.path().join("inbox.db"))
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+        tokio::task::spawn_blocking(move || drop((jobs, inbox)))
+            .await
+            .unwrap();
+    }
 
     fn next_jobs() -> NextJobs {
         NextJobs::new(Arc::new(Flock::new(PathBuf::new(), PathBuf::new(), false)))
