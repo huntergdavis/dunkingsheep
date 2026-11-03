@@ -203,7 +203,6 @@ mod tests {
     use super::*;
     use crate::api;
     use crate::flock::panes::Stores;
-    use crate::flock::sends::Message;
     use crate::proc::{process_start, Caller};
     use crate::server::RequestCtx;
     use crate::tasks::Tasks;

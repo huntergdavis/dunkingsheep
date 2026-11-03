@@ -9,7 +9,7 @@ use crate::flock::loop_env::LoopTerminalFactory;
 use crate::flock::panes::Stores;
 use crate::metrics::MetricsStore;
 use crate::roles::Roles;
-use crate::server::{Dispatcher, RequestCtx};
+use crate::server::RequestCtx;
 use crate::server_runtime::{RuntimeObservability, RuntimeServiceInputs, RuntimeServices};
 use crate::tasks::Tasks;
 use crate::terminal::{fakes::FakeTerminal, TerminalError};
