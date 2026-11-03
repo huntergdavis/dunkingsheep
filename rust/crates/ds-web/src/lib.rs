@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod roster;
 pub mod routes;
 
 pub use routes::auth::RequestScheme;
