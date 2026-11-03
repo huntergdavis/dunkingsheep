@@ -4249,7 +4249,7 @@ fn cli_route_46_messages() {
     let metrics = run_daemon_cli(
         &["metrics", "--since", "10", "--until", "20"],
         "metrics",
-        json!({"window_s":3600.0, "since":10.0, "until":20.0}),
+        json!({"window_s":3600, "since":10.0, "until":20.0}),
         json!({"deliveries":3}),
     );
     assert_eq!(Some(0), metrics.status.code());
