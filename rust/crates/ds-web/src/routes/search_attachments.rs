@@ -332,7 +332,7 @@ fn multipart_file(body: &[u8], boundary: &str) -> Option<(String, Option<String>
             return Some((filename, mime, tail[..data_end].to_vec()));
         }
         let next_delimiter = data_start.checked_add(data_end)?.checked_add(2)?;
-        let suffix = body.get(next_delimiter.checked_add(delimiter.len())?)?;
+        let suffix = body.get(next_delimiter.checked_add(delimiter.len())?..)?;
         if suffix.starts_with(b"--") {
             return None;
         }
