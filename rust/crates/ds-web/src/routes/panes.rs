@@ -135,7 +135,7 @@ async fn report_viewport(
         Ok(body) => body,
         Err(_) => return invalid_viewport_response(),
     };
-    let sample: ViewportSample = match serde_json::from_slice(&body) {
+    let sample: ViewportSample = match serde_json::from_slice::<ViewportSample>(&body) {
         Ok(sample) if sample.is_valid() => sample,
         _ => return invalid_viewport_response(),
     };
