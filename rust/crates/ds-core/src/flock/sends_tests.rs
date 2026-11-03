@@ -1067,7 +1067,13 @@ mod guarded_preparation_tests {
             || None,
             |env, guard| {
                 Ok(submit_text(
-                    &flock, env, P, "ours", true, false, Some(guard),
+                    &flock,
+                    env,
+                    P,
+                    "ours",
+                    true,
+                    false,
+                    Some(guard),
                 ))
             },
         );

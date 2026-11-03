@@ -516,12 +516,7 @@ fn submit_text_with_options(
             return Err(detail);
         }
         flock.remember_typed(pane_id, text);
-        if !env.persist_typed_attempt(
-            pane_id,
-            text,
-            options.press_enter,
-            generation.as_deref(),
-        ) {
+        if !env.persist_typed_attempt(pane_id, text, options.press_enter, generation.as_deref()) {
             return Err("typed but not submitted: durable attempt receipt failed".into());
         }
         if !options.press_enter {
