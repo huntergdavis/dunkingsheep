@@ -144,6 +144,59 @@ fn production_dispatcher_uses_real_handler_registry_and_gate() {
 }
 
 #[test]
+fn dispatcher_close_keeps_real_outbox_workers_until_owner_shutdown() {
+    use crate::server_runtime::outbox_runtime::FlockSnapshot;
+    use std::sync::{mpsc, Mutex};
+    use std::time::Duration;
+
+    let (worker_started_tx, worker_started_rx) = mpsc::channel();
+    let (release_worker_tx, release_worker_rx) = mpsc::sync_channel(0);
+    let release_worker_rx = Mutex::new(release_worker_rx);
+    let request_thread = std::thread::current().id();
+    let terminal_factory: LoopTerminalFactory = Arc::new(move || {
+        if std::thread::current().id() != request_thread {
+            worker_started_tx.send(()).unwrap();
+            release_worker_rx.lock().unwrap().recv().unwrap();
+        }
+        Box::new(FakeTerminal::new())
+    });
+    let (_dir, services) = make_services("dispatch-outbox-close", terminal_factory, None);
+    let dispatcher = services.dispatcher(handlers());
+
+    dispatcher.close();
+    let message = services
+        .flock()
+        .new_message("w1:p1", "w1:p1", "outbox survives close", "test")
+        .unwrap();
+    services
+        .flock()
+        .enqueue(message, services.outbox.pool.as_ref(), &FlockSnapshot)
+        .expect("dispatcher close must leave the owner-held outbox accepting work");
+    worker_started_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("outbox worker did not start after dispatcher close");
+
+    let shutdown_services = Arc::clone(&services);
+    let (shutdown_done_tx, shutdown_done_rx) = mpsc::channel();
+    let shutdown = std::thread::spawn(move || {
+        shutdown_services.shutdown();
+        shutdown_done_tx.send(()).unwrap();
+    });
+    assert!(
+        shutdown_done_rx
+            .recv_timeout(Duration::from_millis(50))
+            .is_err(),
+        "owner shutdown must join the active worker"
+    );
+
+    release_worker_tx.send(()).unwrap();
+    shutdown_done_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("owner shutdown did not join the outbox worker");
+    shutdown.join().unwrap();
+}
+
+#[test]
 fn pane_lookup_preserves_absence_and_backend_failure_and_metrics_are_best_effort() {
     let dir = tempfile::tempdir().unwrap();
     let metrics = Arc::new(MetricsStore::open(dir.path().join("metrics.db")).unwrap());
