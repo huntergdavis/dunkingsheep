@@ -2271,6 +2271,14 @@ mod tests {
                 && event.pane_id.as_deref() == Some(pane)
                 && event.outcome.as_deref() == Some("claim")
         }));
+        jobs.flock.attach_stores(crate::flock::panes::Stores {
+            tasks: Some(Arc::clone(&tasks)),
+            ..Default::default()
+        });
+        let metrics = Arc::try_unwrap(metrics).expect("only local metrics owner remains");
+        std::thread::spawn(move || drop(metrics))
+            .join()
+            .expect("metrics store drop thread");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
