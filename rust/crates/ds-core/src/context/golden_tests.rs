@@ -100,7 +100,11 @@ fn entry_value(entry: &super::store::Entry) -> Value {
     ] {
         value.insert(
             key.to_string(),
-            entry.get(key).map_or(Value::Null, |field| json!(field)),
+            if key == "slug" {
+                json!(entry.slug)
+            } else {
+                entry.get(key).map_or(Value::Null, |field| json!(field))
+            },
         );
     }
     value.insert(

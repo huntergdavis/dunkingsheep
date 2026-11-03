@@ -73,7 +73,16 @@ def main(argv):
         except dunk_context.ContextError as exc:
             found = {"error": str(exc)}
         cases.append({"op": "search", "args": args, "expected": found})
-    for key in ["fact-port-old", "port", "gt-old-rule", "missing-entry"]:
+    historical = next((entry for entry in entries if entry.get("superseded_by")), None)
+    retired = next((entry for entry in entries if store.is_retired(entry)), None)
+    first_entry = next((entry for entry in entries if not entry.get("error")), None)
+    get_keys = [
+        (historical or first_entry or {}).get("slug", "missing-entry"),
+        (historical or first_entry or {}).get("subject", "missing-entry"),
+        (retired or {}).get("slug", "missing-entry"),
+        "__t50_missing_context_entry__",
+    ]
+    for key in get_keys:
         try:
             found = get_projection(store.resolve(key))
         except dunk_context.ContextError as exc:
