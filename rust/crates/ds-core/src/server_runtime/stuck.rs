@@ -613,19 +613,25 @@ mod tests {
             },
         );
 
+        let recovery_started_at = crate::clock::now_s();
         let acted =
             services
                 .runtime
                 .block_on(crate::flock::loops_stuck::StuckEnv::stuck_observer_step(
                     adapter.as_ref(),
                 ));
+        let recovery_finished_at = crate::clock::now_s();
         assert_eq!(1, acted);
         let tracker = services.flock.stuck_tracker.lock().unwrap();
         assert_eq!(1, tracker.records["%stuck-test"].attempts);
         assert!(tracker.records["%stuck-test"].last_attempt_at.is_some());
-        assert_eq!(
-            Some(now),
-            services.flock.stuck_candidates.lock().unwrap()["%strict-test"].consumed_at
-        );
+        let candidates = services.flock.stuck_candidates.lock().unwrap();
+        let strict_candidate = &candidates["%strict-test"];
+        let consumed_at = strict_candidate
+            .consumed_at
+            .expect("strict empty-composer receipt is consumed");
+        assert!(consumed_at.is_finite());
+        assert!((recovery_started_at..=recovery_finished_at).contains(&consumed_at));
+        assert!(strict_candidate.retired_at.is_none());
     }
 }
