@@ -836,12 +836,44 @@ impl Drop for TimeoutRestore<'_> {
     }
 }
 
+#[cfg(test)]
+pub(crate) struct AllocationCommitBarrier {
+    pub(crate) entered: std::sync::mpsc::Sender<()>,
+    pub(crate) release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
 impl Tasks {
     /// Fixed actor job: acquire neither Flock lock nor SQLite write lock by waiting.
     pub(crate) async fn allocation_try_guarded(
         &self,
         flock: std::sync::Arc<crate::flock::Flock>,
         candidates: BTreeMap<String, AllocationCandidate>,
+    ) -> Result<GuardedAllocation, DunkError> {
+        #[cfg(test)]
+        let result = self
+            .allocation_try_guarded_inner(flock, candidates, None)
+            .await;
+        #[cfg(not(test))]
+        let result = self.allocation_try_guarded_inner(flock, candidates).await;
+        result
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn allocation_try_guarded_with_barrier(
+        &self,
+        flock: std::sync::Arc<crate::flock::Flock>,
+        candidates: BTreeMap<String, AllocationCandidate>,
+        barrier: std::sync::Arc<AllocationCommitBarrier>,
+    ) -> Result<GuardedAllocation, DunkError> {
+        self.allocation_try_guarded_inner(flock, candidates, Some(barrier))
+            .await
+    }
+
+    async fn allocation_try_guarded_inner(
+        &self,
+        flock: std::sync::Arc<crate::flock::Flock>,
+        candidates: BTreeMap<String, AllocationCandidate>,
+        #[cfg(test)] barrier: Option<std::sync::Arc<AllocationCommitBarrier>>,
     ) -> Result<GuardedAllocation, DunkError> {
         let attached = flock
             .stores()
@@ -879,6 +911,12 @@ impl Tasks {
                     },
                 };
                 let result = allocate_in(&tx, &idle, crate::clock::now_s())?;
+                #[cfg(test)]
+                if let Some(barrier) = barrier {
+                    barrier.entered.send(()).map_err(|_| DunkError::Unavailable("allocation barrier closed".into()))?;
+                    barrier.release.lock().unwrap().recv_timeout(std::time::Duration::from_secs(5))
+                        .map_err(|_| DunkError::Unavailable("allocation barrier timed out".into()))?;
+                }
                 tx.commit().map_err(db::map_sqlite)?;
                 Ok(GuardedAllocation::Committed(result))
             })();

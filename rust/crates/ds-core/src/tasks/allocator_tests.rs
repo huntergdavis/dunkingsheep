@@ -1346,3 +1346,127 @@ async fn allocator_timeout_restores_after_actor_panic() {
         .unwrap();
     assert_eq!(timeout, crate::db::BUSY_TIMEOUT_MS);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn guarded_allocation_holds_turn_and_outbox_through_commit() {
+    use crate::flock::{
+        commands_turns::{NoHooks, TurnState},
+        panes::Stores,
+        sends::{OutboxWake, SnapshotStore},
+        Flock,
+    };
+    use std::sync::{mpsc, Arc, Mutex};
+    struct RefuseWake;
+    impl OutboxWake for RefuseWake {
+        fn ensure_worker(&self, _: &Arc<Flock>, _: &str) -> Result<(), DunkError> {
+            Err(DunkError::Refused("test worker unavailable".into()))
+        }
+    }
+    struct Save;
+    impl SnapshotStore for Save {
+        fn save(&self, flock: &Flock) -> Result<(), DunkError> {
+            flock.save()
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let tasks = Arc::new(Tasks::open(dir.path().join("tasks.db")).await.unwrap());
+    tasks.allocation_init().await.unwrap();
+    let flock = Arc::new(Flock::new(
+        dir.path().join("launches"),
+        dir.path().join("lanes"),
+        false,
+    ));
+    flock.attach_stores(Stores {
+        tasks: Some(Arc::clone(&tasks)),
+        ..Stores::default()
+    });
+    let offered = task(&tasks, "atomic allocation").await;
+    offer(&tasks, &offered, &[]).await;
+    worker(&tasks, "%1", "worker", &[]).await;
+    flock.turn_states.lock().unwrap().insert(
+        "%1".into(),
+        TurnState {
+            started_at: 1.0,
+            expires_at: 0.0,
+            ended_at: Some(2.0),
+            ttl_s: 5.0,
+            turn_id: "original".into(),
+            source: None,
+            caller: Some(json!({})),
+            handoff_id: None,
+        },
+    );
+    let candidates = BTreeMap::from([(
+        "%1".into(),
+        AllocationCandidate {
+            turn_id: "original".into(),
+            ended_at: Some(2.0),
+            caller: json!({}),
+        },
+    )]);
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let barrier = Arc::new(AllocationCommitBarrier {
+        entered: entered_tx,
+        release: Mutex::new(release_rx),
+    });
+    let worker_tasks = Arc::clone(&tasks);
+    let worker_flock = Arc::clone(&flock);
+    let allocation = tokio::spawn(async move {
+        worker_tasks
+            .allocation_try_guarded_inner(worker_flock, candidates, Some(barrier))
+            .await
+    });
+    entered_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    assert!(flock.turn_states.try_lock().is_err());
+    assert!(flock.outbox.try_lock().is_err());
+    let (started_tx, started_rx) = mpsc::channel();
+    let (done_tx, done_rx) = mpsc::channel();
+    let turn_flock = Arc::clone(&flock);
+    let started_turn = started_tx.clone();
+    let done_turn = done_tx.clone();
+    let turn = std::thread::spawn(move || {
+        started_turn.send(()).unwrap();
+        let result = turn_flock.turn_start(None, None, None, Some("%1"), None, &NoHooks);
+        done_turn.send(()).unwrap();
+        result
+    });
+    let queue_flock = Arc::clone(&flock);
+    let queue = std::thread::spawn(move || {
+        let message = queue_flock
+            .new_message("%1", "%1", "pending", "test")
+            .unwrap();
+        started_tx.send(()).unwrap();
+        let result = queue_flock.enqueue(message, &RefuseWake, &Save);
+        done_tx.send(()).unwrap();
+        result
+    });
+    started_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    started_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    assert!(matches!(done_rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+    release_tx.send(()).unwrap();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(3), allocation)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    match result {
+        GuardedAllocation::Committed(rows) => assert_eq!(rows[0]["task_id"], offered.id),
+        _ => panic!("expected committed allocation"),
+    }
+    done_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    done_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    turn.join().unwrap().unwrap();
+    assert!(queue.join().unwrap().is_err());
+    assert_eq!(tasks.get(&offered.id).await.unwrap().status, "in_progress");
+}

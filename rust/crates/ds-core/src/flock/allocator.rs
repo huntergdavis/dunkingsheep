@@ -21,6 +21,8 @@ struct State {
 pub(crate) struct Allocator {
     state: Mutex<State>,
     idle: Condvar,
+    #[cfg(test)]
+    commit_barrier: Mutex<Option<Arc<crate::tasks::allocator::AllocationCommitBarrier>>>,
 }
 
 impl Allocator {
@@ -33,6 +35,8 @@ impl Allocator {
                 stopped: false,
             }),
             idle: Condvar::new(),
+            #[cfg(test)]
+            commit_barrier: Mutex::new(None),
         }
     }
 
@@ -43,6 +47,21 @@ impl Allocator {
         while state.active != 0 {
             state = self.idle.wait(state).unwrap_or_else(|p| p.into_inner());
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn seed_cache(&self, result: Value) {
+        let mut state = self.state.lock().unwrap();
+        state.last_result = result;
+        state.last_tick = None;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_commit_barrier(
+        &self,
+        barrier: Arc<crate::tasks::allocator::AllocationCommitBarrier>,
+    ) {
+        *self.commit_barrier.lock().unwrap() = Some(barrier);
     }
 
     fn stopped(&self) -> bool {
@@ -228,10 +247,23 @@ async fn run(services: &Arc<RuntimeServices>) -> Result<Option<Value>, DunkError
         if services.allocator.stopped() {
             return Err(DunkError::Unavailable("allocator stopped".into()));
         }
-        match tasks
+        #[cfg(test)]
+        let barrier = services.allocator.commit_barrier.lock().unwrap().take();
+        #[cfg(test)]
+        let attempt = if let Some(barrier) = barrier {
+            tasks
+                .allocation_try_guarded_with_barrier(Arc::clone(flock), candidates.clone(), barrier)
+                .await
+        } else {
+            tasks
+                .allocation_try_guarded(Arc::clone(flock), candidates.clone())
+                .await
+        };
+        #[cfg(not(test))]
+        let attempt = tasks
             .allocation_try_guarded(Arc::clone(flock), candidates.clone())
-            .await?
-        {
+            .await;
+        match attempt? {
             GuardedAllocation::Committed(handoffs) => break handoffs,
             GuardedAllocation::RetryLock => tokio::time::sleep(Duration::from_millis(10)).await,
             GuardedAllocation::RetryBusy => {

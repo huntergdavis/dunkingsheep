@@ -243,8 +243,11 @@ impl RuntimeServices {
                     Arc::clone(&services.outbox.pool),
                 )?;
                 let unread = flock.inbox_count(&view, None, Some(&pane))?.unread;
-                let delivery =
-                    flock.delivery_state(terminal, &pane, Some("idle"), Some(&info), None);
+                let delivery = if unread == 0 {
+                    flock.delivery_state(terminal, &pane, Some("idle"), Some(&info), None)
+                } else {
+                    serde_json::Value::Null
+                };
                 Ok((unread, delivery))
             })
             .await
@@ -499,6 +502,130 @@ mod tests {
     }
 
     #[test]
+    fn runtime_allocator_caller_cancellation_does_not_abandon_commit_before_shutdown() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let handle = runtime.handle().clone();
+        let (tasks, inbox) = tasks_and_inbox(&runtime, &dir);
+        let task = handle
+            .block_on(tasks.add("global", "offered", "acceptance"))
+            .unwrap();
+        handle
+            .block_on(tasks.update(
+                &task.id,
+                crate::tasks::FieldEdit {
+                    assignees: Some(vec!["w2:p2".into()]),
+                    ..Default::default()
+                },
+                None,
+            ))
+            .unwrap();
+        handle
+            .block_on(tasks.allocation_offer(&task.id, "code", &serde_json::json!([]), "w2:p2"))
+            .unwrap();
+        handle
+            .block_on(tasks.allocation_register(
+                "w1:p1",
+                &serde_json::json!(["code"]),
+                &serde_json::json!(["worker"]),
+                &serde_json::json!([]),
+                "w2:p2",
+                &serde_json::json!(true),
+            ))
+            .unwrap();
+        let stores = Stores {
+            tasks: Some(Arc::clone(&tasks)),
+            inbox: Some(inbox),
+            ..Stores::default()
+        };
+        let env = configured_env(&dir, "1");
+        let factory: LoopTerminalFactory = Arc::new(|| {
+            let mut terminal = FakeTerminal::new();
+            terminal.panes[0].command = "codex".into();
+            terminal.panes[0].pane_pid = Some(i64::from(std::process::id()));
+            terminal
+                .screens
+                .insert("w1:p1".into(), "› Ask Codex to do anything\n".into());
+            Box::new(terminal)
+        });
+        let services =
+            RuntimeServices::new(startup_inputs(&dir, runtime, env, factory, stores)).unwrap();
+        let pid = i64::from(std::process::id());
+        services.flock().set_caller(Some(serde_json::json!({"pid":pid,"start":process_start(pid),"name":"codex","pane_id":"w1:p1","source":"agent"})));
+        services
+            .flock()
+            .turn_start(
+                None,
+                None,
+                None,
+                Some("w1:p1"),
+                None,
+                &crate::flock::commands_turns::NoHooks,
+            )
+            .unwrap();
+        services
+            .flock()
+            .turn_end(
+                None,
+                "done",
+                Some("w1:p1"),
+                None,
+                false,
+                &crate::flock::commands_turns::NoHooks,
+            )
+            .unwrap();
+        services.flock().clear_caller();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        services.allocator.set_commit_barrier(Arc::new(
+            crate::tasks::allocator::AllocationCommitBarrier {
+                entered: entered_tx,
+                release: std::sync::Mutex::new(release_rx),
+            },
+        ));
+        let running_services = Arc::clone(&services);
+        let caller = handle.spawn(async move { running_services.allocator_tick().await });
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .unwrap();
+        caller.abort();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let stopping = Arc::clone(&services);
+        let shutdown = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            stopping.shutdown();
+            done_tx.send(()).unwrap();
+        });
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        assert!(matches!(
+            done_rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        release_tx.send(()).unwrap();
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        shutdown.join().unwrap();
+        assert_eq!(
+            handle.block_on(tasks.get(&task.id)).unwrap().status,
+            "in_progress"
+        );
+        assert_eq!(
+            handle
+                .block_on(tasks.next_job_handoffs(Some("w1:p1")))
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
     fn runtime_allocator_obeys_disabled_gate_with_real_services() {
         let dir = tempfile::tempdir().unwrap();
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -560,13 +687,16 @@ mod tests {
             stores,
         ))
         .unwrap();
+        services
+            .allocator
+            .seed_cache(serde_json::json!({"old":true}));
         assert_eq!(
             handle.block_on(services.allocator_tick()).unwrap(),
             serde_json::json!({})
         );
         assert_eq!(
             handle.block_on(services.allocator_tick()).unwrap(),
-            serde_json::json!({})
+            serde_json::json!({"old":true})
         );
         services.shutdown();
         assert!(handle.block_on(services.allocator_tick()).is_err());
