@@ -74,12 +74,16 @@ async fn game_key(
     Extension(scheme): Extension<RequestScheme>,
     request: axum::extract::Request,
 ) -> Response {
-    if let Err(response) = authenticate(auth.as_ref(), request.headers(), scheme).await {
-        return response;
-    }
+    let headers = request.headers().clone();
     let body = match request_json(request).await {
         Ok(body) => body,
         Err(response) => return response,
+    };
+    if let Err(response) = authenticate(auth.as_ref(), &headers, scheme).await {
+        return response;
+    }
+    let Some(body) = body else {
+        return required_body_error();
     };
     let object = match model_object(&body, "GameKey") {
         Ok(object) => object,
@@ -101,12 +105,16 @@ async fn game_type(
     Extension(scheme): Extension<RequestScheme>,
     request: axum::extract::Request,
 ) -> Response {
-    if let Err(response) = authenticate(auth.as_ref(), request.headers(), scheme).await {
-        return response;
-    }
+    let headers = request.headers().clone();
     let body = match request_json(request).await {
         Ok(body) => body,
         Err(response) => return response,
+    };
+    if let Err(response) = authenticate(auth.as_ref(), &headers, scheme).await {
+        return response;
+    }
+    let Some(body) = body else {
+        return required_body_error();
     };
     let object = match model_object(&body, "GameType") {
         Ok(object) => object,
@@ -126,7 +134,7 @@ async fn game_type(
     }
 }
 
-async fn request_json(request: axum::extract::Request) -> Result<Value, Response> {
+async fn request_json(request: axum::extract::Request) -> Result<Option<Value>, Response> {
     let bytes = to_bytes(request.into_body(), usize::MAX)
         .await
         .map_err(|_| {
@@ -135,6 +143,9 @@ async fn request_json(request: axum::extract::Request) -> Result<Value, Response
                 "There was an error parsing the body".into(),
             )
         })?;
+    if bytes.is_empty() {
+        return Ok(None);
+    }
     serde_json::from_slice(&bytes).map_err(|error| {
         let input = String::from_utf8_lossy(&bytes);
         let message = python_json_error(&error);
@@ -150,7 +161,16 @@ async fn request_json(request: axum::extract::Request) -> Result<Value, Response
             }]})),
         )
             .into_response()
-    })
+    }).map(Some)
+}
+
+fn required_body_error() -> Response {
+    validation_error(json!({
+        "type": "missing",
+        "loc": ["body"],
+        "msg": "Field required",
+        "input": null
+    }))
 }
 
 fn json_error_position(input: &str, error: &serde_json::Error) -> usize {
@@ -790,6 +810,74 @@ mod tests {
                 "ctx": {"error": "Expecting value"}
             }]})
         );
+        assert!(backend.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn game_input_parses_nonempty_json_before_auth_and_origin_checks() {
+        let backend = Arc::new(FakeGameInput::default());
+        let auth = Arc::new(FakeAuth::default());
+        let app = app(backend.clone(), auth.clone());
+
+        let response = block_on(app.clone().oneshot(request(
+            "/api/game/key",
+            r#"{"key":}"#,
+            false,
+        )))
+        .expect("unauthenticated malformed JSON response");
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let (_, body) = block_response(response);
+        assert_eq!(
+            serde_json::from_str::<Value>(&body).unwrap(),
+            json!({"detail": [{
+                "type": "json_invalid",
+                "loc": ["body", 7],
+                "msg": "JSON decode error",
+                "input": {},
+                "ctx": {"error": "Expecting value"}
+            }]})
+        );
+
+        let mut cross_origin = request("/api/game/type", r#"{"text":}"#, true);
+        cross_origin.headers_mut().insert(
+            header::ORIGIN,
+            "http://evil.test".parse().expect("origin header"),
+        );
+        let response = block_on(app.oneshot(cross_origin))
+            .expect("cross-origin malformed JSON response");
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(auth.seen.lock().unwrap().len(), 0);
+        assert!(backend.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn game_input_empty_body_authenticates_before_required_body_validation() {
+        let backend = Arc::new(FakeGameInput::default());
+        let auth = Arc::new(FakeAuth::default());
+        let app = app(backend.clone(), auth.clone());
+
+        let response = block_on(app.clone().oneshot(request(
+            "/api/game/key",
+            "",
+            true,
+        )))
+        .expect("authenticated missing body response");
+        let (status, body) = block_response(response);
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            serde_json::from_str::<Value>(&body).unwrap(),
+            json!({"detail": [{
+                "type": "missing",
+                "loc": ["body"],
+                "msg": "Field required",
+                "input": null
+            }]})
+        );
+
+        let response = block_on(app.oneshot(request("/api/game/key", "", false)))
+            .expect("unauthenticated missing body response");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(auth.seen.lock().unwrap().len(), 2);
         assert!(backend.calls.lock().unwrap().is_empty());
     }
 
