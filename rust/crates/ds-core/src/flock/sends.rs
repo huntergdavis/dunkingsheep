@@ -176,7 +176,7 @@ impl TypingLock {
 }
 
 impl Flock {
-    fn recovery_box_text<E: SendEnv + PaneInfoEnv>(
+    pub(crate) fn recovery_box_text<E: SendEnv + PaneInfoEnv>(
         &self,
         env: &E,
         pane_id: &str,

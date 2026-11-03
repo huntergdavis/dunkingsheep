@@ -9,6 +9,7 @@ mod dispatcher;
 mod inbox;
 mod inbox_metrics;
 mod inbox_stores;
+mod keypress;
 mod layout;
 mod push;
 mod status;
