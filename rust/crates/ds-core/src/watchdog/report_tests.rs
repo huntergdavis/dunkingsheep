@@ -1,4 +1,4 @@
-use super::recoveries;
+use super::{digest, evidence, line, recoveries, render_lines};
 use serde_json::{json, Value};
 
 #[test]
@@ -48,4 +48,60 @@ fn a_finding_still_present_suppresses_both_recovery_lines() {
 fn missing_recovery_state_is_reported_as_empty_lists() {
     let recovered = recoveries(&Value::Null, &[]);
     assert_eq!(recovered, json!({"vp": [], "owner": []}));
+}
+
+#[test]
+fn finding_line_matches_python_format_and_ascii_sorted_evidence_json() {
+    let finding = json!({
+        "rule": "inbox.undeliverable",
+        "key": "dead",
+        "class": "ops",
+        "severity": "warning",
+        "source": "inbox",
+        "threshold": "1 msgs",
+        "measured": "1 msgs",
+        "window": "current backlog",
+        "evidence": {"z": 1, "alpha": "café"}
+    });
+    assert_eq!(evidence(&finding), r#"{"alpha":"caf\u00e9","z":1}"#);
+    assert_eq!(
+        line("WOULD-NOTIFY VP", &finding, &json!("no"), None, None),
+        r#"WOULD-NOTIFY VP rule=inbox.undeliverable class=ops severity=warning source=inbox threshold=1 msgs measured=1 msgs window=current backlog dedupe=inbox.undeliverable|dead suppressed=no evidence={"alpha":"caf\u00e9","z":1}"#
+    );
+}
+
+#[test]
+fn render_lines_and_digest_preserve_python_order_and_text() {
+    let finding = json!({
+        "rule": "host.disk_full", "key": "/tmp", "class": "ops", "severity": "critical",
+        "source": "disk", "threshold": "90%", "measured": "95%", "window": "now",
+        "evidence": {"free": 5}
+    });
+    let config = json!({"rules": {"host.disk_full": {"must_hold_runs": 3}}});
+    let decisions = vec![json!({
+        "finding": finding, "owner": "hold", "vp": "no", "streak": 2
+    })];
+    let skipped = vec![json!({"rule": "money.spend_projection", "error": "no metering source"})];
+    let recovered = json!({
+        "vp": ["host.disk_full|/old"], "owner": ["host.disk_full|/older"]
+    });
+
+    let lines = render_lines(&config, &decisions, &skipped, &recovered, "dry-run");
+    assert_eq!(
+        lines,
+        vec![
+            r#"WOULD-PAGE OWNER rule=host.disk_full class=ops severity=critical source=disk threshold=90% measured=95% window=now; held 2/3 runs dedupe=host.disk_full|/tmp suppressed=hold evidence={"free":5}"#,
+            r#"WOULD-NOTIFY VP rule=host.disk_full class=ops severity=critical source=disk threshold=90% measured=95% window=now dedupe=host.disk_full|/tmp suppressed=no evidence={"free":5}"#,
+            "SKIPPED rule=money.spend_projection error=no metering source",
+            "RESOLVED VP dedupe=host.disk_full|/old",
+            "RESOLVED OWNER dedupe=host.disk_full|/older"
+        ]
+    );
+    assert_eq!(
+        digest("daily", &lines),
+        format!(
+            "Watchdog daily: deterministic rules; no model involved.\n{}",
+            lines.join("\n")
+        )
+    );
 }
