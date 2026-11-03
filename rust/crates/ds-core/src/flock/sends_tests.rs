@@ -2517,6 +2517,173 @@ fn owned_recovery_evidence_preserves_malformed_binding_as_a_refusal() {
 }
 
 #[test]
+fn stuck_status_never_resolves_busy_dead_modal_or_unreadable_to_ready() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Flock::new(dir.path().join("launches"), dir.path().join("lanes"), false);
+    let mut env = Pane::default();
+    assert_eq!(flock.stuck_status(&env, "%1"), "unknown");
+    env.screens.insert("%1".into(), frame("stuck body", &[]));
+    assert_eq!(flock.stuck_status(&env, "%1"), "unknown");
+    env.statuses.insert("%1".into(), "working".into());
+    assert_eq!(flock.stuck_status(&env, "%1"), "working");
+    env.statuses.insert("%1".into(), "idle".into());
+    env.gone = true;
+    assert_eq!(flock.stuck_status(&env, "%1"), "dead");
+    env.gone = false;
+    env.screens.insert(
+        "%1".into(),
+        "Press Enter to confirm or Esc to cancel\n".into(),
+    );
+    assert_eq!(flock.stuck_status(&env, "%1"), "blocked");
+}
+
+#[test]
+fn stuck_text_is_ours_requires_complete_matching_text_and_readable_screen() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Flock::new(dir.path().join("launches"), dir.path().join("lanes"), false);
+    let mut env = Pane::default();
+    flock
+        .sent_text_by_pane
+        .lock()
+        .unwrap()
+        .insert("%1".into(), vec!["stuck body".into()]);
+    assert!(!flock.stuck_text_is_ours(&env, "%1", Some("stuck body"), "stuck body"));
+    env.screens.insert("%1".into(), frame("stuck body", &[]));
+    assert!(flock.stuck_text_is_ours(&env, "%1", Some("stuck body"), "stuck body"));
+    assert!(!flock.stuck_text_is_ours(&env, "%1", Some("stuck body"), "stuck body plus edit"));
+}
+
+#[test]
+fn press_stuck_enter_refuses_replaced_pane_before_sending_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Flock::new(dir.path().join("launches"), dir.path().join("lanes"), false);
+    let mut env = Pane::default();
+    env.panes
+        .push(serde_json::json!({"pane_id": "%1", "pane_pid": std::process::id()}));
+    env.screens.insert("%1".into(), frame("stuck body", &[]));
+    let (pressed, _) = flock.press_stuck_enter(
+        &mut env,
+        "%1",
+        &crate::stuck::fingerprint("stuck body"),
+        "pid:wrong:start:wrong",
+        "m1",
+        Some("stuck body"),
+        None,
+        false,
+        None,
+        100.0,
+    );
+    assert!(!pressed);
+    assert!(env.keys.is_empty());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn scheduled_recovery_requires_current_schedule_for_styled_and_real_native_evidence() {
+    struct ChildGuard(std::process::Child);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let hooks = dir.path().join("hooks");
+    let cwd = dir.path().join("cwd");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&hooks).unwrap();
+    std::fs::create_dir_all(&cwd).unwrap();
+    let binary = dir.path().join("codex");
+    std::fs::copy("/bin/sleep", &binary).unwrap();
+    let child = std::process::Command::new(binary)
+        .arg("300")
+        .env("CODEX_HOME", &home)
+        .env("DUNKINGSHEEP_CODEX_STATE_DIR", &hooks)
+        .spawn()
+        .unwrap();
+    let child = ChildGuard(child);
+    let pid = i64::from(child.0.id());
+    let start = crate::proc::process_start(pid).unwrap();
+    let session = "01a173ee-beed-7461-a560-e5f6c1f666a7";
+    let rollout = home.join(format!("rollout-{session}.jsonl"));
+    std::fs::write(
+        &rollout,
+        format!(
+            "{}\n",
+            serde_json::json!({"type":"session_meta", "payload":{"session_id":session,"cwd":cwd}})
+        ),
+    )
+    .unwrap();
+    let db = rusqlite::Connection::open(home.join("state_5.sqlite")).unwrap();
+    db.execute(
+        "create table threads (id text primary key, rollout_path text, cwd text)",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "insert into threads values (?,?,?)",
+        (session, rollout.to_str().unwrap(), cwd.to_str().unwrap()),
+    )
+    .unwrap();
+    std::fs::write(hooks.join("bound.json"), serde_json::json!({"session_id":session,"pane_id":"%1","root_pid":pid,"root_start":start,"cwd":cwd}).to_string()).unwrap();
+
+    for native in [false, true] {
+        for (present, running, template, target, now, expected) in [
+            (true, true, "instruction", "%1", 101.0, true),
+            (true, false, "instruction", "%1", 101.0, false),
+            (true, true, "changed", "%1", 101.0, false),
+            (true, true, "instruction", "%1", 1000.0, false),
+            (false, true, "instruction", "%1", 101.0, false),
+            (true, true, "instruction", "%2", 101.0, false),
+        ] {
+            let flock = Flock::new(dir.path().join("launches"), dir.path().join("lanes"), false);
+            let rows = if present {
+                serde_json::json!({"dunkers":[{"id":"d1","target_pane_id":target,"text":template,"running":running}]})
+            } else {
+                serde_json::json!({"dunkers":[]})
+            };
+            flock.dunks.load(rows.as_object().unwrap());
+            let mut env = Pane::default();
+            env.panes
+                .push(serde_json::json!({"pane_id":"%1","pane_pid":pid,"agent":"codex","cwd":cwd}));
+            env.statuses.insert("%1".into(), "idle".into());
+            flock
+                .sent_text_by_pane
+                .lock()
+                .unwrap()
+                .insert("%1".into(), vec!["previous".into(), "stuck body".into()]);
+            let screen = if native {
+                "› stuck body\n\n  model · /tmp/test\n".to_string()
+            } else {
+                "\x1b[1;2m›\x1b[0m previous\n\x1b[1m›\x1b[0m stuck body\n\n\n  model · /tmp/test\n"
+                    .to_string()
+            };
+            let mut message = Message::new("m1", "%1", "writer", "stuck body", "d1");
+            message.status = "sent".into();
+            message.scheduled = true;
+            message.created_at = 100.0;
+            message.schedule_template = Some("instruction".into());
+            message.attempt_generation = pane_generation(&env, "%1");
+            message.typed_at = native.then_some(100.0);
+            flock.note_stuck_candidate(&message);
+            let entry = flock.stuck_candidates.lock().unwrap()["%1"].clone();
+            if native {
+                assert!(
+                    flock.owned_recovery_evidence(&env, "%1", &screen).is_some(),
+                    "native fixture must authenticate"
+                );
+            }
+            assert_eq!(
+                flock.sent_schedule_pending(&env, "%1", &entry, &screen, now),
+                expected,
+                "native={native} running={running} template={template} now={now}"
+            );
+        }
+    }
+}
+
+#[test]
 fn reconcile_stuck_requires_the_live_message_and_created_at_identity() {
     let dir = tempfile::tempdir().unwrap();
     let flock = Flock::new(dir.path().join("launches.json"), dir.path(), false);

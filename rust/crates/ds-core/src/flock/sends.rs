@@ -199,11 +199,30 @@ impl Flock {
         typed_text(screen)
     }
 
-    fn stuck_status<E: SendEnv + PaneInfoEnv>(&self, env: &E, pane_id: &str) -> String {
+    pub(super) fn stuck_status<E: SendEnv + PaneInfoEnv>(&self, env: &E, pane_id: &str) -> String {
         let Some(screen) = read_screen(env, pane_id, None, true) else {
             return "unknown".into();
         };
         let status = env.read_status(pane_id);
+        if env.session_process_gone(pane_id) {
+            return "dead".into();
+        }
+        if modal_open(&screen) || self.turn_active(pane_id) {
+            return "blocked".into();
+        }
+        if is_working_status(status.as_deref()) {
+            return "working".into();
+        }
+        if !matches!(status.as_deref(), Some("idle" | "ready")) {
+            return if self
+                .owned_recovery_evidence(env, pane_id, &screen)
+                .is_some()
+            {
+                "ready".into()
+            } else {
+                "unknown".into()
+            };
+        }
         let typed = if modal_open(&screen) {
             None
         } else {
@@ -251,7 +270,7 @@ impl Flock {
         })
     }
 
-    fn sent_schedule_pending<E: SendEnv + PaneInfoEnv>(
+    pub(super) fn sent_schedule_pending<E: SendEnv + PaneInfoEnv>(
         &self,
         env: &E,
         pane_id: &str,
@@ -269,7 +288,8 @@ impl Flock {
             return self.scheduled_recovery_current(pane_id, entry, now);
         }
         let (boundary, region) = styled_composer_boundary(screen);
-        boundary == "delimited"
+        self.scheduled_recovery_current(pane_id, entry, now)
+            && boundary == "delimited"
             && !region.is_empty()
             && crate::stuck::collapse(&region) == crate::stuck::collapse(&entry.text)
             && dim_bodies_accounted(self, pane_id, screen)
@@ -277,7 +297,7 @@ impl Flock {
                 .is_some()
     }
 
-    fn stuck_text_is_ours<E: SendEnv + PaneInfoEnv>(
+    pub(super) fn stuck_text_is_ours<E: SendEnv + PaneInfoEnv>(
         &self,
         env: &E,
         pane_id: &str,
@@ -314,7 +334,7 @@ impl Flock {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn press_stuck_enter<E: SendEnv + PaneInfoEnv>(
+    pub(super) fn press_stuck_enter<E: SendEnv + PaneInfoEnv>(
         &self,
         env: &mut E,
         pane_id: &str,
@@ -325,7 +345,7 @@ impl Flock {
         message: Option<&Message>,
         require_intent: bool,
         created_at: Option<f64>,
-        now: f64,
+        _observed_at: f64,
     ) -> (bool, String) {
         let pane_lock = self.send_lock_for(pane_id);
         let Ok(_pane_guard) = pane_lock.lock() else {
@@ -334,6 +354,9 @@ impl Flock {
         let Ok(_typing_guard) = self.typing_guard(pane_id) else {
             return (false, "typing lock unavailable".into());
         };
+        // The reservation and lock acquisition can take time; schedule freshness is a
+        // wall-clock precondition at the key boundary, not the earlier observation time.
+        let now = clock::now_s();
         let Some(screen) = read_screen(env, pane_id, None, true) else {
             return (false, "pane unreadable".into());
         };
@@ -413,10 +436,27 @@ impl Flock {
         {
             return (false, "composer is not owned".into());
         }
+        if require_intent {
+            let candidate = self
+                .stuck_candidates
+                .lock()
+                .ok()
+                .and_then(|c| c.get(pane_id).cloned());
+            if candidate.as_ref().is_some_and(|entry| {
+                entry.scheduled
+                    && entry.status == "sent"
+                    && !self.scheduled_recovery_current(pane_id, entry, clock::now_s())
+            }) {
+                return (
+                    false,
+                    "the scheduled instruction is stale or superseded".into(),
+                );
+            }
+        }
         if let Some(evidence) = native {
             if evidence.entry.message_id != message_id
                 || (evidence.entry.scheduled
-                    && !self.scheduled_recovery_current(pane_id, &evidence.entry, now))
+                    && !self.scheduled_recovery_current(pane_id, &evidence.entry, clock::now_s()))
                 || evidence.native.assert_unchanged().is_err()
             {
                 return (false, "native evidence changed".into());
