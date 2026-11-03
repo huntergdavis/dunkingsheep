@@ -3232,11 +3232,11 @@ fn test_poolrad_progress_reports_the_recorded_count() {
 }
 
 fn task_api_fixture() -> (
+    tokio::runtime::Runtime,
     tempfile::TempDir,
     Flock,
     Arc<crate::tasks::Tasks>,
     Dispatcher,
-    tokio::runtime::Runtime,
 ) {
     let (dir, flock) = flock();
     let mut roles = Roles::new(
@@ -3267,7 +3267,7 @@ fn task_api_fixture() -> (
     });
     let mut dispatcher = Dispatcher::new();
     dispatcher.register_task_add_list_read();
-    (dir, flock, tasks, dispatcher, runtime)
+    (runtime, dir, flock, tasks, dispatcher)
 }
 
 fn dispatch_task_api(
@@ -3295,7 +3295,7 @@ fn dispatch_task_api(
 
 #[test]
 fn h_task_add_matches_python_defaults_and_role_gate() {
-    let (_dir, flock, _tasks, dispatcher, runtime) = task_api_fixture();
+    let (runtime, _dir, flock, _tasks, dispatcher) = task_api_fixture();
     let plain = dispatch_task_api(
         &dispatcher,
         &flock,
@@ -3357,7 +3357,7 @@ fn h_task_add_matches_python_defaults_and_role_gate() {
 
 #[test]
 fn h_task_read_returns_full_wire_and_latest_three_note_reasons() {
-    let (_dir, flock, tasks, dispatcher, runtime) = task_api_fixture();
+    let (runtime, _dir, flock, tasks, dispatcher) = task_api_fixture();
     let created = dispatch_task_api(
         &dispatcher,
         &flock,
@@ -3425,7 +3425,7 @@ fn h_task_read_returns_full_wire_and_latest_three_note_reasons() {
 
 #[test]
 fn h_task_list_matches_python_defaults_and_slice_limits() {
-    let (_dir, flock, tasks, dispatcher, runtime) = task_api_fixture();
+    let (runtime, _dir, flock, tasks, dispatcher) = task_api_fixture();
     let mut ids = Vec::new();
     for title in ["first", "second", "third", "fourth"] {
         let created = dispatch_task_api(
