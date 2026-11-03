@@ -5,7 +5,6 @@ use serde_json::{json, Value};
 use super::RequestRuntimeAdapter;
 
 impl RequestRuntimeAdapter<'_> {
-    #[allow(dead_code)] // The complete RosterEnv implementation is owned by its assembly leaf.
     fn helper_rosterenv_lanes(&self) -> Result<Vec<Value>, String> {
         match self
             .terminal
@@ -17,7 +16,6 @@ impl RequestRuntimeAdapter<'_> {
         }
     }
 
-    #[allow(dead_code)] // The complete RosterEnv implementation is owned by its assembly leaf.
     fn helper_rosterenv_leases_for_pane(&self, pane_id: &str, now: f64) -> Vec<Value> {
         let Some(tasks) = self.terminal.flock.stores().tasks else {
             return Vec::new();
@@ -47,7 +45,6 @@ impl RequestRuntimeAdapter<'_> {
         }
     }
 
-    #[allow(dead_code)] // The complete RosterEnv implementation is owned by its assembly leaf.
     fn helper_rosterenv_task(&self, task_id: &str) -> Option<Value> {
         let tasks = self.terminal.flock.stores().tasks?;
         self.runtime
@@ -56,7 +53,6 @@ impl RequestRuntimeAdapter<'_> {
             .map(|task| json!({"id": task.id, "title": task.title}))
     }
 
-    #[allow(dead_code)] // The complete RosterEnv implementation is owned by its assembly leaf.
     fn helper_rosterenv_inbox_count(&self, mailbox: &str) -> Option<(i64, Option<f64>)> {
         let inbox = self.terminal.flock.stores().inbox?;
         match crate::inbox::count(inbox.read_pool(), mailbox, &[], crate::clock::now_s()) {
@@ -71,12 +67,10 @@ impl RequestRuntimeAdapter<'_> {
         }
     }
 
-    #[allow(dead_code)] // The complete RosterEnv implementation is owned by its assembly leaf.
     fn helper_rosterenv_activity(&self, lane: &Value, now: f64) -> Result<Value, String> {
         Ok(self.terminal.flock.roster_activity(lane, now))
     }
 
-    #[allow(dead_code)] // The complete RosterEnv implementation is owned by its assembly leaf.
     fn helper_rosterenv_cpu_sample(
         &self,
         caller: &Value,
@@ -109,6 +103,27 @@ impl RequestRuntimeAdapter<'_> {
             .and_then(Value::as_array)
             .and_then(|callers| callers.first())
             .cloned())
+    }
+}
+
+impl crate::flock::roster::RosterEnv for RequestRuntimeAdapter<'_> {
+    fn lanes(&self) -> Result<Vec<Value>, String> {
+        self.helper_rosterenv_lanes()
+    }
+    fn leases_for_pane(&self, pane: &str, now: f64) -> Vec<Value> {
+        self.helper_rosterenv_leases_for_pane(pane, now)
+    }
+    fn task(&self, id: &str) -> Option<Value> {
+        self.helper_rosterenv_task(id)
+    }
+    fn inbox_count(&self, mailbox: &str) -> Option<(i64, Option<f64>)> {
+        self.helper_rosterenv_inbox_count(mailbox)
+    }
+    fn activity(&self, lane: &Value, now: f64) -> Result<Value, String> {
+        self.helper_rosterenv_activity(lane, now)
+    }
+    fn cpu_sample(&self, caller: &Value, now: f64) -> Result<Option<Value>, String> {
+        self.helper_rosterenv_cpu_sample(caller, now)
     }
 }
 
@@ -392,5 +407,78 @@ mod tests {
         let adapter = RequestRuntimeAdapter::new(&flock, &request, runtime.handle(), &terminal);
 
         assert_eq!(adapter.helper_rosterenv_task("missing-task"), None);
+    }
+    #[test]
+    fn production_env_roster_trait_uses_concrete_services() {
+        use crate::flock::roster::{roster, RosterEnv};
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let tasks = Arc::new(
+            runtime
+                .block_on(Tasks::open(dir.path().join("tasks.db")))
+                .unwrap(),
+        );
+        runtime.block_on(tasks.allocation_init()).unwrap();
+        let task = runtime
+            .block_on(tasks.add("global", "real roster task", "body"))
+            .unwrap();
+        runtime
+            .block_on(tasks.claim_next("global", "w1:p1", ClaimOptions::default()))
+            .unwrap();
+        let inbox = Arc::new(
+            crate::inbox_store::Store::open(dir.path().join("inbox.db"), dir.path().join("blobs"))
+                .unwrap(),
+        );
+        inbox
+            .ensure_next_job("nj-roster-trait", "w1:p1", "w1:p1", "body", "subject")
+            .unwrap();
+        let flock = Flock::new(dir.path().join("launches"), dir.path().join("lanes"), false);
+        flock.attach_stores(Stores {
+            tasks: Some(tasks),
+            inbox: Some(inbox),
+            ..Stores::default()
+        });
+        let mut fake = FakeTerminal::new();
+        fake.panes[0].command = "codex".into();
+        let terminal: Mutex<Box<dyn Terminal>> = Mutex::new(Box::new(fake));
+        let request = RequestCtx::default();
+        let adapter = RequestRuntimeAdapter::new(&flock, &request, runtime.handle(), &terminal);
+        let env: &dyn RosterEnv = &adapter;
+        let now = crate::clock::now_s();
+        assert!(env
+            .lanes()
+            .unwrap()
+            .iter()
+            .any(|lane| lane["pane_id"] == "w1:p1"));
+        assert!(env
+            .leases_for_pane("w1:p1", now)
+            .iter()
+            .any(|lease| lease["task_id"] == task.id));
+        assert_eq!(env.task(&task.id).unwrap()["title"], "real roster task");
+        assert_eq!(env.task("missing-task"), None);
+        assert_eq!(env.inbox_count("w1:p1").unwrap().0, 1);
+        let activity = env
+            .activity(&json!({"pane_id":"w1:p1", "agent":"pi"}), now)
+            .unwrap();
+        assert_eq!(activity["state"], "unknown");
+        assert!(activity["reason"]
+            .as_str()
+            .unwrap()
+            .contains("no activity source"));
+        assert_eq!(
+            env.cpu_sample(&json!({"caller_pid":i64::MAX,"caller_start":"1"}), now)
+                .unwrap(),
+            None
+        );
+        let view = roster(env, now).unwrap();
+        assert!(view["lanes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|lane| lane["pane_id"] == "w1:p1"));
     }
 }
