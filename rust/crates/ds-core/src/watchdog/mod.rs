@@ -16,6 +16,7 @@ use std::path::Path;
 use crate::error::DunkError;
 
 pub mod config;
+pub mod evaluate;
 pub mod rules;
 pub mod rules_delivery;
 pub mod rules_dunks;

@@ -1,0 +1,431 @@
+//! `evaluate` and `self_error` from `dunk_watchdog.py`.
+//!
+//! This is the rule-table boundary: inputs are loaded read-only and lazily, individual failures
+//! stay attached to the rule that encountered them, unavailable sources are reported as skipped,
+//! and findings are ordered by the shared `sort_findings` implementation.
+
+use std::cell::OnceCell;
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use serde_json::{json, Value};
+
+use super::rules_delivery;
+use super::rules_dunks;
+use super::rules_host::{self, HostSample, Panes};
+use super::rules_inbox::{self, InboxDb};
+use super::rules_lanes::{self, Starvation};
+use super::rules_resource;
+use super::rules_security;
+use super::{rules, rules_dunks::MetricsDb as DunkMetricsDb, sort_findings, TaskData};
+use crate::error::DunkError;
+
+/// Optional read-only pane inventory provider, equivalent to Python's `panes_provider` seam.
+pub type PanesProvider<'a> = dyn Fn() -> Result<Option<Panes>, DunkError> + 'a;
+/// Optional host sampler, equivalent to Python's `host_sampler` seam.
+pub type HostSampler<'a> = dyn Fn(&Path) -> Result<HostSample, DunkError> + 'a;
+
+const RULE_IDS: &[&str] = &[
+    "delivery.ambiguous_queued",
+    "dunk.overdue",
+    "dunk.skip_loop",
+    "fleet.assignment_starvation",
+    "health.failed",
+    "host.disk_full",
+    "host.heavy_slot_stale",
+    "host.load",
+    "host.tmp",
+    "inbox.ambiguous_sender",
+    "inbox.undeliverable",
+    "inbox.unread_dead",
+    "inbox.unread_live",
+    "lane.idle_holding_task",
+    "lane.working_without_task",
+    "money.spend_projection",
+    "pane.retired",
+    "resource.would_kill",
+    "security.secret_text",
+    "task.blocked_stale",
+    "task.lease_stale",
+];
+
+struct Inputs<'a> {
+    dir: PathBuf,
+    now: f64,
+    pane_source: &'a str,
+    pane_id_pattern: &'a str,
+    panes_provider: Option<&'a PanesProvider<'a>>,
+    host_sampler: Option<&'a HostSampler<'a>>,
+    tasks: OnceCell<Result<TaskData, DunkError>>,
+    dunks: OnceCell<Result<Vec<Value>, DunkError>>,
+    panes: OnceCell<Result<Option<Panes>, DunkError>>,
+    names: OnceCell<Result<BTreeMap<String, String>, DunkError>>,
+    starvation: OnceCell<Result<Starvation, DunkError>>,
+}
+
+impl Inputs<'_> {
+    fn path(&self, name: &str) -> PathBuf {
+        self.dir.join(name)
+    }
+
+    fn cached<T>(
+        cell: &OnceCell<Result<T, DunkError>>,
+        load: impl FnOnce() -> Result<T, DunkError>,
+    ) -> Result<&T, DunkError> {
+        match cell.get_or_init(load) {
+            Ok(value) => Ok(value),
+            Err(error) => Err(clone_error(error)),
+        }
+    }
+
+    fn tasks(&self) -> Result<&TaskData, DunkError> {
+        Self::cached(&self.tasks, || {
+            TaskData::load(&self.path("tasks.db"), self.now)
+        })
+    }
+
+    fn dunks(&self) -> Result<&[Value], DunkError> {
+        Self::cached(&self.dunks, || {
+            rules_dunks::load_dunks(&self.path("dunks.json"))
+        })
+        .map(Vec::as_slice)
+    }
+
+    fn panes(&self) -> Result<Option<&Panes>, DunkError> {
+        if self.pane_source == "none" {
+            return Ok(None);
+        }
+        match Self::cached(&self.panes, || match self.panes_provider {
+            Some(provider) => provider(),
+            None => Err(DunkError::Unavailable(
+                "pane inventory provider is not configured".into(),
+            )),
+        })? {
+            Some(panes) => Ok(Some(panes)),
+            None => Ok(None),
+        }
+    }
+
+    fn names(&self) -> Result<&BTreeMap<String, String>, DunkError> {
+        Self::cached(&self.names, || {
+            InboxDb {
+                path: &self.path("inbox.db"),
+            }
+            .name_to_pane(self.now)
+        })
+    }
+
+    fn starvation(&self, rule: &Value) -> Result<&Starvation, DunkError> {
+        let since = self.now - rule["quiet_minutes"].as_f64().unwrap_or(0.0) * 60.0;
+        Self::cached(&self.starvation, || {
+            Starvation::load(&self.path("tasks.db"), self.now, since)
+        })
+    }
+
+    fn host(&self, path: &Path) -> Result<HostSample, DunkError> {
+        match self.host_sampler {
+            Some(sampler) => sampler(path),
+            None => rules_host::sample_host(path),
+        }
+    }
+}
+
+fn config_dir(config: &Value) -> PathBuf {
+    let raw = config["stores"]["config_dir"].as_str().unwrap_or("");
+    PathBuf::from(crate::native_session::expanduser(raw))
+}
+
+fn clone_error(error: &DunkError) -> DunkError {
+    match error {
+        DunkError::Refused(message) => DunkError::Refused(message.clone()),
+        DunkError::Retryable(message) => DunkError::Retryable(message.clone()),
+        DunkError::Ambiguous(message) => DunkError::Ambiguous(message.clone()),
+        DunkError::Identity(message) => DunkError::Identity(message.clone()),
+        DunkError::Unavailable(message) => DunkError::Unavailable(message.clone()),
+        DunkError::Busy => DunkError::Busy,
+    }
+}
+
+fn error_text(error: &DunkError) -> String {
+    let kind = match error {
+        DunkError::Refused(_) => "DunkError",
+        DunkError::Retryable(_) => "RetryableDunkError",
+        DunkError::Ambiguous(_) => "AmbiguousTarget",
+        DunkError::Identity(_) => "IdentityError",
+        DunkError::Unavailable(_) => "ConnectionError",
+        DunkError::Busy => "OperationalError",
+    };
+    format!("{kind}: {error}")
+}
+
+fn read_json(path: &Path) -> Result<Value, DunkError> {
+    let text = fs::read_to_string(path)?;
+    serde_json::from_str(&text).map_err(Into::into)
+}
+
+fn read_outbox(path: &Path) -> Result<Vec<Value>, DunkError> {
+    let state = read_json(path)?;
+    let object = state
+        .as_object()
+        .ok_or_else(|| DunkError::Refused("dunks.json root is not an object".into()))?;
+    let Some(rows) = object.get("outbox").filter(|value| truthy(value)) else {
+        return Ok(Vec::new());
+    };
+    rows.as_array()
+        .cloned()
+        .ok_or_else(|| DunkError::Refused("dunks.json 'outbox' is not an array".into()))
+}
+
+fn truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(value) => *value,
+        Value::Number(value) => value.as_f64().is_some_and(|number| number != 0.0),
+        Value::String(value) => !value.is_empty(),
+        Value::Array(value) => !value.is_empty(),
+        Value::Object(value) => !value.is_empty(),
+    }
+}
+
+fn retired_path(inputs: &Inputs<'_>) -> PathBuf {
+    inputs.path("retired-panes.json")
+}
+
+fn run_rule(rule_id: &str, rule: &Value, inputs: &Inputs<'_>) -> Result<Vec<Value>, DunkError> {
+    let inbox_path = inputs.path("inbox.db");
+    let inbox = InboxDb { path: &inbox_path };
+    let metrics_path = inputs.path("metrics.db");
+    let retired = retired_path(inputs);
+    match rule_id {
+        "task.blocked_stale" => Ok(rules::rule_task_blocked_stale(
+            inputs.tasks()?,
+            rule,
+            inputs.now,
+        )),
+        "task.lease_stale" => rules::rule_task_lease_stale(inputs.tasks()?, rule, inputs.now),
+        "dunk.skip_loop" => {
+            let metrics = DunkMetricsDb {
+                path: &metrics_path,
+            };
+            let retired = rules_dunks::retired_panes(&retired);
+            rules_dunks::rule_dunk_skip_loop(inputs.dunks()?, &metrics, &retired, rule, inputs.now)
+        }
+        "dunk.overdue" => Ok(rules_dunks::rule_dunk_overdue(
+            inputs.dunks()?,
+            rule,
+            inputs.now,
+        )),
+        "delivery.ambiguous_queued" => {
+            let outbox = read_outbox(&inputs.path("dunks.json"))?;
+            let observations = rules_delivery::MetricsDb {
+                path: &metrics_path,
+            };
+            Ok(rules_delivery::rule_delivery_ambiguous_queued(
+                &outbox,
+                &observations,
+                rule,
+                inputs.now,
+            ))
+        }
+        "inbox.undeliverable" => rules_inbox::rule_inbox_undeliverable(&inbox, rule, inputs.now),
+        "inbox.unread_live" => {
+            rules_inbox::rule_inbox_unread_live(&inbox, inputs.panes()?, &retired, rule, inputs.now)
+        }
+        "inbox.unread_dead" => {
+            rules_inbox::rule_inbox_unread_dead(&inbox, inputs.panes()?, &retired, rule, inputs.now)
+        }
+        "inbox.ambiguous_sender" => {
+            let panes = if rule["require_live_pane"].as_bool().unwrap_or(false) {
+                inputs.panes()?
+            } else {
+                None
+            };
+            rules_inbox::rule_inbox_ambiguous_sender(
+                &inbox,
+                inputs.pane_id_pattern,
+                panes,
+                rule,
+                inputs.now,
+            )
+        }
+        "lane.working_without_task" => rules_lanes::rule_lane_working_without_task(
+            inputs.panes()?,
+            inputs.tasks()?,
+            inputs.names()?,
+            inputs.pane_id_pattern,
+            rule,
+            inputs.now,
+        ),
+        "lane.idle_holding_task" => rules_lanes::rule_lane_idle_holding_task(
+            inputs.panes()?,
+            inputs.tasks()?,
+            &inbox,
+            inputs.names()?,
+            inputs.pane_id_pattern,
+            rule,
+            inputs.now,
+        ),
+        "fleet.assignment_starvation" => {
+            let snapshot = inputs.starvation(rule)?;
+            rules_lanes::rule_fleet_assignment_starvation(
+                snapshot,
+                &|| {
+                    rules_lanes::turn_panes(
+                        &metrics_path,
+                        inputs.now - rule["quiet_minutes"].as_f64().unwrap_or(0.0) * 60.0,
+                        inputs.now,
+                    )
+                },
+                &|| inputs.panes().map(|panes| panes.cloned()),
+                rule,
+                inputs.now,
+            )
+        }
+        "host.load" => {
+            let host = inputs.host(Path::new("/"))?;
+            let heavy = rules_host::heavy_jobs(Path::new("/tmp"));
+            Ok(rules_host::rule_host_load(
+                &host,
+                inputs.panes()?,
+                heavy,
+                rule,
+            ))
+        }
+        "host.tmp" => {
+            let path = PathBuf::from(rule["path"].as_str().unwrap_or(""));
+            let host = inputs.host(&path)?;
+            Ok(rules_host::rule_host_tmp(&host, rule))
+        }
+        "host.disk_full" => {
+            rules_host::rule_host_disk_full(&|path| inputs.host(Path::new(path)), rule)
+        }
+        "host.heavy_slot_stale" => rules_host::rule_host_heavy_slot_stale(rule, inputs.now),
+        "resource.would_kill" => {
+            rules_resource::rule_resource_would_kill(inputs.tasks()?, rule, inputs.now)
+        }
+        "pane.retired" => {
+            let records: Vec<_> = crate::panes::all_retired(&retired);
+            Ok(rules_host::rule_pane_retired(&records, rule))
+        }
+        "security.secret_text" => {
+            let inbox_path = inputs.path("inbox.db");
+            let tasks_path = inputs.path("tasks.db");
+            let dunks_path = inputs.path("dunks.json");
+            rules_security::rule_security_secret_text(
+                &|since| {
+                    rules_security::text_records(
+                        &inbox_path,
+                        &tasks_path,
+                        &dunks_path,
+                        since,
+                        inputs.now,
+                    )
+                },
+                rule,
+                inputs.now,
+            )
+        }
+        "money.spend_projection" => rules_host::rule_money_spend_projection(rule)
+            .map_err(|unavailable| DunkError::Unavailable(unavailable.to_string())),
+        "health.failed" => {
+            let health = read_json(&inputs.path("health.json"))?;
+            Ok(rules_host::rule_health_failed(&health, rule, inputs.now))
+        }
+        _ => Ok(Vec::new()),
+    }
+}
+
+/// Run every configured rule, or only the exact names in `only`.
+///
+/// Stores and SQLite databases are opened read-only. Pane and host readers are injectable for
+/// deterministic callers; with `panes.source != "none"`, an absent pane provider is reported as
+/// a rule error instead of silently appearing empty. A failed rule contributes an entry to
+/// `errors`, while source-declared unavailability contributes an entry to `skipped`.
+pub fn evaluate(
+    config: &Value,
+    now: f64,
+    panes_provider: Option<&PanesProvider<'_>>,
+    host_sampler: Option<&HostSampler<'_>>,
+    only: Option<&[&str]>,
+) -> Value {
+    let pane_source = config["panes"]["source"].as_str().unwrap_or("none");
+    let pane_id_pattern = config["panes"]["pane_id_pattern"].as_str().unwrap_or("");
+    let inputs = Inputs {
+        dir: config_dir(config),
+        now,
+        pane_source,
+        pane_id_pattern,
+        panes_provider,
+        host_sampler,
+        tasks: OnceCell::new(),
+        dunks: OnceCell::new(),
+        panes: OnceCell::new(),
+        names: OnceCell::new(),
+        starvation: OnceCell::new(),
+    };
+    let mut findings = Vec::new();
+    let mut errors = Vec::new();
+    let mut skipped = Vec::new();
+    for rule_id in RULE_IDS {
+        if only.is_some_and(|selected| !selected.contains(rule_id)) {
+            continue;
+        }
+        let rule = &config["rules"][*rule_id];
+        if *rule_id == "money.spend_projection"
+            && (rule["source"].is_null() || rule["cap"].is_null())
+        {
+            skipped.push(json!({"rule": rule_id, "error": "no metering source"}));
+            continue;
+        }
+        if !rule["enabled"].as_bool().unwrap_or(false) {
+            continue;
+        }
+        if matches!(
+            *rule_id,
+            "fleet.assignment_starvation"
+                | "inbox.unread_dead"
+                | "lane.working_without_task"
+                | "lane.idle_holding_task"
+        ) && pane_source == "none"
+        {
+            skipped.push(json!({
+                "rule": rule_id,
+                "error": "pane source disabled (panes.source=none)"
+            }));
+            continue;
+        }
+        match run_rule(rule_id, rule, &inputs) {
+            Ok(mut found) => findings.append(&mut found),
+            Err(error) if *rule_id == "money.spend_projection" => {
+                skipped.push(json!({"rule": rule_id, "error": error.to_string()}));
+            }
+            Err(error) => errors.push(json!({"rule": rule_id, "error": error_text(&error)})),
+        }
+    }
+    sort_findings(&mut findings);
+    json!({"findings": findings, "errors": errors, "skipped": skipped})
+}
+
+/// One `watchdog.self_error` finding carrying the raw per-run problems.
+pub fn self_error(problems: &[Value]) -> Value {
+    json!({
+        "rule": "watchdog.self_error",
+        "key": "run",
+        "severity": "self",
+        "class": "self",
+        "source": "watchdog-self",
+        "summary": format!(
+            "watchdog could not do {} thing(s); coverage or owner delivery is affected",
+            problems.len()
+        ),
+        "threshold": "-",
+        "measured": format!("{} problem(s)", problems.len()),
+        "window": "this run",
+        "evidence": {"problems": problems},
+    })
+}
+
+#[cfg(test)]
+#[path = "evaluate_tests.rs"]
+mod evaluate_tests;
