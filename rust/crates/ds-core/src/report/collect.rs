@@ -502,6 +502,7 @@ fn rounded_integer(value: f64) -> Value {
 
 #[cfg(test)]
 mod tests {
+    use super::super::ReportPaths;
     use super::*;
     use std::time::{Duration, SystemTime};
 
