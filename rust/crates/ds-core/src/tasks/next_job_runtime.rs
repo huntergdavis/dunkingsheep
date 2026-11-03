@@ -465,6 +465,17 @@ mod tests {
         assert!(
             matches!(disabled, Err(MaterialiseError::DispatchPaused(ref reason)) if reason == "disabled")
         );
+        let missing_task = json!({"pane_id":"w1:p1", "task_id":"t999999999", "message_id":"nj-missing", "trigger":"restart"}).as_object().unwrap().clone();
+        let result = jobs
+            .materialise_with(
+                &missing_task,
+                test_env(dir.path(), "1", "w1:p1"),
+                Some(fake_factory()),
+            )
+            .await;
+        assert!(
+            matches!(result, Err(MaterialiseError::Other(DunkError::Refused(ref reason))) if reason == "no task with id \"t999999999\"")
+        );
         let calls = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&calls);
         let unavailable: LoopTerminalFactory = Arc::new(move || {
