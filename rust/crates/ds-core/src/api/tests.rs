@@ -3230,3 +3230,285 @@ fn test_poolrad_progress_reports_the_recorded_count() {
         "poolrad progress adapter is not wired"
     );
 }
+
+fn task_api_fixture() -> (
+    tempfile::TempDir,
+    Flock,
+    Arc<crate::tasks::Tasks>,
+    Dispatcher,
+    tokio::runtime::Runtime,
+) {
+    let (dir, flock) = flock();
+    let mut roles = Roles::new(
+        &Env::default(),
+        Some(dir.path().join("roles.json")),
+        Some(dir.path().join("tokens.json")),
+        None,
+    )
+    .expect("role registry");
+    for (pane, role) in [("w1:p1", "worker"), ("w1:p2", "owner"), ("w1:p3", "worker")] {
+        roles
+            .register(pane, role, None, None, None, None, None, None)
+            .expect("role registration");
+    }
+    flock.attach_roles(roles, None);
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("runtime");
+    let tasks = Arc::new(
+        runtime
+            .block_on(crate::tasks::Tasks::open(dir.path().join("tasks.db")))
+            .expect("task store"),
+    );
+    flock.attach_stores(Stores {
+        tasks: Some(tasks.clone()),
+        ..Stores::default()
+    });
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_task_add_list_read();
+    (dir, flock, tasks, dispatcher, runtime)
+}
+
+fn dispatch_task_api(
+    dispatcher: &Dispatcher,
+    flock: &Flock,
+    runtime: &tokio::runtime::Runtime,
+    name: &str,
+    input: Value,
+    pane: &str,
+) -> Result<Value, DunkError> {
+    let env = TestEnv::default();
+    let request = RequestCtx {
+        self_pane_id: Some(pane.to_string()),
+        ..RequestCtx::default()
+    };
+    let context = HandlerContext {
+        flock,
+        request: &request,
+        env: &env,
+        runtime: runtime.handle(),
+    };
+    let gate = FlockGate(&context);
+    dispatcher.dispatch(&context, &gate, name, args(input))
+}
+
+#[test]
+fn h_task_add_matches_python_defaults_and_role_gate() {
+    let (_dir, flock, _tasks, dispatcher, runtime) = task_api_fixture();
+    let plain = dispatch_task_api(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_add",
+        json!({"title": "default"}),
+        "w1:p1",
+    )
+    .expect("default task");
+    assert_eq!(plain["scope"], "global");
+    assert_eq!(plain["status"], "open");
+    assert_eq!(plain["priority"], "low");
+    assert_eq!(plain["body"], "");
+    assert_eq!(plain["created_by"], "w1:p1");
+    assert_eq!(plain["assignees"], json!([]));
+    assert_eq!(plain["children"], json!([]));
+
+    let high = dispatch_task_api(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_add",
+        json!({
+            "title": "explicit",
+            "priority": "high",
+            "scope": "self",
+            "body": "details"
+        }),
+        "w1:p1",
+    )
+    .expect("explicit high-priority task");
+    assert_eq!(high["scope"], "w1:p1");
+    assert_eq!(high["priority"], "high");
+    assert_eq!(high["body"], "details");
+
+    assert!(matches!(
+        dispatch_task_api(
+            &dispatcher,
+            &flock,
+            &runtime,
+            "task_add",
+            json!({"title": "not assignable", "assignees": ["w1:p3"]}),
+            "w1:p1",
+        ),
+        Err(DunkError::Refused(message)) if message.contains("only to yourself")
+    ));
+
+    let owner_assigned = dispatch_task_api(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_add",
+        json!({"title": "owner assigned", "assignees": ["w1:p3"]}),
+        "w1:p2",
+    )
+    .expect("owner assignment");
+    assert_eq!(owner_assigned["assignees"], json!(["w1:p3"]));
+}
+
+#[test]
+fn h_task_read_returns_full_wire_and_latest_three_note_reasons() {
+    let (_dir, flock, tasks, dispatcher, runtime) = task_api_fixture();
+    let created = dispatch_task_api(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_add",
+        json!({"title": "read me", "scope": "self", "body": "full row"}),
+        "w1:p1",
+    )
+    .expect("create task");
+    let id = created["id"].as_str().expect("task id");
+    for index in 0..5 {
+        runtime
+            .block_on(tasks.note(id, "note", "w1:p1", Some(&format!("note {index}"))))
+            .expect("append note");
+    }
+
+    let read = dispatch_task_api(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_read",
+        json!({"id": id}),
+        "w1:p1",
+    )
+    .expect("read task");
+    assert_eq!(read["id"], id);
+    assert_eq!(read["scope"], "w1:p1");
+    assert_eq!(read["body"], "full row");
+    assert_eq!(read["children"], json!([]));
+    assert!(read["leases"].is_array());
+    assert_eq!(
+        read["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|note| note["reason"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["note 2", "note 3", "note 4"]
+    );
+    assert_eq!(read["notes"][0]["actor"], "w1:p1");
+
+    assert!(matches!(
+        dispatch_task_api(
+            &dispatcher,
+            &flock,
+            &runtime,
+            "task_read",
+            json!({"id": id}),
+            "w1:p3",
+        ),
+        Err(DunkError::Refused(message)) if message.contains("not visible")
+    ));
+    assert!(matches!(
+        dispatch_task_api(
+            &dispatcher,
+            &flock,
+            &runtime,
+            "task_read",
+            json!({"id": "t999999"}),
+            "w1:p1",
+        ),
+        Err(DunkError::Refused(message)) if message.contains("no task with id")
+    ));
+}
+
+#[test]
+fn h_task_list_matches_python_defaults_and_slice_limits() {
+    let (_dir, flock, tasks, dispatcher, runtime) = task_api_fixture();
+    let mut ids = Vec::new();
+    for title in ["first", "second", "third", "fourth"] {
+        let created = dispatch_task_api(
+            &dispatcher,
+            &flock,
+            &runtime,
+            "task_add",
+            json!({"title": title}),
+            "w1:p1",
+        )
+        .expect("create list fixture");
+        ids.push(created["id"].as_str().unwrap().to_string());
+    }
+    runtime
+        .block_on(tasks.complete(&ids[0]))
+        .expect("complete first task");
+
+    for args in [json!({}), json!({"limit": null}), json!({"limit": 0})] {
+        let listed = dispatch_task_api(&dispatcher, &flock, &runtime, "task_list", args, "w1:p1")
+            .expect("default task list");
+        assert_eq!(listed["scope"], "visible");
+        assert_eq!(listed["pane_id"], "w1:p1");
+        assert_eq!(listed["tasks"].as_array().unwrap().len(), 4);
+    }
+
+    let two = dispatch_task_api(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_list",
+        json!({"limit": "2"}),
+        "w1:p1",
+    )
+    .expect("positive limit");
+    assert_eq!(two["tasks"].as_array().unwrap().len(), 2);
+
+    let negative = dispatch_task_api(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_list",
+        json!({"limit": -1}),
+        "w1:p1",
+    )
+    .expect("negative Python slice");
+    assert_eq!(negative["tasks"].as_array().unwrap().len(), 3);
+
+    let active = dispatch_task_api(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_list",
+        json!({"include_done": false}),
+        "w1:p1",
+    )
+    .expect("exclude completed tasks");
+    assert_eq!(active["tasks"].as_array().unwrap().len(), 3);
+    assert!(active["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|task| task["status"] != "done"));
+
+    assert!(matches!(
+        dispatch_task_api(
+            &dispatcher,
+            &flock,
+            &runtime,
+            "task_list",
+            json!({"limit": "nope"}),
+            "w1:p1",
+        ),
+        Err(DunkError::Refused(message)) if message == "invalid literal for int() with base 10: 'nope'"
+    ));
+    assert!(matches!(
+        dispatch_task_api(
+            &dispatcher,
+            &flock,
+            &runtime,
+            "task_list",
+            json!({"scope": "w1:p3"}),
+            "w1:p1",
+        ),
+        Err(DunkError::Refused(_))
+    ));
+}
