@@ -7,6 +7,7 @@ description = "Dunking Sheep web adapter foundation (docs/rust/RUST_PORT.md sect
 
 [dependencies]
 axum.workspace = true
+ds-core = { path = "../ds-core" }
 serde.workspace = true
 serde_json.workspace = true
 

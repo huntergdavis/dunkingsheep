@@ -420,6 +420,7 @@ dependencies = [
  "chrono",
  "clap",
  "ds-core",
+ "ds-tui",
  "serde_json",
  "tempfile",
 ]
@@ -468,6 +469,7 @@ name = "ds-web"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "ds-core",
  "serde",
  "serde_json",
  "tower",
