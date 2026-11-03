@@ -285,6 +285,7 @@ mod tests {
                 Some("broken") => Err(AuthError::Internal("auth db".into())),
                 _ => match cookie {
                     Some("session") => Ok(super::super::auth::Identity::Owner),
+                    Some("broken") => Err(AuthError::Internal("auth db".into())),
                     _ => Err(AuthError::SignInRequired),
                 },
             };
