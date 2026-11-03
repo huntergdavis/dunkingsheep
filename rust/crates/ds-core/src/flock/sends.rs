@@ -239,6 +239,34 @@ fn hold_backoff_s(attempts: i64) -> f64 {
         .min(HOLD_BACKOFF_CAP_S)
 }
 
+pub type HoldSignature = (String, String);
+
+fn hold_signature(env: &dyn SendEnv, pane_id: &str) -> HoldSignature {
+    let Some(screen) = env.read_pane(pane_id, CONSUMPTION_READ_LINES, true) else {
+        return ("gone".into(), String::new());
+    };
+    if modal_open(&screen) {
+        let modal = collapse(&strip_ansi(&screen));
+        let start = modal
+            .char_indices()
+            .nth(modal.chars().count().saturating_sub(4000))
+            .map(|(index, _)| index)
+            .unwrap_or(0);
+        return ("modal".into(), modal[start..].to_owned());
+    }
+    if let Some(text) = federated_composer(env.federated_input(), &screen) {
+        return ("box".into(), text);
+    }
+    let (text, detail) = box_text(&screen);
+    if detail.starts_with(AMBIGUOUS_COMPOSER) {
+        return ("gone".into(), String::new());
+    }
+    match typed_text(&screen) {
+        Some(_) => ("box".into(), text),
+        None => ("gone".into(), String::new()),
+    }
+}
+
 /// Result of one idempotent outbox delivery transition.
 #[allow(dead_code)] // Consumed by the dependent outbox worker/runtime integration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -402,8 +430,8 @@ pub fn ensure_box_clear(
 }
 
 /// Type text and perform its initial submit key under one typing guard. The returned action owns
-/// the later confirmation; call [`confirm_send_action`] only after dropping the guard. The attempt
-/// baseline and generation are captured before the first terminal write.
+/// the later confirmation; call [`confirm_send_action`] only after dropping the guard. Delivery
+/// supplies the generation it captured before entering the guarded send.
 pub fn submit_text(
     flock: &Flock,
     env: &mut dyn SendPreparationEnv,
@@ -411,6 +439,7 @@ pub fn submit_text(
     text: &str,
     press_enter: bool,
     check_box: bool,
+    attempt_generation: Option<&str>,
     guard: Option<&TypingGuard<'_>>,
 ) -> SendAction {
     let guarded = guard.is_some();
@@ -427,7 +456,6 @@ pub fn submit_text(
             }
         }
         let baseline = env.read_status(pane_id);
-        let generation = env.attempt_generation(pane_id);
         let before = env
             .read_pane(pane_id, CONSUMPTION_READ_LINES, true)
             .unwrap_or_default();
@@ -449,7 +477,7 @@ pub fn submit_text(
             return Err(detail);
         }
         flock.remember_typed(pane_id, text);
-        if !env.persist_typed_attempt(pane_id, text, press_enter, generation.as_deref()) {
+        if !env.persist_typed_attempt(pane_id, text, press_enter, attempt_generation) {
             return Err("typed but not submitted: durable attempt receipt failed".into());
         }
         if !press_enter {
@@ -1526,7 +1554,7 @@ pub struct Message {
     pub detail: Option<String>,
     pub holds: i64,
     pub next_attempt_at: Option<f64>,
-    pub hold_signature: Option<String>,
+    pub hold_signature: Option<HoldSignature>,
     pub created_at: f64,
     pub finished_at: Option<f64>,
     /// Completion event shared by clones and deliberately omitted from the wire form.
@@ -1873,6 +1901,15 @@ pub(crate) fn message_from_snapshot(value: &Value) -> Option<Message> {
     let row = value.as_object()?;
     let field = |key: &str| row.get(key);
     let string = |key: &str| field(key).and_then(Value::as_str).map(str::to_owned);
+    let hold_signature = || match field("hold_signature")? {
+        Value::Array(parts) if parts.len() == 2 => {
+            Some((parts[0].as_str()?.to_owned(), parts[1].as_str()?.to_owned()))
+        }
+        // Older Rust snapshots stored only the box text. Keep that text comparable as a box
+        // signature so upgrading does not discard an existing held-message backoff.
+        Value::String(text) => Some(("box".to_owned(), text.clone())),
+        _ => None,
+    };
     let id = string("id")?;
     let pane_id = string("pane_id")?;
     let target_label = string("target_label").unwrap_or_else(|| pane_id.clone());
@@ -1904,7 +1941,7 @@ pub(crate) fn message_from_snapshot(value: &Value) -> Option<Message> {
     message.detail = string("detail");
     message.holds = field("holds").and_then(Value::as_i64).unwrap_or(0);
     message.next_attempt_at = field("next_attempt_at").and_then(Value::as_f64);
-    message.hold_signature = string("hold_signature");
+    message.hold_signature = hold_signature();
     message.created_at = field("created_at")
         .and_then(Value::as_f64)
         .unwrap_or(message.created_at);
@@ -2038,6 +2075,7 @@ impl Flock {
                         &message.text,
                         message.press_enter,
                         false,
+                        message.attempt_generation.as_deref(),
                         Some(guard),
                     ))
                 }
@@ -2046,9 +2084,7 @@ impl Flock {
         if !sent {
             let terminal;
             let attempts;
-            let hold_signature = env
-                .read_pane(&pane_id, CONSUMPTION_READ_LINES, true)
-                .map(|screen| box_text(&screen).0);
+            let hold_signature = hold_signature(env, &pane_id);
             {
                 let mut outbox = outbox_lock(&self.outbox);
                 let Some(queue) = outbox.get_mut(&pane_id) else {
@@ -2070,7 +2106,7 @@ impl Flock {
                 } else {
                     let delay = hold_backoff_s(attempts);
                     stored.next_attempt_at = Some(now + delay);
-                    stored.hold_signature = hold_signature;
+                    stored.hold_signature = Some(hold_signature);
                     stored.detail = Some(if detail.is_empty() { "held" } else { &detail }.into());
                 }
                 message = stored.clone();

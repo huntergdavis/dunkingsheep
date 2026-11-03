@@ -23,6 +23,7 @@ struct Pane {
     reads: RefCell<Vec<(String, bool)>>,
     screen_script: RefCell<VecDeque<Option<String>>>,
     status_script: RefCell<VecDeque<Option<String>>>,
+    attempt_generation_script: RefCell<VecDeque<Option<String>>>,
     now: f64,
     sleeps: Vec<f64>,
     remembered: BTreeMap<String, String>,
@@ -158,6 +159,9 @@ impl SendPreparationEnv for Pane {
     }
 
     fn attempt_generation(&self, pane_id: &str) -> Option<String> {
+        if let Some(generation) = self.attempt_generation_script.borrow_mut().pop_front() {
+            return generation;
+        }
         pane_generation(self, pane_id)
     }
 
@@ -709,7 +713,16 @@ mod guarded_preparation_tests {
         ]);
         let guard = flock.typing_guard(P).unwrap();
 
-        let mut action = submit_text(&flock, &mut pane, P, "hello", true, false, Some(&guard));
+        let mut action = submit_text(
+            &flock,
+            &mut pane,
+            P,
+            "hello",
+            true,
+            false,
+            None,
+            Some(&guard),
+        );
         drop(guard);
         confirm_send_action(&mut pane, &mut action);
 
@@ -734,7 +747,16 @@ mod guarded_preparation_tests {
             .extend([Some(submit_live_screen()), Some(submit_live_screen())]);
         let guard = flock.typing_guard(P).unwrap();
 
-        let action = submit_text(&flock, &mut pane, P, "draft", false, false, Some(&guard));
+        let action = submit_text(
+            &flock,
+            &mut pane,
+            P,
+            "draft",
+            false,
+            false,
+            None,
+            Some(&guard),
+        );
         drop(guard);
 
         assert_eq!((true, "sent".to_string()), (action.ok, action.detail));
@@ -753,7 +775,7 @@ mod guarded_preparation_tests {
         ));
         let guard = flock.typing_guard(P).unwrap();
 
-        let action = submit_text(&flock, &mut pane, P, "ours", true, true, Some(&guard));
+        let action = submit_text(&flock, &mut pane, P, "ours", true, true, None, Some(&guard));
 
         assert!(!action.ok);
         assert!(action.detail.starts_with("agent session is dead"));
@@ -1069,6 +1091,7 @@ mod guarded_preparation_tests {
                     "ours",
                     true,
                     false,
+                    None,
                     Some(guard),
                 ))
             },
@@ -2111,6 +2134,8 @@ fn deliver_message_persists_hold_backoff_and_keeps_original_refusal() {
     message.hold_while_typing = false;
     flock.outbox.lock().unwrap().insert(P.into(), vec![message]);
     let mut pane = Pane::default();
+    pane.screens
+        .insert(P.into(), submit_pending_screen("human draft"));
 
     assert_eq!(
         DeliveryOutcome::Held,
@@ -2122,18 +2147,40 @@ fn deliver_message_persists_hold_backoff_and_keeps_original_refusal() {
     assert_eq!(Some("disabled".into()), held.detail);
     assert_eq!(Some(105.0), held.next_attempt_at);
     assert_eq!(1, held.holds);
+    assert_eq!(
+        Some(("box".into(), "human draft".into())),
+        held.hold_signature
+    );
     assert!(!held.done.is_set());
 
     let snapshot: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
     assert_eq!(1, snapshot["outbox"][0]["holds"]);
     assert_eq!(105.0, snapshot["outbox"][0]["next_attempt_at"]);
+    assert_eq!(
+        serde_json::json!(["box", "human draft"]),
+        snapshot["outbox"][0]["hold_signature"]
+    );
     let restored = Flock::new(dir.path().join("restored-launches.json"), dir.path(), false);
     restored.restore_snapshot(&snapshot);
     let restored_outbox = restored.outbox_snapshot();
     let restored_message = &restored_outbox[P][0];
     assert_eq!(1, restored_message.holds);
     assert_eq!(Some(105.0), restored_message.next_attempt_at);
+}
+
+#[test]
+fn hold_signature_preserves_modal_kind_and_collapsed_screen_text() {
+    let mut pane = Pane::default();
+    pane.screens.insert(
+        P.into(),
+        "Select Model and Effort\n  enter   select · esc back\n".into(),
+    );
+
+    assert_eq!(
+        ("modal".to_owned(), "Select Model and Effort enter select · esc back".to_owned()),
+        hold_signature(&pane, P)
+    );
 }
 
 #[test]
@@ -2196,14 +2243,29 @@ fn deliver_message_terminal_action_failure_is_not_retried() {
         "pane_id": P,
         "pane_pid": std::process::id(),
     })];
-    let attempt_generation = pane_generation(&pane, P);
+    pane.attempt_generation_script.borrow_mut().extend([
+        Some("pid:123:start:captured".into()),
+        Some("pid:456:start:replacement".into()),
+    ]);
 
     assert_eq!(
         DeliveryOutcome::Failed,
         flock.deliver_message("m-failed", 100.0, &mut pane, || None)
     );
     assert_eq!(1, pane.typed.len());
-    assert_eq!(attempt_generation, pane.typed_attempts[0].3);
+    assert_eq!(
+        Some("pid:123:start:captured".into()),
+        pane.typed_attempts[0].3
+    );
+    assert_eq!(
+        Some("pid:456:start:replacement".into()),
+        pane.attempt_generation_script
+            .borrow()
+            .front()
+            .cloned()
+            .flatten(),
+        "submit_text must not reread the generation after delivery captured it"
+    );
     assert!(waiter.is_set());
     assert!(flock.outbox_snapshot().is_empty());
     assert_eq!(
