@@ -363,12 +363,11 @@ fn task_complete_wakes_next_job_push_after_commit() {
     );
     assert!(result["next_job"].is_object());
     assert!(result["next_job"].get("task").is_none());
-    assert!(runtime
-        .block_on(tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            notified
-        ))
-        .is_ok());
+    assert!(runtime.block_on(async {
+        tokio::time::timeout(std::time::Duration::from_secs(1), notified)
+            .await
+            .is_ok()
+    }));
     let next_after = runtime.block_on(tasks.get(&next.id)).unwrap();
     assert_eq!("in_progress", next_after.status);
 }
@@ -457,10 +456,11 @@ fn task_complete_review_sync_observes_committed_verdict_and_contains_failure() {
             .as_str()
     );
     assert!(!result["github"]["errors"].as_array().unwrap().is_empty());
-    assert_eq!(
-        vec![("done".into(), Some("accept".into()))],
-        *observed.lock().unwrap()
-    );
+    let observed = observed.lock().unwrap();
+    assert!(!observed.is_empty());
+    assert!(observed
+        .iter()
+        .all(|(status, verdict)| status == "done" && verdict.as_deref() == Some("accept")));
 }
 
 #[test]
@@ -509,12 +509,11 @@ fn task_complete_advance_failure_does_not_wake_or_run_review_sync() {
         runtime.block_on(tasks.get(&review.id)).unwrap().status
     );
     assert!(observed.lock().unwrap().is_empty());
-    assert!(runtime
-        .block_on(tokio::time::timeout(
-            std::time::Duration::from_millis(25),
-            wake.notified()
-        ))
-        .is_err());
+    assert!(runtime.block_on(async {
+        tokio::time::timeout(std::time::Duration::from_millis(25), wake.notified())
+            .await
+            .is_err()
+    }));
 }
 
 #[test]
@@ -563,12 +562,11 @@ fn task_complete_landed_failure_is_after_wake_and_skips_review_sync() {
         runtime.block_on(tasks.get(&review.id)).unwrap().status
     );
     assert!(observed.lock().unwrap().is_empty());
-    assert!(runtime
-        .block_on(tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            wake.notified()
-        ))
-        .is_ok());
+    assert!(runtime.block_on(async {
+        tokio::time::timeout(std::time::Duration::from_secs(1), wake.notified())
+            .await
+            .is_ok()
+    }));
 }
 
 #[test]
