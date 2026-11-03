@@ -2095,6 +2095,124 @@ fn record_delivery_outcome_records_metrics_receipts_and_waiters_once() {
 }
 
 #[test]
+fn deliver_message_persists_hold_backoff_and_keeps_original_refusal() {
+    let dir = tempfile::tempdir().unwrap();
+    let state_path = dir.path().join("state.json");
+    let flock = Flock::new(dir.path().join("launches.json"), dir.path(), true);
+    flock
+        .attach_status_state(super::status_runtime::StatusState::at_start(
+            "test",
+            &state_path,
+            std::env::current_exe().unwrap(),
+            crate::config::Env::default(),
+        ))
+        .unwrap();
+    let mut message = Message::new("m-hold", P, "pane", "hello", "test");
+    message.hold_while_typing = false;
+    flock.outbox.lock().unwrap().insert(P.into(), vec![message]);
+    let mut pane = Pane::default();
+
+    assert_eq!(
+        DeliveryOutcome::Held,
+        flock.deliver_message("m-hold", 100.0, &mut pane, || Some("disabled".into()))
+    );
+    let queue = flock.outbox_snapshot();
+    let held = &queue[P][0];
+    assert_eq!("queued", held.status);
+    assert_eq!(Some("disabled".into()), held.detail);
+    assert_eq!(Some(105.0), held.next_attempt_at);
+    assert_eq!(1, held.holds);
+    assert!(!held.done.is_set());
+
+    let snapshot: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+    assert_eq!(1, snapshot["outbox"][0]["holds"]);
+    assert_eq!(105.0, snapshot["outbox"][0]["next_attempt_at"]);
+    let restored = Flock::new(dir.path().join("restored-launches.json"), dir.path(), false);
+    restored.restore_snapshot(&snapshot);
+    let restored_outbox = restored.outbox_snapshot();
+    let restored_message = &restored_outbox[P][0];
+    assert_eq!(1, restored_message.holds);
+    assert_eq!(Some(105.0), restored_message.next_attempt_at);
+}
+
+#[test]
+fn deliver_message_exhaustion_removes_once_remembers_and_releases_waiter() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Flock::new(dir.path().join("launches.json"), dir.path(), false);
+    let mut message = Message::new("m-exhausted", P, "pane", "hello", "test");
+    message.hold_while_typing = false;
+    let waiter = message.done.clone();
+    flock.outbox.lock().unwrap().insert(P.into(), vec![message]);
+    let mut pane = Pane::default();
+
+    for attempt in 0..HOLD_ATTEMPT_LIMIT {
+        let result =
+            flock.deliver_message("m-exhausted", 100.0 + attempt as f64, &mut pane, || {
+                Some("disabled".into())
+            });
+        assert_eq!(
+            if attempt + 1 == HOLD_ATTEMPT_LIMIT {
+                DeliveryOutcome::Undeliverable
+            } else {
+                DeliveryOutcome::Held
+            },
+            result
+        );
+    }
+
+    assert!(flock.outbox_snapshot().is_empty());
+    assert!(waiter.is_set());
+    assert_eq!(
+        Some("undeliverable"),
+        flock
+            .decided
+            .lock()
+            .unwrap()
+            .by_id
+            .get("m-exhausted")
+            .map(|row| row.status.as_str())
+    );
+    assert_eq!(
+        DeliveryOutcome::AlreadyDecided,
+        flock.deliver_message("m-exhausted", 200.0, &mut pane, || None)
+    );
+}
+
+#[test]
+fn deliver_message_terminal_action_failure_is_not_retried() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Flock::new(dir.path().join("launches.json"), dir.path(), false);
+    let mut message = Message::new("m-failed", P, "pane", "hello", "test");
+    message.hold_while_typing = false;
+    let waiter = message.done.clone();
+    flock.outbox.lock().unwrap().insert(P.into(), vec![message]);
+    let mut pane = Pane {
+        receipt_ok: false,
+        ..Pane::default()
+    };
+    pane.panes = vec![serde_json::json!({
+        "pane_id": P,
+        "pane_pid": std::process::id(),
+    })];
+    let attempt_generation = pane_generation(&pane, P);
+
+    assert_eq!(
+        DeliveryOutcome::Failed,
+        flock.deliver_message("m-failed", 100.0, &mut pane, || None)
+    );
+    assert_eq!(1, pane.typed.len());
+    assert_eq!(attempt_generation, pane.typed_attempts[0].3);
+    assert!(waiter.is_set());
+    assert!(flock.outbox_snapshot().is_empty());
+    assert_eq!(
+        DeliveryOutcome::AlreadyDecided,
+        flock.deliver_message("m-failed", 200.0, &mut pane, || None)
+    );
+    assert_eq!(1, pane.typed.len());
+}
+
+#[test]
 fn record_delivery_outcome_ignores_receipt_errors_and_still_settles_waiter() {
     use crate::flock::panes::Stores;
     use crate::inbox_store::{Outgoing, Store};
