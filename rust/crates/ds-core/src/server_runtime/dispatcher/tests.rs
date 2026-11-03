@@ -137,7 +137,10 @@ fn production_dispatcher_uses_real_handler_registry_and_gate() {
         .dispatch("create_workspace", &json!({}), &ctx)
         .unwrap_err();
     assert!(denied.to_string().contains("requires a superuser"));
+
     dispatcher.close();
+    let after_close = dispatcher.dispatch("whoami", &json!({}), &ctx).unwrap();
+    assert_eq!(after_close["pane_id"], "w1:p1");
 }
 
 #[test]

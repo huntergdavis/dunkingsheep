@@ -125,10 +125,6 @@ impl Dispatcher for RuntimeDispatcher {
             });
         }
     }
-
-    fn close(&self) {
-        self.services.shutdown();
-    }
 }
 
 #[cfg(test)]

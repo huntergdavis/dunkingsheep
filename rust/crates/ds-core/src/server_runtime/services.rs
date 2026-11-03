@@ -96,6 +96,11 @@ impl RuntimeServices {
                 "runtime whole-state file must be distinct from launches, lanes, and executable",
             ));
         }
+        if inputs.launches_file == inputs.lane_registry_file {
+            return Err(refusal(
+                "runtime launches and lane registry files must be distinct",
+            ));
+        }
         if inputs.stores.tasks.is_none() {
             return Err(refusal("runtime task store is not attached"));
         }
@@ -178,7 +183,8 @@ impl RuntimeServices {
     }
 
     /// Stop/join outbox workers while their Flock, stores, and runtime remain alive.
-    /// The caller remains responsible for the t1605 connection-drain order.
+    /// The startup owner calls this after FlockServer has stopped accepting and drained/joined
+    /// its request threads (the remaining t1605 shutdown gate).
     pub fn shutdown(&self) {
         if !self.stopped.swap(true, Ordering::AcqRel) {
             self.outbox.stop_and_join();
@@ -601,6 +607,27 @@ mod tests {
             .unwrap()
             .to_string()
             .contains("release version must be configured"));
+
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = Builder::new_multi_thread().enable_all().build().unwrap();
+        let (tasks, inbox) = tasks_and_inbox(&runtime, &dir);
+        let mut inputs = startup_inputs(
+            &dir,
+            runtime,
+            Env::default(),
+            fake_factory_with_current_pane(),
+            Stores {
+                tasks: Some(tasks),
+                inbox: Some(inbox),
+                ..Stores::default()
+            },
+        );
+        inputs.launches_file = inputs.lane_registry_file.clone();
+        assert!(RuntimeServices::new(inputs)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("launches and lane registry files must be distinct"));
 
         let dir = tempfile::tempdir().unwrap();
         let runtime = Builder::new_multi_thread().enable_all().build().unwrap();
