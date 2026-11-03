@@ -194,19 +194,26 @@ async fn request_json(request: Request) -> Result<Option<Value>, Response> {
         return Ok(None);
     }
     serde_json::from_slice(&bytes).map(Some).map_err(|error| {
-        let offset = error.column().saturating_sub(1);
+        let error_text = error.to_string();
+        let offset = if error_text.starts_with("EOF while parsing an object") {
+            String::from_utf8_lossy(&bytes).chars().count()
+        } else {
+            error.column().saturating_sub(1)
+        };
         validation_error(
             "json_invalid",
             vec![json!("body"), json!(offset)],
             "JSON decode error",
             json!({}),
-            Some(json!({"error": python_json_error(&error.to_string())})),
+            Some(json!({"error": python_json_error(&error_text)})),
         )
     })
 }
 
 fn python_json_error(error: &str) -> &'static str {
-    if error.starts_with("key must be a string") {
+    if error.starts_with("key must be a string")
+        || error.starts_with("EOF while parsing an object")
+    {
         "Expecting property name enclosed in double quotes"
     } else if error.starts_with("EOF while parsing") || error.starts_with("expected value") {
         "Expecting value"
@@ -604,6 +611,23 @@ mod tests {
         assert_eq!(StatusCode::UNPROCESSABLE_ENTITY, status);
         assert_eq!("string_too_long", value["detail"][0]["type"]);
         assert_eq!(80, value["detail"][0]["ctx"]["max_length"]);
+        assert!(game.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn game_savestate_maps_incomplete_json_object_to_python_decode_error() {
+        let game = Arc::new(FakeGame::new(Value::Null));
+        let (status, _body, value) = response(
+            app(game.clone(), authorized()),
+            request("POST", "/api/game/savestate", "{"),
+        );
+        assert_eq!(StatusCode::UNPROCESSABLE_ENTITY, status);
+        assert_eq!(
+            json!({"detail":[{"type":"json_invalid","loc":["body",1],
+                "msg":"JSON decode error","input":{},
+                "ctx":{"error":"Expecting property name enclosed in double quotes"}}]}),
+            value
+        );
         assert!(game.calls.lock().unwrap().is_empty());
     }
 
