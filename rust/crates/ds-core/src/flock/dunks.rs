@@ -6,12 +6,15 @@
 //! `SnapshotStore` facade. It does NOT add runtime dunk CRUD, a dunk-only writer, whole-state
 //! file restore/save, or the per-dunk timer, idle gating and skip/hold backpressure.
 
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use regex::Regex;
 use serde_json::{json, Map, Value};
 
-use super::{sends::SnapshotStore, Flock};
+use super::sends::{
+    DirectSendOptions, DirectTextMetadata, OutboxWake, SendPreparationEnv, SnapshotStore,
+};
+use super::Flock;
 use crate::clock;
 use crate::error::DunkError;
 
@@ -498,6 +501,52 @@ impl DunkList {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    /// Snapshot a dunk for one explicit fire transition, marking its volatile status first.
+    fn begin_fire(&self, dunk_id: &str) -> Result<Dunker, DunkError> {
+        let mut state = self.state();
+        let index = Self::find(&state, dunk_id)?;
+        let dunker = &mut state.dunkers[index];
+        if dunker.target_pane_id.as_deref().is_none_or(str::is_empty) {
+            dunker.status = "No target - press c".into();
+            return Err(DunkError::Refused(format!("{} has no target", dunker.id)));
+        }
+        dunker.status = "Sending...".into();
+        Ok(dunker.clone())
+    }
+
+    /// Apply the synchronous fire outcome to the dunk if it still exists. Removing a dunk
+    /// concurrently with its send leaves the in-flight transition operating on its snapshot.
+    fn finish_fire(&self, dunk_id: &str, sent_text: Option<&str>, ok: bool, detail: &str) -> bool {
+        let mut state = self.state();
+        let Ok(index) = Self::find(&state, dunk_id) else {
+            return false;
+        };
+        let dunker = &mut state.dunkers[index];
+        if ok {
+            if let Some(text) = sent_text {
+                dunker.send_count += 1;
+                dunker.skip_count = 0;
+                dunker.last_sent_at = Some(clock::now_s());
+                dunker.last_error = None;
+                dunker.last_sent_text = Some(text.to_owned());
+                dunker.awaiting_consumption = true;
+                dunker.unknown_skips = 0;
+            }
+            dunker.status = format!("Tested {}", chrono::Local::now().format("%H:%M:%S"));
+        } else {
+            dunker.status = "Test failed".into();
+            dunker.last_error = Some(detail.to_owned());
+        }
+        true
+    }
+
+    fn queue_fire(&self, dunk_id: &str) {
+        let mut state = self.state();
+        if let Ok(index) = Self::find(&state, dunk_id) {
+            state.dunkers[index].status = "Queued (typing)".into();
+        }
+    }
+
     /// `_load` (the dunk part): `next_id` and every row that parses; a corrupt row is
     /// skipped, restored rows read `Restored`. A running dunk with a stale `next_send_at`
     /// is pushed `RESTORE_GRACE_S` ahead (its timer is the caller's to respawn).
@@ -824,6 +873,104 @@ impl Flock {
     #[allow(dead_code)] // Dunk CRUD callers will use this facade in following assigned leaves.
     pub(crate) fn _save_dunks(&self, store: &dyn SnapshotStore) -> Result<(), DunkError> {
         store.save(self)
+    }
+
+    /// `Flock.fire` with `wait=true`: expand and synchronously fire one dunk through the shared
+    /// guarded direct-send path, then persist the resulting dunk counters via the whole-state
+    /// snapshot seam. Timer scheduling and asynchronous fire workers belong to later slices.
+    pub fn fire(
+        self: &Arc<Self>,
+        dunk_id: &str,
+        env: &mut dyn SendPreparationEnv,
+        wake: &dyn OutboxWake,
+        store: &dyn SnapshotStore,
+        permission: impl FnMut() -> Option<String>,
+    ) -> Result<Value, DunkError> {
+        let dunker = self.dunks.begin_fire(dunk_id)?;
+        let pane_id = dunker
+            .target_pane_id
+            .as_deref()
+            .expect("begin_fire requires a target");
+        let text = expand_template(&dunker.text, &dunker).trim().to_owned();
+        if text.is_empty() {
+            self.dunks.finish_fire(&dunker.id, None, true, "");
+            return Ok(json!({
+                "id": dunker.id,
+                "ok": true,
+                "queued": false,
+                "message": "empty text, nothing sent",
+            }));
+        }
+
+        let delivery = self.send_now(
+            &json!(pane_id),
+            &text,
+            DirectSendOptions {
+                hold_while_typing: dunker.hold_while_typing,
+                wait_s: 5.0,
+                ..DirectSendOptions::default()
+            },
+            DirectTextMetadata {
+                source: &dunker.id,
+                ..DirectTextMetadata::default()
+            },
+            env,
+            wake,
+            store,
+            permission,
+        );
+        let (ok, detail) = match delivery {
+            Ok(result) => {
+                if result.get("status").and_then(Value::as_str) == Some("queued") {
+                    self.dunks.queue_fire(&dunker.id);
+                    let message_id = result
+                        .get("message_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    let message = format!(
+                        "queued: the box in {} would not clear",
+                        dunker.target_label()
+                    );
+                    store.save(self)?;
+                    return Ok(json!({
+                        "id": dunker.id,
+                        "ok": Value::Null,
+                        "queued": true,
+                        "message_id": message_id,
+                        "message": message,
+                    }));
+                }
+                let detail = result
+                    .get("detail")
+                    .and_then(Value::as_str)
+                    .unwrap_or("send failed")
+                    .to_owned();
+                (
+                    result.get("status").and_then(Value::as_str) == Some("sent"),
+                    detail,
+                )
+            }
+            Err(error) => (false, error.to_string()),
+        };
+
+        self.dunks
+            .finish_fire(&dunker.id, ok.then_some(text.as_str()), ok, &detail);
+        if let Err(error) = store.save(self) {
+            self.dunks
+                .finish_fire(&dunker.id, None, false, &error.to_string());
+            return Ok(json!({
+                "id": dunker.id,
+                "ok": false,
+                "queued": false,
+                "message": error.to_string(),
+            }));
+        }
+        Ok(json!({
+            "id": dunker.id,
+            "ok": ok,
+            "queued": false,
+            "message": detail,
+        }))
     }
 }
 
