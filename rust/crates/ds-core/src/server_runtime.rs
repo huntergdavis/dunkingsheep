@@ -7,6 +7,7 @@
 mod delivery;
 mod dispatcher;
 mod inbox;
+mod inbox_data;
 mod inbox_metrics;
 mod inbox_stores;
 mod keypress;

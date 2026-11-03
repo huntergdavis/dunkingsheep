@@ -122,7 +122,11 @@ impl RequestRuntimeAdapter<'_> {
                     .filter(|s| !s.is_empty())
                     .map(String::from)
             },
-            || super::normalize_backend_name(env.get("DUNKINGSHEEP_TERMINAL_BACKEND")),
+            || {
+                Ok(super::normalize_backend_name(
+                    env.get("DUNKINGSHEEP_TERMINAL_BACKEND"),
+                ))
+            },
         )?;
         let mut lanes: Vec<String> = crate::pm::load_routing(None, None, env)
             .unwrap_or_default()

@@ -21,7 +21,7 @@ use super::Flock;
 /// What the inbox commands need from outside the lane registry and the pure resolver.
 pub trait InboxEnv: MailboxEnv {
     /// `caller_role(pane)`.
-    fn caller_role(&self, pane_id: &str) -> String;
+    fn caller_role(&self, pane_id: &str) -> Result<String, DunkError>;
     /// `DUNKINGSHEEP_MAILBOX`, trimmed; `None` when unset or blank.
     fn mailbox_override(&self) -> Option<String>;
     /// Recipient-side wake policy; tests inject it without changing process environment.
@@ -29,7 +29,7 @@ pub trait InboxEnv: MailboxEnv {
         std::env::var("DUNKINGSHEEP_INBOX_SILENT_MAILBOXES").ok()
     }
     /// The backend's name, for the `_own_mailbox` refusal text.
-    fn backend_name(&self) -> String;
+    fn backend_name(&self) -> Result<String, DunkError>;
     /// `dunk_pm.load_routing()` members, for `inbox_count`'s `lane_panes`.
     fn lane_panes(&self) -> Vec<String>;
     fn pool(&self) -> &crate::db::ReadPool;
@@ -235,7 +235,7 @@ impl Flock {
         pool: impl FnOnce() -> &'a crate::db::ReadPool,
         self_pane_id: &str,
         mailbox_override: impl FnOnce() -> Option<String>,
-        backend_name: impl FnOnce() -> String,
+        backend_name: impl FnOnce() -> Result<String, DunkError>,
     ) -> Result<String, DunkError> {
         let mut resolved = false;
         let key = match self.resolve_mailbox(env, "self", Some(self_pane_id), false, "") {
@@ -255,14 +255,17 @@ impl Flock {
                 if key.is_none() && self.mailbox_exists_in(pool(), self_pane_id) {
                     key = Some(self_pane_id.to_string());
                 }
-                key.ok_or_else(|| {
-                    refused(format!(
-                        "cannot resolve this lane's mailbox: {self_pane_id:?} is not a pane \
+                match key {
+                    Some(key) => key,
+                    None => {
+                        return Err(refused(format!(
+                            "cannot resolve this lane's mailbox: {self_pane_id:?} is not a pane \
                          on the current backend ({}) and no mailbox is named after it; set \
                          DUNKINGSHEEP_MAILBOX to the lane's mailbox name",
-                        backend_name()
-                    ))
-                })?
+                            backend_name()?
+                        )))
+                    }
+                }
             }
         };
         // Only a REAL resolution is worth remembering: recording a fallback would poison the
@@ -286,7 +289,7 @@ impl Flock {
         if let Some(spec) = spec.filter(|s| !s.is_empty()) {
             let resolved = self.resolve_mailbox(env, spec, self_pane_id, strict, "")?.0;
             if let (true, Some(pane)) = (own_only, self_pane_id.filter(|p| !p.is_empty())) {
-                let role = env.caller_role(pane);
+                let role = env.caller_role(pane)?;
                 if !matches!(role.as_str(), "owner" | "web" | "system") {
                     let own = self.own_mailbox(env, pane)?;
                     if resolved != own {
@@ -481,9 +484,10 @@ impl Flock {
             // Over the socket a system sender must hold the system token; in-process
             // callers (the daemon's own loops, tests) are trusted code.
             if self.socket_peer_ok().is_some() {
-                let role = self_pane
-                    .map(|p| env.caller_role(p))
-                    .unwrap_or_else(|| "anonymous".to_string());
+                let role = match self_pane {
+                    Some(pane) => env.caller_role(pane)?,
+                    None => "anonymous".to_string(),
+                };
                 if !matches!(role.as_str(), "system" | "owner") {
                     return Err(refused(format!(
                         "system sender {} requires the system token; a pane-less process \
