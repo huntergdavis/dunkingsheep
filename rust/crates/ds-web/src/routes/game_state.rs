@@ -197,6 +197,8 @@ async fn request_json(request: Request) -> Result<Option<Value>, Response> {
         let error_text = error.to_string();
         let offset = if error_text.starts_with("EOF while parsing an object") {
             String::from_utf8_lossy(&bytes).chars().count()
+        } else if error_text.starts_with("trailing comma") {
+            python_trailing_comma_offset(&bytes).unwrap_or_else(|| error.column().saturating_sub(1))
         } else {
             error.column().saturating_sub(1)
         };
@@ -215,6 +217,8 @@ fn python_json_error(error: &str) -> &'static str {
         || error.starts_with("EOF while parsing an object")
     {
         "Expecting property name enclosed in double quotes"
+    } else if error.starts_with("trailing comma") {
+        "Illegal trailing comma before end of object"
     } else if error.starts_with("EOF while parsing") || error.starts_with("expected value") {
         "Expecting value"
     } else if error.starts_with("expected `:`") {
@@ -224,6 +228,35 @@ fn python_json_error(error: &str) -> &'static str {
     } else {
         "Invalid JSON"
     }
+}
+
+fn python_trailing_comma_offset(bytes: &[u8]) -> Option<usize> {
+    let text = String::from_utf8_lossy(bytes);
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (byte_offset, character) in text.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                in_string = false;
+            }
+        } else if character == '"' {
+            in_string = true;
+        } else if character == ',' {
+            let after_comma = &text[byte_offset + character.len_utf8()..];
+            if after_comma
+                .trim_start_matches(|character| matches!(character, ' ' | '\n' | '\r' | '\t'))
+                .starts_with('}')
+            {
+                return Some(text[..byte_offset].chars().count());
+            }
+        }
+    }
+    None
 }
 
 fn python_integer(value: &Value) -> Option<i64> {
@@ -626,6 +659,23 @@ mod tests {
             json!({"detail":[{"type":"json_invalid","loc":["body",1],
                 "msg":"JSON decode error","input":{},
                 "ctx":{"error":"Expecting property name enclosed in double quotes"}}]}),
+            value
+        );
+        assert!(game.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn game_savestate_maps_trailing_object_comma_to_python_decode_error() {
+        let game = Arc::new(FakeGame::new(Value::Null));
+        let (status, _body, value) = response(
+            app(game.clone(), authorized()),
+            request("POST", "/api/game/savestate", r#"{"tag":"quick",}"#),
+        );
+        assert_eq!(StatusCode::UNPROCESSABLE_ENTITY, status);
+        assert_eq!(
+            json!({"detail":[{"type":"json_invalid","loc":["body",14],
+                "msg":"JSON decode error","input":{},
+                "ctx":{"error":"Illegal trailing comma before end of object"}}]}),
             value
         );
         assert!(game.calls.lock().unwrap().is_empty());
