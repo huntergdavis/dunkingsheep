@@ -30,8 +30,9 @@ pub enum DeliveryId {
     OutOfRange { negative: bool },
 }
 
+/// A validated Python integer before a route backend binds it to SQLite's i64 parameter.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PythonInt {
+pub enum PythonInt {
     Value(i64),
     OutOfRange { negative: bool },
 }
@@ -42,11 +43,18 @@ enum PythonInt {
 pub trait MessagesReadBackend: Send + Sync + 'static {
     fn known_channel(&self, channel: &str) -> bool;
 
-    fn messages<'a>(&'a self, channel: &'a str, before: i64, limit: i64) -> MessagesReadFuture<'a>;
+    /// Reconcile the channel before binding `before`; an out-of-range value must preserve
+    /// SQLite's binding error after reconciliation has run.
+    fn messages<'a>(
+        &'a self,
+        channel: &'a str,
+        before: PythonInt,
+        limit: i64,
+    ) -> MessagesReadFuture<'a>;
 
     fn deliveries<'a>(&'a self, channel: &'a str, ids: &'a [DeliveryId]) -> MessagesReadFuture<'a>;
 
-    fn message_context(&self, message_id: i64) -> MessageContextFuture<'_>;
+    fn message_context(&self, message_id: PythonInt) -> MessageContextFuture<'_>;
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -116,9 +124,8 @@ async fn messages(
         return detail_response(StatusCode::NOT_FOUND, "Unknown channel");
     }
     let before = match before.expect("valid before value or default") {
-        PythonInt::Value(0) => i64::MAX,
-        PythonInt::Value(value) => value,
-        PythonInt::OutOfRange { .. } => return internal_error_response(),
+        PythonInt::Value(0) => PythonInt::Value(i64::MAX),
+        value => value,
     };
     match backend.messages(channel, before, limit).await {
         Ok(result) => Json(result).into_response(),
@@ -194,8 +201,7 @@ async fn message_context(
         .unwrap_or_default();
     let decoded_id = decode_path_component(raw_id);
     let message_id = match parse_python_int(&decoded_id) {
-        Some(PythonInt::Value(value)) => value,
-        Some(PythonInt::OutOfRange { .. }) => return internal_error_response(),
+        Some(value) => value,
         None => return invalid_integer("path", "message_id", &decoded_id),
     };
     match backend.message_context(message_id).await {
@@ -543,15 +549,26 @@ mod tests {
         fn messages<'a>(
             &'a self,
             channel: &'a str,
-            before: i64,
+            before: PythonInt,
             limit: i64,
         ) -> MessagesReadFuture<'a> {
+            let (before_text, overflow) = match before {
+                PythonInt::Value(value) => (value.to_string(), false),
+                PythonInt::OutOfRange { negative } => (
+                    if negative {
+                        "negative-overflow".into()
+                    } else {
+                        "positive-overflow".into()
+                    },
+                    true,
+                ),
+            };
             self.calls
                 .lock()
                 .unwrap()
-                .push(format!("messages:{channel}:{before}:{limit}"));
+                .push(format!("messages:{channel}:{before_text}:{limit}"));
             Box::pin(async move {
-                if self.fail {
+                if self.fail || overflow {
                     Err(MessagesReadError)
                 } else {
                     Ok(json!({
@@ -597,13 +614,24 @@ mod tests {
             })
         }
 
-        fn message_context(&self, message_id: i64) -> MessageContextFuture<'_> {
+        fn message_context(&self, message_id: PythonInt) -> MessageContextFuture<'_> {
+            let (message_id, overflow) = match message_id {
+                PythonInt::Value(value) => (value.to_string(), false),
+                PythonInt::OutOfRange { negative } => (
+                    if negative {
+                        "negative-overflow".into()
+                    } else {
+                        "positive-overflow".into()
+                    },
+                    true,
+                ),
+            };
             self.calls
                 .lock()
                 .unwrap()
                 .push(format!("context:{message_id}"));
             Box::pin(async move {
-                if self.fail {
+                if self.fail || overflow {
                     Err(MessagesReadError)
                 } else {
                     Ok(self.context.clone())
@@ -899,14 +927,17 @@ mod tests {
     }
 
     #[test]
-    fn message_integer_overflow_matches_sqlite_binding_failure() {
+    fn message_integer_overflow_reconciles_before_sqlite_binding_failure() {
         let backend = Arc::new(FakeBackend::default());
         let before = block_on(app(backend.clone(), authorized()).oneshot(request(
             "/api/messages?channel=cos&before=9223372036854775808",
         )))
         .unwrap();
         assert_eq!(before.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        assert!(backend.calls.lock().unwrap().is_empty());
+        assert_eq!(
+            backend.calls.lock().unwrap().as_slice(),
+            ["messages:cos:positive-overflow:50"]
+        );
 
         let unknown_channel = block_on(app(backend.clone(), authorized()).oneshot(request(
             "/api/messages?channel=unknown&before=9223372036854775808",
@@ -915,6 +946,10 @@ mod tests {
         let (status, body) = response_json(unknown_channel);
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(body, json!({"detail": "Unknown channel"}));
+        assert_eq!(
+            backend.calls.lock().unwrap().as_slice(),
+            ["messages:cos:positive-overflow:50"]
+        );
 
         let context = block_on(
             app(backend.clone(), authorized())
@@ -922,7 +957,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(context.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        assert!(backend.calls.lock().unwrap().is_empty());
+        assert_eq!(
+            backend.calls.lock().unwrap().as_slice(),
+            [
+                "messages:cos:positive-overflow:50",
+                "context:positive-overflow"
+            ]
+        );
 
         assert_eq!(
             parse_python_int("-9223372036854775808"),
