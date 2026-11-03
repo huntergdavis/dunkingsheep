@@ -113,6 +113,39 @@ impl NextJobs {
         std::ptr::eq(self.flock.as_ref(), flock)
     }
 
+    /// Reconcile each durable handoff in journal order. A bad handoff is isolated so it
+    /// cannot keep later work from reaching the existing delivery state machine.
+    #[allow(dead_code)] // Wired by the process-owned next-job recovery worker.
+    pub(crate) async fn tick(&self, restart: bool) -> Result<(), DunkError> {
+        let tasks = self
+            .flock
+            .stores()
+            .tasks
+            .ok_or_else(|| DunkError::Refused("task store unavailable".into()))?;
+        for handoff in tasks.next_job_handoffs(None).await? {
+            let state = handoff.get("state").and_then(Value::as_str).unwrap_or("");
+            if matches!(state, "started" | "undeliverable" | "cancelled") {
+                continue;
+            }
+            let pane = handoff
+                .get("pane_id")
+                .and_then(Value::as_str)
+                .unwrap_or("<missing>")
+                .to_owned();
+            let message_id = handoff
+                .get("message_id")
+                .and_then(Value::as_str)
+                .unwrap_or("<missing>")
+                .to_owned();
+            if let Err(error) = self.deliver(handoff, restart).await {
+                eprintln!(
+                    "next-job tick delivery failed pane={pane} message={message_id}: {error}"
+                );
+            }
+        }
+        Ok(())
+    }
+
     pub fn new(flock: Arc<Flock>) -> Self {
         Self::with_providers(flock, Arc::new(process_gate_env), None)
     }
@@ -1424,6 +1457,161 @@ mod tests {
 
     fn fake_factory() -> LoopTerminalFactory {
         Arc::new(|| Box::new(crate::terminal::fakes::FakeTerminal::new()))
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn next_jobs_tick_skips_terminal_and_continues_after_one_failure() {
+        async fn record(
+            tasks: &crate::tasks::Tasks,
+            task_id: &str,
+            message_id: &str,
+            state: &str,
+            attempt: i64,
+            attempt_at: f64,
+            mut details: Map<String, Value>,
+        ) {
+            details.insert("state".into(), json!(state));
+            details.insert("attempt".into(), json!(attempt));
+            details.insert("attempt_at".into(), json!(attempt_at));
+            tasks
+                .record_next_job_handoff(
+                    task_id,
+                    "w1:p1",
+                    None,
+                    Some(message_id),
+                    attempt,
+                    None,
+                    Some(attempt_at),
+                    Some(details),
+                )
+                .await
+                .unwrap();
+        }
+
+        async fn seed_receipt(
+            inbox: Arc<crate::inbox_store::Store>,
+            message_id: &'static str,
+            state: &'static str,
+        ) {
+            tokio::task::spawn_blocking(move || {
+                inbox.ensure_next_job(message_id, "w1:p1", "w1:p1", "body", "subject")?;
+                inbox.record_notify(message_id, state, None, Some("transport-1"), Some(1))
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        }
+
+        let (_dir, jobs, tasks, inbox) = materialise_fixture().await;
+        let failed = tasks
+            .add("global", "Deleted before delivery", "body")
+            .await
+            .unwrap();
+        record(
+            &tasks,
+            &failed.id,
+            "nj-tick-failure",
+            "pending",
+            0,
+            0.0,
+            Map::new(),
+        )
+        .await;
+        tasks.delete(&failed.id).await.unwrap();
+
+        let terminal = tasks
+            .add("global", "Terminal handoffs", "body")
+            .await
+            .unwrap();
+        for (message_id, state) in [
+            ("nj-tick-started", "started"),
+            ("nj-tick-undeliverable", "undeliverable"),
+            ("nj-tick-cancelled", "cancelled"),
+        ] {
+            record(&tasks, &terminal.id, message_id, state, 1, 10.0, Map::new()).await;
+        }
+
+        let interrupted = tasks
+            .add("global", "Interrupted handoff", "body")
+            .await
+            .unwrap();
+        let attempt_at = crate::clock::now_s() - 10.0;
+        record(
+            &tasks,
+            &interrupted.id,
+            "nj-tick-interrupted",
+            "sending",
+            1,
+            attempt_at,
+            json!({"transport_owner":{"pid":-1,"start":null}})
+                .as_object()
+                .unwrap()
+                .clone(),
+        )
+        .await;
+        seed_receipt(Arc::clone(&inbox), "nj-tick-interrupted", "queued").await;
+
+        let sent = tasks.add("global", "Sent handoff", "body").await.unwrap();
+        let attempt_at = crate::clock::now_s() - 2.0;
+        let message_id = "nj-tick-sent";
+        record(
+            &tasks,
+            &sent.id,
+            message_id,
+            "sent",
+            1,
+            attempt_at,
+            json!({
+                "delivered_at": attempt_at + 1.0,
+                "transport_id": "transport-1",
+                "observed_turn": {
+                    "turn_id": "turn-after-restart",
+                    "started_at": attempt_at + 0.5,
+                    "source": "test",
+                    "caller": null,
+                    "handoff_id": message_id
+                }
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        )
+        .await;
+        seed_receipt(Arc::clone(&inbox), message_id, "sent").await;
+        let unassigned = tasks
+            .add("global", "Not a durable handoff", "body")
+            .await
+            .unwrap();
+
+        jobs.tick(true).await.unwrap();
+
+        let handoffs = tasks.next_job_handoffs(None).await.unwrap();
+        let by_message: std::collections::HashMap<_, _> = handoffs
+            .iter()
+            .map(|handoff| {
+                (
+                    handoff["message_id"].as_str().unwrap(),
+                    handoff["state"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(by_message["nj-tick-started"], "started");
+        assert_eq!(by_message["nj-tick-undeliverable"], "undeliverable");
+        assert_eq!(by_message["nj-tick-cancelled"], "cancelled");
+        assert_eq!(by_message["nj-tick-interrupted"], "undeliverable");
+        assert_eq!(by_message[message_id], "started");
+        assert_eq!(tasks.get(&unassigned.id).await.unwrap().status, "open");
+        let receipt = crate::inbox::status(
+            inbox.read_pool(),
+            "nj-tick-interrupted",
+            crate::clock::now_s(),
+        )
+        .unwrap();
+        assert_eq!(receipt.notify_state.as_deref(), Some("undeliverable"));
+
+        tokio::task::spawn_blocking(move || drop((jobs, inbox, tasks)))
+            .await
+            .unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
