@@ -125,12 +125,12 @@ async fn send_now(
         Ok(identity) => identity,
         Err(response) => return response,
     };
-    if identity != Identity::Owner {
-        return detail_response(StatusCode::FORBIDDEN, "Owner sign-in required");
-    }
     let Ok(message_id) = message_id.parse::<i64>() else {
         return path_integer_error(&message_id);
     };
+    if identity != Identity::Owner {
+        return detail_response(StatusCode::FORBIDDEN, "Owner sign-in required");
+    }
     match backend.send_now(message_id).await {
         Ok(value) => Json(value).into_response(),
         Err(error) => error.into_response(),
@@ -152,9 +152,6 @@ async fn post_brief(
         Ok(identity) => identity,
         Err(response) => return response,
     };
-    if identity != Identity::Api {
-        return detail_response(StatusCode::FORBIDDEN, "API token required");
-    }
     let Some(body) = body else {
         return required_body_error();
     };
@@ -162,6 +159,9 @@ async fn post_brief(
         Ok(data) => data,
         Err(response) => return response,
     };
+    if identity != Identity::Api {
+        return detail_response(StatusCode::FORBIDDEN, "API token required");
+    }
     match backend.post_brief(data).await {
         Ok(value) => Json(value).into_response(),
         Err(error) => error.into_response(),
@@ -169,12 +169,19 @@ async fn post_brief(
 }
 
 fn message_input(body: &Value) -> Result<MessageIn, Response> {
-    let object = model_object(body)?;
+    let Some(object) = body.as_object() else {
+        return Err(model_attributes_error(body));
+    };
+    let mut errors = Vec::new();
     let channel =
-        string_field(object, "channel", body, true, 0, usize::MAX)?.expect("required string");
-    let text = string_field(object, "body", body, false, 0, 12_000)?.unwrap_or_default();
-    let attachment_ids = string_list(object, "attachment_ids", body, 10)?;
-    let external_id = optional_string(object, "external_id", body, 100)?;
+        string_field(object, "channel", body, true, 0, usize::MAX, &mut errors).unwrap_or_default();
+    let text =
+        string_field(object, "body", body, false, 0, 12_000, &mut errors).unwrap_or_default();
+    let attachment_ids = string_list(object, "attachment_ids", 10, &mut errors);
+    let external_id = optional_string(object, "external_id", body, 100, &mut errors);
+    if !errors.is_empty() {
+        return Err(validation_errors(errors));
+    }
     Ok(MessageIn {
         channel,
         body: text.trim().to_owned(),
@@ -184,12 +191,20 @@ fn message_input(body: &Value) -> Result<MessageIn, Response> {
 }
 
 fn brief_input(body: &Value) -> Result<BriefIn, Response> {
-    let object = model_object(body)?;
+    let Some(object) = body.as_object() else {
+        return Err(model_attributes_error(body));
+    };
+    let mut errors = Vec::new();
+    // Keep this order aligned with BriefIn in web/app.py: answers, channel, body,
+    // attachment_ids. Pydantic reports every field error in declaration order.
+    let answers = integer_list(object, "answers", 500, &mut errors);
     let channel =
-        string_field(object, "channel", body, true, 0, usize::MAX)?.expect("required string");
-    let text = string_field(object, "body", body, true, 1, 20_000)?.expect("required string");
-    let attachment_ids = string_list(object, "attachment_ids", body, 10)?;
-    let answers = integer_list(object, "answers", body, 500)?;
+        string_field(object, "channel", body, true, 0, usize::MAX, &mut errors).unwrap_or_default();
+    let text = string_field(object, "body", body, true, 1, 20_000, &mut errors).unwrap_or_default();
+    let attachment_ids = string_list(object, "attachment_ids", 10, &mut errors);
+    if !errors.is_empty() {
+        return Err(validation_errors(errors));
+    }
     Ok(BriefIn {
         answers,
         channel,
@@ -198,15 +213,13 @@ fn brief_input(body: &Value) -> Result<BriefIn, Response> {
     })
 }
 
-fn model_object(body: &Value) -> Result<&Map<String, Value>, Response> {
-    body.as_object().ok_or_else(|| {
-        validation_error(json!({
-            "type": "model_attributes_type",
-            "loc": ["body"],
-            "msg": "Input should be a valid dictionary or object to extract fields from",
-            "input": body
-        }))
-    })
+fn model_attributes_error(body: &Value) -> Response {
+    validation_error(json!({
+        "type": "model_attributes_type",
+        "loc": ["body"],
+        "msg": "Input should be a valid dictionary or object to extract fields from",
+        "input": body
+    }))
 }
 
 fn string_field<'a>(
@@ -216,35 +229,39 @@ fn string_field<'a>(
     required: bool,
     min: usize,
     max: usize,
-) -> Result<Option<String>, Response> {
+    errors: &mut Vec<Value>,
+) -> Option<String> {
     let Some(value) = object.get(name) else {
         if required {
-            return Err(missing_field(name, body));
+            errors.push(missing_field_error(name, body));
         }
-        return Ok(None);
+        return None;
     };
     let Some(text) = value.as_str() else {
-        return Err(validation_error(json!({
+        errors.push(json!({
             "type": "string_type", "loc": ["body", name],
             "msg": "Input should be a valid string", "input": value
-        })));
+        }));
+        return None;
     };
     let length = text.chars().count();
     if length < min {
-        return Err(validation_error(json!({
+        errors.push(json!({
             "type": "string_too_short", "loc": ["body", name],
             "msg": format!("String should have at least {min} character"),
             "input": value, "ctx": {"min_length": min}
-        })));
+        }));
+        return None;
     }
     if length > max {
-        return Err(validation_error(json!({
+        errors.push(json!({
             "type": "string_too_long", "loc": ["body", name],
             "msg": format!("String should have at most {max} characters"),
             "input": value, "ctx": {"max_length": max}
-        })));
+        }));
+        return None;
     }
-    Ok(Some(text.to_owned()))
+    Some(text.to_owned())
 }
 
 fn optional_string(
@@ -252,9 +269,10 @@ fn optional_string(
     name: &str,
     body: &Value,
     max: usize,
-) -> Result<Option<String>, Response> {
+    errors: &mut Vec<Value>,
+) -> Option<String> {
     match object.get(name) {
-        None | Some(Value::Null) => Ok(None),
+        None | Some(Value::Null) => None,
         Some(value) => string_field(
             &Map::from_iter([(name.to_owned(), value.clone())]),
             name,
@@ -262,6 +280,7 @@ fn optional_string(
             true,
             0,
             max,
+            errors,
         ),
     }
 }
@@ -269,35 +288,39 @@ fn optional_string(
 fn string_list(
     object: &Map<String, Value>,
     name: &str,
-    _body: &Value,
     max: usize,
-) -> Result<Vec<String>, Response> {
+    errors: &mut Vec<Value>,
+) -> Vec<String> {
     let Some(value) = object.get(name) else {
-        return Ok(Vec::new());
+        return Vec::new();
     };
     let Some(items) = value.as_array() else {
-        return Err(validation_error(json!({
+        errors.push(json!({
             "type": "list_type", "loc": ["body", name],
             "msg": "Input should be a valid list", "input": value
-        })));
+        }));
+        return Vec::new();
     };
     if items.len() > max {
-        return Err(validation_error(json!({
+        errors.push(json!({
             "type": "too_long", "loc": ["body", name],
             "msg": format!("List should have at most {max} items after validation, not {}", items.len()),
             "input": value, "ctx": {"field_type": "List", "max_length": max, "actual_length": items.len()}
-        })));
+        }));
+        return Vec::new();
     }
     items
         .iter()
         .enumerate()
-        .map(|(index, item)| {
-            item.as_str().map(str::to_owned).ok_or_else(|| {
-                validation_error(json!({
+        .filter_map(|(index, item)| match item.as_str() {
+            Some(text) => Some(text.to_owned()),
+            None => {
+                errors.push(json!({
                     "type": "string_type", "loc": ["body", name, index],
                     "msg": "Input should be a valid string", "input": item
-                }))
-            })
+                }));
+                None
+            }
         })
         .collect()
 }
@@ -305,54 +328,62 @@ fn string_list(
 fn integer_list(
     object: &Map<String, Value>,
     name: &str,
-    _body: &Value,
     max: usize,
-) -> Result<Vec<i64>, Response> {
+    errors: &mut Vec<Value>,
+) -> Vec<i64> {
     let Some(value) = object.get(name) else {
-        return Ok(Vec::new());
+        return Vec::new();
     };
     let Some(items) = value.as_array() else {
-        return Err(validation_error(json!({
+        errors.push(json!({
             "type": "list_type", "loc": ["body", name],
             "msg": "Input should be a valid list", "input": value
-        })));
+        }));
+        return Vec::new();
     };
     if items.len() > max {
-        return Err(validation_error(json!({
+        errors.push(json!({
             "type": "too_long", "loc": ["body", name],
             "msg": format!("List should have at most {max} items after validation, not {}", items.len()),
             "input": value, "ctx": {"field_type": "List", "max_length": max, "actual_length": items.len()}
-        })));
+        }));
+        return Vec::new();
     }
     items
         .iter()
         .enumerate()
-        .map(|(index, item)| {
+        .filter_map(|(index, item)| {
             let number = match item {
                 Value::Number(number) => number.as_i64(),
                 _ => None,
             };
             match number {
-                Some(number) if number > 0 => Ok(number),
-                Some(_) => Err(validation_error(json!({
-                    "type": "greater_than", "loc": ["body", name, index],
-                    "msg": "Input should be greater than 0", "input": item,
-                    "ctx": {"gt": 0}
-                }))),
-                None => Err(validation_error(json!({
-                    "type": "int_type", "loc": ["body", name, index],
-                    "msg": "Input should be a valid integer", "input": item
-                }))),
+                Some(number) if number > 0 => Some(number),
+                Some(_) => {
+                    errors.push(json!({
+                        "type": "greater_than", "loc": ["body", name, index],
+                        "msg": "Input should be greater than 0", "input": item,
+                        "ctx": {"gt": 0}
+                    }));
+                    None
+                }
+                None => {
+                    errors.push(json!({
+                        "type": "int_type", "loc": ["body", name, index],
+                        "msg": "Input should be a valid integer", "input": item
+                    }));
+                    None
+                }
             }
         })
         .collect()
 }
 
-fn missing_field(name: &str, body: &Value) -> Response {
-    validation_error(json!({
+fn missing_field_error(name: &str, body: &Value) -> Value {
+    json!({
         "type": "missing", "loc": ["body", name],
         "msg": "Field required", "input": body
-    }))
+    })
 }
 
 async fn request_json(request: Request) -> Result<Option<Value>, Response> {
@@ -546,9 +577,13 @@ fn required_body_error() -> Response {
 }
 
 fn validation_error(error: Value) -> Response {
+    validation_errors(vec![error])
+}
+
+fn validation_errors(errors: Vec<Value>) -> Response {
     (
         StatusCode::UNPROCESSABLE_ENTITY,
-        Json(json!({"detail": [error]})),
+        Json(json!({"detail": errors})),
     )
         .into_response()
 }
@@ -737,6 +772,65 @@ mod tests {
     }
 
     #[test]
+    fn post_message_accumulates_model_errors_in_declared_field_order() {
+        let backend = Arc::new(FakeMessages::default());
+        let long_body = "x".repeat(12_001);
+        let payload = json!({
+            "channel": 7,
+            "body": long_body,
+            "attachment_ids": [null]
+        });
+        let result = block_on(app(backend.clone()).oneshot(request(
+            "/api/messages",
+            &payload.to_string(),
+            "owner-token",
+        )))
+        .unwrap();
+        let (status, body) = response(result);
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        let errors = body["detail"].as_array().unwrap();
+        assert_eq!(errors.len(), 3);
+        assert_eq!(errors[0]["type"], "string_type");
+        assert_eq!(errors[0]["loc"], json!(["body", "channel"]));
+        assert_eq!(errors[1]["type"], "string_too_long");
+        assert_eq!(errors[1]["loc"], json!(["body", "body"]));
+        assert_eq!(errors[1]["ctx"]["max_length"], 12_000);
+        assert_eq!(errors[2]["type"], "string_type");
+        assert_eq!(errors[2]["loc"], json!(["body", "attachment_ids", 0]));
+        assert!(backend.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn auth_dependency_runs_before_invalid_body_validation() {
+        let backend = Arc::new(FakeMessages::default());
+        let unauthorized = block_on(app(backend.clone()).oneshot(request(
+            "/api/messages",
+            r#"{"channel":7,"body":"ok"}"#,
+            "expired-token",
+        )))
+        .unwrap();
+        let (status, body) = response(unauthorized);
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body, json!({"detail": "Sign in required"}));
+        assert!(backend.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn malformed_json_is_decoded_before_auth_dependency() {
+        let backend = Arc::new(FakeMessages::default());
+        let result = block_on(app(backend.clone()).oneshot(request(
+            "/api/messages",
+            "{invalid json",
+            "expired-token",
+        )))
+        .unwrap();
+        let (status, body) = response(result);
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["detail"][0]["type"], "json_invalid");
+        assert!(backend.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn post_message_rejects_non_utf8_origin_instead_of_treating_it_as_absent() {
         let backend = Arc::new(FakeMessages::default());
         let mut request = request(
@@ -866,6 +960,32 @@ mod tests {
     }
 
     #[test]
+    fn send_now_validates_path_before_endpoint_role_check() {
+        let backend = Arc::new(FakeMessages::default());
+        let result = block_on(app(backend.clone()).oneshot(request(
+            "/api/messages/not-an-integer/send-now",
+            "",
+            "api-token",
+        )))
+        .unwrap();
+        let (status, body) = response(result);
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["detail"][0]["type"], "int_parsing");
+        assert_eq!(body["detail"][0]["loc"], json!(["path", "message_id"]));
+        assert!(backend.calls.lock().unwrap().is_empty());
+
+        let unauthenticated = block_on(app(backend.clone()).oneshot(request(
+            "/api/messages/not-an-integer/send-now",
+            "",
+            "expired-token",
+        )))
+        .unwrap();
+        let (status, body) = response(unauthenticated);
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body, json!({"detail": "Sign in required"}));
+    }
+
+    #[test]
     fn send_now_preserves_backend_http_error() {
         let backend = Arc::new(FakeMessages {
             error: Some(MessagesWriteError::Http {
@@ -915,6 +1035,28 @@ mod tests {
             *backend.calls.lock().unwrap(),
             vec!["brief:pane-worker:done:[4]"]
         );
+    }
+
+    #[test]
+    fn post_brief_validates_model_before_endpoint_role_check() {
+        let backend = Arc::new(FakeMessages::default());
+        let result = block_on(app(backend.clone()).oneshot(request(
+            "/api/brief",
+            r#"{"answers":["bad"],"channel":7,"body":""}"#,
+            "owner-token",
+        )))
+        .unwrap();
+        let (status, body) = response(result);
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        let errors = body["detail"].as_array().unwrap();
+        assert_eq!(errors.len(), 3);
+        assert_eq!(errors[0]["type"], "int_type");
+        assert_eq!(errors[0]["loc"], json!(["body", "answers", 0]));
+        assert_eq!(errors[1]["type"], "string_type");
+        assert_eq!(errors[1]["loc"], json!(["body", "channel"]));
+        assert_eq!(errors[2]["type"], "string_too_short");
+        assert_eq!(errors[2]["loc"], json!(["body", "body"]));
+        assert!(backend.calls.lock().unwrap().is_empty());
     }
 
     #[test]
