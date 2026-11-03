@@ -64,6 +64,7 @@ struct FireEnv {
     fail_send: bool,
     fail_attempt_receipt: bool,
     attempts: Vec<(String, bool, Option<String>, Option<String>)>,
+    mutate_dunk_during_send: Option<Arc<Flock>>,
 }
 
 impl SendEnv for FireEnv {
@@ -152,6 +153,19 @@ impl SendPreparationEnv for FireEnv {
         if self.fail_send {
             return (false, "boom".into());
         }
+        if let Some(flock) = self.mutate_dunk_during_send.take() {
+            flock
+                .dunks
+                .update(
+                    "d1",
+                    None,
+                    &UpdateArgs {
+                        text: Some("updated during I/O".into()),
+                        ..UpdateArgs::default()
+                    },
+                )
+                .expect("Dunker state lock must be free during terminal I/O");
+        }
         self.typed.push((pane_id.into(), text.into()));
         (true, "typed".into())
     }
@@ -195,6 +209,7 @@ fn fire_env(fail_send: bool) -> FireEnv {
         fail_send,
         fail_attempt_receipt: false,
         attempts: Vec::new(),
+        mutate_dunk_during_send: None,
     }
 }
 
@@ -386,6 +401,17 @@ fn queued_fire_uses_live_template_and_updates_only_captured_same_id_dunker() {
         env.attempts
     );
     assert_eq!(2, store.calls.load(Ordering::SeqCst));
+    let history = flock
+        .message_history
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let outer = history
+        .iter()
+        .find(|message| message.id == result["message_id"].as_str().unwrap())
+        .expect("outer queued message lifecycle remains separate");
+    assert_eq!("first {id}", outer.text);
+    assert_eq!("d1", outer.source);
+    assert_eq!("sent", outer.status);
 }
 
 #[test]
@@ -570,6 +596,27 @@ fn cancelled_queued_dunk_does_not_allocate_or_submit_an_attempt() {
 }
 
 #[test]
+fn dunk_state_lock_is_released_during_terminal_io() {
+    let (_dir, flock) = new_flock();
+    load_one_fire_dunk(&flock, "continue", None);
+    let flock = Arc::new(flock);
+    let store = Arc::new(CapturingSnapshotStore::default());
+    let mut env = fire_env(false);
+    env.mutate_dunk_during_send = Some(Arc::clone(&flock));
+
+    let result = flock
+        .fire("d1", &mut env, &NoopOutboxWake, store, || None)
+        .unwrap();
+    assert_eq!(json!(true), result["ok"]);
+    assert_eq!(vec![("w1:p2".into(), "continue".into())], env.typed);
+    assert_eq!(json!(1), flock.dunks.get("d1").unwrap()["send_count"]);
+    assert_eq!(
+        json!("updated during I/O"),
+        flock.dunks.get("d1").unwrap()["text"]
+    );
+}
+
+#[test]
 fn manual_fire_with_max_sends_does_not_remove_the_dunk() {
     let (_dir, flock) = new_flock();
     load_one_fire_dunk(&flock, "continue", Some(1));
@@ -583,6 +630,30 @@ fn manual_fire_with_max_sends_does_not_remove_the_dunk() {
 
     assert_eq!(json!(true), result["ok"]);
     assert_eq!(json!(1), flock.dunks.get("d1").unwrap()["send_count"]);
+}
+
+#[test]
+fn successful_dunk_attempt_surfaces_and_clears_detector_fallback() {
+    let (_dir, flock) = new_flock();
+    load_one_fire_dunk(&flock, "continue", None);
+    flock.dunks.set_detector_fallback("d1", true);
+    let flock = Arc::new(flock);
+    let mut env = fire_env(false);
+
+    let result = flock
+        .fire(
+            "d1",
+            &mut env,
+            &NoopOutboxWake,
+            Arc::new(CapturingSnapshotStore::default()),
+            || None,
+        )
+        .unwrap();
+    assert_eq!(json!(true), result["ok"]);
+    assert_eq!(
+        json!("input box not recognised on this pane; sent anyway after repeated skips (detector fallback)"),
+        flock.dunks.get("d1").unwrap()["last_error"]
+    );
 }
 
 #[test]

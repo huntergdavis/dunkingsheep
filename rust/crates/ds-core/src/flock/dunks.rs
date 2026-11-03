@@ -591,6 +591,14 @@ impl DunkList {
         }
     }
 
+    #[cfg(test)]
+    pub(super) fn set_detector_fallback(&self, dunk_id: &str, value: bool) {
+        let state = self.state();
+        if let Ok(index) = Self::find(&state, dunk_id) {
+            Self::lock_dunker(&state.dunkers[index]).detector_fallback = value;
+        }
+    }
+
     pub(super) fn queue_fire(handle: &DunkerHandle) {
         Self::lock_dunker(handle).status = "Queued (typing)".into();
     }
@@ -959,7 +967,7 @@ impl Flock {
         dunk_id: &str,
         env: &mut dyn SendPreparationEnv,
         wake: &dyn OutboxWake,
-        store: Arc<impl SnapshotStore>,
+        store: Arc<impl SnapshotStore + 'static>,
         permission: impl FnMut() -> Option<String>,
     ) -> Result<Value, DunkError> {
         let handle = self.dunks.begin_fire(dunk_id)?;
