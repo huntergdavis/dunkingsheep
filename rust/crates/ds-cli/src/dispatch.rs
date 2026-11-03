@@ -10,6 +10,7 @@
 //! `usage_cmd` preserves daemon/local object insertion order with Python-compatible scalars.
 
 use serde_json::{Map, Value};
+use std::cell::RefCell;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -44,6 +45,71 @@ fn joined_words(ns: &Map<String, Value>, key: &str) -> String {
                 .join(" ")
         })
         .unwrap_or_default()
+}
+
+fn string_values(value: &Value) -> Vec<String> {
+    value
+        .as_array()
+        .map(|values| values.iter().map(crate::render_fleet::py_str).collect())
+        .unwrap_or_default()
+}
+
+fn run_command_with_stderr(
+    ns: &Map<String, Value>,
+    command: &str,
+    args: Map<String, Value>,
+    render: impl Fn(&Value) -> (String, String),
+) -> Outcome {
+    let stderr = RefCell::new(None);
+    let mut outcome = crate::daemon_cmd::run_command(ns, command, args, |result| {
+        let (stdout, message) = render(result);
+        *stderr.borrow_mut() = Some(message);
+        stdout
+    });
+    if !matches!(ns.get("json"), Some(Value::Bool(true))) {
+        outcome.stderr = stderr.into_inner().unwrap_or_default();
+    }
+    outcome
+}
+
+fn respawn_argv(ns: &Map<String, Value>) -> Result<(Value, Value), Outcome> {
+    let invalid_json = |error: serde_json::Error| Outcome {
+        stdout: String::new(),
+        stderr: format!("--command-json/--rollback-json must be JSON arrays: {error}\n"),
+        code: 2,
+    };
+    let command_json = text(ns, "command_json").unwrap_or_default();
+    let argv: Value = serde_json::from_str(command_json).map_err(invalid_json)?;
+    if !argv
+        .as_array()
+        .is_some_and(|values| !values.is_empty() && values.iter().all(Value::is_string))
+    {
+        return Err(Outcome {
+            stdout: String::new(),
+            stderr: "--command-json must be a non-empty JSON array of strings\n".into(),
+            code: 2,
+        });
+    }
+
+    let rollback_json = text(ns, "rollback_json").filter(|value| !value.is_empty());
+    let rollback = match rollback_json {
+        Some(value) => {
+            let argv: Value = serde_json::from_str(value).map_err(invalid_json)?;
+            if !argv
+                .as_array()
+                .is_some_and(|values| !values.is_empty() && values.iter().all(Value::is_string))
+            {
+                return Err(Outcome {
+                    stdout: String::new(),
+                    stderr: "--rollback-json must be a non-empty JSON array of strings\n".into(),
+                    code: 2,
+                });
+            }
+            argv
+        }
+        None => Value::Null,
+    };
+    Ok((argv, rollback))
 }
 
 fn not_ported(command: &str) -> Outcome {
@@ -2519,6 +2585,263 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
             Map::new(),
             crate::render_fleet::render_workspaces,
         ),
+        "new-workspace" | "workspace" => {
+            let mut args = Map::new();
+            for key in [
+                "label", "cwd", "run", "focus", "mailbox", "role", "provider", "model",
+            ] {
+                args.insert(
+                    match key {
+                        "run" => "command",
+                        other => other,
+                    }
+                    .into(),
+                    ns.get(key).cloned().unwrap_or(Value::Null),
+                );
+            }
+            run_command_with_stderr(ns, "create_workspace", args, |result| {
+                (
+                    crate::render_fleet::render_created(result),
+                    crate::render_fleet::created_error(result).unwrap_or_default(),
+                )
+            })
+        }
+        "new-tab" | "tab" => {
+            let mut args = Map::new();
+            for key in ["workspace", "label", "cwd", "run", "focus"] {
+                args.insert(
+                    if key == "run" { "command" } else { key }.into(),
+                    ns.get(key).cloned().unwrap_or(Value::Null),
+                );
+            }
+            run_command_with_stderr(ns, "create_tab", args, |result| {
+                (
+                    crate::render_fleet::render_created(result),
+                    crate::render_fleet::created_error(result).unwrap_or_default(),
+                )
+            })
+        }
+        "split" => {
+            let mut args = Map::new();
+            args.insert(
+                "target".into(),
+                ns.get("target").cloned().unwrap_or(Value::Null),
+            );
+            args.insert(
+                "direction".into(),
+                Value::String(
+                    if matches!(ns.get("down"), Some(Value::Bool(true))) {
+                        "down"
+                    } else {
+                        "right"
+                    }
+                    .into(),
+                ),
+            );
+            for key in ["cwd", "run", "focus"] {
+                args.insert(
+                    if key == "run" { "command" } else { key }.into(),
+                    ns.get(key).cloned().unwrap_or(Value::Null),
+                );
+            }
+            run_command_with_stderr(ns, "split_pane", args, |result| {
+                (
+                    crate::render_fleet::render_created(result),
+                    crate::render_fleet::created_error(result).unwrap_or_default(),
+                )
+            })
+        }
+        "start-agent" | "agent" => {
+            let argv = ns.get("argv").map(string_values).unwrap_or_default();
+            let mut args = Map::new();
+            args.insert(
+                "name".into(),
+                ns.get("name").cloned().unwrap_or(Value::Null),
+            );
+            args.insert(
+                "command".into(),
+                Value::String(ds_core::flock::commands_layout::shlex_join(&argv)),
+            );
+            for key in [
+                "workspace",
+                "tab",
+                "split",
+                "cwd",
+                "focus",
+                "role",
+                "provider",
+                "model",
+            ] {
+                args.insert(key.into(), ns.get(key).cloned().unwrap_or(Value::Null));
+            }
+            crate::daemon_cmd::run_command(ns, "start_agent", args, |result| {
+                let argv = string_values(&result["argv"]);
+                format!(
+                    "started agent {} in {}: {}\n",
+                    crate::render_fleet::py_str(&result["name"]),
+                    crate::render_fleet::py_str(&result["pane_id"]),
+                    ds_core::flock::commands_layout::shlex_join(&argv)
+                )
+            })
+        }
+        "respawn-pane" | "respawn" => {
+            let (argv, rollback) = match respawn_argv(ns) {
+                Ok(values) => values,
+                Err(outcome) => return outcome,
+            };
+            let mut args = Map::new();
+            for (key, value) in [
+                ("pane", ns.get("pane").cloned().unwrap_or(Value::Null)),
+                ("argv", argv),
+                ("rollback_argv", rollback),
+                (
+                    "expected_pid",
+                    ns.get("expected_pid").cloned().unwrap_or(Value::Null),
+                ),
+                (
+                    "expected_start",
+                    ns.get("expected_start").cloned().unwrap_or(Value::Null),
+                ),
+                (
+                    "confirm_idle",
+                    ns.get("confirm_idle")
+                        .cloned()
+                        .unwrap_or(Value::Bool(false)),
+                ),
+                ("reason", ns.get("reason").cloned().unwrap_or(Value::Null)),
+            ] {
+                args.insert(key.into(), value);
+            }
+            crate::daemon_cmd::run_command(ns, "respawn_pane", args, |result| {
+                format!(
+                    "respawned pane {} ({} -> {}); reason={}\n",
+                    crate::render_fleet::py_str(&result["pane_id"]),
+                    crate::render_fleet::py_str(&result["old_pid"]),
+                    crate::render_fleet::py_str(&result["pane_pid"]),
+                    crate::render_fleet::py_str(&result["reason"])
+                )
+            })
+        }
+        "rename" => {
+            let mut args = Map::new();
+            for key in ["kind", "target", "label"] {
+                args.insert(key.into(), ns.get(key).cloned().unwrap_or(Value::Null));
+            }
+            crate::daemon_cmd::run_command(ns, "rename", args, crate::render_fleet::render_renamed)
+        }
+        "focus" => {
+            let mut args = Map::new();
+            for key in ["kind", "target"] {
+                args.insert(key.into(), ns.get(key).cloned().unwrap_or(Value::Null));
+            }
+            crate::daemon_cmd::run_command(ns, "focus", args, |result| {
+                format!(
+                    "focused {} {}\n",
+                    crate::render_fleet::py_str(&result["kind"]),
+                    crate::render_fleet::py_str(&result["id"])
+                )
+            })
+        }
+        "close" => {
+            let mut args = Map::new();
+            for key in ["kind", "target"] {
+                args.insert(key.into(), ns.get(key).cloned().unwrap_or(Value::Null));
+            }
+            args.insert(
+                "force".into(),
+                ns.get("force").cloned().unwrap_or(Value::Bool(false)),
+            );
+            crate::daemon_cmd::run_command(ns, "close", args, |result| {
+                let joined = |key: &str| {
+                    result[key]
+                        .as_array()
+                        .map(|values| {
+                            values
+                                .iter()
+                                .map(crate::render_fleet::py_str)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        })
+                        .unwrap_or_default()
+                };
+                let panes = joined("closed_panes");
+                let stopped = joined("stopped_dunks");
+                format!(
+                    "closed {} {}; panes {}{}\n",
+                    crate::render_fleet::py_str(&result["kind"]),
+                    crate::render_fleet::py_str(&result["id"]),
+                    if panes.is_empty() { "-" } else { &panes },
+                    if stopped.is_empty() {
+                        String::new()
+                    } else {
+                        format!("; stopped dunks {stopped}")
+                    }
+                )
+            })
+        }
+        "herdr" => {
+            let argv = ns.get("argv").map(string_values).unwrap_or_default();
+            let mut args = Map::new();
+            args.insert(
+                "command".into(),
+                Value::String(ds_core::flock::commands_layout::shlex_join(&argv)),
+            );
+            run_command_with_stderr(ns, "herdr", args, |result| {
+                let (stderr, stdout) = crate::render_print::render_herdr(result);
+                (stdout, stderr)
+            })
+        }
+        "herdr-help" => {
+            let mut args = Map::new();
+            args.insert(
+                "topic".into(),
+                ns.get("topic").cloned().unwrap_or(Value::Null),
+            );
+            crate::daemon_cmd::run_command(ns, "herdr_help", args, |result| {
+                let text = crate::render_fleet::py_str(&result["text"]);
+                if text.ends_with('\n') {
+                    text
+                } else {
+                    format!("{text}\n")
+                }
+            })
+        }
+        "read" => {
+            let mut args = Map::new();
+            args.insert(
+                "target".into(),
+                ns.get("target").cloned().unwrap_or(Value::Null),
+            );
+            args.insert(
+                "lines".into(),
+                ns.get("lines").cloned().unwrap_or(Value::from(40)),
+            );
+            crate::daemon_cmd::run_command(ns, "read_pane", args, |result| {
+                let text = crate::render_fleet::py_str(&result["text"]);
+                if text.ends_with('\n') {
+                    text
+                } else {
+                    format!("{text}\n")
+                }
+            })
+        }
+        "shutdown" => {
+            let mut args = Map::new();
+            args.insert(
+                "stop_all".into(),
+                ns.get("stop_all").cloned().unwrap_or(Value::Bool(false)),
+            );
+            crate::daemon_cmd::run_command(ns, "shutdown", args, |result| {
+                format!(
+                    "daemon shutting down{}\n",
+                    if crate::render_fleet::truthy(&result["stopped_all"]) {
+                        " (all dunks stopped)"
+                    } else {
+                        ""
+                    }
+                )
+            })
+        }
         "list" | "ls" => crate::daemon_cmd::run_command(ns, "list_dunks", Map::new(), |result| {
             crate::render_print::render_dunks(result["dunks"].as_array().map_or(&[], Vec::as_slice))
         }),

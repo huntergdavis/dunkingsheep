@@ -4259,3 +4259,318 @@ fn cli_route_46_messages() {
     );
     assert!(metrics.stderr.is_empty());
 }
+
+#[test]
+fn cli_route_47_workspace() {
+    let workspace = run_daemon_cli(
+        &[
+            "workspace",
+            "--as",
+            "lane-42",
+            "-l",
+            "My workspace",
+            "--cwd",
+            "/tmp/project",
+            "-r",
+            "codex --model opus",
+            "--focus",
+            "--role",
+            "worker",
+            "--provider",
+            "codex",
+            "--model",
+            "gpt-6",
+        ],
+        "create_workspace",
+        json!({
+            "label": "My workspace",
+            "cwd": "/tmp/project",
+            "command": "codex --model opus",
+            "focus": true,
+            "mailbox": "lane-42",
+            "role": "worker",
+            "provider": "codex",
+            "model": "gpt-6"
+        }),
+        json!({
+            "ok": true,
+            "workspace": {"workspace_id": "w1", "label": "My workspace"},
+            "tab": {"tab_id": "t1", "label": "main"},
+            "pane": {"pane_id": "%41"},
+            "ran": "codex --model opus",
+            "error": "pane launch pending"
+        }),
+    );
+    assert_eq!(Some(0), workspace.status.code());
+    assert_eq!(
+        "created workspace w1 'My workspace', tab t1 'main', pane %41; running 'codex --model opus'\n",
+        String::from_utf8(workspace.stdout).unwrap()
+    );
+    assert_eq!(
+        "pane launch pending\n",
+        String::from_utf8(workspace.stderr).unwrap()
+    );
+
+    let tab = run_daemon_cli(
+        &["tab", "-w", "w1", "-l", "docs"],
+        "create_tab",
+        json!({
+            "workspace": "w1",
+            "label": "docs",
+            "cwd": null,
+            "command": null,
+            "focus": false
+        }),
+        json!({"ok": true, "tab": {"tab_id": "t2", "label": "docs"}, "pane": {"pane_id": "%42"}}),
+    );
+    assert_eq!(Some(0), tab.status.code());
+    assert_eq!(
+        "created tab t2 'docs', pane %42\n",
+        String::from_utf8(tab.stdout).unwrap()
+    );
+    assert!(tab.stderr.is_empty());
+
+    let split = run_daemon_cli(
+        &[
+            "split",
+            "%42",
+            "--down",
+            "--cwd",
+            "/tmp/project",
+            "-r",
+            "sh -lc pwd",
+            "--focus",
+        ],
+        "split_pane",
+        json!({
+            "target": "%42",
+            "direction": "down",
+            "cwd": "/tmp/project",
+            "command": "sh -lc pwd",
+            "focus": true
+        }),
+        json!({"ok": true, "pane": {"pane_id": "%43"}, "ran": "sh -lc pwd"}),
+    );
+    assert_eq!(Some(0), split.status.code());
+    assert_eq!(
+        "created pane %43; running 'sh -lc pwd'\n",
+        String::from_utf8(split.stdout).unwrap()
+    );
+    assert!(split.stderr.is_empty());
+}
+
+#[test]
+fn cli_route_48_agent() {
+    let agent = run_daemon_cli(
+        &[
+            "agent",
+            "writer",
+            "-w",
+            "Site",
+            "--tab",
+            "t4",
+            "--split",
+            "down",
+            "--cwd",
+            "/tmp/site",
+            "--focus",
+            "--role",
+            "worker",
+            "--provider",
+            "codex",
+            "--model",
+            "gpt-6",
+            "--",
+            "codex",
+            "--model",
+            "opus four",
+            "it's",
+        ],
+        "start_agent",
+        json!({
+            "name": "writer",
+            "command": "codex --model 'opus four' 'it'\"'\"'s",
+            "workspace": "Site",
+            "tab": "t4",
+            "split": "down",
+            "cwd": "/tmp/site",
+            "focus": true,
+            "role": "worker",
+            "provider": "codex",
+            "model": "gpt-6"
+        }),
+        json!({"ok": true, "name": "writer", "pane_id": "%51", "argv": ["codex", "--model", "opus four", "it's"]}),
+    );
+    assert_eq!(Some(0), agent.status.code());
+    assert_eq!(
+        "started agent writer in %51: codex --model 'opus four' 'it'\"'\"'s\n",
+        String::from_utf8(agent.stdout).unwrap()
+    );
+    assert!(agent.stderr.is_empty());
+
+    let respawn = run_daemon_cli(
+        &[
+            "respawn",
+            "%52",
+            "--expected-pid",
+            "123",
+            "--expected-start",
+            "456789",
+            "--confirm-idle",
+            "--reason",
+            "refresh",
+            "--command-json",
+            "[\"codex\",\"--resume\"]",
+            "--rollback-json",
+            "[\"bash\"]",
+        ],
+        "respawn_pane",
+        json!({
+            "pane": "%52",
+            "argv": ["codex", "--resume"],
+            "rollback_argv": ["bash"],
+            "expected_pid": 123,
+            "expected_start": "456789",
+            "confirm_idle": true,
+            "reason": "refresh"
+        }),
+        json!({"ok": true, "pane_id": "%52", "old_pid": 123, "pane_pid": 124, "reason": "refresh"}),
+    );
+    assert_eq!(Some(0), respawn.status.code());
+    assert_eq!(
+        "respawned pane %52 (123 -> 124); reason=refresh\n",
+        String::from_utf8(respawn.stdout).unwrap()
+    );
+    assert!(respawn.stderr.is_empty());
+
+    let rename = run_daemon_cli(
+        &["rename", "pane", "%52", "writer's pane"],
+        "rename",
+        json!({"kind": "pane", "target": "%52", "label": "writer's pane"}),
+        json!({"ok": true, "kind": "pane", "id": "%52", "label": "writer's pane"}),
+    );
+    assert_eq!(Some(0), rename.status.code());
+    assert_eq!(
+        "renamed pane %52 -> \"writer's pane\"\n",
+        String::from_utf8(rename.stdout).unwrap()
+    );
+    assert!(rename.stderr.is_empty());
+
+    let temp = tempfile::tempdir().unwrap();
+    let missing_socket = temp.path().join("never-created.sock");
+    let malformed = Command::new(env!("CARGO_BIN_EXE_dunkingsheep"))
+        .args([
+            "--socket",
+            missing_socket.to_str().unwrap(),
+            "--self-pane",
+            "%99",
+            "respawn-pane",
+            "%52",
+            "--expected-pid",
+            "123",
+            "--expected-start",
+            "456789",
+            "--command-json",
+            "not-json",
+        ])
+        .env_remove("DUNKINGSHEEP_SOCKET")
+        .env_remove("DUNKINGSHEEP_SERVICE_TOKEN")
+        .env_remove("DUNKINGSHEEP_SERVICE_TOKEN_FILE")
+        .output()
+        .unwrap();
+    assert_eq!(Some(2), malformed.status.code());
+    assert!(malformed.stdout.is_empty());
+    assert!(String::from_utf8(malformed.stderr)
+        .unwrap()
+        .starts_with("--command-json/--rollback-json must be JSON arrays:"));
+}
+
+#[test]
+fn cli_route_49_terminal() {
+    let focused = run_daemon_cli(
+        &["focus", "--json", "pane", "%61"],
+        "focus",
+        json!({"kind": "pane", "target": "%61"}),
+        json!({"ok": true, "kind": "pane", "id": "%61"}),
+    );
+    assert_eq!(Some(0), focused.status.code());
+    assert_eq!(
+        "{\n  \"ok\": true,\n  \"kind\": \"pane\",\n  \"id\": \"%61\"\n}\n",
+        String::from_utf8(focused.stdout).unwrap()
+    );
+    assert!(focused.stderr.is_empty());
+
+    let closed = run_daemon_cli(
+        &["close", "pane", "%61", "--force"],
+        "close",
+        json!({"kind": "pane", "target": "%61", "force": true}),
+        json!({
+            "ok": true,
+            "kind": "pane",
+            "id": "%61",
+            "closed_panes": ["%61", "%62"],
+            "stopped_dunks": ["d1", "d2"]
+        }),
+    );
+    assert_eq!(Some(0), closed.status.code());
+    assert_eq!(
+        "closed pane %61; panes %61, %62; stopped dunks d1, d2\n",
+        String::from_utf8(closed.stdout).unwrap()
+    );
+    assert!(closed.stderr.is_empty());
+
+    let shutdown = run_daemon_cli(
+        &["shutdown", "--stop-all"],
+        "shutdown",
+        json!({"stop_all": true}),
+        json!({"ok": true, "stopped_all": true}),
+    );
+    assert_eq!(Some(0), shutdown.status.code());
+    assert_eq!(
+        "daemon shutting down (all dunks stopped)\n",
+        String::from_utf8(shutdown.stdout).unwrap()
+    );
+    assert!(shutdown.stderr.is_empty());
+}
+
+#[test]
+fn cli_route_50_terminal_io() {
+    let herdr = run_daemon_cli(
+        &["herdr", "pane", "zoom", "w9:p2", "--on"],
+        "herdr",
+        json!({"command": "pane zoom w9:p2 --on"}),
+        json!({"ok": true, "error": "backend warning", "result": {"zoom": true}, "text": "ignored"}),
+    );
+    assert_eq!(Some(0), herdr.status.code());
+    assert_eq!(
+        "{\n  \"zoom\": true\n}\n",
+        String::from_utf8(herdr.stdout).unwrap()
+    );
+    assert_eq!(
+        "herdr error: backend warning\n",
+        String::from_utf8(herdr.stderr).unwrap()
+    );
+
+    let help = run_daemon_cli(
+        &["herdr-help"],
+        "herdr_help",
+        json!({"topic": null}),
+        json!({"ok": true, "text": "herdr usage"}),
+    );
+    assert_eq!(Some(0), help.status.code());
+    assert_eq!("herdr usage\n", String::from_utf8(help.stdout).unwrap());
+    assert!(help.stderr.is_empty());
+
+    let read = run_daemon_cli(
+        &["read", "%71", "-l", "2"],
+        "read_pane",
+        json!({"target": "%71", "lines": 2}),
+        json!({"ok": true, "text": "line one\nline two"}),
+    );
+    assert_eq!(Some(0), read.status.code());
+    assert_eq!(
+        "line one\nline two\n",
+        String::from_utf8(read.stdout).unwrap()
+    );
+    assert!(read.stderr.is_empty());
+}
