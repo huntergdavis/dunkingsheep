@@ -101,6 +101,13 @@ impl RuntimeServices {
                 "runtime launches and lane registry files must be distinct",
             ));
         }
+        if inputs.launches_file == inputs.executable
+            || inputs.lane_registry_file == inputs.executable
+        {
+            return Err(refusal(
+                "runtime launches and lane registry files must be distinct from executable identity",
+            ));
+        }
         if inputs.stores.tasks.is_none() {
             return Err(refusal("runtime task store is not attached"));
         }
@@ -628,6 +635,36 @@ mod tests {
             .unwrap()
             .to_string()
             .contains("launches and lane registry files must be distinct"));
+
+        for collide_launches in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let runtime = Builder::new_multi_thread().enable_all().build().unwrap();
+            let (tasks, inbox) = tasks_and_inbox(&runtime, &dir);
+            let mut inputs = startup_inputs(
+                &dir,
+                runtime,
+                Env::default(),
+                fake_factory_with_current_pane(),
+                Stores {
+                    tasks: Some(tasks),
+                    inbox: Some(inbox),
+                    ..Stores::default()
+                },
+            );
+            let executable = inputs.executable.clone();
+            let executable_contents = std::fs::read(&executable).unwrap();
+            if collide_launches {
+                inputs.launches_file = executable.clone();
+            } else {
+                inputs.lane_registry_file = executable.clone();
+            }
+            assert!(RuntimeServices::new(inputs)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("distinct from executable identity"));
+            assert_eq!(std::fs::read(executable).unwrap(), executable_contents);
+        }
 
         let dir = tempfile::tempdir().unwrap();
         let runtime = Builder::new_multi_thread().enable_all().build().unwrap();
