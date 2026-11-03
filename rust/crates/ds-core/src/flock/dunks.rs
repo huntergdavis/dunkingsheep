@@ -514,7 +514,7 @@ impl DunkList {
 
     /// Snapshot a dunk for one explicit fire transition, marking its volatile status first.
     pub(super) fn begin_fire(&self, dunk_id: &str) -> Result<DunkerHandle, DunkError> {
-        let mut state = self.state();
+        let state = self.state();
         let index = Self::find(&state, dunk_id)?;
         let handle = Arc::clone(&state.dunkers[index]);
         let mut dunker = Self::lock_dunker(&handle);
@@ -624,7 +624,8 @@ impl DunkList {
 
     pub fn get(&self, dunk_id: &str) -> Result<Map<String, Value>, DunkError> {
         let state = self.state();
-        Ok(Self::lock_dunker(&state.dunkers[Self::find(&state, dunk_id)?]).to_dict())
+        let dunker = Self::lock_dunker(&state.dunkers[Self::find(&state, dunk_id)?]).to_dict();
+        Ok(dunker)
     }
 
     pub fn list(&self) -> Vec<Map<String, Value>> {
@@ -645,7 +646,7 @@ impl DunkList {
         if live_panes.is_empty() {
             return false;
         }
-        let mut state = self.state();
+        let state = self.state();
         let mut changed = false;
         for handle in &state.dunkers {
             let mut dunker = Self::lock_dunker(handle);
@@ -751,7 +752,7 @@ impl DunkList {
             .as_deref()
             .map(|v| check_bool(v, "hold_while_typing"))
             .transpose()?;
-        let mut state = self.state();
+        let state = self.state();
         let index = Self::find(&state, dunk_id)?;
         let handle = Arc::clone(&state.dunkers[index]);
         let mut dunker = Self::lock_dunker(&handle);
@@ -842,7 +843,8 @@ impl DunkList {
     pub fn toggle(&self, dunk_id: &str) -> Result<Map<String, Value>, DunkError> {
         let running = {
             let state = self.state();
-            Self::lock_dunker(&state.dunkers[Self::find(&state, dunk_id)?]).running
+            let running = Self::lock_dunker(&state.dunkers[Self::find(&state, dunk_id)?]).running;
+            running
         };
         if running {
             self.stop(dunk_id)
@@ -857,7 +859,7 @@ impl DunkList {
     /// so the persisted fields are the whole stop. A stopped dunk therefore can never report
     /// itself as scheduled again: nothing is left to overwrite the status.)
     pub fn halt_aimed_at(&self, doomed: &[String]) -> Vec<String> {
-        let mut state = self.state();
+        let state = self.state();
         let mut stopped = Vec::new();
         for handle in &state.dunkers {
             let mut dunker = Self::lock_dunker(handle);
@@ -877,7 +879,7 @@ impl DunkList {
 
     /// `Flock.stop_all`.
     pub fn stop_all(&self) -> Vec<Map<String, Value>> {
-        let mut state = self.state();
+        let state = self.state();
         for handle in &state.dunkers {
             let mut dunker = Self::lock_dunker(handle);
             if dunker.running {
