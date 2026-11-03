@@ -462,6 +462,8 @@ pub fn clamp_desk_args(command: &str, args: &Args) -> Args {
 #[derive(Default)]
 pub struct Dispatcher {
     handlers: HashMap<&'static str, Handler>,
+    #[cfg(test)]
+    registration_attempts: Vec<&'static str>,
 }
 
 impl Dispatcher {
@@ -471,7 +473,14 @@ impl Dispatcher {
 
     /// Register the handler for a registry command (later slices call this).
     pub fn register(&mut self, name: &'static str, handler: Handler) {
+        #[cfg(test)]
+        self.registration_attempts.push(name);
         self.handlers.insert(name, handler);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn registration_attempts(&self) -> &[&'static str] {
+        &self.registration_attempts
     }
 
     /// Register only the T39 status, identity and turn-start handler leaf.
