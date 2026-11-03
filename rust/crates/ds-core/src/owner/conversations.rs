@@ -309,51 +309,58 @@ fn python_repr_value(value: &Value) -> String {
 
 fn python_number_string(value: &serde_json::Number) -> String {
     if value.is_f64() {
-        value
-            .as_f64()
-            .map(python_float_string)
-            .unwrap_or_else(|| value.to_string())
+        python_float_string(&value.to_string())
     } else {
         value.to_string()
     }
 }
 
-fn python_float_string(value: f64) -> String {
-    if !value.is_finite() || value == 0.0 {
-        return crate::usage::py_float_repr(value);
-    }
-
-    let text = value.to_string();
+fn python_float_string(text: &str) -> String {
     let (sign, unsigned) = text
         .strip_prefix('-')
         .map(|unsigned| ("-", unsigned))
-        .unwrap_or(("", text.as_str()));
-    let (integer, fraction) = unsigned.split_once('.').unwrap_or((unsigned, ""));
+        .unwrap_or(("", text));
+    let (mantissa, explicit_exponent) = unsigned
+        .split_once(['e', 'E'])
+        .map(|(mantissa, exponent)| (mantissa, exponent.parse::<i32>().unwrap_or_default()))
+        .unwrap_or((unsigned, 0));
+    let (integer, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
     let digits = format!("{integer}{fraction}");
     let Some(first_nonzero) = digits.bytes().position(|digit| digit != b'0') else {
-        return crate::usage::py_float_repr(value);
+        return format!("{sign}0.0");
     };
-    let exponent = integer.len() as i32 - first_nonzero as i32 - 1;
+    let significant = digits[first_nonzero..].trim_end_matches('0');
+    let exponent = explicit_exponent + integer.len() as i32 - first_nonzero as i32 - 1;
 
     if (-4..16).contains(&exponent) {
-        return if text.contains('.') {
-            text
+        let point = exponent + 1;
+        if point <= 0 {
+            format!("{sign}0.{}{}", "0".repeat((-point) as usize), significant)
+        } else if point as usize >= significant.len() {
+            format!(
+                "{sign}{}{}.0",
+                significant,
+                "0".repeat(point as usize - significant.len())
+            )
         } else {
-            format!("{text}.0")
-        };
-    }
-
-    let significant = digits[first_nonzero..].trim_end_matches('0');
-    let mantissa = if significant.len() == 1 {
-        significant.to_string()
+            format!(
+                "{sign}{}.{}",
+                &significant[..point as usize],
+                &significant[point as usize..]
+            )
+        }
     } else {
-        format!("{}.{}", &significant[..1], &significant[1..])
-    };
-    format!(
-        "{sign}{mantissa}e{}{:02}",
-        if exponent < 0 { '-' } else { '+' },
-        exponent.abs()
-    )
+        let mantissa = if significant.len() == 1 {
+            significant.to_string()
+        } else {
+            format!("{}.{}", &significant[..1], &significant[1..])
+        };
+        format!(
+            "{sign}{mantissa}e{}{:02}",
+            if exponent < 0 { '-' } else { '+' },
+            exponent.abs()
+        )
+    }
 }
 
 fn python_repr(value: &str) -> String {
