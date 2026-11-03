@@ -3,12 +3,22 @@
 //! the process walk, and the review-completion gate order.
 
 use std::collections::BTreeSet;
+use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 
 use super::*;
+use crate::api::{CommandEnv, HandlerContext};
+use crate::config::Env;
 use crate::flock::panes::Stores;
-use crate::tasks::{AddOptions, Tasks};
+use crate::github::{GitHubRequest, GitHubResponse, GitHubTransport, PinBoxFuture, Tokens};
+use crate::proc::Caller;
+use crate::roles::Roles;
+use crate::server::RequestCtx;
+use crate::tasks::next_job_runtime::NextJobs;
+use crate::tasks::{AddOptions, Task, Tasks};
+use crate::terminal::{FakeTerminal, Terminal};
 
 #[tokio::test]
 async fn after_review_verdict_preserves_the_review_service_result() {
@@ -62,6 +72,500 @@ async fn setup(tag: &str) -> (crate::testsupport::Scratch<Flock>, std::sync::Arc
         ..Default::default()
     });
     (crate::testsupport::Scratch::new(flock, scratch), tasks)
+}
+
+struct TaskCompletionEnv<'a> {
+    terminal: Mutex<Box<dyn Terminal>>,
+    jobs: &'a NextJobs,
+    tokens: Tokens,
+    transport: Box<dyn GitHubTransport>,
+    pane: String,
+}
+
+impl PaneInfoEnv for TaskCompletionEnv<'_> {
+    fn list_panes_grouped(&self) -> Vec<Value> {
+        vec![json!({"pane_id": self.pane, "pane_pid": 1101})]
+    }
+
+    fn get_pane(&self, pane_id: &str) -> Option<Value> {
+        (pane_id == self.pane).then(|| json!({"pane_id": self.pane, "pane_pid": 1101}))
+    }
+}
+
+impl CommandEnv for TaskCompletionEnv<'_> {
+    fn terminal(&self) -> &Mutex<Box<dyn Terminal>> {
+        &self.terminal
+    }
+
+    fn now_s(&self) -> f64 {
+        1_800_000_000.0
+    }
+
+    fn next_jobs(&self) -> Result<&NextJobs, DunkError> {
+        Ok(self.jobs)
+    }
+
+    fn github_tokens(&self) -> Result<&Tokens, DunkError> {
+        Ok(&self.tokens)
+    }
+
+    fn review_transport(&self) -> Result<&dyn GitHubTransport, DunkError> {
+        Ok(self.transport.as_ref())
+    }
+}
+
+#[derive(Default)]
+struct NoNetworkTransport;
+
+impl GitHubTransport for NoNetworkTransport {
+    fn send<'a>(&'a self, _: GitHubRequest) -> PinBoxFuture<'a, Result<GitHubResponse, String>> {
+        Box::pin(async { Err("unexpected token mint in task completion test".into()) })
+    }
+}
+
+struct CompletionReviewTransport {
+    tasks: Arc<Tasks>,
+    task_id: String,
+    observed: Arc<Mutex<Vec<(String, Option<String>)>>>,
+    fail: bool,
+}
+
+impl GitHubTransport for CompletionReviewTransport {
+    fn send<'a>(&'a self, _: GitHubRequest) -> PinBoxFuture<'a, Result<GitHubResponse, String>> {
+        Box::pin(async move {
+            let task = self
+                .tasks
+                .get_full_wire(&self.task_id, None)
+                .await
+                .map_err(|error| error.to_string())?;
+            self.observed.lock().unwrap().push((
+                task.typed.status,
+                task.wire["verdict"].as_str().map(str::to_owned),
+            ));
+            if self.fail {
+                Err("scripted ReviewSync transport failure".into())
+            } else {
+                Ok(GitHubResponse {
+                    status: 200,
+                    reason: "OK".into(),
+                    body: b"{}".to_vec(),
+                })
+            }
+        })
+    }
+}
+
+fn completion_services(
+    role: &str,
+    dispatch: bool,
+) -> (
+    tempfile::TempDir,
+    tokio::runtime::Runtime,
+    Arc<Flock>,
+    Arc<Tasks>,
+    NextJobs,
+    Tokens,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let tasks = Arc::new(
+        runtime
+            .block_on(Tasks::open(dir.path().join("tasks.db")))
+            .unwrap(),
+    );
+    runtime.block_on(tasks.allocation_init()).unwrap();
+    let flock = Arc::new(Flock::new(
+        dir.path().join("launches.json"),
+        dir.path().join("lanes.json"),
+        false,
+    ));
+    let role_path = dir.path().join("roles.json");
+    std::fs::write(
+        &role_path,
+        serde_json::to_vec(&json!({
+            "lanes": {"w1:p1": {"role": role, "provider": "openai"}},
+            "reviewer_providers": ["openai"]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let roles = Roles::new(
+        &Env::from_pairs(&[]),
+        Some(role_path),
+        Some(dir.path().join("tokens.json")),
+        None,
+    )
+    .unwrap();
+    flock.attach_roles(roles, None);
+    let inbox = Arc::new(
+        runtime
+            .block_on(tokio::task::spawn_blocking({
+                let db = dir.path().join("inbox.db");
+                let blobs = dir.path().join("blobs");
+                move || crate::inbox_store::Store::open(db, blobs)
+            }))
+            .unwrap()
+            .unwrap(),
+    );
+    flock.attach_stores(Stores {
+        tasks: Some(Arc::clone(&tasks)),
+        inbox: Some(inbox),
+        ..Default::default()
+    });
+    let pane = "w1:p1".to_owned();
+    let env = Env::from_pairs(&[
+        ("DUNKINGSHEEP_DIR", dir.path().to_str().unwrap()),
+        (
+            "DUNKINGSHEEP_TURN_END_DISPATCH",
+            if dispatch { "1" } else { "0" },
+        ),
+        ("DUNKINGSHEEP_DISPATCH_LANES", pane.as_str()),
+    ]);
+    let factory: crate::flock::loop_env::LoopTerminalFactory =
+        Arc::new(|| Box::new(FakeTerminal::default()));
+    let jobs = NextJobs::with_providers(
+        Arc::clone(&flock),
+        Arc::new(move || Ok(env.clone())),
+        Some(factory),
+    );
+    let token_path = dir.path().join("github-tokens.json");
+    std::fs::write(
+        &token_path,
+        serde_json::to_vec(&json!({
+            "tokens": {"reviewer": {
+                "token": "reviewer-test-token",
+                "expires_at": 4_102_444_800.0
+            }}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let tokens = Tokens::new(
+        Some(token_path),
+        dir.path().to_path_buf(),
+        Box::new(NoNetworkTransport),
+        Some("https://github.invalid".into()),
+    );
+    (dir, runtime, flock, tasks, jobs, tokens)
+}
+
+fn completion_env<'a>(
+    jobs: &'a NextJobs,
+    tokens: Tokens,
+    transport: Box<dyn GitHubTransport>,
+) -> TaskCompletionEnv<'a> {
+    TaskCompletionEnv {
+        terminal: Mutex::new(Box::new(FakeTerminal::default())),
+        jobs,
+        tokens,
+        transport,
+        pane: "w1:p1".into(),
+    }
+}
+
+fn invoke_task_complete(
+    flock: &Flock,
+    runtime: &tokio::runtime::Runtime,
+    env: &dyn CommandEnv,
+    request: &RequestCtx,
+    task_id: &str,
+    by: Option<&str>,
+    verdict: Option<&str>,
+    landed: bool,
+) -> Result<Value, DunkError> {
+    let handle = runtime.handle();
+    let context = HandlerContext {
+        flock,
+        request,
+        env,
+        runtime: &handle,
+    };
+    flock.task_complete(&context, task_id, by, verdict, landed)
+}
+
+fn completion_request() -> RequestCtx {
+    RequestCtx {
+        self_pane_id: Some("w1:p1".into()),
+        ..Default::default()
+    }
+}
+
+fn add_owned_task(runtime: &tokio::runtime::Runtime, tasks: &Tasks, title: &str) -> Task {
+    runtime
+        .block_on(tasks.add_with(
+            "global",
+            title,
+            "",
+            AddOptions {
+                assignees: vec!["w1:p1".into()],
+                ..Default::default()
+            },
+        ))
+        .unwrap()
+}
+
+fn add_review_task(runtime: &tokio::runtime::Runtime, tasks: &Tasks) -> Task {
+    runtime
+        .block_on(tasks.add_with(
+            "global",
+            "review",
+            "",
+            AddOptions {
+                kind: Some("review".into()),
+                assignees: vec!["w1:p1".into()],
+                author: Some("w9:p9".into()),
+                repo: Some("o/r".into()),
+                pr: Some("5".into()),
+                head: Some("abc".into()),
+                ..Default::default()
+            },
+        ))
+        .unwrap()
+}
+
+#[test]
+fn task_complete_wakes_next_job_push_after_commit() {
+    let (_dir, runtime, flock, tasks, jobs, tokens) = completion_services("owner", true);
+    let current = add_owned_task(&runtime, &tasks, "current");
+    let next = add_owned_task(&runtime, &tasks, "next");
+    runtime
+        .block_on(tasks.update_with_status(
+            &current.id,
+            Default::default(),
+            Some("in_progress"),
+            Some("w1:p1"),
+        ))
+        .unwrap();
+    let wake = flock.push_wake();
+    let notified = wake.notified();
+    let env = completion_env(&jobs, tokens, Box::<NoNetworkTransport>::default());
+    let result = invoke_task_complete(
+        &flock,
+        &runtime,
+        &env,
+        &completion_request(),
+        &current.id,
+        None,
+        None,
+        true,
+    )
+    .unwrap();
+    assert_eq!(
+        "done",
+        runtime.block_on(tasks.get(&current.id)).unwrap().status
+    );
+    assert!(result["next_job"].is_object());
+    assert!(result["next_job"].get("task").is_none());
+    assert!(runtime
+        .block_on(tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            notified
+        ))
+        .is_ok());
+    let next_after = runtime.block_on(tasks.get(&next.id)).unwrap();
+    assert_eq!("in_progress", next_after.status);
+}
+
+#[test]
+fn task_complete_landed_false_closes_and_true_opens_dependency() {
+    let (_dir, runtime, flock, tasks, jobs, tokens) = completion_services("owner", false);
+    let current = add_owned_task(&runtime, &tasks, "stacked current");
+    let dependent = runtime
+        .block_on(tasks.add_with(
+            "global",
+            "dependent",
+            "",
+            AddOptions {
+                assignees: vec!["w1:p1".into()],
+                depends_on: vec![current.id.clone()],
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+    let env = completion_env(&jobs, tokens, Box::<NoNetworkTransport>::default());
+    let first = invoke_task_complete(
+        &flock,
+        &runtime,
+        &env,
+        &completion_request(),
+        &current.id,
+        None,
+        None,
+        false,
+    )
+    .unwrap();
+    assert_eq!(false, first["landed"]);
+    let blocked = runtime
+        .block_on(tasks.decorate(&dependent.id, None))
+        .unwrap();
+    assert_eq!(vec![current.id.clone()], blocked.deps.blocked_by);
+    runtime
+        .block_on(tasks.set_landed(&current.id, true, Some("w1:p1"), None, None))
+        .unwrap();
+    let opened = runtime
+        .block_on(tasks.decorate(&dependent.id, None))
+        .unwrap();
+    assert!(opened.deps.blocked_by.is_empty());
+}
+
+#[test]
+fn task_complete_review_sync_observes_committed_verdict_and_contains_failure() {
+    let (_dir, runtime, flock, tasks, jobs, tokens) = completion_services("reviewer", false);
+    let review = add_review_task(&runtime, &tasks);
+    runtime
+        .block_on(tasks.claim_next("global", "w1:p1", Default::default()))
+        .unwrap();
+    runtime
+        .block_on(tasks.note(&review.id, "note", "w1:p1", Some("reviewed")))
+        .unwrap();
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let transport = CompletionReviewTransport {
+        tasks: Arc::clone(&tasks),
+        task_id: review.id.clone(),
+        observed: Arc::clone(&observed),
+        fail: true,
+    };
+    let env = completion_env(&jobs, tokens, Box::new(transport));
+    let result = invoke_task_complete(
+        &flock,
+        &runtime,
+        &env,
+        &completion_request(),
+        &review.id,
+        None,
+        Some("accept"),
+        true,
+    )
+    .unwrap();
+    assert_eq!(
+        "done",
+        runtime.block_on(tasks.get(&review.id)).unwrap().status
+    );
+    assert_eq!(
+        Some("accept"),
+        runtime
+            .block_on(tasks.get_full_wire(&review.id, None))
+            .unwrap()
+            .wire["verdict"]
+            .as_str()
+    );
+    assert!(!result["github"]["errors"].as_array().unwrap().is_empty());
+    assert_eq!(
+        vec![("done".into(), Some("accept".into()))],
+        *observed.lock().unwrap()
+    );
+}
+
+#[test]
+fn task_complete_advance_failure_does_not_wake_or_run_review_sync() {
+    let (_dir, runtime, flock, tasks, jobs, tokens) = completion_services("reviewer", false);
+    let review = add_review_task(&runtime, &tasks);
+    runtime
+        .block_on(tasks.claim_next("global", "w1:p1", Default::default()))
+        .unwrap();
+    runtime
+        .block_on(tasks.note(&review.id, "note", "w1:p1", Some("reviewed")))
+        .unwrap();
+    let conn = rusqlite::Connection::open(tasks.path()).unwrap();
+    conn.execute_batch(&format!(
+        "CREATE TRIGGER reject_completion BEFORE UPDATE OF status ON tasks \
+         WHEN OLD.id = '{}' AND NEW.status = 'done' \
+         BEGIN SELECT RAISE(ABORT, 'scripted advance failure'); END;",
+        review.id
+    ))
+    .unwrap();
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let env = completion_env(
+        &jobs,
+        tokens,
+        Box::new(CompletionReviewTransport {
+            tasks: Arc::clone(&tasks),
+            task_id: review.id.clone(),
+            observed: Arc::clone(&observed),
+            fail: false,
+        }),
+    );
+    let wake = flock.push_wake();
+    let result = invoke_task_complete(
+        &flock,
+        &runtime,
+        &env,
+        &completion_request(),
+        &review.id,
+        None,
+        Some("accept"),
+        true,
+    );
+    assert!(result.is_err());
+    assert_eq!(
+        "in_progress",
+        runtime.block_on(tasks.get(&review.id)).unwrap().status
+    );
+    assert!(observed.lock().unwrap().is_empty());
+    assert!(runtime
+        .block_on(tokio::time::timeout(
+            std::time::Duration::from_millis(25),
+            wake.notified()
+        ))
+        .is_err());
+}
+
+#[test]
+fn task_complete_landed_failure_is_after_wake_and_skips_review_sync() {
+    let (_dir, runtime, flock, tasks, jobs, tokens) = completion_services("reviewer", false);
+    let review = add_review_task(&runtime, &tasks);
+    runtime
+        .block_on(tasks.claim_next("global", "w1:p1", Default::default()))
+        .unwrap();
+    runtime
+        .block_on(tasks.note(&review.id, "note", "w1:p1", Some("reviewed")))
+        .unwrap();
+    let conn = rusqlite::Connection::open(tasks.path()).unwrap();
+    conn.execute_batch(&format!(
+        "CREATE TRIGGER reject_unlanded BEFORE UPDATE OF landed ON tasks \
+         WHEN OLD.id = '{}' AND NEW.landed = 0 \
+         BEGIN SELECT RAISE(ABORT, 'scripted landed failure'); END;",
+        review.id
+    ))
+    .unwrap();
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let env = completion_env(
+        &jobs,
+        tokens,
+        Box::new(CompletionReviewTransport {
+            tasks: Arc::clone(&tasks),
+            task_id: review.id.clone(),
+            observed: Arc::clone(&observed),
+            fail: false,
+        }),
+    );
+    let wake = flock.push_wake();
+    let result = invoke_task_complete(
+        &flock,
+        &runtime,
+        &env,
+        &completion_request(),
+        &review.id,
+        None,
+        Some("accept"),
+        false,
+    );
+    assert!(result.is_err());
+    assert_eq!(
+        "done",
+        runtime.block_on(tasks.get(&review.id)).unwrap().status
+    );
+    assert!(observed.lock().unwrap().is_empty());
+    assert!(runtime
+        .block_on(tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            wake.notified()
+        ))
+        .is_ok());
 }
 
 fn text(result: Result<(), DunkError>) -> String {

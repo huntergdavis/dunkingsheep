@@ -1,17 +1,19 @@
-//! T35 slice 3 (first part): the guards of `Flock.task_complete` that run BEFORE any mutation:
-//! `_authorize_task_complete`, `_require_completion_binding` and the review-completion gates
-//! (role, no-self-merge, verdict, cancelled/done). NOT here: the wiring (`set_verdict`,
-//! `advance_next_job`, `set_landed`), `_require_review_evidence` (needs `Tasks::notes`), the
-//! `authors_of` store read, `_after_review_verdict` (the GitHub hook).
+//! T35 slice 3: source-ordered task completion guards, the committed NextJobs handoff,
+//! landed state, and the contained ReviewSync verdict hook.
 
 use std::collections::BTreeSet;
 use std::future::Future;
+use std::sync::Arc;
 
 use super::panes::PaneInfoEnv;
 use super::Flock;
 use crate::error::DunkError;
 use crate::proc::{caller_pane_auth_failure, Caller};
+use crate::review::ConfiguredReviewPolicy;
+use crate::superusers::FileAllowlist;
+use crate::tasks::advance::OperatorProof;
 use crate::tasks::{validate_verdict, Decorated, ReviewFacts, Task, Tasks};
+use serde_json::{json, Value};
 
 fn refuse<T>(text: impl Into<String>) -> Result<T, DunkError> {
     Err(DunkError::Refused(text.into()))
@@ -33,6 +35,227 @@ pub struct ReviewCaller<'a> {
 }
 
 impl Flock {
+    /// Complete a task through the request's shared next-job manager. The request context is
+    /// captured synchronously by the dispatcher; the identity-bound caller is copied before
+    /// driving the async store work on that same request thread.
+    pub fn task_complete(
+        &self,
+        context: &crate::api::HandlerContext<'_>,
+        task_id: &str,
+        by: Option<&str>,
+        verdict: Option<&str>,
+        landed: bool,
+    ) -> Result<Value, DunkError> {
+        if !std::ptr::eq(self, context.flock) {
+            return refuse("task completion request flock mismatch");
+        }
+        let caller = context.request.caller.clone();
+        let self_pane_id = context.request.self_pane_id.clone();
+        let task_id = task_id.to_owned();
+        let by = by.map(str::to_owned);
+        let verdict = verdict.map(str::to_owned);
+        context.block_on(self.task_complete_async(
+            context,
+            &task_id,
+            by.as_deref(),
+            verdict.as_deref(),
+            landed,
+            caller,
+            self_pane_id,
+        ))?
+    }
+
+    async fn task_complete_async(
+        &self,
+        context: &crate::api::HandlerContext<'_>,
+        task_id: &str,
+        by: Option<&str>,
+        requested_verdict: Option<&str>,
+        landed: bool,
+        caller: Option<Caller>,
+        self_pane_id: Option<String>,
+    ) -> Result<Value, DunkError> {
+        let tasks = self.task_store()?;
+        let visible = tasks
+            .get_full_wire(task_id, self_pane_id.as_deref())
+            .await?;
+        let original_task = visible.wire.clone();
+        let task = visible.decorated;
+        let is_review = task.task.kind == "review";
+
+        let role = if is_review {
+            Some(self.caller_role(self_pane_id.as_deref(), context.env)?)
+        } else {
+            None
+        };
+        let facts = review_facts_from_wire(&visible.wire);
+        let empty_worked = BTreeSet::new();
+        let may_review = if role.as_deref() == Some("reviewer") {
+            match self_pane_id.as_deref().filter(|pane| !pane.is_empty()) {
+                Some(pane) => {
+                    self.with_roles(|roles, _| roles.may_review(pane, role.as_deref()))?
+                }
+                None => false,
+            }
+        } else {
+            false
+        };
+        let role_caller = role.as_deref().map(|role| ReviewCaller {
+            pane: self_pane_id.as_deref(),
+            role,
+            may_review,
+            worked: Ok(&empty_worked),
+        });
+        if is_review {
+            let who = role_caller
+                .as_ref()
+                .ok_or_else(|| DunkError::Refused("review caller role is unavailable".into()))?;
+            Self::check_review_role(&task, who)?;
+        } else if requested_verdict.is_some() {
+            return refuse("--verdict applies to review tasks only");
+        }
+
+        let worked = if is_review
+            && role.as_deref() == Some("reviewer")
+            && self_pane_id.as_deref().is_some_and(|pane| !pane.is_empty())
+        {
+            match (facts.repo.as_deref(), facts.pr) {
+                (Some(repo), Some(pr)) => tasks
+                    .authors_of(repo, pr)
+                    .await
+                    .map(|authors| authors.into_iter().collect())
+                    .map_err(|e| e.to_string()),
+                _ => Ok(empty_worked.clone()),
+            }
+        } else {
+            Ok(empty_worked.clone())
+        };
+        let mut validated_verdict = None;
+        if is_review {
+            let role = role
+                .as_deref()
+                .ok_or_else(|| DunkError::Refused("review caller role is unavailable".into()))?;
+            let review_caller = ReviewCaller {
+                pane: self_pane_id.as_deref(),
+                role,
+                may_review,
+                worked: match &worked {
+                    Ok(worked) => Ok(worked),
+                    Err(error) => Err(error),
+                },
+            };
+            // Keep the source order: role/provider and authorship/verdict gates, then evidence,
+            // and only then stale/cancelled review state.
+            validated_verdict = Self::check_review_caller_and_verdict(
+                &task,
+                &facts,
+                requested_verdict,
+                &review_caller,
+            )?;
+            Self::require_review_evidence(
+                tasks.as_ref(),
+                &task.task,
+                self_pane_id.as_deref(),
+                role,
+            )
+            .await?;
+            Self::check_review_head_unjudged(&task, &facts)?;
+        }
+
+        // Match Python's order: pane lookup, operator proof, ownership/binding, then mutation.
+        let pane_info = self_pane_id
+            .as_deref()
+            .filter(|pane| !pane.is_empty())
+            .and_then(|pane| context.env.get_pane(pane));
+        let role = match role {
+            Some(role) => role,
+            None => self.caller_role(self_pane_id.as_deref(), context.env)?,
+        };
+        let operator = matches!(role.as_str(), "owner" | "system");
+        self.authorize_task_complete(
+            &task,
+            self_pane_id.as_deref(),
+            operator,
+            context.env,
+            caller.as_ref(),
+        )?;
+        let next_jobs = context.env.next_jobs()?;
+        if !next_jobs.owns_flock(self) {
+            return refuse("request next-job flock mismatch");
+        }
+        let allowlist_path = self.with_roles(|roles, legacy| {
+            Ok(legacy
+                .map(|allowlist| allowlist.path.clone())
+                .unwrap_or_else(|| roles.path.clone()))
+        })?;
+        let pane = self_pane_id
+            .as_deref()
+            .filter(|pane| !pane.is_empty())
+            .ok_or_else(|| DunkError::Refused("task completion needs a pane identity".into()))?;
+        let operator_proof = Some(OperatorProof {
+            pane_id: pane.to_owned(),
+            pane_info,
+            allowlist: Arc::new(FileAllowlist(allowlist_path)),
+        });
+        let actor = self_pane_id
+            .as_deref()
+            .filter(|pane| !pane.is_empty())
+            .or(by);
+
+        if let Some(verdict) = validated_verdict.as_deref() {
+            tasks.set_verdict(task_id, verdict, actor).await?;
+        }
+        let advance = next_jobs
+            .advance(pane, "completion", Some(task_id), caller, operator_proof)
+            .await?;
+        self.wake_push();
+
+        let mut result = tasks
+            .get_full_wire(task_id, self_pane_id.as_deref())
+            .await?
+            .wire
+            .as_object()
+            .cloned()
+            .ok_or_else(|| DunkError::Refused("completed task is not an object".into()))?;
+        let mut next_job = advance.plan;
+        next_job.remove("task");
+        result.insert("next_job".into(), Value::Object(next_job));
+        if !landed {
+            tasks.set_landed(task_id, false, actor, None, None).await?;
+            result.insert("landed".into(), json!(false));
+        }
+        if let Some(verdict) = validated_verdict.as_deref() {
+            let github = self
+                .contain_review_verdict(&original_task, async {
+                    let tokens = context
+                        .env
+                        .github_tokens()
+                        .map_err(|error| error.to_string())?;
+                    let transport = context
+                        .env
+                        .review_transport()
+                        .map_err(|error| error.to_string())?;
+                    let policy = ConfiguredReviewPolicy {
+                        config_dir: tokens.config_dir().to_path_buf(),
+                    };
+                    Ok(self
+                        .after_review_verdict(
+                            tokens,
+                            policy,
+                            tokens.api_root(),
+                            super::commands_review::BorrowedGitHubTransport(transport),
+                            &original_task,
+                            verdict,
+                            actor,
+                        )
+                        .await)
+                })
+                .await;
+            result.insert("github".into(), github);
+        }
+        Ok(Value::Object(result))
+    }
+
     /// Error boundary retained from the partial PR629 adapter. The actual
     /// `_after_review_verdict` hook is the ReviewSync-backed method in `commands_review`.
     pub async fn contain_review_verdict<F>(
@@ -246,6 +469,7 @@ impl Flock {
         who: &ReviewCaller<'_>,
     ) -> Result<Option<String>, DunkError> {
         let t = &task.task;
+        Self::check_review_role(task, who)?;
         if t.kind != "review" {
             return match verdict {
                 Some(_) => refuse("--verdict applies to review tasks only"),
@@ -253,17 +477,6 @@ impl Flock {
             };
         }
         let pane = who.pane.unwrap_or("");
-        if who.role == "reviewer" && !who.may_review {
-            return refuse(format!(
-                "{pane} may not review (provider not on the reviewer list)"
-            ));
-        }
-        if who.role != "reviewer" && who.role != "owner" {
-            return refuse(format!(
-                "a review is completed by its reviewer lane, not role {}",
-                who.role
-            ));
-        }
         if who.role == "reviewer" && !pane.is_empty() {
             if facts
                 .author
@@ -308,6 +521,25 @@ impl Flock {
         Ok(Some(verdict))
     }
 
+    fn check_review_role(task: &Decorated, who: &ReviewCaller<'_>) -> Result<(), DunkError> {
+        if task.task.kind != "review" {
+            return Ok(());
+        }
+        let pane = who.pane.unwrap_or("");
+        if who.role == "reviewer" && !who.may_review {
+            return refuse(format!(
+                "{pane} may not review (provider not on the reviewer list)"
+            ));
+        }
+        if who.role != "reviewer" && who.role != "owner" {
+            return refuse(format!(
+                "a review is completed by its reviewer lane, not role {}",
+                who.role
+            ));
+        }
+        Ok(())
+    }
+
     /// Second half of the gates: one verdict per head (t656). A cancelled task is not a place to put
     /// a verdict, and a done one already carries the verdict its merge record was built on.
     pub fn check_review_head_unjudged(
@@ -331,6 +563,21 @@ impl Flock {
             ));
         }
         Ok(())
+    }
+}
+
+fn review_facts_from_wire(wire: &Value) -> ReviewFacts {
+    ReviewFacts {
+        author: wire
+            .get("author")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        repo: wire.get("repo").and_then(Value::as_str).map(str::to_owned),
+        pr: wire.get("pr").and_then(Value::as_i64),
+        verdict: wire
+            .get("verdict")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
     }
 }
 

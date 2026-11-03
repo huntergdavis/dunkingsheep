@@ -107,6 +107,14 @@ pub trait CommandEnv: PaneInfoEnv {
         Err(DunkError::Refused("turn hooks are not wired".into()))
     }
 
+    /// The request's shared next-job manager. Completion must use the same manager that
+    /// services turn-end decisions so its per-pane lock and handoff state remain canonical.
+    fn next_jobs(&self) -> Result<&crate::tasks::next_job_runtime::NextJobs, DunkError> {
+        Err(DunkError::Refused(
+            "request next-job service is not attached".into(),
+        ))
+    }
+
     /// The accepted T52 Poolrad sync service used by the T39 command adapter.
     fn poolrad_sync(&self, _limit: usize, _dry_run: bool) -> Result<Value, DunkError> {
         Err(DunkError::Refused(
