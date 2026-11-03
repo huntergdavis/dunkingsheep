@@ -1143,6 +1143,15 @@ mod tests {
             .unwrap()
     }
 
+    fn multipart_request(body: Body) -> Request<Body> {
+        let mut request = request("POST", "/api/uploads", body);
+        request.headers_mut().insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("multipart/form-data; boundary=b"),
+        );
+        request
+    }
+
     fn json_response(response: Response) -> (StatusCode, Value) {
         let status = response.status();
         let body = block_on(to_bytes(response.into_body(), usize::MAX)).unwrap();
@@ -1333,11 +1342,9 @@ mod tests {
     fn upload_parses_all_parts_and_uses_last_file_value() {
         let backend = Arc::new(FakeBackend::default());
         let multipart = b"--b\r\nContent-Disposition: form-data; name=\"file\"; filename=\"first.txt\"\r\n\r\none\r\n--b\r\nContent-Disposition: form-data; name=\"file\"; filename=\"last.txt\"\r\n\r\nlast\r\n--b--\r\n";
-        let response = block_on(app(backend.clone()).oneshot(request(
-            "POST",
-            "/api/uploads",
-            Body::from(multipart.as_slice()),
-        )))
+        let response = block_on(
+            app(backend.clone()).oneshot(multipart_request(Body::from(multipart.as_slice()))),
+        )
         .unwrap();
         let (status, body) = json_response(response);
         assert_eq!(status, StatusCode::OK);
@@ -1348,11 +1355,9 @@ mod tests {
 
         let backend = Arc::new(FakeBackend::default());
         let malformed = b"--b\r\nContent-Disposition: form-data; name=\"file\"; filename=\"first.txt\"\r\n\r\none\r\n--b\r\nContent-Disposition: garbage\r\n\r\nignored\r\n--b--\r\n";
-        let response = block_on(app(backend.clone()).oneshot(request(
-            "POST",
-            "/api/uploads",
-            Body::from(malformed.as_slice()),
-        )))
+        let response = block_on(
+            app(backend.clone()).oneshot(multipart_request(Body::from(malformed.as_slice()))),
+        )
         .unwrap();
         let (status, body) = json_response(response);
         assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -1370,12 +1375,9 @@ mod tests {
             "--b\r\nContent-Disposition: form-data; name=\"description\"\r\n\r\n{}\r\n--b\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.txt\"\r\n\r\nfile\r\n--b--\r\n",
             "x".repeat(80 * 1024)
         );
-        let response = block_on(app(backend.clone()).oneshot(request(
-            "POST",
-            "/api/uploads",
-            Body::from(accepted_body),
-        )))
-        .unwrap();
+        let response =
+            block_on(app(backend.clone()).oneshot(multipart_request(Body::from(accepted_body))))
+                .unwrap();
         assert_eq!(json_response(response).0, StatusCode::OK);
         assert_eq!(backend.uploads.lock().unwrap().len(), 1);
 
@@ -1384,12 +1386,9 @@ mod tests {
             "--b\r\nContent-Disposition: form-data; name=\"description\"\r\n\r\n{}\r\n--b\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.txt\"\r\n\r\nfile\r\n--b--\r\n",
             "x".repeat(MAX_NON_FILE_PART_SIZE + 1)
         );
-        let response = block_on(app(backend.clone()).oneshot(request(
-            "POST",
-            "/api/uploads",
-            Body::from(too_large_body),
-        )))
-        .unwrap();
+        let response =
+            block_on(app(backend.clone()).oneshot(multipart_request(Body::from(too_large_body))))
+                .unwrap();
         let (status, body) = json_response(response);
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(
