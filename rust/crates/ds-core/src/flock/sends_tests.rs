@@ -2154,6 +2154,136 @@ fn deliver_message_persists_hold_backoff_and_keeps_original_refusal() {
 }
 
 #[test]
+fn deliver_message_uses_normalized_block_reason_for_hold_metrics_and_terminal_detail() {
+    use crate::flock::panes::Stores;
+    use crate::metrics::MetricsStore;
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let metrics = Arc::new(MetricsStore::open(":memory:").unwrap());
+    let flock = Flock::new(dir.path().join("launches.json"), dir.path(), false);
+    flock.attach_stores(Stores {
+        metrics: Some(metrics.clone()),
+        ..Stores::default()
+    });
+    flock.outbox.lock().unwrap().insert(
+        P.into(),
+        vec![Message::new("m-dialog", P, "pane", "hello", "test")],
+    );
+    let mut pane = Pane::default();
+    pane.screens.insert(P.into(), submit_modal_screen());
+
+    for attempt in 0..10 {
+        let outcome = flock.deliver_message("m-dialog", 100.0 + attempt as f64, &mut pane, || None);
+        assert_eq!(
+            if attempt == 9 {
+                DeliveryOutcome::Undeliverable
+            } else {
+                DeliveryOutcome::Held
+            },
+            outcome
+        );
+        if attempt == 0 {
+            let held = &flock.outbox_snapshot()[P][0];
+            assert_eq!(
+                Some(format!("{BOX_HOLD} (dialog)").as_str()),
+                held.detail.as_deref()
+            );
+        }
+    }
+
+    let history = flock.message_history.lock().unwrap();
+    let terminal = history
+        .iter()
+        .find(|message| message.id == "m-dialog")
+        .unwrap();
+    assert_eq!(
+        Some("undeliverable after 10 refused attempts (last reason: dialog); not retried again"),
+        terminal.detail.as_deref()
+    );
+    drop(history);
+
+    let events = metrics.events_between(0.0, 1.0).unwrap();
+    let held_events: Vec<_> = events
+        .iter()
+        .filter(|event| event.kind == "message.held")
+        .collect();
+    assert_eq!(10, held_events.len());
+    assert!(held_events
+        .iter()
+        .all(|event| event.reason.as_deref() == Some("dialog")));
+    let terminal_event = events
+        .iter()
+        .find(|event| event.kind == "message.undeliverable")
+        .unwrap();
+    assert_eq!(Some("dialog"), terminal_event.reason.as_deref());
+}
+
+#[test]
+fn deliver_message_does_not_use_permission_or_dead_session_detail_as_block_reason() {
+    use crate::flock::panes::Stores;
+    use crate::metrics::MetricsStore;
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let metrics = Arc::new(MetricsStore::open(":memory:").unwrap());
+    let flock = Flock::new(dir.path().join("launches.json"), dir.path(), false);
+    flock.attach_stores(Stores {
+        metrics: Some(metrics.clone()),
+        ..Stores::default()
+    });
+    let mut pane = Pane::default();
+
+    for (id, dead, permission_detail) in [
+        ("m-permission", false, Some("disabled")),
+        ("m-dead", true, None),
+    ] {
+        pane.gone = dead;
+        let mut message = Message::new(id, P, "pane", "hello", "test");
+        if permission_detail.is_some() {
+            message.hold_while_typing = false;
+        }
+        flock.outbox.lock().unwrap().insert(P.into(), vec![message]);
+
+        for attempt in 0..10 {
+            let outcome = flock.deliver_message(id, 100.0 + attempt as f64, &mut pane, || {
+                permission_detail.map(str::to_owned)
+            });
+            assert_eq!(
+                if attempt == 9 {
+                    DeliveryOutcome::Undeliverable
+                } else {
+                    DeliveryOutcome::Held
+                },
+                outcome
+            );
+            if attempt == 0 {
+                let held = &flock.outbox_snapshot()[P][0];
+                assert_eq!(permission_detail, held.detail.as_deref());
+            }
+        }
+    }
+
+    let history = flock.message_history.lock().unwrap();
+    for id in ["m-permission", "m-dead"] {
+        let terminal = history.iter().find(|message| message.id == id).unwrap();
+        assert_eq!(
+            Some(
+                "undeliverable after 10 refused attempts (last reason: unknown); not retried again"
+            ),
+            terminal.detail.as_deref()
+        );
+    }
+    drop(history);
+
+    let events = metrics.events_between(0.0, 1.0).unwrap();
+    assert!(events
+        .iter()
+        .filter(|event| event.kind == "message.held" || event.kind == "message.undeliverable")
+        .all(|event| event.reason.is_none()));
+}
+
+#[test]
 fn python_hold_signature_list_survives_restore_and_resnapshot() {
     let python_row = serde_json::json!({
         "id": "m-held",

@@ -641,27 +641,41 @@ pub fn send_guarded(
     env: &mut dyn SendPreparationEnv,
     pane_id: &str,
     options: SendGuardOptions,
-    mut permission: impl FnMut() -> Option<String>,
+    permission: impl FnMut() -> Option<String>,
     action: impl FnOnce(&mut dyn SendPreparationEnv, &TypingGuard<'_>) -> Result<SendAction, String>,
 ) -> (bool, Option<bool>, String) {
+    let (sent, ok, detail, _) =
+        send_guarded_with_reason(flock, env, pane_id, options, permission, action);
+    (sent, ok, detail)
+}
+
+fn send_guarded_with_reason(
+    flock: &Flock,
+    env: &mut dyn SendPreparationEnv,
+    pane_id: &str,
+    options: SendGuardOptions,
+    mut permission: impl FnMut() -> Option<String>,
+    action: impl FnOnce(&mut dyn SendPreparationEnv, &TypingGuard<'_>) -> Result<SendAction, String>,
+) -> (bool, Option<bool>, String, Option<String>) {
     let pane_lock = flock.send_lock_for(pane_id);
     let _pane_guard = lock_unpoison(&pane_lock);
     let typing_guard = match flock.typing_guard(pane_id) {
         Ok(guard) => guard,
-        Err(error) => return (false, None, error.to_string()),
+        Err(error) => return (false, None, error.to_string(), None),
     };
     if let Some(detail) = permission() {
-        return (false, None, detail);
+        return (false, None, detail, None);
     }
     if options.hold_while_typing {
         if let Some(marker) = dead_session(env, pane_id) {
-            return (false, None, format!("dead session ({marker})"));
+            return (false, None, format!("dead session ({marker})"), None);
         }
         if env.session_process_gone(pane_id) {
             return (
                 false,
                 None,
                 "the lane's recorded process is gone".to_string(),
+                None,
             );
         }
         match ensure_box_clear(
@@ -674,21 +688,34 @@ pub fn send_guarded(
             &typing_guard,
         ) {
             Ok(()) => {}
-            Err(reason) => return (false, None, format!("{BOX_HOLD} ({reason})")),
+            Err(reason) => {
+                return (
+                    false,
+                    None,
+                    format!("{BOX_HOLD} ({reason})"),
+                    Some(reason.to_string()),
+                )
+            }
         }
     }
     let result = action(env, &typing_guard);
     drop(typing_guard);
     match result {
         Ok(action) if !action.ok && action.detail.starts_with(BOX_HOLD) => {
-            (false, None, action.detail)
+            let reason = action
+                .detail
+                .strip_prefix(BOX_HOLD)
+                .and_then(|suffix| suffix.strip_prefix(" ("))
+                .and_then(|suffix| suffix.strip_suffix(')'))
+                .map(str::to_owned);
+            (false, None, action.detail, reason)
         }
         Ok(mut action) => {
             // Keep the per-pane lock across confirmation, but release the global typing lock.
             confirm_send_action(env, &mut action);
-            (true, Some(action.ok), action.detail)
+            (true, Some(action.ok), action.detail, None)
         }
-        Err(detail) => (true, Some(false), detail),
+        Err(detail) => (true, Some(false), detail, None),
     }
 }
 
@@ -2107,8 +2134,8 @@ impl Flock {
             allow_modal: message.kind == "keys",
             preserve_draft: false,
         };
-        let (sent, ok, detail) =
-            send_guarded(self, env, &pane_id, options, permission, |env, guard| {
+        let (sent, ok, detail, blocker_reason) =
+            send_guarded_with_reason(self, env, &pane_id, options, permission, |env, guard| {
                 if message.kind == "keys" {
                     let keys: Vec<String> =
                         message.text.split_whitespace().map(str::to_owned).collect();
@@ -2134,6 +2161,7 @@ impl Flock {
         if !sent {
             let terminal;
             let attempts;
+            let last_reason = blocker_reason.as_deref().unwrap_or("unknown");
             let hold_signature = hold_signature(env, &pane_id);
             {
                 let mut outbox = outbox_lock(&self.outbox);
@@ -2150,7 +2178,7 @@ impl Flock {
                     stored.status = "undeliverable".into();
                     stored.detail = Some(format!(
                         "undeliverable after {attempts} refused attempts (last reason: {}); not retried again",
-                        if detail.is_empty() { "unknown" } else { &detail }
+                        last_reason
                     ));
                     stored.finished_at = Some(clock::now_s());
                 } else {
@@ -2172,7 +2200,6 @@ impl Flock {
                 }
             }
             if let Some(metrics) = self.stores().metrics {
-                let reason = (!detail.is_empty()).then_some(detail.clone());
                 metrics.record(&crate::metrics::Event {
                     at: 0.0,
                     kind: "message.held".into(),
@@ -2181,7 +2208,7 @@ impl Flock {
                     sender: None,
                     source: Some(message.source.clone()),
                     outcome: Some("held".into()),
-                    reason,
+                    reason: blocker_reason.clone(),
                     duration_ms: None,
                     attempts: Some(attempts),
                     bytes: Some(message.text.len() as i64),
@@ -2190,7 +2217,7 @@ impl Flock {
             if terminal {
                 message.detail = Some(format!(
                     "undeliverable after {attempts} refused attempts (last reason: {}); not retried again",
-                    if detail.is_empty() { "unknown" } else { &detail }
+                    last_reason
                 ));
                 if let Some(metrics) = self.stores().metrics {
                     metrics.record(&crate::metrics::Event {
@@ -2201,7 +2228,7 @@ impl Flock {
                         sender: None,
                         source: Some(message.source.clone()),
                         outcome: Some("undeliverable".into()),
-                        reason: Some(detail.clone()),
+                        reason: blocker_reason.clone(),
                         duration_ms: None,
                         attempts: Some(attempts),
                         bytes: Some(message.text.len() as i64),
