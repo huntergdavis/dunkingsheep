@@ -778,16 +778,14 @@ async fn add_poolrad_review_at(
 
 fn review_event_meta(db_path: &Path, task_id: &str, event: &str) -> Value {
     let conn = rusqlite::Connection::open(db_path).unwrap();
-    let raw: Option<String> = conn
+    let raw: String = conn
         .query_row(
-            "SELECT meta FROM task_events WHERE task_id = ? AND event = ? ORDER BY id DESC LIMIT 1",
+            "SELECT COALESCE((SELECT meta FROM task_events WHERE task_id = ? AND event = ? ORDER BY id DESC LIMIT 1), '{}')",
             rusqlite::params![task_id, event],
             |row| row.get(0),
         )
-        .optional()
         .unwrap();
-    raw.and_then(|meta| serde_json::from_str(&meta).ok())
-        .unwrap_or_else(|| json!({}))
+    serde_json::from_str(&raw).ok().unwrap_or_else(|| json!({}))
 }
 
 fn github_file_response(text: &str) -> Result<crate::github::GitHubResponse, String> {
