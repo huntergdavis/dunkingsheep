@@ -1119,6 +1119,13 @@ impl DunkList {
 }
 
 impl Flock {
+    pub(crate) fn dunk_hold_signature(
+        &self,
+        env: &dyn super::sends::SendEnv,
+        pane: &str,
+    ) -> (String, String) {
+        super::sends::hold_signature(self, env, pane)
+    }
     /// Start and return the captured row lifetime for the runtime's timer owner.
     pub(crate) fn start_dunk(&self, dunk_id: &str) -> Result<DunkerHandle, DunkError> {
         self.dunks.start(dunk_id)?;

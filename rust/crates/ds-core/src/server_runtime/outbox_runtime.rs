@@ -63,7 +63,13 @@ impl OutboxRuntime {
                 reporter: reporter.clone(),
             }))
         });
-        let timers = DunkTimerOwner::new(Arc::downgrade(&flock), runtime, factory);
+        let timers = DunkTimerOwner::new(
+            Arc::downgrade(&flock),
+            runtime,
+            factory,
+            Arc::downgrade(&pool),
+            reporter,
+        );
         for handle in flock.dunks.running_handles() {
             timers.start(handle)?;
         }
@@ -224,15 +230,25 @@ struct DunkTimerOwner {
     flock: Weak<Flock>,
     runtime: Handle,
     factory: Arc<Factory>,
+    pool: Weak<OutboxWorkerPool>,
+    reporter: StalePanelReporter,
     workers: Mutex<HashMap<usize, TimerWorker>>,
 }
 
 impl DunkTimerOwner {
-    fn new(flock: Weak<Flock>, runtime: Handle, factory: Arc<Factory>) -> Self {
+    fn new(
+        flock: Weak<Flock>,
+        runtime: Handle,
+        factory: Arc<Factory>,
+        pool: Weak<OutboxWorkerPool>,
+        reporter: StalePanelReporter,
+    ) -> Self {
         Self {
             flock,
             runtime,
             factory,
+            pool,
+            reporter,
             workers: Mutex::new(HashMap::new()),
         }
     }
@@ -257,12 +273,24 @@ impl DunkTimerOwner {
         let flock = self.flock.clone();
         let runtime = self.runtime.clone();
         let factory = Arc::clone(&self.factory);
+        let pool = self.pool.clone();
+        let reporter = self.reporter.clone();
         let join = thread::Builder::new()
             .name(format!(
                 "dunk-timer-{}",
                 crate::flock::dunks::DunkList::timer_fields(&handle).id
             ))
-            .spawn(move || run_dunk_timer(flock, runtime, factory, handle, thread_signal));
+            .spawn(move || {
+                run_dunk_timer(
+                    flock,
+                    runtime,
+                    factory,
+                    handle,
+                    thread_signal,
+                    pool,
+                    reporter,
+                )
+            });
         let join = join
             .map_err(|error| DunkError::Refused(format!("could not start dunk timer: {error}")))?;
         workers.insert(key, TimerWorker { signal, join });
@@ -384,11 +412,21 @@ fn run_dunk_timer(
     factory: Arc<Factory>,
     handle: crate::flock::dunks::DunkerHandle,
     signal: Arc<TimerSignal>,
+    pool: Weak<OutboxWorkerPool>,
+    mut reporter: StalePanelReporter,
 ) {
     let Some(flock) = weak_flock.upgrade() else {
         return;
     };
     let terminal = Mutex::new(factory());
+    let Some(pool) = pool.upgrade() else { return };
+    let request = RequestCtx::default();
+    let adapter = RequestRuntimeAdapter::new(&flock, &request, &runtime, &terminal);
+    let Ok(inbox) = InboxRuntimeView::new(adapter, Arc::clone(&flock), pool) else {
+        return;
+    };
+    let mut panel_seen = None;
+    let mut panel_since = crate::clock::now_s();
     let mut env = TerminalCallAdapter {
         flock: &flock,
         terminal: &terminal,
@@ -506,6 +544,38 @@ fn run_dunk_timer(
             }
             timer_wait(&signal, 1.0);
         } else {
+            let now = crate::clock::now_s();
+            let signature = flock.dunk_hold_signature(&env, pane);
+            if panel_seen.as_ref() != Some(&signature) {
+                panel_seen = Some(signature.clone());
+                panel_since = now;
+            } else if signature.0 == "modal" {
+                let generation = pane_generation(&env, pane);
+                reporter.note(
+                    &flock,
+                    &inbox,
+                    pane,
+                    "modal",
+                    generation.as_deref(),
+                    Some(&signature.1),
+                    panel_since,
+                );
+            } else if signature.0 == "box"
+                && flock.unwedge(
+                    &mut env,
+                    pane,
+                    &signature.1,
+                    Some(panel_since),
+                    None,
+                    now,
+                    None,
+                    true,
+                )
+            {
+                panel_seen = None;
+                panel_since = now;
+                continue;
+            }
             crate::flock::dunks::DunkList::timer_hold(
                 &handle,
                 blocker.as_deref().unwrap_or(&detail),
