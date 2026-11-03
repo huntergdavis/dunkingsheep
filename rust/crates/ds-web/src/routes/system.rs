@@ -88,12 +88,10 @@ async fn herdr_webui(
 }
 
 fn same_origin(headers: &HeaderMap, scheme: RequestScheme) -> Option<Response> {
-    let origin = match headers.get(header::ORIGIN) {
-        None => return None,
-        Some(value) => match value.to_str() {
-            Ok(origin) => origin,
-            Err(_) => return Some(cross_origin_response()),
-        },
+    let value = headers.get(header::ORIGIN)?;
+    let origin = match value.to_str() {
+        Ok(origin) => origin,
+        Err(_) => return Some(cross_origin_response()),
     };
     let host = headers
         .get(header::HOST)
