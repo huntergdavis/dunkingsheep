@@ -505,6 +505,7 @@ mod tests {
     fn runtime_allocator_caller_cancellation_does_not_abandon_commit_before_shutdown() {
         let dir = tempfile::tempdir().unwrap();
         let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
             .enable_all()
             .build()
             .unwrap();
@@ -591,7 +592,17 @@ mod tests {
         entered_rx
             .recv_timeout(std::time::Duration::from_secs(3))
             .unwrap();
+        // Simulate the next eligible tick without waiting thirty wall-clock seconds.
+        services.allocator.seed_cache(serde_json::json!({}));
+        let overlapping = Arc::clone(&services);
+        let second = handle.spawn(async move { overlapping.allocator_tick().await });
+        assert!(
+            services.allocator.wait_for_active(2),
+            "eligible ticks must not be single-flight"
+        );
         caller.abort();
+        // Break the later materialisation gate only after the allocation preflight.
+        std::fs::write(dir.path().join("retired-panes.json"), "{").unwrap();
         let (started_tx, started_rx) = std::sync::mpsc::channel();
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let stopping = Arc::clone(&services);
@@ -612,17 +623,105 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(5))
             .unwrap();
         shutdown.join().unwrap();
+        let _ = handle.block_on(second);
         assert_eq!(
             handle.block_on(tasks.get(&task.id)).unwrap().status,
             "in_progress"
         );
+        let handoffs = handle
+            .block_on(tasks.next_job_handoffs(Some("w1:p1")))
+            .unwrap();
+        assert_eq!(handoffs.len(), 1);
+        assert_eq!(handoffs[0]["state"], "pending");
+    }
+
+    #[test]
+    fn runtime_allocator_error_preserves_previous_cache_and_entry_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let handle = runtime.handle().clone();
+        let (tasks, inbox) = tasks_and_inbox(&runtime, &dir);
+        let stores = Stores {
+            tasks: Some(tasks),
+            inbox: Some(inbox),
+            ..Stores::default()
+        };
+        let env = configured_env(&dir, "1");
+        let services = RuntimeServices::new(startup_inputs(
+            &dir,
+            runtime,
+            env,
+            fake_factory_with_current_pane(),
+            stores,
+        ))
+        .unwrap();
+        let connection = crate::db::open_writer(&dir.path().join("tasks.db")).unwrap();
+        connection
+            .execute_batch("DROP TABLE allocation_workers")
+            .unwrap();
+        services
+            .allocator
+            .seed_cache(serde_json::json!({"old":true}));
+        assert!(handle.block_on(services.allocator_tick()).is_err());
         assert_eq!(
-            handle
-                .block_on(tasks.next_job_handoffs(Some("w1:p1")))
-                .unwrap()
-                .len(),
-            1
+            handle.block_on(services.allocator_tick()).unwrap(),
+            serde_json::json!({"old":true})
         );
+        services.shutdown();
+    }
+
+    #[test]
+    fn runtime_allocator_preserves_busy_budget_without_holding_flock_locks() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let handle = runtime.handle().clone();
+        let (tasks, inbox) = tasks_and_inbox(&runtime, &dir);
+        handle
+            .block_on(tasks.allocation_register(
+                "w1:p1",
+                &serde_json::json!(["code"]),
+                &serde_json::json!(["worker"]),
+                &serde_json::json!([]),
+                "w2:p2",
+                &serde_json::json!(true),
+            ))
+            .unwrap();
+        let stores = Stores {
+            tasks: Some(tasks),
+            inbox: Some(inbox),
+            ..Stores::default()
+        };
+        let env = configured_env(&dir, "0");
+        let services = RuntimeServices::new(startup_inputs(
+            &dir,
+            runtime,
+            env,
+            fake_factory_with_current_pane(),
+            stores,
+        ))
+        .unwrap();
+        let blocker = crate::db::open_writer(&dir.path().join("tasks.db")).unwrap();
+        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let started = std::time::Instant::now();
+        let result = handle
+            .block_on(async {
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(15),
+                    services.allocator_tick(),
+                )
+                .await
+            })
+            .unwrap();
+        assert!(matches!(result, Err(DunkError::Busy)));
+        assert!(started.elapsed() >= std::time::Duration::from_millis(crate::db::BUSY_TIMEOUT_MS));
+        blocker.execute_batch("ROLLBACK").unwrap();
+        services.shutdown();
     }
 
     #[test]

@@ -1063,10 +1063,16 @@ async fn guarded_allocation_retries_lock_and_restores_sqlite_timeout() {
         dir.path().join("other-lanes"),
         false,
     ));
-    assert!(tasks
-        .allocation_try_guarded(other, BTreeMap::new())
-        .await
-        .is_err());
+    let wrong_tasks = Arc::new(Tasks::open(dir.path().join("other.db")).await.unwrap());
+    other.attach_stores(Stores {
+        tasks: Some(wrong_tasks),
+        ..Stores::default()
+    });
+    let mismatch = match tasks.allocation_try_guarded(other, BTreeMap::new()).await {
+        Err(error) => error.to_string(),
+        Ok(_) => panic!("mismatched task store must be refused"),
+    };
+    assert!(mismatch.contains("allocator task store mismatch"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1469,4 +1475,43 @@ async fn guarded_allocation_holds_turn_and_outbox_through_commit() {
     turn.join().unwrap().unwrap();
     assert!(queue.join().unwrap().is_err());
     assert_eq!(tasks.get(&offered.id).await.unwrap().status, "in_progress");
+}
+
+#[tokio::test]
+async fn guarded_allocation_restores_timeout_after_sql_error() {
+    use crate::flock::{panes::Stores, Flock};
+    use std::sync::Arc;
+    let dir = tempfile::tempdir().unwrap();
+    let tasks = Arc::new(Tasks::open(dir.path().join("tasks.db")).await.unwrap());
+    tasks.allocation_init().await.unwrap();
+    let flock = Arc::new(Flock::new(
+        dir.path().join("launches"),
+        dir.path().join("lanes"),
+        false,
+    ));
+    flock.attach_stores(Stores {
+        tasks: Some(Arc::clone(&tasks)),
+        ..Stores::default()
+    });
+    tasks
+        .writer
+        .call(|conn| {
+            conn.execute_batch("DROP TABLE allocation_offers")
+                .map_err(crate::db::map_sqlite)
+        })
+        .await
+        .unwrap();
+    assert!(tasks
+        .allocation_try_guarded(flock, BTreeMap::new())
+        .await
+        .is_err());
+    let timeout: u64 = tasks
+        .writer
+        .call(|conn| {
+            conn.pragma_query_value(None, "busy_timeout", |row| row.get(0))
+                .map_err(crate::db::map_sqlite)
+        })
+        .await
+        .unwrap();
+    assert_eq!(timeout, crate::db::BUSY_TIMEOUT_MS);
 }

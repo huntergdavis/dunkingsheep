@@ -914,7 +914,7 @@ impl Tasks {
                 #[cfg(test)]
                 if let Some(barrier) = barrier {
                     barrier.entered.send(()).map_err(|_| DunkError::Unavailable("allocation barrier closed".into()))?;
-                    barrier.release.lock().unwrap().recv_timeout(std::time::Duration::from_secs(5))
+                    barrier.release.lock().unwrap().recv_timeout(std::time::Duration::from_secs(15))
                         .map_err(|_| DunkError::Unavailable("allocation barrier timed out".into()))?;
                 }
                 tx.commit().map_err(db::map_sqlite)?;

@@ -57,6 +57,16 @@ impl Allocator {
     }
 
     #[cfg(test)]
+    pub(crate) fn wait_for_active(&self, count: usize) -> bool {
+        let state = self.state.lock().unwrap();
+        let (state, _) = self
+            .idle
+            .wait_timeout_while(state, Duration::from_secs(3), |state| state.active < count)
+            .unwrap();
+        state.active >= count
+    }
+
+    #[cfg(test)]
     pub(crate) fn set_commit_barrier(
         &self,
         barrier: Arc<crate::tasks::allocator::AllocationCommitBarrier>,
@@ -88,6 +98,8 @@ impl Allocator {
             }
             state.last_tick = Some(now);
             state.active += 1;
+            #[cfg(test)]
+            services.allocator.idle.notify_all();
         }
         let handle = services.runtime_handle().clone();
         handle
