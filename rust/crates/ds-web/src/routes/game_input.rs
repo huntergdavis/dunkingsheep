@@ -740,9 +740,9 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Value>(&body).unwrap(),
             json!({"detail": [{
-                "type": "model_type",
+                "type": "model_attributes_type",
                 "loc": ["body"],
-                "msg": "Input should be a valid dictionary or instance of GameKey",
+                "msg": "Input should be a valid dictionary or object to extract fields from",
                 "input": "{\"key\":\"Return\"}"
             }]})
         );
