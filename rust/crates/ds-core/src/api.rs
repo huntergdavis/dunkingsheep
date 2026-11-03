@@ -2376,6 +2376,24 @@ pub fn h_task_read(context: &HandlerContext<'_>, args: Args) -> Result<Value, Du
     Ok(task.wire)
 }
 
+impl Dispatcher {
+    /// Register only the T39 task-completion handler.
+    pub fn register_task_complete(&mut self) {
+        self.register("task_complete", h_task_complete);
+    }
+}
+
+/// `dunk_api.h_task_complete`.
+pub fn h_task_complete(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let id = args.get("id").map(python_value_string).unwrap_or_default();
+    let by = task_string_arg(&args, "by", "task_complete")?;
+    let verdict = task_string_arg(&args, "verdict", "task_complete")?;
+    let landed = python_bool_arg(&args, "landed", true);
+    context
+        .flock
+        .task_complete(context, &id, by, verdict, landed)
+}
+
 /// `dunk_api.h_task_delete`.
 pub fn h_task_delete(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
     let id = args.get("id").map(python_value_string).unwrap_or_default();

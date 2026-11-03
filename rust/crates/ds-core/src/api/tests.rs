@@ -4691,6 +4691,251 @@ fn h_task_delete_matches_python_and_store_guards() {
     assert!(runtime.block_on(tasks.get(&removable.id)).is_err());
 }
 
+struct TaskCompleteApiEnv<'a> {
+    terminal: Mutex<Box<dyn Terminal>>,
+    jobs: &'a crate::tasks::next_job_runtime::NextJobs,
+}
+
+impl PaneInfoEnv for TaskCompleteApiEnv<'_> {
+    fn list_panes_grouped(&self) -> Vec<Value> {
+        Vec::new()
+    }
+
+    fn get_pane(&self, _pane_id: &str) -> Option<Value> {
+        None
+    }
+}
+
+impl CommandEnv for TaskCompleteApiEnv<'_> {
+    fn terminal(&self) -> &Mutex<Box<dyn Terminal>> {
+        &self.terminal
+    }
+
+    fn now_s(&self) -> f64 {
+        1_800_000_000.0
+    }
+
+    fn next_jobs(&self) -> Result<&crate::tasks::next_job_runtime::NextJobs, DunkError> {
+        Ok(self.jobs)
+    }
+}
+
+fn task_complete_fixture() -> (
+    tokio::runtime::Runtime,
+    tempfile::TempDir,
+    Arc<Flock>,
+    Arc<crate::tasks::Tasks>,
+    crate::tasks::next_job_runtime::NextJobs,
+    Dispatcher,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let tasks = Arc::new(
+        runtime
+            .block_on(crate::tasks::Tasks::open(dir.path().join("tasks.db")))
+            .expect("task store"),
+    );
+    runtime
+        .block_on(tasks.allocation_init())
+        .expect("allocation init");
+    let flock = Arc::new(Flock::new(
+        dir.path().join("launches.json"),
+        dir.path().join("lanes.json"),
+        false,
+    ));
+    let mut roles = Roles::new(
+        &Env::default(),
+        Some(dir.path().join("roles.json")),
+        Some(dir.path().join("tokens.json")),
+        None,
+    )
+    .expect("roles");
+    roles
+        .register("w1:p1", "worker", None, None, None, None, None, None)
+        .expect("register worker");
+    flock.attach_roles(roles, None);
+    flock.attach_stores(Stores {
+        tasks: Some(Arc::clone(&tasks)),
+        ..Stores::default()
+    });
+    let gate_env = Env::from_pairs(&[
+        ("DUNKINGSHEEP_DIR", dir.path().to_str().unwrap()),
+        ("DUNKINGSHEEP_TURN_END_DISPATCH", "0"),
+    ]);
+    let jobs = crate::tasks::next_job_runtime::NextJobs::with_providers(
+        Arc::clone(&flock),
+        Arc::new(move || Ok(gate_env.clone())),
+        None,
+    );
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_task_complete();
+    (runtime, dir, flock, tasks, jobs, dispatcher)
+}
+
+fn add_in_progress_task(
+    runtime: &tokio::runtime::Runtime,
+    tasks: &crate::tasks::Tasks,
+    title: &str,
+) -> crate::tasks::Task {
+    let task = runtime
+        .block_on(tasks.add_with(
+            "global",
+            title,
+            "",
+            crate::tasks::AddOptions {
+                assignees: vec!["w1:p1".into()],
+                ..Default::default()
+            },
+        ))
+        .expect("add task");
+    runtime
+        .block_on(tasks.update_with_status(
+            &task.id,
+            Default::default(),
+            Some("in_progress"),
+            Some("w1:p1"),
+        ))
+        .expect("claim task");
+    task
+}
+
+fn dispatch_task_complete(
+    dispatcher: &Dispatcher,
+    flock: &Flock,
+    runtime: &tokio::runtime::Runtime,
+    jobs: &crate::tasks::next_job_runtime::NextJobs,
+    role: &impl CallerGate,
+    args: Option<Args>,
+) -> Result<Value, DunkError> {
+    let env = TaskCompleteApiEnv {
+        terminal: Mutex::new(Box::new(FakeTerminal::default())),
+        jobs,
+    };
+    let request = RequestCtx {
+        self_pane_id: Some("w1:p1".into()),
+        ..Default::default()
+    };
+    let context = HandlerContext {
+        flock,
+        request: &request,
+        env: &env,
+        runtime: runtime.handle(),
+    };
+    dispatcher.dispatch(&context, role, "task_complete", args)
+}
+
+#[test]
+fn h_task_complete_dispatcher_matches_defaults_and_landed_boolean() {
+    let (runtime, _dir, flock, tasks, jobs, dispatcher) = task_complete_fixture();
+    let default_landed = add_in_progress_task(&runtime, &tasks, "default landed");
+    let default_result = dispatch_task_complete(
+        &dispatcher,
+        &flock,
+        &runtime,
+        &jobs,
+        &FixedRole("worker", false),
+        args(json!({"id": default_landed.id})),
+    )
+    .expect("complete with Python defaults");
+    assert_eq!("done", default_result["status"]);
+    assert!(default_result["next_job"].is_object());
+    assert_eq!(
+        "done",
+        runtime
+            .block_on(tasks.get(&default_landed.id))
+            .unwrap()
+            .status
+    );
+    assert_eq!(
+        Some("w1:p1"),
+        runtime
+            .block_on(tasks.get(&default_landed.id))
+            .unwrap()
+            .completed_by
+            .as_deref()
+    );
+
+    let stacked = add_in_progress_task(&runtime, &tasks, "stacked landed");
+    let stacked_result = dispatch_task_complete(
+        &dispatcher,
+        &flock,
+        &runtime,
+        &jobs,
+        &FixedRole("worker", false),
+        args(json!({"id": stacked.id, "by": "spoofed label", "landed": "false"})),
+    )
+    .expect("complete a stacked task");
+    assert_eq!(false, stacked_result["landed"]);
+    assert_eq!("done", stacked_result["status"]);
+    assert_eq!(
+        Some("w1:p1"),
+        runtime
+            .block_on(tasks.get(&stacked.id))
+            .unwrap()
+            .completed_by
+            .as_deref()
+    );
+}
+
+#[test]
+fn h_task_complete_dispatcher_pins_role_and_argument_errors() {
+    let (runtime, _dir, flock, tasks, jobs, dispatcher) = task_complete_fixture();
+    let task = add_in_progress_task(&runtime, &tasks, "must remain open");
+
+    assert!(matches!(
+        dispatch_task_complete(
+            &dispatcher,
+            &flock,
+            &runtime,
+            &jobs,
+            &FixedRole("desk", false),
+            args(json!({"id": task.id})),
+        ),
+        Err(DunkError::Refused(message)) if message.contains("not permitted for role desk")
+    ));
+    assert!(matches!(
+        dispatch_task_complete(
+            &dispatcher,
+            &flock,
+            &runtime,
+            &jobs,
+            &FixedRole("worker", false),
+            args(json!({})),
+        ),
+        Err(DunkError::Refused(message)) if message == "task_complete: missing required argument(s): id"
+    ));
+    assert!(matches!(
+        dispatch_task_complete(
+            &dispatcher,
+            &flock,
+            &runtime,
+            &jobs,
+            &FixedRole("worker", false),
+            args(json!({"id": task.id, "extra": true})),
+        ),
+        Err(DunkError::Refused(message)) if message == "task_complete: unknown argument(s): extra"
+    ));
+    assert!(matches!(
+        dispatch_task_complete(
+            &dispatcher,
+            &flock,
+            &runtime,
+            &jobs,
+            &FixedRole("worker", false),
+            args(json!({"id": task.id, "verdict": "accept"})),
+        ),
+        Err(DunkError::Refused(message)) if message == "--verdict applies to review tasks only"
+    ));
+    assert_eq!(
+        "in_progress",
+        runtime.block_on(tasks.get(&task.id)).unwrap().status
+    );
+}
+
 fn owner_api_fixture(tag: &str) -> (tempfile::TempDir, Flock, OwnerApiEnv) {
     let dir = tempfile::tempdir().unwrap();
     let flock = Flock::new(
