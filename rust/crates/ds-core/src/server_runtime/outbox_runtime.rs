@@ -317,4 +317,52 @@ mod tests {
         assert!(blocked.done.wait_timeout(Duration::from_secs(5)));
         owner.stop_and_join();
     }
+    #[test]
+    fn shutdown_joins_waiting_worker_without_dropping_message() {
+        use crate::flock::panes::Stores;
+        let dir = tempfile::tempdir().unwrap();
+        let flock = Arc::new(Flock::new(
+            dir.path().join("launches"),
+            dir.path().join("lanes"),
+            false,
+        ));
+        let store = Arc::new(
+            crate::inbox_store::Store::open(dir.path().join("inbox.db"), dir.path().join("blobs"))
+                .unwrap(),
+        );
+        flock.attach_stores(Stores {
+            inbox: Some(store),
+            ..Stores::default()
+        });
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let owner = OutboxRuntime::new(
+            Arc::clone(&flock),
+            runtime.handle().clone(),
+            Arc::new(move || {
+                let mut fake = FakeTerminal::new();
+                fake.screens
+                    .insert("w1:p1".into(), "❯ a human draft".into());
+                let _ = started_tx.send(());
+                Box::new(fake)
+            }),
+        )
+        .unwrap();
+        let message = Message::new("m1", "w1:p1", "lane", "message", "test");
+        flock
+            .enqueue(message.clone(), owner.pool.as_ref(), &FlockSnapshot)
+            .unwrap();
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let start = Instant::now();
+        owner.stop_and_join();
+        assert!(start.elapsed() < Duration::from_secs(3));
+        assert!(!message.done.is_set());
+        assert_eq!(
+            crate::flock::sends::outbox_lock(&flock.outbox)["w1:p1"][0].id,
+            "m1"
+        );
+    }
 }
