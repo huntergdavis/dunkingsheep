@@ -135,19 +135,51 @@ async fn request_json(request: axum::extract::Request) -> Result<Value, Response
                 "There was an error parsing the body".into(),
             )
         })?;
-    serde_json::from_slice(&bytes).map_err(|_| {
+    serde_json::from_slice(&bytes).map_err(|error| {
+        let input = String::from_utf8_lossy(&bytes);
+        let message = python_json_error(&error);
+        let position = json_error_position(&input, &error);
         (
             StatusCode::UNPROCESSABLE_ENTITY,
             Json(json!({"detail": [{
                 "type": "json_invalid",
-                "loc": ["body", 0],
+                "loc": ["body", position],
                 "msg": "JSON decode error",
-                "input": String::from_utf8_lossy(&bytes),
-                "ctx": {"error": "Invalid JSON"}
+                "input": {},
+                "ctx": {"error": message}
             }]})),
         )
             .into_response()
     })
+}
+
+fn json_error_position(input: &str, error: &serde_json::Error) -> usize {
+    let line_start = input
+        .split_inclusive('\n')
+        .take(error.line().saturating_sub(1))
+        .map(str::len)
+        .sum::<usize>();
+    let byte_position = line_start
+        .saturating_add(error.column().saturating_sub(1))
+        .min(input.len());
+    input[..byte_position].chars().count()
+}
+
+fn python_json_error(error: &serde_json::Error) -> String {
+    let message = error.to_string();
+    let message = message
+        .split_once(" at line ")
+        .map_or(message.as_str(), |(message, _)| message);
+    match message {
+        "expected value" => "Expecting value".to_owned(),
+        "key must be a string" => "Expecting property name enclosed in double quotes".to_owned(),
+        "expected `:`" | "expected ':'" => "Expecting ':' delimiter".to_owned(),
+        "expected `,` or `}`"
+        | "expected ',' or '}'"
+        | "expected `,` or `]`"
+        | "expected ',' or ']'" => "Expecting ',' delimiter".to_owned(),
+        _ => message.to_owned(),
+    }
 }
 
 fn model_object(body: &Value) -> Result<&Map<String, Value>, Response> {
@@ -703,6 +735,27 @@ mod tests {
             }]})
         );
         assert_eq!(*backend.calls.lock().unwrap(), vec!["type:look:false"]);
+    }
+
+    #[test]
+    fn game_type_malformed_json_matches_fastapi_decoder_error() {
+        let backend = Arc::new(FakeGameInput::default());
+        let app = app(backend.clone(), Arc::new(FakeAuth::default()));
+        let response = block_on(app.oneshot(request("/api/game/type", r#"{"text":}"#, true)))
+            .expect("malformed JSON response");
+        let (status, body) = block_response(response);
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            serde_json::from_str::<Value>(&body).unwrap(),
+            json!({"detail": [{
+                "type": "json_invalid",
+                "loc": ["body", 8],
+                "msg": "JSON decode error",
+                "input": {},
+                "ctx": {"error": "Expecting value"}
+            }]})
+        );
+        assert!(backend.calls.lock().unwrap().is_empty());
     }
 
     #[test]
