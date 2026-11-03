@@ -27,6 +27,7 @@ use super::auth::{AuthBackend, AuthError, RequestScheme};
 
 const MAX_UPLOAD: usize = 25 * 1024 * 1024;
 const MAX_MULTIPART_OVERHEAD: usize = 64 * 1024;
+const MAX_NON_FILE_PART_SIZE: usize = 1024 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SearchAttachmentsError {
@@ -181,17 +182,26 @@ async fn upload(
             .eq_ignore_ascii_case("multipart/form-data")
     }) && boundary.is_none()
     {
-        return detail_response(StatusCode::BAD_REQUEST, "Invalid multipart request");
+        return detail_response(StatusCode::BAD_REQUEST, "Missing boundary in multipart.");
     }
     let Some(boundary) = boundary else {
         return invalid_upload();
     };
-    let bytes = match to_bytes(request.into_body(), MAX_UPLOAD + MAX_MULTIPART_OVERHEAD).await {
+    let bytes = match to_bytes(
+        request.into_body(),
+        MAX_UPLOAD + MAX_NON_FILE_PART_SIZE + MAX_MULTIPART_OVERHEAD,
+    )
+    .await
+    {
         Ok(bytes) => bytes,
         Err(_) => return too_large(),
     };
-    let Some((filename, mime, file_bytes)) = multipart_file(&bytes, &boundary) else {
-        return invalid_upload();
+    let (filename, mime, file_bytes) = match multipart_file(&bytes, &boundary) {
+        Ok(Some(file)) => file,
+        Ok(None) => return invalid_upload(),
+        Err(MultipartFileError::BadRequest(detail)) => {
+            return detail_response(StatusCode::BAD_REQUEST, detail)
+        }
     };
     if let Err(response) = authenticate(auth.as_ref(), &headers, scheme).await {
         return response;
@@ -321,11 +331,11 @@ fn download_response(
         }
     };
     match parsed.as_slice() {
-        [] => range_error(
-            StatusCode::BAD_REQUEST,
-            "Range header: range must be requested",
-            None,
-        ),
+        [] => {
+            *response.status_mut() = StatusCode::OK;
+            *response.body_mut() = Body::from(file.bytes);
+            response
+        }
         [range] => single_range_response(response, file, range),
         ranges => multiple_ranges_response(response, file, ranges, &content_type),
     }
@@ -378,28 +388,41 @@ fn parse_byte_ranges(value: &str, file_size: usize) -> Result<Vec<ByteRange>, By
         let start_text = start_text.trim();
         let end_text = end_text.trim();
         let parsed = if start_text.is_empty() {
-            let Some(suffix) = parse_decimal(end_text) else {
+            let Some(suffix) = parse_python_range_integer(end_text) else {
                 continue;
             };
-            let start = file_size.saturating_sub(suffix);
+            let start = if suffix.negative {
+                file_size.saturating_add(suffix.magnitude)
+            } else {
+                file_size.saturating_sub(suffix.magnitude)
+            };
             (start, file_size)
         } else {
-            let Some(start) = parse_decimal(start_text) else {
+            let Some(start) = parse_python_range_integer(start_text) else {
                 continue;
             };
+            if start.negative {
+                return Err(ByteRangeError::Unsatisfiable);
+            }
             let end = if end_text.is_empty() {
                 file_size
             } else {
-                let Some(end_inclusive) = parse_decimal(end_text) else {
+                let Some(end_inclusive) = parse_python_range_integer(end_text) else {
                     continue;
                 };
-                if end_inclusive < file_size {
-                    end_inclusive.saturating_add(1)
+                if end_inclusive.negative {
+                    if end_inclusive.magnitude == 0 {
+                        1
+                    } else {
+                        0
+                    }
+                } else if end_inclusive.magnitude < file_size {
+                    end_inclusive.magnitude.saturating_add(1)
                 } else {
                     file_size
                 }
             };
-            (start, end)
+            (start.magnitude, end)
         };
         if parsed.0 >= file_size {
             return Err(ByteRangeError::Unsatisfiable);
@@ -433,15 +456,49 @@ fn parse_byte_ranges(value: &str, file_size: usize) -> Result<Vec<ByteRange>, By
     Ok(merged)
 }
 
-fn parse_decimal(value: &str) -> Option<usize> {
-    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PythonRangeInteger {
+    negative: bool,
+    magnitude: usize,
+}
+
+fn parse_python_range_integer(value: &str) -> Option<PythonRangeInteger> {
+    let value = value.trim();
+    let (negative, digits) = if let Some(value) = value.strip_prefix('-') {
+        (true, value)
+    } else if let Some(value) = value.strip_prefix('+') {
+        (false, value)
+    } else {
+        (false, value)
+    };
+    if digits.is_empty() {
         return None;
     }
-    Some(value.bytes().fold(0usize, |number, digit| {
-        number
-            .saturating_mul(10)
-            .saturating_add(usize::from(digit - b'0'))
-    }))
+    let bytes = digits.as_bytes();
+    if !bytes[0].is_ascii_digit() || !bytes[bytes.len() - 1].is_ascii_digit() {
+        return None;
+    }
+    let mut magnitude = 0usize;
+    let mut previous_was_digit = false;
+    for &byte in bytes {
+        match byte {
+            b'0'..=b'9' => {
+                magnitude = magnitude
+                    .saturating_mul(10)
+                    .saturating_add(usize::from(byte - b'0'));
+                previous_was_digit = true;
+            }
+            b'_' if previous_was_digit => previous_was_digit = false,
+            _ => return None,
+        }
+    }
+    if !previous_was_digit {
+        return None;
+    }
+    Some(PythonRangeInteger {
+        negative: negative && magnitude != 0,
+        magnitude,
+    })
 }
 
 fn range_error(status: StatusCode, message: &str, content_range: Option<String>) -> Response {
@@ -582,36 +639,70 @@ fn multipart_boundary(content_type: &str) -> Option<String> {
     })
 }
 
-fn multipart_file(body: &[u8], boundary: &str) -> Option<(String, Option<String>, Vec<u8>)> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MultipartFileError {
+    BadRequest(&'static str),
+}
+
+fn multipart_file(
+    body: &[u8],
+    boundary: &str,
+) -> Result<Option<(String, Option<String>, Vec<u8>)>, MultipartFileError> {
+    const MISSING_PART_NAME: &str =
+        "The Content-Disposition header field \"name\" must be provided.";
+    const PART_TOO_LARGE: &str = "Part exceeded maximum size of 1024KB.";
     let delimiter = format!("--{boundary}").into_bytes();
     if !body.starts_with(&delimiter) {
-        return None;
+        return Ok(None);
     }
     let mut marker = b"\r\n".to_vec();
     marker.extend_from_slice(&delimiter);
     let mut part_start = 0;
+    let mut selected_file = None;
     loop {
-        if !body.get(part_start..)?.starts_with(&delimiter) {
-            return None;
+        let Some(part) = body.get(part_start..) else {
+            return Ok(None);
+        };
+        if !part.starts_with(&delimiter) {
+            return Ok(None);
         }
-        let mut header_start = part_start.checked_add(delimiter.len())?;
-        let after_delimiter = body.get(header_start..)?;
+        let Some(mut header_start) = part_start.checked_add(delimiter.len()) else {
+            return Ok(None);
+        };
+        let Some(after_delimiter) = body.get(header_start..) else {
+            return Ok(None);
+        };
         if after_delimiter.starts_with(b"--") {
-            return None;
+            return Ok(selected_file);
         }
         if !after_delimiter.starts_with(b"\r\n") {
-            return None;
+            return Ok(None);
         }
-        header_start = header_start.checked_add(2)?;
-        let header_end_relative = body
-            .get(header_start..)?
+        let Some(next_header_start) = header_start.checked_add(2) else {
+            return Ok(None);
+        };
+        header_start = next_header_start;
+        let Some(header_bytes) = body.get(header_start..) else {
+            return Ok(None);
+        };
+        let Some(header_end_relative) = header_bytes
             .windows(4)
-            .position(|window| window == b"\r\n\r\n")?;
-        let header_end = header_start.checked_add(header_end_relative)?;
-        if header_end > MAX_MULTIPART_OVERHEAD {
-            return None;
+            .position(|window| window == b"\r\n\r\n")
+        else {
+            return Ok(None);
+        };
+        let Some(header_end) = header_start.checked_add(header_end_relative) else {
+            return Ok(None);
+        };
+        if header_end_relative > MAX_MULTIPART_OVERHEAD {
+            return Ok(None);
         }
-        let headers = std::str::from_utf8(body.get(header_start..header_end)?).ok()?;
+        let Some(header_slice) = body.get(header_start..header_end) else {
+            return Ok(None);
+        };
+        let Ok(headers) = std::str::from_utf8(header_slice) else {
+            return Ok(None);
+        };
         let mut field_name = None;
         let mut filename = None;
         let mut mime = None;
@@ -620,16 +711,25 @@ fn multipart_file(body: &[u8], boundary: &str) -> Option<(String, Option<String>
                 continue;
             };
             if name.trim().eq_ignore_ascii_case("content-disposition") {
-                let (field, part_filename) = disposition_parameters(value)?;
+                let Some((field, part_filename)) = disposition_parameters(value) else {
+                    return Err(MultipartFileError::BadRequest(MISSING_PART_NAME));
+                };
                 field_name = Some(field);
                 filename = part_filename;
             } else if name.trim().eq_ignore_ascii_case("content-type") {
                 mime = Some(value.trim().to_owned());
             }
         }
-        let data_start = header_end.checked_add(4)?;
-        let tail = body.get(data_start..)?;
-        let data_end = tail
+        let Some(field_name) = field_name else {
+            return Err(MultipartFileError::BadRequest(MISSING_PART_NAME));
+        };
+        let Some(data_start) = header_end.checked_add(4) else {
+            return Ok(None);
+        };
+        let Some(tail) = body.get(data_start..) else {
+            return Ok(None);
+        };
+        let Some(data_end) = tail
             .windows(marker.len())
             .enumerate()
             .find_map(|(at, window)| {
@@ -638,15 +738,39 @@ fn multipart_file(body: &[u8], boundary: &str) -> Option<(String, Option<String>
                 }
                 let suffix = &tail[at + marker.len()..];
                 (suffix.starts_with(b"--") || suffix.starts_with(b"\r\n")).then_some(at)
-            })?;
-        if field_name.as_deref() == Some("file") {
-            let filename = filename?;
-            return Some((filename, mime, tail[..data_end].to_vec()));
+            })
+        else {
+            return Ok(None);
+        };
+        if field_name == "file" {
+            match filename {
+                Some(filename) => {
+                    selected_file = Some((filename, mime, tail[..data_end].to_vec()));
+                }
+                None => {
+                    selected_file = None;
+                    if data_end > MAX_NON_FILE_PART_SIZE {
+                        return Err(MultipartFileError::BadRequest(PART_TOO_LARGE));
+                    }
+                }
+            }
+        } else if data_end > MAX_NON_FILE_PART_SIZE {
+            return Err(MultipartFileError::BadRequest(PART_TOO_LARGE));
         }
-        let next_delimiter = data_start.checked_add(data_end)?.checked_add(2)?;
-        let suffix = body.get(next_delimiter.checked_add(delimiter.len())?..)?;
+        let Some(next_delimiter) = data_start
+            .checked_add(data_end)
+            .and_then(|end| end.checked_add(2))
+        else {
+            return Ok(None);
+        };
+        let Some(suffix_start) = next_delimiter.checked_add(delimiter.len()) else {
+            return Ok(None);
+        };
+        let Some(suffix) = body.get(suffix_start..) else {
+            return Ok(None);
+        };
         if suffix.starts_with(b"--") {
-            return None;
+            return Ok(selected_file);
         }
         part_start = next_delimiter;
     }
@@ -794,17 +918,25 @@ fn parse_query(raw: Option<&str>) -> Result<std::collections::BTreeMap<String, S
                         b'A'..=b'F' => Some(byte - b'A' + 10),
                         _ => None,
                     };
-                    out.push(hex(bytes[at + 1]).ok_or(())? * 16 + hex(bytes[at + 2]).ok_or(())?);
-                    at += 3;
+                    if let (Some(high), Some(low)) = (hex(bytes[at + 1]), hex(bytes[at + 2])) {
+                        out.push(high * 16 + low);
+                        at += 3;
+                    } else {
+                        out.push(b'%');
+                        at += 1;
+                    }
                 }
-                b'%' => return Err(()),
+                b'%' => {
+                    out.push(b'%');
+                    at += 1;
+                }
                 byte => {
                     out.push(byte);
                     at += 1;
                 }
             }
         }
-        String::from_utf8(out).map_err(|_| ())
+        Ok(String::from_utf8_lossy(&out).into_owned())
     }
     let mut values = std::collections::BTreeMap::new();
     for part in raw.unwrap_or("").split('&').filter(|part| !part.is_empty()) {
@@ -1042,6 +1174,25 @@ mod tests {
     }
 
     #[test]
+    fn search_uses_python_query_decoding_for_malformed_percent_and_utf8() {
+        for (query, expected) in [("a%", "a%"), ("a%2", "a%2"), ("a%FF", "a\u{fffd}")] {
+            let backend = Arc::new(FakeBackend::default());
+            let response = block_on(app(backend.clone()).oneshot(request(
+                "GET",
+                &format!("/api/search?q={query}"),
+                Body::empty(),
+            )))
+            .unwrap();
+            assert_eq!(json_response(response).0, StatusCode::OK, "{query:?}");
+            assert_eq!(
+                *backend.search.lock().unwrap(),
+                vec![(format!("%{expected}%"), None, i64::MAX, 51)],
+                "{query:?}"
+            );
+        }
+    }
+
+    #[test]
     fn short_search_skips_storage_and_unknown_channel_is_not_found() {
         let backend = Arc::new(FakeBackend::default());
         let short = block_on(app(backend.clone()).oneshot(request(
@@ -1179,6 +1330,76 @@ mod tests {
     }
 
     #[test]
+    fn upload_parses_all_parts_and_uses_last_file_value() {
+        let backend = Arc::new(FakeBackend::default());
+        let multipart = b"--b\r\nContent-Disposition: form-data; name=\"file\"; filename=\"first.txt\"\r\n\r\none\r\n--b\r\nContent-Disposition: form-data; name=\"file\"; filename=\"last.txt\"\r\n\r\nlast\r\n--b--\r\n";
+        let response = block_on(app(backend.clone()).oneshot(request(
+            "POST",
+            "/api/uploads",
+            Body::from(multipart.as_slice()),
+        )))
+        .unwrap();
+        let (status, body) = json_response(response);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["filename"], "last.txt");
+        assert_eq!(body["size"], 4);
+        assert_eq!(backend.uploads.lock().unwrap().len(), 1);
+        assert_eq!(backend.uploads.lock().unwrap()[0].bytes, b"last");
+
+        let backend = Arc::new(FakeBackend::default());
+        let malformed = b"--b\r\nContent-Disposition: form-data; name=\"file\"; filename=\"first.txt\"\r\n\r\none\r\n--b\r\nContent-Disposition: garbage\r\n\r\nignored\r\n--b--\r\n";
+        let response = block_on(app(backend.clone()).oneshot(request(
+            "POST",
+            "/api/uploads",
+            Body::from(malformed.as_slice()),
+        )))
+        .unwrap();
+        let (status, body) = json_response(response);
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body,
+            json!({"detail":"The Content-Disposition header field \"name\" must be provided."})
+        );
+        assert!(backend.uploads.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn upload_uses_python_nonfile_part_size_limit() {
+        let backend = Arc::new(FakeBackend::default());
+        let accepted_body = format!(
+            "--b\r\nContent-Disposition: form-data; name=\"description\"\r\n\r\n{}\r\n--b\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.txt\"\r\n\r\nfile\r\n--b--\r\n",
+            "x".repeat(80 * 1024)
+        );
+        let response = block_on(app(backend.clone()).oneshot(request(
+            "POST",
+            "/api/uploads",
+            Body::from(accepted_body),
+        )))
+        .unwrap();
+        assert_eq!(json_response(response).0, StatusCode::OK);
+        assert_eq!(backend.uploads.lock().unwrap().len(), 1);
+
+        let backend = Arc::new(FakeBackend::default());
+        let too_large_body = format!(
+            "--b\r\nContent-Disposition: form-data; name=\"description\"\r\n\r\n{}\r\n--b\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.txt\"\r\n\r\nfile\r\n--b--\r\n",
+            "x".repeat(MAX_NON_FILE_PART_SIZE + 1)
+        );
+        let response = block_on(app(backend.clone()).oneshot(request(
+            "POST",
+            "/api/uploads",
+            Body::from(too_large_body),
+        )))
+        .unwrap();
+        let (status, body) = json_response(response);
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body,
+            json!({"detail":"Part exceeded maximum size of 1024KB."})
+        );
+        assert!(backend.uploads.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn upload_matches_mixed_case_part_header_names() {
         let backend = Arc::new(FakeBackend::default());
         let multipart = b"--b\r\ncOnTeNt-dIsPoSiTiOn: form-data; name=\"file\"; filename=\"a.txt\"\r\ncOnTeNt-tYpE: text/plain\r\n\r\nabc\r\n--b--\r\n";
@@ -1256,7 +1477,13 @@ mod tests {
             .body(Body::from("ignored"))
             .unwrap();
         let response = block_on(app(backend.clone()).oneshot(request)).unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            json_response(response),
+            (
+                StatusCode::BAD_REQUEST,
+                json!({"detail":"Missing boundary in multipart."})
+            )
+        );
         assert!(backend.uploads.lock().unwrap().is_empty());
     }
 
@@ -1436,6 +1663,38 @@ mod tests {
         let response = block_on(app(range_fixture()).oneshot(req)).unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert!(!response.headers().contains_key(header::CONTENT_RANGE));
+        assert_eq!(
+            block_on(to_bytes(response.into_body(), usize::MAX)).unwrap(),
+            "abcdef"
+        );
+    }
+
+    #[test]
+    fn download_matches_python_range_integer_lexemes_and_range_limit() {
+        let mut request = request("GET", "/api/uploads/a1", Body::empty());
+        request
+            .headers_mut()
+            .insert(header::RANGE, HeaderValue::from_static("bytes=+1-+2"));
+        let response = block_on(app(range_fixture()).oneshot(request)).unwrap();
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(response.headers()[header::CONTENT_RANGE], "bytes 1-2/6");
+        assert_eq!(
+            block_on(to_bytes(response.into_body(), usize::MAX)).unwrap(),
+            "bc"
+        );
+        assert_eq!(
+            parse_byte_ranges("bytes=1_0-1_1", 20).unwrap(),
+            vec![ByteRange { start: 10, end: 12 }]
+        );
+
+        let ranges = (0..101).map(|_| "0-0").collect::<Vec<_>>().join(",");
+        let mut request = request("GET", "/api/uploads/a1", Body::empty());
+        request.headers_mut().insert(
+            header::RANGE,
+            HeaderValue::from_str(&format!("bytes={ranges}")).unwrap(),
+        );
+        let response = block_on(app(range_fixture()).oneshot(request)).unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
             block_on(to_bytes(response.into_body(), usize::MAX)).unwrap(),
             "abcdef"
