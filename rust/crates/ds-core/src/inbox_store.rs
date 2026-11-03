@@ -167,10 +167,19 @@ fn owner_sqlite_subject(subject: Option<&JsonValue>) -> Result<rusqlite::types::
             .and_then(|number| i64::try_from(number).ok())
             .map(SqlValue::Integer)
             .ok_or_else(|| refuse("Python int too large to convert to SQLite INTEGER")),
-        JsonValue::Number(value) => value
-            .as_f64()
-            .map(SqlValue::Real)
-            .ok_or_else(|| refuse("Python int too large to convert to SQLite INTEGER")),
+        JsonValue::Number(value) => {
+            let raw = value.to_string();
+            if !raw
+                .chars()
+                .any(|character| matches!(character, '.' | 'e' | 'E'))
+            {
+                return Err(refuse("Python int too large to convert to SQLite INTEGER"));
+            }
+            value
+                .as_f64()
+                .map(SqlValue::Real)
+                .ok_or_else(|| refuse("Python int too large to convert to SQLite INTEGER"))
+        }
         JsonValue::Array(_) => Err(refuse(
             "Error binding parameter 6: type 'list' is not supported",
         )),

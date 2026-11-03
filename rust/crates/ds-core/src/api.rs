@@ -349,54 +349,12 @@ fn python_int_arg(args: &Args, key: &str, default: i64) -> Result<i64, DunkError
 }
 
 fn parse_python_decimal_integer(value: &str) -> Option<i64> {
-    let literal = value.trim();
-    let sign_len = usize::from(matches!(literal.as_bytes().first(), Some(b'+' | b'-')));
-    let negative = literal.as_bytes().first() == Some(&b'-');
-    let (_, digits) = literal.split_at(sign_len);
-    if digits.is_empty() {
-        return None;
+    match parse_python_decimal_integer_checked(value) {
+        Ok(value) => Some(value),
+        Err(DecimalIntError::Invalid) => None,
+        Err(DecimalIntError::Overflow) if value.trim_start().starts_with('-') => Some(i64::MIN),
+        Err(DecimalIntError::Overflow) => Some(i64::MAX),
     }
-
-    let maximum = if negative {
-        (i64::MAX as u64) + 1
-    } else {
-        i64::MAX as u64
-    };
-    let mut magnitude = 0_u64;
-    let mut previous_was_digit = false;
-    let mut chars = digits.chars().peekable();
-    while let Some(character) = chars.next() {
-        if let Some(digit) = python_decimal_digit(character) {
-            magnitude = magnitude
-                .saturating_mul(10)
-                .saturating_add(u64::from(digit))
-                .min(maximum);
-            previous_was_digit = true;
-        } else if character == '_'
-            && previous_was_digit
-            && chars
-                .peek()
-                .and_then(|next| python_decimal_digit(*next))
-                .is_some()
-        {
-            previous_was_digit = false;
-        } else {
-            return None;
-        }
-    }
-    if !previous_was_digit {
-        return None;
-    }
-
-    Some(if negative {
-        if magnitude > i64::MAX as u64 {
-            i64::MIN
-        } else {
-            -(magnitude as i64)
-        }
-    } else {
-        magnitude as i64
-    })
 }
 
 /// `dunk_roles.clamp_desk_args`: daemon-side result caps for the desk role.
@@ -1138,7 +1096,7 @@ pub fn h_owner_outbox(context: &HandlerContext<'_>, args: Args) -> Result<Value,
         .get("transport")
         .map(python_value_string)
         .unwrap_or_default();
-    let limit = python_int_arg(&args, "limit", 20)?;
+    let limit = owner_outbox_limit_arg(&args, 20)?;
     let outbox = crate::owner::OwnerConversations::new(context.flock, context.env).outbox(
         Some(&transport),
         Some(limit),
@@ -1149,6 +1107,115 @@ pub fn h_owner_outbox(context: &HandlerContext<'_>, args: Args) -> Result<Value,
         "messages": outbox.messages.iter().map(owner_message_value).collect::<Vec<_>>(),
         "count": outbox.count,
     }))
+}
+
+fn owner_outbox_limit_arg(args: &Args, default: i64) -> Result<i64, DunkError> {
+    let Some(value) = args.get("limit").filter(|value| !value.is_null()) else {
+        return Ok(default);
+    };
+    let overflow =
+        || DunkError::Refused("Python int too large to convert to SQLite INTEGER".into());
+    match value {
+        Value::Bool(value) => Ok(i64::from(*value)),
+        Value::Number(value) => {
+            if let Some(value) = value.as_i64() {
+                return Ok(value);
+            }
+            if let Some(value) = value.as_u64() {
+                return i64::try_from(value).map_err(|_| overflow());
+            }
+            let value = value
+                .as_f64()
+                .ok_or_else(|| DunkError::Refused("cannot convert value to int".into()))?
+                .trunc();
+            if value >= 9_223_372_036_854_775_808.0 || value < -9_223_372_036_854_775_808.0 {
+                return Err(overflow());
+            }
+            Ok(value as i64)
+        }
+        Value::String(value) => match parse_python_decimal_integer_checked(value) {
+            Ok(value) => Ok(value),
+            Err(DecimalIntError::Overflow) => Err(overflow()),
+            Err(DecimalIntError::Invalid) => Err(DunkError::Refused(format!(
+                "invalid literal for int() with base 10: {}",
+                py_repr(value)
+            ))),
+        },
+        Value::Array(_) => Err(DunkError::Refused(
+            "int() argument must be a string, a bytes-like object or a real number, not 'list'"
+                .into(),
+        )),
+        Value::Object(_) => Err(DunkError::Refused(
+            "int() argument must be a string, a bytes-like object or a real number, not 'dict'"
+                .into(),
+        )),
+        Value::Null => unreachable!("null limit uses the default"),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DecimalIntError {
+    Invalid,
+    Overflow,
+}
+
+fn parse_python_decimal_integer_checked(value: &str) -> Result<i64, DecimalIntError> {
+    let literal = value.trim();
+    let sign_len = usize::from(matches!(literal.as_bytes().first(), Some(b'+' | b'-')));
+    let negative = literal.as_bytes().first() == Some(&b'-');
+    let (_, digits) = literal.split_at(sign_len);
+    if digits.is_empty() {
+        return Err(DecimalIntError::Invalid);
+    }
+    let maximum = if negative {
+        (i64::MAX as u64) + 1
+    } else {
+        i64::MAX as u64
+    };
+    let mut magnitude = 0_u64;
+    let mut overflow = false;
+    let mut previous_was_digit = false;
+    let mut chars = digits.chars().peekable();
+    while let Some(character) = chars.next() {
+        if let Some(digit) = python_decimal_digit(character) {
+            match magnitude
+                .checked_mul(10)
+                .and_then(|number| number.checked_add(u64::from(digit)))
+            {
+                Some(number) if number <= maximum => magnitude = number,
+                _ => {
+                    overflow = true;
+                    magnitude = maximum;
+                }
+            }
+            previous_was_digit = true;
+        } else if character == '_'
+            && previous_was_digit
+            && chars
+                .peek()
+                .and_then(|next| python_decimal_digit(*next))
+                .is_some()
+        {
+            previous_was_digit = false;
+        } else {
+            return Err(DecimalIntError::Invalid);
+        }
+    }
+    if !previous_was_digit {
+        return Err(DecimalIntError::Invalid);
+    }
+    if overflow {
+        return Err(DecimalIntError::Overflow);
+    }
+    Ok(if negative {
+        if magnitude > i64::MAX as u64 {
+            i64::MIN
+        } else {
+            -(magnitude as i64)
+        }
+    } else {
+        magnitude as i64
+    })
 }
 
 fn poolrad_limit(args: &Args) -> Result<usize, DunkError> {

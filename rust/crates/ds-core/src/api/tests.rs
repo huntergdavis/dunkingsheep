@@ -4134,6 +4134,29 @@ fn h_owner_ingest_matches_python() {
     .expect("omitted subject");
     assert_eq!(omitted["message"]["subject"], Value::Null);
 
+    let oversized: Value = serde_json::from_str(
+        r#"{"body":"too large","transport":"web","external_id":"raw-overflow-subject","subject":18446744073709551616}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_ingest",
+            args(oversized),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "Python int too large to convert to SQLite INTEGER"
+    ));
+    assert!(flock
+        .stores()
+        .inbox
+        .unwrap()
+        .find_by_external_id("owner", Some("raw-overflow-subject"))
+        .unwrap()
+        .is_none());
+
     let duplicate = dispatch_owner_api(
         &dispatcher,
         &flock,
@@ -4306,6 +4329,28 @@ fn h_owner_outbox_matches_python() {
             Some("w1:p1"),
         ),
         Err(DunkError::Refused(message)) if message == "invalid literal for int() with base 10: 'bad'"
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_outbox",
+            args(json!({"transport": "telegram", "limit": 9223372036854775808_u64})),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "Python int too large to convert to SQLite INTEGER"
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_outbox",
+            args(json!({"transport": "telegram", "limit": "9223372036854775808"})),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "Python int too large to convert to SQLite INTEGER"
     ));
     assert!(matches!(
         dispatch_owner_api(

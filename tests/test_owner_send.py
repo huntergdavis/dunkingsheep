@@ -135,6 +135,26 @@ class OwnerIngestWireOracle(unittest.TestCase):
                        "bad-subject-list", "bad-subject-dict"):
             self.assertNotIn(failed, ids)
 
+    def test_large_integer_subject_and_outbox_limit_raise_sqlite_overflow(self):
+        with self.assertRaises(OverflowError) as subject_error:
+            self.flock.owner_ingest(
+                "body", "web", external_id="oversized-subject",
+                subject=18446744073709551616,
+            )
+        self.assertEqual(
+            "Python int too large to convert to SQLite INTEGER",
+            str(subject_error.exception),
+        )
+        self.assertIsNone(self.inbox.find_by_external_id("owner", "oversized-subject"))
+
+        for limit in (9223372036854775808, "9223372036854775808"):
+            with self.subTest(limit=limit), self.assertRaises(OverflowError) as limit_error:
+                self.flock.owner_outbox("web", limit=limit)
+            self.assertEqual(
+                "Python int too large to convert to SQLite INTEGER",
+                str(limit_error.exception),
+            )
+
 
 @unittest.skipUnless(importlib.util.find_spec("fastapi"), "web.app needs fastapi")
 class OwnerSend(unittest.TestCase):
