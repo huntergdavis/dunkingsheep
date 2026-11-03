@@ -420,6 +420,7 @@ dependencies = [
  "chrono",
  "clap",
  "ds-core",
+ "ds-mcp",
  "ds-tui",
  "serde_json",
  "tempfile",

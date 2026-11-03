@@ -158,6 +158,122 @@ fn run_cli_with_stdin(socket: &str, command: &[&str], input: &str) -> Output {
     child.wait_with_output().expect("wait for Rust CLI")
 }
 
+#[cfg(unix)]
+#[test]
+fn cli_route_55_mcp() {
+    let temp = tempfile::tempdir().unwrap();
+    let socket = temp.path().join("mcp-daemon.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let expected_pane = std::env::var("TMUX_PANE")
+        .ok()
+        .filter(|pane| !pane.trim().is_empty())
+        .or_else(|| {
+            std::env::var("HERDR_PANE_ID")
+                .ok()
+                .filter(|pane| !pane.trim().is_empty())
+        });
+    let daemon = std::thread::spawn(move || {
+        let mut commands = Vec::new();
+        for (expected_cmd, result) in [
+            ("status", json!({})),
+            (
+                "whoami",
+                json!({"role": "worker", "label": "inherited caller"}),
+            ),
+            ("status", json!({})),
+            (
+                "whoami",
+                json!({"role": "worker", "label": "inherited caller"}),
+            ),
+        ] {
+            let (stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(&stream).read_line(&mut line).unwrap();
+            let request: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(expected_cmd, request["cmd"]);
+            assert_eq!(expected_pane.as_deref(), request["self_pane_id"].as_str());
+            assert!(request.get("service_token").is_none());
+            commands.push(request["cmd"].as_str().unwrap().to_string());
+            let mut writer = &stream;
+            writer
+                .write_all(format!("{}\n", json!({"ok": true, "result": result})).as_bytes())
+                .unwrap();
+        }
+        commands
+    });
+
+    let requests = [
+        json!({"jsonrpc":"2.0","id":"init-7","method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"route-test","version":"1"}}}),
+        json!({"jsonrpc":"2.0","id":8,"method":"tools/list","params":{}}),
+        json!({"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"whoami","arguments":{}}}),
+    ];
+    let input = requests
+        .iter()
+        .map(Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    let mut child = Command::new(env!("CARGO_BIN_EXE_dunkingsheep"))
+        .args(["mcp", "--json"])
+        .env("DUNKINGSHEEP_SOCKET", &socket)
+        .env_remove("DUNKINGSHEEP_SERVICE_TOKEN")
+        .env_remove("DUNKINGSHEEP_SERVICE_TOKEN_FILE")
+        .env_remove("DUNKINGSHEEP_CLIENT_TIMEOUT")
+        .env_remove("DUNKINGSHEEP_SEND_TIMEOUT_S")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn Rust CLI MCP route");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!output.stdout.is_empty());
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("dunkingsheep MCP server"));
+    let replies: Vec<Value> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(3, replies.len());
+    assert_eq!("init-7", replies[0]["id"]);
+    assert_eq!("2025-06-18", replies[0]["result"]["protocolVersion"]);
+    assert_eq!("dunkingsheep", replies[0]["result"]["serverInfo"]["name"]);
+    assert_eq!(
+        ds_mcp::SERVER_VERSION,
+        replies[0]["result"]["serverInfo"]["version"]
+    );
+    assert_eq!(ds_mcp::INSTRUCTIONS, replies[0]["result"]["instructions"]);
+    assert_eq!(8, replies[1]["id"]);
+    assert!(replies[1]["result"]["tools"]
+        .as_array()
+        .is_some_and(|tools| !tools.is_empty()));
+    assert_eq!(9, replies[2]["id"]);
+    assert_eq!(
+        "{\n  \"label\": \"inherited caller\",\n  \"role\": \"worker\"\n}",
+        replies[2]["result"]["content"][0]["text"]
+    );
+    assert_eq!(
+        json!({"label":"inherited caller","role":"worker"}),
+        replies[2]["result"]["structuredContent"]
+    );
+    assert_eq!(false, replies[2]["result"]["isError"]);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("MCP server"));
+    assert_eq!(
+        vec!["status", "whoami", "status", "whoami"],
+        daemon.join().unwrap()
+    );
+}
+
 fn run_local_cli(
     socket: &Path,
     cwd: &Path,

@@ -3157,6 +3157,12 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
         "guide" | "help" | "docs" => guide(ns),
         "commands" => commands(json),
         "mcp-map" => mcp_map(ns),
+        // MCP owns stdout for JSON-RPC even when the CLI's global --json flag is present.
+        "mcp" => Outcome {
+            stdout: String::new(),
+            stderr: String::new(),
+            code: ds_mcp::run_stdio(),
+        },
         "install" => install_launcher(ns, json),
         "mcp-setup" => mcp_setup(ns),
         "context" => context(ns, json),
