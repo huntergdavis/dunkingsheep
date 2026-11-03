@@ -216,9 +216,10 @@ fn first_script_src(html: &str) -> Option<&str> {
             .map_or(html.len(), |offset| attrs_start + offset);
         let attrs = &html[attrs_start..boundary];
         if attrs.len() > 1 {
-            for (position, _) in attrs.match_indices("src=\"").rev() {
+            let mut candidate_end = attrs.len();
+            while let Some(position) = attrs[..candidate_end].rfind("src=\"") {
                 if position == 0 {
-                    continue;
+                    break;
                 }
                 let value_start = position + "src=\"".len();
                 if let Some(relative_end) = attrs[value_start..].find('"') {
@@ -226,6 +227,7 @@ fn first_script_src(html: &str) -> Option<&str> {
                         return Some(&attrs[value_start..value_start + relative_end]);
                     }
                 }
+                candidate_end = position;
             }
         }
         search_from = attrs_start;
@@ -265,11 +267,12 @@ mod tests {
 
     impl TempDir {
         fn new() -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "ds-web-system-{}-{}",
-                std::process::id(),
-                NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
-            ));
+            let path = std::env::temp_dir() // tempdir-ok: ds-web has no tempfile dev dependency; Drop removes each fixture.
+                .join(format!(
+                    "ds-web-system-{}-{}",
+                    std::process::id(),
+                    NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+                ));
             fs::create_dir_all(&path).expect("create temp directory");
             Self(path)
         }
