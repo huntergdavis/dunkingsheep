@@ -23,6 +23,7 @@ mod status;
 mod stuck;
 mod submit;
 mod summary;
+mod turn_next;
 mod turn_plan;
 mod turn_send;
 mod verify;
@@ -62,6 +63,7 @@ pub(crate) struct RequestRuntimeAdapter<'a> {
     runtime: &'a Handle,
     inbox: Option<Arc<crate::inbox_store::Store>>,
     outbox: Option<&'a outbox_runtime::OutboxRuntime>,
+    next_jobs: Option<&'a crate::tasks::next_job_runtime::NextJobs>,
 }
 
 /// Terminal access shared by the request and loop adapters. A lock is held only while a
@@ -99,6 +101,7 @@ impl<'a> RequestRuntimeAdapter<'a> {
             runtime,
             inbox,
             outbox: None,
+            next_jobs: None,
         }
     }
 
@@ -112,6 +115,18 @@ impl<'a> RequestRuntimeAdapter<'a> {
             return Err(DunkError::Refused("request outbox flock mismatch".into()));
         }
         self.outbox = Some(outbox);
+        Ok(self)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn with_next_jobs(
+        mut self,
+        next_jobs: &'a crate::tasks::next_job_runtime::NextJobs,
+    ) -> Result<Self, DunkError> {
+        if !next_jobs.owns_flock(self.terminal.flock) {
+            return Err(DunkError::Refused("request next-job flock mismatch".into()));
+        }
+        self.next_jobs = Some(next_jobs);
         Ok(self)
     }
 
@@ -370,6 +385,13 @@ impl PaneInfoEnv for RequestRuntimeAdapter<'_> {
 }
 
 impl crate::api::CommandEnv for RequestRuntimeAdapter<'_> {
+    fn turn_hooks(&self) -> Result<&dyn crate::flock::commands_turns::TurnHooks, DunkError> {
+        if self.next_jobs.is_none() || self.outbox.is_none() {
+            return Err(DunkError::Refused("turn services are not attached".into()));
+        }
+        Ok(self)
+    }
+
     fn terminal(&self) -> &Mutex<Box<dyn Terminal>> {
         self.terminal.terminal
     }

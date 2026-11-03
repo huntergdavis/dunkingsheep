@@ -59,9 +59,9 @@ pub trait TurnHooks {
         duration_ms: Option<i64>,
     );
     /// `self.next_jobs.observe_turn(pane_id, state)`.
-    fn observe_turn(&self, pane_id: &str, state: &TurnState);
+    fn observe_turn(&self, pane_id: &str, state: &TurnState) -> Result<(), DunkError>;
     /// `self._dispatch_on_turn_end(pane_id)`: the record returned under `dispatch`.
-    fn dispatch_on_turn_end(&self, pane_id: &str) -> Value;
+    fn dispatch_on_turn_end(&self, pane_id: &str) -> Result<Value, DunkError>;
 }
 
 /// Hooks that do nothing: dispatch is a skip.
@@ -79,9 +79,11 @@ impl TurnHooks for NoHooks {
         _: Option<i64>,
     ) {
     }
-    fn observe_turn(&self, _: &str, _: &TurnState) {}
-    fn dispatch_on_turn_end(&self, _: &str) -> Value {
-        skip("turn.end", "not_wired")
+    fn observe_turn(&self, _: &str, _: &TurnState) -> Result<(), DunkError> {
+        Ok(())
+    }
+    fn dispatch_on_turn_end(&self, _: &str) -> Result<Value, DunkError> {
+        Ok(skip("turn.end", "not_wired"))
     }
 }
 
@@ -183,7 +185,7 @@ impl Flock {
             },
         );
         hooks.record("turn.start", pane_id, source, None, "ok", now, None);
-        hooks.observe_turn(pane_id, &state);
+        hooks.observe_turn(pane_id, &state)?;
         Ok(json!({
             "pane_id": pane_id, "started_at": now, "expires_at": now + ttl, "ttl_s": ttl,
             "source": source, "turn_id": state.turn_id,
@@ -264,7 +266,7 @@ impl Flock {
         );
         // THE TRIGGER: the turn just ended and the lane is idle.
         let dispatch = if authenticated {
-            hooks.dispatch_on_turn_end(pane_id)
+            hooks.dispatch_on_turn_end(pane_id)?
         } else {
             skip("turn.end", "unauthenticated")
         };
@@ -394,21 +396,31 @@ pub trait TurnDispatchEnv {
     /// `self.metrics.record("turn.end.dispatch", ...)`.
     fn record(&self, pane_id: &str, outcome: &str, reason: Option<&str>, bytes: Option<usize>);
     /// `self.next_jobs.advance(pane_id, "turn.end")`: the next-job plan.
-    fn advance_next_job(&self, pane_id: &str) -> Value;
+    fn advance_next_job(&self, pane_id: &str) -> Result<Value, DunkError>;
     /// Any next-job handoff of this pane whose task is not yet done or cancelled.
-    fn open_handoffs(&self, pane_id: &str) -> bool;
+    fn open_handoffs(&self, pane_id: &str, inspect_tasks: bool) -> Result<bool, DunkError>;
 }
 
 impl Flock {
     /// `_dispatch_on_turn_end`: advance the next-job plan; a claim, or an unfinished handoff,
     /// ends here with `delivered: false`; otherwise reserve the pane (concurrent turn ends cannot
     /// enqueue twice) and run the claimed-work nudge.
-    pub fn dispatch_on_turn_end(&self, pane_id: &str, env: &dyn TurnDispatchEnv) -> Value {
-        let plan = env.advance_next_job(pane_id);
+    pub fn dispatch_on_turn_end(
+        &self,
+        pane_id: &str,
+        env: &dyn TurnDispatchEnv,
+    ) -> Result<Value, DunkError> {
+        let plan = env.advance_next_job(pane_id)?;
+        self.wake_push();
         self.dispatch_after_plan(pane_id, plan, env)
     }
 
-    fn dispatch_after_plan(&self, pane_id: &str, plan: Value, env: &dyn TurnDispatchEnv) -> Value {
+    fn dispatch_after_plan(
+        &self,
+        pane_id: &str,
+        plan: Value,
+        env: &dyn TurnDispatchEnv,
+    ) -> Result<Value, DunkError> {
         let with_delivered = |mut plan: Value| {
             if let Some(object) = plan.as_object_mut() {
                 object.insert("delivered".into(), json!(false));
@@ -424,19 +436,20 @@ impl Flock {
         ]
         .contains(&reason)
         {
-            return with_delivered(plan);
+            return Ok(with_delivered(plan));
         }
-        if plan.get("action").and_then(Value::as_str) == Some("claim") || env.open_handoffs(pane_id)
-        {
-            return with_delivered(plan);
+        let is_claim = plan.get("action").and_then(Value::as_str) == Some("claim");
+        let open_handoffs = env.open_handoffs(pane_id, !is_claim)?;
+        if is_claim || open_handoffs {
+            return Ok(with_delivered(plan));
         }
         {
             let mut state = self.turn_dispatch.lock().unwrap_or_else(|p| p.into_inner());
             if state.dispatching.contains(pane_id) {
-                return json!({
+                return Ok(json!({
                     "trigger": "turn.end", "pane_id": pane_id, "action": "skip",
                     "reason": "dispatch_in_progress", "delivered": false,
-                });
+                }));
             }
             state.dispatching.insert(pane_id.to_string());
         }
@@ -447,7 +460,7 @@ impl Flock {
             flock: self,
             pane_id,
         };
-        self.dispatch_claimed_turn_end(pane_id, crate::clock::now_s(), env)
+        Ok(self.dispatch_claimed_turn_end(pane_id, crate::clock::now_s(), env))
     }
 
     /// `_dispatch_claimed_turn_end`: prompt a lane that ended its turn still holding work.

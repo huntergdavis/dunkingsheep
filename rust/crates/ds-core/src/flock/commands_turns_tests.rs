@@ -49,15 +49,16 @@ impl TurnHooks for Spy {
             duration.is_some()
         ));
     }
-    fn observe_turn(&self, pane: &str, state: &TurnState) {
+    fn observe_turn(&self, pane: &str, state: &TurnState) -> Result<(), crate::error::DunkError> {
         self.calls
             .lock()
             .unwrap()
             .push(format!("observe {pane} {}", state.turn_id.len()));
+        Ok(())
     }
-    fn dispatch_on_turn_end(&self, pane: &str) -> Value {
+    fn dispatch_on_turn_end(&self, pane: &str) -> Result<Value, crate::error::DunkError> {
         self.calls.lock().unwrap().push(format!("dispatch {pane}"));
-        json!({ "trigger": "turn.end", "action": "claim", "delivered": true })
+        Ok(json!({ "trigger": "turn.end", "action": "claim", "delivered": true }))
     }
 }
 
@@ -436,6 +437,8 @@ struct Env {
     readiness: Result<Readiness, String>,
     send: Result<Value, String>,
     handoffs_open: bool,
+    fail_advance: bool,
+    fail_handoffs: bool,
     next_job: Value,
     plan_skip: Option<&'static str>,
     panic_in_plan: bool,
@@ -461,6 +464,8 @@ impl Env {
             }),
             send: Ok(json!({ "outcome": "ok", "message_id": "m1", "message": "typed" })),
             handoffs_open: false,
+            fail_advance: false,
+            fail_handoffs: false,
             next_job: json!({ "action": "none", "reason": "no_handoff" }),
             plan_skip: None,
             panic_in_plan: false,
@@ -537,11 +542,17 @@ impl TurnDispatchEnv for Env {
             .unwrap()
             .push(format!("{pane} {outcome} {reason:?} {}", bytes.is_some()));
     }
-    fn advance_next_job(&self, _: &str) -> Value {
-        self.next_job.clone()
+    fn advance_next_job(&self, _: &str) -> Result<Value, crate::error::DunkError> {
+        if self.fail_advance {
+            return Err(crate::error::DunkError::Refused("advance failed".into()));
+        }
+        Ok(self.next_job.clone())
     }
-    fn open_handoffs(&self, _: &str) -> bool {
-        self.handoffs_open
+    fn open_handoffs(&self, _: &str, _: bool) -> Result<bool, crate::error::DunkError> {
+        if self.fail_handoffs {
+            return Err(crate::error::DunkError::Refused("handoff failed".into()));
+        }
+        Ok(self.handoffs_open)
     }
 }
 
@@ -732,12 +743,15 @@ fn concurrent_turn_ends_cannot_enqueue_twice() {
         .unwrap()
         .dispatching
         .insert(PANE.to_string());
-    let second = flock.dispatch_on_turn_end(PANE, &env);
+    let second = flock.dispatch_on_turn_end(PANE, &env).unwrap();
     assert_eq!(second["reason"], "dispatch_in_progress");
     assert_eq!(second["delivered"], false);
     assert!(env.sent.lock().unwrap().is_empty());
     flock.turn_dispatch.lock().unwrap().dispatching.clear();
-    assert_eq!(flock.dispatch_on_turn_end(PANE, &env)["delivered"], true);
+    assert_eq!(
+        flock.dispatch_on_turn_end(PANE, &env).unwrap()["delivered"],
+        true
+    );
     assert!(
         flock.turn_dispatch.lock().unwrap().dispatching.is_empty(),
         "the reservation is released"
@@ -749,14 +763,17 @@ fn a_next_job_claim_or_an_open_handoff_or_a_closed_lane_ends_before_the_nudge() 
     let flock = flock();
     let mut env = Env::ready();
     env.next_job = json!({ "action": "claim", "reason": "handoff" });
-    let out = flock.dispatch_on_turn_end(PANE, &env);
+    let out = flock.dispatch_on_turn_end(PANE, &env).unwrap();
     assert_eq!(
         (out["action"].as_str(), out["delivered"].as_bool()),
         (Some("claim"), Some(false))
     );
     let mut env = Env::ready();
     env.handoffs_open = true;
-    assert_eq!(flock.dispatch_on_turn_end(PANE, &env)["delivered"], false);
+    assert_eq!(
+        flock.dispatch_on_turn_end(PANE, &env).unwrap()["delivered"],
+        false
+    );
     for reason in [
         "disabled",
         "not_allowed",
@@ -765,7 +782,7 @@ fn a_next_job_claim_or_an_open_handoff_or_a_closed_lane_ends_before_the_nudge() 
     ] {
         let mut env = Env::ready();
         env.next_job = json!({ "action": "skip", "reason": reason });
-        let out = flock.dispatch_on_turn_end(PANE, &env);
+        let out = flock.dispatch_on_turn_end(PANE, &env).unwrap();
         assert_eq!(out["reason"], reason);
         assert!(env.sent.lock().unwrap().is_empty());
     }
@@ -779,7 +796,7 @@ fn a_panicking_hook_does_not_wedge_the_pane() {
     let mut broken = Env::ready();
     broken.panic_in_plan = true;
     let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        flock.dispatch_on_turn_end(PANE, &broken)
+        flock.dispatch_on_turn_end(PANE, &broken).unwrap()
     }));
     assert!(caught.is_err(), "the hook's panic propagates");
     assert!(
@@ -787,7 +804,7 @@ fn a_panicking_hook_does_not_wedge_the_pane() {
         "the reservation was released"
     );
     let healthy = Env::ready();
-    let again = flock.dispatch_on_turn_end(PANE, &healthy);
+    let again = flock.dispatch_on_turn_end(PANE, &healthy).unwrap();
     assert_eq!(
         again["delivered"], true,
         "the same pane dispatches normally afterwards"
@@ -828,4 +845,35 @@ fn a_task_with_no_id_is_the_text_none_like_pythons_str() {
     let out = dispatch(&flock, &env);
     assert_eq!(out["task_id"], "None");
     assert_eq!(out["item"], "board:None");
+}
+
+#[test]
+fn turn_dispatch_errors_preserve_wake_and_nudge_order() {
+    use std::time::Duration;
+    let flock = flock();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let wake = flock.push_wake();
+    let mut env = Env::ready();
+    env.fail_advance = true;
+    assert!(flock.dispatch_on_turn_end(PANE, &env).is_err());
+    assert!(runtime
+        .block_on(tokio::time::timeout(
+            Duration::from_millis(20),
+            wake.notified()
+        ))
+        .is_err());
+    assert!(env.sent.lock().unwrap().is_empty());
+    env.fail_advance = false;
+    env.fail_handoffs = true;
+    assert!(flock.dispatch_on_turn_end(PANE, &env).is_err());
+    assert!(runtime
+        .block_on(tokio::time::timeout(
+            Duration::from_millis(100),
+            wake.notified()
+        ))
+        .is_ok());
+    assert!(env.sent.lock().unwrap().is_empty());
 }

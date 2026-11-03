@@ -107,6 +107,10 @@ async fn record_next_job_notify(
 }
 
 impl NextJobs {
+    pub(crate) fn owns_flock(&self, flock: &Flock) -> bool {
+        std::ptr::eq(self.flock.as_ref(), flock)
+    }
+
     pub fn new(flock: Arc<Flock>) -> Self {
         Self {
             flock,
