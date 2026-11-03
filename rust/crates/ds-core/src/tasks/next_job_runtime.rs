@@ -130,11 +130,13 @@ impl NextJobs {
             let pane = handoff
                 .get("pane_id")
                 .and_then(Value::as_str)
-                .unwrap_or("<missing>");
+                .unwrap_or("<missing>")
+                .to_owned();
             let message_id = handoff
                 .get("message_id")
                 .and_then(Value::as_str)
-                .unwrap_or("<missing>");
+                .unwrap_or("<missing>")
+                .to_owned();
             if let Err(error) = self.deliver(handoff, restart).await {
                 eprintln!(
                     "next-job tick delivery failed pane={pane} message={message_id}: {error}"
