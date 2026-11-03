@@ -444,12 +444,15 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))
             .unwrap();
         assert_eq!(count, 1);
+        tokio::task::spawn_blocking(move || drop((jobs, inbox)))
+            .await
+            .unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn next_jobs_materialise_refuses_changed_or_unavailable_pane() {
         use std::sync::atomic::{AtomicUsize, Ordering};
-        let (dir, jobs, tasks, _) = materialise_fixture().await;
+        let (dir, jobs, tasks, inbox) = materialise_fixture().await;
         let task = tasks.add("global", "Example", "body").await.unwrap();
         let h = json!({"pane_id":"w1:p1", "task_id":task.id, "message_id":"nj-unavailable", "trigger":"restart"}).as_object().unwrap().clone();
         let disabled = jobs
@@ -499,6 +502,9 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))
             .unwrap();
         assert_eq!(count, 0);
+        tokio::task::spawn_blocking(move || drop((jobs, inbox)))
+            .await
+            .unwrap();
     }
 
     fn next_jobs() -> NextJobs {
