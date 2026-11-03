@@ -495,7 +495,7 @@ fn parse_python_json_string(bytes: &[u8], start: usize) -> Option<(usize, Python
                 index += 2;
             }
             _ => {
-                let remaining = std::str::from_utf8(bytes.get(index..)?)?;
+                let remaining = std::str::from_utf8(bytes.get(index..)?).ok()?;
                 let character = remaining.chars().next()?;
                 code_points.push(u32::from(character));
                 index += character.len_utf8();
