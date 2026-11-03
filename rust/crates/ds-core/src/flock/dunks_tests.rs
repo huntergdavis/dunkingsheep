@@ -658,7 +658,12 @@ fn deferred_dunk_retarget_during_guarded_preflight_keeps_the_outer_pane() {
     assert_eq!(vec![("w1:p2".into(), "continue".into())], env.typed);
     assert_eq!("w1:p3", flock.dunks.get("d1").unwrap()["target_pane_id"]);
     assert_eq!(
-        vec![("d1".into(), true, Some("continue".into()), Some("pid-1:start-1".into()))],
+        vec![(
+            "d1".into(),
+            true,
+            Some("continue".into()),
+            Some("pid-1:start-1".into())
+        )],
         env.attempts
     );
 }
