@@ -431,7 +431,11 @@ class Sync:
                             not in ("done", "cancelled")):
                         # This is the still-needed additional reviewer, not a
                         # redundant review of a head whose lane count is final.
-                        continue
+                        # The context may nevertheless be stale success; restore
+                        # pending before leaving that live second reviewer alone.
+                        outcome = self._reconcile_terminal_status(repo, pr, token, report)
+                        if outcome is None or (not outcome[0] and not outcome[2]):
+                            continue
                     # A judged head with a live duplicate (filed by an older tick):
                     # the verdict stands, the duplicate goes.
                     if self._cancel_review_if_live(

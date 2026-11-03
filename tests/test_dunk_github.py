@@ -375,6 +375,18 @@ class TimerTests(unittest.TestCase):
         self.assertEqual("failure", self.github.statuses[-1][2])
         self.assertEqual([], self.github.merged)
 
+    def test_needed_second_review_restores_stale_success_to_pending(self):
+        self._review("accept", REVIEWER)
+        with patch.object(dunk_github, "required_verdicts", return_value=2):
+            self.sync.run()
+            live = self.flock.tasks.list(kind="review", include_done=False)
+            self.assertEqual(1, len(live))
+            self.github.post_status("o/r", "a" * 40, "success", "tok-reviewer", "stale")
+            self.sync.run()
+            self.assertEqual("pending", self.github.statuses[-1][2])
+            self.assertEqual("open", self.flock.tasks.get(live[0]["id"])["status"])
+            self.assertEqual([], getattr(self.github, "merged", []))
+
     def test_terminal_status_does_not_repair_stale_or_unreadable_head(self):
         self._review("accept")
         self.github.post_status("o/r", "a" * 40, "pending", "tok-reviewer", "duplicate")
