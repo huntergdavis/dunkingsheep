@@ -3253,7 +3253,9 @@ fn task_api_fixture() -> (
     }
     flock.attach_roles(roles, None);
 
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
         .build()
         .expect("runtime");
     let tasks = Arc::new(
