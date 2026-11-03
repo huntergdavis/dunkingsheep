@@ -162,6 +162,7 @@ pub struct Writer {
     /// a sender is a deadlock (found by the two-writer test hanging, not spinning).
     jobs: Mutex<Option<tokio::sync::mpsc::Sender<Job>>>,
     actor: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    quarantined: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Writer {
@@ -171,18 +172,24 @@ impl Writer {
         let path = checked_path(path.as_ref())?;
         let mut connection = open_writer(&path)?;
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Job>(64);
+        let quarantined = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let actor_quarantined = std::sync::Arc::clone(&quarantined);
         let actor = tokio::spawn(async move {
             while let Some(job) = rx.recv().await {
                 // A job that panics must not take the writer with it: the panic is
                 // caught, the connection is still valid, and the next job runs.
                 let _ =
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job(&mut connection)));
+                if actor_quarantined.load(std::sync::atomic::Ordering::Acquire) {
+                    break;
+                }
             }
         });
         Ok(Writer {
             path,
             jobs: Mutex::new(Some(tx)),
             actor: Mutex::new(Some(actor)),
+            quarantined,
         })
     }
 
@@ -219,6 +226,18 @@ impl Writer {
         answer
             .await
             .map_err(|_| DunkError::Unavailable("the writer dropped the reply".to_string()))?
+    }
+
+    /// Run one guarded job; restoration failures quarantine this connection before another job.
+    pub(crate) async fn call_quarantinable<T, F>(&self, work: F) -> Result<T, DunkError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Connection, &std::sync::atomic::AtomicBool) -> Result<T, DunkError>
+            + Send
+            + 'static,
+    {
+        let quarantined = std::sync::Arc::clone(&self.quarantined);
+        self.call(move |conn| work(conn, &quarantined)).await
     }
 
     /// Stop the actor and wait for it, closing the connection.

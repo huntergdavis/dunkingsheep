@@ -995,3 +995,76 @@ async fn a_new_revision_reuses_the_review_task_and_it_can_be_allocated_again() {
         1
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn guarded_allocation_retries_lock_and_restores_sqlite_timeout() {
+    use crate::flock::{panes::Stores, Flock};
+    use std::sync::{mpsc, Arc};
+    let dir = tempfile::tempdir().unwrap();
+    let tasks = Arc::new(Tasks::open(dir.path().join("tasks.db")).await.unwrap());
+    tasks.allocation_init().await.unwrap();
+    let flock = Arc::new(Flock::new(
+        dir.path().join("launches"),
+        dir.path().join("lanes"),
+        false,
+    ));
+    flock.attach_stores(Stores {
+        tasks: Some(Arc::clone(&tasks)),
+        ..Stores::default()
+    });
+    let (held_tx, held_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let other = Arc::clone(&flock);
+    let holder = std::thread::spawn(move || {
+        let _guard = other.outbox.lock().unwrap();
+        held_tx.send(()).unwrap();
+        release_rx.recv().unwrap();
+    });
+    held_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    assert!(matches!(
+        tasks
+            .allocation_try_guarded(Arc::clone(&flock), BTreeMap::new())
+            .await
+            .unwrap(),
+        GuardedAllocation::RetryLock
+    ));
+    release_tx.send(()).unwrap();
+    holder.join().unwrap();
+    let blocker = crate::db::open_writer(&dir.path().join("tasks.db")).unwrap();
+    blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+    assert!(matches!(
+        tasks
+            .allocation_try_guarded(Arc::clone(&flock), BTreeMap::new())
+            .await
+            .unwrap(),
+        GuardedAllocation::RetryBusy
+    ));
+    blocker.execute_batch("ROLLBACK").unwrap();
+    assert!(matches!(
+        tasks
+            .allocation_try_guarded(Arc::clone(&flock), BTreeMap::new())
+            .await
+            .unwrap(),
+        GuardedAllocation::Committed(_)
+    ));
+    let timeout: u64 = tasks
+        .writer
+        .call(|conn| {
+            conn.pragma_query_value(None, "busy_timeout", |row| row.get(0))
+                .map_err(crate::db::map_sqlite)
+        })
+        .await
+        .unwrap();
+    assert_eq!(timeout, crate::db::BUSY_TIMEOUT_MS);
+    let other = Arc::new(Flock::new(
+        dir.path().join("other"),
+        dir.path().join("other-lanes"),
+        false,
+    ));
+    assert!(tasks
+        .allocation_try_guarded(other, BTreeMap::new())
+        .await
+        .is_err());
+}

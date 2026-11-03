@@ -68,6 +68,7 @@ pub struct RuntimeServices {
     pub(super) terminal_factory: LoopTerminalFactory,
     pub(super) runtime: Runtime,
     pub(super) stuck_reporter: StalePanelReporter,
+    pub(crate) allocator: crate::flock::allocator::Allocator,
     stopped: AtomicBool,
 }
 
@@ -180,6 +181,7 @@ impl RuntimeServices {
             terminal_factory,
             runtime,
             stuck_reporter,
+            allocator: crate::flock::allocator::Allocator::new(),
             stopped: AtomicBool::new(false),
         }))
     }
@@ -197,6 +199,75 @@ impl RuntimeServices {
         Arc::new(RuntimeDispatcher::new(Arc::clone(self), handlers))
     }
 
+    /// Resolve lane evidence using a terminal owned by the blocking worker.
+    pub(crate) async fn allocator_lanes(
+        self: &Arc<Self>,
+    ) -> Result<Vec<serde_json::Value>, DunkError> {
+        LoopRuntimeAdapter::new(Arc::clone(&self.flock), Arc::clone(&self.terminal_factory))
+            .with_loop_terminal(|flock, terminal| {
+                flock.resolve_lanes(terminal, crate::clock::now_s())
+            })
+            .await
+            .map_err(|error| refusal(format!("allocator terminal worker failed: {error}")))?
+    }
+
+    /// Inspect unread and composer state through the real validated inbox view.
+    pub(crate) async fn allocator_probe(
+        self: &Arc<Self>,
+        pane: String,
+        info: serde_json::Value,
+    ) -> Result<(i64, serde_json::Value), DunkError> {
+        let services = Arc::clone(self);
+        LoopRuntimeAdapter::new(Arc::clone(&self.flock), Arc::clone(&self.terminal_factory))
+            .with_loop_terminal(move |flock, terminal| {
+                let request = crate::server::RequestCtx::default();
+                let adapter = super::RequestRuntimeAdapter::new(
+                    flock,
+                    &request,
+                    terminal.runtime,
+                    terminal.terminal,
+                );
+                let view = super::inbox_data::InboxRuntimeView::new(
+                    adapter,
+                    Arc::clone(&services.flock),
+                    Arc::clone(&services.outbox.pool),
+                )?;
+                let unread = flock.inbox_count(&view, None, Some(&pane))?.unread;
+                let delivery =
+                    flock.delivery_state(terminal, &pane, Some("idle"), Some(&info), None);
+                Ok((unread, delivery))
+            })
+            .await
+            .map_err(|error| refusal(format!("allocator terminal worker failed: {error}")))?
+    }
+
+    pub(crate) async fn allocator_gate(
+        &self,
+        pane: &str,
+        lanes: Vec<serde_json::Value>,
+    ) -> Option<String> {
+        self.next_jobs.gate(pane, Some(lanes)).await
+    }
+
+    pub(crate) async fn allocator_materialise(
+        &self,
+        handoff: &serde_json::Map<String, serde_json::Value>,
+    ) {
+        if let Err(error) = self.next_jobs.materialise(handoff).await {
+            eprintln!("allocation intent retained for next-job recovery: {error:?}");
+        }
+    }
+
+    /// Run one allocator pass using this service set and its shared manager.
+    #[allow(dead_code)] // The production push loop starts in t1605.
+    pub(crate) async fn allocator_tick(self: &Arc<Self>) -> Result<serde_json::Value, DunkError> {
+        crate::flock::allocator::Allocator::tick(Arc::clone(self)).await
+    }
+
+    pub(crate) fn runtime_handle(&self) -> &tokio::runtime::Handle {
+        self.runtime.handle()
+    }
+
     /// The one Flock owned by this process runtime.
     pub fn flock(&self) -> &Arc<Flock> {
         &self.flock
@@ -207,6 +278,7 @@ impl RuntimeServices {
     /// its request threads (the remaining t1605 shutdown gate).
     pub fn shutdown(&self) {
         if !self.stopped.swap(true, Ordering::AcqRel) {
+            self.allocator.stop_and_join();
             self.outbox.stop_and_join();
         }
     }

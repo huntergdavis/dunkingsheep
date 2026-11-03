@@ -779,6 +779,112 @@ impl Tasks {
     }
 }
 
+/// Captured idleness proof; revalidated while the real turn and outbox locks are held.
+#[derive(Clone)]
+pub(crate) struct AllocationCandidate {
+    pub turn_id: String,
+    pub ended_at: Option<f64>,
+    pub caller: Value,
+}
+
+pub(crate) enum GuardedAllocation {
+    RetryLock,
+    RetryBusy,
+    Committed(Vec<Value>),
+}
+
+/// Restores the actor's SQLite timeout even if the transaction panics.
+struct TimeoutRestore<'a> {
+    conn: &'a Connection,
+    previous_ms: u64,
+    quarantine: &'a std::sync::atomic::AtomicBool,
+    restored: bool,
+}
+impl TimeoutRestore<'_> {
+    fn restore(&mut self) -> Result<(), DunkError> {
+        match self
+            .conn
+            .busy_timeout(std::time::Duration::from_millis(self.previous_ms))
+        {
+            Ok(()) => {
+                self.restored = true;
+                Ok(())
+            }
+            Err(error) => {
+                self.quarantine
+                    .store(true, std::sync::atomic::Ordering::Release);
+                Err(db::map_sqlite(error))
+            }
+        }
+    }
+}
+impl Drop for TimeoutRestore<'_> {
+    fn drop(&mut self) {
+        if !self.restored {
+            let _ = self.restore();
+        }
+    }
+}
+
+impl Tasks {
+    /// Fixed actor job: acquire neither Flock lock nor SQLite write lock by waiting.
+    pub(crate) async fn allocation_try_guarded(
+        &self,
+        flock: std::sync::Arc<crate::flock::Flock>,
+        candidates: BTreeMap<String, AllocationCandidate>,
+    ) -> Result<GuardedAllocation, DunkError> {
+        let attached = flock
+            .stores()
+            .tasks
+            .ok_or_else(|| DunkError::Refused("task store unavailable".into()))?;
+        if !std::ptr::eq(attached.as_ref(), self) {
+            return Err(DunkError::Refused("allocator task store mismatch".into()));
+        }
+        self.writer.call_quarantinable(move |conn, quarantine| {
+            let turns = match flock.turn_states.try_lock() {
+                Ok(guard) => guard,
+                Err(std::sync::TryLockError::WouldBlock) => return Ok(GuardedAllocation::RetryLock),
+                Err(std::sync::TryLockError::Poisoned(_)) => return Err(DunkError::Refused("turn state lock poisoned".into())),
+            };
+            let outbox = match flock.outbox.try_lock() {
+                Ok(guard) => guard,
+                Err(std::sync::TryLockError::WouldBlock) => return Ok(GuardedAllocation::RetryLock),
+                Err(std::sync::TryLockError::Poisoned(_)) => return Err(DunkError::Refused("outbox lock poisoned".into())),
+            };
+            let idle = candidates.into_iter().filter_map(|(pane, candidate)| {
+                let state = turns.get(&pane)?;
+                let pending = outbox.get(&pane).is_some_and(|q| q.iter().any(|m| m.status == "queued"));
+                (state.turn_id == candidate.turn_id && state.ended_at == candidate.ended_at && !pending)
+                    .then_some((pane, candidate.caller))
+            }).collect::<BTreeMap<_, _>>();
+            let previous_ms: u64 = conn.pragma_query_value(None, "busy_timeout", |r| r.get(0)).map_err(db::map_sqlite)?;
+            conn.busy_timeout(std::time::Duration::ZERO).map_err(db::map_sqlite)?;
+            let mut restore = TimeoutRestore { conn, previous_ms, quarantine, restored: false };
+            let outcome = (|| {
+                let tx = match rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate) {
+                    Ok(tx) => tx,
+                    Err(error) => return match db::map_sqlite(error) {
+                        DunkError::Busy => Ok(GuardedAllocation::RetryBusy),
+                        other => Err(other),
+                    },
+                };
+                let result = allocate_in(&tx, &idle, crate::clock::now_s())?;
+                tx.commit().map_err(db::map_sqlite)?;
+                Ok(GuardedAllocation::Committed(result))
+            })();
+            let restored = restore.restore();
+            match (outcome, restored) {
+                (Ok(GuardedAllocation::Committed(result)), Err(error)) => {
+                    eprintln!("allocation committed; writer quarantined after timeout restoration: {error}");
+                    Ok(GuardedAllocation::Committed(result))
+                }
+                (_, Err(error)) => Err(error),
+                (outcome, Ok(())) => outcome,
+            }
+        }).await
+    }
+}
+
 #[cfg(test)]
 #[path = "allocator_tests.rs"]
 mod allocator_tests;
