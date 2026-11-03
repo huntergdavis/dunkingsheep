@@ -233,7 +233,7 @@ fn python_scope_arg(value: Option<&Value>) -> Option<String> {
     })
 }
 
-fn python_value_repr(value: &Value) -> String {
+pub(crate) fn python_value_repr(value: &Value) -> String {
     match value {
         Value::String(value) => py_repr(value),
         Value::Array(values) => format!(

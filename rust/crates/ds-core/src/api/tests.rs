@@ -4607,6 +4607,14 @@ fn h_owner_ingest_raw_errors_match_python_order() {
         ),
         Err(DunkError::Refused(message)) if message.starts_with("no such file to attach:")
     ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher, &flock, &env, "owner_ingest",
+            args(json!({"body": "x", "transport": "web", "external_id": "raw-python-dict-path", "attach": [{"x": true}]})),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "no such file to attach: {'x': True}"
+    ));
     for (external_id, subject, expected) in [
         (
             "raw-list-subject",
@@ -4632,6 +4640,7 @@ fn h_owner_ingest_raw_errors_match_python_order() {
         "raw-empty-body",
         "raw-noniterable",
         "raw-missing-path",
+        "raw-python-dict-path",
         "raw-list-subject",
         "raw-dict-subject",
     ] {

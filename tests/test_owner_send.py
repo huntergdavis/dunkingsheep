@@ -105,6 +105,7 @@ class OwnerIngestWireOracle(unittest.TestCase):
 
     def test_fresh_errors_follow_body_attachment_then_subject_order(self):
         from dunk_core import DunkError
+        from dunk_api import h_owner_ingest
 
         with self.assertRaisesRegex(Exception, "a message needs a body or an attachment"):
             self.flock.owner_ingest("  ", "web", external_id="empty-body", attachments=[])
@@ -115,6 +116,14 @@ class OwnerIngestWireOracle(unittest.TestCase):
         with self.assertRaisesRegex(DunkError, "no such file to attach"):
             self.flock.owner_ingest("body", "web", external_id="missing-before-subject",
                                     attachments=[missing], subject=[])
+        with self.assertRaises(DunkError) as caught:
+            h_owner_ingest(
+                self.flock,
+                {"body": "body", "transport": "web", "external_id": "dict-attachment-path",
+                 "attach": [{"x": True}]},
+                None,
+            )
+        self.assertEqual("no such file to attach: {'x': True}", str(caught.exception))
 
         attachment = os.path.join(self.tmp.name, "existing.txt")
         with open(attachment, "wb") as handle:
@@ -132,7 +141,7 @@ class OwnerIngestWireOracle(unittest.TestCase):
         rows = self.inbox.conversation("owner")
         ids = {row["external_id"] for row in rows}
         for failed in ("empty-body", "bad-attach", "missing-before-subject",
-                       "bad-subject-list", "bad-subject-dict"):
+                       "dict-attachment-path", "bad-subject-list", "bad-subject-dict"):
             self.assertNotIn(failed, ids)
 
     def test_large_integer_subject_and_outbox_limit_raise_sqlite_overflow(self):
