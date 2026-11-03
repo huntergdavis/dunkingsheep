@@ -49,8 +49,8 @@ impl Flock {
             Err(error) => {
                 let task_id = task
                     .get("id")
-                    .map(crate::context::store::py_str)
-                    .unwrap_or_else(|| "None".into());
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("None");
                 eprintln!("review verdict side effects failed for {task_id}: {error}");
                 serde_json::json!({"errors": [error]})
             }
