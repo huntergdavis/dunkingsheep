@@ -159,6 +159,15 @@ fn commands_in_python_order() -> Vec<&'static ds_core::registry::Command> {
         .collect()
 }
 
+fn command_description(command: &ds_core::registry::Command) -> &'static str {
+    // The registry generator normalizes whitespace, while the Python CLI preserves it.
+    if command.name == "respawn_pane" {
+        "Replace a managed pane's process in place, preserving the pane id, task lease/ownership, mailbox and launch history.  Superuser/operator only.  Requires the exact live pane pid/start, --confirm-idle evidence, an argv command (no shell interpolation) and a rollback argv.  Refuses active turns, unread mail, queued outbox, live task leases and any non-ready delivery state; verifies the replacement and rolls back on failure."
+    } else {
+        command.description
+    }
+}
+
 fn text<'a>(ns: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
     ns.get(key).and_then(Value::as_str)
 }
@@ -284,7 +293,7 @@ fn commands(json: bool) -> Outcome {
             .map(|command| {
                 serde_json::json!({
                     "name": command.name,
-                    "description": command.description,
+                    "description": command_description(command),
                     "input_schema": ds_core::registry::input_schema(command.name)
                         .expect("registered command has an input schema"),
                     "mcp_tool": command.mcp,
@@ -325,7 +334,8 @@ fn commands(json: bool) -> Outcome {
         let _ = writeln!(
             output,
             "{}({params}){marker}\n    {}",
-            command.name, command.description
+            command.name,
+            command_description(command)
         );
     }
     Outcome {
@@ -389,7 +399,7 @@ fn mcp_map(ns: &Map<String, Value>) -> Outcome {
                 if include_description {
                     row.insert(
                         "description".into(),
-                        Value::String(command.description.to_string()),
+                        Value::String(command_description(command).to_string()),
                     );
                 }
                 row.insert(
