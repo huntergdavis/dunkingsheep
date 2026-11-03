@@ -138,6 +138,11 @@ impl Inputs<'_> {
     }
 }
 
+fn config_dir(config: &Value) -> PathBuf {
+    let raw = config["stores"]["config_dir"].as_str().unwrap_or("");
+    PathBuf::from(crate::native_session::expanduser(raw))
+}
+
 fn clone_error(error: &DunkError) -> DunkError {
     match error {
         DunkError::Refused(message) => DunkError::Refused(message.clone()),
