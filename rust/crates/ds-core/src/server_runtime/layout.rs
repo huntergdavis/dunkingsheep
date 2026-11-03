@@ -36,13 +36,11 @@ fn pane_value(terminal: &dyn Terminal, pane: &Pane) -> Value {
 }
 
 impl RequestRuntimeAdapter<'_> {
-    #[allow(dead_code)] // The complete LayoutBackend assembly belongs to its dependent leaf.
     pub(crate) fn helper_layoutbackend_list_panes(&self) -> Vec<Value> {
         self.terminal
             .with_env(|env| MailboxEnv::list_panes_grouped(env))
     }
 
-    #[allow(dead_code)] // The complete LayoutBackend assembly belongs to its dependent leaf.
     pub(crate) fn helper_layoutbackend_list_tabs(&self) -> Vec<Value> {
         self.terminal.with_terminal(|terminal| {
             terminal
@@ -61,7 +59,6 @@ impl RequestRuntimeAdapter<'_> {
         })
     }
 
-    #[allow(dead_code)] // The complete LayoutBackend assembly belongs to its dependent leaf.
     pub(crate) fn helper_layoutbackend_list_workspaces(&self) -> Vec<Value> {
         self.terminal.with_terminal(|terminal| {
             let tabs = terminal.list_tabs();
@@ -84,19 +81,16 @@ impl RequestRuntimeAdapter<'_> {
         })
     }
 
-    #[allow(dead_code)] // The complete LayoutBackend assembly belongs to its dependent leaf.
     pub(crate) fn helper_layoutbackend_get_pane(&self, pane_id: &str) -> Option<Value> {
         self.terminal
             .with_env(|env| PaneInfoEnv::get_pane(env, pane_id))
     }
 
-    #[allow(dead_code)] // The complete LayoutBackend assembly belongs to its dependent leaf.
     pub(crate) fn helper_layoutbackend_server_error_hint(&self) -> String {
         self.terminal
             .with_terminal(|terminal| terminal.server_error_hint())
     }
 
-    #[allow(dead_code)] // The complete LayoutBackend assembly belongs to its dependent leaf.
     pub(crate) fn helper_layoutbackend_create_workspace(
         &mut self,
         label: Option<&str>,
@@ -126,7 +120,6 @@ impl RequestRuntimeAdapter<'_> {
         })
     }
 
-    #[allow(dead_code)] // The complete LayoutBackend assembly belongs to its dependent leaf.
     pub(crate) fn helper_layoutbackend_create_tab(
         &mut self,
         workspace_id: Option<&str>,
@@ -153,7 +146,6 @@ impl RequestRuntimeAdapter<'_> {
         })
     }
 
-    #[allow(dead_code)] // The complete LayoutBackend assembly belongs to its dependent leaf.
     pub(crate) fn helper_layoutbackend_split_pane(
         &mut self,
         pane_id: &str,
@@ -175,7 +167,6 @@ impl RequestRuntimeAdapter<'_> {
         })
     }
 
-    #[allow(dead_code)] // The complete LayoutBackend assembly belongs to its dependent leaf.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn helper_layoutbackend_start_agent(
         &mut self,
@@ -214,7 +205,6 @@ impl RequestRuntimeAdapter<'_> {
         })
     }
 
-    #[allow(dead_code)] // The complete LayoutBackend assembly belongs to its dependent leaf.
     pub(crate) fn helper_layoutbackend_rename(
         &mut self,
         kind: &str,
@@ -252,7 +242,6 @@ impl RequestRuntimeAdapter<'_> {
         })
     }
 
-    #[allow(dead_code)] // The complete LayoutBackend assembly belongs to its dependent leaf.
     pub(crate) fn helper_layoutbackend_focus(
         &mut self,
         kind: &str,

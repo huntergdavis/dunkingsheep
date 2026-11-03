@@ -241,6 +241,79 @@ impl SendEnv for TerminalCallAdapter<'_> {
     }
 }
 
+impl crate::flock::commands_layout::LayoutBackend for RequestRuntimeAdapter<'_> {
+    fn list_panes(&self) -> Vec<Value> {
+        self.helper_layoutbackend_list_panes()
+    }
+
+    fn list_tabs(&self) -> Vec<Value> {
+        self.helper_layoutbackend_list_tabs()
+    }
+
+    fn list_workspaces(&self) -> Vec<Value> {
+        self.helper_layoutbackend_list_workspaces()
+    }
+
+    fn get_pane(&self, pane_id: &str) -> Option<Value> {
+        self.helper_layoutbackend_get_pane(pane_id)
+    }
+
+    fn server_error_hint(&self) -> String {
+        self.helper_layoutbackend_server_error_hint()
+    }
+
+    fn create_workspace(
+        &mut self,
+        label: Option<&str>,
+        cwd: Option<&str>,
+        focus: bool,
+    ) -> Result<Value, String> {
+        self.helper_layoutbackend_create_workspace(label, cwd, focus)
+    }
+
+    fn create_tab(
+        &mut self,
+        workspace_id: Option<&str>,
+        label: Option<&str>,
+        cwd: Option<&str>,
+        focus: bool,
+    ) -> Result<Value, String> {
+        self.helper_layoutbackend_create_tab(workspace_id, label, cwd, focus)
+    }
+
+    fn split_pane(
+        &mut self,
+        pane_id: &str,
+        direction: &str,
+        cwd: Option<&str>,
+        focus: bool,
+    ) -> Result<Value, String> {
+        self.helper_layoutbackend_split_pane(pane_id, direction, cwd, focus)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start_agent(
+        &mut self,
+        name: &str,
+        argv: &[String],
+        workspace_id: Option<&str>,
+        tab_id: Option<&str>,
+        split: Option<&str>,
+        cwd: Option<&str>,
+        focus: bool,
+    ) -> Result<Value, String> {
+        self.helper_layoutbackend_start_agent(name, argv, workspace_id, tab_id, split, cwd, focus)
+    }
+
+    fn rename(&mut self, kind: &str, target_id: &str, label: &str) -> Result<Value, String> {
+        self.helper_layoutbackend_rename(kind, target_id, label)
+    }
+
+    fn focus(&mut self, kind: &str, target_id: &str) -> Result<Value, String> {
+        self.helper_layoutbackend_focus(kind, target_id)
+    }
+}
+
 impl PaneInfoEnv for TerminalCallAdapter<'_> {
     fn list_panes_grouped(&self) -> Vec<Value> {
         self.with_env(|env| PaneInfoEnv::list_panes_grouped(env))
@@ -418,6 +491,72 @@ mod tests {
     use crate::flock::sends::SendEnv;
     use crate::tasks::{ClaimOptions, ClaimOutcome, Tasks};
     use crate::terminal::fakes::FakeTerminal;
+
+    #[test]
+    fn production_layout_backend_assembly_delegates_all_methods() {
+        use crate::flock::commands_layout::LayoutBackend;
+
+        let dir = crate::testsupport::dir("runtime-layout-backend");
+        let flock = Flock::new(
+            dir.path().join("launches.json"),
+            dir.path().join("roles.json"),
+            false,
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let mut fake = FakeTerminal::new();
+        fake.show_created_tab_pane = true;
+        let terminal: Mutex<Box<dyn Terminal>> = Mutex::new(Box::new(fake));
+        let request = RequestCtx::default();
+        let mut adapter = RequestRuntimeAdapter::new(&flock, &request, runtime.handle(), &terminal);
+        let backend: &mut dyn LayoutBackend = &mut adapter;
+
+        assert_eq!(3, backend.list_panes().len());
+        assert_eq!(3, backend.list_tabs().len());
+        assert_eq!(2, backend.list_workspaces().len());
+        assert_eq!("w1:p1", backend.get_pane("w1:p1").unwrap()["pane_id"]);
+        assert_eq!(
+            "tmux server not running - start it with `tmux new -d`",
+            backend.server_error_hint()
+        );
+        assert_eq!(
+            "demo",
+            backend.create_workspace(Some("demo"), None, false).unwrap()["workspace"]["label"]
+        );
+        assert_eq!(
+            "notes",
+            backend
+                .create_tab(Some("w1"), Some("notes"), None, true)
+                .unwrap()["tab"]["label"]
+        );
+        assert!(
+            backend.split_pane("w1:p1", "right", None, false).unwrap()["root_pane"]["pane_id"]
+                .as_str()
+                .unwrap()
+                .starts_with("w9:p")
+        );
+        assert_eq!(
+            "w1:p-worker",
+            backend
+                .start_agent(
+                    "worker",
+                    &["claude".to_owned()],
+                    Some("s1"),
+                    Some("w1"),
+                    None,
+                    None,
+                    true,
+                )
+                .unwrap()["pane_id"]
+        );
+        assert_eq!(
+            "Ops",
+            backend.rename("tab", "w1", "Ops").unwrap()["tab"]["label"]
+        );
+        assert_eq!(json!({}), backend.focus("pane", "w1:p1").unwrap());
+    }
 
     #[test]
     fn production_env_send_read_uses_concrete_services() {
