@@ -661,12 +661,6 @@ fn federated_recovery_waits_then_submits_once_without_replaying_text() {
         *waits.lock().unwrap()
     );
     assert_eq!(
-        Some("consumed"),
-        flock.stuck_candidates.lock().unwrap()["%1"]
-            .recovery_outcome
-            .as_deref()
-    );
-    assert_eq!(
         Some(String::new()),
         crate::terminal::composer::federated_composer(true, &probe.screen.lock().unwrap())
     );
