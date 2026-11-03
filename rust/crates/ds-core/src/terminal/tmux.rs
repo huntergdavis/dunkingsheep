@@ -159,6 +159,9 @@ impl TmuxBackend {
 }
 
 impl Terminal for TmuxBackend {
+    fn is_live_backend(&self) -> bool {
+        true
+    }
     fn version(&self) -> String {
         match self.run(&["-V"]) {
             Ok(result) if result.code == 0 => result.stdout.trim().to_string(),

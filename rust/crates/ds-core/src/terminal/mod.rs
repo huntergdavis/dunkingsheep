@@ -163,6 +163,10 @@ pub trait Terminal: std::fmt::Debug {
     fn version(&self) -> String;
     /// Whether the backend can be used at all right now.
     fn is_available(&self) -> bool;
+    /// Whether this backend represents real panes rather than a fixture.
+    fn is_live_backend(&self) -> bool {
+        false
+    }
     /// One line an operator can act on when it cannot.
     fn server_error_hint(&self) -> String;
 

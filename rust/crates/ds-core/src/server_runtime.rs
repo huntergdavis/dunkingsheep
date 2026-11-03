@@ -447,12 +447,8 @@ impl LoopRuntimeAdapter {
 }
 
 impl ReaperEnv for LoopRuntimeAdapter {
-    fn list_panes(&self) -> LoopFuture<'_, Result<Vec<Value>, DunkError>> {
-        self.helper_reaperenv_list_panes()
-    }
-
-    fn is_live(&self) -> bool {
-        self.helper_reaperenv_is_live()
+    fn pane_snapshot(&self) -> LoopFuture<'_, (bool, Result<Vec<Value>, DunkError>)> {
+        self.helper_reaperenv_pane_snapshot()
     }
 
     fn clear_historical_errors<'a>(&'a self, panes: &'a BTreeSet<String>) -> LoopFuture<'a, ()> {

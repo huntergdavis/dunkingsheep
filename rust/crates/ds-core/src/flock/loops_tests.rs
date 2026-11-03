@@ -35,11 +35,8 @@ impl Fake {
 }
 
 impl ReaperEnv for Fake {
-    fn list_panes(&self) -> LoopFuture<'_, Result<Vec<Value>, DunkError>> {
-        Box::pin(async move { self.panes.clone().map_err(DunkError::Refused) })
-    }
-    fn is_live(&self) -> bool {
-        self.live
+    fn pane_snapshot(&self) -> LoopFuture<'_, (bool, Result<Vec<Value>, DunkError>)> {
+        Box::pin(async move { (self.live, self.panes.clone().map_err(DunkError::Refused)) })
     }
     fn clear_historical_errors<'a>(&'a self, panes: &'a BTreeSet<String>) -> LoopFuture<'a, ()> {
         Box::pin(async move {
@@ -82,18 +79,13 @@ impl OrderedFake {
 }
 
 impl ReaperEnv for OrderedFake {
-    fn list_panes(&self) -> LoopFuture<'_, Result<Vec<Value>, DunkError>> {
+    fn pane_snapshot(&self) -> LoopFuture<'_, (bool, Result<Vec<Value>, DunkError>)> {
         Box::pin(async move {
             self.record("list:start");
             tokio::task::yield_now().await;
             self.record("list:done");
-            Ok(vec![json!({ "pane_id": "%1" })])
+            (true, Ok(vec![json!({ "pane_id": "%1" })]))
         })
-    }
-
-    fn is_live(&self) -> bool {
-        self.record("live");
-        true
     }
 
     fn clear_historical_errors<'a>(&'a self, _: &'a BTreeSet<String>) -> LoopFuture<'a, ()> {
@@ -202,7 +194,6 @@ async fn loop_reaper_async_maintenance_is_awaited_in_source_order() {
             "clear:done",
             "inbox:start",
             "inbox:done",
-            "live",
             "memory:start",
             "memory:done",
         ],
