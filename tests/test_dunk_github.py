@@ -96,8 +96,15 @@ class FakeGitHub:
         # free text ("dirty" = conflicts, "blocked" = a pending check, "clean").
         detail = {"additions": 10, "deletions": 2, "changed_files": 1,
                   "body": self.pr_body}
+        current = next((pr for pr in self.pulls if pr["number"] == number), None)
+        if current is not None:
+            detail.update({"state": "open", "head": {"sha": current["head"]}})
         detail.update(getattr(self, "details", {}).get(number, {}))
         return detail
+
+    def review_status(self, repo, sha, token):
+        return next((status[2] for status in reversed(self.statuses)
+                     if status[0] == repo and status[1] == sha), None)
 
     def post_status(self, repo, sha, state, token, description, target_url=None):
         if self.fail_status:
@@ -204,6 +211,19 @@ def pull(number=7, head="a" * 40, branch="pi-worker-3/t124", login="dunkingsheep
 
 
 class PureTests(unittest.TestCase):
+    def test_review_status_reads_only_the_review_context_and_rejects_bad_payloads(self):
+        with patch.object(dunk_github, "_request", return_value=(200, {"statuses": [
+                {"context": "other", "state": "failure"},
+                {"context": dunk_github.REVIEW_CONTEXT, "state": "pending"}]})):
+            self.assertEqual("pending", dunk_github.review_status("o/r", "a" * 40, "token"))
+        with patch.object(dunk_github, "_request", return_value=(200, {"statuses": []})):
+            self.assertIsNone(dunk_github.review_status("o/r", "a" * 40, "token"))
+        for bad in (None, {}, {"statuses": [None]}, {"statuses": [
+                {"context": dunk_github.REVIEW_CONTEXT, "state": "unknown"}]}):
+            with patch.object(dunk_github, "_request", return_value=(200, bad)):
+                with self.assertRaises(dunk_github.GitHubError):
+                    dunk_github.review_status("o/r", "a" * 40, "token")
+
     def test_kind_for_role(self):
         self.assertEqual("author", dunk_github.kind_for_role("worker"))
         self.assertEqual("reviewer", dunk_github.kind_for_role("reviewer"))
@@ -315,6 +335,84 @@ class TimerTests(unittest.TestCase):
         if verdict:
             return self.flock.tasks.complete(task["id"], by=lane, verdict=verdict)
         return task
+
+    def test_cancelled_duplicate_pending_is_repaired_before_merge(self):
+        self._review("accept")
+        duplicate = self._review()
+        self.flock.tasks.cancel(duplicate["id"], reason="duplicate")
+        self.github.post_status("o/r", "a" * 40, "pending", "tok-reviewer", "duplicate")
+        original = self.github.merge_pull
+        def merge_after_success(repo, number, token, sha=None):
+            self.assertEqual("success", self.github.review_status(repo, sha, token))
+            return original(repo, number, token, sha=sha)
+        self.github.merge_pull = merge_after_success
+        report = self.sync.run()
+        self.assertEqual("success", self.github.statuses[-1][2])
+        self.assertEqual([("o/r", 7, "a" * 40)], self.github.merged)
+        self.assertEqual([], report["errors"])
+
+    def test_terminal_status_requires_distinct_threshold_and_honors_veto(self):
+        self._review("accept", REVIEWER)
+        self.github.post_status("o/r", "a" * 40, "pending", "tok-reviewer", "duplicate")
+        with patch.object(dunk_github, "required_verdicts", return_value=2):
+            self.sync.run()
+            self.assertEqual("pending", self.github.statuses[-1][2])
+            self.assertEqual([], getattr(self.github, "merged", []))
+            live = self.flock.tasks.list(kind="review", include_done=False)
+            self.assertEqual(1, len(live))
+            self.flock.tasks.complete(live[0]["id"], by=SECOND_REVIEWER, verdict="accept")
+            self.sync.run()
+            self.assertEqual("success", self.github.statuses[-1][2])
+        self._review("needs-fix", "w3:p3")
+        self.github.post_status("o/r", "a" * 40, "pending", "tok-reviewer", "duplicate")
+        self.github.merged = []
+        with patch.object(dunk_github, "required_verdicts", return_value=2):
+            self.sync.run()
+        self.assertEqual("failure", self.github.statuses[-1][2])
+        self.assertEqual([], self.github.merged)
+
+    def test_terminal_status_does_not_repair_stale_or_unreadable_head(self):
+        self._review("accept")
+        self.github.post_status("o/r", "a" * 40, "pending", "tok-reviewer", "duplicate")
+        for detail in ({"state": "open", "head": {"sha": "b" * 40}},
+                       {"state": "open", "head": None}, {"state": "closed"}):
+            self.github.details = {7: detail}
+            report = self.sync.run()
+            self.assertEqual("pending", self.github.statuses[-1][2])
+            self.assertEqual([], getattr(self.github, "merged", []))
+            self.assertTrue(report["errors"])
+
+    def test_terminal_status_rechecks_verdict_after_github_io(self):
+        self._review("accept")
+        self.github.post_status("o/r", "a" * 40, "pending", "tok-reviewer", "duplicate")
+        original = self.github.review_status
+        def status_with_new_veto(repo, sha, token):
+            self._review("needs-fix", "w3:p3")
+            return original(repo, sha, token)
+        self.github.review_status = status_with_new_veto
+        self.sync.run()
+        self.assertEqual("failure", self.github.statuses[-1][2])
+        self.assertEqual([], getattr(self.github, "merged", []))
+
+    def test_terminal_status_lookup_or_publish_failure_defers_merge(self):
+        self._review("accept")
+        self.github.post_status("o/r", "a" * 40, "pending", "tok-reviewer", "duplicate")
+        with patch.object(self.github, "review_status", side_effect=dunk_github.GitHubError("offline")):
+            report = self.sync.run()
+        self.assertTrue(report["errors"])
+        self.assertEqual([], getattr(self.github, "merged", []))
+        self.github.fail_status = True
+        report = self.sync.run()
+        self.assertTrue(report["errors"])
+        self.assertEqual([], getattr(self.github, "merged", []))
+
+    def test_terminal_status_success_does_not_republish_every_tick(self):
+        self._review("accept")
+        self.github.post_status("o/r", "a" * 40, "success", "tok-reviewer", "accepted")
+        self.github.merge_blocked = True
+        self.sync.run()
+        self.sync.run()
+        self.assertEqual(["success"], [status[2] for status in self.github.statuses])
 
     def test_review_metadata_is_uncapped_global_and_does_not_decorate_cards(self):
         self._old_review_history()

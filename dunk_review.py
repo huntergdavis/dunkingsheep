@@ -336,6 +336,31 @@ class Sync:
             raise
         return True
 
+    def _reconcile_terminal_status(self, repo, pr, token, report):
+        """Repair a stale review context only for the authoritative current PR head."""
+        head, number = pr["head"], pr["number"]
+        try:
+            detail = self.github.pull_detail(repo, number, token)
+            if (not isinstance(detail, dict) or detail.get("state") != "open"
+                    or not isinstance(detail.get("head"), dict)
+                    or detail["head"].get("sha") != head):
+                report["errors"].append(f"status {repo}#{number}: current head unavailable or changed")
+                return None
+            current = self.github.review_status(repo, head, token)
+        except dunk_github.GitHubError as error:
+            report["errors"].append(f"status {repo}#{number}: {error}")
+            return None
+        # Both GitHub reads may have overlapped another review completion.
+        final, accepts, needs_fix, required = self._is_final(repo, head, number)
+        desired = "failure" if needs_fix else "success" if final else "pending"
+        if current != desired:
+            description = (f"needs-fix stands from {', '.join(needs_fix)}" if needs_fix else
+                           f"accepted by {len(accepts)} distinct reviewer lanes ({', '.join(accepts)})"
+                           if final else f"awaiting {required} distinct accepting reviewer lanes")
+            if not self._status(repo, head, desired, token, description, pr.get("url"), report):
+                return None
+        return final, accepts, needs_fix, required
+
     def run(self, dry_run=False):
         report = {"repos": [], "filed": [], "cancelled": [], "statuses": [],
                   "followups": [], "conflicted": [], "errors": []}
@@ -416,13 +441,15 @@ class Sync:
                     # protection may now be satisfied, so try the merge again - but
                     # only when the DISTINCT-lane count is met (t662), and never when
                     # any lane said needs-fix.
-                    if done.get("verdict") == "accept" and not dry_run:
-                        final, accepts, needs_fix, required = self._is_final(
-                            repo, pr["head"], pr["number"])
+                    if not dry_run:
+                        outcome = self._reconcile_terminal_status(repo, pr, token, report)
+                        if outcome is None:
+                            continue
+                        final, accepts, needs_fix, required = outcome
                         if final:
                             self._merge(repo, pr["number"], pr["head"], token, report,
                                         done["id"])
-                        elif not needs_fix and current is None:
+                        elif accepts and not needs_fix and current is None:
                             # 1 of 2 accepted and nobody is reviewing: keep a second
                             # review in the queue rather than waiting forever.
                             self._second_review(repo, pr["number"], pr["head"],
@@ -554,9 +581,11 @@ class Sync:
         try:
             self.github.post_status(repo, sha, state, token, description, url)
             report["statuses"].append({"repo": repo, "head": sha[:12], "state": state})
+            return True
         except dunk_github.GitHubError as error:
             # The reviewer App without `statuses: write` lands here: say so, keep going.
             report["errors"].append(f"status {repo}@{sha[:12]}: {error}")
+            return False
 
     def on_verdict(self, task, verdict, by=None):
         """Called by the daemon when a review completes: status + approval + follow-up."""
