@@ -735,7 +735,7 @@ mod tests {
         );
         inbox
             .send(&crate::inbox_store::Outgoing {
-                mailbox: "w1:p1",
+                mailbox: "π - work",
                 pane_id: Some("w1:p1"),
                 body: Some("unread"),
                 ..Default::default()
@@ -744,7 +744,7 @@ mod tests {
         services.allocator.seed_cache(serde_json::json!({}));
         let unread = handle.block_on(services.allocator_tick()).unwrap();
         assert_eq!(unread["workers"]["w1:p1"], "unread_or_unknown");
-        inbox.read("w1:p1", 10, false, true).unwrap();
+        inbox.read("π - work", 10, false, true).unwrap();
         services.allocator.seed_cache(serde_json::json!({}));
         let blocked = handle.block_on(services.allocator_tick()).unwrap();
         assert_eq!(blocked["workers"]["w1:p1"], "delivery_not_ready");
