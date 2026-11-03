@@ -5,7 +5,9 @@
 
 use std::{
     collections::hash_map::RandomState,
+    future::poll_fn,
     hash::{BuildHasher, Hasher},
+    pin::Pin,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
@@ -14,7 +16,7 @@ use std::{
 };
 
 use axum::{
-    body::{to_bytes, Body},
+    body::{to_bytes, Body, HttpBody as _},
     extract::{Extension, Path, Request},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
@@ -26,8 +28,11 @@ use serde_json::{json, Value};
 use super::auth::{AuthBackend, AuthError, RequestScheme};
 
 const MAX_UPLOAD: usize = 25 * 1024 * 1024;
-const MAX_MULTIPART_OVERHEAD: usize = 64 * 1024;
+const MAX_MULTIPART_HEADERS: usize = 64 * 1024;
 const MAX_NON_FILE_PART_SIZE: usize = 1024 * 1024;
+const MAX_MULTIPART_FILES: usize = 1000;
+const MAX_MULTIPART_FIELDS: usize = 1000;
+const MULTIPART_FEED_SIZE: usize = 64 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SearchAttachmentsError {
@@ -187,36 +192,29 @@ async fn upload(
     let Some(boundary) = boundary else {
         return invalid_upload();
     };
-    let bytes = match to_bytes(
-        request.into_body(),
-        MAX_UPLOAD + MAX_NON_FILE_PART_SIZE + MAX_MULTIPART_OVERHEAD,
-    )
-    .await
-    {
-        Ok(bytes) => bytes,
-        Err(_) => return too_large(),
-    };
-    let (filename, mime, file_bytes) = match multipart_file(&bytes, &boundary) {
+    let parsed = match multipart_file(request.into_body(), &boundary).await {
         Ok(Some(file)) => file,
         Ok(None) => return invalid_upload(),
         Err(MultipartFileError::BadRequest(detail)) => {
-            return detail_response(StatusCode::BAD_REQUEST, detail)
+            return detail_response(StatusCode::BAD_REQUEST, detail);
         }
+        Err(MultipartFileError::BodyFailure) => return too_large(),
     };
     if let Err(response) = authenticate(auth.as_ref(), &headers, scheme).await {
         return response;
     }
-    if file_bytes.len() > MAX_UPLOAD {
+    if parsed.bytes.len() > MAX_UPLOAD {
         return too_large();
     }
-    let filename = sanitize_filename(&filename);
+    let filename = sanitize_filename(&parsed.filename);
     let upload = UploadPart {
         filename,
-        storage_mime: mime
+        storage_mime: parsed
+            .mime
             .clone()
             .unwrap_or_else(|| "application/octet-stream".to_owned()),
-        response_mime: mime,
-        bytes: file_bytes,
+        response_mime: parsed.mime,
+        bytes: parsed.bytes,
     };
     match backend.save_upload(upload) {
         Ok(value) => Json(value).into_response(),
@@ -320,14 +318,14 @@ fn download_response(
     let parsed = match parse_byte_ranges(range.unwrap_or_default(), content_length) {
         Ok(ranges) => ranges,
         Err(ByteRangeError::Malformed(message)) => {
-            return range_error(StatusCode::BAD_REQUEST, &message, None)
+            return range_error(StatusCode::BAD_REQUEST, &message, None);
         }
         Err(ByteRangeError::Unsatisfiable) => {
             return range_error(
                 StatusCode::RANGE_NOT_SATISFIABLE,
                 "",
                 Some(format!("bytes */{}", file.metadata.content_length)),
-            )
+            );
         }
     };
     match parsed.as_slice() {
@@ -642,137 +640,216 @@ fn multipart_boundary(content_type: &str) -> Option<String> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MultipartFileError {
     BadRequest(&'static str),
+    BodyFailure,
 }
 
-fn multipart_file(
-    body: &[u8],
+#[derive(Debug)]
+struct ParsedUpload {
+    filename: String,
+    mime: Option<String>,
+    bytes: Vec<u8>,
+}
+
+struct MultipartPart {
+    capture: bool,
+    is_file: bool,
+    size: usize,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum MultipartEnd {
+    Next,
+    Closing,
+}
+
+fn find_multipart_end(buffer: &[u8], marker: &[u8]) -> Option<(usize, MultipartEnd)> {
+    buffer
+        .windows(marker.len())
+        .enumerate()
+        .find_map(|(at, window)| {
+            if window != marker {
+                return None;
+            }
+            let suffix = buffer.get(at + marker.len()..)?;
+            if suffix.starts_with(b"--") {
+                Some((at, MultipartEnd::Closing))
+            } else if suffix.starts_with(b"\r\n") {
+                Some((at, MultipartEnd::Next))
+            } else {
+                None
+            }
+        })
+}
+
+fn feed_part_data(
+    part: &mut Option<MultipartPart>,
+    selected_file: &mut Option<ParsedUpload>,
+    bytes: &[u8],
+    part_too_large: &'static str,
+) -> Result<(), MultipartFileError> {
+    let Some(part) = part.as_mut() else {
+        return Ok(());
+    };
+    part.size = part.size.saturating_add(bytes.len());
+    if !part.is_file && part.size > MAX_NON_FILE_PART_SIZE {
+        return Err(MultipartFileError::BadRequest(part_too_large));
+    }
+    if part.capture {
+        if let Some(file) = selected_file.as_mut() {
+            let remaining = MAX_UPLOAD
+                .saturating_add(1)
+                .saturating_sub(file.bytes.len());
+            file.bytes
+                .extend_from_slice(&bytes[..bytes.len().min(remaining)]);
+        }
+    }
+    Ok(())
+}
+
+async fn multipart_file(
+    mut body: Body,
     boundary: &str,
-) -> Result<Option<(String, Option<String>, Vec<u8>)>, MultipartFileError> {
+) -> Result<Option<ParsedUpload>, MultipartFileError> {
     const MISSING_PART_NAME: &str =
         "The Content-Disposition header field \"name\" must be provided.";
     const PART_TOO_LARGE: &str = "Part exceeded maximum size of 1024KB.";
     let delimiter = format!("--{boundary}").into_bytes();
-    if !body.starts_with(&delimiter) {
-        return Ok(None);
-    }
     let mut marker = b"\r\n".to_vec();
     marker.extend_from_slice(&delimiter);
-    let mut part_start = 0;
-    let mut selected_file = None;
+    let mut buffer = Vec::new();
+    let mut selected_file: Option<ParsedUpload> = None;
+    let mut files = 0usize;
+    let mut fields = 0usize;
+    let mut part: Option<MultipartPart> = None;
+    let mut started = false;
     loop {
-        let Some(part) = body.get(part_start..) else {
+        let frame = poll_fn(|cx| Pin::new(&mut body).poll_frame(cx))
+            .await
+            .transpose()
+            .map_err(|_| MultipartFileError::BodyFailure)?;
+        let Some(frame) = frame else {
             return Ok(None);
         };
-        if !part.starts_with(&delimiter) {
-            return Ok(None);
-        }
-        let Some(mut header_start) = part_start.checked_add(delimiter.len()) else {
-            return Ok(None);
+        let Ok(data) = frame.into_data() else {
+            continue;
         };
-        let Some(after_delimiter) = body.get(header_start..) else {
-            return Ok(None);
-        };
-        if after_delimiter.starts_with(b"--") {
-            return Ok(selected_file);
-        }
-        if !after_delimiter.starts_with(b"\r\n") {
-            return Ok(None);
-        }
-        let Some(next_header_start) = header_start.checked_add(2) else {
-            return Ok(None);
-        };
-        header_start = next_header_start;
-        let Some(header_bytes) = body.get(header_start..) else {
-            return Ok(None);
-        };
-        let Some(header_end_relative) = header_bytes
-            .windows(4)
-            .position(|window| window == b"\r\n\r\n")
-        else {
-            return Ok(None);
-        };
-        let Some(header_end) = header_start.checked_add(header_end_relative) else {
-            return Ok(None);
-        };
-        if header_end_relative > MAX_MULTIPART_OVERHEAD {
-            return Ok(None);
-        }
-        let Some(header_slice) = body.get(header_start..header_end) else {
-            return Ok(None);
-        };
-        let Ok(headers) = std::str::from_utf8(header_slice) else {
-            return Ok(None);
-        };
-        let mut field_name = None;
-        let mut filename = None;
-        let mut mime = None;
-        for line in headers.split("\r\n") {
-            let Some((name, value)) = line.split_once(':') else {
-                continue;
-            };
-            if name.trim().eq_ignore_ascii_case("content-disposition") {
-                let Some((field, part_filename)) = disposition_parameters(value) else {
-                    return Err(MultipartFileError::BadRequest(MISSING_PART_NAME));
-                };
-                field_name = Some(field);
-                filename = part_filename;
-            } else if name.trim().eq_ignore_ascii_case("content-type") {
-                mime = Some(value.trim().to_owned());
-            }
-        }
-        let Some(field_name) = field_name else {
-            return Err(MultipartFileError::BadRequest(MISSING_PART_NAME));
-        };
-        let Some(data_start) = header_end.checked_add(4) else {
-            return Ok(None);
-        };
-        let Some(tail) = body.get(data_start..) else {
-            return Ok(None);
-        };
-        let Some(data_end) = tail
-            .windows(marker.len())
-            .enumerate()
-            .find_map(|(at, window)| {
-                if window != marker.as_slice() {
-                    return None;
-                }
-                let suffix = &tail[at + marker.len()..];
-                (suffix.starts_with(b"--") || suffix.starts_with(b"\r\n")).then_some(at)
-            })
-        else {
-            return Ok(None);
-        };
-        if field_name == "file" {
-            match filename {
-                Some(filename) => {
-                    selected_file = Some((filename, mime, tail[..data_end].to_vec()));
-                }
-                None => {
-                    selected_file = None;
-                    if data_end > MAX_NON_FILE_PART_SIZE {
-                        return Err(MultipartFileError::BadRequest(PART_TOO_LARGE));
+        for chunk in data.chunks(MULTIPART_FEED_SIZE) {
+            buffer.extend_from_slice(chunk);
+            loop {
+                if !started {
+                    if buffer.len() < delimiter.len() + 2 {
+                        break;
                     }
+                    if !buffer.starts_with(&delimiter) {
+                        return Ok(None);
+                    }
+                    let suffix = &buffer[delimiter.len()..];
+                    if suffix.starts_with(b"--") {
+                        return Ok(selected_file);
+                    }
+                    if !suffix.starts_with(b"\r\n") {
+                        return Ok(None);
+                    }
+                    buffer.drain(..delimiter.len() + 2);
+                    started = true;
+                    continue;
                 }
+
+                if part.is_none() {
+                    let Some(header_end) = buffer.windows(4).position(|w| w == b"\r\n\r\n") else {
+                        if buffer.len() > MAX_MULTIPART_HEADERS {
+                            return Ok(None);
+                        }
+                        break;
+                    };
+                    if header_end > MAX_MULTIPART_HEADERS {
+                        return Ok(None);
+                    }
+                    let Ok(headers) = std::str::from_utf8(&buffer[..header_end]) else {
+                        return Ok(None);
+                    };
+                    let mut field_name = None;
+                    let mut filename = None;
+                    let mut mime = None;
+                    for line in headers.split("\r\n") {
+                        let Some((name, value)) = line.split_once(':') else {
+                            continue;
+                        };
+                        if name.trim().eq_ignore_ascii_case("content-disposition") {
+                            let Some((field, part_filename)) = disposition_parameters(value) else {
+                                return Err(MultipartFileError::BadRequest(MISSING_PART_NAME));
+                            };
+                            field_name = Some(field);
+                            filename = part_filename;
+                        } else if name.trim().eq_ignore_ascii_case("content-type") {
+                            mime = Some(value.trim().to_owned());
+                        }
+                    }
+                    let Some(field_name) = field_name else {
+                        return Err(MultipartFileError::BadRequest(MISSING_PART_NAME));
+                    };
+                    let is_file = filename.is_some();
+                    let capture = is_file && field_name == "file";
+                    if is_file {
+                        files += 1;
+                        if files > MAX_MULTIPART_FILES {
+                            return Err(MultipartFileError::BadRequest(
+                                "Too many files. Maximum number of files is 1000.",
+                            ));
+                        }
+                    } else {
+                        fields += 1;
+                        if fields > MAX_MULTIPART_FIELDS {
+                            return Err(MultipartFileError::BadRequest(
+                                "Too many fields. Maximum number of fields is 1000.",
+                            ));
+                        }
+                    }
+                    if field_name == "file" {
+                        if let Some(filename) = filename {
+                            selected_file = Some(ParsedUpload {
+                                filename,
+                                mime,
+                                bytes: Vec::new(),
+                            });
+                        } else {
+                            selected_file = None;
+                        }
+                    }
+                    buffer.drain(..header_end + 4);
+                    part = Some(MultipartPart {
+                        capture,
+                        is_file,
+                        size: 0,
+                    });
+                    continue;
+                }
+
+                let Some((at, end_kind)) = find_multipart_end(&buffer, &marker) else {
+                    let keep = marker.len() + 2;
+                    if buffer.len() <= keep {
+                        break;
+                    }
+                    let emit = buffer.len() - keep;
+                    feed_part_data(
+                        &mut part,
+                        &mut selected_file,
+                        &buffer[..emit],
+                        PART_TOO_LARGE,
+                    )?;
+                    buffer.drain(..emit);
+                    break;
+                };
+                feed_part_data(&mut part, &mut selected_file, &buffer[..at], PART_TOO_LARGE)?;
+                let consumed = at + marker.len();
+                buffer.drain(..consumed);
+                part = None;
+                if end_kind == MultipartEnd::Closing {
+                    return Ok(selected_file);
+                }
+                buffer.drain(..2);
             }
-        } else if data_end > MAX_NON_FILE_PART_SIZE {
-            return Err(MultipartFileError::BadRequest(PART_TOO_LARGE));
         }
-        let Some(next_delimiter) = data_start
-            .checked_add(data_end)
-            .and_then(|end| end.checked_add(2))
-        else {
-            return Ok(None);
-        };
-        let Some(suffix_start) = next_delimiter.checked_add(delimiter.len()) else {
-            return Ok(None);
-        };
-        let Some(suffix) = body.get(suffix_start..) else {
-            return Ok(None);
-        };
-        if suffix.starts_with(b"--") {
-            return Ok(selected_file);
-        }
-        part_start = next_delimiter;
     }
 }
 
@@ -1394,6 +1471,78 @@ mod tests {
         assert_eq!(
             body,
             json!({"detail":"Part exceeded maximum size of 1024KB."})
+        );
+        assert!(backend.uploads.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn upload_accepts_python_multipart_aggregate_overhead_without_aggregate_cap() {
+        let backend = Arc::new(FakeBackend::default());
+        let mut body = Vec::with_capacity(28 * 1024 * 1024);
+        for index in 0..27 {
+            body.extend_from_slice(
+                format!("--b\r\nContent-Disposition: form-data; name=\"field{index}\"\r\n\r\n")
+                    .as_bytes(),
+            );
+            body.resize(body.len() + MAX_NON_FILE_PART_SIZE, b'x');
+            body.extend_from_slice(b"\r\n");
+        }
+        body.extend_from_slice(
+            b"--b\r\nContent-Disposition: form-data; name=\"file\"; filename=\"tiny.txt\"\r\n\r\nx\r\n--b--\r\n",
+        );
+
+        let response =
+            block_on(app(backend.clone()).oneshot(multipart_request(Body::from(body)))).unwrap();
+        let (status, response_body) = json_response(response);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response_body["size"], 1);
+        assert_eq!(backend.uploads.lock().unwrap()[0].bytes, b"x");
+    }
+
+    #[test]
+    fn upload_enforces_python_multipart_field_count_limit() {
+        let backend = Arc::new(FakeBackend::default());
+        let mut body = Vec::new();
+        for index in 0..1001 {
+            body.extend_from_slice(
+                format!(
+                    "--b\r\nContent-Disposition: form-data; name=\"field{index}\"\r\n\r\nx\r\n"
+                )
+                .as_bytes(),
+            );
+        }
+        body.extend_from_slice(b"--b--\r\n");
+        let response =
+            block_on(app(backend.clone()).oneshot(multipart_request(Body::from(body)))).unwrap();
+        let (status, response_body) = json_response(response);
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response_body["detail"],
+            "Too many fields. Maximum number of fields is 1000."
+        );
+        assert!(backend.uploads.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn upload_enforces_python_multipart_file_count_limit() {
+        let backend = Arc::new(FakeBackend::default());
+        let mut body = Vec::new();
+        for index in 0..1001 {
+            body.extend_from_slice(
+                format!(
+                    "--b\r\nContent-Disposition: form-data; name=\"other{index}\"; filename=\"f{index}.txt\"\r\n\r\nx\r\n"
+                )
+                .as_bytes(),
+            );
+        }
+        body.extend_from_slice(b"--b--\r\n");
+        let response =
+            block_on(app(backend.clone()).oneshot(multipart_request(Body::from(body)))).unwrap();
+        let (status, response_body) = json_response(response);
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response_body["detail"],
+            "Too many files. Maximum number of files is 1000."
         );
         assert!(backend.uploads.lock().unwrap().is_empty());
     }
