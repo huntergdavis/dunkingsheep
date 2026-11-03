@@ -20,6 +20,8 @@ use crate::tasks::{AddOptions, Task, Tasks};
 use crate::terminal::fakes::FakeTerminal;
 use crate::terminal::Terminal;
 
+type ObservedVerdicts = Arc<Mutex<Vec<(String, Option<String>)>>>;
+
 #[tokio::test]
 async fn after_review_verdict_preserves_the_review_service_result() {
     let scratch = crate::testsupport::dir("tc-review-verdict-ok");
@@ -126,7 +128,7 @@ impl GitHubTransport for NoNetworkTransport {
 struct CompletionReviewTransport {
     tasks: Arc<Tasks>,
     task_id: String,
-    observed: Arc<Mutex<Vec<(String, Option<String>)>>>,
+    observed: ObservedVerdicts,
     fail: bool,
 }
 
@@ -201,16 +203,16 @@ fn completion_services(
     )
     .unwrap();
     flock.attach_roles(roles, None);
-    let inbox = Arc::new(
-        runtime
-            .block_on(tokio::task::spawn_blocking({
-                let db = dir.path().join("inbox.db");
-                let blobs = dir.path().join("blobs");
-                move || crate::inbox_store::Store::open(db, blobs)
-            }))
-            .unwrap()
-            .unwrap(),
-    );
+    let inbox = Arc::new(runtime.block_on(async {
+        tokio::task::spawn_blocking({
+            let db = dir.path().join("inbox.db");
+            let blobs = dir.path().join("blobs");
+            move || crate::inbox_store::Store::open(db, blobs)
+        })
+        .await
+        .unwrap()
+        .unwrap()
+    }));
     flock.attach_stores(Stores {
         tasks: Some(Arc::clone(&tasks)),
         inbox: Some(inbox),
@@ -283,7 +285,7 @@ fn invoke_task_complete(
         flock,
         request,
         env,
-        runtime: &handle,
+        runtime: handle,
     };
     flock.task_complete(&context, task_id, by, verdict, landed)
 }
