@@ -860,20 +860,14 @@ fn turn_dispatch_errors_preserve_wake_and_nudge_order() {
     env.fail_advance = true;
     assert!(flock.dispatch_on_turn_end(PANE, &env).is_err());
     assert!(runtime
-        .block_on(tokio::time::timeout(
-            Duration::from_millis(20),
-            wake.notified()
-        ))
+        .block_on(async { tokio::time::timeout(Duration::from_millis(20), wake.notified()).await })
         .is_err());
     assert!(env.sent.lock().unwrap().is_empty());
     env.fail_advance = false;
     env.fail_handoffs = true;
     assert!(flock.dispatch_on_turn_end(PANE, &env).is_err());
     assert!(runtime
-        .block_on(tokio::time::timeout(
-            Duration::from_millis(100),
-            wake.notified()
-        ))
+        .block_on(async { tokio::time::timeout(Duration::from_millis(100), wake.notified()).await })
         .is_ok());
     assert!(env.sent.lock().unwrap().is_empty());
 }

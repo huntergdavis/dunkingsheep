@@ -162,7 +162,10 @@ mod tests {
                 1,
                 None,
                 None,
-                None,
+                Some(serde_json::Map::from_iter([(
+                    "state".into(),
+                    serde_json::json!("cancelled"),
+                )])),
             ))
             .unwrap();
         let flock = Arc::new(Flock::new(
@@ -196,6 +199,10 @@ mod tests {
             .with_next_jobs(&jobs)
             .unwrap();
         let env: &dyn TurnDispatchEnv = &adapter;
+        // A cancelled handoff still blocks while its task is open, even after reassignment.
+        runtime
+            .block_on(tasks.assign(&task.id, &["w9:p9"], "set"))
+            .unwrap();
         assert!(env.open_handoffs("w1:p1", true).unwrap());
         assert!(!env.open_handoffs("w1:p1", false).unwrap());
         runtime.block_on(tasks.cancel(&task.id, "test")).unwrap();
@@ -235,5 +242,49 @@ mod tests {
         assert!(adapter
             .helper_turndispatchenv_open_handoffs("w1:p1", true)
             .is_err());
+    }
+    #[test]
+    fn turn_next_real_advance_preserves_disabled_decision() {
+        const CHILD: &str = "DS_T1904_DISABLED_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("--exact").arg("server_runtime::turn_next::tests::turn_next_real_advance_preserves_disabled_decision")
+                .arg("--nocapture").env(CHILD, "1").env("DUNKINGSHEEP_TURN_END_DISPATCH", "0").status().unwrap();
+            assert!(status.success());
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let tasks = Arc::new(
+            runtime
+                .block_on(Tasks::open(dir.path().join("tasks.db")))
+                .unwrap(),
+        );
+        runtime.block_on(tasks.allocation_init()).unwrap();
+        let flock = Arc::new(Flock::new(
+            dir.path().join("launches"),
+            dir.path().join("lanes"),
+            false,
+        ));
+        flock.attach_stores(Stores {
+            tasks: Some(Arc::clone(&tasks)),
+            ..Stores::default()
+        });
+        let jobs = crate::tasks::next_job_runtime::NextJobs::new(Arc::clone(&flock));
+        let terminal: Mutex<Box<dyn Terminal>> = Mutex::new(Box::new(FakeTerminal::new()));
+        let request = RequestCtx::default();
+        let adapter = RequestRuntimeAdapter::new(&flock, &request, runtime.handle(), &terminal)
+            .with_next_jobs(&jobs)
+            .unwrap();
+        let plan = adapter
+            .helper_turndispatchenv_advance_next_job("w1:p1")
+            .unwrap();
+        assert_eq!(plan["action"], "skip");
+        assert_eq!(plan["reason"], "disabled");
+        let decisions = runtime.block_on(tasks.next_job_decisions()).unwrap();
+        assert!(decisions.iter().any(|(pane, _)| pane == "w1:p1"));
     }
 }
