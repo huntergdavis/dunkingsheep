@@ -20,6 +20,7 @@ pub struct StatusState {
     pub(crate) state_file: PathBuf,
     pub(crate) env: Env,
     pub(crate) idle_claim_s: f64,
+    pub(crate) turn_end_wait_s: f64,
 }
 
 impl StatusState {
@@ -40,6 +41,7 @@ impl StatusState {
             state_file: state_file.into(),
             env,
             idle_claim_s: crate::activity::IDLE_CLAIM_S,
+            turn_end_wait_s: 4.0,
         }
     }
 }
@@ -49,6 +51,12 @@ impl Flock {
     /// unconfigured: its legacy arguments contain neither release nor whole-state path.
     pub fn attach_status_state(&self, mut state: StatusState) -> Result<(), DunkError> {
         state.idle_claim_s = crate::activity::idle_claim_s_from(&state.env)?;
+        state.turn_end_wait_s = match state.env.get("DUNKINGSHEEP_TURN_END_WAIT_S") {
+            None => 4.0,
+            Some(value) => crate::github::parse_python_float(value).ok_or_else(|| {
+                DunkError::Refused("invalid DUNKINGSHEEP_TURN_END_WAIT_S float".into())
+            })?,
+        };
         self.status_runtime
             .set(state)
             .map_err(|_| DunkError::Refused("status startup state is already configured".into()))
