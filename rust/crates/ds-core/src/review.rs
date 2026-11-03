@@ -12,7 +12,7 @@ use std::pin::Pin;
 
 use crate::flock::Flock;
 use crate::github::{GitHubTransport, StatusUpdate};
-use crate::tasks::{AddOptions, ReviewTaskRow, TaskNote, Tasks};
+use crate::tasks::{wire::TaskWire, AddOptions, ReviewTaskRow, TaskNote, Tasks};
 
 #[derive(Clone, Copy)]
 struct AccountingLedgerConfig {
@@ -95,6 +95,23 @@ pub trait ReviewTaskActor {
         number: i64,
         head: &'a str,
     ) -> ReviewFuture<'a, Result<String, String>>;
+
+    /// Read the task's complete Python-compatible wire snapshot in one Tasks actor call.
+    fn full_task_wire<'a>(&'a self, id: &'a str) -> ReviewFuture<'a, Result<TaskWire, String>> {
+        let _ = id;
+        Box::pin(async { Err("full task wire snapshot is unavailable".into()) })
+    }
+
+    /// Mark completed rows for the merged PR as landed after GitHub confirms the merge.
+    fn mark_landed_for_pr<'a>(
+        &'a self,
+        repo: &'a str,
+        number: i64,
+        by: &'a str,
+    ) -> ReviewFuture<'a, Result<Vec<String>, String>> {
+        let _ = (repo, number, by);
+        Box::pin(async { Err("landed task writer is unavailable".into()) })
+    }
 }
 
 impl ReviewTaskActor for Tasks {
@@ -207,6 +224,27 @@ impl ReviewTaskActor for Tasks {
             .await
             .map(|task| task.id)
             .map_err(|error| error.to_string())
+        })
+    }
+
+    fn full_task_wire<'a>(&'a self, id: &'a str) -> ReviewFuture<'a, Result<TaskWire, String>> {
+        Box::pin(async move {
+            Tasks::get_full_wire(self, id, None)
+                .await
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    fn mark_landed_for_pr<'a>(
+        &'a self,
+        repo: &'a str,
+        number: i64,
+        by: &'a str,
+    ) -> ReviewFuture<'a, Result<Vec<String>, String>> {
+        Box::pin(async move {
+            Tasks::mark_landed_for_pr(self, repo, number, Some(by))
+                .await
+                .map_err(|error| error.to_string())
         })
     }
 }
@@ -348,6 +386,31 @@ impl ReviewTaskActor for Flock {
             .map_err(|error| error.to_string())
         })
     }
+
+    fn full_task_wire<'a>(&'a self, id: &'a str) -> ReviewFuture<'a, Result<TaskWire, String>> {
+        let tasks = attached_review_tasks(self);
+        Box::pin(async move {
+            let tasks = tasks.map_err(|error| error.to_string())?;
+            Tasks::get_full_wire(&tasks, id, None)
+                .await
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    fn mark_landed_for_pr<'a>(
+        &'a self,
+        repo: &'a str,
+        number: i64,
+        by: &'a str,
+    ) -> ReviewFuture<'a, Result<Vec<String>, String>> {
+        let tasks = attached_review_tasks(self);
+        Box::pin(async move {
+            let tasks = tasks.map_err(|error| error.to_string())?;
+            Tasks::mark_landed_for_pr(&tasks, repo, number, Some(by))
+                .await
+                .map_err(|error| error.to_string())
+        })
+    }
 }
 
 impl ReviewRunContext for Flock {
@@ -448,20 +511,6 @@ pub trait ReviewTokenSource {
     fn author_token(&self) -> ReviewFuture<'_, Result<String, String>> {
         Box::pin(async { Err("author token source is unavailable".into()) })
     }
-}
-
-/// The merge/accounting operation supplied by the adjacent accepted ReviewSync merge slice.
-/// The timer owns selection and terminal guards; this seam owns only the existing merge path.
-pub trait ReviewRunMerge {
-    fn merge<'a>(
-        &'a self,
-        repo: &'a str,
-        number: i64,
-        head: &'a str,
-        token: &'a str,
-        task_id: &'a str,
-        report: &'a mut Value,
-    ) -> ReviewFuture<'a, Result<(), String>>;
 }
 
 impl ReviewTokenSource for crate::github::Tokens {
@@ -1962,15 +2011,160 @@ where
 
 impl<S, T, G, X> ReviewSync<S, T, G, X>
 where
+    S: ReviewTaskActor,
+    T: ReviewTokenSource,
+    X: GitHubTransport,
+{
+    /// Account for a body PR only after retrieving its complete Tasks wire snapshot.
+    /// A task read, identity mismatch, or accounting failure is report-only after merge.
+    pub async fn _account_after_merge(
+        &self,
+        repo: &str,
+        number: i64,
+        _head: &str,
+        task_id: &str,
+        report: &mut Value,
+    ) {
+        let task = match self.flock.full_task_wire(task_id).await {
+            Ok(task) => task.wire,
+            Err(error) => {
+                append_report(
+                    report,
+                    "errors",
+                    Value::String(format!(
+                        "accounting {repo}#{number}: read {task_id}: {error}"
+                    )),
+                );
+                return;
+            }
+        };
+        let task_repo = task.get("repo").cloned().unwrap_or(Value::Null);
+        let task_pr = task.get("pr").cloned().unwrap_or(Value::Null);
+        if task_repo != Value::String(repo.to_string()) || task_pr != Value::from(number) {
+            append_report(
+                report,
+                "errors",
+                Value::String(format!(
+                    "accounting {repo}#{number}: {task_id} is {}#{}, not this PR",
+                    python_string(&task_repo),
+                    python_string(&task_pr)
+                )),
+            );
+            return;
+        }
+
+        let by = task
+            .get("completed_by")
+            .filter(|value| python_truthy(value))
+            .map(python_string)
+            .unwrap_or_else(|| "review-sync".into());
+        let result = match self.account(&task, Some(&by), false).await {
+            Ok(result) => result,
+            Err(error) => {
+                append_report(
+                    report,
+                    "errors",
+                    Value::String(format!("accounting {repo}#{number}: {error}")),
+                );
+                return;
+            }
+        };
+        append_report(
+            report,
+            "accounting",
+            serde_json::json!({
+                "repo": repo,
+                "pr": number,
+                "task": task_id,
+                "accounting_pr": result.get("accounting_pr").cloned().unwrap_or(Value::Null),
+                "reason": result.get("reason").cloned().unwrap_or(Value::Null),
+                "errors": result.get("errors")
+                    .filter(|value| python_truthy(value))
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!([])),
+            }),
+        );
+    }
+
+    /// Merge the exact reviewed head, then account and release landed dependents.
+    /// The merge is never rolled back by a later task-store or accounting failure.
+    pub async fn _merge(
+        &self,
+        repo: &str,
+        number: i64,
+        head: &str,
+        token: &str,
+        report: &mut Value,
+        task_id: Option<&str>,
+    ) -> bool {
+        match crate::github::merge_pull(
+            &self.transport,
+            &self.api_root,
+            repo,
+            number,
+            token,
+            Some(head),
+        )
+        .await
+        {
+            Ok(_) => {}
+            Err(error) => {
+                let error = error.to_string();
+                if !error.contains("405") {
+                    append_report(
+                        report,
+                        "errors",
+                        Value::String(format!("merge {repo}#{number}: {error}")),
+                    );
+                }
+                return false;
+            }
+        }
+
+        append_report(
+            report,
+            "merged",
+            serde_json::json!({
+                "repo": repo,
+                "pr": number,
+                "head": head.chars().take(12).collect::<String>(),
+                "task": task_id,
+            }),
+        );
+        if let Some(task_id) = task_id.filter(|id| !id.is_empty()) {
+            self._account_after_merge(repo, number, head, task_id, report)
+                .await;
+        }
+        match self
+            .flock
+            .mark_landed_for_pr(repo, number, "review-sync")
+            .await
+        {
+            Ok(flipped) => {
+                for id in flipped {
+                    append_report(report, "landed", Value::String(id));
+                }
+            }
+            Err(error) => append_report(
+                report,
+                "errors",
+                Value::String(format!("landed {repo}#{number}: {error}")),
+            ),
+        }
+        true
+    }
+}
+
+impl<S, T, G, X> ReviewSync<S, T, G, X>
+where
     S: ReviewTaskActor + ReviewTaskCreator + ReviewRunContext,
     T: ReviewTokenSource,
     G: ReviewPolicy + ReviewRepoConfig,
     X: GitHubTransport,
 {
-    /// Run the deterministic ReviewSync sweep against the injected real task, token,
-    /// repository, identity, and transport sources. Final merges are delegated to the
-    /// adjacent merge/accounting slice through `ReviewRunMerge`.
-    pub async fn run<M: ReviewRunMerge>(&self, merger: &M, dry_run: bool) -> Result<Value, String> {
+    /// Run the deterministic ReviewSync sweep against the injected task, token,
+    /// repository, identity, and transport sources.
+    pub async fn run(&self, dry_run: bool) -> Result<Value, String> {
         let mut report = serde_json::json!({
             "repos": [], "filed": [], "cancelled": [], "statuses": [],
             "followups": [], "conflicted": [], "errors": [], "merged": []
@@ -2136,9 +2330,15 @@ where
                         let required = self.github.required_verdicts(&repo)?.max(1);
                         let final_verdict = needs_fix.is_empty() && accepts.len() >= required;
                         if final_verdict {
-                            merger
-                                .merge(&repo, pr.number, &pr.head, &token, &done.id, &mut report)
-                                .await?;
+                            self._merge(
+                                &repo,
+                                pr.number,
+                                &pr.head,
+                                &token,
+                                &mut report,
+                                Some(&done.id),
+                            )
+                            .await;
                         } else if needs_fix.is_empty() && current.is_none() {
                             if let Some(first_lane) = accepts.first() {
                                 let _ = self
