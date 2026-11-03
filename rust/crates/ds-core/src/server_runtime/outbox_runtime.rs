@@ -268,4 +268,53 @@ mod tests {
         assert!(!threads.is_empty());
         assert!(threads.iter().all(|id| *id != std::thread::current().id()));
     }
+    #[test]
+    fn blocked_pane_does_not_block_another_worker() {
+        use crate::flock::panes::Stores;
+        let dir = tempfile::tempdir().unwrap();
+        let flock = Arc::new(Flock::new(
+            dir.path().join("launches"),
+            dir.path().join("lanes"),
+            false,
+        ));
+        let store = Arc::new(
+            crate::inbox_store::Store::open(dir.path().join("inbox.db"), dir.path().join("blobs"))
+                .unwrap(),
+        );
+        flock.attach_stores(Stores {
+            inbox: Some(store),
+            ..Stores::default()
+        });
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let owner = OutboxRuntime::new(
+            Arc::clone(&flock),
+            runtime.handle().clone(),
+            Arc::new(|| Box::new(FakeTerminal::new())),
+        )
+        .unwrap();
+        let mut blocked = Message::new("m1", "w1:p1", "one", "first", "test");
+        let mut independent = Message::new("m2", "w2:p2", "two", "second", "test");
+        for message in [&mut blocked, &mut independent] {
+            message.hold_while_typing = false;
+            message.press_enter = false;
+        }
+        let lock = flock.send_lock_for("w1:p1");
+        let guard = lock.lock().unwrap();
+        flock
+            .enqueue(blocked.clone(), owner.pool.as_ref(), &FlockSnapshot)
+            .unwrap();
+        flock
+            .enqueue(independent.clone(), owner.pool.as_ref(), &FlockSnapshot)
+            .unwrap();
+        let progressed = independent.done.wait_timeout(Duration::from_secs(5));
+        let still_blocked = !blocked.done.is_set();
+        drop(guard);
+        assert!(progressed, "independent pane failed to progress");
+        assert!(still_blocked, "blocked pane unexpectedly completed");
+        assert!(blocked.done.wait_timeout(Duration::from_secs(5)));
+        owner.stop_and_join();
+    }
 }
