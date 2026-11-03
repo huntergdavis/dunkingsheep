@@ -4460,7 +4460,7 @@ fn h_owner_ingest_raw_errors_match_python_order() {
     ] {
         assert!(
             inbox
-                .find_by_external_id("owner", external_id)
+                .find_by_external_id("owner", Some(external_id))
                 .unwrap()
                 .is_none(),
             "failed request inserted {external_id}"
