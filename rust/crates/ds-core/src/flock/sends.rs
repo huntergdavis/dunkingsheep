@@ -3034,6 +3034,7 @@ impl OutboxWake for OutboxWorkerPool {
 
 /// One deterministic result from the per-pane queue-head scheduler.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // Production worker startup is gated to a separate runtime task.
 pub(crate) enum OutboxStep {
     Empty,
     Delivered,
@@ -3044,6 +3045,7 @@ pub(crate) enum OutboxStep {
 
 /// `_outbox_step`: inspect exactly the FIFO head, release the queue lock before any external
 /// read, wait, send, or save, then let the guarded delivery transition recheck the pane.
+#[allow(dead_code)] // Exercised here; production worker startup is a separate gated task.
 pub(crate) fn outbox_step<E: SendPreparationEnv + PaneInfoEnv>(
     flock: &Flock,
     env: &mut E,
@@ -3134,7 +3136,7 @@ pub(crate) fn outbox_step<E: SendPreparationEnv + PaneInfoEnv>(
             }
         }
     };
-    match flock.deliver_message(&head.id, now, env, || permission()) {
+    match flock.deliver_message(&head.id, now, env, permission) {
         DeliveryOutcome::Sent | DeliveryOutcome::Failed | DeliveryOutcome::AlreadyDecided => {
             OutboxStep::Delivered
         }
@@ -3146,6 +3148,7 @@ pub(crate) fn outbox_step<E: SendPreparationEnv + PaneInfoEnv>(
 /// `_outbox_worker`: run deterministic queue steps, report stale modals, and make one real
 /// owned-text recovery transition when the same box remains visible. Runtime adapters provide
 /// terminal I/O and a stop-aware wait; tests can advance a fake clock without spawning threads.
+#[allow(dead_code)] // Production worker startup is gated to a separate runtime task.
 pub(crate) fn outbox_worker<E: SendPreparationEnv + PaneInfoEnv + InboxEnv>(
     flock: &Flock,
     env: &mut E,
