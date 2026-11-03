@@ -1,0 +1,19 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/api/pane-text?pane=%259&lines=40"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json"
+    },
+    "body": "{\"pane\":\"%9\",\"text\":\"fixture pane\",\"readonly\":true,\"note\":\"read-only: typing goes through the delivery path, not this endpoint\"}",
+    "json": {
+      "pane": "%9",
+      "text": "fixture pane",
+      "readonly": true,
+      "note": "read-only: typing goes through the delivery path, not this endpoint"
+    }
+  }
+}
