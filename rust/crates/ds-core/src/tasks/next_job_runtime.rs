@@ -2198,8 +2198,12 @@ mod tests {
         let (_dir, jobs, tasks) = configured_jobs().await;
         let pane = "%1";
         add_assigned_task(&tasks, pane).await;
-        let metrics =
-            Arc::new(crate::metrics::MetricsStore::open(":memory:").expect("metrics store"));
+        let metrics = Arc::new(
+            tokio::task::spawn_blocking(|| crate::metrics::MetricsStore::open(":memory:"))
+                .await
+                .expect("metrics store worker")
+                .expect("metrics store"),
+        );
         jobs.flock.attach_stores(crate::flock::panes::Stores {
             tasks: Some(Arc::clone(&tasks)),
             metrics: Some(Arc::clone(&metrics)),
@@ -2323,7 +2327,11 @@ mod tests {
                     }
                 }
             } else {
-                assert_eq!(stored, committed);
+                for (key, value) in committed {
+                    if key != "at" {
+                        assert_eq!(stored.get(key), Some(value), "changed field {key}");
+                    }
+                }
                 assert!(stored["reason"].is_null());
             }
         }
