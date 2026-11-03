@@ -23,6 +23,7 @@ use sha2::{Digest, Sha256};
 use crate::clock::now_s;
 use crate::db::{map_sqlite, ReadPool, SyncWriter, DEFAULT_READ_POOL};
 use crate::error::DunkError;
+use crate::flock::mailbox::OWNER_MAILBOX;
 use crate::inbox::{
     check_sizes, mailbox_where, next_message_number, normalise_mailbox, receipt_of,
     retention_cutoff, validate_transport, Summary, COUNTER_UPSERT, MAX_BLOB_BYTES, PURGE_SELECTION,
