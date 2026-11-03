@@ -172,6 +172,11 @@ impl Flock {
             .turns
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Startup captures the process environment once, matching Python's import-time setting.
+        let idle_claim_s = self
+            .status_state()
+            .map(|state| activity::idle_claim_s_from(&state.env))
+            .unwrap_or(IDLE_CLAIM_S);
         let activity = activity::activity(
             pane_id,
             harness,
@@ -179,7 +184,7 @@ impl Flock {
             None,
             Some(&turns),
             now,
-            IDLE_CLAIM_S,
+            idle_claim_s,
         );
         serde_json::to_value(activity).expect("activity serializes to JSON")
     }
