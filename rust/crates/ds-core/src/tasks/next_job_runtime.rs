@@ -14,13 +14,11 @@ use tokio::sync::OwnedMutexGuard;
 
 use super::advance::{Advance, AdvanceOptions, OperatorProof, PlanInput, Planner};
 use super::next_job::Handoff;
-use super::Tasks;
 use crate::config::Env;
 use crate::dispatch::NextJob;
 use crate::error::DunkError;
 use crate::flock::commands_turns::TurnState;
 use crate::flock::loop_env::{configured_loop_terminal_factory, LoopTerminalFactory};
-use crate::flock::mailbox::MailboxEnv;
 use crate::flock::sends::{self, Message, SendGuardOptions};
 use crate::flock::Flock;
 use crate::metrics::Event;
@@ -260,6 +258,7 @@ impl NextJobs {
         };
         let adapter = LoopRuntimeAdapter::new(Arc::clone(&self.flock), factory);
         let pane = pane.to_owned();
+        let worker_pane = pane.clone();
         match adapter
             .with_loop_terminal(move |flock, terminal| {
                 let store = flock.stores().inbox?;
@@ -269,7 +268,7 @@ impl NextJobs {
                     .own_mailbox_from_sources(
                         terminal,
                         || store.read_pool(),
-                        &pane,
+                        &worker_pane,
                         || {
                             env.get("DUNKINGSHEEP_MAILBOX")
                                 .map(|value| {
@@ -2230,6 +2229,11 @@ mod tests {
 
         assert_eq!(advance.plan["action"], "claim");
         assert_eq!(advance.plan["handoff"]["state"], "pending");
+        let claimed = tasks
+            .get(advance.plan["task_id"].as_str().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(claimed.status, "in_progress");
         let handoffs = tasks.next_job_handoffs(Some(pane)).await.unwrap();
         assert_eq!(handoffs.len(), 1);
         assert_eq!(handoffs[0]["state"], "pending");
@@ -2239,6 +2243,41 @@ mod tests {
                 && event.pane_id.as_deref() == Some(pane)
                 && event.outcome.as_deref() == Some("claim")
         }));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_unknown_unread_is_not_permission() {
+        let (_dir, jobs, tasks) = configured_jobs().await;
+        let pane = "%1";
+        add_assigned_task(&tasks, pane).await;
+
+        let advance = jobs
+            .advance_with_materialiser(
+                pane,
+                "turn.end",
+                None,
+                None,
+                None,
+                None,
+                None,
+                false,
+                |_| async {
+                    Err(MaterialiseError::Other(DunkError::Refused(
+                        "unexpected materialisation".into(),
+                    )))
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(advance.plan["action"], "skip");
+        assert_eq!(advance.plan["reason"], "unread_unknown");
+        assert!(advance.plan.get("handoff").is_none());
+        assert!(tasks
+            .next_job_handoffs(Some(pane))
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
