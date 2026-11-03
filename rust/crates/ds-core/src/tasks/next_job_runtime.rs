@@ -86,6 +86,35 @@ fn caller_map(caller: Option<Caller>) -> Map<String, Value> {
     values
 }
 
+fn caller_from_map(value: Option<&Value>) -> Option<Caller> {
+    let caller = value?.as_object()?;
+    if caller.is_empty() {
+        return None;
+    }
+    let source = match caller.get("source").and_then(Value::as_str) {
+        Some("agent") => "agent",
+        Some("session") => "session",
+        Some("peer") => "peer",
+        _ => "none",
+    };
+    Some(Caller::new(
+        caller.get("pid").and_then(Value::as_i64),
+        caller
+            .get("start")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        caller
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        caller
+            .get("pane_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        source,
+    ))
+}
+
 #[allow(dead_code)] // Delivery and turn binding use the blocking receipt bridge.
 async fn record_next_job_notify(
     inbox: Arc<crate::inbox_store::Store>,
@@ -144,6 +173,39 @@ impl NextJobs {
             }
         }
         Ok(())
+    }
+
+    /// Replay only temporary/refusal decisions after process restart, then reconcile
+    /// durable handoffs. Explicit no-work decisions stay terminal so startup never
+    /// polls the unassigned fleet backlog.
+    #[allow(dead_code)] // Wired by the process-owned next-job recovery worker.
+    pub(crate) async fn recover(&self) -> Result<(), DunkError> {
+        let tasks = self
+            .flock
+            .stores()
+            .tasks
+            .ok_or_else(|| DunkError::Refused("task store unavailable".into()))?;
+        for (pane, plan) in tasks.next_job_decisions().await? {
+            let retry_reason = matches!(
+                plan.get("reason").and_then(Value::as_str),
+                Some(
+                    "unread_unknown"
+                        | "unread_mail"
+                        | "pending_delivery"
+                        | "disabled"
+                        | "not_allowed"
+                        | "unavailable_lane"
+                        | "readiness_unknown"
+                )
+            );
+            if retry_reason {
+                let from_task = plan.get("from_task").and_then(Value::as_str);
+                let caller = caller_from_map(plan.get("caller"));
+                self.advance(&pane, "restart", from_task, caller, None)
+                    .await?;
+            }
+        }
+        self.tick(true).await
     }
 
     pub fn new(flock: Arc<Flock>) -> Self {
@@ -1610,6 +1672,161 @@ mod tests {
         assert_eq!(receipt.notify_state.as_deref(), Some("undeliverable"));
 
         tokio::task::spawn_blocking(move || drop((jobs, inbox, tasks)))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn next_jobs_recover_restores_durable_pending_work() {
+        let (_dir, original_jobs, tasks, inbox) = materialise_fixture().await;
+        let jobs = NextJobs::with_providers(
+            Arc::clone(&original_jobs.flock),
+            Arc::new(|| {
+                Ok(Env::from_pairs(&[(
+                    "DUNKINGSHEEP_TURN_END_DISPATCH",
+                    "off",
+                )]))
+            }),
+            None,
+        );
+        let caller = Caller::new(
+            Some(123),
+            Some("process-start".into()),
+            Some("codex".into()),
+            Some("w1:p1".into()),
+            "agent",
+        );
+        let source_task = tasks
+            .add("global", "Previous completion context", "body")
+            .await
+            .unwrap();
+        jobs.advance_with_materialiser(
+            AdvanceRequest {
+                pane: "w1:p1",
+                trigger: "turn.end",
+                from_task: Some(&source_task.id),
+                caller: Some(caller),
+                operator_proof: None,
+                dispatch_reason: Some("disabled".into()),
+                unread: None,
+                pending_delivery: false,
+            },
+            |_| async { unreachable!("a refused decision cannot create a handoff") },
+        )
+        .await
+        .unwrap();
+        jobs.advance_with_materialiser(
+            AdvanceRequest {
+                pane: "w2:p2",
+                trigger: "turn.start",
+                from_task: None,
+                caller: None,
+                operator_proof: None,
+                dispatch_reason: None,
+                unread: None,
+                pending_delivery: false,
+            },
+            |_| async { unreachable!("a refused decision cannot create a handoff") },
+        )
+        .await
+        .unwrap();
+        jobs.advance_with_materialiser(
+            AdvanceRequest {
+                pane: "w2:p2",
+                trigger: "turn.end",
+                from_task: None,
+                caller: None,
+                operator_proof: None,
+                dispatch_reason: None,
+                unread: Some(0),
+                pending_delivery: false,
+            },
+            |_| async { unreachable!("explicit no-work cannot create a handoff") },
+        )
+        .await
+        .unwrap();
+
+        let unassigned = tasks
+            .add("global", "Never poll unassigned backlog", "body")
+            .await
+            .unwrap();
+        let interrupted = tasks
+            .add("global", "Uncertain send is never replayed", "body")
+            .await
+            .unwrap();
+        let message_id = "nj-recover-uncertain";
+        let attempt_at = crate::clock::now_s() - 10.0;
+        tasks
+            .record_next_job_handoff(
+                &interrupted.id,
+                "w3:p3",
+                None,
+                Some(message_id),
+                1,
+                None,
+                Some(attempt_at),
+                Some(
+                    json!({
+                        "state":"sending",
+                        "attempt":1,
+                        "attempt_at":attempt_at,
+                        "transport_owner":{"pid":-1,"start":null}
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                ),
+            )
+            .await
+            .unwrap();
+        let receipt_store = Arc::clone(&inbox);
+        tokio::task::spawn_blocking(move || {
+            receipt_store.ensure_next_job(message_id, "w3:p3", "w3:p3", "body", "subject")?;
+            receipt_store.record_notify(message_id, "queued", None, Some("transport-1"), Some(1))
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        jobs.recover().await.unwrap();
+
+        let decisions = tasks.next_job_decisions().await.unwrap();
+        let recovered = decisions
+            .iter()
+            .find(|(pane, _)| pane == "w1:p1")
+            .map(|(_, plan)| plan)
+            .expect("eligible decision remains journaled");
+        assert_eq!(recovered["trigger"], "restart");
+        assert_eq!(recovered["reason"], "disabled");
+        assert_eq!(recovered["caller"]["pane_id"], "w1:p1");
+        assert_eq!(recovered["caller"]["pid"], 123);
+        assert_eq!(recovered["caller"]["name"], "codex");
+        assert_eq!(recovered["caller"]["source"], "agent");
+        assert_eq!(recovered["from_task"], source_task.id);
+        let terminal = decisions
+            .iter()
+            .find(|(pane, _)| pane == "w2:p2")
+            .map(|(_, plan)| plan)
+            .expect("no-work decision remains journaled");
+        assert_eq!(terminal["trigger"], "turn.end");
+        assert_eq!(terminal["reason"], "no_assigned_work");
+
+        let handoff = tasks
+            .next_job_handoffs(Some("w3:p3"))
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|handoff| handoff["message_id"] == message_id)
+            .expect("durable handoff was reconciled");
+        assert_eq!(handoff["state"], "undeliverable");
+        assert_eq!(handoff["reason"], "delivery_interrupted");
+        assert_eq!(handoff["attempt"], 1, "recovery must not resend");
+        let receipt =
+            crate::inbox::status(inbox.read_pool(), message_id, crate::clock::now_s()).unwrap();
+        assert_eq!(receipt.notify_state.as_deref(), Some("undeliverable"));
+        assert_eq!(tasks.get(&unassigned.id).await.unwrap().status, "open");
+
+        tokio::task::spawn_blocking(move || drop((jobs, original_jobs, inbox, tasks)))
             .await
             .unwrap();
     }
