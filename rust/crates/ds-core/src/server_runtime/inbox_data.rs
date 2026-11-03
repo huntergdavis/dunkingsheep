@@ -144,9 +144,11 @@ mod tests {
     use super::*;
     use crate::{
         config::Env,
-        flock::Flock,
+        flock::{panes::Stores, status_runtime::StatusState, Flock},
+        inbox_store::{Outgoing, Store},
         roles::Roles,
         server::RequestCtx,
+        server_runtime::{outbox_runtime::OutboxRuntime, RequestRuntimeAdapter},
         terminal::{fakes::FakeTerminal, Terminal},
     };
     use std::sync::Mutex;
@@ -192,5 +194,149 @@ mod tests {
         );
         assert_eq!(mailbox_override_from(Some(" \u{1c}\t")), None);
         assert_eq!(mailbox_override_from(None), None);
+    }
+
+    #[test]
+    fn production_env_inbox_count_uses_concrete_services() {
+        let dir = tempfile::tempdir().unwrap();
+        let mailbox = mailbox_override_from(std::env::var("DUNKINGSHEEP_MAILBOX").ok().as_deref())
+            .unwrap_or_else(|| "%9".into());
+        let store =
+            Arc::new(Store::open(dir.path().join("inbox.db"), dir.path().join("blobs")).unwrap());
+        for (index, sender) in ["%3", "%2", "%3", "%6"].into_iter().enumerate() {
+            store
+                .send(&Outgoing {
+                    mailbox: &mailbox,
+                    body: Some("queued message"),
+                    subject: Some("count fixture"),
+                    sender: Some(sender),
+                    pane_id: Some("%9"),
+                    external_id: Some(match index {
+                        0 => "count-1",
+                        1 => "count-2",
+                        2 => "count-3",
+                        _ => "count-4",
+                    }),
+                    ..Outgoing::default()
+                })
+                .unwrap();
+        }
+
+        let routing_path = dir.path().join("pm-routing.json");
+        std::fs::write(
+            &routing_path,
+            r#"{"alpha":{"pm":"%1","members":["%3","%2","%3"],"mode":"redirect","vp_pane":"%0"}}"#,
+        )
+        .unwrap();
+        let routing_path = routing_path.to_string_lossy().into_owned();
+        let dir_path = dir.path().to_string_lossy().into_owned();
+        let env = Env::from_pairs(&[
+            ("DUNKINGSHEEP_DIR", dir_path.as_str()),
+            ("DUNKINGSHEEP_PM_ROUTING", routing_path.as_str()),
+        ]);
+        let flock = Arc::new(Flock::new(
+            dir.path().join("launches.json"),
+            dir.path().join("lanes.json"),
+            false,
+        ));
+        flock
+            .attach_status_state(StatusState::at_start(
+                "test",
+                dir.path().join("state.json"),
+                dir.path().join("daemon"),
+                env,
+            ))
+            .unwrap();
+        flock.attach_stores(Stores {
+            inbox: Some(Arc::clone(&store)),
+            ..Stores::default()
+        });
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let owner = OutboxRuntime::new(
+            Arc::clone(&flock),
+            runtime.handle().clone(),
+            Arc::new(|| Box::new(FakeTerminal::new())),
+        )
+        .unwrap();
+        let pool = Arc::clone(&owner.pool);
+        let worker_flock = Arc::clone(&flock);
+        let handle = runtime.handle().clone();
+        let (counts, missing_mailbox_error) = runtime
+            .block_on(tokio::task::spawn_blocking(move || {
+                let terminal: Mutex<Box<dyn Terminal>> = Mutex::new(Box::new(FakeTerminal::new()));
+                let request = RequestCtx::default();
+                let adapter =
+                    RequestRuntimeAdapter::new(&worker_flock, &request, &handle, &terminal);
+                let view = InboxRuntimeView::new(adapter, Arc::clone(&worker_flock), pool).unwrap();
+                let counts = worker_flock.inbox_count(&view, None, Some("%9")).unwrap();
+                let missing = worker_flock
+                    .inbox_count(&view, None, None)
+                    .unwrap_err()
+                    .to_string();
+                (counts, missing)
+            }))
+            .unwrap();
+        assert_eq!(counts.mailbox, mailbox);
+        assert_eq!(counts.total, 4);
+        assert_eq!(counts.unread, 4);
+        assert_eq!(counts.archived, 0);
+        assert_eq!(counts.undeliverable, 0);
+        assert_eq!(counts.attachments_unread, 0);
+        assert_eq!(counts.from_lanes, 3);
+        assert!(counts.oldest_unread_s.is_some());
+        assert!(missing_mailbox_error.contains("no mailbox given and no caller pane to default to"));
+
+        let broken_path = dir.path().join("broken-routing.json");
+        std::fs::write(&broken_path, b"not JSON").unwrap();
+        let broken_path = broken_path.to_string_lossy().into_owned();
+        let broken_env = Env::from_pairs(&[
+            ("DUNKINGSHEEP_DIR", dir_path.as_str()),
+            ("DUNKINGSHEEP_PM_ROUTING", broken_path.as_str()),
+        ]);
+        let broken_flock = Arc::new(Flock::new(
+            dir.path().join("broken-launches.json"),
+            dir.path().join("broken-lanes.json"),
+            false,
+        ));
+        broken_flock
+            .attach_status_state(StatusState::at_start(
+                "test",
+                dir.path().join("broken-state.json"),
+                dir.path().join("daemon"),
+                broken_env,
+            ))
+            .unwrap();
+        broken_flock.attach_stores(Stores {
+            inbox: Some(store),
+            ..Stores::default()
+        });
+        let broken_owner = OutboxRuntime::new(
+            Arc::clone(&broken_flock),
+            runtime.handle().clone(),
+            Arc::new(|| Box::new(FakeTerminal::new())),
+        )
+        .unwrap();
+        let broken_pool = Arc::clone(&broken_owner.pool);
+        let handle = runtime.handle().clone();
+        let broken_counts = runtime
+            .block_on(tokio::task::spawn_blocking(move || {
+                let terminal: Mutex<Box<dyn Terminal>> = Mutex::new(Box::new(FakeTerminal::new()));
+                let request = RequestCtx::default();
+                let adapter =
+                    RequestRuntimeAdapter::new(&broken_flock, &request, &handle, &terminal);
+                let view =
+                    InboxRuntimeView::new(adapter, Arc::clone(&broken_flock), broken_pool).unwrap();
+                broken_flock.inbox_count(&view, None, Some("%9")).unwrap()
+            }))
+            .unwrap();
+        assert_eq!(broken_counts.total, 4);
+        assert_eq!(broken_counts.unread, 4);
+        assert_eq!(broken_counts.from_lanes, 0);
+        owner.stop_and_join();
+        broken_owner.stop_and_join();
     }
 }
