@@ -279,11 +279,14 @@ mod tests {
             cookie: Option<&'a str>,
         ) -> super::super::auth::AuthFuture<'a, Result<super::super::auth::Identity, AuthError>>
         {
-            let result = match bearer.or(cookie) {
+            let result = match bearer {
                 Some("token") => Ok(super::super::auth::Identity::Api),
                 Some("session") => Ok(super::super::auth::Identity::Owner),
                 Some("broken") => Err(AuthError::Internal("auth db".into())),
-                _ => Err(AuthError::SignInRequired),
+                _ => match cookie {
+                    Some("session") => Ok(super::super::auth::Identity::Owner),
+                    _ => Err(AuthError::SignInRequired),
+                },
             };
             Box::pin(async move { result })
         }
@@ -515,6 +518,20 @@ mod tests {
         request.headers_mut().append(
             header::COOKIE,
             HeaderValue::from_static("vp_session=broken"),
+        );
+        let response = block_on(app.oneshot(request)).unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(*backend.reads.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn auth_falls_back_to_session_cookie_after_invalid_bearer() {
+        let (app, backend) = app(Some(b"index"));
+        let mut request = request("/dash/custom/path", Some("expired-bearer"));
+        request.headers_mut().append(
+            header::COOKIE,
+            HeaderValue::from_static("vp_session=session"),
         );
         let response = block_on(app.oneshot(request)).unwrap();
 
