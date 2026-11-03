@@ -654,9 +654,24 @@ mod tests {
             let message_id = message_id.to_owned();
             let pane = pane.to_owned();
             let notify_state = notify_state.to_owned();
+            let receipt_message_id = message_id.clone();
+            let receipt_pane = pane.clone();
+            let receipt_notify_id = message_id.clone();
             tokio::task::spawn_blocking(move || {
-                inbox.ensure_next_job(&message_id, &pane, &pane, "body", "subject")?;
-                inbox.record_notify(&message_id, &notify_state, None, Some("transport"), Some(1))
+                inbox.ensure_next_job(
+                    &receipt_message_id,
+                    &receipt_pane,
+                    &receipt_pane,
+                    "body",
+                    "subject",
+                )?;
+                inbox.record_notify(
+                    &receipt_notify_id,
+                    &notify_state,
+                    None,
+                    Some("transport"),
+                    Some(1),
+                )
             })
             .await
             .unwrap()
