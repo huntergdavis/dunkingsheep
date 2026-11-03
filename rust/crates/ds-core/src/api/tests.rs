@@ -4399,6 +4399,64 @@ fn h_owner_outbox_matches_python() {
             &flock,
             &env,
             "owner_outbox",
+            args(serde_json::from_str(
+                r#"{"transport":"web","limit":-9223372036854775809}"#
+            )
+            .unwrap()),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "Python int too large to convert to SQLite INTEGER"
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_outbox",
+            args(json!({"transport": "bogus", "limit": 18446744073709551616_u128})),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "transport must be one of web, telegram, report; got 'bogus'"
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_outbox",
+            args(json!({"transport": null, "limit": 18446744073709551616_u128})),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "an outbox needs a transport"
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_outbox",
+            args(json!({"transport": "web", "limit": 18446744073709551616_u128})),
+            Some("w1:p2"),
+        ),
+        Err(DunkError::Refused(message)) if message.contains("not permitted for role worker")
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_outbox",
+            args(json!({"transport": "web", "limit": "bad"})),
+            Some("w1:p2"),
+        ),
+        Err(DunkError::Refused(message)) if message == "invalid literal for int() with base 10: 'bad'"
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_outbox",
             args(json!({"transport": null, "limit": 20})),
             Some("w1:p1"),
         ),

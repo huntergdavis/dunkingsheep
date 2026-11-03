@@ -1102,11 +1102,21 @@ pub fn h_owner_outbox(context: &HandlerContext<'_>, args: Args) -> Result<Value,
         .filter(|value| !value.is_null())
         .map(python_value_string);
     let limit = owner_outbox_limit_arg(&args, 20)?;
-    let outbox = crate::owner::OwnerConversations::new(context.flock, context.env).outbox(
-        transport.as_deref(),
-        Some(limit),
-        context.self_pane_id(),
-    )?;
+    let conversations = crate::owner::OwnerConversations::new(context.flock, context.env);
+    let limit = match limit {
+        OwnerOutboxLimit::Sqlite(limit) => limit,
+        OwnerOutboxLimit::Overflow => {
+            // Python evaluates int() before calling owner_outbox, but SQLite
+            // binds the resulting integer only after role and transport
+            // validation. Reuse the existing read-only service operation to
+            // preserve those earlier errors before reporting bind overflow.
+            conversations.outbox(transport.as_deref(), Some(20), context.self_pane_id())?;
+            return Err(DunkError::Refused(
+                "Python int too large to convert to SQLite INTEGER".into(),
+            ));
+        }
+    };
+    let outbox = conversations.outbox(transport.as_deref(), Some(limit), context.self_pane_id())?;
     Ok(json!({
         "transport": outbox.transport,
         "messages": outbox.messages.iter().map(owner_message_value).collect::<Vec<_>>(),
@@ -1114,33 +1124,48 @@ pub fn h_owner_outbox(context: &HandlerContext<'_>, args: Args) -> Result<Value,
     }))
 }
 
-fn owner_outbox_limit_arg(args: &Args, default: i64) -> Result<i64, DunkError> {
+enum OwnerOutboxLimit {
+    Sqlite(i64),
+    Overflow,
+}
+
+fn owner_outbox_limit_arg(args: &Args, default: i64) -> Result<OwnerOutboxLimit, DunkError> {
     let Some(value) = args.get("limit").filter(|value| !value.is_null()) else {
-        return Ok(default);
+        return Ok(OwnerOutboxLimit::Sqlite(default));
     };
-    let overflow =
-        || DunkError::Refused("Python int too large to convert to SQLite INTEGER".into());
     match value {
-        Value::Bool(value) => Ok(i64::from(*value)),
+        Value::Bool(value) => Ok(OwnerOutboxLimit::Sqlite(i64::from(*value))),
         Value::Number(value) => {
             if let Some(value) = value.as_i64() {
-                return Ok(value);
+                return Ok(OwnerOutboxLimit::Sqlite(value));
             }
             if let Some(value) = value.as_u64() {
-                return i64::try_from(value).map_err(|_| overflow());
+                return Ok(i64::try_from(value)
+                    .map(OwnerOutboxLimit::Sqlite)
+                    .unwrap_or(OwnerOutboxLimit::Overflow));
+            }
+            let token = value.to_string();
+            if !token.bytes().any(|byte| matches!(byte, b'.' | b'e' | b'E')) {
+                return Ok(match parse_python_decimal_integer_checked(&token) {
+                    Ok(value) => OwnerOutboxLimit::Sqlite(value),
+                    Err(DecimalIntError::Overflow) => OwnerOutboxLimit::Overflow,
+                    Err(DecimalIntError::Invalid) => {
+                        return Err(DunkError::Refused("cannot convert value to int".into()))
+                    }
+                });
             }
             let value = value
                 .as_f64()
                 .ok_or_else(|| DunkError::Refused("cannot convert value to int".into()))?
                 .trunc();
             if value >= 9_223_372_036_854_775_808.0 || value < -9_223_372_036_854_775_808.0 {
-                return Err(overflow());
+                return Ok(OwnerOutboxLimit::Overflow);
             }
-            Ok(value as i64)
+            Ok(OwnerOutboxLimit::Sqlite(value as i64))
         }
         Value::String(value) => match parse_python_decimal_integer_checked(value) {
-            Ok(value) => Ok(value),
-            Err(DecimalIntError::Overflow) => Err(overflow()),
+            Ok(value) => Ok(OwnerOutboxLimit::Sqlite(value)),
+            Err(DecimalIntError::Overflow) => Ok(OwnerOutboxLimit::Overflow),
             Err(DecimalIntError::Invalid) => Err(DunkError::Refused(format!(
                 "invalid literal for int() with base 10: {}",
                 py_repr(value)

@@ -174,6 +174,31 @@ class OwnerIngestWireOracle(unittest.TestCase):
         with self.assertRaisesRegex(DunkError, "^an outbox needs a transport$"):
             self.flock.owner_outbox(None)
 
+    def test_outbox_integer_overflow_follows_role_and_transport_validation(self):
+        from dunk_core import DunkError
+        from dunk_api import h_owner_outbox
+
+        owner, worker = "w1:p1", "w1:p2"
+        self.flock.roles.register(owner, role="owner", by=owner)
+        self.flock.roles.register(worker, role="worker", by=owner)
+        huge = 18446744073709551616
+
+        # int() is evaluated by the API wrapper before Flock performs its role gate.
+        with self.assertRaisesRegex(ValueError, r"^invalid literal for int\(\) with base 10: 'bad'$"):
+            h_owner_outbox(self.flock, {"transport": "web", "limit": "bad"}, worker)
+
+        with self.assertRaisesRegex(
+            DunkError,
+            "^transport must be one of web, telegram, report; got 'bogus'$",
+        ):
+            h_owner_outbox(self.flock, {"transport": "bogus", "limit": huge}, owner)
+        with self.assertRaisesRegex(DunkError, "^an outbox needs a transport$"):
+            h_owner_outbox(self.flock, {"transport": None, "limit": huge}, owner)
+        with self.assertRaisesRegex(DunkError, "role 'worker' may not read or answer it"):
+            h_owner_outbox(self.flock, {"transport": "web", "limit": huge}, worker)
+        with self.assertRaisesRegex(OverflowError, "^Python int too large to convert to SQLite INTEGER$"):
+            h_owner_outbox(self.flock, {"transport": "web", "limit": huge}, owner)
+
 
 @unittest.skipUnless(importlib.util.find_spec("fastapi"), "web.app needs fastapi")
 class OwnerSend(unittest.TestCase):
