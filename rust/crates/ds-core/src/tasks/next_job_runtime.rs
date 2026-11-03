@@ -21,6 +21,7 @@ use crate::flock::Flock;
 use crate::server_runtime::LoopRuntimeAdapter;
 
 /// A paused dispatch must remain distinguishable from a materialisation failure.
+#[allow(dead_code)] // The next-job worker consumes this typed result from delivery.
 #[derive(Debug)]
 pub(crate) enum MaterialiseError {
     DispatchPaused(String),
@@ -36,9 +37,11 @@ impl From<DunkError> for MaterialiseError {
 pub struct NextJobs {
     // Later runtime leaves use the shared Flock for dispatch, tasks, and inbox work.
     flock: Arc<Flock>,
+    #[allow(dead_code)] // The next-job worker leaves call delivery and turn binding.
     locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
+#[allow(dead_code)] // The next-job worker consumes these outcomes after this leaf.
 enum TransportResult {
     Held(String),
     Sent {
@@ -51,6 +54,7 @@ enum TransportResult {
     },
 }
 
+#[allow(dead_code)] // Delivery and turn binding use the blocking receipt bridge.
 async fn record_next_job_notify(
     inbox: Arc<crate::inbox_store::Store>,
     message_id: String,
@@ -149,6 +153,7 @@ impl NextJobs {
     }
 
     /// Advance one durable handoff through its bounded send/recovery state machine.
+    #[allow(dead_code)] // Wired by the following next-job tick/recovery leaf.
     pub(crate) async fn deliver(
         &self,
         handoff: Handoff,
@@ -158,6 +163,7 @@ impl NextJobs {
         self.deliver_with(handoff, restart, env, None).await
     }
 
+    #[allow(dead_code)] // Wired by the following next-job tick/recovery leaf.
     async fn deliver_with(
         &self,
         handoff: Handoff,
@@ -660,6 +666,7 @@ impl NextJobs {
         Ok(updated)
     }
 
+    #[allow(dead_code)] // Delivery and turn observation use this lock after worker wiring.
     fn pane_lock(&self, pane: &str) -> Arc<tokio::sync::Mutex<()>> {
         let mut locks = self
             .locks
@@ -672,6 +679,7 @@ impl NextJobs {
         )
     }
 
+    #[allow(dead_code)] // Used by delivery while the next-job worker leaf is being wired.
     async fn lock_pane(&self, pane: &str) -> OwnedMutexGuard<()> {
         self.pane_lock(pane).lock_owned().await
     }
@@ -681,6 +689,7 @@ impl NextJobs {
     /// The sender owns this lock while it writes the delivery receipt, so an
     /// observation arriving during that window is bound by the sender's final
     /// `bind_turn_locked` call instead of waiting here.
+    #[allow(dead_code)] // Wired by the following next-job tick/recovery leaf.
     pub(crate) async fn bind_turn(&self, pane: String) -> Result<(), DunkError> {
         let lock = self.pane_lock(&pane);
         let Ok(_guard) = lock.try_lock_owned() else {
@@ -690,6 +699,7 @@ impl NextJobs {
     }
 
     /// Bind while the caller already owns this pane's async lock.
+    #[allow(dead_code)] // Delivery uses this while the next-job worker leaf is being wired.
     async fn bind_turn_locked(&self, pane: &str) -> Result<(), DunkError> {
         let stores = self.flock.stores();
         let tasks = stores
@@ -760,6 +770,7 @@ impl NextJobs {
     /// Persist a matching producer generation before trying the pane lock. A sender may
     /// currently hold that lock while waiting for this producer callback to return, so the
     /// observation itself must remain nonblocking with respect to pane serialization.
+    #[allow(dead_code)] // Wired by the following producer-turn callback leaf.
     pub(crate) async fn observe_turn(
         &self,
         pane: String,
