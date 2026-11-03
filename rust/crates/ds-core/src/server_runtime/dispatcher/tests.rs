@@ -109,9 +109,7 @@ fn production_dispatcher_uses_real_handler_registry_and_gate() {
     let denied = dispatcher
         .dispatch("create_workspace", &json!({}), &ctx)
         .unwrap_err();
-    assert!(denied
-        .to_string()
-        .contains("create_workspace is not permitted for role worker"));
+    assert!(denied.to_string().contains("requires a superuser"));
 }
 
 #[test]
