@@ -1397,15 +1397,14 @@ mod tests {
 
     #[test]
     fn download_serves_single_range_and_honors_if_range() {
-        let mut request = request("GET", "/api/uploads/a1", Body::empty());
-        request
-            .headers_mut()
+        let mut req = request("GET", "/api/uploads/a1", Body::empty());
+        req.headers_mut()
             .insert(header::RANGE, HeaderValue::from_static("bytes=1-3"));
-        request.headers_mut().insert(
+        req.headers_mut().insert(
             header::IF_RANGE,
             HeaderValue::from_static("\"7a7d5b4bd1e88dca4470ebf19361f0c1\""),
         );
-        let response = block_on(app(range_fixture()).oneshot(request)).unwrap();
+        let response = block_on(app(range_fixture()).oneshot(req)).unwrap();
         assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
         assert_eq!(response.headers()[header::CONTENT_RANGE], "bytes 1-3/6");
         assert_eq!(response.headers()[header::CONTENT_LENGTH], "3");
@@ -1414,15 +1413,14 @@ mod tests {
             "bcd"
         );
 
-        let mut request = request("GET", "/api/uploads/a1", Body::empty());
-        request
-            .headers_mut()
+        let mut req = request("GET", "/api/uploads/a1", Body::empty());
+        req.headers_mut()
             .insert(header::RANGE, HeaderValue::from_static("bytes=1-3"));
-        request.headers_mut().insert(
+        req.headers_mut().insert(
             header::IF_RANGE,
             HeaderValue::from_static("Tue, 14 Nov 2023 22:13:20 GMT"),
         );
-        let response = block_on(app(range_fixture()).oneshot(request)).unwrap();
+        let response = block_on(app(range_fixture()).oneshot(req)).unwrap();
         assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
         assert_eq!(response.headers()[header::CONTENT_RANGE], "bytes 1-3/6");
         assert_eq!(
@@ -1430,14 +1428,12 @@ mod tests {
             "bcd"
         );
 
-        let mut request = request("GET", "/api/uploads/a1", Body::empty());
-        request
-            .headers_mut()
+        let mut req = request("GET", "/api/uploads/a1", Body::empty());
+        req.headers_mut()
             .insert(header::RANGE, HeaderValue::from_static("bytes=1-3"));
-        request
-            .headers_mut()
+        req.headers_mut()
             .insert(header::IF_RANGE, HeaderValue::from_static("\"stale\""));
-        let response = block_on(app(range_fixture()).oneshot(request)).unwrap();
+        let response = block_on(app(range_fixture()).oneshot(req)).unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert!(!response.headers().contains_key(header::CONTENT_RANGE));
         assert_eq!(
@@ -1448,22 +1444,20 @@ mod tests {
 
     #[test]
     fn download_rejects_malformed_and_unsatisfiable_ranges() {
-        let mut request = request("GET", "/api/uploads/a1", Body::empty());
-        request
-            .headers_mut()
+        let mut req = request("GET", "/api/uploads/a1", Body::empty());
+        req.headers_mut()
             .insert(header::RANGE, HeaderValue::from_static("bytes=not-a-range"));
-        let response = block_on(app(range_fixture()).oneshot(request)).unwrap();
+        let response = block_on(app(range_fixture()).oneshot(req)).unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert_eq!(
             block_on(to_bytes(response.into_body(), usize::MAX)).unwrap(),
             "Range header: range must be requested"
         );
 
-        let mut request = request("GET", "/api/uploads/a1", Body::empty());
-        request
-            .headers_mut()
+        let mut req = request("GET", "/api/uploads/a1", Body::empty());
+        req.headers_mut()
             .insert(header::RANGE, HeaderValue::from_static("bytes=99-"));
-        let response = block_on(app(range_fixture()).oneshot(request)).unwrap();
+        let response = block_on(app(range_fixture()).oneshot(req)).unwrap();
         assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
         assert_eq!(response.headers()[header::CONTENT_RANGE], "bytes */6");
         assert_eq!(response.headers()[header::CONTENT_LENGTH], "0");
@@ -1474,11 +1468,10 @@ mod tests {
 
     #[test]
     fn download_serves_multipart_ranges() {
-        let mut request = request("GET", "/api/uploads/a1", Body::empty());
-        request
-            .headers_mut()
+        let mut req = request("GET", "/api/uploads/a1", Body::empty());
+        req.headers_mut()
             .insert(header::RANGE, HeaderValue::from_static("bytes=0-1,4-5"));
-        let response = block_on(app(range_fixture()).oneshot(request)).unwrap();
+        let response = block_on(app(range_fixture()).oneshot(req)).unwrap();
         assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
         let content_type = response.headers()[header::CONTENT_TYPE]
             .to_str()
@@ -1498,11 +1491,10 @@ mod tests {
         )));
         assert!(body.ends_with(&format!("--{boundary}--")));
 
-        let mut request = request("GET", "/api/uploads/a1", Body::empty());
-        request
-            .headers_mut()
+        let mut req = request("GET", "/api/uploads/a1", Body::empty());
+        req.headers_mut()
             .insert(header::RANGE, HeaderValue::from_static("bytes=0-2,2-4"));
-        let response = block_on(app(range_fixture()).oneshot(request)).unwrap();
+        let response = block_on(app(range_fixture()).oneshot(req)).unwrap();
         assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
         assert_eq!(response.headers()[header::CONTENT_RANGE], "bytes 0-4/6");
         assert_eq!(response.headers()[header::CONTENT_LENGTH], "5");
