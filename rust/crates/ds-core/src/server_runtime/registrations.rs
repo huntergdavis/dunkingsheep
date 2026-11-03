@@ -62,6 +62,9 @@ mod tests {
         Arc::new(move || {
             let mut terminal = FakeTerminal::new();
             terminal.fail_grouped_panes = fail_grouped_panes.clone();
+            for pane in &mut terminal.panes {
+                pane.pane_pid = Some(std::process::id() as i64);
+            }
             Box::new(terminal)
         })
     }
@@ -289,6 +292,31 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(bad_send.contains("text must be a string"));
+        let pid = std::process::id() as i64;
+        let current = crate::proc::stat(pid).unwrap();
+        let mut authenticated = request("w1:p1");
+        authenticated.caller = Some(crate::proc::Caller::new(
+            Some(pid),
+            Some(current.start),
+            Some("codex".into()),
+            Some("w1:p1".into()),
+            "agent",
+        ));
+        let turn = dispatcher
+            .dispatch("turn_start", &json!({}), &authenticated)
+            .unwrap();
+        assert_eq!(turn["pane_id"], "w1:p1");
+        assert!(turn["turn_id"].as_str().is_some());
+        let sent = dispatcher
+            .dispatch(
+                "send_text",
+                &json!({"target":"w1:p1", "text":"assembly smoke", "hold_while_typing":false}),
+                &authenticated,
+            )
+            .unwrap();
+        assert_eq!(sent["pane_id"], "w1:p1");
+        assert_eq!(sent["text"], "assembly smoke");
+        assert!(sent["id"].as_str().is_some());
         let desk = request("w3:p3");
         let denied = dispatcher
             .dispatch("review_sync", &json!({}), &desk)
