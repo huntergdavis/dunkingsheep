@@ -316,6 +316,10 @@ fn queued_fire_uses_live_template_and_updates_only_captured_same_id_dunker() {
     let captured = flock.dunks.begin_fire("d1").unwrap();
     // Restore the queued volatile status after taking the stable object handle for assertions.
     super::dunks::DunkList::queue_fire(&captured);
+    captured
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .send_count = 4;
 
     flock
         .dunks
@@ -323,7 +327,7 @@ fn queued_fire_uses_live_template_and_updates_only_captured_same_id_dunker() {
             "d1",
             None,
             &UpdateArgs {
-                text: Some("updated {id}".into()),
+                text: Some("updated {count}".into()),
                 ..UpdateArgs::default()
             },
         )
@@ -383,19 +387,19 @@ fn queued_fire_uses_live_template_and_updates_only_captured_same_id_dunker() {
         )
     );
     assert_eq!(
-        vec![("w1:p2".into(), "updated d1".into())],
+        vec![("w1:p2".into(), "updated 5".into())],
         env.typed,
         "the queued fire expands its current template when drained"
     );
     assert_eq!(json!(0), flock.dunks.get("d1").unwrap()["send_count"]);
     let captured = captured.lock().unwrap_or_else(|e| e.into_inner());
-    assert_eq!(1, captured.send_count);
-    assert_eq!(Some("updated d1"), captured.last_sent_text.as_deref());
+    assert_eq!(5, captured.send_count);
+    assert_eq!(Some("updated 5"), captured.last_sent_text.as_deref());
     assert_eq!(
         vec![(
             "d1".into(),
             true,
-            Some("updated {id}".into()),
+            Some("updated {count}".into()),
             Some("pid-1:start-1".into())
         )],
         env.attempts
