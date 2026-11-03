@@ -5,9 +5,14 @@
 //! `submit_text`/`send_guarded`/`delivery_state`, and the thread-timing assertions of the
 //! clear-to-send tests (the settle wait is injected, so wall-clock is not asserted).
 
+use super::commands_inbox::{InboxEnv, Nudge, RouteEntry};
+use super::mailbox::MailboxEnv;
 use super::sends::*;
 use super::Flock;
+use crate::db::ReadPool;
+use crate::error::DunkError;
 use crate::flock::panes::PaneInfoEnv;
+use crate::inbox_store::Store;
 use crate::terminal::screen::{box_text, AMBIGUOUS_COMPOSER};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
@@ -38,6 +43,9 @@ struct Pane {
     receipt_ok: bool,
     events: Vec<&'static str>,
     pending_override: Option<String>,
+    receipt_frames: Vec<Option<String>>,
+    receipt_forward:
+        Option<Box<dyn FnMut(Option<&mut Message>, &str, &str, bool, Option<&str>) -> bool>>,
 }
 
 impl SendEnv for Pane {
@@ -179,23 +187,403 @@ impl SendPreparationEnv for Pane {
 
     fn persist_typed_attempt(
         &mut self,
+        message: Option<&mut Message>,
         pane_id: &str,
         text: &str,
         press_enter: bool,
         generation: Option<&str>,
     ) -> bool {
         self.events.push("receipt");
+        self.receipt_frames
+            .push(message.as_deref().map(|message| message.id.clone()));
         self.typed_attempts.push((
             pane_id.into(),
             text.into(),
             press_enter,
             generation.map(str::to_owned),
         ));
-        self.receipt_ok
+        if let Some(forward) = self.receipt_forward.as_mut() {
+            forward(message, pane_id, text, press_enter, generation)
+        } else {
+            self.receipt_ok
+        }
     }
 }
 
 const P: &str = "w2:p1";
+
+type ReceiptForward = dyn FnMut(Option<&mut Message>, &str, &str, bool, Option<&str>) -> bool;
+
+fn real_receipt_forward(
+    flock: std::sync::Arc<Flock>,
+    pane: serde_json::Value,
+) -> Box<ReceiptForward> {
+    Box::new(move |message, pane_id, text, press_enter, generation| {
+        let Some(message) = message else {
+            // Python's low-level submit_text call has no message receipt context.
+            return true;
+        };
+        assert_eq!(message.attempt_generation.as_deref(), generation);
+        flock
+            .persist_typed_attempt(message, pane_id, text, press_enter, &pane)
+            .unwrap_or(false)
+    })
+}
+
+struct WorkerInbox {
+    pool: ReadPool,
+    store: Store,
+}
+
+impl MailboxEnv for WorkerInbox {
+    fn list_panes(&self) -> Vec<serde_json::Value> {
+        Vec::new()
+    }
+    fn list_panes_grouped(&self) -> Vec<serde_json::Value> {
+        Vec::new()
+    }
+    fn registered_pane(&self, _: &str) -> (bool, bool, Option<String>) {
+        (false, false, None)
+    }
+}
+
+impl InboxEnv for WorkerInbox {
+    fn caller_role(&self, _: &str) -> Result<String, DunkError> {
+        Ok("worker".into())
+    }
+    fn mailbox_override(&self) -> Option<String> {
+        None
+    }
+    fn backend_name(&self) -> Result<String, DunkError> {
+        Ok("test".into())
+    }
+    fn lane_panes(&self) -> Vec<String> {
+        Vec::new()
+    }
+    fn pool(&self) -> &ReadPool {
+        &self.pool
+    }
+    fn store(&self) -> &Store {
+        &self.store
+    }
+    fn now(&self) -> f64 {
+        crate::clock::now_s()
+    }
+    fn record_metric(
+        &self,
+        _: &str,
+        _: Option<&str>,
+        _: &str,
+        _: Option<&str>,
+        _: Option<i64>,
+        _: Option<i64>,
+    ) {
+    }
+    fn pm_routing(&self) -> Vec<RouteEntry> {
+        Vec::new()
+    }
+    fn fold_into_queued_notice(&self, _: &str, _: &str, _: &str) -> Option<String> {
+        None
+    }
+    fn send_now(&self, _: &str, _: &str, _: &str) -> Result<Nudge, DunkError> {
+        Ok(Nudge::default())
+    }
+    fn record_sent(&self, _: Option<&str>, _: &str, _: Option<&str>, _: usize, _: usize) {}
+    fn tasks_for_pane(&self, _: &str) -> Result<serde_json::Value, DunkError> {
+        Ok(serde_json::json!([]))
+    }
+}
+
+fn worker_inbox() -> (tempfile::TempDir, WorkerInbox) {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("inbox.db"), dir.path().join("blobs")).unwrap();
+    let pool = ReadPool::open(store.path(), 1).unwrap();
+    (dir, WorkerInbox { pool, store })
+}
+
+fn persistent_receipt_flock(dir: &std::path::Path) -> Flock {
+    let flock = Flock::new(dir.join("launches.json"), dir, true);
+    flock
+        .attach_status_state(super::status_runtime::StatusState::at_start(
+            "test",
+            dir.join("state.json"),
+            std::env::current_exe().unwrap(),
+            crate::config::Env::default(),
+        ))
+        .unwrap();
+    flock
+}
+
+struct NoopOutboxWake;
+impl OutboxWake for NoopOutboxWake {
+    fn ensure_worker(&self, _: &std::sync::Arc<Flock>, _: &str) -> Result<(), DunkError> {
+        Ok(())
+    }
+}
+
+struct NoopSnapshotStore;
+impl SnapshotStore for NoopSnapshotStore {
+    fn save(&self, _: &Flock) -> Result<(), DunkError> {
+        Ok(())
+    }
+}
+
+#[test]
+fn immediate_send_receipt_uses_the_exact_nonqueued_message() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = std::sync::Arc::new(persistent_receipt_flock(dir.path()));
+    let mut pane = Pane::default();
+    pane.panes = vec![serde_json::json!({"pane_id": P, "tab_label": "worker"})];
+    pane.receipt_forward = Some(real_receipt_forward(
+        flock.clone(),
+        serde_json::json!({"pane_id": P}),
+    ));
+
+    let result = flock
+        .send_now(
+            &serde_json::json!(P),
+            "same text",
+            DirectSendOptions {
+                hold_while_typing: false,
+                ..DirectSendOptions::default()
+            },
+            DirectTextMetadata {
+                press_enter: false,
+                ..DirectTextMetadata::default()
+            },
+            &mut pane,
+            &NoopOutboxWake,
+            &NoopSnapshotStore,
+            || None,
+        )
+        .unwrap();
+
+    let message_id = result["message_id"].as_str().unwrap();
+    assert_eq!("sent", result["status"]);
+    assert!(flock.outbox_snapshot().is_empty());
+    assert_eq!(vec![Some(message_id.to_owned())], pane.receipt_frames);
+    assert_eq!(
+        message_id,
+        flock.stuck_candidates.lock().unwrap()[P].message_id
+    );
+    let snapshot: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.path().join("state.json")).unwrap()).unwrap();
+    assert_eq!(message_id, snapshot["stuck_candidates"][P]["message_id"]);
+}
+
+#[test]
+fn queued_identical_text_receipts_keep_each_actual_message_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = std::sync::Arc::new(persistent_receipt_flock(dir.path()));
+    let mut first = Message::new("m-first", P, "worker", "identical", "test");
+    first.hold_while_typing = false;
+    first.press_enter = false;
+    let mut second = Message::new("m-second", P, "worker", "identical", "test");
+    second.hold_while_typing = false;
+    second.press_enter = false;
+    flock
+        .outbox
+        .lock()
+        .unwrap()
+        .insert(P.into(), vec![first, second]);
+
+    let mut pane = Pane::default();
+    pane.receipt_forward = Some(real_receipt_forward(
+        flock.clone(),
+        serde_json::json!({"pane_id": P}),
+    ));
+    assert_eq!(
+        DeliveryOutcome::Sent,
+        flock.deliver_message("m-first", 10.0, &mut pane, || None)
+    );
+    assert_eq!(
+        DeliveryOutcome::Sent,
+        flock.deliver_message("m-second", 11.0, &mut pane, || None)
+    );
+
+    assert_eq!(
+        vec![Some("m-first".into()), Some("m-second".into())],
+        pane.receipt_frames
+    );
+    assert_eq!(
+        vec![Some("m-first".into()), Some("m-second".into())],
+        flock
+            .message_history
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|message| Some(message.id.clone()))
+            .collect::<Vec<_>>()
+    );
+    let snapshot: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.path().join("state.json")).unwrap()).unwrap();
+    assert_eq!("m-second", snapshot["stuck_candidates"][P]["message_id"]);
+}
+
+#[test]
+fn captured_none_generation_is_forwarded_without_a_second_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = std::sync::Arc::new(Flock::new(
+        dir.path().join("launches.json"),
+        dir.path(),
+        false,
+    ));
+    let mut captured = Message::new("m-captured-generation", P, "worker", "first", "test");
+    captured.hold_while_typing = false;
+    captured.press_enter = false;
+    captured.attempt_generation = Some("captured-generation".into());
+    let mut message = Message::new("m-none-generation", P, "worker", "body", "test");
+    message.hold_while_typing = false;
+    message.press_enter = false;
+    flock
+        .outbox
+        .lock()
+        .unwrap()
+        .insert(P.into(), vec![captured, message]);
+    let mut pane = Pane::default();
+    pane.receipt_forward = Some(real_receipt_forward(
+        flock.clone(),
+        serde_json::json!({"pane_id": P}),
+    ));
+
+    assert_eq!(
+        DeliveryOutcome::Sent,
+        flock.deliver_message("m-captured-generation", 9.0, &mut pane, || None)
+    );
+    assert_eq!(Some("captured-generation".into()), pane.typed_attempts[0].3);
+    pane.attempt_generation_script
+        .borrow_mut()
+        .extend([None, Some("replacement-generation".into())]);
+    assert_eq!(
+        DeliveryOutcome::Sent,
+        flock.deliver_message("m-none-generation", 10.0, &mut pane, || None)
+    );
+    assert_eq!(None, pane.typed_attempts[1].3);
+    assert_eq!(
+        Some("replacement-generation".into()),
+        pane.attempt_generation_script
+            .borrow()
+            .front()
+            .cloned()
+            .flatten()
+    );
+    assert_eq!(
+        vec![
+            Some("m-captured-generation".into()),
+            Some("m-none-generation".into())
+        ],
+        pane.receipt_frames
+    );
+}
+
+#[test]
+fn low_level_text_submission_has_no_message_frame_or_recovery_authority() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = std::sync::Arc::new(persistent_receipt_flock(dir.path()));
+    let mut pane = Pane::default();
+    pane.receipt_forward = Some(real_receipt_forward(
+        flock.clone(),
+        serde_json::json!({"pane_id": P}),
+    ));
+    let guard = flock.typing_guard(P).unwrap();
+    let action = submit_text(&flock, &mut pane, P, "unframed", false, false, Some(&guard));
+    drop(guard);
+
+    assert!(action.ok);
+    assert_eq!(vec![None], pane.receipt_frames);
+    assert!(flock.stuck_candidates.lock().unwrap().is_empty());
+    assert!(!dir.path().join("state.json").exists());
+
+    pane.panes = vec![serde_json::json!({"pane_id": P, "tab_label": "worker"})];
+    let result = flock
+        .send_now(
+            &serde_json::json!(P),
+            "framed after low-level send",
+            DirectSendOptions {
+                hold_while_typing: false,
+                ..DirectSendOptions::default()
+            },
+            DirectTextMetadata {
+                press_enter: false,
+                ..DirectTextMetadata::default()
+            },
+            &mut pane,
+            &NoopOutboxWake,
+            &NoopSnapshotStore,
+            || None,
+        )
+        .unwrap();
+    assert_eq!("m1", result["message_id"]);
+    assert_eq!(vec![None, Some("m1".into())], pane.receipt_frames);
+    assert_eq!("m1", flock.stuck_candidates.lock().unwrap()[P].message_id);
+}
+
+#[test]
+fn failed_real_receipt_snapshot_prevents_the_first_enter() {
+    let dir = tempfile::tempdir().unwrap();
+    let blocker = dir.path().join("not-a-directory");
+    std::fs::write(&blocker, b"file").unwrap();
+    let flock = std::sync::Arc::new(Flock::new(
+        dir.path().join("launches.json"),
+        dir.path(),
+        true,
+    ));
+    flock
+        .attach_status_state(super::status_runtime::StatusState::at_start(
+            "test",
+            blocker.join("state.json"),
+            std::env::current_exe().unwrap(),
+            crate::config::Env::default(),
+        ))
+        .unwrap();
+    let mut pane = Pane::default();
+    pane.panes = vec![serde_json::json!({"pane_id": P, "tab_label": "worker"})];
+    pane.receipt_forward = Some(real_receipt_forward(
+        flock.clone(),
+        serde_json::json!({"pane_id": P}),
+    ));
+
+    let result = flock
+        .send_now(
+            &serde_json::json!(P),
+            "do not press enter",
+            DirectSendOptions {
+                hold_while_typing: false,
+                ..DirectSendOptions::default()
+            },
+            DirectTextMetadata::default(),
+            &mut pane,
+            &NoopOutboxWake,
+            &NoopSnapshotStore,
+            || None,
+        )
+        .unwrap();
+
+    assert_eq!("failed", result["status"]);
+    assert_eq!(vec![Some("m1".into())], pane.receipt_frames);
+    assert!(pane.keys.iter().all(|(_, key)| key != "Enter"));
+}
+
+#[test]
+fn outbox_worker_accepts_distinct_send_and_inbox_environment_types() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Flock::new(dir.path().join("launches.json"), dir.path(), false);
+    let (_inbox_dir, inbox) = worker_inbox();
+    let mut pane = Pane::default();
+    let stopped = std::sync::atomic::AtomicBool::new(false);
+    let mut reporter = super::loops_stuck::StalePanelReporter::new();
+    outbox_worker(
+        &flock,
+        &mut pane,
+        &inbox,
+        P,
+        &stopped,
+        &mut reporter,
+        &|_| true,
+        || None,
+    );
+    assert!(flock.outbox_snapshot().is_empty());
+}
 
 #[test]
 fn direct_key_send_serializes_keys_and_immediate_mode_delivers_without_queueing() {
