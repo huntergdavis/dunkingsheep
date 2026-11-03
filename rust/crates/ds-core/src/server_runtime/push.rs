@@ -253,11 +253,13 @@ mod tests {
     }
 
     impl PushEnv for PushClaimEnv {
-        fn list_panes(&self) -> Result<Vec<Value>, crate::error::DunkError> {
-            Ok(vec![serde_json::json!({
-                "pane_id": self.pane_id,
-                "agent_status": "idle"
-            })])
+        fn list_panes<'a>(&'a self) -> LoopFuture<'a, Result<Vec<Value>, crate::error::DunkError>> {
+            Box::pin(async move {
+                Ok(vec![serde_json::json!({
+                    "pane_id": self.pane_id,
+                    "agent_status": "idle"
+                })])
+            })
         }
 
         fn caller_role(&self, _: &str, _: Option<&Value>) -> String {
@@ -280,11 +282,13 @@ mod tests {
             Some(true)
         }
 
-        fn unread_mail(&self, _: &str) -> bool {
-            self.unread
+        fn unread_mail<'a>(&'a self, _: &'a str) -> LoopFuture<'a, bool> {
+            Box::pin(async move { self.unread })
         }
 
-        fn announce_task(&self, _: &str, _: &Task, _: f64) {}
+        fn announce_task<'a>(&'a self, _: &'a str, _: &'a Task, _: f64) -> LoopFuture<'a, ()> {
+            Box::pin(async move {})
+        }
     }
 
     #[test]
