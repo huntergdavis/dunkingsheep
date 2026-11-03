@@ -139,7 +139,7 @@ impl LoopRuntimeAdapter {
     pub(crate) fn helper_stuckenv_closed(&self) -> bool {
         self.runtime_services
             .as_ref()
-            .map_or(true, |services| services.is_stopped())
+            .is_none_or(|services| services.is_stopped())
     }
 
     #[allow(dead_code)] // The complete StuckEnv assembly is owned by the dependent runtime leaf.
