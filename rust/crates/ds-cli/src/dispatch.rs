@@ -1615,11 +1615,11 @@ fn command_output_timeout(
     timeout: Duration,
 ) -> Result<std::process::Output, String> {
     let mut child = command.spawn().map_err(|error| error.to_string())?;
-    let stdout = child
+    let mut stdout = child
         .stdout
         .take()
         .ok_or_else(|| "guard check stdout was not captured".to_string())?;
-    let stderr = child
+    let mut stderr = child
         .stderr
         .take()
         .ok_or_else(|| "guard check stderr was not captured".to_string())?;
