@@ -2634,6 +2634,14 @@ mod tests {
             )
             .await
             .unwrap();
+        store
+            .set_verdict(&accept.id, "accept", Some("%1"))
+            .await
+            .unwrap();
+        store
+            .task_complete(&accept.id, Some("%1"), true)
+            .await
+            .unwrap();
         let needs_fix = store
             .add_with(
                 "global",
@@ -2650,24 +2658,11 @@ mod tests {
             .await
             .unwrap();
         store
-            .writer
-            .call({
-                let accept_id = accept.id.clone();
-                let needs_fix_id = needs_fix.id.clone();
-                move |conn| {
-                    conn.execute(
-                        "UPDATE tasks SET status='done', completed_by='%1', verdict='accept' WHERE id=?",
-                        params![accept_id],
-                    )
-                    .map_err(db::map_sqlite)?;
-                    conn.execute(
-                        "UPDATE tasks SET status='done', completed_by='%2', verdict='needs-fix' WHERE id=?",
-                        params![needs_fix_id],
-                    )
-                    .map_err(db::map_sqlite)?;
-                    Ok(())
-                }
-            })
+            .set_verdict(&needs_fix.id, "needs-fix", Some("%2"))
+            .await
+            .unwrap();
+        store
+            .task_complete(&needs_fix.id, Some("%2"), true)
             .await
             .unwrap();
 

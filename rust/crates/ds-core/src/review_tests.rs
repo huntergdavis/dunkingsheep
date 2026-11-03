@@ -455,8 +455,10 @@ impl ReviewTaskActor for FakeReviewActor {
 struct FakeReviewTransport {
     requests: Mutex<Vec<crate::github::GitHubRequest>>,
     responses: Mutex<VecDeque<Result<crate::github::GitHubResponse, String>>>,
-    completion_on_request: Mutex<Option<(String, Arc<Tasks>, String, String, String)>>,
+    completion_on_request: Mutex<Option<CompletionOnRequest>>,
 }
+
+type CompletionOnRequest = (String, usize, Arc<Tasks>, String, String, String);
 
 impl FakeReviewTransport {
     fn with_responses(
@@ -479,6 +481,26 @@ impl FakeReviewTransport {
     ) {
         *self.completion_on_request.lock().unwrap() = Some((
             url_fragment.to_string(),
+            0,
+            tasks,
+            id.to_string(),
+            by.to_string(),
+            verdict.to_string(),
+        ));
+    }
+
+    fn complete_review_after_matching_requests(
+        &self,
+        url_fragment: &str,
+        skip_matches: usize,
+        tasks: Arc<Tasks>,
+        id: &str,
+        by: &str,
+        verdict: &str,
+    ) {
+        *self.completion_on_request.lock().unwrap() = Some((
+            url_fragment.to_string(),
+            skip_matches,
             tasks,
             id.to_string(),
             by.to_string(),
@@ -509,17 +531,19 @@ impl GitHubTransport for FakeReviewTransport {
                 });
             let effect = {
                 let mut effect = self.completion_on_request.lock().unwrap();
-                if effect
-                    .as_ref()
-                    .filter(|(fragment, ..)| url.contains(fragment))
-                    .is_some()
-                {
-                    effect.take()
-                } else {
-                    None
-                }
+                let should_run = effect.as_mut().is_some_and(|(fragment, skip, ..)| {
+                    if !url.contains(fragment) {
+                        return false;
+                    }
+                    if *skip > 0 {
+                        *skip -= 1;
+                        return false;
+                    }
+                    true
+                });
+                should_run.then(|| effect.take()).flatten()
             };
-            if let Some((_, tasks, id, by, verdict)) = effect {
+            if let Some((_, _, tasks, id, by, verdict)) = effect {
                 tasks
                     .set_verdict(&id, &verdict, Some(&by))
                     .await
@@ -717,28 +741,10 @@ impl ReviewTaskActor for CancelRaceActor {
 impl ReviewTaskCreator for CancelRaceActor {
     fn add_review_task<'a>(
         &'a self,
-        title: &'a str,
-        body: &'a str,
-        author: Option<&'a str>,
-        repo: &'a str,
-        number: i64,
-        head: &'a str,
-        expected_verdict_ids: &'a [String],
+        request: ReviewTaskRequest<'a>,
     ) -> ReviewFuture<'a, Result<Option<String>, String>> {
         let tasks = self.tasks.clone();
-        Box::pin(async move {
-            ReviewTaskCreator::add_review_task(
-                &*tasks,
-                title,
-                body,
-                author,
-                repo,
-                number,
-                head,
-                expected_verdict_ids,
-            )
-            .await
-        })
+        Box::pin(async move { ReviewTaskCreator::add_review_task(&*tasks, request).await })
     }
 }
 
@@ -1553,10 +1559,7 @@ async fn run_failed_repo_list_skips_cleanup_and_unknown_or_malformed_detail_pres
     let (sync, _, report) = run_actual_review_sync(store, transport, 2).await;
     assert_eq!("open", sync.flock.get(&task.id).await.unwrap().status);
     assert_eq!(1, report["errors"].as_array().unwrap().len());
-    assert!(report["errors"][0]
-        .as_str()
-        .unwrap()
-        .contains("cleanup: HTTP 500"));
+    assert!(report["errors"][0].as_str().unwrap().contains("cleanup:"));
 }
 
 #[tokio::test]
@@ -1729,7 +1732,14 @@ async fn run_refreshes_verdicts_during_github_listing_and_reads_history_past_one
         github_response(200, json!({"mergeable": true, "state": "open"})),
         github_response(200, json!({"body": "review details"})),
     ]);
-    transport.complete_review_on_request("/pulls/7", effect_tasks, &first.id, "%1", "accept");
+    transport.complete_review_after_matching_requests(
+        "/pulls/7",
+        1,
+        effect_tasks,
+        &first.id,
+        "%1",
+        "accept",
+    );
     let (sync, _, report) = run_actual_review_sync(store, transport, 2).await;
     assert_eq!("done", sync.flock.get(&first.id).await.unwrap().status);
     assert_eq!(

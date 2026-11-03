@@ -283,14 +283,18 @@ impl ReviewRunContext for Flock {
 pub trait ReviewTaskCreator {
     fn add_review_task<'a>(
         &'a self,
-        title: &'a str,
-        body: &'a str,
-        author: Option<&'a str>,
-        repo: &'a str,
-        number: i64,
-        head: &'a str,
-        expected_verdict_ids: &'a [String],
+        request: ReviewTaskRequest<'a>,
     ) -> ReviewFuture<'a, Result<Option<String>, String>>;
+}
+
+pub struct ReviewTaskRequest<'a> {
+    pub title: &'a str,
+    pub body: &'a str,
+    pub author: Option<&'a str>,
+    pub repo: &'a str,
+    pub number: i64,
+    pub head: &'a str,
+    pub expected_verdict_ids: &'a [String],
 }
 
 /// Runtime inputs read from the existing owner/Flock sources for one timer pass.
@@ -367,30 +371,24 @@ impl ReviewTokenSource for crate::github::Tokens {
 impl ReviewTaskCreator for Tasks {
     fn add_review_task<'a>(
         &'a self,
-        title: &'a str,
-        body: &'a str,
-        author: Option<&'a str>,
-        repo: &'a str,
-        number: i64,
-        head: &'a str,
-        expected_verdict_ids: &'a [String],
+        request: ReviewTaskRequest<'a>,
     ) -> ReviewFuture<'a, Result<Option<String>, String>> {
         Box::pin(async move {
             self.add_review_with_verdict_guard(
                 "global",
-                title,
-                body,
+                request.title,
+                request.body,
                 AddOptions {
                     priority: Some("high".into()),
                     kind: Some("review".into()),
-                    author: author.map(str::to_owned),
-                    repo: Some(repo.into()),
-                    pr: Some(number.to_string()),
-                    head: Some(head.into()),
+                    author: request.author.map(str::to_owned),
+                    repo: Some(request.repo.into()),
+                    pr: Some(request.number.to_string()),
+                    head: Some(request.head.into()),
                     created_by: Some("review-sync".into()),
                     ..Default::default()
                 },
-                expected_verdict_ids,
+                request.expected_verdict_ids,
             )
             .await
             .map(|task| task.map(|task| task.id))
@@ -402,13 +400,7 @@ impl ReviewTaskCreator for Tasks {
 impl ReviewTaskCreator for Flock {
     fn add_review_task<'a>(
         &'a self,
-        title: &'a str,
-        body: &'a str,
-        author: Option<&'a str>,
-        repo: &'a str,
-        number: i64,
-        head: &'a str,
-        expected_verdict_ids: &'a [String],
+        request: ReviewTaskRequest<'a>,
     ) -> ReviewFuture<'a, Result<Option<String>, String>> {
         let tasks = attached_review_tasks(self);
         Box::pin(async move {
@@ -416,19 +408,19 @@ impl ReviewTaskCreator for Flock {
             tasks
                 .add_review_with_verdict_guard(
                     "global",
-                    title,
-                    body,
+                    request.title,
+                    request.body,
                     AddOptions {
                         priority: Some("high".into()),
                         kind: Some("review".into()),
-                        author: author.map(str::to_owned),
-                        repo: Some(repo.into()),
-                        pr: Some(number.to_string()),
-                        head: Some(head.into()),
+                        author: request.author.map(str::to_owned),
+                        repo: Some(request.repo.into()),
+                        pr: Some(request.number.to_string()),
+                        head: Some(request.head.into()),
                         created_by: Some("review-sync".into()),
                         ..Default::default()
                     },
-                    expected_verdict_ids,
+                    request.expected_verdict_ids,
                 )
                 .await
                 .map(|task| task.map(|task| task.id))
@@ -915,15 +907,15 @@ where
             .collect::<Vec<_>>();
         match self
             .flock
-            .add_review_task(
-                &title,
-                &body,
-                Some(first_lane),
+            .add_review_task(ReviewTaskRequest {
+                title: &title,
+                body: &body,
+                author: Some(first_lane),
                 repo,
                 number,
                 head,
-                &expected_verdict_ids,
-            )
+                expected_verdict_ids: &expected_verdict_ids,
+            })
             .await
         {
             Ok(id) => id,
@@ -1063,9 +1055,12 @@ where
                             "head moved to {}; delta review filed",
                             pr.head.chars().take(12).collect::<String>()
                         );
-                        if dry_run {
-                            append_report(&mut report, "cancelled", Value::String(stale.id));
-                        } else if self.cancel_review_if_live(&stale.id, &reason).await? {
+                        let cancelled = if dry_run {
+                            true
+                        } else {
+                            self.cancel_review_if_live(&stale.id, &reason).await?
+                        };
+                        if cancelled {
                             append_report(&mut report, "cancelled", Value::String(stale.id));
                         }
                     }
@@ -1190,15 +1185,15 @@ where
                 let body = review_body(&pr, &detail, author.as_deref());
                 let id = match self
                     .flock
-                    .add_review_task(
-                        &title,
-                        &body,
-                        author.as_deref(),
-                        &repo,
-                        pr.number,
-                        &pr.head,
-                        &expected_verdict_ids,
-                    )
+                    .add_review_task(ReviewTaskRequest {
+                        title: &title,
+                        body: &body,
+                        author: author.as_deref(),
+                        repo: &repo,
+                        number: pr.number,
+                        head: &pr.head,
+                        expected_verdict_ids: &expected_verdict_ids,
+                    })
                     .await
                 {
                     Ok(Some(id)) => id,
