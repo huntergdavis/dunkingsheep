@@ -435,13 +435,17 @@ async fn authenticate(
     scheme: RequestScheme,
 ) -> Result<Identity, Response> {
     if let Some(origin) = headers
-        .get(header::ORIGIN)
-        .and_then(|value| value.to_str().ok())
+        .get_all(header::ORIGIN)
+        .iter()
+        .next()
+        .map(header_latin1)
     {
         let host = headers
-            .get(header::HOST)
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or("");
+            .get_all(header::HOST)
+            .iter()
+            .next()
+            .map(header_latin1)
+            .unwrap_or_default();
         let scheme_text = match scheme {
             RequestScheme::Http => "http",
             RequestScheme::Https => "https",
@@ -453,22 +457,64 @@ async fn authenticate(
             ));
         }
     }
-    let bearer = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
+    let authorization = headers
+        .get_all(header::AUTHORIZATION)
+        .iter()
+        .next()
+        .map(header_latin1);
+    let bearer = authorization
+        .as_deref()
         .and_then(|value| value.strip_prefix("Bearer "));
-    let cookie = headers
-        .get(header::COOKIE)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| {
-            value.split(';').find_map(|part| {
-                let (name, value) = part.trim().split_once('=')?;
-                (name.trim() == "vp_session").then(|| value.trim())
-            })
-        });
-    auth.identity(bearer, cookie)
+    let cookie = session_cookie(headers);
+    auth.identity(bearer, cookie.as_deref())
         .await
         .map_err(auth_error_response)
+}
+
+fn header_latin1(value: &HeaderValue) -> String {
+    value
+        .as_bytes()
+        .iter()
+        .map(|byte| char::from(*byte))
+        .collect()
+}
+
+fn session_cookie(headers: &HeaderMap) -> Option<String> {
+    let mut session = None;
+    for header in headers.get_all(header::COOKIE).iter() {
+        let value = header_latin1(header);
+        for part in value.split(';') {
+            let (name, value) = part.split_once('=').unwrap_or(("", part));
+            let name = name.trim();
+            let value = value.trim();
+            if name == "vp_session" {
+                session = Some(python_cookie_unquote(value));
+            }
+        }
+    }
+    session
+}
+
+fn python_cookie_unquote(value: &str) -> String {
+    let characters: Vec<char> = value.chars().collect();
+    if characters.len() < 2 || characters[0] != '"' || characters[characters.len() - 1] != '"' {
+        return value.to_owned();
+    }
+    let mut result = String::new();
+    let mut index = 1;
+    let end = characters.len() - 1;
+    while index < end {
+        if characters[index] == '\\' {
+            index += 1;
+            if index < end {
+                result.push(characters[index]);
+            }
+        } else {
+            result.push(characters[index]);
+        }
+        index += 1;
+    }
+    result
 }
 
 fn auth_error_response(error: AuthError) -> Response {
@@ -560,10 +606,17 @@ mod tests {
             cookie: Option<&'a str>,
         ) -> super::super::auth::AuthFuture<'a, Result<Identity, AuthError>> {
             Box::pin(async move {
-                match bearer.or(cookie) {
+                let valid_bearer = match bearer {
                     Some("owner-token") => Ok(Identity::Owner),
                     Some("api-token") => Ok(Identity::Api),
                     _ => Err(AuthError::SignInRequired),
+                };
+                match valid_bearer {
+                    Ok(identity) => Ok(identity),
+                    Err(_) => match cookie {
+                        Some("owner-token") => Ok(Identity::Owner),
+                        _ => Err(AuthError::SignInRequired),
+                    },
                 }
             })
         }
@@ -680,6 +733,80 @@ mod tests {
         assert_eq!(
             *backend.calls.lock().unwrap(),
             vec!["post:Owner:pane-worker:hello"]
+        );
+    }
+
+    #[test]
+    fn post_message_rejects_non_utf8_origin_instead_of_treating_it_as_absent() {
+        let backend = Arc::new(FakeMessages::default());
+        let mut request = request(
+            "/api/messages",
+            r#"{"channel":"pane-worker","body":"hello"}"#,
+            "owner-token",
+        );
+        request.headers_mut().insert(
+            header::ORIGIN,
+            HeaderValue::from_bytes(b"http://desk.test\xff").unwrap(),
+        );
+        let result = block_on(app(backend.clone()).oneshot(request)).unwrap();
+        let (status, body) = response(result);
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body, json!({"detail": "Cross-origin request refused"}));
+        assert!(backend.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn post_message_cookie_uses_all_headers_last_value_and_python_unquote() {
+        let backend = Arc::new(FakeMessages::default());
+        let cookie_cases: [&[&str]; 3] = [
+            &["vp_session=expired; vp_session=\"owner-token\""],
+            &["vp_session=expired; vp_session=\"owner\\-token\""],
+            &["vp_session=expired", "vp_session=owner-token"],
+        ];
+        for cookie_headers in cookie_cases {
+            let mut request = request(
+                "/api/messages",
+                r#"{"channel":"pane-worker","body":"hello"}"#,
+                "expired-token",
+            );
+            for value in cookie_headers {
+                request
+                    .headers_mut()
+                    .append(header::COOKIE, HeaderValue::from_static(value));
+            }
+            let result = block_on(app(backend.clone()).oneshot(request)).unwrap();
+            let (status, _) = response(result);
+            assert_eq!(status, StatusCode::OK);
+        }
+        assert_eq!(
+            *backend.calls.lock().unwrap(),
+            vec![
+                "post:Owner:pane-worker:hello",
+                "post:Owner:pane-worker:hello"
+            ]
+        );
+    }
+
+    #[test]
+    fn post_message_prefers_valid_bearer_and_falls_back_to_cookie() {
+        let backend = Arc::new(FakeMessages::default());
+        for token in ["api-token", "expired-token"] {
+            let mut request = request(
+                "/api/messages",
+                r#"{"channel":"pane-worker","body":"hello"}"#,
+                token,
+            );
+            request.headers_mut().append(
+                header::COOKIE,
+                HeaderValue::from_static("vp_session=owner-token"),
+            );
+            let result = block_on(app(backend.clone()).oneshot(request)).unwrap();
+            let (status, _) = response(result);
+            assert_eq!(status, StatusCode::OK);
+        }
+        assert_eq!(
+            *backend.calls.lock().unwrap(),
+            vec!["post:Api:pane-worker:hello", "post:Owner:pane-worker:hello"]
         );
     }
 
