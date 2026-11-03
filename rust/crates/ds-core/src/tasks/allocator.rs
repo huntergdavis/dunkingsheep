@@ -799,9 +799,19 @@ struct TimeoutRestore<'a> {
     previous_ms: u64,
     quarantine: &'a std::sync::atomic::AtomicBool,
     restored: bool,
+    #[cfg(test)]
+    fail_restore: bool,
 }
 impl TimeoutRestore<'_> {
     fn restore(&mut self) -> Result<(), DunkError> {
+        #[cfg(test)]
+        if self.fail_restore {
+            self.quarantine
+                .store(true, std::sync::atomic::Ordering::Release);
+            return Err(DunkError::Unavailable(
+                "injected timeout restore failure".into(),
+            ));
+        }
         match self
             .conn
             .busy_timeout(std::time::Duration::from_millis(self.previous_ms))
@@ -858,7 +868,7 @@ impl Tasks {
                     .then_some((pane, candidate.caller))
             }).collect::<BTreeMap<_, _>>();
             let previous_ms: u64 = conn.pragma_query_value(None, "busy_timeout", |r| r.get(0)).map_err(db::map_sqlite)?;
-            let mut restore = TimeoutRestore { conn, previous_ms, quarantine, restored: false };
+            let mut restore = TimeoutRestore { conn, previous_ms, quarantine, restored: false, #[cfg(test)] fail_restore: false };
             conn.busy_timeout(std::time::Duration::ZERO).map_err(db::map_sqlite)?;
             let outcome = (|| {
                 let tx = match rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate) {

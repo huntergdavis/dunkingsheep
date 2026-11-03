@@ -1229,3 +1229,120 @@ async fn guarded_allocation_yields_to_outbox_waker_using_same_writer() {
     thread.join().unwrap().unwrap();
     assert_eq!(flock.outbox.lock().unwrap()["%1"].len(), 1);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn guarded_allocation_yields_to_other_database_writer_callback() {
+    use crate::flock::{panes::Stores, Flock};
+    use crate::tasks::advance::{AdvanceOptions, Planner};
+    use std::sync::{mpsc, Arc, Mutex};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("tasks.db");
+    let first = Arc::new(Tasks::open(&path).await.unwrap());
+    first.allocation_init().await.unwrap();
+    let second = Arc::new(Tasks::open(&path).await.unwrap());
+    let flock = Arc::new(Flock::new(
+        dir.path().join("launches"),
+        dir.path().join("lanes"),
+        false,
+    ));
+    flock.attach_stores(Stores {
+        tasks: Some(Arc::clone(&first)),
+        ..Stores::default()
+    });
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let release_rx = Mutex::new(release_rx);
+    let from_planner = Arc::clone(&flock);
+    let planner: Arc<Planner> = Arc::new(move |_| {
+        started_tx.send(()).unwrap();
+        release_rx.lock().unwrap().recv().unwrap();
+        let _outbox = from_planner.outbox.lock().unwrap();
+        serde_json::Map::from_iter([("action".into(), json!("skip"))])
+    });
+    let other = tokio::spawn(async move {
+        second
+            .advance_next_job("%1", "turn.end", AdvanceOptions::default(), planner)
+            .await
+    });
+    started_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        first.allocation_try_guarded(Arc::clone(&flock), BTreeMap::new()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(matches!(result, GuardedAllocation::RetryBusy));
+    release_tx.send(()).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), other)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn allocator_timeout_restore_failure_quarantines_real_writer() {
+    let tasks = store("restore-failure").await;
+    let error = tasks
+        .writer
+        .call_quarantinable(|conn, quarantine| {
+            let previous_ms = conn
+                .pragma_query_value(None, "busy_timeout", |row| row.get(0))
+                .map_err(crate::db::map_sqlite)?;
+            let mut restore = TimeoutRestore {
+                conn,
+                previous_ms,
+                quarantine,
+                restored: false,
+                fail_restore: true,
+            };
+            conn.busy_timeout(std::time::Duration::ZERO)
+                .map_err(crate::db::map_sqlite)?;
+            restore.restore()
+        })
+        .await
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("injected timeout restore failure"));
+    assert!(
+        tasks.allocation_status().await.is_err(),
+        "quarantined actor must reject later jobs"
+    );
+}
+
+#[tokio::test]
+async fn allocator_timeout_restores_after_actor_panic() {
+    let tasks = store("restore-panic").await;
+    let outcome: Result<(), DunkError> = tasks
+        .writer
+        .call_quarantinable(|conn, quarantine| {
+            let previous_ms = conn
+                .pragma_query_value(None, "busy_timeout", |row| row.get(0))
+                .map_err(crate::db::map_sqlite)?;
+            let _restore = TimeoutRestore {
+                conn,
+                previous_ms,
+                quarantine,
+                restored: false,
+                fail_restore: false,
+            };
+            conn.busy_timeout(std::time::Duration::ZERO)
+                .map_err(crate::db::map_sqlite)?;
+            panic!("injected allocation panic");
+        })
+        .await;
+    assert!(outcome.is_err());
+    let timeout: u64 = tasks
+        .writer
+        .call(|conn| {
+            conn.pragma_query_value(None, "busy_timeout", |row| row.get(0))
+                .map_err(crate::db::map_sqlite)
+        })
+        .await
+        .unwrap();
+    assert_eq!(timeout, crate::db::BUSY_TIMEOUT_MS);
+}
