@@ -32,6 +32,7 @@ pub(crate) struct RuntimeDispatcher {
     handlers: api::Dispatcher,
 }
 
+#[allow(dead_code)] // Used when the staged dispatcher is wired by server startup.
 struct RolePaneQuery<'a> {
     list_panes_grouped: &'a dyn Fn() -> Result<Vec<Value>, DunkError>,
     get_pane: &'a dyn Fn(&str) -> Option<Value>,
