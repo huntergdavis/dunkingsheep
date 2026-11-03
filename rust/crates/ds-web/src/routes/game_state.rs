@@ -1106,16 +1106,56 @@ fn bearer_value(headers: &HeaderMap) -> Option<String> {
 }
 
 fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
-    headers
-        .get_all(header::COOKIE)
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .flat_map(|value| value.split(';'))
-        .filter_map(|part| {
-            let (key, value) = part.trim().split_once('=')?;
-            (key == name).then(|| value.to_owned())
-        })
-        .last()
+    let mut cookie = None;
+    for value in headers.get_all(header::COOKIE).iter() {
+        let value = value
+            .as_bytes()
+            .iter()
+            .map(|byte| char::from(*byte))
+            .collect::<String>();
+        for part in value.split(';') {
+            let (key, value) = part.split_once('=').unwrap_or(("", part));
+            if key.trim() == name {
+                cookie = Some(unquote_cookie_value(value.trim()));
+            }
+        }
+    }
+    cookie
+}
+
+fn unquote_cookie_value(value: &str) -> String {
+    let Some(value) = value
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+    else {
+        return value.to_owned();
+    };
+
+    let chars = value.chars().collect::<Vec<_>>();
+    let mut unquoted = String::with_capacity(value.len());
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index] == '\\' && index + 1 < chars.len() {
+            if index + 3 < chars.len()
+                && matches!(chars[index + 1], '0'..='3')
+                && matches!(chars[index + 2], '0'..='7')
+                && matches!(chars[index + 3], '0'..='7')
+            {
+                let octal = (chars[index + 1] as u32 - '0' as u32) * 64
+                    + (chars[index + 2] as u32 - '0' as u32) * 8
+                    + (chars[index + 3] as u32 - '0' as u32);
+                unquoted.push(char::from(octal as u8));
+                index += 4;
+            } else {
+                unquoted.push(chars[index + 1]);
+                index += 2;
+            }
+        } else {
+            unquoted.push(chars[index]);
+            index += 1;
+        }
+    }
+    unquoted
 }
 
 fn auth_error_response(error: AuthError) -> Response {
@@ -1293,6 +1333,26 @@ mod tests {
             Some("invalid-second".to_owned()),
             cookie_value(&headers, "vp_session")
         );
+    }
+
+    #[test]
+    fn quoted_session_cookie_values_match_starlette_unquoting() {
+        for (header_value, expected) in [
+            (r#"vp_session="token-value""#, "token-value"),
+            (r#"vp_session="session\-token""#, "session-token"),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.append(
+                header::COOKIE,
+                HeaderValue::from_str(header_value).unwrap(),
+            );
+
+            assert_eq!(
+                Some(expected.to_owned()),
+                cookie_value(&headers, "vp_session"),
+                "cookie header {header_value:?}"
+            );
+        }
     }
 
     fn block_on<F: Future>(future: F) -> F::Output {
