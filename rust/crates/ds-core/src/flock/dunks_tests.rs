@@ -314,6 +314,37 @@ fn fire_reports_guarded_send_failure_and_records_last_error() {
 }
 
 #[test]
+fn immediate_dunk_retarget_during_guarded_preflight_keeps_target_placeholder_pinned() {
+    let (_dir, flock) = new_flock();
+    load_one_fire_dunk(&flock, "deliver to {target} {count}", None);
+    let flock = Arc::new(flock);
+    let mut env = fire_env(false);
+    *env.mutate_dunk_target_on_read
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((
+        Arc::clone(&flock),
+        json!({"pane_id": "w1:p3", "tab_label": "Other agent"}),
+    ));
+
+    let result = flock
+        .fire(
+            "d1",
+            &mut env,
+            &NoopOutboxWake,
+            Arc::new(CapturingSnapshotStore::default()),
+            || None,
+        )
+        .unwrap();
+
+    assert_eq!(json!(true), result["ok"]);
+    assert_eq!(
+        vec![("w1:p2".into(), "deliver to Agent 1".into())],
+        env.typed
+    );
+    assert_eq!("w1:p3", flock.dunks.get("d1").unwrap()["target_pane_id"]);
+}
+
+#[test]
 fn queued_fire_uses_live_template_and_updates_only_captured_same_id_dunker() {
     let (_dir, flock) = new_flock();
     load_one_fire_dunk(&flock, "first {id}", None);
@@ -615,7 +646,7 @@ fn cancelled_queued_dunk_does_not_allocate_or_submit_an_attempt() {
 #[test]
 fn deferred_dunk_retarget_during_guarded_preflight_keeps_the_outer_pane() {
     let (_dir, flock) = new_flock();
-    load_one_fire_dunk(&flock, "continue", None);
+    load_one_fire_dunk(&flock, "deliver to {target} {count}", None);
     let flock = Arc::new(flock);
     let mut env = fire_env(false);
     env.screen = "Press Enter to confirm or Esc to cancel".into();
@@ -655,13 +686,16 @@ fn deferred_dunk_retarget_during_guarded_preflight_keeps_the_outer_pane() {
         )
     );
 
-    assert_eq!(vec![("w1:p2".into(), "continue".into())], env.typed);
+    assert_eq!(
+        vec![("w1:p2".into(), "deliver to Agent 1".into())],
+        env.typed
+    );
     assert_eq!("w1:p3", flock.dunks.get("d1").unwrap()["target_pane_id"]);
     assert_eq!(
         vec![(
             "d1".into(),
             true,
-            Some("continue".into()),
+            Some("deliver to {target} {count}".into()),
             Some("pid-1:start-1".into())
         )],
         env.attempts

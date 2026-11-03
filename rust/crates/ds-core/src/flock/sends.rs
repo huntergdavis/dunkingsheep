@@ -1394,7 +1394,10 @@ fn submit_dunk_action(
     env: &mut dyn SendPreparationEnv,
     guard: &TypingGuard<'_>,
 ) -> Result<SendAction, String> {
-    let dunk = super::dunks::DunkList::send_snapshot(&action.dunker);
+    let dunk = super::dunks::DunkList::send_snapshot_for_target(
+        &action.dunker,
+        Some(guarded_target_label),
+    );
     if dunk.text.is_empty() {
         return Ok(SendAction::completed(true, "empty text, nothing sent"));
     }

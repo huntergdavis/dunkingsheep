@@ -383,6 +383,14 @@ impl Dunker {
 
 /// `expand_template`: the known `{placeholders}`; other braces are left alone.
 pub fn expand_template(text: &str, dunker: &Dunker) -> String {
+    expand_template_for_target(text, dunker, None)
+}
+
+fn expand_template_for_target(
+    text: &str,
+    dunker: &Dunker,
+    guarded_target_label: Option<&str>,
+) -> String {
     let now = chrono::Local::now();
     template_re()
         .replace_all(text, |caps: &regex::Captures| match &caps[1] {
@@ -390,7 +398,9 @@ pub fn expand_template(text: &str, dunker: &Dunker) -> String {
             "name" if dunker.name.is_empty() => dunker.id.clone(),
             "name" => dunker.name.clone(),
             "count" => (dunker.send_count + 1).to_string(),
-            "target" => dunker.target_label(),
+            "target" => guarded_target_label
+                .map(str::to_owned)
+                .unwrap_or_else(|| dunker.target_label()),
             "interval" => format_interval(dunker.interval_minutes),
             "time" => now.format("%H:%M:%S").to_string(),
             _ => now.format("%Y-%m-%d").to_string(),
@@ -551,13 +561,25 @@ impl DunkList {
     }
 
     pub(super) fn send_snapshot(handle: &DunkerHandle) -> DunkSendSnapshot {
+        Self::send_snapshot_for_target(handle, None)
+    }
+
+    pub(super) fn send_snapshot_for_target(
+        handle: &DunkerHandle,
+        guarded_target_label: Option<&str>,
+    ) -> DunkSendSnapshot {
         let dunker = Self::lock_dunker(handle);
         let template = dunker.text.clone();
+        let target_label = guarded_target_label
+            .map(str::to_owned)
+            .unwrap_or_else(|| dunker.target_label());
         DunkSendSnapshot {
             id: dunker.id.clone(),
             pane_id: dunker.target_pane_id.clone().unwrap_or_default(),
-            target_label: dunker.target_label(),
-            text: expand_template(&template, &dunker).trim().to_owned(),
+            target_label,
+            text: expand_template_for_target(&template, &dunker, guarded_target_label)
+                .trim()
+                .to_owned(),
             template,
             detector_fallback: dunker.detector_fallback,
             hold_while_typing: dunker.hold_while_typing,
