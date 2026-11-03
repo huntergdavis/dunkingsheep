@@ -11,6 +11,7 @@
 
 use serde_json::{Map, Value};
 use std::cell::RefCell;
+use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -1614,25 +1615,57 @@ fn command_output_timeout(
     timeout: Duration,
 ) -> Result<std::process::Output, String> {
     let mut child = command.spawn().map_err(|error| error.to_string())?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "guard check stdout was not captured".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "guard check stderr was not captured".to_string())?;
+    let stdout_reader = std::thread::spawn(move || {
+        let mut output = Vec::new();
+        stdout.read_to_end(&mut output).map(|()| output)
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut output = Vec::new();
+        stderr.read_to_end(&mut output).map(|()| output)
+    });
     let started = Instant::now();
-    loop {
-        if child
-            .try_wait()
-            .map_err(|error| error.to_string())?
-            .is_some()
-        {
-            return child.wait_with_output().map_err(|error| error.to_string());
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) if started.elapsed() < timeout => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break Err(format!(
+                    "guard check timed out after {} seconds",
+                    timeout.as_secs()
+                ));
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break Err(error.to_string());
+            }
         }
-        if started.elapsed() >= timeout {
-            let _ = child.kill();
-            let _ = child.wait_with_output();
-            return Err(format!(
-                "guard check timed out after {} seconds",
-                timeout.as_secs()
-            ));
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    };
+    let stdout = stdout_reader
+        .join()
+        .map_err(|_| "guard check stdout reader panicked".to_string())?
+        .map_err(|error| error.to_string())?;
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_| "guard check stderr reader panicked".to_string())?
+        .map_err(|error| error.to_string())?;
+    Ok(std::process::Output {
+        status: status?,
+        stdout,
+        stderr,
+    })
 }
 
 #[cfg(test)]
@@ -1644,9 +1677,29 @@ mod guard_timeout_tests {
     #[test]
     fn guard_check_child_obeys_timeout() {
         let mut command = Command::new("sleep");
-        command.arg("5");
+        command
+            .arg("5")
+            .stdout(super::Stdio::piped())
+            .stderr(super::Stdio::piped());
         let error = command_output_timeout(&mut command, Duration::from_millis(30)).unwrap_err();
         assert!(error.contains("timed out"), "{error}");
+    }
+
+    #[test]
+    fn guard_check_drains_large_child_output() {
+        let mut command = Command::new("python3");
+        command
+            .args([
+                "-c",
+                "import sys; sys.stdout.write('o' * 1048576); sys.stderr.write('e' * 1048576)",
+            ])
+            .stdout(super::Stdio::piped())
+            .stderr(super::Stdio::piped());
+        let output = command_output_timeout(&mut command, Duration::from_secs(10)).unwrap();
+        assert_eq!(output.stdout.len(), 1_048_576);
+        assert_eq!(output.stderr.len(), 1_048_576);
+        assert!(output.stdout.iter().all(|byte| *byte == b'o'));
+        assert!(output.stderr.iter().all(|byte| *byte == b'e'));
     }
 }
 
