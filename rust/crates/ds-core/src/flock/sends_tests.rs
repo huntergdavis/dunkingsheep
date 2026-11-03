@@ -2737,6 +2737,7 @@ fn scheduled_recovery_requires_current_schedule_for_styled_and_real_native_evide
                 for (old_id, old_hash, expected_spent) in [
                     ("m1", "dbe71a6e223b4ec1", u32::MAX),
                     ("m1@100", "dbe71a6e223b4ec1", u32::MAX),
+                    ("m1@100", "51d09990b82bd9c5", u32::MAX),
                     ("m1@100", "b2d4ddd55ad59b5e", 1),
                 ] {
                     *flock.stuck_tracker.lock().unwrap() = crate::stuck::Tracker::default();

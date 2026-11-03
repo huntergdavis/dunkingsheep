@@ -517,7 +517,6 @@ impl Tracker {
             if legacy_used
                 && record.message_id.as_deref() == Some(message_id)
                 && (record.generation.is_none() || record.generation == obs.generation)
-                && record.fingerprint.as_deref() == Some(&current)
             {
                 record.attempts = u32::MAX;
             }
@@ -695,8 +694,9 @@ impl Tracker {
         }
     }
 
-    /// Whether this exact intent has an old Rust FNV budget or attempted record.
-    /// The caller must preserve the old entry and refuse remaining attempts.
+    /// Whether this identity has an ambiguous prior budget or attempted record.
+    /// Old hashes are unversioned and old Rust normalized whitespace differently, so a
+    /// different fingerprint under the same identity cannot safely be treated as fresh.
     pub fn legacy_attempt_seen(
         &self,
         pane_id: &str,
@@ -705,19 +705,28 @@ impl Tracker {
         text: &str,
     ) -> bool {
         let legacy = legacy_fingerprint(text);
-        let key = ledger_key(pane_id, message_id, generation, &legacy);
-        self.spent.get(&key).is_some_and(|count| *count > 0)
-            || (generation.is_some()
-                && self
-                    .spent
-                    .get(&ledger_key(pane_id, message_id, None, &legacy))
-                    .is_some_and(|count| *count > 0))
-            || self.records.get(pane_id).is_some_and(|record| {
-                record.message_id.as_deref() == Some(message_id)
-                    && (record.generation.is_none() || record.generation.as_deref() == generation)
-                    && record.fingerprint.as_deref() == Some(&legacy)
-                    && record.attempts > 0
-            })
+        let current = fingerprint(text);
+        let prefix = ledger_key(pane_id, message_id, generation, "");
+        let unknown_prefix = generation.map(|_| ledger_key(pane_id, message_id, None, ""));
+        self.spent.iter().any(|(key, count)| {
+            if *count == 0 {
+                return false;
+            }
+            let suffix = key.strip_prefix(&prefix).or_else(|| {
+                unknown_prefix
+                    .as_deref()
+                    .and_then(|prefix| key.strip_prefix(prefix))
+            });
+            suffix.is_some_and(|stored| stored != current || stored == legacy)
+        }) || self.records.get(pane_id).is_some_and(|record| {
+            record.message_id.as_deref() == Some(message_id)
+                && (record.generation.is_none() || record.generation.as_deref() == generation)
+                && record
+                    .fingerprint
+                    .as_deref()
+                    .is_none_or(|stored| stored != current || stored == legacy)
+                && record.attempts > 0
+        })
     }
 
     pub fn mark_terminal(&mut self, pane_id: &str, reason: &str) {
@@ -892,15 +901,15 @@ mod tests {
             max_attempts: 2,
             ..Config::default()
         };
-        for record_only in [false, true] {
+        for record_kind in 0..3 {
             let mut tracker = Tracker::default();
-            if record_only {
+            if record_kind != 0 {
                 tracker.records.insert(
                     obs.pane_id.clone(),
                     Record {
                         message_id: obs.message_id.clone(),
                         generation: None,
-                        fingerprint: Some(legacy_fingerprint("stuck body")),
+                        fingerprint: (record_kind == 1).then(|| legacy_fingerprint("stuck body")),
                         first_seen: Some(0.0),
                         last_attempt_at: Some(1.0),
                         attempts: 1,
@@ -923,6 +932,60 @@ mod tests {
                 ),
                 u32::MAX
             );
+        }
+        let mut python_state = Tracker::default();
+        python_state.spent.insert(
+            ledger_key(&obs.pane_id, "m1", None, &fingerprint("stuck body")),
+            2,
+        );
+        assert!(!python_state.decide(&obs, &config, 10.0).recovers());
+        assert_eq!(python_state.decide(&obs, &config, 12.0).action, "terminal");
+    }
+
+    #[test]
+    fn legacy_whitespace_variants_cannot_refund_same_identity_after_restart() {
+        let old_text = "a\u{1c}b";
+        let obs = observation("a b");
+        assert_eq!(
+            fingerprint(old_text),
+            fingerprint(obs.text.as_deref().unwrap())
+        );
+        assert_ne!(
+            legacy_fingerprint(old_text),
+            legacy_fingerprint(obs.text.as_deref().unwrap())
+        );
+        let config = Config {
+            threshold_s: 1.0,
+            max_attempts: 2,
+            ..Config::default()
+        };
+        for record_kind in 0..3 {
+            let mut tracker = Tracker::default();
+            let old_hash = legacy_fingerprint(old_text);
+            if record_kind != 0 {
+                tracker.records.insert(
+                    obs.pane_id.clone(),
+                    Record {
+                        message_id: obs.message_id.clone(),
+                        generation: obs.generation.clone(),
+                        fingerprint: (record_kind == 1).then_some(old_hash.clone()),
+                        first_seen: Some(0.0),
+                        last_attempt_at: Some(1.0),
+                        attempts: 1,
+                        terminal: None,
+                    },
+                );
+            } else {
+                tracker.spent.insert(
+                    ledger_key(&obs.pane_id, "m1", obs.generation.as_deref(), &old_hash),
+                    1,
+                );
+            }
+            assert!(!tracker.decide(&obs, &config, 10.0).recovers());
+            let mut restored = Tracker::from_state(&tracker.to_state()).unwrap();
+            restored.forget(&obs.pane_id);
+            assert!(!restored.decide(&obs, &config, 20.0).recovers());
+            assert_eq!(restored.decide(&obs, &config, 22.0).action, "terminal");
         }
     }
 
