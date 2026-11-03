@@ -926,8 +926,11 @@ pub(crate) enum DeliveryOutcome {
 pub trait SendPreparationEnv: FlushEnv + super::send_keys::KeyPressEnv {
     fn send_text(&mut self, pane_id: &str, text: &str) -> (bool, String);
     fn attempt_generation(&self, pane_id: &str) -> Option<String>;
+    /// Persist typed-attempt state for the actual message when a delivery frame exists.
+    /// `None` preserves the low-level `submit_text` path, which has no message authority.
     fn persist_typed_attempt(
         &mut self,
+        message: Option<&mut Message>,
         pane_id: &str,
         text: &str,
         press_enter: bool,
@@ -1091,22 +1094,23 @@ pub fn submit_text(
             press_enter,
             check_box,
             attempt_generation: AttemptGeneration::Capture,
+            message: None,
         },
         guard,
     )
 }
 
-#[derive(Clone, Copy)]
 struct SubmitOptions<'a> {
     press_enter: bool,
     check_box: bool,
-    attempt_generation: AttemptGeneration<'a>,
+    attempt_generation: AttemptGeneration,
+    message: Option<&'a mut Message>,
 }
 
-#[derive(Clone, Copy)]
-enum AttemptGeneration<'a> {
+#[derive(Clone)]
+enum AttemptGeneration {
     Capture,
-    Captured(Option<&'a str>),
+    Captured(Option<String>),
 }
 
 /// Delivery passes its pre-guard generation snapshot so a pane replacement during preflight
@@ -1116,7 +1120,7 @@ fn submit_text_with_options(
     env: &mut dyn SendPreparationEnv,
     pane_id: &str,
     text: &str,
-    options: SubmitOptions<'_>,
+    mut options: SubmitOptions<'_>,
     guard: Option<&TypingGuard<'_>>,
 ) -> SendAction {
     let guarded = guard.is_some();
@@ -1135,7 +1139,7 @@ fn submit_text_with_options(
         let baseline = env.read_status(pane_id);
         let generation = match options.attempt_generation {
             AttemptGeneration::Capture => env.attempt_generation(pane_id),
-            AttemptGeneration::Captured(generation) => generation.map(str::to_owned),
+            AttemptGeneration::Captured(generation) => generation,
         };
         let before = env
             .read_pane(pane_id, CONSUMPTION_READ_LINES, true)
@@ -1158,7 +1162,13 @@ fn submit_text_with_options(
             return Err(detail);
         }
         flock.remember_typed(pane_id, text);
-        if !env.persist_typed_attempt(pane_id, text, options.press_enter, generation.as_deref()) {
+        if !env.persist_typed_attempt(
+            options.message.take(),
+            pane_id,
+            text,
+            options.press_enter,
+            generation.as_deref(),
+        ) {
             return Err("typed but not submitted: durable attempt receipt failed".into());
         }
         if !options.press_enter {
@@ -3260,9 +3270,10 @@ pub(crate) fn outbox_step<E: SendPreparationEnv + PaneInfoEnv>(
 /// owned-text recovery transition when the same box remains visible. Runtime adapters provide
 /// terminal I/O and a stop-aware wait; tests can advance a fake clock without spawning threads.
 #[allow(dead_code)] // Production worker startup is gated to a separate runtime task.
-pub(crate) fn outbox_worker<E: SendPreparationEnv + PaneInfoEnv + InboxEnv>(
+pub(crate) fn outbox_worker<E: SendPreparationEnv + PaneInfoEnv>(
     flock: &Flock,
     env: &mut E,
+    inbox: &dyn InboxEnv,
     pane_id: &str,
     stopped: &AtomicBool,
     reporter: &mut super::loops_stuck::StalePanelReporter,
@@ -3294,7 +3305,7 @@ pub(crate) fn outbox_worker<E: SendPreparationEnv + PaneInfoEnv + InboxEnv>(
             let generation = pane_generation(env, pane_id);
             reporter.note(
                 flock,
-                env,
+                inbox,
                 pane_id,
                 "modal",
                 generation.as_deref(),
@@ -3496,24 +3507,27 @@ impl Flock {
             allow_modal: message.kind == "keys",
             preserve_draft: false,
         };
+        let is_keys = message.kind == "keys";
+        let message_text = message.text.clone();
+        let press_enter = message.press_enter;
+        let attempt_generation = message.attempt_generation.clone();
         let (sent, ok, detail, blocker_reason) =
             send_guarded_with_reason(self, env, &pane_id, options, permission, |env, guard| {
-                if message.kind == "keys" {
+                if is_keys {
                     let keys: Vec<String> =
-                        message.text.split_whitespace().map(str::to_owned).collect();
+                        message_text.split_whitespace().map(str::to_owned).collect();
                     Ok(press_keys(env, &pane_id, &keys, guard))
                 } else {
                     Ok(submit_text_with_options(
                         self,
                         env,
                         &pane_id,
-                        &message.text,
+                        &message_text,
                         SubmitOptions {
-                            press_enter: message.press_enter,
+                            press_enter,
                             check_box: false,
-                            attempt_generation: AttemptGeneration::Captured(
-                                message.attempt_generation.as_deref(),
-                            ),
+                            attempt_generation: AttemptGeneration::Captured(attempt_generation),
+                            message: Some(&mut message),
                         },
                         Some(guard),
                     ))
@@ -4334,24 +4348,27 @@ impl Flock {
             allow_modal: message.kind == "keys",
             preserve_draft: false,
         };
+        let is_keys = message.kind == "keys";
+        let message_text = message.text.clone();
+        let press_enter = message.press_enter;
+        let attempt_generation = message.attempt_generation.clone();
         let (sent, ok, detail, _) =
             send_guarded_with_reason(self, env, &pane_id, options, permission, |env, guard| {
-                if message.kind == "keys" {
+                if is_keys {
                     let keys: Vec<String> =
-                        message.text.split_whitespace().map(str::to_owned).collect();
+                        message_text.split_whitespace().map(str::to_owned).collect();
                     Ok(press_keys(env, &pane_id, &keys, guard))
                 } else {
                     Ok(submit_text_with_options(
                         self,
                         env,
                         &pane_id,
-                        &message.text,
+                        &message_text,
                         SubmitOptions {
-                            press_enter: message.press_enter,
+                            press_enter,
                             check_box: false,
-                            attempt_generation: AttemptGeneration::Captured(
-                                message.attempt_generation.as_deref(),
-                            ),
+                            attempt_generation: AttemptGeneration::Captured(attempt_generation),
+                            message: Some(&mut message),
                         },
                         Some(guard),
                     ))
