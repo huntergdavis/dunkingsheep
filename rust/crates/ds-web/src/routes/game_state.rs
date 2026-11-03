@@ -208,6 +208,9 @@ async fn game_loadstate(
             None,
         );
     };
+    if matches!(input, Value::Number(number) if python_float_integer_exceeds_i64(number)) {
+        return slot_integer_string_too_large_error(input);
+    }
     let Some(slot) = python_integer(input) else {
         let bound = match input {
             Value::String(value) => match clean_pydantic_integer_string(value) {
@@ -924,6 +927,22 @@ fn python_integer(value: &Value) -> Option<i64> {
     }
 }
 
+fn python_float_integer_exceeds_i64(number: &serde_json::Number) -> bool {
+    let token = number.to_string();
+    if !token
+        .bytes()
+        .any(|byte| matches!(byte, b'.' | b'e' | b'E'))
+    {
+        return false;
+    }
+
+    number.as_f64().is_some_and(|value| {
+        value.is_finite()
+            && value.fract() == 0.0
+            && (value < i64::MIN as f64 || value >= -(i64::MIN as f64))
+    })
+}
+
 #[derive(Clone, Copy)]
 enum SlotBound {
     Minimum,
@@ -1107,17 +1126,16 @@ fn bearer_value(headers: &HeaderMap) -> Option<String> {
 
 fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
     let mut cookie = None;
-    for value in headers.get_all(header::COOKIE).iter() {
-        let value = value
-            .as_bytes()
-            .iter()
-            .map(|byte| char::from(*byte))
-            .collect::<String>();
-        for part in value.split(';') {
-            let (key, value) = part.split_once('=').unwrap_or(("", part));
-            if key.trim() == name {
-                cookie = Some(unquote_cookie_value(value.trim()));
-            }
+    let value = headers.get(header::COOKIE)?;
+    let value = value
+        .as_bytes()
+        .iter()
+        .map(|byte| char::from(*byte))
+        .collect::<String>();
+    for part in value.split(';') {
+        let (key, value) = part.split_once('=').unwrap_or(("", part));
+        if key.trim() == name {
+            cookie = Some(unquote_cookie_value(value.trim()));
         }
     }
     cookie
@@ -1318,19 +1336,35 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_session_cookies_use_the_last_value() {
+    fn duplicate_session_cookies_in_first_header_use_the_last_value() {
         let mut headers = HeaderMap::new();
         headers.append(
             header::COOKIE,
-            HeaderValue::from_static("vp_session=valid-first; theme=dark"),
-        );
-        headers.append(
-            header::COOKIE,
-            HeaderValue::from_static("theme=light; vp_session=invalid-second"),
+            HeaderValue::from_static(
+                "vp_session=valid-first; theme=dark; vp_session=invalid-second",
+            ),
         );
 
         assert_eq!(
             Some("invalid-second".to_owned()),
+            cookie_value(&headers, "vp_session")
+        );
+    }
+
+    #[test]
+    fn duplicate_cookie_headers_use_the_first_header_value() {
+        let mut headers = HeaderMap::new();
+        headers.append(
+            header::COOKIE,
+            HeaderValue::from_static("vp_session=first-header"),
+        );
+        headers.append(
+            header::COOKIE,
+            HeaderValue::from_static("vp_session=second-header"),
+        );
+
+        assert_eq!(
+            Some("first-header".to_owned()),
             cookie_value(&headers, "vp_session")
         );
     }
@@ -1494,6 +1528,37 @@ mod tests {
                 "input":9_223_372_036_854_775_908u64,"ctx":{"le":99}}]}),
             value
         );
+        assert!(game.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn game_loadstate_maps_oversized_integral_float_to_pydantic_size_error() {
+        let game = Arc::new(FakeGame::new(Value::Null));
+        let (status, _body, value) = response(
+            app(game.clone(), authorized()),
+            request("POST", "/api/game/loadstate", r#"{"slot":1e19}"#),
+        );
+
+        assert_eq!(StatusCode::UNPROCESSABLE_ENTITY, status);
+        assert_eq!("int_parsing_size", value["detail"][0]["type"]);
+        assert_eq!(
+            "Unable to parse input string as an integer, exceeded maximum size",
+            value["detail"][0]["msg"]
+        );
+        assert!(game.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn game_loadstate_converts_integral_float_before_slot_bounds() {
+        let game = Arc::new(FakeGame::new(Value::Null));
+        let (status, _body, value) = response(
+            app(game.clone(), authorized()),
+            request("POST", "/api/game/loadstate", r#"{"slot":100.0}"#),
+        );
+
+        assert_eq!(StatusCode::UNPROCESSABLE_ENTITY, status);
+        assert_eq!("less_than_equal", value["detail"][0]["type"]);
+        assert_eq!(json!(100.0), value["detail"][0]["input"]);
         assert!(game.calls.lock().unwrap().is_empty());
     }
 
