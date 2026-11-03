@@ -62,6 +62,46 @@ impl CommandEnv for TestEnv {
     }
 }
 
+struct OwnerApiEnv {
+    terminal: Mutex<Box<dyn Terminal>>,
+    owner_push: crate::owner::OwnerPush,
+    now_s: f64,
+}
+
+impl OwnerApiEnv {
+    fn new(path: &Path, now_s: f64) -> Self {
+        Self {
+            terminal: Mutex::new(Box::new(FakeTerminal::default())),
+            owner_push: crate::owner::OwnerPush::open(path).unwrap(),
+            now_s,
+        }
+    }
+}
+
+impl PaneInfoEnv for OwnerApiEnv {
+    fn list_panes_grouped(&self) -> Vec<Value> {
+        Vec::new()
+    }
+
+    fn get_pane(&self, pane_id: &str) -> Option<Value> {
+        Some(json!({"pane_id": pane_id, "pane_pid": std::process::id()}))
+    }
+}
+
+impl CommandEnv for OwnerApiEnv {
+    fn terminal(&self) -> &Mutex<Box<dyn Terminal>> {
+        &self.terminal
+    }
+
+    fn now_s(&self) -> f64 {
+        self.now_s
+    }
+
+    fn owner_push(&self) -> Result<&crate::owner::OwnerPush, DunkError> {
+        Ok(&self.owner_push)
+    }
+}
+
 struct NoNetworkGithubTransport;
 
 impl crate::github::GitHubTransport for NoNetworkGithubTransport {
@@ -3758,4 +3798,168 @@ fn h_task_delete_matches_python_and_store_guards() {
     .expect("delete task");
     assert_eq!(deleted, json!({"deleted": removable.id}));
     assert!(runtime.block_on(tasks.get(&removable.id)).is_err());
+}
+
+fn owner_api_fixture(tag: &str) -> (tempfile::TempDir, Flock, OwnerApiEnv) {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Flock::new(
+        dir.path().join(format!("{tag}-launches.json")),
+        dir.path().join(format!("{tag}-lanes.json")),
+        false,
+    );
+    let mut roles = Roles::new(
+        &Env::default(),
+        Some(dir.path().join(format!("{tag}-roles.json"))),
+        Some(dir.path().join(format!("{tag}-tokens.json"))),
+        None,
+    )
+    .unwrap();
+    roles
+        .register("w1:p1", "owner", None, None, None, None, None, None)
+        .unwrap();
+    roles
+        .register("w1:p2", "worker", None, None, None, None, None, None)
+        .unwrap();
+    flock.attach_roles(roles, None);
+    let inbox = Arc::new(
+        crate::inbox_store::Store::open(
+            dir.path().join(format!("{tag}-inbox.db")),
+            dir.path().join(format!("{tag}-blobs")),
+        )
+        .unwrap(),
+    );
+    flock.attach_stores(Stores {
+        inbox: Some(inbox),
+        ..Stores::default()
+    });
+    let env = OwnerApiEnv::new(
+        &dir.path().join(format!("{tag}-owner-push.db")),
+        1_800_000_100.0,
+    );
+    (dir, flock, env)
+}
+
+fn dispatch_owner_api(
+    dispatcher: &Dispatcher,
+    flock: &Flock,
+    env: &dyn CommandEnv,
+    command: &str,
+    args: Option<Args>,
+    pane: Option<&str>,
+) -> Result<Value, DunkError> {
+    let request = RequestCtx {
+        self_pane_id: pane.map(str::to_owned),
+        ..RequestCtx::default()
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let context = HandlerContext {
+        flock,
+        request: &request,
+        env,
+        runtime: runtime.handle(),
+    };
+    dispatcher.dispatch(&context, &FlockGate(&context), command, args)
+}
+
+#[test]
+fn h_owner_stats_matches_python() {
+    let (_dir, flock, env) = owner_api_fixture("owner-stats");
+    env.owner_push
+        .push("w1:p2", "pending", None, None, 1_800_000_090.0)
+        .unwrap();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_owner_stats_receipts_conversation();
+
+    let out = dispatch_owner_api(&dispatcher, &flock, &env, "owner_stats", None, None)
+        .expect("owner stats via dispatcher");
+    assert_eq!(out["stats"]["pushed"], 1);
+    assert_eq!(out["stats"]["pending"], 1);
+    assert_eq!(out["pending"][0]["pane_id"], "w1:p2");
+}
+
+#[test]
+fn h_owner_receipts_matches_python() {
+    let (_dir, flock, env) = owner_api_fixture("owner-receipts");
+    let id = env
+        .owner_push
+        .push("w1:p2", "pending", None, None, 1_800_000_090.0)
+        .unwrap()
+        .id;
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_owner_stats_receipts_conversation();
+
+    let out = dispatch_owner_api(
+        &dispatcher,
+        &flock,
+        &env,
+        "owner_receipts",
+        args(json!({"push_ids": format!("{id}, , nope")})),
+        None,
+    )
+    .expect("owner receipts via dispatcher");
+    assert_eq!(out["requested"], 1);
+    assert_eq!(out["returned"], 1);
+    assert_eq!(out["receipts"][0]["id"], id);
+    assert_eq!(out["receipts"][0].get("body"), None);
+    assert_eq!(env.owner_push.pending(None).unwrap().len(), 1);
+}
+
+#[test]
+fn h_owner_conversation_matches_python() {
+    let (_dir, flock, env) = owner_api_fixture("owner-conversation");
+    let inbox = flock.stores().inbox.unwrap();
+    let question = inbox
+        .send(&crate::inbox_store::Outgoing {
+            mailbox: crate::flock::mailbox::OWNER_MAILBOX,
+            body: Some("question"),
+            sender: Some("agent:%7"),
+            mailbox_label: Some(crate::flock::mailbox::OWNER_MAILBOX),
+            transport: Some("telegram"),
+            ..crate::inbox_store::Outgoing::default()
+        })
+        .unwrap();
+    inbox
+        .send(&crate::inbox_store::Outgoing {
+            mailbox: crate::flock::mailbox::OWNER_MAILBOX,
+            body: Some("answer"),
+            sender: Some("owner"),
+            mailbox_label: Some(crate::flock::mailbox::OWNER_MAILBOX),
+            transport: Some("web"),
+            reply_to: Some(&question),
+            ..crate::inbox_store::Outgoing::default()
+        })
+        .unwrap();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_owner_stats_receipts_conversation();
+
+    let out = dispatch_owner_api(
+        &dispatcher,
+        &flock,
+        &env,
+        "owner_conversation",
+        args(json!({"limit": 0})),
+        Some("w1:p1"),
+    )
+    .expect("owner conversation via dispatcher");
+    assert_eq!(out["mailbox"], crate::flock::mailbox::OWNER_MAILBOX);
+    assert_eq!(out["count"], 2);
+    assert_eq!(out["messages"][0]["sender"], "agent:%7");
+    assert_eq!(out["messages"][0]["transport"], "telegram");
+    assert_eq!(out["messages"][1]["sender"], "owner");
+    assert_eq!(out["messages"][1]["reply_to"], question);
+    assert_eq!(out["messages"][0]["answered"], true);
+    assert_eq!(out["waiting"], json!([]));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_conversation",
+            None,
+            Some("w1:p2"),
+        ),
+        Err(DunkError::Refused(message)) if message.contains("may not read or answer it")
+    ));
 }

@@ -83,6 +83,11 @@ pub trait CommandEnv: PaneInfoEnv {
         ))
     }
 
+    /// The daemon-owned owner-push store used by the T39 owner stats and receipt views.
+    fn owner_push(&self) -> Result<&crate::owner::OwnerPush, DunkError> {
+        Err(DunkError::Refused("owner push adapter is not wired".into()))
+    }
+
     /// The retired-pane archive used by `retire_pane`.
     fn retired_panes_path(&self) -> Result<PathBuf, DunkError> {
         crate::panes::default_path(&crate::config::Env::from_process())
@@ -520,6 +525,13 @@ impl Dispatcher {
     pub fn register_report_run_list(&mut self) {
         self.register("report_run", crate::report::report_run_handler);
         self.register("report_list", crate::report::report_list_handler);
+    }
+
+    /// Register the T39 owner statistics, receipts and conversation views.
+    pub fn register_owner_stats_receipts_conversation(&mut self) {
+        self.register("owner_stats", h_owner_stats);
+        self.register("owner_receipts", h_owner_receipts);
+        self.register("owner_conversation", h_owner_conversation);
     }
 
     /// Register only the T39 task-following API leaf.
@@ -991,6 +1003,58 @@ pub fn h_token_revoke(context: &HandlerContext<'_>, args: Args) -> Result<Value,
     context
         .flock
         .token_revoke(label, context.self_pane_id(), context.env)
+}
+
+/// `dunk_api.h_owner_stats`.
+pub fn h_owner_stats(context: &HandlerContext<'_>, _: Args) -> Result<Value, DunkError> {
+    crate::flock::commands_owner_views::h_owner_stats(
+        context.env.owner_push()?,
+        context.env.now_s(),
+    )
+}
+
+/// `dunk_api.h_owner_receipts`.
+pub fn h_owner_receipts(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    crate::flock::commands_owner_views::h_owner_receipts(
+        context.env.owner_push()?,
+        &Value::Object(args),
+    )
+}
+
+/// `dunk_api.h_owner_conversation`.
+pub fn h_owner_conversation(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let limit = match args.get("limit").filter(|value| truthy(value)) {
+        None => 50,
+        Some(value) => {
+            let mut limit_args = Args::new();
+            limit_args.insert("limit".into(), value.clone());
+            memory_int_arg(&limit_args, "limit", 50)?
+        }
+    };
+    let before = match args.get("before") {
+        None | Some(Value::Null) => None,
+        Some(Value::Number(number)) => number.as_f64(),
+        Some(value) => {
+            return Err(DunkError::Refused(match value {
+                Value::String(text) => {
+                    format!("could not convert string to float: {}", py_repr(text))
+                }
+                Value::Bool(_) => {
+                    "float() argument must be a string or a real number, not 'bool'".into()
+                }
+                Value::Array(_) => {
+                    "float() argument must be a string or a real number, not 'list'".into()
+                }
+                Value::Object(_) => {
+                    "float() argument must be a string or a real number, not 'dict'".into()
+                }
+                _ => "float() argument must be a string or a real number".into(),
+            }));
+        }
+    };
+    let conversation = crate::owner::OwnerConversations::new(context.flock, context.env)
+        .conversation(Some(limit), before, context.self_pane_id())?;
+    serde_json::to_value(conversation).map_err(DunkError::from)
 }
 
 fn poolrad_limit(args: &Args) -> Result<usize, DunkError> {
