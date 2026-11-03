@@ -14,6 +14,9 @@ use axum::{
 use ds_web::{
     router_with_scheme,
     routes::auth::{AuthBackend, AuthError, AuthFuture, Identity},
+    routes::ops_metrics::{
+        router as ops_metrics_router, OpsMetricsBackend, OpsMetricsError, OpsMetricsFuture,
+    },
     routes::owner::{
         router as owner_router, OwnerWebBackend, OwnerWebError, OwnerWebFuture, OwnerWebState,
     },
@@ -159,6 +162,108 @@ fn owner_capability_matches_python_fixture() {
     let backend = Arc::new(CapabilityBackend(fixture["backend"]["response"].clone()));
     let state = Arc::new(OwnerWebState::new(backend));
     let app = owner_router().layer(Extension(state));
+    let request = Request::builder()
+        .method(request_fixture["method"].as_str().unwrap())
+        .uri(request_fixture["path"].as_str().unwrap())
+        .header(
+            header::HOST,
+            request_fixture["headers"]["host"].as_str().unwrap(),
+        )
+        .body(Body::empty())
+        .expect("valid fixture request");
+
+    let response = block_on(app.oneshot(request)).expect("in-process router response");
+    let expected = &fixture["response"];
+    assert_eq!(
+        response.status().as_u16(),
+        expected["status"].as_u64().unwrap() as u16
+    );
+    for (name, value) in expected["headers"].as_object().unwrap() {
+        assert_eq!(
+            response.headers().get(name).unwrap().to_str().unwrap(),
+            value.as_str().unwrap(),
+            "header {name}"
+        );
+    }
+    let set_cookie = response
+        .headers()
+        .get(header::SET_COOKIE)
+        .map(|value| value.to_str().unwrap());
+    assert_eq!(set_cookie, expected["set_cookie"].as_str());
+    let bytes = block_on(to_bytes(response.into_body(), usize::MAX)).expect("response body");
+    let raw = String::from_utf8(bytes.to_vec()).expect("UTF-8 JSON body");
+    assert_eq!(raw, expected["body"].as_str().unwrap());
+    assert_eq!(
+        serde_json::from_str::<Value>(&raw).unwrap(),
+        expected["json"]
+    );
+}
+
+struct AcceptingAuthBackend;
+
+impl AuthBackend for AcceptingAuthBackend {
+    fn login<'a>(
+        &'a self,
+        _address: &'a str,
+        _password: &'a str,
+    ) -> AuthFuture<'a, Result<String, AuthError>> {
+        Box::pin(async { Err(AuthError::Internal("unexpected login".into())) })
+    }
+
+    fn identity<'a>(
+        &'a self,
+        _bearer: Option<&'a str>,
+        _cookie: Option<&'a str>,
+    ) -> AuthFuture<'a, Result<Identity, AuthError>> {
+        Box::pin(async { Ok(Identity::Owner) })
+    }
+
+    fn logout<'a>(&'a self, _cookie: Option<&'a str>) -> AuthFuture<'a, Result<(), AuthError>> {
+        Box::pin(async { Err(AuthError::Internal("unexpected logout".into())) })
+    }
+
+    fn change_password<'a>(
+        &'a self,
+        _current: &'a str,
+        _new: &'a str,
+        _keep_cookie: Option<&'a str>,
+    ) -> AuthFuture<'a, Result<(), AuthError>> {
+        Box::pin(async { Err(AuthError::Internal("unexpected password change".into())) })
+    }
+}
+
+struct UnusedOpsMetricsBackend;
+
+impl OpsMetricsBackend for UnusedOpsMetricsBackend {
+    fn history<'a>(&'a self, _hours: u16) -> OpsMetricsFuture<'a, Result<Value, OpsMetricsError>> {
+        Box::pin(async {
+            Err(OpsMetricsError::other(
+                "invalid history window reached the backend",
+            ))
+        })
+    }
+
+    fn refresh<'a>(&'a self) -> OpsMetricsFuture<'a, Result<Value, OpsMetricsError>> {
+        Box::pin(async { Err(OpsMetricsError::other("unexpected refresh")) })
+    }
+
+    fn board_snapshot<'a>(&'a self) -> OpsMetricsFuture<'a, Result<Value, OpsMetricsError>> {
+        Box::pin(async { Err(OpsMetricsError::other("unexpected board snapshot")) })
+    }
+}
+
+#[test]
+fn operations_metrics_history_range_error_matches_python_fixture() {
+    let fixture: Value = serde_json::from_str(include_str!(
+        "fixtures/ops_metrics_history_range_error.json"
+    ))
+    .expect("valid shared Python/Rust fixture");
+    let request_fixture = &fixture["request"];
+    let auth: Arc<dyn AuthBackend> = Arc::new(AcceptingAuthBackend);
+    let backend: Arc<dyn OpsMetricsBackend> = Arc::new(UnusedOpsMetricsBackend);
+    let app = ops_metrics_router()
+        .layer(Extension(auth))
+        .layer(Extension(backend));
     let request = Request::builder()
         .method(request_fixture["method"].as_str().unwrap())
         .uri(request_fixture["path"].as_str().unwrap())
