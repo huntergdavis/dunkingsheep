@@ -355,9 +355,7 @@ fn download_response(
 }
 
 fn file_response_content_type(mime: &str) -> String {
-    if mime.to_ascii_lowercase().starts_with("text/")
-        && !mime.to_ascii_lowercase().contains("charset=")
-    {
+    if mime.starts_with("text/") && !mime.contains("charset=") {
         format!("{mime}; charset=utf-8")
     } else {
         mime.to_owned()
@@ -1022,19 +1020,60 @@ async fn authenticate(
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "));
-    let cookie = headers
-        .get(header::COOKIE)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| {
-            value.split(';').find_map(|part| {
-                let (name, value) = part.trim().split_once('=')?;
-                (name.trim() == "vp_session").then(|| value.trim())
-            })
-        });
-    auth.identity(bearer, cookie)
+    let cookie = session_cookie(headers);
+    auth.identity(bearer, cookie.as_deref())
         .await
         .map(|_| ())
         .map_err(auth_error_response)
+}
+
+fn session_cookie(headers: &HeaderMap) -> Option<String> {
+    let mut session = None;
+    for header_value in headers.get_all(header::COOKIE).iter() {
+        let cookie_header = latin1_text(header_value.as_bytes());
+        for chunk in cookie_header.split(';') {
+            let (name, value) = chunk.split_once('=').unwrap_or(("", chunk));
+            let name = name.trim();
+            let value = value.trim();
+            if (!name.is_empty() || !value.is_empty()) && name == "vp_session" {
+                session = Some(unquote_cookie_value(value));
+            }
+        }
+    }
+    session
+}
+
+fn unquote_cookie_value(value: &str) -> String {
+    if value.len() < 2 || !value.starts_with('"') || !value.ends_with('"') {
+        return value.to_owned();
+    }
+    let characters = value[1..value.len() - 1].chars().collect::<Vec<_>>();
+    let mut output = String::with_capacity(value.len() - 2);
+    let mut at = 0;
+    while at < characters.len() {
+        if characters[at] == '\\' && at + 1 < characters.len() {
+            if at + 3 < characters.len()
+                && ('0'..='3').contains(&characters[at + 1])
+                && ('0'..='7').contains(&characters[at + 2])
+                && ('0'..='7').contains(&characters[at + 3])
+            {
+                let value = (characters[at + 1] as u32 - '0' as u32) * 64
+                    + (characters[at + 2] as u32 - '0' as u32) * 8
+                    + (characters[at + 3] as u32 - '0' as u32);
+                if let Some(character) = char::from_u32(value) {
+                    output.push(character);
+                }
+                at += 4;
+            } else {
+                output.push(characters[at + 1]);
+                at += 2;
+            }
+        } else {
+            output.push(characters[at]);
+            at += 1;
+        }
+    }
+    output
 }
 
 fn parse_query(raw: Option<&str>) -> Result<std::collections::BTreeMap<String, String>, ()> {
@@ -1521,6 +1560,52 @@ mod tests {
             block_on(app(backend).oneshot(request("GET", "/api/search?q=hi", Body::empty())))
                 .unwrap();
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn authenticate_uses_starlette_last_unquoted_cookie_across_headers() {
+        let mut headers = HeaderMap::new();
+        headers.append(
+            header::COOKIE,
+            HeaderValue::from_static("vp_session=first; vp_session=second"),
+        );
+        assert_eq!(session_cookie(&headers).as_deref(), Some("second"));
+
+        let mut headers = HeaderMap::new();
+        headers.append(header::COOKIE, HeaderValue::from_static("vp_session=first"));
+        headers.append(
+            header::COOKIE,
+            HeaderValue::from_static("vp_session=\"owner-token\""),
+        );
+        assert_eq!(session_cookie(&headers).as_deref(), Some("owner-token"));
+
+        let mut headers = HeaderMap::new();
+        headers.append(
+            header::COOKIE,
+            HeaderValue::from_static("vp_session=\"tok\\\"en\""),
+        );
+        assert_eq!(session_cookie(&headers).as_deref(), Some("tok\"en"));
+
+        let mut headers = HeaderMap::new();
+        headers.append(
+            header::COOKIE,
+            HeaderValue::from_static("vp_session=\"\\101\""),
+        );
+        assert_eq!(session_cookie(&headers).as_deref(), Some("A"));
+
+        let backend = Arc::new(FakeBackend::default());
+        let mut request = request("GET", "/api/search?q=hi", Body::empty());
+        request.headers_mut().remove(header::AUTHORIZATION);
+        request
+            .headers_mut()
+            .append(header::COOKIE, HeaderValue::from_static("vp_session=bad"));
+        request.headers_mut().append(
+            header::COOKIE,
+            HeaderValue::from_static("vp_session=\"owner-token\""),
+        );
+        let response = block_on(app(backend.clone()).oneshot(request)).unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(backend.search.lock().unwrap().len(), 1);
     }
 
     #[test]
@@ -2069,6 +2154,27 @@ mod tests {
         assert_eq!(
             content_disposition("sheep.png", true),
             "inline; filename=\"sheep.png\""
+        );
+    }
+
+    #[test]
+    fn file_response_content_type_checks_prefix_and_charset_case_sensitively() {
+        assert_eq!(
+            file_response_content_type("text/plain"),
+            "text/plain; charset=utf-8"
+        );
+        assert_eq!(file_response_content_type("TEXT/PLAIN"), "TEXT/PLAIN");
+        assert_eq!(
+            file_response_content_type("text/PLAIN"),
+            "text/PLAIN; charset=utf-8"
+        );
+        assert_eq!(
+            file_response_content_type("text/plain; CHARSET=x"),
+            "text/plain; CHARSET=x; charset=utf-8"
+        );
+        assert_eq!(
+            file_response_content_type("text/plain; charset=x"),
+            "text/plain; charset=x"
         );
     }
 
