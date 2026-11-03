@@ -2000,6 +2000,143 @@ fn read_view(ns: &Map<String, Value>) -> Outcome {
     crate::daemon_cmd::run_command(ns, rpc, args, crate::render_print::render_view)
 }
 
+fn dispatch_route(ns: &Map<String, Value>) -> Outcome {
+    let mut args = Map::new();
+    args.insert(
+        "action".into(),
+        Value::String(text(ns, "dispatch_command").unwrap_or("").to_owned()),
+    );
+    if let Some(brief) = ns
+        .get("brief")
+        .and_then(Value::as_array)
+        .filter(|words| !words.is_empty())
+    {
+        args.insert(
+            "brief".into(),
+            Value::String(
+                brief
+                    .iter()
+                    .map(crate::render_fleet::py_str)
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            ),
+        );
+    }
+    // Match run_client_command's exact optional-field forwarding. The parsed --lanes option is
+    // not included by the Python route today; only task_id, lane and id are forwarded here.
+    for key in ["task_id", "lane", "id"] {
+        if let Some(value) = ns.get(key).filter(|value| !value.is_null()) {
+            args.insert(key.into(), value.clone());
+        }
+    }
+    if matches!(ns.get("dry_run"), Some(Value::Bool(true))) {
+        args.insert("dry_run".into(), Value::Bool(true));
+    }
+    crate::daemon_cmd::run_command(ns, "dispatch", args, |result| {
+        crate::render_print::render_dispatch(result)
+            .unwrap_or_else(|| crate::render_print::render_dispatch_tick(result))
+    })
+}
+
+fn delivery_queue_route(ns: &Map<String, Value>) -> Outcome {
+    match text(ns, "command").unwrap_or("") {
+        "clear-box" => {
+            let mut args = Map::new();
+            args.insert(
+                "target".into(),
+                ns.get("target").cloned().unwrap_or(Value::Null),
+            );
+            args.insert(
+                "reason".into(),
+                ns.get("reason").cloned().unwrap_or(Value::Null),
+            );
+            crate::daemon_cmd::run_command(ns, "clear_box", args, crate::render_fleet::render_clear)
+        }
+        "delivery" => {
+            let mut args = Map::new();
+            let target = text(ns, "target").unwrap_or("").to_owned();
+            args.insert("target".into(), Value::String(target.clone()));
+            args.insert(
+                "status".into(),
+                ns.get("status").cloned().unwrap_or(Value::Null),
+            );
+            crate::daemon_cmd::run_command(ns, "delivery", args, move |result| {
+                let reason = if crate::render_print::truthy(&result["reason"]) {
+                    format!(" - {}", crate::render_fleet::py_str(&result["reason"]))
+                } else {
+                    String::new()
+                };
+                format!(
+                    "{target}: {}{reason}\n",
+                    crate::render_fleet::py_str(&result["state"])
+                )
+            })
+        }
+        "flush" => {
+            let mut args = Map::new();
+            args.insert(
+                "target".into(),
+                ns.get("target").cloned().unwrap_or(Value::Null),
+            );
+            crate::daemon_cmd::run_command(ns, "flush_box", args, |result| {
+                let mut output = format!(
+                    "{} ({}): {}",
+                    crate::render_fleet::py_str(&result["target_label"]),
+                    crate::render_fleet::py_str(&result["pane_id"]),
+                    crate::render_fleet::py_str(&result["message"])
+                );
+                if crate::render_print::truthy(&result["text"]) {
+                    let text = crate::render_fleet::py_str(&result["text"]);
+                    let preview: String = text.chars().take(60).collect();
+                    output.push_str(&format!(
+                        " -> {}",
+                        crate::render_print::py_repr_str(&preview)
+                    ));
+                }
+                output.push('\n');
+                output
+            })
+        }
+        "messages" | "queue" => crate::daemon_cmd::run_command(
+            ns,
+            "list_messages",
+            Map::new(),
+            crate::render_fleet::render_messages,
+        ),
+        "cancel-message" | "cancel" => {
+            let mut args = Map::new();
+            args.insert(
+                "message_id".into(),
+                ns.get("message_id").cloned().unwrap_or(Value::Null),
+            );
+            crate::daemon_cmd::run_command(ns, "cancel_message", args, |result| {
+                format!(
+                    "cancelled {} for {}\n",
+                    crate::render_fleet::py_str(&result["message_id"]),
+                    crate::render_fleet::py_str(&result["target_label"])
+                )
+            })
+        }
+        "metrics" => {
+            let mut args = Map::new();
+            for (key, value) in [
+                ("window_s", "window"),
+                ("since", "since"),
+                ("until", "until"),
+            ] {
+                args.insert(key.into(), ns.get(value).cloned().unwrap_or(Value::Null));
+            }
+            crate::daemon_cmd::run_command(
+                ns,
+                "metrics",
+                args,
+                crate::render_print::render_json_indent2,
+            )
+        }
+        other => not_ported(other),
+    }
+}
+
 fn poolrad(ns: &Map<String, Value>) -> Outcome {
     match text(ns, "poolrad_command") {
         Some("backlog-sync") => {
@@ -2308,6 +2445,9 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
         "state" => state(ns),
         "roster" | "message-state" | "reply-stats" | "project-summary" => read_view(ns),
         "poolrad" => poolrad(ns),
+        "dispatch" => dispatch_route(ns),
+        "clear-box" | "delivery" | "flush" | "messages" | "queue" | "cancel-message" | "cancel"
+        | "metrics" => delivery_queue_route(ns),
         "gh-token" => crate::daemon_cmd::gh_token(ns),
         "tui" => tui(ns),
         // `client.call("list_panes"), print_panes`
