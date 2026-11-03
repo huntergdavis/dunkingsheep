@@ -102,7 +102,7 @@ fn random_hex() -> String {
 fn require(conn: &Connection, id: &str) -> Result<Task, DunkError> {
     let row = conn
         .query_row(
-            "SELECT id, scope, title, body, status, priority, kind, assignees, depends_on, block_reason, created_at, updated_at FROM tasks WHERE id = ?",
+            "SELECT id, scope, title, body, status, priority, kind, assignees, depends_on, block_reason, created_at, updated_at, completed_by, completed_at FROM tasks WHERE id = ?",
             params![id],
             super::row_to_task,
         )
