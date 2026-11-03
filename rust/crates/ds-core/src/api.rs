@@ -536,6 +536,11 @@ impl Dispatcher {
         self.register("task_read", h_task_read);
     }
 
+    /// Register only the T39 task-delete handler leaf.
+    pub fn register_task_delete(&mut self) {
+        self.register("task_delete", h_task_delete);
+    }
+
     /// `dunk_api.dispatch(flock, name, args, self_pane_id)`, with the acting pane read only from
     /// this request's [`RequestCtx`] and caller state scoped to this synchronous request thread.
     pub fn dispatch<G: CallerGate + ?Sized>(
@@ -1705,6 +1710,13 @@ pub fn h_task_read(context: &HandlerContext<'_>, args: Args) -> Result<Value, Du
             .task_read_wire_with_notes(&id, context.self_pane_id()),
     )??;
     Ok(task.wire)
+}
+
+/// `dunk_api.h_task_delete`.
+pub fn h_task_delete(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let id = args.get("id").map(python_value_string).unwrap_or_default();
+    let deleted = context.block_on(context.flock.task_delete(&id, context.self_pane_id()))??;
+    Ok(json!({"deleted": deleted}))
 }
 
 /// `dunk_api.h_task_list`.

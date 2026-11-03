@@ -3638,3 +3638,124 @@ fn h_task_list_matches_python_defaults_and_slice_limits() {
         Err(DunkError::Refused(_))
     ));
 }
+
+fn task_delete_fixture() -> (
+    tokio::runtime::Runtime,
+    tempfile::TempDir,
+    Flock,
+    Arc<crate::tasks::Tasks>,
+    Dispatcher,
+) {
+    let (dir, flock) = flock();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let tasks = Arc::new(
+        runtime
+            .block_on(crate::tasks::Tasks::open(dir.path().join("tasks.db")))
+            .expect("task store"),
+    );
+    flock.attach_stores(Stores {
+        tasks: Some(tasks.clone()),
+        ..Stores::default()
+    });
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_task_delete();
+    (runtime, dir, flock, tasks, dispatcher)
+}
+
+fn dispatch_task_delete(
+    dispatcher: &Dispatcher,
+    flock: &Flock,
+    runtime: &tokio::runtime::Runtime,
+    gate: &impl CallerGate,
+    args: Option<Args>,
+) -> Result<Value, DunkError> {
+    let env = TestEnv::default();
+    let request = RequestCtx::default();
+    let context = HandlerContext {
+        flock,
+        request: &request,
+        env: &env,
+        runtime: runtime.handle(),
+    };
+    dispatcher.dispatch(&context, gate, "task_delete", args)
+}
+
+#[test]
+fn h_task_delete_matches_python_and_store_guards() {
+    let (runtime, _dir, flock, tasks, dispatcher) = task_delete_fixture();
+    let blocked = runtime
+        .block_on(tasks.add("global", "blocked by dependency", ""))
+        .expect("blocked task");
+    let dependent = runtime
+        .block_on(tasks.add_with(
+            "global",
+            "dependent",
+            "",
+            crate::tasks::AddOptions {
+                depends_on: vec![blocked.id.clone()],
+                ..Default::default()
+            },
+        ))
+        .expect("dependent task");
+    let removable = runtime
+        .block_on(tasks.add("global", "removable", ""))
+        .expect("removable task");
+
+    assert!(matches!(
+        dispatch_task_delete(
+            &dispatcher,
+            &flock,
+            &runtime,
+            &FixedRole("worker", false),
+            args(json!({"id": removable.id})),
+        ),
+        Err(DunkError::Refused(message)) if message.contains("not permitted for role worker")
+    ));
+    assert!(runtime.block_on(tasks.get(&removable.id)).is_ok());
+
+    assert!(matches!(
+        dispatch_task_delete(
+            &dispatcher,
+            &flock,
+            &runtime,
+            &FixedRole("owner", true),
+            None,
+        ),
+        Err(DunkError::Refused(message)) if message == "task_delete: missing required argument(s): id"
+    ));
+    assert!(matches!(
+        dispatch_task_delete(
+            &dispatcher,
+            &flock,
+            &runtime,
+            &FixedRole("owner", true),
+            args(json!({"id": "t999999"})),
+        ),
+        Err(DunkError::Refused(message)) if message.contains("no task with id")
+    ));
+    assert!(matches!(
+        dispatch_task_delete(
+            &dispatcher,
+            &flock,
+            &runtime,
+            &FixedRole("owner", true),
+            args(json!({"id": blocked.id})),
+        ),
+        Err(DunkError::Refused(message)) if message.contains(&format!("task {} is a dependency of {}", blocked.id, dependent.id))
+    ));
+
+    let deleted = dispatch_task_delete(
+        &dispatcher,
+        &flock,
+        &runtime,
+        &FixedRole("owner", true),
+        args(json!({"id": removable.id})),
+    )
+    .expect("delete task");
+    assert_eq!(deleted, json!({"deleted": removable.id}));
+    assert!(runtime.block_on(tasks.get(&removable.id)).is_err());
+}
