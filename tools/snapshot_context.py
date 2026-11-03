@@ -14,10 +14,10 @@ writes:
 
 The Rust test (`context::golden_tests`) opens a COPY of `tree/`, rebuilds a ledger from the
 `ledger` block (entries to skip = unrecorded, entries recorded with other text = modified) and
-fails when a digest, entries listing, search result or check report differs byte for byte.
+compares the Python read-side results, including get, stats and entry_stats. The access log uses
+fixed timestamps so access counts and last-access values do not depend on when the snapshot runs.
 
-NOT covered: `stats`/`entry_stats` (they read the access log's wall-clock times) and the global
-store; the live tree comparison is separate (tools/context_live_diff.py).
+The live tree comparison is separate (tools/context_live_diff.py).
 """
 import argparse
 import json
@@ -49,6 +49,26 @@ SEARCHES = [
     {"query": "café OR retired", "cls": None, "scope": None, "limit": 5},
     {"query": "nothingmatchesthis", "cls": None, "scope": None, "limit": 20},
 ]
+GETS = ["fact-port-old", "port", "gt-old-rule", "missing-entry"]
+ACCESS_LOG = [
+    # Far-future timestamps stay inside the seven-day comparison window for the fixture's
+    # lifetime; the zero timestamp stays outside it. Stats applies only a lower bound.
+    {"slug": "gt-worktrees", "at": 4000000000.25, "kind": "read", "by": "fixture"},
+    {"slug": "fact-deploy", "at": 4000000001.5, "kind": "read", "by": "fixture"},
+    {"slug": "fact-deploy", "at": 4000000002.75, "kind": "injected", "by": "fixture"},
+    {"slug": "fact-deploy", "at": 0.0, "kind": "read", "by": "fixture"},
+    {"slug": "prov-cache2", "at": 4000000003.0, "kind": "injected", "by": "fixture"},
+    {"slug": "unknown-slug", "at": 4000000004.0, "kind": "read", "by": "fixture"},
+]
+
+
+def get_projection(entry):
+    if entry is None:
+        return None
+    return {key: entry.get(key) for key in (
+        "slug", "class", "subject", "type", "scope", "authority", "stated", "source",
+        "recheck_after", "supersedes", "superseded_by", "retired_at", "retired_reason",
+        "body", "error")}
 
 
 def build(tmp):
@@ -112,12 +132,32 @@ def snapshot():
             found = store.search(args["query"], cls=args["cls"], scope=args["scope"],
                                  limit=args["limit"])
             cases.append({"op": "search", "args": args, "expected": found})
+        for key in GETS:
+            cases.append({"op": "get", "args": {"key": key},
+                          "expected": get_projection(store.resolve(key))})
         cases.append({"op": "check", "args": {}, "expected": store.check()})
+        access = Path(store.access_path())
+        access.write_text("".join(json.dumps(row) + "\n" for row in ACCESS_LOG),
+                          encoding="utf-8")
+        real_date = dunk_context.date
+
+        class SnapshotDate(real_date):
+            @classmethod
+            def today(cls):
+                return cls.fromisoformat(TODAY)
+
+        dunk_context.date = SnapshotDate
+        try:
+            cases.append({"op": "stats", "args": {}, "expected": store.stats()})
+            cases.append({"op": "entry_stats", "args": {}, "expected": store.entry_stats()})
+        finally:
+            dunk_context.date = real_date
         modified = ["fact-cafe"]
         unrecorded = ["fact-forged", "fact-broken"]
         tree = Path(tmp) / "tree"
-        shutil.copytree(root, tree, ignore=shutil.ignore_patterns(".index*", "access.jsonl"))
-        return {"ledger": {"modified": modified, "unrecorded": unrecorded},
+        shutil.copytree(root, tree, ignore=shutil.ignore_patterns(".index*"))
+        return {"snapshot_day": TODAY,
+                "ledger": {"modified": modified, "unrecorded": unrecorded},
                 "cases": cases}, tree
     except Exception:
         shutil.rmtree(tmp, ignore_errors=True)
