@@ -2424,6 +2424,9 @@ pub struct Message {
     /// Transient Dunk send behavior. It deliberately does not participate in the wire/snapshot
     /// form; restoring a row creates an ordinary text delivery with no Dunk authority.
     dunk_delivery: Option<Arc<DunkDeliveryAction>>,
+    /// Original key argument boundaries for live `send_keys_now` messages. This is transient:
+    /// restored rows retain the historical whitespace-split behavior of their serialized text.
+    key_arguments: Option<Vec<String>>,
 }
 
 pub(crate) struct DunkDeliveryAction {
@@ -2502,6 +2505,7 @@ impl Message {
             done: Arc::new(CompletionWaiter::default()),
             attempt_state: Arc::new(MessageAttemptState::default()),
             dunk_delivery: None,
+            key_arguments: None,
         }
     }
 
@@ -3816,8 +3820,9 @@ impl Flock {
                 let message_text = message.folded_text();
                 message.text = message_text.clone();
                 if is_keys {
-                    let keys: Vec<String> =
-                        message_text.split_whitespace().map(str::to_owned).collect();
+                    let keys = message.key_arguments.clone().unwrap_or_else(|| {
+                        message_text.split_whitespace().map(str::to_owned).collect()
+                    });
                     Ok(press_keys(env, &pane_id, &keys, guard))
                 } else {
                     Ok(submit_text_with_options(
@@ -4622,6 +4627,7 @@ impl Flock {
             .unwrap_or(pane_id);
         let mut message = self.new_message(pane_id, label, &text, "send_keys")?;
         message.kind = "keys".into();
+        message.key_arguments = Some(normalized);
         if options.hold_while_typing {
             self.enqueue(message.clone(), wake, store)?;
             if options.wait_s > 0.0 {
@@ -4664,14 +4670,16 @@ impl Flock {
             preserve_draft: false,
         };
         let is_keys = message.kind == "keys";
+        let key_arguments = message.key_arguments.clone();
         let message_text = message.text.clone();
         let press_enter = message.press_enter;
         let attempt_generation = message.attempt_generation.clone();
         let (sent, ok, detail, _) =
             send_guarded_with_reason(self, env, &pane_id, options, permission, |env, guard| {
                 if is_keys {
-                    let keys: Vec<String> =
-                        message_text.split_whitespace().map(str::to_owned).collect();
+                    let keys = key_arguments.unwrap_or_else(|| {
+                        message_text.split_whitespace().map(str::to_owned).collect()
+                    });
                     Ok(press_keys(env, &pane_id, &keys, guard))
                 } else {
                     Ok(submit_text_with_options(
