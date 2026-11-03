@@ -332,11 +332,26 @@ impl Flock {
         caller: Option<(i64, Option<String>, Option<String>)>,
         self_pane_id: Option<&str>,
     ) -> Result<(f64, f64), DunkError> {
+        self.task_heartbeat_with_lease_parser(task_id, || Ok(lease_seconds), caller, self_pane_id)
+            .await
+    }
+
+    pub(crate) async fn task_heartbeat_with_lease_parser<F>(
+        &self,
+        task_id: &str,
+        parse_lease: F,
+        caller: Option<(i64, Option<String>, Option<String>)>,
+        self_pane_id: Option<&str>,
+    ) -> Result<(f64, f64), DunkError>
+    where
+        F: FnOnce() -> Result<Option<f64>, DunkError>,
+    {
         let pane = self_pane_id.filter(|p| !p.is_empty()).ok_or_else(|| {
             DunkError::Refused("task heartbeat requires a known caller pane".into())
         })?;
         let tasks = self.task_store()?;
         self.visible_task(&tasks, task_id, self_pane_id).await?;
+        let lease_seconds = parse_lease()?;
         tasks.heartbeat(task_id, pane, lease_seconds, caller).await
     }
 
@@ -420,6 +435,30 @@ impl Flock {
         caller: Option<(i64, Option<String>, Option<String>)>,
         self_pane_id: Option<&str>,
     ) -> Result<(ClaimOutcome, bool), DunkError> {
+        self.task_next_with_lease_parser(
+            env,
+            scope,
+            || Ok(lease_seconds),
+            allow_busy,
+            caller,
+            self_pane_id,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn task_next_with_lease_parser<F>(
+        &self,
+        env: &dyn PaneInfoEnv,
+        scope: Option<&str>,
+        parse_lease: F,
+        allow_busy: bool,
+        caller: Option<(i64, Option<String>, Option<String>)>,
+        self_pane_id: Option<&str>,
+    ) -> Result<(ClaimOutcome, bool), DunkError>
+    where
+        F: FnOnce() -> Result<Option<f64>, DunkError>,
+    {
         let tasks = self.task_store()?;
         let pane = self_pane_id.filter(|p| !p.is_empty());
         let role = match pane {
@@ -446,6 +485,7 @@ impl Flock {
         }
         let value = scope.map(str::trim).unwrap_or("");
         let mut follow_scope = TASK_GLOBAL.to_string();
+        let mut auto_pane = None;
         let target = match value {
             "" | "global" => TASK_GLOBAL.to_string(),
             "self" => {
@@ -457,22 +497,7 @@ impl Flock {
             }
             "auto" => {
                 if let Some(pane) = pane {
-                    let local = tasks
-                        .claim_next(
-                            pane,
-                            pane,
-                            ClaimOptions {
-                                lease_seconds,
-                                caller: caller.clone(),
-                                allow_busy,
-                                kinds: kinds.clone(),
-                                exclude_author: exclude_author.clone(),
-                            },
-                        )
-                        .await?;
-                    if matches!(local, ClaimOutcome::Claimed { .. }) {
-                        return Ok((local, false));
-                    }
+                    auto_pane = Some(pane);
                 }
                 TASK_GLOBAL.to_string()
             }
@@ -491,6 +516,25 @@ impl Flock {
                 resolved
             }
         };
+        let lease_seconds = parse_lease()?;
+        if let Some(pane) = auto_pane {
+            let local = tasks
+                .claim_next(
+                    pane,
+                    pane,
+                    ClaimOptions {
+                        lease_seconds,
+                        caller: caller.clone(),
+                        allow_busy,
+                        kinds: kinds.clone(),
+                        exclude_author: exclude_author.clone(),
+                    },
+                )
+                .await?;
+            if matches!(local, ClaimOutcome::Claimed { .. }) {
+                return Ok((local, false));
+            }
+        }
         let outcome = tasks
             .claim_next(
                 &target,
@@ -660,6 +704,17 @@ impl Flock {
         args: TaskUpdateArgs<'_>,
         self_pane_id: Option<&str>,
     ) -> Result<Task, DunkError> {
+        self.task_update_with_raw_block_reason(task_id, args, None, self_pane_id)
+            .await
+    }
+
+    pub(crate) async fn task_update_with_raw_block_reason(
+        &self,
+        task_id: &str,
+        args: TaskUpdateArgs<'_>,
+        raw_block_reason: Option<Option<serde_json::Value>>,
+        self_pane_id: Option<&str>,
+    ) -> Result<Task, DunkError> {
         let tasks = self.task_store()?;
         self.visible_task(&tasks, task_id, self_pane_id).await?;
         let resolved = match args.assignees {
@@ -678,7 +733,13 @@ impl Flock {
             block_reason: args.block_reason.map(|r| r.map(own)),
         };
         tasks
-            .update_with_status(task_id, edit, args.status, self_pane_id)
+            .update_with_status_and_raw_block_reason(
+                task_id,
+                edit,
+                args.status,
+                self_pane_id,
+                raw_block_reason,
+            )
             .await
     }
 

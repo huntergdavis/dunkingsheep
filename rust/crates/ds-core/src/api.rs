@@ -639,6 +639,19 @@ impl Dispatcher {
         self.register("task_delete", h_task_delete);
     }
 
+    /// Register only the T39 task mutation and lease handlers assigned to t2966.
+    pub fn register_task_mutation_leases(&mut self) {
+        self.register("task_update", h_task_update);
+        self.register("task_assign", h_task_assign);
+        self.register("task_note", h_task_note);
+        self.register("task_block", h_task_block);
+        self.register("task_unblock", h_task_unblock);
+        self.register("task_cancel", h_task_cancel);
+        self.register("task_next", h_task_next);
+        self.register("task_heartbeat", h_task_heartbeat);
+        self.register("task_release", h_task_release);
+    }
+
     /// Register only the T39 direct-send handlers.
     pub fn register_send_text_keys_flush_box(&mut self) {
         self.register("send_text", h_send_text);
@@ -2529,6 +2542,215 @@ pub fn h_task_read(context: &HandlerContext<'_>, args: Args) -> Result<Value, Du
             .task_read_wire_with_notes(&id, context.self_pane_id()),
     )??;
     Ok(task.wire)
+}
+
+/// `dunk_api.h_task_update`.
+pub fn h_task_update(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let pane = context.self_pane_id();
+    let role = context.flock.caller_role(pane, context.env)?;
+    if !matches!(role.as_str(), "owner" | "system" | "web") {
+        let touched = ["status", "assignees", "multi_assignee", "block_reason"]
+            .into_iter()
+            .filter(|key| args.contains_key(*key))
+            .collect::<Vec<_>>();
+        if !touched.is_empty() {
+            return Err(DunkError::Refused(format!(
+                "task update cannot change {} for role {role}: status moves through next/complete/block, and assignment is the owner's",
+                touched.join(", ")
+            )));
+        }
+    }
+    let assignee_values = task_values(args.get("assignees"));
+    let assignees = assignee_values
+        .as_ref()
+        .map(|values| values.iter().map(String::as_str).collect::<Vec<_>>());
+    let depends_values = task_values(args.get("depends_on"));
+    let depends_on = depends_values
+        .as_ref()
+        .map(|values| values.iter().map(String::as_str).collect::<Vec<_>>());
+    let parent_id = match args.get("parent_id") {
+        None => None,
+        Some(Value::Null) => Some(None),
+        Some(Value::String(value)) => Some(Some(value.as_str())),
+        Some(_) => {
+            return Err(DunkError::Refused(
+                "task_update: parent_id must be a string or null".into(),
+            ))
+        }
+    };
+    let raw_block_reason = args.get("block_reason").map(|value| {
+        if value.is_null() {
+            None
+        } else {
+            Some(value.clone())
+        }
+    });
+    let update = crate::flock::commands_tasks::TaskUpdateArgs {
+        title: task_string_arg(&args, "title", "task_update")?,
+        body: task_string_arg(&args, "body", "task_update")?,
+        status: task_string_arg(&args, "status", "task_update")?,
+        priority: task_string_arg(&args, "priority", "task_update")?,
+        parent_id,
+        assignees,
+        depends_on,
+        block_reason: None,
+        multi_assignee: args
+            .contains_key("multi_assignee")
+            .then(|| python_bool_arg(&args, "multi_assignee", false)),
+    };
+    let id = args.get("id").map(python_value_string).unwrap_or_default();
+    let task = context.block_on(context.flock.task_update_wire_with_raw_block_reason(
+        &id,
+        update,
+        raw_block_reason,
+        pane,
+    ))??;
+    Ok(task.wire)
+}
+
+/// `dunk_api.h_task_assign`.
+pub fn h_task_assign(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let pane = context.self_pane_id();
+    let role = context.flock.caller_role(pane, context.env)?;
+    if !matches!(role.as_str(), "owner" | "system" | "web") {
+        return Err(DunkError::Refused(format!(
+            "task assign requires the owner role (caller is {role}); lanes pull work with task next, they are not handed it"
+        )));
+    }
+    let values = task_values(args.get("assignees"));
+    let assignees = values
+        .as_ref()
+        .map(|values| values.iter().map(String::as_str).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let mode_value = args.get("mode").filter(|value| truthy(value));
+    let mode = match mode_value {
+        None => "add".to_string(),
+        Some(Value::String(value)) => value.clone(),
+        Some(value) => {
+            let kind = python_type_name(value);
+            return Err(DunkError::Refused(format!(
+                "'{}' object has no attribute 'strip'",
+                kind
+            )));
+        }
+    };
+    let id = args.get("id").map(python_value_string).unwrap_or_default();
+    let task = context.block_on(context.flock.task_assign_wire(&id, &assignees, &mode, pane))??;
+    Ok(task.wire)
+}
+
+/// `dunk_api.h_task_note`.
+pub fn h_task_note(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let id = args.get("id").map(python_value_string).unwrap_or_default();
+    let event = args
+        .get("event")
+        .filter(|value| truthy(value))
+        .cloned()
+        .unwrap_or_else(|| json!("note"));
+    let meta = match args.get("reason").filter(|value| truthy(value)) {
+        Some(reason) => json!({"reason": reason}),
+        None => json!({}),
+    };
+    context.block_on(
+        context
+            .flock
+            .task_note_wire(&id, &event, context.self_pane_id(), &meta),
+    )?
+}
+
+/// `dunk_api.h_task_block`.
+pub fn h_task_block(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let id = args.get("id").map(python_value_string).unwrap_or_default();
+    let task = context.block_on(context.flock.task_block_wire(
+        &id,
+        args.get("reason"),
+        context.self_pane_id(),
+    ))??;
+    Ok(task.wire)
+}
+
+/// `dunk_api.h_task_unblock`.
+pub fn h_task_unblock(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let id = args.get("id").map(python_value_string).unwrap_or_default();
+    let task = context.block_on(context.flock.task_unblock_wire(&id, context.self_pane_id()))??;
+    Ok(task.wire)
+}
+
+/// `dunk_api.h_task_cancel`.
+pub fn h_task_cancel(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let id = args.get("id").map(python_value_string).unwrap_or_default();
+    context.block_on(context.flock.task_cancel_wire(
+        &id,
+        args.get("reason"),
+        context.self_pane_id(),
+    ))?
+}
+
+/// `dunk_api.h_task_next`.
+pub fn h_task_next(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let pane = context.self_pane_id();
+    let scope = python_scope_arg(args.get("scope"));
+    // `current_caller` is request-thread state; capture it before this future may hop workers.
+    let caller = context.flock.caller_identity();
+    context.block_on(context.flock.task_next_wire_with_lease_parser(
+        context.env,
+        scope.as_deref(),
+        || python_lease_seconds(&args),
+        python_bool_arg(&args, "allow_busy", false),
+        caller,
+        pane,
+    ))?
+}
+
+/// `dunk_api.h_task_heartbeat`.
+pub fn h_task_heartbeat(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let pane = context.self_pane_id();
+    let id = args.get("id").map(python_value_string).unwrap_or_default();
+    let caller = context.flock.caller_identity();
+    let (expires_at, lease_seconds) =
+        context.block_on(context.flock.task_heartbeat_with_lease_parser(
+            &id,
+            || python_lease_seconds(&args),
+            caller,
+            pane,
+        ))??;
+    Ok(json!({
+        "task_id": id,
+        "pane_id": pane,
+        "expires_at": expires_at,
+        "lease_seconds": lease_seconds,
+    }))
+}
+
+fn python_lease_seconds(args: &Args) -> Result<Option<f64>, DunkError> {
+    let lease_seconds = args
+        .get("lease_seconds")
+        .filter(|value| truthy(value))
+        .map(python_float)
+        .transpose()?;
+    if lease_seconds.is_some_and(|lease| lease <= 0.0) {
+        return Err(DunkError::Refused("lease_seconds must be positive".into()));
+    }
+    Ok(lease_seconds)
+}
+
+/// `dunk_api.h_task_release`.
+pub fn h_task_release(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let id = args.get("id").map(python_value_string).unwrap_or_default();
+    let task = context.block_on(context.flock.task_release_wire(&id, context.self_pane_id()))??;
+    Ok(task.wire)
+}
+
+fn python_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "NoneType",
+        Value::Bool(_) => "bool",
+        Value::Number(number) if number.is_i64() || number.is_u64() => "int",
+        Value::Number(_) => "float",
+        Value::String(_) => "str",
+        Value::Array(_) => "list",
+        Value::Object(_) => "dict",
+    }
 }
 
 impl Dispatcher {

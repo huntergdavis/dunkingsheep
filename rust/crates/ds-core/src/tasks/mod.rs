@@ -20,8 +20,8 @@
 
 use std::path::{Path, PathBuf};
 
-use rusqlite::{params, Connection, OptionalExtension};
-use serde_json::json;
+use rusqlite::{params, types::Value as SqlValue, Connection, OptionalExtension};
+use serde_json::{json, Value as JsonValue};
 
 pub mod metrics;
 
@@ -165,6 +165,12 @@ pub struct Tasks {
 /// An `on_event` callback: (task id, event, completed-by, kind). Cheap, and it must not
 /// write the task store; a panicking callback is contained, never raised (`_fire`).
 pub type Observer = Box<dyn Fn(&str, &str, Option<&str>, Option<&str>) + Send + Sync>;
+
+#[derive(Clone)]
+enum StatusReason {
+    Text(Option<String>),
+    Raw(Option<JsonValue>),
+}
 
 impl Tasks {
     /// Open (or create) the store and bring its schema up to date.
@@ -460,10 +466,38 @@ impl Tasks {
         reason: Option<&str>,
         actor: Option<&str>,
     ) -> Result<Task, DunkError> {
+        self.set_status_with_reason(
+            id,
+            status,
+            StatusReason::Text(reason.map(str::to_owned)),
+            actor,
+        )
+        .await
+    }
+
+    /// The raw API block/cancel path preserves Python sqlite scalar binding and error order.
+    pub(crate) async fn set_status_with_raw_reason(
+        &self,
+        id: &str,
+        status: &str,
+        reason: Option<&JsonValue>,
+        actor: Option<&str>,
+    ) -> Result<Task, DunkError> {
+        self.set_status_with_reason(id, status, StatusReason::Raw(reason.cloned()), actor)
+            .await
+    }
+
+    async fn set_status_with_reason(
+        &self,
+        id: &str,
+        status: &str,
+        reason: StatusReason,
+        actor: Option<&str>,
+    ) -> Result<Task, DunkError> {
         let wanted = id.to_string();
         let id = wanted.clone();
         let status = status.to_string();
-        let reason = reason.map(|r| r.to_string());
+        let reason = reason.clone();
         let actor = actor.map(|a| a.to_string());
         let now = crate::clock::now_s();
         self.writer
@@ -485,6 +519,19 @@ impl Tasks {
                     return Err(DunkError::Refused(format!(
                         "task {id} is {current}; a finished task is not reopened by an edit (t854)")));
                 }
+                // SQLite's attempted binding happens only after visibility and terminal-state
+                // checks, as in Python. The rejected composite value therefore cannot hide a
+                // refusal or partially change status, leases, or events.
+                let (reason_binding, reason_meta) = match &reason {
+                    StatusReason::Text(value) => (
+                        value.clone().map(SqlValue::Text),
+                        value.clone().map(|value| json!({"reason": value}).to_string()),
+                    ),
+                    StatusReason::Raw(value) => (
+                        Some(crate::sqlite_scalar::python_sqlite_scalar(value.as_ref(), 5)?),
+                        None,
+                    ),
+                };
                 // FINDING 2: the transition writes the columns that give it meaning, and
                 // exactly one event row - task_metrics is computed from those rows, so a
                 // silent transition is invisible to the metrics.
@@ -492,8 +539,8 @@ impl Tasks {
                     status.as_str()
                 {
                     "done" => (actor.clone(), Some(now), None, None),
-                    "cancelled" => (None, None, Some(now), reason.clone()),
-                    "blocked" => (None, None, None, reason.clone()),
+                    "cancelled" => (None, None, Some(now), reason_binding.clone()),
+                    "blocked" => (None, None, None, reason_binding.clone()),
                     _ => (None, None, None, None),
                 };
                 let changed = conn
@@ -539,7 +586,7 @@ impl Tasks {
                     "INSERT INTO task_events (task_id, event, at, actor, scope, priority, \
                      status_from, status_to, duration_ms, meta) VALUES (?,?,?,?,?,?,?,?,?,?)",
                     params![id, event, now, actor, scope, priority, current, status, duration_ms,
-                            reason.clone().map(|r| json!({"reason": r}).to_string())],
+                            reason_meta],
                 )
                 .map_err(db::map_sqlite)?;
                 if ends_claim(status.as_str()) {
@@ -884,6 +931,32 @@ impl Tasks {
             })
             .await
     }
+
+    /// Append an API note using Python-compatible SQLite scalar binding. This path does not
+    /// require the task to exist; actor identity is trusted request state and may be SQL NULL.
+    pub(crate) async fn note_raw(
+        &self,
+        id: &str,
+        event: &JsonValue,
+        actor: Option<&str>,
+        meta: &JsonValue,
+    ) -> Result<(), DunkError> {
+        let id = id.to_string();
+        let event = crate::sqlite_scalar::python_sqlite_scalar(Some(event), 2)?;
+        let actor = actor.map(|actor| SqlValue::Text(actor.to_string()));
+        let meta = SqlValue::Text(meta.to_string());
+        let now = crate::clock::now_s();
+        self.writer
+            .call(move |conn| {
+                conn.execute(
+                    "INSERT INTO task_events (task_id, event, at, actor, meta) VALUES (?,?,?,?,?)",
+                    params![id, event, now, actor, meta],
+                )
+                .map_err(db::map_sqlite)?;
+                Ok(())
+            })
+            .await
+    }
     /// `assign` (t786 slice 4): add, remove or replace the assignees. The read-modify-write
     /// is ONE immediate transaction, the Python's F4: a concurrent assign must not be lost
     /// between the read and the update.
@@ -1039,6 +1112,18 @@ impl Tasks {
         status: Option<&str>,
         actor: Option<&str>,
     ) -> Result<Task, DunkError> {
+        self.update_with_status_and_raw_block_reason(id, edit, status, actor, None)
+            .await
+    }
+
+    pub(crate) async fn update_with_status_and_raw_block_reason(
+        &self,
+        id: &str,
+        edit: FieldEdit,
+        status: Option<&str>,
+        actor: Option<&str>,
+        raw_block_reason: Option<Option<JsonValue>>,
+    ) -> Result<Task, DunkError> {
         if let Some(title) = &edit.title {
             if title.trim().is_empty() {
                 return Err(DunkError::Refused("a task needs a title".into()));
@@ -1053,6 +1138,7 @@ impl Tasks {
         let requested_status = status.map(str::to_string);
         let now = crate::clock::now_s();
         let edit_for_call = edit.clone();
+        let raw_block_reason = raw_block_reason.clone();
         self.writer
             .call(move |conn| {
                 let tx = conn
@@ -1243,7 +1329,16 @@ impl Tasks {
                         ).map_err(db::map_sqlite)?;
                     }
                 }
-                if let Some(reason) = &edit_for_call.block_reason {
+                if let Some(raw_reason) = raw_block_reason {
+                    // Python's combined update binds the raw block_reason as parameter five.
+                    let reason = crate::sqlite_scalar::python_sqlite_scalar(raw_reason.as_ref(), 5)?;
+                    tx.execute(
+                        "UPDATE tasks SET block_reason = ? WHERE id = ?",
+                        params![reason, id],
+                    )
+                    .map_err(db::map_sqlite)?;
+                    changed = true;
+                } else if let Some(reason) = &edit_for_call.block_reason {
                     tx.execute("UPDATE tasks SET block_reason = ? WHERE id = ?", params![reason, id]).map_err(db::map_sqlite)?;
                     changed = true;
                 }

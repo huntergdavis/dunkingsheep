@@ -59,6 +59,7 @@ pub mod roles;
 pub mod secrets;
 pub mod server;
 pub mod server_runtime;
+pub(crate) mod sqlite_scalar;
 pub use server_runtime::{RuntimeObservability, RuntimeServiceInputs, RuntimeServices};
 pub mod state;
 pub mod stuck;

@@ -151,42 +151,7 @@ fn owner_wire_python_string(value: &JsonValue) -> String {
 }
 
 fn owner_sqlite_subject(subject: Option<&JsonValue>) -> Result<rusqlite::types::Value, DunkError> {
-    use rusqlite::types::Value as SqlValue;
-    let Some(subject) = subject else {
-        return Ok(SqlValue::Null);
-    };
-    match subject {
-        JsonValue::Null => Ok(SqlValue::Null),
-        JsonValue::Bool(value) => Ok(SqlValue::Integer(i64::from(*value))),
-        JsonValue::String(value) => Ok(SqlValue::Text(value.clone())),
-        JsonValue::Number(value) if value.is_i64() => {
-            Ok(SqlValue::Integer(value.as_i64().expect("is_i64")))
-        }
-        JsonValue::Number(value) if value.is_u64() => value
-            .as_u64()
-            .and_then(|number| i64::try_from(number).ok())
-            .map(SqlValue::Integer)
-            .ok_or_else(|| refuse("Python int too large to convert to SQLite INTEGER")),
-        JsonValue::Number(value) => {
-            let raw = value.to_string();
-            if !raw
-                .chars()
-                .any(|character| matches!(character, '.' | 'e' | 'E'))
-            {
-                return Err(refuse("Python int too large to convert to SQLite INTEGER"));
-            }
-            value
-                .as_f64()
-                .map(SqlValue::Real)
-                .ok_or_else(|| refuse("Python int too large to convert to SQLite INTEGER"))
-        }
-        JsonValue::Array(_) => Err(refuse(
-            "Error binding parameter 6: type 'list' is not supported",
-        )),
-        JsonValue::Object(_) => Err(refuse(
-            "Error binding parameter 6: type 'dict' is not supported",
-        )),
-    }
+    crate::sqlite_scalar::python_sqlite_scalar(subject, 6)
 }
 
 impl Store {
