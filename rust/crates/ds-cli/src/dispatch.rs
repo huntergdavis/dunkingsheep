@@ -168,6 +168,12 @@ fn command_description(command: &ds_core::registry::Command) -> &'static str {
     }
 }
 
+fn cli_param_required(command: &ds_core::registry::Command, name: &str) -> bool {
+    // The generated `required` field is MCP-required. argparse leaves these two
+    // CLI parameters optional, even though MCP requires them in its schema.
+    !matches!(command.name, "add_dunk" | "create_tab") && command.required.contains(&name)
+}
+
 fn text<'a>(ns: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
     ns.get(key).and_then(Value::as_str)
 }
@@ -316,7 +322,7 @@ fn commands(json: bool) -> Outcome {
                 format!(
                     "{}{}",
                     param.name,
-                    if command.required.contains(&param.name) {
+                    if cli_param_required(command, param.name) {
                         "*"
                     } else {
                         ""
