@@ -241,7 +241,7 @@ fn hold_backoff_s(attempts: i64) -> f64 {
 
 pub type HoldSignature = (String, String);
 
-pub(super) fn hold_signature(env: &dyn SendEnv, pane_id: &str) -> HoldSignature {
+pub(super) fn hold_signature(flock: &Flock, env: &dyn SendEnv, pane_id: &str) -> HoldSignature {
     let Some(screen) = env.read_pane(pane_id, CONSUMPTION_READ_LINES, true) else {
         return ("gone".into(), String::new());
     };
@@ -259,6 +259,10 @@ pub(super) fn hold_signature(env: &dyn SendEnv, pane_id: &str) -> HoldSignature 
     }
     let (text, detail) = box_text(&screen);
     if detail.starts_with(AMBIGUOUS_COMPOSER) {
+        let known = flock.known_send_texts(pane_id);
+        if let Some(region) = owned_composer_region(flock, pane_id, &screen, &known) {
+            return ("box".into(), region);
+        }
         return ("gone".into(), String::new());
     }
     match typed_text(&screen) {
@@ -2162,7 +2166,7 @@ impl Flock {
             let terminal;
             let attempts;
             let last_reason = blocker_reason.as_deref().unwrap_or("unknown");
-            let hold_signature = hold_signature(env, &pane_id);
+            let hold_signature = hold_signature(self, env, &pane_id);
             {
                 let mut outbox = outbox_lock(&self.outbox);
                 let Some(queue) = outbox.get_mut(&pane_id) else {

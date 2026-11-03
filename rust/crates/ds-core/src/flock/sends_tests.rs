@@ -2203,7 +2203,9 @@ fn deliver_message_uses_normalized_block_reason_for_hold_metrics_and_terminal_de
     );
     drop(history);
 
-    let events = metrics.events_between(0.0, 1.0).unwrap();
+    let events = metrics
+        .events_between(0.0, crate::clock::now_s() + 1.0)
+        .unwrap();
     let held_events: Vec<_> = events
         .iter()
         .filter(|event| event.kind == "message.held")
@@ -2259,7 +2261,9 @@ fn deliver_message_does_not_use_permission_or_dead_session_detail_as_block_reaso
             );
             if attempt == 0 {
                 let held = &flock.outbox_snapshot()[P][0];
-                assert_eq!(permission_detail, held.detail.as_deref());
+                let expected_detail = permission_detail
+                    .or_else(|| dead.then_some("the lane's recorded process is gone"));
+                assert_eq!(expected_detail, held.detail.as_deref());
             }
         }
     }
@@ -2276,7 +2280,9 @@ fn deliver_message_does_not_use_permission_or_dead_session_detail_as_block_reaso
     }
     drop(history);
 
-    let events = metrics.events_between(0.0, 1.0).unwrap();
+    let events = metrics
+        .events_between(0.0, crate::clock::now_s() + 1.0)
+        .unwrap();
     assert!(events
         .iter()
         .filter(|event| event.kind == "message.held" || event.kind == "message.undeliverable")
@@ -2310,6 +2316,8 @@ fn python_hold_signature_list_survives_restore_and_resnapshot() {
 
 #[test]
 fn hold_signature_preserves_modal_kind_and_collapsed_screen_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Flock::new(dir.path().join("launches.json"), dir.path(), false);
     let mut pane = Pane::default();
     pane.screens.insert(
         P.into(),
@@ -2321,7 +2329,27 @@ fn hold_signature_preserves_modal_kind_and_collapsed_screen_text() {
             "modal".to_owned(),
             "Select Model and Effort enter select · esc back".to_owned()
         ),
-        hold_signature(&pane, P)
+        hold_signature(&flock, &pane, P)
+    );
+}
+
+#[test]
+fn hold_signature_preserves_owned_ambiguous_composer_region() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Flock::new(dir.path().join("launches.json"), dir.path(), false);
+    let owned = "queued message owned by this flock";
+    flock
+        .sent_text_by_pane
+        .lock()
+        .unwrap()
+        .insert(P.into(), vec![owned.into()]);
+    let mut pane = Pane::default();
+    pane.screens
+        .insert(P.into(), format!("❯ {owned}\n\n\nstatus · ready\n"));
+
+    assert_eq!(
+        ("box".into(), owned.into()),
+        hold_signature(&flock, &pane, P)
     );
 }
 
