@@ -210,6 +210,7 @@ fn host_agnostic_url(configured: &str, hostname: Option<&str>) -> String {
     {
         return configured.to_owned();
     }
+    let scheme = scheme.to_ascii_lowercase();
 
     let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let authority = &rest[..authority_end];
@@ -228,7 +229,7 @@ fn host_agnostic_url(configured: &str, hostname: Option<&str>) -> String {
             match &value[close + 1..] {
                 "" => None,
                 suffix if suffix.starts_with(':') => match parse_port(&suffix[1..]) {
-                    Some(port) => Some(port),
+                    Some(port) => (port != 0).then_some(port),
                     None if suffix.len() == 1 => None,
                     None => return configured.to_owned(),
                 },
@@ -237,7 +238,7 @@ fn host_agnostic_url(configured: &str, hostname: Option<&str>) -> String {
         }
         value => match value.rsplit_once(':') {
             Some((host, port)) if !host.contains(':') => match parse_port(port) {
-                Some(port) => Some(port),
+                Some(port) => (port != 0).then_some(port),
                 None if port.is_empty() => None,
                 None => return configured.to_owned(),
             },
@@ -591,6 +592,27 @@ mod tests {
                 "label": "Herdr web UI"
             })
         );
+    }
+
+    #[test]
+    fn herdr_webui_matches_python_urlsplit_port_zero_and_scheme_case() {
+        let temp = TempDir::new();
+        for (configured_url, expected_url) in [
+            ("https://configured.example:0/ui", "https://desk.example/ui"),
+            (
+                "HTTPS://configured.example:443/ui",
+                "https://desk.example:443/ui",
+            ),
+        ] {
+            let app = app(config(&temp.0, configured_url, "ui"));
+            let response =
+                block_on(app.oneshot(bearer_request("/api/herdr-webui", Some("desk.example"))))
+                    .expect("route response");
+            let (status, content_type, body) = response_json(response);
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(content_type, "application/json");
+            assert_eq!(body["url"], expected_url);
+        }
     }
 
     #[test]
