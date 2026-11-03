@@ -20,13 +20,68 @@ use super::auth::{AuthBackend, AuthError, Identity, RequestScheme};
 pub type GameStateFuture<'a> =
     Pin<Box<dyn Future<Output = Result<Value, GameStateError>> + Send + 'a>>;
 
+struct ParsedRequestJson {
+    value: Value,
+    surrogate_tag: Option<PythonString>,
+}
+
+/// A Python string's Unicode code points, including lone surrogate code points.
+///
+/// Python's JSON decoder preserves lone `\\uXXXX` surrogates. Rust `String`
+/// cannot represent those values, so the game-state backend receives this
+/// code-point form for save-state tags.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PythonString {
+    code_points: Vec<u32>,
+}
+
+impl PythonString {
+    /// Returns the string as Unicode code points, preserving lone surrogates.
+    pub fn code_points(&self) -> &[u32] {
+        &self.code_points
+    }
+
+    fn from_text(text: &str) -> Self {
+        Self {
+            code_points: text.chars().map(u32::from).collect(),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.code_points.len()
+    }
+
+    fn has_surrogate(&self) -> bool {
+        self.code_points
+            .iter()
+            .any(|code_point| (0xd800..=0xdfff).contains(code_point))
+    }
+
+    fn is_ascii(&self, text: &str) -> bool {
+        self.code_points
+            .iter()
+            .copied()
+            .eq(text.bytes().map(u32::from))
+    }
+
+    fn debug_text(&self) -> String {
+        self.code_points
+            .iter()
+            .map(|code_point| match char::from_u32(*code_point) {
+                Some(character) => character.to_string(),
+                None => format!("\\u{code_point:04x}"),
+            })
+            .collect()
+    }
+}
+
 /// Runtime operations used by the three game-state endpoints.
 ///
 /// A concrete adapter can call the game session/client; route tests inject a
 /// fake so they never contact a running emulator or write save-state files.
 pub trait GameStateBackend: Send + Sync + 'static {
     fn list_states(&self) -> GameStateFuture<'_>;
-    fn savestate(&self, tag: String) -> GameStateFuture<'_>;
+    fn savestate(&self, tag: PythonString) -> GameStateFuture<'_>;
     fn loadstate(&self, slot: i64) -> GameStateFuture<'_>;
 }
 
@@ -80,22 +135,29 @@ async fn game_savestate(
     if let Err(response) = authenticate(auth.as_ref(), &headers, scheme).await {
         return response;
     }
-    let body = match parsed_body {
-        Some(Value::Object(body)) => body,
-        Some(input) => return model_error(input),
+    let parsed_body = match parsed_body {
+        Some(parsed_body) => parsed_body,
         None => return missing_body_error(),
     };
+    let surrogate_tag = parsed_body.surrogate_tag;
+    let body = match parsed_body.value {
+        Value::Object(body) => body,
+        input => return model_error(input),
+    };
     let tag = match body.get("tag") {
-        None => String::new(),
-        Some(Value::String(tag)) if tag.chars().count() <= 80 => tag.clone(),
+        None => PythonString::from_text(""),
         Some(Value::String(tag)) => {
-            return validation_error(
-                "string_too_long",
-                vec![json!("body"), json!("tag")],
-                "String should have at most 80 characters",
-                json!(tag),
-                Some(json!({"max_length": 80})),
-            );
+            let tag = surrogate_tag.unwrap_or_else(|| PythonString::from_text(tag));
+            if tag.len() > 80 {
+                return validation_error(
+                    "string_too_long",
+                    vec![json!("body"), json!("tag")],
+                    "String should have at most 80 characters",
+                    json!(tag.debug_text()),
+                    Some(json!({"max_length": 80})),
+                );
+            }
+            tag
         }
         Some(input) => {
             return validation_error(
@@ -130,8 +192,11 @@ async fn game_loadstate(
         return response;
     }
     let body = match parsed_body {
-        Some(Value::Object(body)) => body,
-        Some(input) => return model_error(input),
+        Some(ParsedRequestJson {
+            value: Value::Object(body),
+            ..
+        }) => body,
+        Some(ParsedRequestJson { value: input, .. }) => return model_error(input),
         None => return missing_body_error(),
     };
     let Some(input) = body.get("slot") else {
@@ -193,7 +258,7 @@ async fn game_loadstate(
     }
 }
 
-async fn request_json(request: Request) -> Result<Option<Value>, Response> {
+async fn request_json(request: Request) -> Result<Option<ParsedRequestJson>, Response> {
     let parse_as_json = request_json_content_type(request.headers());
     let bytes = to_bytes(request.into_body(), usize::MAX)
         .await
@@ -207,48 +272,293 @@ async fn request_json(request: Request) -> Result<Option<Value>, Response> {
         return Ok(None);
     }
     if !parse_as_json {
-        return Ok(Some(Value::String(
-            String::from_utf8_lossy(&bytes).into_owned(),
-        )));
+        return Ok(Some(ParsedRequestJson {
+            value: Value::String(String::from_utf8_lossy(&bytes).into_owned()),
+            surrogate_tag: None,
+        }));
     }
-    serde_json::from_slice(&bytes).map(Some).map_err(|error| {
-        let error_text = error.to_string();
-        let invalid_escape = (error_text.starts_with("invalid escape")
-            || error_text.starts_with("EOF while parsing a string"))
-            .then(|| python_invalid_escape(&bytes))
-            .flatten();
-        let trailing_comma = error_text
-            .starts_with("trailing comma")
-            .then(|| python_trailing_comma(&bytes))
-            .flatten();
-        let offset = if let Some(invalid_escape) = invalid_escape {
-            invalid_escape.offset()
-        } else if error_text.starts_with("EOF while parsing an object") {
-            String::from_utf8_lossy(&bytes).chars().count()
-        } else if error_text.starts_with("EOF while parsing a string") {
-            python_unterminated_string_offset(&bytes)
-                .unwrap_or_else(|| error.column().saturating_sub(1))
-        } else if error_text.starts_with("EOF while parsing") {
-            String::from_utf8_lossy(&bytes).chars().count()
-        } else if let Some((offset, _)) = trailing_comma {
-            offset
+    match serde_json::from_slice(&bytes) {
+        Ok(value) => Ok(Some(ParsedRequestJson {
+            value,
+            surrogate_tag: None,
+        })),
+        Err(error) => {
+            if let Some(normalized) = replace_lone_surrogate_escapes(&bytes) {
+                if let Ok(value) = serde_json::from_slice(&normalized) {
+                    let surrogate_tag = top_level_tag_python_string(&bytes)
+                        .filter(PythonString::has_surrogate);
+                    return Ok(Some(ParsedRequestJson {
+                        value,
+                        surrogate_tag,
+                    }));
+                }
+            }
+            Err(python_json_decode_error(&bytes, &error))
+        }
+    }
+}
+
+fn python_json_decode_error(bytes: &[u8], error: &serde_json::Error) -> Response {
+    let error_text = error.to_string();
+    let invalid_escape = (error_text.starts_with("invalid escape")
+        || error_text.starts_with("EOF while parsing a string"))
+        .then(|| python_invalid_escape(bytes))
+        .flatten();
+    let trailing_comma = error_text
+        .starts_with("trailing comma")
+        .then(|| python_trailing_comma(bytes))
+        .flatten();
+    let offset = if let Some(invalid_escape) = invalid_escape {
+        invalid_escape.offset()
+    } else if error_text.starts_with("EOF while parsing an object") {
+        String::from_utf8_lossy(bytes).chars().count()
+    } else if error_text.starts_with("EOF while parsing a string") {
+        python_unterminated_string_offset(bytes)
+            .unwrap_or_else(|| error.column().saturating_sub(1))
+    } else if error_text.starts_with("EOF while parsing") {
+        String::from_utf8_lossy(bytes).chars().count()
+    } else if let Some((offset, _)) = trailing_comma {
+        offset
+    } else {
+        python_json_offset(bytes, error.line(), error.column())
+    };
+    validation_error(
+        "json_invalid",
+        vec![json!("body"), json!(offset)],
+        "JSON decode error",
+        json!({}),
+        Some(json!({
+            "error": python_json_error(
+                &error_text,
+                trailing_comma.map(|(_, kind)| kind),
+                invalid_escape,
+            )
+        })),
+    )
+}
+
+fn replace_lone_surrogate_escapes(bytes: &[u8]) -> Option<Vec<u8>> {
+    let mut normalized = Vec::with_capacity(bytes.len());
+    let mut in_string = false;
+    let mut index = 0;
+    let mut changed = false;
+
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if !in_string {
+            normalized.push(byte);
+            if byte == b'"' {
+                in_string = true;
+            }
+            index += 1;
+        } else if byte == b'"' {
+            normalized.push(byte);
+            in_string = false;
+            index += 1;
+        } else if byte == b'\\' {
+            let Some(code_unit) = json_hex_quad(bytes, index) else {
+                normalized.push(byte);
+                if let Some(escaped) = bytes.get(index + 1) {
+                    normalized.push(*escaped);
+                    index += 2;
+                } else {
+                    index += 1;
+                }
+                continue;
+            };
+
+            if (0xd800..=0xdbff).contains(&code_unit) {
+                let next_escape = index + 6;
+                if json_hex_quad(bytes, next_escape)
+                    .is_some_and(|low| (0xdc00..=0xdfff).contains(&low))
+                {
+                    normalized.extend_from_slice(&bytes[index..index + 12]);
+                    index += 12;
+                } else {
+                    normalized.extend_from_slice(br"\uFFFD");
+                    changed = true;
+                    index += 6;
+                }
+            } else if (0xdc00..=0xdfff).contains(&code_unit) {
+                normalized.extend_from_slice(br"\uFFFD");
+                changed = true;
+                index += 6;
+            } else {
+                normalized.extend_from_slice(&bytes[index..index + 6]);
+                index += 6;
+            }
         } else {
-            python_json_offset(&bytes, error.line(), error.column())
-        };
-        validation_error(
-            "json_invalid",
-            vec![json!("body"), json!(offset)],
-            "JSON decode error",
-            json!({}),
-            Some(json!({
-                "error": python_json_error(
-                    &error_text,
-                    trailing_comma.map(|(_, kind)| kind),
-                    invalid_escape,
-                )
-            })),
-        )
-    })
+            normalized.push(byte);
+            index += 1;
+        }
+    }
+
+    changed.then_some(normalized)
+}
+
+fn json_hex_quad(bytes: &[u8], slash_index: usize) -> Option<u16> {
+    if bytes.get(slash_index..slash_index + 2)? != b"\\u" {
+        return None;
+    }
+    let mut value = 0_u16;
+    for byte in bytes.get(slash_index + 2..slash_index + 6)? {
+        value = value.checked_mul(16)? + u16::from((*byte as char).to_digit(16)? as u8);
+    }
+    Some(value)
+}
+
+fn top_level_tag_python_string(bytes: &[u8]) -> Option<PythonString> {
+    let mut index = skip_json_whitespace(bytes, 0);
+    if bytes.get(index) != Some(&b'{') {
+        return None;
+    }
+    index += 1;
+    let mut tag = None;
+
+    loop {
+        index = skip_json_whitespace(bytes, index);
+        if bytes.get(index) == Some(&b'}') {
+            return tag;
+        }
+        let (after_key, key) = parse_python_json_string(bytes, index)?;
+        index = skip_json_whitespace(bytes, after_key);
+        if bytes.get(index) != Some(&b':') {
+            return None;
+        }
+        index = skip_json_whitespace(bytes, index + 1);
+
+        if key.is_ascii("tag") {
+            if bytes.get(index) == Some(&b'"') {
+                let (after_value, value) = parse_python_json_string(bytes, index)?;
+                tag = value.has_surrogate().then_some(value);
+                index = after_value;
+            } else {
+                tag = None;
+                index = skip_json_value(bytes, index)?;
+            }
+        } else {
+            index = skip_json_value(bytes, index)?;
+        }
+
+        index = skip_json_whitespace(bytes, index);
+        match bytes.get(index) {
+            Some(b',') => index += 1,
+            Some(b'}') => return tag,
+            _ => return None,
+        }
+    }
+}
+
+fn parse_python_json_string(bytes: &[u8], start: usize) -> Option<(usize, PythonString)> {
+    if bytes.get(start) != Some(&b'"') {
+        return None;
+    }
+    let mut code_points = Vec::new();
+    let mut index = start + 1;
+
+    loop {
+        match *bytes.get(index)? {
+            b'"' => return Some((index + 1, PythonString { code_points })),
+            b'\\' => {
+                match *bytes.get(index + 1)? {
+                    b'"' => code_points.push(u32::from(b'"')),
+                    b'\\' => code_points.push(u32::from(b'\\')),
+                    b'/' => code_points.push(u32::from(b'/')),
+                    b'b' => code_points.push(0x08),
+                    b'f' => code_points.push(0x0c),
+                    b'n' => code_points.push(u32::from(b'\n')),
+                    b'r' => code_points.push(u32::from(b'\r')),
+                    b't' => code_points.push(u32::from(b'\t')),
+                    b'u' => {
+                        let code_unit = json_hex_quad(bytes, index)?;
+                        index += 6;
+                        if (0xd800..=0xdbff).contains(&code_unit) {
+                            if let Some(low) = json_hex_quad(bytes, index)
+                                .filter(|low| (0xdc00..=0xdfff).contains(low))
+                            {
+                                code_points.push(
+                                    0x10000
+                                        + ((u32::from(code_unit) - 0xd800) << 10)
+                                        + (u32::from(low) - 0xdc00),
+                                );
+                                index += 6;
+                                continue;
+                            }
+                            code_points.push(u32::from(code_unit));
+                            continue;
+                        }
+                        code_points.push(u32::from(code_unit));
+                        continue;
+                    }
+                    _ => return None,
+                }
+                index += 2;
+            }
+            _ => {
+                let remaining = std::str::from_utf8(bytes.get(index..)?)?;
+                let character = remaining.chars().next()?;
+                code_points.push(u32::from(character));
+                index += character.len_utf8();
+            }
+        }
+    }
+}
+
+fn skip_json_value(bytes: &[u8], start: usize) -> Option<usize> {
+    if bytes.get(start) == Some(&b'"') {
+        return Some(skip_json_string(bytes, start));
+    }
+    let mut index = start;
+    let mut objects = 0_usize;
+    let mut arrays = 0_usize;
+    while let Some(byte) = bytes.get(index).copied() {
+        match byte {
+            b'"' => index = skip_json_string(bytes, index),
+            b'{' => {
+                objects += 1;
+                index += 1;
+            }
+            b'[' => {
+                arrays += 1;
+                index += 1;
+            }
+            b'}' if objects == 0 && arrays == 0 => return Some(index),
+            b']' if arrays == 0 => return None,
+            b'}' => {
+                objects = objects.checked_sub(1)?;
+                index += 1;
+            }
+            b']' => {
+                arrays = arrays.checked_sub(1)?;
+                index += 1;
+            }
+            b',' if objects == 0 && arrays == 0 => return Some(index),
+            _ => index += 1,
+        }
+    }
+    Some(index)
+}
+
+fn skip_json_string(bytes: &[u8], start: usize) -> usize {
+    let mut index = start + 1;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' => return index + 1,
+            b'\\' => index = (index + 2).min(bytes.len()),
+            _ => index += 1,
+        }
+    }
+    index
+}
+
+fn skip_json_whitespace(bytes: &[u8], mut index: usize) -> usize {
+    while bytes
+        .get(index)
+        .is_some_and(|byte| matches!(byte, b' ' | b'\n' | b'\r' | b'\t'))
+    {
+        index += 1;
+    }
+    index
 }
 
 fn request_json_content_type(headers: &HeaderMap) -> bool {
@@ -721,8 +1031,11 @@ mod tests {
             Box::pin(async move { result })
         }
 
-        fn savestate(&self, tag: String) -> GameStateFuture<'_> {
-            self.calls.lock().unwrap().push(format!("savestate:{tag}"));
+        fn savestate(&self, tag: PythonString) -> GameStateFuture<'_> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("savestate:{}", tag.debug_text()));
             let result = self.result.lock().unwrap().clone();
             Box::pin(async move { result })
         }
@@ -1119,6 +1432,31 @@ mod tests {
             }
         }
         assert!(game.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn game_savestate_passes_python_lone_surrogate_tag_to_backend() {
+        let game = Arc::new(FakeGame::new(Value::Null));
+        let (status, body, _value) = response(
+            app(game.clone(), authorized()),
+            request("POST", "/api/game/savestate", r#"{"tag":"\ud800"}"#),
+        );
+
+        assert_eq!(StatusCode::OK, status);
+        assert_eq!("null", body);
+        assert_eq!(vec!["savestate:\\ud800"], *game.calls.lock().unwrap());
+    }
+
+    #[test]
+    fn game_savestate_combines_python_surrogate_pair_for_backend() {
+        let game = Arc::new(FakeGame::new(Value::Null));
+        let (status, _body, _value) = response(
+            app(game.clone(), authorized()),
+            request("POST", "/api/game/savestate", r#"{"tag":"\ud83d\ude00"}"#),
+        );
+
+        assert_eq!(StatusCode::OK, status);
+        assert_eq!(vec!["savestate:😀"], *game.calls.lock().unwrap());
     }
 
     #[test]
