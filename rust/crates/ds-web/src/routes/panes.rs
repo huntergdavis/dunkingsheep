@@ -260,6 +260,27 @@ async fn api_pane_text(
         )
             .into_response();
     };
+    let lines = match query.lines {
+        Some(value) => match parse_pydantic_int(&value) {
+            Some(lines) => lines,
+            None => {
+                return (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(QueryValidationError {
+                        detail: vec![QueryValidationDetail {
+                            kind: "int_parsing",
+                            loc: vec!["query", "lines"],
+                            msg: "Input should be a valid integer, unable to parse string as an integer",
+                            input: Some(value),
+                        }],
+                    }),
+                )
+                    .into_response();
+            }
+        },
+        None => 40,
+    }
+    .clamp(1, 200);
     let pane = pane.trim().to_owned();
     if !pane.starts_with('%') {
         return detail_response(StatusCode::BAD_REQUEST, "a tmux pane id looks like %9");
@@ -284,26 +305,6 @@ async fn api_pane_text(
         }
     }
 
-    let lines = match query.lines {
-        Some(value) => match value.trim().parse::<i64>() {
-            Ok(lines) => lines.clamp(1, 200),
-            Err(_) => {
-                return (
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    Json(QueryValidationError {
-                        detail: vec![QueryValidationDetail {
-                            kind: "int_parsing",
-                            loc: vec!["query", "lines"],
-                            msg: "Input should be a valid integer, unable to parse string as an integer",
-                            input: Some(value),
-                        }],
-                    }),
-                )
-                    .into_response();
-            }
-        },
-        None => 40,
-    };
     let result = match state
         .backend
         .rpc("read_pane", json!({"target": pane, "lines": lines}))
@@ -338,6 +339,65 @@ async fn api_pane_text(
         note: Some(PANE_TEXT_READONLY_NOTE),
     })
     .into_response()
+}
+
+/// Match Pydantic's string-to-int query conversion while keeping values outside
+/// the route's 1..=200 range safe to clamp without overflowing a machine int.
+fn parse_pydantic_int(raw: &str) -> Option<i64> {
+    let value = raw.trim();
+    let (negative, digits) = match value.as_bytes().first() {
+        Some(b'-') => (true, &value[1..]),
+        Some(b'+') => (false, &value[1..]),
+        _ => (false, value),
+    };
+    if digits.is_empty()
+        || digits.len() > 8_600
+        || digits.bytes().filter(u8::is_ascii_digit).count() > 4_300
+    {
+        return None;
+    }
+
+    fn valid_digit_sequence(value: &str) -> bool {
+        let bytes = value.as_bytes();
+        !bytes.is_empty()
+            && bytes.iter().enumerate().all(|(index, byte)| match byte {
+                b'0'..=b'9' => true,
+                b'_' => {
+                    index > 0
+                        && index + 1 < bytes.len()
+                        && bytes[index - 1].is_ascii_digit()
+                        && bytes[index + 1].is_ascii_digit()
+                }
+                _ => false,
+            })
+    }
+
+    let integer = digits.split_once('.');
+    let integer_part = match integer {
+        Some((whole, fraction)) => {
+            if !valid_digit_sequence(whole)
+                || !valid_digit_sequence(fraction)
+                || fraction.bytes().any(|byte| byte != b'0' && byte != b'_')
+            {
+                return None;
+            }
+            whole
+        }
+        None => digits,
+    };
+    if !valid_digit_sequence(integer_part) {
+        return None;
+    }
+    let magnitude = integer_part
+        .bytes()
+        .filter(|byte| *byte != b'_')
+        .fold(0_i64, |value, byte| {
+            value
+                .saturating_mul(10)
+                .saturating_add(i64::from(byte - b'0'))
+                .min(201)
+        });
+    Some(if negative { -magnitude } else { magnitude })
 }
 
 async fn authenticate(
@@ -432,16 +492,19 @@ fn parse_query(raw: Option<&str>) -> Result<HashMap<String, String>, ()> {
                     index += 1;
                 }
                 b'%' => {
-                    let high = bytes
-                        .get(index + 1)
-                        .and_then(|byte| hex_value(*byte))
-                        .ok_or(())?;
-                    let low = bytes
-                        .get(index + 2)
-                        .and_then(|byte| hex_value(*byte))
-                        .ok_or(())?;
-                    decoded.push((high << 4) | low);
-                    index += 3;
+                    match (
+                        bytes.get(index + 1).and_then(|byte| hex_value(*byte)),
+                        bytes.get(index + 2).and_then(|byte| hex_value(*byte)),
+                    ) {
+                        (Some(high), Some(low)) => {
+                            decoded.push((high << 4) | low);
+                            index += 3;
+                        }
+                        _ => {
+                            decoded.push(b'%');
+                            index += 1;
+                        }
+                    }
                 }
                 byte => {
                     decoded.push(byte);
@@ -449,7 +512,7 @@ fn parse_query(raw: Option<&str>) -> Result<HashMap<String, String>, ()> {
                 }
             }
         }
-        String::from_utf8(decoded).map_err(|_| ())
+        Ok(String::from_utf8_lossy(&decoded).into_owned())
     }
 
     let mut query = HashMap::new();
@@ -743,6 +806,45 @@ mod tests {
             body["reason"],
             "the daemon could not read the pane: daemon offline"
         );
+    }
+
+    #[test]
+    fn pane_text_validates_lines_before_returning_a_warm_cache_entry() {
+        let backend = FakeBackend::new(Ok(json!({"text": "cached pane"})));
+        let app = app(Arc::clone(&backend));
+        let warm = request("GET", "/api/pane-text?pane=%259", None, None);
+        let (status, _) = response_json(block_on(app.clone().oneshot(warm)).unwrap());
+        assert_eq!(status, StatusCode::OK);
+
+        let invalid = request("GET", "/api/pane-text?pane=%259&lines=nope", None, None);
+        let (status, body) = response_json(block_on(app.oneshot(invalid)).unwrap());
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["detail"][0]["type"], "int_parsing");
+        assert_eq!(body["detail"][0]["loc"], json!(["query", "lines"]));
+        assert_eq!(body["detail"][0]["input"], "nope");
+        assert_eq!(backend.calls.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn pane_text_query_parsing_matches_python_percent_and_integer_behavior() {
+        assert_eq!(
+            parse_query(Some("pane=%259&noise=%ZZ")),
+            Ok(HashMap::from([
+                ("pane".into(), "%9".into()),
+                ("noise".into(), "%ZZ".into()),
+            ]))
+        );
+        assert_eq!(
+            parse_query(Some("pane=%FF")),
+            Ok(HashMap::from([("pane".into(), "�".into())]))
+        );
+
+        assert_eq!(parse_pydantic_int("  +1.00  "), Some(1));
+        assert_eq!(parse_pydantic_int("1_0"), Some(10));
+        assert_eq!(parse_pydantic_int(&"9".repeat(4_300)), Some(201));
+        assert_eq!(parse_pydantic_int(&"9".repeat(4_301)), None);
+        assert_eq!(parse_pydantic_int("1.5"), None);
+        assert_eq!(parse_pydantic_int("1__0"), None);
     }
 
     #[test]
