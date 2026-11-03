@@ -707,6 +707,22 @@ impl Store {
         })
     }
 
+    /// Whether a stable PM digest already has a row. Python checks this before its upsert to
+    /// report `created` versus `updated`; failures are left to the caller's best-effort policy.
+    pub fn digest_exists(&self, digest_id: &str) -> Result<bool, DunkError> {
+        let digest_id = digest_id.to_string();
+        self.writer.call(move |connection| {
+            let exists: i64 = connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM messages WHERE digest_id = ?)",
+                    [&digest_id],
+                    |row| row.get(0),
+                )
+                .map_err(map_sqlite)?;
+            Ok(exists != 0)
+        })
+    }
+
     /// `read(mailbox, limit, peek, mark)`: full messages in queue order. Marks them read
     /// unless `peek` or `!mark`; the select and the update share one writer call, as the
     /// Python shares one lock. `mark = false` lets a caller render first and commit with
