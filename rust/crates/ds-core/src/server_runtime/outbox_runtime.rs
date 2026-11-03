@@ -38,6 +38,15 @@ impl OutboxRuntime {
         runtime: Handle,
         factory: Arc<Factory>,
     ) -> Result<Self, DunkError> {
+        Self::new_with_reporter(flock, runtime, factory, StalePanelReporter::new())
+    }
+
+    pub(crate) fn new_with_reporter(
+        flock: Arc<Flock>,
+        runtime: Handle,
+        factory: Arc<Factory>,
+        reporter: StalePanelReporter,
+    ) -> Result<Self, DunkError> {
         if flock.stores().inbox.is_none() {
             return Err(DunkError::Refused("inbox store is not attached".into()));
         }
@@ -46,6 +55,7 @@ impl OutboxRuntime {
                 runtime,
                 factory,
                 pool: pool.clone(),
+                reporter: reporter.clone(),
             }))
         });
         Ok(Self { flock, pool })
@@ -64,6 +74,7 @@ struct Runner {
     runtime: Handle,
     factory: Arc<Factory>,
     pool: Weak<OutboxWorkerPool>,
+    reporter: StalePanelReporter,
 }
 impl OutboxWorkerRunner for Runner {
     fn run(&self, flock: Arc<Flock>, pane_id: &str, stopped: &AtomicBool) {
@@ -82,7 +93,7 @@ impl OutboxWorkerRunner for Runner {
             terminal: &terminal,
             runtime: &self.runtime,
         };
-        let mut reporter = StalePanelReporter::new();
+        let mut reporter = self.reporter.clone();
         let wait = |seconds: f64| {
             let deadline = Instant::now() + Duration::from_secs_f64(seconds.max(0.0));
             while !stopped.load(Ordering::Acquire) {

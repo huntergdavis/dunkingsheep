@@ -197,12 +197,15 @@ fn alert_flock(dir: &tempfile::TempDir) -> Flock {
 }
 
 #[test]
-fn note_stale_panel_waits_requires_identity_and_retries_only_failed_sinks() {
+fn cloned_reporters_share_warning_and_retry_only_failed_sinks() {
     let inbox = AlertInbox::new();
     let state = tempfile::tempdir().unwrap();
     let alert_db = state.path().join("alerts.db");
     let flock = alert_flock(&state);
-    let mut reporter = StalePanelReporter::new();
+    // Model the observer, an outbox worker, and that worker's restart.
+    let mut loop_reporter = StalePanelReporter::new();
+    let mut outbox_reporter = loop_reporter.clone();
+    let mut restarted_outbox_reporter = outbox_reporter.clone();
     let owner_calls = Cell::new(0);
     let vp_calls = Cell::new(0);
     let mut owner = |_: &str| {
@@ -219,7 +222,7 @@ fn note_stale_panel_waits_requires_identity_and_retries_only_failed_sinks() {
         crate::dialog_alerts::post_vp(&flock, &inbox, body, Some("w9:pH"))
     };
 
-    reporter.note_with_sinks(
+    loop_reporter.note_with_sinks(
         &flock,
         "%2",
         "modal",
@@ -231,7 +234,7 @@ fn note_stale_panel_waits_requires_identity_and_retries_only_failed_sinks() {
         &mut owner,
         &mut vp,
     );
-    reporter.note_with_sinks(
+    loop_reporter.note_with_sinks(
         &flock,
         "%2",
         "box",
@@ -243,7 +246,7 @@ fn note_stale_panel_waits_requires_identity_and_retries_only_failed_sinks() {
         &mut owner,
         &mut vp,
     );
-    reporter.note_with_sinks(
+    loop_reporter.note_with_sinks(
         &flock,
         "%3",
         "modal",
@@ -255,7 +258,7 @@ fn note_stale_panel_waits_requires_identity_and_retries_only_failed_sinks() {
         &mut owner,
         &mut vp,
     );
-    reporter.note_with_sinks(
+    loop_reporter.note_with_sinks(
         &flock,
         "%4",
         "modal",
@@ -270,7 +273,7 @@ fn note_stale_panel_waits_requires_identity_and_retries_only_failed_sinks() {
     assert_eq!(owner_calls.get(), 0);
     assert_eq!(vp_calls.get(), 0);
 
-    reporter.note_with_sinks(
+    loop_reporter.note_with_sinks(
         &flock,
         "%2",
         "modal",
@@ -296,7 +299,7 @@ fn note_stale_panel_waits_requires_identity_and_retries_only_failed_sinks() {
     );
     assert_eq!(inbox.nudges.lock().unwrap().len(), 1);
 
-    reporter.note_with_sinks(
+    outbox_reporter.note_with_sinks(
         &flock,
         "%2",
         "modal",
@@ -314,7 +317,7 @@ fn note_stale_panel_waits_requires_identity_and_retries_only_failed_sinks() {
         "failed owner sink waits for the 60s retry"
     );
     assert_eq!(vp_calls.get(), 1, "successful VP sink is not repeated");
-    reporter.note_with_sinks(
+    restarted_outbox_reporter.note_with_sinks(
         &flock,
         "%2",
         "modal",

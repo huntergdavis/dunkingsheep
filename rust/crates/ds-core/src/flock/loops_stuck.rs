@@ -18,7 +18,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::Value;
@@ -80,9 +80,9 @@ pub struct DialogObserver {
 /// The `_warned_modal` state and alert integration for a production `StuckEnv`.
 /// The runtime adapter owns one reporter alongside its observer and calls
 /// [`note`](Self::note) from `StuckEnv::note_stale_panel`.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct StalePanelReporter {
-    warned_modal: BTreeSet<String>,
+    warned_modal: Arc<Mutex<BTreeSet<String>>>,
 }
 
 impl StalePanelReporter {
@@ -187,7 +187,13 @@ impl StalePanelReporter {
             Err(error) => eprintln!("could not notify blocked dialog on {pane_id}: {error}"),
         }
 
-        if self.warned_modal.insert(pane_id.to_string()) {
+        // Hold the shared lock only for the once-per-pane decision, never metrics or sink I/O.
+        let should_warn = self
+            .warned_modal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(pane_id.to_string());
+        if should_warn {
             if let Some(metrics) = flock.stores().metrics {
                 metrics.record(&Event {
                     at: now,
