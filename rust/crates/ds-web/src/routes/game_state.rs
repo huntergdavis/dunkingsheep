@@ -277,15 +277,30 @@ async fn request_json(request: Request) -> Result<Option<ParsedRequestJson>, Res
             surrogate_tag: None,
         }));
     }
-    match serde_json::from_slice(&bytes) {
+    let json_bytes = match decode_python_json_bytes(&bytes) {
+        Ok(bytes) => bytes,
+        Err(()) => {
+            return Err(detail_response(
+                StatusCode::BAD_REQUEST,
+                "There was an error parsing the body",
+            ));
+        }
+    };
+    if python_json_integer_exceeds_digit_limit(&json_bytes) {
+        return Err(detail_response(
+            StatusCode::BAD_REQUEST,
+            "There was an error parsing the body",
+        ));
+    }
+    match serde_json::from_slice(&json_bytes) {
         Ok(value) => Ok(Some(ParsedRequestJson {
             value,
             surrogate_tag: None,
         })),
         Err(error) => {
-            if let Some(normalized) = replace_lone_surrogate_escapes(&bytes) {
+            if let Some(normalized) = replace_lone_surrogate_escapes(&json_bytes) {
                 if let Ok(value) = serde_json::from_slice(&normalized) {
-                    let surrogate_tag = top_level_tag_python_string(&bytes)
+                    let surrogate_tag = top_level_tag_python_string(&json_bytes)
                         .filter(PythonString::has_surrogate);
                     return Ok(Some(ParsedRequestJson {
                         value,
@@ -293,10 +308,135 @@ async fn request_json(request: Request) -> Result<Option<ParsedRequestJson>, Res
                     }));
                 }
             }
-            Err(python_json_decode_error(&bytes, &error))
+            Err(python_json_decode_error(&json_bytes, &error))
         }
     }
 }
+
+fn decode_python_json_bytes(bytes: &[u8]) -> Result<Vec<u8>, ()> {
+    #[derive(Clone, Copy)]
+    enum Encoding {
+        Utf8,
+        Utf16Le,
+        Utf16Be,
+        Utf32Le,
+        Utf32Be,
+    }
+
+    let (encoding, payload) = if bytes.starts_with(&[0x00, 0x00, 0xfe, 0xff]) {
+        (Encoding::Utf32Be, &bytes[4..])
+    } else if bytes.starts_with(&[0xff, 0xfe, 0x00, 0x00]) {
+        (Encoding::Utf32Le, &bytes[4..])
+    } else if bytes.starts_with(&[0xef, 0xbb, 0xbf]) {
+        (Encoding::Utf8, &bytes[3..])
+    } else if bytes.starts_with(&[0xfe, 0xff]) {
+        (Encoding::Utf16Be, &bytes[2..])
+    } else if bytes.starts_with(&[0xff, 0xfe]) {
+        (Encoding::Utf16Le, &bytes[2..])
+    } else if bytes.len() >= 4 && bytes[0] == 0 && bytes[1] == 0 && bytes[2] == 0 {
+        (Encoding::Utf32Be, bytes)
+    } else if bytes.len() >= 4 && bytes[0] != 0 && bytes[1] == 0 && bytes[2] == 0 && bytes[3] == 0 {
+        (Encoding::Utf32Le, bytes)
+    } else if bytes.len() >= 4 && bytes[0] == 0 && bytes[2] == 0 {
+        (Encoding::Utf16Be, bytes)
+    } else if bytes.len() >= 4 && bytes[1] == 0 {
+        (Encoding::Utf16Le, bytes)
+    } else {
+        (Encoding::Utf8, bytes)
+    };
+
+    match encoding {
+        Encoding::Utf8 => std::str::from_utf8(payload)
+            .map(|text| text.as_bytes().to_vec())
+            .map_err(|_| ()),
+        Encoding::Utf16Le | Encoding::Utf16Be => {
+            if payload.len() % 2 != 0 {
+                return Err(());
+            }
+            let units: Vec<u16> = payload
+                .chunks_exact(2)
+                .map(|pair| match encoding {
+                    Encoding::Utf16Le => u16::from_le_bytes([pair[0], pair[1]]),
+                    Encoding::Utf16Be => u16::from_be_bytes([pair[0], pair[1]]),
+                    _ => unreachable!(),
+                })
+                .collect();
+            String::from_utf16(&units)
+                .map(|text| text.into_bytes())
+                .map_err(|_| ())
+        }
+        Encoding::Utf32Le | Encoding::Utf32Be => {
+            if payload.len() % 4 != 0 {
+                return Err(());
+            }
+            let mut text = String::new();
+            for quad in payload.chunks_exact(4) {
+                let code_point = match encoding {
+                    Encoding::Utf32Le => u32::from_le_bytes([quad[0], quad[1], quad[2], quad[3]]),
+                    Encoding::Utf32Be => u32::from_be_bytes([quad[0], quad[1], quad[2], quad[3]]),
+                    _ => unreachable!(),
+                };
+                text.push(char::from_u32(code_point).ok_or(())?);
+            }
+            Ok(text.into_bytes())
+        }
+    }
+}
+
+fn python_json_integer_exceeds_digit_limit(bytes: &[u8]) -> bool {
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' => index = skip_json_string(bytes, index),
+            b'-' | b'0'..=b'9' => {
+                let number_start = index;
+                if bytes[index] == b'-' {
+                    index += 1;
+                }
+                let Some(first_digit) = bytes.get(index).copied() else {
+                    return false;
+                };
+                if first_digit == b'0' {
+                    index += 1;
+                    if bytes.get(index).is_some_and(u8::is_ascii_digit) {
+                        while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+                            index += 1;
+                        }
+                        continue;
+                    }
+                } else if (b'1'..=b'9').contains(&first_digit) {
+                    index += 1;
+                    while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+                        index += 1;
+                    }
+                } else {
+                    index = number_start + 1;
+                    continue;
+                }
+
+                let integer_digits = index - number_start - usize::from(bytes[number_start] == b'-');
+                if bytes
+                    .get(index)
+                    .is_some_and(|byte| matches!(byte, b'.' | b'e' | b'E'))
+                {
+                    while bytes.get(index).is_some_and(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.')
+                    }) {
+                        index += 1;
+                    }
+                    continue;
+                }
+                if integer_digits > PYTHON_MAX_JSON_INT_DIGITS {
+                    return true;
+                }
+            }
+            _ => index += 1,
+        }
+    }
+    false
+}
+
+const PYTHON_MAX_JSON_INT_DIGITS: usize = 4300;
 
 fn python_json_decode_error(bytes: &[u8], error: &serde_json::Error) -> Response {
     let error_text = error.to_string();
@@ -1109,6 +1249,16 @@ mod tests {
             .unwrap()
     }
 
+    fn request_bytes(method: &str, path: &str, body: Vec<u8>) -> HttpRequest<Body> {
+        HttpRequest::builder()
+            .method(method)
+            .uri(path)
+            .header(header::HOST, "desk.test")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body))
+            .unwrap()
+    }
+
     fn request_without_content_type(method: &str, path: &str, body: &str) -> HttpRequest<Body> {
         HttpRequest::builder()
             .method(method)
@@ -1457,6 +1607,61 @@ mod tests {
 
         assert_eq!(StatusCode::OK, status);
         assert_eq!(vec!["savestate:😀"], *game.calls.lock().unwrap());
+    }
+
+    #[test]
+    fn game_savestate_accepts_python_json_byte_encodings() {
+        let text = r#"{"tag":"quick"}"#;
+        let encodings = [
+            text.encode_utf16()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>(),
+            text.encode_utf16()
+                .flat_map(u16::to_be_bytes)
+                .collect::<Vec<_>>(),
+            text.chars()
+                .flat_map(|character| u32::from(character).to_le_bytes())
+                .collect::<Vec<_>>(),
+            text.chars()
+                .flat_map(|character| u32::from(character).to_be_bytes())
+                .collect::<Vec<_>>(),
+        ];
+        let game = Arc::new(FakeGame::new(Value::Null));
+
+        for body in encodings {
+            let (status, _body, _value) = response(
+                app(game.clone(), authorized()),
+                request_bytes("POST", "/api/game/savestate", body),
+            );
+            assert_eq!(StatusCode::OK, status);
+        }
+
+        assert_eq!(
+            vec!["savestate:quick"; 4],
+            *game.calls.lock().unwrap()
+        );
+    }
+
+    #[test]
+    fn game_loadstate_matches_python_raw_integer_digit_limit() {
+        let game = Arc::new(FakeGame::new(Value::Null));
+        for (digits, expected_status) in [
+            (4300, StatusCode::UNPROCESSABLE_ENTITY),
+            (4301, StatusCode::BAD_REQUEST),
+        ] {
+            let body = format!(r#"{{"slot":{}}}"#, "1".repeat(digits));
+            let (status, body, value) = response(
+                app(game.clone(), authorized()),
+                request("POST", "/api/game/loadstate", &body),
+            );
+            assert_eq!(expected_status, status);
+            if digits == 4300 {
+                assert_eq!("less_than_equal", value["detail"][0]["type"]);
+            } else {
+                assert_eq!(r#"{"detail":"There was an error parsing the body"}"#, body);
+            }
+        }
+        assert!(game.calls.lock().unwrap().is_empty());
     }
 
     #[test]
