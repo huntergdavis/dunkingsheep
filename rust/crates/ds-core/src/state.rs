@@ -146,7 +146,7 @@ impl StateStore {
                 let argv = row
                     .get("argv")
                     .filter(|v| truthy(v))
-                    .map(|v| serde_json::to_string(v))
+                    .map(serde_json::to_string)
                     .transpose()?;
                 statement
                     .execute(params![
@@ -272,8 +272,7 @@ pub fn project_of(cwd: Option<&str>) -> Option<String> {
     cwd.trim()
         .trim_matches('/')
         .split('/')
-        .filter(|part| !part.is_empty())
-        .last()
+        .rfind(|part| !part.is_empty())
         .map(str::to_string)
 }
 

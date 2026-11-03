@@ -10,15 +10,181 @@
 //! `usage_cmd` preserves daemon/local object insertion order with Python-compatible scalars.
 
 use serde_json::{Map, Value};
+use std::cell::RefCell;
+use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use crate::context_cmd::context_read;
 use crate::usage_cmd::{ordered_json, sorted_json, usage_command, Outcome};
 use ds_core::context::digest::{digest_both, select_stores, DEFAULT_CAP};
 use ds_core::context::ledger::Ledger;
 use ds_core::context::store::Store;
+
+// The generated registry sorts its rows by name for reproducible generation. The Python CLI's
+// `commands` and `mcp-map` printers use declaration order, so keep that presentation order here.
+const PYTHON_COMMAND_ORDER: &[&str] = &[
+    "owner_push",
+    "owner_poll",
+    "owner_take",
+    "owner_stats",
+    "owner_receipts",
+    "state_capture",
+    "state_latest",
+    "roster",
+    "message_state",
+    "reply_stats",
+    "project_summary",
+    "lanes",
+    "lane_set",
+    "retire_pane",
+    "dispatch",
+    "clear_box",
+    "delivery",
+    "help",
+    "status",
+    "turn_start",
+    "turn_end",
+    "poll",
+    "list_dunks",
+    "get_dunk",
+    "add_dunk",
+    "update_dunk",
+    "remove_dunk",
+    "start_dunk",
+    "stop_dunk",
+    "toggle_dunk",
+    "stop_all",
+    "fire_dunk",
+    "send_text",
+    "send_keys",
+    "flush_box",
+    "list_messages",
+    "get_message",
+    "cancel_message",
+    "report_run",
+    "report_list",
+    "owner_conversation",
+    "owner_reply",
+    "owner_ingest",
+    "owner_outbox",
+    "owner_delivered",
+    "inbox_send",
+    "inbox_count",
+    "pm_digest",
+    "pm_routing",
+    "inbox_list",
+    "inbox_read",
+    "inbox_status",
+    "inbox_ack",
+    "inbox_recover",
+    "inbox_archive",
+    "inbox_cancel",
+    "inbox_delete",
+    "inbox_stats",
+    "inbox_fetch",
+    "allocation",
+    "task_add",
+    "task_list",
+    "task_read",
+    "task_update",
+    "task_assign",
+    "task_complete",
+    "task_block",
+    "task_unblock",
+    "task_cancel",
+    "task_delete",
+    "task_note",
+    "task_next",
+    "task_heartbeat",
+    "task_release",
+    "task_follow",
+    "task_unfollow",
+    "task_followers",
+    "task_stats",
+    "task_metrics",
+    "task_reap",
+    "memory_recall",
+    "memory_context",
+    "memory_search",
+    "memory_stats",
+    "memory_status",
+    "memory_backfill",
+    "memory_ingest",
+    "health",
+    "doctor",
+    "recover",
+    "metrics",
+    "list_panes",
+    "read_pane",
+    "delivery_capability",
+    "list_workspaces",
+    "create_workspace",
+    "create_tab",
+    "split_pane",
+    "start_agent",
+    "respawn_pane",
+    "rename",
+    "focus",
+    "close",
+    "herdr",
+    "herdr_help",
+    "shutdown",
+    "gh_token",
+    "review_sync",
+    "review_list",
+    "context_add",
+    "context_promote",
+    "context_supersede",
+    "context_retire",
+    "poolrad_sync",
+    "poolrad_progress",
+    "whoami",
+    "lane_register",
+    "lane_unregister",
+    "token_issue",
+    "token_revoke",
+    "superuser_status",
+    "superuser_add",
+    "superuser_remove",
+    "superuser_recover",
+];
+
+fn commands_in_python_order() -> Vec<&'static ds_core::registry::Command> {
+    PYTHON_COMMAND_ORDER
+        .iter()
+        .map(|name| ds_core::registry::command(name).expect("Python CLI command is registered"))
+        .collect()
+}
+
+fn command_description(command: &ds_core::registry::Command) -> &'static str {
+    // The registry generator normalizes whitespace, while the Python CLI preserves it.
+    if command.name == "respawn_pane" {
+        "Replace a managed pane's process in place, preserving the pane id, task lease/ownership, mailbox and launch history.  Superuser/operator only.  Requires the exact live pane pid/start, --confirm-idle evidence, an argv command (no shell interpolation) and a rollback argv.  Refuses active turns, unread mail, queued outbox, live task leases and any non-ready delivery state; verifies the replacement and rolls back on failure."
+    } else {
+        command.description
+    }
+}
+
+fn cli_param_required(command: &ds_core::registry::Command, name: &str) -> bool {
+    // The generated `required` field is MCP-required. argparse leaves these two
+    // CLI parameters optional, even though MCP requires them in its schema.
+    !matches!(command.name, "add_dunk" | "create_tab") && command.required.contains(&name)
+}
+
+fn mcp_group_action(command_name: &str) -> Option<(&'static str, &'static str)> {
+    let mut mapping = None;
+    for group in ds_core::registry::GROUPS {
+        for (action, name) in group.actions {
+            if *name == command_name {
+                mapping = Some((group.name, *action));
+            }
+        }
+    }
+    mapping
+}
 
 fn text<'a>(ns: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
     ns.get(key).and_then(Value::as_str)
@@ -46,11 +212,327 @@ fn joined_words(ns: &Map<String, Value>, key: &str) -> String {
         .unwrap_or_default()
 }
 
+fn string_values(value: &Value) -> Vec<String> {
+    value
+        .as_array()
+        .map(|values| values.iter().map(crate::render_fleet::py_str).collect())
+        .unwrap_or_default()
+}
+
+fn run_command_with_stderr(
+    ns: &Map<String, Value>,
+    command: &str,
+    args: Map<String, Value>,
+    render: impl Fn(&Value) -> (String, String),
+) -> Outcome {
+    let stderr = RefCell::new(None);
+    let mut outcome = crate::daemon_cmd::run_command(ns, command, args, |result| {
+        let (stdout, message) = render(result);
+        *stderr.borrow_mut() = Some(message);
+        stdout
+    });
+    if !matches!(ns.get("json"), Some(Value::Bool(true))) {
+        outcome.stderr = stderr.into_inner().unwrap_or_default();
+    }
+    outcome
+}
+
+fn respawn_argv(ns: &Map<String, Value>) -> Result<(Value, Value), Outcome> {
+    let invalid_json = |error: serde_json::Error| Outcome {
+        stdout: String::new(),
+        stderr: format!("--command-json/--rollback-json must be JSON arrays: {error}\n"),
+        code: 2,
+    };
+    let command_json = text(ns, "command_json").unwrap_or_default();
+    let argv: Value = serde_json::from_str(command_json).map_err(invalid_json)?;
+    if !argv
+        .as_array()
+        .is_some_and(|values| !values.is_empty() && values.iter().all(Value::is_string))
+    {
+        return Err(Outcome {
+            stdout: String::new(),
+            stderr: "--command-json must be a non-empty JSON array of strings\n".into(),
+            code: 2,
+        });
+    }
+
+    let rollback_json = text(ns, "rollback_json").filter(|value| !value.is_empty());
+    let rollback = match rollback_json {
+        Some(value) => {
+            let argv: Value = serde_json::from_str(value).map_err(invalid_json)?;
+            if !argv
+                .as_array()
+                .is_some_and(|values| !values.is_empty() && values.iter().all(Value::is_string))
+            {
+                return Err(Outcome {
+                    stdout: String::new(),
+                    stderr: "--rollback-json must be a non-empty JSON array of strings\n".into(),
+                    code: 2,
+                });
+            }
+            argv
+        }
+        None => Value::Null,
+    };
+    Ok((argv, rollback))
+}
+
 fn not_ported(command: &str) -> Outcome {
     Outcome {
         stdout: String::new(),
         stderr: format!("dunkingsheep (rust port): `{command}` is parsed but not ported yet\n"),
         code: 1,
+    }
+}
+
+fn guide(ns: &Map<String, Value>) -> Outcome {
+    let markdown = matches!(ns.get("markdown"), Some(Value::Bool(true)));
+    let version = crate::cli_table::ROOT
+        .args
+        .iter()
+        .find(|arg| arg.dest == "version")
+        .and_then(|arg| arg.version)
+        .and_then(|version| version.strip_prefix("dunkingsheep "))
+        .and_then(|version| version.split_whitespace().next())
+        .expect("generated CLI table has an application version");
+    Outcome {
+        stdout: ds_core::help::guide(markdown, version),
+        stderr: String::new(),
+        code: 0,
+    }
+}
+
+fn commands(json: bool) -> Outcome {
+    let commands = commands_in_python_order();
+
+    if json {
+        let rows = commands
+            .iter()
+            .map(|command| {
+                serde_json::json!({
+                    "name": command.name,
+                    "description": command_description(command),
+                    "input_schema": ds_core::registry::input_schema(command.name)
+                        .expect("registered command has an input schema"),
+                    "mcp_tool": command.mcp,
+                })
+            })
+            .collect::<Vec<_>>();
+        return Outcome {
+            stdout: format!("{}\n", ordered_json(&Value::Array(rows))),
+            stderr: String::new(),
+            code: 0,
+        };
+    }
+
+    let mut output = String::new();
+    for command in commands {
+        let params = command
+            .params
+            .iter()
+            .map(|param| {
+                format!(
+                    "{}{}",
+                    param.name,
+                    if cli_param_required(command, param.name) {
+                        "*"
+                    } else {
+                        ""
+                    }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let marker = if command.mcp {
+            ""
+        } else {
+            "  [socket/cli only]"
+        };
+        use std::fmt::Write as _;
+        let _ = writeln!(
+            output,
+            "{}({params}){marker}\n    {}",
+            command.name,
+            command_description(command)
+        );
+    }
+    Outcome {
+        stdout: output,
+        stderr: String::new(),
+        code: 0,
+    }
+}
+
+fn python_json_string_len(value: &str) -> usize {
+    let mut len = 2;
+    for ch in value.chars() {
+        len += match ch {
+            '"' | '\\' | '\u{0008}' | '\t' | '\n' | '\u{000c}' | '\r' => 2,
+            ch if ch <= '\u{001f}' => 6,
+            ch if ch.is_ascii() => 1,
+            ch if ch <= '\u{ffff}' => 6,
+            _ => 12,
+        };
+    }
+    len
+}
+
+fn python_json_len(value: &Value) -> usize {
+    match value {
+        Value::Null => 4,
+        Value::Bool(true) => 4,
+        Value::Bool(false) => 5,
+        Value::Number(number) => number.to_string().len(),
+        Value::String(value) => python_json_string_len(value),
+        Value::Array(values) => {
+            2 + values.iter().map(python_json_len).sum::<usize>()
+                + values.len().saturating_sub(1) * 2
+        }
+        Value::Object(values) => {
+            2 + values
+                .iter()
+                .map(|(key, value)| python_json_string_len(key) + 2 + python_json_len(value))
+                .sum::<usize>()
+                + values.len().saturating_sub(1) * 2
+        }
+    }
+}
+
+fn mcp_map(ns: &Map<String, Value>) -> Outcome {
+    use ds_core::registry::{self, GROUPS};
+
+    let markdown = matches!(ns.get("markdown"), Some(Value::Bool(true)));
+    let commands = commands_in_python_order();
+    let flat = commands
+        .iter()
+        .copied()
+        .filter(|command| command.mcp)
+        .collect::<Vec<_>>();
+    let schema_rows = |commands: &[&ds_core::registry::Command], include_description: bool| {
+        commands
+            .iter()
+            .map(|command| {
+                let mut row = Map::new();
+                row.insert("name".into(), Value::String(command.name.to_string()));
+                if include_description {
+                    row.insert(
+                        "description".into(),
+                        Value::String(command_description(command).to_string()),
+                    );
+                }
+                row.insert(
+                    "inputSchema".into(),
+                    registry::input_schema(command.name).expect("registered schema"),
+                );
+                Value::Object(row)
+            })
+            .collect::<Vec<_>>()
+    };
+    let grouped_rows = GROUPS
+        .iter()
+        .map(|group| {
+            let mut row = Map::new();
+            row.insert("name".into(), Value::String(group.name.to_string()));
+            row.insert(
+                "description".into(),
+                Value::String(group.description.to_string()),
+            );
+            row.insert(
+                "inputSchema".into(),
+                registry::grouped_input_schema(group.name).expect("registered group schema"),
+            );
+            Value::Object(row)
+        })
+        .collect::<Vec<_>>();
+    let flat_bytes = python_json_len(&Value::Array(schema_rows(&flat, true)));
+    let grouped_bytes = python_json_len(&Value::Array(grouped_rows));
+    let hot = GROUPS
+        .iter()
+        .filter(|group| matches!(group.name, "inbox" | "task" | "memory"))
+        .map(|group| {
+            let mut row = Map::new();
+            row.insert("name".into(), Value::String(group.name.to_string()));
+            row.insert(
+                "inputSchema".into(),
+                registry::grouped_input_schema(group.name).expect("registered group schema"),
+            );
+            Value::Object(row)
+        })
+        .collect::<Vec<_>>();
+    let hot_bytes = python_json_len(&Value::Array(hot));
+    let mut output = Vec::new();
+
+    if markdown {
+        output.extend([
+            "# MCP tool map (t8 grouping audit)".to_string(),
+            String::new(),
+            "The declared MCP surface is one namespaced tool per domain, each taking an `action`. Nothing was removed: every flat name still resolves, and every command stays on the CLI/socket API.".to_string(),
+            String::new(),
+            format!("- declared tools: **{}** grouped (was **{}** flat)", GROUPS.len(), flat.len()),
+            format!("- grouped schema bytes: **{grouped_bytes}** (was **{flat_bytes}**, -{:.1}%)", 100.0 * (1.0 - grouped_bytes as f64 / flat_bytes as f64)),
+            format!("- hot set (`inbox`, `task`, `memory`): **{hot_bytes}** bytes (target <10 KB)"),
+            String::new(), "## Grouped tools".to_string(), String::new(),
+            "| Tool | Actions |".to_string(), "| --- | --- |".to_string(),
+        ]);
+        for group in GROUPS {
+            output.push(format!(
+                "| `{}` | {} |",
+                group.name,
+                group
+                    .actions
+                    .iter()
+                    .map(|(action, _)| format!("`{action}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        output.extend([
+            String::new(),
+            "## OLD flat tool -> NEW grouped tool".to_string(),
+            String::new(),
+            "| Old tool | New tool | action |".to_string(),
+            "| --- | --- | --- |".to_string(),
+        ]);
+        for command in &flat {
+            let (group, action) = mcp_group_action(command.name).unwrap_or(("None", "None"));
+            output.push(format!("| `{}` | `{group}` | `{action}` |", command.name));
+        }
+        output.extend([
+            String::new(),
+            "## CLI/socket-only commands (not MCP tools)".to_string(),
+            String::new(),
+            "| Command | Why |".to_string(),
+            "| --- | --- |".to_string(),
+            "| `shutdown` | daemon stop; CLI/socket only |".to_string(),
+        ]);
+    } else {
+        output.push(format!("declared {} grouped tools (was {} flat); schema {grouped_bytes} bytes (was {flat_bytes}); hot set (inbox, task, memory) {hot_bytes} bytes", GROUPS.len(), flat.len()));
+        output.push(String::new());
+        for group in GROUPS {
+            output.push(format!(
+                "{}: {}",
+                group.name,
+                group
+                    .actions
+                    .iter()
+                    .map(|(action, _)| *action)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        output.push(String::new());
+        for command in &flat {
+            let (group, action) = mcp_group_action(command.name).unwrap_or(("None", "None"));
+            output.push(format!("{} -> {group}(action={action})", command.name));
+        }
+        for command in commands.iter().filter(|command| !command.mcp) {
+            output.push(format!("{} -> (CLI/socket only)", command.name));
+        }
+    }
+    Outcome {
+        stdout: format!("{}\n", output.join("\n")),
+        stderr: String::new(),
+        code: 0,
     }
 }
 
@@ -1378,6 +1860,263 @@ fn guard_install(no_shadow: bool) -> Result<Value, String> {
     Ok(value)
 }
 
+fn guard_status() -> Value {
+    let dir = guard_config_dir();
+    let guard_dir = dir.join("bin");
+    let target = guard_dir.join("herdr");
+    let installed = target.exists();
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let resolved = find_executable("herdr", &path.to_string_lossy());
+    let active = resolved.as_ref().is_some_and(|path| {
+        path.parent()
+            .is_some_and(|parent| real_path(parent) == real_path(&guard_dir))
+    });
+    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+    let bashrc = home.join(".bashrc");
+    let shell_configured = std::fs::read_to_string(bashrc)
+        .map(|contents| contents.contains("# dunkingsheep herdr guard"))
+        .unwrap_or(false);
+    let (herdr, real_herdr) = resolve_real_herdr(&guard_dir, &home);
+    let shadowing = file_has_marker(&herdr, b"dunkingsheep-herdr-guard") && real_herdr.exists();
+    let tmux_dir = dir.join("tmux-guard");
+    let tmux_wrapper = tmux_dir.join("tmux");
+    let tmux_real = tmux_dir.join("tmux-real");
+    serde_json::json!({
+        "installed": installed,
+        "wrapper": if installed { Some(target) } else { None::<PathBuf> },
+        "shell_configured": shell_configured,
+        "active_in_this_shell": active,
+        "shadowing_herdr": shadowing,
+        "covers_agents_started_by_herdr": shadowing,
+        "herdr_resolves_to": resolved,
+        "real_herdr": if shadowing { real_herdr } else { herdr },
+        "guarded_commands": ["pane run", "pane send-text", "pane send-keys", "agent send", "pane close", "pane kill", "tab close", "workspace close", "pane split/rename/focus", "tab create/rename/focus", "workspace create/rename/focus", "agent start"],
+        "tmux_guard": {
+            "installed": tmux_wrapper.exists(),
+            "wrapper": if tmux_wrapper.exists() { Some(tmux_wrapper) } else { None::<PathBuf> },
+            "real_tmux": if tmux_real.exists() { Some(tmux_real) } else { None::<PathBuf> },
+            "covers": "agent panes started by TmuxBackend (PATH prefix); user shells untouched"
+        }
+    })
+}
+
+fn guard_unshadow() -> Result<Value, String> {
+    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+    let guard_dir = guard_config_dir().join("bin");
+    let (herdr, real_herdr) = resolve_real_herdr(&guard_dir, &home);
+    let restored = if file_has_marker(&herdr, b"dunkingsheep-herdr-guard") && real_herdr.exists() {
+        std::fs::rename(&real_herdr, &herdr).map_err(|error| error.to_string())?;
+        true
+    } else {
+        false
+    };
+    let mut value = guard_status();
+    value["restored"] = Value::Bool(restored);
+    value["herdr"] = serde_json::to_value(herdr).unwrap();
+    Ok(value)
+}
+
+fn guard_shadow() -> Result<Value, String> {
+    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+    let dir = guard_config_dir();
+    let guard_dir = dir.join("bin");
+    let (herdr, real_herdr) = resolve_real_herdr(&guard_dir, &home);
+    if !herdr.exists() {
+        return Err(format!(
+            "cannot find the herdr binary (looked at {})",
+            herdr.display()
+        ));
+    }
+    if !file_has_marker(&herdr, b"dunkingsheep-herdr-guard") {
+        if real_herdr.exists() {
+            return Err(format!(
+                "{} already exists; move it aside first",
+                real_herdr.display()
+            ));
+        }
+        std::fs::rename(&herdr, &real_herdr).map_err(|error| error.to_string())?;
+    }
+    std::fs::create_dir_all(&guard_dir).map_err(|error| error.to_string())?;
+    let source = include_str!("../../../../dunk_guard_wrapper.py");
+    let cli = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../dunkingsheep");
+    let cli = std::fs::canonicalize(&cli).unwrap_or(cli);
+    let rendered = source.replace("__DUNKINGSHEEP__", &format!("{:?}", cli.to_string_lossy()));
+    let wrapper = guard_dir.join("herdr");
+    for target in [&herdr, &wrapper] {
+        std::fs::write(target, &rendered).map_err(|error| error.to_string())?;
+        std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o755))
+            .map_err(|error| error.to_string())?;
+    }
+    let mut value = guard_status();
+    value["shadowed"] = Value::Bool(true);
+    Ok(value)
+}
+
+fn guard_uninstall() -> Result<Value, String> {
+    let _ = guard_unshadow()?;
+    let target = guard_config_dir().join("bin/herdr");
+    let wrapper_removed = if target.exists() {
+        std::fs::remove_file(target).map_err(|error| error.to_string())?;
+        true
+    } else {
+        false
+    };
+    let bashrc = PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".bashrc");
+    let path_line = format!(
+        "export PATH=\"{}:$PATH\"",
+        guard_config_dir().join("bin").display()
+    );
+    let mut bashrc_cleaned = false;
+    if let Ok(contents) = std::fs::read_to_string(&bashrc) {
+        let mut lines = Vec::new();
+        let mut skip_path_line = false;
+        for line in contents.lines() {
+            if line.contains("# dunkingsheep herdr guard") {
+                skip_path_line = true;
+                bashrc_cleaned = true;
+                continue;
+            }
+            if skip_path_line && line.trim() == path_line {
+                skip_path_line = false;
+                continue;
+            }
+            skip_path_line = false;
+            lines.push(line);
+        }
+        if bashrc_cleaned {
+            let mut cleaned = lines.join("\n");
+            if contents.ends_with('\n') && !cleaned.is_empty() {
+                cleaned.push('\n');
+            }
+            std::fs::write(bashrc, cleaned).map_err(|error| error.to_string())?;
+        }
+    }
+    let mut value = guard_status();
+    value["wrapper_removed"] = Value::Bool(wrapper_removed);
+    value["bashrc_cleaned"] = Value::Bool(bashrc_cleaned);
+    Ok(value)
+}
+
+fn guard_check() -> Result<Value, String> {
+    let path = guard_config_dir().join("bin/herdr");
+    if !path.exists() {
+        return Ok(serde_json::json!({"ok": false, "detail": "guard is not installed"}));
+    }
+    let mut command = Command::new("python3");
+    command
+        .arg(&path)
+        .args(["pane", "run", "no-such-pane-xyz", "echo hi"])
+        .env_remove("DUNKINGSHEEP_GUARD")
+        .env_remove("HERDR_GUARD_OFF")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    command.stdin(Stdio::null());
+    let output = command_output_timeout(&mut command, Duration::from_secs(60))?;
+    let mut detail = String::from_utf8_lossy(&output.stdout).into_owned();
+    detail.push_str(&String::from_utf8_lossy(&output.stderr));
+    let ok = {
+        let lower = detail.to_lowercase();
+        lower.contains("no pane matches")
+            || lower.contains("no herdr pane matches")
+            || lower.contains("dunk")
+    };
+    let detail: String = detail.trim().chars().take(300).collect();
+    Ok(serde_json::json!({"ok": ok, "detail": detail}))
+}
+
+fn command_output_timeout(
+    command: &mut Command,
+    timeout: Duration,
+) -> Result<std::process::Output, String> {
+    let mut child = command.spawn().map_err(|error| error.to_string())?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "guard check stdout was not captured".to_string())?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "guard check stderr was not captured".to_string())?;
+    let stdout_reader = std::thread::spawn(move || {
+        let mut output = Vec::new();
+        stdout.read_to_end(&mut output).map(|_| output)
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut output = Vec::new();
+        stderr.read_to_end(&mut output).map(|_| output)
+    });
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) if started.elapsed() < timeout => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break Err(format!(
+                    "guard check timed out after {} seconds",
+                    timeout.as_secs()
+                ));
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break Err(error.to_string());
+            }
+        }
+    };
+    let stdout = stdout_reader
+        .join()
+        .map_err(|_| "guard check stdout reader panicked".to_string())?
+        .map_err(|error| error.to_string())?;
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_| "guard check stderr reader panicked".to_string())?
+        .map_err(|error| error.to_string())?;
+    Ok(std::process::Output {
+        status: status?,
+        stdout,
+        stderr,
+    })
+}
+
+#[cfg(test)]
+mod guard_timeout_tests {
+    use super::command_output_timeout;
+    use std::process::Command;
+    use std::time::Duration;
+
+    #[test]
+    fn guard_check_child_obeys_timeout() {
+        let mut command = Command::new("sleep");
+        command
+            .arg("5")
+            .stdout(super::Stdio::piped())
+            .stderr(super::Stdio::piped());
+        let error = command_output_timeout(&mut command, Duration::from_millis(30)).unwrap_err();
+        assert!(error.contains("timed out"), "{error}");
+    }
+
+    #[test]
+    fn guard_check_drains_large_child_output() {
+        let mut command = Command::new("python3");
+        command
+            .args([
+                "-c",
+                "import sys; sys.stdout.write('o' * 1048576); sys.stderr.write('e' * 1048576)",
+            ])
+            .stdout(super::Stdio::piped())
+            .stderr(super::Stdio::piped());
+        let output = command_output_timeout(&mut command, Duration::from_secs(10)).unwrap();
+        assert_eq!(output.stdout.len(), 1_048_576);
+        assert_eq!(output.stderr.len(), 1_048_576);
+        assert!(output.stdout.iter().all(|byte| *byte == b'o'));
+        assert!(output.stderr.iter().all(|byte| *byte == b'e'));
+    }
+}
+
 fn owner_command(ns: &Map<String, Value>) -> Outcome {
     match text(ns, "owner_command") {
         Some("push") => {
@@ -1866,16 +2605,26 @@ fn pm(ns: &Map<String, Value>) -> Outcome {
 }
 
 fn guard(ns: &Map<String, Value>) -> Outcome {
-    let result = match text(ns, "action").unwrap_or("status") {
+    let action = text(ns, "action").unwrap_or("status");
+    let result = match action {
+        "status" => Ok(guard_status()),
         "install" => guard_install(matches!(ns.get("no_shadow"), Some(Value::Bool(true)))),
         "install-tmux" => guard_install_tmux(),
+        "check" => guard_check(),
+        "shadow" => guard_shadow(),
+        "unshadow" => guard_unshadow(),
+        "uninstall" => guard_uninstall(),
         other => return not_ported(&format!("guard {other}")),
     };
     match result {
         Ok(value) if matches!(ns.get("json"), Some(Value::Bool(true))) => Outcome {
             stdout: crate::render_print::render_json_indent2(&value),
             stderr: String::new(),
-            code: 0,
+            code: if value.get("ok") == Some(&Value::Bool(false)) {
+                1
+            } else {
+                0
+            },
         },
         Ok(value) => Outcome {
             stdout: value
@@ -1885,7 +2634,11 @@ fn guard(ns: &Map<String, Value>) -> Outcome {
                 .map(|(k, v)| format!("{k:<22} {v}\n"))
                 .collect(),
             stderr: String::new(),
-            code: 0,
+            code: if value.get("ok") == Some(&Value::Bool(false)) {
+                1
+            } else {
+                0
+            },
         },
         Err(message) => Outcome {
             stdout: String::new(),
@@ -2401,6 +3154,9 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
     let command = text(ns, "command").unwrap_or("");
     let json = matches!(ns.get("json"), Some(Value::Bool(true)));
     match command {
+        "guide" | "help" | "docs" => guide(ns),
+        "commands" => commands(json),
+        "mcp-map" => mcp_map(ns),
         "install" => install_launcher(ns, json),
         "mcp-setup" => mcp_setup(ns),
         "context" => context(ns, json),
@@ -2519,6 +3275,263 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
             Map::new(),
             crate::render_fleet::render_workspaces,
         ),
+        "new-workspace" | "workspace" => {
+            let mut args = Map::new();
+            for key in [
+                "label", "cwd", "run", "focus", "mailbox", "role", "provider", "model",
+            ] {
+                args.insert(
+                    match key {
+                        "run" => "command",
+                        other => other,
+                    }
+                    .into(),
+                    ns.get(key).cloned().unwrap_or(Value::Null),
+                );
+            }
+            run_command_with_stderr(ns, "create_workspace", args, |result| {
+                (
+                    crate::render_fleet::render_created(result),
+                    crate::render_fleet::created_error(result).unwrap_or_default(),
+                )
+            })
+        }
+        "new-tab" | "tab" => {
+            let mut args = Map::new();
+            for key in ["workspace", "label", "cwd", "run", "focus"] {
+                args.insert(
+                    if key == "run" { "command" } else { key }.into(),
+                    ns.get(key).cloned().unwrap_or(Value::Null),
+                );
+            }
+            run_command_with_stderr(ns, "create_tab", args, |result| {
+                (
+                    crate::render_fleet::render_created(result),
+                    crate::render_fleet::created_error(result).unwrap_or_default(),
+                )
+            })
+        }
+        "split" => {
+            let mut args = Map::new();
+            args.insert(
+                "target".into(),
+                ns.get("target").cloned().unwrap_or(Value::Null),
+            );
+            args.insert(
+                "direction".into(),
+                Value::String(
+                    if matches!(ns.get("down"), Some(Value::Bool(true))) {
+                        "down"
+                    } else {
+                        "right"
+                    }
+                    .into(),
+                ),
+            );
+            for key in ["cwd", "run", "focus"] {
+                args.insert(
+                    if key == "run" { "command" } else { key }.into(),
+                    ns.get(key).cloned().unwrap_or(Value::Null),
+                );
+            }
+            run_command_with_stderr(ns, "split_pane", args, |result| {
+                (
+                    crate::render_fleet::render_created(result),
+                    crate::render_fleet::created_error(result).unwrap_or_default(),
+                )
+            })
+        }
+        "start-agent" | "agent" => {
+            let argv = ns.get("argv").map(string_values).unwrap_or_default();
+            let mut args = Map::new();
+            args.insert(
+                "name".into(),
+                ns.get("name").cloned().unwrap_or(Value::Null),
+            );
+            args.insert(
+                "command".into(),
+                Value::String(ds_core::flock::commands_layout::shlex_join(&argv)),
+            );
+            for key in [
+                "workspace",
+                "tab",
+                "split",
+                "cwd",
+                "focus",
+                "role",
+                "provider",
+                "model",
+            ] {
+                args.insert(key.into(), ns.get(key).cloned().unwrap_or(Value::Null));
+            }
+            crate::daemon_cmd::run_command(ns, "start_agent", args, |result| {
+                let argv = string_values(&result["argv"]);
+                format!(
+                    "started agent {} in {}: {}\n",
+                    crate::render_fleet::py_str(&result["name"]),
+                    crate::render_fleet::py_str(&result["pane_id"]),
+                    ds_core::flock::commands_layout::shlex_join(&argv)
+                )
+            })
+        }
+        "respawn-pane" | "respawn" => {
+            let (argv, rollback) = match respawn_argv(ns) {
+                Ok(values) => values,
+                Err(outcome) => return outcome,
+            };
+            let mut args = Map::new();
+            for (key, value) in [
+                ("pane", ns.get("pane").cloned().unwrap_or(Value::Null)),
+                ("argv", argv),
+                ("rollback_argv", rollback),
+                (
+                    "expected_pid",
+                    ns.get("expected_pid").cloned().unwrap_or(Value::Null),
+                ),
+                (
+                    "expected_start",
+                    ns.get("expected_start").cloned().unwrap_or(Value::Null),
+                ),
+                (
+                    "confirm_idle",
+                    ns.get("confirm_idle")
+                        .cloned()
+                        .unwrap_or(Value::Bool(false)),
+                ),
+                ("reason", ns.get("reason").cloned().unwrap_or(Value::Null)),
+            ] {
+                args.insert(key.into(), value);
+            }
+            crate::daemon_cmd::run_command(ns, "respawn_pane", args, |result| {
+                format!(
+                    "respawned pane {} ({} -> {}); reason={}\n",
+                    crate::render_fleet::py_str(&result["pane_id"]),
+                    crate::render_fleet::py_str(&result["old_pid"]),
+                    crate::render_fleet::py_str(&result["pane_pid"]),
+                    crate::render_fleet::py_str(&result["reason"])
+                )
+            })
+        }
+        "rename" => {
+            let mut args = Map::new();
+            for key in ["kind", "target", "label"] {
+                args.insert(key.into(), ns.get(key).cloned().unwrap_or(Value::Null));
+            }
+            crate::daemon_cmd::run_command(ns, "rename", args, crate::render_fleet::render_renamed)
+        }
+        "focus" => {
+            let mut args = Map::new();
+            for key in ["kind", "target"] {
+                args.insert(key.into(), ns.get(key).cloned().unwrap_or(Value::Null));
+            }
+            crate::daemon_cmd::run_command(ns, "focus", args, |result| {
+                format!(
+                    "focused {} {}\n",
+                    crate::render_fleet::py_str(&result["kind"]),
+                    crate::render_fleet::py_str(&result["id"])
+                )
+            })
+        }
+        "close" => {
+            let mut args = Map::new();
+            for key in ["kind", "target"] {
+                args.insert(key.into(), ns.get(key).cloned().unwrap_or(Value::Null));
+            }
+            args.insert(
+                "force".into(),
+                ns.get("force").cloned().unwrap_or(Value::Bool(false)),
+            );
+            crate::daemon_cmd::run_command(ns, "close", args, |result| {
+                let joined = |key: &str| {
+                    result[key]
+                        .as_array()
+                        .map(|values| {
+                            values
+                                .iter()
+                                .map(crate::render_fleet::py_str)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        })
+                        .unwrap_or_default()
+                };
+                let panes = joined("closed_panes");
+                let stopped = joined("stopped_dunks");
+                format!(
+                    "closed {} {}; panes {}{}\n",
+                    crate::render_fleet::py_str(&result["kind"]),
+                    crate::render_fleet::py_str(&result["id"]),
+                    if panes.is_empty() { "-" } else { &panes },
+                    if stopped.is_empty() {
+                        String::new()
+                    } else {
+                        format!("; stopped dunks {stopped}")
+                    }
+                )
+            })
+        }
+        "herdr" => {
+            let argv = ns.get("argv").map(string_values).unwrap_or_default();
+            let mut args = Map::new();
+            args.insert(
+                "command".into(),
+                Value::String(ds_core::flock::commands_layout::shlex_join(&argv)),
+            );
+            run_command_with_stderr(ns, "herdr", args, |result| {
+                let (stderr, stdout) = crate::render_print::render_herdr(result);
+                (stdout, stderr)
+            })
+        }
+        "herdr-help" => {
+            let mut args = Map::new();
+            args.insert(
+                "topic".into(),
+                ns.get("topic").cloned().unwrap_or(Value::Null),
+            );
+            crate::daemon_cmd::run_command(ns, "herdr_help", args, |result| {
+                let text = crate::render_fleet::py_str(&result["text"]);
+                if text.ends_with('\n') {
+                    text
+                } else {
+                    format!("{text}\n")
+                }
+            })
+        }
+        "read" => {
+            let mut args = Map::new();
+            args.insert(
+                "target".into(),
+                ns.get("target").cloned().unwrap_or(Value::Null),
+            );
+            args.insert(
+                "lines".into(),
+                ns.get("lines").cloned().unwrap_or(Value::from(40)),
+            );
+            crate::daemon_cmd::run_command(ns, "read_pane", args, |result| {
+                let text = crate::render_fleet::py_str(&result["text"]);
+                if text.ends_with('\n') {
+                    text
+                } else {
+                    format!("{text}\n")
+                }
+            })
+        }
+        "shutdown" => {
+            let mut args = Map::new();
+            args.insert(
+                "stop_all".into(),
+                ns.get("stop_all").cloned().unwrap_or(Value::Bool(false)),
+            );
+            crate::daemon_cmd::run_command(ns, "shutdown", args, |result| {
+                format!(
+                    "daemon shutting down{}\n",
+                    if crate::render_fleet::truthy(&result["stopped_all"]) {
+                        " (all dunks stopped)"
+                    } else {
+                        ""
+                    }
+                )
+            })
+        }
         "list" | "ls" => crate::daemon_cmd::run_command(ns, "list_dunks", Map::new(), |result| {
             crate::render_print::render_dunks(result["dunks"].as_array().map_or(&[], Vec::as_slice))
         }),

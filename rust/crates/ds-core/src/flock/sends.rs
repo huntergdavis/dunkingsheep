@@ -6,8 +6,8 @@
 //!
 //! The Python reaches the backend, the lease table and the clock through `self`; here they are
 //! [`SendEnv`], so every decision is testable with a scripted pane. NOT in this slice (next
-//! NOT in these slices (later t801 work): `send_now`/`send_keys_now`, `_enqueue`/`_deliver`,
-//! the per-pane outbox task, and public `clear_box`.
+//! Later T33 slices add the public `send_now`/`send_keys_now` routes on the accepted outbox and
+//! confirmation seams; the per-pane worker and public `clear_box` remain separate integrations.
 //!
 //! POLICY (owner, 2026-10-23/24) kept verbatim: a busy agent is NOT a hold reason, and there
 //! is NO "a human is typing" hold - every message goes through this daemon, so a non-empty box
@@ -16,10 +16,10 @@
 
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, VecDeque};
-use std::sync::atomic::Ordering;
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use super::commands_inbox::NOTICE_PREFIX;
+use super::commands_inbox::{InboxEnv, NOTICE_PREFIX};
 use super::guarded_submit::confirm_guarded_submission;
 use super::panes::PaneInfoEnv;
 use super::resolve::{resolve_target, resolve_target_dict};
@@ -27,6 +27,7 @@ use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::ThreadId;
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::Flock;
@@ -857,6 +858,8 @@ const HOLD_BACKOFF_BASE_S: f64 = 5.0;
 const HOLD_BACKOFF_CAP_S: f64 = 300.0;
 #[allow(dead_code)] // Used by the dependent outbox worker's delivery entry point.
 const HOLD_ATTEMPT_LIMIT: i64 = 10;
+/// `_outbox_worker` rechecks a held or not-yet-due pane at this cadence.
+pub(crate) const MESSAGE_RECHECK_S: f64 = 5.0;
 
 #[allow(dead_code)] // Used by the dependent outbox worker's delivery entry point.
 fn hold_backoff_s(attempts: i64) -> f64 {
@@ -865,6 +868,15 @@ fn hold_backoff_s(attempts: i64) -> f64 {
 }
 
 pub type HoldSignature = (String, String);
+
+struct OutboxHold<'a> {
+    message: &'a Message,
+    now: f64,
+    permanent: bool,
+    reason: Option<&'a str>,
+    refused_detail: Option<&'a str>,
+    signature: HoldSignature,
+}
 
 pub(super) fn hold_signature(flock: &Flock, env: &dyn SendEnv, pane_id: &str) -> HoldSignature {
     let Some(screen) = env.read_pane(pane_id, CONSUMPTION_READ_LINES, true) else {
@@ -913,8 +925,11 @@ pub(crate) enum DeliveryOutcome {
 pub trait SendPreparationEnv: FlushEnv + super::send_keys::KeyPressEnv {
     fn send_text(&mut self, pane_id: &str, text: &str) -> (bool, String);
     fn attempt_generation(&self, pane_id: &str) -> Option<String>;
+    /// Persist typed-attempt state for the actual message when a delivery frame exists.
+    /// `None` preserves the low-level `submit_text` path, which has no message authority.
     fn persist_typed_attempt(
         &mut self,
+        message: Option<&mut Message>,
         pane_id: &str,
         text: &str,
         press_enter: bool,
@@ -1078,22 +1093,23 @@ pub fn submit_text(
             press_enter,
             check_box,
             attempt_generation: AttemptGeneration::Capture,
+            message: None,
         },
         guard,
     )
 }
 
-#[derive(Clone, Copy)]
 struct SubmitOptions<'a> {
     press_enter: bool,
     check_box: bool,
-    attempt_generation: AttemptGeneration<'a>,
+    attempt_generation: AttemptGeneration,
+    message: Option<&'a mut Message>,
 }
 
-#[derive(Clone, Copy)]
-enum AttemptGeneration<'a> {
+#[derive(Clone)]
+enum AttemptGeneration {
     Capture,
-    Captured(Option<&'a str>),
+    Captured(Option<String>),
 }
 
 /// Delivery passes its pre-guard generation snapshot so a pane replacement during preflight
@@ -1103,11 +1119,11 @@ fn submit_text_with_options(
     env: &mut dyn SendPreparationEnv,
     pane_id: &str,
     text: &str,
-    options: SubmitOptions<'_>,
+    mut options: SubmitOptions<'_>,
     guard: Option<&TypingGuard<'_>>,
 ) -> SendAction {
     let guarded = guard.is_some();
-    let mut perform = |guard: &TypingGuard<'_>| {
+    let mut perform = Some(|guard: &TypingGuard<'_>| {
         if let Some(dead) = dead_session(env, pane_id) {
             return Err(format!(
                 "agent session is dead ({dead}); not submitting into a dead composer"
@@ -1122,7 +1138,7 @@ fn submit_text_with_options(
         let baseline = env.read_status(pane_id);
         let generation = match options.attempt_generation {
             AttemptGeneration::Capture => env.attempt_generation(pane_id),
-            AttemptGeneration::Captured(generation) => generation.map(str::to_owned),
+            AttemptGeneration::Captured(generation) => generation,
         };
         let before = env
             .read_pane(pane_id, CONSUMPTION_READ_LINES, true)
@@ -1145,7 +1161,13 @@ fn submit_text_with_options(
             return Err(detail);
         }
         flock.remember_typed(pane_id, text);
-        if !env.persist_typed_attempt(pane_id, text, options.press_enter, generation.as_deref()) {
+        if !env.persist_typed_attempt(
+            options.message.take(),
+            pane_id,
+            text,
+            options.press_enter,
+            generation.as_deref(),
+        ) {
             return Err("typed but not submitted: durable attempt receipt failed".into());
         }
         if !options.press_enter {
@@ -1167,12 +1189,12 @@ fn submit_text_with_options(
             }),
             key_confirmation: None,
         })
-    };
+    });
 
     let prepared = match guard {
-        Some(guard) => perform(guard),
+        Some(guard) => perform.take().expect("submit operation is available")(guard),
         None => match flock.typing_guard(pane_id) {
-            Ok(guard) => perform(&guard),
+            Ok(guard) => perform.take().expect("submit operation is available")(&guard),
             Err(error) => return SendAction::completed(false, error.to_string()),
         },
     };
@@ -2178,6 +2200,19 @@ impl CompletionWaiter {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
         }
     }
+
+    /// Wait for completion up to `timeout`, returning whether the event was set.
+    pub fn wait_timeout(&self, timeout: Duration) -> bool {
+        let state = lock_unpoison(&self.state);
+        if state.settled {
+            return true;
+        }
+        let (state, _) = self
+            .changed
+            .wait_timeout_while(state, timeout, |state| !state.settled)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.settled
+    }
 }
 
 impl PartialEq for CompletionWaiter {
@@ -2255,6 +2290,22 @@ pub struct Message {
     pub finished_at: Option<f64>,
     /// Completion event shared by clones and deliberately omitted from the wire form.
     pub done: Arc<CompletionWaiter>,
+    /// Transient identity and receipt frame shared only by clones of this exact message.
+    /// It is deliberately omitted from snapshots; a restored message starts a new lifetime.
+    attempt_state: Arc<MessageAttemptState>,
+}
+
+#[derive(Debug, Default)]
+struct MessageAttemptState {
+    receipt_ids: Mutex<Vec<String>>,
+    folded_text: Mutex<Option<String>>,
+}
+
+// This state is process-local ownership evidence, not part of message value equality.
+impl PartialEq for MessageAttemptState {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
 }
 
 impl Message {
@@ -2283,7 +2334,73 @@ impl Message {
             created_at: clock::now_s(),
             finished_at: None,
             done: Arc::new(CompletionWaiter::default()),
+            attempt_state: Arc::new(MessageAttemptState::default()),
         }
+    }
+
+    /// Append an inbox receipt to this exact queued notice's completion frame.
+    /// The caller must hold the canonical outbox row while calling this method.
+    /// Returns false for a non-notice or a notice that is no longer queued.
+    pub fn append_notify_for(&mut self, inbox_message_id: &str) -> bool {
+        if !self.is_notice || self.status != "queued" {
+            return false;
+        }
+        self.notify_for.push(inbox_message_id.to_owned());
+        self.attempt_state
+            .receipt_ids
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(inbox_message_id.to_owned());
+        true
+    }
+
+    /// Update text on the exact queued notice and its in-flight delivery frame.
+    /// The caller holds the canonical outbox row.
+    pub(crate) fn set_folded_notice_text(&mut self, text: &str) {
+        self.text = text.to_owned();
+        *self
+            .attempt_state
+            .folded_text
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(text.to_owned());
+    }
+
+    fn folded_text(&self) -> String {
+        self.attempt_state
+            .folded_text
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .unwrap_or_else(|| self.text.clone())
+    }
+
+    fn prepare_receipt_frame(&self) {
+        *self
+            .attempt_state
+            .receipt_ids
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = self.notify_for.clone();
+    }
+
+    fn receipt_frame(&self) -> Vec<String> {
+        let shared = self
+            .attempt_state
+            .receipt_ids
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if shared.is_empty() {
+            self.notify_for.clone()
+        } else {
+            shared.clone()
+        }
+    }
+
+    fn refresh_notify_for_from_frame(&mut self) {
+        self.notify_for = self.receipt_frame();
+    }
+
+    fn same_lifetime(&self, other: &Message) -> bool {
+        Arc::ptr_eq(&self.attempt_state, &other.attempt_state)
     }
 
     /// `_queued_message`.
@@ -2841,7 +2958,468 @@ pub trait SnapshotStore: Send + Sync {
 /// the outbox mutex, after appending the message. Implementations must not re-enter
 /// the outbox during this call.
 pub trait OutboxWake: Send + Sync {
-    fn ensure_worker(&self, flock: &Flock, pane_id: &str) -> Result<(), DunkError>;
+    fn ensure_worker(&self, flock: &Arc<Flock>, pane_id: &str) -> Result<(), DunkError>;
+}
+
+/// Arguments shared by the public direct-send entry points.
+#[derive(Debug, Clone)]
+pub struct DirectSendOptions<'a> {
+    pub self_pane_id: Option<&'a str>,
+    pub hold_while_typing: bool,
+    pub wait_s: f64,
+}
+
+impl Default for DirectSendOptions<'_> {
+    fn default() -> Self {
+        Self {
+            self_pane_id: None,
+            hold_while_typing: true,
+            wait_s: 0.0,
+        }
+    }
+}
+
+/// Additional text-message metadata accepted by `Flock::send_now`.
+#[derive(Debug, Clone)]
+pub struct DirectTextMetadata<'a> {
+    pub press_enter: bool,
+    pub is_notice: bool,
+    pub notify_for: Option<&'a str>,
+    pub source: &'a str,
+}
+
+impl Default for DirectTextMetadata<'_> {
+    fn default() -> Self {
+        Self {
+            press_enter: true,
+            is_notice: false,
+            notify_for: None,
+            source: "send_text",
+        }
+    }
+}
+
+/// Runtime-owned environment adapter that executes the real `outbox_worker` loop.
+/// Implementations construct fresh terminal services on the worker thread.
+pub trait OutboxWorkerRunner: Send + Sync + 'static {
+    fn run(&self, flock: Arc<Flock>, pane_id: &str, stopped: &AtomicBool);
+}
+
+struct WorkerRegistration {
+    token: u64,
+    stopped: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+#[derive(Default)]
+struct OutboxWorkerPoolState {
+    workers: HashMap<(u64, String), WorkerRegistration>,
+    retired: Vec<(u64, JoinHandle<()>)>,
+    closed_flocks: HashSet<u64>,
+    next_token: u64,
+}
+
+/// Concrete one-worker-per-pane registration and shutdown gate. The runtime supplies the
+/// already-bound terminal runner; this pool owns identity, enqueue/exit race closure, and joins.
+pub struct OutboxWorkerPool {
+    state: Arc<Mutex<OutboxWorkerPoolState>>,
+    runner: Arc<dyn OutboxWorkerRunner>,
+}
+
+impl OutboxWorkerPool {
+    pub fn new(runner: Arc<dyn OutboxWorkerRunner>) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(OutboxWorkerPoolState::default())),
+            runner,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retired_worker_counts_for_test(&self) -> (usize, usize) {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (
+            state.retired.len(),
+            state
+                .retired
+                .iter()
+                .filter(|(_, handle)| handle.is_finished())
+                .count(),
+        )
+    }
+
+    /// Stop and join every worker for this flock. Call this before closing terminal/store
+    /// services; after this call, enqueue refuses to start another worker for the same flock.
+    pub fn stop_outbox_workers(&self, flock: &Flock) {
+        let flock_id = flock.id;
+        let (workers, mut retired) = {
+            let mut workers = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            workers.closed_flocks.insert(flock_id);
+            let keys: Vec<_> = workers
+                .workers
+                .keys()
+                .filter(|(id, _)| *id == flock_id)
+                .cloned()
+                .collect();
+            let active = keys
+                .into_iter()
+                .filter_map(|key| workers.workers.remove(&key))
+                .collect::<Vec<_>>();
+            let retired = workers
+                .retired
+                .extract_if(.., |(id, _)| *id == flock_id)
+                .map(|(_, handle)| handle)
+                .collect::<Vec<_>>();
+            (active, retired)
+        };
+        for mut worker in workers {
+            worker.stopped.store(true, Ordering::Release);
+            if let Some(handle) = worker.handle.take() {
+                let _ = handle.join();
+            }
+        }
+        for handle in retired.drain(..) {
+            let _ = handle.join();
+        }
+    }
+
+    fn ensure_worker(&self, flock: &Arc<Flock>, pane_id: &str) -> Result<(), DunkError> {
+        let flock_id = flock.id;
+        let key = (flock_id, pane_id.to_owned());
+        let mut workers = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reap_finished_retired(&mut workers);
+        if workers.closed_flocks.contains(&flock_id) {
+            return Err(DunkError::Refused("outbox workers are stopping".into()));
+        }
+        if workers.workers.contains_key(&key) {
+            return Ok(());
+        }
+        workers.next_token = workers
+            .next_token
+            .checked_add(1)
+            .ok_or_else(|| DunkError::Refused("outbox worker identity exhausted".into()))?;
+        let token = workers.next_token;
+        let stopped = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stopped);
+        let state = Arc::clone(&self.state);
+        let runner = Arc::clone(&self.runner);
+        let worker_flock = Arc::clone(flock);
+        let worker_pane = pane_id.to_owned();
+        let worker_key = key.clone();
+        let (start_tx, start_rx) = std::sync::mpsc::sync_channel::<()>(0);
+        let handle = thread::Builder::new()
+            .name(format!("outbox-{pane_id}"))
+            .spawn(move || {
+                if start_rx.recv().is_err() {
+                    return;
+                }
+                loop {
+                    if worker_stop.load(Ordering::Acquire) {
+                        break;
+                    }
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        runner.run(Arc::clone(&worker_flock), &worker_pane, &worker_stop);
+                    }));
+                    if result.is_err() {
+                        eprintln!("outbox worker for {} panicked; it will retry", worker_pane);
+                    }
+                    if worker_stop.load(Ordering::Acquire) {
+                        break;
+                    }
+                    // Keep the queue lock through the empty check and registration removal.
+                    // Enqueue takes the same lock before `ensure_worker`, closing the classic
+                    // append-after-empty / before-exit race.
+                    let outbox = outbox_lock(&worker_flock.outbox);
+                    let has_queued = outbox
+                        .get(&worker_pane)
+                        .is_some_and(|queue| queue.iter().any(|row| row.status == "queued"));
+                    if has_queued {
+                        drop(outbox);
+                        thread::sleep(Duration::from_secs_f64(MESSAGE_RECHECK_S));
+                        continue;
+                    }
+                    let mut workers = state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if workers
+                        .workers
+                        .get(&worker_key)
+                        .is_some_and(|worker| worker.token == token)
+                    {
+                        if let Some(mut worker) = workers.workers.remove(&worker_key) {
+                            if let Some(handle) = worker.handle.take() {
+                                workers.retired.push((flock_id, handle));
+                            }
+                        }
+                    }
+                    return;
+                }
+                let _outbox = outbox_lock(&worker_flock.outbox);
+                let mut workers = state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if workers
+                    .workers
+                    .get(&worker_key)
+                    .is_some_and(|worker| worker.token == token)
+                {
+                    if let Some(mut worker) = workers.workers.remove(&worker_key) {
+                        if let Some(handle) = worker.handle.take() {
+                            workers.retired.push((flock_id, handle));
+                        }
+                    }
+                }
+            })
+            .map_err(|error| {
+                DunkError::Refused(format!("could not start outbox worker: {error}"))
+            })?;
+        workers.workers.insert(
+            key,
+            WorkerRegistration {
+                token,
+                stopped,
+                handle: Some(handle),
+            },
+        );
+        drop(workers);
+        let _ = start_tx.send(());
+        Ok(())
+    }
+}
+
+fn reap_finished_retired(state: &mut OutboxWorkerPoolState) {
+    let mut pending = Vec::with_capacity(state.retired.len());
+    for (flock_id, handle) in state.retired.drain(..) {
+        if handle.is_finished() {
+            let _ = handle.join();
+        } else {
+            pending.push((flock_id, handle));
+        }
+    }
+    state.retired = pending;
+}
+
+impl OutboxWake for OutboxWorkerPool {
+    fn ensure_worker(&self, flock: &Arc<Flock>, pane_id: &str) -> Result<(), DunkError> {
+        OutboxWorkerPool::ensure_worker(self, flock, pane_id)
+    }
+}
+
+/// One deterministic result from the per-pane queue-head scheduler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // Production worker startup is gated to a separate runtime task.
+pub(crate) enum OutboxStep {
+    Empty,
+    Delivered,
+    Held,
+    Due,
+    Stopped,
+}
+
+/// `_outbox_step`: inspect exactly the FIFO head, release the queue lock before any external
+/// read, wait, send, or save, then let the guarded delivery transition recheck the pane.
+#[allow(dead_code)] // Exercised here; production worker startup is a separate gated task.
+pub(crate) fn outbox_step<E: SendPreparationEnv + PaneInfoEnv>(
+    flock: &Flock,
+    env: &mut E,
+    pane_id: &str,
+    now: f64,
+    stopped: &AtomicBool,
+    wait: &dyn Fn(f64) -> bool,
+    permission: &mut dyn FnMut() -> Option<String>,
+) -> OutboxStep {
+    if stopped.load(Ordering::Acquire) {
+        return OutboxStep::Stopped;
+    }
+    let head = {
+        let mut outbox = outbox_lock(&flock.outbox);
+        let Some(queue) = outbox.get_mut(pane_id) else {
+            return OutboxStep::Empty;
+        };
+        queue.retain(|message| message.status == "queued");
+        let Some(stored_head) = queue.first_mut() else {
+            outbox.remove(pane_id);
+            return OutboxStep::Empty;
+        };
+        stored_head.prepare_receipt_frame();
+        stored_head.clone()
+    };
+
+    if let Some(due_at) = head.next_attempt_at {
+        let signature = hold_signature(flock, env, pane_id);
+        let native_ready = if env.federated_input() {
+            env.read_pane(pane_id, CONSUMPTION_READ_LINES, true)
+                .is_some_and(|screen| {
+                    federated_composer(env.federated_input(), &screen).as_deref() == Some("")
+                })
+                && send_blocker(env, pane_id).is_none()
+        } else {
+            false
+        };
+        if signature
+            != (
+                head.hold_signature_kind
+                    .clone()
+                    .unwrap_or_else(|| "box".into()),
+                head.hold_signature.clone().unwrap_or_default(),
+            )
+            || native_ready
+        {
+            let mut outbox = outbox_lock(&flock.outbox);
+            if let Some(stored) = outbox
+                .get_mut(pane_id)
+                .and_then(|queue| queue.iter_mut().find(|row| row.same_lifetime(&head)))
+            {
+                stored.next_attempt_at = None;
+                stored.hold_signature = None;
+                stored.hold_signature_kind = None;
+            }
+        } else if now < due_at {
+            return OutboxStep::Due;
+        }
+    }
+
+    let interrupted = std::cell::Cell::new(false);
+    let clear = if head.hold_while_typing {
+        clear_to_send(env, pane_id, &|seconds| {
+            let was_interrupted = wait(seconds);
+            interrupted.set(was_interrupted);
+            was_interrupted
+        })
+    } else {
+        true
+    };
+    if stopped.load(Ordering::Acquire) && interrupted.get() {
+        return OutboxStep::Stopped;
+    }
+    if stopped.load(Ordering::Acquire) {
+        return OutboxStep::Stopped;
+    }
+    if !clear {
+        let (kind, reason) = send_blocker(env, pane_id).unwrap_or(("unknown", "unknown".into()));
+        if kind != "dead" {
+            let signature = hold_signature(flock, env, pane_id);
+            return match flock.record_outbox_hold(OutboxHold {
+                message: &head,
+                now,
+                permanent: false,
+                reason: Some(&reason),
+                refused_detail: None,
+                signature,
+            }) {
+                DeliveryOutcome::Held | DeliveryOutcome::Undeliverable => OutboxStep::Held,
+                DeliveryOutcome::Missing => OutboxStep::Empty,
+                DeliveryOutcome::Sent
+                | DeliveryOutcome::Failed
+                | DeliveryOutcome::AlreadyDecided => OutboxStep::Delivered,
+            };
+        }
+    }
+    {
+        let mut outbox = outbox_lock(&flock.outbox);
+        let Some(queue) = outbox.get_mut(pane_id) else {
+            return OutboxStep::Empty;
+        };
+        queue.retain(|message| message.status == "queued");
+        match queue.first() {
+            Some(current) if current.same_lifetime(&head) => {}
+            Some(_) => return OutboxStep::Delivered,
+            None => {
+                outbox.remove(pane_id);
+                return OutboxStep::Empty;
+            }
+        }
+    };
+    match flock.deliver_message_frame(&head, now, env, permission) {
+        DeliveryOutcome::Sent | DeliveryOutcome::Failed | DeliveryOutcome::AlreadyDecided => {
+            OutboxStep::Delivered
+        }
+        DeliveryOutcome::Held | DeliveryOutcome::Undeliverable => OutboxStep::Held,
+        DeliveryOutcome::Missing => OutboxStep::Empty,
+    }
+}
+
+/// `_outbox_worker`: run deterministic queue steps, report stale modals, and make one real
+/// owned-text recovery transition when the same box remains visible. Runtime adapters provide
+/// terminal I/O and a stop-aware wait; tests can advance a fake clock without spawning threads.
+#[allow(dead_code)] // Production worker startup is gated to a separate runtime task.
+pub(crate) fn outbox_worker<E: SendPreparationEnv + PaneInfoEnv>(
+    flock: &Flock,
+    env: &mut E,
+    inbox: &dyn InboxEnv,
+    pane_id: &str,
+    stopped: &AtomicBool,
+    reporter: &mut super::loops_stuck::StalePanelReporter,
+    wait: &dyn Fn(f64) -> bool,
+    mut permission: impl FnMut() -> Option<String>,
+) {
+    let mut seen: Option<HoldSignature> = None;
+    let mut seen_since = env.now_s();
+    loop {
+        if stopped.load(Ordering::Acquire) {
+            return;
+        }
+        let now = env.now_s();
+        let outcome = outbox_step(flock, env, pane_id, now, stopped, wait, &mut permission);
+        match outcome {
+            OutboxStep::Empty | OutboxStep::Stopped => return,
+            OutboxStep::Delivered => {
+                seen = None;
+                seen_since = env.now_s();
+                continue;
+            }
+            OutboxStep::Held | OutboxStep::Due => {}
+        }
+        let signature = hold_signature(flock, env, pane_id);
+        if seen.as_ref() != Some(&signature) {
+            seen = Some(signature);
+            seen_since = env.now_s();
+        } else if signature.0 == "modal" {
+            let generation = pane_generation(env, pane_id);
+            reporter.note(
+                flock,
+                inbox,
+                pane_id,
+                "modal",
+                generation.as_deref(),
+                Some(&signature.1),
+                seen_since,
+            );
+        } else if signature.0 == "box" {
+            let head = outbox_lock(&flock.outbox)
+                .get(pane_id)
+                .and_then(|queue| queue.first())
+                .cloned();
+            if let Some(head) = head {
+                let recovery_now = env.now_s();
+                if flock.unwedge(
+                    env,
+                    pane_id,
+                    &signature.1,
+                    Some(seen_since),
+                    Some(&head),
+                    recovery_now,
+                    Some(&head.id),
+                    true,
+                ) {
+                    seen = None;
+                    seen_since = env.now_s();
+                    continue;
+                }
+            }
+        }
+        if wait(MESSAGE_RECHECK_S) {
+            return;
+        }
+    }
 }
 
 pub(crate) fn outbox_lock(
@@ -2853,6 +3431,107 @@ pub(crate) fn outbox_lock(
 }
 
 impl Flock {
+    fn record_outbox_hold(&self, hold: OutboxHold<'_>) -> DeliveryOutcome {
+        let OutboxHold {
+            message,
+            now,
+            permanent,
+            reason,
+            refused_detail,
+            signature,
+        } = hold;
+        let (message, attempts, terminal) = {
+            let mut outbox = outbox_lock(&self.outbox);
+            let pane_id = &message.pane_id;
+            let Some(queue) = outbox.get_mut(pane_id) else {
+                return DeliveryOutcome::Missing;
+            };
+            let Some(stored) = queue.iter_mut().find(|row| row.same_lifetime(message)) else {
+                return DeliveryOutcome::Missing;
+            };
+            if stored.status != "queued" {
+                return DeliveryOutcome::AlreadyDecided;
+            }
+            stored.holds = stored.holds.saturating_add(1);
+            let attempts = stored.holds.min(HOLD_ATTEMPT_LIMIT);
+            let terminal = permanent && attempts >= HOLD_ATTEMPT_LIMIT;
+            let reason_label = reason.unwrap_or("unknown");
+            if terminal {
+                stored.status = "undeliverable".into();
+                stored.detail = Some(format!(
+                    "undeliverable after {attempts} deferred attempts ({reason_label}); the target cannot accept"
+                ));
+                stored.finished_at = Some(now);
+            } else {
+                let delay = hold_backoff_s(attempts);
+                stored.next_attempt_at = Some(now + delay);
+                stored.hold_signature_kind = Some(signature.0);
+                stored.hold_signature = Some(signature.1);
+                stored.detail = Some(refused_detail.map_or_else(
+                    || {
+                        format!("deferred ({reason_label}); attempt {attempts} of {HOLD_ATTEMPT_LIMIT}, next attempt in {delay:.0}s")
+                    },
+                    str::to_owned,
+                ));
+            }
+            let mut message = stored.clone();
+            message.refresh_notify_for_from_frame();
+            if terminal {
+                queue.retain(|row| !row.same_lifetime(&message));
+                if queue.is_empty() {
+                    outbox.remove(pane_id);
+                }
+            }
+            (message, attempts, terminal)
+        };
+
+        if let Some(metrics) = self.stores().metrics {
+            metrics.record(&crate::metrics::Event {
+                at: 0.0,
+                kind: "message.held".into(),
+                pane_id: Some(message.pane_id.clone()),
+                mailbox: Some(message.target_label.clone()),
+                sender: None,
+                source: Some(message.source.clone()),
+                outcome: Some("held".into()),
+                reason: reason.map(str::to_owned),
+                duration_ms: None,
+                attempts: Some(attempts),
+                bytes: Some(message.text.len() as i64),
+            });
+        }
+        if terminal {
+            if let Some(metrics) = self.stores().metrics {
+                metrics.record(&crate::metrics::Event {
+                    at: 0.0,
+                    kind: "message.undeliverable".into(),
+                    pane_id: Some(message.pane_id.clone()),
+                    mailbox: Some(message.target_label.clone()),
+                    sender: None,
+                    source: Some(message.source.clone()),
+                    outcome: Some("undeliverable".into()),
+                    reason: reason.map(str::to_owned),
+                    duration_ms: None,
+                    attempts: Some(attempts),
+                    bytes: Some(message.text.len() as i64),
+                });
+            }
+            self.remember(&message);
+            let _ = self.save();
+            self.record_delivery_outcome(
+                &message,
+                false,
+                message.detail.as_deref(),
+                "undeliverable",
+                None,
+            );
+            DeliveryOutcome::Undeliverable
+        } else {
+            let _ = self.save();
+            DeliveryOutcome::Held
+        }
+    }
+
     /// Deliver one queued message, persisting every hold and decided transition.
     /// The outbox lock protects only state selection and mutation; terminal I/O always runs
     /// after it has been released.
@@ -2864,7 +3543,7 @@ impl Flock {
         env: &mut dyn SendPreparationEnv,
         permission: impl FnMut() -> Option<String>,
     ) -> DeliveryOutcome {
-        let mut message = {
+        let expected = {
             let mut outbox = outbox_lock(&self.outbox);
             let Some(message) = outbox
                 .values_mut()
@@ -2888,6 +3567,30 @@ impl Flock {
             }
             message.clone()
         };
+        self.deliver_message_frame(&expected, now, env, permission)
+    }
+
+    fn deliver_message_frame(
+        &self,
+        expected: &Message,
+        now: f64,
+        env: &mut dyn SendPreparationEnv,
+        permission: impl FnMut() -> Option<String>,
+    ) -> DeliveryOutcome {
+        let mut message = {
+            let mut outbox = outbox_lock(&self.outbox);
+            let Some(message) = outbox
+                .get_mut(&expected.pane_id)
+                .and_then(|queue| queue.iter_mut().find(|row| row.same_lifetime(expected)))
+            else {
+                return DeliveryOutcome::Missing;
+            };
+            if message.status != "queued" {
+                return DeliveryOutcome::AlreadyDecided;
+            }
+            message.prepare_receipt_frame();
+            message.clone()
+        };
 
         if message.attempt_generation.is_none() {
             // Capture identity before any terminal action, without holding the queue mutex.
@@ -2895,7 +3598,7 @@ impl Flock {
             let mut outbox = outbox_lock(&self.outbox);
             if let Some(stored) = outbox
                 .get_mut(&message.pane_id)
-                .and_then(|queue| queue.iter_mut().find(|row| row.id == message_id))
+                .and_then(|queue| queue.iter_mut().find(|row| row.same_lifetime(&message)))
             {
                 if stored.attempt_generation.is_none() {
                     stored.attempt_generation = message.attempt_generation.clone();
@@ -2910,24 +3613,30 @@ impl Flock {
             allow_modal: message.kind == "keys",
             preserve_draft: false,
         };
+        let is_keys = message.kind == "keys";
+        let press_enter = message.press_enter;
+        let attempt_generation = message.attempt_generation.clone();
         let (sent, ok, detail, blocker_reason) =
             send_guarded_with_reason(self, env, &pane_id, options, permission, |env, guard| {
-                if message.kind == "keys" {
+                // The exact message frame survives cancellation and same-ID replacement.
+                // Read folded text after acquiring the pane and typing guards.
+                let message_text = message.folded_text();
+                message.text = message_text.clone();
+                if is_keys {
                     let keys: Vec<String> =
-                        message.text.split_whitespace().map(str::to_owned).collect();
+                        message_text.split_whitespace().map(str::to_owned).collect();
                     Ok(press_keys(env, &pane_id, &keys, guard))
                 } else {
                     Ok(submit_text_with_options(
                         self,
                         env,
                         &pane_id,
-                        &message.text,
+                        &message_text,
                         SubmitOptions {
-                            press_enter: message.press_enter,
+                            press_enter,
                             check_box: false,
-                            attempt_generation: AttemptGeneration::Captured(
-                                message.attempt_generation.as_deref(),
-                            ),
+                            attempt_generation: AttemptGeneration::Captured(attempt_generation),
+                            message: Some(&mut message),
                         },
                         Some(guard),
                     ))
@@ -2935,95 +3644,18 @@ impl Flock {
             });
 
         if !sent {
-            let terminal;
-            let attempts;
-            let last_reason = blocker_reason.as_deref().unwrap_or("unknown");
             let hold_signature = hold_signature(self, env, &pane_id);
-            {
-                let mut outbox = outbox_lock(&self.outbox);
-                let Some(queue) = outbox.get_mut(&pane_id) else {
-                    return DeliveryOutcome::Missing;
-                };
-                let Some(stored) = queue.iter_mut().find(|row| row.id == message_id) else {
-                    return DeliveryOutcome::Missing;
-                };
-                stored.holds = stored.holds.saturating_add(1);
-                attempts = stored.holds.min(HOLD_ATTEMPT_LIMIT);
-                terminal = stored.holds >= HOLD_ATTEMPT_LIMIT;
-                if terminal {
-                    stored.status = "undeliverable".into();
-                    stored.detail = Some(format!(
-                        "undeliverable after {attempts} refused attempts (last reason: {}); not retried again",
-                        last_reason
-                    ));
-                    stored.finished_at = Some(clock::now_s());
-                } else {
-                    let delay = hold_backoff_s(attempts);
-                    stored.next_attempt_at = Some(now + delay);
-                    stored.hold_signature_kind = Some(hold_signature.0);
-                    stored.hold_signature = Some(hold_signature.1);
-                    stored.detail = Some(if detail.is_empty() { "held" } else { &detail }.into());
-                }
-                message = stored.clone();
-                let empty = if terminal {
-                    queue.retain(|row| row.id != message_id);
-                    queue.is_empty()
-                } else {
-                    false
-                };
-                if empty {
-                    outbox.remove(&pane_id);
-                }
-            }
-            if let Some(metrics) = self.stores().metrics {
-                metrics.record(&crate::metrics::Event {
-                    at: 0.0,
-                    kind: "message.held".into(),
-                    pane_id: Some(message.pane_id.clone()),
-                    mailbox: Some(message.target_label.clone()),
-                    sender: None,
-                    source: Some(message.source.clone()),
-                    outcome: Some("held".into()),
-                    reason: blocker_reason.clone(),
-                    duration_ms: None,
-                    attempts: Some(attempts),
-                    bytes: Some(message.text.len() as i64),
-                });
-            }
-            if terminal {
-                message.detail = Some(format!(
-                    "undeliverable after {attempts} refused attempts (last reason: {}); not retried again",
-                    last_reason
-                ));
-                if let Some(metrics) = self.stores().metrics {
-                    metrics.record(&crate::metrics::Event {
-                        at: 0.0,
-                        kind: "message.undeliverable".into(),
-                        pane_id: Some(message.pane_id.clone()),
-                        mailbox: Some(message.target_label.clone()),
-                        sender: None,
-                        source: Some(message.source.clone()),
-                        outcome: Some("undeliverable".into()),
-                        reason: blocker_reason.clone(),
-                        duration_ms: None,
-                        attempts: Some(attempts),
-                        bytes: Some(message.text.len() as i64),
-                    });
-                }
-                self.remember(&message);
-                let _ = self.save();
-                self.record_delivery_outcome(
-                    &message,
-                    false,
-                    message.detail.as_deref(),
-                    "undeliverable",
-                    None,
-                );
-                DeliveryOutcome::Undeliverable
-            } else {
-                let _ = self.save();
-                DeliveryOutcome::Held
-            }
+            let reason = blocker_reason.as_deref();
+            let permanent = detail.starts_with("dead session (")
+                || detail == "the lane's recorded process is gone";
+            self.record_outbox_hold(OutboxHold {
+                message: &message,
+                now,
+                permanent,
+                reason,
+                refused_detail: Some(&detail),
+                signature: hold_signature,
+            })
         } else {
             message.status = if ok.unwrap_or(false) {
                 "sent"
@@ -3040,12 +3672,12 @@ impl Flock {
             });
             {
                 let mut outbox = outbox_lock(&self.outbox);
-                let Some(queue) = outbox.get_mut(&pane_id) else {
-                    return DeliveryOutcome::Missing;
-                };
-                queue.retain(|row| row.id != message_id);
-                if queue.is_empty() {
-                    outbox.remove(&pane_id);
+                message.refresh_notify_for_from_frame();
+                if let Some(queue) = outbox.get_mut(&pane_id) {
+                    queue.retain(|row| !row.same_lifetime(&message));
+                    if queue.is_empty() {
+                        outbox.remove(&pane_id);
+                    }
                 }
             }
             self.remember(&message);
@@ -3117,9 +3749,9 @@ impl Flock {
         }
 
         if let Some(inbox) = stores.inbox.as_ref() {
-            for inbox_id in &message.notify_for {
+            for inbox_id in message.receipt_frame() {
                 let _ = inbox.record_notify(
-                    inbox_id,
+                    &inbox_id,
                     if ok { "sent" } else { "failed" },
                     detail,
                     None,
@@ -3437,6 +4069,7 @@ impl Flock {
         if message.pane_id != pane_id || message.text != text {
             return Ok(true);
         }
+        message.refresh_notify_for_from_frame();
         let previous_status = message.status.clone();
         message.press_enter = press_enter;
         message.typed_at = Some(clock::now_s());
@@ -3650,7 +4283,7 @@ impl Flock {
     /// Append a message to its pane's FIFO, ensure its worker under the queue lock,
     /// then save the current whole-Flock snapshot after releasing that lock.
     pub fn enqueue(
-        &self,
+        self: &Arc<Self>,
         message: Message,
         wake: &dyn OutboxWake,
         store: &dyn SnapshotStore,
@@ -3662,6 +4295,220 @@ impl Flock {
             wake.ensure_worker(self, &pane_id)?;
         }
         store.save(self)
+    }
+
+    /// Send one text message through the shared guarded delivery path. With the default hold
+    /// behavior it enters the per-pane FIFO; disabling holds performs one immediate attempt.
+    #[allow(clippy::too_many_arguments)]
+    pub fn send_now(
+        self: &Arc<Self>,
+        target: &Value,
+        text: &str,
+        options: DirectSendOptions<'_>,
+        metadata: DirectTextMetadata<'_>,
+        env: &mut dyn SendPreparationEnv,
+        wake: &dyn OutboxWake,
+        store: &dyn SnapshotStore,
+        mut permission: impl FnMut() -> Option<String>,
+    ) -> Result<Value, DunkError> {
+        let panes = env.list_panes_grouped();
+        let pane = if target.is_object() {
+            resolve_target_dict(&panes, target)?.clone()
+        } else {
+            let spec = match target {
+                Value::Null => String::new(),
+                Value::String(spec) => spec.clone(),
+                Value::Bool(value) => if *value { "True" } else { "False" }.into(),
+                other => other.to_string(),
+            };
+            resolve_target(
+                &panes,
+                &spec,
+                options.self_pane_id,
+                &env.server_error_hint(),
+            )?
+            .clone()
+        };
+        if text.trim().is_empty() {
+            return Err(DunkError::Refused("text is required".into()));
+        }
+        let pane_id = pane
+            .get("pane_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let label = pane
+            .get("tab_label")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(pane_id);
+        let mut message = self.new_message(pane_id, label, text, metadata.source)?;
+        message.press_enter = metadata.press_enter;
+        message.is_notice = metadata.is_notice || text.starts_with(NOTICE_PREFIX);
+        if let Some(id) = metadata.notify_for.filter(|id| !id.is_empty()) {
+            message.notify_for.push(id.to_owned());
+        }
+        if options.hold_while_typing {
+            self.enqueue(message.clone(), wake, store)?;
+            if options.wait_s > 0.0 {
+                message
+                    .done
+                    .wait_timeout(Duration::from_secs_f64(options.wait_s.min(3600.0)));
+            }
+            return Ok(self.direct_message_result(&message));
+        }
+        message.hold_while_typing = false;
+        let message = self.deliver_direct(message, env, &mut permission);
+        let result = self.direct_message_result(&message);
+        let _ = store.save(self);
+        Ok(result)
+    }
+
+    /// Send a normalized key sequence as a direct message, preserving its wire text and `keys`
+    /// kind while using the same outbox ordering and immediate-attempt behavior as text sends.
+    #[allow(clippy::too_many_arguments)]
+    pub fn send_keys_now(
+        self: &Arc<Self>,
+        target: &Value,
+        keys: &[String],
+        options: DirectSendOptions<'_>,
+        env: &mut dyn SendPreparationEnv,
+        wake: &dyn OutboxWake,
+        store: &dyn SnapshotStore,
+        mut permission: impl FnMut() -> Option<String>,
+    ) -> Result<Value, DunkError> {
+        let panes = env.list_panes_grouped();
+        let pane = if target.is_object() {
+            resolve_target_dict(&panes, target)?.clone()
+        } else {
+            let spec = match target {
+                Value::Null => String::new(),
+                Value::String(spec) => spec.clone(),
+                Value::Bool(value) => if *value { "True" } else { "False" }.into(),
+                other => other.to_string(),
+            };
+            resolve_target(
+                &panes,
+                &spec,
+                options.self_pane_id,
+                &env.server_error_hint(),
+            )?
+            .clone()
+        };
+        let normalized: Vec<String> = keys
+            .iter()
+            .filter(|key| !key.trim().is_empty())
+            .cloned()
+            .collect();
+        if normalized.is_empty() {
+            return Err(DunkError::Refused(
+                "keys are required, e.g. 'Enter' or 'ctrl+c'".into(),
+            ));
+        }
+        let text = normalized.join(" ");
+        let pane_id = pane
+            .get("pane_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let label = pane
+            .get("tab_label")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(pane_id);
+        let mut message = self.new_message(pane_id, label, &text, "send_keys")?;
+        message.kind = "keys".into();
+        if options.hold_while_typing {
+            self.enqueue(message.clone(), wake, store)?;
+            if options.wait_s > 0.0 {
+                message
+                    .done
+                    .wait_timeout(Duration::from_secs_f64(options.wait_s.min(3600.0)));
+            }
+            return Ok(self.direct_message_result(&message));
+        }
+        message.hold_while_typing = false;
+        let message = self.deliver_direct(message, env, &mut permission);
+        let result = self.direct_message_result(&message);
+        let _ = store.save(self);
+        Ok(result)
+    }
+
+    fn direct_message_result(&self, message: &Message) -> Value {
+        let history = self
+            .message_history
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        history
+            .iter()
+            .find(|row| row.id == message.id)
+            .unwrap_or(message)
+            .to_dict()
+    }
+
+    fn deliver_direct(
+        &self,
+        mut message: Message,
+        env: &mut dyn SendPreparationEnv,
+        permission: &mut impl FnMut() -> Option<String>,
+    ) -> Message {
+        message.attempt_generation = env.attempt_generation(&message.pane_id);
+        let pane_id = message.pane_id.clone();
+        let options = SendGuardOptions {
+            hold_while_typing: false,
+            allow_modal: message.kind == "keys",
+            preserve_draft: false,
+        };
+        let is_keys = message.kind == "keys";
+        let message_text = message.text.clone();
+        let press_enter = message.press_enter;
+        let attempt_generation = message.attempt_generation.clone();
+        let (sent, ok, detail, _) =
+            send_guarded_with_reason(self, env, &pane_id, options, permission, |env, guard| {
+                if is_keys {
+                    let keys: Vec<String> =
+                        message_text.split_whitespace().map(str::to_owned).collect();
+                    Ok(press_keys(env, &pane_id, &keys, guard))
+                } else {
+                    Ok(submit_text_with_options(
+                        self,
+                        env,
+                        &pane_id,
+                        &message_text,
+                        SubmitOptions {
+                            press_enter,
+                            check_box: false,
+                            attempt_generation: AttemptGeneration::Captured(attempt_generation),
+                            message: Some(&mut message),
+                        },
+                        Some(guard),
+                    ))
+                }
+            });
+        message.status = if sent && ok.unwrap_or(false) {
+            "sent"
+        } else {
+            "failed"
+        }
+        .into();
+        message.detail = Some(detail.clone());
+        message.finished_at = Some(clock::now_s());
+        self.set_last_message(if message.status == "sent" {
+            format!("Sent to {}", message.target_label)
+        } else {
+            format!("Send failed: {detail}")
+        });
+        self.remember(&message);
+        self.record_delivery_outcome(
+            &message,
+            message.status == "sent",
+            Some(&detail),
+            if message.status == "sent" {
+                "ok"
+            } else {
+                "failed"
+            },
+            Some("message.sent"),
+        );
+        message
     }
 
     /// Current pane queues for the snapshot-store seam and deterministic tests.

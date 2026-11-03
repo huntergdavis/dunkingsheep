@@ -233,7 +233,7 @@ fn python_scope_arg(value: Option<&Value>) -> Option<String> {
     })
 }
 
-fn python_value_repr(value: &Value) -> String {
+pub(crate) fn python_value_repr(value: &Value) -> String {
     match value {
         Value::String(value) => py_repr(value),
         Value::Array(values) => format!(
@@ -306,9 +306,9 @@ fn task_string_arg<'a>(
     }
 }
 
-fn task_list_limit(args: &Args) -> Result<i64, DunkError> {
-    let Some(value) = args.get("limit").filter(|value| !value.is_null()) else {
-        return Ok(200);
+fn python_int_arg(args: &Args, key: &str, default: i64) -> Result<i64, DunkError> {
+    let Some(value) = args.get(key).filter(|value| !value.is_null()) else {
+        return Ok(default);
     };
     match value {
         Value::Bool(value) => Ok(i64::from(*value)),
@@ -349,54 +349,12 @@ fn task_list_limit(args: &Args) -> Result<i64, DunkError> {
 }
 
 fn parse_python_decimal_integer(value: &str) -> Option<i64> {
-    let literal = value.trim();
-    let sign_len = usize::from(matches!(literal.as_bytes().first(), Some(b'+' | b'-')));
-    let negative = literal.as_bytes().first() == Some(&b'-');
-    let (_, digits) = literal.split_at(sign_len);
-    if digits.is_empty() {
-        return None;
+    match parse_python_decimal_integer_checked(value) {
+        Ok(value) => Some(value),
+        Err(DecimalIntError::Invalid) => None,
+        Err(DecimalIntError::Overflow) if value.trim_start().starts_with('-') => Some(i64::MIN),
+        Err(DecimalIntError::Overflow) => Some(i64::MAX),
     }
-
-    let maximum = if negative {
-        (i64::MAX as u64) + 1
-    } else {
-        i64::MAX as u64
-    };
-    let mut magnitude = 0_u64;
-    let mut previous_was_digit = false;
-    let mut chars = digits.chars().peekable();
-    while let Some(character) = chars.next() {
-        if let Some(digit) = python_decimal_digit(character) {
-            magnitude = magnitude
-                .saturating_mul(10)
-                .saturating_add(u64::from(digit))
-                .min(maximum);
-            previous_was_digit = true;
-        } else if character == '_'
-            && previous_was_digit
-            && chars
-                .peek()
-                .and_then(|next| python_decimal_digit(*next))
-                .is_some()
-        {
-            previous_was_digit = false;
-        } else {
-            return None;
-        }
-    }
-    if !previous_was_digit {
-        return None;
-    }
-
-    Some(if negative {
-        if magnitude > i64::MAX as u64 {
-            i64::MIN
-        } else {
-            -(magnitude as i64)
-        }
-    } else {
-        magnitude as i64
-    })
 }
 
 /// `dunk_roles.clamp_desk_args`: daemon-side result caps for the desk role.
@@ -524,7 +482,12 @@ impl Dispatcher {
     /// Register the T39 report run/list handlers over an explicit source adapter.
     pub fn register_report_run_list(&mut self) {
         self.register("report_run", crate::report::report_run_handler);
-        self.register("report_list", crate::report::report_list_handler);
+        self.register("report_list", h_report_list);
+    }
+
+    /// Register only the T39 report-list handler.
+    pub fn register_report_list(&mut self) {
+        self.register("report_list", h_report_list);
     }
 
     /// Register the T39 owner statistics, receipts and conversation views.
@@ -532,6 +495,13 @@ impl Dispatcher {
         self.register("owner_stats", h_owner_stats);
         self.register("owner_receipts", h_owner_receipts);
         self.register("owner_conversation", h_owner_conversation);
+    }
+
+    /// Register only the T39 owner reply, ingest and outbox handlers.
+    pub fn register_owner_reply_ingest_outbox(&mut self) {
+        self.register("owner_reply", h_owner_reply);
+        self.register("owner_ingest", h_owner_ingest);
+        self.register("owner_outbox", h_owner_outbox);
     }
 
     /// Register only the T39 task-following API leaf.
@@ -588,7 +558,8 @@ impl Dispatcher {
             .iter()
             .copied()
             .filter(|key| match args.get(*key) {
-                None | Some(Value::Null) => true,
+                None => true,
+                Some(Value::Null) => true,
                 Some(Value::String(s)) => s.is_empty(),
                 _ => false,
             })
@@ -1021,6 +992,11 @@ pub fn h_owner_receipts(context: &HandlerContext<'_>, args: Args) -> Result<Valu
     )
 }
 
+/// `dunk_api.h_report_list`.
+pub fn h_report_list(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    crate::report::report_list_handler(context, args)
+}
+
 /// `dunk_api.h_owner_conversation`.
 pub fn h_owner_conversation(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
     let limit = match args.get("limit").filter(|value| truthy(value)) {
@@ -1056,6 +1032,226 @@ pub fn h_owner_conversation(context: &HandlerContext<'_>, args: Args) -> Result<
     let conversation = crate::owner::OwnerConversations::new(context.flock, context.env)
         .conversation(Some(limit), before, context.self_pane_id())?;
     serde_json::to_value(conversation).map_err(DunkError::from)
+}
+
+/// `dunk_api.h_owner_reply`.
+pub fn h_owner_reply(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let message_id = args
+        .get("message_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| DunkError::Refused("message_id must be a string".into()))?;
+    let reply = crate::owner::OwnerConversations::new(context.flock, context.env).reply(
+        message_id,
+        args.get("body"),
+        context.self_pane_id(),
+    )?;
+    Ok(json!({
+        "reply": owner_message_value(&reply.reply),
+        "question": reply.question,
+        "transport": reply.transport,
+        "acked": reply.acked,
+    }))
+}
+
+fn owner_message_value(message: &crate::inbox_store::Message) -> Value {
+    let summary = &message.summary;
+    json!({
+        "message_id": summary.message_id,
+        "mailbox": summary.mailbox,
+        "destination": summary.destination,
+        "sender": summary.sender,
+        "subject": summary.subject,
+        "state": summary.state,
+        "created_at": summary.created_at,
+        "waiting_s": summary.waiting_s,
+        "body_bytes": summary.body_bytes,
+        "digest_id": summary.digest_id,
+        "transport": summary.transport,
+        "reply_to": summary.reply_to,
+        "external_id": summary.external_id,
+        "delivered_at": summary.delivered_at,
+        "delivery_transport": summary.delivery_transport,
+        "attachments": message.attachments.iter().map(|attachment| json!({
+            "id": attachment.id,
+            "filename": attachment.filename,
+            "media_type": attachment.media_type,
+            "size": attachment.size,
+        })).collect::<Vec<_>>(),
+        "body": message.body,
+        "read_at": message.read_at,
+    })
+}
+
+/// `dunk_api.h_owner_ingest`.
+pub fn h_owner_ingest(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let ingested = crate::owner::OwnerConversations::new(context.flock, context.env).ingest_wire(
+        crate::owner::conversations::OwnerIngestWire {
+            body: args.get("body"),
+            transport: args.get("transport"),
+            external_id: args.get("external_id"),
+            subject: args.get("subject"),
+            attachments: args.get("attach"),
+        },
+        context.self_pane_id(),
+    )?;
+    Ok(json!({
+        "message": owner_message_value(&ingested.message),
+        "duplicate": ingested.duplicate,
+        "transport": ingested.transport,
+    }))
+}
+
+/// `dunk_api.h_owner_outbox`.
+pub fn h_owner_outbox(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let transport = args
+        .get("transport")
+        .filter(|value| !value.is_null())
+        .map(python_value_string);
+    let limit = owner_outbox_limit_arg(&args, 20)?;
+    let conversations = crate::owner::OwnerConversations::new(context.flock, context.env);
+    let limit = match limit {
+        OwnerOutboxLimit::Sqlite(limit) => limit,
+        OwnerOutboxLimit::Overflow => {
+            // Python evaluates int() before calling owner_outbox, but SQLite
+            // binds the resulting integer only after role and transport
+            // validation. Reuse the existing read-only service operation to
+            // preserve those earlier errors before reporting bind overflow.
+            conversations.outbox(transport.as_deref(), Some(20), context.self_pane_id())?;
+            return Err(DunkError::Refused(
+                "Python int too large to convert to SQLite INTEGER".into(),
+            ));
+        }
+    };
+    let outbox = conversations.outbox(transport.as_deref(), Some(limit), context.self_pane_id())?;
+    Ok(json!({
+        "transport": outbox.transport,
+        "messages": outbox.messages.iter().map(owner_message_value).collect::<Vec<_>>(),
+        "count": outbox.count,
+    }))
+}
+
+enum OwnerOutboxLimit {
+    Sqlite(i64),
+    Overflow,
+}
+
+fn owner_outbox_limit_arg(args: &Args, default: i64) -> Result<OwnerOutboxLimit, DunkError> {
+    let Some(value) = args.get("limit").filter(|value| !value.is_null()) else {
+        return Ok(OwnerOutboxLimit::Sqlite(default));
+    };
+    match value {
+        Value::Bool(value) => Ok(OwnerOutboxLimit::Sqlite(i64::from(*value))),
+        Value::Number(value) => {
+            if let Some(value) = value.as_i64() {
+                return Ok(OwnerOutboxLimit::Sqlite(value));
+            }
+            if let Some(value) = value.as_u64() {
+                return Ok(i64::try_from(value)
+                    .map(OwnerOutboxLimit::Sqlite)
+                    .unwrap_or(OwnerOutboxLimit::Overflow));
+            }
+            let token = value.to_string();
+            if !token.bytes().any(|byte| matches!(byte, b'.' | b'e' | b'E')) {
+                return Ok(match parse_python_decimal_integer_checked(&token) {
+                    Ok(value) => OwnerOutboxLimit::Sqlite(value),
+                    Err(DecimalIntError::Overflow) => OwnerOutboxLimit::Overflow,
+                    Err(DecimalIntError::Invalid) => {
+                        return Err(DunkError::Refused("cannot convert value to int".into()))
+                    }
+                });
+            }
+            let value = value
+                .as_f64()
+                .ok_or_else(|| DunkError::Refused("cannot convert value to int".into()))?
+                .trunc();
+            if value >= 9_223_372_036_854_775_808.0 || value < -9_223_372_036_854_775_808.0 {
+                return Ok(OwnerOutboxLimit::Overflow);
+            }
+            Ok(OwnerOutboxLimit::Sqlite(value as i64))
+        }
+        Value::String(value) => match parse_python_decimal_integer_checked(value) {
+            Ok(value) => Ok(OwnerOutboxLimit::Sqlite(value)),
+            Err(DecimalIntError::Overflow) => Ok(OwnerOutboxLimit::Overflow),
+            Err(DecimalIntError::Invalid) => Err(DunkError::Refused(format!(
+                "invalid literal for int() with base 10: {}",
+                py_repr(value)
+            ))),
+        },
+        Value::Array(_) => Err(DunkError::Refused(
+            "int() argument must be a string, a bytes-like object or a real number, not 'list'"
+                .into(),
+        )),
+        Value::Object(_) => Err(DunkError::Refused(
+            "int() argument must be a string, a bytes-like object or a real number, not 'dict'"
+                .into(),
+        )),
+        Value::Null => unreachable!("null limit uses the default"),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DecimalIntError {
+    Invalid,
+    Overflow,
+}
+
+fn parse_python_decimal_integer_checked(value: &str) -> Result<i64, DecimalIntError> {
+    let literal = value.trim();
+    let sign_len = usize::from(matches!(literal.as_bytes().first(), Some(b'+' | b'-')));
+    let negative = literal.as_bytes().first() == Some(&b'-');
+    let (_, digits) = literal.split_at(sign_len);
+    if digits.is_empty() {
+        return Err(DecimalIntError::Invalid);
+    }
+    let maximum = if negative {
+        (i64::MAX as u64) + 1
+    } else {
+        i64::MAX as u64
+    };
+    let mut magnitude = 0_u64;
+    let mut overflow = false;
+    let mut previous_was_digit = false;
+    let mut chars = digits.chars().peekable();
+    while let Some(character) = chars.next() {
+        if let Some(digit) = python_decimal_digit(character) {
+            match magnitude
+                .checked_mul(10)
+                .and_then(|number| number.checked_add(u64::from(digit)))
+            {
+                Some(number) if number <= maximum => magnitude = number,
+                _ => {
+                    overflow = true;
+                    magnitude = maximum;
+                }
+            }
+            previous_was_digit = true;
+        } else if character == '_'
+            && previous_was_digit
+            && chars
+                .peek()
+                .and_then(|next| python_decimal_digit(*next))
+                .is_some()
+        {
+            previous_was_digit = false;
+        } else {
+            return Err(DecimalIntError::Invalid);
+        }
+    }
+    if !previous_was_digit {
+        return Err(DecimalIntError::Invalid);
+    }
+    if overflow {
+        return Err(DecimalIntError::Overflow);
+    }
+    Ok(if negative {
+        if magnitude > i64::MAX as u64 {
+            i64::MIN
+        } else {
+            -(magnitude as i64)
+        }
+    } else {
+        magnitude as i64
+    })
 }
 
 fn poolrad_limit(args: &Args) -> Result<usize, DunkError> {
@@ -1790,7 +1986,7 @@ pub fn h_task_list(context: &HandlerContext<'_>, args: Args) -> Result<Value, Du
     let status = task_string_arg(&args, "status", "task_list")?;
     let assignee = task_string_arg(&args, "assignee", "task_list")?;
     let kind = task_string_arg(&args, "kind", "task_list")?;
-    let limit = task_list_limit(&args)?;
+    let limit = python_int_arg(&args, "limit", 200)?;
     let (scope, tasks) = context.block_on(context.flock.task_list_wire(
         scope,
         status,

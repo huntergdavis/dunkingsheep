@@ -7,7 +7,7 @@ description = "Dunking Sheep core: the library every Rust binary shares (docs/ru
 
 [dependencies]
 serde.workspace = true
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["arbitrary_precision"] }
 jsonwebtoken.workspace = true
 reqwest.workspace = true
 # T02: the pinned crates from RUST_PORT.md section 3 that these six modules need.
