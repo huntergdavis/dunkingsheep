@@ -12,6 +12,7 @@ use tokio::runtime::Handle;
 use super::RequestRuntimeAdapter;
 use crate::api;
 use crate::error::DunkError;
+use crate::flock::mailbox::MailboxEnv;
 use crate::flock::panes::PaneInfoEnv;
 use crate::flock::Flock;
 use crate::metrics::Event;
