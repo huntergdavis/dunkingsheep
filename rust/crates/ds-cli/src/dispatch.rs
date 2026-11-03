@@ -174,6 +174,18 @@ fn cli_param_required(command: &ds_core::registry::Command, name: &str) -> bool 
     !matches!(command.name, "add_dunk" | "create_tab") && command.required.contains(&name)
 }
 
+fn mcp_group_action(command_name: &str) -> Option<(&'static str, &'static str)> {
+    let mut mapping = None;
+    for group in ds_core::registry::GROUPS {
+        for (action, name) in group.actions {
+            if *name == command_name {
+                mapping = Some((group.name, *action));
+            }
+        }
+    }
+    mapping
+}
+
 fn text<'a>(ns: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
     ns.get(key).and_then(Value::as_str)
 }
@@ -482,16 +494,7 @@ fn mcp_map(ns: &Map<String, Value>) -> Outcome {
             "| --- | --- | --- |".to_string(),
         ]);
         for command in &flat {
-            let mapping = GROUPS.iter().find_map(|group| {
-                group
-                    .actions
-                    .iter()
-                    .find(|(_, name)| *name == command.name)
-                    .map(|(action, _)| (group.name, *action))
-            });
-            let (group, action) = mapping
-                .map(|(group, action)| (group, action))
-                .unwrap_or(("None", "None"));
+            let (group, action) = mcp_group_action(command.name).unwrap_or(("None", "None"));
             output.push(format!("| `{}` | `{group}` | `{action}` |", command.name));
         }
         output.extend([
@@ -519,16 +522,7 @@ fn mcp_map(ns: &Map<String, Value>) -> Outcome {
         }
         output.push(String::new());
         for command in &flat {
-            let mapping = GROUPS.iter().find_map(|group| {
-                group
-                    .actions
-                    .iter()
-                    .find(|(_, name)| *name == command.name)
-                    .map(|(action, _)| (group.name, *action))
-            });
-            let (group, action) = mapping
-                .map(|(group, action)| (group, action))
-                .unwrap_or(("None", "None"));
+            let (group, action) = mcp_group_action(command.name).unwrap_or(("None", "None"));
             output.push(format!("{} -> {group}(action={action})", command.name));
         }
         for command in commands.iter().filter(|command| !command.mcp) {
