@@ -20,6 +20,7 @@ mod registrations;
 mod retire_inbox;
 mod retire_roles;
 mod roster;
+mod send_commands;
 mod services;
 mod status;
 mod stuck;
@@ -390,6 +391,11 @@ impl PaneInfoEnv for RequestRuntimeAdapter<'_> {
 }
 
 impl crate::api::CommandEnv for RequestRuntimeAdapter<'_> {
+    fn send_commands(&self) -> Result<&dyn crate::api::SendCommandEnv, DunkError> {
+        self.require_send_outbox()?;
+        Ok(self)
+    }
+
     fn next_jobs(&self) -> Result<&crate::tasks::next_job_runtime::NextJobs, DunkError> {
         self.next_jobs
             .ok_or_else(|| refusal("request next-job service is not attached"))
