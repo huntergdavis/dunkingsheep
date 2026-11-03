@@ -7,6 +7,7 @@ use crate::flock::panes::PaneInfoEnv;
 use crate::server_runtime::RequestRuntimeAdapter;
 
 impl RequestRuntimeAdapter<'_> {
+    #[allow(dead_code)] // The assembled backend is wired into runtime by a dependent leaf.
     fn helper_verifybackend_agent_child_pids(&mut self, pane_pid: i64) -> Option<Vec<Value>> {
         crate::proc::pane_agent_pids(Some(pane_pid)).map(|entries| {
             entries
@@ -24,15 +25,18 @@ impl RequestRuntimeAdapter<'_> {
         })
     }
 
+    #[allow(dead_code)] // The assembled backend is wired into runtime by a dependent leaf.
     fn helper_verifybackend_process_start(&self, pid: i64) -> Option<i64> {
         crate::proc::process_start(pid)?.parse().ok()
     }
 
+    #[allow(dead_code)] // The assembled backend is wired into runtime by a dependent leaf.
     fn helper_verifybackend_get_pane(&self, pane_id: &str) -> Option<Value> {
         self.terminal
             .with_env(|env| PaneInfoEnv::get_pane(env, pane_id))
     }
 
+    #[allow(dead_code)] // The assembled backend is wired into runtime by a dependent leaf.
     fn helper_verifybackend_read_pane(&mut self, pane_id: &str, lines: usize) -> Option<String> {
         let lines = i64::try_from(lines).unwrap_or(i64::MAX);
         self.terminal
