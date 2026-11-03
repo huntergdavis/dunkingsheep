@@ -965,7 +965,8 @@ impl Flock {
         let handle = self.dunks.begin_fire(dunk_id)?;
         let dunker = DunkList::lock_dunker(&handle).clone();
         let snapshot = DunkList::send_snapshot(&handle);
-        let action = DunkDeliveryAction::new(Arc::clone(&handle), Arc::clone(&store));
+        let action_store: Arc<dyn SnapshotStore> = store.clone();
+        let action = DunkDeliveryAction::new(Arc::clone(&handle), action_store);
         let (sent, send_ok, detail, blocker) =
             super::sends::send_dunk_now(self, &action, env, permission);
         if !sent && blocker.is_some() && snapshot.hold_while_typing {
