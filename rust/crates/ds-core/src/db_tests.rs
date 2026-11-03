@@ -283,3 +283,20 @@ fn two_reads_run_at_the_same_time() {
     );
     assert_eq!(2, pool.size());
 }
+
+#[tokio::test]
+async fn quarantined_writer_rejects_subsequent_jobs() {
+    let writer = Writer::spawn(":memory:").unwrap();
+    writer
+        .call_quarantinable(|_, quarantined| {
+            quarantined.store(true, std::sync::atomic::Ordering::Release);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let result = writer.call(|_| Ok(())).await;
+    assert!(
+        result.is_err(),
+        "a quarantined connection must not execute another job"
+    );
+}

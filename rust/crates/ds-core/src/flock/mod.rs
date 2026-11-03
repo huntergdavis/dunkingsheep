@@ -777,6 +777,7 @@ fn truthy(value: &Value) -> bool {
 }
 
 pub mod agent_verify;
+pub(crate) mod allocator;
 pub mod clear_box;
 pub mod commands_inbox;
 pub mod commands_layout;

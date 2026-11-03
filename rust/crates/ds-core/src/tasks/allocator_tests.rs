@@ -995,3 +995,631 @@ async fn a_new_revision_reuses_the_review_task_and_it_can_be_allocated_again() {
         1
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn guarded_allocation_retries_lock_and_restores_sqlite_timeout() {
+    use crate::flock::{panes::Stores, Flock};
+    use std::sync::{mpsc, Arc};
+    let dir = tempfile::tempdir().unwrap();
+    let tasks = Arc::new(Tasks::open(dir.path().join("tasks.db")).await.unwrap());
+    tasks.allocation_init().await.unwrap();
+    let flock = Arc::new(Flock::new(
+        dir.path().join("launches"),
+        dir.path().join("lanes"),
+        false,
+    ));
+    flock.attach_stores(Stores {
+        tasks: Some(Arc::clone(&tasks)),
+        ..Stores::default()
+    });
+    let (held_tx, held_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let other = Arc::clone(&flock);
+    let holder = std::thread::spawn(move || {
+        let _guard = other.outbox.lock().unwrap();
+        held_tx.send(()).unwrap();
+        release_rx.recv().unwrap();
+    });
+    held_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    assert!(matches!(
+        tasks
+            .allocation_try_guarded(Arc::clone(&flock), BTreeMap::new())
+            .await
+            .unwrap(),
+        GuardedAllocation::RetryLock
+    ));
+    release_tx.send(()).unwrap();
+    holder.join().unwrap();
+    let blocker = crate::db::open_writer(&dir.path().join("tasks.db")).unwrap();
+    blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+    assert!(matches!(
+        tasks
+            .allocation_try_guarded(Arc::clone(&flock), BTreeMap::new())
+            .await
+            .unwrap(),
+        GuardedAllocation::RetryBusy
+    ));
+    blocker.execute_batch("ROLLBACK").unwrap();
+    assert!(matches!(
+        tasks
+            .allocation_try_guarded(Arc::clone(&flock), BTreeMap::new())
+            .await
+            .unwrap(),
+        GuardedAllocation::Committed(_)
+    ));
+    let timeout: u64 = tasks
+        .writer
+        .call(|conn| {
+            conn.pragma_query_value(None, "busy_timeout", |row| row.get(0))
+                .map_err(crate::db::map_sqlite)
+        })
+        .await
+        .unwrap();
+    assert_eq!(timeout, crate::db::BUSY_TIMEOUT_MS);
+    let other = Arc::new(Flock::new(
+        dir.path().join("other"),
+        dir.path().join("other-lanes"),
+        false,
+    ));
+    let wrong_tasks = Arc::new(Tasks::open(dir.path().join("other.db")).await.unwrap());
+    other.attach_stores(Stores {
+        tasks: Some(wrong_tasks),
+        ..Stores::default()
+    });
+    let mismatch = match tasks.allocation_try_guarded(other, BTreeMap::new()).await {
+        Err(error) => error.to_string(),
+        Ok(_) => panic!("mismatched task store must be refused"),
+    };
+    assert!(mismatch.contains("allocator task store mismatch"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn guarded_allocation_rechecks_turn_and_queue_before_real_commit() {
+    use crate::flock::{commands_turns::TurnState, panes::Stores, Flock};
+    use std::sync::Arc;
+    let dir = tempfile::tempdir().unwrap();
+    let tasks = Arc::new(Tasks::open(dir.path().join("tasks.db")).await.unwrap());
+    tasks.allocation_init().await.unwrap();
+    let flock = Arc::new(Flock::new(
+        dir.path().join("launches"),
+        dir.path().join("lanes"),
+        false,
+    ));
+    flock.attach_stores(Stores {
+        tasks: Some(Arc::clone(&tasks)),
+        ..Stores::default()
+    });
+    let offered = task(&tasks, "guarded work").await;
+    offer(&tasks, &offered, &[]).await;
+    worker(&tasks, "%1", "worker", &[]).await;
+    let turn = TurnState {
+        started_at: 1.0,
+        expires_at: 0.0,
+        ended_at: Some(2.0),
+        ttl_s: 5.0,
+        turn_id: "original".into(),
+        source: None,
+        caller: Some(json!({})),
+        handoff_id: None,
+    };
+    flock
+        .turn_states
+        .lock()
+        .unwrap()
+        .insert("%1".into(), turn.clone());
+    let candidates = BTreeMap::from([(
+        "%1".to_string(),
+        AllocationCandidate {
+            turn_id: "original".into(),
+            ended_at: Some(2.0),
+            caller: json!({}),
+        },
+    )]);
+    flock
+        .turn_states
+        .lock()
+        .unwrap()
+        .get_mut("%1")
+        .unwrap()
+        .turn_id = "changed".into();
+    match tasks
+        .allocation_try_guarded(Arc::clone(&flock), candidates.clone())
+        .await
+        .unwrap()
+    {
+        GuardedAllocation::Committed(rows) => assert!(rows.is_empty()),
+        _ => panic!("uncontended test must commit"),
+    }
+    flock.turn_states.lock().unwrap().insert("%1".into(), turn);
+    let message = flock.new_message("%1", "%1", "pending", "test").unwrap();
+    flock
+        .outbox
+        .lock()
+        .unwrap()
+        .insert("%1".into(), vec![message]);
+    match tasks
+        .allocation_try_guarded(Arc::clone(&flock), candidates.clone())
+        .await
+        .unwrap()
+    {
+        GuardedAllocation::Committed(rows) => assert!(rows.is_empty()),
+        _ => panic!("uncontended test must commit"),
+    }
+    flock.outbox.lock().unwrap().remove("%1");
+    match tasks
+        .allocation_try_guarded(Arc::clone(&flock), candidates.clone())
+        .await
+        .unwrap()
+    {
+        GuardedAllocation::Committed(rows) => assert_eq!(rows[0]["task_id"], offered.id),
+        _ => panic!("uncontended test must commit"),
+    }
+    assert_eq!(tasks.get(&offered.id).await.unwrap().status, "in_progress");
+    match tasks
+        .allocation_try_guarded(Arc::clone(&flock), candidates)
+        .await
+        .unwrap()
+    {
+        GuardedAllocation::Committed(rows) => assert!(rows.is_empty()),
+        _ => panic!("uncontended test must commit"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn guarded_allocation_yields_to_outbox_waker_using_same_writer() {
+    use crate::flock::{
+        panes::Stores,
+        sends::{OutboxWake, SnapshotStore},
+        Flock,
+    };
+    use std::sync::{mpsc, Arc, Mutex};
+    struct Save;
+    impl SnapshotStore for Save {
+        fn save(&self, flock: &Flock) -> Result<(), DunkError> {
+            flock.save()
+        }
+    }
+    struct Wake {
+        tasks: Arc<Tasks>,
+        handle: tokio::runtime::Handle,
+        held: mpsc::Sender<()>,
+        release: Mutex<mpsc::Receiver<()>>,
+    }
+    impl OutboxWake for Wake {
+        fn ensure_worker(&self, _: &Arc<Flock>, _: &str) -> Result<(), DunkError> {
+            self.held.send(()).unwrap();
+            self.release.lock().unwrap().recv().unwrap();
+            self.handle.block_on(self.tasks.allocation_status())?;
+            Ok(())
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let tasks = Arc::new(Tasks::open(dir.path().join("tasks.db")).await.unwrap());
+    tasks.allocation_init().await.unwrap();
+    let flock = Arc::new(Flock::new(
+        dir.path().join("launches"),
+        dir.path().join("lanes"),
+        false,
+    ));
+    flock.attach_stores(Stores {
+        tasks: Some(Arc::clone(&tasks)),
+        ..Stores::default()
+    });
+    let (held_tx, held_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let wake = Wake {
+        tasks: Arc::clone(&tasks),
+        handle: tokio::runtime::Handle::current(),
+        held: held_tx,
+        release: Mutex::new(release_rx),
+    };
+    let other = Arc::clone(&flock);
+    let thread = std::thread::spawn(move || {
+        let message = other.new_message("%1", "%1", "queued", "test").unwrap();
+        other.enqueue(message, &wake, &Save)
+    });
+    held_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        tasks.allocation_try_guarded(Arc::clone(&flock), BTreeMap::new()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(matches!(outcome, GuardedAllocation::RetryLock));
+    release_tx.send(()).unwrap();
+    thread.join().unwrap().unwrap();
+    assert_eq!(flock.outbox.lock().unwrap()["%1"].len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn guarded_allocation_yields_to_other_database_writer_callback() {
+    use crate::flock::{panes::Stores, Flock};
+    use crate::tasks::advance::{AdvanceOptions, Planner};
+    use std::sync::{mpsc, Arc, Mutex};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("tasks.db");
+    let first = Arc::new(Tasks::open(&path).await.unwrap());
+    first.allocation_init().await.unwrap();
+    let second = Arc::new(Tasks::open(&path).await.unwrap());
+    let flock = Arc::new(Flock::new(
+        dir.path().join("launches"),
+        dir.path().join("lanes"),
+        false,
+    ));
+    flock.attach_stores(Stores {
+        tasks: Some(Arc::clone(&first)),
+        ..Stores::default()
+    });
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let release_rx = Mutex::new(release_rx);
+    let from_planner = Arc::clone(&flock);
+    let planner: Arc<Planner> = Arc::new(move |_| {
+        started_tx.send(()).unwrap();
+        release_rx.lock().unwrap().recv().unwrap();
+        let _outbox = from_planner.outbox.lock().unwrap();
+        serde_json::Map::from_iter([("action".into(), json!("skip"))])
+    });
+    let other = tokio::spawn(async move {
+        second
+            .advance_next_job("%1", "turn.end", AdvanceOptions::default(), planner)
+            .await
+    });
+    started_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        first.allocation_try_guarded(Arc::clone(&flock), BTreeMap::new()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(matches!(result, GuardedAllocation::RetryBusy));
+    release_tx.send(()).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), other)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn allocator_timeout_restore_failure_quarantines_real_writer() {
+    let tasks = store("restore-failure").await;
+    let error = tasks
+        .writer
+        .call_quarantinable(|conn, quarantine| {
+            let previous_ms = conn
+                .pragma_query_value(None, "busy_timeout", |row| row.get(0))
+                .map_err(crate::db::map_sqlite)?;
+            let mut restore = TimeoutRestore {
+                conn,
+                previous_ms,
+                quarantine,
+                restored: false,
+                fail_restore: true,
+            };
+            conn.busy_timeout(std::time::Duration::ZERO)
+                .map_err(crate::db::map_sqlite)?;
+            restore.restore()
+        })
+        .await
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("injected timeout restore failure"));
+    assert!(
+        tasks.allocation_status().await.is_err(),
+        "quarantined actor must reject later jobs"
+    );
+}
+
+#[tokio::test]
+async fn allocator_timeout_restores_after_actor_panic() {
+    let tasks = store("restore-panic").await;
+    let outcome: Result<(), DunkError> = tasks
+        .writer
+        .call_quarantinable(|conn, quarantine| {
+            let previous_ms = conn
+                .pragma_query_value(None, "busy_timeout", |row| row.get(0))
+                .map_err(crate::db::map_sqlite)?;
+            let _restore = TimeoutRestore {
+                conn,
+                previous_ms,
+                quarantine,
+                restored: false,
+                fail_restore: false,
+            };
+            conn.busy_timeout(std::time::Duration::ZERO)
+                .map_err(crate::db::map_sqlite)?;
+            panic!("injected allocation panic");
+        })
+        .await;
+    assert!(outcome.is_err());
+    let timeout: u64 = tasks
+        .writer
+        .call(|conn| {
+            conn.pragma_query_value(None, "busy_timeout", |row| row.get(0))
+                .map_err(crate::db::map_sqlite)
+        })
+        .await
+        .unwrap();
+    assert_eq!(timeout, crate::db::BUSY_TIMEOUT_MS);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn guarded_allocation_holds_turn_and_outbox_through_commit() {
+    use crate::flock::{
+        commands_turns::{NoHooks, TurnState},
+        panes::Stores,
+        sends::{OutboxWake, SnapshotStore},
+        Flock,
+    };
+    use std::sync::{mpsc, Arc, Mutex};
+    struct RefuseWake;
+    impl OutboxWake for RefuseWake {
+        fn ensure_worker(&self, _: &Arc<Flock>, _: &str) -> Result<(), DunkError> {
+            Err(DunkError::Refused("test worker unavailable".into()))
+        }
+    }
+    struct Save;
+    impl SnapshotStore for Save {
+        fn save(&self, flock: &Flock) -> Result<(), DunkError> {
+            flock.save()
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let tasks = Arc::new(Tasks::open(dir.path().join("tasks.db")).await.unwrap());
+    tasks.allocation_init().await.unwrap();
+    let flock = Arc::new(Flock::new(
+        dir.path().join("launches"),
+        dir.path().join("lanes"),
+        false,
+    ));
+    flock.attach_stores(Stores {
+        tasks: Some(Arc::clone(&tasks)),
+        ..Stores::default()
+    });
+    let offered = task(&tasks, "atomic allocation").await;
+    offer(&tasks, &offered, &[]).await;
+    worker(&tasks, "%1", "worker", &[]).await;
+    flock.turn_states.lock().unwrap().insert(
+        "%1".into(),
+        TurnState {
+            started_at: 1.0,
+            expires_at: 0.0,
+            ended_at: Some(2.0),
+            ttl_s: 5.0,
+            turn_id: "original".into(),
+            source: None,
+            caller: Some(json!({})),
+            handoff_id: None,
+        },
+    );
+    let candidates = BTreeMap::from([(
+        "%1".into(),
+        AllocationCandidate {
+            turn_id: "original".into(),
+            ended_at: Some(2.0),
+            caller: json!({}),
+        },
+    )]);
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let barrier = Arc::new(AllocationCommitBarrier {
+        entered: entered_tx,
+        release: Mutex::new(release_rx),
+    });
+    let worker_tasks = Arc::clone(&tasks);
+    let worker_flock = Arc::clone(&flock);
+    let allocation = tokio::spawn(async move {
+        worker_tasks
+            .allocation_try_guarded_inner(worker_flock, candidates, Some(barrier))
+            .await
+    });
+    entered_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    assert!(flock.turn_states.try_lock().is_err());
+    assert!(flock.outbox.try_lock().is_err());
+    let (started_tx, started_rx) = mpsc::channel();
+    let (done_tx, done_rx) = mpsc::channel();
+    let turn_flock = Arc::clone(&flock);
+    let started_turn = started_tx.clone();
+    let done_turn = done_tx.clone();
+    let turn = std::thread::spawn(move || {
+        started_turn.send(()).unwrap();
+        let result = turn_flock.turn_start(None, None, None, Some("%1"), None, &NoHooks);
+        done_turn.send(()).unwrap();
+        result
+    });
+    let queue_flock = Arc::clone(&flock);
+    let queue = std::thread::spawn(move || {
+        let message = queue_flock
+            .new_message("%1", "%1", "pending", "test")
+            .unwrap();
+        started_tx.send(()).unwrap();
+        let result = queue_flock.enqueue(message, &RefuseWake, &Save);
+        done_tx.send(()).unwrap();
+        result
+    });
+    started_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    started_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    assert!(matches!(done_rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+    release_tx.send(()).unwrap();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(3), allocation)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    match result {
+        GuardedAllocation::Committed(rows) => assert_eq!(rows[0]["task_id"], offered.id),
+        _ => panic!("expected committed allocation"),
+    }
+    done_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    done_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    turn.join().unwrap().unwrap();
+    assert!(queue.join().unwrap().is_err());
+    assert_eq!(tasks.get(&offered.id).await.unwrap().status, "in_progress");
+}
+
+#[tokio::test]
+async fn guarded_allocation_restores_timeout_after_sql_error() {
+    use crate::flock::{panes::Stores, Flock};
+    use std::sync::Arc;
+    let dir = tempfile::tempdir().unwrap();
+    let tasks = Arc::new(Tasks::open(dir.path().join("tasks.db")).await.unwrap());
+    tasks.allocation_init().await.unwrap();
+    let flock = Arc::new(Flock::new(
+        dir.path().join("launches"),
+        dir.path().join("lanes"),
+        false,
+    ));
+    flock.attach_stores(Stores {
+        tasks: Some(Arc::clone(&tasks)),
+        ..Stores::default()
+    });
+    tasks
+        .writer
+        .call(|conn| {
+            conn.execute_batch("DROP TABLE allocation_offers")
+                .map_err(crate::db::map_sqlite)
+        })
+        .await
+        .unwrap();
+    assert!(tasks
+        .allocation_try_guarded(flock, BTreeMap::new())
+        .await
+        .is_err());
+    let timeout: u64 = tasks
+        .writer
+        .call(|conn| {
+            conn.pragma_query_value(None, "busy_timeout", |row| row.get(0))
+                .map_err(crate::db::map_sqlite)
+        })
+        .await
+        .unwrap();
+    assert_eq!(timeout, crate::db::BUSY_TIMEOUT_MS);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn guarded_allocation_unblocks_waker_waiting_on_same_actor() {
+    use crate::flock::{
+        panes::Stores,
+        sends::{OutboxWake, SnapshotStore},
+        Flock,
+    };
+    use std::future::{poll_fn, Future};
+    use std::sync::{mpsc, Arc, Mutex};
+    use std::task::Poll;
+    struct Save;
+    impl SnapshotStore for Save {
+        fn save(&self, flock: &Flock) -> Result<(), DunkError> {
+            flock.save()
+        }
+    }
+    struct Wake {
+        tasks: Arc<Tasks>,
+        handle: tokio::runtime::Handle,
+        held: mpsc::Sender<()>,
+        go: Mutex<mpsc::Receiver<()>>,
+        queued: mpsc::Sender<()>,
+    }
+    impl OutboxWake for Wake {
+        fn ensure_worker(&self, _: &Arc<Flock>, _: &str) -> Result<(), DunkError> {
+            self.held.send(()).unwrap();
+            self.go.lock().unwrap().recv().unwrap();
+            self.handle.block_on(async {
+                let mut future = Box::pin(self.tasks.allocation_status());
+                poll_fn(|cx| match future.as_mut().poll(cx) {
+                    Poll::Pending => {
+                        self.queued.send(()).unwrap();
+                        Poll::Ready(())
+                    }
+                    Poll::Ready(_) => panic!("actor gate must hold the queued waker job"),
+                })
+                .await;
+                future.await.map(|_| ())
+            })
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let tasks = Arc::new(Tasks::open(dir.path().join("tasks.db")).await.unwrap());
+    tasks.allocation_init().await.unwrap();
+    let flock = Arc::new(Flock::new(
+        dir.path().join("launches"),
+        dir.path().join("lanes"),
+        false,
+    ));
+    flock.attach_stores(Stores {
+        tasks: Some(Arc::clone(&tasks)),
+        ..Stores::default()
+    });
+    let (actor_started_tx, actor_started_rx) = mpsc::channel();
+    let (actor_go_tx, actor_go_rx) = mpsc::channel();
+    let blocker_tasks = Arc::clone(&tasks);
+    let blocker = tokio::spawn(async move {
+        blocker_tasks
+            .writer
+            .call(move |_| {
+                actor_started_tx.send(()).unwrap();
+                actor_go_rx.recv().unwrap();
+                Ok(())
+            })
+            .await
+    });
+    actor_started_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    let (held_tx, held_rx) = mpsc::channel();
+    let (go_tx, go_rx) = mpsc::channel();
+    let (queued_tx, queued_rx) = mpsc::channel();
+    let wake = Wake {
+        tasks: Arc::clone(&tasks),
+        handle: tokio::runtime::Handle::current(),
+        held: held_tx,
+        go: Mutex::new(go_rx),
+        queued: queued_tx,
+    };
+    let other = Arc::clone(&flock);
+    let thread = std::thread::spawn(move || {
+        let message = other.new_message("%1", "%1", "queued", "test").unwrap();
+        other.enqueue(message, &wake, &Save)
+    });
+    held_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    let mut allocation =
+        Box::pin(tasks.allocation_try_guarded(Arc::clone(&flock), BTreeMap::new()));
+    poll_fn(|cx| match allocation.as_mut().poll(cx) {
+        Poll::Pending => Poll::Ready(()),
+        Poll::Ready(_) => panic!("actor gate must hold the queued allocation job"),
+    })
+    .await;
+    go_tx.send(()).unwrap();
+    queued_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    actor_go_tx.send(()).unwrap();
+    blocker.await.unwrap().unwrap();
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), allocation)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(outcome, GuardedAllocation::RetryLock));
+    thread.join().unwrap().unwrap();
+}
