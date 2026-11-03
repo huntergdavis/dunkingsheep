@@ -210,22 +210,28 @@ async fn request_json(request: Request) -> Result<Option<Value>, Response> {
     }
     serde_json::from_slice(&bytes).map(Some).map_err(|error| {
         let error_text = error.to_string();
+        let trailing_comma = error_text
+            .starts_with("trailing comma")
+            .then(|| python_trailing_comma(&bytes))
+            .flatten();
         let offset = if error_text.starts_with("EOF while parsing an object") {
             String::from_utf8_lossy(&bytes).chars().count()
         } else if error_text.starts_with("EOF while parsing a string") {
             python_unterminated_string_offset(&bytes)
                 .unwrap_or_else(|| error.column().saturating_sub(1))
-        } else if error_text.starts_with("trailing comma") {
-            python_trailing_comma_offset(&bytes).unwrap_or_else(|| error.column().saturating_sub(1))
+        } else if let Some((offset, _)) = trailing_comma {
+            offset
         } else {
-            error.column().saturating_sub(1)
+            python_json_offset(&bytes, error.line(), error.column())
         };
         validation_error(
             "json_invalid",
             vec![json!("body"), json!(offset)],
             "JSON decode error",
             json!({}),
-            Some(json!({"error": python_json_error(&error_text)})),
+            Some(json!({
+                "error": python_json_error(&error_text, trailing_comma.map(|(_, kind)| kind))
+            })),
         )
     })
 }
@@ -267,13 +273,23 @@ fn python_unterminated_string_offset(bytes: &[u8]) -> Option<usize> {
     string_start.map(|byte_offset| text[..byte_offset].chars().count())
 }
 
-fn python_json_error(error: &str) -> &'static str {
+#[derive(Clone, Copy)]
+enum JsonContainer {
+    Object,
+    Array,
+}
+
+fn python_json_error(error: &str, trailing_container: Option<JsonContainer>) -> &'static str {
     if error.starts_with("key must be a string")
         || error.starts_with("EOF while parsing an object")
     {
         "Expecting property name enclosed in double quotes"
     } else if error.starts_with("trailing comma") {
-        "Illegal trailing comma before end of object"
+        match trailing_container {
+            Some(JsonContainer::Object) => "Illegal trailing comma before end of object",
+            Some(JsonContainer::Array) => "Illegal trailing comma before end of array",
+            None => "Invalid JSON",
+        }
     } else if error.starts_with("EOF while parsing a string") {
         "Unterminated string starting at"
     } else if error.starts_with("EOF while parsing") || error.starts_with("expected value") {
@@ -287,10 +303,30 @@ fn python_json_error(error: &str) -> &'static str {
     }
 }
 
-fn python_trailing_comma_offset(bytes: &[u8]) -> Option<usize> {
+fn python_json_offset(bytes: &[u8], line: usize, column: usize) -> usize {
+    let text = String::from_utf8_lossy(bytes);
+    let mut lines = text.split_inclusive('\n');
+    let mut preceding_characters = 0;
+    for _ in 1..line {
+        let Some(previous_line) = lines.next() else {
+            return text.chars().count();
+        };
+        preceding_characters += previous_line.chars().count();
+    }
+    let current_line = lines.next().unwrap_or_default();
+    let current_line = current_line.strip_suffix('\n').unwrap_or(current_line);
+    let mut byte_offset = column.saturating_sub(1).min(current_line.len());
+    while !current_line.is_char_boundary(byte_offset) {
+        byte_offset -= 1;
+    }
+    preceding_characters + current_line[..byte_offset].chars().count()
+}
+
+fn python_trailing_comma(bytes: &[u8]) -> Option<(usize, JsonContainer)> {
     let text = String::from_utf8_lossy(bytes);
     let mut in_string = false;
     let mut escaped = false;
+    let mut containers = Vec::new();
 
     for (byte_offset, character) in text.char_indices() {
         if in_string {
@@ -303,14 +339,26 @@ fn python_trailing_comma_offset(bytes: &[u8]) -> Option<usize> {
             }
         } else if character == '"' {
             in_string = true;
+        } else if character == '{' {
+            containers.push(JsonContainer::Object);
+        } else if character == '[' {
+            containers.push(JsonContainer::Array);
         } else if character == ',' {
             let after_comma = &text[byte_offset + character.len_utf8()..];
-            if after_comma
+            let closing = after_comma
                 .trim_start_matches(|character| matches!(character, ' ' | '\n' | '\r' | '\t'))
-                .starts_with('}')
-            {
-                return Some(text[..byte_offset].chars().count());
+                .chars()
+                .next();
+            let container = match (closing, containers.last()) {
+                (Some('}'), Some(JsonContainer::Object)) => Some(JsonContainer::Object),
+                (Some(']'), Some(JsonContainer::Array)) => Some(JsonContainer::Array),
+                _ => None,
+            };
+            if let Some(container) = container {
+                return Some((text[..byte_offset].chars().count(), container));
             }
+        } else if matches!(character, '}' | ']') {
+            containers.pop();
         }
     }
     None
@@ -327,7 +375,7 @@ fn python_integer(value: &Value) -> Option<i64> {
                     .filter(|value| value.fract() == 0.0)
                     .and_then(|value| i64::try_from(value as i128).ok())
             }),
-        Value::String(value) => value.trim().parse().ok(),
+        Value::String(value) => clean_pydantic_integer_string(value)?.parse().ok(),
         Value::Bool(value) => Some(i64::from(*value)),
         Value::Null | Value::Array(_) | Value::Object(_) => None,
     }
@@ -340,7 +388,8 @@ enum SlotBound {
 }
 
 fn numeric_string_slot_bound(value: &str) -> Option<SlotBound> {
-    let value = value.trim();
+    let normalized = clean_pydantic_integer_string(value)?;
+    let value = normalized.as_str();
     let (negative, digits) = if let Some(digits) = value.strip_prefix('-') {
         (true, digits)
     } else if let Some(digits) = value.strip_prefix('+') {
@@ -359,6 +408,43 @@ fn numeric_string_slot_bound(value: &str) -> Option<SlotBound> {
     } else {
         None
     }
+}
+
+fn clean_pydantic_integer_string(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let bytes = value.as_bytes();
+    for (index, byte) in bytes.iter().enumerate() {
+        if *byte == b'_'
+            && (index == 0
+                || index + 1 == bytes.len()
+                || !bytes[index - 1].is_ascii_digit()
+                || !bytes[index + 1].is_ascii_digit())
+        {
+            return None;
+        }
+    }
+    let mut cleaned: String = value.chars().filter(|character| *character != '_').collect();
+    if let Some(decimal) = cleaned.find('.') {
+        let fraction = &cleaned[decimal + 1..];
+        if fraction.is_empty() || !fraction.bytes().all(|byte| byte == b'0') {
+            return None;
+        }
+        cleaned.truncate(decimal);
+    }
+    let digits = cleaned
+        .strip_prefix('-')
+        .or_else(|| cleaned.strip_prefix('+'))
+        .unwrap_or(&cleaned);
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    if cleaned.starts_with('+') {
+        cleaned.remove(0);
+    }
+    Some(cleaned)
 }
 
 fn model_error(input: Value) -> Response {
@@ -607,6 +693,15 @@ mod tests {
             .unwrap()
     }
 
+    fn request_without_content_type(method: &str, path: &str, body: &str) -> HttpRequest<Body> {
+        HttpRequest::builder()
+            .method(method)
+            .uri(path)
+            .header(header::HOST, "desk.test")
+            .body(Body::from(body.to_owned()))
+            .unwrap()
+    }
+
     fn block_on<F: Future>(future: F) -> F::Output {
         let waker: &Waker = Waker::noop();
         let mut context = Context::from_waker(waker);
@@ -771,6 +866,44 @@ mod tests {
     }
 
     #[test]
+    fn game_loadstate_coerces_pydantic_integer_string_forms_before_bounds_checks() {
+        let cases = [
+            ("+1", Some(1), None),
+            ("-1", None, Some("greater_than_equal")),
+            ("1_0", Some(10), None),
+            ("1_00", None, Some("less_than_equal")),
+            ("1.0", Some(1), None),
+            ("100.0", None, Some("less_than_equal")),
+            (
+                "9_223_372_036_854_775_808",
+                None,
+                Some("less_than_equal"),
+            ),
+        ];
+        for (value, expected_slot, expected_error) in cases {
+            let game = Arc::new(FakeGame::new(Value::Null));
+            let body = format!(r#"{{"slot":"{value}"}}"#);
+            let (status, _body, response) = response(
+                app(game.clone(), authorized()),
+                request("POST", "/api/game/loadstate", &body),
+            );
+            if let Some(slot) = expected_slot {
+                assert_eq!(StatusCode::OK, status, "input {value:?}");
+                assert_eq!(
+                    vec![format!("loadstate:{slot}")],
+                    game.calls.lock().unwrap().clone(),
+                    "input {value:?}"
+                );
+            } else {
+                assert_eq!(StatusCode::UNPROCESSABLE_ENTITY, status, "input {value:?}");
+                assert_eq!(expected_error.unwrap(), response["detail"][0]["type"]);
+                assert_eq!(value, response["detail"][0]["input"]);
+                assert!(game.calls.lock().unwrap().is_empty());
+            }
+        }
+    }
+
+    #[test]
     fn game_loadstate_requires_slot_with_python_validation_shape() {
         let game = Arc::new(FakeGame::new(Value::Null));
         let (status, _body, value) = response(
@@ -832,6 +965,26 @@ mod tests {
                 "ctx":{"error":"Illegal trailing comma before end of object"}}]}),
             value
         );
+        assert!(game.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn game_savestate_maps_array_comma_and_multiline_json_errors_to_python() {
+        let game = Arc::new(FakeGame::new(Value::Null));
+        for (body, offset, error) in [
+            ("[1,]", 2, "Illegal trailing comma before end of array"),
+            ("{\"tag\":", 7, "Expecting value"),
+            ("{\"tag\":\n}", 8, "Expecting value"),
+        ] {
+            let (status, _body, value) = response(
+                app(game.clone(), authorized()),
+                request("POST", "/api/game/savestate", body),
+            );
+            assert_eq!(StatusCode::UNPROCESSABLE_ENTITY, status);
+            assert_eq!("json_invalid", value["detail"][0]["type"]);
+            assert_eq!(offset, value["detail"][0]["loc"][1]);
+            assert_eq!(error, value["detail"][0]["ctx"]["error"]);
+        }
         assert!(game.calls.lock().unwrap().is_empty());
     }
 
@@ -912,6 +1065,53 @@ mod tests {
                 json!({"detail":[{"type":"model_attributes_type","loc":["body"],
                     "msg":"Input should be a valid dictionary or object to extract fields from",
                     "input":body}]}),
+                value
+            );
+        }
+        assert!(game.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn game_state_model_routes_parse_json_without_content_type_header() {
+        let game = Arc::new(FakeGame::new(Value::Null));
+        for (path, body) in [
+            ("/api/game/savestate", r#"{"tag":"quick"}"#),
+            ("/api/game/loadstate", r#"{"slot":3}"#),
+        ] {
+            let (status, _body, _value) = response(
+                app(game.clone(), authorized()),
+                request_without_content_type("POST", path, body),
+            );
+            assert_eq!(StatusCode::OK, status);
+        }
+        assert_eq!(
+            vec!["savestate:quick".to_owned(), "loadstate:3".to_owned()],
+            game.calls.lock().unwrap().clone()
+        );
+    }
+
+    #[test]
+    fn empty_model_bodies_authenticate_before_missing_body_validation() {
+        let game = Arc::new(FakeGame::new(Value::Null));
+        for path in ["/api/game/savestate", "/api/game/loadstate"] {
+            let unauthenticated = Arc::new(FakeAuth {
+                result: Err(AuthError::SignInRequired),
+            });
+            let (status, _body, value) = response(
+                app(game.clone(), unauthenticated),
+                request("POST", path, ""),
+            );
+            assert_eq!(StatusCode::UNAUTHORIZED, status);
+            assert_eq!(json!({"detail":"Sign in required"}), value);
+
+            let (status, _body, value) = response(
+                app(game.clone(), authorized()),
+                request("POST", path, ""),
+            );
+            assert_eq!(StatusCode::UNPROCESSABLE_ENTITY, status);
+            assert_eq!(
+                json!({"detail":[{"type":"missing","loc":["body"],
+                    "msg":"Field required","input":null}]}),
                 value
             );
         }
