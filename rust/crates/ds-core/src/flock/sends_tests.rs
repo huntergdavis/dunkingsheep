@@ -2650,6 +2650,7 @@ fn outbox_step_defers_a_busy_non_queueing_harness_without_typing_or_exhausting()
         )],
     );
     let mut pane = busy_codex();
+    pane.harness.insert(P.into(), "unknown".into());
     let stopped = AtomicBool::new(false);
     let mut now = 100.0;
 
