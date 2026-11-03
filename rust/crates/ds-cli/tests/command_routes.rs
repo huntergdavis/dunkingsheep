@@ -36,6 +36,38 @@ fn run_cli_with_env(socket: &str, command: &[&str], env: &[(&str, &str)]) -> Out
     cli.output().expect("run Rust CLI")
 }
 
+fn run_binary_without_command(args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_dunkingsheep"))
+        .args(args)
+        .env_remove("DUNKINGSHEEP_SOCKET")
+        .env_remove("DUNKINGSHEEP_SERVICE_TOKEN")
+        .env_remove("DUNKINGSHEEP_SERVICE_TOKEN_FILE")
+        .output()
+        .expect("run Rust CLI")
+}
+
+fn run_python_reference(args: &[&str]) -> Output {
+    Command::new("python3")
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../dunkingsheep"
+        ))
+        .args(args)
+        .env_remove("DUNKINGSHEEP_SOCKET")
+        .env_remove("DUNKINGSHEEP_SERVICE_TOKEN")
+        .env_remove("DUNKINGSHEEP_SERVICE_TOKEN_FILE")
+        .output()
+        .expect("run Python CLI reference")
+}
+
+fn assert_matches_python(args: &[&str]) {
+    let rust = run_binary_without_command(args);
+    let python = run_python_reference(args);
+    assert_eq!(rust.status.code(), python.status.code(), "args: {args:?}");
+    assert_eq!(rust.stdout, python.stdout, "stdout for args: {args:?}");
+    assert_eq!(rust.stderr, python.stderr, "stderr for args: {args:?}");
+}
+
 #[cfg(unix)]
 fn write_guard_fixture(path: &Path, contents: &str) {
     use std::os::unix::fs::PermissionsExt;
@@ -4745,4 +4777,26 @@ fn cli_route_guard_actions_2() {
         std::fs::read_to_string(home.join(".bashrc")).unwrap(),
         "before\nafter\n"
     );
+}
+
+#[test]
+fn cli_route_guide_and_empty_argv() {
+    assert_matches_python(&[]);
+    assert_matches_python(&["guide"]);
+    assert_matches_python(&["guide", "--markdown"]);
+    assert_matches_python(&["help"]);
+    assert_matches_python(&["help", "--markdown"]);
+    assert_matches_python(&["docs"]);
+    assert_matches_python(&["docs", "--markdown"]);
+}
+
+#[test]
+fn cli_route_58_commands_map() {
+    assert_matches_python(&["commands"]);
+    assert_matches_python(&["commands", "--json"]);
+    assert_matches_python(&["--json", "commands"]);
+    assert_matches_python(&["mcp-map"]);
+    assert_matches_python(&["mcp-map", "--json"]);
+    assert_matches_python(&["--json", "mcp-map"]);
+    assert_matches_python(&["mcp-map", "--markdown"]);
 }

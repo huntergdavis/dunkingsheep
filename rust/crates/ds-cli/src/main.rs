@@ -6,8 +6,18 @@ use std::io::Write;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
+    let argv: Vec<_> = std::env::args_os().collect();
+    if argv.len() == 1 {
+        // Python argparse prints the root help when no command words were supplied.
+        // The generated clap tree has a required subcommand, so translate its root
+        // help through the existing argparse renderer before parsing.
+        let clap_help = ds_cli::args::build().render_help().to_string();
+        let help = ds_cli::args::argparse_help(&clap_help).unwrap_or(clap_help);
+        let _ = std::io::stdout().write_all(help.as_bytes());
+        return ExitCode::SUCCESS;
+    }
     // `--help` / `--version` exit 0 and a usage error exits 2, as argparse does.
-    let namespace = ds_cli::args::parse_or_exit(std::env::args_os());
+    let namespace = ds_cli::args::parse_or_exit(argv);
     let outcome = ds_cli::dispatch::run(&namespace);
     let _ = std::io::stdout().write_all(outcome.stdout.as_bytes());
     let _ = std::io::stderr().write_all(outcome.stderr.as_bytes());

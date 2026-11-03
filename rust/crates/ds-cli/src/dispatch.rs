@@ -122,6 +122,272 @@ fn not_ported(command: &str) -> Outcome {
     }
 }
 
+fn guide(ns: &Map<String, Value>) -> Outcome {
+    let markdown = matches!(ns.get("markdown"), Some(Value::Bool(true)));
+    let version = crate::cli_table::ROOT
+        .args
+        .iter()
+        .find(|arg| arg.dest == "version")
+        .and_then(|arg| arg.version)
+        .and_then(|version| version.strip_prefix("dunkingsheep "))
+        .and_then(|version| version.split_whitespace().next())
+        .expect("generated CLI table has an application version");
+    Outcome {
+        stdout: ds_core::help::guide(markdown, version),
+        stderr: String::new(),
+        code: 0,
+    }
+}
+
+fn commands(json: bool) -> Outcome {
+    use ds_core::registry::COMMANDS;
+
+    if json {
+        let rows = COMMANDS
+            .iter()
+            .map(|command| {
+                serde_json::json!({
+                    "name": command.name,
+                    "description": command.description,
+                    "input_schema": ds_core::registry::input_schema(command.name)
+                        .expect("registered command has an input schema"),
+                    "mcp_tool": command.mcp,
+                })
+            })
+            .collect::<Vec<_>>();
+        return Outcome {
+            stdout: format!("{}\n", ordered_json(&Value::Array(rows))),
+            stderr: String::new(),
+            code: 0,
+        };
+    }
+
+    let mut output = String::new();
+    for command in COMMANDS {
+        let params = command
+            .params
+            .iter()
+            .map(|param| {
+                format!(
+                    "{}{}",
+                    param.name,
+                    if command.required.contains(&param.name) {
+                        "*"
+                    } else {
+                        ""
+                    }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let marker = if command.mcp {
+            ""
+        } else {
+            "  [socket/cli only]"
+        };
+        use std::fmt::Write as _;
+        let _ = writeln!(
+            output,
+            "{}({params}){marker}\n    {}",
+            command.name, command.description
+        );
+    }
+    Outcome {
+        stdout: output,
+        stderr: String::new(),
+        code: 0,
+    }
+}
+
+fn python_json_string_len(value: &str) -> usize {
+    let mut len = 2;
+    for ch in value.chars() {
+        len += match ch {
+            '"' | '\\' | '\u{0008}' | '\t' | '\n' | '\u{000c}' | '\r' => 2,
+            ch if ch <= '\u{001f}' => 6,
+            ch if ch.is_ascii() => 1,
+            ch if ch <= '\u{ffff}' => 6,
+            _ => 12,
+        };
+    }
+    len
+}
+
+fn python_json_len(value: &Value) -> usize {
+    match value {
+        Value::Null => 4,
+        Value::Bool(true) => 4,
+        Value::Bool(false) => 5,
+        Value::Number(number) => number.to_string().len(),
+        Value::String(value) => python_json_string_len(value),
+        Value::Array(values) => {
+            2 + values.iter().map(python_json_len).sum::<usize>()
+                + values.len().saturating_sub(1) * 2
+        }
+        Value::Object(values) => {
+            2 + values
+                .iter()
+                .map(|(key, value)| python_json_string_len(key) + 2 + python_json_len(value))
+                .sum::<usize>()
+                + values.len().saturating_sub(1) * 2
+        }
+    }
+}
+
+fn mcp_map(ns: &Map<String, Value>) -> Outcome {
+    use ds_core::registry::{self, COMMANDS, GROUPS};
+
+    let markdown = matches!(ns.get("markdown"), Some(Value::Bool(true)));
+    let flat = COMMANDS
+        .iter()
+        .filter(|command| command.mcp)
+        .collect::<Vec<_>>();
+    let schema_rows = |commands: &[&ds_core::registry::Command], include_description: bool| {
+        commands
+            .iter()
+            .map(|command| {
+                let mut row = Map::new();
+                row.insert("name".into(), Value::String(command.name.to_string()));
+                if include_description {
+                    row.insert(
+                        "description".into(),
+                        Value::String(command.description.to_string()),
+                    );
+                }
+                row.insert(
+                    "inputSchema".into(),
+                    registry::input_schema(command.name).expect("registered schema"),
+                );
+                Value::Object(row)
+            })
+            .collect::<Vec<_>>()
+    };
+    let grouped_rows = GROUPS
+        .iter()
+        .map(|group| {
+            let mut row = Map::new();
+            row.insert("name".into(), Value::String(group.name.to_string()));
+            row.insert(
+                "description".into(),
+                Value::String(group.description.to_string()),
+            );
+            row.insert(
+                "inputSchema".into(),
+                registry::grouped_input_schema(group.name).expect("registered group schema"),
+            );
+            Value::Object(row)
+        })
+        .collect::<Vec<_>>();
+    let flat_bytes = python_json_len(&Value::Array(schema_rows(&flat, true)));
+    let grouped_bytes = python_json_len(&Value::Array(grouped_rows));
+    let hot = GROUPS
+        .iter()
+        .filter(|group| matches!(group.name, "inbox" | "task" | "memory"))
+        .map(|group| {
+            let mut row = Map::new();
+            row.insert("name".into(), Value::String(group.name.to_string()));
+            row.insert(
+                "inputSchema".into(),
+                registry::grouped_input_schema(group.name).expect("registered group schema"),
+            );
+            Value::Object(row)
+        })
+        .collect::<Vec<_>>();
+    let hot_bytes = python_json_len(&Value::Array(hot));
+    let mut output = Vec::new();
+
+    if markdown {
+        output.extend([
+            "# MCP tool map (t8 grouping audit)".to_string(),
+            String::new(),
+            "The declared MCP surface is one namespaced tool per domain, each taking an `action`. Nothing was removed: every flat name still resolves, and each command stays on the CLI/socket API.".to_string(),
+            String::new(),
+            format!("- declared tools: **{}** grouped (was **{}** flat)", GROUPS.len(), flat.len()),
+            format!("- grouped schema bytes: **{grouped_bytes}** (was **{flat_bytes}**, -{:.1}%)", 100.0 * (1.0 - grouped_bytes as f64 / flat_bytes as f64)),
+            format!("- hot set (`inbox`, `task`, `memory`): **{hot_bytes}** bytes (target <10 KB)"),
+            String::new(), "## Grouped tools".to_string(), String::new(),
+            "| Tool | Actions |".to_string(), "| --- | --- |".to_string(),
+        ]);
+        for group in GROUPS {
+            output.push(format!(
+                "| `{}` | {} |",
+                group.name,
+                group
+                    .actions
+                    .iter()
+                    .map(|(action, _)| format!("`{action}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        output.extend([
+            String::new(),
+            "## OLD flat tool -> NEW grouped tool".to_string(),
+            String::new(),
+            "| Old tool | New tool | action |".to_string(),
+            "| --- | --- | --- |".to_string(),
+        ]);
+        for command in &flat {
+            let mapping = GROUPS.iter().find_map(|group| {
+                group
+                    .actions
+                    .iter()
+                    .find(|(_, name)| *name == command.name)
+                    .map(|(action, _)| (group.name, *action))
+            });
+            let (group, action) = mapping
+                .map(|(group, action)| (group, action))
+                .unwrap_or(("None", "None"));
+            output.push(format!("| `{}` | `{group}` | `{action}` |", command.name));
+        }
+        output.extend([
+            String::new(),
+            "## CLI/socket-only commands (not MCP tools)".to_string(),
+            String::new(),
+            "| Command | Why |".to_string(),
+            "| --- | --- |".to_string(),
+            "| `shutdown` | daemon stop; CLI/socket only |".to_string(),
+        ]);
+    } else {
+        output.push(format!("declared {} grouped tools (was {} flat); schema {grouped_bytes} bytes (was {flat_bytes}); hot set (inbox, task, memory) {hot_bytes} bytes", GROUPS.len(), flat.len()));
+        output.push(String::new());
+        for group in GROUPS {
+            output.push(format!(
+                "{}: {}",
+                group.name,
+                group
+                    .actions
+                    .iter()
+                    .map(|(action, _)| *action)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        output.push(String::new());
+        for command in &flat {
+            let mapping = GROUPS.iter().find_map(|group| {
+                group
+                    .actions
+                    .iter()
+                    .find(|(_, name)| *name == command.name)
+                    .map(|(action, _)| (group.name, *action))
+            });
+            let (group, action) = mapping
+                .map(|(group, action)| (group, action))
+                .unwrap_or(("None", "None"));
+            output.push(format!("{} -> {group}(action={action})", command.name));
+        }
+        for command in COMMANDS.iter().filter(|command| !command.mcp) {
+            output.push(format!("{} -> (CLI/socket only)", command.name));
+        }
+    }
+    Outcome {
+        stdout: format!("{}\n", output.join("\n")),
+        stderr: String::new(),
+        code: 0,
+    }
+}
+
 fn tui(ns: &Map<String, Value>) -> Outcome {
     let client = match crate::daemon_cmd::connect(ns) {
         Ok(client) => client,
@@ -2740,6 +3006,9 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
     let command = text(ns, "command").unwrap_or("");
     let json = matches!(ns.get("json"), Some(Value::Bool(true)));
     match command {
+        "guide" | "help" | "docs" => guide(ns),
+        "commands" => commands(json),
+        "mcp-map" => mcp_map(ns),
         "install" => install_launcher(ns, json),
         "mcp-setup" => mcp_setup(ns),
         "context" => context(ns, json),
