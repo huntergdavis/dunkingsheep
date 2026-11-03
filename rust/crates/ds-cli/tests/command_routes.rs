@@ -36,6 +36,25 @@ fn run_cli_with_env(socket: &str, command: &[&str], env: &[(&str, &str)]) -> Out
     cli.output().expect("run Rust CLI")
 }
 
+#[cfg(unix)]
+fn write_guard_fixture(path: &Path, contents: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, contents).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[cfg(unix)]
+fn run_guard_fixture(home: &Path, config: &Path, path: &Path, args: &[&str]) -> Output {
+    let empty_socket = home.join("unused.sock");
+    let env = [
+        ("HOME", home.to_str().unwrap()),
+        ("DUNKINGSHEEP_DIR", config.to_str().unwrap()),
+        ("PATH", path.to_str().unwrap()),
+    ];
+    run_cli_with_env(empty_socket.to_str().unwrap(), args, &env)
+}
+
 fn run_local_context_cli(
     cwd: &Path,
     config_dir: &Path,
@@ -4577,4 +4596,131 @@ fn cli_route_50_terminal_io() {
         String::from_utf8(read.stdout).unwrap()
     );
     assert!(read.stderr.is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_route_guard_actions_1() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let config = temp.path().join("config");
+    let bin = temp.path().join("fake-bin");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(
+        home.join(".bashrc"),
+        format!(
+            "# dunkingsheep herdr guard\nexport PATH=\"{}:$PATH\"\n",
+            config.join("bin").display()
+        ),
+    )
+    .unwrap();
+    write_guard_fixture(&bin.join("herdr"), "#!/bin/sh\nexit 0\n");
+    let status = run_guard_fixture(&home, &config, &bin, &["guard", "status", "--json"]);
+    assert!(
+        status.status.success(),
+        "{}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let value: Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(value["installed"], false);
+    assert_eq!(value["shell_configured"], true);
+    assert_eq!(
+        value["herdr_resolves_to"],
+        bin.join("herdr").to_str().unwrap()
+    );
+    assert_eq!(value["tmux_guard"]["installed"], false);
+
+    let missing = run_guard_fixture(&home, &config, &bin, &["guard", "check", "--json"]);
+    assert_eq!(missing.status.code(), Some(1));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&missing.stdout).unwrap(),
+        json!({
+            "ok": false, "detail": "guard is not installed"
+        })
+    );
+
+    let guard = config.join("bin/herdr");
+    write_guard_fixture(&guard, "#!/bin/sh\n# dunkingsheep-herdr-guard\nexit 0\n");
+    let log = temp.path().join("python.log");
+    write_guard_fixture(
+        &bin.join("python3"),
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" > '{}'\necho 'no pane matches'\n",
+            log.display()
+        ),
+    );
+    let checked = run_guard_fixture(&home, &config, &bin, &["guard", "check", "--json"]);
+    assert!(
+        checked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&checked.stderr)
+    );
+    let value: Value = serde_json::from_slice(&checked.stdout).unwrap();
+    assert_eq!(value["ok"], true);
+    assert_eq!(
+        std::fs::read_to_string(log).unwrap().trim(),
+        format!("{} pane run no-such-pane-xyz echo hi", guard.display())
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_route_guard_actions_2() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let config = temp.path().join("config");
+    let bin = temp.path().join("fake-bin");
+    std::fs::create_dir_all(&home).unwrap();
+    write_guard_fixture(&bin.join("herdr"), "#!/bin/sh\necho real-herdr\n");
+    std::fs::write(
+        home.join(".bashrc"),
+        format!(
+            "before\n# dunkingsheep herdr guard\nexport PATH=\"{}:$PATH\"\nafter\n",
+            config.join("bin").display()
+        ),
+    )
+    .unwrap();
+
+    let shadowed = run_guard_fixture(&home, &config, &bin, &["guard", "shadow", "--json"]);
+    assert!(
+        shadowed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&shadowed.stderr)
+    );
+    let shadowed: Value = serde_json::from_slice(&shadowed.stdout).unwrap();
+    assert_eq!(shadowed["shadowed"], true);
+    assert_eq!(shadowed["shadowing_herdr"], true);
+    assert!(config.join("bin/herdr-real").exists());
+    assert!(std::fs::read_to_string(bin.join("herdr"))
+        .unwrap()
+        .contains("dunkingsheep-herdr-guard"));
+
+    let unshadowed = run_guard_fixture(&home, &config, &bin, &["guard", "unshadow", "--json"]);
+    assert!(
+        unshadowed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&unshadowed.stderr)
+    );
+    let unshadowed: Value = serde_json::from_slice(&unshadowed.stdout).unwrap();
+    assert_eq!(unshadowed["restored"], true);
+    assert_eq!(unshadowed["shadowing_herdr"], false);
+    assert_eq!(
+        std::fs::read_to_string(bin.join("herdr")).unwrap(),
+        "#!/bin/sh\necho real-herdr\n"
+    );
+
+    let removed = run_guard_fixture(&home, &config, &bin, &["guard", "uninstall", "--json"]);
+    assert!(
+        removed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    let removed: Value = serde_json::from_slice(&removed.stdout).unwrap();
+    assert_eq!(removed["wrapper_removed"], true);
+    assert_eq!(removed["bashrc_cleaned"], true);
+    assert!(!config.join("bin/herdr").exists());
+    assert_eq!(
+        std::fs::read_to_string(home.join(".bashrc")).unwrap(),
+        "before\nafter\n"
+    );
 }
