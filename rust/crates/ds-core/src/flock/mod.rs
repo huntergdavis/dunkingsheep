@@ -774,6 +774,7 @@ fn truthy(value: &Value) -> bool {
 }
 
 pub mod agent_verify;
+pub mod clear_box;
 pub mod commands_inbox;
 pub mod commands_layout;
 pub mod commands_owner_views;
@@ -804,6 +805,8 @@ pub mod status_runtime;
 pub mod task_wire;
 pub mod views;
 
+#[cfg(test)]
+mod clear_box_tests;
 #[cfg(test)]
 mod commands_inbox_tests;
 #[cfg(test)]
