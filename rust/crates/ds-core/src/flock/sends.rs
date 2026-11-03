@@ -851,6 +851,62 @@ const REMEMBERED_SENDS: usize = 4;
 
 /// Hold detail shared with Python's `BOX_HOLD` contract.
 pub const BOX_HOLD: &str = "the box would not clear (text left untouched)";
+#[allow(dead_code)] // Used by the dependent outbox worker's delivery entry point.
+const HOLD_BACKOFF_BASE_S: f64 = 5.0;
+#[allow(dead_code)] // Used by the dependent outbox worker's delivery entry point.
+const HOLD_BACKOFF_CAP_S: f64 = 300.0;
+#[allow(dead_code)] // Used by the dependent outbox worker's delivery entry point.
+const HOLD_ATTEMPT_LIMIT: i64 = 10;
+
+#[allow(dead_code)] // Used by the dependent outbox worker's delivery entry point.
+fn hold_backoff_s(attempts: i64) -> f64 {
+    (HOLD_BACKOFF_BASE_S * 2_f64.powi(attempts.saturating_sub(1).max(0) as i32))
+        .min(HOLD_BACKOFF_CAP_S)
+}
+
+pub type HoldSignature = (String, String);
+
+pub(super) fn hold_signature(flock: &Flock, env: &dyn SendEnv, pane_id: &str) -> HoldSignature {
+    let Some(screen) = env.read_pane(pane_id, CONSUMPTION_READ_LINES, true) else {
+        return ("gone".into(), String::new());
+    };
+    if modal_open(&screen) {
+        let modal = collapse(&strip_ansi(&screen));
+        let start = modal
+            .char_indices()
+            .nth(modal.chars().count().saturating_sub(4000))
+            .map(|(index, _)| index)
+            .unwrap_or(0);
+        return ("modal".into(), modal[start..].to_owned());
+    }
+    if let Some(text) = federated_composer(env.federated_input(), &screen) {
+        return ("box".into(), text);
+    }
+    let (text, detail) = box_text(&screen);
+    if detail.starts_with(AMBIGUOUS_COMPOSER) {
+        let known = flock.known_send_texts(pane_id);
+        if let Some(region) = owned_composer_region(flock, pane_id, &screen, &known) {
+            return ("box".into(), region);
+        }
+        return ("gone".into(), String::new());
+    }
+    match typed_text(&screen) {
+        Some(_) => ("box".into(), text),
+        None => ("gone".into(), String::new()),
+    }
+}
+
+/// Result of one idempotent outbox delivery transition.
+#[allow(dead_code)] // Consumed by the dependent outbox worker/runtime integration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DeliveryOutcome {
+    Sent,
+    Failed,
+    Held,
+    Undeliverable,
+    AlreadyDecided,
+    Missing,
+}
 
 /// Terminal services used by the bounded send preparation path. Composer ownership comes from
 /// the flock's recent-send history and queued outbox; a shape match alone never authorizes a key.
@@ -1003,8 +1059,7 @@ pub fn ensure_box_clear(
 }
 
 /// Type text and perform its initial submit key under one typing guard. The returned action owns
-/// the later confirmation; call [`confirm_send_action`] only after dropping the guard. The attempt
-/// baseline and generation are captured before the first terminal write.
+/// the later confirmation; call [`confirm_send_action`] only after dropping the guard.
 pub fn submit_text(
     flock: &Flock,
     env: &mut dyn SendPreparationEnv,
@@ -1014,6 +1069,43 @@ pub fn submit_text(
     check_box: bool,
     guard: Option<&TypingGuard<'_>>,
 ) -> SendAction {
+    submit_text_with_options(
+        flock,
+        env,
+        pane_id,
+        text,
+        SubmitOptions {
+            press_enter,
+            check_box,
+            attempt_generation: AttemptGeneration::Capture,
+        },
+        guard,
+    )
+}
+
+#[derive(Clone, Copy)]
+struct SubmitOptions<'a> {
+    press_enter: bool,
+    check_box: bool,
+    attempt_generation: AttemptGeneration<'a>,
+}
+
+#[derive(Clone, Copy)]
+enum AttemptGeneration<'a> {
+    Capture,
+    Captured(Option<&'a str>),
+}
+
+/// Delivery passes its pre-guard generation snapshot so a pane replacement during preflight
+/// cannot transfer receipt authority to the replacement pane.
+fn submit_text_with_options(
+    flock: &Flock,
+    env: &mut dyn SendPreparationEnv,
+    pane_id: &str,
+    text: &str,
+    options: SubmitOptions<'_>,
+    guard: Option<&TypingGuard<'_>>,
+) -> SendAction {
     let guarded = guard.is_some();
     let mut perform = |guard: &TypingGuard<'_>| {
         if let Some(dead) = dead_session(env, pane_id) {
@@ -1021,14 +1113,17 @@ pub fn submit_text(
                 "agent session is dead ({dead}); not submitting into a dead composer"
             ));
         }
-        if check_box {
+        if options.check_box {
             match ensure_box_clear(flock, env, pane_id, false, false, false, guard) {
                 Ok(()) => {}
                 Err(reason) => return Err(format!("{BOX_HOLD} ({reason})")),
             }
         }
         let baseline = env.read_status(pane_id);
-        let generation = env.attempt_generation(pane_id);
+        let generation = match options.attempt_generation {
+            AttemptGeneration::Capture => env.attempt_generation(pane_id),
+            AttemptGeneration::Captured(generation) => generation.map(str::to_owned),
+        };
         let before = env
             .read_pane(pane_id, CONSUMPTION_READ_LINES, true)
             .unwrap_or_default();
@@ -1050,10 +1145,10 @@ pub fn submit_text(
             return Err(detail);
         }
         flock.remember_typed(pane_id, text);
-        if !env.persist_typed_attempt(pane_id, text, press_enter, generation.as_deref()) {
+        if !env.persist_typed_attempt(pane_id, text, options.press_enter, generation.as_deref()) {
             return Err("typed but not submitted: durable attempt receipt failed".into());
         }
-        if !press_enter {
+        if !options.press_enter {
             return Ok(SendAction::completed(true, "sent"));
         }
         let (ok, detail, _key) = send_submit_key(env, pane_id, "Enter", busy_hint);
@@ -1175,27 +1270,41 @@ pub fn send_guarded(
     env: &mut dyn SendPreparationEnv,
     pane_id: &str,
     options: SendGuardOptions,
-    mut permission: impl FnMut() -> Option<String>,
+    permission: impl FnMut() -> Option<String>,
     action: impl FnOnce(&mut dyn SendPreparationEnv, &TypingGuard<'_>) -> Result<SendAction, String>,
 ) -> (bool, Option<bool>, String) {
+    let (sent, ok, detail, _) =
+        send_guarded_with_reason(flock, env, pane_id, options, permission, action);
+    (sent, ok, detail)
+}
+
+fn send_guarded_with_reason(
+    flock: &Flock,
+    env: &mut dyn SendPreparationEnv,
+    pane_id: &str,
+    options: SendGuardOptions,
+    mut permission: impl FnMut() -> Option<String>,
+    action: impl FnOnce(&mut dyn SendPreparationEnv, &TypingGuard<'_>) -> Result<SendAction, String>,
+) -> (bool, Option<bool>, String, Option<String>) {
     let pane_lock = flock.send_lock_for(pane_id);
     let _pane_guard = lock_unpoison(&pane_lock);
     let typing_guard = match flock.typing_guard(pane_id) {
         Ok(guard) => guard,
-        Err(error) => return (false, None, error.to_string()),
+        Err(error) => return (false, None, error.to_string(), None),
     };
     if let Some(detail) = permission() {
-        return (false, None, detail);
+        return (false, None, detail, None);
     }
     if options.hold_while_typing {
         if let Some(marker) = dead_session(env, pane_id) {
-            return (false, None, format!("dead session ({marker})"));
+            return (false, None, format!("dead session ({marker})"), None);
         }
         if env.session_process_gone(pane_id) {
             return (
                 false,
                 None,
                 "the lane's recorded process is gone".to_string(),
+                None,
             );
         }
         match ensure_box_clear(
@@ -1208,21 +1317,34 @@ pub fn send_guarded(
             &typing_guard,
         ) {
             Ok(()) => {}
-            Err(reason) => return (false, None, format!("{BOX_HOLD} ({reason})")),
+            Err(reason) => {
+                return (
+                    false,
+                    None,
+                    format!("{BOX_HOLD} ({reason})"),
+                    Some(reason.to_string()),
+                )
+            }
         }
     }
     let result = action(env, &typing_guard);
     drop(typing_guard);
     match result {
         Ok(action) if !action.ok && action.detail.starts_with(BOX_HOLD) => {
-            (false, None, action.detail)
+            let reason = action
+                .detail
+                .strip_prefix(BOX_HOLD)
+                .and_then(|suffix| suffix.strip_prefix(" ("))
+                .and_then(|suffix| suffix.strip_suffix(')'))
+                .map(str::to_owned);
+            (false, None, action.detail, reason)
         }
         Ok(mut action) => {
             // Keep the per-pane lock across confirmation, but release the global typing lock.
             confirm_send_action(env, &mut action);
-            (true, Some(action.ok), action.detail)
+            (true, Some(action.ok), action.detail, None)
         }
-        Err(detail) => (true, Some(false), detail),
+        Err(detail) => (true, Some(false), detail, None),
     }
 }
 
@@ -2128,6 +2250,7 @@ pub struct Message {
     pub holds: i64,
     pub next_attempt_at: Option<f64>,
     pub hold_signature: Option<String>,
+    pub hold_signature_kind: Option<String>,
     pub created_at: f64,
     pub finished_at: Option<f64>,
     /// Completion event shared by clones and deliberately omitted from the wire form.
@@ -2156,6 +2279,7 @@ impl Message {
             holds: 0,
             next_attempt_at: None,
             hold_signature: None,
+            hold_signature_kind: None,
             created_at: clock::now_s(),
             finished_at: None,
             done: Arc::new(CompletionWaiter::default()),
@@ -2610,7 +2734,9 @@ pub(crate) fn message_snapshot(message: &Message) -> Value {
         "detail": message.detail,
         "holds": message.holds,
         "next_attempt_at": message.next_attempt_at,
-        "hold_signature": message.hold_signature,
+        "hold_signature": message.hold_signature.as_ref().map(|text| {
+            json!([message.hold_signature_kind.as_deref().unwrap_or("box"), text])
+        }),
         "created_at": message.created_at,
         "finished_at": message.finished_at,
         "typed_at": message.typed_at,
@@ -2621,6 +2747,15 @@ pub(crate) fn message_from_snapshot(value: &Value) -> Option<Message> {
     let row = value.as_object()?;
     let field = |key: &str| row.get(key);
     let string = |key: &str| field(key).and_then(Value::as_str).map(str::to_owned);
+    let hold_signature = || match field("hold_signature")? {
+        Value::Array(parts) if parts.len() == 2 => {
+            Some((parts[0].as_str()?.to_owned(), parts[1].as_str()?.to_owned()))
+        }
+        // Older Rust snapshots stored only the box text. Keep that text comparable as a box
+        // signature so upgrading does not discard an existing held-message backoff.
+        Value::String(text) => Some(("box".to_owned(), text.clone())),
+        _ => None,
+    };
     let id = string("id")?;
     let pane_id = string("pane_id")?;
     let target_label = string("target_label").unwrap_or_else(|| pane_id.clone());
@@ -2652,7 +2787,10 @@ pub(crate) fn message_from_snapshot(value: &Value) -> Option<Message> {
     message.detail = string("detail");
     message.holds = field("holds").and_then(Value::as_i64).unwrap_or(0);
     message.next_attempt_at = field("next_attempt_at").and_then(Value::as_f64);
-    message.hold_signature = string("hold_signature");
+    if let Some((kind, text)) = hold_signature() {
+        message.hold_signature_kind = Some(kind);
+        message.hold_signature = Some(text);
+    }
     message.created_at = field("created_at")
         .and_then(Value::as_f64)
         .unwrap_or(message.created_at);
@@ -2715,6 +2853,219 @@ pub(crate) fn outbox_lock(
 }
 
 impl Flock {
+    /// Deliver one queued message, persisting every hold and decided transition.
+    /// The outbox lock protects only state selection and mutation; terminal I/O always runs
+    /// after it has been released.
+    #[allow(dead_code)] // The dependent outbox worker/runtime wires this bounded delivery edge.
+    pub(crate) fn deliver_message(
+        &self,
+        message_id: &str,
+        now: f64,
+        env: &mut dyn SendPreparationEnv,
+        permission: impl FnMut() -> Option<String>,
+    ) -> DeliveryOutcome {
+        let mut message = {
+            let mut outbox = outbox_lock(&self.outbox);
+            let Some(message) = outbox
+                .values_mut()
+                .flat_map(|queue| queue.iter_mut())
+                .find(|message| message.id == message_id)
+            else {
+                return if self
+                    .decided
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .by_id
+                    .contains_key(message_id)
+                {
+                    DeliveryOutcome::AlreadyDecided
+                } else {
+                    DeliveryOutcome::Missing
+                };
+            };
+            if message.status == "cancelled" || message.status != "queued" {
+                return DeliveryOutcome::AlreadyDecided;
+            }
+            message.clone()
+        };
+
+        if message.attempt_generation.is_none() {
+            // Capture identity before any terminal action, without holding the queue mutex.
+            message.attempt_generation = env.attempt_generation(&message.pane_id);
+            let mut outbox = outbox_lock(&self.outbox);
+            if let Some(stored) = outbox
+                .get_mut(&message.pane_id)
+                .and_then(|queue| queue.iter_mut().find(|row| row.id == message_id))
+            {
+                if stored.attempt_generation.is_none() {
+                    stored.attempt_generation = message.attempt_generation.clone();
+                }
+                message.attempt_generation = stored.attempt_generation.clone();
+            }
+        }
+
+        let pane_id = message.pane_id.clone();
+        let options = SendGuardOptions {
+            hold_while_typing: message.hold_while_typing,
+            allow_modal: message.kind == "keys",
+            preserve_draft: false,
+        };
+        let (sent, ok, detail, blocker_reason) =
+            send_guarded_with_reason(self, env, &pane_id, options, permission, |env, guard| {
+                if message.kind == "keys" {
+                    let keys: Vec<String> =
+                        message.text.split_whitespace().map(str::to_owned).collect();
+                    Ok(press_keys(env, &pane_id, &keys, guard))
+                } else {
+                    Ok(submit_text_with_options(
+                        self,
+                        env,
+                        &pane_id,
+                        &message.text,
+                        SubmitOptions {
+                            press_enter: message.press_enter,
+                            check_box: false,
+                            attempt_generation: AttemptGeneration::Captured(
+                                message.attempt_generation.as_deref(),
+                            ),
+                        },
+                        Some(guard),
+                    ))
+                }
+            });
+
+        if !sent {
+            let terminal;
+            let attempts;
+            let last_reason = blocker_reason.as_deref().unwrap_or("unknown");
+            let hold_signature = hold_signature(self, env, &pane_id);
+            {
+                let mut outbox = outbox_lock(&self.outbox);
+                let Some(queue) = outbox.get_mut(&pane_id) else {
+                    return DeliveryOutcome::Missing;
+                };
+                let Some(stored) = queue.iter_mut().find(|row| row.id == message_id) else {
+                    return DeliveryOutcome::Missing;
+                };
+                stored.holds = stored.holds.saturating_add(1);
+                attempts = stored.holds.min(HOLD_ATTEMPT_LIMIT);
+                terminal = stored.holds >= HOLD_ATTEMPT_LIMIT;
+                if terminal {
+                    stored.status = "undeliverable".into();
+                    stored.detail = Some(format!(
+                        "undeliverable after {attempts} refused attempts (last reason: {}); not retried again",
+                        last_reason
+                    ));
+                    stored.finished_at = Some(clock::now_s());
+                } else {
+                    let delay = hold_backoff_s(attempts);
+                    stored.next_attempt_at = Some(now + delay);
+                    stored.hold_signature_kind = Some(hold_signature.0);
+                    stored.hold_signature = Some(hold_signature.1);
+                    stored.detail = Some(if detail.is_empty() { "held" } else { &detail }.into());
+                }
+                message = stored.clone();
+                let empty = if terminal {
+                    queue.retain(|row| row.id != message_id);
+                    queue.is_empty()
+                } else {
+                    false
+                };
+                if empty {
+                    outbox.remove(&pane_id);
+                }
+            }
+            if let Some(metrics) = self.stores().metrics {
+                metrics.record(&crate::metrics::Event {
+                    at: 0.0,
+                    kind: "message.held".into(),
+                    pane_id: Some(message.pane_id.clone()),
+                    mailbox: Some(message.target_label.clone()),
+                    sender: None,
+                    source: Some(message.source.clone()),
+                    outcome: Some("held".into()),
+                    reason: blocker_reason.clone(),
+                    duration_ms: None,
+                    attempts: Some(attempts),
+                    bytes: Some(message.text.len() as i64),
+                });
+            }
+            if terminal {
+                message.detail = Some(format!(
+                    "undeliverable after {attempts} refused attempts (last reason: {}); not retried again",
+                    last_reason
+                ));
+                if let Some(metrics) = self.stores().metrics {
+                    metrics.record(&crate::metrics::Event {
+                        at: 0.0,
+                        kind: "message.undeliverable".into(),
+                        pane_id: Some(message.pane_id.clone()),
+                        mailbox: Some(message.target_label.clone()),
+                        sender: None,
+                        source: Some(message.source.clone()),
+                        outcome: Some("undeliverable".into()),
+                        reason: blocker_reason.clone(),
+                        duration_ms: None,
+                        attempts: Some(attempts),
+                        bytes: Some(message.text.len() as i64),
+                    });
+                }
+                self.remember(&message);
+                let _ = self.save();
+                self.record_delivery_outcome(
+                    &message,
+                    false,
+                    message.detail.as_deref(),
+                    "undeliverable",
+                    None,
+                );
+                DeliveryOutcome::Undeliverable
+            } else {
+                let _ = self.save();
+                DeliveryOutcome::Held
+            }
+        } else {
+            message.status = if ok.unwrap_or(false) {
+                "sent"
+            } else {
+                "failed"
+            }
+            .into();
+            message.detail = Some(detail.clone());
+            message.finished_at = Some(clock::now_s());
+            self.set_last_message(if ok.unwrap_or(false) {
+                format!("Sent to {}", message.target_label)
+            } else {
+                format!("Send failed: {detail}")
+            });
+            {
+                let mut outbox = outbox_lock(&self.outbox);
+                let Some(queue) = outbox.get_mut(&pane_id) else {
+                    return DeliveryOutcome::Missing;
+                };
+                queue.retain(|row| row.id != message_id);
+                if queue.is_empty() {
+                    outbox.remove(&pane_id);
+                }
+            }
+            self.remember(&message);
+            let _ = self.save();
+            let succeeded = ok.unwrap_or(false);
+            self.record_delivery_outcome(
+                &message,
+                succeeded,
+                Some(&detail),
+                if succeeded { "ok" } else { "failed" },
+                Some("message.sent"),
+            );
+            if succeeded {
+                DeliveryOutcome::Sent
+            } else {
+                DeliveryOutcome::Failed
+            }
+        }
+    }
+
     /// `_record_delivery_outcome`: record terminal metrics/receipts once and always release
     /// the message waiter. Store failures are best-effort bookkeeping, never worker failures.
     #[allow(dead_code)] // Called by a dependent T33 outbox integration slice.

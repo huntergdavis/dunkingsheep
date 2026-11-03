@@ -26,6 +26,7 @@ struct Pane {
     on_read: RefCell<Option<Box<dyn FnMut()>>>,
     screen_script: RefCell<VecDeque<Option<String>>>,
     status_script: RefCell<VecDeque<Option<String>>>,
+    attempt_generation_script: RefCell<VecDeque<Option<String>>>,
     now: f64,
     sleeps: Vec<f64>,
     remembered: BTreeMap<String, String>,
@@ -170,6 +171,9 @@ impl SendPreparationEnv for Pane {
     }
 
     fn attempt_generation(&self, pane_id: &str) -> Option<String> {
+        if let Some(generation) = self.attempt_generation_script.borrow_mut().pop_front() {
+            return generation;
+        }
         pane_generation(self, pane_id)
     }
 
@@ -2104,6 +2108,353 @@ fn record_delivery_outcome_records_metrics_receipts_and_waiters_once() {
         .unwrap();
     assert_eq!("message.failed", failed.kind);
     assert_eq!(Some("timeout".into()), failed.reason);
+}
+
+#[test]
+fn deliver_message_persists_hold_backoff_and_keeps_original_refusal() {
+    let dir = tempfile::tempdir().unwrap();
+    let state_path = dir.path().join("state.json");
+    let flock = Flock::new(dir.path().join("launches.json"), dir.path(), true);
+    flock
+        .attach_status_state(super::status_runtime::StatusState::at_start(
+            "test",
+            &state_path,
+            std::env::current_exe().unwrap(),
+            crate::config::Env::default(),
+        ))
+        .unwrap();
+    let mut message = Message::new("m-hold", P, "pane", "hello", "test");
+    message.hold_while_typing = false;
+    flock.outbox.lock().unwrap().insert(P.into(), vec![message]);
+    let mut pane = Pane::default();
+    pane.screens
+        .insert(P.into(), submit_pending_screen("human draft"));
+
+    assert_eq!(
+        DeliveryOutcome::Held,
+        flock.deliver_message("m-hold", 100.0, &mut pane, || Some("disabled".into()))
+    );
+    let queue = flock.outbox_snapshot();
+    let held = &queue[P][0];
+    assert_eq!("queued", held.status);
+    assert_eq!(Some("disabled".into()), held.detail);
+    assert_eq!(Some(105.0), held.next_attempt_at);
+    assert_eq!(1, held.holds);
+    assert_eq!(Some("human draft".into()), held.hold_signature);
+    assert_eq!(Some("box".into()), held.hold_signature_kind);
+    assert!(!held.done.is_set());
+
+    let snapshot: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+    assert_eq!(1, snapshot["outbox"][0]["holds"]);
+    assert_eq!(105.0, snapshot["outbox"][0]["next_attempt_at"]);
+    assert_eq!(
+        serde_json::json!(["box", "human draft"]),
+        snapshot["outbox"][0]["hold_signature"]
+    );
+    let restored = Flock::new(dir.path().join("restored-launches.json"), dir.path(), false);
+    restored.restore_snapshot(&snapshot);
+    let restored_outbox = restored.outbox_snapshot();
+    let restored_message = &restored_outbox[P][0];
+    assert_eq!(1, restored_message.holds);
+    assert_eq!(Some(105.0), restored_message.next_attempt_at);
+    assert_eq!(
+        Some("human draft"),
+        restored_message.hold_signature.as_deref()
+    );
+    assert_eq!(Some("box"), restored_message.hold_signature_kind.as_deref());
+}
+
+#[test]
+fn deliver_message_uses_normalized_block_reason_for_hold_metrics_and_terminal_detail() {
+    use crate::flock::panes::Stores;
+    use crate::metrics::MetricsStore;
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let metrics = Arc::new(MetricsStore::open(":memory:").unwrap());
+    let flock = Flock::new(dir.path().join("launches.json"), dir.path(), false);
+    flock.attach_stores(Stores {
+        metrics: Some(metrics.clone()),
+        ..Stores::default()
+    });
+    flock.outbox.lock().unwrap().insert(
+        P.into(),
+        vec![Message::new("m-dialog", P, "pane", "hello", "test")],
+    );
+    let mut pane = Pane::default();
+    pane.screens.insert(P.into(), submit_modal_screen());
+
+    for attempt in 0..10 {
+        let outcome = flock.deliver_message("m-dialog", 100.0 + attempt as f64, &mut pane, || None);
+        assert_eq!(
+            if attempt == 9 {
+                DeliveryOutcome::Undeliverable
+            } else {
+                DeliveryOutcome::Held
+            },
+            outcome
+        );
+        if attempt == 0 {
+            let held = &flock.outbox_snapshot()[P][0];
+            assert_eq!(
+                Some(format!("{BOX_HOLD} (dialog)").as_str()),
+                held.detail.as_deref()
+            );
+        }
+    }
+
+    let history = flock.message_history.lock().unwrap();
+    let terminal = history
+        .iter()
+        .find(|message| message.id == "m-dialog")
+        .unwrap();
+    assert_eq!(
+        Some("undeliverable after 10 refused attempts (last reason: dialog); not retried again"),
+        terminal.detail.as_deref()
+    );
+    drop(history);
+
+    let events = metrics
+        .events_between(0.0, crate::clock::now_s() + 1.0)
+        .unwrap();
+    let held_events: Vec<_> = events
+        .iter()
+        .filter(|event| event.kind == "message.held")
+        .collect();
+    assert_eq!(10, held_events.len());
+    assert!(held_events
+        .iter()
+        .all(|event| event.reason.as_deref() == Some("dialog")));
+    let terminal_event = events
+        .iter()
+        .find(|event| event.kind == "message.undeliverable")
+        .unwrap();
+    assert_eq!(Some("dialog"), terminal_event.reason.as_deref());
+}
+
+#[test]
+fn deliver_message_does_not_use_permission_or_dead_session_detail_as_block_reason() {
+    use crate::flock::panes::Stores;
+    use crate::metrics::MetricsStore;
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let metrics = Arc::new(MetricsStore::open(":memory:").unwrap());
+    let flock = Flock::new(dir.path().join("launches.json"), dir.path(), false);
+    flock.attach_stores(Stores {
+        metrics: Some(metrics.clone()),
+        ..Stores::default()
+    });
+    let mut pane = Pane::default();
+
+    for (id, dead, permission_detail) in [
+        ("m-permission", false, Some("disabled")),
+        ("m-dead", true, None),
+    ] {
+        pane.gone = dead;
+        let mut message = Message::new(id, P, "pane", "hello", "test");
+        if permission_detail.is_some() {
+            message.hold_while_typing = false;
+        }
+        flock.outbox.lock().unwrap().insert(P.into(), vec![message]);
+
+        for attempt in 0..10 {
+            let outcome = flock.deliver_message(id, 100.0 + attempt as f64, &mut pane, || {
+                permission_detail.map(str::to_owned)
+            });
+            assert_eq!(
+                if attempt == 9 {
+                    DeliveryOutcome::Undeliverable
+                } else {
+                    DeliveryOutcome::Held
+                },
+                outcome
+            );
+            if attempt == 0 {
+                let held = &flock.outbox_snapshot()[P][0];
+                let expected_detail = permission_detail
+                    .or_else(|| dead.then_some("the lane's recorded process is gone"));
+                assert_eq!(expected_detail, held.detail.as_deref());
+            }
+        }
+    }
+
+    let history = flock.message_history.lock().unwrap();
+    for id in ["m-permission", "m-dead"] {
+        let terminal = history.iter().find(|message| message.id == id).unwrap();
+        assert_eq!(
+            Some(
+                "undeliverable after 10 refused attempts (last reason: unknown); not retried again"
+            ),
+            terminal.detail.as_deref()
+        );
+    }
+    drop(history);
+
+    let events = metrics
+        .events_between(0.0, crate::clock::now_s() + 1.0)
+        .unwrap();
+    assert!(events
+        .iter()
+        .filter(|event| event.kind == "message.held" || event.kind == "message.undeliverable")
+        .all(|event| event.reason.is_none()));
+}
+
+#[test]
+fn python_hold_signature_list_survives_restore_and_resnapshot() {
+    let python_row = serde_json::json!({
+        "id": "m-held",
+        "pane_id": P,
+        "target_label": "worker",
+        "text": "held text",
+        "source": "test",
+        "hold_signature": ["modal", "Press Enter to confirm"],
+        "holds": 2,
+        "next_attempt_at": 80.0
+    });
+
+    let message = message_from_snapshot(&python_row).unwrap();
+    assert_eq!(Some("modal"), message.hold_signature_kind.as_deref());
+    assert_eq!(
+        Some("Press Enter to confirm"),
+        message.hold_signature.as_deref()
+    );
+    assert_eq!(
+        serde_json::json!(["modal", "Press Enter to confirm"]),
+        message_snapshot(&message)["hold_signature"]
+    );
+}
+
+#[test]
+fn hold_signature_preserves_modal_kind_and_collapsed_screen_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Flock::new(dir.path().join("launches.json"), dir.path(), false);
+    let mut pane = Pane::default();
+    pane.screens.insert(
+        P.into(),
+        "Select Model and Effort\n  enter   select · esc back\n".into(),
+    );
+
+    assert_eq!(
+        (
+            "modal".to_owned(),
+            "Select Model and Effort enter select · esc back".to_owned()
+        ),
+        hold_signature(&flock, &pane, P)
+    );
+}
+
+#[test]
+fn hold_signature_preserves_owned_ambiguous_composer_region() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Flock::new(dir.path().join("launches.json"), dir.path(), false);
+    let owned = "queued message owned by this flock";
+    flock
+        .sent_text_by_pane
+        .lock()
+        .unwrap()
+        .insert(P.into(), vec![owned.into()]);
+    let mut pane = Pane::default();
+    pane.screens
+        .insert(P.into(), format!("❯ {owned}\n\n\nstatus · ready\n"));
+
+    assert_eq!(
+        ("box".into(), owned.into()),
+        hold_signature(&flock, &pane, P)
+    );
+}
+
+#[test]
+fn deliver_message_exhaustion_removes_once_remembers_and_releases_waiter() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Flock::new(dir.path().join("launches.json"), dir.path(), false);
+    let mut message = Message::new("m-exhausted", P, "pane", "hello", "test");
+    message.hold_while_typing = false;
+    let waiter = message.done.clone();
+    flock.outbox.lock().unwrap().insert(P.into(), vec![message]);
+    let mut pane = Pane::default();
+
+    const HOLD_LIMIT: i64 = 10;
+    for attempt in 0..HOLD_LIMIT {
+        let result =
+            flock.deliver_message("m-exhausted", 100.0 + attempt as f64, &mut pane, || {
+                Some("disabled".into())
+            });
+        assert_eq!(
+            if attempt + 1 == HOLD_LIMIT {
+                DeliveryOutcome::Undeliverable
+            } else {
+                DeliveryOutcome::Held
+            },
+            result
+        );
+    }
+
+    assert!(flock.outbox_snapshot().is_empty());
+    assert!(waiter.is_set());
+    assert_eq!(
+        Some("undeliverable"),
+        flock
+            .decided
+            .lock()
+            .unwrap()
+            .by_id
+            .get("m-exhausted")
+            .map(|row| row.status.as_str())
+    );
+    assert_eq!(
+        DeliveryOutcome::AlreadyDecided,
+        flock.deliver_message("m-exhausted", 200.0, &mut pane, || None)
+    );
+}
+
+#[test]
+fn deliver_message_terminal_action_failure_is_not_retried() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Flock::new(dir.path().join("launches.json"), dir.path(), false);
+    let mut message = Message::new("m-failed", P, "pane", "hello", "test");
+    message.hold_while_typing = false;
+    let waiter = message.done.clone();
+    flock.outbox.lock().unwrap().insert(P.into(), vec![message]);
+    let mut pane = Pane {
+        receipt_ok: false,
+        ..Pane::default()
+    };
+    pane.panes = vec![serde_json::json!({
+        "pane_id": P,
+        "pane_pid": std::process::id(),
+    })];
+    pane.attempt_generation_script.borrow_mut().extend([
+        Some("pid:123:start:captured".into()),
+        Some("pid:456:start:replacement".into()),
+    ]);
+
+    assert_eq!(
+        DeliveryOutcome::Failed,
+        flock.deliver_message("m-failed", 100.0, &mut pane, || None)
+    );
+    assert_eq!(1, pane.typed.len());
+    assert_eq!(
+        Some("pid:123:start:captured".into()),
+        pane.typed_attempts[0].3
+    );
+    assert_eq!(
+        Some("pid:456:start:replacement".into()),
+        pane.attempt_generation_script
+            .borrow()
+            .front()
+            .cloned()
+            .flatten(),
+        "submit_text must not reread the generation after delivery captured it"
+    );
+    assert!(waiter.is_set());
+    assert!(flock.outbox_snapshot().is_empty());
+    assert_eq!(
+        DeliveryOutcome::AlreadyDecided,
+        flock.deliver_message("m-failed", 200.0, &mut pane, || None)
+    );
+    assert_eq!(1, pane.typed.len());
 }
 
 #[test]
