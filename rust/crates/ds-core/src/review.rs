@@ -2040,7 +2040,7 @@ where
         };
         let task_repo = task.get("repo").cloned().unwrap_or(Value::Null);
         let task_pr = task.get("pr").cloned().unwrap_or(Value::Null);
-        if task_repo != Value::String(repo.to_string()) || task_pr != Value::from(number) {
+        if task_repo.as_str() != Some(repo) || task_pr.as_i64() != Some(number) {
             append_report(
                 report,
                 "errors",

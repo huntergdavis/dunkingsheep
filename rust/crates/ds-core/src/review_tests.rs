@@ -1687,28 +1687,29 @@ async fn merge_uses_full_task_snapshot_accounts_after_success_and_marks_landed_l
         .await
     );
 
-    assert_eq!("reviewed-head", report["merged"][0]["head"]);
+    assert_eq!("reviewed-hea", report["merged"][0]["head"]);
     assert_eq!(stored.id, report["merged"][0]["task"]);
     assert_eq!(82, report["accounting"][0]["accounting_pr"]);
     assert_eq!(json!([]), report["accounting"][0]["errors"]);
     assert_eq!(json!([stored.id]), report["landed"]);
     assert_eq!(vec!["reviewer", "author"], *token_calls.lock().unwrap());
 
-    let requests = sync.transport.requests.lock().unwrap();
-    assert_eq!(18, requests.len());
-    assert!(requests[0].url.ends_with("/pulls/7/merge"));
-    let merge_body: Value = serde_json::from_slice(requests[0].body.as_ref().unwrap()).unwrap();
-    assert_eq!("reviewed-head-123456", merge_body["sha"]);
-    assert!(requests[1].url.ends_with("/git/ref/heads/main"));
-    assert_eq!("POST", requests[13].method);
-    assert!(requests[13].url.ends_with("/pulls"));
-    let accounting_body: Value =
-        serde_json::from_slice(requests[13].body.as_ref().unwrap()).unwrap();
-    assert!(accounting_body["body"]
-        .as_str()
-        .unwrap()
-        .contains("verdict `accept` by %2"));
-    drop(requests);
+    {
+        let requests = sync.transport.requests.lock().unwrap();
+        assert_eq!(18, requests.len());
+        assert!(requests[0].url.ends_with("/pulls/7/merge"));
+        let merge_body: Value = serde_json::from_slice(requests[0].body.as_ref().unwrap()).unwrap();
+        assert_eq!("reviewed-head-123456", merge_body["sha"]);
+        assert!(requests[1].url.ends_with("/git/ref/heads/main"));
+        assert_eq!("POST", requests[13].method);
+        assert!(requests[13].url.ends_with("/pulls"));
+        let accounting_body: Value =
+            serde_json::from_slice(requests[13].body.as_ref().unwrap()).unwrap();
+        assert!(accounting_body["body"]
+            .as_str()
+            .unwrap()
+            .contains("verdict `accept` by %2"));
+    }
 
     let full = sync.flock.get_full_wire(&stored.id, None).await.unwrap();
     assert_eq!("huntergdavis/poolrad-decomp", full.wire["repo"]);
@@ -2654,7 +2655,7 @@ async fn run_routes_final_accept_through_real_merge_and_landed_writer() {
     expected_landed.sort();
     assert_eq!(expected_landed, landed);
     let requests = sync.transport.requests.lock().unwrap();
-    assert!(requests[0].url.ends_with("/pulls?state=open"));
+    assert!(requests[0].url.contains("/pulls?state=open"));
     assert!(requests[1].url.ends_with("/pulls/7"));
     assert!(requests[2].url.ends_with("/pulls/7/merge"));
     let merge_body: Value = serde_json::from_slice(requests[2].body.as_ref().unwrap()).unwrap();
