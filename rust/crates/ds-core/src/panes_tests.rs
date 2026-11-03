@@ -229,6 +229,22 @@ fn a_live_pane_and_a_protected_name_stay_unresolved() {
 }
 
 #[test]
+fn casefolded_protected_names_stay_unresolved() {
+    let record = Retired {
+        pane_id: "wW:p4".into(),
+        reason: "superseded".into(),
+        by: None,
+        labels: vec!["STRASSE".into()],
+        mailboxes: vec![],
+        retired_at: 1_700_000_000.0,
+    };
+    let candidates = vec!["STRASSE".to_string()];
+    let protected = vec!["Straße".to_string()];
+    let selected = retired_mailboxes(&candidates, &[record], &[], &protected);
+    assert!(selected.is_empty(), "{selected:?}");
+}
+
+#[test]
 fn the_written_json_matches_the_pythons_bytes() {
     // Parity, measured rather than assumed: `json.dumps(data, indent=2,
     // sort_keys=True)` for the same record produces exactly this text (no trailing

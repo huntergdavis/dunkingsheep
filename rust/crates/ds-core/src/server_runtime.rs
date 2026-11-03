@@ -7,9 +7,13 @@
 mod delivery;
 mod inbox;
 mod push;
+mod inbox_metrics;
+mod inbox_stores;
+mod layout;
 mod status;
 mod submit;
 
+use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::sync::{Arc, Mutex};
 
@@ -19,6 +23,8 @@ use tokio::task::JoinHandle;
 
 use crate::error::{refusal, DunkError};
 use crate::flock::lanes::TerminalEnv;
+use crate::flock::loop_env::LoopFuture;
+use crate::flock::loops::ReaperEnv;
 use crate::flock::mailbox::MailboxEnv;
 use crate::flock::panes::PaneInfoEnv;
 use crate::flock::sends::SendEnv;
@@ -27,6 +33,8 @@ use crate::flock::Flock;
 use crate::server::RequestCtx;
 use crate::terminal::tmux::TmuxBackend;
 use crate::terminal::Terminal;
+
+mod reaper;
 
 /// A request-scoped adapter borrowed on the server's existing connection thread.
 ///
@@ -38,6 +46,7 @@ pub(crate) struct RequestRuntimeAdapter<'a> {
     terminal: TerminalCallAdapter<'a>,
     request: &'a RequestCtx,
     runtime: &'a Handle,
+    inbox: Option<Arc<crate::inbox_store::Store>>,
 }
 
 /// Terminal access shared by the request and loop adapters. A lock is held only while a
@@ -64,6 +73,7 @@ impl<'a> RequestRuntimeAdapter<'a> {
         runtime: &'a Handle,
         terminal: &'a Mutex<Box<dyn Terminal>>,
     ) -> Self {
+        let inbox = flock.stores().inbox;
         Self {
             terminal: TerminalCallAdapter {
                 flock,
@@ -72,6 +82,7 @@ impl<'a> RequestRuntimeAdapter<'a> {
             },
             request,
             runtime,
+            inbox,
         }
     }
 
@@ -305,6 +316,36 @@ impl LoopRuntimeAdapter {
             };
             call(&flock, &adapter)
         })
+    }
+}
+
+impl ReaperEnv for LoopRuntimeAdapter {
+    fn list_panes(&self) -> LoopFuture<'_, Result<Vec<Value>, DunkError>> {
+        self.helper_reaperenv_list_panes()
+    }
+
+    fn is_live(&self) -> bool {
+        self.helper_reaperenv_is_live()
+    }
+
+    fn clear_historical_errors<'a>(&'a self, panes: &'a BTreeSet<String>) -> LoopFuture<'a, ()> {
+        self.helper_reaperenv_clear_historical_errors(panes)
+    }
+
+    fn inbox_maintenance<'a>(
+        &'a self,
+        panes: &'a BTreeSet<String>,
+        pane_list: &'a [Value],
+    ) -> LoopFuture<'a, ()> {
+        self.helper_reaperenv_inbox_maintenance(panes, pane_list)
+    }
+
+    fn memory_maintenance(&self) -> LoopFuture<'_, ()> {
+        self.helper_reaperenv_memory_maintenance()
+    }
+
+    fn set_last_message(&self, message: &str) {
+        self.helper_reaperenv_set_last_message(message);
     }
 }
 

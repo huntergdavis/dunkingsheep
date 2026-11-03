@@ -1,9 +1,11 @@
 """GitHub Apps and the review timer (FLAT_FLEET.md 6), against a fake GitHub."""
 
+import io
 import os
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -15,7 +17,7 @@ import dunk_review  # noqa: E402
 from dunk_core import DunkError, Flock  # noqa: E402
 from dunk_inbox import Inbox  # noqa: E402
 from dunk_roles import Roles  # noqa: E402
-from dunk_tasks import Tasks  # noqa: E402
+from dunk_tasks import TaskError, Tasks  # noqa: E402
 from fakes import FakeHerdr  # noqa: E402
 
 OWNER, WORKER, REVIEWER = "w1:p2", "w2:p3", "w2:p1"
@@ -286,6 +288,7 @@ class TimerTests(unittest.TestCase):
     def test_a_closed_pr_cancels_its_review(self):
         self.sync.run()
         self.github.pulls = []
+        self.github.details = {7: {"state": "closed"}}
         report = self.sync.run()
         self.assertEqual(1, len(report["cancelled"]))
 
@@ -294,6 +297,153 @@ class TimerTests(unittest.TestCase):
         report = self.sync.run()
         self.assertEqual(1, len(report["filed"]))
         self.assertTrue(any("403" in e for e in report["errors"]))
+
+    def _closed_review_fixture(self):
+        self.sync.run()
+        task = self.flock.tasks.list(kind="review", include_done=False)[0]
+        self.github.pulls = []
+        self.github.details = {task["pr"]: {"state": "closed"},
+                               999: {"state": "closed"}}
+        return task
+
+    def test_cleanup_uses_state_from_real_github_detail_wrapper(self):
+        self.sync.run()
+        task = self.flock.tasks.list(kind="review", include_done=False)[0]
+        self.github.pulls = []
+        for state in ("open", "closed"):
+            with self.subTest(state=state), \
+                    patch.object(self.github, "pull_detail", side_effect=dunk_github.pull_detail), \
+                    patch.object(dunk_github, "_request", return_value=(200, {
+                        "state": state, "head": {"sha": task["head"]}})) as request:
+                report = self.sync.run()
+                request.assert_called_once_with(
+                    "GET", f"{dunk_github.API}/repos/o/r/pulls/{task['pr']}",
+                    token="tok-reviewer")
+                self.assertEqual([task["id"]] if state == "closed" else [], report["cancelled"])
+
+    def test_cleanup_real_wrapper_reports_malformed_http_json_and_keeps_review(self):
+        self.sync.run()
+        task = self.flock.tasks.list(kind="review", include_done=False)[0]
+        self.github.pulls = []
+        for response in (None, [], ["closed"], "closed", 1, False):
+            with self.subTest(response=response), \
+                    patch.object(self.github, "pull_detail", side_effect=dunk_github.pull_detail), \
+                    patch.object(dunk_github, "_request", return_value=(200, response)):
+                report = self.sync.run()
+                self.assertEqual([], report["cancelled"])
+                self.assertTrue(any("cleanup: GitHub pull detail: expected a JSON object" in e
+                                    for e in report["errors"]))
+                self.assertEqual("open", self.flock.tasks.get(task["id"])["status"])
+
+    def test_cleanup_real_transport_reports_invalid_json_and_keeps_review(self):
+        self.sync.run()
+        task = self.flock.tasks.list(kind="review", include_done=False)[0]
+        self.github.pulls = []
+        response = io.BytesIO(b"not JSON")
+        response.status = 200
+        with patch.object(self.github, "pull_detail", side_effect=dunk_github.pull_detail), \
+                patch.object(dunk_github.urllib.request, "urlopen", return_value=response):
+            report = self.sync.run()
+        self.assertEqual([], report["cancelled"])
+        self.assertTrue(any("cleanup: GitHub pull detail: invalid JSON" in e
+                            for e in report["errors"]))
+        self.assertEqual("open", self.flock.tasks.get(task["id"])["status"])
+
+    def test_real_github_detail_preserves_state_and_head_without_invention(self):
+        for response in ({}, {"state": "open", "head": {"sha": "b" * 40}}):
+            with self.subTest(response=response), \
+                    patch.object(dunk_github, "_request", return_value=(200, response)):
+                detail = dunk_github.pull_detail("o/r", 7, "fake-token")
+                self.assertEqual(response.get("state"), detail["state"])
+                self.assertEqual(response.get("head"), detail["head"])
+
+    def test_cleanup_preserves_open_review_omitted_by_stale_list(self):
+        self.sync.run()
+        task = self.flock.tasks.list(kind="review", include_done=False)[0]
+        self.github.pulls = []
+        for head in (task["head"], "b" * 40):
+            with self.subTest(head=head):
+                self.github.details = {task["pr"]: {"state": "open", "head": {"sha": head}}}
+                report = self.sync.run()
+                self.assertEqual([], report["cancelled"])
+                self.assertEqual("open", self.flock.tasks.get(task["id"])["status"])
+
+    def test_cleanup_preserves_conflicted_open_review(self):
+        self.sync.run()
+        task = self.flock.tasks.list(kind="review", include_done=False)[0]
+        self.github.details = {task["pr"]: {"state": "open", "mergeable": False}}
+        report = self.sync.run()
+        self.assertEqual(1, len(report["conflicted"]))
+        self.assertEqual([], report["cancelled"])
+        self.assertEqual("open", self.flock.tasks.get(task["id"])["status"])
+
+    def test_cleanup_unknown_detail_preserves_review_and_reports_error(self):
+        task = self._closed_review_fixture()
+        for detail in (None, [], {}, {"state": "unknown"}, {"state": True}):
+            with self.subTest(detail=detail), patch.object(self.github, "pull_detail", return_value=detail):
+                report = self.sync.run()
+                self.assertEqual([], report["cancelled"])
+                self.assertTrue(any("cleanup: unknown PR state" in e for e in report["errors"]))
+                self.assertEqual("open", self.flock.tasks.get(task["id"])["status"])
+
+    def test_cleanup_detail_failure_preserves_review(self):
+        task = self._closed_review_fixture()
+        with patch.object(self.github, "pull_detail", side_effect=dunk_github.GitHubError("offline")):
+            report = self.sync.run()
+        self.assertEqual([], report["cancelled"])
+        self.assertTrue(any("cleanup: offline" in e for e in report["errors"]))
+        self.assertEqual("open", self.flock.tasks.get(task["id"])["status"])
+
+    def test_cleanup_failed_repo_list_never_attempts_cancellation(self):
+        task = self._closed_review_fixture()
+        with patch.object(self.github, "open_pulls", side_effect=dunk_github.GitHubError("list offline")), \
+                patch.object(self.github, "pull_detail") as detail:
+            report = self.sync.run()
+        detail.assert_not_called()
+        self.assertEqual([], report["cancelled"])
+        self.assertEqual("open", self.flock.tasks.get(task["id"])["status"])
+
+    def test_cleanup_merged_detail_cancels_review(self):
+        task = self._closed_review_fixture()
+        self.github.details = {task["pr"]: {"state": "merged"}}
+        self.assertEqual([task["id"]], self.sync.run()["cancelled"])
+
+    def _finish_review_fixture(self, task_id):
+        # Another request's completed verdict, only in this test's temporary DB.
+        self.flock.tasks.db.execute(
+            "UPDATE tasks SET status='done', verdict='accept' WHERE id=?", (task_id,))
+        self.flock.tasks.db.commit()
+
+    def test_closed_review_snapshot_completed_before_canonical_check(self):
+        task = self._closed_review_fixture()
+        other = self.flock.tasks.add("global", "another closed review", kind="review",
+                                     repo="o/r", pr=999, head="c" * 40)
+        def pulls(repo, token):
+            self._finish_review_fixture(task["id"])
+            return []
+        with patch.object(self.github, "open_pulls", side_effect=pulls), \
+                patch.object(self.flock.tasks, "cancel", wraps=self.flock.tasks.cancel) as cancel:
+            report = self.sync.run()
+        cancel.assert_called_once_with(other["id"], reason="PR closed or merged on GitHub")
+        self.assertEqual([other["id"]], report["cancelled"])
+        self.assertEqual("accept", self.flock.tasks.get(task["id"])["verdict"])
+
+    def test_closed_review_completion_between_check_and_cancel(self):
+        task = self._closed_review_fixture()
+        original = self.flock.tasks.cancel
+        def cancel(task_id, reason=None):
+            self._finish_review_fixture(task_id)
+            return original(task_id, reason=reason)
+        with patch.object(self.flock.tasks, "cancel", side_effect=cancel):
+            report = self.sync.run()
+        self.assertEqual([], report["cancelled"])
+        self.assertEqual("done", self.flock.tasks.get(task["id"])["status"])
+
+    def test_closed_review_unrelated_cancel_error_still_propagates(self):
+        self._closed_review_fixture()
+        with patch.object(self.flock.tasks, "cancel", side_effect=TaskError("unrelated refusal")):
+            with self.assertRaisesRegex(TaskError, "unrelated refusal"):
+                self.sync.run()
 
     def test_accept_posts_success_and_approves_as_the_reviewer_app(self):
         self.sync.run()

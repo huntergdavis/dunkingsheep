@@ -13,10 +13,10 @@
 //! A FIXTURE BACKEND CANNOT REAP, and must not try (t247): `reap` refuses a pane list that is not
 //! tagged live, correctly, so the tick skips the reap instead of logging a refusal as a fault.
 //!
-//! NOT PORTED here (named hooks on `ReaperEnv`, default no-ops, until their owners land): the
-//! inbox `mark_undeliverable` / `auto_archive_undeliverable` / `_archive_retired_inbox` sweeps,
-//! `_clear_historical_errors`, and `self.last_message`. `_task_push_loop` and
-//! `_stuck_observer_loop` are the next slices (they need `next_jobs`, which has no Rust owner).
+//! The concrete production services are supplied by `LoopRuntimeAdapter`; every terminal or
+//! synchronous-store hook is awaited so Tokio worker threads never drive SyncWriter directly.
+//! `_task_push_loop` and `_stuck_observer_loop` are the next slices (they need `next_jobs`,
+//! which has no Rust owner).
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -26,6 +26,7 @@ use serde_json::Value;
 
 use super::Flock;
 use crate::error::DunkError;
+use crate::flock::loop_env::LoopFuture;
 use crate::tasks::{CallerAlive, Requeued};
 
 /// `TASK_REAP_S` (`DUNKINGSHEEP_REAP_S`, default 15 s), read per call here.
@@ -42,18 +43,22 @@ pub fn reap_interval() -> Duration {
 /// must never break the tick (the Python wraps each in its own `except`).
 pub trait ReaperEnv: Send + Sync {
     /// `self.herdr.list_panes()`: the backend's panes, or an error when it cannot answer.
-    fn list_panes(&self) -> Result<Vec<Value>, DunkError>;
+    fn list_panes(&self) -> LoopFuture<'_, Result<Vec<Value>, DunkError>>;
     /// `getattr(self.herdr, "live", False)`: only a live backend may move real work.
     fn is_live(&self) -> bool;
     /// `_clear_historical_errors(panes)`.
-    fn clear_historical_errors(&self, _panes: &BTreeSet<String>) {}
+    fn clear_historical_errors<'a>(&'a self, panes: &'a BTreeSet<String>) -> LoopFuture<'a, ()>;
     /// The inbox sweeps: `mark_undeliverable(panes)`, `auto_archive_undeliverable()`,
     /// `_archive_retired_inbox(pane_list)`.
-    fn inbox_maintenance(&self, _panes: &BTreeSet<String>, _pane_list: &[Value]) {}
+    fn inbox_maintenance<'a>(
+        &'a self,
+        panes: &'a BTreeSet<String>,
+        pane_list: &'a [Value],
+    ) -> LoopFuture<'a, ()>;
     /// `self.memory.recover_leases()` + `requeue_partial()`: deterministic self-repair.
-    fn memory_maintenance(&self) {}
+    fn memory_maintenance(&self) -> LoopFuture<'_, ()>;
     /// `self.last_message = "Requeued N task(s) (...)"`.
-    fn set_last_message(&self, _message: &str) {}
+    fn set_last_message(&self, message: &str);
 }
 
 /// What a tick did, for the log and for tests.
@@ -69,19 +74,30 @@ pub struct ReaperTick {
 }
 
 impl Flock {
+    /// Port `_clear_historical_errors`: mutate exact live targets and save the whole Flock once.
+    pub(crate) fn clear_historical_errors(
+        &self,
+        live_panes: &BTreeSet<String>,
+    ) -> Result<(), DunkError> {
+        if self.dunks.clear_historical_errors(live_panes) {
+            self.save()?;
+        }
+        Ok(())
+    }
+
     /// `_task_reaper_loop`, one iteration.
     pub async fn reaper_tick(&self, env: &dyn ReaperEnv) -> ReaperTick {
         let mut tick = ReaperTick::default();
         let mut panes: Option<BTreeSet<String>> = None;
-        match env.list_panes() {
+        match env.list_panes().await {
             Ok(list) => {
                 self.snapshot_launches(&list);
                 let ids: BTreeSet<String> = list
                     .iter()
                     .filter_map(|p| p.get("pane_id").and_then(Value::as_str).map(String::from))
                     .collect();
-                env.clear_historical_errors(&ids);
-                env.inbox_maintenance(&ids, &list);
+                env.clear_historical_errors(&ids).await;
+                env.inbox_maintenance(&ids, &list).await;
                 tick.panes = Some(ids.len());
                 panes = Some(ids);
             }
@@ -131,7 +147,7 @@ impl Flock {
                 return tick;
             }
         }
-        env.memory_maintenance();
+        env.memory_maintenance().await;
         if let Some(panes) = &panes {
             self.task_waiters
                 .lock()

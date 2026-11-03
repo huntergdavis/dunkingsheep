@@ -7,10 +7,16 @@
 
 use serde_json::Value;
 use std::collections::BTreeSet;
+use std::future::Future;
+use std::pin::Pin;
+
+use crate::github::{GitHubTransport, StatusUpdate};
+use crate::tasks::{AddOptions, ReviewTaskRow, TaskNote, Tasks};
 
 pub type ReviewPrKey = (Option<Value>, Option<Value>);
 pub type JudgedHeadKey = (Option<Value>, Option<Value>, Option<Value>);
 pub type FinalVerdict = (bool, Vec<String>, Vec<String>, usize);
+pub type ReviewFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 
 /// The exact task query used by the review timer, injectable for deterministic tests.
 pub trait ReviewTaskStore {
@@ -23,6 +29,121 @@ pub trait ReviewTaskStore {
         limit: usize,
         kind: &str,
     ) -> Result<Vec<Value>, Self::Error>;
+}
+
+/// Async actor operations needed by the source-faithful ReviewSync methods.
+/// Production uses `Tasks`; tests inject a recording actor without opening a live DB.
+pub trait ReviewTaskActor {
+    fn set_accounting_pr<'a>(
+        &'a self,
+        id: &'a str,
+        number: i64,
+    ) -> ReviewFuture<'a, Result<(), String>>;
+
+    fn note_with_meta<'a>(
+        &'a self,
+        id: &'a str,
+        event: &'a str,
+        actor: &'a str,
+        meta: &'a Value,
+    ) -> ReviewFuture<'a, Result<(), String>>;
+
+    fn list_review_rows(&self) -> ReviewFuture<'_, Result<Vec<ReviewTaskRow>, String>>;
+
+    fn notes<'a>(&'a self, id: &'a str) -> ReviewFuture<'a, Result<Vec<TaskNote>, String>>;
+}
+
+impl ReviewTaskActor for Tasks {
+    fn set_accounting_pr<'a>(
+        &'a self,
+        id: &'a str,
+        number: i64,
+    ) -> ReviewFuture<'a, Result<(), String>> {
+        Box::pin(async move {
+            Tasks::set_accounting_pr(self, id, number)
+                .await
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    fn note_with_meta<'a>(
+        &'a self,
+        id: &'a str,
+        event: &'a str,
+        actor: &'a str,
+        meta: &'a Value,
+    ) -> ReviewFuture<'a, Result<(), String>> {
+        Box::pin(async move {
+            let reason = meta.get("reason").and_then(Value::as_str);
+            Tasks::note_with_meta(self, id, event, actor, reason, meta)
+                .await
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    fn list_review_rows(&self) -> ReviewFuture<'_, Result<Vec<ReviewTaskRow>, String>> {
+        Box::pin(async move {
+            Tasks::list_review_rows_visible(self)
+                .await
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    fn notes<'a>(&'a self, id: &'a str) -> ReviewFuture<'a, Result<Vec<TaskNote>, String>> {
+        Box::pin(async move {
+            Tasks::notes(self, id)
+                .await
+                .map_err(|error| error.to_string())
+        })
+    }
+}
+
+/// The concrete actor seam for filing the next review task through `Tasks::add_with`.
+/// The production implementation below always uses the real writer actor.
+pub trait ReviewTaskCreator {
+    fn add_review_task<'a>(
+        &'a self,
+        title: &'a str,
+        body: &'a str,
+        first_lane: &'a str,
+        repo: &'a str,
+        number: i64,
+        head: &'a str,
+    ) -> ReviewFuture<'a, Result<String, String>>;
+}
+
+impl ReviewTaskCreator for Tasks {
+    fn add_review_task<'a>(
+        &'a self,
+        title: &'a str,
+        body: &'a str,
+        first_lane: &'a str,
+        repo: &'a str,
+        number: i64,
+        head: &'a str,
+    ) -> ReviewFuture<'a, Result<String, String>> {
+        Box::pin(async move {
+            self.add_with(
+                "global",
+                title,
+                body,
+                AddOptions {
+                    priority: Some("high".into()),
+                    kind: Some("review".into()),
+                    author: Some(first_lane.into()),
+                    repo: Some(repo.into()),
+                    pr: Some(number.to_string()),
+                    head: Some(head.into()),
+                    created_by: Some("review-sync".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map(|task| task.id)
+            .map_err(|error| error.to_string())
+        })
+    }
 }
 
 /// The one GitHub policy query this pure review slice needs. Production callers
@@ -54,13 +175,15 @@ pub struct ReviewDetail {
 
 /// Rust counterpart of `Sync`: dependencies are supplied at construction so
 /// these helpers never create credentials, make requests, or touch a live store.
-pub struct ReviewSync<S, T, G> {
+pub struct ReviewSync<S, T, G, X = ()> {
     pub flock: S,
     pub tokens: T,
     pub github: G,
+    pub transport: X,
+    pub api_root: String,
 }
 
-impl<S, G: Default> ReviewSync<S, (), G> {
+impl<S, G: Default> ReviewSync<S, (), G, ()> {
     /// Missing tokens and GitHub adapters use their injected defaults, matching
     /// Python's `tokens or Tokens()` and `github=dunk_github` constructor values.
     pub fn new(flock: S, github: Option<G>) -> Self {
@@ -68,17 +191,40 @@ impl<S, G: Default> ReviewSync<S, (), G> {
             flock,
             tokens: (),
             github: github.unwrap_or_default(),
+            transport: (),
+            api_root: crate::github::DEFAULT_API.to_string(),
         }
     }
 }
 
-impl<S, T, G> ReviewSync<S, T, G> {
+impl<S, T, G> ReviewSync<S, T, G, ()> {
     /// Construct with an explicitly supplied token source.
     pub fn with_tokens(flock: S, tokens: T, github: G) -> Self {
         Self {
             flock,
             tokens,
             github,
+            transport: (),
+            api_root: crate::github::DEFAULT_API.to_string(),
+        }
+    }
+}
+
+impl<S, T, G, X> ReviewSync<S, T, G, X> {
+    /// Supply the production HTTP transport and API root explicitly.
+    pub fn with_transport(
+        flock: S,
+        tokens: T,
+        github: G,
+        api_root: impl Into<String>,
+        transport: X,
+    ) -> Self {
+        Self {
+            flock,
+            tokens,
+            github,
+            transport,
+            api_root: api_root.into(),
         }
     }
 }
@@ -184,6 +330,280 @@ impl<S: ReviewTaskStore, T, G: ReviewPolicy> ReviewSync<S, T, G> {
         let required = self.github.required_verdicts(repo).max(1);
         let final_verdict = needs_fix.is_empty() && accepts.len() >= required;
         Ok((final_verdict, accepts, needs_fix, required))
+    }
+}
+
+impl<S, T, G, X> ReviewSync<S, T, G, X>
+where
+    X: GitHubTransport,
+{
+    /// Return whether GitHub reports a conflict; unknown mergeability remains `None`.
+    pub async fn conflicting(
+        &self,
+        repo: &str,
+        number: i64,
+        token: &str,
+        report: Option<&mut Value>,
+    ) -> Option<bool> {
+        let detail =
+            match crate::github::pull_detail(&self.transport, &self.api_root, repo, number, token)
+                .await
+            {
+                Ok(detail) => detail,
+                Err(error) => {
+                    if let Some(report) = report {
+                        append_report(
+                            report,
+                            "errors",
+                            Value::String(format!("mergeable {repo}#{number}: {error}")),
+                        );
+                    }
+                    return None;
+                }
+            };
+        if !detail.is_object() {
+            return None;
+        }
+        let mergeable = detail.get("mergeable");
+        let state = detail
+            .get("mergeable_state")
+            .filter(|value| python_truthy(value))
+            .map(python_string)
+            .unwrap_or_default()
+            .trim()
+            .to_lowercase();
+        if mergeable == Some(&Value::Bool(false)) || state == "dirty" {
+            return Some(true);
+        }
+        if mergeable == Some(&Value::Bool(true))
+            || matches!(state.as_str(), "clean" | "blocked" | "unstable" | "behind")
+        {
+            return Some(false);
+        }
+        None
+    }
+
+    /// Post the review status and record the source-compatible success/error report.
+    pub async fn _status(&self, token: &str, update: StatusUpdate<'_>, report: &mut Value) {
+        let short_sha: String = update.sha.chars().take(12).collect();
+        let (repo, state) = (update.repo, update.state);
+        match crate::github::post_status(&self.transport, &self.api_root, token, update).await {
+            Ok(_) => append_report(
+                report,
+                "statuses",
+                serde_json::json!({"repo": repo, "head": short_sha, "state": state}),
+            ),
+            Err(error) => append_report(
+                report,
+                "errors",
+                Value::String(format!("status {repo}@{short_sha}: {error}")),
+            ),
+        }
+    }
+}
+
+impl<S, T, G, X> ReviewSync<S, T, G, X>
+where
+    S: ReviewTaskActor,
+{
+    /// Render the accounting PR body exactly as `Sync._accounting_body` does.
+    pub fn _accounting_body(
+        &self,
+        task: &Value,
+        ident: &str,
+        doc: &str,
+        ledger: &str,
+        number: i64,
+        by: Option<&str>,
+    ) -> String {
+        let by = by.filter(|value| !value.is_empty()).unwrap_or("reviewer");
+        let head = task
+            .get("head")
+            .filter(|value| python_truthy(value))
+            .map(python_string)
+            .unwrap_or_default();
+        let id = task
+            .get("id")
+            .map(python_string)
+            .unwrap_or_else(|| "None".into());
+        format!(
+            "Accounting row for the accepted body {ident}.\n\n- body PR (the reviewed content): #{number}\n- review task: {id}, verdict `accept` by {by}\n- head reviewed: {head}\n- ledger: `{ledger}`\n- row added: `{ident},{doc}`\n\nDerived deterministically from the verdict notes and the files the body PR\nadds: one row id, one evidence document that carries its unit and offset. No\nmodel decided anything here. The reviewed content is the body PR; this PR only\nrecords the credit.\n\nOpened by the review timer as `dunkingsheep-reviewer[bot]` and approved as\n`dunkingsheep-author[bot]` so the two identities GitHub counts are distinct.\nAuto-merge is enabled; branch protection decides when it lands."
+        )
+    }
+
+    /// Record accounting metadata after awaiting the column write and then the note.
+    /// Failures are returned to the caller for logging; they never mutate a verdict.
+    pub async fn _record_accounting(&self, task: &Value, out: &Value) -> Option<String> {
+        self.try_record_accounting(task, out).await.err()
+    }
+
+    async fn try_record_accounting(&self, task: &Value, out: &Value) -> Result<(), String> {
+        let task_id = task
+            .get("id")
+            .map(python_string)
+            .ok_or_else(|| "review task has no id".to_string())?;
+        let accounting_pr = out
+            .get("accounting_pr")
+            .filter(|value| python_truthy(value));
+        if let Some(number) = accounting_pr {
+            let number = number
+                .as_i64()
+                .ok_or_else(|| "accounting PR number is not an integer".to_string())?;
+            self.flock.set_accounting_pr(&task_id, number).await?;
+        }
+        let body_pr = out
+            .get("body_pr")
+            .map(python_string)
+            .unwrap_or_else(|| "None".into());
+        let summary = if let Some(number) = accounting_pr {
+            format!(
+                "accounting PR #{} for body PR #{body_pr}",
+                python_string(number)
+            )
+        } else {
+            let reason = out
+                .get("reason")
+                .filter(|value| python_truthy(value))
+                .map(python_string)
+                .unwrap_or_else(|| {
+                    out.get("errors")
+                        .filter(|value| python_truthy(value))
+                        .and_then(Value::as_array)
+                        .map(|errors| {
+                            errors
+                                .iter()
+                                .map(python_string)
+                                .collect::<Vec<_>>()
+                                .join("; ")
+                        })
+                        .unwrap_or_default()
+                });
+            format!("no accounting PR for body PR #{body_pr}: {reason}")
+        };
+        let meta = serde_json::json!({
+            "reason": summary,
+            "accounting_pr": out.get("accounting_pr").cloned().unwrap_or(Value::Null),
+            "body_pr": out.get("body_pr").cloned().unwrap_or(Value::Null),
+            "row": out.get("row").cloned().unwrap_or(Value::Null),
+            "url": out.get("url").cloned().unwrap_or(Value::Null),
+            "state": out.get("state").cloned().unwrap_or(Value::Null),
+            "errors": out.get("errors").filter(|value| python_truthy(value)).cloned().unwrap_or_else(|| serde_json::json!([])),
+        });
+        self.flock
+            .note_with_meta(&task_id, "accounting", "review-sync", &meta)
+            .await
+    }
+
+    /// First matching, different, completed ACCEPT for the exact review identity.
+    pub async fn _standing_accept(&self, task: &Value) -> Option<String> {
+        let id = task.get("id").filter(|value| python_truthy(value))?;
+        let repo = task.get("repo").filter(|value| python_truthy(value))?;
+        let pr = task.get("pr").filter(|value| python_truthy(value))?;
+        let head = task.get("head").filter(|value| python_truthy(value))?;
+        let rows = self.flock.list_review_rows().await.ok()?;
+        rows.into_iter().find_map(|other| {
+            (other.id != python_string(id)
+                && other.status == "done"
+                && other.verdict.as_deref() == Some("accept")
+                && other.repo.as_deref() == repo.as_str()
+                && other.pr == pr.as_i64()
+                && other.head.as_deref() == head.as_str())
+            .then_some(other.id)
+        })
+    }
+
+    /// Join the reviewer's notes or return the source-compatible fallback sentence.
+    pub async fn _evidence(&self, task: &Value) -> String {
+        let id = task.get("id").map(python_string).unwrap_or_default();
+        let notes = match self.flock.notes(&id).await {
+            Ok(notes) => notes,
+            Err(_) => return "(no note store)".into(),
+        };
+        let text = notes
+            .into_iter()
+            .map(|note| note.text.trim().to_string())
+            .filter(|note| !note.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        if text.is_empty() {
+            "(no evidence was recorded on the review task)".into()
+        } else {
+            text
+        }
+    }
+
+    /// Render the needs-fix body with its supplied reviewer evidence.
+    pub fn _review_body(
+        &self,
+        task: &Value,
+        by: Option<&str>,
+        head: &str,
+        evidence: &str,
+    ) -> String {
+        format!(
+            "Needs fix per {} (reviewer lane {}) at head {head}.\n\nThe reviewer's evidence, verbatim:\n\n{evidence}\n\nA verdict is bound to this head: a new push files a new review.",
+            task.get("id").map(python_string).unwrap_or_else(|| "None".into()),
+            by.filter(|value| !value.is_empty()).unwrap_or("?")
+        )
+    }
+}
+
+impl<S, T, G, X> ReviewSync<S, T, G, X>
+where
+    S: ReviewTaskCreator,
+    G: ReviewPolicy,
+{
+    /// File the distinct second review task for an accepted exact head.
+    pub async fn _second_review(
+        &self,
+        repo: &str,
+        number: i64,
+        head: &str,
+        first_lane: &str,
+        report: Option<&mut Value>,
+    ) -> Option<String> {
+        let repository = repo.rsplit('/').next().unwrap_or(repo);
+        let short_head: String = head.chars().take(8).collect();
+        let title: String = format!(
+            "Review {repository} PR #{number} {short_head} (second reviewer: {first_lane} accepted)"
+        )
+        .chars()
+        .take(120)
+        .collect();
+        let required = self.github.required_verdicts(repo);
+        let body = format!(
+            "SECOND REVIEW {repo}#{number} @ {head}\nLane {first_lane} already accepted this exact head. {required} distinct reviewer lanes are required, so this task exists for a DIFFERENT lane; the claim filter keeps {first_lane} off it.\n\nVerdict: `dunkingsheep task complete <id> --verdict accept|needs-fix` with the evidence in `task note` first."
+        );
+        match self
+            .flock
+            .add_review_task(&title, &body, first_lane, repo, number, head)
+            .await
+        {
+            Ok(id) => Some(id),
+            Err(error) => {
+                if let Some(report) = report {
+                    append_report(
+                        report,
+                        "errors",
+                        Value::String(format!("second review {repo}#{number}: {error}")),
+                    );
+                }
+                None
+            }
+        }
+    }
+}
+
+fn append_report(report: &mut Value, key: &str, value: Value) {
+    let Some(object) = report.as_object_mut() else {
+        return;
+    };
+    if let Some(items) = object
+        .entry(key.to_string())
+        .or_insert_with(|| Value::Array(Vec::new()))
+        .as_array_mut()
+    {
+        items.push(value);
     }
 }
 

@@ -16,6 +16,9 @@ use std::process::{Command, Stdio};
 
 use crate::context_cmd::context_read;
 use crate::usage_cmd::{ordered_json, usage_command, Outcome};
+use ds_core::context::digest::{digest_both, select_stores, DEFAULT_CAP};
+use ds_core::context::ledger::Ledger;
+use ds_core::context::store::Store;
 
 fn text<'a>(ns: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
     ns.get(key).and_then(Value::as_str)
@@ -51,8 +54,285 @@ fn not_ported(command: &str) -> Outcome {
     }
 }
 
+fn memory_aux(ns: &Map<String, Value>) -> Outcome {
+    let sub = text(ns, "memory_command").unwrap_or("");
+    match sub {
+        "hook-context" => {
+            let query = text(ns, "query")
+                .filter(|query| !query.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| {
+                    std::env::current_dir()
+                        .ok()
+                        .and_then(|cwd| cwd.file_name().map(|name| name.to_string_lossy().into()))
+                        .unwrap_or_default()
+                });
+            let mut args = Map::new();
+            args.insert("query".into(), Value::String(query));
+            args.insert(
+                "sessions".into(),
+                ns.get("sessions").cloned().unwrap_or(Value::Null),
+            );
+            crate::daemon_cmd::run_command(ns, "memory_context", args, |result| {
+                crate::render_print::render_memory_hook_context(result)
+            })
+        }
+        "stats" => crate::daemon_cmd::run_command(
+            ns,
+            "memory_stats",
+            Map::new(),
+            crate::render_print::render_memory_stats,
+        ),
+        "status" => crate::daemon_cmd::run_command(
+            ns,
+            "memory_status",
+            Map::new(),
+            crate::render_print::render_memory_stats,
+        ),
+        _ => not_ported(&format!("memory {sub}")),
+    }
+}
+
+fn memory(ns: &Map<String, Value>) -> Outcome {
+    let mut args = Map::new();
+    match text(ns, "memory_command") {
+        Some("recall" | "search") => {
+            for key in ["query", "limit", "harness", "project", "since"] {
+                args.insert(key.into(), ns.get(key).cloned().unwrap_or(Value::Null));
+            }
+            let rpc = if text(ns, "memory_command") == Some("search") {
+                "memory_search"
+            } else {
+                "memory_recall"
+            };
+            crate::daemon_cmd::run_command(ns, rpc, args, |result| {
+                crate::render_print::render_memory(
+                    result.as_array().map(Vec::as_slice).unwrap_or_default(),
+                )
+            })
+        }
+        Some("context") => {
+            for key in ["query", "sessions"] {
+                args.insert(key.into(), ns.get(key).cloned().unwrap_or(Value::Null));
+            }
+            crate::daemon_cmd::run_command(ns, "memory_context", args, |result| {
+                crate::render_print::render_memory_context(result)
+            })
+        }
+        Some("ingest") => {
+            for key in ["path", "harness", "project"] {
+                args.insert(key.into(), ns.get(key).cloned().unwrap_or(Value::Null));
+            }
+            crate::daemon_cmd::run_command(ns, "memory_ingest", args, |result| {
+                format!(
+                    "queued {} ({})\n",
+                    crate::render_fleet::py_str(&result["path"]),
+                    crate::render_fleet::py_str(&result["harness"])
+                )
+            })
+        }
+        Some("backfill") => {
+            let action = if ns.get("pause") == Some(&Value::Bool(true)) {
+                "pause"
+            } else if ns.get("resume") == Some(&Value::Bool(true)) {
+                "resume"
+            } else if ns.get("status") == Some(&Value::Bool(true)) {
+                "status"
+            } else {
+                "start"
+            };
+            args.insert("action".into(), Value::String(action.to_string()));
+            args.insert(
+                "limit".into(),
+                ns.get("limit").cloned().unwrap_or(Value::Null),
+            );
+            crate::daemon_cmd::run_command(ns, "memory_backfill", args, |result| {
+                crate::render_print::render_memory_backfill(result)
+            })
+        }
+        Some(other) => not_ported(&format!("memory {other}")),
+        None => not_ported("memory"),
+    }
+}
+
+fn superuser(ns: &Map<String, Value>) -> Outcome {
+    let (rpc, args) = match text(ns, "superuser_command") {
+        Some("status") => ("superuser_status", Map::new()),
+        Some("add") => {
+            let mut args = Map::new();
+            args.insert(
+                "entry".into(),
+                ns.get("entry").cloned().unwrap_or(Value::Null),
+            );
+            ("superuser_add", args)
+        }
+        Some("remove") => {
+            let mut args = Map::new();
+            args.insert(
+                "entry".into(),
+                ns.get("entry").cloned().unwrap_or(Value::Null),
+            );
+            ("superuser_remove", args)
+        }
+        Some("recover") => {
+            let mut args = Map::new();
+            args.insert(
+                "name".into(),
+                ns.get("name").cloned().unwrap_or(Value::Null),
+            );
+            ("superuser_recover", args)
+        }
+        Some(other) => return not_ported(&format!("superuser {other}")),
+        None => return not_ported("superuser"),
+    };
+    crate::daemon_cmd::run_command(ns, rpc, args, crate::render_fleet::render_superuser)
+}
+
+fn context_local(ns: &Map<String, Value>, json: bool) -> Option<Outcome> {
+    let sub = text(ns, "context_command").unwrap_or("");
+    let path = text(ns, "path")
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from);
+    let global = matches!(ns.get("global_store"), Some(Value::Bool(true)));
+    let now = chrono::Local::now().naive_local();
+
+    let outcome = |value: Value, text: String| Outcome {
+        stdout: if json {
+            format!("{}\n", ordered_json(&value))
+        } else {
+            text
+        },
+        stderr: String::new(),
+        code: 0,
+    };
+    let failed = |message: String| Outcome {
+        stdout: String::new(),
+        stderr: format!("{message}\n"),
+        code: 1,
+    };
+
+    match sub {
+        "init" => {
+            let store = Store::new(path.as_deref(), global);
+            match store.ensure() {
+                Ok(root) => {
+                    let root = root.display().to_string();
+                    Some(outcome(
+                        serde_json::json!({"root": root}),
+                        format!("store at {root}\n"),
+                    ))
+                }
+                Err(error) => Some(failed(error.0)),
+            }
+        }
+        "snapshot" => {
+            let as_of = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let selected = if global {
+                Some("global")
+            } else if matches!(ns.get("project"), Some(Value::Bool(true))) {
+                Some("project")
+            } else {
+                None
+            };
+            let mut ledger = Ledger::new(None);
+            let digest = digest_both(
+                path.as_deref(),
+                selected,
+                DEFAULT_CAP,
+                None,
+                false,
+                &mut ledger,
+                now,
+            );
+            let stores = select_stores(path.as_deref(), selected);
+            let mut snapshots = Map::new();
+            for (name, store) in stores {
+                let stats = match store.stats() {
+                    Ok(stats) => stats,
+                    Err(error) => return Some(failed(error.0)),
+                };
+                let entries = match store.entry_stats(&mut ledger) {
+                    Ok(entries) => entries,
+                    Err(error) => return Some(failed(error.0)),
+                };
+                let mut snapshot = Map::new();
+                snapshot.insert(
+                    "status".into(),
+                    Value::String(if store.exists() { "ok" } else { "absent" }.into()),
+                );
+                snapshot.insert(
+                    "path".into(),
+                    Value::String(store.root.display().to_string()),
+                );
+                snapshot.insert(
+                    "counts".into(),
+                    stats.get("counts").cloned().unwrap_or(Value::Null),
+                );
+                snapshot.insert(
+                    "reads_7d".into(),
+                    stats.get("reads_7d").cloned().unwrap_or(Value::Null),
+                );
+                snapshot.insert(
+                    "injected_7d".into(),
+                    stats.get("injected_7d").cloned().unwrap_or(Value::Null),
+                );
+                snapshot.insert(
+                    "never_read_count".into(),
+                    stats
+                        .get("never_read_count")
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                );
+                snapshot.insert(
+                    "never_delivered_count".into(),
+                    stats
+                        .get("never_delivered_count")
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                );
+                snapshot.insert("entries".into(), Value::Array(entries));
+                snapshots.insert(name, Value::Object(snapshot));
+            }
+            let mut value = Map::new();
+            value.insert("schema".into(), Value::String("context-snapshot/1".into()));
+            value.insert("as_of".into(), Value::from(as_of));
+            value.insert("digest".into(), Value::String(digest));
+            value.insert("stores".into(), Value::Object(snapshots));
+            let value = Value::Object(value);
+            Some(outcome(value.clone(), ordered_json(&value) + "\n"))
+        }
+        "ledger" if text(ns, "action") == Some("adopt") => {
+            if std::env::var("DUNKINGSHEEP_SUPERUSER").ok().as_deref() != Some("1") {
+                return Some(failed(
+                    "refused: `context ledger adopt` is the owner's bootstrap; run it with DUNKINGSHEEP_SUPERUSER=1 from the owner's terminal".into(),
+                ));
+            }
+            let store = Store::new(path.as_deref(), global);
+            let mut ledger = Ledger::new(None);
+            let adopted = match store.adopt(&mut ledger, "adopt") {
+                Ok(adopted) => adopted,
+                Err(error) => return Some(failed(error.to_string())),
+            };
+            let ledger_path = ledger.path.display().to_string();
+            let value = serde_json::json!({"adopted": adopted, "ledger": ledger_path});
+            let count = value["adopted"].as_array().map_or(0, Vec::len);
+            Some(outcome(
+                value,
+                format!("adopted {count} entries into {ledger_path}\n"),
+            ))
+        }
+        _ => None,
+    }
+}
+
 fn context(ns: &Map<String, Value>, json: bool) -> Outcome {
     let sub = text(ns, "context_command").unwrap_or("");
+    if let Some(out) = context_local(ns, json) {
+        return out;
+    }
     if matches!(sub, "add" | "promote" | "supersede" | "retire")
         && matches!(ns.get("local"), Some(Value::Bool(true)))
     {
@@ -1705,6 +1985,62 @@ fn report(ns: &Map<String, Value>) -> Outcome {
     }
 }
 
+fn token(ns: &Map<String, Value>) -> Outcome {
+    match text(ns, "token_command") {
+        Some("issue") => {
+            let mut args = Map::new();
+            args.insert(
+                "role".into(),
+                ns.get("role").cloned().unwrap_or(Value::Null),
+            );
+            args.insert(
+                "label".into(),
+                ns.get("label").cloned().unwrap_or(Value::Null),
+            );
+            crate::daemon_cmd::run_command(ns, "token_issue", args, |result| {
+                format!("{}\n", crate::render_fleet::py_str(&result["token"]))
+            })
+        }
+        Some("revoke") => {
+            let mut args = Map::new();
+            args.insert(
+                "label".into(),
+                ns.get("label").cloned().unwrap_or(Value::Null),
+            );
+            crate::daemon_cmd::run_command(ns, "token_revoke", args, |result| {
+                format!(
+                    "revoked {} token(s) labelled {}\n",
+                    crate::render_fleet::py_str(&result["revoked"]),
+                    crate::render_fleet::py_str(&result["label"])
+                )
+            })
+        }
+        Some("list") => {
+            crate::daemon_cmd::run_command(ns, "superuser_status", Map::new(), |result| {
+                let rows = result
+                    .get("tokens")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .map(|token| {
+                        let label = crate::render_fleet::py_str(&token["label"]);
+                        let role = crate::render_fleet::py_str(&token["role"]);
+                        let padding = 24usize.saturating_sub(label.chars().count());
+                        format!("{label}{} {role}", " ".repeat(padding))
+                    })
+                    .collect::<Vec<_>>();
+                if rows.is_empty() {
+                    "no tokens\n".to_string()
+                } else {
+                    format!("{}\n", rows.join("\n"))
+                }
+            })
+        }
+        Some(other) => not_ported(&format!("token {other}")),
+        None => not_ported("token"),
+    }
+}
+
 /// Run one parsed command (`ns` is the argparse namespace as a dictionary).
 pub fn run(ns: &Map<String, Value>) -> Outcome {
     let command = text(ns, "command").unwrap_or("");
@@ -1731,6 +2067,11 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
         "github" => github(ns),
         "guard" => guard(ns),
         "report" => report(ns),
+        "superuser" => superuser(ns),
+        "memory" => match text(ns, "memory_command") {
+            Some("hook-context" | "stats" | "status") => memory_aux(ns),
+            _ => memory(ns),
+        },
         "allocation" => allocation(ns),
         "load" => load_report(ns),
         "pm" => pm(ns),
@@ -1739,6 +2080,7 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
             Some("outbox" | "delivered" | "stats") | None => owner_outbox(ns),
             _ => owner_command(ns),
         },
+        "token" => token(ns),
         "review" => review(ns),
         "state" => state(ns),
         "roster" | "message-state" | "reply-stats" | "project-summary" => read_view(ns),

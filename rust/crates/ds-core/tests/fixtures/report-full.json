@@ -1,0 +1,113 @@
+{
+  "generated_at": 1700000000,
+  "iso": "2023-11-14T22:13:20Z",
+  "sections": {
+    "tasks": {
+      "window_hours": 24,
+      "current_status": {
+        "open": 2,
+        "blocked": 1,
+        "done": 0
+      },
+      "current_priority": {
+        "high": 1,
+        "urgent": 2
+      },
+      "flow": {
+        "created": 3,
+        "claimed": 2,
+        "completed": 1,
+        "cancelled": null,
+        "blocked": 1
+      },
+      "latency_ms": {
+        "claim": {
+          "p50": 12,
+          "p90": 44,
+          "count": 2
+        },
+        "empty": {
+          "p50": null,
+          "p90": null,
+          "count": 0
+        }
+      }
+    },
+    "lanes": {
+      "live": 3,
+      "working": [
+        {
+          "pane": "%159",
+          "tasks": [
+            "t123",
+            "t124"
+          ]
+        }
+      ],
+      "idle": [
+        {
+          "pane": "%160",
+          "label": "worker"
+        }
+      ],
+      "dead": [
+        {
+          "pane": "%161",
+          "label": "gone",
+          "role": "worker"
+        }
+      ]
+    },
+    "needs_owner": {
+      "questions": [
+        {
+          "id": "t125",
+          "priority": "urgent",
+          "age_s": 95,
+          "question": "Review this 🐑"
+        }
+      ]
+    },
+    "reviews": {
+      "count": 1,
+      "oldest_age_s": 6000,
+      "reviews": [
+        {
+          "task": "t123",
+          "repo": "dunkingsheep",
+          "pr": 42,
+          "head": "abc123",
+          "age_s": 89,
+          "reviewer": []
+        }
+      ]
+    },
+    "poolrad": {
+      "credited": 7,
+      "identities": 8,
+      "main": "deadbeef",
+      "ceiling_note": "815 is a CEILING",
+      "replaced_note": "replaced 2"
+    },
+    "budget": {
+      "providers": [
+        {
+          "provider": "claude",
+          "used": 3,
+          "limit": 8,
+          "window": null
+        }
+      ]
+    },
+    "watchdog": {
+      "heartbeat_age_s": null,
+      "state": {
+        "nested": {
+          "watchdog": "a b"
+        },
+        "running": true,
+        "stale": false
+      }
+    }
+  }
+}

@@ -4,5 +4,7 @@
 pub mod app;
 pub mod model;
 pub mod rows;
+pub mod runtime;
+pub mod terminal_io;
 pub mod text_editor;
 pub mod view;

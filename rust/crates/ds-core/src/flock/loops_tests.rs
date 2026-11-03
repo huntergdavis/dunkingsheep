@@ -12,6 +12,7 @@ use super::loops::{run_reaper, ReaperEnv};
 use super::panes::Stores;
 use super::Flock;
 use crate::error::DunkError;
+use crate::flock::loop_env::LoopFuture;
 use crate::tasks::{ClaimOptions, Tasks};
 
 struct Fake {
@@ -34,30 +35,96 @@ impl Fake {
 }
 
 impl ReaperEnv for Fake {
-    fn list_panes(&self) -> Result<Vec<Value>, DunkError> {
-        self.panes.clone().map_err(DunkError::Refused)
+    fn list_panes(&self) -> LoopFuture<'_, Result<Vec<Value>, DunkError>> {
+        Box::pin(async move { self.panes.clone().map_err(DunkError::Refused) })
     }
     fn is_live(&self) -> bool {
         self.live
     }
-    fn clear_historical_errors(&self, panes: &BTreeSet<String>) {
-        self.log
-            .lock()
-            .unwrap()
-            .push(format!("clear {}", panes.len()));
+    fn clear_historical_errors<'a>(&'a self, panes: &'a BTreeSet<String>) -> LoopFuture<'a, ()> {
+        Box::pin(async move {
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("clear {}", panes.len()));
+        })
     }
-    fn inbox_maintenance(&self, panes: &BTreeSet<String>, _: &[Value]) {
-        self.log
-            .lock()
-            .unwrap()
-            .push(format!("inbox {}", panes.len()));
+    fn inbox_maintenance<'a>(
+        &'a self,
+        panes: &'a BTreeSet<String>,
+        _: &'a [Value],
+    ) -> LoopFuture<'a, ()> {
+        Box::pin(async move {
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("inbox {}", panes.len()));
+        })
     }
-    fn memory_maintenance(&self) {
-        self.log.lock().unwrap().push("memory".into());
+    fn memory_maintenance(&self) -> LoopFuture<'_, ()> {
+        Box::pin(async move {
+            self.log.lock().unwrap().push("memory".into());
+        })
     }
     fn set_last_message(&self, message: &str) {
         self.log.lock().unwrap().push(format!("last {message}"));
     }
+}
+
+struct OrderedFake {
+    log: Mutex<Vec<&'static str>>,
+}
+
+impl OrderedFake {
+    fn record(&self, event: &'static str) {
+        self.log.lock().unwrap().push(event);
+    }
+}
+
+impl ReaperEnv for OrderedFake {
+    fn list_panes(&self) -> LoopFuture<'_, Result<Vec<Value>, DunkError>> {
+        Box::pin(async move {
+            self.record("list:start");
+            tokio::task::yield_now().await;
+            self.record("list:done");
+            Ok(vec![json!({ "pane_id": "%1" })])
+        })
+    }
+
+    fn is_live(&self) -> bool {
+        self.record("live");
+        true
+    }
+
+    fn clear_historical_errors<'a>(&'a self, _: &'a BTreeSet<String>) -> LoopFuture<'a, ()> {
+        Box::pin(async move {
+            self.record("clear:start");
+            tokio::task::yield_now().await;
+            self.record("clear:done");
+        })
+    }
+
+    fn inbox_maintenance<'a>(
+        &'a self,
+        _: &'a BTreeSet<String>,
+        _: &'a [Value],
+    ) -> LoopFuture<'a, ()> {
+        Box::pin(async move {
+            self.record("inbox:start");
+            tokio::task::yield_now().await;
+            self.record("inbox:done");
+        })
+    }
+
+    fn memory_maintenance(&self) -> LoopFuture<'_, ()> {
+        Box::pin(async move {
+            self.record("memory:start");
+            tokio::task::yield_now().await;
+            self.record("memory:done");
+        })
+    }
+
+    fn set_last_message(&self, _: &str) {}
 }
 
 async fn flock_with_tasks(tag: &str) -> (Arc<Flock>, Arc<Tasks>, tempfile::TempDir) {
@@ -115,6 +182,32 @@ async fn the_tick_sweeps_auto_unblock_before_the_live_backend_check() {
 
     assert!(tick.skipped_not_live);
     assert_eq!("open", tasks.get(&dependent.id).await.unwrap().status);
+}
+
+#[tokio::test]
+async fn loop_reaper_async_maintenance_is_awaited_in_source_order() {
+    let (flock, _tasks, _dir) = flock_with_tasks("async-order").await;
+    let env = OrderedFake {
+        log: Mutex::new(Vec::new()),
+    };
+
+    let tick = flock.reaper_tick(&env).await;
+
+    assert!(!tick.skipped_not_live);
+    assert_eq!(
+        vec![
+            "list:start",
+            "list:done",
+            "clear:start",
+            "clear:done",
+            "inbox:start",
+            "inbox:done",
+            "live",
+            "memory:start",
+            "memory:done",
+        ],
+        *env.log.lock().unwrap()
+    );
 }
 
 #[tokio::test]

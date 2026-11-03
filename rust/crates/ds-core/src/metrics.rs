@@ -500,7 +500,7 @@ pub struct Durations {
     pub blocked: Option<Duration5>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Default)]
 pub struct Retries {
     /// How many submits took 1, 2, 3... Enter presses; `None` when none measured.
     pub enter_presses: Option<BTreeMap<i64, i64>>,
@@ -508,16 +508,6 @@ pub struct Retries {
     pub submits: Option<i64>,
     /// Share of submits that worked first time, rounded to 4 places.
     pub first_press_success_rate: Option<f64>,
-}
-
-impl Default for Retries {
-    fn default() -> Self {
-        Retries {
-            enter_presses: None,
-            submits: None,
-            first_press_success_rate: None,
-        }
-    }
 }
 
 /// Counts and duration distributions for one window of rows.

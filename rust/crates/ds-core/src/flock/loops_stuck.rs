@@ -13,16 +13,24 @@
 //!
 //! NOT PORTED here (a named hook, default 0): `_stuck_observer_step` itself and
 //! `_federated_recovery_step`. They need `_unwedge`, `_box_text`, the outbox and the `Message`
-//! type from T33 (`flock/sends.rs`, t801, not landed), and `_note_stale_panel`'s alert sinks.
+//! type from T33 (`flock/sends.rs`, t801, not landed). The durable stale-panel alert reporter
+//! is provided below for the production `StuckEnv` hook.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::Value;
 
 use crate::error::DunkError;
+use crate::flock::commands_inbox::InboxEnv;
+use crate::flock::Flock;
+use crate::metrics::Event;
 use crate::terminal::screen::{collapse, modal_open, strip_ansi};
+
+/// `MODAL_WAIT_S`: wait for a stable dialog before reporting it.
+pub const MODAL_WAIT_S: f64 = 30.0;
 
 /// `STUCK_OBSERVE_TICK_S`.
 pub const STUCK_OBSERVE_TICK_S: f64 = 5.0;
@@ -39,8 +47,15 @@ pub trait StuckEnv: Send + Sync {
     fn read_screen(&self, pane_id: &str) -> Option<String>;
     /// `self._pane_generation(pane)`.
     fn pane_generation(&self, pane_id: &str) -> Option<String>;
-    /// `self._note_stale_panel(pane, ("modal", text), since)`.
-    fn note_stale_panel(&self, pane_id: &str, signature_text: &str, since: f64);
+    /// `self._note_stale_panel(pane, ("modal", text), since)`, with the current pane generation
+    /// captured by this same observation.
+    fn note_stale_panel(
+        &self,
+        pane_id: &str,
+        generation: Option<&str>,
+        signature_text: &str,
+        since: f64,
+    );
     /// `self.closed`.
     fn closed(&self) -> bool {
         false
@@ -63,6 +78,136 @@ type Observation = (Option<String>, String, f64);
 pub struct DialogObserver {
     scan_at: f64,
     observations: BTreeMap<String, Observation>,
+}
+
+/// The `_warned_modal` state and alert integration for a production `StuckEnv`.
+/// The runtime adapter owns one reporter alongside its observer and calls
+/// [`note`](Self::note) from `StuckEnv::note_stale_panel`.
+#[derive(Debug, Default)]
+pub struct StalePanelReporter {
+    warned_modal: BTreeSet<String>,
+}
+
+impl StalePanelReporter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// `_note_stale_panel`: durable alerts retry independently of one-time logging and metrics.
+    /// `generation` is the current process-bound pane generation from the observer scan.
+    #[allow(clippy::too_many_arguments)]
+    pub fn note(
+        &mut self,
+        flock: &Flock,
+        inbox: &dyn InboxEnv,
+        pane_id: &str,
+        signature_kind: &str,
+        generation: Option<&str>,
+        signature: Option<&str>,
+        since: f64,
+    ) {
+        self.note_at(
+            flock,
+            inbox,
+            pane_id,
+            signature_kind,
+            generation,
+            signature,
+            since,
+            crate::clock::now_s(),
+            None,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn note_at(
+        &mut self,
+        flock: &Flock,
+        inbox: &dyn InboxEnv,
+        pane_id: &str,
+        signature_kind: &str,
+        generation: Option<&str>,
+        signature: Option<&str>,
+        since: f64,
+        now: f64,
+        path: Option<&Path>,
+    ) {
+        if signature_kind != "modal" || now - since < MODAL_WAIT_S {
+            return;
+        }
+        let mut owner = |body: &str| crate::dialog_alerts::post_owner_from_environment(body);
+        let mut vp = |body: &str| crate::dialog_alerts::post_vp(flock, inbox, body, None);
+        self.note_with_sinks(
+            flock,
+            pane_id,
+            signature_kind,
+            generation,
+            signature,
+            since,
+            now,
+            path,
+            &mut owner,
+            &mut vp,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn note_with_sinks(
+        &mut self,
+        flock: &Flock,
+        pane_id: &str,
+        signature_kind: &str,
+        generation: Option<&str>,
+        signature: Option<&str>,
+        since: f64,
+        now: f64,
+        path: Option<&Path>,
+        owner: &mut dyn FnMut(&str) -> Result<crate::dialog_alerts::SinkDelivery, String>,
+        vp: &mut dyn FnMut(&str) -> Result<crate::dialog_alerts::SinkDelivery, String>,
+    ) {
+        if signature_kind != "modal" || now - since < MODAL_WAIT_S {
+            return;
+        }
+        match crate::dialog_alerts::notify(
+            pane_id,
+            generation,
+            signature,
+            owner,
+            vp,
+            path,
+            Some(now),
+        ) {
+            Ok(attempts) => {
+                for attempt in attempts.into_iter().filter(|attempt| !attempt.delivered) {
+                    eprintln!(
+                        "dialog alert {} -> {} failed ({}); will retry",
+                        pane_id,
+                        attempt.sink,
+                        attempt.error.as_deref().unwrap_or("undeliverable")
+                    );
+                }
+            }
+            Err(error) => eprintln!("could not notify blocked dialog on {pane_id}: {error}"),
+        }
+
+        if self.warned_modal.insert(pane_id.to_string()) {
+            if let Some(metrics) = flock.stores().metrics {
+                metrics.record(&Event {
+                    at: now,
+                    kind: "panel.blocking".into(),
+                    pane_id: Some(pane_id.into()),
+                    outcome: Some("held".into()),
+                    reason: Some("dialog".into()),
+                    duration_ms: Some(((now - since) * 1000.0) as i64),
+                    ..Event::default()
+                });
+            }
+            eprintln!(
+                "{pane_id}: a dialog has been open for {}s and blocks message delivery. It is waiting for a person to answer it; nothing will be typed or pressed there until they do.",
+                (now - since) as i64
+            );
+        }
+    }
 }
 
 /// The last 4000 characters (Python slices code points, not bytes).
@@ -118,8 +263,11 @@ impl DialogObserver {
                 }
                 _ => now,
             };
-            current.insert(pane_id.to_string(), (generation, signature.clone(), since));
-            env.note_stale_panel(pane_id, &signature, since);
+            current.insert(
+                pane_id.to_string(),
+                (generation.clone(), signature.clone(), since),
+            );
+            env.note_stale_panel(pane_id, generation.as_deref(), &signature, since);
         }
         // Absent/nonmodal/replaced panes start a fresh stability interval.
         self.observations = current;

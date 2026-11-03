@@ -4,8 +4,8 @@
 //! `inbox_list`, `inbox_status`, `inbox_stats`, `inbox_recover`.
 //!
 //! Slice 2 adds `inbox_ack`/`archive`/`cancel`/`delete`/`fetch`; slice 3 adds `inbox_send` and
-//! `inbox_read`. The outbox (`send_now`, the queued-notice fold), the PM routing file, the
-//! tasks view and metrics have no Rust owner yet, so they sit behind [`InboxEnv`] hooks.
+//! `inbox_read`. The outbox (`send_now`, the queued-notice fold) and PM routing file remain
+//! behind [`InboxEnv`] hooks; the runtime adapter supplies metrics and task-view services.
 //! NOT ported: the `log.info` line of `inbox_send`. `_own_mailbox`'s 30 s cache is not ported: it only saves the pane-list walk.
 
 use crate::error::DunkError;
@@ -24,6 +24,10 @@ pub trait InboxEnv: MailboxEnv {
     fn caller_role(&self, pane_id: &str) -> String;
     /// `DUNKINGSHEEP_MAILBOX`, trimmed; `None` when unset or blank.
     fn mailbox_override(&self) -> Option<String>;
+    /// Recipient-side wake policy; tests inject it without changing process environment.
+    fn inbox_silent_mailboxes(&self) -> Option<String> {
+        std::env::var("DUNKINGSHEEP_INBOX_SILENT_MAILBOXES").ok()
+    }
     /// The backend's name, for the `_own_mailbox` refusal text.
     fn backend_name(&self) -> String;
     /// `dunk_pm.load_routing()` members, for `inbox_count`'s `lane_panes`.
@@ -32,8 +36,7 @@ pub trait InboxEnv: MailboxEnv {
     fn store(&self) -> &Store;
     fn now(&self) -> f64;
     /// `self.metrics.record(kind, pane_id=.., mailbox=.., sender=.., source="inbox",
-    /// outcome="ok", duration_ms=..)`. Metrics have no Rust owner yet, so the daemon wiring
-    /// supplies this.
+    /// outcome="ok", duration_ms=.., bytes=..)`. An unattached metrics store is safely ignored.
     fn record_metric(
         &self,
         kind: &str,
@@ -41,6 +44,7 @@ pub trait InboxEnv: MailboxEnv {
         mailbox: &str,
         sender: Option<&str>,
         duration_ms: Option<i64>,
+        bytes: Option<i64>,
     );
     /// `dunk_pm.load_routing()`; an unreadable file is an empty routing (the send path
     /// swallows it: "routing must never block a send").
@@ -64,8 +68,8 @@ pub trait InboxEnv: MailboxEnv {
         bytes: usize,
         attachments: usize,
     );
-    /// `self.tasks.for_pane(pane)`, already rendered as the wire's JSON.
-    fn tasks_for_pane(&self, pane_id: &str) -> Value;
+    /// `self.tasks.for_pane(pane)`, already rendered as wire JSON; errors leave mail unread.
+    fn tasks_for_pane(&self, pane_id: &str) -> Result<Value, DunkError>;
 }
 
 /// One project in the PM routing file (`dunk_pm.load_routing`).
@@ -88,6 +92,29 @@ pub struct Nudge {
 
 /// `SYSTEM_SENDERS`.
 pub const SYSTEM_SENDERS: [&str; 1] = ["watchdog"];
+
+/// Match final recipient identifiers exactly, case-sensitively after trimming.
+/// No case folding: silence never changes durable storage or authority.
+pub fn recipient_is_quiet(
+    policy: Option<&str>,
+    mailbox: &str,
+    label: &str,
+    pane_id: Option<&str>,
+) -> bool {
+    let normalize = |text: &str| {
+        text.trim_matches(|c: char| c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c))
+            .to_owned()
+    };
+    let destinations = [Some(mailbox), Some(label), pane_id];
+    policy.unwrap_or("").split(',').any(|entry| {
+        let entry = normalize(entry);
+        !entry.is_empty()
+            && destinations
+                .iter()
+                .flatten()
+                .any(|value| normalize(value) == entry)
+    })
+}
 
 /// `NOTICE_PREFIX`.
 pub const NOTICE_PREFIX: &str = "[inbox] ";
@@ -376,6 +403,7 @@ impl Flock {
                 key.as_deref().unwrap_or(""),
                 was.sender.as_deref(),
                 duration,
+                None,
             );
         }
         Ok(AckResult {
@@ -544,7 +572,14 @@ impl Flock {
             ..Default::default()
         })?;
         let mut notified = false;
-        if args.notify {
+        if args.notify
+            && !recipient_is_quiet(
+                env.inbox_silent_mailboxes().as_deref(),
+                &mailbox,
+                &label,
+                pane_id.as_deref(),
+            )
+        {
             if let Some(pane) = pane_id.as_deref() {
                 let unread = inbox::count(env.pool(), &mailbox, &[], env.now())?.unread;
                 let text = notice_text(&mailbox, unread, sender.as_deref(), subject.as_deref());
@@ -645,6 +680,7 @@ impl Flock {
             self_pane_id
                 .filter(|p| !p.is_empty())
                 .map(|p| env.tasks_for_pane(p))
+                .transpose()?
         } else {
             None
         };
@@ -671,10 +707,11 @@ impl Flock {
             message.read_at = Some(now);
             env.record_metric(
                 "inbox.read",
-                None,
+                message.pane_id.as_deref(),
                 &key,
                 message.summary.sender.as_deref(),
                 Some(((now - message.summary.created_at) * 1000.0) as i64),
+                Some(message.summary.body_bytes),
             );
         }
         Ok(ReadResult {

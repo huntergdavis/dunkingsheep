@@ -36,6 +36,39 @@ fn run_cli_with_env(socket: &str, command: &[&str], env: &[(&str, &str)]) -> Out
     cli.output().expect("run Rust CLI")
 }
 
+fn run_local_context_cli(
+    cwd: &Path,
+    config_dir: &Path,
+    superuser: &str,
+    args: &[String],
+) -> Output {
+    run_local_context_cli_with_ledger(cwd, config_dir, superuser, args, None)
+}
+
+fn run_local_context_cli_with_ledger(
+    cwd: &Path,
+    config_dir: &Path,
+    superuser: &str,
+    args: &[String],
+    ledger: Option<&Path>,
+) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_dunkingsheep"));
+    command
+        .args(["--self-pane", "%99"])
+        .args(args)
+        .current_dir(cwd)
+        .env("DUNKINGSHEEP_DIR", config_dir)
+        .env("DUNKINGSHEEP_SUPERUSER", superuser)
+        .env_remove("DUNKINGSHEEP_SOCKET")
+        .env_remove("DUNKINGSHEEP_CONTEXT_LEDGER")
+        .env_remove("DUNKINGSHEEP_SERVICE_TOKEN")
+        .env_remove("DUNKINGSHEEP_SERVICE_TOKEN_FILE");
+    if let Some(ledger) = ledger {
+        command.env("DUNKINGSHEEP_CONTEXT_LEDGER", ledger);
+    }
+    command.output().expect("run Rust CLI")
+}
+
 fn run_cli_with_stdin(socket: &str, command: &[&str], input: &str) -> Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_dunkingsheep"))
         .args(["--socket", socket, "--self-pane", "%99"])
@@ -2918,4 +2951,750 @@ fn cli_route_26_reports() {
         String::from_utf8(listed.stdout).unwrap()
     );
     assert!(listed.stderr.is_empty());
+}
+
+#[test]
+fn cli_route_32_token() {
+    let issued = run_daemon_cli(
+        &["token", "issue", "--role", "owner"],
+        "token_issue",
+        json!({"role": "owner", "label": null}),
+        json!({"token": "single-use-secret", "role": "owner", "label": null}),
+    );
+    assert_eq!(Some(0), issued.status.code());
+    assert_eq!(
+        "single-use-secret\n",
+        String::from_utf8(issued.stdout).unwrap()
+    );
+    assert!(issued.stderr.is_empty());
+
+    let issued_json = run_daemon_cli(
+        &[
+            "token", "issue", "--role", "web", "--label", "web app", "--json",
+        ],
+        "token_issue",
+        json!({"role": "web", "label": "web app"}),
+        json!({"token": "json-secret", "role": "web", "label": "web app"}),
+    );
+    assert_eq!(Some(0), issued_json.status.code());
+    assert_eq!(
+        "{\n  \"token\": \"json-secret\",\n  \"role\": \"web\",\n  \"label\": \"web app\"\n}\n",
+        String::from_utf8(issued_json.stdout).unwrap()
+    );
+    assert!(issued_json.stderr.is_empty());
+
+    let revoked = run_daemon_cli(
+        &["token", "revoke", "expired-web"],
+        "token_revoke",
+        json!({"label": "expired-web"}),
+        json!({"revoked": 2, "label": "expired-web"}),
+    );
+    assert_eq!(Some(0), revoked.status.code());
+    assert_eq!(
+        "revoked 2 token(s) labelled expired-web\n",
+        String::from_utf8(revoked.stdout).unwrap()
+    );
+    assert!(revoked.stderr.is_empty());
+
+    let revoked_json = run_daemon_cli(
+        &["token", "revoke", "missing", "--json"],
+        "token_revoke",
+        json!({"label": "missing"}),
+        json!({"revoked": 0, "label": "missing"}),
+    );
+    assert_eq!(Some(0), revoked_json.status.code());
+    assert_eq!(
+        "{\n  \"revoked\": 0,\n  \"label\": \"missing\"\n}\n",
+        String::from_utf8(revoked_json.stdout).unwrap()
+    );
+    assert!(revoked_json.stderr.is_empty());
+
+    let listed = run_daemon_cli(
+        &["token", "list"],
+        "superuser_status",
+        json!({}),
+        json!({
+            "tokens": [
+                {"label": "web desk", "role": "web"},
+                {"label": "owner", "role": "owner"}
+            ]
+        }),
+    );
+    assert_eq!(Some(0), listed.status.code());
+    assert_eq!(
+        format!(
+            "{:<24} {}\n{:<24} {}\n",
+            "web desk", "web", "owner", "owner"
+        ),
+        String::from_utf8(listed.stdout).unwrap()
+    );
+    assert!(listed.stderr.is_empty());
+
+    let empty = run_daemon_cli(
+        &["token", "list"],
+        "superuser_status",
+        json!({}),
+        json!({"tokens": []}),
+    );
+    assert_eq!(Some(0), empty.status.code());
+    assert_eq!("no tokens\n", String::from_utf8(empty.stdout).unwrap());
+    assert!(empty.stderr.is_empty());
+
+    let listed_json = run_daemon_cli(
+        &["token", "list", "--json"],
+        "superuser_status",
+        json!({}),
+        json!({"tokens": [{"label": "system", "role": "system"}]}),
+    );
+    assert_eq!(Some(0), listed_json.status.code());
+    assert_eq!(
+        "{\n  \"tokens\": [\n    {\n      \"label\": \"system\",\n      \"role\": \"system\"\n    }\n  ]\n}\n",
+        String::from_utf8(listed_json.stdout).unwrap()
+    );
+    assert!(listed_json.stderr.is_empty());
+}
+
+#[test]
+fn cli_route_10_context_local_seed() {
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = temp.path().join("work");
+    let config = temp.path().join("config");
+    let store = temp.path().join("project-store");
+    std::fs::create_dir_all(&cwd).unwrap();
+    std::fs::create_dir_all(&config).unwrap();
+
+    let empty_path_init = run_local_context_cli(
+        &cwd,
+        &config,
+        "0",
+        &[
+            "context".to_string(),
+            "init".to_string(),
+            "--path".to_string(),
+            String::new(),
+        ],
+    );
+    assert_eq!(Some(0), empty_path_init.status.code());
+    assert_eq!(
+        "store at .dunkingsheep\n",
+        String::from_utf8(empty_path_init.stdout).unwrap()
+    );
+    assert!(empty_path_init.stderr.is_empty());
+    let default_store = cwd.join(".dunkingsheep");
+    assert!(default_store.join("ground-truth").is_dir());
+    assert!(default_store.join("fact").is_dir());
+    assert!(!cwd.join("ground-truth").exists());
+    assert!(!cwd.join("fact").exists());
+
+    let init = run_local_context_cli(
+        &cwd,
+        &config,
+        "0",
+        &[
+            "context".into(),
+            "init".into(),
+            "--path".into(),
+            store.display().to_string(),
+        ],
+    );
+    assert_eq!(Some(0), init.status.code());
+    assert_eq!(
+        format!("store at {}\n", store.display()),
+        String::from_utf8(init.stdout).unwrap()
+    );
+    assert!(init.stderr.is_empty());
+    for class in ["ground-truth", "fact", "history", "provisional"] {
+        assert!(
+            store.join(class).is_dir(),
+            "missing class directory {class}"
+        );
+    }
+    assert!(store.join("README.md").is_file());
+
+    let init_json = run_local_context_cli(
+        &cwd,
+        &config,
+        "0",
+        &[
+            "context".into(),
+            "init".into(),
+            "--path".into(),
+            store.display().to_string(),
+            "--json".into(),
+        ],
+    );
+    assert_eq!(Some(0), init_json.status.code());
+    assert_eq!(
+        format!("{{\n  \"root\": \"{}\"\n}}\n", store.display()),
+        String::from_utf8(init_json.stdout).unwrap()
+    );
+    assert!(init_json.stderr.is_empty());
+
+    let entry = store.join("fact").join("fixture.md");
+    std::fs::write(
+        &entry,
+        "---\nclass: fact\nsubject: fixture\ntype: reference\nscope: project\nauthority: agent\nsource: test\nstated: 2026-11-01\n---\nFixture body.\n",
+    )
+    .unwrap();
+    let ledger = config.join("context-ledger.db");
+    let refused = run_local_context_cli(
+        &cwd,
+        &config,
+        "0",
+        &[
+            "context".into(),
+            "ledger".into(),
+            "adopt".into(),
+            "--path".into(),
+            store.display().to_string(),
+        ],
+    );
+    assert_eq!(Some(1), refused.status.code());
+    assert!(refused.stdout.is_empty());
+    assert_eq!(
+        "refused: `context ledger adopt` is the owner's bootstrap; run it with DUNKINGSHEEP_SUPERUSER=1 from the owner's terminal\n",
+        String::from_utf8(refused.stderr).unwrap()
+    );
+    assert!(
+        !ledger.exists(),
+        "unauthorized adopt must not create the ledger"
+    );
+
+    let failing_ledger = config.join("ledger-is-a-directory");
+    std::fs::create_dir(&failing_ledger).unwrap();
+    let failed_adopt = run_local_context_cli_with_ledger(
+        &cwd,
+        &config,
+        "1",
+        &[
+            "context".into(),
+            "ledger".into(),
+            "adopt".into(),
+            "--path".into(),
+            store.display().to_string(),
+        ],
+        Some(&failing_ledger),
+    );
+    assert_ne!(Some(0), failed_adopt.status.code());
+    assert!(failed_adopt.stdout.is_empty());
+    let error = String::from_utf8(failed_adopt.stderr).unwrap();
+    assert!(!error.trim().is_empty());
+    assert!(!error.contains("adopted"));
+
+    let empty_path_snapshot = run_local_context_cli(
+        &cwd,
+        &config,
+        "0",
+        &[
+            "context".to_string(),
+            "snapshot".to_string(),
+            "--path".to_string(),
+            String::new(),
+        ],
+    );
+    assert_eq!(Some(0), empty_path_snapshot.status.code());
+    assert!(empty_path_snapshot.stderr.is_empty());
+    let empty_path_snapshot: Value = serde_json::from_slice(&empty_path_snapshot.stdout).unwrap();
+    assert_eq!(
+        ".dunkingsheep",
+        empty_path_snapshot["stores"]["project"]["path"]
+    );
+
+    let snapshot = run_local_context_cli(
+        &cwd,
+        &config,
+        "0",
+        &[
+            "context".into(),
+            "snapshot".into(),
+            "--project".into(),
+            "--path".into(),
+            store.display().to_string(),
+        ],
+    );
+    assert_eq!(Some(0), snapshot.status.code());
+    assert!(snapshot.stderr.is_empty());
+    let snapshot: Value = serde_json::from_slice(&snapshot.stdout).unwrap();
+    assert_eq!("context-snapshot/1", snapshot["schema"]);
+    assert!(snapshot["as_of"].as_u64().unwrap() > 0);
+    assert!(snapshot["digest"]
+        .as_str()
+        .unwrap()
+        .contains("Fixture body."));
+    assert_eq!("ok", snapshot["stores"]["project"]["status"]);
+    assert_eq!(
+        store.display().to_string(),
+        snapshot["stores"]["project"]["path"]
+    );
+    assert_eq!(1, snapshot["stores"]["project"]["counts"]["fact"]);
+    assert_eq!(
+        1,
+        snapshot["stores"]["project"]["entries"]
+            .as_array()
+            .unwrap()
+            .len()
+    );
+
+    let adopted = run_local_context_cli(
+        &cwd,
+        &config,
+        "1",
+        &[
+            "context".into(),
+            "ledger".into(),
+            "adopt".into(),
+            "--path".into(),
+            store.display().to_string(),
+        ],
+    );
+    assert_eq!(Some(0), adopted.status.code());
+    assert_eq!(
+        format!("adopted 1 entries into {}\n", ledger.display()),
+        String::from_utf8(adopted.stdout).unwrap()
+    );
+    assert!(adopted.stderr.is_empty());
+    assert!(ledger.is_file());
+
+    let status = run_local_context_cli(
+        &cwd,
+        &config,
+        "0",
+        &[
+            "context".into(),
+            "ledger".into(),
+            "status".into(),
+            "--path".into(),
+            store.display().to_string(),
+        ],
+    );
+    assert_eq!(Some(0), status.status.code());
+    assert_eq!(
+        format!("{:11} {:13} {}\n", "recorded", "fact", "fixture"),
+        String::from_utf8(status.stdout).unwrap()
+    );
+    assert!(status.stderr.is_empty());
+}
+
+#[test]
+fn cli_route_33_superuser_a() {
+    let status = run_daemon_cli(
+        &["superuser", "status"],
+        "superuser_status",
+        json!({}),
+        json!({
+            "path": "/tmp/roles.json",
+            "superuser": true,
+            "pane_id": "%99",
+            "role": "owner",
+            "lanes": {},
+            "tokens": [{"label": "owner", "role": "owner"}]
+        }),
+    );
+    assert_eq!(Some(0), status.status.code());
+    assert_eq!(
+        "roles /tmp/roles.json\n  owner: yes (pane %99, role owner)\n  (no lanes registered; `lane register --role owner` bootstraps)\n  tokens: owner=owner\n",
+        String::from_utf8(status.stdout).unwrap()
+    );
+    assert!(status.stderr.is_empty());
+
+    let added = run_daemon_cli(
+        &["superuser", "add", "worker@example"],
+        "superuser_add",
+        json!({"entry": "worker@example"}),
+        json!({
+            "path": "/tmp/roles.json",
+            "superuser": true,
+            "pane_id": "%99",
+            "role": "owner",
+            "lanes": {},
+            "tokens": [],
+            "added": "worker@example"
+        }),
+    );
+    assert_eq!(Some(0), added.status.code());
+    assert_eq!(
+        "roles /tmp/roles.json\n  owner: yes (pane %99, role owner)\n  (no lanes registered; `lane register --role owner` bootstraps)\n  added: worker@example\n",
+        String::from_utf8(added.stdout).unwrap()
+    );
+    assert!(added.stderr.is_empty());
+
+    let removed_json = run_daemon_cli(
+        &["superuser", "remove", "worker@example", "--json"],
+        "superuser_remove",
+        json!({"entry": "worker@example"}),
+        json!({"removed": 1, "entry": "worker@example"}),
+    );
+    assert_eq!(Some(0), removed_json.status.code());
+    assert_eq!(
+        "{\n  \"removed\": 1,\n  \"entry\": \"worker@example\"\n}\n",
+        String::from_utf8(removed_json.stdout).unwrap()
+    );
+    assert!(removed_json.stderr.is_empty());
+}
+
+#[test]
+fn cli_route_36_memory_b() {
+    let hook = run_daemon_cli(
+        &[
+            "memory",
+            "hook-context",
+            "--query",
+            "start prompt",
+            "--sessions",
+            "2",
+        ],
+        "memory_context",
+        json!({"query": "start prompt", "sessions": 2}),
+        json!({"text": "prior session notes"}),
+    );
+    assert_eq!(Some(0), hook.status.code());
+    assert_eq!(
+        "{\"hookSpecificOutput\": {\"hookEventName\": \"SessionStart\", \"additionalContext\": \"Dunking Sheep memory - relevant past sessions for this workspace:\\n\\nprior session notes\"}}\n",
+        String::from_utf8(hook.stdout).unwrap()
+    );
+    assert!(hook.stderr.is_empty());
+
+    let cwd_name = std::env::current_dir()
+        .unwrap()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let hook_json = run_daemon_cli(
+        &["memory", "hook-context", "--query", "", "--json"],
+        "memory_context",
+        json!({"query": cwd_name, "sessions": 5}),
+        json!({"text": ""}),
+    );
+    assert_eq!(Some(0), hook_json.status.code());
+    assert_eq!(
+        "{\n  \"text\": \"\"\n}\n",
+        String::from_utf8(hook_json.stdout).unwrap()
+    );
+    assert!(hook_json.stderr.is_empty());
+
+    let stats = run_daemon_cli(
+        &["memory", "stats"],
+        "memory_stats",
+        json!({}),
+        json!({
+            "path": "/tmp/memory.db",
+            "schema_version": 2,
+            "ok": true,
+            "sources": 4,
+            "sessions": 3,
+            "chunks": 9,
+            "queue_depth": 0,
+            "queue": "idle",
+            "db_bytes": 100,
+            "queries": {"count": 7, "p50": 1.25, "p95": 2.5, "p99": 3.5, "errors": 0},
+            "harness": [{"harness": "codex", "chunks": 9, "sessions": 3}]
+        }),
+    );
+    assert_eq!(Some(0), stats.status.code());
+    assert_eq!(
+        "path /tmp/memory.db  schema 2  ok True\nsources 4  sessions 3  chunks 9\nqueue depth 0  idle\ndb bytes 100\nqueries n=7 p50=1.25 p95=2.5 p99=3.5 errors=0\n  codex: 9 chunks / 3 sessions\n",
+        String::from_utf8(stats.stdout).unwrap()
+    );
+    assert!(stats.stderr.is_empty());
+
+    let status = run_daemon_cli(
+        &["memory", "status", "--json"],
+        "memory_status",
+        json!({}),
+        json!({"ok": true, "sources": 0}),
+    );
+    assert_eq!(Some(0), status.status.code());
+    assert_eq!(
+        "{\n  \"ok\": true,\n  \"sources\": 0\n}\n",
+        String::from_utf8(status.stdout).unwrap()
+    );
+    assert!(status.stderr.is_empty());
+}
+
+#[test]
+fn cli_route_34_superuser_b() {
+    let status = run_daemon_cli(
+        &["superuser", "status"],
+        "superuser_status",
+        json!({}),
+        json!({
+            "path": "/tmp/roles.json",
+            "superuser": true,
+            "pane_id": "%99",
+            "role": "owner",
+            "lanes": {},
+            "tokens": [{"label": "owner", "role": "owner"}]
+        }),
+    );
+    assert_eq!(Some(0), status.status.code());
+    assert_eq!(
+        "roles /tmp/roles.json\n  owner: yes (pane %99, role owner)\n  (no lanes registered; `lane register --role owner` bootstraps)\n  tokens: owner=owner\n",
+        String::from_utf8(status.stdout).unwrap()
+    );
+    assert!(status.stderr.is_empty());
+
+    let added = run_daemon_cli(
+        &["superuser", "add", "worker@example"],
+        "superuser_add",
+        json!({"entry": "worker@example"}),
+        json!({
+            "path": "/tmp/roles.json",
+            "superuser": true,
+            "pane_id": "%99",
+            "role": "owner",
+            "lanes": {},
+            "tokens": [],
+            "added": "worker@example"
+        }),
+    );
+    assert_eq!(Some(0), added.status.code());
+    assert_eq!(
+        "roles /tmp/roles.json\n  owner: yes (pane %99, role owner)\n  (no lanes registered; `lane register --role owner` bootstraps)\n  added: worker@example\n",
+        String::from_utf8(added.stdout).unwrap()
+    );
+    assert!(added.stderr.is_empty());
+
+    let removed = run_daemon_cli(
+        &["superuser", "remove", "worker@example"],
+        "superuser_remove",
+        json!({"entry": "worker@example"}),
+        json!({
+            "path": "/tmp/roles.json",
+            "superuser": true,
+            "pane_id": "%99",
+            "role": "owner",
+            "lanes": {},
+            "tokens": [],
+            "removed": 1,
+            "entry": "worker@example"
+        }),
+    );
+    assert_eq!(Some(0), removed.status.code());
+    assert_eq!(
+        "roles /tmp/roles.json\n  owner: yes (pane %99, role owner)\n  (no lanes registered; `lane register --role owner` bootstraps)\n  removed: 1 (worker@example)\n",
+        String::from_utf8(removed.stdout).unwrap()
+    );
+    assert!(removed.stderr.is_empty());
+
+    let recovered = run_daemon_cli(
+        &["superuser", "recover"],
+        "superuser_recover",
+        json!({"name": null}),
+        json!({
+            "path": "/tmp/roles.json",
+            "superuser": true,
+            "pane_id": "%99",
+            "role": "owner",
+            "lanes": {},
+            "tokens": [],
+            "recovered": true,
+            "entry": {"role": "owner"}
+        }),
+    );
+    assert_eq!(Some(0), recovered.status.code());
+    assert_eq!(
+        "roles /tmp/roles.json\n  owner: yes (pane %99, role owner)\n  (no lanes registered; `lane register --role owner` bootstraps)\n  recovered: %99 (None)\n",
+        String::from_utf8(recovered.stdout).unwrap()
+    );
+    assert!(recovered.stderr.is_empty());
+
+    let named = run_daemon_cli(
+        &[
+            "superuser",
+            "recover",
+            "--name",
+            "bootstrap owner",
+            "--json",
+        ],
+        "superuser_recover",
+        json!({"name": "bootstrap owner"}),
+        json!({
+            "path": "/tmp/roles.json",
+            "superuser": true,
+            "pane_id": "%99",
+            "role": "owner",
+            "lanes": {},
+            "tokens": [],
+            "recovered": true,
+            "entry": {"role": "owner"}
+        }),
+    );
+    assert_eq!(Some(0), named.status.code());
+    assert_eq!(
+        "{\n  \"path\": \"/tmp/roles.json\",\n  \"superuser\": true,\n  \"pane_id\": \"%99\",\n  \"role\": \"owner\",\n  \"lanes\": {},\n  \"tokens\": [],\n  \"recovered\": true,\n  \"entry\": {\n    \"role\": \"owner\"\n  }\n}\n",
+        String::from_utf8(named.stdout).unwrap()
+    );
+    assert!(named.stderr.is_empty());
+}
+
+#[test]
+fn cli_route_35_memory_a() {
+    let recalled = run_daemon_cli(
+        &[
+            "memory",
+            "recall",
+            "CLI routes",
+            "--limit",
+            "2",
+            "--harness",
+            "codex",
+            "--project",
+            "dunkingsheep",
+            "--since",
+            "123.5",
+        ],
+        "memory_recall",
+        json!({
+            "query": "CLI routes",
+            "limit": 2,
+            "harness": "codex",
+            "project": "dunkingsheep",
+            "since": 123.5
+        }),
+        json!([{
+            "score": 2.25,
+            "harness": "codex",
+            "project": "dunkingsheep",
+            "session_id": "s42",
+            "role": "assistant",
+            "snippet": "first line\nsecond line"
+        }]),
+    );
+    assert_eq!(Some(0), recalled.status.code());
+    assert_eq!(
+        format!(
+            "{:.3} {:<8} {:<20} #{} [{}]\n  {}\n",
+            2.25, "codex", "dunkingsheep", "s42", "assistant", "first line second line"
+        ),
+        String::from_utf8(recalled.stdout).unwrap()
+    );
+    assert!(recalled.stderr.is_empty());
+
+    let searched = run_daemon_cli(
+        &["memory", "search", "nothing", "--json"],
+        "memory_search",
+        json!({
+            "query": "nothing",
+            "limit": 10,
+            "harness": null,
+            "project": null,
+            "since": null
+        }),
+        json!([]),
+    );
+    assert_eq!(Some(0), searched.status.code());
+    assert_eq!("[]\n", String::from_utf8(searched.stdout).unwrap());
+    assert!(searched.stderr.is_empty());
+
+    let context = run_daemon_cli(
+        &["memory", "context", "memory plan", "--sessions", "3"],
+        "memory_context",
+        json!({"query": "memory plan", "sessions": 3}),
+        json!({
+            "query": "memory plan",
+            "counts": {"sessions": 1, "snippets": 1},
+            "sessions": [{
+                "harness": "codex",
+                "project": "dunkingsheep",
+                "session_id": "s7",
+                "title": "Saved plan",
+                "score": 1.25,
+                "snippets": [{"snippet": "saved\nline"}]
+            }]
+        }),
+    );
+    assert_eq!(Some(0), context.status.code());
+    assert_eq!(
+        "query 'memory plan'  sessions 1  snippets 1\n- codex dunkingsheep #s7 Saved plan (score 1.250)\n    saved line\n",
+        String::from_utf8(context.stdout).unwrap()
+    );
+    assert!(context.stderr.is_empty());
+}
+
+#[test]
+fn cli_route_37_memory_c() {
+    let ingested = run_daemon_cli(
+        &[
+            "memory",
+            "ingest",
+            "/tmp/session.jsonl",
+            "--harness",
+            "codex",
+            "--project",
+            "demo",
+        ],
+        "memory_ingest",
+        json!({
+            "path": "/tmp/session.jsonl",
+            "harness": "codex",
+            "project": "demo"
+        }),
+        json!({"path": "/tmp/session.jsonl", "harness": "codex"}),
+    );
+    assert_eq!(Some(0), ingested.status.code());
+    assert_eq!(
+        "queued /tmp/session.jsonl (codex)\n",
+        String::from_utf8(ingested.stdout).unwrap()
+    );
+    assert!(ingested.stderr.is_empty());
+
+    let started = run_daemon_cli(
+        &["memory", "backfill", "--limit", "4"],
+        "memory_backfill",
+        json!({"action": "start", "limit": 4}),
+        json!({
+            "enqueued": 2,
+            "discovered": 7,
+            "paused": false,
+            "status": {"ingestor": {"throttle_s": 15}}
+        }),
+    );
+    assert_eq!(Some(0), started.status.code());
+    assert_eq!(
+        "queued 2 of 7 source(s); paused False; throttle 15\npath None  schema None  ok None\nsources None  sessions None  chunks None\nqueue depth None  None\ndb bytes None\nqueries n=None p50=None p95=None p99=None errors=None\ningestor {'throttle_s': 15}\n",
+        String::from_utf8(started.stdout).unwrap()
+    );
+    assert!(started.stderr.is_empty());
+
+    let paused = run_daemon_cli(
+        &[
+            "memory", "backfill", "--pause", "--resume", "--status", "--limit", "3", "--json",
+        ],
+        "memory_backfill",
+        json!({"action": "pause", "limit": 3}),
+        json!({"paused": true}),
+    );
+    assert_eq!(Some(0), paused.status.code());
+    assert_eq!(
+        "{\n  \"paused\": true\n}\n",
+        String::from_utf8(paused.stdout).unwrap()
+    );
+    assert!(paused.stderr.is_empty());
+
+    let resumed = run_daemon_cli(
+        &["memory", "backfill", "--resume", "--status", "--json"],
+        "memory_backfill",
+        json!({"action": "resume", "limit": null}),
+        json!({"resumed": true}),
+    );
+    assert_eq!(Some(0), resumed.status.code());
+    assert_eq!(
+        "{\n  \"resumed\": true\n}\n",
+        String::from_utf8(resumed.stdout).unwrap()
+    );
+    assert!(resumed.stderr.is_empty());
+
+    let status = run_daemon_cli(
+        &["memory", "backfill", "--status", "--json"],
+        "memory_backfill",
+        json!({"action": "status", "limit": null}),
+        json!({"status": "idle"}),
+    );
+    assert_eq!(Some(0), status.status.code());
+    assert_eq!(
+        "{\n  \"status\": \"idle\"\n}\n",
+        String::from_utf8(status.stdout).unwrap()
+    );
+    assert!(status.stderr.is_empty());
 }

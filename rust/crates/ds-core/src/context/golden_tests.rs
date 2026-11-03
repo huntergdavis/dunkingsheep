@@ -201,7 +201,7 @@ fn live_tree_matches_the_python() {
         serde_json::from_str(&std::fs::read_to_string(out.join("expected.json")).unwrap()).unwrap();
     let store = Store::new(Some(&root), false);
     let mut ledger = Ledger::new(Some(&dir.path().join("ledger.db")));
-    store.adopt(&mut ledger, "adopt");
+    store.adopt(&mut ledger, "adopt").unwrap();
     let diffs = all_differences(&store, &mut ledger, &expect);
     for line in &diffs {
         eprintln!("DIFF {line}");
