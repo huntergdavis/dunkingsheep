@@ -695,6 +695,7 @@ mod tests {
         std::fs::write(&executable, b"test daemon identity").unwrap();
         let factory: crate::flock::loop_env::LoopTerminalFactory = Arc::new(|| {
             let mut terminal = FakeTerminal::new();
+            terminal.panes[0].label = "w1:p1".into();
             terminal.panes[0].command = "codex".into();
             terminal.panes[0].pane_pid = Some(i64::from(std::process::id()));
             terminal
