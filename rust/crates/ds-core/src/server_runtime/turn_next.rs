@@ -375,7 +375,13 @@ mod tests {
             provider_calls.fetch_add(1, Ordering::SeqCst);
             Ok(env.clone())
         });
-        let factory: crate::flock::loop_env::LoopTerminalFactory = Arc::new(|| {
+        let worker_threads = Arc::new(Mutex::new(Vec::new()));
+        let factory_threads = Arc::clone(&worker_threads);
+        let factory: crate::flock::loop_env::LoopTerminalFactory = Arc::new(move || {
+            factory_threads
+                .lock()
+                .unwrap()
+                .push(std::thread::current().id());
             let mut terminal = FakeTerminal::new();
             terminal.panes[0].command = "codex".into();
             Box::new(terminal)
@@ -426,5 +432,10 @@ mod tests {
             calls.load(Ordering::SeqCst) >= 2,
             "gate and materialisation must both use the provider"
         );
+        let threads = worker_threads.lock().unwrap();
+        assert!(!threads.is_empty());
+        assert!(threads
+            .iter()
+            .all(|thread| *thread != std::thread::current().id()));
     }
 }
