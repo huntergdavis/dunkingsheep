@@ -88,7 +88,13 @@ async fn herdr_webui(
 }
 
 fn same_origin(headers: &HeaderMap, scheme: RequestScheme) -> Option<Response> {
-    let origin = headers.get(header::ORIGIN)?.to_str().ok()?;
+    let origin = match headers.get(header::ORIGIN) {
+        None => return None,
+        Some(value) => match value.to_str() {
+            Ok(origin) => origin,
+            Err(_) => return Some(cross_origin_response()),
+        },
+    };
     let host = headers
         .get(header::HOST)
         .and_then(|value| value.to_str().ok())
@@ -98,16 +104,18 @@ fn same_origin(headers: &HeaderMap, scheme: RequestScheme) -> Option<Response> {
         RequestScheme::Https => "https",
     };
     if origin != format!("{scheme}://{host}") {
-        Some(
-            (
-                StatusCode::FORBIDDEN,
-                Json(json!({"detail": "Cross-origin request refused"})),
-            )
-                .into_response(),
-        )
+        Some(cross_origin_response())
     } else {
         None
     }
+}
+
+fn cross_origin_response() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(json!({"detail": "Cross-origin request refused"})),
+    )
+        .into_response()
 }
 
 fn bearer_value(headers: &HeaderMap) -> Option<String> {
@@ -502,6 +510,29 @@ mod tests {
         request.headers_mut().insert(
             header::ORIGIN,
             "http://evil.test".parse().expect("origin header"),
+        );
+        let response = block_on(app.oneshot(request)).expect("route response");
+        let (status, content_type, body) = response_json(response);
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(content_type, "application/json");
+        assert_eq!(body, json!({"detail": "Cross-origin request refused"}));
+        assert!(backend.identities.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn herdr_webui_rejects_invalid_origin_bytes_before_authentication() {
+        let temp = TempDir::new();
+        let backend = Arc::new(FakeAuth::default());
+        let app = build_router(
+            config(&temp.0, "https://herdr.example", "Herdr web UI"),
+            backend.clone(),
+            RequestScheme::Http,
+        );
+        let mut request = bearer_request("/api/herdr-webui", Some("desk.test"));
+        request.headers_mut().insert(
+            header::ORIGIN,
+            axum::http::HeaderValue::from_bytes(b"http://desk.test\xff")
+                .expect("opaque origin header bytes"),
         );
         let response = block_on(app.oneshot(request)).expect("route response");
         let (status, content_type, body) = response_json(response);
