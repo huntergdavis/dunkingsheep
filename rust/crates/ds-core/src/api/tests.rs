@@ -3939,7 +3939,7 @@ fn h_owner_conversation_matches_python() {
         &flock,
         &env,
         "owner_conversation",
-        args(json!({"limit": 0})),
+        args(json!({"limit": 0, "before": "9999999999"})),
         Some("w1:p1"),
     )
     .expect("owner conversation via dispatcher");
@@ -3961,5 +3961,16 @@ fn h_owner_conversation_matches_python() {
             Some("w1:p2"),
         ),
         Err(DunkError::Refused(message)) if message.contains("not permitted for role worker")
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_conversation",
+            args(json!({"before": "not a timestamp"})),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "could not convert string to float: 'not a timestamp'"
     ));
 }

@@ -1034,14 +1034,15 @@ pub fn h_owner_conversation(context: &HandlerContext<'_>, args: Args) -> Result<
     let before = match args.get("before") {
         None | Some(Value::Null) => None,
         Some(Value::Number(number)) => number.as_f64(),
+        Some(Value::Bool(value)) => Some(if *value { 1.0 } else { 0.0 }),
+        Some(Value::String(text)) => Some(text.trim().parse::<f64>().map_err(|_| {
+            DunkError::Refused(format!(
+                "could not convert string to float: {}",
+                py_repr(text)
+            ))
+        })?),
         Some(value) => {
             return Err(DunkError::Refused(match value {
-                Value::String(text) => {
-                    format!("could not convert string to float: {}", py_repr(text))
-                }
-                Value::Bool(_) => {
-                    "float() argument must be a string or a real number, not 'bool'".into()
-                }
                 Value::Array(_) => {
                     "float() argument must be a string or a real number, not 'list'".into()
                 }
