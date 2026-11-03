@@ -1697,6 +1697,47 @@ pub fn render_dispatched(result: &Value) -> String {
     out
 }
 
+/// The tick/status branch of Python's `print_dispatch`, including its
+/// `dunk_dispatch.summary` text followed by the per-lane send results.
+pub fn render_dispatch_tick(result: &Value) -> String {
+    let idle = arr(result, "idle_unfilled");
+    let blocked = arr(result, "blocked");
+    let dead = arr(result, "dead");
+    let mut reasons: Vec<String> = blocked
+        .iter()
+        .map(|item| format!("{}: {}", field(&item, "name"), field(&item, "reason")))
+        .collect();
+    reasons.sort();
+    reasons.dedup();
+
+    let mut out = format!(
+        "idle lanes: {}\ndispatched this hour: {}\nblocked lanes: {}",
+        idle.len(),
+        field(result, "dispatched_1h"),
+        blocked.len()
+    );
+    if !reasons.is_empty() {
+        out.push_str(&format!(" ({})", reasons.join("; ")));
+    }
+    out.push('\n');
+    if !dead.is_empty() {
+        let names = dead
+            .iter()
+            .map(|item| field(&item, "name"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push_str(&format!("dead lanes: {} ({names})\n", dead.len()));
+    }
+    if truthy(get(result, "queue_empty")) {
+        out.push_str(&format!(
+            "the standby queue is empty and {} lane(s) are idle\n",
+            idle.len()
+        ));
+    }
+    out.push_str(&render_dispatched(result));
+    out
+}
+
 /// `print_status`. `stamp` renders `code_mtime`/`started_at`; `now` is `time.time()`.
 pub fn render_status(result: &Value, stamp: Stamp, now: f64) -> String {
     let mut out = String::new();

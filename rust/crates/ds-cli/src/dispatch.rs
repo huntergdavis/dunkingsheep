@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use crate::context_cmd::context_read;
-use crate::usage_cmd::{ordered_json, usage_command, Outcome};
+use crate::usage_cmd::{ordered_json, sorted_json, usage_command, Outcome};
 use ds_core::context::digest::{digest_both, select_stores, DEFAULT_CAP};
 use ds_core::context::ledger::Ledger;
 use ds_core::context::store::Store;
@@ -51,6 +51,25 @@ fn not_ported(command: &str) -> Outcome {
         stdout: String::new(),
         stderr: format!("dunkingsheep (rust port): `{command}` is parsed but not ported yet\n"),
         code: 1,
+    }
+}
+
+fn tui(ns: &Map<String, Value>) -> Outcome {
+    let client = match crate::daemon_cmd::connect(ns) {
+        Ok(client) => client,
+        Err(outcome) => return outcome,
+    };
+    match ds_tui::runtime::run_terminal(client) {
+        Ok(()) => Outcome {
+            stdout: String::new(),
+            stderr: String::new(),
+            code: 0,
+        },
+        Err(error) => Outcome {
+            stdout: String::new(),
+            stderr: format!("error: {error}\n"),
+            code: 3,
+        },
     }
 }
 
@@ -186,6 +205,205 @@ fn superuser(ns: &Map<String, Value>) -> Outcome {
         None => return not_ported("superuser"),
     };
     crate::daemon_cmd::run_command(ns, rpc, args, crate::render_fleet::render_superuser)
+}
+
+fn health(ns: &Map<String, Value>) -> Outcome {
+    let mut client = match crate::daemon_cmd::connect(ns) {
+        Ok(client) => client,
+        Err(outcome) => return outcome,
+    };
+    if matches!(ns.get("deep"), Some(Value::Bool(true))) {
+        client.timeout = client.timeout.max(std::time::Duration::from_secs(180));
+    }
+    let mut args = Map::new();
+    args.insert(
+        "repair".into(),
+        ns.get("repair").cloned().unwrap_or(Value::Bool(false)),
+    );
+    args.insert(
+        "deep".into(),
+        ns.get("deep").cloned().unwrap_or(Value::Bool(false)),
+    );
+    let result = match crate::daemon_cmd::call(&mut client, "health", args) {
+        Ok(result) => result,
+        Err(outcome) => return outcome,
+    };
+
+    let json = matches!(ns.get("json"), Some(Value::Bool(true)));
+    let mut stdout = if json {
+        format!("{}\n", ordered_json(&result))
+    } else {
+        crate::render_print::render_health(&result)
+    };
+    if !json {
+        if let Some(requested) = text(ns, "write") {
+            let requested = if requested.is_empty() {
+                None
+            } else {
+                Some(requested)
+            };
+            match write_health_report(&result, requested) {
+                Ok(path) => stdout.push_str(&format!("  report written to {path}\n")),
+                Err(error) => {
+                    return Outcome {
+                        stdout,
+                        stderr: format!("{error}\n"),
+                        code: 3,
+                    }
+                }
+            }
+        }
+    }
+    Outcome {
+        stdout,
+        stderr: String::new(),
+        code: if result.get("ok") == Some(&Value::Bool(false)) {
+            2
+        } else {
+            0
+        },
+    }
+}
+
+fn write_health_report(result: &Value, requested: Option<&str>) -> Result<String, String> {
+    let path = requested.map(PathBuf::from).unwrap_or_else(|| {
+        PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
+            .join(".config/dunkingsheep/health.json")
+    });
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
+    }
+    let body = sorted_json(result);
+    std::fs::write(&path, body)
+        .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+    Ok(requested
+        .unwrap_or_else(|| path.to_str().unwrap_or_default())
+        .to_string())
+}
+
+fn recover(ns: &Map<String, Value>) -> Outcome {
+    let mut args = Map::new();
+    args.insert(
+        "apply".into(),
+        ns.get("apply").cloned().unwrap_or(Value::Bool(false)),
+    );
+    args.insert(
+        "record".into(),
+        ns.get("record").cloned().unwrap_or(Value::Bool(false)),
+    );
+    crate::daemon_cmd::run_command(ns, "recover", args, crate::render_print::render_recover)
+}
+
+fn capability(ns: &Map<String, Value>) -> Outcome {
+    let mut args = Map::new();
+    args.insert(
+        "target".into(),
+        ns.get("target").cloned().unwrap_or(Value::Null),
+    );
+    crate::daemon_cmd::run_command(
+        ns,
+        "delivery_capability",
+        args,
+        crate::render_fleet::render_capability,
+    )
+}
+
+fn lane(ns: &Map<String, Value>) -> Outcome {
+    let action = text(ns, "lane_command").unwrap_or("list");
+    let (rpc, args, printer): (&str, Map<String, Value>, Box<dyn Fn(&Value) -> String>) =
+        match action {
+            "register" => {
+                let mut args = Map::new();
+                for key in ["pane", "role", "provider", "model", "label"] {
+                    args.insert(key.into(), ns.get(key).cloned().unwrap_or(Value::Null));
+                }
+                (
+                    "lane_register",
+                    args,
+                    Box::new(|result| {
+                        format!(
+                            "registered {} as {} (pid {})\n",
+                            crate::render_fleet::py_str(&result["pane_id"]),
+                            crate::render_fleet::py_str(&result["role"]),
+                            result
+                                .get("pane_pid")
+                                .filter(|value| !value.is_null())
+                                .map(crate::render_fleet::py_str)
+                                .unwrap_or_else(|| "None".into())
+                        )
+                    }),
+                )
+            }
+            "unregister" => {
+                let mut args = Map::new();
+                args.insert(
+                    "pane".into(),
+                    ns.get("pane").cloned().unwrap_or(Value::Null),
+                );
+                (
+                    "lane_unregister",
+                    args,
+                    Box::new(|result| {
+                        format!(
+                            "unregistered {}: {}\n",
+                            crate::render_fleet::py_str(&result["pane_id"]),
+                            crate::render_fleet::py_str(&Value::Bool(crate::render_print::truthy(
+                                &result["removed"]
+                            )))
+                        )
+                    }),
+                )
+            }
+            "set" => {
+                let mut args = Map::new();
+                args.insert(
+                    "pane".into(),
+                    ns.get("pane").cloned().unwrap_or(Value::Null),
+                );
+                args.insert(
+                    "mailbox".into(),
+                    ns.get("mailbox").cloned().unwrap_or(Value::Null),
+                );
+                ("lane_set", args, Box::new(crate::render_fleet::render_lane))
+            }
+            _ => (
+                "lanes",
+                Map::new(),
+                Box::new(crate::render_fleet::render_lanes),
+            ),
+        };
+    crate::daemon_cmd::run_command(ns, rpc, args, printer)
+}
+
+fn retired(ns: &Map<String, Value>) -> Outcome {
+    let mut args = Map::new();
+    args.insert(
+        "action".into(),
+        ns.get("retire_command").cloned().unwrap_or(Value::Null),
+    );
+    args.insert(
+        "pane".into(),
+        ns.get("pane").cloned().unwrap_or(Value::Null),
+    );
+    args.insert(
+        "reason".into(),
+        ns.get("reason").cloned().unwrap_or(Value::Null),
+    );
+    let stamp = |at: f64| {
+        use chrono::TimeZone;
+        chrono::Local
+            .timestamp_opt(at.floor() as i64, 0)
+            .single()
+            .map(|time| time.format("%Y-%m-%d %H:%M").to_string())
+            .unwrap_or_default()
+    };
+    crate::daemon_cmd::run_command(ns, "retire_pane", args, |result| {
+        crate::render_print::render_retired(result, &stamp)
+    })
 }
 
 fn context_local(ns: &Map<String, Value>, json: bool) -> Option<Outcome> {
@@ -1782,6 +2000,143 @@ fn read_view(ns: &Map<String, Value>) -> Outcome {
     crate::daemon_cmd::run_command(ns, rpc, args, crate::render_print::render_view)
 }
 
+fn dispatch_route(ns: &Map<String, Value>) -> Outcome {
+    let mut args = Map::new();
+    args.insert(
+        "action".into(),
+        Value::String(text(ns, "dispatch_command").unwrap_or("").to_owned()),
+    );
+    if let Some(brief) = ns
+        .get("brief")
+        .and_then(Value::as_array)
+        .filter(|words| !words.is_empty())
+    {
+        args.insert(
+            "brief".into(),
+            Value::String(
+                brief
+                    .iter()
+                    .map(crate::render_fleet::py_str)
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            ),
+        );
+    }
+    // Match run_client_command's exact optional-field forwarding. The parsed --lanes option is
+    // not included by the Python route today; only task_id, lane and id are forwarded here.
+    for key in ["task_id", "lane", "id"] {
+        if let Some(value) = ns.get(key).filter(|value| !value.is_null()) {
+            args.insert(key.into(), value.clone());
+        }
+    }
+    if matches!(ns.get("dry_run"), Some(Value::Bool(true))) {
+        args.insert("dry_run".into(), Value::Bool(true));
+    }
+    crate::daemon_cmd::run_command(ns, "dispatch", args, |result| {
+        crate::render_print::render_dispatch(result)
+            .unwrap_or_else(|| crate::render_print::render_dispatch_tick(result))
+    })
+}
+
+fn delivery_queue_route(ns: &Map<String, Value>) -> Outcome {
+    match text(ns, "command").unwrap_or("") {
+        "clear-box" => {
+            let mut args = Map::new();
+            args.insert(
+                "target".into(),
+                ns.get("target").cloned().unwrap_or(Value::Null),
+            );
+            args.insert(
+                "reason".into(),
+                ns.get("reason").cloned().unwrap_or(Value::Null),
+            );
+            crate::daemon_cmd::run_command(ns, "clear_box", args, crate::render_fleet::render_clear)
+        }
+        "delivery" => {
+            let mut args = Map::new();
+            let target = text(ns, "target").unwrap_or("").to_owned();
+            args.insert("target".into(), Value::String(target.clone()));
+            args.insert(
+                "status".into(),
+                ns.get("status").cloned().unwrap_or(Value::Null),
+            );
+            crate::daemon_cmd::run_command(ns, "delivery", args, move |result| {
+                let reason = if crate::render_print::truthy(&result["reason"]) {
+                    format!(" - {}", crate::render_fleet::py_str(&result["reason"]))
+                } else {
+                    String::new()
+                };
+                format!(
+                    "{target}: {}{reason}\n",
+                    crate::render_fleet::py_str(&result["state"])
+                )
+            })
+        }
+        "flush" => {
+            let mut args = Map::new();
+            args.insert(
+                "target".into(),
+                ns.get("target").cloned().unwrap_or(Value::Null),
+            );
+            crate::daemon_cmd::run_command(ns, "flush_box", args, |result| {
+                let mut output = format!(
+                    "{} ({}): {}",
+                    crate::render_fleet::py_str(&result["target_label"]),
+                    crate::render_fleet::py_str(&result["pane_id"]),
+                    crate::render_fleet::py_str(&result["message"])
+                );
+                if crate::render_print::truthy(&result["text"]) {
+                    let text = crate::render_fleet::py_str(&result["text"]);
+                    let preview: String = text.chars().take(60).collect();
+                    output.push_str(&format!(
+                        " -> {}",
+                        crate::render_print::py_repr_str(&preview)
+                    ));
+                }
+                output.push('\n');
+                output
+            })
+        }
+        "messages" | "queue" => crate::daemon_cmd::run_command(
+            ns,
+            "list_messages",
+            Map::new(),
+            crate::render_fleet::render_messages,
+        ),
+        "cancel-message" | "cancel" => {
+            let mut args = Map::new();
+            args.insert(
+                "message_id".into(),
+                ns.get("message_id").cloned().unwrap_or(Value::Null),
+            );
+            crate::daemon_cmd::run_command(ns, "cancel_message", args, |result| {
+                format!(
+                    "cancelled {} for {}\n",
+                    crate::render_fleet::py_str(&result["message_id"]),
+                    crate::render_fleet::py_str(&result["target_label"])
+                )
+            })
+        }
+        "metrics" => {
+            let mut args = Map::new();
+            for (key, value) in [
+                ("window_s", "window"),
+                ("since", "since"),
+                ("until", "until"),
+            ] {
+                args.insert(key.into(), ns.get(value).cloned().unwrap_or(Value::Null));
+            }
+            crate::daemon_cmd::run_command(
+                ns,
+                "metrics",
+                args,
+                crate::render_print::render_json_indent2,
+            )
+        }
+        other => not_ported(other),
+    }
+}
+
 fn poolrad(ns: &Map<String, Value>) -> Outcome {
     match text(ns, "poolrad_command") {
         Some("backlog-sync") => {
@@ -2068,6 +2423,11 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
         "guard" => guard(ns),
         "report" => report(ns),
         "superuser" => superuser(ns),
+        "health" => health(ns),
+        "recover" => recover(ns),
+        "capability" | "capabilities" => capability(ns),
+        "lane" | "lanes" => lane(ns),
+        "retired" => retired(ns),
         "memory" => match text(ns, "memory_command") {
             Some("hook-context" | "stats" | "status") => memory_aux(ns),
             _ => memory(ns),
@@ -2085,7 +2445,11 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
         "state" => state(ns),
         "roster" | "message-state" | "reply-stats" | "project-summary" => read_view(ns),
         "poolrad" => poolrad(ns),
+        "dispatch" => dispatch_route(ns),
+        "clear-box" | "delivery" | "flush" | "messages" | "queue" | "cancel-message" | "cancel"
+        | "metrics" => delivery_queue_route(ns),
         "gh-token" => crate::daemon_cmd::gh_token(ns),
+        "tui" => tui(ns),
         // `client.call("list_panes"), print_panes`
         "fire" | "test" => {
             let mut args = Map::new();

@@ -52,6 +52,7 @@ fn build_arg(arg: &'static Arg) -> clap::Arg {
     }
     a = match arg.nargs {
         Nargs::Opt => a.num_args(0..=1),
+        Nargs::OptEmpty => a.num_args(0..=1).default_missing_value(""),
         Nargs::Plus => a.num_args(1..),
         Nargs::Star => a.num_args(0..),
         Nargs::One | Nargs::Zero => a,

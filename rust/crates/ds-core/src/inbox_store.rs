@@ -31,6 +31,7 @@ use crate::inbox::{
 mod retired;
 pub use retired::RetiredArchiveOptions;
 mod owner_queries;
+mod owner_service;
 const _: () = assert!(MAX_BLOB_BYTES > 0);
 
 /// What `send` stores. Every field but `mailbox` and `body` is optional, as in the Python.

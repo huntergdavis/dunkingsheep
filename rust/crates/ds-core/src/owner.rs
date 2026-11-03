@@ -16,6 +16,9 @@
 //! Ported from `dunk_owner.py`. The write path is [`crate::db::SyncWriter`] (t978), so the
 //! methods keep the Python's blocking shape, and reads go through a `ReadPool`.
 
+pub mod conversations;
+pub use conversations::OwnerConversations;
+
 use std::path::Path;
 
 use serde::Serialize;

@@ -4,18 +4,377 @@
 //! binding, or a hook record bound to the process generation and pane. It does not read rollout
 //! history and never selects the newest session found on disk.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use serde_json::Value;
 
-use crate::native_session::{self, NativeSessionError};
+use crate::native_session::{self, NativeSessionError, NativeSessionSnapshot, Signature};
 use crate::proc::{self, PaneProcess};
+
+#[path = "recovery_native/python_printability.rs"]
+mod python_printability;
 
 const CODEX_HOME: &str = "CODEX_HOME";
 const STATE_DIR: &str = "DUNKINGSHEEP_CODEX_STATE_DIR";
 const BINDINGS_ENV: &str = "DUNKINGSHEEP_RECOVERY_BINDINGS";
+
+/// The decoded prompt transcript, authenticated to one live process and exact rollout file.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PromptSession {
+    pub snapshot: NativeSessionSnapshot,
+    pub text: String,
+    pub pid: i64,
+    pub start: String,
+}
+
+impl PromptSession {
+    /// Refuse when either the bound process generation or its rollout file changed.
+    pub fn assert_unchanged(&self) -> Result<(), NativeSessionError> {
+        self.assert_unchanged_with(|| proc::process_alive(self.pid, Some(&self.start)))
+    }
+
+    fn assert_unchanged_with<P>(&self, mut process_alive: P) -> Result<(), NativeSessionError>
+    where
+        P: FnMut() -> bool,
+    {
+        if !process_alive() {
+            return refuse("the bound Codex process changed");
+        }
+        self.snapshot.assert_unchanged()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PromptSessionCacheKey {
+    pid: i64,
+    start: String,
+    session_id: String,
+    path: String,
+    cwd: String,
+    signature: Signature,
+}
+
+#[derive(Default)]
+struct PromptSessionCache {
+    entries: VecDeque<(PromptSessionCacheKey, PromptSession)>,
+}
+
+static PROMPT_SESSION_CACHE: OnceLock<Mutex<PromptSessionCache>> = OnceLock::new();
+
+/// Read the decoded transcript for the exact process-bound native session named by `pane`.
+///
+/// The process/session resolver and rollout reader remain the authority for session identity,
+/// cwd and turn state. This function only extracts decoded message bodies from that same file.
+pub fn read_prompt_session(pane: &Value) -> Result<PromptSession, NativeSessionError> {
+    let binding = resolve_prompt_session(pane)?;
+    let cache = PROMPT_SESSION_CACHE.get_or_init(|| Mutex::new(PromptSessionCache::default()));
+    read_prompt_session_from_binding(&binding, cache)
+}
+
+fn read_prompt_session_from_binding(
+    binding: &PromptSessionBinding,
+    cache: &Mutex<PromptSessionCache>,
+) -> Result<PromptSession, NativeSessionError> {
+    read_prompt_session_from_binding_with(
+        binding,
+        cache,
+        || {},
+        || proc::process_alive(binding.pid, Some(&binding.start)),
+    )
+}
+
+fn read_prompt_session_from_binding_with<A, P>(
+    binding: &PromptSessionBinding,
+    cache: &Mutex<PromptSessionCache>,
+    after_cache_key: A,
+    mut process_alive: P,
+) -> Result<PromptSession, NativeSessionError>
+where
+    A: FnOnce(),
+    P: FnMut() -> bool,
+{
+    let initial_signature = fs::metadata(&binding.rollout_path)
+        .map(|metadata| native_session::signature(&metadata))
+        .map_err(|_| NativeSessionError::Refusal("native session rollout is unreadable".into()))?;
+    let initial_key = cache_key(binding, initial_signature);
+    after_cache_key();
+
+    let cached = cache
+        .lock()
+        .map_err(|_| NativeSessionError::Refusal("prompt session cache is unavailable".into()))?
+        .entries
+        .iter()
+        .find(|(key, _)| *key == initial_key)
+        .map(|(_, value)| value.clone());
+    if let Some(cached) = cached {
+        cached.assert_unchanged_with(&mut process_alive)?;
+        return Ok(cached);
+    }
+
+    if !process_alive() {
+        return refuse("the bound Codex process changed");
+    }
+    let rollout = native_session::read_rollout(
+        &binding.rollout_path,
+        &binding.session_id,
+        Some(&binding.cwd),
+    )?;
+    if !rollout.active.is_empty() {
+        return refuse("the native session has an active turn");
+    }
+    let snapshot = NativeSessionSnapshot {
+        session_id: binding.session_id.clone(),
+        rollout_path: binding.rollout_path.clone(),
+        signature: rollout.signature,
+        active_turns: rollout.active,
+        started_turns: rollout.started,
+        completed_turns: rollout.completed,
+    };
+    snapshot.assert_unchanged()?;
+    let transcript = fs::read_to_string(&binding.rollout_path)
+        .map_err(|_| NativeSessionError::Refusal("native session rollout is unreadable".into()))?;
+    let text = decode_prompt_bodies(&transcript)?;
+    if fs::metadata(&binding.rollout_path)
+        .map(|metadata| native_session::signature(&metadata))
+        .ok()
+        != Some(snapshot.signature)
+    {
+        return Err(NativeSessionError::Changed(
+            "native session changed during the prompt read".into(),
+        ));
+    }
+    if !process_alive() {
+        return refuse("the bound Codex process changed");
+    }
+    snapshot.assert_unchanged()?;
+    let evidence = PromptSession {
+        snapshot,
+        text,
+        pid: binding.pid,
+        start: binding.start.clone(),
+    };
+    evidence.assert_unchanged()?;
+
+    let key = cache_key(binding, evidence.snapshot.signature);
+    let mut cache = cache
+        .lock()
+        .map_err(|_| NativeSessionError::Refusal("prompt session cache is unavailable".into()))?;
+    cache.entries.push_back((key, evidence.clone()));
+    while cache.entries.len() > 8 {
+        cache.entries.pop_front();
+    }
+    Ok(evidence)
+}
+
+fn cache_key(binding: &PromptSessionBinding, signature: Signature) -> PromptSessionCacheKey {
+    PromptSessionCacheKey {
+        pid: binding.pid,
+        start: binding.start.clone(),
+        session_id: binding.session_id.clone(),
+        path: binding.rollout_path.clone(),
+        cwd: binding.cwd.clone(),
+        signature,
+    }
+}
+
+fn decode_prompt_bodies(transcript: &str) -> Result<String, NativeSessionError> {
+    let mut bodies = Vec::new();
+    for (index, line) in transcript.lines().enumerate() {
+        let event: Value = serde_json::from_str(line).map_err(|_| {
+            NativeSessionError::Refusal(format!(
+                "native session rollout line {} is malformed",
+                index + 1
+            ))
+        })?;
+        let Some(event) = event.as_object() else {
+            return refuse("native session rollout event is not an object");
+        };
+        let payload_value = event.get("payload");
+        let payload_value = if prompt_truthy(payload_value) {
+            payload_value.expect("truthy payload is present")
+        } else {
+            continue;
+        };
+        let Some(payload) = payload_value.as_object() else {
+            return refuse("native session rollout payload is not an object");
+        };
+        match event.get("type").and_then(Value::as_str) {
+            Some("response_item")
+                if payload.get("type").and_then(Value::as_str) == Some("message") =>
+            {
+                refuse_lossy_integer_tokens(line)?;
+                let Some(content) = payload.get("content") else {
+                    continue;
+                };
+                let Some(content) = content.as_array() else {
+                    return refuse("native session message content is not a list");
+                };
+                for part in content {
+                    if let Some(part) = part.as_object() {
+                        bodies.push(prompt_str_or_empty(part.get("text")));
+                    }
+                }
+            }
+            Some("event_msg")
+                if matches!(
+                    payload.get("type").and_then(Value::as_str),
+                    Some("user_message" | "agent_message")
+                ) =>
+            {
+                refuse_lossy_integer_tokens(line)?;
+                bodies.push(prompt_str_or_empty(payload.get("message")));
+            }
+            _ => {}
+        }
+    }
+    Ok(bodies.join("\n"))
+}
+
+// The line was already validated as JSON. Scan numeric tokens outside strings before
+// trusting the decoded Value: serde_json converts out-of-range integers and integer -0
+// to f64, whereas Python retains integer semantics. Conservatively refuse the whole
+// selected record, including ancillary fields, rather than use altered evidence.
+fn refuse_lossy_integer_tokens(line: &str) -> Result<(), NativeSessionError> {
+    let bytes = line.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' => {
+                index += 1;
+                while index < bytes.len() {
+                    match bytes[index] {
+                        b'\\' => index += 2,
+                        b'"' => {
+                            index += 1;
+                            break;
+                        }
+                        _ => index += 1,
+                    }
+                }
+            }
+            b'-' | b'0'..=b'9' => {
+                let start = index;
+                index += 1;
+                while index < bytes.len()
+                    && matches!(bytes[index], b'0'..=b'9' | b'.' | b'e' | b'E' | b'+' | b'-')
+                {
+                    index += 1;
+                }
+                let token = &line[start..index];
+                if !token.contains(['.', 'e', 'E']) {
+                    let representable = if token.starts_with('-') {
+                        token != "-0" && token.parse::<i64>().is_ok()
+                    } else {
+                        token.parse::<u64>().is_ok()
+                    };
+                    if !representable {
+                        return refuse("native session selected record contains an integer that cannot be represented without loss");
+                    }
+                }
+            }
+            _ => index += 1,
+        }
+    }
+    Ok(())
+}
+
+fn prompt_truthy(value: Option<&Value>) -> bool {
+    match value {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(value)) => *value,
+        Some(Value::Number(value)) => value.as_f64().is_some_and(|value| value != 0.0),
+        Some(Value::String(value)) => !value.is_empty(),
+        Some(Value::Array(value)) => !value.is_empty(),
+        Some(Value::Object(value)) => !value.is_empty(),
+    }
+}
+
+fn prompt_str_or_empty(value: Option<&Value>) -> String {
+    if !prompt_truthy(value) {
+        return String::new();
+    }
+    prompt_python_str(value.expect("truthy value is present"))
+}
+
+fn prompt_python_str(value: &Value) -> String {
+    match value {
+        Value::Null => "None".into(),
+        Value::Bool(true) => "True".into(),
+        Value::Bool(false) => "False".into(),
+        Value::String(value) => value.clone(),
+        Value::Number(value) if value.is_f64() => {
+            crate::usage::py_float_repr(value.as_f64().expect("JSON float is representable"))
+        }
+        Value::Number(value) => value.to_string(),
+        Value::Array(values) => format!(
+            "[{}]",
+            values
+                .iter()
+                .map(prompt_python_repr)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Value::Object(values) => format!(
+            "{{{}}}",
+            values
+                .iter()
+                .map(|(key, value)| format!(
+                    "{}: {}",
+                    prompt_python_repr(&Value::String(key.clone())),
+                    prompt_python_repr(value)
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+fn prompt_python_repr(value: &Value) -> String {
+    match value {
+        Value::String(value) => prompt_python_string_repr(value),
+        Value::Array(_) | Value::Object(_) => prompt_python_str(value),
+        other => prompt_python_str(other),
+    }
+}
+
+fn prompt_python_string_repr(value: &str) -> String {
+    let quote = if value.contains('\'') && !value.contains('"') {
+        '"'
+    } else {
+        '\''
+    };
+    let mut result = String::with_capacity(value.len() + 2);
+    result.push(quote);
+    for character in value.chars() {
+        match character {
+            '\\' => result.push_str("\\\\"),
+            '\n' => result.push_str("\\n"),
+            '\r' => result.push_str("\\r"),
+            '\t' => result.push_str("\\t"),
+            character if character == quote => {
+                result.push('\\');
+                result.push(character);
+            }
+            character if !python_printability::is_printable(character) => {
+                use std::fmt::Write as _;
+                let codepoint = character as u32;
+                if codepoint <= 0xff {
+                    write!(result, "\\x{codepoint:02x}").expect("write to string");
+                } else if codepoint <= 0xffff {
+                    write!(result, "\\u{codepoint:04x}").expect("write to string");
+                } else {
+                    write!(result, "\\U{codepoint:08x}").expect("write to string");
+                }
+            }
+            character => result.push(character),
+        }
+    }
+    result.push(quote);
+    result
+}
 
 /// The resolved process and session identity, without reading prompt/rollout history.
 #[derive(Debug, Clone, PartialEq, Eq)]

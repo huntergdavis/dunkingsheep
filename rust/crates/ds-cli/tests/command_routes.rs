@@ -128,6 +128,16 @@ fn run_local_cli(
 }
 
 fn run_daemon_cli(command: &[&str], rpc: &str, args: Value, result: Value) -> Output {
+    run_daemon_cli_with_env(command, rpc, args, result, &[])
+}
+
+fn run_daemon_cli_with_env(
+    command: &[&str],
+    rpc: &str,
+    args: Value,
+    result: Value,
+    env: &[(&str, &str)],
+) -> Output {
     let temp = tempfile::tempdir().unwrap();
     let socket = temp.path().join("daemon.sock");
     let socket_text = socket.display().to_string();
@@ -152,9 +162,133 @@ fn run_daemon_cli(command: &[&str], rpc: &str, args: Value, result: Value) -> Ou
                 .unwrap();
         }
     });
-    let output = run_cli(&socket_text, command);
+    let output = run_cli_with_env(&socket_text, command, env);
     daemon.join().unwrap();
     output
+}
+
+fn run_tui_pty(key: &str) -> (Value, Vec<Value>) {
+    const PTY_DRIVER: &str = r#"
+import errno, json, os, pty, select, subprocess, sys, termios, time
+binary, socket, key = sys.argv[1:]
+master, slave = pty.openpty()
+slave_name = os.ttyname(slave)
+before = termios.tcgetattr(slave)
+env = os.environ.copy()
+env['TERM'] = 'xterm-256color'
+proc = subprocess.Popen([binary, '--socket', socket, '--self-pane', '%99', 'tui', '--json'],
+                        stdin=slave, stdout=slave, stderr=subprocess.PIPE, env=env)
+os.close(slave)
+output = bytearray()
+sent = False
+deadline = time.monotonic() + 10
+while time.monotonic() < deadline and proc.poll() is None:
+    readable, _, _ = select.select([master], [], [], 0.1)
+    if readable:
+        try:
+            chunk = os.read(master, 4096)
+        except OSError as error:
+            if error.errno == errno.EIO:
+                break
+            raise
+        output.extend(chunk)
+        if not sent and b'\x1b[?1049h' in output:
+            os.write(master, key.encode())
+            sent = True
+if proc.poll() is None:
+    proc.kill()
+code = proc.wait()
+for _ in range(5):
+    readable, _, _ = select.select([master], [], [], 0.05)
+    if not readable:
+        break
+    try:
+        output.extend(os.read(master, 4096))
+    except OSError as error:
+        if error.errno == errno.EIO:
+            break
+        raise
+check = os.open(slave_name, os.O_RDWR | os.O_NOCTTY)
+restored = termios.tcgetattr(check) == before
+os.close(check)
+stderr = proc.stderr.read().decode('utf-8', 'replace')
+os.close(master)
+print(json.dumps({'code': code, 'sent': sent, 'restored': restored,
+                  'terminal': output.decode('utf-8', 'replace'), 'stderr': stderr}))
+"#;
+
+    let temp = tempfile::tempdir().unwrap();
+    let socket = temp.path().join("daemon.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let expected = if key == "Q" {
+        vec![
+            ("status", json!({})),
+            ("shutdown", json!({"stop_all": true})),
+            ("list_dunks", json!({})),
+        ]
+    } else {
+        vec![("status", json!({})), ("list_dunks", json!({}))]
+    };
+    let daemon = std::thread::spawn(move || {
+        let mut calls = Vec::new();
+        for (expected_cmd, expected_args) in expected {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(12);
+            let (stream, _) = loop {
+                match listener.accept() {
+                    Ok(connection) => break connection,
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            && std::time::Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("accept fake TUI RPC: {error}"),
+                }
+            };
+            let mut line = String::new();
+            BufReader::new(&stream).read_line(&mut line).unwrap();
+            let request: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(expected_cmd, request["cmd"].as_str().unwrap());
+            assert_eq!(expected_args, request["args"]);
+            assert_eq!("%99", request["self_pane_id"]);
+            let result = match expected_cmd {
+                "status" => json!({}),
+                "list_dunks" => json!({"dunks": []}),
+                "shutdown" => json!({}),
+                _ => unreachable!(),
+            };
+            let response = json!({"ok": true, "result": result});
+            let mut writer = &stream;
+            writer
+                .write_all(format!("{response}\n").as_bytes())
+                .unwrap();
+            calls.push(request);
+        }
+        calls
+    });
+
+    let driver = Command::new("python3")
+        .args([
+            "-c",
+            PTY_DRIVER,
+            env!("CARGO_BIN_EXE_dunkingsheep"),
+            socket.to_str().unwrap(),
+            key,
+        ])
+        .env_remove("DUNKINGSHEEP_SOCKET")
+        .env_remove("DUNKINGSHEEP_SERVICE_TOKEN")
+        .env_remove("DUNKINGSHEEP_SERVICE_TOKEN_FILE")
+        .output()
+        .expect("run pseudo-terminal driver");
+    let calls = daemon.join().unwrap();
+    assert!(
+        driver.status.success(),
+        "PTY driver failed: {}",
+        String::from_utf8_lossy(&driver.stderr)
+    );
+    let report: Value = serde_json::from_slice(&driver.stdout).unwrap();
+    (report, calls)
 }
 
 #[test]
@@ -3276,6 +3410,37 @@ fn cli_route_10_context_local_seed() {
 }
 
 #[test]
+fn cli_route_54_tui() {
+    for key in ["q", "\u{1b}", "Q"] {
+        let (report, calls) = run_tui_pty(key);
+        assert_eq!(0, report["code"], "key {key:?}: {report}");
+        assert_eq!(
+            true, report["sent"],
+            "TUI did not enter its screen: {report}"
+        );
+        assert_eq!(
+            true, report["restored"],
+            "terminal mode was not restored: {report}"
+        );
+        assert_eq!("", report["stderr"]);
+        let terminal = report["terminal"].as_str().unwrap();
+        assert!(terminal.contains("\u{1b}[?1049h"), "{report}");
+        assert!(terminal.contains("\u{1b}[?1049l"), "{report}");
+
+        let commands: Vec<_> = calls
+            .iter()
+            .map(|call| call["cmd"].as_str().unwrap())
+            .collect();
+        if key == "Q" {
+            assert_eq!(commands, ["status", "shutdown", "list_dunks"]);
+            assert_eq!(json!({"stop_all": true}), calls[1]["args"]);
+        } else {
+            assert_eq!(commands, ["status", "list_dunks"]);
+        }
+    }
+}
+
+#[test]
 fn cli_route_33_superuser_a() {
     let status = run_daemon_cli(
         &["superuser", "status"],
@@ -3697,4 +3862,400 @@ fn cli_route_37_memory_c() {
         String::from_utf8(status.stdout).unwrap()
     );
     assert!(status.stderr.is_empty());
+}
+
+#[test]
+fn cli_route_38_health() {
+    let temp = tempfile::tempdir().unwrap();
+    let report = temp.path().join("reports/health.json");
+    let report_text = report.to_str().unwrap();
+    let result = json!({
+        "ok": true,
+        "duration_ms": 12,
+        "problems": ["p"],
+        "repairs": ["r"],
+        "checks": {
+            "memory": {"ok": true, "sources": 1, "sessions": 2, "chunks": 3, "queue_depth": 0},
+            "integrity": "ok", "stale_leases": 0, "wal_bytes": 9,
+            "disk_free_bytes": 8, "tasks": 4,
+            "dispatch": {"status": "ok", "age_s": 120, "dry_run": true}
+        }
+    });
+    let written = run_daemon_cli_with_env(
+        &["health", "--repair", "--deep", "--write", report_text],
+        "health",
+        json!({"repair": true, "deep": true}),
+        result.clone(),
+        &[("HOME", temp.path().to_str().unwrap())],
+    );
+    assert_eq!(Some(0), written.status.code());
+    assert_eq!(
+        format!(
+            "health ok  duration 12 ms\n  problem: p\n  repaired: r\n  memory ok=True sources=1 sessions=2 chunks=3 queue=0\n  integrity=ok stale=0 wal=9 disk_free=8 tasks=4\n  dispatcher=ok last_tick=2.0m ago (120s) (dry run)\n  report written to {report_text}\n"
+        ),
+        String::from_utf8(written.stdout).unwrap()
+    );
+    assert!(written.stderr.is_empty());
+    assert_eq!(
+        result,
+        serde_json::from_slice::<Value>(&std::fs::read(&report).unwrap()).unwrap()
+    );
+
+    let default_report = temp.path().join(".config/dunkingsheep/health.json");
+    let default_report_text = default_report.to_str().unwrap();
+    let default_written = run_daemon_cli_with_env(
+        &["health", "--write"],
+        "health",
+        json!({"repair": false, "deep": false}),
+        result.clone(),
+        &[("HOME", temp.path().to_str().unwrap())],
+    );
+    assert_eq!(Some(0), default_written.status.code());
+    assert!(String::from_utf8(default_written.stdout)
+        .unwrap()
+        .ends_with(&format!("  report written to {default_report_text}\n")));
+    assert!(default_written.stderr.is_empty());
+    assert_eq!(
+        result,
+        serde_json::from_slice::<Value>(&std::fs::read(&default_report).unwrap()).unwrap()
+    );
+
+    let json_output = run_daemon_cli(
+        &["health", "--json"],
+        "health",
+        json!({"repair": false, "deep": false}),
+        json!({"ok": true}),
+    );
+    assert_eq!(Some(0), json_output.status.code());
+    assert_eq!(
+        "{\n  \"ok\": true\n}\n",
+        String::from_utf8(json_output.stdout).unwrap()
+    );
+    assert!(json_output.stderr.is_empty());
+}
+
+#[test]
+fn cli_route_39_capability() {
+    let output = run_daemon_cli(
+        &["capabilities", "%42"],
+        "delivery_capability",
+        json!({"target": "%42"}),
+        json!({
+            "pane_id": "%42", "mailbox": "worker", "declared": true,
+            "agent": "codex", "drains": true, "send": "immediate",
+            "drain_evidence": "probe", "expect": "type safely"
+        }),
+    );
+    assert_eq!(Some(0), output.status.code());
+    assert_eq!(
+        "%42  mailbox='worker'  declared=yes  agent=codex\n  drains=yes  send=immediate  evidence=probe\n  type safely\n",
+        String::from_utf8(output.stdout).unwrap()
+    );
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn cli_route_40_lane_a() {
+    let listed = run_daemon_cli(&["lanes"], "lanes", json!({}), json!({"lanes": []}));
+    assert_eq!(Some(0), listed.status.code());
+    assert_eq!(
+        "the lane registry is empty\n",
+        String::from_utf8(listed.stdout).unwrap()
+    );
+    assert!(listed.stderr.is_empty());
+
+    let registered = run_daemon_cli(
+        &[
+            "lane",
+            "register",
+            "--role",
+            "worker",
+            "--pane",
+            "%42",
+            "--provider",
+            "codex",
+            "--model",
+            "gpt",
+            "--label",
+            "fixture",
+        ],
+        "lane_register",
+        json!({
+            "pane": "%42", "role": "worker", "provider": "codex", "model": "gpt",
+            "label": "fixture"
+        }),
+        json!({"pane_id": "%42", "role": "worker", "pane_pid": 123}),
+    );
+    assert_eq!(Some(0), registered.status.code());
+    assert_eq!(
+        "registered %42 as worker (pid 123)\n",
+        String::from_utf8(registered.stdout).unwrap()
+    );
+    assert!(registered.stderr.is_empty());
+
+    let set = run_daemon_cli(
+        &["lane", "set", "%42", "ops"],
+        "lane_set",
+        json!({"pane": "%42", "mailbox": "ops"}),
+        json!({"pane_id": "%42", "mailbox": "ops"}),
+    );
+    assert_eq!(Some(0), set.status.code());
+    assert_eq!(
+        "%42 is 'ops' (declared)\n",
+        String::from_utf8(set.stdout).unwrap()
+    );
+    assert!(set.stderr.is_empty());
+}
+
+#[test]
+fn cli_route_41_lane_b() {
+    let output = run_daemon_cli(
+        &["lane", "unregister", "%42"],
+        "lane_unregister",
+        json!({"pane": "%42"}),
+        json!({"pane_id": "%42", "removed": true}),
+    );
+    assert_eq!(Some(0), output.status.code());
+    assert_eq!(
+        "unregistered %42: True\n",
+        String::from_utf8(output.stdout).unwrap()
+    );
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn cli_route_42_retired() {
+    let listed = run_daemon_cli(
+        &["retired", "list"],
+        "retire_pane",
+        json!({"action": "list", "pane": null, "reason": null}),
+        json!({"retired": []}),
+    );
+    assert_eq!(Some(0), listed.status.code());
+    assert_eq!(
+        "no retired panes\n",
+        String::from_utf8(listed.stdout).unwrap()
+    );
+    assert!(listed.stderr.is_empty());
+
+    let retired = run_daemon_cli(
+        &[
+            "retired",
+            "retire",
+            "%42",
+            "--reason",
+            "superseded-by:wW:p7",
+        ],
+        "retire_pane",
+        json!({"action": "retire", "pane": "%42", "reason": "superseded-by:wW:p7"}),
+        json!({"pane_id": "%42", "reason": "superseded-by:wW:p7", "unread_kept": 0}),
+    );
+    assert_eq!(Some(0), retired.status.code());
+    assert_eq!(
+        "retired %42 (superseded-by:wW:p7); 0 unread message(s) kept as the record\n",
+        String::from_utf8(retired.stdout).unwrap()
+    );
+    assert!(retired.stderr.is_empty());
+
+    let unretired = run_daemon_cli(
+        &["retired", "unretire", "%42"],
+        "retire_pane",
+        json!({"action": "unretire", "pane": "%42", "reason": null}),
+        json!({"pane_id": "%42"}),
+    );
+    assert_eq!(Some(0), unretired.status.code());
+    assert_eq!(
+        "unretired %42\n",
+        String::from_utf8(unretired.stdout).unwrap()
+    );
+    assert!(unretired.stderr.is_empty());
+}
+
+#[test]
+fn cli_route_43_dispatch_a() {
+    let added = run_daemon_cli(
+        &[
+            "dispatch",
+            "add",
+            "review",
+            "the",
+            "patch",
+            "--task-id",
+            "t9",
+            "--lane",
+            "codex",
+        ],
+        "dispatch",
+        json!({"action":"add", "brief":"review the patch", "task_id":"t9", "lane":"codex"}),
+        json!({"id":7, "brief":"review the patch", "task_id":"t9", "lane":"codex"}),
+    );
+    assert_eq!(Some(0), added.status.code());
+    assert_eq!(
+        "added standby item 7 for t9 (reserved for codex)\n",
+        String::from_utf8(added.stdout).unwrap()
+    );
+    assert!(added.stderr.is_empty());
+
+    let listed = run_daemon_cli(
+        &["dispatch", "list"],
+        "dispatch",
+        json!({"action":"list"}),
+        json!({"items": []}),
+    );
+    assert_eq!(Some(0), listed.status.code());
+    assert_eq!(
+        "standby queue is empty\n",
+        String::from_utf8(listed.stdout).unwrap()
+    );
+    assert!(listed.stderr.is_empty());
+
+    let removed = run_daemon_cli(
+        &["dispatch", "remove", "7", "--json"],
+        "dispatch",
+        json!({"action":"remove", "id":7}),
+        json!({"removed": 7}),
+    );
+    assert_eq!(Some(0), removed.status.code());
+    assert_eq!(
+        "{\n  \"removed\": 7\n}\n",
+        String::from_utf8(removed.stdout).unwrap()
+    );
+    assert!(removed.stderr.is_empty());
+}
+
+#[test]
+fn cli_route_44_dispatch_b() {
+    let ticked = run_daemon_cli(
+        &["dispatch", "tick", "--dry-run", "--lanes", "%5,%6"],
+        "dispatch",
+        // The Python run_client_command currently omits its parsed --lanes option.
+        json!({"action":"tick", "dry_run":true}),
+        json!({
+            "idle_unfilled": ["%6"],
+            "dispatched_1h": 2,
+            "blocked": [{"name":"Llama", "reason":"mailbox busy"}],
+            "dead": [{"name":"offline"}],
+            "queue_empty": true,
+            "dispatched": [
+                {"pane_id":"%5", "sent":true, "text":"review patch"},
+                {"pane_id":"%6", "sent":false, "error":"blocked", "text":"next patch"}
+            ]
+        }),
+    );
+    assert_eq!(Some(0), ticked.status.code());
+    assert_eq!(
+        "idle lanes: 1\ndispatched this hour: 2\nblocked lanes: 1 (Llama: mailbox busy)\ndead lanes: 1 (offline)\nthe standby queue is empty and 1 lane(s) are idle\n  sent %5: review patch\n  FAILED %6: next patch [blocked]\n",
+        String::from_utf8(ticked.stdout).unwrap()
+    );
+    assert!(ticked.stderr.is_empty());
+
+    let status = run_daemon_cli(
+        &["dispatch", "status", "--json"],
+        "dispatch",
+        json!({"action":"status"}),
+        json!({"summary":"last dispatch tick", "pending":2}),
+    );
+    assert_eq!(Some(0), status.status.code());
+    assert_eq!(
+        "{\n  \"summary\": \"last dispatch tick\",\n  \"pending\": 2\n}\n",
+        String::from_utf8(status.stdout).unwrap()
+    );
+    assert!(status.stderr.is_empty());
+}
+
+#[test]
+fn cli_route_45_send_queue() {
+    let cleared = run_daemon_cli(
+        &["clear-box", "Pane A", "--reason", "stale draft"],
+        "clear_box",
+        json!({"target":"Pane A", "reason":"stale draft"}),
+        json!({
+            "target_label":"Pane A", "pane_id":"%5", "flushed":true,
+            "before":{"state":"draft"}, "after":{"state":"empty"}, "reason":"stale draft"
+        }),
+    );
+    assert_eq!(Some(0), cleared.status.code());
+    assert_eq!(
+        "cleared Pane A (%5): draft -> empty [stale draft]\n",
+        String::from_utf8(cleared.stdout).unwrap()
+    );
+    assert!(cleared.stderr.is_empty());
+
+    let delivery = run_daemon_cli(
+        &["delivery", "Pane A"],
+        "delivery",
+        json!({"target":"Pane A", "status":null}),
+        json!({"state":"blocked", "reason":"typing"}),
+    );
+    assert_eq!(Some(0), delivery.status.code());
+    assert_eq!(
+        "Pane A: blocked - typing\n",
+        String::from_utf8(delivery.stdout).unwrap()
+    );
+    assert!(delivery.stderr.is_empty());
+
+    let flushed = run_daemon_cli(
+        &["flush", "Pane A"],
+        "flush_box",
+        json!({"target":"Pane A"}),
+        json!({"target_label":"Pane A", "pane_id":"%5", "message":"submitted", "text":"hello"}),
+    );
+    assert_eq!(Some(0), flushed.status.code());
+    assert_eq!(
+        "Pane A (%5): submitted -> 'hello'\n",
+        String::from_utf8(flushed.stdout).unwrap()
+    );
+    assert!(flushed.stderr.is_empty());
+}
+
+#[test]
+fn cli_route_46_messages() {
+    let messages = run_daemon_cli(
+        &["messages"],
+        "list_messages",
+        json!({}),
+        json!({"queued": [], "recent": []}),
+    );
+    assert_eq!(Some(0), messages.status.code());
+    assert_eq!("no messages\n", String::from_utf8(messages.stdout).unwrap());
+    assert!(messages.stderr.is_empty());
+
+    let queue = run_daemon_cli(
+        &["queue", "--json"],
+        "list_messages",
+        json!({}),
+        json!({"queued": [], "recent": []}),
+    );
+    assert_eq!(Some(0), queue.status.code());
+    assert_eq!(
+        "{\n  \"queued\": [],\n  \"recent\": []\n}\n",
+        String::from_utf8(queue.stdout).unwrap()
+    );
+    assert!(queue.stderr.is_empty());
+
+    let cancelled = run_daemon_cli(
+        &["cancel", "m7"],
+        "cancel_message",
+        json!({"message_id":"m7"}),
+        json!({"message_id":"m7", "target_label":"Pane A"}),
+    );
+    assert_eq!(Some(0), cancelled.status.code());
+    assert_eq!(
+        "cancelled m7 for Pane A\n",
+        String::from_utf8(cancelled.stdout).unwrap()
+    );
+    assert!(cancelled.stderr.is_empty());
+
+    let metrics = run_daemon_cli(
+        &["metrics", "--since", "10", "--until", "20"],
+        "metrics",
+        json!({"window_s":3600, "since":10.0, "until":20.0}),
+        json!({"deliveries":3}),
+    );
+    assert_eq!(Some(0), metrics.status.code());
+    assert_eq!(
+        "{\n  \"deliveries\": 3\n}\n",
+        String::from_utf8(metrics.stdout).unwrap()
+    );
+    assert!(metrics.stderr.is_empty());
 }

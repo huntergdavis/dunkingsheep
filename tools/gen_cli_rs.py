@@ -76,6 +76,8 @@ def ty_of(action):
 
 
 def nargs_of(action):
+    if action.nargs == "?" and action.const == "":
+        return "Nargs::OptEmpty"
     return {None: "Nargs::One", "?": "Nargs::Opt", "+": "Nargs::Plus", "*": "Nargs::Star",
             0: "Nargs::Zero"}[action.nargs]
 

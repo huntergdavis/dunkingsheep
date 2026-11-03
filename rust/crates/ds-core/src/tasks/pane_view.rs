@@ -60,7 +60,7 @@ impl Tasks {
     }
 }
 
-fn slice_length(length: usize, limit: i64) -> usize {
+pub(super) fn slice_length(length: usize, limit: i64) -> usize {
     if limit >= 0 {
         length.min(usize::try_from(limit).unwrap_or(usize::MAX))
     } else {
@@ -69,7 +69,7 @@ fn slice_length(length: usize, limit: i64) -> usize {
 }
 
 /// Preserve the complete stored row, including metadata absent from the smaller `Task` type.
-fn row_wire(row: &Row<'_>) -> rusqlite::Result<Map<String, Value>> {
+pub(super) fn row_wire(row: &Row<'_>) -> rusqlite::Result<Map<String, Value>> {
     let mut result = Map::new();
     for (index, name) in row.as_ref().column_names().iter().enumerate() {
         let value = match row.get::<_, SqlValue>(index)? {
@@ -90,7 +90,11 @@ fn row_wire(row: &Row<'_>) -> rusqlite::Result<Map<String, Value>> {
     Ok(result)
 }
 
-fn decorated_wire(conn: &Connection, d: &Decorated, now: f64) -> Result<Value, DunkError> {
+pub(super) fn decorated_wire(
+    conn: &Connection,
+    d: &Decorated,
+    now: f64,
+) -> Result<Value, DunkError> {
     let mut wire = conn
         .query_row("SELECT * FROM tasks WHERE id = ?", [&d.task.id], row_wire)
         .map_err(map_sqlite)?;
