@@ -1717,18 +1717,28 @@ async fn merge_uses_full_task_snapshot_accounts_after_success_and_marks_landed_l
     assert_eq!("%2", full.wire["completed_by"]);
     assert_eq!(82, full.wire["accounting_pr"]);
     assert_eq!(Some(true), sync.flock.landed_of(&stored.id).await.unwrap());
-    let event_order: Vec<String> = rusqlite::Connection::open(dir.path().join("tasks.db"))
+    let event_rows: Vec<(String, Option<String>, String)> =
+        rusqlite::Connection::open(dir.path().join("tasks.db"))
         .unwrap()
-        .prepare("SELECT event FROM task_events WHERE task_id = ? AND event IN ('accounting','landed') ORDER BY id")
+        .prepare("SELECT event, actor, meta FROM task_events WHERE task_id = ? AND event IN ('accounting','landed') ORDER BY id")
         .unwrap()
-        .query_map([&stored.id], |row| row.get(0))
+        .query_map([&stored.id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
-    assert_eq!(Some("landed"), event_order.last().map(String::as_str));
-    assert!(event_order[..event_order.len() - 1]
-        .iter()
-        .all(|event| event == "accounting"));
+    assert_eq!(3, event_rows.len());
+    assert_eq!("accounting", event_rows[0].0);
+    assert_eq!("accounting", event_rows[1].0);
+    assert_eq!("landed", event_rows[2].0);
+    assert_eq!(None, event_rows[0].1.as_deref());
+    let setter_meta: Value = serde_json::from_str(&event_rows[0].2).unwrap();
+    assert_eq!(json!({"accounting_pr": 82, "body_pr": 7}), setter_meta);
+    assert_eq!(Some("review-sync"), event_rows[1].1.as_deref());
+    let summary_meta: Value = serde_json::from_str(&event_rows[1].2).unwrap();
+    assert_eq!("accounting PR #82 for body PR #7", summary_meta["reason"]);
+    assert_eq!(82, summary_meta["accounting_pr"]);
+    assert_eq!(7, summary_meta["body_pr"]);
+    assert_eq!(Some("review-sync"), event_rows[2].1.as_deref());
 }
 
 #[tokio::test]
