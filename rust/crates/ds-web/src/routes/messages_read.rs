@@ -30,6 +30,12 @@ pub enum DeliveryId {
     OutOfRange { negative: bool },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PythonInt {
+    Value(i64),
+    OutOfRange { negative: bool },
+}
+
 /// Database/client boundary for the read routes. Implementations perform the
 /// same reconciliation and SQL reads as `web.app.messages`, `deliveries`, and
 /// `message_context`; tests inject deterministic results without live state.
@@ -84,9 +90,8 @@ async fn messages(
                 None
             }
         },
-        None => Some(i64::MAX),
+        None => Some(PythonInt::Value(i64::MAX)),
     };
-    let before = before.map(|value| if value == 0 { i64::MAX } else { value });
     let limit = match query.get("limit") {
         Some(value) => match parse_python_int(value) {
             Some(value) => Some(value),
@@ -95,18 +100,26 @@ async fn messages(
                 None
             }
         },
-        None => Some(50),
+        None => Some(PythonInt::Value(50)),
     }
-    .map(|value| value.clamp(1, 100));
+    .map(|value| match value {
+        PythonInt::Value(value) => value.clamp(1, 100),
+        PythonInt::OutOfRange { negative: true } => 1,
+        PythonInt::OutOfRange { negative: false } => 100,
+    });
     if !validation_errors.is_empty() {
         return validation_error_response(validation_errors);
     }
     let channel = channel.expect("required channel was validated");
-    let before = before.expect("valid before value or default");
     let limit = limit.expect("valid limit value or default");
     if !backend.known_channel(channel) {
         return detail_response(StatusCode::NOT_FOUND, "Unknown channel");
     }
+    let before = match before.expect("valid before value or default") {
+        PythonInt::Value(0) => i64::MAX,
+        PythonInt::Value(value) => value,
+        PythonInt::OutOfRange { .. } => return internal_error_response(),
+    };
     match backend.messages(channel, before, limit).await {
         Ok(result) => Json(result).into_response(),
         Err(_) => internal_error_response(),
@@ -181,7 +194,8 @@ async fn message_context(
         .unwrap_or_default();
     let decoded_id = decode_path_component(raw_id);
     let message_id = match parse_python_int(&decoded_id) {
-        Some(value) => value,
+        Some(PythonInt::Value(value)) => value,
+        Some(PythonInt::OutOfRange { .. }) => return internal_error_response(),
         None => return invalid_integer("path", "message_id", &decoded_id),
     };
     match backend.message_context(message_id).await {
@@ -440,7 +454,7 @@ fn parse_builtin_int(raw: &str) -> Option<DeliveryId> {
 
 /// Pydantic's query integer conversion accepts whitespace, signs, underscores,
 /// and decimal strings with an all-zero fractional part.
-fn parse_python_int(raw: &str) -> Option<i64> {
+fn parse_python_int(raw: &str) -> Option<PythonInt> {
     let value = raw.trim();
     let (negative, digits) = match value.as_bytes().first() {
         Some(b'-') => (true, &value[1..]),
@@ -482,18 +496,18 @@ fn parse_python_int(raw: &str) -> Option<i64> {
     if !valid_sequence(integer_part) {
         return None;
     }
-    let magnitude = integer_part
-        .bytes()
-        .filter(|byte| *byte != b'_')
-        .fold(0_i64, |value, byte| {
-            value
-                .saturating_mul(10)
-                .saturating_add(i64::from(byte - b'0'))
-        });
-    Some(if negative {
-        magnitude.saturating_neg()
+    let normalized: String = integer_part
+        .chars()
+        .filter(|character| *character != '_')
+        .collect();
+    let signed = if negative {
+        format!("-{normalized}")
     } else {
-        magnitude
+        normalized
+    };
+    Some(match signed.parse::<i64>() {
+        Ok(value) => PythonInt::Value(value),
+        Err(_) => PythonInt::OutOfRange { negative },
     })
 }
 
@@ -882,6 +896,42 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["channel"], "cos");
         assert_eq!(backend.calls.lock().unwrap().as_slice(), ["context:7"]);
+    }
+
+    #[test]
+    fn message_integer_overflow_matches_sqlite_binding_failure() {
+        let backend = Arc::new(FakeBackend::default());
+        let before = block_on(app(backend.clone(), authorized()).oneshot(request(
+            "/api/messages?channel=cos&before=9223372036854775808",
+        )))
+        .unwrap();
+        assert_eq!(before.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(backend.calls.lock().unwrap().is_empty());
+
+        let unknown_channel = block_on(app(backend.clone(), authorized()).oneshot(request(
+            "/api/messages?channel=unknown&before=9223372036854775808",
+        )))
+        .unwrap();
+        let (status, body) = response_json(unknown_channel);
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body, json!({"detail": "Unknown channel"}));
+
+        let context = block_on(
+            app(backend.clone(), authorized())
+                .oneshot(request("/api/messages/9223372036854775808/context")),
+        )
+        .unwrap();
+        assert_eq!(context.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(backend.calls.lock().unwrap().is_empty());
+
+        assert_eq!(
+            parse_python_int("-9223372036854775808"),
+            Some(PythonInt::Value(i64::MIN))
+        );
+        assert_eq!(
+            parse_python_int("9223372036854775808"),
+            Some(PythonInt::OutOfRange { negative: false })
+        );
     }
 
     #[test]
