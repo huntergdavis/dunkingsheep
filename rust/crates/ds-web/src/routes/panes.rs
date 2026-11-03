@@ -377,7 +377,7 @@ fn parse_pydantic_int(raw: &str) -> Option<i64> {
         Some((whole, fraction)) => {
             if !valid_digit_sequence(whole)
                 || !valid_digit_sequence(fraction)
-                || fraction.bytes().any(|byte| byte != b'0' && byte != b'_')
+                || fraction.bytes().any(|byte| byte != b'0')
             {
                 return None;
             }
@@ -840,6 +840,8 @@ mod tests {
         );
 
         assert_eq!(parse_pydantic_int("  +1.00  "), Some(1));
+        assert_eq!(parse_pydantic_int("1.0_0"), None);
+        assert_eq!(parse_pydantic_int("1_0.00"), Some(10));
         assert_eq!(parse_pydantic_int("1_0"), Some(10));
         assert_eq!(parse_pydantic_int(&"9".repeat(4_300)), Some(201));
         assert_eq!(parse_pydantic_int(&"9".repeat(4_301)), None);
