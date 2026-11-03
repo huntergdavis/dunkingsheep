@@ -156,6 +156,7 @@ pub(crate) fn report_list_handler(
 fn optional_path(args: &Args, key: &str) -> Result<Option<PathBuf>, DunkError> {
     match args.get(key) {
         None | Some(Value::Null) => Ok(None),
+        Some(Value::String(path)) if path.is_empty() => Ok(None),
         Some(Value::String(path)) => Ok(Some(PathBuf::from(path))),
         Some(_) => Err(DunkError::Refused(format!("{key} must be a string"))),
     }

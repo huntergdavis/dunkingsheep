@@ -649,19 +649,35 @@ fn dispatcher_report_run_list_handlers_use_sources_and_preserve_role_gates() {
     let mut dispatcher = Dispatcher::new();
     dispatcher.register_report_run_list();
 
-    let run = dispatch_as_flock_role(&dispatcher, &flock, &env, Some("w1:p1"), "report_run", None)
-        .unwrap();
-    assert!(Path::new(run["path"].as_str().unwrap()).is_file());
+    let mut empty_out_dir = Args::new();
+    empty_out_dir.insert("out_dir".to_owned(), json!(""));
+    let run = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p1"),
+        "report_run",
+        Some(empty_out_dir),
+    )
+    .unwrap();
+    let report_path = Path::new(run["path"].as_str().unwrap());
+    assert!(report_path.is_file());
+    assert_eq!(
+        report_path.parent(),
+        Some(env.sources.paths.output_dir.as_path())
+    );
     assert_eq!(run["posted"]["transport"], "report");
     assert_eq!(run["generated_at"], "2027-01-15T08:00:00Z");
 
+    let mut empty_list_dir = Args::new();
+    empty_list_dir.insert("out_dir".to_owned(), json!(""));
     let list = dispatch_as_flock_role(
         &dispatcher,
         &flock,
         &env,
         Some("w2:p2"),
         "report_list",
-        None,
+        Some(empty_list_dir),
     )
     .unwrap();
     assert_eq!(list["count"], 1);
