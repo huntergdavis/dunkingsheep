@@ -17,6 +17,11 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Map, Value};
 
 use crate::config::Env;
+use crate::error::DunkError;
+use crate::flock::commands_inbox::{notice_text, InboxEnv};
+use crate::flock::Flock;
+use crate::inbox;
+use crate::inbox_store::DigestUpsert;
 
 type Object = Map<String, Value>;
 
@@ -44,6 +49,12 @@ pub struct Entry {
 /// `{project: entry}` in file order.
 pub type Routing = Vec<(String, Entry)>;
 
+/// PM command sources. Unlike inbox-send routing, API PM views must fail closed when the
+/// routing configuration is unavailable or invalid. Runtime composition belongs to t1605.
+pub trait PmEnv: InboxEnv {
+    fn config(&self) -> Result<&Env, DunkError>;
+}
+
 /// `DEFAULT_VP_PANE`: `DUNKINGSHEEP_VP_PANE`, else `w9:pH`.
 pub fn default_vp_pane(env: &Env) -> String {
     env.get("DUNKINGSHEEP_VP_PANE")
@@ -68,7 +79,9 @@ fn expand_user(path: &str, env: &Env) -> PathBuf {
 /// Python uses `Path.home()` here, not `DUNKINGSHEEP_DIR`; kept).
 pub fn default_routing_path(env: &Env) -> PathBuf {
     match env.get("DUNKINGSHEEP_PM_ROUTING") {
-        Some(path) if !path.is_empty() => PathBuf::from(path),
+        // Python constructs Path(os.environ.get(...)); an explicitly empty value is `.`.
+        Some("") => PathBuf::from("."),
+        Some(path) => PathBuf::from(path),
         _ => home(env)
             .join(".config")
             .join("dunkingsheep")
@@ -391,19 +404,155 @@ pub fn digest_id(project: &str) -> String {
     format!("pm-digest:{project}")
 }
 
+fn payload_items(payload: Option<&Value>, key: &str) -> Vec<String> {
+    match payload.and_then(|value| value.get(key)) {
+        Some(Value::Array(items)) => items.iter().map(py_str).collect(),
+        Some(Value::String(text)) => text.chars().map(|ch| ch.to_string()).collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn payload_numbers(payload: Option<&Value>) -> Vec<Value> {
+    match payload.and_then(|value| value.get("numbers")) {
+        Some(Value::Array(items)) => items.clone(),
+        Some(Value::String(text)) => text.chars().map(|ch| json!(ch.to_string())).collect(),
+        _ => Vec::new(),
+    }
+}
+
+impl Flock {
+    /// `Flock.pm_digest`: publish/update the stable per-project row, then attempt its pane
+    /// notification. A notification failure leaves the stored digest and a false result.
+    pub fn pm_digest(
+        &self,
+        env: &dyn PmEnv,
+        project: &str,
+        payload: Option<&Value>,
+        to: Option<&str>,
+        self_pane_id: Option<&str>,
+    ) -> Result<Value, DunkError> {
+        let config = env.config()?;
+        let empty_payload = Value::String(String::new());
+        let normalized_payload = payload
+            .filter(|value| truthy(value))
+            .or(Some(&empty_payload));
+        let object = match normalized_payload {
+            Some(Value::Object(map)) => Some(map.clone()),
+            Some(Value::String(text)) => Some(
+                parse_payload(Some(text)).map_err(|error| DunkError::Refused(error.to_string()))?,
+            ),
+            _ => None,
+        };
+        let demo = object
+            .as_ref()
+            .and_then(|payload| payload.get("demo"))
+            .is_some_and(|value| truthy(value));
+        let body = if let Some(payload) = &object {
+            let live = checkpoint_numbers(project, None, config);
+            let object_value = Value::Object(payload.clone());
+            let numbers = live.unwrap_or_else(|| payload_numbers(Some(&object_value)));
+            let changed = payload_items(Some(&object_value), "changed");
+            let blocked = payload_items(Some(&object_value), "blocked");
+            let owner_decisions = payload_items(Some(&object_value), "owner_decisions");
+            let note = payload
+                .get("note")
+                .filter(|value| truthy(value))
+                .map(py_str);
+            render_digest(
+                project,
+                &Digest {
+                    changed: &changed,
+                    blocked: &blocked,
+                    owner_decisions: &owner_decisions,
+                    numbers: &numbers,
+                    window: Some("30 min"),
+                    note: note.as_deref(),
+                },
+            )
+        } else {
+            normalized_payload.map(py_str).unwrap_or_default()
+        };
+
+        let target = to
+            .filter(|target| !target.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| default_vp_pane(config));
+        let (mailbox, label, pane_id) =
+            self.resolve_mailbox(env, &target, self_pane_id, false, "")?;
+        let digest_id = digest_id(project);
+        let action = if env.store().digest_exists(&digest_id).unwrap_or(false) {
+            "updated"
+        } else {
+            "created"
+        };
+        let subject = if demo {
+            format!("PM digest (DEMO): {project}")
+        } else {
+            format!("PM digest: {project}")
+        };
+        let message_id = env.store().upsert_digest(DigestUpsert {
+            mailbox: &mailbox,
+            digest_id: &digest_id,
+            body: &body,
+            subject: Some(&subject),
+            sender: self_pane_id,
+            mailbox_label: Some(&label),
+            pane_id: pane_id.as_deref(),
+        })?;
+
+        // Read back the stored row after the write has completed; notification is deliberately
+        // later so failures cannot erase a successful digest.
+        let now = env.now();
+        let (summary, stored_body) = inbox::get(env.pool(), &message_id, now)?;
+        let read_at = inbox::status(env.pool(), &message_id, now)?.read_at;
+        let mut message = json!({
+            "message_id": summary.message_id,
+            "mailbox": summary.mailbox,
+            "destination": summary.destination,
+            "sender": summary.sender,
+            "subject": summary.subject,
+            "state": summary.state,
+            "created_at": summary.created_at,
+            "waiting_s": summary.waiting_s,
+            "body_bytes": summary.body_bytes,
+            "digest_id": summary.digest_id,
+            "transport": summary.transport,
+            "reply_to": summary.reply_to,
+            "external_id": summary.external_id,
+            "delivered_at": summary.delivered_at,
+            "delivery_transport": summary.delivery_transport,
+            "attachments": [],
+            "body": stored_body,
+            "read_at": read_at,
+            "action": action,
+        });
+        if let Some(pane) = pane_id.as_deref() {
+            let notified = (|| -> Result<(), DunkError> {
+                let unread = inbox::count(env.pool(), &mailbox, &[], now)?.unread;
+                let notice = notice_text(
+                    &mailbox,
+                    unread,
+                    self_pane_id,
+                    Some(&format!("PM digest: {project}")),
+                );
+                env.send_now(pane, &notice, &message_id)?;
+                Ok(())
+            })()
+            .is_ok();
+            message["notified"] = json!(notified);
+        }
+        message["digest_id"] = json!(digest_id);
+        Ok(message)
+    }
+}
+
 /// `parse_payload`: a JSON digest payload or a plain body string (which becomes `{"note": ...}`).
 pub fn parse_payload(raw: Option<&str>) -> Result<Object, PmError> {
     let text = raw.unwrap_or("").trim();
-    if text.is_empty() {
-        return Err(PmError("a digest needs a body on stdin".into()));
-    }
     if text.starts_with('{') {
-        let payload: Value = serde_json::from_str(text)
-            .map_err(|e| PmError(format!("digest payload is not valid JSON: {e}")))?;
-        return match payload {
-            Value::Object(map) => Ok(map),
-            _ => Err(PmError("digest payload must be a JSON object".into())),
-        };
+        if let Ok(Value::Object(map)) = serde_json::from_str(text) {
+            return Ok(map);
+        }
     }
     let mut map = Object::new();
     map.insert("note".into(), json!(text));

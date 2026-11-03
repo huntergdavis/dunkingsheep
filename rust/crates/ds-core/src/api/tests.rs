@@ -9,10 +9,13 @@ use std::cell::Cell;
 use std::sync::Mutex;
 
 use crate::config::Env;
+use crate::flock::commands_inbox::{InboxEnv, Nudge, RouteEntry};
 use crate::flock::commands_turns::{TurnHooks, TurnState};
 use crate::flock::dunks::DunkList;
+use crate::flock::mailbox::MailboxEnv;
 use crate::flock::panes::{PaneInfoEnv, Stores};
 use crate::flock::status::{StatusEnv, ViewCache};
+use crate::inbox_store::Store;
 use crate::proc::Caller;
 use crate::report::{ReportPaths, ReportSources};
 use crate::roles::Roles;
@@ -604,6 +607,361 @@ fn dispatch_as_flock_role(
         runtime: runtime.handle(),
     };
     dispatcher.dispatch(&context, &FlockGate(&context), name, args)
+}
+
+struct PmApiEnv {
+    terminal: Mutex<Box<dyn Terminal>>,
+    store: Store,
+    config: Env,
+    config_error: Option<String>,
+    panes: Vec<Value>,
+    fail_notify: bool,
+    notices: Mutex<Vec<String>>,
+    now: f64,
+    _dir: tempfile::TempDir,
+}
+
+impl PmApiEnv {
+    fn new(config: Env, fail_notify: bool) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("inbox.sqlite3"), dir.path().join("blobs"))
+            .expect("inbox store");
+        Self {
+            terminal: Mutex::new(Box::new(FakeTerminal::default())),
+            store,
+            config,
+            config_error: None,
+            panes: vec![
+                json!({"pane_id":"w2:p2", "label":"worker", "tab_label":"worker", "workspace_label":"work", "agent":"codex"}),
+                json!({"pane_id":"w9:pH", "label":"VP", "tab_label":"VP", "workspace_label":"lead", "agent":"codex"}),
+            ],
+            fail_notify,
+            notices: Mutex::new(Vec::new()),
+            now: 2_000_000_000.0,
+            _dir: dir,
+        }
+    }
+}
+
+impl PaneInfoEnv for PmApiEnv {
+    fn list_panes_grouped(&self) -> Vec<Value> {
+        self.panes.clone()
+    }
+
+    fn get_pane(&self, pane_id: &str) -> Option<Value> {
+        self.panes
+            .iter()
+            .find(|pane| pane["pane_id"] == pane_id)
+            .cloned()
+    }
+}
+
+impl MailboxEnv for PmApiEnv {
+    fn list_panes(&self) -> Vec<Value> {
+        self.panes.clone()
+    }
+
+    fn list_panes_grouped(&self) -> Vec<Value> {
+        self.panes.clone()
+    }
+
+    fn registered_pane(&self, _pane_id: &str) -> (bool, bool, Option<String>) {
+        (false, false, None)
+    }
+}
+
+impl InboxEnv for PmApiEnv {
+    fn caller_role(&self, _pane_id: &str) -> Result<String, DunkError> {
+        Ok("worker".into())
+    }
+
+    fn mailbox_override(&self) -> Option<String> {
+        None
+    }
+
+    fn backend_name(&self) -> Result<String, DunkError> {
+        Ok("test terminal".into())
+    }
+
+    fn lane_panes(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn pool(&self) -> &crate::db::ReadPool {
+        self.store.read_pool()
+    }
+
+    fn store(&self) -> &Store {
+        &self.store
+    }
+
+    fn now(&self) -> f64 {
+        self.now
+    }
+
+    fn record_metric(
+        &self,
+        _kind: &str,
+        _pane_id: Option<&str>,
+        _mailbox: &str,
+        _sender: Option<&str>,
+        _duration_ms: Option<i64>,
+        _bytes: Option<i64>,
+    ) {
+    }
+
+    fn pm_routing(&self) -> Vec<RouteEntry> {
+        Vec::new()
+    }
+
+    fn fold_into_queued_notice(
+        &self,
+        _pane_id: &str,
+        _text: &str,
+        _message_id: &str,
+    ) -> Option<String> {
+        None
+    }
+
+    fn send_now(&self, _pane_id: &str, text: &str, _message_id: &str) -> Result<Nudge, DunkError> {
+        if self.fail_notify {
+            return Err(DunkError::Refused("test notification failure".into()));
+        }
+        self.notices.lock().unwrap().push(text.to_string());
+        Ok(Nudge::default())
+    }
+
+    fn record_sent(
+        &self,
+        _pane_id: Option<&str>,
+        _mailbox: &str,
+        _sender: Option<&str>,
+        _bytes: usize,
+        _attachments: usize,
+    ) {
+    }
+
+    fn tasks_for_pane(&self, _pane_id: &str) -> Result<Value, DunkError> {
+        Ok(json!({"tasks": []}))
+    }
+}
+
+impl crate::pm::PmEnv for PmApiEnv {
+    fn config(&self) -> Result<&Env, DunkError> {
+        if let Some(message) = &self.config_error {
+            return Err(DunkError::Refused(message.clone()));
+        }
+        Ok(&self.config)
+    }
+}
+
+impl CommandEnv for PmApiEnv {
+    fn terminal(&self) -> &Mutex<Box<dyn Terminal>> {
+        &self.terminal
+    }
+
+    fn now_s(&self) -> f64 {
+        self.now
+    }
+
+    fn pm_env(&self) -> Result<&dyn crate::pm::PmEnv, DunkError> {
+        Ok(self)
+    }
+}
+
+fn pm_dispatcher() -> Dispatcher {
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_pm_digest_routing();
+    dispatcher
+}
+
+#[test]
+fn h_pm_routing_matches_python_defaults_and_propagates_bad_config() {
+    let (_dir, flock) = staffed_flock("pm-routing");
+    let dir = tempfile::tempdir().unwrap();
+    let routing_path = dir.path().join("routing.json");
+    std::fs::write(
+        &routing_path,
+        r#"{"poolrad":{"pm":"w2:p2","members":["w2:p2"],"mode":"flag"}}"#,
+    )
+    .unwrap();
+    let routing_path = routing_path.to_string_lossy().into_owned();
+    let home = dir.path().to_string_lossy().into_owned();
+    let env = PmApiEnv::new(
+        Env::from_pairs(&[
+            ("HOME", &home),
+            ("DUNKINGSHEEP_PM_ROUTING", &routing_path),
+            ("DUNKINGSHEEP_VP_PANE", "w9:pH"),
+        ]),
+        false,
+    );
+    let dispatcher = pm_dispatcher();
+    let result =
+        dispatch_as_flock_role(&dispatcher, &flock, &env, Some("w2:p2"), "pm_routing", None)
+            .unwrap();
+    assert_eq!(
+        result["routing"]["poolrad"],
+        json!({"pm":"w2:p2", "members":["w2:p2"], "mode":"flag", "vp_pane":"w9:pH"})
+    );
+    assert_eq!(result["registry"], routing_path);
+    assert_eq!(result["vp_pane"], "w9:pH");
+
+    let default_env = PmApiEnv::new(Env::from_pairs(&[("HOME", &home)]), false);
+    let defaults =
+        dispatch_as_flock_role(&dispatcher, &flock, &default_env, None, "pm_routing", None)
+            .unwrap();
+    assert_eq!(defaults["routing"], json!({}));
+    assert_eq!(defaults["vp_pane"], "w9:pH");
+    assert_eq!(
+        defaults["registry"],
+        dir.path()
+            .join(".config/dunkingsheep/pm-routing.json")
+            .to_string_lossy()
+            .as_ref()
+    );
+
+    let invalid_path = dir.path().join("invalid.json");
+    std::fs::write(&invalid_path, "{broken").unwrap();
+    let invalid_path = invalid_path.to_string_lossy().into_owned();
+    let invalid_env = PmApiEnv::new(
+        Env::from_pairs(&[("HOME", &home), ("DUNKINGSHEEP_PM_ROUTING", &invalid_path)]),
+        false,
+    );
+    let error = dispatch_as_flock_role(&dispatcher, &flock, &invalid_env, None, "pm_routing", None)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("PM routing"));
+    assert!(error.contains("not readable JSON"));
+
+    let empty_env = PmApiEnv::new(
+        Env::from_pairs(&[("HOME", &home), ("DUNKINGSHEEP_PM_ROUTING", "")]),
+        false,
+    );
+    let empty_path_error =
+        dispatch_as_flock_role(&dispatcher, &flock, &empty_env, None, "pm_routing", None)
+            .unwrap_err()
+            .to_string();
+    assert!(empty_path_error.contains("not readable JSON"));
+}
+
+#[test]
+fn h_pm_digest_matches_python_store_update_checkpoint_and_notify_contract() {
+    let (_dir, flock) = staffed_flock("pm-digest");
+    let dir = tempfile::tempdir().unwrap();
+    let checkpoint = dir.path().join("checkpoint.json");
+    std::fs::write(
+        &checkpoint,
+        r#"{"strict_full_c_originals":42,"verified_game_identities":60,"reviewed_change":{"reviewed_commit":"abc123"}}"#,
+    )
+    .unwrap();
+    let home = dir.path().to_string_lossy().into_owned();
+    let checkpoint = checkpoint.to_string_lossy().into_owned();
+    let env = PmApiEnv::new(
+        Env::from_pairs(&[
+            ("HOME", &home),
+            ("DUNKINGSHEEP_VP_PANE", "w9:pH"),
+            ("POOLRAD_CHECKPOINT", &checkpoint),
+        ]),
+        false,
+    );
+    let dispatcher = pm_dispatcher();
+    let first = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w2:p2"),
+        "pm_digest",
+        args(json!({"project":"poolrad", "payload":"{\"demo\":true,\"changed\":[\"new source\"],\"numbers\":[{\"name\":\"strict C bodies\",\"value\":1,\"unit\":\"/old\"}]}"})),
+    )
+    .unwrap();
+    assert_eq!(first["action"], "created");
+    assert_eq!(first["digest_id"], "pm-digest:poolrad");
+    assert_eq!(first["subject"], "PM digest (DEMO): poolrad");
+    assert_eq!(first["mailbox"], "VP");
+    assert_eq!(first["notified"], true);
+    assert_eq!(first["attachments"], json!([]));
+    assert!(first["body"].as_str().unwrap().contains("new source"));
+    assert!(first["body"]
+        .as_str()
+        .unwrap()
+        .contains("strict C bodies: 42 /60"));
+    assert!(!first["body"].as_str().unwrap().contains("/old"));
+    assert_eq!(env.notices.lock().unwrap().len(), 1);
+
+    let second = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w2:p2"),
+        "pm_digest",
+        args(json!({"project":"poolrad", "payload":"{broken"})),
+    )
+    .unwrap();
+    assert_eq!(second["action"], "updated");
+    assert_eq!(second["message_id"], first["message_id"]);
+    assert!(second["body"].as_str().unwrap().contains("{broken"));
+    assert_eq!(second["subject"], "PM digest: poolrad");
+    let row_count: i64 = env
+        .pool()
+        .with(|connection| {
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM messages WHERE digest_id = 'pm-digest:poolrad'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(crate::db::map_sqlite)
+        })
+        .unwrap();
+    assert_eq!(row_count, 1);
+
+    let fallback = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w2:p2"),
+        "pm_digest",
+        args(json!({"project":"alpha", "payload":"{\"numbers\":[{\"name\":\"payload value\",\"value\":7}]}"})),
+    )
+    .unwrap();
+    assert!(fallback["body"]
+        .as_str()
+        .unwrap()
+        .contains("payload value: 7"));
+
+    let failed_notify = PmApiEnv::new(
+        Env::from_pairs(&[("HOME", &home), ("DUNKINGSHEEP_VP_PANE", "w9:pH")]),
+        true,
+    );
+    let stored = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &failed_notify,
+        Some("w2:p2"),
+        "pm_digest",
+        args(json!({"project":"beta", "payload":"brief"})),
+    )
+    .unwrap();
+    assert_eq!(stored["notified"], false);
+    assert_eq!(stored["action"], "created");
+    assert!(failed_notify
+        .store
+        .digest_exists("pm-digest:beta")
+        .expect("stored before notification"));
+}
+
+#[test]
+fn pm_commands_refuse_unwired_and_failed_config_adapters() {
+    let (_dir, flock) = staffed_flock("pm-config-errors");
+    let dispatcher = pm_dispatcher();
+    let env = PmApiEnv {
+        config_error: Some("PM config unavailable".into()),
+        ..PmApiEnv::new(Env::default(), false)
+    };
+    let error = dispatch_as_flock_role(&dispatcher, &flock, &env, None, "pm_routing", None)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("PM config unavailable"));
 }
 
 struct ReportApiSources {

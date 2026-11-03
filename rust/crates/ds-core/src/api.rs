@@ -141,6 +141,11 @@ pub trait CommandEnv: PaneInfoEnv {
     fn owner_views(&self) -> Result<&dyn OwnerViewEnv, DunkError> {
         Err(DunkError::Refused("owner view adapter is not wired".into()))
     }
+
+    /// Fallible PM routing and digest services. Runtime composition is assigned to t1605.
+    fn pm_env(&self) -> Result<&dyn crate::pm::PmEnv, DunkError> {
+        Err(DunkError::Refused("PM adapter is not wired".into()))
+    }
 }
 
 /// Context shared by every handler in one synchronous request. The server must keep this whole
@@ -558,6 +563,12 @@ impl Dispatcher {
         self.register("owner_reply", h_owner_reply);
         self.register("owner_ingest", h_owner_ingest);
         self.register("owner_outbox", h_owner_outbox);
+    }
+
+    /// Register only the T39 PM digest and routing handlers.
+    pub fn register_pm_digest_routing(&mut self) {
+        self.register("pm_digest", h_pm_digest);
+        self.register("pm_routing", h_pm_routing);
     }
 
     /// Register only the T39 task-following API leaf.
@@ -1175,6 +1186,54 @@ pub fn h_owner_stats(context: &HandlerContext<'_>, _: Args) -> Result<Value, Dun
     crate::flock::commands_owner_views::h_owner_stats(
         context.env.owner_push()?,
         context.env.now_s(),
+    )
+}
+
+/// `dunk_api.h_pm_routing`.
+pub fn h_pm_routing(context: &HandlerContext<'_>, _: Args) -> Result<Value, DunkError> {
+    let env = context.env.pm_env()?;
+    let config = env.config()?;
+    let path = crate::pm::default_routing_path(config);
+    let routing = crate::pm::load_routing(Some(&path), None, config)
+        .map_err(|error| DunkError::Refused(error.to_string()))?;
+    let routing = routing
+        .into_iter()
+        .map(|(project, entry)| {
+            (
+                project,
+                json!({
+                    "pm": entry.pm,
+                    "members": entry.members,
+                    "mode": entry.mode,
+                    "vp_pane": entry.vp_pane,
+                }),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+    Ok(json!({
+        "routing": routing,
+        "registry": path.to_string_lossy(),
+        "vp_pane": crate::pm::default_vp_pane(config),
+    }))
+}
+
+/// `dunk_api.h_pm_digest`.
+pub fn h_pm_digest(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let project = args
+        .get("project")
+        .map(python_value_string)
+        .ok_or_else(|| DunkError::Refused("'project' is required".into()))?;
+    let payload = args.get("payload").filter(|value| truthy(value));
+    let target = args
+        .get("to")
+        .filter(|value| truthy(value))
+        .map(python_value_string);
+    context.flock.pm_digest(
+        context.env.pm_env()?,
+        &project,
+        payload,
+        target.as_deref(),
+        context.self_pane_id(),
     )
 }
 
