@@ -309,15 +309,7 @@ fn multipart_file(body: &[u8], boundary: &str) -> Option<(String, Option<String>
                 return None;
             }
             let suffix = &tail[at + marker.len()..];
-            let valid_closing_boundary = suffix.strip_prefix(b"--").is_some_and(|trailing| {
-                let padding = trailing
-                    .iter()
-                    .position(|byte| !matches!(*byte, b' ' | b'\t'))
-                    .unwrap_or(trailing.len());
-                let after_padding = &trailing[padding..];
-                after_padding.is_empty() || after_padding.starts_with(b"\r\n")
-            });
-            (valid_closing_boundary || suffix.starts_with(b"\r\n")).then_some(at)
+            (suffix.starts_with(b"--") || suffix.starts_with(b"\r\n")).then_some(at)
         })?;
     Some((filename, mime, tail[..data_end].to_vec()))
 }
@@ -801,26 +793,30 @@ mod tests {
     }
 
     #[test]
-    fn upload_preserves_payload_containing_closing_boundary_prefix_with_junk() {
-        let backend = Arc::new(FakeBackend::default());
-        let payload = b"first\r\n--b--junk\r\nsecond";
-        let mut multipart =
-            b"--b\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.txt\"\r\n\r\n"
-                .to_vec();
-        multipart.extend_from_slice(payload);
-        multipart.extend_from_slice(b"\r\n--b--\r\n");
-        let request = Request::builder()
-            .method("POST")
-            .uri("/api/uploads")
-            .header("host", "desk.test")
-            .header("origin", "http://desk.test")
-            .header("authorization", "Bearer owner-token")
-            .header("content-type", "multipart/form-data; boundary=b")
-            .body(Body::from(multipart))
-            .unwrap();
-        let response = block_on(app(backend.clone()).oneshot(request)).unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(backend.uploads.lock().unwrap()[0].bytes, payload);
+    fn upload_matches_python_multipart_closing_prefix_junk_truncation() {
+        for payload in [
+            b"alpha\r\n--b--junk\r\nomega".as_slice(),
+            b"alpha\r\n--b-- \tjunk\r\nomega".as_slice(),
+        ] {
+            let backend = Arc::new(FakeBackend::default());
+            let mut multipart =
+                b"--b\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.txt\"\r\n\r\n"
+                    .to_vec();
+            multipart.extend_from_slice(payload);
+            multipart.extend_from_slice(b"\r\n--b--\r\n");
+            let request = Request::builder()
+                .method("POST")
+                .uri("/api/uploads")
+                .header("host", "desk.test")
+                .header("origin", "http://desk.test")
+                .header("authorization", "Bearer owner-token")
+                .header("content-type", "multipart/form-data; boundary=b")
+                .body(Body::from(multipart))
+                .unwrap();
+            let response = block_on(app(backend.clone()).oneshot(request)).unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(backend.uploads.lock().unwrap()[0].bytes, b"alpha");
+        }
     }
 
     #[test]
