@@ -20,7 +20,7 @@ use axum::{
 };
 use serde_json::json;
 
-use super::auth::{AuthBackend, AuthError, RequestScheme};
+use super::auth::{AuthBackend, AuthError, AuthFuture, Identity, RequestScheme};
 
 #[derive(Clone, Debug)]
 pub struct SystemConfig {
