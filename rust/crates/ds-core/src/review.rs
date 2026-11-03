@@ -316,9 +316,8 @@ pub struct ConfiguredReviewPolicy {
 }
 
 impl ReviewPolicy for ConfiguredReviewPolicy {
-    fn required_verdicts(&self, repo: &str) -> usize {
-        crate::github::required_verdicts(repo, None)
-            .unwrap_or(crate::github::DEFAULT_REQUIRED_VERDICTS)
+    fn required_verdicts(&self, repo: &str) -> Result<usize, String> {
+        crate::github::required_verdicts(repo, None).map_err(|error| error.to_string())
     }
 }
 
@@ -432,7 +431,7 @@ impl ReviewTaskCreator for Flock {
 /// The one GitHub policy query this pure review slice needs. Production callers
 /// can adapt the API/config source; tests supply a fixture implementation.
 pub trait ReviewPolicy {
-    fn required_verdicts(&self, repo: &str) -> usize;
+    fn required_verdicts(&self, repo: &str) -> Result<usize, String>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -599,8 +598,13 @@ impl<S: ReviewTaskStore, T, G: ReviewPolicy> ReviewSync<S, T, G> {
         head: &str,
         number: Option<i64>,
         lane: Option<&str>,
-    ) -> Result<FinalVerdict, S::Error> {
-        let (mut accepts, needs_fix) = self.head_verdicts(repo, head, number)?;
+    ) -> Result<FinalVerdict, String>
+    where
+        S::Error: std::fmt::Display,
+    {
+        let (mut accepts, needs_fix) = self
+            .head_verdicts(repo, head, number)
+            .map_err(|error| error.to_string())?;
         if let Some(lane) = lane.filter(|lane| !lane.is_empty()) {
             if accepts
                 .binary_search_by(|candidate| candidate.as_str().cmp(lane))
@@ -610,7 +614,7 @@ impl<S: ReviewTaskStore, T, G: ReviewPolicy> ReviewSync<S, T, G> {
                 accepts.sort();
             }
         }
-        let required = self.github.required_verdicts(repo).max(1);
+        let required = self.github.required_verdicts(repo)?.max(1);
         let final_verdict = needs_fix.is_empty() && accepts.len() >= required;
         Ok((final_verdict, accepts, needs_fix, required))
     }
@@ -894,7 +898,19 @@ where
         .chars()
         .take(120)
         .collect();
-        let required = self.github.required_verdicts(repo);
+        let required = match self.github.required_verdicts(repo) {
+            Ok(required) => required.max(1),
+            Err(error) => {
+                if let Some(report) = report {
+                    append_report(
+                        report,
+                        "errors",
+                        Value::String(format!("second review {repo}#{number}: {error}")),
+                    );
+                }
+                return None;
+            }
+        };
         if !needs_fix.is_empty() || accepts.len() >= required.max(1) {
             return None;
         }
@@ -1070,7 +1086,7 @@ where
                     if let Some(current_row) = current.as_ref() {
                         if current_row.head.as_deref() == Some(pr.head.as_str()) && !dry_run {
                             let (accepts, needs_fix) = verdict_lanes(&terminal_verdict_rows);
-                            let required = self.github.required_verdicts(&repo).max(1);
+                            let required = self.github.required_verdicts(&repo)?.max(1);
                             let final_verdict = needs_fix.is_empty() && accepts.len() >= required;
                             let still_needed = done_row.verdict.as_deref() == Some("accept")
                                 && !final_verdict
@@ -1106,7 +1122,7 @@ where
                 if let Some(done) = done {
                     if done.verdict.as_deref() == Some("accept") && !dry_run {
                         let (accepts, needs_fix) = verdict_lanes(&terminal_verdict_rows);
-                        let required = self.github.required_verdicts(&repo).max(1);
+                        let required = self.github.required_verdicts(&repo)?.max(1);
                         let final_verdict = needs_fix.is_empty() && accepts.len() >= required;
                         if final_verdict {
                             merger

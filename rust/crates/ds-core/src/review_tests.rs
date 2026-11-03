@@ -280,8 +280,26 @@ struct FakeReviewPolicy {
 }
 
 impl ReviewPolicy for FakeReviewPolicy {
-    fn required_verdicts(&self, _repo: &str) -> usize {
-        self.required.max(1)
+    fn required_verdicts(&self, _repo: &str) -> Result<usize, String> {
+        Ok(self.required.max(1))
+    }
+}
+
+struct FailingReviewPolicy;
+
+impl ReviewPolicy for FailingReviewPolicy {
+    fn required_verdicts(&self, _repo: &str) -> Result<usize, String> {
+        Err("invalid required_verdicts config".into())
+    }
+}
+
+impl ReviewRepoConfig for FailingReviewPolicy {
+    fn repos(&self) -> Result<Vec<String>, String> {
+        Ok(vec!["o/r".into()])
+    }
+
+    fn author_from_mints(&self, _since: f64) -> Result<Option<String>, String> {
+        Ok(None)
     }
 }
 
@@ -1658,6 +1676,31 @@ async fn run_needs_fix_blocks_second_review_and_final_merge_even_with_later_acce
         .iter()
         .all(|row| row.status == "done"));
     assert!(report["errors"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn run_fails_closed_when_required_verdict_policy_is_invalid() {
+    let dir = crate::testsupport::dir("review-sync-run-invalid-required-verdicts");
+    let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    let accept = add_actual_review(&store, 7, "head-a", "first accept").await;
+    finish_review(&store, &accept.id, "%1", "accept").await;
+    let transport = FakeReviewTransport::with_responses([
+        github_response(200, open_pull(7, "head-a", "work/topic")),
+        github_response(200, json!({"mergeable": true, "state": "open"})),
+    ]);
+    let sync = ReviewSync::with_transport(
+        store,
+        FakeReviewTokens(Ok("test-token".into())),
+        FailingReviewPolicy,
+        "https://api.example.test",
+        transport,
+    );
+    let merger = FakeReviewMerge::default();
+
+    let error = sync.run(&merger, false).await.unwrap_err();
+
+    assert!(error.contains("invalid required_verdicts config"));
+    assert!(merger.calls.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
