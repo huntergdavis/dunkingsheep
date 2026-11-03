@@ -191,11 +191,11 @@ fn can_message(pane: Option<&Value>, authority: &mut Authority<'_>) -> Result<bo
 /// Callback call order matches Python: every output row asks once for `activity_group` (including
 /// offline rows); online non-`cos` rows ask a second time for `can_message`. Discovered-pane
 /// eligibility always uses `is_lane`, not the callback.
-pub fn build_roster(
+pub fn build_roster<'a>(
     configured: &[Value],
     panes: &[Value],
     include_terminals: bool,
-    mut authority: Option<&mut CanMessage<'_>>,
+    mut authority: Option<&'a mut CanMessage<'a>>,
 ) -> Result<Vec<Value>, RosterError> {
     let mut rows: Vec<(Value, Option<Value>)> = Vec::new();
     let mut used: Vec<Value> = Vec::new();
