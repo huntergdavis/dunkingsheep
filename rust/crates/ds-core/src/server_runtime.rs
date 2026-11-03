@@ -314,7 +314,7 @@ impl LoopRuntimeAdapter {
     pub(crate) fn with_loop_terminal<T, F>(&self, call: F) -> JoinHandle<T>
     where
         T: Send + 'static,
-        F: for<'a> FnOnce(&'a Flock, &'a TerminalCallAdapter<'a>) -> T + Send + 'static,
+        F: for<'a> FnOnce(&'a Flock, &'a mut TerminalCallAdapter<'a>) -> T + Send + 'static,
     {
         let flock = Arc::clone(&self.flock);
         let factory = Arc::clone(&self.terminal_factory);
@@ -326,7 +326,7 @@ impl LoopRuntimeAdapter {
                 terminal: &terminal,
                 runtime: &runtime,
             };
-            call(&flock, &adapter)
+            call(&flock, &mut adapter)
         })
     }
 }
