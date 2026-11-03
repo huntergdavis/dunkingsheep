@@ -438,6 +438,12 @@ fn run_inflight_fold(interleaving: FoldInterleaving, send_ok: bool) -> FoldResul
         .get(P)
         .cloned()
         .unwrap_or_default();
+    let generation = {
+        let history = flock.message_history.lock().unwrap();
+        history
+            .back()
+            .and_then(|message| message.attempt_generation.clone())
+    };
     FoldResult {
         first: receipt_state(&pool, &first),
         folded: receipt_state(&pool, &folded),
@@ -445,12 +451,7 @@ fn run_inflight_fold(interleaving: FoldInterleaving, send_ok: bool) -> FoldResul
         replacement_receipt: receipt_state(&pool, &replacement_receipt),
         outcome,
         queued,
-        generation: flock
-            .message_history
-            .lock()
-            .unwrap()
-            .back()
-            .and_then(|message| message.attempt_generation.clone()),
+        generation,
         typed: pane.typed.clone(),
         done: waiter.is_set(),
     }
