@@ -1033,8 +1033,10 @@ fn queued_key_send_keeps_live_key_argument_boundaries() {
         dir.path(),
         false,
     ));
-    let mut pane = Pane::default();
-    pane.panes = vec![serde_json::json!({"pane_id": P, "tab_label": "Agent A"})];
+    let mut pane = Pane {
+        panes: vec![serde_json::json!({"pane_id": P, "tab_label": "Agent A"})],
+        ..Pane::default()
+    };
     let queued = flock
         .send_keys_now(
             &serde_json::json!(P),
