@@ -1327,7 +1327,18 @@ fn cli_route_56_mcp_setup() {
         .join("quoted space \"double\" 'single' \\backslash");
     std::fs::create_dir_all(&quoted_dir).unwrap();
     let quoted_executable = quoted_dir.join("dunkingsheep");
-    std::fs::copy(env!("CARGO_BIN_EXE_dunkingsheep"), &quoted_executable).unwrap();
+    let source_executable = env!("CARGO_BIN_EXE_dunkingsheep");
+    let staged_executable = tempfile::NamedTempFile::new_in(&quoted_dir).unwrap();
+    std::fs::copy(source_executable, staged_executable.path()).unwrap();
+    std::fs::set_permissions(
+        staged_executable.path(),
+        std::fs::metadata(source_executable).unwrap().permissions(),
+    )
+    .unwrap();
+    staged_executable
+        .into_temp_path()
+        .persist(&quoted_executable)
+        .unwrap();
     let run_quoted = |harness: &str| {
         Command::new(&quoted_executable)
             .args(["mcp-setup", harness])
