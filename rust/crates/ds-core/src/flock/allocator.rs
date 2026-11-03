@@ -136,6 +136,33 @@ impl Allocator {
     }
 }
 
+/// Observe the two related tables without blocking an executor worker or holding
+/// one guard while waiting for the other. Contention is retried outside both.
+fn try_idle_snapshot(
+    flock: &crate::flock::Flock,
+    pane: &str,
+) -> Result<Option<(Option<super::commands_turns::TurnState>, bool)>, DunkError> {
+    let turns = match flock.turn_states.try_lock() {
+        Ok(guard) => guard,
+        Err(std::sync::TryLockError::WouldBlock) => return Ok(None),
+        Err(std::sync::TryLockError::Poisoned(_)) => {
+            return Err(DunkError::Refused("turn state lock poisoned".into()))
+        }
+    };
+    let outbox = match flock.outbox.try_lock() {
+        Ok(guard) => guard,
+        Err(std::sync::TryLockError::WouldBlock) => return Ok(None),
+        Err(std::sync::TryLockError::Poisoned(_)) => {
+            return Err(DunkError::Refused("outbox lock poisoned".into()))
+        }
+    };
+    let turn = turns.get(pane).cloned();
+    let pending = outbox
+        .get(pane)
+        .is_some_and(|queue| queue.iter().any(|message| message.status == "queued"));
+    Ok(Some((turn, pending)))
+}
+
 async fn run(services: &Arc<RuntimeServices>) -> Result<Option<Value>, DunkError> {
     let flock = services.flock();
     let tasks = flock
@@ -182,18 +209,15 @@ async fn run(services: &Arc<RuntimeServices>) -> Result<Option<Value>, DunkError
         };
         if reason.is_none() {
             if let Some(info) = panes.get(pane) {
-                let turn = flock
-                    .turn_states
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .get(pane)
-                    .cloned();
-                let pending = flock
-                    .outbox
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .get(pane)
-                    .is_some_and(|q| q.iter().any(|m| m.status == "queued"));
+                let (turn, pending) = loop {
+                    if let Some(snapshot) = try_idle_snapshot(flock, pane)? {
+                        break snapshot;
+                    }
+                    if services.allocator.stopped() {
+                        return Err(DunkError::Unavailable("allocator stopped".into()));
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                };
                 if let Some(turn) = turn {
                     let caller = turn.caller.clone().unwrap_or_else(|| json!({}));
                     let identity = Caller::new(
@@ -214,9 +238,12 @@ async fn run(services: &Arc<RuntimeServices>) -> Result<Option<Value>, DunkError
                     } else if pending {
                         Some("pending_delivery".into())
                     } else {
+                        let present = caller.as_object().is_some_and(|map| !map.is_empty());
                         caller_pane_auth_failure(
-                            Some(&identity),
-                            info.get("pane_pid").and_then(Value::as_i64),
+                            present.then_some(&identity),
+                            info.get("pane_pid")
+                                .and_then(Value::as_i64)
+                                .filter(|pid| *pid != 0),
                         )
                         .map(str::to_owned)
                     };
@@ -298,4 +325,49 @@ async fn run(services: &Arc<RuntimeServices>) -> Result<Option<Value>, DunkError
     Ok(Some(
         json!({"allocated": handoffs, "workers": reasons, "at": crate::clock::now_s()}),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::flock::{panes::Stores, Flock};
+    use crate::tasks::Tasks;
+
+    #[tokio::test]
+    async fn preflight_outbox_contention_releases_turn_lock_and_actor_progresses() {
+        let dir = tempfile::tempdir().unwrap();
+        let tasks = Arc::new(Tasks::open(dir.path().join("tasks.db")).await.unwrap());
+        tasks.allocation_init().await.unwrap();
+        let flock = Arc::new(Flock::new(
+            dir.path().join("launches"),
+            dir.path().join("lanes"),
+            false,
+        ));
+        flock.attach_stores(Stores {
+            tasks: Some(Arc::clone(&tasks)),
+            ..Stores::default()
+        });
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let other = Arc::clone(&flock);
+        let holder = std::thread::spawn(move || {
+            let _outbox = other.outbox.lock().unwrap();
+            held_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+        held_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(try_idle_snapshot(&flock, "%1").unwrap().is_none());
+        assert!(
+            flock.turn_states.try_lock().is_ok(),
+            "failed snapshot must release turn guard"
+        );
+        let status = tokio::time::timeout(Duration::from_secs(2), tasks.allocation_status())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(status["workers"].is_array());
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+        assert!(try_idle_snapshot(&flock, "%1").unwrap().is_some());
+    }
 }

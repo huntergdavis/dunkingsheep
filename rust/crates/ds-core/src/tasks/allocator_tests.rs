@@ -1515,3 +1515,111 @@ async fn guarded_allocation_restores_timeout_after_sql_error() {
         .unwrap();
     assert_eq!(timeout, crate::db::BUSY_TIMEOUT_MS);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn guarded_allocation_unblocks_waker_waiting_on_same_actor() {
+    use crate::flock::{
+        panes::Stores,
+        sends::{OutboxWake, SnapshotStore},
+        Flock,
+    };
+    use std::future::{poll_fn, Future};
+    use std::sync::{mpsc, Arc, Mutex};
+    use std::task::Poll;
+    struct Save;
+    impl SnapshotStore for Save {
+        fn save(&self, flock: &Flock) -> Result<(), DunkError> {
+            flock.save()
+        }
+    }
+    struct Wake {
+        tasks: Arc<Tasks>,
+        handle: tokio::runtime::Handle,
+        held: mpsc::Sender<()>,
+        go: Mutex<mpsc::Receiver<()>>,
+        queued: mpsc::Sender<()>,
+    }
+    impl OutboxWake for Wake {
+        fn ensure_worker(&self, _: &Arc<Flock>, _: &str) -> Result<(), DunkError> {
+            self.held.send(()).unwrap();
+            self.go.lock().unwrap().recv().unwrap();
+            self.handle.block_on(async {
+                let mut future = Box::pin(self.tasks.allocation_status());
+                poll_fn(|cx| match future.as_mut().poll(cx) {
+                    Poll::Pending => {
+                        self.queued.send(()).unwrap();
+                        Poll::Ready(())
+                    }
+                    Poll::Ready(_) => panic!("actor gate must hold the queued waker job"),
+                })
+                .await;
+                future.await.map(|_| ())
+            })
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let tasks = Arc::new(Tasks::open(dir.path().join("tasks.db")).await.unwrap());
+    tasks.allocation_init().await.unwrap();
+    let flock = Arc::new(Flock::new(
+        dir.path().join("launches"),
+        dir.path().join("lanes"),
+        false,
+    ));
+    flock.attach_stores(Stores {
+        tasks: Some(Arc::clone(&tasks)),
+        ..Stores::default()
+    });
+    let (actor_started_tx, actor_started_rx) = mpsc::channel();
+    let (actor_go_tx, actor_go_rx) = mpsc::channel();
+    let blocker_tasks = Arc::clone(&tasks);
+    let blocker = tokio::spawn(async move {
+        blocker_tasks
+            .writer
+            .call(move |_| {
+                actor_started_tx.send(()).unwrap();
+                actor_go_rx.recv().unwrap();
+                Ok(())
+            })
+            .await
+    });
+    actor_started_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    let (held_tx, held_rx) = mpsc::channel();
+    let (go_tx, go_rx) = mpsc::channel();
+    let (queued_tx, queued_rx) = mpsc::channel();
+    let wake = Wake {
+        tasks: Arc::clone(&tasks),
+        handle: tokio::runtime::Handle::current(),
+        held: held_tx,
+        go: Mutex::new(go_rx),
+        queued: queued_tx,
+    };
+    let other = Arc::clone(&flock);
+    let thread = std::thread::spawn(move || {
+        let message = other.new_message("%1", "%1", "queued", "test").unwrap();
+        other.enqueue(message, &wake, &Save)
+    });
+    held_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    let mut allocation =
+        Box::pin(tasks.allocation_try_guarded(Arc::clone(&flock), BTreeMap::new()));
+    poll_fn(|cx| match allocation.as_mut().poll(cx) {
+        Poll::Pending => Poll::Ready(()),
+        Poll::Ready(_) => panic!("actor gate must hold the queued allocation job"),
+    })
+    .await;
+    go_tx.send(()).unwrap();
+    queued_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    actor_go_tx.send(()).unwrap();
+    blocker.await.unwrap().unwrap();
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), allocation)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(outcome, GuardedAllocation::RetryLock));
+    thread.join().unwrap().unwrap();
+}

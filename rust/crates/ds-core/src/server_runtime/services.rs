@@ -636,6 +636,68 @@ mod tests {
     }
 
     #[test]
+    fn runtime_allocator_reports_missing_caller_without_claim() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let handle = runtime.handle().clone();
+        let (tasks, inbox) = tasks_and_inbox(&runtime, &dir);
+        handle
+            .block_on(tasks.allocation_register(
+                "w1:p1",
+                &serde_json::json!(["code"]),
+                &serde_json::json!(["worker"]),
+                &serde_json::json!([]),
+                "w2:p2",
+                &serde_json::json!(true),
+            ))
+            .unwrap();
+        let stores = Stores {
+            tasks: Some(tasks),
+            inbox: Some(inbox),
+            ..Stores::default()
+        };
+        let env = configured_env(&dir, "1");
+        let services = RuntimeServices::new(startup_inputs(
+            &dir,
+            runtime,
+            env,
+            fake_factory_with_current_pane(),
+            stores,
+        ))
+        .unwrap();
+        services.flock().clear_caller();
+        services
+            .flock()
+            .turn_start(
+                None,
+                None,
+                None,
+                Some("w1:p1"),
+                None,
+                &crate::flock::commands_turns::NoHooks,
+            )
+            .unwrap();
+        services
+            .flock()
+            .turn_end(
+                None,
+                "done",
+                Some("w1:p1"),
+                None,
+                false,
+                &crate::flock::commands_turns::NoHooks,
+            )
+            .unwrap();
+        let result = handle.block_on(services.allocator_tick()).unwrap();
+        assert_eq!(result["workers"]["w1:p1"], "caller_missing");
+        assert_eq!(result["allocated"], serde_json::json!([]));
+        services.shutdown();
+    }
+
+    #[test]
     fn runtime_allocator_error_preserves_previous_cache_and_entry_time() {
         let dir = tempfile::tempdir().unwrap();
         let runtime = tokio::runtime::Builder::new_multi_thread()
