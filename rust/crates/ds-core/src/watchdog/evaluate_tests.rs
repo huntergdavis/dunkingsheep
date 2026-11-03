@@ -210,6 +210,7 @@ fn test_evaluate_preserves_missing_read_only_database_error() {
     let fixture = Fixture::new();
     let tasks_path = fixture.path("tasks.db");
     let inbox_path = fixture.path("inbox.db");
+    let metrics_path = fixture.path("metrics.db");
 
     let tasks_config = fixture.config(&["task.blocked_stale"]);
     let tasks_result = evaluate(
@@ -236,6 +237,38 @@ fn test_evaluate_preserves_missing_read_only_database_error() {
         python_missing_store_error(&inbox_path),
         inbox_result["errors"][0]["error"]
     );
+
+    std::fs::write(
+        fixture.path("dunks.json"),
+        r#"{"dunkers":[{"id":"d1"}],"outbox":[]}"#,
+    )
+    .unwrap();
+    let dunk_config = fixture.config(&["dunk.skip_loop"]);
+    let dunk_result = evaluate(&dunk_config, NOW, None, None, Some(&["dunk.skip_loop"]));
+    assert_eq!(
+        python_missing_store_error(&metrics_path),
+        dunk_result["errors"][0]["error"]
+    );
+
+    // Python deliberately catches a metrics read error for this rule and emits no finding/error.
+    // The Rust rule preserves that behavior, so there is no evaluator error to reclassify.
+    std::fs::write(
+        fixture.path("dunks.json"),
+        format!(
+            r#"{{"dunkers":[],"outbox":[{{"id":"m1","pane_id":"%8","holds":1000,"created_at":{}}}]}}"#,
+            NOW - 100.0 * 24.0 * 60.0 * 60.0
+        ),
+    )
+    .unwrap();
+    let delivery_config = fixture.config(&["delivery.ambiguous_queued"]);
+    let delivery_result = evaluate(
+        &delivery_config,
+        NOW,
+        None,
+        None,
+        Some(&["delivery.ambiguous_queued"]),
+    );
+    assert!(delivery_result["errors"].as_array().unwrap().is_empty());
 }
 
 #[test]

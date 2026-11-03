@@ -294,6 +294,7 @@ fn error_text(rule_id: &str, error: &DunkError, inputs: &Inputs<'_>) -> String {
 fn missing_sqlite_path(rule_id: &str, inputs: &Inputs<'_>) -> Option<PathBuf> {
     let filenames: &[&str] = match rule_id {
         "task.blocked_stale" | "task.lease_stale" | "resource.would_kill" => &["tasks.db"],
+        "dunk.skip_loop" => &["metrics.db"],
         "inbox.undeliverable"
         | "inbox.unread_live"
         | "inbox.unread_dead"
