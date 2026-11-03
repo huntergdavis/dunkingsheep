@@ -2146,13 +2146,14 @@ fn deliver_message_exhaustion_removes_once_remembers_and_releases_waiter() {
     flock.outbox.lock().unwrap().insert(P.into(), vec![message]);
     let mut pane = Pane::default();
 
-    for attempt in 0..HOLD_ATTEMPT_LIMIT {
+    const HOLD_LIMIT: i64 = 10;
+    for attempt in 0..HOLD_LIMIT {
         let result =
             flock.deliver_message("m-exhausted", 100.0 + attempt as f64, &mut pane, || {
                 Some("disabled".into())
             });
         assert_eq!(
-            if attempt + 1 == HOLD_ATTEMPT_LIMIT {
+            if attempt + 1 == HOLD_LIMIT {
                 DeliveryOutcome::Undeliverable
             } else {
                 DeliveryOutcome::Held
