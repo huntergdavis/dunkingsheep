@@ -23,6 +23,169 @@ use ds_core::context::digest::{digest_both, select_stores, DEFAULT_CAP};
 use ds_core::context::ledger::Ledger;
 use ds_core::context::store::Store;
 
+// The generated registry sorts its rows by name for reproducible generation. The Python CLI's
+// `commands` and `mcp-map` printers use declaration order, so keep that presentation order here.
+const PYTHON_COMMAND_ORDER: &[&str] = &[
+    "owner_push",
+    "owner_poll",
+    "owner_take",
+    "owner_stats",
+    "owner_receipts",
+    "state_capture",
+    "state_latest",
+    "roster",
+    "message_state",
+    "reply_stats",
+    "project_summary",
+    "lanes",
+    "lane_set",
+    "retire_pane",
+    "dispatch",
+    "clear_box",
+    "delivery",
+    "help",
+    "status",
+    "turn_start",
+    "turn_end",
+    "poll",
+    "list_dunks",
+    "get_dunk",
+    "add_dunk",
+    "update_dunk",
+    "remove_dunk",
+    "start_dunk",
+    "stop_dunk",
+    "toggle_dunk",
+    "stop_all",
+    "fire_dunk",
+    "send_text",
+    "send_keys",
+    "flush_box",
+    "list_messages",
+    "get_message",
+    "cancel_message",
+    "report_run",
+    "report_list",
+    "owner_conversation",
+    "owner_reply",
+    "owner_ingest",
+    "owner_outbox",
+    "owner_delivered",
+    "inbox_send",
+    "inbox_count",
+    "pm_digest",
+    "pm_routing",
+    "inbox_list",
+    "inbox_read",
+    "inbox_status",
+    "inbox_ack",
+    "inbox_recover",
+    "inbox_archive",
+    "inbox_cancel",
+    "inbox_delete",
+    "inbox_stats",
+    "inbox_fetch",
+    "allocation",
+    "task_add",
+    "task_list",
+    "task_read",
+    "task_update",
+    "task_assign",
+    "task_complete",
+    "task_block",
+    "task_unblock",
+    "task_cancel",
+    "task_delete",
+    "task_note",
+    "task_next",
+    "task_heartbeat",
+    "task_release",
+    "task_follow",
+    "task_unfollow",
+    "task_followers",
+    "task_stats",
+    "task_metrics",
+    "task_reap",
+    "memory_recall",
+    "memory_context",
+    "memory_search",
+    "memory_stats",
+    "memory_status",
+    "memory_backfill",
+    "memory_ingest",
+    "health",
+    "doctor",
+    "recover",
+    "metrics",
+    "list_panes",
+    "read_pane",
+    "delivery_capability",
+    "list_workspaces",
+    "create_workspace",
+    "create_tab",
+    "split_pane",
+    "start_agent",
+    "respawn_pane",
+    "rename",
+    "focus",
+    "close",
+    "herdr",
+    "herdr_help",
+    "shutdown",
+    "gh_token",
+    "review_sync",
+    "review_list",
+    "context_add",
+    "context_promote",
+    "context_supersede",
+    "context_retire",
+    "poolrad_sync",
+    "poolrad_progress",
+    "whoami",
+    "lane_register",
+    "lane_unregister",
+    "token_issue",
+    "token_revoke",
+    "superuser_status",
+    "superuser_add",
+    "superuser_remove",
+    "superuser_recover",
+];
+
+fn commands_in_python_order() -> Vec<&'static ds_core::registry::Command> {
+    PYTHON_COMMAND_ORDER
+        .iter()
+        .map(|name| ds_core::registry::command(name).expect("Python CLI command is registered"))
+        .collect()
+}
+
+fn command_description(command: &ds_core::registry::Command) -> &'static str {
+    // The registry generator normalizes whitespace, while the Python CLI preserves it.
+    if command.name == "respawn_pane" {
+        "Replace a managed pane's process in place, preserving the pane id, task lease/ownership, mailbox and launch history.  Superuser/operator only.  Requires the exact live pane pid/start, --confirm-idle evidence, an argv command (no shell interpolation) and a rollback argv.  Refuses active turns, unread mail, queued outbox, live task leases and any non-ready delivery state; verifies the replacement and rolls back on failure."
+    } else {
+        command.description
+    }
+}
+
+fn cli_param_required(command: &ds_core::registry::Command, name: &str) -> bool {
+    // The generated `required` field is MCP-required. argparse leaves these two
+    // CLI parameters optional, even though MCP requires them in its schema.
+    !matches!(command.name, "add_dunk" | "create_tab") && command.required.contains(&name)
+}
+
+fn mcp_group_action(command_name: &str) -> Option<(&'static str, &'static str)> {
+    let mut mapping = None;
+    for group in ds_core::registry::GROUPS {
+        for (action, name) in group.actions {
+            if *name == command_name {
+                mapping = Some((group.name, *action));
+            }
+        }
+    }
+    mapping
+}
+
 fn text<'a>(ns: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
     ns.get(key).and_then(Value::as_str)
 }
@@ -119,6 +282,257 @@ fn not_ported(command: &str) -> Outcome {
         stdout: String::new(),
         stderr: format!("dunkingsheep (rust port): `{command}` is parsed but not ported yet\n"),
         code: 1,
+    }
+}
+
+fn guide(ns: &Map<String, Value>) -> Outcome {
+    let markdown = matches!(ns.get("markdown"), Some(Value::Bool(true)));
+    let version = crate::cli_table::ROOT
+        .args
+        .iter()
+        .find(|arg| arg.dest == "version")
+        .and_then(|arg| arg.version)
+        .and_then(|version| version.strip_prefix("dunkingsheep "))
+        .and_then(|version| version.split_whitespace().next())
+        .expect("generated CLI table has an application version");
+    Outcome {
+        stdout: ds_core::help::guide(markdown, version),
+        stderr: String::new(),
+        code: 0,
+    }
+}
+
+fn commands(json: bool) -> Outcome {
+    let commands = commands_in_python_order();
+
+    if json {
+        let rows = commands
+            .iter()
+            .map(|command| {
+                serde_json::json!({
+                    "name": command.name,
+                    "description": command_description(command),
+                    "input_schema": ds_core::registry::input_schema(command.name)
+                        .expect("registered command has an input schema"),
+                    "mcp_tool": command.mcp,
+                })
+            })
+            .collect::<Vec<_>>();
+        return Outcome {
+            stdout: format!("{}\n", ordered_json(&Value::Array(rows))),
+            stderr: String::new(),
+            code: 0,
+        };
+    }
+
+    let mut output = String::new();
+    for command in commands {
+        let params = command
+            .params
+            .iter()
+            .map(|param| {
+                format!(
+                    "{}{}",
+                    param.name,
+                    if cli_param_required(command, param.name) {
+                        "*"
+                    } else {
+                        ""
+                    }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let marker = if command.mcp {
+            ""
+        } else {
+            "  [socket/cli only]"
+        };
+        use std::fmt::Write as _;
+        let _ = writeln!(
+            output,
+            "{}({params}){marker}\n    {}",
+            command.name,
+            command_description(command)
+        );
+    }
+    Outcome {
+        stdout: output,
+        stderr: String::new(),
+        code: 0,
+    }
+}
+
+fn python_json_string_len(value: &str) -> usize {
+    let mut len = 2;
+    for ch in value.chars() {
+        len += match ch {
+            '"' | '\\' | '\u{0008}' | '\t' | '\n' | '\u{000c}' | '\r' => 2,
+            ch if ch <= '\u{001f}' => 6,
+            ch if ch.is_ascii() => 1,
+            ch if ch <= '\u{ffff}' => 6,
+            _ => 12,
+        };
+    }
+    len
+}
+
+fn python_json_len(value: &Value) -> usize {
+    match value {
+        Value::Null => 4,
+        Value::Bool(true) => 4,
+        Value::Bool(false) => 5,
+        Value::Number(number) => number.to_string().len(),
+        Value::String(value) => python_json_string_len(value),
+        Value::Array(values) => {
+            2 + values.iter().map(python_json_len).sum::<usize>()
+                + values.len().saturating_sub(1) * 2
+        }
+        Value::Object(values) => {
+            2 + values
+                .iter()
+                .map(|(key, value)| python_json_string_len(key) + 2 + python_json_len(value))
+                .sum::<usize>()
+                + values.len().saturating_sub(1) * 2
+        }
+    }
+}
+
+fn mcp_map(ns: &Map<String, Value>) -> Outcome {
+    use ds_core::registry::{self, GROUPS};
+
+    let markdown = matches!(ns.get("markdown"), Some(Value::Bool(true)));
+    let commands = commands_in_python_order();
+    let flat = commands
+        .iter()
+        .copied()
+        .filter(|command| command.mcp)
+        .collect::<Vec<_>>();
+    let schema_rows = |commands: &[&ds_core::registry::Command], include_description: bool| {
+        commands
+            .iter()
+            .map(|command| {
+                let mut row = Map::new();
+                row.insert("name".into(), Value::String(command.name.to_string()));
+                if include_description {
+                    row.insert(
+                        "description".into(),
+                        Value::String(command_description(command).to_string()),
+                    );
+                }
+                row.insert(
+                    "inputSchema".into(),
+                    registry::input_schema(command.name).expect("registered schema"),
+                );
+                Value::Object(row)
+            })
+            .collect::<Vec<_>>()
+    };
+    let grouped_rows = GROUPS
+        .iter()
+        .map(|group| {
+            let mut row = Map::new();
+            row.insert("name".into(), Value::String(group.name.to_string()));
+            row.insert(
+                "description".into(),
+                Value::String(group.description.to_string()),
+            );
+            row.insert(
+                "inputSchema".into(),
+                registry::grouped_input_schema(group.name).expect("registered group schema"),
+            );
+            Value::Object(row)
+        })
+        .collect::<Vec<_>>();
+    let flat_bytes = python_json_len(&Value::Array(schema_rows(&flat, true)));
+    let grouped_bytes = python_json_len(&Value::Array(grouped_rows));
+    let hot = GROUPS
+        .iter()
+        .filter(|group| matches!(group.name, "inbox" | "task" | "memory"))
+        .map(|group| {
+            let mut row = Map::new();
+            row.insert("name".into(), Value::String(group.name.to_string()));
+            row.insert(
+                "inputSchema".into(),
+                registry::grouped_input_schema(group.name).expect("registered group schema"),
+            );
+            Value::Object(row)
+        })
+        .collect::<Vec<_>>();
+    let hot_bytes = python_json_len(&Value::Array(hot));
+    let mut output = Vec::new();
+
+    if markdown {
+        output.extend([
+            "# MCP tool map (t8 grouping audit)".to_string(),
+            String::new(),
+            "The declared MCP surface is one namespaced tool per domain, each taking an `action`. Nothing was removed: every flat name still resolves, and every command stays on the CLI/socket API.".to_string(),
+            String::new(),
+            format!("- declared tools: **{}** grouped (was **{}** flat)", GROUPS.len(), flat.len()),
+            format!("- grouped schema bytes: **{grouped_bytes}** (was **{flat_bytes}**, -{:.1}%)", 100.0 * (1.0 - grouped_bytes as f64 / flat_bytes as f64)),
+            format!("- hot set (`inbox`, `task`, `memory`): **{hot_bytes}** bytes (target <10 KB)"),
+            String::new(), "## Grouped tools".to_string(), String::new(),
+            "| Tool | Actions |".to_string(), "| --- | --- |".to_string(),
+        ]);
+        for group in GROUPS {
+            output.push(format!(
+                "| `{}` | {} |",
+                group.name,
+                group
+                    .actions
+                    .iter()
+                    .map(|(action, _)| format!("`{action}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        output.extend([
+            String::new(),
+            "## OLD flat tool -> NEW grouped tool".to_string(),
+            String::new(),
+            "| Old tool | New tool | action |".to_string(),
+            "| --- | --- | --- |".to_string(),
+        ]);
+        for command in &flat {
+            let (group, action) = mcp_group_action(command.name).unwrap_or(("None", "None"));
+            output.push(format!("| `{}` | `{group}` | `{action}` |", command.name));
+        }
+        output.extend([
+            String::new(),
+            "## CLI/socket-only commands (not MCP tools)".to_string(),
+            String::new(),
+            "| Command | Why |".to_string(),
+            "| --- | --- |".to_string(),
+            "| `shutdown` | daemon stop; CLI/socket only |".to_string(),
+        ]);
+    } else {
+        output.push(format!("declared {} grouped tools (was {} flat); schema {grouped_bytes} bytes (was {flat_bytes}); hot set (inbox, task, memory) {hot_bytes} bytes", GROUPS.len(), flat.len()));
+        output.push(String::new());
+        for group in GROUPS {
+            output.push(format!(
+                "{}: {}",
+                group.name,
+                group
+                    .actions
+                    .iter()
+                    .map(|(action, _)| *action)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        output.push(String::new());
+        for command in &flat {
+            let (group, action) = mcp_group_action(command.name).unwrap_or(("None", "None"));
+            output.push(format!("{} -> {group}(action={action})", command.name));
+        }
+        for command in commands.iter().filter(|command| !command.mcp) {
+            output.push(format!("{} -> (CLI/socket only)", command.name));
+        }
+    }
+    Outcome {
+        stdout: format!("{}\n", output.join("\n")),
+        stderr: String::new(),
+        code: 0,
     }
 }
 
@@ -2740,6 +3154,9 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
     let command = text(ns, "command").unwrap_or("");
     let json = matches!(ns.get("json"), Some(Value::Bool(true)));
     match command {
+        "guide" | "help" | "docs" => guide(ns),
+        "commands" => commands(json),
+        "mcp-map" => mcp_map(ns),
         "install" => install_launcher(ns, json),
         "mcp-setup" => mcp_setup(ns),
         "context" => context(ns, json),
