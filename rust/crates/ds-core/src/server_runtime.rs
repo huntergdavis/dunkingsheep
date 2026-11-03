@@ -20,6 +20,7 @@ mod registrations;
 mod retire_inbox;
 mod retire_roles;
 mod roster;
+mod send_commands;
 mod services;
 mod status;
 mod stuck;
@@ -390,6 +391,11 @@ impl PaneInfoEnv for RequestRuntimeAdapter<'_> {
 }
 
 impl crate::api::CommandEnv for RequestRuntimeAdapter<'_> {
+    fn send_commands(&self) -> Result<&dyn crate::api::SendCommandEnv, DunkError> {
+        self.require_send_outbox()?;
+        Ok(self)
+    }
+
     fn delivery_env(&self) -> Result<&dyn crate::flock::delivery::DeliveryEnv, DunkError> {
         Ok(self)
     }

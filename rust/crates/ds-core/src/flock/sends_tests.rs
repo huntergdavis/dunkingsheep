@@ -916,8 +916,10 @@ fn direct_key_send_serializes_keys_and_immediate_mode_delivers_without_queueing(
         dir.path(),
         false,
     ));
-    let mut pane = Pane::default();
-    pane.panes = vec![serde_json::json!({"pane_id": P, "tab_label": "Agent A"})];
+    let mut pane = Pane {
+        panes: vec![serde_json::json!({"pane_id": P, "tab_label": "Agent A"})],
+        ..Pane::default()
+    };
     let result = flock
         .send_keys_now(
             &serde_json::json!(P),
@@ -938,6 +940,160 @@ fn direct_key_send_serializes_keys_and_immediate_mode_delivers_without_queueing(
     assert_eq!("sent", result["status"]);
     assert_eq!("Escape", pane.keys[0].1);
     assert!(flock.outbox_snapshot().is_empty());
+}
+
+#[test]
+fn direct_key_send_preserves_whitespace_inside_one_argument_and_multiple_arguments() {
+    use std::sync::Arc;
+
+    struct Wake;
+    impl OutboxWake for Wake {
+        fn ensure_worker(&self, _: &Arc<Flock>, _: &str) -> Result<(), crate::error::DunkError> {
+            panic!("immediate send must not start an outbox worker")
+        }
+    }
+    struct Store;
+    impl SnapshotStore for Store {
+        fn save(&self, _: &Flock) -> Result<(), crate::error::DunkError> {
+            Ok(())
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Arc::new(Flock::new(
+        dir.path().join("launches.json"),
+        dir.path(),
+        false,
+    ));
+    let mut pane = Pane {
+        panes: vec![serde_json::json!({"pane_id": P, "tab_label": "Agent A"})],
+        ..Pane::default()
+    };
+    let options = DirectSendOptions {
+        hold_while_typing: false,
+        ..DirectSendOptions::default()
+    };
+
+    let single = flock
+        .send_keys_now(
+            &serde_json::json!(P),
+            &["ctrl+c Enter".into()],
+            options.clone(),
+            &mut pane,
+            &Wake,
+            &Store,
+            || None,
+        )
+        .unwrap();
+    assert_eq!("sent", single["status"]);
+    assert_eq!(vec![(P.to_owned(), "ctrl+c Enter".to_owned())], pane.keys);
+
+    pane.keys.clear();
+    let multiple = flock
+        .send_keys_now(
+            &serde_json::json!(P),
+            &["ctrl+c".into(), "Enter".into()],
+            options,
+            &mut pane,
+            &Wake,
+            &Store,
+            || None,
+        )
+        .unwrap();
+    assert_eq!("sent", multiple["status"]);
+    assert_eq!(
+        vec![
+            (P.to_owned(), "ctrl+c".to_owned()),
+            (P.to_owned(), "Enter".to_owned())
+        ],
+        pane.keys
+    );
+}
+
+#[test]
+fn queued_key_send_keeps_live_key_argument_boundaries() {
+    use std::sync::Arc;
+
+    struct Wake;
+    impl OutboxWake for Wake {
+        fn ensure_worker(&self, _: &Arc<Flock>, _: &str) -> Result<(), crate::error::DunkError> {
+            Ok(())
+        }
+    }
+    struct Store;
+    impl SnapshotStore for Store {
+        fn save(&self, _: &Flock) -> Result<(), crate::error::DunkError> {
+            Ok(())
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Arc::new(Flock::new(
+        dir.path().join("launches.json"),
+        dir.path(),
+        false,
+    ));
+    let mut pane = Pane {
+        panes: vec![serde_json::json!({"pane_id": P, "tab_label": "Agent A"})],
+        ..Pane::default()
+    };
+    let queued = flock
+        .send_keys_now(
+            &serde_json::json!(P),
+            &["ctrl+c Enter".into()],
+            DirectSendOptions::default(),
+            &mut pane,
+            &Wake,
+            &Store,
+            || None,
+        )
+        .unwrap();
+    assert_eq!("queued", queued["status"]);
+    assert_eq!("ctrl+c Enter", flock.outbox_snapshot()[P][0].text);
+
+    // Deliver through the same queue-head frame; skip the unrelated typing-settle gate here.
+    flock.outbox.lock().unwrap().get_mut(P).unwrap()[0].hold_while_typing = false;
+    assert_eq!(
+        DeliveryOutcome::Sent,
+        flock.deliver_message(
+            queued["message_id"].as_str().unwrap(),
+            100.0,
+            &mut pane,
+            || None
+        )
+    );
+    assert_eq!(vec![(P.to_owned(), "ctrl+c Enter".to_owned())], pane.keys);
+}
+
+#[test]
+fn restored_key_message_uses_legacy_whitespace_split() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Flock::new(dir.path().join("launches.json"), dir.path(), false);
+    let mut live = Message::new("m-restored-keys", P, "Agent A", "ctrl+c Enter", "send_keys");
+    live.kind = "keys".into();
+    let snapshot = message_snapshot(&live);
+    assert!(snapshot.get("key_arguments").is_none());
+    let mut restored = message_from_snapshot(&snapshot).unwrap();
+    restored.hold_while_typing = false;
+    assert_eq!("keys", restored.kind);
+    flock
+        .outbox
+        .lock()
+        .unwrap()
+        .insert(P.into(), vec![restored]);
+
+    let mut pane = Pane::default();
+    assert_eq!(
+        DeliveryOutcome::Sent,
+        flock.deliver_message("m-restored-keys", 100.0, &mut pane, || None)
+    );
+    assert_eq!(
+        vec![
+            (P.to_owned(), "ctrl+c".to_owned()),
+            (P.to_owned(), "Enter".to_owned())
+        ],
+        pane.keys
+    );
 }
 
 #[test]
