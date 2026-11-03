@@ -2298,6 +2298,7 @@ pub struct Message {
 #[derive(Debug, Default)]
 struct MessageAttemptState {
     receipt_ids: Mutex<Vec<String>>,
+    folded_text: Mutex<Option<String>>,
 }
 
 // This state is process-local ownership evidence, not part of message value equality.
@@ -2351,6 +2352,26 @@ impl Message {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(inbox_message_id.to_owned());
         true
+    }
+
+    /// Update text on the exact queued notice and its in-flight delivery frame.
+    /// The caller holds the canonical outbox row.
+    pub(crate) fn set_folded_notice_text(&mut self, text: &str) {
+        self.text = text.to_owned();
+        *self
+            .attempt_state
+            .folded_text
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(text.to_owned());
+    }
+
+    fn folded_text(&self) -> String {
+        self.attempt_state
+            .folded_text
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .unwrap_or_else(|| self.text.clone())
     }
 
     fn prepare_receipt_frame(&self) {
@@ -3593,11 +3614,14 @@ impl Flock {
             preserve_draft: false,
         };
         let is_keys = message.kind == "keys";
-        let message_text = message.text.clone();
         let press_enter = message.press_enter;
         let attempt_generation = message.attempt_generation.clone();
         let (sent, ok, detail, blocker_reason) =
             send_guarded_with_reason(self, env, &pane_id, options, permission, |env, guard| {
+                // The exact message frame survives cancellation and same-ID replacement.
+                // Read folded text after acquiring the pane and typing guards.
+                let message_text = message.folded_text();
+                message.text = message_text.clone();
                 if is_keys {
                     let keys: Vec<String> =
                         message_text.split_whitespace().map(str::to_owned).collect();
