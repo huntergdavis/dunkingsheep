@@ -1124,7 +1124,7 @@ fn submit_text_with_options(
     guard: Option<&TypingGuard<'_>>,
 ) -> SendAction {
     let guarded = guard.is_some();
-    let mut perform = |guard: &TypingGuard<'_>| {
+    let mut perform = Some(|guard: &TypingGuard<'_>| {
         if let Some(dead) = dead_session(env, pane_id) {
             return Err(format!(
                 "agent session is dead ({dead}); not submitting into a dead composer"
@@ -1190,12 +1190,12 @@ fn submit_text_with_options(
             }),
             key_confirmation: None,
         })
-    };
+    });
 
     let prepared = match guard {
-        Some(guard) => perform(guard),
+        Some(guard) => perform.take().expect("submit operation is available")(guard),
         None => match flock.typing_guard(pane_id) {
-            Ok(guard) => perform(&guard),
+            Ok(guard) => perform.take().expect("submit operation is available")(&guard),
             Err(error) => return SendAction::completed(false, error.to_string()),
         },
     };
