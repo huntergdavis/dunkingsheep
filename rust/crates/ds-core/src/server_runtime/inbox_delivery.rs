@@ -12,7 +12,7 @@ impl InboxRuntimeView<'_> {
             .get_mut(pane)?
             .iter_mut()
             .find(|m| m.status == "queued" && m.is_notice)?;
-        message.text = text.to_owned();
+        message.set_folded_notice_text(text);
         if !message.append_notify_for(id) {
             return None;
         }
@@ -125,6 +125,16 @@ mod tests {
     }
     #[test]
     fn concurrent_fold_settles_both_inbox_receipts() {
+        check_concurrent_fold(0);
+    }
+
+    #[test]
+    fn folded_text_survives_cancellation_and_replacement() {
+        check_concurrent_fold(1);
+        check_concurrent_fold(2);
+    }
+
+    fn check_concurrent_fold(mode: u8) {
         use crate::inbox_store::Outgoing;
         use std::time::{Duration, Instant};
 
@@ -145,6 +155,7 @@ mod tests {
         };
         let first = store.send(&outgoing).unwrap();
         let second = store.send(&outgoing).unwrap();
+        let third = store.send(&outgoing).unwrap();
         let flock = Arc::new(Flock::new(
             dir.path().join("launches"),
             dir.path().join("lanes"),
@@ -211,6 +222,19 @@ mod tests {
                 view.fold_notice("w1:p1", "updated", &second).as_deref(),
                 Some("m1")
             );
+            if mode != 0 {
+                let mut outbox = outbox_lock(&view.flock.outbox);
+                let queue = outbox.get_mut("w1:p1").unwrap();
+                queue.clear();
+                if mode == 2 {
+                    let mut replacement =
+                        Message::new("m1", "w1:p1", "lane", "replacement", "test");
+                    replacement.is_notice = true;
+                    replacement.notify_for.push(third.clone());
+                    replacement.attempt_generation = Some("replacement".into());
+                    queue.push(replacement);
+                }
+            }
             drop(guard);
             worker.join().unwrap();
         });
@@ -227,5 +251,22 @@ mod tests {
             crate::inbox::status(store.read_pool(), &second, crate::clock::now_s()).unwrap();
         assert!(first_status.notify_state.is_some());
         assert_eq!(first_status.notify_state, second_status.notify_state);
+        assert!(
+            crate::inbox::status(store.read_pool(), &third, crate::clock::now_s())
+                .unwrap()
+                .notify_state
+                .is_none()
+        );
+        if mode == 2 {
+            let outbox = outbox_lock(&flock.outbox);
+            let replacement = &outbox["w1:p1"][0];
+            assert_eq!(replacement.text, "replacement");
+            assert_eq!(replacement.status, "queued");
+            assert_eq!(replacement.notify_for, [third]);
+            assert_eq!(
+                replacement.attempt_generation.as_deref(),
+                Some("replacement")
+            );
+        }
     }
 }
