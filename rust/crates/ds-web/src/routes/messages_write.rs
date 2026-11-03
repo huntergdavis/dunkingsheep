@@ -14,7 +14,7 @@ use axum::{
     routing::post,
     Json, Router,
 };
-use serde_json::{json, Map, Value};
+use serde_json::{json, Map, Number, Value};
 
 use super::auth::{AuthBackend, AuthError, Identity, RequestScheme};
 
@@ -46,7 +46,7 @@ pub trait MessagesWriteBackend: Send + Sync + 'static {
 
     fn send_now<'a>(
         &'a self,
-        message_id: i64,
+        message_id: Number,
     ) -> MessagesWriteFuture<'a, Result<Value, MessagesWriteError>>;
 
     fn post_brief<'a>(
@@ -65,7 +65,7 @@ pub struct MessageIn {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BriefIn {
-    pub answers: Vec<i64>,
+    pub answers: Vec<Number>,
     pub channel: String,
     pub body: String,
     pub attachment_ids: Vec<String>,
@@ -125,7 +125,7 @@ async fn send_now(
         Ok(identity) => identity,
         Err(response) => return response,
     };
-    let Ok(message_id) = message_id.parse::<i64>() else {
+    let Some(message_id) = python_path_integer(&message_id) else {
         return path_integer_error(&message_id);
     };
     if identity != Identity::Owner {
@@ -330,7 +330,7 @@ fn integer_list(
     name: &str,
     max: usize,
     errors: &mut Vec<Value>,
-) -> Vec<i64> {
+) -> Vec<Number> {
     let Some(value) = object.get(name) else {
         return Vec::new();
     };
@@ -354,11 +354,11 @@ fn integer_list(
         .enumerate()
         .filter_map(|(index, item)| {
             let number = match item {
-                Value::Number(number) => number.as_i64(),
+                Value::Number(number) if integer_number_lexeme(number) => Some(number),
                 _ => None,
             };
             match number {
-                Some(number) if number > 0 => Some(number),
+                Some(number) if positive_integer_lexeme(number) => Some(number.clone()),
                 Some(_) => {
                     errors.push(json!({
                         "type": "greater_than", "loc": ["body", name, index],
@@ -377,6 +377,84 @@ fn integer_list(
             }
         })
         .collect()
+}
+
+/// Pydantic's strict `int` accepts only JSON integer tokens here. With
+/// `serde_json/arbitrary_precision`, Number retains the token instead of
+/// rounding or narrowing it through a machine integer or float.
+fn integer_number_lexeme(number: &Number) -> bool {
+    let text = number.to_string();
+    let digits = text.strip_prefix('-').unwrap_or(&text);
+    !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn positive_integer_lexeme(number: &Number) -> bool {
+    let text = number.to_string();
+    !text.starts_with('-') && text.bytes().any(|byte| byte.is_ascii_digit() && byte != b'0')
+}
+
+/// Match the installed Pydantic path `int` coercion observed by the ASGI oracle:
+/// whitespace/signs, digit separators, and zero-only decimal fractions are
+/// accepted; exponent and fractional values are rejected.
+fn python_path_integer(input: &str) -> Option<Number> {
+    let input = input.trim();
+    if input.is_empty() {
+        return None;
+    }
+    let (negative, unsigned) = if let Some(rest) = input.strip_prefix('-') {
+        (true, rest)
+    } else if let Some(rest) = input.strip_prefix('+') {
+        (false, rest)
+    } else {
+        (false, input)
+    };
+    let mut parts = unsigned.split('.');
+    let whole = parts.next()?;
+    let fraction = parts.next();
+    if parts.next().is_some() {
+        return None;
+    }
+    let whole = python_digit_segment(whole)?;
+    if let Some(fraction) = fraction {
+        let fraction = python_digit_segment(fraction)?;
+        if !fraction.bytes().all(|byte| byte == b'0') {
+            return None;
+        }
+    }
+    let significant = whole.trim_start_matches('0');
+    let magnitude = if significant.is_empty() { "0" } else { significant };
+    let canonical = if negative && magnitude != "0" {
+        format!("-{magnitude}")
+    } else {
+        magnitude.to_owned()
+    };
+    serde_json::from_str::<Number>(&canonical).ok()
+}
+
+fn python_digit_segment(input: &str) -> Option<String> {
+    if input.is_empty() {
+        return None;
+    }
+    let bytes = input.as_bytes();
+    if !bytes[0].is_ascii_digit() || !bytes[bytes.len() - 1].is_ascii_digit() {
+        return None;
+    }
+    let mut digits = String::with_capacity(input.len());
+    let mut previous_was_digit = false;
+    for &byte in bytes {
+        match byte {
+            b'0'..=b'9' => {
+                digits.push(char::from(byte));
+                previous_was_digit = true;
+            }
+            b'_' if previous_was_digit => previous_was_digit = false,
+            _ => return None,
+        }
+    }
+    if !previous_was_digit {
+        return None;
+    }
+    Some(digits)
 }
 
 fn missing_field_error(name: &str, body: &Value) -> Value {
@@ -697,7 +775,7 @@ mod tests {
         }
         fn send_now<'a>(
             &'a self,
-            message_id: i64,
+            message_id: Number,
         ) -> MessagesWriteFuture<'a, Result<Value, MessagesWriteError>> {
             self.calls
                 .lock()
@@ -714,8 +792,14 @@ mod tests {
             data: BriefIn,
         ) -> MessagesWriteFuture<'a, Result<Value, MessagesWriteError>> {
             self.calls.lock().unwrap().push(format!(
-                "brief:{}:{}:{:?}",
-                data.channel, data.body, data.answers
+                "brief:{}:{}:[{}]",
+                data.channel,
+                data.body,
+                data.answers
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",")
             ));
             let result = match &self.error {
                 Some(error) => Err(error.clone()),
@@ -986,6 +1070,54 @@ mod tests {
     }
 
     #[test]
+    fn send_now_preserves_python_sized_path_integer_before_role_check() {
+        let backend = Arc::new(FakeMessages::default());
+        let huge = "1267650600228229401496703205376";
+        let rejected = block_on(app(backend.clone()).oneshot(request(
+            &format!("/api/messages/{huge}/send-now"),
+            "",
+            "api-token",
+        )))
+        .unwrap();
+        let (status, body) = response(rejected);
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body, json!({"detail": "Owner sign-in required"}));
+        assert!(backend.calls.lock().unwrap().is_empty());
+
+        let accepted = block_on(app(backend.clone()).oneshot(request(
+            &format!("/api/messages/{huge}/send-now"),
+            "",
+            "owner-token",
+        )))
+        .unwrap();
+        let (status, body) = response(accepted);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["id"], huge);
+        assert_eq!(*backend.calls.lock().unwrap(), vec![format!("send:{huge}")]);
+    }
+
+    #[test]
+    fn send_now_path_integer_matches_python_coercion_without_float_rounding() {
+        for (input, expected) in [
+            ("+7", "7"),
+            ("007", "7"),
+            ("1_0", "10"),
+            ("1.0", "1"),
+            ("1_0.00", "10"),
+            ("-0.0", "0"),
+        ] {
+            assert_eq!(
+                python_path_integer(input).map(|number| number.to_string()),
+                Some(expected.to_owned()),
+                "input {input:?}"
+            );
+        }
+        for input in ["1.5", "1e2", "1.", ".0", "1__0", "_10", "10_"] {
+            assert_eq!(python_path_integer(input), None, "input {input:?}");
+        }
+    }
+
+    #[test]
     fn send_now_preserves_backend_http_error() {
         let backend = Arc::new(FakeMessages {
             error: Some(MessagesWriteError::Http {
@@ -1056,6 +1188,59 @@ mod tests {
         assert_eq!(errors[1]["loc"], json!(["body", "channel"]));
         assert_eq!(errors[2]["type"], "string_too_short");
         assert_eq!(errors[2]["loc"], json!(["body", "body"]));
+        assert!(backend.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn post_brief_preserves_python_sized_strict_integer_answers() {
+        let backend = Arc::new(FakeMessages::default());
+        let huge = "1267650600228229401496703205376";
+        let rejected = block_on(app(backend.clone()).oneshot(request(
+            "/api/brief",
+            &format!(
+                r#"{{"channel":"pane-worker","body":"done","answers":[{huge}]}}"#
+            ),
+            "owner-token",
+        )))
+        .unwrap();
+        let (status, body) = response(rejected);
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body, json!({"detail": "API token required"}));
+        assert!(backend.calls.lock().unwrap().is_empty());
+
+        let accepted = block_on(app(backend.clone()).oneshot(request(
+            "/api/brief",
+            &format!(
+                r#"{{"channel":"pane-worker","body":"done","answers":[{huge}]}}"#
+            ),
+            "api-token",
+        )))
+        .unwrap();
+        let (status, _) = response(accepted);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            *backend.calls.lock().unwrap(),
+            vec![format!("brief:pane-worker:done:[{huge}]")]
+        );
+    }
+
+    #[test]
+    fn post_brief_rejects_json_float_and_boolean_as_strict_integers() {
+        let backend = Arc::new(FakeMessages::default());
+        for token in ["1.0", "1e0", "true"] {
+            let result = block_on(app(backend.clone()).oneshot(request(
+                "/api/brief",
+                &format!(
+                    r#"{{"channel":"pane-worker","body":"done","answers":[{token}]}}"#
+                ),
+                "api-token",
+            )))
+            .unwrap();
+            let (status, body) = response(result);
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "token {token}");
+            assert_eq!(body["detail"][0]["type"], "int_type", "token {token}");
+            assert_eq!(body["detail"][0]["loc"], json!(["body", "answers", 0]));
+        }
         assert!(backend.calls.lock().unwrap().is_empty());
     }
 
