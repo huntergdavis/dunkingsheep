@@ -54,6 +54,25 @@ fn not_ported(command: &str) -> Outcome {
     }
 }
 
+fn tui(ns: &Map<String, Value>) -> Outcome {
+    let client = match crate::daemon_cmd::connect(ns) {
+        Ok(client) => client,
+        Err(outcome) => return outcome,
+    };
+    match ds_tui::runtime::run_terminal(client) {
+        Ok(()) => Outcome {
+            stdout: String::new(),
+            stderr: String::new(),
+            code: 0,
+        },
+        Err(error) => Outcome {
+            stdout: String::new(),
+            stderr: format!("error: {error}\n"),
+            code: 3,
+        },
+    }
+}
+
 fn memory_aux(ns: &Map<String, Value>) -> Outcome {
     let sub = text(ns, "memory_command").unwrap_or("");
     match sub {
@@ -2290,6 +2309,7 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
         "roster" | "message-state" | "reply-stats" | "project-summary" => read_view(ns),
         "poolrad" => poolrad(ns),
         "gh-token" => crate::daemon_cmd::gh_token(ns),
+        "tui" => tui(ns),
         // `client.call("list_panes"), print_panes`
         "fire" | "test" => {
             let mut args = Map::new();

@@ -167,6 +167,130 @@ fn run_daemon_cli_with_env(
     output
 }
 
+fn run_tui_pty(key: &str) -> (Value, Vec<Value>) {
+    const PTY_DRIVER: &str = r#"
+import errno, json, os, pty, select, subprocess, sys, termios, time
+binary, socket, key = sys.argv[1:]
+master, slave = pty.openpty()
+slave_name = os.ttyname(slave)
+before = termios.tcgetattr(slave)
+env = os.environ.copy()
+env['TERM'] = 'xterm-256color'
+proc = subprocess.Popen([binary, '--socket', socket, '--self-pane', '%99', 'tui', '--json'],
+                        stdin=slave, stdout=slave, stderr=subprocess.PIPE, env=env)
+os.close(slave)
+output = bytearray()
+sent = False
+deadline = time.monotonic() + 10
+while time.monotonic() < deadline and proc.poll() is None:
+    readable, _, _ = select.select([master], [], [], 0.1)
+    if readable:
+        try:
+            chunk = os.read(master, 4096)
+        except OSError as error:
+            if error.errno == errno.EIO:
+                break
+            raise
+        output.extend(chunk)
+        if not sent and b'\x1b[?1049h' in output:
+            os.write(master, key.encode())
+            sent = True
+if proc.poll() is None:
+    proc.kill()
+code = proc.wait()
+for _ in range(5):
+    readable, _, _ = select.select([master], [], [], 0.05)
+    if not readable:
+        break
+    try:
+        output.extend(os.read(master, 4096))
+    except OSError as error:
+        if error.errno == errno.EIO:
+            break
+        raise
+check = os.open(slave_name, os.O_RDWR | os.O_NOCTTY)
+restored = termios.tcgetattr(check) == before
+os.close(check)
+stderr = proc.stderr.read().decode('utf-8', 'replace')
+os.close(master)
+print(json.dumps({'code': code, 'sent': sent, 'restored': restored,
+                  'terminal': output.decode('utf-8', 'replace'), 'stderr': stderr}))
+"#;
+
+    let temp = tempfile::tempdir().unwrap();
+    let socket = temp.path().join("daemon.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let expected = if key == "Q" {
+        vec![
+            ("status", json!({})),
+            ("shutdown", json!({"stop_all": true})),
+            ("list_dunks", json!({})),
+        ]
+    } else {
+        vec![("status", json!({})), ("list_dunks", json!({}))]
+    };
+    let daemon = std::thread::spawn(move || {
+        let mut calls = Vec::new();
+        for (expected_cmd, expected_args) in expected {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(12);
+            let (stream, _) = loop {
+                match listener.accept() {
+                    Ok(connection) => break connection,
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            && std::time::Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("accept fake TUI RPC: {error}"),
+                }
+            };
+            let mut line = String::new();
+            BufReader::new(&stream).read_line(&mut line).unwrap();
+            let request: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(expected_cmd, request["cmd"].as_str().unwrap());
+            assert_eq!(expected_args, request["args"]);
+            assert_eq!("%99", request["self_pane_id"]);
+            let result = match expected_cmd {
+                "status" => json!({}),
+                "list_dunks" => json!({"dunks": []}),
+                "shutdown" => json!({}),
+                _ => unreachable!(),
+            };
+            let response = json!({"ok": true, "result": result});
+            let mut writer = &stream;
+            writer
+                .write_all(format!("{response}\n").as_bytes())
+                .unwrap();
+            calls.push(request);
+        }
+        calls
+    });
+
+    let driver = Command::new("python3")
+        .args([
+            "-c",
+            PTY_DRIVER,
+            env!("CARGO_BIN_EXE_dunkingsheep"),
+            socket.to_str().unwrap(),
+            key,
+        ])
+        .env_remove("DUNKINGSHEEP_SOCKET")
+        .env_remove("DUNKINGSHEEP_SERVICE_TOKEN")
+        .env_remove("DUNKINGSHEEP_SERVICE_TOKEN_FILE")
+        .output()
+        .expect("run pseudo-terminal driver");
+    let calls = daemon.join().unwrap();
+    assert!(
+        driver.status.success(),
+        "PTY driver failed: {}",
+        String::from_utf8_lossy(&driver.stderr)
+    );
+    let report: Value = serde_json::from_slice(&driver.stdout).unwrap();
+    (report, calls)
+}
+
 #[test]
 fn cli_route_05_dunk_send_extends_client_timeout() {
     let temp = tempfile::tempdir().unwrap();
@@ -3283,6 +3407,37 @@ fn cli_route_10_context_local_seed() {
         String::from_utf8(status.stdout).unwrap()
     );
     assert!(status.stderr.is_empty());
+}
+
+#[test]
+fn cli_route_54_tui() {
+    for key in ["q", "\u{1b}", "Q"] {
+        let (report, calls) = run_tui_pty(key);
+        assert_eq!(0, report["code"], "key {key:?}: {report}");
+        assert_eq!(
+            true, report["sent"],
+            "TUI did not enter its screen: {report}"
+        );
+        assert_eq!(
+            true, report["restored"],
+            "terminal mode was not restored: {report}"
+        );
+        assert_eq!("", report["stderr"]);
+        let terminal = report["terminal"].as_str().unwrap();
+        assert!(terminal.contains("\u{1b}[?1049h"), "{report}");
+        assert!(terminal.contains("\u{1b}[?1049l"), "{report}");
+
+        let commands: Vec<_> = calls
+            .iter()
+            .map(|call| call["cmd"].as_str().unwrap())
+            .collect();
+        if key == "Q" {
+            assert_eq!(commands, ["status", "shutdown", "list_dunks"]);
+            assert_eq!(json!({"stop_all": true}), calls[1]["args"]);
+        } else {
+            assert_eq!(commands, ["status", "list_dunks"]);
+        }
+    }
 }
 
 #[test]
