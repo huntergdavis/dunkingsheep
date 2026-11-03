@@ -8,10 +8,12 @@ use crate::terminal::{
     fakes::FakeTerminal, AgentSpec, Pane, Resize, Tab, Terminal, TerminalError, Workspace,
 };
 
+type KeyBatches = Arc<Mutex<Vec<(String, Vec<String>)>>>;
+
 #[derive(Debug)]
 struct RecordingTerminal {
     inner: FakeTerminal,
-    batches: Arc<Mutex<Vec<(String, Vec<String>)>>>,
+    batches: KeyBatches,
 }
 impl Terminal for RecordingTerminal {
     fn version(&self) -> String {
@@ -109,7 +111,7 @@ impl Terminal for RecordingTerminal {
 struct Fixture {
     flock: Flock,
     terminal: Mutex<Box<dyn Terminal>>,
-    batches: Arc<Mutex<Vec<(String, Vec<String>)>>>,
+    batches: KeyBatches,
     metrics: Arc<MetricsStore>,
     runtime: tokio::runtime::Runtime,
     _dir: tempfile::TempDir,
