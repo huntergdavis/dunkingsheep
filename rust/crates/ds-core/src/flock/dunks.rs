@@ -821,7 +821,7 @@ impl DunkList {
 
     /// `Flock.start` (the persisted fields; the timer is the caller's).
     pub fn start(&self, dunk_id: &str) -> Result<Map<String, Value>, DunkError> {
-        let mut state = self.state();
+        let state = self.state();
         let index = Self::find(&state, dunk_id)?;
         let handle = Arc::clone(&state.dunkers[index]);
         let mut dunker = Self::lock_dunker(&handle);
@@ -831,7 +831,7 @@ impl DunkList {
 
     /// `Flock.stop`.
     pub fn stop(&self, dunk_id: &str) -> Result<Map<String, Value>, DunkError> {
-        let mut state = self.state();
+        let state = self.state();
         let index = Self::find(&state, dunk_id)?;
         let handle = Arc::clone(&state.dunkers[index]);
         let mut dunker = Self::lock_dunker(&handle);
