@@ -17,9 +17,11 @@ use crate::metrics::Event;
 use crate::server::{Dispatcher, PaneInfo, RequestCtx};
 use crate::terminal::Terminal;
 
+#[allow(dead_code)] // The server startup assembly is outside this dispatcher leaf.
 pub(crate) type TerminalFactory = Arc<dyn Fn() -> Box<dyn Terminal> + Send + Sync + 'static>;
 
 /// Shared server dispatcher; terminal instances stay local to each method call.
+#[allow(dead_code)] // Constructed by the dependent production server startup assembly.
 pub(crate) struct RuntimeDispatcher {
     flock: Arc<Flock>,
     runtime: Handle,
@@ -28,6 +30,7 @@ pub(crate) struct RuntimeDispatcher {
 }
 
 impl RuntimeDispatcher {
+    #[allow(dead_code)] // Constructed by the dependent production server startup assembly.
     pub(crate) fn new(
         flock: Arc<Flock>,
         runtime: Handle,

@@ -27,7 +27,7 @@ fn factory(fail_grouped_panes: Option<TerminalError>) -> TerminalFactory {
     })
 }
 
-fn flock(tag: &str, metrics: Option<Arc<MetricsStore>>) -> (tempfile::TempDir, Arc<Flock>) {
+fn make_flock(tag: &str, metrics: Option<Arc<MetricsStore>>) -> (tempfile::TempDir, Arc<Flock>) {
     let dir = tempfile::tempdir().unwrap();
     let flock = Arc::new(Flock::new(
         dir.path().join(format!("{tag}-launches.json")),
@@ -91,7 +91,7 @@ fn request(pane: &str) -> RequestCtx {
 
 #[test]
 fn production_dispatcher_uses_real_handler_registry_and_gate() {
-    let (_dir, flock) = flock("dispatch", None);
+    let (_dir, flock) = make_flock("dispatch", None);
     let runtime = Builder::new_current_thread().enable_all().build().unwrap();
     let dispatcher = make_dispatcher(Arc::clone(&flock), runtime.handle(), factory(None));
     let ctx = request("w1:p1");
@@ -118,7 +118,7 @@ fn production_dispatcher_uses_real_handler_registry_and_gate() {
 fn pane_lookup_preserves_absence_and_backend_failure_and_metrics_are_best_effort() {
     let dir = tempfile::tempdir().unwrap();
     let metrics = Arc::new(MetricsStore::open(dir.path().join("metrics.db")).unwrap());
-    let (_flock_dir, flock) = flock("pane-info", Some(Arc::clone(&metrics)));
+    let (_flock_dir, flock) = make_flock("pane-info", Some(Arc::clone(&metrics)));
     let runtime = Builder::new_current_thread().enable_all().build().unwrap();
     let dispatcher = make_dispatcher(Arc::clone(&flock), runtime.handle(), factory(None));
     assert_eq!(
@@ -161,7 +161,7 @@ fn pane_lookup_preserves_absence_and_backend_failure_and_metrics_are_best_effort
     assert_eq!(events[0].pane_id.as_deref(), Some("w1:p1"));
     assert_eq!(events[0].source.as_deref(), Some("pane_not_in_ancestry"));
 
-    let (_no_metrics_dir, no_metrics_flock) = flock("no-metrics", None);
+    let (_no_metrics_dir, no_metrics_flock) = make_flock("no-metrics", None);
     let no_metrics = make_dispatcher(
         Arc::clone(&no_metrics_flock),
         runtime.handle(),
