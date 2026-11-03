@@ -650,4 +650,17 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(backend.calls.lock().unwrap().len(), 1);
     }
+    #[test]
+    fn auth_bearer_precedes_cookie_value() {
+        let backend = Arc::new(FakeDashboard::ready());
+        let mut request = request("GET", "/api/poolrad-dashboard/dashboard.html", true);
+        request.headers_mut().append(
+            header::COOKIE,
+            HeaderValue::from_static("vp_session=invalid"),
+        );
+        let response = block_on(app(backend.clone()).oneshot(request)).unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(backend.calls.lock().unwrap().len(), 1);
+    }
 }
