@@ -88,10 +88,7 @@ async fn operations_metrics_history(
     if let Err(response) = authenticate(auth.as_ref(), request.headers(), scheme).await {
         return response;
     }
-    let query = match parse_query(request.uri().query()) {
-        Ok(query) => query,
-        Err(()) => return detail_response(StatusCode::BAD_REQUEST, "invalid query"),
-    };
+    let query = parse_query(request.uri().query());
     let hours_raw = query.get("hours").map(String::as_str);
     let hours = match parse_hours(hours_raw) {
         Ok(hours) => hours,
@@ -236,8 +233,8 @@ fn detail_response(status: StatusCode, detail: impl Into<String>) -> Response {
     (status, Json(json!({"detail": detail.into()}))).into_response()
 }
 
-fn parse_query(raw: Option<&str>) -> Result<std::collections::HashMap<String, String>, ()> {
-    fn decode(component: &str) -> Result<String, ()> {
+fn parse_query(raw: Option<&str>) -> std::collections::HashMap<String, String> {
+    fn decode(component: &str) -> String {
         let bytes = component.as_bytes();
         let mut decoded = Vec::with_capacity(bytes.len());
         let mut index = 0;
@@ -248,18 +245,41 @@ fn parse_query(raw: Option<&str>) -> Result<std::collections::HashMap<String, St
                     index += 1;
                 }
                 b'%' if index + 2 < bytes.len() => {
-                    let hex = std::str::from_utf8(&bytes[index + 1..index + 3]).map_err(|_| ())?;
-                    decoded.push(u8::from_str_radix(hex, 16).map_err(|_| ())?);
-                    index += 3;
+                    let hex = &bytes[index + 1..index + 3];
+                    match (hex_digit(hex[0]), hex_digit(hex[1])) {
+                        (Some(high), Some(low)) => {
+                            decoded.push((high << 4) | low);
+                            index += 3;
+                        }
+                        _ => {
+                            // urllib.parse leaves a malformed escape literal. Unknown
+                            // query keys are ignored by the Python route, so `%ZZ` and
+                            // trailing `%` must not turn an otherwise valid request into 400.
+                            decoded.push(b'%');
+                            index += 1;
+                        }
+                    }
                 }
-                b'%' => return Err(()),
+                b'%' => {
+                    decoded.push(b'%');
+                    index += 1;
+                }
                 byte => {
                     decoded.push(byte);
                     index += 1;
                 }
             }
         }
-        String::from_utf8(decoded).map_err(|_| ())
+        String::from_utf8_lossy(&decoded).into_owned()
+    }
+
+    fn hex_digit(byte: u8) -> Option<u8> {
+        match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            b'A'..=b'F' => Some(byte - b'A' + 10),
+            _ => None,
+        }
     }
 
     let mut values = std::collections::HashMap::new();
@@ -269,9 +289,9 @@ fn parse_query(raw: Option<&str>) -> Result<std::collections::HashMap<String, St
         .filter(|pair| !pair.is_empty())
     {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-        values.insert(decode(key)?, decode(value)?);
+        values.insert(decode(key), decode(value));
     }
-    Ok(values)
+    values
 }
 
 #[cfg(test)]
@@ -440,6 +460,46 @@ mod tests {
         );
         assert_eq!(
             vec![("history".into(), Some(24)), ("history".into(), Some(168))],
+            *backend.calls.lock().unwrap()
+        );
+    }
+
+    #[test]
+    fn operations_metrics_history_tolerates_malformed_percent_escapes_like_python() {
+        let backend = Arc::new(FakeOpsMetrics::default());
+        let auth = Arc::new(FakeAuth::accepting());
+        let app = app(backend.clone(), auth);
+
+        // Starlette preserves malformed escapes in query values. An unknown key is
+        // ignored by FastAPI, leaving the route's 24-hour default in effect.
+        let response = block_on(
+            app.clone()
+                .oneshot(request("GET", "/api/ops-metrics/history?noise=%ZZ")),
+        )
+        .unwrap();
+        assert_eq!(
+            (200, json!({"window_hours": 24})),
+            block_on(response_json(response))
+        );
+
+        // A malformed value for `hours` reaches FastAPI's integer validation,
+        // which returns 422 rather than rejecting the query string with 400.
+        let response =
+            block_on(app.oneshot(request("GET", "/api/ops-metrics/history?hours=1%"))).unwrap();
+        assert_eq!(
+            (
+                422,
+                json!({"detail": [{
+                    "type": "int_parsing",
+                    "loc": ["query", "hours"],
+                    "msg": "Input should be a valid integer, unable to parse string as an integer",
+                    "input": "1%"
+                }]})
+            ),
+            block_on(response_json(response))
+        );
+        assert_eq!(
+            vec![("history".into(), Some(24))],
             *backend.calls.lock().unwrap()
         );
     }
