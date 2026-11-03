@@ -227,6 +227,9 @@ fn python_json_error(error: &serde_json::Error) -> String {
     }
 }
 
+// Match FastAPI's request-body adapter, which validates with attribute extraction enabled.
+// For non-object JSON this is `model_attributes_type`; standalone BaseModel validation uses a
+// different `model_type` error and is not the route's Python behavior.
 fn model_object(body: &Value) -> Result<&Map<String, Value>, Response> {
     body.as_object().ok_or_else(|| {
         validation_error(json!({
@@ -692,7 +695,7 @@ mod tests {
     }
 
     #[test]
-    fn game_input_non_object_bodies_match_pydantic_model_attributes_errors() {
+    fn game_input_non_object_bodies_match_fastapi_model_attributes_errors() {
         let backend = Arc::new(FakeGameInput::default());
         let app = app(backend.clone(), Arc::new(FakeAuth::default()));
         for path in ["/api/game/key", "/api/game/type"] {
