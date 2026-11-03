@@ -45,6 +45,234 @@ pub fn recoveries(state: &Value, findings: &[Value]) -> Value {
     json!({"vp": vp, "owner": owner})
 }
 
+/// Serialize evidence like Python's `json.dumps(..., sort_keys=True, separators=(",", ":"))`.
+///
+/// serde_json emits compact JSON and orders object keys by default; this additionally escapes
+/// non-ASCII characters because Python's default `ensure_ascii=True` does.
+pub fn evidence(item: &Value) -> String {
+    let mut encoded = String::new();
+    write_sorted_json(&item["evidence"], &mut encoded);
+    encoded
+}
+
+fn push_ascii_json_string(value: &str, output: &mut String) {
+    let encoded = serde_json::to_string(value).unwrap_or_else(|_| "\"\"".into());
+    let mut ascii = String::with_capacity(encoded.len());
+    for ch in encoded.chars() {
+        if ch.is_ascii() {
+            ascii.push(ch);
+        } else {
+            let code = ch as u32;
+            if code <= 0xffff {
+                ascii.push_str(&format!("\\u{code:04x}"));
+            } else {
+                let scalar = code - 0x1_0000;
+                let high = 0xd800 + (scalar >> 10);
+                let low = 0xdc00 + (scalar & 0x3ff);
+                ascii.push_str(&format!("\\u{high:04x}\\u{low:04x}"));
+            }
+        }
+    }
+    output.push_str(&ascii);
+}
+
+fn python_float_json(value: f64) -> String {
+    if value == 0.0 {
+        return if value.is_sign_negative() {
+            "-0.0".into()
+        } else {
+            "0.0".into()
+        };
+    }
+
+    let scientific = format!("{value:e}");
+    let Some((mantissa, exponent)) = scientific.split_once('e') else {
+        return scientific;
+    };
+    let Ok(exponent) = exponent.parse::<i32>() else {
+        return scientific;
+    };
+    let negative = mantissa.starts_with('-');
+    let digits: String = mantissa.chars().filter(|ch| ch.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        return scientific;
+    }
+
+    let sign = if negative { "-" } else { "" };
+    if !(-4..16).contains(&exponent) {
+        let exponent_sign = if exponent < 0 { '-' } else { '+' };
+        return format!(
+            "{sign}{}{fraction}e{exponent_sign}{:02}",
+            &digits[..1],
+            exponent.unsigned_abs(),
+            fraction = if digits.len() > 1 {
+                format!(".{}", &digits[1..])
+            } else {
+                String::new()
+            }
+        );
+    }
+
+    let decimal_position = exponent + 1;
+    if decimal_position <= 0 {
+        format!(
+            "{sign}0.{}{}",
+            "0".repeat(decimal_position.unsigned_abs() as usize),
+            digits
+        )
+    } else if decimal_position as usize >= digits.len() {
+        format!(
+            "{sign}{}{}.0",
+            digits,
+            "0".repeat(decimal_position as usize - digits.len())
+        )
+    } else {
+        format!(
+            "{sign}{}.{}",
+            &digits[..decimal_position as usize],
+            &digits[decimal_position as usize..]
+        )
+    }
+}
+
+fn write_sorted_json(value: &Value, output: &mut String) {
+    match value {
+        Value::Null => output.push_str("null"),
+        Value::Bool(value) => output.push_str(if *value { "true" } else { "false" }),
+        Value::Number(value) if value.is_f64() => {
+            if let Some(number) = value.as_f64() {
+                output.push_str(&python_float_json(number));
+            } else {
+                output.push_str(&value.to_string());
+            }
+        }
+        Value::Number(value) => output.push_str(&value.to_string()),
+        Value::String(value) => push_ascii_json_string(value, output),
+        Value::Array(values) => {
+            output.push('[');
+            for (index, value) in values.iter().enumerate() {
+                if index > 0 {
+                    output.push(',');
+                }
+                write_sorted_json(value, output);
+            }
+            output.push(']');
+        }
+        Value::Object(values) => {
+            output.push('{');
+            let mut keys = values.keys().collect::<Vec<_>>();
+            keys.sort();
+            for (index, key) in keys.into_iter().enumerate() {
+                if index > 0 {
+                    output.push(',');
+                }
+                push_ascii_json_string(key, output);
+                output.push(':');
+                write_sorted_json(&values[key], output);
+            }
+            output.push('}');
+        }
+    }
+}
+
+fn field_text(value: &Value) -> String {
+    value
+        .as_str()
+        .map(str::to_owned)
+        .unwrap_or_else(|| value.to_string())
+}
+
+/// Format one finding line, including the held-run window when an owner hold applies.
+pub fn line(
+    prefix: &str,
+    item: &Value,
+    suppressed: &Value,
+    streak: Option<&Value>,
+    hold: Option<&Value>,
+) -> String {
+    let window = if let Some(hold) = hold {
+        format!(
+            "{}; held {}/{} runs",
+            field_text(&item["window"]),
+            streak.map(field_text).unwrap_or_else(|| "null".into()),
+            field_text(hold)
+        )
+    } else {
+        field_text(&item["window"])
+    };
+
+    format!(
+        "{prefix} rule={} class={} severity={} source={} threshold={} measured={} window={} dedupe={}|{} suppressed={} evidence={}",
+        field_text(&item["rule"]),
+        field_text(&item["class"]),
+        field_text(&item["severity"]),
+        field_text(&item["source"]),
+        field_text(&item["threshold"]),
+        field_text(&item["measured"]),
+        window,
+        field_text(&item["rule"]),
+        field_text(&item["key"]),
+        field_text(suppressed),
+        evidence(item),
+    )
+}
+
+/// Render finding, skipped-rule, and recovered-finding lines without performing delivery.
+pub fn render_lines(
+    config: &Value,
+    decisions: &[Value],
+    skipped: &[Value],
+    recovered: &Value,
+    mode: &str,
+) -> Vec<String> {
+    let (vp_prefix, owner_prefix) = if mode == "live" {
+        ("NOTIFY VP", "PAGE OWNER")
+    } else {
+        ("WOULD-NOTIFY VP", "WOULD-PAGE OWNER")
+    };
+    let mut output = Vec::new();
+
+    for decision in decisions {
+        let item = &decision["finding"];
+        if !decision["owner"].is_null() {
+            let hold = &config["rules"][field_text(&item["rule"])]["must_hold_runs"];
+            output.push(line(
+                owner_prefix,
+                item,
+                &decision["owner"],
+                Some(&decision["streak"]),
+                Some(hold),
+            ));
+        }
+        output.push(line(vp_prefix, item, &decision["vp"], None, None));
+    }
+
+    for entry in skipped {
+        output.push(format!(
+            "SKIPPED rule={} error={}",
+            field_text(&entry["rule"]),
+            field_text(&entry["error"])
+        ));
+    }
+    for key in recovered["vp"].as_array().into_iter().flatten() {
+        output.push(format!("RESOLVED VP dedupe={}", field_text(key)));
+    }
+    for key in recovered["owner"].as_array().into_iter().flatten() {
+        output.push(format!("RESOLVED OWNER dedupe={}", field_text(key)));
+    }
+    output
+}
+
+/// Build the deterministic watchdog digest body.
+pub fn digest(title: &str, lines: &[String]) -> String {
+    let mut output = format!("Watchdog {title}: deterministic rules; no model involved.");
+    for line in lines {
+        output.push('\n');
+        output.push_str(line);
+    }
+    output
+}
+
 #[cfg(test)]
 #[path = "report_tests.rs"]
 mod report_tests;
