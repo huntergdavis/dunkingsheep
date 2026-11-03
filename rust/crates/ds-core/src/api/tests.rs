@@ -5136,6 +5136,43 @@ fn api_t39_task_next_heartbeat_release_preserve_caller_and_lease_envelopes() {
 
 #[test]
 fn api_t39_nonfinite_leases_remain_numeric_through_task_wire_and_events() {
+    fn client_roundtrip(command: &str, input: Value, result: Value) -> Value {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().expect("client socket directory");
+        let path = dir.path().join("peer.sock");
+        let listener = UnixListener::bind(&path).expect("temporary peer");
+        std::thread::scope(|scope| {
+            let peer = scope.spawn(|| {
+                let (mut socket, _) = listener.accept().expect("client connected");
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut line = String::new();
+                BufReader::new(&socket).read_line(&mut line).unwrap();
+                let request: crate::protocol::Request = serde_json::from_str(&line).unwrap();
+                assert_eq!(request.cmd, command);
+                assert_eq!(request.args, input);
+                assert_eq!(request.self_pane_id.as_deref(), Some("w1:p1"));
+                let response = crate::protocol::Response::ok(request.id, result);
+                socket
+                    .write_all(crate::protocol::encode_line(&response).as_bytes())
+                    .unwrap();
+            });
+            let mut client = crate::client::FlockClient::new(
+                crate::client::UnixTransport { path },
+                Some("w1:p1".into()),
+                "test pane".into(),
+                Duration::from_secs(5),
+                None,
+            );
+            let decoded = client.call(command, input.as_object().unwrap().clone());
+            peer.join().expect("temporary peer completed");
+            decoded.expect("actual client decodes dispatcher result")
+        })
+    }
     let raw_float: Value = serde_json::from_str("1e309").expect("standard JSON float overflow");
     assert!(python_float(&raw_float)
         .expect("JSON float exponent converts to Python infinity")
@@ -5164,11 +5201,12 @@ fn api_t39_nonfinite_leases_remain_numeric_through_task_wire_and_events() {
         &flock,
         &runtime,
         "task_next",
-        next_args,
+        next_args.clone(),
         Some("w1:p1"),
         Some(caller.clone()),
     )
     .expect("positive infinite lease is stored and returned");
+    let next = client_roundtrip("task_next", next_args, next);
     assert_eq!(next["task"]["id"], task.id);
     assert_eq!(next["task"]["title"], "literal Infinity");
     for field in ["lease_seconds", "expires_at"] {
@@ -5231,11 +5269,12 @@ fn api_t39_nonfinite_leases_remain_numeric_through_task_wire_and_events() {
         &flock,
         &runtime,
         "task_heartbeat",
-        heartbeat_args,
+        heartbeat_args.clone(),
         Some("w1:p1"),
         Some(caller.clone()),
     )
     .expect("numeric exponent heartbeat stores infinity");
+    let heartbeat = client_roundtrip("task_heartbeat", heartbeat_args, heartbeat);
     assert_eq!(
         heartbeat["lease_seconds"].as_number().unwrap().to_string(),
         "1e+999"
