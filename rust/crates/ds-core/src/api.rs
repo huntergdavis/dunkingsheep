@@ -2399,7 +2399,7 @@ fn python_float(value: &Value) -> Result<f64, DunkError> {
             .as_f64()
             .ok_or_else(|| DunkError::Refused("number is outside float range".into())),
         Value::Bool(value) => Ok(if *value { 1.0 } else { 0.0 }),
-        Value::String(value) => value.parse::<f64>().map_err(|_| {
+        Value::String(value) => crate::github::parse_python_float(value).ok_or_else(|| {
             DunkError::Refused(format!("could not convert string to float: '{value}'"))
         }),
         Value::Null => Ok(0.0),

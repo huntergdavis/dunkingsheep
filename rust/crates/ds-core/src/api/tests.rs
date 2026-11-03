@@ -4932,6 +4932,23 @@ fn api_t39_task_block_cancel_bind_raw_reasons_after_guards_and_return_dependents
 
 #[test]
 fn api_t39_task_next_heartbeat_release_preserve_caller_and_lease_envelopes() {
+    assert_eq!(
+        python_float(&json!(" 30 ")).expect("Python whitespace float"),
+        30.0
+    );
+    assert_eq!(
+        python_float(&json!("3_0")).expect("Python underscore float"),
+        30.0
+    );
+    assert_eq!(
+        python_float(&json!("٣٠")).expect("Python Unicode digit float"),
+        30.0
+    );
+    assert!(python_float(&json!("3__0")).is_err());
+    assert!(python_float(&json!("Infinity"))
+        .expect("Python nonfinite float")
+        .is_infinite());
+
     let (runtime, _dir, flock, tasks, dispatcher) = task_mutation_api_fixture();
     let first = runtime
         .block_on(tasks.add("global", "first claim", ""))
@@ -5004,12 +5021,13 @@ fn api_t39_task_next_heartbeat_release_preserve_caller_and_lease_envelopes() {
         &flock,
         &runtime,
         "task_next",
-        json!({"scope": "global", "allow_busy": " YES "}),
+        json!({"scope": "global", "allow_busy": " YES ", "lease_seconds": " 30 "}),
         Some("w1:p1"),
         Some(caller.clone()),
     )
     .expect("truthy allow_busy permits an explicit second claim");
     assert_eq!(parallel["task"]["id"], second.id);
+    assert_eq!(parallel["lease_seconds"], 30.0);
     assert!(parallel.get("following").is_none());
 
     let heartbeat = dispatch_task_mutation(
@@ -5025,6 +5043,17 @@ fn api_t39_task_next_heartbeat_release_preserve_caller_and_lease_envelopes() {
     assert_eq!(heartbeat["task_id"], first.id);
     assert_eq!(heartbeat["pane_id"], "w1:p1");
     assert_eq!(heartbeat["lease_seconds"], 1800.0);
+    let whitespace_heartbeat = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_heartbeat",
+        json!({"id": first.id, "lease_seconds": " 30 "}),
+        Some("w1:p1"),
+        Some(caller.clone()),
+    )
+    .expect("heartbeat accepts Python float whitespace");
+    assert_eq!(whitespace_heartbeat["lease_seconds"], 30.0);
     let refreshed = runtime
         .block_on(tasks.leases_for_pane("w1:p1", None))
         .expect("refreshed leases")
