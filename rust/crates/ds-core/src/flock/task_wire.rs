@@ -48,8 +48,27 @@ impl Flock {
         mode: &str,
         self_pane_id: Option<&str>,
     ) -> Result<TaskWire, DunkError> {
+        self.task_assign_wire_with_mode_parser(
+            task_id,
+            assignees,
+            || Ok(mode.to_string()),
+            self_pane_id,
+        )
+        .await
+    }
+
+    pub(crate) async fn task_assign_wire_with_mode_parser<F>(
+        &self,
+        task_id: &str,
+        assignees: &[&str],
+        parse_mode: F,
+        self_pane_id: Option<&str>,
+    ) -> Result<TaskWire, DunkError>
+    where
+        F: FnOnce() -> Result<String, DunkError>,
+    {
         let task = self
-            .task_assign(task_id, assignees, mode, self_pane_id)
+            .task_assign_with_mode_parser(task_id, assignees, parse_mode, self_pane_id)
             .await?;
         self.task_store()?
             .get_full_wire(&task.id, self_pane_id)

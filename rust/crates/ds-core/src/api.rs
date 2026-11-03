@@ -358,6 +358,12 @@ fn python_value_string(value: &Value) -> String {
     }
 }
 
+fn python_optional_string_arg(args: &Args, key: &str) -> Option<String> {
+    args.get(key)
+        .filter(|value| !value.is_null())
+        .map(python_value_string)
+}
+
 fn task_values(value: Option<&Value>) -> Option<Vec<String>> {
     let value = value.filter(|value| !value.is_null())?;
     let values: Vec<String> = match value {
@@ -2568,16 +2574,14 @@ pub fn h_task_update(context: &HandlerContext<'_>, args: Args) -> Result<Value, 
     let depends_on = depends_values
         .as_ref()
         .map(|values| values.iter().map(String::as_str).collect::<Vec<_>>());
-    let parent_id = match args.get("parent_id") {
-        None => None,
-        Some(Value::Null) => Some(None),
-        Some(Value::String(value)) => Some(Some(value.as_str())),
-        Some(_) => {
-            return Err(DunkError::Refused(
-                "task_update: parent_id must be a string or null".into(),
-            ))
+    let parent_id_value = args.get("parent_id").map(|value| {
+        if truthy(value) {
+            Some(python_value_string(value))
+        } else {
+            None
         }
-    };
+    });
+    let parent_id = parent_id_value.as_ref().map(|value| value.as_deref());
     let raw_block_reason = args.get("block_reason").map(|value| {
         if value.is_null() {
             None
@@ -2585,11 +2589,15 @@ pub fn h_task_update(context: &HandlerContext<'_>, args: Args) -> Result<Value, 
             Some(value.clone())
         }
     });
+    let title = python_optional_string_arg(&args, "title");
+    let body = python_optional_string_arg(&args, "body");
+    let status = python_optional_string_arg(&args, "status");
+    let priority = python_optional_string_arg(&args, "priority");
     let update = crate::flock::commands_tasks::TaskUpdateArgs {
-        title: task_string_arg(&args, "title", "task_update")?,
-        body: task_string_arg(&args, "body", "task_update")?,
-        status: task_string_arg(&args, "status", "task_update")?,
-        priority: task_string_arg(&args, "priority", "task_update")?,
+        title: title.as_deref(),
+        body: body.as_deref(),
+        status: status.as_deref(),
+        priority: priority.as_deref(),
         parent_id,
         assignees: assignees.as_deref(),
         depends_on: depends_on.as_deref(),
@@ -2623,19 +2631,20 @@ pub fn h_task_assign(context: &HandlerContext<'_>, args: Args) -> Result<Value, 
         .map(|values| values.iter().map(String::as_str).collect::<Vec<_>>())
         .unwrap_or_default();
     let mode_value = args.get("mode").filter(|value| truthy(value));
-    let mode = match mode_value {
-        None => "add".to_string(),
-        Some(Value::String(value)) => value.clone(),
-        Some(value) => {
-            let kind = python_type_name(value);
-            return Err(DunkError::Refused(format!(
-                "'{}' object has no attribute 'strip'",
-                kind
-            )));
-        }
-    };
     let id = args.get("id").map(python_value_string).unwrap_or_default();
-    let task = context.block_on(context.flock.task_assign_wire(&id, &assignees, &mode, pane))??;
+    let task = context.block_on(context.flock.task_assign_wire_with_mode_parser(
+        &id,
+        &assignees,
+        || match mode_value {
+            None => Ok("add".to_string()),
+            Some(Value::String(value)) => Ok(value.clone()),
+            Some(value) => Err(DunkError::Refused(format!(
+                "'{}' object has no attribute 'strip'",
+                python_type_name(value)
+            ))),
+        },
+        pane,
+    ))??;
     Ok(task.wire)
 }
 

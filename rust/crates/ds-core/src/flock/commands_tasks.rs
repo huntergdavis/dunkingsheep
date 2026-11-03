@@ -807,11 +807,30 @@ impl Flock {
         mode: &str,
         self_pane_id: Option<&str>,
     ) -> Result<Task, DunkError> {
+        self.task_assign_with_mode_parser(task_id, assignees, || Ok(mode.to_string()), self_pane_id)
+            .await
+    }
+
+    pub(crate) async fn task_assign_with_mode_parser<F>(
+        &self,
+        task_id: &str,
+        assignees: &[&str],
+        parse_mode: F,
+        self_pane_id: Option<&str>,
+    ) -> Result<Task, DunkError>
+    where
+        F: FnOnce() -> Result<String, DunkError>,
+    {
         let tasks = self.task_store()?;
         self.visible_task(&tasks, task_id, self_pane_id).await?;
         let resolved = Self::task_assignees(assignees, self_pane_id)?;
         let refs: Vec<&str> = resolved.iter().map(String::as_str).collect();
-        tasks.assign(task_id, &refs, mode).await
+        // Tasks.assign rejects an empty normalized list before it examines `mode.strip()`.
+        if refs.is_empty() {
+            return tasks.assign(task_id, &refs, "add").await;
+        }
+        let mode = parse_mode()?;
+        tasks.assign(task_id, &refs, &mode).await
     }
 
     /// `task_note`: append an explanatory event. Unlike the others it does NOT require the

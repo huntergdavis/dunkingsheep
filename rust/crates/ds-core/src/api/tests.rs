@@ -4516,6 +4516,114 @@ fn api_t39_task_update_and_assign_preserve_dispatch_roles_values_and_full_wire()
     .expect("owner assignment with default mode");
     assert_eq!(assigned["assignees"], json!(["w1:p1", "w1:p3"]));
     assert!(assigned["children"].is_array());
+    let falsey_mode_defaults = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_assign",
+        json!({"id": task.id, "assignees": ["w1:p1"], "mode": []}),
+        Some("w1:p2"),
+        None,
+    )
+    .expect("Python falsey mode defaults to add");
+    assert_eq!(falsey_mode_defaults["assignees"], json!(["w1:p1", "w1:p3"]));
+
+    let private_assignment = runtime
+        .block_on(tasks.add("w1:p3", "private assignment", ""))
+        .expect("private assignment task");
+    let private_mode_error = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_assign",
+        json!({"id": private_assignment.id, "assignees": ["w1:p1"], "mode": [1]}),
+        Some("w1:p2"),
+        None,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(private_mode_error.contains("belongs to another pane's private queue"));
+    let empty_assignees = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_assign",
+        json!({"id": task.id, "assignees": [], "mode": [1]}),
+        Some("w1:p2"),
+        None,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(empty_assignees.contains("at least one assignee is required"));
+    let falsey_mode_empty_assignees = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_assign",
+        json!({"id": task.id, "assignees": [], "mode": []}),
+        Some("w1:p2"),
+        None,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(falsey_mode_empty_assignees.contains("at least one assignee is required"));
+
+    let parent = runtime
+        .block_on(tasks.add("global", "parent for coercion", ""))
+        .expect("coercion parent");
+    let coercion_task = runtime
+        .block_on(tasks.add_with(
+            "global",
+            "before coercion",
+            "before body",
+            crate::tasks::AddOptions {
+                parent_id: Some(parent.id.clone()),
+                ..Default::default()
+            },
+        ))
+        .expect("coercion task");
+    let coerced = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_update",
+        json!({
+            "id": coercion_task.id,
+            "title": 42,
+            "body": false,
+            "parent_id": 0
+        }),
+        Some("w1:p2"),
+        None,
+    )
+    .expect("Python stringifies title/body and clears falsey parent ids");
+    assert_eq!(coerced["title"], "42");
+    assert_eq!(coerced["body"], "False");
+    assert_eq!(coerced["parent_id"], Value::Null);
+    let nonstring_status = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_update",
+        json!({"id": coercion_task.id, "status": 42}),
+        Some("w1:p2"),
+        None,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(nonstring_status.contains("status must be one of"));
+    let nonstring_priority = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_update",
+        json!({"id": coercion_task.id, "priority": true}),
+        Some("w1:p2"),
+        None,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(nonstring_priority.contains("priority must be one of"));
 
     let raw_reason = dispatch_task_mutation(
         &dispatcher,
