@@ -101,7 +101,7 @@ mod tests {
     use crate::inbox_store::Store;
     use crate::server::RequestCtx;
     use crate::server_runtime::outbox_runtime::OutboxRuntime;
-    use crate::terminal::{fakes::FakeTerminal, Terminal};
+    use crate::terminal::fakes::FakeTerminal;
     use std::sync::{Arc, Mutex};
 
     #[test]

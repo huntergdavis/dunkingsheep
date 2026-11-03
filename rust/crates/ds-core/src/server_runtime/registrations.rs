@@ -253,17 +253,6 @@ mod tests {
         })
     }
 
-    fn factory(fail_grouped_panes: Option<TerminalError>) -> LoopTerminalFactory {
-        Arc::new(move || {
-            let mut terminal = FakeTerminal::new();
-            terminal.fail_grouped_panes = fail_grouped_panes.clone();
-            for pane in &mut terminal.panes {
-                pane.pane_pid = Some(std::process::id() as i64);
-            }
-            Box::new(terminal)
-        })
-    }
-
     fn make_services(
         tag: &str,
         terminal_factory: LoopTerminalFactory,
