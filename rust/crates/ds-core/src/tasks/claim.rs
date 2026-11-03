@@ -323,7 +323,7 @@ impl Tasks {
                     }
                 }
                 if mine_only {
-                    rows.retain(|row| row.candidate.assignees.iter().any(|a| *a == pane));
+                    rows.retain(|row| row.candidate.assignees.contains(&pane));
                 }
                 for row in rows.iter_mut() {
                     let id = row.candidate.id.clone();
