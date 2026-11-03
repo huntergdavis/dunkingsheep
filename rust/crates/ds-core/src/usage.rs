@@ -392,28 +392,50 @@ pub fn py_float_repr(value: f64) -> String {
         }
         .into();
     }
-    let exponent = {
-        let sci = format!("{value:e}");
-        sci.split_once('e')
-            .and_then(|(_, e)| e.parse::<i32>().ok())
-            .unwrap_or(0)
-    };
-    if (-4..16).contains(&exponent) {
-        let text = format!("{value}");
-        if text.contains('.') {
-            text
+    // Number uses shortest ties-to-even digits; Rust Display picks a different
+    // decimal on some exact midpoints. Normalize notation after choosing digits.
+    let text = serde_json::Number::from_f64(value.abs())
+        .unwrap()
+        .to_string();
+    let (mantissa, exp) = text
+        .split_once('e')
+        .map_or((text.as_str(), 0), |(m, e)| (m, e.parse::<i32>().unwrap()));
+    let decimal = mantissa.find('.').unwrap_or(mantissa.len()) as i32;
+    let all: String = mantissa.chars().filter(|c| *c != '.').collect();
+    let leading = all.bytes().take_while(|c| *c == b'0').count();
+    let digits = all[leading..].trim_end_matches('0');
+    let exponent = exp + decimal - leading as i32 - 1;
+    let mut result = if (-4..16).contains(&exponent) {
+        let point = exponent + 1;
+        if point <= 0 {
+            format!("0.{}{}", "0".repeat((-point) as usize), digits)
+        } else if point as usize >= digits.len() {
+            format!("{}{}.0", digits, "0".repeat(point as usize - digits.len()))
         } else {
-            format!("{text}.0")
+            format!(
+                "{}.{}",
+                &digits[..point as usize],
+                &digits[point as usize..]
+            )
         }
     } else {
-        let sci = format!("{value:e}");
-        let (mantissa, _) = sci.split_once('e').unwrap_or((&sci, "0"));
+        let fraction = if digits.len() > 1 {
+            format!(".{}", &digits[1..])
+        } else {
+            String::new()
+        };
         format!(
-            "{mantissa}e{}{:02}",
+            "{}{}e{}{:02}",
+            &digits[..1],
+            fraction,
             if exponent < 0 { '-' } else { '+' },
             exponent.abs()
         )
+    };
+    if value.is_sign_negative() {
+        result.insert(0, '-');
     }
+    result
 }
 
 /// `json.dumps(value, sort_keys=True)`: ", " and ": " separators, keys sorted at every
