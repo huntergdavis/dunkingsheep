@@ -1093,9 +1093,13 @@ mod list_tests {
         // ANOTHER request's context. A thread hop cannot be forced deterministically, so this pins
         // the contract at the source: nothing after the first `.await` may read that context.
         let source = include_str!("commands_tasks.rs");
-        let start = source.find("pub async fn task_next(").expect("task_next");
+        let start = source
+            .find("pub(crate) async fn task_next_with_lease_parser")
+            .expect("task_next lease parser");
         let body = &source[start..];
-        let body = &body[..body.find("/// `task_follow`").expect("end of task_next")];
+        let body = &body[..body
+            .find("/// `task_follow`")
+            .expect("end of task_next lease parser")];
         let first_await = body.find(".await").expect("task_next awaits");
         let (before, after) = body.split_at(first_await);
         for forbidden in [

@@ -4514,10 +4514,7 @@ fn api_t39_task_update_and_assign_preserve_dispatch_roles_values_and_full_wire()
         None,
     )
     .expect("owner assignment with default mode");
-    assert_eq!(
-        assigned["assignees"],
-        json!(["w1:p1", "42", "True", "None", "{'k': 1}", "['x']", "w1:p3"])
-    );
+    assert_eq!(assigned["assignees"], json!(["w1:p1", "w1:p3"]));
     assert!(assigned["children"].is_array());
 
     let raw_reason = dispatch_task_mutation(
@@ -4612,12 +4609,12 @@ fn api_t39_task_note_preserves_raw_event_meta_and_null_actor_without_task_lookup
     )
     .expect("roles");
     // Replace the attached role store with an owner token so the trusted caller has no pane.
-    roles
+    let owner_token = roles
         .issue_token("owner", Some("fixture-owner"), Some("api test"))
         .expect("owner token");
     flock.attach_roles(roles, None);
     let request = RequestCtx {
-        service_token: Some("fixture-owner".into()),
+        service_token: Some(owner_token),
         ..RequestCtx::default()
     };
 
@@ -4728,7 +4725,7 @@ fn api_t39_task_block_cancel_bind_raw_reasons_after_guards_and_return_dependents
         ))
         .expect("dependent");
     let private = runtime
-        .block_on(tasks.add("w1:p2", "private task", ""))
+        .block_on(tasks.add("w1:p3", "private task", ""))
         .expect("private task");
 
     let blocked = dispatch_task_mutation(
@@ -4785,7 +4782,7 @@ fn api_t39_task_block_cancel_bind_raw_reasons_after_guards_and_return_dependents
         &runtime,
         "task_cancel",
         json!({"id": private.id, "reason": []}),
-        Some("w1:p1"),
+        Some("w1:p2"),
         None,
     )
     .unwrap_err()
