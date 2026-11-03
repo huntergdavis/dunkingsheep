@@ -435,25 +435,69 @@ impl Flock {
         {
             return (false, "composer is not owned".into());
         }
+        // Candidate and outbox writers do not acquire the pane/typing locks. Hold their
+        // guards from this last validation through the one backend key call so a newer
+        // intent or cancellation cannot race between the check and the press.
+        let rows = outbox_lock(&self.outbox);
+        let matching: Vec<_> = rows
+            .get(pane_id)
+            .into_iter()
+            .flatten()
+            .filter(|m| m.id == message_id)
+            .collect();
+        if !matching.is_empty() && !matching.iter().any(|m| m.status == "queued") {
+            return (false, "message no longer queued".into());
+        }
+        let Ok(candidates) = self.stuck_candidates.lock() else {
+            return (false, "intent registry unavailable".into());
+        };
+        let live = candidates.get(pane_id);
         if require_intent {
-            let candidate = self
-                .stuck_candidates
-                .lock()
-                .ok()
-                .and_then(|c| c.get(pane_id).cloned());
-            if candidate.as_ref().is_some_and(|entry| {
-                entry.scheduled
+            let Some(entry) = live else {
+                return (false, "intent missing".into());
+            };
+            if entry.message_id != message_id
+                || created_at.is_some_and(|at| at != entry.created_at)
+                || !entry.press_enter
+                || entry.kind != "text"
+                || !entry.eligible
+                || entry.generation.as_deref() != Some(generation)
+                || !matches!(entry.status.as_str(), "failed" | "sent" | "typed")
+                || crate::stuck::collapse(&entry.text) != crate::stuck::collapse(&content)
+                || (entry.scheduled
                     && entry.status == "sent"
-                    && !self.scheduled_recovery_current(pane_id, entry, clock::now_s())
-            }) {
-                return (
-                    false,
-                    "the scheduled instruction is stale or superseded".into(),
-                );
+                    && !self.scheduled_recovery_current(pane_id, entry, clock::now_s()))
+            {
+                return (false, "intent no longer authorizes the press".into());
             }
         }
+        if live.is_some_and(|entry| {
+            entry.native_recovery.unwrap_or(false)
+                || entry.native_binding.is_some()
+                || entry.native_binding_invalid.is_some()
+        }) && native.is_none()
+        {
+            return (false, "native evidence changed".into());
+        }
         if let Some(evidence) = native {
-            if evidence.entry.message_id != message_id
+            if live.is_none_or(|entry| {
+                entry.message_id != evidence.entry.message_id
+                    || entry.created_at != evidence.entry.created_at
+                    || !entry.eligible
+                    || !entry.press_enter
+                    || entry.kind != "text"
+                    || entry.status != evidence.entry.status
+                    || entry.generation != evidence.entry.generation
+                    || entry.typed_at != evidence.entry.typed_at
+                    || entry.text != evidence.entry.text
+                    || entry.native_binding_invalid.is_some()
+                    || entry.native_binding.as_ref()
+                        != Some(&(
+                            evidence.native.pid,
+                            evidence.native.start.clone(),
+                            evidence.native.snapshot.session_id.clone(),
+                        ))
+            }) || evidence.entry.message_id != message_id
                 || (evidence.entry.scheduled
                     && !self.scheduled_recovery_current(pane_id, &evidence.entry, clock::now_s()))
                 || evidence.native.assert_unchanged().is_err()
@@ -461,7 +505,10 @@ impl Flock {
                 return (false, "native evidence changed".into());
             }
         }
-        env.send_key(pane_id, "Enter")
+        let result = env.send_key(pane_id, "Enter");
+        drop(candidates);
+        drop(rows);
+        result
     }
 
     /// Perform at most one recovery transition. The caller supplies its clock; terminal reads

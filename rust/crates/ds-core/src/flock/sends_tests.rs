@@ -23,6 +23,7 @@ struct Pane {
     after_key_screen: Option<String>,
     key_refusal: Option<String>,
     reads: RefCell<Vec<(String, bool)>>,
+    on_read: RefCell<Option<Box<dyn FnMut()>>>,
     screen_script: RefCell<VecDeque<Option<String>>>,
     status_script: RefCell<VecDeque<Option<String>>>,
     now: f64,
@@ -41,6 +42,9 @@ struct Pane {
 impl SendEnv for Pane {
     fn read_pane(&self, pane_id: &str, _lines: i64, ansi: bool) -> Option<String> {
         self.reads.borrow_mut().push((pane_id.to_string(), ansi));
+        if let Some(callback) = self.on_read.borrow_mut().as_mut() {
+            callback();
+        }
         if let Some(screen) = self.screen_script.borrow_mut().pop_front() {
             return screen;
         }
@@ -2625,6 +2629,61 @@ fn press_stuck_enter_honors_backend_refusal_and_busy_status() {
     assert!(!pressed);
     assert_eq!(detail, "backend refused");
     assert_eq!(env.events, vec!["key"]);
+    assert!(env.keys.is_empty());
+}
+
+#[test]
+fn press_stuck_enter_refuses_intent_superseded_during_final_preflight() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = std::sync::Arc::new(Flock::new(
+        dir.path().join("launches"),
+        dir.path().join("lanes"),
+        false,
+    ));
+    let mut env = Pane::default();
+    env.panes
+        .push(serde_json::json!({"pane_id":"%1", "pane_pid":std::process::id()}));
+    env.screens.insert("%1".into(), frame("stuck body", &[]));
+    env.statuses.insert("%1".into(), "idle".into());
+    flock
+        .sent_text_by_pane
+        .lock()
+        .unwrap()
+        .insert("%1".into(), vec!["stuck body".into()]);
+    let generation = pane_generation(&env, "%1").unwrap();
+    let mut original = Message::new("m1", "%1", "writer", "stuck body", "send_text");
+    original.created_at = 1.0;
+    original.status = "failed".into();
+    original.attempt_generation = Some(generation.clone());
+    flock.note_stuck_candidate(&original);
+    let mut replacement = Message::new("m2", "%1", "writer", "new intent", "send_text");
+    replacement.created_at = 2.0;
+    replacement.status = "cancelled".into();
+    replacement.press_enter = false;
+    let owner = std::sync::Arc::clone(&flock);
+    let mut reads = 0;
+    *env.on_read.borrow_mut() = Some(Box::new(move || {
+        reads += 1;
+        if reads == 2 {
+            owner.note_stuck_candidate(&replacement);
+        }
+    }));
+    let (pressed, _) = flock.press_stuck_enter(
+        &mut env,
+        "%1",
+        &crate::stuck::fingerprint("stuck body"),
+        &generation,
+        "m1",
+        Some("stuck body"),
+        Some(&original),
+        true,
+        Some(1.0),
+    );
+    assert!(!pressed);
+    assert_eq!(
+        flock.stuck_candidates.lock().unwrap()["%1"].message_id,
+        "m2"
+    );
     assert!(env.keys.is_empty());
 }
 
