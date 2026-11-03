@@ -50,7 +50,13 @@ pub fn recoveries(state: &Value, findings: &[Value]) -> Value {
 /// serde_json emits compact JSON and orders object keys by default; this additionally escapes
 /// non-ASCII characters because Python's default `ensure_ascii=True` does.
 pub fn evidence(item: &Value) -> String {
-    let encoded = serde_json::to_string(&item["evidence"]).unwrap_or_else(|_| "null".into());
+    let mut encoded = String::new();
+    write_sorted_json(&item["evidence"], &mut encoded);
+    encoded
+}
+
+fn push_ascii_json_string(value: &str, output: &mut String) {
+    let encoded = serde_json::to_string(value).unwrap_or_else(|_| "\"\"".into());
     let mut ascii = String::with_capacity(encoded.len());
     for ch in encoded.chars() {
         if ch.is_ascii() {
@@ -67,7 +73,40 @@ pub fn evidence(item: &Value) -> String {
             }
         }
     }
-    ascii
+    output.push_str(&ascii);
+}
+
+fn write_sorted_json(value: &Value, output: &mut String) {
+    match value {
+        Value::Null => output.push_str("null"),
+        Value::Bool(value) => output.push_str(if *value { "true" } else { "false" }),
+        Value::Number(value) => output.push_str(&value.to_string()),
+        Value::String(value) => push_ascii_json_string(value, output),
+        Value::Array(values) => {
+            output.push('[');
+            for (index, value) in values.iter().enumerate() {
+                if index > 0 {
+                    output.push(',');
+                }
+                write_sorted_json(value, output);
+            }
+            output.push(']');
+        }
+        Value::Object(values) => {
+            output.push('{');
+            let mut keys = values.keys().collect::<Vec<_>>();
+            keys.sort();
+            for (index, key) in keys.into_iter().enumerate() {
+                if index > 0 {
+                    output.push(',');
+                }
+                push_ascii_json_string(key, output);
+                output.push(':');
+                write_sorted_json(&values[key], output);
+            }
+            output.push('}');
+        }
+    }
 }
 
 fn field_text(value: &Value) -> String {
