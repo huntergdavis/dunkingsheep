@@ -226,6 +226,7 @@ impl Flock {
     /// `_after_review_verdict`: invoke the accepted review engine after durable
     /// task completion. GitHub/service errors are logged and returned without
     /// undoing the recorded verdict.
+    #[allow(clippy::too_many_arguments)]
     pub async fn after_review_verdict<T, G, X>(
         &self,
         tokens: &T,
