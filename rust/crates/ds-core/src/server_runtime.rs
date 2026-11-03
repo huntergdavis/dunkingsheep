@@ -388,6 +388,11 @@ impl PaneInfoEnv for RequestRuntimeAdapter<'_> {
 }
 
 impl crate::api::CommandEnv for RequestRuntimeAdapter<'_> {
+    fn next_jobs(&self) -> Result<&crate::tasks::next_job_runtime::NextJobs, DunkError> {
+        self.next_jobs
+            .ok_or_else(|| refusal("request next-job service is not attached"))
+    }
+
     fn turn_hooks(&self) -> Result<&dyn crate::flock::commands_turns::TurnHooks, DunkError> {
         if self.next_jobs.is_none() || self.outbox.is_none() {
             return Err(DunkError::Refused("turn services are not attached".into()));
