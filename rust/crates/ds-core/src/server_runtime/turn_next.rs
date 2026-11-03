@@ -36,6 +36,8 @@ impl RequestRuntimeAdapter<'_> {
         if !inspect_tasks {
             return Ok(false);
         }
+        // Python's any() checks the unfiltered handoffs in order and stops at the first
+        // non-terminal task; only errors reached before that point propagate.
         for handoff in handoffs {
             let id = handoff
                 .get("task_id")
@@ -237,6 +239,76 @@ mod tests {
         assert!(
             env.open_handoffs("w1:p1", false).is_err(),
             "even a claim must surface the handoff read failure"
+        );
+    }
+
+    #[test]
+    fn handoff_task_lookup_preserves_python_any_short_circuit() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let tasks = Arc::new(
+            runtime
+                .block_on(Tasks::open(dir.path().join("tasks.db")))
+                .unwrap(),
+        );
+        runtime.block_on(tasks.allocation_init()).unwrap();
+        let active = runtime
+            .block_on(tasks.add("global", "active", "body"))
+            .unwrap();
+        let missing = runtime
+            .block_on(tasks.add("global", "later missing", "body"))
+            .unwrap();
+        for (pane, id, message) in [
+            ("w1:p1", &active.id, "i1"),
+            ("w1:p1", &missing.id, "i2"),
+            ("w2:p2", &missing.id, "i3"),
+            ("w2:p2", &active.id, "i4"),
+        ] {
+            let details =
+                serde_json::Map::from_iter([("state".into(), serde_json::json!("cancelled"))]);
+            runtime
+                .block_on(tasks.record_next_job_handoff(
+                    id,
+                    pane,
+                    None,
+                    Some(message),
+                    1,
+                    None,
+                    None,
+                    Some(details),
+                ))
+                .unwrap();
+        }
+        runtime.block_on(tasks.delete(&missing.id)).unwrap();
+        let flock = Arc::new(Flock::new(
+            dir.path().join("launches"),
+            dir.path().join("lanes"),
+            false,
+        ));
+        flock.attach_stores(Stores {
+            tasks: Some(tasks),
+            ..Stores::default()
+        });
+        let jobs = crate::tasks::next_job_runtime::NextJobs::new(Arc::clone(&flock));
+        let terminal: Mutex<Box<dyn Terminal>> = Mutex::new(Box::new(FakeTerminal::new()));
+        let request = RequestCtx::default();
+        let adapter = RequestRuntimeAdapter::new(&flock, &request, runtime.handle(), &terminal)
+            .with_next_jobs(&jobs)
+            .unwrap();
+        assert!(
+            adapter
+                .helper_turndispatchenv_open_handoffs("w1:p1", true)
+                .unwrap(),
+            "active first must short-circuit the later missing task"
+        );
+        assert!(
+            adapter
+                .helper_turndispatchenv_open_handoffs("w2:p2", true)
+                .is_err(),
+            "missing first must propagate"
         );
     }
 
