@@ -390,6 +390,24 @@ impl PaneInfoEnv for RequestRuntimeAdapter<'_> {
 }
 
 impl crate::api::CommandEnv for RequestRuntimeAdapter<'_> {
+    fn delivery_env(&self) -> Result<&dyn crate::flock::delivery::DeliveryEnv, DunkError> {
+        Ok(self)
+    }
+
+    fn with_clear_box_env(
+        &self,
+        operation: &mut dyn FnMut(
+            &mut dyn crate::flock::clear_box::ClearBoxEnv,
+        ) -> Result<Value, DunkError>,
+    ) -> Result<Value, DunkError> {
+        let mut adapter = TerminalCallAdapter {
+            flock: self.terminal.flock,
+            terminal: self.terminal.terminal,
+            runtime: self.runtime,
+        };
+        operation(&mut adapter)
+    }
+
     fn next_jobs(&self) -> Result<&crate::tasks::next_job_runtime::NextJobs, DunkError> {
         self.next_jobs
             .ok_or_else(|| refusal("request next-job service is not attached"))
