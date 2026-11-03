@@ -16,6 +16,7 @@ use serde_json::{json, Map, Value};
 use tokio::runtime::Handle;
 
 use crate::error::DunkError;
+use crate::flock::commands_tasks::TaskAddArgs;
 use crate::flock::panes::PaneInfoEnv;
 use crate::flock::Flock;
 use crate::proc::Caller;
@@ -264,6 +265,135 @@ fn python_value_string(value: &Value) -> String {
     }
 }
 
+fn task_values(value: Option<&Value>) -> Option<Vec<String>> {
+    let value = value.filter(|value| !value.is_null())?;
+    let values: Vec<String> = match value {
+        Value::Array(values) => values.iter().map(python_value_string).collect(),
+        _ => python_value_string(value)
+            .split(',')
+            .map(str::to_string)
+            .collect(),
+    };
+    Some(
+        values
+            .into_iter()
+            .map(|value: String| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .collect(),
+    )
+}
+
+fn task_add_string<'a>(args: &'a Args, key: &str) -> Result<Option<&'a str>, DunkError> {
+    task_string_arg(args, key, "task_add")
+}
+
+fn task_string_arg<'a>(
+    args: &'a Args,
+    key: &str,
+    command: &str,
+) -> Result<Option<&'a str>, DunkError> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value)),
+        Some(_) => Err(DunkError::Refused(format!(
+            "{command}: {key} must be a string"
+        ))),
+    }
+}
+
+fn task_list_limit(args: &Args) -> Result<i64, DunkError> {
+    let Some(value) = args.get("limit").filter(|value| !value.is_null()) else {
+        return Ok(200);
+    };
+    match value {
+        Value::Bool(value) => Ok(i64::from(*value)),
+        Value::Number(value) => {
+            if let Some(value) = value.as_i64() {
+                Ok(value)
+            } else if value.as_u64().is_some() {
+                Ok(i64::MAX)
+            } else if let Some(value) = value.as_f64() {
+                let value = value.trunc();
+                Ok(if value >= i64::MAX as f64 {
+                    i64::MAX
+                } else if value <= i64::MIN as f64 {
+                    i64::MIN
+                } else {
+                    value as i64
+                })
+            } else {
+                Err(DunkError::Refused("cannot convert value to int".into()))
+            }
+        }
+        Value::String(value) => parse_python_decimal_integer(value).ok_or_else(|| {
+            DunkError::Refused(format!(
+                "invalid literal for int() with base 10: {}",
+                py_repr(value)
+            ))
+        }),
+        Value::Array(_) => Err(DunkError::Refused(
+            "int() argument must be a string, a bytes-like object or a real number, not 'list'"
+                .into(),
+        )),
+        Value::Object(_) => Err(DunkError::Refused(
+            "int() argument must be a string, a bytes-like object or a real number, not 'dict'"
+                .into(),
+        )),
+        Value::Null => unreachable!("null limit uses the default"),
+    }
+}
+
+fn parse_python_decimal_integer(value: &str) -> Option<i64> {
+    let literal = value.trim();
+    let sign_len = usize::from(matches!(literal.as_bytes().first(), Some(b'+' | b'-')));
+    let negative = literal.as_bytes().first() == Some(&b'-');
+    let (_, digits) = literal.split_at(sign_len);
+    if digits.is_empty() {
+        return None;
+    }
+
+    let maximum = if negative {
+        (i64::MAX as u64) + 1
+    } else {
+        i64::MAX as u64
+    };
+    let mut magnitude = 0_u64;
+    let mut previous_was_digit = false;
+    let mut chars = digits.chars().peekable();
+    while let Some(character) = chars.next() {
+        if let Some(digit) = python_decimal_digit(character) {
+            magnitude = magnitude
+                .saturating_mul(10)
+                .saturating_add(u64::from(digit))
+                .min(maximum);
+            previous_was_digit = true;
+        } else if character == '_'
+            && previous_was_digit
+            && chars
+                .peek()
+                .and_then(|next| python_decimal_digit(*next))
+                .is_some()
+        {
+            previous_was_digit = false;
+        } else {
+            return None;
+        }
+    }
+    if !previous_was_digit {
+        return None;
+    }
+
+    Some(if negative {
+        if magnitude > i64::MAX as u64 {
+            i64::MIN
+        } else {
+            -(magnitude as i64)
+        }
+    } else {
+        magnitude as i64
+    })
+}
+
 /// `dunk_roles.clamp_desk_args`: daemon-side result caps for the desk role.
 pub fn clamp_desk_args(command: &str, args: &Args) -> Args {
     let mut args = args.clone();
@@ -397,6 +527,13 @@ impl Dispatcher {
         self.register("task_follow", h_task_follow);
         self.register("task_unfollow", h_task_unfollow);
         self.register("task_followers", h_task_followers);
+    }
+
+    /// Register the T39 task creation, listing and read handler group.
+    pub fn register_task_add_list_read(&mut self) {
+        self.register("task_add", h_task_add);
+        self.register("task_list", h_task_list);
+        self.register("task_read", h_task_read);
     }
 
     /// `dunk_api.dispatch(flock, name, args, self_pane_id)`, with the acting pane read only from
@@ -1511,6 +1648,86 @@ pub fn h_task_follow(context: &HandlerContext<'_>, args: Args) -> Result<Value, 
         "scope": scope,
         "following": true,
         "followers": followers,
+    }))
+}
+
+/// `dunk_api.h_task_add`.
+pub fn h_task_add(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let title = task_add_string(&args, "title")?.ok_or_else(|| {
+        DunkError::Refused("task_add: missing required argument(s): title".into())
+    })?;
+    let scope = task_add_string(&args, "scope")?;
+    let body = task_add_string(&args, "body")?;
+    let assignee_values = task_values(args.get("assignees"));
+    let assignees = assignee_values
+        .as_ref()
+        .map(|values| values.iter().map(String::as_str).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let dependency_values = task_values(args.get("depends_on"));
+    let depends_on = dependency_values
+        .as_ref()
+        .map(|values| values.iter().map(String::as_str).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let pr = args
+        .get("pr")
+        .filter(|value| !value.is_null())
+        .map(python_value_string);
+    let options = TaskAddArgs {
+        status: task_add_string(&args, "status")?,
+        priority: task_add_string(&args, "priority")?,
+        kind: task_add_string(&args, "kind")?,
+        author: task_add_string(&args, "author")?,
+        repo: task_add_string(&args, "repo")?,
+        pr: pr.as_deref(),
+        head: task_add_string(&args, "head")?,
+        assignees: &assignees,
+        parent_id: task_add_string(&args, "parent_id")?,
+        depends_on: &depends_on,
+        multi_assignee: python_bool_arg(&args, "multi_assignee", false),
+    };
+    let task = context.block_on(context.flock.task_add_wire(
+        title,
+        scope,
+        body,
+        options,
+        context.self_pane_id(),
+        context.env,
+    ))??;
+    Ok(task.wire)
+}
+
+/// `dunk_api.h_task_read`.
+pub fn h_task_read(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let id = args.get("id").map(python_value_string).unwrap_or_default();
+    let task = context.block_on(
+        context
+            .flock
+            .task_read_wire_with_notes(&id, context.self_pane_id()),
+    )??;
+    Ok(task.wire)
+}
+
+/// `dunk_api.h_task_list`.
+pub fn h_task_list(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let scope = task_string_arg(&args, "scope", "task_list")?;
+    let status = task_string_arg(&args, "status", "task_list")?;
+    let assignee = task_string_arg(&args, "assignee", "task_list")?;
+    let kind = task_string_arg(&args, "kind", "task_list")?;
+    let limit = task_list_limit(&args)?;
+    let (scope, tasks) = context.block_on(context.flock.task_list_wire(
+        scope,
+        status,
+        assignee,
+        python_bool_arg(&args, "include_done", true),
+        Some(limit),
+        context.self_pane_id(),
+        kind,
+        python_bool_arg(&args, "needs_owner", false),
+    ))??;
+    Ok(json!({
+        "scope": scope.unwrap_or_else(|| "visible".into()),
+        "pane_id": context.self_pane_id(),
+        "tasks": tasks.into_iter().map(|task| task.wire).collect::<Vec<_>>(),
     }))
 }
 
