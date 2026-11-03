@@ -29,6 +29,7 @@ struct Pane {
     key_refusal: Option<String>,
     reads: RefCell<Vec<(String, bool)>>,
     on_read: RefCell<Option<Box<dyn FnMut()>>>,
+    on_send_text: RefCell<Option<Box<dyn FnMut()>>>,
     screen_script: RefCell<VecDeque<Option<String>>>,
     status_script: RefCell<VecDeque<Option<String>>>,
     attempt_generation_script: RefCell<VecDeque<Option<String>>>,
@@ -46,6 +47,7 @@ struct Pane {
     receipt_frames: Vec<Option<String>>,
     receipt_forward:
         Option<Box<dyn FnMut(Option<&mut Message>, &str, &str, bool, Option<&str>) -> bool>>,
+    send_refusal: Option<String>,
 }
 
 impl SendEnv for Pane {
@@ -173,9 +175,15 @@ impl super::send_keys::KeyPressEnv for Pane {
 
 impl SendPreparationEnv for Pane {
     fn send_text(&mut self, pane_id: &str, text: &str) -> (bool, String) {
+        if let Some(callback) = self.on_send_text.borrow_mut().as_mut() {
+            callback();
+        }
         self.events.push("typed");
         self.typed.push((pane_id.into(), text.into()));
-        (true, "typed".into())
+        match &self.send_refusal {
+            Some(reason) => (false, reason.clone()),
+            None => (true, "typed".into()),
+        }
     }
 
     fn attempt_generation(&self, pane_id: &str) -> Option<String> {
@@ -312,6 +320,301 @@ fn persistent_receipt_flock(dir: &std::path::Path) -> Flock {
         ))
         .unwrap();
     flock
+}
+
+fn receipt_store(dir: &std::path::Path) -> (std::sync::Arc<Store>, ReadPool) {
+    let store = std::sync::Arc::new(
+        Store::open(dir.join("fold-inbox.db"), dir.join("fold-blobs")).unwrap(),
+    );
+    let pool = ReadPool::open(store.path(), 1).unwrap();
+    (store, pool)
+}
+
+fn queued_receipt(store: &Store, body: &str) -> String {
+    let id = store
+        .send(&crate::inbox_store::Outgoing {
+            mailbox: "worker",
+            body: Some(body),
+            ..Default::default()
+        })
+        .unwrap();
+    store
+        .record_notify(&id, "queued", Some("awaiting notice"), None, None)
+        .unwrap();
+    id
+}
+
+fn receipt_state(pool: &ReadPool, id: &str) -> String {
+    crate::inbox::status(pool, id, crate::clock::now_s())
+        .unwrap()
+        .notify_state
+        .unwrap()
+}
+
+#[derive(Clone, Copy)]
+struct FoldInterleaving {
+    fold: bool,
+    cancel: bool,
+    replace: bool,
+    same_created_at: bool,
+}
+
+struct FoldResult {
+    first: String,
+    folded: String,
+    replacement_receipt: String,
+    outcome: DeliveryOutcome,
+    queued: Vec<Message>,
+    generation: Option<String>,
+    typed: Vec<(String, String)>,
+    done: bool,
+}
+
+fn run_inflight_fold(interleaving: FoldInterleaving, send_ok: bool) -> FoldResult {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, pool) = receipt_store(dir.path());
+    let first = queued_receipt(&store, "first receipt");
+    let folded = queued_receipt(&store, "folded receipt");
+    let replacement_receipt = queued_receipt(&store, "replacement receipt");
+    let flock = std::sync::Arc::new(persistent_receipt_flock(dir.path()));
+    flock.attach_stores(super::panes::Stores {
+        inbox: Some(store.clone()),
+        ..Default::default()
+    });
+
+    let mut message = Message::new("m-fold", P, "worker", "notice text", "notice");
+    message.is_notice = true;
+    message.created_at = 1000.0;
+    message.notify_for = vec![first.clone()];
+    message.press_enter = false;
+    let waiter = message.done.clone();
+    flock.outbox.lock().unwrap().insert(P.into(), vec![message]);
+
+    let callback_flock = flock.clone();
+    let callback_folded = folded.clone();
+    let callback_replacement_receipt = replacement_receipt.clone();
+    let callback_interleaving = interleaving;
+    let mut pane = Pane::default();
+    pane.attempt_generation_script
+        .borrow_mut()
+        .push_back(Some("original-generation".into()));
+    pane.send_refusal = (!send_ok).then(|| "controlled terminal failure".into());
+    pane.receipt_forward = Some(real_receipt_forward(
+        flock.clone(),
+        serde_json::json!({"pane_id": P}),
+    ));
+    pane.on_send_text.replace(Some(Box::new(move || {
+        let mut outbox = outbox_lock(&callback_flock.outbox);
+        let queue = outbox.get_mut(P).unwrap();
+        if callback_interleaving.fold {
+            assert!(queue[0].append_notify_for(&callback_folded));
+            queue[0].text = "folded notice text".into();
+        }
+        if callback_interleaving.cancel {
+            queue[0].status = "cancelled".into();
+            queue.remove(0);
+        }
+        if callback_interleaving.replace {
+            let mut replacement = Message::new("m-fold", P, "worker", "replacement", "replacement");
+            replacement.is_notice = true;
+            replacement.notify_for = vec![callback_replacement_receipt.clone()];
+            replacement.attempt_generation = Some("replacement-generation".into());
+            replacement.created_at = if callback_interleaving.same_created_at {
+                1000.0
+            } else {
+                99.0
+            };
+            queue.clear();
+            queue.push(replacement);
+        }
+    })));
+
+    let outcome = flock.deliver_message("m-fold", 10.0, &mut pane, || None);
+    let queued = flock
+        .outbox
+        .lock()
+        .unwrap()
+        .get(P)
+        .cloned()
+        .unwrap_or_default();
+    FoldResult {
+        first: receipt_state(&pool, &first),
+        folded: receipt_state(&pool, &folded),
+        replacement_receipt: receipt_state(&pool, &replacement_receipt),
+        outcome,
+        queued,
+        generation: pane
+            .typed_attempts
+            .first()
+            .and_then(|attempt| attempt.3.clone()),
+        typed: pane.typed.clone(),
+        done: waiter.is_set(),
+    }
+}
+
+#[test]
+fn fold_during_success_and_failure_settles_the_exact_receipt_frame() {
+    for (send_ok, expected, outcome) in [
+        (true, "sent", DeliveryOutcome::Sent),
+        (false, "failed", DeliveryOutcome::Failed),
+    ] {
+        let result = run_inflight_fold(
+            FoldInterleaving {
+                fold: true,
+                cancel: false,
+                replace: false,
+                same_created_at: false,
+            },
+            send_ok,
+        );
+        assert_eq!(outcome, result.outcome);
+        assert_eq!(expected, result.first);
+        assert_eq!(expected, result.folded);
+        assert_eq!("queued", result.replacement_receipt);
+        assert!(result.queued.is_empty());
+        assert_eq!(Some("original-generation".into()), result.generation);
+        assert_eq!(vec![(P.into(), "notice text".into())], result.typed);
+        assert!(result.done);
+    }
+}
+
+#[test]
+fn fold_then_cancel_still_settles_the_actual_attempt_receipts() {
+    let result = run_inflight_fold(
+        FoldInterleaving {
+            fold: true,
+            cancel: true,
+            replace: false,
+            same_created_at: false,
+        },
+        true,
+    );
+    assert_eq!(DeliveryOutcome::Sent, result.outcome);
+    assert_eq!("sent", result.first);
+    assert_eq!("sent", result.folded);
+    assert_eq!("queued", result.replacement_receipt);
+    assert!(result.queued.is_empty());
+    assert!(result.done);
+}
+
+#[test]
+fn same_id_replacement_never_inherits_completion_even_with_matching_stamp() {
+    for same_created_at in [false, true] {
+        let result = run_inflight_fold(
+            FoldInterleaving {
+                fold: false,
+                cancel: false,
+                replace: true,
+                same_created_at,
+            },
+            true,
+        );
+        assert_eq!(DeliveryOutcome::Sent, result.outcome);
+        assert_eq!("sent", result.first);
+        assert_eq!("queued", result.folded);
+        assert_eq!("queued", result.replacement_receipt);
+        assert_eq!(1, result.queued.len());
+        assert_eq!("m-fold", result.queued[0].id);
+        assert_eq!("replacement", result.queued[0].text);
+        assert_eq!("queued", result.queued[0].status);
+        assert_eq!(
+            vec![result.replacement_receipt.clone()],
+            result.queued[0].notify_for
+        );
+        assert_eq!(
+            Some("replacement-generation".into()),
+            result.queued[0].attempt_generation
+        );
+    }
+}
+
+#[test]
+fn fold_cancel_and_same_id_replacement_settles_only_original_receipts() {
+    for send_ok in [true, false] {
+        let result = run_inflight_fold(
+            FoldInterleaving {
+                fold: true,
+                cancel: true,
+                replace: true,
+                same_created_at: true,
+            },
+            send_ok,
+        );
+        assert_eq!(
+            if send_ok {
+                DeliveryOutcome::Sent
+            } else {
+                DeliveryOutcome::Failed
+            },
+            result.outcome
+        );
+        assert_eq!(if send_ok { "sent" } else { "failed" }, result.first);
+        assert_eq!(if send_ok { "sent" } else { "failed" }, result.folded);
+        assert_eq!("queued", result.replacement_receipt);
+        assert_eq!(1, result.queued.len());
+        assert_eq!("replacement", result.queued[0].text);
+        assert_eq!("queued", result.queued[0].status);
+        assert_eq!(
+            Some("replacement-generation".into()),
+            result.queued[0].attempt_generation
+        );
+    }
+}
+
+#[test]
+fn guard_held_fold_stays_queued_and_cancel_before_start_sends_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, pool) = receipt_store(dir.path());
+    let first = queued_receipt(&store, "first");
+    let folded = queued_receipt(&store, "folded");
+    let flock = std::sync::Arc::new(Flock::new(
+        dir.path().join("launches.json"),
+        dir.path(),
+        false,
+    ));
+    flock.attach_stores(super::panes::Stores {
+        inbox: Some(store.clone()),
+        ..Default::default()
+    });
+    let mut held = Message::new("m-held-fold", P, "worker", "notice", "notice");
+    held.is_notice = true;
+    held.notify_for = vec![first.clone()];
+    held.press_enter = false;
+    flock.outbox.lock().unwrap().insert(P.into(), vec![held]);
+    let permission_flock = flock.clone();
+    let permission_folded = folded.clone();
+    let mut pane = Pane::default();
+    assert_eq!(
+        DeliveryOutcome::Held,
+        flock.deliver_message("m-held-fold", 1.0, &mut pane, move || {
+            let mut outbox = outbox_lock(&permission_flock.outbox);
+            assert!(outbox.get_mut(P).unwrap()[0].append_notify_for(&permission_folded));
+            Some("held for test".into())
+        })
+    );
+    assert!(pane.typed.is_empty());
+    assert_eq!("queued", receipt_state(&pool, &first));
+    assert_eq!("queued", receipt_state(&pool, &folded));
+
+    let mut cancelled = Message::new("m-cancel-before", P, "worker", "cancelled", "test");
+    cancelled.status = "cancelled".into();
+    cancelled.notify_for = vec![first.clone()];
+    flock
+        .outbox
+        .lock()
+        .unwrap()
+        .insert(P.into(), vec![cancelled]);
+    let guard_calls = std::cell::Cell::new(0);
+    assert_eq!(
+        DeliveryOutcome::AlreadyDecided,
+        flock.deliver_message("m-cancel-before", 2.0, &mut pane, || {
+            guard_calls.set(guard_calls.get() + 1);
+            None
+        })
+    );
+    assert_eq!(0, guard_calls.get());
+    assert!(pane.typed.is_empty());
+    assert_eq!("queued", receipt_state(&pool, &first));
 }
 
 struct NoopOutboxWake;
