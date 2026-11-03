@@ -213,7 +213,7 @@ fn enqueue_appends_starts_worker_then_saves_the_queued_message() {
     impl OutboxWake for Events {
         fn ensure_worker(
             &self,
-            flock: &Flock,
+            flock: &Arc<Flock>,
             pane_id: &str,
         ) -> Result<(), crate::error::DunkError> {
             assert!(matches!(
@@ -238,7 +238,11 @@ fn enqueue_appends_starts_worker_then_saves_the_queued_message() {
     }
 
     let dir = tempfile::tempdir().unwrap();
-    let flock = Flock::new(dir.path().join("launches.json"), dir.path(), false);
+    let flock = Arc::new(Flock::new(
+        dir.path().join("launches.json"),
+        dir.path(),
+        false,
+    ));
     let mut message = flock
         .new_message("pane-a", "Agent A", "check the queue", "t1944")
         .unwrap();
@@ -280,7 +284,7 @@ fn enqueue_keeps_fifo_order_and_allocates_unique_ids_for_concurrent_producers() 
     // probing `try_lock` would conflate unrelated contention with enqueue's own lock lifetime.
     struct Wake(AtomicUsize);
     impl OutboxWake for Wake {
-        fn ensure_worker(&self, _: &Flock, _: &str) -> Result<(), crate::error::DunkError> {
+        fn ensure_worker(&self, _: &Arc<Flock>, _: &str) -> Result<(), crate::error::DunkError> {
             self.0.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -350,6 +354,116 @@ fn enqueue_keeps_fifo_order_and_allocates_unique_ids_for_concurrent_producers() 
             .collect();
         assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
     }
+}
+
+#[test]
+fn outbox_worker_pool_registers_one_worker_per_pane_and_joins_on_stop() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    #[derive(Default)]
+    struct Runner {
+        started: AtomicUsize,
+        active: AtomicUsize,
+    }
+    impl OutboxWorkerRunner for Runner {
+        fn run(&self, _flock: Arc<Flock>, _pane_id: &str, stopped: &std::sync::atomic::AtomicBool) {
+            self.started.fetch_add(1, Ordering::SeqCst);
+            self.active.fetch_add(1, Ordering::SeqCst);
+            while !stopped.load(std::sync::atomic::Ordering::Acquire) {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            self.active.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+    struct Store;
+    impl SnapshotStore for Store {
+        fn save(&self, _: &Flock) -> Result<(), crate::error::DunkError> {
+            Ok(())
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Arc::new(Flock::new(
+        dir.path().join("launches.json"),
+        dir.path(),
+        false,
+    ));
+    let runner = Arc::new(Runner::default());
+    let pool = OutboxWorkerPool::new(runner.clone());
+    let store = Store;
+    for (pane, text) in [("pane-a", "one"), ("pane-a", "two"), ("pane-b", "other")] {
+        let message = flock.new_message(pane, pane, text, "test").unwrap();
+        flock.enqueue(message, &pool, &store).unwrap();
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while runner.active.load(Ordering::SeqCst) < 2 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(2, runner.started.load(Ordering::SeqCst));
+    assert_eq!(2, runner.active.load(Ordering::SeqCst));
+
+    pool.stop_outbox_workers(&flock);
+
+    assert_eq!(0, runner.active.load(Ordering::SeqCst));
+}
+
+#[test]
+fn outbox_worker_pool_reaps_completed_handles_between_idle_bursts() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    #[derive(Default)]
+    struct DrainingRunner(AtomicUsize);
+    impl OutboxWorkerRunner for DrainingRunner {
+        fn run(&self, flock: Arc<Flock>, pane_id: &str, _: &std::sync::atomic::AtomicBool) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            outbox_lock(&flock.outbox).remove(pane_id);
+        }
+    }
+    struct Store;
+    impl SnapshotStore for Store {
+        fn save(&self, _: &Flock) -> Result<(), crate::error::DunkError> {
+            Ok(())
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Arc::new(Flock::new(
+        dir.path().join("launches.json"),
+        dir.path(),
+        false,
+    ));
+    let runner = Arc::new(DrainingRunner::default());
+    let pool = OutboxWorkerPool::new(runner.clone());
+    let store = Store;
+
+    for burst in 0..8 {
+        let message = flock
+            .new_message(P, "pane", &format!("burst {burst}"), "test")
+            .unwrap();
+        flock.enqueue(message, &pool, &store).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let (retired, finished) = pool.retired_worker_counts_for_test();
+            if retired > 0 && retired == finished {
+                assert!(
+                    retired <= 1,
+                    "completed worker handles accumulated: {retired}"
+                );
+                break;
+            }
+            assert!(Instant::now() < deadline, "worker did not retire");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    assert_eq!(8, runner.0.load(Ordering::SeqCst));
+    pool.stop_outbox_workers(&flock);
+    assert_eq!((0, 0), pool.retired_worker_counts_for_test());
 }
 
 fn busy_codex() -> Pane {
@@ -2185,16 +2299,9 @@ fn deliver_message_uses_normalized_block_reason_for_hold_metrics_and_terminal_de
     let mut pane = Pane::default();
     pane.screens.insert(P.into(), submit_modal_screen());
 
-    for attempt in 0..10 {
+    for attempt in 0..12 {
         let outcome = flock.deliver_message("m-dialog", 100.0 + attempt as f64, &mut pane, || None);
-        assert_eq!(
-            if attempt == 9 {
-                DeliveryOutcome::Undeliverable
-            } else {
-                DeliveryOutcome::Held
-            },
-            outcome
-        );
+        assert_eq!(DeliveryOutcome::Held, outcome);
         if attempt == 0 {
             let held = &flock.outbox_snapshot()[P][0];
             assert_eq!(
@@ -2204,16 +2311,10 @@ fn deliver_message_uses_normalized_block_reason_for_hold_metrics_and_terminal_de
         }
     }
 
-    let history = flock.message_history.lock().unwrap();
-    let terminal = history
-        .iter()
-        .find(|message| message.id == "m-dialog")
-        .unwrap();
-    assert_eq!(
-        Some("undeliverable after 10 refused attempts (last reason: dialog); not retried again"),
-        terminal.detail.as_deref()
-    );
-    drop(history);
+    let held = &flock.outbox_snapshot()[P][0];
+    assert_eq!("queued", held.status);
+    assert_eq!(12, held.holds);
+    assert!(flock.message_history.lock().unwrap().is_empty());
 
     let events = metrics
         .events_between(0.0, crate::clock::now_s() + 1.0)
@@ -2222,15 +2323,13 @@ fn deliver_message_uses_normalized_block_reason_for_hold_metrics_and_terminal_de
         .iter()
         .filter(|event| event.kind == "message.held")
         .collect();
-    assert_eq!(10, held_events.len());
+    assert_eq!(12, held_events.len());
     assert!(held_events
         .iter()
         .all(|event| event.reason.as_deref() == Some("dialog")));
-    let terminal_event = events
+    assert!(!events
         .iter()
-        .find(|event| event.kind == "message.undeliverable")
-        .unwrap();
-    assert_eq!(Some("dialog"), terminal_event.reason.as_deref());
+        .any(|event| event.kind == "message.undeliverable"));
 }
 
 #[test]
@@ -2259,12 +2358,13 @@ fn deliver_message_does_not_use_permission_or_dead_session_detail_as_block_reaso
         }
         flock.outbox.lock().unwrap().insert(P.into(), vec![message]);
 
-        for attempt in 0..10 {
+        let attempts = if dead { 10 } else { 12 };
+        for attempt in 0..attempts {
             let outcome = flock.deliver_message(id, 100.0 + attempt as f64, &mut pane, || {
                 permission_detail.map(str::to_owned)
             });
             assert_eq!(
-                if attempt == 9 {
+                if dead && attempt == 9 {
                     DeliveryOutcome::Undeliverable
                 } else {
                     DeliveryOutcome::Held
@@ -2278,18 +2378,19 @@ fn deliver_message_does_not_use_permission_or_dead_session_detail_as_block_reaso
                 assert_eq!(expected_detail, held.detail.as_deref());
             }
         }
+        if !dead {
+            assert_eq!(12, flock.outbox_snapshot()[P][0].holds);
+            flock.outbox.lock().unwrap().remove(P);
+        }
     }
 
     let history = flock.message_history.lock().unwrap();
-    for id in ["m-permission", "m-dead"] {
-        let terminal = history.iter().find(|message| message.id == id).unwrap();
-        assert_eq!(
-            Some(
-                "undeliverable after 10 refused attempts (last reason: unknown); not retried again"
-            ),
-            terminal.detail.as_deref()
-        );
-    }
+    let terminal = history
+        .iter()
+        .find(|message| message.id == "m-dead")
+        .unwrap();
+    assert_eq!("undeliverable", terminal.status);
+    assert!(history.iter().all(|message| message.id != "m-permission"));
     drop(history);
 
     let events = metrics
@@ -2369,18 +2470,16 @@ fn hold_signature_preserves_owned_ambiguous_composer_region() {
 fn deliver_message_exhaustion_removes_once_remembers_and_releases_waiter() {
     let dir = tempfile::tempdir().unwrap();
     let flock = Flock::new(dir.path().join("launches.json"), dir.path(), false);
-    let mut message = Message::new("m-exhausted", P, "pane", "hello", "test");
-    message.hold_while_typing = false;
+    let message = Message::new("m-exhausted", P, "pane", "hello", "test");
     let waiter = message.done.clone();
     flock.outbox.lock().unwrap().insert(P.into(), vec![message]);
     let mut pane = Pane::default();
+    pane.gone = true;
 
     const HOLD_LIMIT: i64 = 10;
     for attempt in 0..HOLD_LIMIT {
         let result =
-            flock.deliver_message("m-exhausted", 100.0 + attempt as f64, &mut pane, || {
-                Some("disabled".into())
-            });
+            flock.deliver_message("m-exhausted", 100.0 + attempt as f64, &mut pane, || None);
         assert_eq!(
             if attempt + 1 == HOLD_LIMIT {
                 DeliveryOutcome::Undeliverable
@@ -2455,6 +2554,167 @@ fn deliver_message_terminal_action_failure_is_not_retried() {
         flock.deliver_message("m-failed", 200.0, &mut pane, || None)
     );
     assert_eq!(1, pane.typed.len());
+}
+
+#[test]
+fn outbox_step_respects_due_time_and_releases_queue_lock_before_reads() {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::TryLockError;
+
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Flock::new(dir.path().join("launches.json"), dir.path(), false);
+    let mut message = Message::new("m-due", P, "pane", "send me", "test");
+    message.next_attempt_at = Some(105.0);
+    message.hold_signature_kind = Some("box".into());
+    message.hold_signature = Some("human draft".into());
+    flock.outbox.lock().unwrap().insert(P.into(), vec![message]);
+    let mut pane = Pane::default();
+    pane.screens
+        .insert(P.into(), submit_pending_screen("human draft"));
+    let stopped = AtomicBool::new(false);
+    let waited = AtomicBool::new(false);
+
+    let result = outbox_step(
+        &flock,
+        &mut pane,
+        P,
+        104.0,
+        &stopped,
+        &|_| {
+            waited.store(true, std::sync::atomic::Ordering::SeqCst);
+            false
+        },
+        &mut || None,
+    );
+
+    assert_eq!(OutboxStep::Due, result);
+    assert!(!waited.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(matches!(
+        flock.outbox.try_lock(),
+        Ok(_) | Err(TryLockError::Poisoned(_))
+    ));
+    assert_eq!(0, flock.outbox_snapshot()[P][0].holds);
+}
+
+#[test]
+fn outbox_step_clears_backoff_when_the_box_signature_changes() {
+    use std::sync::atomic::AtomicBool;
+
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Flock::new(dir.path().join("launches.json"), dir.path(), false);
+    let mut message = Message::new("m-changed", P, "pane", "send me", "test");
+    message.next_attempt_at = Some(500.0);
+    message.hold_signature_kind = Some("box".into());
+    message.hold_signature = Some("old draft".into());
+    flock.outbox.lock().unwrap().insert(P.into(), vec![message]);
+    let mut pane = Pane::default();
+    pane.screens
+        .insert(P.into(), submit_pending_screen("new draft"));
+    let stopped = AtomicBool::new(false);
+    let waits = std::cell::Cell::new(0);
+
+    let result = outbox_step(
+        &flock,
+        &mut pane,
+        P,
+        100.0,
+        &stopped,
+        &|_| {
+            waits.set(waits.get() + 1);
+            false
+        },
+        &mut || None,
+    );
+
+    assert_eq!(OutboxStep::Held, result);
+    assert_eq!(1, waits.get()); // optimistic settle runs before the guarded draft recheck
+    let held = &flock.outbox_snapshot()[P][0];
+    assert_eq!(1, held.holds);
+    assert_eq!(Some(105.0), held.next_attempt_at);
+}
+
+#[test]
+fn outbox_step_defers_a_busy_non_queueing_harness_without_typing_or_exhausting() {
+    use std::sync::atomic::AtomicBool;
+
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Flock::new(dir.path().join("launches.json"), dir.path(), false);
+    flock.outbox.lock().unwrap().insert(
+        P.into(),
+        vec![Message::new(
+            "m-busy-deferred",
+            P,
+            "pane",
+            "send me",
+            "test",
+        )],
+    );
+    let mut pane = busy_codex();
+    pane.harness.insert(P.into(), "unknown".into());
+    let stopped = AtomicBool::new(false);
+    let mut now = 100.0;
+
+    for _ in 0..12 {
+        assert_eq!(
+            OutboxStep::Held,
+            outbox_step(&flock, &mut pane, P, now, &stopped, &|_| false, &mut || {
+                None
+            },)
+        );
+        let queue = flock.outbox_snapshot();
+        assert_eq!(1, queue[P].len());
+        assert_eq!("queued", queue[P][0].status);
+        now = queue[P][0].next_attempt_at.unwrap();
+    }
+
+    assert_eq!(12, flock.outbox_snapshot()[P][0].holds);
+    assert!(pane.typed.is_empty());
+    assert!(pane.keys.is_empty());
+}
+
+#[test]
+fn outbox_step_only_attempts_the_fifo_head_and_never_waits_with_queue_locked() {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::TryLockError;
+
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Flock::new(dir.path().join("launches.json"), dir.path(), false);
+    let first = Message::new("m-first", P, "pane", "first", "test");
+    let second = Message::new("m-second", P, "pane", "second", "test");
+    flock
+        .outbox
+        .lock()
+        .unwrap()
+        .insert(P.into(), vec![first, second]);
+    let mut pane = Pane::default();
+    pane.statuses.insert(P.into(), "idle".into());
+    pane.screens.insert(P.into(), hint_screen());
+    let stopped = AtomicBool::new(false);
+    let wait_saw_unlocked_queue = std::cell::Cell::new(false);
+
+    let result = outbox_step(
+        &flock,
+        &mut pane,
+        P,
+        100.0,
+        &stopped,
+        &|_| {
+            wait_saw_unlocked_queue.set(matches!(
+                flock.outbox.try_lock(),
+                Ok(_) | Err(TryLockError::Poisoned(_))
+            ));
+            false
+        },
+        &mut || None,
+    );
+
+    assert_eq!(OutboxStep::Delivered, result);
+    assert!(wait_saw_unlocked_queue.get());
+    let queue = flock.outbox_snapshot();
+    assert_eq!(1, queue[P].len());
+    assert_eq!("m-second", queue[P][0].id);
+    assert_eq!(0, queue[P][0].holds);
+    assert_eq!("m-first", flock.message_history.lock().unwrap()[0].id);
 }
 
 #[test]
