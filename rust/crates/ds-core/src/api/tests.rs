@@ -4686,17 +4686,21 @@ fn api_t39_task_note_preserves_raw_event_meta_and_null_actor_without_task_lookup
     );
 
     let before = rows.len();
-    let binding = dispatch_task_mutation_request(
-        &dispatcher,
-        &flock,
-        &runtime,
-        "task_note",
-        json!({"id": "t-missing-is-allowed", "event": []}),
-        &request,
-    )
-    .unwrap_err()
-    .to_string();
-    assert!(binding.contains("Error binding parameter 2: type 'list' is not supported"));
+    for (event, kind) in [(json!(["x"]), "list"), (json!({"x": 1}), "dict")] {
+        let binding = dispatch_task_mutation_request(
+            &dispatcher,
+            &flock,
+            &runtime,
+            "task_note",
+            json!({"id": "t-missing-is-allowed", "event": event}),
+            &request,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(binding.contains(&format!(
+            "Error binding parameter 2: type '{kind}' is not supported"
+        )));
+    }
     let after: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM task_events WHERE task_id = ?",
