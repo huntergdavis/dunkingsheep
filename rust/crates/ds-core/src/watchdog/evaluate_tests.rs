@@ -206,6 +206,39 @@ fn test_evaluate_preserves_file_error_for_json_input() {
 }
 
 #[test]
+fn test_evaluate_preserves_missing_read_only_database_error() {
+    let fixture = Fixture::new();
+    let tasks_path = fixture.path("tasks.db");
+    let inbox_path = fixture.path("inbox.db");
+
+    let tasks_config = fixture.config(&["task.blocked_stale"]);
+    let tasks_result = evaluate(
+        &tasks_config,
+        NOW,
+        None,
+        None,
+        Some(&["task.blocked_stale"]),
+    );
+    assert_eq!(
+        python_missing_store_error(&tasks_path),
+        tasks_result["errors"][0]["error"]
+    );
+
+    let inbox_config = fixture.config(&["inbox.undeliverable"]);
+    let inbox_result = evaluate(
+        &inbox_config,
+        NOW,
+        None,
+        None,
+        Some(&["inbox.undeliverable"]),
+    );
+    assert_eq!(
+        python_missing_store_error(&inbox_path),
+        inbox_result["errors"][0]["error"]
+    );
+}
+
+#[test]
 fn test_evaluate_skips_pane_rules_when_pane_source_is_disabled() {
     let fixture = Fixture::new();
     let mut config = fixture.config(&["lane.working_without_task"]);
@@ -256,6 +289,19 @@ fn python_open_error(path: &std::path::Path) -> String {
         .arg(path)
         .output()
         .expect("python3 file error oracle");
+    assert!(output.status.success());
+    String::from_utf8(output.stdout).unwrap().trim().to_string()
+}
+
+fn python_missing_store_error(path: &std::path::Path) -> String {
+    let output = Command::new("python3")
+        .args([
+            "-c",
+            "import os,sys\ntry:\n if not os.path.exists(sys.argv[1]): raise FileNotFoundError(sys.argv[1])\nexcept Exception as error: print(type(error).__name__ + ': ' + str(error))",
+        ])
+        .arg(path)
+        .output()
+        .expect("python3 missing store error oracle");
     assert!(output.status.success());
     String::from_utf8(output.stdout).unwrap().trim().to_string()
 }

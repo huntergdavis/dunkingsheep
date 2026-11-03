@@ -264,6 +264,13 @@ fn error_text(rule_id: &str, error: &DunkError, inputs: &Inputs<'_>) -> String {
                     return python_os_error(&inputs.path("dunks.json"), errno);
                 }
             }
+            if message.contains("unable to open database") {
+                if let Some(path) = missing_sqlite_path(rule_id, inputs) {
+                    // Python's _ro checks os.path.exists before opening SQLite, so a missing
+                    // store is FileNotFoundError(path), not sqlite3.OperationalError.
+                    return format!("FileNotFoundError: {}", path.display());
+                }
+            }
             // SQLite's Python reader surfaces sqlite3.OperationalError. The Rust SQLite adapter
             // preserves its diagnostic text in Refused; recover the source exception here.
             // These diagnostics come from rusqlite calls in watchdog rules; Python's
@@ -282,6 +289,24 @@ fn error_text(rule_id: &str, error: &DunkError, inputs: &Inputs<'_>) -> String {
         DunkError::Busy => "OperationalError: database is locked".into(),
         other => error_text_for_transport(other),
     }
+}
+
+fn missing_sqlite_path(rule_id: &str, inputs: &Inputs<'_>) -> Option<PathBuf> {
+    let filenames: &[&str] = match rule_id {
+        "task.blocked_stale" | "task.lease_stale" | "resource.would_kill" => &["tasks.db"],
+        "inbox.undeliverable"
+        | "inbox.unread_live"
+        | "inbox.unread_dead"
+        | "inbox.ambiguous_sender" => &["inbox.db"],
+        "lane.working_without_task" | "lane.idle_holding_task" => &["tasks.db", "inbox.db"],
+        "fleet.assignment_starvation" => &["tasks.db", "metrics.db"],
+        "security.secret_text" => &["inbox.db", "tasks.db"],
+        _ => &[],
+    };
+    filenames
+        .iter()
+        .map(|filename| inputs.path(filename))
+        .find(|path| !path.exists())
 }
 
 fn malformed_assignees_task(message: &str) -> Option<&str> {
