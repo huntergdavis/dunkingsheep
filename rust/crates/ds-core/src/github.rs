@@ -7,6 +7,11 @@
 mod mints;
 pub use mints::{author_from_mints, author_mint_path, record_author_mint, repos_config};
 
+/// Parse a Python-compatible float string using the existing mint decoder.
+pub(crate) fn parse_python_float(raw: &str) -> Option<f64> {
+    mints::parse_float(raw).ok()
+}
+
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;

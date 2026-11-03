@@ -18,6 +18,7 @@ mod push;
 mod push_eligibility;
 mod retire_inbox;
 mod retire_roles;
+mod roster;
 mod status;
 mod stuck;
 mod submit;

@@ -309,12 +309,13 @@ fn the_claude_probe_names_the_cause_it_actually_had() {
 /// t984 finding 4: the only env knob in this module is honoured again.
 #[test]
 fn the_idle_claim_window_comes_from_the_environment() {
-    let default = activity::idle_claim_s_from(&ds_core::config::Env::from_pairs(&[]));
+    let default = activity::idle_claim_s_from(&ds_core::config::Env::from_pairs(&[])).unwrap();
     assert_eq!(IDLE_CLAIM_S, default);
     let tuned = activity::idle_claim_s_from(&ds_core::config::Env::from_pairs(&[(
         "DUNKINGSHEEP_IDLE_CLAIM_S",
         "60",
-    )]));
+    )]))
+    .unwrap();
     assert_eq!(
         60.0, tuned,
         "DUNKINGSHEEP_IDLE_CLAIM_S is read, not ignored"

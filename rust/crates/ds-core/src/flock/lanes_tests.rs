@@ -193,3 +193,86 @@ fn resolve_lanes_preserves_successful_empty_listing() {
 
     assert!(flock().resolve_lanes(&env, 100.0).unwrap().is_empty());
 }
+
+#[test]
+fn roster_activity_uses_startup_idle_claim_threshold() {
+    use crate::activity::Turn;
+    use crate::config::Env;
+    use crate::flock::status_runtime::StatusState;
+
+    let dir = tempfile::tempdir().unwrap();
+    let pane = serde_json::json!({"pane_id": "w1:p1", "agent": "codex"});
+    let turn = Turn {
+        ended_at: Some(1000.0),
+        ..Turn::default()
+    };
+    for (name, env, expected) in [
+        (
+            "configured",
+            Env::from_pairs(&[("DUNKINGSHEEP_IDLE_CLAIM_S", "60")]),
+            "unknown",
+        ),
+        ("default", Env::default(), "idle"),
+    ] {
+        let flock = Flock::new(
+            dir.path().join(format!("{name}-launches")),
+            dir.path().join(format!("{name}-lanes")),
+            false,
+        );
+        flock
+            .attach_status_state(StatusState::at_start(
+                "test",
+                dir.path().join(format!("{name}-state")),
+                dir.path().join("daemon"),
+                env,
+            ))
+            .unwrap();
+        flock.set_turn("w1:p1", turn.clone());
+        let activity = flock.roster_activity(&pane, 4600.0);
+        assert_eq!(activity["state"], expected, "{name}");
+    }
+}
+
+#[test]
+fn roster_idle_claim_configuration_is_validated_at_startup() {
+    use crate::config::Env;
+    use crate::flock::status_runtime::StatusState;
+    let dir = tempfile::tempdir().unwrap();
+    for raw in ["", "  ", "bad", "1__0"] {
+        let flock = Flock::new(dir.path().join("launches"), dir.path().join("lanes"), false);
+        let state = StatusState::at_start(
+            "test",
+            dir.path().join("state"),
+            dir.path().join("daemon"),
+            Env::from_pairs(&[("DUNKINGSHEEP_IDLE_CLAIM_S", raw)]),
+        );
+        let error = flock.attach_status_state(state).unwrap_err();
+        assert!(
+            error.to_string().contains("DUNKINGSHEEP_IDLE_CLAIM_S"),
+            "{raw:?}"
+        );
+        assert!(flock.status_state().is_err());
+    }
+    for (raw, expected) in [
+        (" 60 ", 60.0),
+        ("1_0", 10.0),
+        ("١٢", 12.0),
+        ("Infinity", f64::INFINITY),
+        ("-Infinity", f64::NEG_INFINITY),
+        ("NaN", f64::NAN),
+    ] {
+        let flock = Flock::new(dir.path().join("launches"), dir.path().join("lanes"), false);
+        let state = StatusState::at_start(
+            "test",
+            dir.path().join("state"),
+            dir.path().join("daemon"),
+            Env::from_pairs(&[("DUNKINGSHEEP_IDLE_CLAIM_S", raw)]),
+        );
+        flock.attach_status_state(state).unwrap();
+        let actual = flock.status_state().unwrap().idle_claim_s;
+        assert!(
+            actual == expected || (actual.is_nan() && expected.is_nan()),
+            "{raw:?}: {actual}"
+        );
+    }
+}
