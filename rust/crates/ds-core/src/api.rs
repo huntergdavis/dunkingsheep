@@ -1156,7 +1156,7 @@ pub fn h_owner_ingest(context: &HandlerContext<'_>, args: Args) -> Result<Value,
     };
     let attachments = owner_ingest_attachments(&args)?;
     let ingested = crate::owner::OwnerConversations::new(context.flock, context.env).ingest(
-        crate::owner::OwnerIngest {
+        crate::owner::conversations::OwnerIngest {
             body: args.get("body"),
             transport: transport.as_deref(),
             external_id: external_id.as_deref(),
