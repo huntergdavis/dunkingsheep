@@ -198,8 +198,10 @@ impl Flock {
                     "task": wire.wire,
                     "scope": scope,
                     "pane_id": self_pane_id,
-                    "lease_seconds": lease_seconds,
-                    "expires_at": expires_at,
+                    "lease_seconds": crate::github::python_float_json_value(lease_seconds)
+                        .expect("claimed lease cannot be NaN"),
+                    "expires_at": crate::github::python_float_json_value(expires_at)
+                        .expect("claimed lease expiry cannot be NaN"),
                     "caller": {"pid": pid, "start": start, "name": name},
                 }))
             }

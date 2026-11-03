@@ -5135,6 +5135,152 @@ fn api_t39_task_next_heartbeat_release_preserve_caller_and_lease_envelopes() {
 }
 
 #[test]
+fn api_t39_nonfinite_leases_remain_numeric_through_task_wire_and_events() {
+    let raw_float: Value = serde_json::from_str("1e309").expect("standard JSON float overflow");
+    assert!(python_float(&raw_float)
+        .expect("JSON float exponent converts to Python infinity")
+        .is_infinite());
+    let raw_larger_float: Value =
+        serde_json::from_str("1e999").expect("arbitrary-precision JSON float");
+    assert!(python_float(&raw_larger_float)
+        .expect("larger exponent remains a Python float")
+        .is_infinite());
+    let raw_large_integer: Value = serde_json::from_str(&format!("1{}", "0".repeat(400)))
+        .expect("arbitrary-precision JSON integer");
+    assert!(matches!(
+        python_float(&raw_large_integer),
+        Err(DunkError::Refused(message)) if message == "int too large to convert to float"
+    ));
+
+    let (runtime, _dir, flock, tasks, dispatcher) = task_mutation_api_fixture();
+    let task = runtime
+        .block_on(tasks.add("global", "literal Infinity", ""))
+        .expect("task");
+    let caller = task_test_caller("w1:p1", 4321, "98765", "codex-agent");
+    let next_args: Value = serde_json::from_str(r#"{"scope":"global","lease_seconds":"Infinity"}"#)
+        .expect("string Infinity is a JSON string");
+    let next = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_next",
+        next_args,
+        Some("w1:p1"),
+        Some(caller.clone()),
+    )
+    .expect("positive infinite lease is stored and returned");
+    assert_eq!(next["task"]["id"], task.id);
+    assert_eq!(next["task"]["title"], "literal Infinity");
+    for field in ["lease_seconds", "expires_at"] {
+        let token = next[field]
+            .as_number()
+            .expect("nonfinite lease remains a JSON number")
+            .to_string();
+        assert_eq!(token, "1e999");
+        assert!(token.parse::<f64>().unwrap().is_infinite());
+    }
+
+    let full = runtime
+        .block_on(tasks.get_full_wire(&task.id, Some("w1:p1")))
+        .expect("full read after claim");
+    assert_eq!(full.wire["title"], "literal Infinity");
+    assert_eq!(
+        full.wire["lease_expires_at"]
+            .as_number()
+            .unwrap()
+            .to_string(),
+        "1e999"
+    );
+    assert_eq!(full.wire["leases"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        full.wire["leases"][0]["expires_at"]
+            .as_number()
+            .unwrap()
+            .to_string(),
+        "1e999"
+    );
+
+    let connection = rusqlite::Connection::open(tasks.path()).expect("read task DB");
+    let (storage_type, expiry): (String, f64) = connection
+        .query_row(
+            "SELECT typeof(expires_at), expires_at FROM task_leases WHERE task_id = ?",
+            [&task.id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("infinite lease row");
+    assert_eq!(storage_type, "real");
+    assert!(expiry.is_infinite());
+    let event_meta: String = connection
+        .query_row(
+            "SELECT meta FROM task_events WHERE task_id = ? AND event = 'claimed'",
+            [&task.id],
+            |row| row.get(0),
+        )
+        .expect("claim event");
+    let event_meta: Value = serde_json::from_str(&event_meta).expect("valid event JSON");
+    assert_eq!(
+        event_meta["lease_seconds"].as_number().unwrap().to_string(),
+        "1e999"
+    );
+
+    let heartbeat_args: Value =
+        serde_json::from_str(&format!(r#"{{"id":"{}","lease_seconds":1e309}}"#, task.id))
+            .expect("numeric exponent lease argument");
+    let heartbeat = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_heartbeat",
+        heartbeat_args,
+        Some("w1:p1"),
+        Some(caller.clone()),
+    )
+    .expect("numeric exponent heartbeat stores infinity");
+    assert_eq!(
+        heartbeat["lease_seconds"].as_number().unwrap().to_string(),
+        "1e999"
+    );
+    assert_eq!(
+        heartbeat["expires_at"].as_number().unwrap().to_string(),
+        "1e999"
+    );
+
+    let negative_infinity = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_heartbeat",
+        json!({"id": task.id, "lease_seconds": "-Infinity"}),
+        Some("w1:p1"),
+        Some(caller.clone()),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(negative_infinity.contains("lease_seconds must be positive"));
+
+    let nan = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_heartbeat",
+        json!({"id": task.id, "lease_seconds": "NaN"}),
+        Some("w1:p1"),
+        Some(caller),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(nan.contains("NOT NULL constraint failed: task_leases.expires_at"));
+    let expiry_after_nan: f64 = connection
+        .query_row(
+            "SELECT expires_at FROM task_leases WHERE task_id = ?",
+            [&task.id],
+            |row| row.get(0),
+        )
+        .expect("failed NaN heartbeat leaves lease untouched");
+    assert!(expiry_after_nan.is_infinite());
+}
+
+#[test]
 fn h_task_add_matches_python_defaults_and_role_gate() {
     let (runtime, _dir, flock, _tasks, dispatcher) = task_api_fixture();
     let plain = dispatch_task_api(

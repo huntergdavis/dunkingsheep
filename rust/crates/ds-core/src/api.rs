@@ -2395,9 +2395,8 @@ fn python_bool_arg(args: &Args, key: &str, default: bool) -> bool {
 
 fn python_float(value: &Value) -> Result<f64, DunkError> {
     match value {
-        Value::Number(number) => number
-            .as_f64()
-            .ok_or_else(|| DunkError::Refused("number is outside float range".into())),
+        Value::Number(number) => crate::github::parse_python_json_float(&number.to_string())
+            .map_err(|message| DunkError::Refused(message.into())),
         Value::Bool(value) => Ok(if *value { 1.0 } else { 0.0 }),
         Value::String(value) => crate::github::parse_python_float(value).ok_or_else(|| {
             DunkError::Refused(format!("could not convert string to float: '{value}'"))
@@ -2726,8 +2725,10 @@ pub fn h_task_heartbeat(context: &HandlerContext<'_>, args: Args) -> Result<Valu
     Ok(json!({
         "task_id": id,
         "pane_id": pane,
-        "expires_at": expires_at,
-        "lease_seconds": lease_seconds,
+        "expires_at": crate::github::python_float_json_value(expires_at)
+            .expect("successful heartbeat expiry cannot be NaN"),
+        "lease_seconds": crate::github::python_float_json_value(lease_seconds)
+            .expect("successful heartbeat lease cannot be NaN"),
     }))
 }
 

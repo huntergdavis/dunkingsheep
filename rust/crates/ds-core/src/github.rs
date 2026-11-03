@@ -12,6 +12,16 @@ pub(crate) fn parse_python_float(raw: &str) -> Option<f64> {
     mints::parse_float(raw).ok()
 }
 
+/// Parse a raw JSON number with Python's int-versus-float overflow distinction.
+pub(crate) fn parse_python_json_float(raw: &str) -> Result<f64, &'static str> {
+    mints::parse_json_number_float(raw)
+}
+
+/// Keep nonfinite task floats numeric in arbitrary-precision JSON Values.
+pub(crate) fn python_float_json_value(value: f64) -> Option<Value> {
+    mints::float_json_value(value)
+}
+
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;

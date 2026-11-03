@@ -275,11 +275,7 @@ impl Json {
     }
     fn float(&self, value: &Value) -> Result<f64, FloatError> {
         if let Some(raw) = self.raw(value) {
-            let result = parse_float(raw)?;
-            if integer(raw) && !result.is_finite() {
-                return Err(FloatError::Overflow);
-            }
-            return Ok(result);
+            return parse_json_float(raw);
         }
         match value {
             Value::Bool(value) => Ok(if *value { 1.0 } else { 0.0 }),
@@ -400,6 +396,32 @@ fn string_end(bytes: &[u8], start: usize) -> Option<usize> {
 fn integer(raw: &str) -> bool {
     !raw.contains(['.', 'e', 'E']) && !matches!(raw, "NaN" | "Infinity" | "-Infinity")
 }
+fn parse_json_float(raw: &str) -> Result<f64, FloatError> {
+    let result = parse_float(raw)?;
+    if integer(raw) && !result.is_finite() {
+        return Err(FloatError::Overflow);
+    }
+    Ok(result)
+}
+pub(super) fn parse_json_number_float(raw: &str) -> Result<f64, &'static str> {
+    parse_json_float(raw).map_err(|error| error.message())
+}
+
+pub(super) fn float_json_value(value: f64) -> Option<Value> {
+    if let Some(number) = serde_json::Number::from_f64(value) {
+        return Some(Value::Number(number));
+    }
+    if value.is_nan() {
+        return None;
+    }
+    let raw = if value.is_sign_negative() {
+        "-1e999"
+    } else {
+        "1e999"
+    };
+    Some(serde_json::from_str(raw).expect("arbitrary_precision accepts the task infinity carrier"))
+}
+
 pub(super) fn parse_float(raw: &str) -> Result<f64, FloatError> {
     let converted: String = raw
         .trim()
