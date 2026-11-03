@@ -10,6 +10,17 @@ use std::sync::{Arc, Mutex};
 const PARTIAL: &str =
     "id,status\nOVL_0038_0775,partial\nOVL_0001_0001, FULL \n,partial\nOVL_0002_0002\n";
 
+type FollowupTaskIdentity = (
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<i64>,
+    Option<String>,
+    String,
+);
+
 #[test]
 fn only_the_partial_status_is_refused_not_presence() {
     let ids = partial_ids(PARTIAL);
@@ -1765,16 +1776,7 @@ async fn needs_fix_followup_uses_real_tasks_writer_and_keeps_review_identity() {
 
     let followup_id = out["followup"].as_str().unwrap();
     let connection = rusqlite::Connection::open(sync.flock.path()).unwrap();
-    let (title, body, kind, author, repo, pr, head, assignees): (
-        String,
-        String,
-        String,
-        Option<String>,
-        Option<String>,
-        Option<i64>,
-        Option<String>,
-        String,
-    ) = connection
+    let (title, body, kind, author, repo, pr, head, assignees): FollowupTaskIdentity = connection
         .query_row(
             "SELECT title, body, kind, author, repo, pr, head, assignees FROM tasks WHERE id = ?",
             [followup_id],
