@@ -355,7 +355,7 @@ fn download_response(
 }
 
 fn file_response_content_type(mime: &str) -> String {
-    if mime.starts_with("text/") && !mime.contains("charset=") {
+    if mime.starts_with("text/") && !mime.to_ascii_lowercase().contains("charset=") {
         format!("{mime}; charset=utf-8")
     } else {
         mime.to_owned()
@@ -2170,7 +2170,11 @@ mod tests {
         );
         assert_eq!(
             file_response_content_type("text/plain; CHARSET=x"),
-            "text/plain; CHARSET=x; charset=utf-8"
+            "text/plain; CHARSET=x"
+        );
+        assert_eq!(
+            file_response_content_type("text/plain; Charset=x"),
+            "text/plain; Charset=x"
         );
         assert_eq!(
             file_response_content_type("text/plain; charset=x"),
