@@ -78,10 +78,7 @@ impl StuckEnv for Fake {
         let pane_id = pane_id.to_owned();
         let text = text.to_owned();
         Box::pin(async move {
-            self.notes
-                .lock()
-                .unwrap()
-                .push((pane_id.into(), text.into(), since));
+            self.notes.lock().unwrap().push((pane_id, text, since));
         })
     }
     fn stuck_recovery_enabled(&self) -> bool {
