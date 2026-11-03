@@ -3410,7 +3410,8 @@ fn h_task_read_returns_full_wire_and_latest_three_note_reasons() {
             json!({"id": id}),
             "w1:p3",
         ),
-        Err(DunkError::Refused(message)) if message.contains("not visible")
+        Err(DunkError::Refused(message))
+            if message == format!("task {id} belongs to another pane's private queue (w1:p1)")
     ));
     assert!(matches!(
         dispatch_task_api(
