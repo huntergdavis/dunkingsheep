@@ -194,6 +194,19 @@ impl RuntimeServices {
             .with_stuck_services(Arc::clone(self))
     }
 
+    /// Bind every push-loop callback to this process's canonical services.
+    #[allow(dead_code)] // Consumed by the dependent loop startup integration.
+    pub(crate) fn push_loop_adapter(self: &Arc<Self>) -> Result<LoopRuntimeAdapter, DunkError> {
+        if self.flock.stores().tasks.is_none() {
+            return Err(refusal("push runtime task store is not attached"));
+        }
+        if !self.next_jobs.owns_flock(self.flock.as_ref()) {
+            return Err(refusal("push runtime next jobs flock mismatch"));
+        }
+        LoopRuntimeAdapter::new(Arc::clone(&self.flock), Arc::clone(&self.terminal_factory))
+            .with_stuck_services(Arc::clone(self))
+    }
+
     /// Bind the caller's real API registry to these canonical services.
     pub fn dispatcher(self: &Arc<Self>, handlers: crate::api::Dispatcher) -> Arc<dyn Dispatcher> {
         Arc::new(RuntimeDispatcher::new(Arc::clone(self), handlers))

@@ -3,14 +3,12 @@
 use crate::server_runtime::LoopRuntimeAdapter;
 
 impl LoopRuntimeAdapter {
-    #[allow(dead_code)] // The complete PushEnv implementation belongs to its assembly leaf.
     pub(crate) fn helper_pushenv_may_review(&self, pane_id: &str) -> bool {
         self.flock
             .with_roles(|roles, _| roles.may_review(pane_id, Some("reviewer")))
             .unwrap_or(false)
     }
 
-    #[allow(dead_code)] // The complete PushEnv implementation belongs to its assembly leaf.
     pub(crate) fn helper_pushenv_provider_of(&self, pane_id: &str) -> Option<String> {
         self.flock
             .with_roles(|roles, _| roles.provider_of(pane_id))
@@ -18,7 +16,6 @@ impl LoopRuntimeAdapter {
             .flatten()
     }
 
-    #[allow(dead_code)] // The complete PushEnv implementation belongs to its assembly leaf.
     pub(crate) fn helper_pushenv_lane_agent_alive(&self, pane_id: &str) -> Option<bool> {
         let registered_pane_pid = self
             .flock
