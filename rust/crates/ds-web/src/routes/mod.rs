@@ -13,5 +13,3 @@ pub mod panes;
 pub mod system;
 #[rustfmt::skip]
 pub mod game_state;
-#[rustfmt::skip]
-pub mod game_state;

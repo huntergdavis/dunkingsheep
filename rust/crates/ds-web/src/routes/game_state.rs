@@ -374,6 +374,7 @@ fn python_json_error(
     } else if error.starts_with("invalid escape") {
         match invalid_escape {
             Some(PythonInvalidEscape::General { .. }) => "Invalid \\escape",
+            Some(PythonInvalidEscape::Unicode { .. }) => "Invalid \\uXXXX escape",
             None => "Invalid JSON",
         }
     } else if error.starts_with("EOF while parsing") || error.starts_with("expected value") {
