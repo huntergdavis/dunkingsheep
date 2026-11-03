@@ -6,18 +6,23 @@
 
 use std::collections::HashMap;
 use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
 use std::sync::{Arc, Mutex};
 
-use serde_json::Value;
+use serde_json::{json, Map, Value};
 use tokio::sync::OwnedMutexGuard;
 
+use super::advance::{Advance, AdvanceOptions, OperatorProof, PlanInput, Planner};
 use super::next_job::Handoff;
 use crate::config::Env;
+use crate::dispatch::NextJob;
 use crate::error::DunkError;
 use crate::flock::commands_turns::TurnState;
 use crate::flock::loop_env::{configured_loop_terminal_factory, LoopTerminalFactory};
 use crate::flock::sends::{self, Message, SendGuardOptions};
 use crate::flock::Flock;
+use crate::metrics::Event;
+use crate::proc::Caller;
 use crate::server_runtime::LoopRuntimeAdapter;
 
 /// A paused dispatch must remain distinguishable from a materialisation failure.
@@ -41,6 +46,17 @@ pub struct NextJobs {
     locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
+struct AdvanceRequest<'a> {
+    pane: &'a str,
+    trigger: &'a str,
+    from_task: Option<&'a str>,
+    caller: Option<Caller>,
+    operator_proof: Option<OperatorProof>,
+    dispatch_reason: Option<String>,
+    unread: Option<i64>,
+    pending_delivery: bool,
+}
+
 #[allow(dead_code)] // The next-job worker consumes these outcomes after this leaf.
 enum TransportResult {
     Held(String),
@@ -55,6 +71,18 @@ enum TransportResult {
 }
 
 type GateEnvProvider = Arc<dyn Fn() -> Result<Env, ()> + Send + Sync + 'static>;
+
+fn caller_map(caller: Option<Caller>) -> Map<String, Value> {
+    let mut values = Map::new();
+    if let Some(caller) = caller {
+        values.insert("pane_id".into(), json!(caller.pane_id));
+        values.insert("pid".into(), json!(caller.pid));
+        values.insert("start".into(), json!(caller.start));
+        values.insert("name".into(), json!(caller.name));
+        values.insert("source".into(), json!(caller.source));
+    }
+    values
+}
 
 #[allow(dead_code)] // Delivery and turn binding use the blocking receipt bridge.
 async fn record_next_job_notify(
@@ -83,6 +111,257 @@ impl NextJobs {
         Self {
             flock,
             locks: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Advance one lane through the existing atomic task decision, then materialise its
+    /// committed handoff. The caller and operator proof are supplied by the request/loop
+    /// boundary; this async manager never reads request-thread identity.
+    #[allow(dead_code)] // The production turn and completion callers are assembled in t1605.
+    pub(crate) async fn advance(
+        &self,
+        pane: &str,
+        trigger: &str,
+        from_task: Option<&str>,
+        caller: Option<Caller>,
+        operator_proof: Option<OperatorProof>,
+    ) -> Result<Advance, DunkError> {
+        let _pane_guard = self.lock_pane(pane).await;
+        let dispatch_reason = self.gate(pane, None).await;
+        let unread = if dispatch_reason.is_some() {
+            None
+        } else {
+            self.unread_count(pane).await
+        };
+        let pending_delivery = self
+            .flock
+            .outbox_snapshot()
+            .get(pane)
+            .is_some_and(|messages| messages.iter().any(|message| message.status == "queued"));
+
+        self.advance_with_materialiser(
+            AdvanceRequest {
+                pane,
+                trigger,
+                from_task,
+                caller,
+                operator_proof,
+                dispatch_reason,
+                unread,
+                pending_delivery,
+            },
+            |handoff| async move { self.materialise(&handoff).await },
+        )
+        .await
+    }
+
+    async fn advance_with_materialiser<M, Fut>(
+        &self,
+        request: AdvanceRequest<'_>,
+        materialise: M,
+    ) -> Result<Advance, DunkError>
+    where
+        M: FnOnce(Handoff) -> Fut,
+        Fut: Future<Output = Result<crate::inbox::Status, MaterialiseError>>,
+    {
+        let AdvanceRequest {
+            pane,
+            trigger,
+            from_task,
+            caller,
+            operator_proof,
+            dispatch_reason,
+            unread,
+            pending_delivery,
+        } = request;
+        let tasks = self
+            .flock
+            .stores()
+            .tasks
+            .ok_or_else(|| DunkError::Refused("task store unavailable".into()))?;
+        let caller = caller_map(caller);
+        let planner: Arc<Planner> = Arc::new(|input: &PlanInput<'_>| {
+            let tasks: Vec<Value> = input
+                .tasks
+                .iter()
+                .map(|task| {
+                    json!({
+                        "id": task.task.id,
+                        "status": task.task.status,
+                        "priority": task.task.priority,
+                        "assignees": task.assignees,
+                        "created_at": task.task.created_at,
+                        "blocked_by": task.deps.blocked_by,
+                        "block_reason": task.task.block_reason,
+                        "allocation_waiting": task.allocation_waiting,
+                    })
+                })
+                .collect();
+            // AdvanceOptions currently carries an integer. Keep -1 as the private
+            // unknown sentinel so dispatch::next_job_plan still receives None.
+            let unread = (input.unread >= 0).then_some(input.unread);
+            let next_job = NextJob {
+                trigger: input.trigger,
+                pane_id: input.pane_id,
+                tasks: &tasks,
+                unread,
+                pending_delivery: input.pending_delivery,
+                dispatch_reason: input.dispatch_reason,
+                now: Some(input.now),
+                ..NextJob::default()
+            };
+            crate::dispatch::next_job_plan(&next_job)
+                .as_object()
+                .cloned()
+                .unwrap_or_default()
+        });
+        let options = AdvanceOptions {
+            from_task: from_task.map(str::to_owned),
+            caller,
+            unread: unread.unwrap_or(-1),
+            pending_delivery,
+            dispatch_reason,
+            operator_proof,
+        };
+        let advance = tasks
+            .advance_next_job(pane, trigger, options, planner)
+            .await?;
+        self.record_advance_decision(pane, trigger, &advance.plan)
+            .await;
+
+        let Some(handoff) = advance
+            .plan
+            .get("handoff")
+            .and_then(Value::as_object)
+            .cloned()
+        else {
+            return Ok(advance);
+        };
+        match materialise(handoff.clone()).await {
+            Ok(_) => {}
+            Err(MaterialiseError::DispatchPaused(reason)) => {
+                let changes = Map::from_iter([("reason".into(), Value::String(reason))]);
+                if tasks
+                    .update_next_job(&handoff, None, changes)
+                    .await?
+                    .is_none()
+                {
+                    return Err(DunkError::Refused(
+                        "committed next-job handoff disappeared while recording dispatch pause"
+                            .into(),
+                    ));
+                }
+            }
+            Err(MaterialiseError::Other(error)) => {
+                eprintln!(
+                    "next-job inbox materialisation deferred pane={pane} message={:?}: {error}",
+                    handoff.get("message_id").and_then(Value::as_str)
+                );
+            }
+        }
+        // The claim and handoff are already committed. Return that original plan even if
+        // the best-effort post-commit inbox materialisation recorded a pause or failed.
+        Ok(advance)
+    }
+
+    async fn unread_count(&self, pane: &str) -> Option<i64> {
+        let factory = match configured_loop_terminal_factory() {
+            Ok(factory) => factory,
+            Err(error) => {
+                eprintln!("next-job unread count unavailable pane={pane}: {error}");
+                return None;
+            }
+        };
+        let adapter = LoopRuntimeAdapter::new(Arc::clone(&self.flock), factory);
+        let pane = pane.to_owned();
+        let worker_pane = pane.clone();
+        match adapter
+            .with_loop_terminal(move |flock, terminal| {
+                let store = flock.stores().inbox?;
+                let status = flock.status_state().ok()?;
+                let env = &status.env;
+                let mailbox = flock
+                    .own_mailbox_from_sources(
+                        terminal,
+                        || store.read_pool(),
+                        &worker_pane,
+                        || {
+                            env.get("DUNKINGSHEEP_MAILBOX")
+                                .map(|value| {
+                                    value.trim_matches(|c: char| {
+                                        c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c)
+                                    })
+                                })
+                                .filter(|value| !value.is_empty())
+                                .map(str::to_owned)
+                        },
+                        || {
+                            let backend = env
+                                .get("DUNKINGSHEEP_TERMINAL_BACKEND")
+                                .unwrap_or("tmux")
+                                .trim()
+                                .to_lowercase();
+                            Ok(if backend.is_empty() {
+                                "tmux".to_owned()
+                            } else {
+                                backend
+                            })
+                        },
+                    )
+                    .ok()?;
+                let mut lane_panes: Vec<String> = crate::pm::load_routing(None, None, env)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .flat_map(|(_, route)| route.members)
+                    .collect();
+                lane_panes.sort();
+                lane_panes.dedup();
+                crate::inbox::count(
+                    store.read_pool(),
+                    &mailbox,
+                    &lane_panes,
+                    crate::clock::now_s(),
+                )
+                .ok()
+                .map(|counts| counts.unread)
+            })
+            .await
+        {
+            Ok(count) => count,
+            Err(error) => {
+                eprintln!("next-job unread count worker failed pane={pane}: {error}");
+                None
+            }
+        }
+    }
+
+    async fn record_advance_decision(&self, pane: &str, trigger: &str, plan: &Map<String, Value>) {
+        let outcome = plan
+            .get("action")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_owned();
+        let reason = plan
+            .get("reason")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        eprintln!(
+            "next-job {pane} trigger={trigger} action={outcome} task={:?} reason={reason:?}",
+            plan.get("task_id").and_then(Value::as_str)
+        );
+        let Some(metrics) = self.flock.stores().metrics else {
+            return;
+        };
+        let event = Event {
+            kind: "next_job.decision".into(),
+            pane_id: Some(pane.to_owned()),
+            source: Some(trigger.to_owned()),
+            outcome: Some(outcome),
+            reason,
+            ..Event::default()
+        };
+        if let Err(error) = tokio::task::spawn_blocking(move || metrics.record(&event)).await {
+            eprintln!("next-job decision metric worker failed pane={pane}: {error}");
         }
     }
 
@@ -1894,6 +2173,204 @@ mod tests {
         tokio::task::spawn_blocking(move || drop((jobs, inbox, tasks)))
             .await
             .unwrap();
+    }
+
+    fn materialised_status(message_id: &str) -> crate::inbox::Status {
+        crate::inbox::Status {
+            message_id: message_id.to_owned(),
+            state: "queued".into(),
+            mailbox: "worker".into(),
+            destination: "worker".into(),
+            pane_id: Some("%1".into()),
+            sender: Some("system".into()),
+            created_at: crate::clock::now_s(),
+            read_at: None,
+            acked_at: None,
+            archived_at: None,
+            cancelled_at: None,
+            waiting_s: Some(0),
+            body_bytes: 0,
+            attachments: 0,
+            attachment_bytes: 0,
+            reason: None,
+            notify_state: None,
+            notify_reason: None,
+            notify_at: None,
+            notify_transport_id: None,
+            notify_attempt: None,
+        }
+    }
+
+    async fn add_assigned_task(tasks: &crate::tasks::Tasks, pane: &str) {
+        let task = tasks
+            .add("global", "Advance to assigned work", "body")
+            .await
+            .unwrap();
+        tasks.assign(&task.id, &[pane], "set").await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn next_jobs_advance_records_handoff_and_progress() {
+        let (_dir, jobs, tasks) = configured_jobs().await;
+        let pane = "%1";
+        add_assigned_task(&tasks, pane).await;
+        let metrics = Arc::new(
+            std::thread::spawn(|| crate::metrics::MetricsStore::open(":memory:"))
+                .join()
+                .expect("metrics store thread")
+                .expect("metrics store"),
+        );
+        jobs.flock.attach_stores(crate::flock::panes::Stores {
+            tasks: Some(Arc::clone(&tasks)),
+            metrics: Some(Arc::clone(&metrics)),
+            ..Default::default()
+        });
+
+        let advance = jobs
+            .advance_with_materialiser(
+                AdvanceRequest {
+                    pane,
+                    trigger: "turn.end",
+                    from_task: None,
+                    caller: None,
+                    operator_proof: None,
+                    dispatch_reason: None,
+                    unread: Some(0),
+                    pending_delivery: false,
+                },
+                |handoff| async move {
+                    let id = handoff
+                        .get("message_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    Ok(materialised_status(id))
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(advance.plan["action"], "claim");
+        assert_eq!(advance.plan["handoff"]["state"], "pending");
+        let claimed = tasks
+            .get(advance.plan["task_id"].as_str().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(claimed.status, "in_progress");
+        let handoffs = tasks.next_job_handoffs(Some(pane)).await.unwrap();
+        assert_eq!(handoffs.len(), 1);
+        assert_eq!(handoffs[0]["state"], "pending");
+        let events = std::thread::spawn({
+            let metrics = Arc::clone(&metrics);
+            move || metrics.events_between(0.0, f64::MAX)
+        })
+        .join()
+        .expect("metrics events thread")
+        .unwrap();
+        assert!(events.iter().any(|event| {
+            event.kind == "next_job.decision"
+                && event.pane_id.as_deref() == Some(pane)
+                && event.outcome.as_deref() == Some("claim")
+        }));
+        jobs.flock.attach_stores(crate::flock::panes::Stores {
+            tasks: Some(Arc::clone(&tasks)),
+            ..Default::default()
+        });
+        let metrics = Arc::try_unwrap(metrics).expect("only local metrics owner remains");
+        std::thread::spawn(move || drop(metrics))
+            .join()
+            .expect("metrics store drop thread");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_unknown_unread_is_not_permission() {
+        let (_dir, jobs, tasks) = configured_jobs().await;
+        let pane = "%1";
+        add_assigned_task(&tasks, pane).await;
+
+        let advance = jobs
+            .advance_with_materialiser(
+                AdvanceRequest {
+                    pane,
+                    trigger: "turn.end",
+                    from_task: None,
+                    caller: None,
+                    operator_proof: None,
+                    dispatch_reason: None,
+                    unread: None,
+                    pending_delivery: false,
+                },
+                |_| async {
+                    Err(MaterialiseError::Other(DunkError::Refused(
+                        "unexpected materialisation".into(),
+                    )))
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(advance.plan["action"], "skip");
+        assert_eq!(advance.plan["reason"], "unread_unknown");
+        assert!(advance.plan.get("handoff").is_none());
+        assert!(tasks
+            .next_job_handoffs(Some(pane))
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn next_jobs_advance_matches_python_materialise_error_handling() {
+        for (pause, reason) in [(true, "dispatch paused"), (false, "materialise failed")] {
+            let (_dir, jobs, tasks) = configured_jobs().await;
+            let pane = "%1";
+            add_assigned_task(&tasks, pane).await;
+            let materialise_error = if pause {
+                MaterialiseError::DispatchPaused(reason.to_owned())
+            } else {
+                MaterialiseError::Other(DunkError::Refused(reason.to_owned()))
+            };
+            let advance = jobs
+                .advance_with_materialiser(
+                    AdvanceRequest {
+                        pane,
+                        trigger: "turn.end",
+                        from_task: None,
+                        caller: None,
+                        operator_proof: None,
+                        dispatch_reason: None,
+                        unread: Some(0),
+                        pending_delivery: false,
+                    },
+                    move |_| async move { Err(materialise_error) },
+                )
+                .await
+                .unwrap();
+            let committed = advance.plan["handoff"].as_object().unwrap();
+            assert_eq!(advance.plan["action"], "claim");
+            assert_eq!(committed["state"], "pending");
+            assert_eq!(committed["attempt"], 0);
+            assert!(committed["reason"].is_null());
+
+            let handoffs = tasks.next_job_handoffs(Some(pane)).await.unwrap();
+            let stored = handoffs.first().expect("committed handoff");
+            assert_eq!(stored["state"], committed["state"]);
+            assert_eq!(stored["attempt"], committed["attempt"]);
+            if pause {
+                assert_eq!(stored["reason"], reason);
+                for (key, value) in committed {
+                    if key != "reason" && key != "at" {
+                        assert_eq!(stored.get(key), Some(value), "changed field {key}");
+                    }
+                }
+            } else {
+                for (key, value) in committed {
+                    if key != "at" {
+                        assert_eq!(stored.get(key), Some(value), "changed field {key}");
+                    }
+                }
+                assert!(stored["reason"].is_null());
+            }
+        }
     }
 
     async fn configured_jobs() -> (tempfile::TempDir, NextJobs, Arc<crate::tasks::Tasks>) {
