@@ -1111,10 +1111,11 @@ fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
         .iter()
         .filter_map(|value| value.to_str().ok())
         .flat_map(|value| value.split(';'))
-        .find_map(|part| {
+        .filter_map(|part| {
             let (key, value) = part.trim().split_once('=')?;
             (key == name).then(|| value.to_owned())
         })
+        .last()
 }
 
 fn auth_error_response(error: AuthError) -> Response {
@@ -1144,7 +1145,7 @@ mod tests {
     use super::*;
     use axum::{
         body::{to_bytes, Body},
-        http::Request as HttpRequest,
+        http::{HeaderValue, Request as HttpRequest},
     };
     use std::{
         future::Future,
@@ -1274,6 +1275,24 @@ mod tests {
             .header(header::HOST, "desk.test")
             .body(Body::from(body.to_owned()))
             .unwrap()
+    }
+
+    #[test]
+    fn duplicate_session_cookies_use_the_last_value() {
+        let mut headers = HeaderMap::new();
+        headers.append(
+            header::COOKIE,
+            HeaderValue::from_static("vp_session=valid-first; theme=dark"),
+        );
+        headers.append(
+            header::COOKIE,
+            HeaderValue::from_static("theme=light; vp_session=invalid-second"),
+        );
+
+        assert_eq!(
+            Some("invalid-second".to_owned()),
+            cookie_value(&headers, "vp_session")
+        );
     }
 
     fn block_on<F: Future>(future: F) -> F::Output {
