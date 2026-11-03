@@ -85,7 +85,7 @@ async fn game_key(
     let Some(body) = body else {
         return required_body_error();
     };
-    let object = match model_object(&body, "GameKey") {
+    let object = match model_object(&body) {
         Ok(object) => object,
         Err(response) => return response,
     };
@@ -116,7 +116,7 @@ async fn game_type(
     let Some(body) = body else {
         return required_body_error();
     };
-    let object = match model_object(&body, "GameType") {
+    let object = match model_object(&body) {
         Ok(object) => object,
         Err(response) => return response,
     };
@@ -227,12 +227,12 @@ fn python_json_error(error: &serde_json::Error) -> String {
     }
 }
 
-fn model_object<'a>(body: &'a Value, model: &str) -> Result<&'a Map<String, Value>, Response> {
+fn model_object(body: &Value) -> Result<&Map<String, Value>, Response> {
     body.as_object().ok_or_else(|| {
         validation_error(json!({
-            "type": "model_type",
+            "type": "model_attributes_type",
             "loc": ["body"],
-            "msg": format!("Input should be a valid dictionary or instance of {model}"),
+            "msg": "Input should be a valid dictionary or object to extract fields from",
             "input": body
         }))
     })
@@ -692,37 +692,34 @@ mod tests {
     }
 
     #[test]
-    fn game_input_non_object_bodies_match_pydantic_model_errors() {
+    fn game_input_non_object_bodies_match_pydantic_model_attributes_errors() {
         let backend = Arc::new(FakeGameInput::default());
         let app = app(backend.clone(), Arc::new(FakeAuth::default()));
-
-        let response = block_on(app.clone().oneshot(request("/api/game/key", "[]", true)))
-            .expect("GameKey array response");
-        let (status, body) = block_response(response);
-        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-        assert_eq!(
-            serde_json::from_str::<Value>(&body).unwrap(),
-            json!({"detail": [{
-                "type": "model_type",
-                "loc": ["body"],
-                "msg": "Input should be a valid dictionary or instance of GameKey",
-                "input": []
-            }]})
-        );
-
-        let response = block_on(app.oneshot(request("/api/game/type", "null", true)))
-            .expect("GameType null response");
-        let (status, body) = block_response(response);
-        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-        assert_eq!(
-            serde_json::from_str::<Value>(&body).unwrap(),
-            json!({"detail": [{
-                "type": "model_type",
-                "loc": ["body"],
-                "msg": "Input should be a valid dictionary or instance of GameType",
-                "input": null
-            }]})
-        );
+        for path in ["/api/game/key", "/api/game/type"] {
+            for (raw_body, input) in [
+                ("[]", json!([])),
+                ("null", Value::Null),
+                (r#""text""#, json!("text")),
+            ] {
+                let response = block_on(
+                    app.clone()
+                        .oneshot(request(path, raw_body, true)),
+                )
+                .unwrap_or_else(|_| panic!("{path} body {raw_body} response"));
+                let (status, body) = block_response(response);
+                assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{path} {raw_body}");
+                assert_eq!(
+                    serde_json::from_str::<Value>(&body).unwrap(),
+                    json!({"detail": [{
+                        "type": "model_attributes_type",
+                        "loc": ["body"],
+                        "msg": "Input should be a valid dictionary or object to extract fields from",
+                        "input": input
+                    }]}),
+                    "{path} {raw_body}"
+                );
+            }
+        }
         assert!(backend.calls.lock().unwrap().is_empty());
     }
 
@@ -743,9 +740,9 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Value>(&body).unwrap(),
             json!({"detail": [{
-                "type": "model_type",
+                "type": "model_attributes_type",
                 "loc": ["body"],
-                "msg": "Input should be a valid dictionary or instance of GameKey",
+                "msg": "Input should be a valid dictionary or object to extract fields from",
                 "input": "{\"key\":\"Return\"}"
             }]})
         );
