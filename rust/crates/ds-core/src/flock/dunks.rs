@@ -6,12 +6,13 @@
 //! `SnapshotStore` facade. It does NOT add runtime dunk CRUD, a dunk-only writer, whole-state
 //! file restore/save, or the per-dunk timer, idle gating and skip/hold backpressure.
 
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use regex::Regex;
 use serde_json::{json, Map, Value};
 
-use super::{sends::SnapshotStore, Flock};
+use super::sends::{DunkDeliveryAction, OutboxWake, SendPreparationEnv, SnapshotStore};
+use super::Flock;
 use crate::clock;
 use crate::error::DunkError;
 
@@ -172,6 +173,8 @@ pub struct Dunker {
     pub hold_while_typing: bool,
     pub hold_count: i64,
     pub last_held_at: Option<f64>,
+    /// Volatile detector fallback state from Python; intentionally excluded from FIELDS.
+    detector_fallback: bool,
     /// Volatile, not persisted.
     pub status: String,
 }
@@ -263,6 +266,7 @@ impl Dunker {
                 .is_none_or(|v| truthy(Some(v))),
             hold_count: int_or_zero(kwargs, "hold_count"),
             last_held_at: opt_f64(kwargs, "last_held_at"),
+            detector_fallback: false,
             status: opt_str(kwargs, "status").unwrap_or_else(|| "Ready".to_string()),
         }
     }
@@ -379,6 +383,14 @@ impl Dunker {
 
 /// `expand_template`: the known `{placeholders}`; other braces are left alone.
 pub fn expand_template(text: &str, dunker: &Dunker) -> String {
+    expand_template_for_target(text, dunker, None)
+}
+
+fn expand_template_for_target(
+    text: &str,
+    dunker: &Dunker,
+    guarded_target_label: Option<&str>,
+) -> String {
     let now = chrono::Local::now();
     template_re()
         .replace_all(text, |caps: &regex::Captures| match &caps[1] {
@@ -386,7 +398,9 @@ pub fn expand_template(text: &str, dunker: &Dunker) -> String {
             "name" if dunker.name.is_empty() => dunker.id.clone(),
             "name" => dunker.name.clone(),
             "count" => (dunker.send_count + 1).to_string(),
-            "target" => dunker.target_label(),
+            "target" => guarded_target_label
+                .map(str::to_owned)
+                .unwrap_or_else(|| dunker.target_label()),
             "interval" => format_interval(dunker.interval_minutes),
             "time" => now.format("%H:%M:%S").to_string(),
             _ => now.format("%Y-%m-%d").to_string(),
@@ -470,9 +484,23 @@ pub struct DunkList {
     inner: std::sync::Mutex<ListState>,
 }
 
+/// Shared identity for one in-memory Dunker lifetime. Replacing a list row creates a new handle;
+/// queued fire work can therefore keep updating its original Dunker after removal.
+pub(super) type DunkerHandle = Arc<std::sync::Mutex<Dunker>>;
+
+pub(super) struct DunkSendSnapshot {
+    pub id: String,
+    pub pane_id: String,
+    pub target_label: String,
+    pub text: String,
+    pub template: String,
+    pub detector_fallback: bool,
+    pub hold_while_typing: bool,
+}
+
 #[derive(Debug)]
 struct ListState {
-    dunkers: Vec<Dunker>,
+    dunkers: Vec<DunkerHandle>,
     next_id: i64,
 }
 
@@ -498,6 +526,105 @@ impl DunkList {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    fn lock_dunker(handle: &DunkerHandle) -> std::sync::MutexGuard<'_, Dunker> {
+        handle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Snapshot a dunk for one explicit fire transition, marking its volatile status first.
+    pub(super) fn begin_fire(&self, dunk_id: &str) -> Result<DunkerHandle, DunkError> {
+        let state = self.state();
+        let index = Self::find(&state, dunk_id)?;
+        let handle = Arc::clone(&state.dunkers[index]);
+        let mut dunker = Self::lock_dunker(&handle);
+        if dunker.target_pane_id.as_deref().is_none_or(str::is_empty) {
+            dunker.status = "No target - press c".into();
+            return Err(DunkError::Refused(format!("{} has no target", dunker.id)));
+        }
+        dunker.status = "Sending...".into();
+        drop(dunker);
+        drop(state);
+        Ok(handle)
+    }
+
+    /// Apply the synchronous fire outcome to the dunk if it still exists. Removing a dunk
+    /// concurrently with its send leaves the in-flight transition operating on its own handle.
+    fn finish_fire(handle: &DunkerHandle, ok: bool, detail: &str) {
+        let mut dunker = Self::lock_dunker(handle);
+        if ok {
+            dunker.status = format!("Tested {}", chrono::Local::now().format("%H:%M:%S"));
+        } else {
+            dunker.status = "Test failed".into();
+            dunker.last_error = Some(detail.to_owned());
+        }
+    }
+
+    pub(super) fn send_snapshot(handle: &DunkerHandle) -> DunkSendSnapshot {
+        Self::send_snapshot_for_target(handle, None)
+    }
+
+    pub(super) fn send_snapshot_for_target(
+        handle: &DunkerHandle,
+        guarded_target_label: Option<&str>,
+    ) -> DunkSendSnapshot {
+        let dunker = Self::lock_dunker(handle);
+        let template = dunker.text.clone();
+        let target_label = guarded_target_label
+            .map(str::to_owned)
+            .unwrap_or_else(|| dunker.target_label());
+        DunkSendSnapshot {
+            id: dunker.id.clone(),
+            pane_id: dunker.target_pane_id.clone().unwrap_or_default(),
+            target_label,
+            text: expand_template_for_target(&template, &dunker, guarded_target_label)
+                .trim()
+                .to_owned(),
+            template,
+            detector_fallback: dunker.detector_fallback,
+            hold_while_typing: dunker.hold_while_typing,
+        }
+    }
+
+    pub(super) fn finish_do_send(
+        handle: &DunkerHandle,
+        text: &str,
+        ok: bool,
+        detail: &str,
+        detector_fallback: bool,
+    ) {
+        let mut dunker = Self::lock_dunker(handle);
+        if ok {
+            dunker.send_count += 1;
+            dunker.skip_count = 0;
+            dunker.last_sent_at = Some(clock::now_s());
+            dunker.last_error = None;
+            dunker.last_sent_text = Some(text.to_owned());
+            dunker.awaiting_consumption = true;
+            dunker.unknown_skips = 0;
+            if detector_fallback {
+                dunker.last_error = Some(
+                    "input box not recognised on this pane; sent anyway after repeated skips (detector fallback)".into(),
+                );
+                dunker.detector_fallback = false;
+            }
+        } else {
+            dunker.last_error = Some(detail.to_owned());
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_detector_fallback(&self, dunk_id: &str, value: bool) {
+        let state = self.state();
+        if let Ok(index) = Self::find(&state, dunk_id) {
+            Self::lock_dunker(&state.dunkers[index]).detector_fallback = value;
+        }
+    }
+
+    pub(super) fn queue_fire(handle: &DunkerHandle) {
+        Self::lock_dunker(handle).status = "Queued (typing)".into();
+    }
+
     /// `_load` (the dunk part): `next_id` and every row that parses; a corrupt row is
     /// skipped, restored rows read `Restored`. A running dunk with a stale `next_send_at`
     /// is pushed `RESTORE_GRACE_S` ahead (its timer is the caller's to respawn).
@@ -519,10 +646,14 @@ impl DunkList {
             };
             dunker.status = "Restored".into();
             state.next_id = state.next_id.max(numeric_id(&dunker.id) + 1);
-            state.dunkers.push(dunker);
+            state.dunkers.push(Arc::new(std::sync::Mutex::new(dunker)));
         }
         let now = clock::now_s();
-        for dunker in state.dunkers.iter_mut().filter(|d| d.running) {
+        for handle in &state.dunkers {
+            let mut dunker = Self::lock_dunker(handle);
+            if !dunker.running {
+                continue;
+            }
             if dunker.next_send_at.is_none_or(|at| at == 0.0 || at < now) {
                 dunker.next_send_at = Some(now + RESTORE_GRACE_S);
             }
@@ -534,7 +665,11 @@ impl DunkList {
         let state = self.state();
         (
             state.next_id,
-            state.dunkers.iter().map(Dunker::persisted_pairs).collect(),
+            state
+                .dunkers
+                .iter()
+                .map(|handle| Self::lock_dunker(handle).persisted_pairs())
+                .collect(),
         )
     }
 
@@ -544,7 +679,7 @@ impl DunkList {
         let position = state
             .dunkers
             .iter()
-            .position(|d| d.id == wanted)
+            .position(|handle| Self::lock_dunker(handle).id == wanted)
             .or_else(|| {
                 let numeric = !wanted.is_empty() && wanted.chars().all(|c| c.is_ascii_digit());
                 numeric
@@ -552,7 +687,7 @@ impl DunkList {
                         state
                             .dunkers
                             .iter()
-                            .position(|d| d.id == format!("d{wanted}"))
+                            .position(|handle| Self::lock_dunker(handle).id == format!("d{wanted}"))
                     })
                     .flatten()
             });
@@ -561,11 +696,17 @@ impl DunkList {
 
     pub fn get(&self, dunk_id: &str) -> Result<Map<String, Value>, DunkError> {
         let state = self.state();
-        Ok(state.dunkers[Self::find(&state, dunk_id)?].to_dict())
+        let dunker = Self::lock_dunker(&state.dunkers[Self::find(&state, dunk_id)?]).to_dict();
+        Ok(dunker)
     }
 
     pub fn list(&self) -> Vec<Map<String, Value>> {
-        self.state().dunkers.iter().map(Dunker::to_dict).collect()
+        let state = self.state();
+        state
+            .dunkers
+            .iter()
+            .map(|handle| Self::lock_dunker(handle).to_dict())
+            .collect()
     }
 
     /// Clear stale missing-pane errors for running dunks whose exact target is live.
@@ -577,9 +718,10 @@ impl DunkList {
         if live_panes.is_empty() {
             return false;
         }
-        let mut state = self.state();
+        let state = self.state();
         let mut changed = false;
-        for dunker in &mut state.dunkers {
+        for handle in &state.dunkers {
+            let mut dunker = Self::lock_dunker(handle);
             let target_is_live = dunker
                 .target_pane_id
                 .as_ref()
@@ -652,7 +794,7 @@ impl DunkList {
             }
         }
         let out = dunker.to_dict();
-        state.dunkers.push(dunker);
+        state.dunkers.push(Arc::new(std::sync::Mutex::new(dunker)));
         Ok(out)
     }
 
@@ -682,9 +824,10 @@ impl DunkList {
             .as_deref()
             .map(|v| check_bool(v, "hold_while_typing"))
             .transpose()?;
-        let mut state = self.state();
+        let state = self.state();
         let index = Self::find(&state, dunk_id)?;
-        let dunker = &mut state.dunkers[index];
+        let handle = Arc::clone(&state.dunkers[index]);
+        let mut dunker = Self::lock_dunker(&handle);
         let mut changed: Vec<&str> = Vec::new();
         if let Some(pane) = pane {
             dunker.set_target(pane);
@@ -742,26 +885,29 @@ impl DunkList {
     pub fn remove(&self, dunk_id: &str) -> Result<Map<String, Value>, DunkError> {
         let mut state = self.state();
         let index = Self::find(&state, dunk_id)?;
-        let mut dunker = state.dunkers.remove(index);
+        let handle = state.dunkers.remove(index);
+        let mut dunker = Self::lock_dunker(&handle);
         dunker.running = false;
         Ok(dunker.to_dict())
     }
 
     /// `Flock.start` (the persisted fields; the timer is the caller's).
     pub fn start(&self, dunk_id: &str) -> Result<Map<String, Value>, DunkError> {
-        let mut state = self.state();
+        let state = self.state();
         let index = Self::find(&state, dunk_id)?;
-        let dunker = &mut state.dunkers[index];
-        start_fields(dunker)?;
+        let handle = Arc::clone(&state.dunkers[index]);
+        let mut dunker = Self::lock_dunker(&handle);
+        start_fields(&mut dunker)?;
         Ok(dunker.to_dict())
     }
 
     /// `Flock.stop`.
     pub fn stop(&self, dunk_id: &str) -> Result<Map<String, Value>, DunkError> {
-        let mut state = self.state();
+        let state = self.state();
         let index = Self::find(&state, dunk_id)?;
-        let dunker = &mut state.dunkers[index];
-        stop_fields(dunker);
+        let handle = Arc::clone(&state.dunkers[index]);
+        let mut dunker = Self::lock_dunker(&handle);
+        stop_fields(&mut dunker);
         Ok(dunker.to_dict())
     }
 
@@ -769,7 +915,8 @@ impl DunkList {
     pub fn toggle(&self, dunk_id: &str) -> Result<Map<String, Value>, DunkError> {
         let running = {
             let state = self.state();
-            state.dunkers[Self::find(&state, dunk_id)?].running
+            let running = Self::lock_dunker(&state.dunkers[Self::find(&state, dunk_id)?]).running;
+            running
         };
         if running {
             self.stop(dunk_id)
@@ -784,9 +931,10 @@ impl DunkList {
     /// so the persisted fields are the whole stop. A stopped dunk therefore can never report
     /// itself as scheduled again: nothing is left to overwrite the status.)
     pub fn halt_aimed_at(&self, doomed: &[String]) -> Vec<String> {
-        let mut state = self.state();
+        let state = self.state();
         let mut stopped = Vec::new();
-        for dunker in state.dunkers.iter_mut() {
+        for handle in &state.dunkers {
+            let mut dunker = Self::lock_dunker(handle);
             let aimed = dunker
                 .target_pane_id
                 .as_deref()
@@ -803,11 +951,18 @@ impl DunkList {
 
     /// `Flock.stop_all`.
     pub fn stop_all(&self) -> Vec<Map<String, Value>> {
-        let mut state = self.state();
-        for dunker in state.dunkers.iter_mut().filter(|d| d.running) {
-            stop_fields(dunker);
+        let state = self.state();
+        for handle in &state.dunkers {
+            let mut dunker = Self::lock_dunker(handle);
+            if dunker.running {
+                stop_fields(&mut dunker);
+            }
         }
-        state.dunkers.iter().map(Dunker::to_dict).collect()
+        state
+            .dunkers
+            .iter()
+            .map(|handle| Self::lock_dunker(handle).to_dict())
+            .collect()
     }
 }
 
@@ -824,6 +979,57 @@ impl Flock {
     #[allow(dead_code)] // Dunk CRUD callers will use this facade in following assigned leaves.
     pub(crate) fn _save_dunks(&self, store: &dyn SnapshotStore) -> Result<(), DunkError> {
         store.save(self)
+    }
+
+    /// `Flock.fire` with `wait=true`: expand and synchronously fire one dunk through the shared
+    /// guarded direct-send path, then persist the resulting dunk counters via the whole-state
+    /// snapshot seam. Timer scheduling and asynchronous fire workers belong to later slices.
+    pub fn fire(
+        self: &Arc<Self>,
+        dunk_id: &str,
+        env: &mut dyn SendPreparationEnv,
+        wake: &dyn OutboxWake,
+        store: Arc<impl SnapshotStore + 'static>,
+        permission: impl FnMut() -> Option<String>,
+    ) -> Result<Value, DunkError> {
+        let handle = self.dunks.begin_fire(dunk_id)?;
+        let dunker = DunkList::lock_dunker(&handle).clone();
+        let snapshot = DunkList::send_snapshot(&handle);
+        let action_store: Arc<dyn SnapshotStore> = store.clone();
+        let action = DunkDeliveryAction::new(Arc::clone(&handle), action_store);
+        let (sent, send_ok, detail, blocker) =
+            super::sends::send_dunk_now(self, &action, env, permission);
+        if !sent && blocker.is_some() && snapshot.hold_while_typing {
+            let mut outer = self.new_message(
+                &snapshot.pane_id,
+                &snapshot.target_label,
+                &dunker.text,
+                &dunker.id,
+            )?;
+            outer.set_dunk_delivery(action);
+            DunkList::queue_fire(&handle);
+            let message_id = outer.id.clone();
+            self.enqueue(outer, wake, store.as_ref())?;
+            let message = format!(
+                "queued: the box in {} would not clear",
+                snapshot.target_label
+            );
+            return Ok(json!({
+                "id": dunker.id,
+                "ok": Value::Null,
+                "queued": true,
+                "message_id": message_id,
+                "message": message,
+            }));
+        }
+        let ok = sent && send_ok.unwrap_or(false);
+        DunkList::finish_fire(&handle, ok, &detail);
+        Ok(json!({
+            "id": dunker.id,
+            "ok": ok,
+            "queued": false,
+            "message": detail,
+        }))
     }
 }
 
