@@ -362,6 +362,7 @@ struct FoldInterleaving {
 struct FoldResult {
     first: String,
     folded: String,
+    replacement_id: String,
     replacement_receipt: String,
     outcome: DeliveryOutcome,
     queued: Vec<Message>,
@@ -440,13 +441,16 @@ fn run_inflight_fold(interleaving: FoldInterleaving, send_ok: bool) -> FoldResul
     FoldResult {
         first: receipt_state(&pool, &first),
         folded: receipt_state(&pool, &folded),
+        replacement_id: replacement_receipt.clone(),
         replacement_receipt: receipt_state(&pool, &replacement_receipt),
         outcome,
         queued,
-        generation: pane
-            .typed_attempts
-            .first()
-            .and_then(|attempt| attempt.3.clone()),
+        generation: flock
+            .message_history
+            .lock()
+            .unwrap()
+            .last()
+            .and_then(|message| message.attempt_generation.clone()),
         typed: pane.typed.clone(),
         done: waiter.is_set(),
     }
@@ -518,7 +522,7 @@ fn same_id_replacement_never_inherits_completion_even_with_matching_stamp() {
         assert_eq!("replacement", result.queued[0].text);
         assert_eq!("queued", result.queued[0].status);
         assert_eq!(
-            vec![result.replacement_receipt.clone()],
+            vec![result.replacement_id.clone()],
             result.queued[0].notify_for
         );
         assert_eq!(
