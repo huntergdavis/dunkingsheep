@@ -532,7 +532,7 @@ impl GitHubTransport for FakeReviewTransport {
             let effect = {
                 let mut effect = self.completion_on_request.lock().unwrap();
                 let should_run = effect.as_mut().is_some_and(|(fragment, skip, ..)| {
-                    if !url.contains(fragment) {
+                    if !url.contains(fragment.as_str()) {
                         return false;
                     }
                     if *skip > 0 {
