@@ -68,6 +68,7 @@ mod tests {
         flock.attach_roles(roles, None);
 
         let mut backend = FakeTerminal::new();
+        backend.panes.clear();
         backend.panes.push(Pane {
             pane_id: "%3".into(),
             session_id: "w1".into(),
