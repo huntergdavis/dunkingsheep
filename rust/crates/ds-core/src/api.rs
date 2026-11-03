@@ -71,6 +71,24 @@ pub trait CommandEnv: PaneInfoEnv {
     /// keeping the request context shared with role and read-only adapters.
     fn terminal(&self) -> &Mutex<Box<dyn Terminal>>;
 
+    /// Delivery-target evidence composed by the request runtime. The existing Flock
+    /// delivery-capability method owns target resolution and response shaping.
+    fn delivery_env(&self) -> Result<&dyn crate::flock::delivery::DeliveryEnv, DunkError> {
+        Err(DunkError::Refused("delivery adapter is not wired".into()))
+    }
+
+    /// Run one existing `Flock::clear_box` operation with the request-local mutable
+    /// composer adapter. Keeping adapter construction behind this callback lets the runtime
+    /// borrow its non-Send terminal only for this operation.
+    fn with_clear_box_env(
+        &self,
+        _operation: &mut dyn FnMut(
+            &mut dyn crate::flock::clear_box::ClearBoxEnv,
+        ) -> Result<Value, DunkError>,
+    ) -> Result<Value, DunkError> {
+        Err(DunkError::Refused("clear box adapter is not wired".into()))
+    }
+
     /// Wall-clock time, in epoch seconds, for request-scoped caches and command timestamps.
     fn now_s(&self) -> f64;
 
@@ -628,6 +646,13 @@ impl Dispatcher {
         self.register("flush_box", h_flush_box);
     }
 
+    /// Register only the T39 clear-box and delivery handlers.
+    pub fn register_clear_box_delivery_capability(&mut self) {
+        self.register("clear_box", h_clear_box);
+        self.register("delivery", h_delivery);
+        self.register("delivery_capability", h_delivery_capability);
+    }
+
     /// `dunk_api.dispatch(flock, name, args, self_pane_id)`, with the acting pane read only from
     /// this request's [`RequestCtx`] and caller state scoped to this synchronous request thread.
     pub fn dispatch<G: CallerGate + ?Sized>(
@@ -1012,6 +1037,136 @@ pub fn h_flush_box(context: &HandlerContext<'_>, args: Args) -> Result<Value, Du
         .env
         .send_commands()?
         .flush_box(&target, context.self_pane_id())
+}
+
+/// `dunk_api.h_clear_box`: preserve the raw target/reason and call the existing guarded Flock
+/// operation exactly once. Its superuser-before-resolution ordering remains in Flock.
+pub fn h_clear_box(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let target = args
+        .get("target")
+        .ok_or_else(|| DunkError::Refused("'target'".into()))?;
+    let reason = args.get("reason");
+    let mut operation = |env: &mut dyn crate::flock::clear_box::ClearBoxEnv| {
+        context
+            .flock
+            .clear_box(env, target, context.self_pane_id(), reason)
+    };
+    context.env.with_clear_box_env(&mut operation)
+}
+
+/// Resolve the raw `dunk_core.Flock.resolve_target` input used by `h_delivery`.
+fn delivery_target(context: &HandlerContext<'_>, target: &Value) -> Result<Value, DunkError> {
+    if let Value::Object(_) = target {
+        let pane_id = target
+            .get("pane_id")
+            .filter(|value| truthy(value))
+            .ok_or_else(|| DunkError::Refused("target dict has no pane_id".into()))?;
+        let panes = context.env.list_panes_grouped();
+        return Ok(panes
+            .iter()
+            .find(|pane| pane.get("pane_id") == Some(pane_id))
+            .cloned()
+            .unwrap_or_else(|| target.clone()));
+    }
+    let spec = Some(target)
+        .filter(|value| truthy(value))
+        .map(python_value_string)
+        .unwrap_or_default();
+    if spec.is_empty() {
+        return Err(DunkError::Refused("target is required".into()));
+    }
+    if matches!(spec.to_lowercase().as_str(), "self" | "me" | "here")
+        && context
+            .self_pane_id()
+            .filter(|pane| !pane.is_empty())
+            .is_none()
+    {
+        return Err(DunkError::Refused(
+            "target 'self' needs TMUX_PANE (or HERDR_PANE_ID on the herdr rollback; run from inside a pane)".into(),
+        ));
+    }
+    let panes = context.env.list_panes_grouped();
+    if panes.is_empty() {
+        let error = context
+            .env
+            .terminal()
+            .lock()
+            .map_err(|_| DunkError::Refused("terminal adapter lock poisoned".into()))?
+            .server_error_hint();
+        return Err(DunkError::Refused(error));
+    }
+    crate::flock::resolve::resolve_target(&panes, &spec, context.self_pane_id(), "").cloned()
+}
+
+/// `dunk_api.h_delivery`: resolve the raw target first; only absent or null status requests
+/// fallback to terminal status. Explicit falsey values still suppress that fallback.
+pub fn h_delivery(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let target = args
+        .get("target")
+        .ok_or_else(|| DunkError::Refused("'target'".into()))?;
+    let pane = delivery_target(context, target)?;
+    let pane_id = pane
+        .get("pane_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| DunkError::Refused("resolved target has no pane_id".into()))?;
+    let status = args
+        .get("status")
+        .filter(|value| !value.is_null())
+        .map(|value| {
+            if truthy(value) {
+                python_value_string(value)
+            } else {
+                String::new()
+            }
+        });
+    let mut operation = |env: &mut dyn crate::flock::clear_box::ClearBoxEnv| {
+        Ok(context
+            .flock
+            .delivery_state(env, pane_id, status.as_deref(), Some(&pane), None))
+    };
+    context.env.with_clear_box_env(&mut operation)
+}
+
+fn python_value_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "NoneType",
+        Value::Bool(_) => "bool",
+        Value::Number(number) if number.is_i64() || number.is_u64() => "int",
+        Value::Number(_) => "float",
+        Value::String(_) => "str",
+        Value::Array(_) => "list",
+        Value::Object(_) => "dict",
+    }
+}
+
+/// `dunk_api.h_delivery_capability`: preserve Python's falsey default and `.strip()` type error
+/// before consulting the Flock delivery service.
+pub fn h_delivery_capability(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let raw = args.get("target").unwrap_or(&Value::Null);
+    let target = if truthy(raw) {
+        let Some(target) = raw.as_str() else {
+            return Err(DunkError::Refused(format!(
+                "'{}' object has no attribute 'strip'",
+                python_value_type_name(raw)
+            )));
+        };
+        target.trim()
+    } else {
+        ""
+    };
+    if target.is_empty() {
+        return Err(DunkError::Refused(
+            "delivery_capability must be given a target (a pane id like %9 or a pinned lane name)"
+                .into(),
+        ));
+    }
+    context.flock.delivery_capability(
+        context.env.delivery_env()?,
+        context.env.owner_push()?,
+        target,
+        context.self_pane_id(),
+        context.env.now_s(),
+    )
 }
 
 struct ApiRetireEnv<'ctx, 'request> {
