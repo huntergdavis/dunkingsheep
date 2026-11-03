@@ -33,7 +33,7 @@ impl LoopRuntimeAdapter {
             .ok()?;
         let pane_pid = match registered_pane_pid {
             Some(Some(pid)) => pid,
-            Some(None) => {
+            Some(None) | None => {
                 let terminal_factory = std::sync::Arc::clone(&self.terminal_factory);
                 let pane_id = pane_id.to_owned();
                 std::thread::Builder::new()
@@ -48,7 +48,6 @@ impl LoopRuntimeAdapter {
                     .ok()
                     .flatten()?
             }
-            None => return None,
         };
         super::delivery::lane_agent_alive_for_pane_pid(pane_pid)
     }
@@ -141,6 +140,29 @@ mod tests {
         );
         assert!(adapter.helper_pushenv_lane_agent_alive("w1:p1").is_some());
         assert_eq!(adapter.helper_pushenv_lane_agent_alive("w9:p9"), None);
+
+        let unregistered_dir = crate::testsupport::dir("runtime-push-eligibility-unregistered");
+        let unregistered_flock = Arc::new(Flock::new(
+            unregistered_dir.path().join("launches.json"),
+            unregistered_dir.path().join("lanes.json"),
+            false,
+        ));
+        let unregistered_roles = Roles::new(
+            &Env::default(),
+            Some(unregistered_dir.path().join("roles.json")),
+            Some(unregistered_dir.path().join("tokens.json")),
+            None,
+        )
+        .expect("empty roles store");
+        unregistered_flock.attach_roles(unregistered_roles, None);
+        let unregistered_adapter = LoopRuntimeAdapter::new(
+            unregistered_flock,
+            Arc::new(|| Box::new(FakeTerminal::new())),
+        );
+        assert!(unregistered_adapter
+            .helper_pushenv_lane_agent_alive("w1:p1")
+            .is_some());
+
         let active_agent = [crate::push::ChildProc {
             comm: "codex".into(),
             state: "S".into(),
