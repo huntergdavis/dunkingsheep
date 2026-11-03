@@ -4,6 +4,7 @@ import io
 import os
 import sys
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -297,6 +298,173 @@ class TimerTests(unittest.TestCase):
         report = self.sync.run()
         self.assertEqual(1, len(report["filed"]))
         self.assertTrue(any("403" in e for e in report["errors"]))
+
+    def _old_review_history(self):
+        # Synthetic private-store rows reproduce the oldest-first UI cap.
+        self.flock.tasks.db.executemany(
+            "INSERT INTO tasks (id,scope,title,body,status,priority,created_at,"
+            "updated_at,kind,repo,pr,head,verdict,completed_by) "
+            "VALUES (?,'global','old','unused body','done','urgent',1,1,"
+            "'review','old/repo',?,'old-head','accept','old-lane')",
+            [(f"t{9000000 + index}", index + 1) for index in range(1001)])
+        self.flock.tasks.db.commit()
+
+    def _review(self, verdict=None, lane=REVIEWER):
+        task = self.flock.tasks.add("global", "review", kind="review",
+                                    repo="o/r", pr=7, head="a" * 40, priority="high")
+        if verdict:
+            return self.flock.tasks.complete(task["id"], by=lane, verdict=verdict)
+        return task
+
+    def test_review_metadata_is_uncapped_global_and_does_not_decorate_cards(self):
+        self._old_review_history()
+        review = self._review("accept")
+        self.flock.tasks.add("w9:p9", "private review", kind="review",
+                            repo="private/repo", pr=7, head="b" * 40)
+        self.flock.tasks.add("global", "not a review")
+        with patch.object(self.flock.tasks, "_decorate", side_effect=AssertionError("UI card")):
+            rows = self.flock.tasks.list_review_rows_visible()
+        self.assertEqual(1002, len(rows))
+        self.assertEqual("t9000000", rows[0]["id"])
+        self.assertEqual(review["id"], rows[-1]["id"])
+        self.assertEqual({"id", "status", "completed_by", "repo", "pr", "head", "verdict"},
+                         set(rows[-1]))
+        self.assertEqual(REVIEWER, rows[-1]["completed_by"])
+
+    def test_old_history_cannot_hide_live_or_accepted_current_head(self):
+        self._old_review_history()
+        task = self._review()
+        self.assertEqual(task["id"], self.sync._live_reviews()[("o/r", 7)]["id"])
+        self.flock.tasks.complete(task["id"], by=REVIEWER, verdict="accept")
+        self.github.merge_blocked = True
+        report = self.sync.run()
+        self.assertEqual([], report["filed"])
+        self.assertEqual(([REVIEWER], []), self.sync.head_verdicts("o/r", "a" * 40, 7))
+        self.assertNotIn("pending", [status[2] for status in self.github.statuses])
+
+    def test_old_history_needs_fix_still_blocks_later_same_head_acceptance(self):
+        self._old_review_history()
+        self._review("needs-fix")
+        self._review("accept", SECOND_REVIEWER)
+        with patch.object(self.sync, "_second_review") as second:
+            report = self.sync.run()
+        self.assertEqual([], report["filed"])
+        self.assertEqual([], getattr(self.github, "merged", []))
+        self.assertEqual([], self.github.reviews)
+        second.assert_not_called()
+
+    def test_review_completed_during_github_listing_is_not_refiled_or_cancelled(self):
+        self._old_review_history()
+        task = self._review()
+        original = self.github.open_pulls
+
+        def pulls(repo, token):
+            self.flock.tasks.complete(task["id"], by=REVIEWER, verdict="needs-fix")
+            return original(repo, token)
+
+        with patch.object(self.github, "open_pulls", side_effect=pulls):
+            report = self.sync.run()
+        self.assertEqual([], report["filed"])
+        self.assertEqual([], report["cancelled"])
+        self.assertEqual(1, len([r for r in self.flock.tasks.list_review_rows_visible()
+                                if r["repo"] == "o/r"]))
+
+    def test_review_completed_during_body_fetch_never_gets_pending_overwrite(self):
+        original = self.github.pull_detail
+        calls = 0
+
+        def detail(repo, number, token):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                self._review("accept")
+            return original(repo, number, token)
+
+        with patch.object(self.github, "pull_detail", side_effect=detail):
+            report = self.sync.run()
+        self.assertEqual([], report["filed"])
+        self.assertEqual([], self.github.statuses)
+        self.assertEqual(1, len(self.flock.tasks.list_review_rows_visible()))
+
+    def test_judged_duplicate_completion_between_check_and_cancel_is_preserved(self):
+        self._review("needs-fix")
+        duplicate = self._review()
+        original = self.flock.tasks.cancel
+
+        def cancel(task_id, reason=None):
+            self.flock.tasks.complete(task_id, by=SECOND_REVIEWER, verdict="accept")
+            return original(task_id, reason=reason)
+
+        with patch.object(self.flock.tasks, "cancel", side_effect=cancel):
+            report = self.sync.run()
+        self.assertEqual([], report["cancelled"])
+        self.assertEqual([], report["filed"])
+        self.assertEqual("done", self.flock.tasks.get(duplicate["id"])["status"])
+
+    def test_peer_completion_between_final_read_and_add_creates_no_task_or_pending(self):
+        original = self.flock.tasks.add
+        peer = Tasks(path=self.flock.tasks.path)
+        raced = False
+        failures = []
+
+        def add(*args, **kwargs):
+            nonlocal raced
+            if not raced:
+                raced = True
+                task = original(*args, **{k: v for k, v in kwargs.items()
+                                          if k != "expected_review_verdicts"})
+
+                def finish():
+                    try:
+                        peer.complete(task["id"], by=REVIEWER, verdict="accept")
+                    except Exception as error:
+                        failures.append(error)
+
+                worker = threading.Thread(target=finish)
+                worker.start()
+                worker.join(5)
+                self.assertFalse(worker.is_alive(), "peer completion must finish before add")
+            return original(*args, **kwargs)
+
+        try:
+            with patch.object(self.flock.tasks, "add", side_effect=add):
+                report = self.sync.run()
+        finally:
+            peer.close()
+        self.assertEqual([], failures)
+        self.assertEqual([], report["filed"])
+        self.assertEqual([], report["errors"])
+        self.assertEqual([], self.github.statuses)
+        self.assertEqual(1, len(self.flock.tasks.list_review_rows_visible()))
+        self.assertEqual(1, self.flock.tasks.db.execute(
+            "SELECT COUNT(*) FROM task_events WHERE event='created'").fetchone()[0])
+
+    def test_additional_review_does_not_race_a_new_needs_fix_verdict(self):
+        self._review("accept")
+        original = self.flock.tasks.add
+        raced = False
+
+        def add(*args, **kwargs):
+            nonlocal raced
+            if not raced:
+                raced = True
+                self._review("needs-fix", SECOND_REVIEWER)
+            return original(*args, **kwargs)
+
+        with patch.object(dunk_github, "required_verdicts", return_value=2), \
+                patch.object(self.flock.tasks, "add", side_effect=add):
+            task_id = self.sync._second_review("o/r", 7, "a" * 40, REVIEWER)
+        self.assertIsNone(task_id)
+        self.assertEqual(2, len(self.flock.tasks.list_review_rows_visible()))
+        self.assertTrue(all(r["status"] == "done"
+                            for r in self.flock.tasks.list_review_rows_visible()))
+
+    def test_judged_duplicate_unrelated_cancel_refusal_is_not_swallowed(self):
+        self._review("needs-fix")
+        self._review()
+        with patch.object(self.flock.tasks, "cancel", side_effect=TaskError("live refusal")):
+            with self.assertRaisesRegex(TaskError, "live refusal"):
+                self.sync.run()
 
     def _closed_review_fixture(self):
         self.sync.run()

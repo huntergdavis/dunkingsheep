@@ -637,7 +637,13 @@ class Tasks:
     def add(self, scope, title, body="", status=DEFAULT_STATUS,
             priority=DEFAULT_PRIORITY, assignees=None, parent_id=None,
             depends_on=None, created_by=None, multi_assignee=False,
-            kind=DEFAULT_KIND, author=None, repo=None, pr=None, head=None):
+            kind=DEFAULT_KIND, author=None, repo=None, pr=None, head=None,
+            expected_review_verdicts=None):
+        """Create a task; an optional review snapshot guard returns None if stale.
+
+        The guard is internal to ReviewSync. Default callers retain ordinary add
+        semantics, including explicitly requested additional reviewer lanes.
+        """
         scope = validate_scope(scope)
         title = str(title or "").strip()
         if not title:
@@ -658,6 +664,10 @@ class Tasks:
         if kind == "review" and not (repo and pr and head):
             raise TaskError("a review task needs repo, pr and head (the exact commit "
                             "under review); the verdict is bound to that head")
+        if expected_review_verdicts is not None:
+            if kind != "review" or scope != GLOBAL:
+                raise TaskError("review verdict expectations require a global review")
+            expected_review_verdicts = set(expected_review_verdicts)
 
         parent_id = str(parent_id).strip() if parent_id else None
         if parent_id:
@@ -674,6 +684,18 @@ class Tasks:
                 self.db.commit()
             self.db.execute("BEGIN IMMEDIATE")
             try:
+                if expected_review_verdicts is not None:
+                    # Share the existing insertion transaction: a completion
+                    # between Sync's read and this insert must not file a review
+                    # or allocate an id/event. Ordinary add callers are unchanged.
+                    actual = {row["id"] for row in self.db.execute(
+                        "SELECT id FROM tasks WHERE scope = ? AND kind = 'review' "
+                        "AND repo = ? AND pr = ? AND head = ? AND status = 'done' "
+                        "AND verdict IS NOT NULL AND verdict != ''",
+                        (GLOBAL, repo, pr, head)).fetchall()}
+                    if actual != expected_review_verdicts:
+                        self.db.rollback()
+                        return None
                 task_id = self._next_id()
                 now = _now()
                 try:
@@ -1368,6 +1390,22 @@ class Tasks:
             tasks = [task for task in tasks if assignee in task["assignees"]]
         tasks.sort(key=self._order_key)
         return tasks[: int(limit)]
+
+    def list_review_rows_visible(self):
+        """Global review identities/verdicts, without UI decoration or a list cap.
+
+        ReviewSync needs the entire verdict history, not the oldest 1000 cards.
+        Keep the ordinary list order, but never load bodies, dependencies or leases.
+        This is the same metadata view as Rust's Tasks.list_review_rows_visible.
+        """
+        rows = [dict(row) for row in self.db.execute(
+            "SELECT id, status, completed_by, repo, pr, head, verdict, priority, "
+            "created_at FROM tasks WHERE scope = ? AND kind = 'review'",
+            (GLOBAL,)).fetchall()]
+        rows.sort(key=self._order_key)
+        for row in rows:
+            del row["priority"], row["created_at"]
+        return rows
 
     def authors_of(self, repo, pr):
         """Pane ids that WORKED on (repo, pr), from the work tasks (t723).

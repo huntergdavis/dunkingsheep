@@ -214,8 +214,7 @@ class Sync:
         self.github = github
 
     def _live_reviews(self):
-        tasks = self.flock.tasks.list(scope=None, include_done=True, limit=1000,
-                                      kind="review")
+        tasks = self.flock.tasks.list_review_rows_visible()
         by_pr = {}
         for task in tasks:
             if task["status"] in ("open", "in_progress", "blocked"):
@@ -226,8 +225,7 @@ class Sync:
         """(repo, pr, head) -> verdict for every DONE review: a head that was
         judged is never re-filed (2026-10-29: an accepted PR got a second review
         task the next tick, whose pending status overwrote the success)."""
-        tasks = self.flock.tasks.list(scope=None, include_done=True, limit=1000,
-                                      kind="review")
+        tasks = self.flock.tasks.list_review_rows_visible()
         out = {}
         for task in tasks:
             if task["status"] == "done" and task.get("verdict"):
@@ -242,16 +240,18 @@ class Sync:
         where `completed_by` is the lane. A lane that accepted twice is one lane; a
         needs-fix from any lane stops the head even if others accept it.
         """
-        tasks = self.flock.tasks.list(scope=None, include_done=True, limit=1000,
-                                      kind="review")
+        return self._verdict_lanes(self._head_verdict_rows(repo, head, number))
+
+    def _head_verdict_rows(self, repo, head, number=None):
+        return [task for task in self.flock.tasks.list_review_rows_visible()
+                if task.get("repo") == repo and task.get("head") == head
+                and (number is None or task.get("pr") == number)
+                and task["status"] == "done" and task.get("verdict")]
+
+    @staticmethod
+    def _verdict_lanes(tasks):
         accepts, needs_fix = set(), set()
         for task in tasks:
-            if task.get("repo") != repo or task.get("head") != head:
-                continue
-            if number is not None and task.get("pr") != number:
-                continue
-            if task["status"] != "done":
-                continue
             lane = task.get("completed_by") or None
             if task.get("verdict") == "accept" and lane:
                 accepts.add(str(lane))
@@ -274,6 +274,10 @@ class Sync:
         author from its own review, so the next reviewer cannot be the same lane. The
         partial unique index allows it because the first review task is done.
         """
+        verdict_rows = self._head_verdict_rows(repo, head, number)
+        accepts, needs_fix = self._verdict_lanes(verdict_rows)
+        if needs_fix or len(accepts) >= dunk_github.required_verdicts(repo):
+            return None
         title = (f"Review {repo.split('/')[-1]} PR #{number} {head[:8]} "
                  f"(second reviewer: {first_lane} accepted)")[:120]
         body = (f"SECOND REVIEW {repo}#{number} @ {head}\n"
@@ -286,12 +290,13 @@ class Sync:
         try:
             task = self.flock.tasks.add("global", title, body=body, priority="high",
                                         kind="review", author=first_lane, repo=repo,
-                                        pr=number, head=head, created_by="review-sync")
+                                        pr=number, head=head, created_by="review-sync",
+                                        expected_review_verdicts=[t["id"] for t in verdict_rows])
         except Exception as error:  # noqa: BLE001
             if report is not None:
                 report["errors"].append(f"second review {repo}#{number}: {error}")
             return None
-        return task["id"]
+        return task["id"] if task else None
 
     def conflicting(self, repo, number, token, report=None):
         """True / False when GitHub says, None when it will not say (t704).
@@ -319,6 +324,18 @@ class Sync:
             return False
         return None
 
+    def _cancel_review_if_live(self, task_id, reason):
+        """A snapshot may already be finished; unrelated refusals still fail."""
+        if self.flock.tasks.get(task_id)["status"] in ("done", "cancelled"):
+            return False
+        try:
+            self.flock.tasks.cancel(task_id, reason=reason)
+        except TaskError:
+            if self.flock.tasks.get(task_id)["status"] in ("done", "cancelled"):
+                return False
+            raise
+        return True
+
     def run(self, dry_run=False):
         report = {"repos": [], "filed": [], "cancelled": [], "statuses": [],
                   "followups": [], "conflicted": [], "errors": []}
@@ -330,7 +347,6 @@ class Sync:
         lanes = self.flock.roles.describe().get("lanes") or {}
         mints = getattr(self.flock, "_gh_token_mints", {}) or {}
         live = self._live_reviews()
-        judged = self._judged_heads()
         report["merged"] = []
         seen = set()
         listed = set()       # repos GitHub answered for; only their closed PRs are cancelled
@@ -366,14 +382,16 @@ class Sync:
                 key = (repo, pr["number"])
                 seen.add(key)
                 current = live.get(key)
-                done = judged.get((repo, pr["number"], pr["head"]))
+                # GitHub reads can outlive another lane's completed verdict.
+                # Refresh after those reads, without the task-card history cap.
+                done = self._judged_heads().get((repo, pr["number"], pr["head"]))
                 if done is not None and current and current.get("head") == pr["head"] \
                         and not dry_run:
                     # A judged head with a live duplicate (filed by an older tick):
                     # the verdict stands, the duplicate goes.
-                    self.flock.tasks.cancel(current["id"],
-                                            reason=f"duplicate of judged review {done['id']}")
-                    report["cancelled"].append(current["id"])
+                    if self._cancel_review_if_live(
+                            current["id"], f"duplicate of judged review {done['id']}"):
+                        report["cancelled"].append(current["id"])
                     current = None
                 if current and current.get("head") == pr["head"]:
                     continue
@@ -388,7 +406,7 @@ class Sync:
                         if final:
                             self._merge(repo, pr["number"], pr["head"], token, report,
                                         done["id"])
-                        elif not live.get(key):
+                        elif not needs_fix and not live.get(key):
                             # 1 of 2 accepted and nobody is reviewing: keep a second
                             # review in the queue rather than waiting forever.
                             self._second_review(repo, pr["number"], pr["head"],
@@ -396,10 +414,12 @@ class Sync:
                     continue
                 if current:
                     if not dry_run:
-                        self.flock.tasks.cancel(current["id"],
-                                                reason=f"head moved to {pr['head'][:12]}; "
-                                                       "delta review filed")
-                    report["cancelled"].append(current["id"])
+                        if self._cancel_review_if_live(
+                                current["id"], f"head moved to {pr['head'][:12]}; "
+                                               "delta review filed"):
+                            report["cancelled"].append(current["id"])
+                    else:
+                        report["cancelled"].append(current["id"])
                 author = attribute_author(pr, lanes, mints)
                 if author is None:
                     author = author_from_tasks(repo, pr["number"], self.flock)
@@ -420,13 +440,19 @@ class Sync:
                     report["filed"].append({"repo": repo, "pr": pr["number"],
                                             "head": pr["head"], "author": author})
                     continue
+                # pull_detail above is another potentially slow network read.
+                if (repo, pr["number"], pr["head"]) in self._judged_heads():
+                    continue
                 try:
                     task = self.flock.tasks.add(
                         "global", title, body=review_body(pr, detail, author),
                         priority="high", kind="review", author=author, repo=repo,
-                        pr=pr["number"], head=pr["head"], created_by="review-sync")
+                        pr=pr["number"], head=pr["head"], created_by="review-sync",
+                        expected_review_verdicts=())
                 except Exception as error:  # noqa: BLE001 - one PR must not stop the sweep
                     report["errors"].append(f"{repo}#{pr['number']}: {error}")
+                    continue
+                if task is None:  # verdict committed after our final read
                     continue
                 report["filed"].append({"task": task["id"], "repo": repo,
                                         "pr": pr["number"], "head": pr["head"],
@@ -453,17 +479,8 @@ class Sync:
                     continue
                 # The live map predates the GitHub reads. Another request may
                 # have completed this review while the sweep was listing PRs.
-                if self.flock.tasks.get(task["id"])["status"] in ("done", "cancelled"):
-                    continue
-                try:
-                    self.flock.tasks.cancel(task["id"], reason="PR closed or merged on GitHub")
-                except TaskError:
-                    # Completion can also commit between the check and cancel.
-                    # A refusal for a still-live task remains a real error.
-                    if self.flock.tasks.get(task["id"])["status"] in ("done", "cancelled"):
-                        continue
-                    raise
-                report["cancelled"].append(task["id"])
+                if self._cancel_review_if_live(task["id"], "PR closed or merged on GitHub"):
+                    report["cancelled"].append(task["id"])
         return report
 
     def _account_after_merge(self, repo, number, head, task_id, report):
