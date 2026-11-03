@@ -4,7 +4,7 @@ use super::*;
 use serde_json::{json, Value};
 use std::cell::RefCell;
 use std::collections::VecDeque;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 const PARTIAL: &str =
     "id,status\nOVL_0038_0775,partial\nOVL_0001_0001, FULL \n,partial\nOVL_0002_0002\n";
@@ -285,6 +285,65 @@ impl ReviewPolicy for FakeReviewPolicy {
     }
 }
 
+impl ReviewRepoConfig for FakeReviewPolicy {
+    fn repos(&self) -> Result<Vec<String>, String> {
+        Ok(vec!["o/r".into()])
+    }
+
+    fn author_from_mints(&self, _since: f64) -> Result<Option<String>, String> {
+        Ok(None)
+    }
+}
+
+struct FakeReviewTokens(Result<String, String>);
+
+impl ReviewTokenSource for FakeReviewTokens {
+    fn reviewer_token(&self) -> ReviewFuture<'_, Result<String, String>> {
+        Box::pin(async move { self.0.clone() })
+    }
+}
+
+impl ReviewRunContext for Tasks {
+    fn lane_labels(&self) -> Result<Vec<(String, String)>, String> {
+        Ok(Vec::new())
+    }
+
+    fn author_token_mints(&self) -> Result<Vec<(String, f64)>, String> {
+        Ok(Vec::new())
+    }
+}
+
+#[derive(Default)]
+struct FakeReviewMerge {
+    calls: Mutex<Vec<(String, i64, String, String)>>,
+    error: Mutex<Option<String>>,
+}
+
+impl ReviewRunMerge for FakeReviewMerge {
+    fn merge<'a>(
+        &'a self,
+        repo: &'a str,
+        number: i64,
+        head: &'a str,
+        _token: &'a str,
+        task_id: &'a str,
+        _report: &'a mut Value,
+    ) -> ReviewFuture<'a, Result<(), String>> {
+        Box::pin(async move {
+            self.calls.lock().unwrap().push((
+                repo.to_string(),
+                number,
+                head.to_string(),
+                task_id.to_string(),
+            ));
+            match self.error.lock().unwrap().clone() {
+                Some(error) => Err(error),
+                None => Ok(()),
+            }
+        })
+    }
+}
+
 #[derive(Default)]
 struct FakeReviewActor {
     rows: RefCell<Vec<ReviewTaskRow>>,
@@ -342,6 +401,46 @@ impl ReviewTaskActor for FakeReviewActor {
         })
     }
 
+    fn task_status<'a>(&'a self, id: &'a str) -> ReviewFuture<'a, Result<String, String>> {
+        Box::pin(async move {
+            self.rows
+                .borrow()
+                .iter()
+                .find(|row| row.id == id)
+                .map(|row| row.status.clone())
+                .ok_or_else(|| format!("no task with id {id:?}"))
+        })
+    }
+
+    fn cancel_review<'a>(
+        &'a self,
+        id: &'a str,
+        _reason: &'a str,
+    ) -> ReviewFuture<'a, Result<(), crate::error::DunkError>> {
+        Box::pin(async move {
+            let mut rows = self.rows.borrow_mut();
+            let row = rows.iter_mut().find(|row| row.id == id).ok_or_else(|| {
+                crate::error::DunkError::Refused(format!("no task with id {id:?}"))
+            })?;
+            if matches!(row.status.as_str(), "done" | "cancelled") {
+                return Err(crate::error::DunkError::Refused(format!(
+                    "cannot cancel {id} because it is {}",
+                    row.status
+                )));
+            }
+            row.status = "cancelled".into();
+            Ok(())
+        })
+    }
+
+    fn authors_of<'a>(
+        &'a self,
+        _repo: &'a str,
+        _number: i64,
+    ) -> ReviewFuture<'a, Result<Vec<String>, String>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
     fn notes<'a>(&'a self, _id: &'a str) -> ReviewFuture<'a, Result<Vec<TaskNote>, String>> {
         Box::pin(async move {
             if let Some(error) = self.notes_error.borrow().clone() {
@@ -356,6 +455,7 @@ impl ReviewTaskActor for FakeReviewActor {
 struct FakeReviewTransport {
     requests: Mutex<Vec<crate::github::GitHubRequest>>,
     responses: Mutex<VecDeque<Result<crate::github::GitHubResponse, String>>>,
+    completion_on_request: Mutex<Option<(String, Arc<Tasks>, String, String, String)>>,
 }
 
 impl FakeReviewTransport {
@@ -365,7 +465,25 @@ impl FakeReviewTransport {
         Self {
             requests: Mutex::new(Vec::new()),
             responses: Mutex::new(responses.into_iter().collect()),
+            completion_on_request: Mutex::new(None),
         }
+    }
+
+    fn complete_review_on_request(
+        &self,
+        url_fragment: &str,
+        tasks: Arc<Tasks>,
+        id: &str,
+        by: &str,
+        verdict: &str,
+    ) {
+        *self.completion_on_request.lock().unwrap() = Some((
+            url_fragment.to_string(),
+            tasks,
+            id.to_string(),
+            by.to_string(),
+            verdict.to_string(),
+        ));
     }
 }
 
@@ -375,8 +493,10 @@ impl GitHubTransport for FakeReviewTransport {
         request: crate::github::GitHubRequest,
     ) -> crate::github::PinBoxFuture<'a, Result<crate::github::GitHubResponse, String>> {
         Box::pin(async move {
+            let url = request.url.clone();
             self.requests.lock().unwrap().push(request);
-            self.responses
+            let response = self
+                .responses
                 .lock()
                 .unwrap()
                 .pop_front()
@@ -386,7 +506,30 @@ impl GitHubTransport for FakeReviewTransport {
                         reason: "OK".into(),
                         body: b"{}".to_vec(),
                     })
-                })
+                });
+            let effect = {
+                let mut effect = self.completion_on_request.lock().unwrap();
+                if effect
+                    .as_ref()
+                    .filter(|(fragment, ..)| url.contains(fragment))
+                    .is_some()
+                {
+                    effect.take()
+                } else {
+                    None
+                }
+            };
+            if let Some((_, tasks, id, by, verdict)) = effect {
+                tasks
+                    .set_verdict(&id, &verdict, Some(&by))
+                    .await
+                    .map_err(|error| error.to_string())?;
+                tasks
+                    .task_complete(&id, Some(&by), true)
+                    .await
+                    .map_err(|error| error.to_string())?;
+            }
+            response
         })
     }
 }
@@ -397,6 +540,216 @@ fn github_response(status: u16, value: Value) -> Result<crate::github::GitHubRes
         reason: if status == 200 { "OK" } else { "Forbidden" }.into(),
         body: serde_json::to_vec(&value).unwrap(),
     })
+}
+
+fn open_pull(number: i64, head: &str, branch: &str) -> Value {
+    json!([{
+        "number": number,
+        "title": "candidate",
+        "html_url": format!("https://example.test/pull/{number}"),
+        "draft": false,
+        "head": {"sha": head, "ref": branch},
+        "base": {"ref": "main"},
+        "created_at": "2026-11-02T22:00:00Z",
+        "updated_at": "2026-11-02T22:01:00Z",
+        "user": {"login": "author"}
+    }])
+}
+
+async fn add_actual_review(
+    tasks: &Tasks,
+    number: i64,
+    head: &str,
+    title: &str,
+) -> crate::tasks::Task {
+    tasks
+        .add_with(
+            "global",
+            title,
+            "",
+            crate::tasks::AddOptions {
+                kind: Some("review".into()),
+                repo: Some("o/r".into()),
+                pr: Some(number.to_string()),
+                head: Some(head.into()),
+                priority: Some("high".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+}
+
+async fn finish_review(tasks: &Tasks, id: &str, lane: &str, verdict: &str) {
+    tasks.set_verdict(id, verdict, Some(lane)).await.unwrap();
+    tasks.task_complete(id, Some(lane), true).await.unwrap();
+}
+
+type ActualReviewSync = ReviewSync<Tasks, FakeReviewTokens, FakeReviewPolicy, FakeReviewTransport>;
+
+async fn run_actual_review_sync(
+    tasks: Tasks,
+    transport: FakeReviewTransport,
+    required: usize,
+) -> (ActualReviewSync, FakeReviewMerge, Value) {
+    let sync = ReviewSync::with_transport(
+        tasks,
+        FakeReviewTokens(Ok("test-token".into())),
+        FakeReviewPolicy { required },
+        "https://api.example.test",
+        transport,
+    );
+    let merger = FakeReviewMerge::default();
+    let report = sync.run(&merger, false).await.unwrap();
+    (sync, merger, report)
+}
+
+#[derive(Clone, Copy)]
+enum CancelRaceMode {
+    FinishBeforeRefusal,
+    RefuseLive,
+}
+
+struct CancelRaceActor {
+    tasks: Arc<Tasks>,
+    mode: CancelRaceMode,
+}
+
+impl ReviewTaskActor for CancelRaceActor {
+    fn set_accounting_pr<'a>(
+        &'a self,
+        id: &'a str,
+        number: i64,
+    ) -> ReviewFuture<'a, Result<(), String>> {
+        let tasks = self.tasks.clone();
+        Box::pin(async move {
+            tasks
+                .set_accounting_pr(id, number)
+                .await
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    fn note_with_meta<'a>(
+        &'a self,
+        id: &'a str,
+        event: &'a str,
+        actor: &'a str,
+        meta: &'a Value,
+    ) -> ReviewFuture<'a, Result<(), String>> {
+        let tasks = self.tasks.clone();
+        Box::pin(async move {
+            let reason = meta.get("reason").and_then(Value::as_str);
+            tasks
+                .note_with_meta(id, event, actor, reason, meta)
+                .await
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    fn list_review_rows(
+        &self,
+    ) -> ReviewFuture<'_, Result<Vec<crate::tasks::ReviewTaskRow>, String>> {
+        let tasks = self.tasks.clone();
+        Box::pin(async move {
+            tasks
+                .list_review_rows_visible()
+                .await
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    fn task_status<'a>(&'a self, id: &'a str) -> ReviewFuture<'a, Result<String, String>> {
+        let tasks = self.tasks.clone();
+        Box::pin(async move {
+            tasks
+                .get(id)
+                .await
+                .map(|task| task.status)
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    fn cancel_review<'a>(
+        &'a self,
+        id: &'a str,
+        _reason: &'a str,
+    ) -> ReviewFuture<'a, Result<(), crate::error::DunkError>> {
+        let tasks = self.tasks.clone();
+        let mode = self.mode;
+        Box::pin(async move {
+            match mode {
+                CancelRaceMode::FinishBeforeRefusal => {
+                    tasks.set_verdict(id, "accept", Some("%9")).await?;
+                    tasks.task_complete(id, Some("%9"), true).await?;
+                    Err(crate::error::DunkError::Refused(
+                        "concurrent completion won the cancel race".into(),
+                    ))
+                }
+                CancelRaceMode::RefuseLive => Err(crate::error::DunkError::Refused(
+                    "synthetic refusal for a still-live review".into(),
+                )),
+            }
+        })
+    }
+
+    fn authors_of<'a>(
+        &'a self,
+        repo: &'a str,
+        number: i64,
+    ) -> ReviewFuture<'a, Result<Vec<String>, String>> {
+        let tasks = self.tasks.clone();
+        Box::pin(async move {
+            tasks
+                .authors_of(repo, number)
+                .await
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    fn notes<'a>(&'a self, id: &'a str) -> ReviewFuture<'a, Result<Vec<TaskNote>, String>> {
+        let tasks = self.tasks.clone();
+        Box::pin(async move { tasks.notes(id).await.map_err(|error| error.to_string()) })
+    }
+}
+
+impl ReviewTaskCreator for CancelRaceActor {
+    fn add_review_task<'a>(
+        &'a self,
+        title: &'a str,
+        body: &'a str,
+        author: Option<&'a str>,
+        repo: &'a str,
+        number: i64,
+        head: &'a str,
+        expected_verdict_ids: &'a [String],
+    ) -> ReviewFuture<'a, Result<Option<String>, String>> {
+        let tasks = self.tasks.clone();
+        Box::pin(async move {
+            ReviewTaskCreator::add_review_task(
+                &*tasks,
+                title,
+                body,
+                author,
+                repo,
+                number,
+                head,
+                expected_verdict_ids,
+            )
+            .await
+        })
+    }
+}
+
+impl ReviewRunContext for CancelRaceActor {
+    fn lane_labels(&self) -> Result<Vec<(String, String)>, String> {
+        Ok(Vec::new())
+    }
+
+    fn author_token_mints(&self) -> Result<Vec<(String, f64)>, String> {
+        Ok(Vec::new())
+    }
 }
 
 fn review_sync(
@@ -439,7 +792,7 @@ fn live_reviews_requests_the_review_task_set_and_keeps_last_duplicate_value() {
     assert_eq!("t4", live[0].1["id"]);
     assert_eq!(Some(&json!(9)), live[1].0 .1.as_ref());
     assert_eq!(
-        vec![(None, true, 1000, "review".to_string())],
+        vec![(None, true, usize::MAX, "review".to_string())],
         *sync.flock.queries.borrow()
     );
 }
@@ -1088,4 +1441,341 @@ async fn second_review_insertion_refusal_returns_no_id_and_appends_source_error(
     let rows = sync.flock.list_review_rows_visible().await.unwrap();
     assert_eq!(1, rows.len());
     assert_eq!(existing.id, rows[0].id);
+}
+
+#[tokio::test]
+async fn second_review_needs_fix_blocks_another_review_on_the_same_head() {
+    let dir = crate::testsupport::dir("review-sync-second-review-needs-fix");
+    let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    let first = store
+        .add_with(
+            "global",
+            "first review",
+            "",
+            crate::tasks::AddOptions {
+                kind: Some("review".into()),
+                repo: Some("o/r".into()),
+                pr: Some("7".into()),
+                head: Some("exact-head".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .set_verdict(&first.id, "needs-fix", Some("%1"))
+        .await
+        .unwrap();
+    store
+        .task_complete(&first.id, Some("%1"), true)
+        .await
+        .unwrap();
+
+    let sync = ReviewSync::with_tokens(store, (), FakeReviewPolicy { required: 2 });
+    assert_eq!(
+        None,
+        sync._second_review("o/r", 7, "exact-head", "%2", None)
+            .await
+    );
+    let rows = sync.flock.list_review_rows_visible().await.unwrap();
+    assert_eq!(1, rows.len());
+    assert_eq!(first.id, rows[0].id);
+}
+
+#[tokio::test]
+async fn run_keeps_an_open_same_head_and_an_open_conflicted_review() {
+    let dir = crate::testsupport::dir("review-sync-run-open-review");
+    let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    let same_head = add_actual_review(&store, 7, "head-a", "same head").await;
+    let transport = FakeReviewTransport::with_responses([
+        github_response(200, open_pull(7, "head-a", "work/topic")),
+        github_response(200, json!({"mergeable": true, "state": "open"})),
+    ]);
+    let (sync, _, report) = run_actual_review_sync(store, transport, 2).await;
+    assert_eq!("open", sync.flock.get(&same_head.id).await.unwrap().status);
+    assert!(report["cancelled"].as_array().unwrap().is_empty());
+
+    let dir = crate::testsupport::dir("review-sync-run-conflicted-open");
+    let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    let conflicted = add_actual_review(&store, 8, "head-b", "conflicted open").await;
+    let transport = FakeReviewTransport::with_responses([
+        github_response(200, open_pull(8, "head-b", "work/topic")),
+        github_response(200, json!({"mergeable": false, "state": "open"})),
+        github_response(200, json!({"state": "open", "head": {"sha": "head-b"}})),
+    ]);
+    let (sync, _, report) = run_actual_review_sync(store, transport, 2).await;
+    assert_eq!("open", sync.flock.get(&conflicted.id).await.unwrap().status);
+    assert!(report["cancelled"].as_array().unwrap().is_empty());
+    assert_eq!(3, sync.transport.requests.lock().unwrap().len());
+}
+
+#[tokio::test]
+async fn run_failed_repo_list_skips_cleanup_and_unknown_or_malformed_detail_preserves_task() {
+    let dir = crate::testsupport::dir("review-sync-run-failed-list");
+    let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    let task = add_actual_review(&store, 7, "head-a", "failed list").await;
+    let transport = FakeReviewTransport::with_responses([github_response(
+        500,
+        json!({"message": "list unavailable"}),
+    )]);
+    let (sync, _, report) = run_actual_review_sync(store, transport, 2).await;
+    assert_eq!("open", sync.flock.get(&task.id).await.unwrap().status);
+    assert_eq!(1, sync.transport.requests.lock().unwrap().len());
+    assert_eq!(1, report["errors"].as_array().unwrap().len());
+
+    for (tag, detail) in [
+        ("unknown", json!({"state": "draft"})),
+        ("malformed", json!({"head": {"sha": "head-a"}})),
+    ] {
+        let dir = crate::testsupport::dir(&format!("review-sync-run-state-{tag}"));
+        let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+        let task = add_actual_review(&store, 7, "head-a", "unknown state").await;
+        let transport = FakeReviewTransport::with_responses([
+            github_response(200, json!([])),
+            github_response(200, detail),
+        ]);
+        let (sync, _, report) = run_actual_review_sync(store, transport, 2).await;
+        assert_eq!("open", sync.flock.get(&task.id).await.unwrap().status);
+        assert_eq!(1, report["errors"].as_array().unwrap().len());
+        assert!(report["errors"][0]
+            .as_str()
+            .unwrap()
+            .contains("cleanup: unknown PR state"));
+    }
+
+    let dir = crate::testsupport::dir("review-sync-run-detail-error");
+    let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    let task = add_actual_review(&store, 7, "head-a", "detail error").await;
+    let transport = FakeReviewTransport::with_responses([
+        github_response(200, json!([])),
+        github_response(500, json!({"message": "detail unavailable"})),
+    ]);
+    let (sync, _, report) = run_actual_review_sync(store, transport, 2).await;
+    assert_eq!("open", sync.flock.get(&task.id).await.unwrap().status);
+    assert_eq!(1, report["errors"].as_array().unwrap().len());
+    assert!(report["errors"][0]
+        .as_str()
+        .unwrap()
+        .contains("cleanup: HTTP 500"));
+}
+
+#[tokio::test]
+async fn run_cancel_race_ignores_terminal_winner_and_propagates_live_refusal() {
+    for (tag, mode, expected_status, expect_error) in [
+        (
+            "terminal-won",
+            CancelRaceMode::FinishBeforeRefusal,
+            "done",
+            false,
+        ),
+        ("live-refused", CancelRaceMode::RefuseLive, "open", true),
+    ] {
+        let dir = crate::testsupport::dir(&format!("review-sync-cancel-race-{tag}"));
+        let tasks = Arc::new(Tasks::open(dir.path().join("tasks.db")).await.unwrap());
+        let task = add_actual_review(&tasks, 7, "head-a", "cancel race").await;
+        let actor = CancelRaceActor {
+            tasks: tasks.clone(),
+            mode,
+        };
+        let transport = FakeReviewTransport::with_responses([
+            github_response(200, json!([])),
+            github_response(200, json!({"state": "closed", "head": {"sha": "head-a"}})),
+        ]);
+        let sync = ReviewSync::with_transport(
+            actor,
+            FakeReviewTokens(Ok("test-token".into())),
+            FakeReviewPolicy { required: 2 },
+            "https://api.example.test",
+            transport,
+        );
+        let result = sync.run(&FakeReviewMerge::default(), false).await;
+        assert_eq!(expected_status, tasks.get(&task.id).await.unwrap().status);
+        if expect_error {
+            assert!(result.unwrap_err().contains("synthetic refusal"));
+        } else {
+            assert!(result.unwrap()["errors"].as_array().unwrap().is_empty());
+        }
+    }
+}
+
+#[tokio::test]
+async fn run_needs_fix_blocks_second_review_and_final_merge_even_with_later_accept() {
+    let dir = crate::testsupport::dir("review-sync-run-needs-fix-blocks");
+    let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    let needs_fix = add_actual_review(&store, 7, "head-a", "needs fix").await;
+    finish_review(&store, &needs_fix.id, "%1", "needs-fix").await;
+    let later_accept = add_actual_review(&store, 7, "head-a", "later accept").await;
+    finish_review(&store, &later_accept.id, "%2", "accept").await;
+    let transport = FakeReviewTransport::with_responses([
+        github_response(200, open_pull(7, "head-a", "work/topic")),
+        github_response(200, json!({"mergeable": true, "state": "open"})),
+    ]);
+    let (sync, merger, report) = run_actual_review_sync(store, transport, 2).await;
+    assert!(merger.merged.lock().unwrap().is_empty());
+    assert!(sync
+        .flock
+        .list_review_rows_visible()
+        .await
+        .unwrap()
+        .iter()
+        .all(|row| row.status == "done"));
+    assert!(report["errors"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn run_closed_and_merged_details_cancel_only_after_authoritative_state() {
+    for state in ["closed", "merged"] {
+        let dir = crate::testsupport::dir(&format!("review-sync-run-{state}"));
+        let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+        let task = add_actual_review(&store, 7, "head-a", "closed review").await;
+        let transport = FakeReviewTransport::with_responses([
+            github_response(200, json!([])),
+            github_response(200, json!({"state": state, "head": {"sha": "head-a"}})),
+        ]);
+        let (sync, _, report) = run_actual_review_sync(store, transport, 2).await;
+        assert_eq!("cancelled", sync.flock.get(&task.id).await.unwrap().status);
+        assert_eq!(vec![json!(task.id)], report["cancelled"]);
+    }
+}
+
+#[tokio::test]
+async fn run_preserves_the_needed_second_review_and_retires_stale_head_before_refiling() {
+    let dir = crate::testsupport::dir("review-sync-run-second-review-ticks");
+    let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    let first = add_actual_review(&store, 7, "head-current", "first accept").await;
+    finish_review(&store, &first.id, "%1", "accept").await;
+    let second = add_actual_review(&store, 7, "head-current", "needed second").await;
+    let transport = FakeReviewTransport::with_responses([
+        github_response(200, open_pull(7, "head-current", "work/topic")),
+        github_response(200, json!({"mergeable": true, "state": "open"})),
+        github_response(200, open_pull(7, "head-current", "work/topic")),
+        github_response(200, json!({"mergeable": true, "state": "open"})),
+    ]);
+    let (sync, _, first_report) = run_actual_review_sync(store, transport, 2).await;
+    assert!(first_report["cancelled"].as_array().unwrap().is_empty());
+    let (_, _, second_report) = sync.run(&FakeReviewMerge::default(), false).await.unwrap();
+    assert!(second_report["cancelled"].as_array().unwrap().is_empty());
+    assert_eq!("open", sync.flock.get(&second.id).await.unwrap().status);
+
+    let dir = crate::testsupport::dir("review-sync-run-stale-head-before-second");
+    let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    let accepted = add_actual_review(&store, 7, "head-current", "current accept").await;
+    finish_review(&store, &accepted.id, "%1", "accept").await;
+    let stale = add_actual_review(&store, 7, "head-old", "stale live review").await;
+    let transport = FakeReviewTransport::with_responses([
+        github_response(200, open_pull(7, "head-current", "work/topic")),
+        github_response(200, json!({"mergeable": true, "state": "open"})),
+        github_response(200, open_pull(7, "head-current", "work/topic")),
+        github_response(200, json!({"mergeable": true, "state": "open"})),
+    ]);
+    let (sync, _, report) = run_actual_review_sync(store, transport, 2).await;
+    assert_eq!("cancelled", sync.flock.get(&stale.id).await.unwrap().status);
+    assert_eq!(vec![json!(stale.id)], report["cancelled"]);
+    let current = sync.flock.list_review_rows_visible().await.unwrap();
+    let second = current
+        .iter()
+        .find(|row| {
+            row.repo.as_deref() == Some("o/r")
+                && row.pr == Some(7)
+                && row.head.as_deref() == Some("head-current")
+                && row.status == "open"
+        })
+        .unwrap();
+    let second_id = second.id.clone();
+    assert!(sync
+        .flock
+        .get(&second_id)
+        .await
+        .unwrap()
+        .title
+        .contains("second reviewer"));
+    let (_, _, next_report) = sync.run(&FakeReviewMerge::default(), false).await.unwrap();
+    assert!(next_report["cancelled"].as_array().unwrap().is_empty());
+    assert_eq!("open", sync.flock.get(&second_id).await.unwrap().status);
+}
+
+#[tokio::test]
+async fn run_refreshes_verdicts_during_github_listing_and_reads_history_past_one_thousand() {
+    let dir = crate::testsupport::dir("review-sync-run-verdict-during-list");
+    let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    let first = add_actual_review(&store, 7, "head-current", "first during listing").await;
+    let effect_tasks = Arc::new(Tasks::open(dir.path().join("tasks.db")).await.unwrap());
+    let transport = FakeReviewTransport::with_responses([
+        github_response(200, open_pull(7, "head-current", "work/topic")),
+        github_response(200, json!({"mergeable": true, "state": "open"})),
+    ]);
+    transport.complete_review_on_request(
+        "/pulls?state=open",
+        effect_tasks,
+        &first.id,
+        "%1",
+        "accept",
+    );
+    let (sync, _, report) = run_actual_review_sync(store, transport, 2).await;
+    assert_eq!("done", sync.flock.get(&first.id).await.unwrap().status);
+    let rows = sync.flock.list_review_rows_visible().await.unwrap();
+    assert_eq!(2, rows.len());
+    assert!(rows.iter().any(|row| {
+        row.pr == Some(7) && row.head.as_deref() == Some("head-current") && row.status == "open"
+    }));
+    assert!(report["errors"].as_array().unwrap().is_empty());
+
+    let dir = crate::testsupport::dir("review-sync-run-verdict-during-body-fetch");
+    let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    let first = add_actual_review(&store, 7, "head-current", "first during body fetch").await;
+    let effect_tasks = Arc::new(Tasks::open(dir.path().join("tasks.db")).await.unwrap());
+    let transport = FakeReviewTransport::with_responses([
+        github_response(200, open_pull(7, "head-current", "work/topic")),
+        github_response(200, json!({"mergeable": true, "state": "open"})),
+        github_response(200, json!({"body": "review details"})),
+    ]);
+    transport.complete_review_on_request("/pulls/7", effect_tasks, &first.id, "%1", "accept");
+    let (sync, _, report) = run_actual_review_sync(store, transport, 2).await;
+    assert_eq!("done", sync.flock.get(&first.id).await.unwrap().status);
+    assert_eq!(
+        1,
+        sync.flock.list_review_rows_visible().await.unwrap().len()
+    );
+    assert!(report["filed"].as_array().unwrap().is_empty());
+
+    let dir = crate::testsupport::dir("review-sync-run-history-over-1000");
+    let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    store
+        .writer
+        .call(|conn| {
+            for index in 0..1005 {
+                let id = format!("old{index:04}");
+                conn.execute(
+                    "INSERT INTO tasks (id, scope, title, body, status, priority, completed_by, assignees, depends_on, created_at, updated_at, kind, repo, pr, head, verdict) VALUES (?, 'global', ?, '', 'done', 'urgent', '%1', '[]', '[]', ?, ?, 'review', 'o/r', ?, 'old-head', 'accept')",
+                    rusqlite::params![id, id, index as f64, index as f64, index],
+                )
+                .map_err(crate::db::map_sqlite)?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let first = add_actual_review(&store, 7, "head-current", "first after history").await;
+    finish_review(&store, &first.id, "%1", "accept").await;
+    let transport = FakeReviewTransport::with_responses([
+        github_response(200, open_pull(7, "head-current", "work/topic")),
+        github_response(200, json!({"mergeable": true, "state": "open"})),
+    ]);
+    let (sync, _, _) = run_actual_review_sync(store, transport, 2).await;
+    let rows = sync.flock.list_review_rows_visible().await.unwrap();
+    assert_eq!(1007, rows.len());
+    let second = rows
+        .iter()
+        .find(|row| {
+            row.pr == Some(7) && row.head.as_deref() == Some("head-current") && row.status == "open"
+        })
+        .unwrap();
+    let second_id = second.id.clone();
+    assert!(sync
+        .flock
+        .get(&second_id)
+        .await
+        .unwrap()
+        .title
+        .contains("second reviewer"));
 }

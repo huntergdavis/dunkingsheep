@@ -226,6 +226,44 @@ impl Tasks {
         body: &str,
         opts: AddOptions,
     ) -> Result<Task, DunkError> {
+        self.add_with_verdict_guard(scope, title, body, opts, None)
+            .await?
+            .ok_or_else(|| DunkError::Refused("unconditional task insertion was refused".into()))
+    }
+
+    /// Add a global review task only if its exact terminal-verdict identity set is unchanged.
+    /// A stale snapshot returns `Ok(None)` before the task counter or event is touched.
+    pub async fn add_review_with_verdict_guard(
+        &self,
+        scope: &str,
+        title: &str,
+        body: &str,
+        opts: AddOptions,
+        expected_verdict_ids: &[String],
+    ) -> Result<Option<Task>, DunkError> {
+        if scope != "global" || opts.kind.as_deref() != Some("review") {
+            return Err(DunkError::Refused(
+                "review verdict expectations require a global review".into(),
+            ));
+        }
+        self.add_with_verdict_guard(
+            scope,
+            title,
+            body,
+            opts,
+            Some(expected_verdict_ids.to_vec()),
+        )
+        .await
+    }
+
+    async fn add_with_verdict_guard(
+        &self,
+        scope: &str,
+        title: &str,
+        body: &str,
+        opts: AddOptions,
+        expected_verdict_ids: Option<Vec<String>>,
+    ) -> Result<Option<Task>, DunkError> {
         let scope = validate_scope(scope)?;
         let title = title.trim().to_string();
         if title.is_empty() {
@@ -295,6 +333,25 @@ impl Tasks {
             let tx = conn
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                 .map_err(db::map_sqlite)?;
+            if let Some(expected_ids) = &expected_verdict_ids {
+                let actual_ids = {
+                    let mut stmt = tx.prepare(
+                        "SELECT id FROM tasks WHERE scope = 'global' AND kind = 'review' \
+                         AND repo = ? AND pr = ? AND head = ? AND status = 'done' \
+                         AND verdict IS NOT NULL AND verdict != ''",
+                    ).map_err(db::map_sqlite)?;
+                    let ids = stmt
+                        .query_map(params![repo, pr, head], |row| row.get::<_, String>(0))
+                        .map_err(db::map_sqlite)?;
+                    ids.collect::<Result<std::collections::BTreeSet<_>, _>>()
+                        .map_err(db::map_sqlite)?
+                };
+                let expected_ids = expected_ids.iter().cloned().collect::<std::collections::BTreeSet<_>>();
+                if actual_ids != expected_ids {
+                    tx.rollback().map_err(db::map_sqlite)?;
+                    return Ok(None);
+                }
+            }
             let require = |wanted: &str| -> Result<(), DunkError> {
                 let found: Option<String> = tx
                     .query_row("SELECT id FROM tasks WHERE id = ?", params![wanted], |row| row.get(0))
@@ -357,10 +414,13 @@ impl Tasks {
                 params![id, "created", now, created_by, scope, priority, status, meta],
             ).map_err(db::map_sqlite)?;
             tx.commit().map_err(db::map_sqlite)?;
-            Ok(id)
+            Ok(Some(id))
         }).await?;
+        let Some(id) = id else {
+            return Ok(None);
+        };
         self.fire(&id, "created", None, None);
-        self.get(&id).await
+        self.get(&id).await.map(Some)
     }
 
     /// One task by id.
@@ -1318,57 +1378,38 @@ impl Tasks {
             .await
     }
 
-    /// Visible review rows with the review-only columns, retaining `list_visible`'s
-    /// exact `order_key` order. The metadata is fetched in one actor query for the
-    /// ordered IDs rather than reconstructed with one query per task.
+    /// Complete global review metadata used by ReviewSync for live identities and verdicts.
+    /// This deliberately bypasses the UI list's 1000-row cap and decorators, while keeping
+    /// its priority/creation/id ordering in one writer query.
     pub async fn list_review_rows_visible(&self) -> Result<Vec<ReviewTaskRow>, DunkError> {
-        let visible = self
-            .list_visible(None, None, None, true, 1000, None, Some("review"), false)
-            .await?;
-        if visible.is_empty() {
-            return Ok(Vec::new());
-        }
-        let ids: Vec<String> = visible.iter().map(|row| row.task.id.clone()).collect();
-        let metadata = self
-            .writer
-            .call(move |conn| {
-                let marks = vec!["?"; ids.len()].join(",");
-                let sql = format!(
-                    "SELECT id, completed_by, repo, pr, head, verdict FROM tasks WHERE id IN ({marks})"
-                );
-                let mut stmt = conn.prepare(&sql).map_err(db::map_sqlite)?;
+        self.writer
+            .call(|conn| {
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT id, status, completed_by, repo, pr, head, verdict \
+                         FROM tasks WHERE scope = 'global' AND kind = 'review' \
+                         ORDER BY CASE priority \
+                           WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 \
+                           WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 99 END, \
+                           created_at, id",
+                    )
+                    .map_err(db::map_sqlite)?;
                 let rows = stmt
-                    .query_map(rusqlite::params_from_iter(ids.iter()), |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, Option<String>>(1)?,
-                        row.get::<_, Option<String>>(2)?,
-                        row.get::<_, Option<i64>>(3)?,
-                        row.get::<_, Option<String>>(4)?,
-                        row.get::<_, Option<String>>(5)?,
-                    ))
-                })
+                    .query_map([], |row| {
+                        Ok(ReviewTaskRow {
+                            id: row.get(0)?,
+                            status: row.get(1)?,
+                            completed_by: row.get(2)?,
+                            repo: row.get(3)?,
+                            pr: row.get(4)?,
+                            head: row.get(5)?,
+                            verdict: row.get(6)?,
+                        })
+                    })
                     .map_err(db::map_sqlite)?;
                 rows.collect::<Result<Vec<_>, _>>().map_err(db::map_sqlite)
             })
-            .await?;
-        let mut out = Vec::with_capacity(visible.len());
-        for row in visible {
-            if let Some((_, completed_by, repo, pr, head, verdict)) =
-                metadata.iter().find(|(id, ..)| id == &row.task.id)
-            {
-                out.push(ReviewTaskRow {
-                    id: row.task.id,
-                    status: row.task.status,
-                    completed_by: completed_by.clone(),
-                    repo: repo.clone(),
-                    pr: *pr,
-                    head: head.clone(),
-                    verdict: verdict.clone(),
-                });
-            }
-        }
-        Ok(out)
+            .await
     }
 
     /// `Tasks.stats`: counts by status, per visible scope and in total.
@@ -2451,6 +2492,239 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(1, events);
+    }
+
+    #[tokio::test]
+    async fn review_add_verdict_guard_rejects_stale_snapshot_without_allocating_id_or_event() {
+        let store = store("review-add-guard-stale").await;
+        let first = store
+            .add_with(
+                "global",
+                "first review",
+                "",
+                AddOptions {
+                    kind: Some("review".into()),
+                    repo: Some("o/r".into()),
+                    pr: Some("7".into()),
+                    head: Some("head-a".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .writer
+            .call({
+                let id = first.id.clone();
+                move |conn| {
+                    conn.execute(
+                        "UPDATE tasks SET status='done', completed_by='%1', verdict='accept' WHERE id=?",
+                        params![id],
+                    )
+                    .map_err(db::map_sqlite)?;
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
+
+        let created_before: i64 = store
+            .writer
+            .call(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM task_events WHERE event='created'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(db::map_sqlite)
+            })
+            .await
+            .unwrap();
+        let counter_before: i64 = store
+            .writer
+            .call(|conn| {
+                conn.query_row("SELECT value FROM counters WHERE name='task'", [], |row| {
+                    row.get(0)
+                })
+                .map_err(db::map_sqlite)
+            })
+            .await
+            .unwrap();
+
+        let stale = store
+            .add_review_with_verdict_guard(
+                "global",
+                "second review",
+                "body",
+                AddOptions {
+                    priority: Some("high".into()),
+                    kind: Some("review".into()),
+                    repo: Some("o/r".into()),
+                    pr: Some("7".into()),
+                    head: Some("head-a".into()),
+                    ..Default::default()
+                },
+                &[],
+            )
+            .await
+            .unwrap();
+        assert!(stale.is_none());
+
+        let created_after: i64 = store
+            .writer
+            .call(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM task_events WHERE event='created'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(db::map_sqlite)
+            })
+            .await
+            .unwrap();
+        let counter_after: i64 = store
+            .writer
+            .call(|conn| {
+                conn.query_row("SELECT value FROM counters WHERE name='task'", [], |row| {
+                    row.get(0)
+                })
+                .map_err(db::map_sqlite)
+            })
+            .await
+            .unwrap();
+        assert_eq!(created_before, created_after);
+        assert_eq!(counter_before, counter_after);
+
+        let inserted = store
+            .add_review_with_verdict_guard(
+                "global",
+                "second review",
+                "body",
+                AddOptions {
+                    priority: Some("high".into()),
+                    kind: Some("review".into()),
+                    repo: Some("o/r".into()),
+                    pr: Some("7".into()),
+                    head: Some("head-a".into()),
+                    ..Default::default()
+                },
+                std::slice::from_ref(&first.id),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(format!("t{}", counter_before + 1), inserted.id);
+    }
+
+    #[tokio::test]
+    async fn review_add_verdict_guard_rejects_a_new_needs_fix_verdict() {
+        let store = store("review-add-guard-needs-fix").await;
+        let accept = store
+            .add_with(
+                "global",
+                "accept",
+                "",
+                AddOptions {
+                    kind: Some("review".into()),
+                    repo: Some("o/r".into()),
+                    pr: Some("7".into()),
+                    head: Some("head-a".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let needs_fix = store
+            .add_with(
+                "global",
+                "needs fix",
+                "",
+                AddOptions {
+                    kind: Some("review".into()),
+                    repo: Some("o/r".into()),
+                    pr: Some("7".into()),
+                    head: Some("head-a".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .writer
+            .call({
+                let accept_id = accept.id.clone();
+                let needs_fix_id = needs_fix.id.clone();
+                move |conn| {
+                    conn.execute(
+                        "UPDATE tasks SET status='done', completed_by='%1', verdict='accept' WHERE id=?",
+                        params![accept_id],
+                    )
+                    .map_err(db::map_sqlite)?;
+                    conn.execute(
+                        "UPDATE tasks SET status='done', completed_by='%2', verdict='needs-fix' WHERE id=?",
+                        params![needs_fix_id],
+                    )
+                    .map_err(db::map_sqlite)?;
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
+
+        let none = store
+            .add_review_with_verdict_guard(
+                "global",
+                "third review",
+                "body",
+                AddOptions {
+                    kind: Some("review".into()),
+                    repo: Some("o/r".into()),
+                    pr: Some("7".into()),
+                    head: Some("head-a".into()),
+                    ..Default::default()
+                },
+                std::slice::from_ref(&accept.id),
+            )
+            .await
+            .unwrap();
+        assert!(none.is_none());
+    }
+
+    #[tokio::test]
+    async fn list_review_rows_visible_reads_uncapped_global_rows_in_priority_age_order() {
+        let store = store("review-rows-uncapped").await;
+        store
+            .writer
+            .call(|conn| {
+                for index in 0..1005 {
+                    let id = format!("t{index:04}");
+                    conn.execute(
+                        "INSERT INTO tasks (id, scope, title, body, status, priority, assignees, depends_on, created_at, updated_at, kind, repo, pr, head) VALUES (?, 'global', ?, '', 'done', 'low', '[]', '[]', ?, ?, 'review', 'o/r', ?, 'head')",
+                        params![id, format!("review {index}"), index as f64, index as f64, index],
+                    )
+                    .map_err(db::map_sqlite)?;
+                }
+                conn.execute(
+                    "INSERT INTO tasks (id, scope, title, body, status, priority, assignees, depends_on, created_at, updated_at, kind, repo, pr, head) VALUES ('urgent', 'global', 'urgent', '', 'open', 'urgent', '[]', '[]', 5000, 5000, 'review', 'o/r', 2000, 'head')",
+                    [],
+                )
+                .map_err(db::map_sqlite)?;
+                conn.execute(
+                    "INSERT INTO tasks (id, scope, title, body, status, priority, assignees, depends_on, created_at, updated_at, kind, repo, pr, head) VALUES ('private', 'w1:p1', 'private', '', 'open', 'urgent', '[]', '[]', 0, 0, 'review', 'o/r', 2001, 'head')",
+                    [],
+                )
+                .map_err(db::map_sqlite)?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let rows = store.list_review_rows_visible().await.unwrap();
+        assert_eq!(1006, rows.len());
+        assert_eq!("urgent", rows[0].id);
+        assert_eq!("t0000", rows[1].id);
+        assert_eq!("t1004", rows[1005].id);
+        assert!(rows.iter().all(|row| row.id != "private"));
     }
 
     #[tokio::test]

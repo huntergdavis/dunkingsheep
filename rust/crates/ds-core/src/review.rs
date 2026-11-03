@@ -10,6 +10,7 @@ use std::collections::BTreeSet;
 use std::future::Future;
 use std::pin::Pin;
 
+use crate::flock::Flock;
 use crate::github::{GitHubTransport, StatusUpdate};
 use crate::tasks::{AddOptions, ReviewTaskRow, TaskNote, Tasks};
 
@@ -49,6 +50,20 @@ pub trait ReviewTaskActor {
     ) -> ReviewFuture<'a, Result<(), String>>;
 
     fn list_review_rows(&self) -> ReviewFuture<'_, Result<Vec<ReviewTaskRow>, String>>;
+
+    fn task_status<'a>(&'a self, id: &'a str) -> ReviewFuture<'a, Result<String, String>>;
+
+    fn cancel_review<'a>(
+        &'a self,
+        id: &'a str,
+        reason: &'a str,
+    ) -> ReviewFuture<'a, Result<(), crate::error::DunkError>>;
+
+    fn authors_of<'a>(
+        &'a self,
+        repo: &'a str,
+        number: i64,
+    ) -> ReviewFuture<'a, Result<Vec<String>, String>>;
 
     fn notes<'a>(&'a self, id: &'a str) -> ReviewFuture<'a, Result<Vec<TaskNote>, String>>;
 }
@@ -90,12 +105,173 @@ impl ReviewTaskActor for Tasks {
         })
     }
 
+    fn task_status<'a>(&'a self, id: &'a str) -> ReviewFuture<'a, Result<String, String>> {
+        Box::pin(async move {
+            Tasks::get(self, id)
+                .await
+                .map(|task| task.status)
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    fn cancel_review<'a>(
+        &'a self,
+        id: &'a str,
+        reason: &'a str,
+    ) -> ReviewFuture<'a, Result<(), crate::error::DunkError>> {
+        Box::pin(async move { Tasks::cancel(self, id, reason).await.map(|_| ()) })
+    }
+
+    fn authors_of<'a>(
+        &'a self,
+        repo: &'a str,
+        number: i64,
+    ) -> ReviewFuture<'a, Result<Vec<String>, String>> {
+        Box::pin(async move {
+            Tasks::authors_of(self, repo, number)
+                .await
+                .map_err(|error| error.to_string())
+        })
+    }
+
     fn notes<'a>(&'a self, id: &'a str) -> ReviewFuture<'a, Result<Vec<TaskNote>, String>> {
         Box::pin(async move {
             Tasks::notes(self, id)
                 .await
                 .map_err(|error| error.to_string())
         })
+    }
+}
+
+fn attached_review_tasks(flock: &Flock) -> Result<std::sync::Arc<Tasks>, crate::error::DunkError> {
+    flock
+        .stores()
+        .tasks
+        .ok_or_else(|| crate::error::DunkError::Refused("task store is not attached".into()))
+}
+
+impl ReviewTaskActor for Flock {
+    fn set_accounting_pr<'a>(
+        &'a self,
+        id: &'a str,
+        number: i64,
+    ) -> ReviewFuture<'a, Result<(), String>> {
+        let tasks = attached_review_tasks(self);
+        Box::pin(async move {
+            let tasks = tasks.map_err(|error| error.to_string())?;
+            Tasks::set_accounting_pr(&tasks, id, number)
+                .await
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    fn note_with_meta<'a>(
+        &'a self,
+        id: &'a str,
+        event: &'a str,
+        actor: &'a str,
+        meta: &'a Value,
+    ) -> ReviewFuture<'a, Result<(), String>> {
+        let tasks = attached_review_tasks(self);
+        Box::pin(async move {
+            let tasks = tasks.map_err(|error| error.to_string())?;
+            let reason = meta.get("reason").and_then(Value::as_str);
+            Tasks::note_with_meta(&tasks, id, event, actor, reason, meta)
+                .await
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    fn list_review_rows(&self) -> ReviewFuture<'_, Result<Vec<ReviewTaskRow>, String>> {
+        let tasks = attached_review_tasks(self);
+        Box::pin(async move {
+            let tasks = tasks.map_err(|error| error.to_string())?;
+            Tasks::list_review_rows_visible(&tasks)
+                .await
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    fn task_status<'a>(&'a self, id: &'a str) -> ReviewFuture<'a, Result<String, String>> {
+        let tasks = attached_review_tasks(self);
+        Box::pin(async move {
+            let tasks = tasks.map_err(|error| error.to_string())?;
+            Tasks::get(&tasks, id)
+                .await
+                .map(|task| task.status)
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    fn cancel_review<'a>(
+        &'a self,
+        id: &'a str,
+        reason: &'a str,
+    ) -> ReviewFuture<'a, Result<(), crate::error::DunkError>> {
+        let tasks = attached_review_tasks(self);
+        Box::pin(async move { Tasks::cancel(&tasks?, id, reason).await.map(|_| ()) })
+    }
+
+    fn authors_of<'a>(
+        &'a self,
+        repo: &'a str,
+        number: i64,
+    ) -> ReviewFuture<'a, Result<Vec<String>, String>> {
+        let tasks = attached_review_tasks(self);
+        Box::pin(async move {
+            let tasks = tasks.map_err(|error| error.to_string())?;
+            Tasks::authors_of(&tasks, repo, number)
+                .await
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    fn notes<'a>(&'a self, id: &'a str) -> ReviewFuture<'a, Result<Vec<TaskNote>, String>> {
+        let tasks = attached_review_tasks(self);
+        Box::pin(async move {
+            let tasks = tasks.map_err(|error| error.to_string())?;
+            Tasks::notes(&tasks, id)
+                .await
+                .map_err(|error| error.to_string())
+        })
+    }
+}
+
+impl ReviewRunContext for Flock {
+    fn lane_labels(&self) -> Result<Vec<(String, String)>, String> {
+        let mut stores = self
+            .role_stores
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let roles = stores
+            .roles
+            .as_mut()
+            .ok_or_else(|| "no role registry is attached to this flock".to_string())?;
+        let described = roles.describe().map_err(|error| error.to_string())?;
+        let lanes = described
+            .get("lanes")
+            .and_then(Value::as_object)
+            .into_iter()
+            .flat_map(|lanes| lanes.iter())
+            .map(|(pane, entry)| {
+                let label = entry
+                    .get("label")
+                    .filter(|value| python_truthy(value))
+                    .map(python_string)
+                    .unwrap_or_default();
+                (pane.clone(), label)
+            })
+            .collect();
+        Ok(lanes)
+    }
+
+    fn author_token_mints(&self) -> Result<Vec<(String, f64)>, String> {
+        let mints = self
+            .gh_token_mints
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Ok(mints.iter().map(|(pane, at)| (pane.clone(), *at)).collect())
     }
 }
 
@@ -106,11 +282,83 @@ pub trait ReviewTaskCreator {
         &'a self,
         title: &'a str,
         body: &'a str,
-        first_lane: &'a str,
+        author: Option<&'a str>,
         repo: &'a str,
         number: i64,
         head: &'a str,
-    ) -> ReviewFuture<'a, Result<String, String>>;
+        expected_verdict_ids: &'a [String],
+    ) -> ReviewFuture<'a, Result<Option<String>, String>>;
+}
+
+/// Runtime inputs read from the existing owner/Flock sources for one timer pass.
+pub trait ReviewRunContext {
+    fn lane_labels(&self) -> Result<Vec<(String, String)>, String>;
+    fn author_token_mints(&self) -> Result<Vec<(String, f64)>, String>;
+}
+
+/// Repo config and ledger-backed mint attribution used by the production timer.
+pub trait ReviewRepoConfig {
+    fn repos(&self) -> Result<Vec<String>, String>;
+    fn author_from_mints(&self, since: f64) -> Result<Option<String>, String>;
+}
+
+/// Real config-backed adapter used by a production ReviewSync instance.
+#[derive(Debug, Clone)]
+pub struct ConfiguredReviewPolicy {
+    pub config_dir: std::path::PathBuf,
+}
+
+impl ReviewPolicy for ConfiguredReviewPolicy {
+    fn required_verdicts(&self, repo: &str) -> usize {
+        crate::github::required_verdicts(repo, None)
+            .unwrap_or(crate::github::DEFAULT_REQUIRED_VERDICTS)
+    }
+}
+
+impl ReviewRepoConfig for ConfiguredReviewPolicy {
+    fn repos(&self) -> Result<Vec<String>, String> {
+        Ok(crate::github::repos_config(&self.config_dir))
+    }
+
+    fn author_from_mints(&self, since: f64) -> Result<Option<String>, String> {
+        crate::github::author_from_mints(Some(since), None, None, &self.config_dir)
+            .map_err(|error| error.to_string())
+    }
+}
+
+/// Token interface for the real GitHub token cache and deterministic tests.
+pub trait ReviewTokenSource {
+    fn reviewer_token(&self) -> ReviewFuture<'_, Result<String, String>>;
+}
+
+/// The merge/accounting operation supplied by the adjacent accepted ReviewSync merge slice.
+/// The timer owns selection and terminal guards; this seam owns only the existing merge path.
+pub trait ReviewRunMerge {
+    fn merge<'a>(
+        &'a self,
+        repo: &'a str,
+        number: i64,
+        head: &'a str,
+        token: &'a str,
+        task_id: &'a str,
+        report: &'a mut Value,
+    ) -> ReviewFuture<'a, Result<(), String>>;
+}
+
+impl ReviewTokenSource for crate::github::Tokens {
+    fn reviewer_token(&self) -> ReviewFuture<'_, Result<String, String>> {
+        Box::pin(async move {
+            let token = self
+                .get("reviewer", None)
+                .await
+                .map_err(|error| error.to_string())?;
+            token
+                .get("token")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| "reviewer token response has no token".to_string())
+        })
+    }
 }
 
 impl ReviewTaskCreator for Tasks {
@@ -118,30 +366,70 @@ impl ReviewTaskCreator for Tasks {
         &'a self,
         title: &'a str,
         body: &'a str,
-        first_lane: &'a str,
+        author: Option<&'a str>,
         repo: &'a str,
         number: i64,
         head: &'a str,
-    ) -> ReviewFuture<'a, Result<String, String>> {
+        expected_verdict_ids: &'a [String],
+    ) -> ReviewFuture<'a, Result<Option<String>, String>> {
         Box::pin(async move {
-            self.add_with(
+            self.add_review_with_verdict_guard(
                 "global",
                 title,
                 body,
                 AddOptions {
                     priority: Some("high".into()),
                     kind: Some("review".into()),
-                    author: Some(first_lane.into()),
+                    author: author.map(str::to_owned),
                     repo: Some(repo.into()),
                     pr: Some(number.to_string()),
                     head: Some(head.into()),
                     created_by: Some("review-sync".into()),
                     ..Default::default()
                 },
+                expected_verdict_ids,
             )
             .await
-            .map(|task| task.id)
+            .map(|task| task.map(|task| task.id))
             .map_err(|error| error.to_string())
+        })
+    }
+}
+
+impl ReviewTaskCreator for Flock {
+    fn add_review_task<'a>(
+        &'a self,
+        title: &'a str,
+        body: &'a str,
+        author: Option<&'a str>,
+        repo: &'a str,
+        number: i64,
+        head: &'a str,
+        expected_verdict_ids: &'a [String],
+    ) -> ReviewFuture<'a, Result<Option<String>, String>> {
+        let tasks = attached_review_tasks(self);
+        Box::pin(async move {
+            let tasks = tasks.map_err(|error| error.to_string())?;
+            tasks
+                .add_review_with_verdict_guard(
+                    "global",
+                    title,
+                    body,
+                    AddOptions {
+                        priority: Some("high".into()),
+                        kind: Some("review".into()),
+                        author: author.map(str::to_owned),
+                        repo: Some(repo.into()),
+                        pr: Some(number.to_string()),
+                        head: Some(head.into()),
+                        created_by: Some("review-sync".into()),
+                        ..Default::default()
+                    },
+                    expected_verdict_ids,
+                )
+                .await
+                .map(|task| task.map(|task| task.id))
+                .map_err(|error| error.to_string())
         })
     }
 }
@@ -233,7 +521,7 @@ impl<S: ReviewTaskStore, T, G: ReviewPolicy> ReviewSync<S, T, G> {
     /// Build the live review map, retaining Python's task query and last-value
     /// replacement behavior while keeping first-insertion order.
     pub fn _live_reviews(&self) -> Result<Vec<(ReviewPrKey, Value)>, S::Error> {
-        let tasks = self.flock.list(None, true, 1000, "review")?;
+        let tasks = self.flock.list(None, true, usize::MAX, "review")?;
         let mut by_pr: Vec<(ReviewPrKey, Value)> = Vec::new();
         for task in tasks {
             let status = task
@@ -252,7 +540,7 @@ impl<S: ReviewTaskStore, T, G: ReviewPolicy> ReviewSync<S, T, G> {
     /// Build the already-judged map. A done review with a falsey verdict is not
     /// a judgment; duplicate keys keep the last task as Python's dict does.
     pub fn _judged_heads(&self) -> Result<Vec<(JudgedHeadKey, Value)>, S::Error> {
-        let tasks = self.flock.list(None, true, 1000, "review")?;
+        let tasks = self.flock.list(None, true, usize::MAX, "review")?;
         let mut out: Vec<(JudgedHeadKey, Value)> = Vec::new();
         for task in tasks {
             if task.get("status").and_then(Value::as_str) != Some("done")
@@ -278,7 +566,7 @@ impl<S: ReviewTaskStore, T, G: ReviewPolicy> ReviewSync<S, T, G> {
         head: &str,
         number: Option<i64>,
     ) -> Result<(Vec<String>, Vec<String>), S::Error> {
-        let tasks = self.flock.list(None, true, 1000, "review")?;
+        let tasks = self.flock.list(None, true, usize::MAX, "review")?;
         let mut accepts = BTreeSet::new();
         let mut needs_fix = BTreeSet::new();
         for task in tasks {
@@ -550,7 +838,7 @@ where
 
 impl<S, T, G, X> ReviewSync<S, T, G, X>
 where
-    S: ReviewTaskCreator,
+    S: ReviewTaskActor + ReviewTaskCreator,
     G: ReviewPolicy,
 {
     /// File the distinct second review task for an accepted exact head.
@@ -562,6 +850,47 @@ where
         first_lane: &str,
         report: Option<&mut Value>,
     ) -> Option<String> {
+        let verdict_rows = match self.flock.list_review_rows().await {
+            Ok(rows) => rows
+                .into_iter()
+                .filter(|row| {
+                    row.status == "done"
+                        && row
+                            .verdict
+                            .as_deref()
+                            .is_some_and(|verdict| !verdict.is_empty())
+                        && row.repo.as_deref() == Some(repo)
+                        && row.pr == Some(number)
+                        && row.head.as_deref() == Some(head)
+                })
+                .collect::<Vec<_>>(),
+            Err(error) => {
+                if let Some(report) = report {
+                    append_report(
+                        report,
+                        "errors",
+                        Value::String(format!("second review {repo}#{number}: {error}")),
+                    );
+                }
+                return None;
+            }
+        };
+        let mut accepts = BTreeSet::new();
+        let mut needs_fix = BTreeSet::new();
+        for row in &verdict_rows {
+            let Some(lane) = row.completed_by.as_deref().filter(|lane| !lane.is_empty()) else {
+                continue;
+            };
+            match row.verdict.as_deref() {
+                Some("accept") => {
+                    accepts.insert(lane.to_string());
+                }
+                Some("needs-fix") => {
+                    needs_fix.insert(lane.to_string());
+                }
+                _ => {}
+            }
+        }
         let repository = repo.rsplit('/').next().unwrap_or(repo);
         let short_head: String = head.chars().take(8).collect();
         let title: String = format!(
@@ -571,15 +900,30 @@ where
         .take(120)
         .collect();
         let required = self.github.required_verdicts(repo);
+        if !needs_fix.is_empty() || accepts.len() >= required.max(1) {
+            return None;
+        }
         let body = format!(
             "SECOND REVIEW {repo}#{number} @ {head}\nLane {first_lane} already accepted this exact head. {required} distinct reviewer lanes are required, so this task exists for a DIFFERENT lane; the claim filter keeps {first_lane} off it.\n\nVerdict: `dunkingsheep task complete <id> --verdict accept|needs-fix` with the evidence in `task note` first."
         );
+        let expected_verdict_ids = verdict_rows
+            .iter()
+            .map(|row| row.id.clone())
+            .collect::<Vec<_>>();
         match self
             .flock
-            .add_review_task(&title, &body, first_lane, repo, number, head)
+            .add_review_task(
+                &title,
+                &body,
+                Some(first_lane),
+                repo,
+                number,
+                head,
+                &expected_verdict_ids,
+            )
             .await
         {
-            Ok(id) => Some(id),
+            Ok(id) => id,
             Err(error) => {
                 if let Some(report) = report {
                     append_report(
@@ -591,6 +935,485 @@ where
                 None
             }
         }
+    }
+}
+
+impl<S, T, G, X> ReviewSync<S, T, G, X>
+where
+    S: ReviewTaskActor + ReviewTaskCreator + ReviewRunContext,
+    T: ReviewTokenSource,
+    G: ReviewPolicy + ReviewRepoConfig,
+    X: GitHubTransport,
+{
+    /// Run the deterministic ReviewSync sweep against the injected real task, token,
+    /// repository, identity, and transport sources. Final merges are delegated to the
+    /// adjacent merge/accounting slice through `ReviewRunMerge`.
+    pub async fn run<M: ReviewRunMerge>(&self, merger: &M, dry_run: bool) -> Result<Value, String> {
+        let mut report = serde_json::json!({
+            "repos": [], "filed": [], "cancelled": [], "statuses": [],
+            "followups": [], "conflicted": [], "errors": [], "merged": []
+        });
+        let token = match self.tokens.reviewer_token().await {
+            Ok(token) => token,
+            Err(error) => {
+                append_report(
+                    &mut report,
+                    "errors",
+                    Value::String(format!("reviewer token: {error}")),
+                );
+                return Ok(report);
+            }
+        };
+        let lanes = self
+            .flock
+            .lane_labels()
+            .map_err(|error| format!("review lane snapshot: {error}"))?;
+        let mints = self
+            .flock
+            .author_token_mints()
+            .map_err(|error| format!("author token mint snapshot: {error}"))?;
+        let initial_rows = self.flock.list_review_rows().await?;
+        let mut live = Vec::new();
+        for row in initial_rows {
+            if matches!(row.status.as_str(), "open" | "in_progress" | "blocked") {
+                let Some(repo) = row.repo.as_ref() else {
+                    continue;
+                };
+                let Some(number) = row.pr else {
+                    continue;
+                };
+                insert_replacing(&mut live, (repo.clone(), number), row);
+            }
+        }
+
+        let repos = self.github.repos()?;
+        let mut seen = BTreeSet::new();
+        let mut listed = BTreeSet::new();
+        for repo in repos {
+            let pulls =
+                match crate::github::open_pulls(&self.transport, &self.api_root, &repo, &token)
+                    .await
+                {
+                    Ok(pulls) => pulls,
+                    Err(error) => {
+                        append_report(
+                            &mut report,
+                            "errors",
+                            Value::String(format!("{repo}: {error}")),
+                        );
+                        continue;
+                    }
+                };
+            listed.insert(repo.clone());
+            append_report(
+                &mut report,
+                "repos",
+                serde_json::json!({"repo": repo, "open": pulls.len()}),
+            );
+            for raw_pr in pulls {
+                if raw_pr.get("draft").is_some_and(python_truthy) {
+                    continue;
+                }
+                let Some(pr) = parse_review_pull(&repo, &raw_pr) else {
+                    continue;
+                };
+                if pr.head.is_empty() {
+                    continue;
+                }
+
+                let conflict = self
+                    .conflicting(&repo, pr.number, &token, Some(&mut report))
+                    .await;
+                if conflict == Some(true) {
+                    append_report(
+                        &mut report,
+                        "conflicted",
+                        serde_json::json!({
+                            "repo": repo,
+                            "pr": pr.number,
+                            "head": pr.head.chars().take(12).collect::<String>()
+                        }),
+                    );
+                    continue;
+                }
+
+                let key = (repo.clone(), pr.number);
+                seen.insert(key.clone());
+                let mut current = live
+                    .iter()
+                    .find(|(candidate, _)| candidate == &key)
+                    .map(|(_, row)| row.clone());
+                // This read is deliberately after the GitHub conflict request. A verdict
+                // may have committed while GitHub was answering.
+                let latest_rows = self.flock.list_review_rows().await?;
+                let terminal_rows = terminal_rows(&latest_rows, &repo, pr.number, &pr.head);
+                let done = terminal_rows.last().cloned();
+
+                // Cancel a stale head before handling the current head's verdict. The live
+                // review uniqueness constraint otherwise blocks the required second review.
+                if current
+                    .as_ref()
+                    .is_some_and(|row| row.head.as_deref() != Some(pr.head.as_str()))
+                {
+                    if let Some(stale) = current.take() {
+                        let reason = format!(
+                            "head moved to {}; delta review filed",
+                            pr.head.chars().take(12).collect::<String>()
+                        );
+                        if dry_run {
+                            append_report(&mut report, "cancelled", Value::String(stale.id));
+                        } else if self.cancel_review_if_live(&stale.id, &reason).await? {
+                            append_report(&mut report, "cancelled", Value::String(stale.id));
+                        }
+                    }
+                }
+
+                if let Some(done_row) = done.as_ref() {
+                    if let Some(current_row) = current.as_ref() {
+                        if current_row.head.as_deref() == Some(pr.head.as_str()) && !dry_run {
+                            let (accepts, needs_fix) = verdict_lanes(&terminal_rows);
+                            let required = self.github.required_verdicts(&repo).max(1);
+                            let final_verdict = needs_fix.is_empty() && accepts.len() >= required;
+                            let still_needed = done_row.verdict.as_deref() == Some("accept")
+                                && !final_verdict
+                                && needs_fix.is_empty();
+                            if still_needed
+                                && !matches!(
+                                    self.flock.task_status(&current_row.id).await?.as_str(),
+                                    "done" | "cancelled"
+                                )
+                            {
+                                continue;
+                            }
+                            let reason = format!("duplicate of judged review {}", done_row.id);
+                            if self.cancel_review_if_live(&current_row.id, &reason).await? {
+                                append_report(
+                                    &mut report,
+                                    "cancelled",
+                                    Value::String(current_row.id.clone()),
+                                );
+                            }
+                            current = None;
+                        }
+                    }
+                }
+
+                if current
+                    .as_ref()
+                    .is_some_and(|row| row.head.as_deref() == Some(pr.head.as_str()))
+                {
+                    continue;
+                }
+
+                if let Some(done) = done {
+                    if done.verdict.as_deref() == Some("accept") && !dry_run {
+                        let (accepts, needs_fix) = verdict_lanes(&terminal_rows);
+                        let required = self.github.required_verdicts(&repo).max(1);
+                        let final_verdict = needs_fix.is_empty() && accepts.len() >= required;
+                        if final_verdict {
+                            merger
+                                .merge(&repo, pr.number, &pr.head, &token, &done.id, &mut report)
+                                .await?;
+                        } else if needs_fix.is_empty() && current.is_none() {
+                            if let Some(first_lane) = accepts.first() {
+                                let _ = self
+                                    ._second_review(
+                                        &repo,
+                                        pr.number,
+                                        &pr.head,
+                                        first_lane,
+                                        Some(&mut report),
+                                    )
+                                    .await;
+                            }
+                        }
+                    }
+                    continue;
+                }
+
+                let mut author =
+                    attribute_author_at(Some(&pr.branch), pr.created_at.as_deref(), &lanes, &mints);
+                if author.is_none() {
+                    author = author_from_tasks(self.flock.authors_of(&repo, pr.number).await);
+                }
+                if author.is_none() {
+                    author = self
+                        .github
+                        .author_from_mints(crate::clock::now_s() - 1800.0)?;
+                }
+                let detail = self
+                    .raw_pull_detail(&repo, pr.number, &token)
+                    .await
+                    .unwrap_or(Value::Null);
+                let detail = ReviewDetail {
+                    additions: detail.get("additions").and_then(Value::as_i64),
+                    deletions: detail.get("deletions").and_then(Value::as_i64),
+                    changed_files: detail.get("changed_files").and_then(Value::as_i64),
+                    body: detail
+                        .get("body")
+                        .filter(|value| python_truthy(value))
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                };
+                let title: String = format!(
+                    "Review {} PR #{} {}: {}",
+                    repo.rsplit('/').next().unwrap_or(&repo),
+                    pr.number,
+                    pr.head.chars().take(8).collect::<String>(),
+                    pr.title
+                )
+                .chars()
+                .take(120)
+                .collect();
+                if dry_run {
+                    append_report(
+                        &mut report,
+                        "filed",
+                        serde_json::json!({
+                            "repo": repo,
+                            "pr": pr.number,
+                            "head": pr.head,
+                            "author": author
+                        }),
+                    );
+                    continue;
+                }
+
+                let latest_rows = self.flock.list_review_rows().await?;
+                if !terminal_rows(&latest_rows, &repo, pr.number, &pr.head).is_empty() {
+                    continue;
+                }
+                let expected_verdict_ids = Vec::new();
+                let body = review_body(&pr, &detail, author.as_deref());
+                let id = match self
+                    .flock
+                    .add_review_task(
+                        &title,
+                        &body,
+                        author.as_deref(),
+                        &repo,
+                        pr.number,
+                        &pr.head,
+                        &expected_verdict_ids,
+                    )
+                    .await
+                {
+                    Ok(Some(id)) => id,
+                    Ok(None) => continue,
+                    Err(error) => {
+                        append_report(
+                            &mut report,
+                            "errors",
+                            Value::String(format!("{repo}#{}: {error}", pr.number)),
+                        );
+                        continue;
+                    }
+                };
+                append_report(
+                    &mut report,
+                    "filed",
+                    serde_json::json!({
+                        "task": id,
+                        "repo": repo,
+                        "pr": pr.number,
+                        "head": pr.head,
+                        "author": author
+                    }),
+                );
+                let description = format!("review task {id} open");
+                self._status(
+                    &token,
+                    StatusUpdate {
+                        repo: &repo,
+                        sha: &pr.head,
+                        state: "pending",
+                        description: &description,
+                        target_url: Some(&pr.url),
+                    },
+                    &mut report,
+                )
+                .await;
+            }
+        }
+
+        for ((repo, number), row) in &live {
+            if seen.contains(&(repo.clone(), *number)) || !listed.contains(repo) || dry_run {
+                continue;
+            }
+            let detail = match self.raw_pull_detail(repo, *number, &token).await {
+                Ok(detail) => detail,
+                Err(error) => {
+                    append_report(
+                        &mut report,
+                        "errors",
+                        Value::String(format!("{repo}#{number} cleanup: {error}")),
+                    );
+                    continue;
+                }
+            };
+            let state = detail.get("state");
+            if state.and_then(Value::as_str) == Some("open") {
+                continue;
+            }
+            if !matches!(state.and_then(Value::as_str), Some("closed" | "merged")) {
+                append_report(
+                    &mut report,
+                    "errors",
+                    Value::String(format!(
+                        "{repo}#{number} cleanup: unknown PR state {}",
+                        python_repr_value(state)
+                    )),
+                );
+                continue;
+            }
+            if self
+                .cancel_review_if_live(&row.id, "PR closed or merged on GitHub")
+                .await?
+            {
+                append_report(&mut report, "cancelled", Value::String(row.id.clone()));
+            }
+        }
+        Ok(report)
+    }
+
+    async fn raw_pull_detail(&self, repo: &str, number: i64, token: &str) -> Result<Value, String> {
+        let url = format!("{}/repos/{repo}/pulls/{number}", self.api_root);
+        crate::github::request(
+            &self.transport,
+            crate::github::RequestOptions {
+                method: "GET",
+                url: &url,
+                token: Some(token),
+                bearer: None,
+                payload: None,
+                timeout_s: 20,
+                api_root: &self.api_root,
+            },
+        )
+        .await
+        .map(|(_, pull)| pull.unwrap_or(Value::Null))
+        .map_err(|error| error.to_string())
+    }
+
+    async fn cancel_review_if_live(&self, id: &str, reason: &str) -> Result<bool, String> {
+        let status = self.flock.task_status(id).await?;
+        if matches!(status.as_str(), "done" | "cancelled") {
+            return Ok(false);
+        }
+        match self.flock.cancel_review(id, reason).await {
+            Ok(()) => Ok(true),
+            Err(crate::error::DunkError::Refused(error)) => {
+                let status = self.flock.task_status(id).await?;
+                if matches!(status.as_str(), "done" | "cancelled") {
+                    Ok(false)
+                } else {
+                    Err(error)
+                }
+            }
+            Err(error) => Err(error.to_string()),
+        }
+    }
+}
+
+fn parse_review_pull(repo: &str, value: &Value) -> Option<ReviewPull> {
+    let number = value.get("number")?.as_i64()?;
+    let get_text = |key: &str| {
+        value
+            .get(key)
+            .filter(|item| python_truthy(item))
+            .map(python_string)
+    };
+    Some(ReviewPull {
+        repo: repo.to_string(),
+        number,
+        head: get_text("head").unwrap_or_default(),
+        title: get_text("title").unwrap_or_default(),
+        url: get_text("url").unwrap_or_default(),
+        branch: get_text("branch").unwrap_or_default(),
+        base: get_text("base").unwrap_or_default(),
+        created_at: get_text("created_at"),
+        updated_at: get_text("updated_at"),
+    })
+}
+
+fn terminal_rows(
+    rows: &[ReviewTaskRow],
+    repo: &str,
+    number: i64,
+    head: &str,
+) -> Vec<ReviewTaskRow> {
+    rows.iter()
+        .filter(|row| {
+            row.status == "done"
+                && row
+                    .verdict
+                    .as_deref()
+                    .is_some_and(|verdict| !verdict.is_empty())
+                && row.repo.as_deref() == Some(repo)
+                && row.pr == Some(number)
+                && row.head.as_deref() == Some(head)
+        })
+        .cloned()
+        .collect()
+}
+
+fn verdict_lanes(rows: &[ReviewTaskRow]) -> (Vec<String>, Vec<String>) {
+    let mut accepts = BTreeSet::new();
+    let mut needs_fix = BTreeSet::new();
+    for row in rows {
+        let Some(lane) = row.completed_by.as_deref().filter(|lane| !lane.is_empty()) else {
+            continue;
+        };
+        match row.verdict.as_deref() {
+            Some("accept") => {
+                accepts.insert(lane.to_string());
+            }
+            Some("needs-fix") => {
+                needs_fix.insert(lane.to_string());
+            }
+            _ => {}
+        }
+    }
+    (
+        accepts.into_iter().collect(),
+        needs_fix.into_iter().collect(),
+    )
+}
+
+fn attribute_author_at(
+    branch: Option<&str>,
+    created_at: Option<&str>,
+    lanes: &[(String, String)],
+    mints: &[(String, f64)],
+) -> Option<String> {
+    let branch = branch.unwrap_or_default().to_lowercase();
+    for (pane, label) in lanes {
+        let label = label.trim().to_lowercase();
+        if !label.is_empty()
+            && (branch.starts_with(&format!("{label}/"))
+                || branch.starts_with(&format!("{label}-")))
+        {
+            return Some(pane.clone());
+        }
+    }
+    let created = _iso(created_at)? as f64;
+    let recent = mints
+        .iter()
+        .filter(|(_, minted)| **minted <= created && created - **minted < 2.0 * 60.0 * 60.0)
+        .map(|(pane, _)| pane)
+        .collect::<Vec<_>>();
+    (recent.len() == 1).then(|| recent[0].clone())
+}
+
+fn python_repr_value(value: Option<&Value>) -> String {
+    match value {
+        None | Some(Value::Null) => "None".into(),
+        Some(Value::String(value)) => {
+            format!("'{}'", value.replace('\\', "\\\\").replace('\'', "\\'"))
+        }
+        Some(Value::Bool(true)) => "True".into(),
+        Some(Value::Bool(false)) => "False".into(),
+        Some(value) => value.to_string(),
     }
 }
 
