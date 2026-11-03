@@ -391,7 +391,7 @@ fn parse_builtin_int(raw: &str) -> Option<DeliveryId> {
     fn decimal_digit(character: char) -> Option<u8> {
         let codepoint = u32::from(character);
         DECIMAL_ZEROES.iter().find_map(|zero| {
-            (codepoint >= *zero && codepoint < *zero + 10).then_some((codepoint - *zero) as u8)
+            (codepoint >= *zero && codepoint < *zero + 10).then(|| (codepoint - *zero) as u8)
         })
     }
 
