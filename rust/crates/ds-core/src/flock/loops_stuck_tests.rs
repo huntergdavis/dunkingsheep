@@ -12,15 +12,105 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use super::commands_inbox::{InboxEnv, Nudge, RouteEntry};
-use super::loops_stuck::{run_stuck_observer, DialogObserver, StalePanelReporter, StuckEnv};
+use super::loops_stuck::{
+    federated_recovery_step, run_stuck_observer, strict_stuck_observer_scan, DialogObserver,
+    StalePanelReporter, StuckEnv,
+};
 use super::mailbox::MailboxEnv;
 use super::Flock;
 use crate::db::ReadPool;
 use crate::error::DunkError;
 use crate::flock::loop_env::LoopFuture;
+use crate::flock::panes::PaneInfoEnv;
+use crate::flock::sends::{Message, SendEnv};
 use crate::inbox_store::Store;
 
 const MODAL: &str = "\u{1b}[1mApprove this?\u{1b}[0m\nEsc to cancel   Enter to confirm\n";
+
+struct RecoveryProbe {
+    screen: Mutex<String>,
+    after_enter: String,
+    keys: Mutex<Vec<String>>,
+    generation: String,
+    federated: bool,
+}
+
+impl SendEnv for RecoveryProbe {
+    fn read_pane(&self, _: &str, _: i64, _: bool) -> Option<String> {
+        Some(self.screen.lock().unwrap().clone())
+    }
+    fn pane_harness(&self, _: &str) -> Option<String> {
+        Some("codex".into())
+    }
+    fn session_process_gone(&self, _: &str) -> bool {
+        false
+    }
+    fn read_status(&self, _: &str) -> Option<String> {
+        Some("idle".into())
+    }
+    fn send_key(&mut self, _: &str, key: &str) -> (bool, String) {
+        self.keys.lock().unwrap().push(key.into());
+        if key == "Enter" {
+            *self.screen.lock().unwrap() = self.after_enter.clone();
+        }
+        (true, "sent".into())
+    }
+    fn federated_input(&self) -> bool {
+        self.federated
+    }
+}
+
+impl PaneInfoEnv for RecoveryProbe {
+    fn list_panes_grouped(&self) -> Vec<Value> {
+        vec![self.get_pane("%1").unwrap()]
+    }
+    fn get_pane(&self, pane_id: &str) -> Option<Value> {
+        (pane_id == "%1").then(|| {
+            json!({
+                "pane_id": "%1", "pane_pid": std::process::id(), "agent": "codex"
+            })
+        })
+    }
+}
+
+fn persisted_flock(dir: &tempfile::TempDir) -> Flock {
+    let flock = Flock::new(
+        dir.path().join("launches.json"),
+        dir.path().join("lanes.json"),
+        true,
+    );
+    flock
+        .attach_status_state(crate::flock::status_runtime::StatusState::at_start(
+            "test",
+            dir.path().join("state.json"),
+            std::env::current_exe().unwrap(),
+            crate::config::Env::default(),
+        ))
+        .unwrap();
+    flock
+}
+
+fn federated_probe() -> RecoveryProbe {
+    let frame = "  >_ OpenAI Codex (v0.165.0)\n\n\x1b[1m\u{203a} pending text\x1b[0m\n\n  GPT-6-Astra high \u{b7} ~/workspace/x\n  ? for shortcuts\n";
+    RecoveryProbe {
+        screen: Mutex::new(frame.into()),
+        after_enter: frame.replace("pending text", "Ask Codex to do anything"),
+        keys: Mutex::default(),
+        generation: format!(
+            "pid:{}:start:{}",
+            std::process::id(),
+            crate::proc::process_start(i64::from(std::process::id())).unwrap()
+        ),
+        federated: true,
+    }
+}
+
+fn failed_federated_candidate(probe: &RecoveryProbe) -> Message {
+    let mut message = Message::new("m1", "%1", "lane", "pending text", "send_text");
+    message.status = "failed".into();
+    message.attempt_generation = Some(probe.generation.clone());
+    message
+}
 
 struct Fake {
     panes: Mutex<Result<Vec<Value>, String>>,
@@ -87,7 +177,7 @@ impl StuckEnv for Fake {
     fn stuck_observer_step(&self) -> LoopFuture<'_, usize> {
         Box::pin(async move {
             self.log.lock().unwrap().push("step");
-            0
+            1
         })
     }
 }
@@ -504,7 +594,7 @@ async fn the_signature_is_the_last_4000_characters() {
 }
 
 #[tokio::test]
-async fn the_loop_scans_dialogs_every_tick_but_runs_the_stuck_step_only_when_enabled() {
+async fn the_loop_invokes_non_noop_stuck_step_when_enabled() {
     for (enabled, want_steps) in [(false, false), (true, true)] {
         let mut fake = Fake::with_panes(json!([agent("%1")]));
         fake.enabled = enabled;
@@ -537,4 +627,104 @@ async fn the_loop_scans_dialogs_every_tick_but_runs_the_stuck_step_only_when_ena
             "enabled={enabled}"
         );
     }
+}
+
+#[test]
+fn federated_recovery_waits_then_submits_once_without_replaying_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = persisted_flock(&dir);
+    let mut probe = federated_probe();
+    flock.note_stuck_candidate(&failed_federated_candidate(&probe));
+    let waits = Mutex::new(Vec::new());
+    let wait = |seconds| waits.lock().unwrap().push(seconds);
+
+    assert_eq!(
+        0,
+        federated_recovery_step(&flock, &mut probe, 100.0, &wait).unwrap()
+    );
+    assert!(
+        probe.keys.lock().unwrap().is_empty(),
+        "threshold has not elapsed"
+    );
+    assert_eq!(
+        1,
+        federated_recovery_step(&flock, &mut probe, 221.0, &wait).unwrap()
+    );
+    assert_eq!(vec!["Enter".to_string()], *probe.keys.lock().unwrap());
+    assert_eq!(
+        vec![crate::flock::sends::SUBMIT_POLL_S[0]],
+        *waits.lock().unwrap()
+    );
+    assert_eq!(
+        Some("consumed"),
+        flock.stuck_candidates.lock().unwrap()["%1"]
+            .recovery_outcome
+            .as_deref()
+    );
+    assert_eq!(
+        Some(String::new()),
+        crate::terminal::composer::federated_composer(true, &probe.screen.lock().unwrap())
+    );
+}
+
+#[test]
+fn strict_stuck_scan_leaves_queued_pane_to_its_outbox_worker() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = persisted_flock(&dir);
+    let mut probe = federated_probe();
+    let candidate = failed_federated_candidate(&probe);
+    flock.note_stuck_candidate(&candidate);
+    let mut queued = Message::new("m2", "%1", "lane", "next", "send_text");
+    queued.status = "queued".into();
+    flock
+        .outbox
+        .lock()
+        .unwrap()
+        .insert("%1".into(), vec![queued]);
+
+    assert_eq!(
+        0,
+        strict_stuck_observer_scan(&flock, &mut probe, 221.0).unwrap()
+    );
+    assert!(probe.keys.lock().unwrap().is_empty());
+}
+
+#[test]
+fn federated_recovery_refuses_no_enter_intent_and_queued_panes() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Flock::new(
+        dir.path().join("launches.json"),
+        dir.path().join("lanes.json"),
+        false,
+    );
+    let mut probe = federated_probe();
+    let mut no_enter = failed_federated_candidate(&probe);
+    no_enter.press_enter = false;
+    flock.note_stuck_candidate(&no_enter);
+    assert_eq!(
+        0,
+        federated_recovery_step(&flock, &mut probe, 221.0, &|_| {}).unwrap()
+    );
+    assert!(probe.keys.lock().unwrap().is_empty());
+
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Flock::new(
+        dir.path().join("launches.json"),
+        dir.path().join("lanes.json"),
+        false,
+    );
+    let mut probe = federated_probe();
+    flock.note_stuck_candidate(&failed_federated_candidate(&probe));
+    let mut queued = Message::new("m2", "%1", "lane", "next", "send_text");
+    queued.status = "queued".into();
+    flock
+        .outbox
+        .lock()
+        .unwrap()
+        .insert("%1".into(), vec![queued]);
+    assert_eq!(
+        0,
+        federated_recovery_step(&flock, &mut probe, 221.0, &|_| {}).unwrap()
+    );
+    assert!(probe.keys.lock().unwrap().is_empty());
 }

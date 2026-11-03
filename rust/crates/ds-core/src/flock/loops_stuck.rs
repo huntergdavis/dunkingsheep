@@ -11,10 +11,8 @@
 //! [`StuckEnv::note_stale_panel`] and never answers a dialog (2.9.0 pressed Escape and did it
 //! 1042 times).
 //!
-//! NOT PORTED here (a named hook, default 0): `_stuck_observer_step` itself and
-//! `_federated_recovery_step`. They need `_unwedge`, `_box_text`, the outbox and the `Message`
-//! type from T33 (`flock/sends.rs`, t801, not landed). The durable stale-panel alert reporter
-//! is provided below for the production `StuckEnv` hook.
+//! The observer partitions native federated composers from strict composers and delegates
+//! strict submissions to the existing guarded recovery transition in `sends`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -26,6 +24,8 @@ use serde_json::Value;
 use crate::error::DunkError;
 use crate::flock::commands_inbox::InboxEnv;
 use crate::flock::loop_env::LoopFuture;
+use crate::flock::panes::PaneInfoEnv;
+use crate::flock::sends::{self, SendEnv, StuckCandidate};
 use crate::flock::Flock;
 use crate::metrics::Event;
 use crate::terminal::screen::{collapse, modal_open, strip_ansi};
@@ -63,8 +63,339 @@ pub trait StuckEnv: Send + Sync {
     fn stuck_recovery_enabled(&self) -> bool {
         false
     }
-    /// `self._stuck_observer_step()`: how many recoveries it acted on. Not ported (needs T33).
+    /// `self._stuck_observer_step()`: how many recoveries it acted on.
     fn stuck_observer_step(&self) -> LoopFuture<'_, usize>;
+}
+
+/// The queued per-pane worker is the sole observer while a message remains queued.
+fn outbox_owns_pane(flock: &Flock, pane_id: &str) -> bool {
+    flock
+        .outbox
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(pane_id)
+        .is_some_and(|queue| queue.iter().any(|message| message.status == "queued"))
+}
+
+fn retire_candidate(
+    flock: &Flock,
+    pane_id: &str,
+    observed: &StuckCandidate,
+    status: &str,
+    now: f64,
+) {
+    let mut candidates = flock
+        .stuck_candidates
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(live) = candidates.get_mut(pane_id) {
+        if live.message_id == observed.message_id && live.created_at == observed.created_at {
+            live.eligible = false;
+            live.status = status.into();
+            live.retired_at = Some(now);
+        }
+    }
+}
+
+/// Strict-composer recovery for one observer tick. Recovery remains delegated to the
+/// existing `Flock::unwedge` transition; this scan only supplies a generation-bound candidate.
+pub(crate) fn strict_stuck_observer_scan<E: SendEnv + PaneInfoEnv>(
+    flock: &Flock,
+    env: &mut E,
+    now: f64,
+) -> Result<usize, DunkError> {
+    let candidates = flock
+        .stuck_candidates
+        .lock()
+        .map_err(|_| DunkError::Refused("stuck candidate registry unavailable".into()))?
+        .iter()
+        .map(|(pane, entry)| (pane.clone(), entry.clone()))
+        .collect::<Vec<_>>();
+    let mut acted = 0;
+    for (pane_id, entry) in candidates {
+        if outbox_owns_pane(flock, &pane_id) {
+            continue;
+        }
+        let screen = sends::read_screen(env, &pane_id, None, true);
+        if screen
+            .as_deref()
+            .and_then(|screen| {
+                crate::terminal::composer::federated_composer(env.federated_input(), screen)
+            })
+            .is_some()
+        {
+            continue; // federated observer exclusively owns recognized native frames
+        }
+        if !entry.eligible {
+            if entry.recovery_outcome.as_deref() == Some("consumed")
+                && !entry.receipts_reconciled.unwrap_or(false)
+            {
+                flock.publish_stuck_receipt(&pane_id, &entry);
+            }
+            continue;
+        }
+        let Some(generation) = sends::pane_generation(env, &pane_id) else {
+            flock
+                .stuck_tracker
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .forget(&pane_id);
+            continue;
+        };
+        if entry.generation.as_deref() != Some(generation.as_str()) {
+            retire_candidate(flock, &pane_id, &entry, "generation-changed", now);
+            flock
+                .stuck_tracker
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .forget(&pane_id);
+            continue;
+        }
+        let Some(screen) = screen else {
+            flock
+                .stuck_tracker
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .forget(&pane_id);
+            continue;
+        };
+        let Some(content) = flock.recovery_box_text(env, &pane_id, &screen) else {
+            flock
+                .stuck_tracker
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .forget(&pane_id);
+            continue;
+        };
+        if content.is_empty() {
+            flock
+                .stuck_tracker
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .forget(&pane_id);
+            retire_candidate(flock, &pane_id, &entry, "consumed", now);
+            continue;
+        }
+        let history_message = flock
+            .message_history
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .find(|message| message.id == entry.message_id && message.pane_id == pane_id)
+            .cloned();
+        let message = history_message.or_else(|| flock.stuck_candidate_message(&pane_id, env));
+        if let Some(message) = message {
+            acted += usize::from(flock.unwedge(
+                env,
+                &pane_id,
+                &content,
+                None,
+                Some(&message),
+                now,
+                Some(&entry.message_id),
+                true,
+            ));
+        }
+    }
+    flock.save()?;
+    Ok(acted)
+}
+
+/// Submit the existing federated composer exactly once after a durable tracker reservation.
+/// This path never sends candidate text and therefore preserves drafts and scrolled input.
+pub(crate) fn federated_recovery_step<E: SendEnv + PaneInfoEnv>(
+    flock: &Flock,
+    env: &mut E,
+    now: f64,
+    wait: &dyn Fn(f64),
+) -> Result<usize, DunkError> {
+    let config = *flock
+        .stuck_config
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !config.enabled || !env.federated_input() {
+        return Ok(0);
+    }
+    let candidates = flock
+        .stuck_candidates
+        .lock()
+        .map_err(|_| DunkError::Refused("stuck candidate registry unavailable".into()))?
+        .iter()
+        .map(|(pane, entry)| (pane.clone(), entry.clone()))
+        .collect::<Vec<_>>();
+    let mut acted = 0;
+    for (pane_id, entry) in candidates {
+        if outbox_owns_pane(flock, &pane_id)
+            || !entry.eligible
+            || !entry.press_enter
+            || entry.kind != "text"
+            || !matches!(entry.status.as_str(), "sent" | "failed")
+            || entry.generation.as_deref().is_none_or(str::is_empty)
+        {
+            continue;
+        }
+        let Some(screen) = sends::read_screen(env, &pane_id, None, true) else {
+            continue;
+        };
+        let Some(content) = crate::terminal::composer::federated_composer(true, &screen) else {
+            continue;
+        };
+        let generation = sends::pane_generation(env, &pane_id);
+        let dead = sends::dead_session(env, &pane_id).is_some();
+        let busy = crate::terminal::screen::status_marker(
+            &screen,
+            &crate::terminal::screen::WORKING_MARKERS,
+            40,
+            true,
+            true,
+        )
+        .is_some();
+        let ready = generation.as_deref() == entry.generation.as_deref()
+            && !busy
+            && !dead
+            && !env.session_process_gone(&pane_id);
+        let identity = format!("federated:{}", entry.message_id);
+        let mut observation = crate::stuck::Observation::new(
+            &pane_id,
+            Some(&identity),
+            Some(&content),
+            if ready { "ready" } else { "unknown" },
+        );
+        observation.generation = generation.clone();
+        let decision = flock
+            .stuck_tracker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .decide(&observation, &config, now);
+        if !decision.recovers() || !flock.persist_enabled || flock.save().is_err() {
+            continue;
+        }
+
+        let pane_lock = flock.send_lock_for(&pane_id);
+        let Ok(_pane_guard) = pane_lock.lock() else {
+            continue;
+        };
+        let Ok(_typing_guard) = flock.typing_guard(&pane_id) else {
+            continue;
+        };
+        let current = sends::read_screen(env, &pane_id, None, true);
+        let live = flock
+            .stuck_candidates
+            .lock()
+            .ok()
+            .and_then(|rows| rows.get(&pane_id).cloned());
+        if live.as_ref() != Some(&entry)
+            || sends::pane_generation(env, &pane_id) != generation
+            || current
+                .as_deref()
+                .and_then(|s| crate::terminal::composer::federated_composer(true, s))
+                != Some(content.clone())
+            || content.is_empty()
+            || sends::dead_session(env, &pane_id).is_some()
+            || env.session_process_gone(&pane_id)
+            || current.as_deref().is_none_or(|s| {
+                crate::terminal::screen::modal_open(s)
+                    || crate::terminal::screen::status_marker(
+                        s,
+                        &crate::terminal::screen::WORKING_MARKERS,
+                        40,
+                        true,
+                        true,
+                    )
+                    .is_some()
+            })
+        {
+            continue;
+        }
+        let (pressed, detail) = env.send_key(&pane_id, "Enter");
+        if !pressed {
+            tracing::warn!(pane_id, detail, "federated stuck recovery key refused");
+            continue;
+        }
+        drop(_typing_guard);
+        drop(_pane_guard);
+        wait(sends::SUBMIT_POLL_S[0]);
+        let after = sends::read_screen(env, &pane_id, None, true);
+        let verified = after
+            .as_deref()
+            .and_then(|s| crate::terminal::composer::federated_composer(true, s))
+            == Some(String::new())
+            && sends::pane_generation(env, &pane_id) == generation;
+        if let Some(metrics) = flock.stores().metrics {
+            metrics.record(&Event {
+                at: now,
+                kind: "stuck.recover".into(),
+                pane_id: Some(pane_id.clone()),
+                source: Some("federated_watchdog".into()),
+                outcome: Some(if verified { "consumed" } else { "unverified" }.into()),
+                reason: Some("authorized preserve-submit; no text replayed".into()),
+                ..Event::default()
+            });
+        }
+        tracing::warn!(pane_id, verified, "federated preserve-submit completed");
+        acted += 1;
+    }
+    flock.save()?;
+    Ok(acted)
+}
+
+impl StuckEnv for crate::server_runtime::LoopRuntimeAdapter {
+    fn list_panes(&self) -> LoopFuture<'_, Result<Vec<Value>, DunkError>> {
+        self.helper_stuckenv_list_panes()
+    }
+
+    fn read_screen(&self, pane_id: &str) -> LoopFuture<'_, Option<String>> {
+        self.helper_stuckenv_read_screen(pane_id)
+    }
+
+    fn pane_generation(&self, pane_id: &str) -> LoopFuture<'_, Option<String>> {
+        self.helper_stuckenv_pane_generation(pane_id)
+    }
+
+    fn note_stale_panel(
+        &self,
+        pane_id: &str,
+        signature_text: &str,
+        since: f64,
+    ) -> LoopFuture<'_, ()> {
+        self.helper_stuckenv_note_stale_panel(pane_id, signature_text, since)
+    }
+
+    fn closed(&self) -> bool {
+        self.helper_stuckenv_closed()
+    }
+
+    fn stuck_recovery_enabled(&self) -> bool {
+        self.helper_stuckenv_stuck_recovery_enabled()
+    }
+
+    fn stuck_observer_step(&self) -> LoopFuture<'_, usize> {
+        Box::pin(async move {
+            let worker = self.with_loop_terminal(|flock, terminal| {
+                let now = crate::clock::now_s();
+                let federated = match federated_recovery_step(flock, terminal, now, &|seconds| {
+                    std::thread::sleep(Duration::from_secs_f64(seconds.max(0.0)))
+                }) {
+                    Ok(acted) => acted,
+                    Err(error) => {
+                        tracing::error!(error = %error, "federated recovery scan failed; strict scan will continue");
+                        0
+                    }
+                };
+                match strict_stuck_observer_scan(flock, terminal, now) {
+                    Ok(strict) => federated + strict,
+                    Err(error) => {
+                        tracing::error!(error = %error, "strict stuck recovery scan failed");
+                        0 // Python's outer scan failure discards the federated acted count.
+                    }
+                }
+            });
+            worker.await.unwrap_or_else(|error| {
+                tracing::error!(error = %error, "stuck observer terminal worker failed");
+                0
+            })
+        })
+    }
 }
 
 /// One pane's observation: `(generation, signature_text, since)`.
