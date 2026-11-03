@@ -312,7 +312,8 @@ mod tests {
             &'a self,
             bearer: Option<&'a str>,
             cookie: Option<&'a str>,
-        ) -> super::super::auth::AuthFuture<'a, Result<(), AuthError>> {
+        ) -> super::super::auth::AuthFuture<'a, Result<super::super::auth::Identity, AuthError>>
+        {
             let accepted = bearer.or(cookie) == Some("owner-token");
             Box::pin(async move {
                 if accepted {
