@@ -4149,11 +4149,63 @@ fn h_owner_ingest_matches_python() {
         ),
         Err(DunkError::Refused(message)) if message == "Python int too large to convert to SQLite INTEGER"
     ));
+    let oversized_negative: Value = serde_json::from_str(
+        r#"{"body":"too small","transport":"web","external_id":"raw-overflow-negative-subject","subject":-9223372036854775809}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_ingest",
+            args(oversized_negative),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "Python int too large to convert to SQLite INTEGER"
+    ));
+    for (wire, expected) in [
+        (
+            r#"{"body":"float","transport":"web","external_id":"float-decimal-pos","subject":18446744073709551616.0}"#,
+            "1.84467440737096e+19",
+        ),
+        (
+            r#"{"body":"float","transport":"web","external_id":"float-exponent-pos","subject":1.8446744073709552e19}"#,
+            "1.84467440737096e+19",
+        ),
+        (
+            r#"{"body":"float","transport":"web","external_id":"float-decimal-neg","subject":-9223372036854775809.0}"#,
+            "-9.22337203685478e+18",
+        ),
+        (
+            r#"{"body":"float","transport":"web","external_id":"float-exponent-neg","subject":-9.223372036854776e18}"#,
+            "-9.22337203685478e+18",
+        ),
+    ] {
+        let wire: Value = serde_json::from_str(wire).unwrap();
+        let out = dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_ingest",
+            args(wire),
+            Some("w1:p1"),
+        )
+        .expect("floating-point subjects remain SQLite REAL binds");
+        assert_eq!(out["message"]["subject"], expected);
+    }
     assert!(flock
         .stores()
         .inbox
         .unwrap()
         .find_by_external_id("owner", Some("raw-overflow-subject"))
+        .unwrap()
+        .is_none());
+    assert!(flock
+        .stores()
+        .inbox
+        .unwrap()
+        .find_by_external_id("owner", Some("raw-overflow-negative-subject"))
         .unwrap()
         .is_none());
 
@@ -4340,6 +4392,17 @@ fn h_owner_outbox_matches_python() {
             Some("w1:p1"),
         ),
         Err(DunkError::Refused(message)) if message == "Python int too large to convert to SQLite INTEGER"
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_outbox",
+            args(json!({"transport": null, "limit": 20})),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "an outbox needs a transport"
     ));
     assert!(matches!(
         dispatch_owner_api(

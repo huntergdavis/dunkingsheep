@@ -136,16 +136,29 @@ class OwnerIngestWireOracle(unittest.TestCase):
             self.assertNotIn(failed, ids)
 
     def test_large_integer_subject_and_outbox_limit_raise_sqlite_overflow(self):
-        with self.assertRaises(OverflowError) as subject_error:
-            self.flock.owner_ingest(
-                "body", "web", external_id="oversized-subject",
-                subject=18446744073709551616,
+        for external_id, subject in [
+            ("oversized-subject", 18446744073709551616),
+            ("oversized-negative-subject", -9223372036854775809),
+        ]:
+            with self.subTest(subject=subject), self.assertRaises(OverflowError) as subject_error:
+                self.flock.owner_ingest("body", "web", external_id=external_id, subject=subject)
+            self.assertEqual(
+                "Python int too large to convert to SQLite INTEGER",
+                str(subject_error.exception),
             )
-        self.assertEqual(
-            "Python int too large to convert to SQLite INTEGER",
-            str(subject_error.exception),
-        )
-        self.assertIsNone(self.inbox.find_by_external_id("owner", "oversized-subject"))
+            self.assertIsNone(self.inbox.find_by_external_id("owner", external_id))
+
+        floats = [
+            (18446744073709551616.0, "1.84467440737096e+19"),
+            (1.8446744073709552e19, "1.84467440737096e+19"),
+            (-9223372036854775809.0, "-9.22337203685478e+18"),
+            (-9.223372036854776e18, "-9.22337203685478e+18"),
+        ]
+        for index, (subject, expected) in enumerate(floats):
+            message = self.flock.owner_ingest(
+                "body", "web", external_id=f"float-subject-{index}", subject=subject
+            )["message"]
+            self.assertEqual(expected, message["subject"])
 
         for limit in (9223372036854775808, "9223372036854775808"):
             with self.subTest(limit=limit), self.assertRaises(OverflowError) as limit_error:
@@ -154,6 +167,12 @@ class OwnerIngestWireOracle(unittest.TestCase):
                 "Python int too large to convert to SQLite INTEGER",
                 str(limit_error.exception),
             )
+
+    def test_null_owner_outbox_transport_reaches_missing_transport_error(self):
+        from dunk_core import DunkError
+
+        with self.assertRaisesRegex(DunkError, "^an outbox needs a transport$"):
+            self.flock.owner_outbox(None)
 
 
 @unittest.skipUnless(importlib.util.find_spec("fastapi"), "web.app needs fastapi")

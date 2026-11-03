@@ -1094,11 +1094,11 @@ pub fn h_owner_ingest(context: &HandlerContext<'_>, args: Args) -> Result<Value,
 pub fn h_owner_outbox(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
     let transport = args
         .get("transport")
-        .map(python_value_string)
-        .unwrap_or_default();
+        .filter(|value| !value.is_null())
+        .map(python_value_string);
     let limit = owner_outbox_limit_arg(&args, 20)?;
     let outbox = crate::owner::OwnerConversations::new(context.flock, context.env).outbox(
-        Some(&transport),
+        transport.as_deref(),
         Some(limit),
         context.self_pane_id(),
     )?;
