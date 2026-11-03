@@ -16,7 +16,7 @@ use axum::{
 };
 use serde_json::{json, Map, Value};
 
-use super::auth::{AuthBackend, AuthError, Identity, RequestScheme};
+use super::auth::{AuthBackend, AuthError, RequestScheme};
 
 pub type GameInputFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -382,9 +382,10 @@ mod tests {
     use serde_json::{json, Value};
     use tower::ServiceExt;
 
+    use super::super::auth::Identity;
     use super::{
         router, AuthBackend, AuthError, GameInputBackend, GameInputError, GameInputFuture,
-        Identity, RequestScheme,
+        RequestScheme,
     };
 
     fn block_on<F: Future>(future: F) -> F::Output {
