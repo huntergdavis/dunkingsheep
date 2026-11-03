@@ -1,17 +1,19 @@
 //! Focused tests for the T32 dunk persistence facade. Whole-file restart semantics belong to
 //! the whole-Flock persistence leaf; these tests cover extraction and the snapshot callback.
 
+use super::dunks::UpdateArgs;
 use super::panes::PaneInfoEnv;
 use super::send_keys::KeyPressEnv;
 use super::sends::FlushEnv;
 use super::sends::{
-    send_submit_key, OutboxWake, SendEnv, SendPreparationEnv, SnapshotStore, SubmitEnv,
+    outbox_step, send_submit_key, OutboxStep, OutboxWake, SendEnv, SendPreparationEnv,
+    SnapshotStore, SubmitEnv,
 };
 use super::Flock;
 use crate::error::DunkError;
 use serde_json::{json, Map, Value};
 use std::collections::BTreeSet;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -56,6 +58,7 @@ fn map(value: Value) -> Map<String, Value> {
 
 struct FireEnv {
     panes: Vec<Value>,
+    screen: String,
     typed: Vec<(String, String)>,
     keys: Vec<(String, String)>,
     fail_send: bool,
@@ -63,10 +66,7 @@ struct FireEnv {
 
 impl SendEnv for FireEnv {
     fn read_pane(&self, _pane_id: &str, _lines: i64, _ansi: bool) -> Option<String> {
-        Some(
-            include_str!("../../tests/fixtures/screen/codex-idle-footer-pane17.ansi")
-                .replace("tab to queue message", "Ask Codex to do anything"),
-        )
+        Some(self.screen.clone())
     }
     fn pane_harness(&self, _pane_id: &str) -> Option<String> {
         Some("codex".into())
@@ -179,6 +179,8 @@ impl OutboxWake for NoopOutboxWake {
 fn fire_env(fail_send: bool) -> FireEnv {
     FireEnv {
         panes: vec![json!({"pane_id": "w1:p2", "tab_label": "Agent"})],
+        screen: include_str!("../../tests/fixtures/screen/codex-pane17-transcript-plus-hint.ansi")
+            .replace("tab to queue message", "Ask Codex to do anything"),
         typed: Vec::new(),
         keys: Vec::new(),
         fail_send,
@@ -211,7 +213,7 @@ fn fire_sends_expanded_text_synchronously_through_guarded_direct_send() {
         .fire("d1", &mut env, &NoopOutboxWake, &store, || None)
         .unwrap();
 
-    assert_eq!(json!(true), result["ok"]);
+    assert_eq!(json!(true), result["ok"], "fire result: {result}");
     assert_eq!(json!(false), result["queued"]);
     assert_eq!(json!("d1"), result["id"]);
     assert_eq!(vec![("w1:p2".into(), "hello from d1".into())], env.typed);
@@ -236,13 +238,88 @@ fn fire_reports_guarded_send_failure_and_records_last_error() {
         .fire("d1", &mut env, &NoopOutboxWake, &store, || None)
         .unwrap();
 
-    assert_eq!(json!(false), result["ok"]);
+    assert_eq!(json!(false), result["ok"], "fire result: {result}");
     assert_eq!(json!("boom"), result["message"]);
     assert!(env.keys.is_empty(), "a refused type must not submit Enter");
     let dunk = flock.dunks.get("d1").unwrap();
     assert_eq!(json!(0), dunk["send_count"]);
     assert_eq!(json!("boom"), dunk["last_error"]);
     assert_eq!(json!("Test failed"), dunk["status"]);
+}
+
+#[test]
+fn queued_fire_expands_at_drain_and_does_not_update_same_id_replacement() {
+    let (_dir, flock) = flock();
+    load_one_fire_dunk(&flock, "first {id}", None);
+    let flock = Arc::new(flock);
+    let store = CapturingSnapshotStore::default();
+    let mut env = fire_env(false);
+
+    let result = flock
+        .fire("d1", &mut env, &NoopOutboxWake, &store, || {
+            Some("test hold".into())
+        })
+        .unwrap();
+    assert_eq!(json!(true), result["queued"]);
+
+    flock
+        .dunks
+        .update(
+            "d1",
+            None,
+            &UpdateArgs {
+                text: Some("updated {id}".into()),
+                ..UpdateArgs::default()
+            },
+        )
+        .unwrap();
+    flock.dunks.remove("d1").unwrap();
+    flock._load_dunks(&map(json!({
+        "next_id": 2,
+        "dunkers": [{
+            "id": "d1",
+            "target_pane_id": "w1:p2",
+            "target_tab": "Agent",
+            "text": "replacement {id}",
+            "created_at": 100.0
+        }]
+    })));
+
+    let stopped = AtomicBool::new(false);
+    let mut permission = || None;
+    let drained = outbox_step(
+        &flock,
+        &mut env,
+        "w1:p2",
+        crate::clock::now_s(),
+        &stopped,
+        &|_| false,
+        &mut permission,
+    );
+
+    assert_eq!(OutboxStep::Delivered, drained);
+    assert_eq!(
+        vec![("w1:p2".into(), "updated d1".into())],
+        env.typed,
+        "the queued fire expands its current template when drained"
+    );
+    assert_eq!(json!(0), flock.dunks.get("d1").unwrap()["send_count"]);
+}
+
+#[test]
+fn manual_fire_with_max_sends_does_not_remove_the_dunk() {
+    let (_dir, flock) = flock();
+    load_one_fire_dunk(&flock, "continue", Some(1));
+    let flock = Arc::new(flock);
+    let store = CapturingSnapshotStore::default();
+    let mut env = fire_env(false);
+
+    let result = flock
+        .fire("d1", &mut env, &NoopOutboxWake, &store, || None)
+        .unwrap();
+
+    assert_eq!(json!(true), result["ok"]);
+    assert_eq!(json!(1), flock.dunks.get("d1").unwrap()["send_count"]);
 }
 
 #[test]
