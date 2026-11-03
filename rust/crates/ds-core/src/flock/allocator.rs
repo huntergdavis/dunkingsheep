@@ -22,6 +22,13 @@ pub(crate) struct Allocator {
     state: Mutex<State>,
     idle: Condvar,
     #[cfg(test)]
+    before_enqueue: Mutex<
+        Option<(
+            std::sync::mpsc::Sender<()>,
+            tokio::sync::oneshot::Receiver<()>,
+        )>,
+    >,
+    #[cfg(test)]
     commit_barrier: Mutex<Option<Arc<crate::tasks::allocator::AllocationCommitBarrier>>>,
 }
 
@@ -35,6 +42,8 @@ impl Allocator {
                 stopped: false,
             }),
             idle: Condvar::new(),
+            #[cfg(test)]
+            before_enqueue: Mutex::new(None),
             #[cfg(test)]
             commit_barrier: Mutex::new(None),
         }
@@ -64,6 +73,15 @@ impl Allocator {
             .wait_timeout_while(state, Duration::from_secs(3), |state| state.active < count)
             .unwrap();
         state.active >= count
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_before_enqueue(
+        &self,
+        entered: std::sync::mpsc::Sender<()>,
+        release: tokio::sync::oneshot::Receiver<()>,
+    ) {
+        *self.before_enqueue.lock().unwrap() = Some((entered, release));
     }
 
     #[cfg(test)]
@@ -280,6 +298,18 @@ async fn run(services: &Arc<RuntimeServices>) -> Result<Option<Value>, DunkError
             pane.to_owned(),
             reason.map(Value::String).unwrap_or(Value::Null),
         );
+    }
+    #[cfg(test)]
+    {
+        let barrier = services.allocator.before_enqueue.lock().unwrap().take();
+        if let Some((entered, release)) = barrier {
+            entered.send(()).map_err(|_| {
+                DunkError::Unavailable("allocator pre-enqueue barrier closed".into())
+            })?;
+            release.await.map_err(|_| {
+                DunkError::Unavailable("allocator pre-enqueue barrier closed".into())
+            })?;
+        }
     }
     let mut busy_waited = Duration::ZERO;
     let handoffs = loop {
