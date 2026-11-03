@@ -85,7 +85,7 @@ fn most_common(items: impl Iterator<Item = String>) -> Vec<(String, i64)> {
             None => counts.push((item, 1)),
         }
     }
-    counts.sort_by(|a, b| b.1.cmp(&a.1));
+    counts.sort_by_key(|entry| std::cmp::Reverse(entry.1));
     counts
 }
 
