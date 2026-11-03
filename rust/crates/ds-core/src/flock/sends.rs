@@ -226,16 +226,21 @@ const REMEMBERED_SENDS: usize = 4;
 
 /// Hold detail shared with Python's `BOX_HOLD` contract.
 pub const BOX_HOLD: &str = "the box would not clear (text left untouched)";
+#[allow(dead_code)] // Used by the dependent outbox worker's delivery entry point.
 const HOLD_BACKOFF_BASE_S: f64 = 5.0;
+#[allow(dead_code)] // Used by the dependent outbox worker's delivery entry point.
 const HOLD_BACKOFF_CAP_S: f64 = 300.0;
+#[allow(dead_code)] // Used by the dependent outbox worker's delivery entry point.
 const HOLD_ATTEMPT_LIMIT: i64 = 10;
 
+#[allow(dead_code)] // Used by the dependent outbox worker's delivery entry point.
 fn hold_backoff_s(attempts: i64) -> f64 {
     (HOLD_BACKOFF_BASE_S * 2_f64.powi(attempts.saturating_sub(1).max(0) as i32))
         .min(HOLD_BACKOFF_CAP_S)
 }
 
 /// Result of one idempotent outbox delivery transition.
+#[allow(dead_code)] // Consumed by the dependent outbox worker/runtime integration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DeliveryOutcome {
     Sent,
@@ -1965,6 +1970,7 @@ impl Flock {
     /// Deliver one queued message, persisting every hold and decided transition.
     /// The outbox lock protects only state selection and mutation; terminal I/O always runs
     /// after it has been released.
+    #[allow(dead_code)] // The dependent outbox worker/runtime wires this bounded delivery edge.
     pub(crate) fn deliver_message(
         &self,
         message_id: &str,
