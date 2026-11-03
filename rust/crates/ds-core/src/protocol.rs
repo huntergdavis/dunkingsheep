@@ -39,6 +39,18 @@ pub struct Response {
     pub retryable: Option<bool>,
 }
 
+/// The request line was empty or did not contain a valid request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RequestDecodeError;
+
+impl std::fmt::Display for RequestDecodeError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("invalid JSON")
+    }
+}
+
+impl std::error::Error for RequestDecodeError {}
+
 impl Response {
     /// A successful reply, echoing the request id.
     pub fn ok(id: Value, result: Value) -> Self {
@@ -76,12 +88,12 @@ impl Response {
 
 /// Parse one request line. On failure the caller answers with [`Response::invalid_json`];
 /// the id is unknown in that case, which is why it is `Null` rather than guessed.
-pub fn decode_request(line: &str) -> Result<Request, ()> {
+pub fn decode_request(line: &str) -> Result<Request, RequestDecodeError> {
     let trimmed = line.trim();
     if trimmed.is_empty() {
-        return Err(());
+        return Err(RequestDecodeError);
     }
-    serde_json::from_str(trimmed).map_err(|_| ())
+    serde_json::from_str(trimmed).map_err(|_| RequestDecodeError)
 }
 
 /// Encode one response line (newline appended by the caller or by [`encode_line`]).

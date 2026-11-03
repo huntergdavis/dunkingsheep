@@ -171,11 +171,11 @@ pub fn plan_recovery(
     }
     let pane_id = pane
         .get("pane_id")
-        .map(|v| py_str(v))
+        .map(py_str)
         .unwrap_or_else(|| "None".into());
     let attempt_id = attempt
         .get("attempt_id")
-        .map(|v| py_str(v))
+        .map(py_str)
         .unwrap_or_else(|| "None".into());
     Ok(json!({
         "action": "submit_once",
