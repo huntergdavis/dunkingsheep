@@ -1,6 +1,7 @@
 //! Ports of `evaluate`, skipped/error handling, filtering and ordering in
 //! `tests/test_dunk_watchdog.py`.
 
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -50,6 +51,16 @@ impl Fixture {
         )
         .unwrap();
         path
+    }
+
+    fn inbox_db(&self) {
+        Connection::open(self.path("inbox.db"))
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE messages (id TEXT, mailbox TEXT, created_at REAL, pane_id TEXT, \
+                 state TEXT, reason TEXT, body TEXT);",
+            )
+            .unwrap();
     }
 
     fn path(&self, name: &str) -> PathBuf {
@@ -183,6 +194,36 @@ fn test_evaluate_reuses_host_samples_by_exact_path() {
     assert!(result["errors"].as_array().unwrap().is_empty());
     assert_eq!(1, calls.borrow().get("/").copied().unwrap_or_default());
     assert_eq!(1, calls.borrow().get("/tmp").copied().unwrap_or_default());
+}
+
+#[test]
+fn test_evaluate_retries_failed_pane_provider_loads() {
+    let fixture = Fixture::new();
+    fixture.inbox_db();
+    let mut config = fixture.config(&["inbox.unread_dead", "inbox.unread_live"]);
+    config["panes"]["source"] = json!("daemon");
+    let calls = Cell::new(0);
+    let provider = || -> Result<Option<Panes>, DunkError> {
+        let call = calls.get();
+        calls.set(call + 1);
+        if call == 0 {
+            Err(DunkError::Refused("temporary pane provider failure".into()))
+        } else {
+            Ok(Some(Panes::new()))
+        }
+    };
+
+    let result = evaluate(
+        &config,
+        NOW,
+        Some(&provider),
+        None,
+        Some(&["inbox.unread_dead", "inbox.unread_live"]),
+    );
+    assert_eq!(2, calls.get());
+    assert_eq!(1, result["errors"].as_array().unwrap().len());
+    assert_eq!("inbox.unread_dead", result["errors"][0]["rule"]);
+    assert!(result["findings"].as_array().unwrap().is_empty());
 }
 
 #[test]

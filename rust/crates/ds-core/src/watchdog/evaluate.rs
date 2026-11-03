@@ -57,11 +57,11 @@ struct Inputs<'a> {
     pane_id_pattern: &'a str,
     panes_provider: Option<&'a PanesProvider<'a>>,
     host_sampler: Option<&'a HostSampler<'a>>,
-    tasks: OnceCell<Result<TaskData, DunkError>>,
-    dunks: OnceCell<Result<Vec<Value>, DunkError>>,
-    panes: OnceCell<Result<Option<Panes>, DunkError>>,
-    names: OnceCell<Result<BTreeMap<String, String>, DunkError>>,
-    starvation: OnceCell<Result<Starvation, DunkError>>,
+    tasks: OnceCell<TaskData>,
+    dunks: OnceCell<Vec<Value>>,
+    panes: OnceCell<Option<Panes>>,
+    names: OnceCell<BTreeMap<String, String>>,
+    starvation: OnceCell<Starvation>,
     host_samples: RefCell<BTreeMap<String, HostSample>>,
 }
 
@@ -71,13 +71,17 @@ impl Inputs<'_> {
     }
 
     fn cached<T>(
-        cell: &OnceCell<Result<T, DunkError>>,
+        cell: &OnceCell<T>,
         load: impl FnOnce() -> Result<T, DunkError>,
     ) -> Result<&T, DunkError> {
-        match cell.get_or_init(load) {
-            Ok(value) => Ok(value),
-            Err(error) => Err(clone_error(error)),
+        if let Some(value) = cell.get() {
+            return Ok(value);
         }
+        let value = load()?;
+        let _ = cell.set(value);
+        Ok(cell
+            .get()
+            .expect("successful loader result was stored in the cache"))
     }
 
     fn tasks(&self) -> Result<&TaskData, DunkError> {
@@ -141,17 +145,6 @@ impl Inputs<'_> {
 fn config_dir(config: &Value) -> PathBuf {
     let raw = config["stores"]["config_dir"].as_str().unwrap_or("");
     PathBuf::from(crate::native_session::expanduser(raw))
-}
-
-fn clone_error(error: &DunkError) -> DunkError {
-    match error {
-        DunkError::Refused(message) => DunkError::Refused(message.clone()),
-        DunkError::Retryable(message) => DunkError::Retryable(message.clone()),
-        DunkError::Ambiguous(message) => DunkError::Ambiguous(message.clone()),
-        DunkError::Identity(message) => DunkError::Identity(message.clone()),
-        DunkError::Unavailable(message) => DunkError::Unavailable(message.clone()),
-        DunkError::Busy => DunkError::Busy,
-    }
 }
 
 fn python_json_decode_error(raw: &str, error: &serde_json::Error) -> String {
