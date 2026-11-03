@@ -85,7 +85,7 @@ async fn game_key(
     let Some(body) = body else {
         return required_body_error();
     };
-    let object = match model_object(&body, "GameKey") {
+    let object = match model_object(&body) {
         Ok(object) => object,
         Err(response) => return response,
     };
@@ -116,7 +116,7 @@ async fn game_type(
     let Some(body) = body else {
         return required_body_error();
     };
-    let object = match model_object(&body, "GameType") {
+    let object = match model_object(&body) {
         Ok(object) => object,
         Err(response) => return response,
     };
@@ -227,17 +227,16 @@ fn python_json_error(error: &serde_json::Error) -> String {
     }
 }
 
-fn model_object<'a>(
-    body: &'a Value,
-    model_name: &str,
-) -> Result<&'a Map<String, Value>, Response> {
+// Match FastAPI's request-body adapter, which validates with attribute extraction enabled.
+// For non-object JSON this is `model_attributes_type`; standalone BaseModel validation uses a
+// different `model_type` error and is not the route's Python behavior.
+fn model_object(body: &Value) -> Result<&Map<String, Value>, Response> {
     body.as_object().ok_or_else(|| {
         validation_error(json!({
-            "type": "model_type",
+            "type": "model_attributes_type",
             "loc": ["body"],
-            "msg": format!("Input should be a valid dictionary or instance of {model_name}"),
-            "input": body,
-            "ctx": {"class_name": model_name}
+            "msg": "Input should be a valid dictionary or object to extract fields from",
+            "input": body
         }))
     })
 }
@@ -696,13 +695,10 @@ mod tests {
     }
 
     #[test]
-    fn game_input_non_object_bodies_match_pydantic_model_type_errors() {
+    fn game_input_non_object_bodies_match_fastapi_model_attributes_errors() {
         let backend = Arc::new(FakeGameInput::default());
         let app = app(backend.clone(), Arc::new(FakeAuth::default()));
-        for (path, model_name) in [
-            ("/api/game/key", "GameKey"),
-            ("/api/game/type", "GameType"),
-        ] {
+        for path in ["/api/game/key", "/api/game/type"] {
             for (raw_body, input) in [
                 ("[]", json!([])),
                 ("null", Value::Null),
@@ -718,11 +714,10 @@ mod tests {
                 assert_eq!(
                     serde_json::from_str::<Value>(&body).unwrap(),
                     json!({"detail": [{
-                        "type": "model_type",
+                        "type": "model_attributes_type",
                         "loc": ["body"],
-                        "msg": format!("Input should be a valid dictionary or instance of {model_name}"),
-                        "input": input,
-                        "ctx": {"class_name": model_name}
+                        "msg": "Input should be a valid dictionary or object to extract fields from",
+                        "input": input
                     }]}),
                     "{path} {raw_body}"
                 );
@@ -748,11 +743,10 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Value>(&body).unwrap(),
             json!({"detail": [{
-                "type": "model_type",
+                "type": "model_attributes_type",
                 "loc": ["body"],
-                "msg": "Input should be a valid dictionary or instance of GameKey",
-                "input": "{\"key\":\"Return\"}",
-                "ctx": {"class_name": "GameKey"}
+                "msg": "Input should be a valid dictionary or object to extract fields from",
+                "input": "{\"key\":\"Return\"}"
             }]})
         );
         assert_eq!(auth.seen.lock().unwrap().len(), 1);
