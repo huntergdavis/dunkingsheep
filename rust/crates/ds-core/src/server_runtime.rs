@@ -14,6 +14,7 @@ mod keypress;
 mod layout;
 mod push;
 mod push_eligibility;
+mod roster;
 mod status;
 mod stuck;
 mod submit;
