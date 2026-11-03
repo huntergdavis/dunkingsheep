@@ -870,4 +870,13 @@ fn turn_dispatch_errors_preserve_wake_and_nudge_order() {
         .block_on(async { tokio::time::timeout(Duration::from_millis(100), wake.notified()).await })
         .is_ok());
     assert!(env.sent.lock().unwrap().is_empty());
+    env.next_job = json!({"action":"claim", "reason":"handoff"});
+    assert!(
+        flock.dispatch_on_turn_end(PANE, &env).is_err(),
+        "claim still reads the handoff store"
+    );
+    assert!(runtime
+        .block_on(async { tokio::time::timeout(Duration::from_millis(100), wake.notified()).await })
+        .is_ok());
+    assert!(env.sent.lock().unwrap().is_empty());
 }

@@ -42,6 +42,8 @@ impl From<DunkError> for MaterialiseError {
 pub struct NextJobs {
     // Later runtime leaves use the shared Flock for dispatch, tasks, and inbox work.
     flock: Arc<Flock>,
+    env_provider: GateEnvProvider,
+    terminal_factory: Option<LoopTerminalFactory>,
     #[allow(dead_code)] // The next-job worker leaves call delivery and turn binding.
     locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
@@ -112,8 +114,19 @@ impl NextJobs {
     }
 
     pub fn new(flock: Arc<Flock>) -> Self {
+        Self::with_providers(flock, Arc::new(process_gate_env), None)
+    }
+
+    /// Construct one shared manager with its gate environment and terminal providers.
+    pub(crate) fn with_providers(
+        flock: Arc<Flock>,
+        env_provider: GateEnvProvider,
+        terminal_factory: Option<LoopTerminalFactory>,
+    ) -> Self {
         Self {
             flock,
+            env_provider,
+            terminal_factory,
             locks: Mutex::new(HashMap::new()),
         }
     }
@@ -269,7 +282,12 @@ impl NextJobs {
     }
 
     async fn unread_count(&self, pane: &str) -> Option<i64> {
-        let factory = match configured_loop_terminal_factory() {
+        let factory = match self
+            .terminal_factory
+            .clone()
+            .map(Ok)
+            .unwrap_or_else(configured_loop_terminal_factory)
+        {
             Ok(factory) => factory,
             Err(error) => {
                 eprintln!("next-job unread count unavailable pane={pane}: {error}");
@@ -374,9 +392,10 @@ impl NextJobs {
         &self,
         handoff: &Handoff,
     ) -> Result<crate::inbox::Status, MaterialiseError> {
-        let env = process_gate_env()
+        let env = (self.env_provider)()
             .map_err(|_| MaterialiseError::DispatchPaused("readiness_unknown".into()))?;
-        self.materialise_with(handoff, env, None).await
+        self.materialise_with(handoff, env, self.terminal_factory.clone())
+            .await
     }
 
     async fn materialise_with(
@@ -444,8 +463,13 @@ impl NextJobs {
         handoff: Handoff,
         restart: bool,
     ) -> Result<Option<Handoff>, DunkError> {
-        self.deliver_with_provider(handoff, restart, Arc::new(process_gate_env), None)
-            .await
+        self.deliver_with_provider(
+            handoff,
+            restart,
+            Arc::clone(&self.env_provider),
+            self.terminal_factory.clone(),
+        )
+        .await
     }
 
     #[allow(dead_code)] // Wired by the following next-job tick/recovery leaf.
@@ -1141,11 +1165,12 @@ impl NextJobs {
     /// the global switch and an unreadable dependency cannot become permission.
     #[allow(dead_code)] // Consumed by the next-job transition leaves.
     pub(crate) async fn gate(&self, pane: &str, lanes: Option<Vec<Value>>) -> Option<String> {
-        let env = match process_gate_env() {
+        let env = match (self.env_provider)() {
             Ok(env) => env,
             Err(()) => return Some("readiness_unknown".into()),
         };
-        self.gate_with(pane, lanes, env, None).await
+        self.gate_with(pane, lanes, env, self.terminal_factory.clone())
+            .await
     }
 
     async fn gate_with(

@@ -318,4 +318,113 @@ mod tests {
         let decisions = runtime.block_on(tasks.next_job_decisions()).unwrap();
         assert!(decisions.iter().any(|(pane, _)| pane == "w1:p1"));
     }
+    #[test]
+    fn turn_next_real_enabled_claim_uses_shared_providers() {
+        use crate::config::Env;
+        use crate::flock::status_runtime::StatusState;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let tasks = Arc::new(
+            runtime
+                .block_on(Tasks::open(dir.path().join("tasks.db")))
+                .unwrap(),
+        );
+        runtime.block_on(tasks.allocation_init()).unwrap();
+        let task = runtime
+            .block_on(tasks.add("global", "real claim", "body"))
+            .unwrap();
+        runtime
+            .block_on(tasks.assign(&task.id, &["w1:p1"], "set"))
+            .unwrap();
+        let inbox = Arc::new(
+            crate::inbox_store::Store::open(dir.path().join("inbox.db"), dir.path().join("blobs"))
+                .unwrap(),
+        );
+        let flock = Arc::new(Flock::new(
+            dir.path().join("launches"),
+            dir.path().join("lanes"),
+            false,
+        ));
+        flock.attach_stores(Stores {
+            tasks: Some(Arc::clone(&tasks)),
+            inbox: Some(Arc::clone(&inbox)),
+            ..Stores::default()
+        });
+        let root = dir.path().to_string_lossy().into_owned();
+        let env = Env::from_pairs(&[
+            ("DUNKINGSHEEP_DIR", &root),
+            ("DUNKINGSHEEP_TURN_END_DISPATCH", "1"),
+            ("DUNKINGSHEEP_DISPATCH_LANES", "w1:p1"),
+            ("DUNKINGSHEEP_MAILBOX", "w1:p1"),
+        ]);
+        flock
+            .attach_status_state(StatusState::at_start(
+                "test",
+                dir.path().join("state"),
+                dir.path().join("daemon"),
+                env.clone(),
+            ))
+            .unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider_calls = Arc::clone(&calls);
+        let provider = Arc::new(move || {
+            provider_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(env.clone())
+        });
+        let factory: crate::flock::loop_env::LoopTerminalFactory = Arc::new(|| {
+            let mut terminal = FakeTerminal::new();
+            terminal.panes[0].command = "codex".into();
+            Box::new(terminal)
+        });
+        let jobs = crate::tasks::next_job_runtime::NextJobs::with_providers(
+            Arc::clone(&flock),
+            provider,
+            Some(factory),
+        );
+        let pid = i64::from(std::process::id());
+        let request = RequestCtx {
+            caller: Some(crate::proc::Caller::new(
+                Some(pid),
+                crate::proc::process_start(pid),
+                Some("test".into()),
+                Some("w1:p1".into()),
+                "peer",
+            )),
+            ..RequestCtx::default()
+        };
+        let terminal: Mutex<Box<dyn Terminal>> = Mutex::new(Box::new(FakeTerminal::new()));
+        let adapter = RequestRuntimeAdapter::new(&flock, &request, runtime.handle(), &terminal)
+            .with_next_jobs(&jobs)
+            .unwrap();
+        let plan = adapter
+            .helper_turndispatchenv_advance_next_job("w1:p1")
+            .unwrap();
+        assert_eq!(plan["action"], "claim", "{plan}");
+        assert_eq!(plan["task_id"], task.id);
+        let leases = runtime
+            .block_on(tasks.leases_for_pane("w1:p1", None))
+            .unwrap();
+        assert!(leases
+            .iter()
+            .any(|lease| lease.task_id == task.id && lease.caller_pid == Some(pid)));
+        let handoffs = runtime
+            .block_on(tasks.next_job_handoffs(Some("w1:p1")))
+            .unwrap();
+        assert_eq!(handoffs.len(), 1);
+        let message = handoffs[0]
+            .get("message_id")
+            .and_then(Value::as_str)
+            .unwrap();
+        let status =
+            crate::inbox::status(inbox.read_pool(), message, crate::clock::now_s()).unwrap();
+        assert_eq!(status.pane_id.as_deref(), Some("w1:p1"));
+        assert!(
+            calls.load(Ordering::SeqCst) >= 2,
+            "gate and materialisation must both use the provider"
+        );
+    }
 }
