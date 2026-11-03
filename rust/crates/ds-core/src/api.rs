@@ -2591,8 +2591,8 @@ pub fn h_task_update(context: &HandlerContext<'_>, args: Args) -> Result<Value, 
         status: task_string_arg(&args, "status", "task_update")?,
         priority: task_string_arg(&args, "priority", "task_update")?,
         parent_id,
-        assignees,
-        depends_on,
+        assignees: assignees.as_deref(),
+        depends_on: depends_on.as_deref(),
         block_reason: None,
         multi_assignee: args
             .contains_key("multi_assignee")
