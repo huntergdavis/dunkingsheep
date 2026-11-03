@@ -19,6 +19,7 @@ mod push_eligibility;
 mod retire_inbox;
 mod retire_roles;
 mod roster;
+mod services;
 mod status;
 mod stuck;
 mod submit;
@@ -27,6 +28,8 @@ mod turn_next;
 mod turn_plan;
 mod turn_send;
 mod verify;
+
+pub use services::{RuntimeObservability, RuntimeServiceInputs, RuntimeServices};
 
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
