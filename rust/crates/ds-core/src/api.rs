@@ -1825,11 +1825,7 @@ pub fn h_review_sync(context: &HandlerContext<'_>, args: Args) -> Result<Value, 
 
 /// `dunk_api.h_review` list action through the attached Tasks actor.
 pub fn h_review_list(context: &HandlerContext<'_>, _: Args) -> Result<Value, DunkError> {
-    context.block_on(
-        context
-            .flock
-            .review_list(context.self_pane_id(), context.env.now_s()),
-    )?
+    context.block_on(context.flock.review_list(context.env.now_s()))?
 }
 
 fn python_bool_string(value: &str) -> bool {

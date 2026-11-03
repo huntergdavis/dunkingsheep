@@ -370,6 +370,21 @@ fn h_review_list_matches_python() {
             },
         ))
         .unwrap();
+    runtime
+        .block_on(tasks.add_with(
+            "%2",
+            "pane-scoped review title",
+            "",
+            crate::tasks::AddOptions {
+                kind: Some("review".into()),
+                repo: Some("o/pane-scoped".into()),
+                pr: Some("8".into()),
+                head: Some("fedcba98765432".into()),
+                assignees: vec!["%2".into()],
+                ..Default::default()
+            },
+        ))
+        .unwrap();
     {
         let env = TestEnv::default();
         let request = RequestCtx {
