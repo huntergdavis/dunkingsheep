@@ -11,3 +11,5 @@ pub mod activity_poolrad;
 pub mod messages_read;
 pub mod panes;
 pub mod system;
+#[rustfmt::skip]
+pub mod game_state;
