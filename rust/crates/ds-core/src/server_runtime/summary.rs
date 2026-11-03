@@ -57,7 +57,6 @@ impl SummaryEnv for RequestRuntimeAdapter<'_> {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use super::*;
     use crate::flock::panes::Stores;
     use crate::flock::project_summary::SummaryEnv;
     use crate::flock::Flock;
