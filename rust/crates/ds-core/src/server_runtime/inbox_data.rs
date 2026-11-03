@@ -266,19 +266,24 @@ mod tests {
         let worker_flock = Arc::clone(&flock);
         let handle = runtime.handle().clone();
         let (counts, missing_mailbox_error) = runtime
-            .block_on(tokio::task::spawn_blocking(move || {
-                let terminal: Mutex<Box<dyn Terminal>> = Mutex::new(Box::new(FakeTerminal::new()));
-                let request = RequestCtx::default();
-                let adapter =
-                    RequestRuntimeAdapter::new(&worker_flock, &request, &handle, &terminal);
-                let view = InboxRuntimeView::new(adapter, Arc::clone(&worker_flock), pool).unwrap();
-                let counts = worker_flock.inbox_count(&view, None, Some("%9")).unwrap();
-                let missing = worker_flock
-                    .inbox_count(&view, None, None)
-                    .unwrap_err()
-                    .to_string();
-                (counts, missing)
-            }))
+            .block_on(async {
+                tokio::task::spawn_blocking(move || {
+                    let terminal: Mutex<Box<dyn Terminal>> =
+                        Mutex::new(Box::new(FakeTerminal::new()));
+                    let request = RequestCtx::default();
+                    let adapter =
+                        RequestRuntimeAdapter::new(&worker_flock, &request, &handle, &terminal);
+                    let view =
+                        InboxRuntimeView::new(adapter, Arc::clone(&worker_flock), pool).unwrap();
+                    let counts = worker_flock.inbox_count(&view, None, Some("%9")).unwrap();
+                    let missing = worker_flock
+                        .inbox_count(&view, None, None)
+                        .unwrap_err()
+                        .to_string();
+                    (counts, missing)
+                })
+                .await
+            })
             .unwrap();
         assert_eq!(counts.mailbox, mailbox);
         assert_eq!(counts.total, 4);
@@ -323,15 +328,20 @@ mod tests {
         let broken_pool = Arc::clone(&broken_owner.pool);
         let handle = runtime.handle().clone();
         let broken_counts = runtime
-            .block_on(tokio::task::spawn_blocking(move || {
-                let terminal: Mutex<Box<dyn Terminal>> = Mutex::new(Box::new(FakeTerminal::new()));
-                let request = RequestCtx::default();
-                let adapter =
-                    RequestRuntimeAdapter::new(&broken_flock, &request, &handle, &terminal);
-                let view =
-                    InboxRuntimeView::new(adapter, Arc::clone(&broken_flock), broken_pool).unwrap();
-                broken_flock.inbox_count(&view, None, Some("%9")).unwrap()
-            }))
+            .block_on(async {
+                tokio::task::spawn_blocking(move || {
+                    let terminal: Mutex<Box<dyn Terminal>> =
+                        Mutex::new(Box::new(FakeTerminal::new()));
+                    let request = RequestCtx::default();
+                    let adapter =
+                        RequestRuntimeAdapter::new(&broken_flock, &request, &handle, &terminal);
+                    let view =
+                        InboxRuntimeView::new(adapter, Arc::clone(&broken_flock), broken_pool)
+                            .unwrap();
+                    broken_flock.inbox_count(&view, None, Some("%9")).unwrap()
+                })
+                .await
+            })
             .unwrap();
         assert_eq!(broken_counts.total, 4);
         assert_eq!(broken_counts.unread, 4);
