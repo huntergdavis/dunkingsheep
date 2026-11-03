@@ -46,6 +46,17 @@ pub struct NextJobs {
     locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
+struct AdvanceRequest<'a> {
+    pane: &'a str,
+    trigger: &'a str,
+    from_task: Option<&'a str>,
+    caller: Option<Caller>,
+    operator_proof: Option<OperatorProof>,
+    dispatch_reason: Option<String>,
+    unread: Option<i64>,
+    pending_delivery: bool,
+}
+
 #[allow(dead_code)] // The next-job worker consumes these outcomes after this leaf.
 enum TransportResult {
     Held(String),
@@ -129,6 +140,31 @@ impl NextJobs {
             .is_some_and(|messages| messages.iter().any(|message| message.status == "queued"));
 
         self.advance_with_materialiser(
+            AdvanceRequest {
+                pane,
+                trigger,
+                from_task,
+                caller,
+                operator_proof,
+                dispatch_reason,
+                unread,
+                pending_delivery,
+            },
+            |handoff| async move { self.materialise(&handoff).await },
+        )
+        .await
+    }
+
+    async fn advance_with_materialiser<M, Fut>(
+        &self,
+        request: AdvanceRequest<'_>,
+        materialise: M,
+    ) -> Result<Advance, DunkError>
+    where
+        M: FnOnce(Handoff) -> Fut,
+        Fut: Future<Output = Result<crate::inbox::Status, MaterialiseError>>,
+    {
+        let AdvanceRequest {
             pane,
             trigger,
             from_task,
@@ -137,27 +173,7 @@ impl NextJobs {
             dispatch_reason,
             unread,
             pending_delivery,
-            |handoff| async move { self.materialise(&handoff).await },
-        )
-        .await
-    }
-
-    async fn advance_with_materialiser<M, Fut>(
-        &self,
-        pane: &str,
-        trigger: &str,
-        from_task: Option<&str>,
-        caller: Option<Caller>,
-        operator_proof: Option<OperatorProof>,
-        dispatch_reason: Option<String>,
-        unread: Option<i64>,
-        pending_delivery: bool,
-        materialise: M,
-    ) -> Result<Advance, DunkError>
-    where
-        M: FnOnce(Handoff) -> Fut,
-        Fut: Future<Output = Result<crate::inbox::Status, MaterialiseError>>,
-    {
+        } = request;
         let tasks = self
             .flock
             .stores()
@@ -2212,14 +2228,16 @@ mod tests {
 
         let advance = jobs
             .advance_with_materialiser(
-                pane,
-                "turn.end",
-                None,
-                None,
-                None,
-                None,
-                Some(0),
-                false,
+                AdvanceRequest {
+                    pane,
+                    trigger: "turn.end",
+                    from_task: None,
+                    caller: None,
+                    operator_proof: None,
+                    dispatch_reason: None,
+                    unread: Some(0),
+                    pending_delivery: false,
+                },
                 |handoff| async move {
                     let id = handoff
                         .get("message_id")
@@ -2241,7 +2259,13 @@ mod tests {
         let handoffs = tasks.next_job_handoffs(Some(pane)).await.unwrap();
         assert_eq!(handoffs.len(), 1);
         assert_eq!(handoffs[0]["state"], "pending");
-        let events = metrics.events_between(0.0, f64::MAX).unwrap();
+        let events = tokio::task::spawn_blocking({
+            let metrics = Arc::clone(&metrics);
+            move || metrics.events_between(0.0, f64::MAX)
+        })
+        .await
+        .expect("metrics events worker")
+        .unwrap();
         assert!(events.iter().any(|event| {
             event.kind == "next_job.decision"
                 && event.pane_id.as_deref() == Some(pane)
@@ -2257,14 +2281,16 @@ mod tests {
 
         let advance = jobs
             .advance_with_materialiser(
-                pane,
-                "turn.end",
-                None,
-                None,
-                None,
-                None,
-                None,
-                false,
+                AdvanceRequest {
+                    pane,
+                    trigger: "turn.end",
+                    from_task: None,
+                    caller: None,
+                    operator_proof: None,
+                    dispatch_reason: None,
+                    unread: None,
+                    pending_delivery: false,
+                },
                 |_| async {
                     Err(MaterialiseError::Other(DunkError::Refused(
                         "unexpected materialisation".into(),
@@ -2297,14 +2323,16 @@ mod tests {
             };
             let advance = jobs
                 .advance_with_materialiser(
-                    pane,
-                    "turn.end",
-                    None,
-                    None,
-                    None,
-                    None,
-                    Some(0),
-                    false,
+                    AdvanceRequest {
+                        pane,
+                        trigger: "turn.end",
+                        from_task: None,
+                        caller: None,
+                        operator_proof: None,
+                        dispatch_reason: None,
+                        unread: Some(0),
+                        pending_delivery: false,
+                    },
                     move |_| async move { Err(materialise_error) },
                 )
                 .await
