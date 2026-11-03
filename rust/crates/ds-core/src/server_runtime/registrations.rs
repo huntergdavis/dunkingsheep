@@ -608,18 +608,15 @@ mod tests {
             .iter()
             .filter(|observation| observation.pane == "w1:p1")
             .collect();
-        assert!(key_batches.windows(2).any(|batches| {
-            batches[0].keys.len() == 1
-                && batches[0].keys[0] == "ctrl+c"
-                && batches[1].keys.len() == 1
-                && batches[1].keys[0] == "Enter"
+        assert!(key_batches.iter().any(|observation| {
+            observation.keys.len() == 1 && observation.keys[0] == "ctrl+c Enter"
         }));
         assert!(
             key_batches
                 .iter()
                 .filter(|observation| observation.keys.len() == 1 && observation.keys[0] == "Enter")
                 .count()
-                >= 2
+                >= 1
         );
         assert!(
             observed

@@ -69,7 +69,8 @@ impl SendCommandEnv for RequestRuntimeAdapter<'_> {
         wait_s: f64,
     ) -> Result<Value, DunkError> {
         let outbox = self.require_send_outbox()?;
-        let keys: Vec<String> = keys.split_whitespace().map(str::to_owned).collect();
+        // The API string is one key argument, matching Python's send_keys_now behavior.
+        let keys = [keys.to_owned()];
         let mut terminal = self.send_terminal();
         outbox.flock.send_keys_now(
             target,
