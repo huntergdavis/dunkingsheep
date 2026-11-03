@@ -390,7 +390,10 @@ fn integer_number_lexeme(number: &Number) -> bool {
 
 fn positive_integer_lexeme(number: &Number) -> bool {
     let text = number.to_string();
-    !text.starts_with('-') && text.bytes().any(|byte| byte.is_ascii_digit() && byte != b'0')
+    !text.starts_with('-')
+        && text
+            .bytes()
+            .any(|byte| byte.is_ascii_digit() && byte != b'0')
 }
 
 /// Match the installed Pydantic path `int` coercion observed by the ASGI oracle:
@@ -422,7 +425,11 @@ fn python_path_integer(input: &str) -> Option<Number> {
         }
     }
     let significant = whole.trim_start_matches('0');
-    let magnitude = if significant.is_empty() { "0" } else { significant };
+    let magnitude = if significant.is_empty() {
+        "0"
+    } else {
+        significant
+    };
     let canonical = if negative && magnitude != "0" {
         format!("-{magnitude}")
     } else {
@@ -1197,9 +1204,7 @@ mod tests {
         let huge = "1267650600228229401496703205376";
         let rejected = block_on(app(backend.clone()).oneshot(request(
             "/api/brief",
-            &format!(
-                r#"{{"channel":"pane-worker","body":"done","answers":[{huge}]}}"#
-            ),
+            &format!(r#"{{"channel":"pane-worker","body":"done","answers":[{huge}]}}"#),
             "owner-token",
         )))
         .unwrap();
@@ -1210,9 +1215,7 @@ mod tests {
 
         let accepted = block_on(app(backend.clone()).oneshot(request(
             "/api/brief",
-            &format!(
-                r#"{{"channel":"pane-worker","body":"done","answers":[{huge}]}}"#
-            ),
+            &format!(r#"{{"channel":"pane-worker","body":"done","answers":[{huge}]}}"#),
             "api-token",
         )))
         .unwrap();
@@ -1230,9 +1233,7 @@ mod tests {
         for token in ["1.0", "1e0", "true"] {
             let result = block_on(app(backend.clone()).oneshot(request(
                 "/api/brief",
-                &format!(
-                    r#"{{"channel":"pane-worker","body":"done","answers":[{token}]}}"#
-                ),
+                &format!(r#"{{"channel":"pane-worker","body":"done","answers":[{token}]}}"#),
                 "api-token",
             )))
             .unwrap();
