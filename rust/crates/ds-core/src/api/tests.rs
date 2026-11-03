@@ -14,6 +14,7 @@ use crate::flock::dunks::DunkList;
 use crate::flock::panes::{PaneInfoEnv, Stores};
 use crate::flock::status::{StatusEnv, ViewCache};
 use crate::proc::Caller;
+use crate::report::{ReportPaths, ReportSources};
 use crate::roles::Roles;
 use crate::server::RequestCtx;
 use crate::terminal::{fakes::FakeTerminal, Terminal};
@@ -563,6 +564,128 @@ fn dispatch_as_flock_role(
         runtime: runtime.handle(),
     };
     dispatcher.dispatch(&context, &FlockGate(&context), name, args)
+}
+
+struct ReportApiSources {
+    paths: ReportPaths,
+    config_dir: PathBuf,
+}
+
+impl ReportSources for ReportApiSources {
+    fn now_s(&self) -> f64 {
+        1_800_000_000.0
+    }
+    fn report_paths(&self) -> ReportPaths {
+        self.paths.clone()
+    }
+    fn config_dir(&self) -> PathBuf {
+        self.config_dir.clone()
+    }
+    fn task_metrics(&self, _window_s: f64) -> Result<Value, String> {
+        Ok(json!({"window":{"seconds":86400},"current":{},"throughput":{},"latency_ms":{}}))
+    }
+    fn list_panes(&self) -> Result<Vec<Value>, String> {
+        Ok(Vec::new())
+    }
+    fn list_tasks(&self, _limit: usize) -> Result<Vec<Value>, String> {
+        Ok(Vec::new())
+    }
+    fn needs_owner_tasks(&self, _limit: usize) -> Result<Value, String> {
+        Ok(json!({"tasks": []}))
+    }
+    fn lane_registry(&self) -> Result<Value, String> {
+        Ok(json!({"lanes": {}}))
+    }
+    fn review_list(&self) -> Result<Value, String> {
+        Ok(json!({"reviews": [], "count": 0, "oldest_age_s": null}))
+    }
+    fn poolrad_progress(&self) -> Result<Value, String> {
+        Ok(json!({"credited": 0}))
+    }
+    fn post_report(&self, _report: &Value, _text: &str) -> Result<Value, String> {
+        Ok(json!({"message_id": "m-test", "transport": "report"}))
+    }
+}
+
+struct ReportApiEnv {
+    terminal: Mutex<Box<dyn Terminal>>,
+    sources: ReportApiSources,
+}
+
+impl PaneInfoEnv for ReportApiEnv {
+    fn list_panes_grouped(&self) -> Vec<Value> {
+        Vec::new()
+    }
+    fn get_pane(&self, _pane_id: &str) -> Option<Value> {
+        None
+    }
+}
+
+impl CommandEnv for ReportApiEnv {
+    fn terminal(&self) -> &Mutex<Box<dyn Terminal>> {
+        &self.terminal
+    }
+    fn now_s(&self) -> f64 {
+        self.sources.now_s()
+    }
+    fn report_sources(&self) -> Result<&dyn ReportSources, DunkError> {
+        Ok(&self.sources)
+    }
+}
+
+#[test]
+fn dispatcher_report_run_list_handlers_use_sources_and_preserve_role_gates() {
+    let temp = tempfile::tempdir().unwrap();
+    let (_flock_dir, flock) = staffed_flock("report-api");
+    let config_dir = temp.path().join("config");
+    let sources = ReportApiSources {
+        paths: ReportPaths::new(temp.path().join("reports"), temp.path().join("home")),
+        config_dir,
+    };
+    let env = ReportApiEnv {
+        terminal: Mutex::new(Box::new(FakeTerminal::default())),
+        sources,
+    };
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_report_run_list();
+
+    let mut empty_out_dir = Args::new();
+    empty_out_dir.insert("out_dir".to_owned(), json!(""));
+    let run = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p1"),
+        "report_run",
+        Some(empty_out_dir),
+    )
+    .unwrap();
+    let report_path = Path::new(run["path"].as_str().unwrap());
+    assert!(report_path.is_file());
+    assert_eq!(
+        report_path.parent(),
+        Some(env.sources.paths.output_dir.as_path())
+    );
+    assert_eq!(run["posted"]["transport"], "report");
+    assert_eq!(run["generated_at"], "2027-01-15T08:00:00Z");
+
+    let mut empty_list_dir = Args::new();
+    empty_list_dir.insert("out_dir".to_owned(), json!(""));
+    let list = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w2:p2"),
+        "report_list",
+        Some(empty_list_dir),
+    )
+    .unwrap();
+    assert_eq!(list["count"], 1);
+
+    let denied =
+        dispatch_as_flock_role(&dispatcher, &flock, &env, Some("w2:p2"), "report_run", None)
+            .unwrap_err();
+    assert!(denied.to_string().contains("not permitted for role worker"));
 }
 
 #[test]

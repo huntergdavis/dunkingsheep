@@ -1,8 +1,14 @@
 //! Deterministic report formatting, prose checks and report-file primitives.
 //!
-//! Collection and posting are deliberately owned by a later report integration
-//! task. These functions consume the measured JSON explicitly and never invent
-//! an unavailable value.
+//! Collection and posting use explicit measurement sources and preserve unavailable
+//! values as section errors rather than invented zeroes.
+
+mod collect;
+mod sources;
+
+pub(crate) use collect::{report_list_handler, report_run_handler};
+pub use collect::{Report, ReportRun, ReportRunError};
+pub use sources::ReportSources;
 
 use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};

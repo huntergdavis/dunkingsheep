@@ -75,6 +75,13 @@ pub trait CommandEnv: PaneInfoEnv {
         ))
     }
 
+    /// Raw store and cache inputs for the report backend. Production wiring is owned by t1605.
+    fn report_sources(&self) -> Result<&dyn crate::report::ReportSources, DunkError> {
+        Err(DunkError::Refused(
+            "report sources adapter is not wired".into(),
+        ))
+    }
+
     /// The retired-pane archive used by `retire_pane`.
     fn retired_panes_path(&self) -> Result<PathBuf, DunkError> {
         crate::panes::default_path(&crate::config::Env::from_process())
@@ -377,6 +384,12 @@ impl Dispatcher {
     pub fn register_poolrad_sync_progress(&mut self) {
         self.register("poolrad_sync", h_poolrad_sync);
         self.register("poolrad_progress", h_poolrad_progress);
+    }
+
+    /// Register the T39 report run/list handlers over an explicit source adapter.
+    pub fn register_report_run_list(&mut self) {
+        self.register("report_run", crate::report::report_run_handler);
+        self.register("report_list", crate::report::report_list_handler);
     }
 
     /// Register only the T39 task-following API leaf.
