@@ -32,6 +32,7 @@ struct Pane {
     typed_attempts: Vec<(String, String, bool, Option<String>)>,
     receipt_ok: bool,
     events: Vec<&'static str>,
+    pending_override: Option<String>,
 }
 
 impl SendEnv for Pane {
@@ -131,6 +132,9 @@ impl super::send_keys::KeyPressEnv for Pane {
     }
 
     fn pending_text(&mut self, pane_id: &str) -> Option<String> {
+        if self.pending_override.is_some() {
+            return self.pending_override.clone();
+        }
         let screen = self.read_pane(pane_id, CONSUMPTION_READ_LINES, true)?;
         let (text, detail) = crate::terminal::screen::box_text(&screen);
         if detail.starts_with(crate::terminal::screen::AMBIGUOUS_COMPOSER) {
@@ -693,11 +697,14 @@ mod guarded_preparation_tests {
         let flock = flock();
         let mut pane = submit_pane("idle");
         pane.receipt_ok = true;
+        pane.screen_script.borrow_mut().clear();
         pane.screen_script.borrow_mut().extend([
             Some(submit_live_screen()),           // dead-session check
             Some(submit_live_screen()),           // pre-type turn indicator
             Some(submit_pending_screen("hello")), // first submit key check
             Some(submit_live_screen()),           // short confirmation
+            Some(submit_live_screen()),           // first verification
+            Some(submit_live_screen()),           // second verification
         ]);
         let guard = flock.typing_guard(P).unwrap();
 
@@ -713,7 +720,7 @@ mod guarded_preparation_tests {
             pane.typed_attempts
         );
         assert_eq!(vec![(P.to_string(), "Enter".to_string())], pane.keys);
-        assert_eq!(vec![SUBMIT_POLL_S[0]], pane.sleeps);
+        assert_eq!(vec![SUBMIT_POLL_S[0], 0.2, 0.4], pane.sleeps);
     }
 
     #[test]
@@ -757,6 +764,7 @@ mod guarded_preparation_tests {
     fn composer_preflight_submits_foreign_text_once_only_when_draft_preservation_is_disabled() {
         let flock = flock();
         let mut pane = submit_pane("idle");
+        pane.screen_script.borrow_mut().clear();
         pane.screen_script.borrow_mut().extend([
             Some(submit_pending_screen("foreign draft")),
             Some(submit_pending_screen("foreign draft")),
@@ -776,6 +784,7 @@ mod guarded_preparation_tests {
     fn composer_preflight_preserves_a_draft_and_does_not_send_a_key() {
         let flock = flock();
         let mut pane = submit_pane("idle");
+        pane.screen_script.borrow_mut().clear();
         pane.screens
             .insert(P.into(), submit_pending_screen("human draft"));
         let guard = flock.typing_guard(P).unwrap();
@@ -791,14 +800,13 @@ mod guarded_preparation_tests {
     fn press_keys_defers_pending_text_confirmation_until_after_guard_release() {
         let flock = flock();
         let mut pane = submit_pane("idle");
-        pane.screen_script
-            .borrow_mut()
-            .extend([Some(submit_pending_screen("existing text"))]);
+        pane.pending_override = Some("existing text".into());
         let guard = flock.typing_guard(P).unwrap();
         let mut action = press_keys(&mut pane, P, &["Enter".into()], &guard);
 
         assert!(pane.keys.is_empty());
         drop(guard);
+        pane.screen_script.borrow_mut().clear();
         pane.screen_script.borrow_mut().extend([
             Some(submit_live_screen()),
             Some(submit_pending_screen("existing text")),
@@ -852,6 +860,7 @@ mod guarded_preparation_tests {
     fn guarded_send_reports_a_box_hold_without_running_the_action() {
         let flock = flock();
         let mut pane = submit_pane("idle");
+        pane.screen_script.borrow_mut().clear();
         pane.screens
             .insert(P.into(), submit_pending_screen("human draft"));
         let mut action_ran = false;
@@ -873,7 +882,7 @@ mod guarded_preparation_tests {
         );
 
         assert!(!action_ran);
-        assert_eq!(false, result.0);
+        assert!(!result.0);
         assert_eq!(None, result.1);
         assert!(result.2.starts_with(BOX_HOLD));
         assert!(pane.keys.is_empty());
@@ -884,6 +893,7 @@ mod guarded_preparation_tests {
         let flock = flock();
         let mut pane = submit_pane("idle");
         pane.receipt_ok = true;
+        pane.screen_script.borrow_mut().clear();
         pane.screen_script.borrow_mut().extend([
             Some(submit_pending_screen("foreign text")), // dead-session blocker read
             Some(submit_pending_screen("foreign text")), // send blocker box read
