@@ -5,6 +5,7 @@
 //! `authors_of` store read, `_after_review_verdict` (the GitHub hook).
 
 use std::collections::BTreeSet;
+use std::future::Future;
 
 use super::panes::PaneInfoEnv;
 use super::Flock;
@@ -32,6 +33,30 @@ pub struct ReviewCaller<'a> {
 }
 
 impl Flock {
+    /// `_after_review_verdict`: run the GitHub review side effect after a verdict has been
+    /// recorded. GitHub failures never undo the task verdict; preserve the Python hook's
+    /// `{"errors": [message]}` result shape for the caller.
+    pub async fn after_review_verdict<F>(
+        &self,
+        task: &serde_json::Value,
+        verdict: F,
+    ) -> serde_json::Value
+    where
+        F: Future<Output = Result<serde_json::Value, String>>,
+    {
+        match verdict.await {
+            Ok(result) => result,
+            Err(error) => {
+                let task_id = task
+                    .get("id")
+                    .map(crate::context::store::py_str)
+                    .unwrap_or_else(|| "None".into());
+                eprintln!("review verdict side effects failed for {task_id}: {error}");
+                serde_json::json!({"errors": [error]})
+            }
+        }
+    }
+
     /// `_require_completion_binding`: refuse a pane claim the kernel evidence does not support.
     /// `caller` is `current_caller()` as a `Caller`; a request that arrived over the socket is
     /// never trusted on its labels, so every shape the kernel cannot check refuses, while a
