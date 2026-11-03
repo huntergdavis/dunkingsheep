@@ -439,7 +439,7 @@ mod tests {
             block_on(response_json(response))
         );
         assert_eq!(
-            [("history".into(), Some(24)), ("history".into(), Some(168))],
+            vec![("history".into(), Some(24)), ("history".into(), Some(168))],
             *backend.calls.lock().unwrap()
         );
     }
@@ -496,7 +496,7 @@ mod tests {
             block_on(response_json(response))
         );
         assert_eq!(
-            [("refresh".into(), None), ("refresh".into(), None)],
+            vec![("refresh".into(), None), ("refresh".into(), None)],
             *backend.calls.lock().unwrap()
         );
     }
@@ -522,7 +522,7 @@ mod tests {
             block_on(response_json(response))
         );
         assert_eq!(
-            [("board".into(), None), ("board".into(), None)],
+            vec![("board".into(), None), ("board".into(), None)],
             *backend.calls.lock().unwrap()
         );
     }
