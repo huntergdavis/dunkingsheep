@@ -7,17 +7,20 @@
 use std::{
     fs,
     path::PathBuf,
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use axum::{
-    extract::State,
+    extract::{Extension, State},
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::get,
     Json, Router,
 };
 use serde_json::json;
+
+use super::auth::{AuthBackend, AuthError, RequestScheme};
 
 #[derive(Clone, Debug)]
 pub struct SystemConfig {
@@ -40,19 +43,39 @@ impl SystemConfig {
     }
 }
 
-/// Mount the public system routes with explicit environment and build inputs.
-pub fn router(config: SystemConfig) -> Router {
+/// Mount the system routes with explicit auth, environment, and build inputs.
+pub fn router(
+    config: SystemConfig,
+    auth_backend: Arc<dyn AuthBackend>,
+    request_scheme: RequestScheme,
+) -> Router {
     Router::new()
         .route("/api/herdr-webui", get(herdr_webui))
         .route("/api/health", get(health))
         .route("/api/version", get(version))
         .with_state(config)
+        .layer(Extension(auth_backend))
+        .layer(Extension(request_scheme))
 }
 
 async fn herdr_webui(
     State(config): State<SystemConfig>,
+    Extension(auth_backend): Extension<Arc<dyn AuthBackend>>,
+    Extension(request_scheme): Extension<RequestScheme>,
     headers: HeaderMap,
-) -> Json<serde_json::Value> {
+) -> Response {
+    if let Some(response) = same_origin(&headers, request_scheme) {
+        return response;
+    }
+    let bearer = bearer_value(&headers);
+    let cookie = cookie_value(&headers);
+    if let Err(error) = auth_backend
+        .identity(bearer.as_deref(), cookie.as_deref())
+        .await
+    {
+        return auth_error_response(error);
+    }
+
     let configured = config.herdr_webui_url.as_deref().unwrap_or_default().trim();
     let hostname = request_hostname(&headers);
     let url = host_agnostic_url(configured, hostname.as_deref());
@@ -61,6 +84,60 @@ async fn herdr_webui(
         "available": !url.is_empty(),
         "label": config.herdr_webui_label.as_deref().unwrap_or("Herdr web UI").trim(),
     }))
+    .into_response()
+}
+
+fn same_origin(headers: &HeaderMap, scheme: RequestScheme) -> Option<Response> {
+    let origin = headers.get(header::ORIGIN)?.to_str().ok()?;
+    let host = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    let scheme = match scheme {
+        RequestScheme::Http => "http",
+        RequestScheme::Https => "https",
+    };
+    if origin != format!("{scheme}://{host}") {
+        Some(
+            (
+                StatusCode::FORBIDDEN,
+                Json(json!({"detail": "Cross-origin request refused"})),
+            )
+                .into_response(),
+        )
+    } else {
+        None
+    }
+}
+
+fn bearer_value(headers: &HeaderMap) -> Option<String> {
+    let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
+    value.strip_prefix("Bearer ").map(str::to_owned)
+}
+
+fn cookie_value(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(';'))
+        .find_map(|part| {
+            let (key, value) = part.trim().split_once('=')?;
+            (key == "vp_session").then(|| value.to_owned())
+        })
+}
+
+fn auth_error_response(error: AuthError) -> Response {
+    let (status, detail) = match error {
+        AuthError::TooManyAttempts => (
+            StatusCode::TOO_MANY_REQUESTS,
+            "Too many attempts; retry in five minutes",
+        ),
+        AuthError::IncorrectPassword => (StatusCode::UNAUTHORIZED, "Incorrect password"),
+        AuthError::SignInRequired => (StatusCode::UNAUTHORIZED, "Sign in required"),
+        AuthError::Internal(_) => return internal_error(),
+    };
+    (status, Json(json!({"detail": detail}))).into_response()
 }
 
 async fn health() -> Json<serde_json::Value> {
@@ -249,6 +326,7 @@ mod tests {
         future::Future,
         pin::pin,
         sync::atomic::{AtomicU64, Ordering},
+        sync::{Arc, Mutex},
         task::{Context, Poll, Waker},
     };
 
@@ -259,7 +337,10 @@ mod tests {
     use serde_json::{json, Value};
     use tower::ServiceExt;
 
-    use super::{router, SystemConfig};
+    use super::{
+        router as build_router, AuthBackend, AuthError, AuthFuture, Identity, RequestScheme,
+        SystemConfig,
+    };
 
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
@@ -299,6 +380,83 @@ mod tests {
         SystemConfig::new(Some(url.to_owned()), Some(label.to_owned()), ui_dist)
     }
 
+    #[derive(Default)]
+    struct FakeAuth {
+        identities: Mutex<Vec<(Option<String>, Option<String>)>>,
+    }
+
+    impl AuthBackend for FakeAuth {
+        fn login<'a>(
+            &'a self,
+            _address: &'a str,
+            _password: &'a str,
+        ) -> AuthFuture<'a, Result<String, AuthError>> {
+            Box::pin(async { Err(AuthError::SignInRequired) })
+        }
+
+        fn identity<'a>(
+            &'a self,
+            bearer: Option<&'a str>,
+            cookie: Option<&'a str>,
+        ) -> AuthFuture<'a, Result<Identity, AuthError>> {
+            self.identities
+                .lock()
+                .expect("identity lock")
+                .push((bearer.map(str::to_owned), cookie.map(str::to_owned)));
+            let identity = if bearer == Some("test-token") || cookie == Some("session-token") {
+                Ok(Identity::Api)
+            } else {
+                Err(AuthError::SignInRequired)
+            };
+            Box::pin(async move { identity })
+        }
+
+        fn logout<'a>(&'a self, _cookie: Option<&'a str>) -> AuthFuture<'a, Result<(), AuthError>> {
+            Box::pin(async { Err(AuthError::SignInRequired) })
+        }
+
+        fn change_password<'a>(
+            &'a self,
+            _current: &'a str,
+            _new: &'a str,
+            _keep_cookie: Option<&'a str>,
+        ) -> AuthFuture<'a, Result<(), AuthError>> {
+            Box::pin(async { Err(AuthError::SignInRequired) })
+        }
+    }
+
+    fn app(config: SystemConfig) -> axum::Router {
+        build_router(config, Arc::new(FakeAuth::default()), RequestScheme::Http)
+    }
+
+    fn bearer_request(path: &str, host: Option<&str>) -> Request<Body> {
+        let mut request = request(path, host);
+        if let Some(host) = host {
+            request.headers_mut().insert(
+                header::ORIGIN,
+                format!("http://{host}").parse().expect("origin header"),
+            );
+        }
+        request.headers_mut().insert(
+            header::AUTHORIZATION,
+            "Bearer test-token".parse().expect("authorization header"),
+        );
+        request
+    }
+
+    fn cookie_request(path: &str, host: &str) -> Request<Body> {
+        let mut request = request(path, Some(host));
+        request.headers_mut().insert(
+            header::ORIGIN,
+            format!("http://{host}").parse().expect("origin header"),
+        );
+        request.headers_mut().insert(
+            header::COOKIE,
+            "vp_session=session-token".parse().expect("cookie header"),
+        );
+        request
+    }
+
     fn request(path: &str, host: Option<&str>) -> Request<Body> {
         let mut builder = Request::builder().uri(path);
         if let Some(host) = host {
@@ -322,16 +480,79 @@ mod tests {
     }
 
     #[test]
+    fn herdr_webui_requires_valid_authentication() {
+        let temp = TempDir::new();
+        let app = app(config(&temp.0, "https://herdr.example", "Herdr web UI"));
+        let response = block_on(app.oneshot(request("/api/herdr-webui", Some("desk.test"))))
+            .expect("route response");
+        let (status, content_type, body) = response_json(response);
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(content_type, "application/json");
+        assert_eq!(body, json!({"detail": "Sign in required"}));
+    }
+
+    #[test]
+    fn herdr_webui_rejects_cross_origin_before_authentication() {
+        let temp = TempDir::new();
+        let backend = Arc::new(FakeAuth::default());
+        let app = build_router(
+            config(&temp.0, "https://herdr.example", "Herdr web UI"),
+            backend.clone(),
+            RequestScheme::Http,
+        );
+        let mut request = bearer_request("/api/herdr-webui", Some("desk.test"));
+        request.headers_mut().insert(
+            header::ORIGIN,
+            "http://evil.test".parse().expect("origin header"),
+        );
+        let response = block_on(app.oneshot(request)).expect("route response");
+        let (status, content_type, body) = response_json(response);
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(content_type, "application/json");
+        assert_eq!(body, json!({"detail": "Cross-origin request refused"}));
+        assert!(backend.identities.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn herdr_webui_accepts_bearer_and_session_authentication() {
+        let temp = TempDir::new();
+        let backend = Arc::new(FakeAuth::default());
+        let app = build_router(
+            config(&temp.0, "https://herdr.example", "Herdr web UI"),
+            backend.clone(),
+            RequestScheme::Http,
+        );
+        let bearer = block_on(
+            app.clone()
+                .oneshot(bearer_request("/api/herdr-webui", Some("desk.test"))),
+        )
+        .expect("bearer response");
+        assert_eq!(bearer.status(), StatusCode::OK);
+        let cookie = block_on(app.oneshot(cookie_request("/api/herdr-webui", "desk.test")))
+            .expect("cookie response");
+        assert_eq!(cookie.status(), StatusCode::OK);
+        assert_eq!(
+            *backend.identities.lock().unwrap(),
+            vec![
+                (Some("test-token".into()), None),
+                (None, Some("session-token".into()))
+            ]
+        );
+    }
+
+    #[test]
     fn herdr_webui_rewrites_host_and_preserves_configured_parts() {
         let temp = TempDir::new();
-        let app = router(config(
+        let app = app(config(
             &temp.0,
             " https://configured.example:9999/ui/panes?mode=full#discard ",
             "  Herdr web UI  ",
         ));
-        let response =
-            block_on(app.oneshot(request("/api/herdr-webui", Some("Owner.Example:8443"))))
-                .expect("route response");
+        let response = block_on(app.oneshot(bearer_request(
+            "/api/herdr-webui",
+            Some("Owner.Example:8443"),
+        )))
+        .expect("route response");
         let (status, content_type, body) = response_json(response);
         assert_eq!(status, StatusCode::OK);
         assert_eq!(content_type, "application/json");
@@ -348,21 +569,23 @@ mod tests {
     #[test]
     fn herdr_webui_empty_and_invalid_config_preserves_source_response() {
         let temp = TempDir::new();
-        let empty = router(config(&temp.0, "   ", "   "));
-        let response = block_on(empty.oneshot(request("/api/herdr-webui", Some("desk.test"))))
-            .expect("route response");
+        let empty = app(config(&temp.0, "   ", "   "));
+        let response =
+            block_on(empty.oneshot(bearer_request("/api/herdr-webui", Some("desk.test"))))
+                .expect("route response");
         let (status, content_type, body) = response_json(response);
         assert_eq!(status, StatusCode::OK);
         assert_eq!(content_type, "application/json");
         assert_eq!(body, json!({"url": "", "available": false, "label": ""}));
 
-        let invalid = router(config(
+        let invalid = app(config(
             &temp.0,
             "https://configured.example:99999/path#fragment",
             "label",
         ));
-        let response = block_on(invalid.oneshot(request("/api/herdr-webui", Some("desk.test"))))
-            .expect("route response");
+        let response =
+            block_on(invalid.oneshot(bearer_request("/api/herdr-webui", Some("desk.test"))))
+                .expect("route response");
         let (status, content_type, body) = response_json(response);
         assert_eq!(status, StatusCode::OK);
         assert_eq!(content_type, "application/json");
@@ -379,10 +602,12 @@ mod tests {
     #[test]
     fn herdr_webui_brackets_ipv6_and_keeps_configured_port() {
         let temp = TempDir::new();
-        let app = router(config(&temp.0, "http://configured.example:8080", "ui"));
-        let response =
-            block_on(app.oneshot(request("/api/herdr-webui", Some("[2001:db8::1]:9000"))))
-                .expect("route response");
+        let app = app(config(&temp.0, "http://configured.example:8080", "ui"));
+        let response = block_on(app.oneshot(bearer_request(
+            "/api/herdr-webui",
+            Some("[2001:db8::1]:9000"),
+        )))
+        .expect("route response");
         let (status, content_type, body) = response_json(response);
         assert_eq!(status, StatusCode::OK);
         assert_eq!(content_type, "application/json");
@@ -399,9 +624,9 @@ mod tests {
     #[test]
     fn herdr_webui_keeps_configured_url_when_host_is_missing() {
         let temp = TempDir::new();
-        let app = router(config(&temp.0, "not a URL#fragment", "ui"));
-        let response =
-            block_on(app.oneshot(request("/api/herdr-webui", None))).expect("route response");
+        let app = app(config(&temp.0, "not a URL#fragment", "ui"));
+        let response = block_on(app.oneshot(bearer_request("/api/herdr-webui", None)))
+            .expect("route response");
         let (status, content_type, body) = response_json(response);
         assert_eq!(status, StatusCode::OK);
         assert_eq!(content_type, "application/json");
@@ -418,7 +643,7 @@ mod tests {
     #[test]
     fn health_returns_public_ok() {
         let temp = TempDir::new();
-        let app = router(config(&temp.0, "", "Herdr web UI"));
+        let app = app(config(&temp.0, "", "Herdr web UI"));
         let response = block_on(app.oneshot(request("/api/health", None))).expect("route response");
         let (status, content_type, body) = response_json(response);
         assert_eq!(status, StatusCode::OK);
@@ -429,7 +654,7 @@ mod tests {
     #[test]
     fn version_missing_index_returns_unbuilt() {
         let temp = TempDir::new();
-        let app = router(config(&temp.0, "", "Herdr web UI"));
+        let app = app(config(&temp.0, "", "Herdr web UI"));
         let response =
             block_on(app.oneshot(request("/api/version", None))).expect("route response");
         let (status, content_type, body) = response_json(response);
@@ -446,7 +671,7 @@ mod tests {
             "<script type=\"module\" src=\"/assets/first.js\"></script><script defer src=\"/assets/second.js\"></script>",
         )
         .expect("write index fixture");
-        let app = router(config(&temp.0, "", "Herdr web UI"));
+        let app = app(config(&temp.0, "", "Herdr web UI"));
         let response =
             block_on(app.oneshot(request("/api/version", None))).expect("route response");
         let (status, content_type, body) = response_json(response);
@@ -469,7 +694,7 @@ mod tests {
         let expected = (duration.as_secs() as u128 * 1_000_000_000
             + u128::from(duration.subsec_nanos()))
         .to_string();
-        let app = router(config(&temp.0, "", "Herdr web UI"));
+        let app = app(config(&temp.0, "", "Herdr web UI"));
         let response =
             block_on(app.oneshot(request("/api/version", None))).expect("route response");
         let (status, content_type, body) = response_json(response);
@@ -483,7 +708,7 @@ mod tests {
     fn version_read_error_returns_server_error_without_path_leakage() {
         let temp = TempDir::new();
         fs::create_dir(temp.0.join("index.html")).expect("create directory fixture");
-        let app = router(config(&temp.0, "", "Herdr web UI"));
+        let app = app(config(&temp.0, "", "Herdr web UI"));
         let response =
             block_on(app.oneshot(request("/api/version", None))).expect("route response");
         let status = response.status();
@@ -497,9 +722,9 @@ mod tests {
     #[test]
     fn herdr_webui_uses_source_defaults_for_missing_environment_values() {
         let temp = TempDir::new();
-        let app = router(SystemConfig::new(None, None, &temp.0));
-        let response =
-            block_on(app.oneshot(request("/api/herdr-webui", None))).expect("route response");
+        let app = app(SystemConfig::new(None, None, &temp.0));
+        let response = block_on(app.oneshot(bearer_request("/api/herdr-webui", None)))
+            .expect("route response");
         let (status, content_type, body) = response_json(response);
         assert_eq!(status, StatusCode::OK);
         assert_eq!(content_type, "application/json");
@@ -517,8 +742,8 @@ mod tests {
     fn herdr_webui_leaves_configured_url_when_bracketed_host_is_invalid() {
         let temp = TempDir::new();
         let configured = "https://[not-ipv6]:8080/ui#fragment";
-        let app = router(config(&temp.0, configured, "ui"));
-        let response = block_on(app.oneshot(request("/api/herdr-webui", Some("desk.test"))))
+        let app = app(config(&temp.0, configured, "ui"));
+        let response = block_on(app.oneshot(bearer_request("/api/herdr-webui", Some("desk.test"))))
             .expect("route response");
         let (status, content_type, body) = response_json(response);
         assert_eq!(status, StatusCode::OK);
