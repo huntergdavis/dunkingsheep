@@ -269,7 +269,7 @@ fn optional_string(
 fn string_list(
     object: &Map<String, Value>,
     name: &str,
-    body: &Value,
+    _body: &Value,
     max: usize,
 ) -> Result<Vec<String>, Response> {
     let Some(value) = object.get(name) else {
@@ -305,7 +305,7 @@ fn string_list(
 fn integer_list(
     object: &Map<String, Value>,
     name: &str,
-    body: &Value,
+    _body: &Value,
     max: usize,
 ) -> Result<Vec<i64>, Response> {
     let Some(value) = object.get(name) else {
