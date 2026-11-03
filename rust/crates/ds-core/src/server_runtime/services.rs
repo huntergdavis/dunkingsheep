@@ -186,6 +186,69 @@ impl RuntimeServices {
         }))
     }
 
+    pub fn start_dunk(
+        &self,
+        id: &str,
+    ) -> Result<serde_json::Map<String, serde_json::Value>, DunkError> {
+        let row = self.outbox.start_dunk(id)?;
+        self.flock.save()?;
+        Ok(row)
+    }
+
+    pub fn stop_dunk(
+        &self,
+        id: &str,
+    ) -> Result<serde_json::Map<String, serde_json::Value>, DunkError> {
+        let row = self.outbox.stop_dunk(id)?;
+        self.flock.save()?;
+        Ok(row)
+    }
+
+    pub fn toggle_dunk(
+        &self,
+        id: &str,
+    ) -> Result<serde_json::Map<String, serde_json::Value>, DunkError> {
+        let row = self.outbox.toggle_dunk(id)?;
+        self.flock.save()?;
+        Ok(row)
+    }
+
+    pub fn add_dunk(
+        &self,
+        pane: Option<&serde_json::Map<String, serde_json::Value>>,
+        args: &crate::flock::dunks::AddArgs,
+    ) -> Result<serde_json::Map<String, serde_json::Value>, DunkError> {
+        self.outbox.add_dunk(pane, args)
+    }
+
+    pub fn update_dunk(
+        &self,
+        id: &str,
+        pane: Option<&serde_json::Map<String, serde_json::Value>>,
+        args: &crate::flock::dunks::UpdateArgs,
+    ) -> Result<serde_json::Map<String, serde_json::Value>, DunkError> {
+        self.outbox.update_dunk(id, pane, args)
+    }
+
+    pub fn remove_dunk(
+        &self,
+        id: &str,
+    ) -> Result<serde_json::Map<String, serde_json::Value>, DunkError> {
+        let row = self.outbox.remove_dunk(id)?;
+        self.flock.save()?;
+        Ok(row)
+    }
+
+    pub fn stop_all_dunks(
+        &self,
+    ) -> Result<Vec<serde_json::Map<String, serde_json::Value>>, DunkError> {
+        self.outbox.stop_all_dunks()
+    }
+
+    pub fn halt_dunks_aimed_at(&self, panes: &[String]) -> Result<Vec<String>, DunkError> {
+        self.outbox.halt_dunks_aimed_at(panes)
+    }
+
     /// Build the stuck observer adapter with the canonical Flock, outbox, and reporter.
     /// The ordinary loop-adapter constructor intentionally does not imply these services.
     #[allow(dead_code)] // The dependent startup integration consumes this staged binder.
@@ -291,8 +354,9 @@ impl RuntimeServices {
     /// its request threads (the remaining t1605 shutdown gate).
     pub fn shutdown(&self) {
         if !self.stopped.swap(true, Ordering::AcqRel) {
+            self.outbox.stop_timer_workers();
             self.allocator.stop_and_join();
-            self.outbox.stop_and_join();
+            self.outbox.stop_outbox_workers();
         }
     }
 
