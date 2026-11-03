@@ -781,6 +781,7 @@ pub mod clear_box;
 pub mod commands_inbox;
 pub mod commands_layout;
 pub mod commands_owner_views;
+pub mod commands_review;
 pub mod commands_task_complete;
 pub mod commands_tasks;
 pub mod commands_turns;

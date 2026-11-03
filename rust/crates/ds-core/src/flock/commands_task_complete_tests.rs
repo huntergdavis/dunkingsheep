@@ -21,7 +21,7 @@ async fn after_review_verdict_preserves_the_review_service_result() {
     let task = json!({"id": "t1"});
     let expected = json!({"review": "approved", "merged": true});
     let result = flock
-        .after_review_verdict(&task, async { Ok(expected.clone()) })
+        .contain_review_verdict(&task, async { Ok(expected.clone()) })
         .await;
     assert_eq!(expected, result);
 }
@@ -36,7 +36,7 @@ async fn after_review_verdict_contains_github_errors_without_failing_completion(
     );
     let task = json!({"id": "t9"});
     let result = flock
-        .after_review_verdict(&task, async { Err("GitHub unavailable".to_string()) })
+        .contain_review_verdict(&task, async { Err("GitHub unavailable".to_string()) })
         .await;
     assert_eq!(json!({"errors": ["GitHub unavailable"]}), result);
 }

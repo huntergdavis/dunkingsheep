@@ -635,6 +635,9 @@ impl Tokens {
     pub fn config_dir(&self) -> &Path {
         &self.config_dir
     }
+    pub fn api_root(&self) -> &str {
+        &self.api_root
+    }
 }
 
 fn unix_time_f64() -> f64 {

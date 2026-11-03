@@ -33,10 +33,9 @@ pub struct ReviewCaller<'a> {
 }
 
 impl Flock {
-    /// `_after_review_verdict`: run the GitHub review side effect after a verdict has been
-    /// recorded. GitHub failures never undo the task verdict; preserve the Python hook's
-    /// `{"errors": [message]}` result shape for the caller.
-    pub async fn after_review_verdict<F>(
+    /// Error boundary retained from the partial PR629 adapter. The actual
+    /// `_after_review_verdict` hook is the ReviewSync-backed method in `commands_review`.
+    pub async fn contain_review_verdict<F>(
         &self,
         task: &serde_json::Value,
         verdict: F,
