@@ -3960,6 +3960,6 @@ fn h_owner_conversation_matches_python() {
             None,
             Some("w1:p2"),
         ),
-        Err(DunkError::Refused(message)) if message.contains("may not read or answer it")
+        Err(DunkError::Refused(message)) if message.contains("not permitted for role worker")
     ));
 }
