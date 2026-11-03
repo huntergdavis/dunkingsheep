@@ -597,7 +597,7 @@ mod tests {
             )
             .unwrap_err()
             .to_string();
-        assert!(role_denied.contains("own pane"));
+        assert!(role_denied.contains("target_mismatch"));
         let observed = observations.lock().unwrap();
         assert!(observed
             .text
