@@ -1,0 +1,1042 @@
+//! Isolated fleet routes. Production RPC, direct-message transport, local inventory,
+//! and metrics connection ownership must be bound and verified under t1702 before mounting.
+use super::{
+    auth::{AuthBackend, AuthError, Identity, RequestScheme},
+    messages_write::MessageIn,
+    panes::{PanesWebBackend, PanesWebError},
+};
+use crate::roster::{discovered_id, is_lane, match_pane};
+use axum::{
+    body::to_bytes,
+    extract::{Extension, Request},
+    http::{header, HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
+    routing::{get, post},
+    Json, Router,
+};
+use serde_json::{json, Value};
+use std::{
+    collections::HashMap,
+    future::Future,
+    pin::Pin,
+    sync::{Arc, Mutex},
+};
+
+pub type FleetFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+#[derive(Debug)]
+pub enum FleetError {
+    Http(StatusCode, String),
+    Database(String),
+    Other(String),
+}
+/// Required runtime operations, deliberately without success defaults. Summary owns
+/// connect/query/close, including close on failure. Direct message transport must
+/// implement Python _post_message(direct=True), preserving the supplied identity.
+pub trait FleetSources: Send + Sync + 'static {
+    fn registry(&self) -> Result<Value, FleetError>;
+    fn session_mtimes(&self) -> Result<HashMap<String, f64>, FleetError>;
+    fn inventory(&self, routed: &[String]) -> Value;
+    fn configured_channels(&self) -> HashMap<String, Value>;
+    fn post_direct_message<'a>(
+        &'a self,
+        data: MessageIn,
+        identity: Identity,
+    ) -> FleetFuture<'a, Result<Value, FleetError>>;
+    fn summary<'a>(&'a self) -> FleetFuture<'a, Result<Value, FleetError>>;
+}
+pub struct FleetState {
+    rpc: Arc<dyn PanesWebBackend>,
+    sources: Arc<dyn FleetSources>,
+    payload: Mutex<Option<(f64, Value)>>,
+    capabilities: Mutex<HashMap<String, (f64, Value)>>,
+}
+impl FleetState {
+    pub fn new(rpc: Arc<dyn PanesWebBackend>, sources: Arc<dyn FleetSources>) -> Self {
+        Self {
+            rpc,
+            sources,
+            payload: Mutex::new(None),
+            capabilities: Mutex::new(HashMap::new()),
+        }
+    }
+    async fn capability(&self, pane: &str) -> Value {
+        let now = self.rpc.now_seconds();
+        if let Some((at, value)) = self.capabilities.lock().unwrap().get(pane) {
+            if now - at < 20.0 {
+                return value.clone();
+            }
+        }
+        match self
+            .rpc
+            .rpc("delivery_capability", json!({"target":pane}))
+            .await
+        {
+            Ok(value) if value.is_object() => {
+                self.capabilities
+                    .lock()
+                    .unwrap()
+                    .insert(pane.into(), (now, value.clone()));
+                value
+            }
+            _ => json!({}),
+        }
+    }
+    fn cache(&self, value: Value) -> Response {
+        *self.payload.lock().unwrap() = Some((self.rpc.now_seconds(), value.clone()));
+        Json(value).into_response()
+    }
+    fn unavailable(&self, reason: &str) -> Response {
+        self.cache(json!({"state":"unavailable","error":cut(reason,300),"rows":[],"count":null,"generated_at":self.rpc.checked_at()}))
+    }
+}
+pub fn router(state: Arc<FleetState>, auth: Arc<dyn AuthBackend>, scheme: RequestScheme) -> Router {
+    Router::new()
+        .route("/api/pane-send", post(api_pane_send))
+        .route("/api/fleet", get(api_fleet))
+        .route("/api/ops-metrics", get(operations_metrics))
+        .layer(Extension(state))
+        .layer(Extension(auth))
+        .layer(Extension(scheme))
+}
+fn detail(status: StatusCode, text: impl Into<String>) -> Response {
+    (status, Json(json!({"detail":text.into()}))).into_response()
+}
+fn internal() -> Response {
+    (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error").into_response()
+}
+fn cut(s: &str, n: usize) -> String {
+    s.chars().take(n).collect()
+}
+fn truth(v: &Value) -> bool {
+    match v {
+        Value::Null => false,
+        Value::Bool(b) => *b,
+        Value::String(s) => !s.is_empty(),
+        Value::Array(a) => !a.is_empty(),
+        Value::Object(o) => !o.is_empty(),
+        Value::Number(n) => n.as_f64() != Some(0.0),
+    }
+}
+fn pystr(v: &Value) -> String {
+    match v {
+        Value::Null => "None".into(),
+        Value::Bool(true) => "True".into(),
+        Value::Bool(false) => "False".into(),
+        Value::String(s) => s.clone(),
+        Value::Array(a) => format!("[{}]", a.iter().map(repr).collect::<Vec<_>>().join(", ")),
+        Value::Object(o) => format!(
+            "{{{}}}",
+            o.iter()
+                .map(|(k, v)| format!("{}: {}", repr(&json!(k)), repr(v)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        _ => v.to_string(),
+    }
+}
+fn repr(v: &Value) -> String {
+    if let Value::String(s) = v {
+        format!(
+            "'{}'",
+            s.replace('\\', "\\\\")
+                .replace('\'', "\\'")
+                .replace('\n', "\\n")
+                .replace('\r', "\\r")
+                .replace('\t', "\\t")
+        )
+    } else {
+        pystr(v)
+    }
+}
+fn text(v: &Value) -> String {
+    if truth(v) {
+        pystr(v).trim().into()
+    } else {
+        String::new()
+    }
+}
+fn error_response(e: FleetError) -> Response {
+    match e {
+        FleetError::Http(s, d) => detail(s, d),
+        _ => internal(),
+    }
+}
+
+async fn api_pane_send(
+    Extension(state): Extension<Arc<FleetState>>,
+    Extension(auth): Extension<Arc<dyn AuthBackend>>,
+    Extension(scheme): Extension<RequestScheme>,
+    request: Request,
+) -> Response {
+    let identity = match authenticate(auth.as_ref(), request.headers(), scheme).await {
+        Ok(i) => i,
+        Err(r) => return r,
+    };
+    let bytes = match to_bytes(request.into_body(), usize::MAX).await {
+        Ok(b) => b,
+        Err(_) => return internal(),
+    };
+    let body: Value = match serde_json::from_slice(&bytes) {
+        Ok(v) => v,
+        Err(_) => return internal(),
+    };
+    if !body.is_object() {
+        return internal();
+    }
+    if truth(&body["channel"]) {
+        // Model construction occurs inside the Python handler: ValidationError is a
+        // server error, not FastAPI's automatic request-model 422 response.
+        let Some(channel) = body["channel"].as_str() else {
+            return internal();
+        };
+        let message = body.get("text").cloned().unwrap_or(json!(""));
+        let Some(message) = message.as_str() else {
+            return internal();
+        };
+        let attachments = body.get("attachment_ids").cloned().unwrap_or(json!([]));
+        let Some(attachments) = attachments.as_array() else {
+            return internal();
+        };
+        if message.chars().count() > 12000
+            || attachments.len() > 10
+            || attachments.iter().any(|v| !v.is_string())
+        {
+            return internal();
+        }
+        let listing = match state.rpc.rpc("list_panes", json!({})).await {
+            Ok(v) => v,
+            Err(e) => {
+                return rpc_error(
+                    e,
+                    "Dunking Sheep unavailable: ",
+                    StatusCode::SERVICE_UNAVAILABLE,
+                )
+            }
+        };
+        let Some(panes) = listing["panes"].as_array() else {
+            return internal();
+        };
+        let configured = state.sources.configured_channels();
+        let target = if let Some(config) = configured.get(channel) {
+            match match_pane(config, panes) {
+                Ok(p) => p,
+                Err(_) => return internal(),
+            }
+        } else {
+            let mut found = None;
+            for pane in panes {
+                if discovered_id(pane["pane_id"].as_str().unwrap_or("")) == channel {
+                    let allowed = is_lane(Some(pane)).unwrap_or(false)
+                        || state
+                            .capability(pane["pane_id"].as_str().unwrap_or(""))
+                            .await["agent_alive"]
+                            == true;
+                    if allowed {
+                        found = Some(pane.clone());
+                        break;
+                    }
+                }
+            }
+            if found.is_none()
+                && !(channel.starts_with("pane-")
+                    && channel.len() > 5
+                    && channel[5..]
+                        .bytes()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-'))
+            {
+                return detail(StatusCode::NOT_FOUND, "Unknown channel");
+            }
+            found
+        };
+        if target.as_ref().is_none_or(|p| p["pane_id"] != body["pane"]) {
+            return detail(
+                StatusCode::CONFLICT,
+                "Channel target changed; refresh before sending",
+            );
+        }
+        if message.trim().is_empty() && attachments.is_empty() {
+            return detail(StatusCode::UNPROCESSABLE_ENTITY, "Message is empty");
+        }
+        let data = MessageIn {
+            channel: channel.into(),
+            body: message.into(),
+            attachment_ids: attachments
+                .iter()
+                .map(|v| v.as_str().unwrap().into())
+                .collect(),
+            external_id: None,
+        };
+        return match state.sources.post_direct_message(data, identity).await {
+            Ok(v) => Json(v).into_response(),
+            Err(e) => error_response(e),
+        };
+    }
+    let pane = text(&body["pane"]);
+    let message = text(&body["text"]);
+    if !pane.starts_with('%') {
+        return detail(StatusCode::BAD_REQUEST, "a tmux pane id looks like %9");
+    }
+    if message.is_empty() {
+        return detail(StatusCode::BAD_REQUEST, "nothing to send");
+    }
+    if message.chars().count() > 16000 {
+        return detail(StatusCode::BAD_REQUEST, "keep it under 16000 characters");
+    }
+    let cap = state.capability(&pane).await;
+    if !truth(&cap) {
+        return detail(
+            StatusCode::BAD_GATEWAY,
+            "the daemon could not describe this lane",
+        );
+    }
+    if !truth(&cap["alive"]) {
+        return detail(
+            StatusCode::CONFLICT,
+            format!("{pane} is not alive: nothing to send to"),
+        );
+    }
+    let route = cap["send"].as_str().unwrap_or("");
+    if !matches!(route, "owner_push" | "guarded") {
+        return detail(
+            StatusCode::CONFLICT,
+            format!(
+                "{pane} declares no send route ({}); not guessing",
+                repr(&cap["send"])
+            ),
+        );
+    }
+    let (method, args) = if route == "owner_push" {
+        ("owner_push", json!({"target":pane,"body":message}))
+    } else {
+        ("send_text", json!({"target":pane,"text":message}))
+    };
+    match state.rpc.rpc(method, args).await {
+        Ok(v) => send_response(&pane, route, &v),
+        Err(e) => rpc_error(e, "delivery path unavailable: ", StatusCode::BAD_GATEWAY),
+    }
+}
+fn rpc_error(e: PanesWebError, prefix: &str, status: StatusCode) -> Response {
+    match e {
+        PanesWebError::Http { status, detail: d } => detail(status, d),
+        PanesWebError::Failure(e) => detail(status, format!("{prefix}{e}")),
+    }
+}
+fn send_response(pane: &str, route: &str, payload: &Value) -> Response {
+    let chosen = if truth(&payload["message"]) {
+        &payload["message"]
+    } else {
+        &payload["outcome"]
+    };
+    let description = cut(&text(chosen), 400);
+    let outcome = text(&payload["outcome"]).to_lowercase();
+    if route == "owner_push" {
+        if outcome.is_empty() {
+            return detail(StatusCode::BAD_GATEWAY,format!("the daemon stored the message but returned no outcome field, so the desk will not invent one: {}",cut(&description,160)));
+        }
+        return Json(json!({"ok":true,"pane":pane,"route":route,"outcome":outcome,"push_id":payload["id"],"detail":description,"note":"Stored for the lane to drain; nothing typed into the pane. 'stored' is not 'read' - it has not arrived until the lane takes it."})).into_response();
+    }
+    if outcome == "refused" {
+        return Json(json!({"ok":false,"pane":pane,"route":route,"outcome":outcome,"message_id":payload["message_id"],"detail":if truth(&payload["message"]) {payload["message"].clone()} else {json!(description)}})).into_response();
+    }
+    if outcome.is_empty() {
+        return detail(
+            StatusCode::CONFLICT,
+            if description.is_empty() {
+                "No daemon outcome".into()
+            } else {
+                description
+            },
+        );
+    }
+    let note=match outcome.as_str() {
+        "queued"=>"Held by the typing guard or not yet delivered. It has NOT arrived - do not read this as delivered.",
+        "unconfirmed"=>"Neither witness fired. It may well have arrived - do NOT resend blindly; ask the lane first.",
+        "stored"=>"Stored in a durable queue the lane drains itself. That is NOT 'read' - it has not arrived until the lane takes it.",
+        "ok"|"sent"=>"Confirmed by the box clearing or by the turn it started - that is delivery to the lane, not proof the agent acted on it.",
+        _=>return detail(StatusCode::BAD_GATEWAY,format!("the sender returned no outcome field, so the desk will not guess: {}",cut(&description,200))),
+    };
+    let mut result = json!({"ok":true,"pane":pane,"route":route,"outcome":outcome,"message_id":payload["message_id"],"detail":description,"note":note});
+    if matches!(outcome.as_str(), "queued" | "unconfirmed") {
+        result[&outcome] = json!(true)
+    }
+    Json(result).into_response()
+}
+async fn api_fleet(Extension(state): Extension<Arc<FleetState>>) -> Response {
+    let now = state.rpc.now_seconds();
+    if let Some((at, payload)) = state.payload.lock().unwrap().as_ref() {
+        if now - at < 3.0 {
+            return Json(payload.clone()).into_response();
+        }
+    }
+    let listing = match state.rpc.rpc("list_panes", json!({})).await {
+        Ok(v) => v,
+        Err(e) => {
+            return state.unavailable(&format!(
+                "pane roster could not be read: {}",
+                match e {
+                    PanesWebError::Failure(s) => s,
+                    PanesWebError::Http { detail, .. } => detail,
+                }
+            ))
+        }
+    };
+    let Some(panes) = listing["panes"].as_array() else {
+        return state.unavailable("pane roster response is missing its panes list");
+    };
+    if panes
+        .iter()
+        .any(|p| !p.is_object() || !p["pane_id"].is_string())
+    {
+        return state.unavailable("pane roster contains an invalid pane");
+    }
+    let registry = state.sources.registry().unwrap_or(json!({}));
+    let mut activity = HashMap::new();
+    let mut sessions = HashMap::new();
+    let mut waiting = HashMap::new();
+    if let Ok(value) = state.rpc.rpc("state_latest", json!({"limit":500})).await {
+        if let Some(rows) = value["rows"].as_array() {
+            for row in rows {
+                let Some(pane) = row["pane_id"].as_str().filter(|s| !s.is_empty()) else {
+                    continue;
+                };
+                if activity.contains_key(pane) {
+                    continue;
+                }
+                if let Some(at) = row["at"].as_f64() {
+                    activity.insert(pane.to_owned(), at);
+                }
+                sessions.insert(pane.to_owned(), row["session_id"].clone());
+            }
+        }
+    }
+    if let Ok(value) = state.rpc.rpc("roster", json!({})).await {
+        if let Some(lanes) = value["lanes"].as_array() {
+            for lane in lanes {
+                if let Some(unread) = lane["inbox"]["unread"].as_i64() {
+                    for key in ["name", "pane_id"] {
+                        if let Some(k) = lane[key].as_str().filter(|s| !s.is_empty()) {
+                            waiting.insert(k.to_owned(), unread);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let turns = state.sources.session_mtimes().unwrap_or_default();
+    let pending = state
+        .rpc
+        .rpc("owner_stats", json!({}))
+        .await
+        .ok()
+        .and_then(|v| pending_counts(&v));
+    let mut rows = Vec::new();
+    for pane in panes {
+        let id = pane["pane_id"].as_str().unwrap();
+        if id.is_empty() || !truth(&pane["agent"]) {
+            continue;
+        }
+        let recorded = &registry[id];
+        let recorded = if recorded.is_object() {
+            if truth(&recorded["mailbox"]) {
+                &recorded["mailbox"]
+            } else {
+                &recorded["name"]
+            }
+        } else {
+            recorded
+        };
+        let name = if truth(recorded) {
+            recorded.clone()
+        } else if truth(&pane["label"]) {
+            pane["label"].clone()
+        } else {
+            json!(id)
+        };
+        let Some(name_str) = name.as_str() else {
+            return internal();
+        };
+        let cwd = pane["cwd"].as_str().unwrap_or("");
+        let project = cwd.trim_end_matches('/').rsplit('/').next().unwrap_or("");
+        let cap = state.capability(id).await;
+        let session = sessions.get(id).cloned().unwrap_or(Value::Null);
+        let sid = session.as_str().unwrap_or("");
+        let last = turns
+            .get(sid)
+            .filter(|t| **t != 0.0)
+            .or_else(|| turns.get(sid.split('-').next().unwrap_or("")))
+            .filter(|t| **t != 0.0)
+            .or_else(|| activity.get(id).filter(|t| **t != 0.0));
+        rows.push(json!({"pane_id":id,"name":name,"project":project,"cwd":pane["cwd"],"agent":pane["agent"],"alive":true,
+            "last_activity_s":last.map(|t|(now-t) as i64),"unread":waiting.get(name_str).copied().unwrap_or(0)+waiting.get(id).copied().unwrap_or(0),
+            "session":session,"send":cap["send"],"drains":cap["drains"],"pending":pending.as_ref().map(|p|p.get(id).copied().unwrap_or(0)),
+            "pending_state":if pending.is_some(){"ok"}else{"unknown"},"can_type":cap["send"]=="guarded"}));
+    }
+    rows.sort_by(|a, b| {
+        (a["project"].as_str(), a["pane_id"].as_str())
+            .cmp(&(b["project"].as_str(), b["pane_id"].as_str()))
+    });
+    let ids = rows
+        .iter()
+        .map(|r| r["pane_id"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    let inventory = state.sources.inventory(&ids);
+    state.cache(json!({"state":"ok","generated_at":state.rpc.checked_at(),"count":rows.len(),"rows":rows,"unrouted":inventory,"note":"shells and dead panes are not lanes and are not listed"}))
+}
+fn pending_counts(value: &Value) -> Option<HashMap<String, u64>> {
+    if !value.is_object() || value["ok"] == false {
+        return None;
+    }
+    let mut counts = HashMap::new();
+    for row in value["pending"].as_array()? {
+        if !row.is_object() || (!row["pane_id"].is_null() && !row["pane_id"].is_string()) {
+            return None;
+        }
+        if let Some(id) = row["pane_id"].as_str().filter(|s| !s.is_empty()) {
+            *counts.entry(id.to_owned()).or_insert(0) += 1;
+        }
+    }
+    Some(counts)
+}
+async fn operations_metrics(
+    Extension(state): Extension<Arc<FleetState>>,
+    Extension(auth): Extension<Arc<dyn AuthBackend>>,
+    Extension(scheme): Extension<RequestScheme>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(r) = authenticate(auth.as_ref(), &headers, scheme).await {
+        return r;
+    }
+    match state.sources.summary().await {
+        Ok(v) => Json(v).into_response(),
+        Err(FleetError::Database(class)) => detail(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("Operations metrics unavailable: {class}"),
+        ),
+        Err(_) => internal(),
+    }
+}
+
+async fn authenticate(
+    backend: &dyn AuthBackend,
+    headers: &HeaderMap,
+    scheme: RequestScheme,
+) -> Result<Identity, Response> {
+    if let Some(response) = same_origin_refusal(headers, scheme) {
+        return Err(response);
+    }
+    let bearer = bearer_value(headers);
+    let cookie = cookie_value(headers, "vp_session");
+    backend
+        .identity(bearer.as_deref(), cookie.as_deref())
+        .await
+        .map_err(auth_error_response)
+}
+
+fn same_origin_refusal(headers: &HeaderMap, scheme: RequestScheme) -> Option<Response> {
+    let origin = headers.get(header::ORIGIN)?.to_str().ok()?;
+    let host = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    let scheme = match scheme {
+        RequestScheme::Http => "http",
+        RequestScheme::Https => "https",
+    };
+    (origin != format!("{scheme}://{host}"))
+        .then(|| detail(StatusCode::FORBIDDEN, "Cross-origin request refused"))
+}
+
+fn bearer_value(headers: &HeaderMap) -> Option<String> {
+    let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
+    value.strip_prefix("Bearer ").map(str::to_owned)
+}
+
+fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    let value = headers.get(header::COOKIE)?;
+    let value = value
+        .as_bytes()
+        .iter()
+        .map(|byte| char::from(*byte))
+        .collect::<String>();
+    let mut cookie = None;
+    for part in value.split(';') {
+        let (key, value) = part.split_once('=').unwrap_or(("", part));
+        if key.trim() == name {
+            cookie = Some(unquote_cookie_value(value.trim()));
+        }
+    }
+    cookie
+}
+
+fn unquote_cookie_value(value: &str) -> String {
+    let Some(value) = value
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+    else {
+        return value.to_owned();
+    };
+
+    let chars = value.chars().collect::<Vec<_>>();
+    let mut unquoted = String::with_capacity(value.len());
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index] == '\\' && index + 1 < chars.len() {
+            if index + 3 < chars.len()
+                && matches!(chars[index + 1], '0'..='3')
+                && matches!(chars[index + 2], '0'..='7')
+                && matches!(chars[index + 3], '0'..='7')
+            {
+                let octal = (chars[index + 1] as u32 - '0' as u32) * 64
+                    + (chars[index + 2] as u32 - '0' as u32) * 8
+                    + (chars[index + 3] as u32 - '0' as u32);
+                unquoted.push(char::from(octal as u8));
+                index += 4;
+            } else {
+                unquoted.push(chars[index + 1]);
+                index += 2;
+            }
+        } else {
+            unquoted.push(chars[index]);
+            index += 1;
+        }
+    }
+    unquoted
+}
+
+fn auth_error_response(error: AuthError) -> Response {
+    match error {
+        AuthError::TooManyAttempts => detail(
+            StatusCode::TOO_MANY_REQUESTS,
+            "Too many attempts; retry in five minutes",
+        ),
+        AuthError::IncorrectPassword => detail(StatusCode::UNAUTHORIZED, "Incorrect password"),
+        AuthError::SignInRequired => detail(StatusCode::UNAUTHORIZED, "Sign in required"),
+        AuthError::Internal(_) => internal(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{
+        auth::AuthFuture,
+        panes::{PanesWebFuture, ViewportSample},
+    };
+    use super::*;
+    use axum::body::Body;
+    use std::{
+        pin::pin,
+        task::{Context, Poll, Waker},
+    };
+    use tower::ServiceExt;
+    #[derive(Default)]
+    struct Fake {
+        calls: Mutex<Vec<(String, Value)>>,
+        replies: Mutex<HashMap<String, Value>>,
+        now: Mutex<f64>,
+        registry: Mutex<Value>,
+        turns: Mutex<HashMap<String, f64>>,
+        summary_error: Mutex<Option<String>>,
+        channels: Mutex<HashMap<String, Value>>,
+    }
+    impl Fake {
+        fn reply(&self, key: &str, value: Value) {
+            self.replies.lock().unwrap().insert(key.into(), value);
+        }
+        fn calls(&self) -> Vec<String> {
+            self.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(m, _)| m.clone())
+                .collect()
+        }
+        fn setup() -> Arc<Self> {
+            let f = Arc::new(Self::default());
+            *f.now.lock().unwrap() = 100.;
+            f
+        }
+    }
+    impl PanesWebBackend for Fake {
+        fn rpc<'a>(
+            &'a self,
+            method: &'a str,
+            args: Value,
+        ) -> PanesWebFuture<'a, Result<Value, PanesWebError>> {
+            self.calls.lock().unwrap().push((method.into(), args));
+            let value = self.replies.lock().unwrap().get(method).cloned();
+            Box::pin(async move { value.ok_or(PanesWebError::Failure("offline".into())) })
+        }
+        fn update_viewport<'a>(
+            &'a self,
+            _: &'a str,
+            _: ViewportSample,
+            _: f64,
+        ) -> PanesWebFuture<'a, Result<bool, PanesWebError>> {
+            panic!("unexpected viewport")
+        }
+        fn viewports(&self) -> PanesWebFuture<'_, Result<Vec<Value>, PanesWebError>> {
+            panic!("unexpected viewport")
+        }
+        fn roster_rows(&self, _: &[Value]) -> Vec<Value> {
+            panic!("unexpected roster callback")
+        }
+        fn now_seconds(&self) -> f64 {
+            *self.now.lock().unwrap()
+        }
+        fn checked_at(&self) -> String {
+            "2026-11-03T00:00:00Z".into()
+        }
+    }
+    impl FleetSources for Fake {
+        fn registry(&self) -> Result<Value, FleetError> {
+            Ok(self.registry.lock().unwrap().clone())
+        }
+        fn session_mtimes(&self) -> Result<HashMap<String, f64>, FleetError> {
+            Ok(self.turns.lock().unwrap().clone())
+        }
+        fn inventory(&self, ids: &[String]) -> Value {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(("inventory".into(), json!(ids)));
+            json!({"state":"unavailable"})
+        }
+        fn configured_channels(&self) -> HashMap<String, Value> {
+            self.channels.lock().unwrap().clone()
+        }
+        fn post_direct_message<'a>(
+            &'a self,
+            data: MessageIn,
+            identity: Identity,
+        ) -> FleetFuture<'a, Result<Value, FleetError>> {
+            self.calls.lock().unwrap().push(("post_direct".into(),json!({"channel":data.channel,"body":data.body,"attachments":data.attachment_ids,"api":identity==Identity::Api})));
+            Box::pin(async { Ok(json!({"id":7,"transport":{"outcome":"stored"}})) })
+        }
+        fn summary(&self) -> FleetFuture<'_, Result<Value, FleetError>> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(("summary".into(), Value::Null));
+            let error = self.summary_error.lock().unwrap().clone();
+            Box::pin(async move {
+                match error {
+                    None => Ok(json!({"summary":"dashboard"})),
+                    Some(s) if s == "other" => Err(FleetError::Other(s)),
+                    Some(s) => Err(FleetError::Database(s)),
+                }
+            })
+        }
+    }
+    struct Auth(bool);
+    impl AuthBackend for Auth {
+        fn identity<'a>(
+            &'a self,
+            _: Option<&'a str>,
+            _: Option<&'a str>,
+        ) -> AuthFuture<'a, Result<Identity, AuthError>> {
+            Box::pin(async move {
+                if self.0 {
+                    Ok(Identity::Api)
+                } else {
+                    Err(AuthError::SignInRequired)
+                }
+            })
+        }
+        fn login<'a>(
+            &'a self,
+            _: &'a str,
+            _: &'a str,
+        ) -> AuthFuture<'a, Result<String, AuthError>> {
+            panic!("unexpected login")
+        }
+        fn logout<'a>(&'a self, _: Option<&'a str>) -> AuthFuture<'a, Result<(), AuthError>> {
+            panic!("unexpected logout")
+        }
+        fn change_password<'a>(
+            &'a self,
+            _: &'a str,
+            _: &'a str,
+            _: Option<&'a str>,
+        ) -> AuthFuture<'a, Result<(), AuthError>> {
+            panic!("unexpected password")
+        }
+    }
+    fn run<F: Future>(future: F) -> F::Output {
+        let mut future = pin!(future);
+        let mut cx = Context::from_waker(Waker::noop());
+        match future.as_mut().poll(&mut cx) {
+            Poll::Ready(v) => v,
+            Poll::Pending => panic!("fake unexpectedly pending"),
+        }
+    }
+    fn app(f: Arc<Fake>, auth: bool) -> Router {
+        router(
+            Arc::new(FleetState::new(f.clone(), f)),
+            Arc::new(Auth(auth)),
+            RequestScheme::Http,
+        )
+    }
+    fn http(app: Router, path: &str, body: Option<&str>) -> (u16, Value) {
+        let req = Request::builder()
+            .method(if body.is_some() { "POST" } else { "GET" })
+            .uri(path)
+            .header("host", "desk.test")
+            .body(Body::from(body.unwrap_or("").to_owned()))
+            .unwrap();
+        let r = run(app.oneshot(req)).unwrap();
+        let status = r.status().as_u16();
+        let bytes = run(to_bytes(r.into_body(), usize::MAX)).unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(json!(String::from_utf8_lossy(&bytes))),
+        )
+    }
+    fn send(f: Arc<Fake>, body: &str) -> (u16, Value) {
+        http(app(f, true), "/api/pane-send", Some(body))
+    }
+    #[test]
+    fn pane_send_auth_precedes_json_and_backend() {
+        for body in ["{", r#"{"pane":"%9","text":"hi"}"#] {
+            let f = Fake::setup();
+            assert_eq!(
+                http(app(f.clone(), false), "/api/pane-send", Some(body)),
+                (401, json!({"detail":"Sign in required"}))
+            );
+            assert!(f.calls().is_empty());
+        }
+    }
+    #[test]
+    fn pane_send_direct_validation_precedes_capability() {
+        for (body, error) in [
+            (
+                json!({"pane":"x","text":"hi"}),
+                "a tmux pane id looks like %9",
+            ),
+            (json!({"pane":"%9","text":" "}), "nothing to send"),
+            (
+                json!({"pane":"%9","text":"x".repeat(16001)}),
+                "keep it under 16000 characters",
+            ),
+        ] {
+            let f = Fake::setup();
+            assert_eq!(
+                send(f.clone(), &body.to_string()),
+                (400, json!({"detail":error}))
+            );
+            assert!(f.calls().is_empty());
+        }
+    }
+    #[test]
+    fn pane_send_capability_refusal_and_route_choice() {
+        for (cap, status) in [
+            (json!({}), 502),
+            (json!({"alive":false}), 409),
+            (json!({"alive":true,"send":"unknown"}), 409),
+        ] {
+            let f = Fake::setup();
+            f.reply("delivery_capability", cap);
+            assert_eq!(send(f.clone(), r#"{"pane":"%9","text":"hi"}"#).0, status);
+            assert_eq!(f.calls(), vec!["delivery_capability"]);
+            assert_eq!(f.calls.lock().unwrap()[0].1, json!({"target":"%9"}));
+        }
+    }
+    #[test]
+    fn pane_send_owner_push_outcome_is_not_delivery() {
+        let f = Fake::setup();
+        f.reply(
+            "delivery_capability",
+            json!({"alive":true,"send":"owner_push"}),
+        );
+        f.reply("owner_push", json!({"outcome":" Stored ","id":5}));
+        let (s, v) = send(f.clone(), r#"{"pane":"%9","text":"hi"}"#);
+        assert_eq!(s, 200);
+        assert_eq!(v["outcome"], "stored");
+        assert_eq!(v["push_id"], 5);
+        assert!(v["note"].as_str().unwrap().contains("not 'read'"));
+        assert_eq!(f.calls(), vec!["delivery_capability", "owner_push"]);
+        f.reply("owner_push", json!({}));
+        assert_eq!(send(f, r#"{"pane":"%9","text":"hi"}"#).0, 502);
+    }
+    #[test]
+    fn pane_send_guarded_outcome_table() {
+        for (outcome, status, ok) in [
+            ("refused", 200, false),
+            ("", 409, false),
+            ("queued", 200, true),
+            ("unconfirmed", 200, true),
+            ("stored", 200, true),
+            ("ok", 200, true),
+            ("sent", 200, true),
+            ("weird", 502, false),
+        ] {
+            let f = Fake::setup();
+            f.reply(
+                "delivery_capability",
+                json!({"alive":true,"send":"guarded"}),
+            );
+            f.reply("send_text", json!({"outcome":outcome,"message_id":8}));
+            let (s, v) = send(f.clone(), r#"{"pane":"%9","text":"hi"}"#);
+            assert_eq!(s, status, "{outcome}");
+            if s == 200 {
+                assert_eq!(v["ok"], ok);
+                assert_eq!(v["outcome"], outcome);
+                assert_eq!(v["message_id"], 8);
+            }
+            assert_eq!(f.calls(), vec!["delivery_capability", "send_text"]);
+        }
+    }
+    #[test]
+    fn pane_send_channel_revalidation_and_message_model() {
+        let f = Fake::setup();
+        f.reply("list_panes", json!({"panes":[{"pane_id":"%9"}]}));
+        f.channels
+            .lock()
+            .unwrap()
+            .insert("owner".into(), json!({"pane":"%9"}));
+        assert_eq!(
+            send(
+                f.clone(),
+                r#"{"channel":"unknown","pane":"%9","text":"hi"}"#
+            )
+            .0,
+            404
+        );
+        assert_eq!(
+            send(f.clone(), r#"{"channel":"owner","pane":"%8","text":""}"#).0,
+            409
+        );
+        assert_eq!(
+            send(f.clone(), r#"{"channel":"owner","pane":"%9","text":""}"#).0,
+            422
+        );
+        assert_eq!(
+            send(f.clone(), r#"{"channel":"owner","pane":"%9","text":12}"#).0,
+            500
+        );
+        assert!(!f.calls().contains(&"post_direct".into()));
+        assert_eq!(
+            send(
+                f.clone(),
+                r#"{"channel":"owner","pane":"%9","text":"hello"}"#
+            )
+            .0,
+            200
+        );
+        assert_eq!(
+            f.calls.lock().unwrap().last().unwrap().1,
+            json!({"channel":"owner","body":"hello","attachments":[],"api":true})
+        );
+    }
+    #[test]
+    fn fleet_roster_unavailable_schema_and_cache() {
+        for listing in [None, Some(json!({})), Some(json!({"panes":[{}]}))] {
+            let f = Fake::setup();
+            if let Some(v) = listing {
+                f.reply("list_panes", v)
+            }
+            let a = app(f.clone(), false);
+            let (s, v) = http(a.clone(), "/api/fleet", None);
+            assert_eq!(s, 200);
+            assert_eq!(v["state"], "unavailable");
+            assert_eq!(v["count"], Value::Null);
+            assert_eq!(v["rows"], json!([]));
+            assert_eq!(http(a, "/api/fleet", None).1, v);
+            assert_eq!(f.calls(), vec!["list_panes"]);
+        }
+    }
+    #[test]
+    fn fleet_rows_filter_sort_and_activity_precedence() {
+        let f = Fake::setup();
+        f.reply("list_panes",json!({"panes":[{"pane_id":"%2","agent":"pi","cwd":"/b/"},{"pane_id":"%1","agent":"claude","cwd":"/a","label":"label"},{"pane_id":"%3","agent":""}]}));
+        f.reply(
+            "state_latest",
+            json!({"rows":[{"pane_id":"%1","at":10,"session_id":"sid"}]}),
+        );
+        f.reply(
+            "roster",
+            json!({"lanes":[{"name":"lane","pane_id":"%1","inbox":{"unread":3}}]}),
+        );
+        f.reply("owner_stats", json!({"pending":[]}));
+        f.reply(
+            "delivery_capability",
+            json!({"send":"guarded","drains":false}),
+        );
+        *f.registry.lock().unwrap() = json!({"%1":{"mailbox":"lane"}});
+        f.turns.lock().unwrap().insert("sid".into(), 95.);
+        let (s, v) = http(app(f, false), "/api/fleet", None);
+        assert_eq!(s, 200);
+        assert_eq!(v["count"], 2);
+        let r = &v["rows"][0];
+        assert_eq!(r["pane_id"], "%1");
+        assert_eq!(r["name"], "lane");
+        assert_eq!(r["project"], "a");
+        assert_eq!(r["last_activity_s"], 5);
+        assert_eq!(r["unread"], 6);
+        assert_eq!(r["pending"], 0);
+        assert_eq!(r["can_type"], true);
+    }
+    #[test]
+    fn fleet_partial_sources_remain_unknown() {
+        let f = Fake::setup();
+        f.reply(
+            "list_panes",
+            json!({"panes":[{"pane_id":"%1","agent":"pi"}]}),
+        );
+        let a = app(f.clone(), false);
+        let (_, v) = http(a.clone(), "/api/fleet", None);
+        let r = &v["rows"][0];
+        assert_eq!(r["pending"], Value::Null);
+        assert_eq!(r["pending_state"], "unknown");
+        assert_eq!(r["last_activity_s"], Value::Null);
+        assert_eq!(r["send"], Value::Null);
+        assert_eq!(r["can_type"], false);
+        assert_eq!(v["unrouted"]["state"], "unavailable");
+        f.reply("delivery_capability", json!({"send":"guarded"}));
+        *f.now.lock().unwrap() = 104.;
+        http(a.clone(), "/api/fleet", None);
+        let count = f
+            .calls()
+            .iter()
+            .filter(|c| *c == "delivery_capability")
+            .count();
+        *f.now.lock().unwrap() = 108.;
+        http(a.clone(), "/api/fleet", None);
+        assert_eq!(
+            f.calls()
+                .iter()
+                .filter(|c| *c == "delivery_capability")
+                .count(),
+            count
+        );
+        *f.now.lock().unwrap() = 125.;
+        http(a, "/api/fleet", None);
+        assert_eq!(
+            f.calls()
+                .iter()
+                .filter(|c| *c == "delivery_capability")
+                .count(),
+            count + 1
+        );
+    }
+    #[test]
+    fn operations_metrics_auth_summary_and_database_errors() {
+        let f = Fake::setup();
+        assert_eq!(http(app(f.clone(), false), "/api/ops-metrics", None).0, 401);
+        assert!(f.calls().is_empty());
+        assert_eq!(
+            http(app(f.clone(), true), "/api/ops-metrics", None),
+            (200, json!({"summary":"dashboard"}))
+        );
+        for (class, status) in [("OperationalError", 503), ("OSError", 503), ("other", 500)] {
+            *f.summary_error.lock().unwrap() = Some(class.into());
+            let (s, v) = http(app(f.clone(), true), "/api/ops-metrics", None);
+            assert_eq!(s, status);
+            if status == 503 {
+                assert_eq!(
+                    v,
+                    json!({"detail":format!("Operations metrics unavailable: {class}")})
+                );
+            }
+        }
+    }
+}
