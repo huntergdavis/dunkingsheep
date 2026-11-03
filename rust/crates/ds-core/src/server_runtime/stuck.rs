@@ -115,10 +115,7 @@ impl LoopRuntimeAdapter {
                     }
                 };
                 let generation = crate::flock::sends::pane_generation(terminal, &worker_pane_id);
-                let mut reporter = worker_services
-                    .stuck_reporter
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut reporter = worker_services.stuck_reporter.clone();
                 reporter.note(
                     flock,
                     &inbox,

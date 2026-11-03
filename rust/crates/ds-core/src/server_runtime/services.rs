@@ -67,7 +67,7 @@ pub struct RuntimeServices {
     pub(super) flock: Arc<Flock>,
     pub(super) terminal_factory: LoopTerminalFactory,
     pub(super) runtime: Runtime,
-    pub(super) stuck_reporter: std::sync::Mutex<StalePanelReporter>,
+    pub(super) stuck_reporter: StalePanelReporter,
     stopped: AtomicBool,
 }
 
@@ -158,10 +158,12 @@ impl RuntimeServices {
 
         let runtime = inputs.runtime;
         let terminal_factory = inputs.terminal_factory;
-        let outbox = OutboxRuntime::new(
+        let stuck_reporter = StalePanelReporter::new();
+        let outbox = OutboxRuntime::new_with_reporter(
             Arc::clone(&flock),
             runtime.handle().clone(),
             Arc::clone(&terminal_factory),
+            stuck_reporter.clone(),
         )?;
         let gate_env = inputs.env;
         let env_provider = Arc::new(move || Ok(gate_env.clone()));
@@ -177,7 +179,7 @@ impl RuntimeServices {
             flock,
             terminal_factory,
             runtime,
-            stuck_reporter: std::sync::Mutex::new(StalePanelReporter::new()),
+            stuck_reporter,
             stopped: AtomicBool::new(false),
         }))
     }
