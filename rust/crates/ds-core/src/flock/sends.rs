@@ -1389,6 +1389,8 @@ fn send_guarded_with_reason(
 fn submit_dunk_action(
     flock: &Flock,
     action: &Arc<DunkDeliveryAction>,
+    guarded_pane_id: &str,
+    guarded_target_label: &str,
     env: &mut dyn SendPreparationEnv,
     guard: &TypingGuard<'_>,
 ) -> Result<SendAction, String> {
@@ -1396,17 +1398,20 @@ fn submit_dunk_action(
     if dunk.text.is_empty() {
         return Ok(SendAction::completed(true, "empty text, nothing sent"));
     }
+    // The action may have waited behind a pane lock or outbox hold while its Dunker was
+    // retargeted. The caller already acquired and preflighted this pane's guards; keep the
+    // inner attempt on that exact pane instead of pairing the guard with a fresh target.
     let mut message = flock
-        .new_message(&dunk.pane_id, &dunk.target_label, &dunk.text, &dunk.id)
+        .new_message(guarded_pane_id, guarded_target_label, &dunk.text, &dunk.id)
         .map_err(|error| error.to_string())?;
     message.scheduled = true;
     message.schedule_template = Some(dunk.template);
-    message.attempt_generation = env.attempt_generation(&dunk.pane_id);
+    message.attempt_generation = env.attempt_generation(guarded_pane_id);
     let attempt_generation = message.attempt_generation.clone();
     let mut result = submit_text_with_options(
         flock,
         env,
-        &dunk.pane_id,
+        guarded_pane_id,
         &dunk.text,
         SubmitOptions {
             press_enter: true,
@@ -1443,7 +1448,9 @@ pub(super) fn send_dunk_now(
             preserve_draft: false,
         },
         permission,
-        |env, guard| submit_dunk_action(flock, action, env, guard),
+        |env, guard| {
+            submit_dunk_action(flock, action, &dunk.pane_id, &dunk.target_label, env, guard)
+        },
     )
 }
 
@@ -3792,7 +3799,14 @@ impl Flock {
                     }
                 }
                 if let Some(action) = message.dunk_delivery.clone() {
-                    return submit_dunk_action(self, &action, env, guard);
+                    return submit_dunk_action(
+                        self,
+                        &action,
+                        &pane_id,
+                        &message.target_label,
+                        env,
+                        guard,
+                    );
                 }
                 // The exact message frame survives cancellation and same-ID replacement.
                 // Read folded text after acquiring the pane and typing guards.

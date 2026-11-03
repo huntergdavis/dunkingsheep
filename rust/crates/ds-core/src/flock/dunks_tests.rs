@@ -65,10 +65,22 @@ struct FireEnv {
     fail_attempt_receipt: bool,
     attempts: Vec<(String, bool, Option<String>, Option<String>)>,
     mutate_dunk_during_send: Option<Arc<Flock>>,
+    mutate_dunk_target_on_read: Mutex<Option<(Arc<Flock>, Value)>>,
 }
 
 impl SendEnv for FireEnv {
     fn read_pane(&self, _pane_id: &str, _lines: i64, _ansi: bool) -> Option<String> {
+        if let Some((flock, target)) = self
+            .mutate_dunk_target_on_read
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+        {
+            flock
+                .dunks
+                .update("d1", Some(&map(target)), &UpdateArgs::default())
+                .expect("target can be retargeted during guarded preflight");
+        }
         Some(self.screen.clone())
     }
     fn pane_harness(&self, _pane_id: &str) -> Option<String> {
@@ -210,6 +222,7 @@ fn fire_env(fail_send: bool) -> FireEnv {
         fail_attempt_receipt: false,
         attempts: Vec::new(),
         mutate_dunk_during_send: None,
+        mutate_dunk_target_on_read: Mutex::new(None),
     }
 }
 
@@ -597,6 +610,57 @@ fn cancelled_queued_dunk_does_not_allocate_or_submit_an_attempt() {
     assert!(env.attempts.is_empty());
     assert!(env.typed.is_empty());
     assert_eq!(json!(0), flock.dunks.get("d1").unwrap()["send_count"]);
+}
+
+#[test]
+fn deferred_dunk_retarget_during_guarded_preflight_keeps_the_outer_pane() {
+    let (_dir, flock) = new_flock();
+    load_one_fire_dunk(&flock, "continue", None);
+    let flock = Arc::new(flock);
+    let mut env = fire_env(false);
+    env.screen = "Press Enter to confirm or Esc to cancel".into();
+    let queued = flock
+        .fire(
+            "d1",
+            &mut env,
+            &NoopOutboxWake,
+            Arc::new(CapturingSnapshotStore::default()),
+            || None,
+        )
+        .unwrap();
+    assert_eq!(json!(true), queued["queued"]);
+
+    // The outbox row and its eventual guard target are p2. Retarget the live Dunker while
+    // that guard is performing composer preflight, before the delivery action snapshots it.
+    env.screen = idle_codex_screen();
+    *env.mutate_dunk_target_on_read
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((
+        Arc::clone(&flock),
+        json!({"pane_id": "w1:p3", "tab_label": "Other agent"}),
+    ));
+
+    let stopped = AtomicBool::new(false);
+    let mut permission = || None;
+    assert_eq!(
+        OutboxStep::Delivered,
+        outbox_step(
+            &flock,
+            &mut env,
+            "w1:p2",
+            crate::clock::now_s(),
+            &stopped,
+            &|_| false,
+            &mut permission,
+        )
+    );
+
+    assert_eq!(vec![("w1:p2".into(), "continue".into())], env.typed);
+    assert_eq!("w1:p3", flock.dunks.get("d1").unwrap()["target_pane_id"]);
+    assert_eq!(
+        vec![("d1".into(), true, Some("continue".into()), Some("pid-1:start-1".into()))],
+        env.attempts
+    );
 }
 
 #[test]
