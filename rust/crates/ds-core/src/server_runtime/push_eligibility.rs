@@ -35,7 +35,7 @@ impl LoopRuntimeAdapter {
             return None;
         };
         let pane_pid = registered_pane_pid.or_else(|| {
-            let terminal_factory = Arc::clone(&self.terminal_factory);
+            let terminal_factory = std::sync::Arc::clone(&self.terminal_factory);
             let pane_id = pane_id.to_owned();
             std::thread::Builder::new()
                 .name("push-lane-pane-info".into())
