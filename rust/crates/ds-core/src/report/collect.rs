@@ -397,7 +397,7 @@ fn budget_section(config_dir: &Path, home_dir: &Path) -> Value {
         .get("providers")
         .filter(|value| truthy(value))
         .unwrap_or(&data);
-    let providers = providers
+    let mut providers = providers
         .as_object()
         .into_iter()
         .flat_map(Map::iter)
@@ -419,6 +419,7 @@ fn budget_section(config_dir: &Path, home_dir: &Path) -> Value {
             }))
         })
         .collect::<Vec<_>>();
+    providers.sort_by(|left, right| left["provider"].as_str().cmp(&right["provider"].as_str()));
     json!({
         "providers": providers,
         "as_of": data.get("as_of").cloned().unwrap_or(Value::Null),
@@ -685,7 +686,7 @@ mod tests {
         let sources = Sources::new(temp.path());
         fs::write(
             sources.config_dir.join("usage.json"),
-            r#"{"providers":{"agent":{"spent":12.5,"budget":20,"window":"daily"}},"as_of":"now"}"#,
+            r#"{"providers":{"zeta":{"spent":12.5,"budget":20,"window":"daily"},"alpha":{"used":3,"limit":9,"window":"monthly"}},"as_of":"now"}"#,
         )
         .unwrap();
         fs::write(
@@ -696,9 +697,14 @@ mod tests {
         let report = Report::collect(&sources, Some(1_700_000_000.0)).unwrap();
         assert_eq!(
             report["sections"]["budget"]["providers"][0]["provider"],
-            "agent"
+            "alpha"
         );
-        assert_eq!(report["sections"]["budget"]["providers"][0]["used"], 12.5);
+        assert_eq!(report["sections"]["budget"]["providers"][0]["used"], 3);
+        assert_eq!(
+            report["sections"]["budget"]["providers"][1]["provider"],
+            "zeta"
+        );
+        assert_eq!(report["sections"]["budget"]["providers"][1]["used"], 12.5);
         assert_eq!(report["sections"]["watchdog"]["heartbeat_age_s"], 10);
         assert_eq!(report["sections"]["watchdog"]["state"]["ok"], true);
         assert!(report["sections"]["watchdog"]["state"]
