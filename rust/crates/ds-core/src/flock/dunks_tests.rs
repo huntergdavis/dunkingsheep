@@ -64,10 +64,13 @@ struct FireEnv {
 
 impl SendEnv for FireEnv {
     fn read_pane(&self, _pane_id: &str, _lines: i64, _ansi: bool) -> Option<String> {
-        Some(include_str!("../../tests/fixtures/screen/codex-idle-footer-pane17.ansi").into())
+        Some(
+            include_str!("../../tests/fixtures/screen/codex-idle-footer-pane17.ansi")
+                .replace("tab to queue message", "type a message"),
+        )
     }
     fn pane_harness(&self, _pane_id: &str) -> Option<String> {
-        None
+        Some("codex".into())
     }
     fn session_process_gone(&self, _pane_id: &str) -> bool {
         false
