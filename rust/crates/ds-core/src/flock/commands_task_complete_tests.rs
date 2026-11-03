@@ -10,6 +10,37 @@ use super::*;
 use crate::flock::panes::Stores;
 use crate::tasks::{AddOptions, Tasks};
 
+#[tokio::test]
+async fn after_review_verdict_preserves_the_review_service_result() {
+    let scratch = crate::testsupport::dir("tc-review-verdict-ok");
+    let flock = Flock::new(
+        scratch.path().join("l.json"),
+        scratch.path().join("n.json"),
+        false,
+    );
+    let task = json!({"id": "t1"});
+    let expected = json!({"review": "approved", "merged": true});
+    let result = flock
+        .after_review_verdict(&task, async { Ok(expected.clone()) })
+        .await;
+    assert_eq!(expected, result);
+}
+
+#[tokio::test]
+async fn after_review_verdict_contains_github_errors_without_failing_completion() {
+    let scratch = crate::testsupport::dir("tc-review-verdict-error");
+    let flock = Flock::new(
+        scratch.path().join("l.json"),
+        scratch.path().join("n.json"),
+        false,
+    );
+    let task = json!({"id": "t9"});
+    let result = flock
+        .after_review_verdict(&task, async { Err("GitHub unavailable".to_string()) })
+        .await;
+    assert_eq!(json!({"errors": ["GitHub unavailable"]}), result);
+}
+
 struct Panes(Option<Value>);
 
 impl PaneInfoEnv for Panes {
