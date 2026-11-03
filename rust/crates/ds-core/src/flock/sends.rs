@@ -16,10 +16,10 @@
 
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, VecDeque};
-use std::sync::atomic::Ordering;
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use super::commands_inbox::NOTICE_PREFIX;
+use super::commands_inbox::{InboxEnv, NOTICE_PREFIX};
 use super::guarded_submit::confirm_guarded_submission;
 use super::panes::PaneInfoEnv;
 use super::resolve::{resolve_target, resolve_target_dict};
@@ -27,6 +27,7 @@ use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::ThreadId;
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::Flock;
@@ -857,6 +858,8 @@ const HOLD_BACKOFF_BASE_S: f64 = 5.0;
 const HOLD_BACKOFF_CAP_S: f64 = 300.0;
 #[allow(dead_code)] // Used by the dependent outbox worker's delivery entry point.
 const HOLD_ATTEMPT_LIMIT: i64 = 10;
+/// `_outbox_worker` rechecks a held or not-yet-due pane at this cadence.
+pub(crate) const MESSAGE_RECHECK_S: f64 = 5.0;
 
 #[allow(dead_code)] // Used by the dependent outbox worker's delivery entry point.
 fn hold_backoff_s(attempts: i64) -> f64 {
@@ -2841,7 +2844,375 @@ pub trait SnapshotStore: Send + Sync {
 /// the outbox mutex, after appending the message. Implementations must not re-enter
 /// the outbox during this call.
 pub trait OutboxWake: Send + Sync {
-    fn ensure_worker(&self, flock: &Flock, pane_id: &str) -> Result<(), DunkError>;
+    fn ensure_worker(&self, flock: &Arc<Flock>, pane_id: &str) -> Result<(), DunkError>;
+}
+
+/// Runtime-owned environment adapter that executes the real `outbox_worker` loop.
+/// Implementations construct fresh terminal services on the worker thread.
+pub trait OutboxWorkerRunner: Send + Sync + 'static {
+    fn run(&self, flock: Arc<Flock>, pane_id: &str, stopped: &AtomicBool);
+}
+
+struct WorkerRegistration {
+    token: u64,
+    stopped: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+#[derive(Default)]
+struct OutboxWorkerPoolState {
+    workers: HashMap<(u64, String), WorkerRegistration>,
+    retired: Vec<(u64, JoinHandle<()>)>,
+    closed_flocks: HashSet<u64>,
+    next_token: u64,
+}
+
+/// Concrete one-worker-per-pane registration and shutdown gate. The runtime supplies the
+/// already-bound terminal runner; this pool owns identity, enqueue/exit race closure, and joins.
+pub struct OutboxWorkerPool {
+    state: Arc<Mutex<OutboxWorkerPoolState>>,
+    runner: Arc<dyn OutboxWorkerRunner>,
+}
+
+impl OutboxWorkerPool {
+    pub fn new(runner: Arc<dyn OutboxWorkerRunner>) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(OutboxWorkerPoolState::default())),
+            runner,
+        }
+    }
+
+    /// Stop and join every worker for this flock. Call this before closing terminal/store
+    /// services; after this call, enqueue refuses to start another worker for the same flock.
+    pub fn stop_outbox_workers(&self, flock: &Flock) {
+        let flock_id = flock.id;
+        let (workers, mut retired) = {
+            let mut workers = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            workers.closed_flocks.insert(flock_id);
+            let keys: Vec<_> = workers
+                .workers
+                .keys()
+                .filter(|(id, _)| *id == flock_id)
+                .cloned()
+                .collect();
+            let active = keys
+                .into_iter()
+                .filter_map(|key| workers.workers.remove(&key))
+                .collect::<Vec<_>>();
+            let retired = workers
+                .retired
+                .extract_if(.., |(id, _)| *id == flock_id)
+                .map(|(_, handle)| handle)
+                .collect::<Vec<_>>();
+            (active, retired)
+        };
+        for mut worker in workers {
+            worker.stopped.store(true, Ordering::Release);
+            if let Some(handle) = worker.handle.take() {
+                let _ = handle.join();
+            }
+        }
+        for (_, handle) in retired.drain(..) {
+            let _ = handle.join();
+        }
+    }
+
+    fn ensure_worker(&self, flock: &Arc<Flock>, pane_id: &str) -> Result<(), DunkError> {
+        let flock_id = flock.id;
+        let key = (flock_id, pane_id.to_owned());
+        let mut workers = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if workers.closed_flocks.contains(&flock_id) {
+            return Err(DunkError::Refused("outbox workers are stopping".into()));
+        }
+        if workers.workers.contains_key(&key) {
+            return Ok(());
+        }
+        workers.next_token = workers
+            .next_token
+            .checked_add(1)
+            .ok_or_else(|| DunkError::Refused("outbox worker identity exhausted".into()))?;
+        let token = workers.next_token;
+        let stopped = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stopped);
+        let state = Arc::clone(&self.state);
+        let runner = Arc::clone(&self.runner);
+        let worker_flock = Arc::clone(flock);
+        let worker_pane = pane_id.to_owned();
+        let worker_key = key.clone();
+        let (start_tx, start_rx) = std::sync::mpsc::sync_channel::<()>(0);
+        let handle = thread::Builder::new()
+            .name(format!("outbox-{pane_id}"))
+            .spawn(move || {
+                if start_rx.recv().is_err() {
+                    return;
+                }
+                loop {
+                    if worker_stop.load(Ordering::Acquire) {
+                        break;
+                    }
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        runner.run(Arc::clone(&worker_flock), &worker_pane, &worker_stop);
+                    }));
+                    if result.is_err() {
+                        eprintln!("outbox worker for {} panicked; it will retry", worker_pane);
+                    }
+                    if worker_stop.load(Ordering::Acquire) {
+                        break;
+                    }
+                    // Keep the queue lock through the empty check and registration removal.
+                    // Enqueue takes the same lock before `ensure_worker`, closing the classic
+                    // append-after-empty / before-exit race.
+                    let outbox = outbox_lock(&worker_flock.outbox);
+                    let has_queued = outbox
+                        .get(&worker_pane)
+                        .is_some_and(|queue| queue.iter().any(|row| row.status == "queued"));
+                    if has_queued {
+                        drop(outbox);
+                        thread::sleep(Duration::from_secs_f64(MESSAGE_RECHECK_S));
+                        continue;
+                    }
+                    let mut workers = state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if workers
+                        .workers
+                        .get(&worker_key)
+                        .is_some_and(|worker| worker.token == token)
+                    {
+                        if let Some(mut worker) = workers.workers.remove(&worker_key) {
+                            if let Some(handle) = worker.handle.take() {
+                                workers.retired.push((flock_id, handle));
+                            }
+                        }
+                    }
+                    return;
+                }
+                let _outbox = outbox_lock(&worker_flock.outbox);
+                let mut workers = state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if workers
+                    .workers
+                    .get(&worker_key)
+                    .is_some_and(|worker| worker.token == token)
+                {
+                    if let Some(mut worker) = workers.workers.remove(&worker_key) {
+                        if let Some(handle) = worker.handle.take() {
+                            workers.retired.push((flock_id, handle));
+                        }
+                    }
+                }
+            })
+            .map_err(|error| {
+                DunkError::Refused(format!("could not start outbox worker: {error}"))
+            })?;
+        workers.workers.insert(
+            key,
+            WorkerRegistration {
+                token,
+                stopped,
+                handle: Some(handle),
+            },
+        );
+        drop(workers);
+        let _ = start_tx.send(());
+        Ok(())
+    }
+}
+
+impl OutboxWake for OutboxWorkerPool {
+    fn ensure_worker(&self, flock: &Arc<Flock>, pane_id: &str) -> Result<(), DunkError> {
+        OutboxWorkerPool::ensure_worker(self, flock, pane_id)
+    }
+}
+
+/// One deterministic result from the per-pane queue-head scheduler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OutboxStep {
+    Empty,
+    Delivered,
+    Held,
+    Due,
+    Stopped,
+}
+
+/// `_outbox_step`: inspect exactly the FIFO head, release the queue lock before any external
+/// read, wait, send, or save, then let the guarded delivery transition recheck the pane.
+pub(crate) fn outbox_step<E: SendPreparationEnv + PaneInfoEnv>(
+    flock: &Flock,
+    env: &mut E,
+    pane_id: &str,
+    now: f64,
+    stopped: &AtomicBool,
+    wait: &dyn Fn(f64) -> bool,
+    permission: &mut dyn FnMut() -> Option<String>,
+) -> OutboxStep {
+    if stopped.load(Ordering::Acquire) {
+        return OutboxStep::Stopped;
+    }
+    let head = {
+        let mut outbox = outbox_lock(&flock.outbox);
+        let Some(queue) = outbox.get_mut(pane_id) else {
+            return OutboxStep::Empty;
+        };
+        queue.retain(|message| message.status == "queued");
+        let Some(head) = queue.first().cloned() else {
+            outbox.remove(pane_id);
+            return OutboxStep::Empty;
+        };
+        head
+    };
+
+    if let Some(due_at) = head.next_attempt_at {
+        let signature = hold_signature(flock, env, pane_id);
+        let native_ready = if env.federated_input() {
+            env.read_pane(pane_id, CONSUMPTION_READ_LINES, true)
+                .is_some_and(|screen| {
+                    federated_composer(env.federated_input(), &screen).as_deref() == Some("")
+                })
+                && send_blocker(env, pane_id).is_none()
+        } else {
+            false
+        };
+        if signature
+            != (
+                head.hold_signature_kind
+                    .clone()
+                    .unwrap_or_else(|| "box".into()),
+                head.hold_signature.clone().unwrap_or_default(),
+            )
+            || native_ready
+        {
+            let mut outbox = outbox_lock(&flock.outbox);
+            if let Some(stored) = outbox
+                .get_mut(pane_id)
+                .and_then(|queue| queue.iter_mut().find(|row| row.id == head.id))
+            {
+                stored.next_attempt_at = None;
+                stored.hold_signature = None;
+                stored.hold_signature_kind = None;
+            }
+        } else if now < due_at {
+            return OutboxStep::Due;
+        }
+    }
+
+    let mut interrupted = false;
+    let _clear = if head.hold_while_typing {
+        clear_to_send(env, pane_id, &|seconds| {
+            interrupted = wait(seconds);
+            interrupted
+        })
+    } else {
+        true
+    };
+    if stopped.load(Ordering::Acquire) && interrupted {
+        return OutboxStep::Stopped;
+    }
+    if stopped.load(Ordering::Acquire) {
+        return OutboxStep::Stopped;
+    }
+    {
+        let mut outbox = outbox_lock(&flock.outbox);
+        let Some(queue) = outbox.get_mut(pane_id) else {
+            return OutboxStep::Empty;
+        };
+        queue.retain(|message| message.status == "queued");
+        match queue.first() {
+            Some(current) if current.id == head.id => {}
+            Some(_) => return OutboxStep::Delivered,
+            None => {
+                outbox.remove(pane_id);
+                return OutboxStep::Empty;
+            }
+        }
+    };
+    match flock.deliver_message(&head.id, now, env, || permission()) {
+        DeliveryOutcome::Sent | DeliveryOutcome::Failed | DeliveryOutcome::AlreadyDecided => {
+            OutboxStep::Delivered
+        }
+        DeliveryOutcome::Held | DeliveryOutcome::Undeliverable => OutboxStep::Held,
+        DeliveryOutcome::Missing => OutboxStep::Empty,
+    }
+}
+
+/// `_outbox_worker`: run deterministic queue steps, report stale modals, and make one real
+/// owned-text recovery transition when the same box remains visible. Runtime adapters provide
+/// terminal I/O and a stop-aware wait; tests can advance a fake clock without spawning threads.
+pub(crate) fn outbox_worker<E: SendPreparationEnv + PaneInfoEnv + InboxEnv>(
+    flock: &Flock,
+    env: &mut E,
+    pane_id: &str,
+    stopped: &AtomicBool,
+    reporter: &mut super::loops_stuck::StalePanelReporter,
+    wait: &dyn Fn(f64) -> bool,
+    mut permission: impl FnMut() -> Option<String>,
+) {
+    let mut seen: Option<HoldSignature> = None;
+    let mut seen_since = env.now_s();
+    loop {
+        if stopped.load(Ordering::Acquire) {
+            return;
+        }
+        let now = env.now_s();
+        let outcome = outbox_step(flock, env, pane_id, now, stopped, wait, &mut permission);
+        match outcome {
+            OutboxStep::Empty | OutboxStep::Stopped => return,
+            OutboxStep::Delivered => {
+                seen = None;
+                seen_since = env.now_s();
+                continue;
+            }
+            OutboxStep::Held | OutboxStep::Due => {}
+        }
+        let signature = hold_signature(flock, env, pane_id);
+        if seen.as_ref() != Some(&signature) {
+            seen = Some(signature);
+            seen_since = env.now_s();
+        } else if signature.0 == "modal" {
+            let generation = pane_generation(env, pane_id);
+            reporter.note(
+                flock,
+                env,
+                pane_id,
+                "modal",
+                generation.as_deref(),
+                Some(&signature.1),
+                seen_since,
+            );
+        } else if signature.0 == "box" {
+            let head = outbox_lock(&flock.outbox)
+                .get(pane_id)
+                .and_then(|queue| queue.first())
+                .cloned();
+            if let Some(head) = head {
+                let recovery_now = env.now_s();
+                if flock.unwedge(
+                    env,
+                    pane_id,
+                    &signature.1,
+                    Some(seen_since),
+                    Some(&head),
+                    recovery_now,
+                    Some(&head.id),
+                    true,
+                ) {
+                    seen = None;
+                    seen_since = env.now_s();
+                    continue;
+                }
+            }
+        }
+        if wait(MESSAGE_RECHECK_S) {
+            return;
+        }
+    }
 }
 
 pub(crate) fn outbox_lock(
@@ -3650,7 +4021,7 @@ impl Flock {
     /// Append a message to its pane's FIFO, ensure its worker under the queue lock,
     /// then save the current whole-Flock snapshot after releasing that lock.
     pub fn enqueue(
-        &self,
+        self: &Arc<Self>,
         message: Message,
         wake: &dyn OutboxWake,
         store: &dyn SnapshotStore,
