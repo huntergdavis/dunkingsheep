@@ -139,7 +139,7 @@ fn pane_lookup_preserves_absence_and_backend_failure_and_metrics_are_best_effort
         .pane_pid
         .is_none());
 
-    let (_failure_dir, failure_flock) = make_flock("pane-failure", None);
+    let (_failure_dir, failure_flock) = make_flock("pane-failure", Some(Arc::clone(&metrics)));
     let failing_factory: TerminalFactory = Arc::new(|| {
         let mut terminal = FakeTerminal::new();
         terminal.panes.clear();
