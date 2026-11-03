@@ -3,7 +3,6 @@
 //! the process walk, and the review-completion gate order.
 
 use std::collections::BTreeSet;
-use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
@@ -18,7 +17,8 @@ use crate::roles::Roles;
 use crate::server::RequestCtx;
 use crate::tasks::next_job_runtime::NextJobs;
 use crate::tasks::{AddOptions, Task, Tasks};
-use crate::terminal::{FakeTerminal, Terminal};
+use crate::terminal::fakes::FakeTerminal;
+use crate::terminal::Terminal;
 
 #[tokio::test]
 async fn after_review_verdict_preserves_the_review_service_result() {
@@ -267,6 +267,7 @@ fn completion_env<'a>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn invoke_task_complete(
     flock: &Flock,
     runtime: &tokio::runtime::Runtime,

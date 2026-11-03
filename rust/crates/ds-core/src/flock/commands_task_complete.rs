@@ -65,6 +65,7 @@ impl Flock {
         ))?
     }
 
+    #[allow(clippy::too_many_arguments)] // Mirrors the completion request's distinct, ordered inputs.
     async fn task_complete_async(
         &self,
         context: &crate::api::HandlerContext<'_>,
