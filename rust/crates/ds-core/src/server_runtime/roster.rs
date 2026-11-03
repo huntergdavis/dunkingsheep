@@ -481,4 +481,34 @@ mod tests {
             .iter()
             .any(|lane| lane["pane_id"] == "w1:p1"));
     }
+    #[test]
+    fn roster_trait_propagates_lane_failure_and_preserves_absent_services() {
+        use crate::flock::roster::{roster, RosterEnv};
+        use crate::terminal::TerminalError;
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let flock = Flock::new(dir.path().join("launches"), dir.path().join("lanes"), false);
+        let mut fake = FakeTerminal::new();
+        fake.fail_grouped_panes = Some(TerminalError::refused("roster fixture unavailable"));
+        let terminal: Mutex<Box<dyn Terminal>> = Mutex::new(Box::new(fake));
+        let request = RequestCtx::default();
+        let adapter = RequestRuntimeAdapter::new(&flock, &request, runtime.handle(), &terminal);
+        let env: &dyn RosterEnv = &adapter;
+        assert!(roster(env, crate::clock::now_s())
+            .unwrap_err()
+            .contains("roster fixture unavailable"));
+        assert!(env
+            .leases_for_pane("w1:p1", crate::clock::now_s())
+            .is_empty());
+        assert_eq!(env.task("missing"), None);
+        assert_eq!(env.inbox_count("w1:p1"), None);
+        assert_eq!(
+            env.cpu_sample(&json!({}), crate::clock::now_s()).unwrap(),
+            None
+        );
+    }
 }
