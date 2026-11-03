@@ -431,6 +431,8 @@ mod tests {
             Box::pin(async move {
                 if self.fail {
                     Err(MessagesReadError)
+                } else if ids.is_empty() {
+                    Ok(json!({"deliveries": {}}))
                 } else {
                     Ok(
                         json!({"deliveries": {"7": {"delivery": "delivered", "delivery_detail": ""}}}),
