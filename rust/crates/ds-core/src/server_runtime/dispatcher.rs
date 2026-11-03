@@ -32,6 +32,7 @@ pub(crate) struct RuntimeDispatcher {
     handlers: api::Dispatcher,
 }
 
+#[allow(dead_code)] // Used once the dispatcher is wired by the production startup assembly.
 struct RolePaneQuery<'a> {
     list_panes_grouped: &'a dyn Fn() -> Result<Vec<Value>, DunkError>,
     get_pane: &'a dyn Fn(&str) -> Option<Value>,
@@ -73,6 +74,7 @@ impl RuntimeDispatcher {
         }
     }
 
+    #[allow(dead_code)] // Used by Dispatcher::pane_info after production startup wiring.
     fn pane_info_at(&self, pane_id: &str, now: f64) -> Result<Option<PaneInfo>, DunkError> {
         if pane_id.is_empty() {
             return Ok(None);
