@@ -144,18 +144,21 @@ async fn game_loadstate(
         );
     };
     let Some(slot) = python_integer(input) else {
-        if let Value::String(value) = input {
-            match numeric_string_slot_bound(value) {
-                Some(SlotBound::Minimum) => return slot_below_minimum_error(input),
-                Some(SlotBound::Maximum) => return slot_exceeds_maximum_error(input),
-                None => {}
-            }
-        }
-        if input
-            .as_u64()
-            .is_some_and(|slot| slot > i64::MAX as u64)
-        {
-            return slot_exceeds_maximum_error(input);
+        let bound = match input {
+            Value::String(value) => match clean_pydantic_integer_string(value) {
+                Ok(normalized) => numeric_slot_bound(&normalized),
+                Err(IntegerStringError::TooManyDigits) => {
+                    return slot_integer_string_too_large_error(input);
+                }
+                Err(IntegerStringError::Invalid) => None,
+            },
+            Value::Number(number) => numeric_slot_bound(&number.to_string()),
+            _ => None,
+        };
+        match bound {
+            Some(SlotBound::Minimum) => return slot_below_minimum_error(input),
+            Some(SlotBound::Maximum) => return slot_exceeds_maximum_error(input),
+            None => {}
         }
         let (kind, message) = match input {
             Value::String(_) => (
@@ -243,7 +246,7 @@ fn request_json_content_type(headers: &HeaderMap) -> bool {
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
     else {
-        return true;
+        return false;
     };
     let media_type = content_type.split(';').next().unwrap_or_default().trim();
     let Some((top_level, subtype)) = media_type.split_once('/') else {
@@ -377,7 +380,7 @@ fn python_integer(value: &Value) -> Option<i64> {
                     .filter(|value| value.fract() == 0.0)
                     .and_then(|value| i64::try_from(value as i128).ok())
             }),
-        Value::String(value) => clean_pydantic_integer_string(value)?.parse().ok(),
+        Value::String(value) => clean_pydantic_integer_string(value).ok()?.parse().ok(),
         Value::Bool(value) => Some(i64::from(*value)),
         Value::Null | Value::Array(_) | Value::Object(_) => None,
     }
@@ -389,9 +392,7 @@ enum SlotBound {
     Maximum,
 }
 
-fn numeric_string_slot_bound(value: &str) -> Option<SlotBound> {
-    let normalized = clean_pydantic_integer_string(value)?;
-    let value = normalized.as_str();
+fn numeric_slot_bound(value: &str) -> Option<SlotBound> {
     let (negative, digits) = if let Some(digits) = value.strip_prefix('-') {
         (true, digits)
     } else if let Some(digits) = value.strip_prefix('+') {
@@ -412,10 +413,17 @@ fn numeric_string_slot_bound(value: &str) -> Option<SlotBound> {
     }
 }
 
-fn clean_pydantic_integer_string(value: &str) -> Option<String> {
+const PYDANTIC_MAX_INT_DIGITS: usize = 4_300;
+
+enum IntegerStringError {
+    Invalid,
+    TooManyDigits,
+}
+
+fn clean_pydantic_integer_string(value: &str) -> Result<String, IntegerStringError> {
     let value = value.trim();
     if value.is_empty() {
-        return None;
+        return Err(IntegerStringError::Invalid);
     }
     let bytes = value.as_bytes();
     for (index, byte) in bytes.iter().enumerate() {
@@ -425,14 +433,14 @@ fn clean_pydantic_integer_string(value: &str) -> Option<String> {
                 || !bytes[index - 1].is_ascii_digit()
                 || !bytes[index + 1].is_ascii_digit())
         {
-            return None;
+            return Err(IntegerStringError::Invalid);
         }
     }
     let mut cleaned: String = value.chars().filter(|character| *character != '_').collect();
     if let Some(decimal) = cleaned.find('.') {
         let fraction = &cleaned[decimal + 1..];
         if fraction.is_empty() || !fraction.bytes().all(|byte| byte == b'0') {
-            return None;
+            return Err(IntegerStringError::Invalid);
         }
         cleaned.truncate(decimal);
     }
@@ -441,12 +449,15 @@ fn clean_pydantic_integer_string(value: &str) -> Option<String> {
         .or_else(|| cleaned.strip_prefix('+'))
         .unwrap_or(&cleaned);
     if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
-        return None;
+        return Err(IntegerStringError::Invalid);
+    }
+    if digits.len() > PYDANTIC_MAX_INT_DIGITS {
+        return Err(IntegerStringError::TooManyDigits);
     }
     if cleaned.starts_with('+') {
         cleaned.remove(0);
     }
-    Some(cleaned)
+    Ok(cleaned)
 }
 
 fn model_error(input: Value) -> Response {
@@ -476,6 +487,16 @@ fn slot_below_minimum_error(input: &Value) -> Response {
         "Input should be greater than or equal to 1",
         input.clone(),
         Some(json!({"ge": 1})),
+    )
+}
+
+fn slot_integer_string_too_large_error(input: &Value) -> Response {
+    validation_error(
+        "int_parsing_size",
+        vec![json!("body"), json!("slot")],
+        "Unable to parse input string as an integer, exceeded maximum size",
+        input.clone(),
+        None,
     )
 }
 
@@ -868,6 +889,48 @@ mod tests {
     }
 
     #[test]
+    fn game_loadstate_preserves_arbitrary_precision_json_integer_bounds() {
+        let game = Arc::new(FakeGame::new(Value::Null));
+        for (slot, expected_error) in [
+            ("18446744073709551616", "less_than_equal"),
+            ("-9223372036854775809", "greater_than_equal"),
+        ] {
+            let body = format!(r#"{{"slot":{slot}}}"#);
+            let (status, _body, value) = response(
+                app(game.clone(), authorized()),
+                request("POST", "/api/game/loadstate", &body),
+            );
+            assert_eq!(StatusCode::UNPROCESSABLE_ENTITY, status);
+            assert_eq!(expected_error, value["detail"][0]["type"]);
+            assert_eq!(slot, value["detail"][0]["input"].to_string());
+        }
+        assert!(game.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn game_loadstate_enforces_pydantic_integer_string_digit_limit() {
+        let game = Arc::new(FakeGame::new(Value::Null));
+        for (digit_count, expected_error) in [(4_300, "less_than_equal"), (4_301, "int_parsing_size")] {
+            let slot = "9".repeat(digit_count);
+            let body = format!(r#"{{"slot":"{slot}"}}"#);
+            let (status, _body, value) = response(
+                app(game.clone(), authorized()),
+                request("POST", "/api/game/loadstate", &body),
+            );
+            assert_eq!(StatusCode::UNPROCESSABLE_ENTITY, status);
+            assert_eq!(expected_error, value["detail"][0]["type"]);
+            assert_eq!(slot, value["detail"][0]["input"]);
+            if expected_error == "int_parsing_size" {
+                assert_eq!(
+                    "Unable to parse input string as an integer, exceeded maximum size",
+                    value["detail"][0]["msg"]
+                );
+            }
+            assert!(game.calls.lock().unwrap().is_empty());
+        }
+    }
+
+    #[test]
     fn game_loadstate_coerces_pydantic_integer_string_forms_before_bounds_checks() {
         let cases = [
             ("+1", Some(1), None),
@@ -1074,22 +1137,36 @@ mod tests {
     }
 
     #[test]
-    fn game_state_model_routes_parse_json_without_content_type_header() {
+    fn game_state_model_routes_treat_missing_content_type_as_raw_body() {
         let game = Arc::new(FakeGame::new(Value::Null));
         for (path, body) in [
             ("/api/game/savestate", r#"{"tag":"quick"}"#),
             ("/api/game/loadstate", r#"{"slot":3}"#),
         ] {
-            let (status, _body, _value) = response(
+            let (status, _body, value) = response(
                 app(game.clone(), authorized()),
                 request_without_content_type("POST", path, body),
             );
-            assert_eq!(StatusCode::OK, status);
+            assert_eq!(StatusCode::UNPROCESSABLE_ENTITY, status);
+            assert_eq!(
+                json!({"detail":[{"type":"model_attributes_type","loc":["body"],
+                    "msg":"Input should be a valid dictionary or object to extract fields from",
+                    "input":body}]}),
+                value
+            );
         }
-        assert_eq!(
-            vec!["savestate:quick".to_owned(), "loadstate:3".to_owned()],
-            game.calls.lock().unwrap().clone()
-        );
+        for path in ["/api/game/savestate", "/api/game/loadstate"] {
+            let unauthenticated = Arc::new(FakeAuth {
+                result: Err(AuthError::SignInRequired),
+            });
+            let (status, _body, value) = response(
+                app(game.clone(), unauthenticated),
+                request_without_content_type("POST", path, "{"),
+            );
+            assert_eq!(StatusCode::UNAUTHORIZED, status);
+            assert_eq!(json!({"detail":"Sign in required"}), value);
+        }
+        assert!(game.calls.lock().unwrap().is_empty());
     }
 
     #[test]
