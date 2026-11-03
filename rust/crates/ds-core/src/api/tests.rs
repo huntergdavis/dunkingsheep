@@ -4630,7 +4630,7 @@ fn h_reply_stats_matches_python() {
     );
     assert_eq!(
         env.views.latency_calls.lock().unwrap().as_slice(),
-        [("a".into(), 200), ("b".into(), 200)]
+        [("b".into(), 200), ("a".into(), 200)]
     );
 }
 

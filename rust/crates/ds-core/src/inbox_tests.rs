@@ -727,7 +727,7 @@ fn seen_latencies_filters_reads_caps_newest_rows_and_clamps_negative_delays() {
     writer
         .execute(
             "INSERT INTO messages (id, mailbox, mailbox_label, sender, body, state, created_at, read_at) \
-             VALUES ('negative', 'latency-box', 'latency-box', 'reader', 'body', 'read', 100.0, 10000.0)",
+             VALUES ('negative', 'latency-box', 'latency-box', 'reader', 'body', 'read', 20000.0, 10000.0)",
             [],
         )
         .expect("insert negative-delay sample");
