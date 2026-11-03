@@ -42,7 +42,7 @@ impl SnapshotStore for OfflineSnapshotStore {
     }
 }
 
-fn flock() -> (tempfile::TempDir, Flock) {
+fn new_flock() -> (tempfile::TempDir, Flock) {
     let dir = tempfile::tempdir().unwrap();
     let flock = Flock::new(
         dir.path().join("launches.json"),
@@ -232,7 +232,7 @@ fn load_one_fire_dunk(flock: &Flock, text: &str, max_sends: Option<i64>) {
 
 #[test]
 fn fire_sends_expanded_text_synchronously_through_guarded_direct_send() {
-    let (_dir, flock) = flock();
+    let (_dir, flock) = new_flock();
     load_one_fire_dunk(&flock, "hello from {id}", None);
     let flock = Arc::new(flock);
     let store = Arc::new(CapturingSnapshotStore::default());
@@ -266,7 +266,7 @@ fn fire_sends_expanded_text_synchronously_through_guarded_direct_send() {
 
 #[test]
 fn fire_reports_guarded_send_failure_and_records_last_error() {
-    let (_dir, flock) = flock();
+    let (_dir, flock) = new_flock();
     load_one_fire_dunk(&flock, "continue", None);
     let flock = Arc::new(flock);
     let store = Arc::new(CapturingSnapshotStore::default());
@@ -287,7 +287,7 @@ fn fire_reports_guarded_send_failure_and_records_last_error() {
 
 #[test]
 fn queued_fire_uses_live_template_and_updates_only_captured_same_id_dunker() {
-    let (_dir, flock) = flock();
+    let (_dir, flock) = new_flock();
     load_one_fire_dunk(&flock, "first {id}", None);
     let flock = Arc::new(flock);
     let store = Arc::new(CapturingSnapshotStore::default());
@@ -327,6 +327,23 @@ fn queued_fire_uses_live_template_and_updates_only_captured_same_id_dunker() {
 
     let stopped = AtomicBool::new(false);
     let mut permission = || None;
+    assert_eq!(
+        OutboxStep::Held,
+        outbox_step(
+            &flock,
+            &mut env,
+            "w1:p2",
+            crate::clock::now_s(),
+            &stopped,
+            &|_| false,
+            &mut permission,
+        )
+    );
+    assert!(
+        env.attempts.is_empty(),
+        "a held retry allocates no attempt frame"
+    );
+    env.screen = idle_codex_screen();
     let drained = outbox_step(
         &flock,
         &mut env,
@@ -373,7 +390,7 @@ fn queued_fire_uses_live_template_and_updates_only_captured_same_id_dunker() {
 
 #[test]
 fn empty_text_skips_inner_attempt_and_post_send_snapshot_error_does_not_rollback() {
-    let (_dir, flock) = flock();
+    let (_dir, flock) = new_flock();
     load_one_fire_dunk(&flock, "   ", None);
     let flock = Arc::new(flock);
     let store = Arc::new(CapturingSnapshotStore::default());
@@ -386,7 +403,7 @@ fn empty_text_skips_inner_attempt_and_post_send_snapshot_error_does_not_rollback
     assert!(env.attempts.is_empty());
     assert!(env.keys.is_empty());
 
-    let (_other_dir, other) = flock();
+    let (_other_dir, other) = new_flock();
     load_one_fire_dunk(&other, "continue", None);
     let other = Arc::new(other);
     let failed = other
@@ -407,7 +424,7 @@ fn empty_text_skips_inner_attempt_and_post_send_snapshot_error_does_not_rollback
 
 #[test]
 fn attempt_receipt_failure_prevents_enter_and_does_not_increment_count() {
-    let (_dir, flock) = flock();
+    let (_dir, flock) = new_flock();
     load_one_fire_dunk(&flock, "continue", None);
     let flock = Arc::new(flock);
     let store = Arc::new(CapturingSnapshotStore::default());
@@ -425,7 +442,7 @@ fn attempt_receipt_failure_prevents_enter_and_does_not_increment_count() {
 
 #[test]
 fn deferred_empty_expansion_skips_inner_attempt_and_restored_queue_is_plain_text() {
-    let (_dir, flock) = flock();
+    let (_dir, flock) = new_flock();
     load_one_fire_dunk(&flock, "first {id}", None);
     let flock = Arc::new(flock);
     let store = Arc::new(CapturingSnapshotStore::default());
@@ -443,7 +460,7 @@ fn deferred_empty_expansion_skips_inner_attempt_and_restored_queue_is_plain_text
     assert_eq!(json!(true), queued["queued"]);
 
     let saved = flock.snapshot();
-    let (_restore_dir, restored) = flock();
+    let (_restore_dir, restored) = new_flock();
     restored.restore_outbox(saved["outbox"].as_array().unwrap());
     let mut plain_env = fire_env(false);
     let stopped = AtomicBool::new(false);
@@ -462,7 +479,7 @@ fn deferred_empty_expansion_skips_inner_attempt_and_restored_queue_is_plain_text
     );
     assert_eq!(vec![("w1:p2".into(), "first {id}".into())], plain_env.typed);
 
-    let (_empty_dir, empty_flock) = flock();
+    let (_empty_dir, empty_flock) = new_flock();
     load_one_fire_dunk(&empty_flock, "first {id}", None);
     let empty_flock = Arc::new(empty_flock);
     let empty_store = Arc::new(CapturingSnapshotStore::default());
@@ -507,8 +524,54 @@ fn deferred_empty_expansion_skips_inner_attempt_and_restored_queue_is_plain_text
 }
 
 #[test]
+fn cancelled_queued_dunk_does_not_allocate_or_submit_an_attempt() {
+    let (_dir, flock) = new_flock();
+    load_one_fire_dunk(&flock, "continue", None);
+    let flock = Arc::new(flock);
+    let mut env = fire_env(false);
+    env.screen = "Press Enter to confirm or Esc to cancel".into();
+    let result = flock
+        .fire(
+            "d1",
+            &mut env,
+            &NoopOutboxWake,
+            Arc::new(CapturingSnapshotStore::default()),
+            || None,
+        )
+        .unwrap();
+    let message_id = result["message_id"].as_str().unwrap();
+    {
+        let mut outbox = super::sends::outbox_lock(&flock.outbox);
+        let row = outbox
+            .get_mut("w1:p2")
+            .unwrap()
+            .iter_mut()
+            .find(|row| row.id == message_id)
+            .unwrap();
+        row.status = "cancelled".into();
+    }
+    let stopped = AtomicBool::new(false);
+    let mut permission = || None;
+    assert_eq!(
+        OutboxStep::Empty,
+        outbox_step(
+            &flock,
+            &mut env,
+            "w1:p2",
+            crate::clock::now_s(),
+            &stopped,
+            &|_| false,
+            &mut permission,
+        )
+    );
+    assert!(env.attempts.is_empty());
+    assert!(env.typed.is_empty());
+    assert_eq!(json!(0), flock.dunks.get("d1").unwrap()["send_count"]);
+}
+
+#[test]
 fn manual_fire_with_max_sends_does_not_remove_the_dunk() {
-    let (_dir, flock) = flock();
+    let (_dir, flock) = new_flock();
     load_one_fire_dunk(&flock, "continue", Some(1));
     let flock = Arc::new(flock);
     let store = Arc::new(CapturingSnapshotStore::default());
@@ -524,7 +587,7 @@ fn manual_fire_with_max_sends_does_not_remove_the_dunk() {
 
 #[test]
 fn captured_dunker_handle_survives_remove_and_same_id_reload() {
-    let (_dir, flock) = flock();
+    let (_dir, flock) = new_flock();
     load_one_fire_dunk(&flock, "first {id}", None);
     let captured = flock.dunks.begin_fire("d1").unwrap();
     flock
@@ -565,7 +628,7 @@ fn captured_dunker_handle_survives_remove_and_same_id_reload() {
 
 #[test]
 fn save_dunks_invokes_the_whole_flock_snapshot_store_with_extracted_fields() {
-    let (_dir, flock) = flock();
+    let (_dir, flock) = new_flock();
     flock._load_dunks(&map(json!({
         "next_id": 5,
         "dunkers": [
@@ -599,7 +662,7 @@ fn save_dunks_invokes_the_whole_flock_snapshot_store_with_extracted_fields() {
 
 #[test]
 fn load_dunks_tolerates_a_corrupt_dunk_collection() {
-    let (_dir, flock) = flock();
+    let (_dir, flock) = new_flock();
     flock._load_dunks(&map(json!({"next_id": "bad", "dunkers": "corrupt"})));
 
     let (next_id, rows) = flock.dunks.snapshot();
@@ -609,7 +672,7 @@ fn load_dunks_tolerates_a_corrupt_dunk_collection() {
 
 #[test]
 fn clear_historical_errors_only_clears_running_exact_live_targets() {
-    let (_dir, flock) = flock();
+    let (_dir, flock) = new_flock();
     flock._load_dunks(&map(json!({
         "next_id": 5,
         "dunkers": [
@@ -645,7 +708,7 @@ fn clear_historical_errors_only_clears_running_exact_live_targets() {
 
 #[test]
 fn save_dunks_forwards_snapshot_store_errors() {
-    let (_dir, flock) = flock();
+    let (_dir, flock) = new_flock();
     let error = flock._save_dunks(&OfflineSnapshotStore).unwrap_err();
     assert!(matches!(error, DunkError::Refused(message) if message == "offline"));
 }

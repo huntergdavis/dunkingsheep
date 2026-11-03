@@ -959,7 +959,7 @@ impl Flock {
         dunk_id: &str,
         env: &mut dyn SendPreparationEnv,
         wake: &dyn OutboxWake,
-        store: Arc<dyn SnapshotStore>,
+        store: Arc<impl SnapshotStore>,
         permission: impl FnMut() -> Option<String>,
     ) -> Result<Value, DunkError> {
         let handle = self.dunks.begin_fire(dunk_id)?;
