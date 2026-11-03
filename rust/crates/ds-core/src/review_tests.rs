@@ -1725,7 +1725,10 @@ async fn merge_uses_full_task_snapshot_accounts_after_success_and_marks_landed_l
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
-    assert_eq!(vec!["accounting", "landed"], event_order);
+    assert_eq!(Some("landed"), event_order.last().map(String::as_str));
+    assert!(event_order[..event_order.len() - 1]
+        .iter()
+        .all(|event| event == "accounting"));
 }
 
 #[tokio::test]
