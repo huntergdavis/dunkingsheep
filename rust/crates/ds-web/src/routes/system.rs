@@ -122,15 +122,58 @@ fn bearer_value(headers: &HeaderMap) -> Option<String> {
 }
 
 fn cookie_value(headers: &HeaderMap) -> Option<String> {
-    headers
-        .get_all(header::COOKIE)
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .flat_map(|value| value.split(';'))
-        .find_map(|part| {
-            let (key, value) = part.trim().split_once('=')?;
-            (key == "vp_session").then(|| value.to_owned())
-        })
+    let mut cookie = None;
+    for value in headers.get_all(header::COOKIE).iter() {
+        // Starlette decodes each Cookie header as Latin-1 before passing it to
+        // cookie_parser, then updates the cookie dict in header/chunk order.
+        let value = value
+            .as_bytes()
+            .iter()
+            .map(|byte| char::from(*byte))
+            .collect::<String>();
+        for part in value.split(';') {
+            let (key, value) = part.split_once('=').unwrap_or(("", part));
+            if key.trim() == "vp_session" {
+                cookie = Some(unquote_cookie_value(value.trim()));
+            }
+        }
+    }
+    cookie.filter(|value| !value.is_empty())
+}
+
+fn unquote_cookie_value(value: &str) -> String {
+    let Some(value) = value
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+    else {
+        return value.to_owned();
+    };
+
+    let chars = value.chars().collect::<Vec<_>>();
+    let mut unquoted = String::with_capacity(value.len());
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index] == '\\' && index + 1 < chars.len() {
+            if index + 3 < chars.len()
+                && matches!(chars[index + 1], '0'..='3')
+                && matches!(chars[index + 2], '0'..='7')
+                && matches!(chars[index + 3], '0'..='7')
+            {
+                let octal = (chars[index + 1] as u32 - '0' as u32) * 64
+                    + (chars[index + 2] as u32 - '0' as u32) * 8
+                    + (chars[index + 3] as u32 - '0' as u32);
+                unquoted.push(char::from(octal as u8));
+                index += 4;
+            } else {
+                unquoted.push(chars[index + 1]);
+                index += 2;
+            }
+        } else {
+            unquoted.push(chars[index]);
+            index += 1;
+        }
+    }
+    unquoted
 }
 
 fn auth_error_response(error: AuthError) -> Response {
@@ -564,6 +607,64 @@ mod tests {
             vec![
                 (Some("test-token".into()), None),
                 (None, Some("session-token".into()))
+            ]
+        );
+    }
+
+    #[test]
+    fn herdr_webui_matches_starlette_quoted_and_duplicate_cookie_parsing() {
+        let temp = TempDir::new();
+        let backend = Arc::new(FakeAuth::default());
+        let app = build_router(
+            config(&temp.0, "https://herdr.example", "Herdr web UI"),
+            backend.clone(),
+            RequestScheme::Http,
+        );
+
+        let mut quoted = cookie_request("/api/herdr-webui", "desk.test");
+        quoted.headers_mut().insert(
+            header::COOKIE,
+            r#"vp_session="session\-token""#
+                .parse()
+                .expect("quoted cookie header"),
+        );
+        let response = block_on(app.clone().oneshot(quoted)).expect("quoted cookie response");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let mut duplicate_in_header = cookie_request("/api/herdr-webui", "desk.test");
+        duplicate_in_header.headers_mut().insert(
+            header::COOKIE,
+            "vp_session=session-token; vp_session=invalid-token"
+                .parse()
+                .expect("duplicate cookie header"),
+        );
+        let response =
+            block_on(app.clone().oneshot(duplicate_in_header)).expect("duplicate cookie response");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let mut duplicate_headers = cookie_request("/api/herdr-webui", "desk.test");
+        duplicate_headers.headers_mut().insert(
+            header::COOKIE,
+            "vp_session=session-token"
+                .parse()
+                .expect("first cookie header"),
+        );
+        duplicate_headers.headers_mut().append(
+            header::COOKIE,
+            "vp_session=invalid-token"
+                .parse()
+                .expect("second cookie header"),
+        );
+        let response =
+            block_on(app.oneshot(duplicate_headers)).expect("duplicate header cookie response");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        assert_eq!(
+            *backend.identities.lock().unwrap(),
+            vec![
+                (None, Some("session-token".into())),
+                (None, Some("invalid-token".into())),
+                (None, Some("invalid-token".into()))
             ]
         );
     }
