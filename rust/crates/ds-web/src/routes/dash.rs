@@ -108,22 +108,67 @@ async fn session_valid(
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "));
-    let cookie = headers
-        .get(header::COOKIE)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| {
-            value.split(';').find_map(|part| {
-                let (name, value) = part.trim().split_once('=')?;
-                (name.trim() == "vp_session").then(|| value.trim())
-            })
-        });
-    match auth.identity(bearer, cookie).await {
+    let cookie = cookie_value(headers, "vp_session");
+    match auth.identity(bearer, cookie.as_deref()).await {
         Ok(_) => Ok(true),
         Err(
             AuthError::SignInRequired | AuthError::IncorrectPassword | AuthError::TooManyAttempts,
         ) => Ok(false),
         Err(AuthError::Internal(_)) => Err(internal_error()),
     }
+}
+
+fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    let mut cookie = None;
+    for header in headers.get_all(header::COOKIE).iter() {
+        let value = header
+            .as_bytes()
+            .iter()
+            .map(|byte| char::from(*byte))
+            .collect::<String>();
+        for part in value.split(';') {
+            let (key, value) = part.split_once('=').unwrap_or(("", part));
+            if key.trim() == name {
+                cookie = Some(unquote_cookie_value(value.trim()));
+            }
+        }
+    }
+    cookie
+}
+
+fn unquote_cookie_value(value: &str) -> String {
+    let Some(value) = value
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+    else {
+        return value.to_owned();
+    };
+
+    let chars = value.chars().collect::<Vec<_>>();
+    let mut unquoted = String::with_capacity(value.len());
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index] == '\\' && index + 1 < chars.len() {
+            if index + 3 < chars.len()
+                && matches!(chars[index + 1], '0'..='3')
+                && matches!(chars[index + 2], '0'..='7')
+                && matches!(chars[index + 3], '0'..='7')
+            {
+                let octal = (chars[index + 1] as u32 - '0' as u32) * 64
+                    + (chars[index + 2] as u32 - '0' as u32) * 8
+                    + (chars[index + 3] as u32 - '0' as u32);
+                unquoted.push(char::from(octal as u8));
+                index += 4;
+            } else {
+                unquoted.push(chars[index + 1]);
+                index += 2;
+            }
+        } else {
+            unquoted.push(chars[index]);
+            index += 1;
+        }
+    }
+    unquoted
 }
 
 fn decode_path(path: &str) -> String {
@@ -395,5 +440,85 @@ mod tests {
         let response = block_on(app.oneshot(request("/dash/cos", Some("broken")))).unwrap();
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(*backend.reads.lock().unwrap(), 0);
+    }
+
+    #[test]
+    fn cookie_value_matches_starlette_last_duplicate_and_quoted_values() {
+        let mut headers = HeaderMap::new();
+        headers.append(
+            header::COOKIE,
+            HeaderValue::from_static(
+                r#"vp_session=first; theme=dark; vp_session="session\-token""#,
+            ),
+        );
+
+        assert_eq!(
+            Some("session-token".to_owned()),
+            cookie_value(&headers, "vp_session")
+        );
+    }
+
+    #[test]
+    fn cookie_value_matches_starlette_across_cookie_header_fields() {
+        let mut headers = HeaderMap::new();
+        headers.append(
+            header::COOKIE,
+            HeaderValue::from_static("vp_session=first-header"),
+        );
+        headers.append(
+            header::COOKIE,
+            HeaderValue::from_static(r#"vp_session="second-header""#),
+        );
+
+        assert_eq!(
+            Some("second-header".to_owned()),
+            cookie_value(&headers, "vp_session")
+        );
+    }
+
+    #[test]
+    fn auth_uses_last_duplicate_cookie_without_bearer() {
+        let (app, backend) = app(Some(b"index"));
+        let mut request = request("/dash/custom/path", None);
+        request.headers_mut().append(
+            header::COOKIE,
+            HeaderValue::from_static("vp_session=session; vp_session=broken"),
+        );
+        let response = block_on(app.oneshot(request)).unwrap();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(*backend.reads.lock().unwrap(), 0);
+    }
+
+    #[test]
+    fn auth_accepts_quoted_cookie_from_later_cookie_header() {
+        let (app, backend) = app(Some(b"index"));
+        let mut request = request("/dash/custom/path", None);
+        request.headers_mut().append(
+            header::COOKIE,
+            HeaderValue::from_static("vp_session=broken"),
+        );
+        request.headers_mut().append(
+            header::COOKIE,
+            HeaderValue::from_static(r#"vp_session="session""#),
+        );
+        let response = block_on(app.oneshot(request)).unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(*backend.reads.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn auth_bearer_precedes_cookie_value() {
+        let (app, backend) = app(Some(b"index"));
+        let mut request = request("/dash/custom/path", Some("token"));
+        request.headers_mut().append(
+            header::COOKIE,
+            HeaderValue::from_static("vp_session=broken"),
+        );
+        let response = block_on(app.oneshot(request)).unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(*backend.reads.lock().unwrap(), 1);
     }
 }
