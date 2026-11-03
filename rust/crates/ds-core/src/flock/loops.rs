@@ -43,9 +43,7 @@ pub fn reap_interval() -> Duration {
 /// must never break the tick (the Python wraps each in its own `except`).
 pub trait ReaperEnv: Send + Sync {
     /// `self.herdr.list_panes()`: the backend's panes, or an error when it cannot answer.
-    fn list_panes(&self) -> LoopFuture<'_, Result<Vec<Value>, DunkError>>;
-    /// `getattr(self.herdr, "live", False)`: only a live backend may move real work.
-    fn is_live(&self) -> bool;
+    fn pane_snapshot(&self) -> LoopFuture<'_, (bool, Result<Vec<Value>, DunkError>)>;
     /// `_clear_historical_errors(panes)`.
     fn clear_historical_errors<'a>(&'a self, panes: &'a BTreeSet<String>) -> LoopFuture<'a, ()>;
     /// The inbox sweeps: `mark_undeliverable(panes)`, `auto_archive_undeliverable()`,
@@ -89,7 +87,8 @@ impl Flock {
     pub async fn reaper_tick(&self, env: &dyn ReaperEnv) -> ReaperTick {
         let mut tick = ReaperTick::default();
         let mut panes: Option<BTreeSet<String>> = None;
-        match env.list_panes().await {
+        let (is_live, listing) = env.pane_snapshot().await;
+        match listing {
             Ok(list) => {
                 self.snapshot_launches(&list);
                 let ids: BTreeSet<String> = list
@@ -108,7 +107,7 @@ impl Flock {
                 eprintln!("task reaper auto-unblock sweep failed: {error}");
             }
         }
-        if !env.is_live() {
+        if !is_live {
             tick.skipped_not_live = true;
             return tick;
         }
