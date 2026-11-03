@@ -1,7 +1,7 @@
 //! Generic `--json` daemon output through the actual Rust CLI process and an isolated fake socket.
 
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixListener;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
@@ -156,6 +156,229 @@ fn run_cli_with_stdin(socket: &str, command: &[&str], input: &str) -> Output {
         .write_all(input.as_bytes())
         .unwrap();
     child.wait_with_output().expect("wait for Rust CLI")
+}
+
+#[cfg(unix)]
+fn accept_fake_daemon(listener: &UnixListener) -> UnixStream {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => return stream,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(error) => panic!("fake daemon did not receive a request: {error}"),
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_route_55_mcp() {
+    let temp = tempfile::tempdir().unwrap();
+    let socket = temp.path().join("mcp-daemon.sock");
+    let decoy_socket = temp.path().join("decoy-daemon.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let fake_launcher = temp.path().join("dunkingsheep");
+    write_guard_fixture(&fake_launcher, "#!/bin/sh\nexit 1\n");
+    let expected_pane = std::env::var("TMUX_PANE")
+        .ok()
+        .filter(|pane| !pane.trim().is_empty())
+        .or_else(|| {
+            std::env::var("HERDR_PANE_ID")
+                .ok()
+                .filter(|pane| !pane.trim().is_empty())
+        });
+    let daemon = std::thread::spawn(move || {
+        let mut commands = Vec::new();
+        for (expected_cmd, result) in [
+            ("status", json!({})),
+            (
+                "whoami",
+                json!({"role": "worker", "label": "inherited caller"}),
+            ),
+            ("status", json!({})),
+            (
+                "whoami",
+                json!({"role": "worker", "label": "inherited caller"}),
+            ),
+        ] {
+            let stream = accept_fake_daemon(&listener);
+            let mut line = String::new();
+            BufReader::new(&stream).read_line(&mut line).unwrap();
+            let request: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(expected_cmd, request["cmd"]);
+            assert_eq!(expected_pane.as_deref(), request["self_pane_id"].as_str());
+            assert!(request.get("service_token").is_none());
+            commands.push(request["cmd"].as_str().unwrap().to_string());
+            let mut writer = &stream;
+            writer
+                .write_all(format!("{}\n", json!({"ok": true, "result": result})).as_bytes())
+                .unwrap();
+        }
+        commands
+    });
+
+    let requests = [
+        json!({"jsonrpc":"2.0","id":"init-7","method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"route-test","version":"1"}}}),
+        json!({"jsonrpc":"2.0","id":8,"method":"tools/list","params":{}}),
+        json!({"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"whoami","arguments":{}}}),
+    ];
+    let input = requests
+        .iter()
+        .map(Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    let mut child = Command::new(env!("CARGO_BIN_EXE_dunkingsheep"))
+        .args(["--socket"])
+        .arg(&socket)
+        .args(["mcp", "--json"])
+        .env("HOME", temp.path())
+        .env("DUNKINGSHEEP_DIR", temp.path().join("config"))
+        .env("DUNKINGSHEEP_SOCKET", &decoy_socket)
+        .env("DUNKINGSHEEP_BIN", &fake_launcher)
+        .env_remove("DUNKINGSHEEP_SERVICE_TOKEN")
+        .env_remove("DUNKINGSHEEP_SERVICE_TOKEN_FILE")
+        .env_remove("DUNKINGSHEEP_CLIENT_TIMEOUT")
+        .env_remove("DUNKINGSHEEP_SEND_TIMEOUT_S")
+        .env_remove("DUNKINGSHEEP_TMUX_SOCKET")
+        .env_remove("DUNKINGSHEEP_TERMINAL_BACKEND")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn Rust CLI MCP route");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!output.stdout.is_empty());
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("dunkingsheep MCP server"));
+    let replies: Vec<Value> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(3, replies.len());
+    assert_eq!("init-7", replies[0]["id"]);
+    assert_eq!("2025-06-18", replies[0]["result"]["protocolVersion"]);
+    assert_eq!("dunkingsheep", replies[0]["result"]["serverInfo"]["name"]);
+    assert_eq!(
+        ds_mcp::SERVER_VERSION,
+        replies[0]["result"]["serverInfo"]["version"]
+    );
+    assert_eq!(ds_mcp::INSTRUCTIONS, replies[0]["result"]["instructions"]);
+    assert_eq!(8, replies[1]["id"]);
+    assert!(replies[1]["result"]["tools"]
+        .as_array()
+        .is_some_and(|tools| !tools.is_empty()));
+    assert_eq!(9, replies[2]["id"]);
+    let tool_text: Value =
+        serde_json::from_str(replies[2]["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        json!({"role":"worker","label":"inherited caller"}),
+        tool_text
+    );
+    assert_eq!(
+        json!({"role":"worker","label":"inherited caller"}),
+        replies[2]["result"]["structuredContent"]
+    );
+    assert_eq!(false, replies[2]["result"]["isError"]);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("MCP server"));
+    assert_eq!(
+        vec!["status", "whoami", "status", "whoami"],
+        daemon.join().unwrap()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_route_57_mcp_self_pane_override() {
+    let temp = tempfile::tempdir().unwrap();
+    let socket = temp.path().join("mcp-daemon.sock");
+    let decoy_socket = temp.path().join("decoy-daemon.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let fake_launcher = temp.path().join("dunkingsheep");
+    write_guard_fixture(&fake_launcher, "#!/bin/sh\nexit 1\n");
+    // This synthetic pane label is only a CLI-option payload sent to the isolated fake socket;
+    // it conveys no real daemon authority and is never used with a live service.
+    let test_pane = "%mcp-cli-override-test";
+    let daemon = std::thread::spawn(move || {
+        for expected_cmd in ["status", "whoami"] {
+            let stream = accept_fake_daemon(&listener);
+            let mut line = String::new();
+            BufReader::new(&stream).read_line(&mut line).unwrap();
+            let request: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(expected_cmd, request["cmd"]);
+            assert_eq!(test_pane, request["self_pane_id"]);
+            assert!(request.get("service_token").is_none());
+            let result = if expected_cmd == "whoami" {
+                json!({"role": "worker", "label": "isolated fake daemon"})
+            } else {
+                json!({})
+            };
+            let mut writer = &stream;
+            writer
+                .write_all(format!("{}\n", json!({"ok": true, "result": result})).as_bytes())
+                .unwrap();
+        }
+    });
+    let input = json!({
+        "jsonrpc":"2.0", "id": 1, "method":"tools/list", "params":{}
+    })
+    .to_string()
+        + "\n";
+    let mut child = Command::new(env!("CARGO_BIN_EXE_dunkingsheep"))
+        .args(["--socket"])
+        .arg(&socket)
+        .args(["--self-pane", test_pane, "mcp", "--json"])
+        .env("HOME", temp.path())
+        .env("DUNKINGSHEEP_DIR", temp.path().join("config"))
+        .env("DUNKINGSHEEP_SOCKET", &decoy_socket)
+        .env("DUNKINGSHEEP_BIN", &fake_launcher)
+        .env("DUNKINGSHEEP_TTY_IDENTITY", "0")
+        .env_remove("TMUX_PANE")
+        .env_remove("DUNKINGSHEEP_SERVICE_TOKEN")
+        .env_remove("DUNKINGSHEEP_SERVICE_TOKEN_FILE")
+        .env_remove("DUNKINGSHEEP_TMUX_SOCKET")
+        .env_remove("DUNKINGSHEEP_TERMINAL_BACKEND")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn Rust CLI MCP self-pane override route");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("dunkingsheep MCP server"));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let reply: Value = serde_json::from_str(stdout.lines().next().unwrap()).unwrap();
+    assert_eq!(1, reply["id"]);
+    assert!(!reply["result"]["tools"].as_array().unwrap().is_empty());
+    daemon.join().unwrap();
 }
 
 fn run_local_cli(
@@ -1209,7 +1432,18 @@ fn cli_route_56_mcp_setup() {
         .join("quoted space \"double\" 'single' \\backslash");
     std::fs::create_dir_all(&quoted_dir).unwrap();
     let quoted_executable = quoted_dir.join("dunkingsheep");
-    std::fs::copy(env!("CARGO_BIN_EXE_dunkingsheep"), &quoted_executable).unwrap();
+    let source_executable = env!("CARGO_BIN_EXE_dunkingsheep");
+    let staged_executable = tempfile::NamedTempFile::new_in(&quoted_dir).unwrap();
+    std::fs::copy(source_executable, staged_executable.path()).unwrap();
+    std::fs::set_permissions(
+        staged_executable.path(),
+        std::fs::metadata(source_executable).unwrap().permissions(),
+    )
+    .unwrap();
+    staged_executable
+        .into_temp_path()
+        .persist(&quoted_executable)
+        .unwrap();
     let run_quoted = |harness: &str| {
         Command::new(&quoted_executable)
             .args(["mcp-setup", harness])
