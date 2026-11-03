@@ -595,7 +595,7 @@ mod tests {
         services.flock.stuck_tracker.lock().unwrap().records.insert(
             "%stuck-test".into(),
             crate::stuck::Record {
-                message_id: Some("m1".into()),
+                message_id: Some("federated:m1".into()),
                 generation: Some(generation.clone()),
                 fingerprint: Some(crate::stuck::fingerprint("pending text")),
                 first_seen: Some(now - 121.0),
