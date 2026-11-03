@@ -246,8 +246,8 @@ fn request_json_content_type(headers: &HeaderMap) -> bool {
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
     else {
-        // FastAPI treats a missing Content-Type as JSON for nonempty model bodies.
-        return true;
+        // The installed FastAPI strict-content-type default treats absent headers as raw bytes.
+        return false;
     };
     let media_type = content_type.split(';').next().unwrap_or_default().trim();
     let Some((top_level, subtype)) = media_type.split_once('/') else {
@@ -1135,18 +1135,14 @@ mod tests {
             );
         }
         assert!(game.calls.lock().unwrap().is_empty());
-    }
 
-    #[test]
-    fn game_state_model_routes_parse_json_without_content_type_header() {
-        let game = Arc::new(FakeGame::new(Value::Null));
         for (path, body) in [
             ("/api/game/savestate", r#"{"tag":"quick"}"#),
             ("/api/game/loadstate", r#"{"slot":3}"#),
         ] {
             let (status, _body, _value) = response(
-                app(game.clone(), authorized()),
-                request_without_content_type("POST", path, body),
+                game_app.clone(),
+                request_with_content_type("POST", path, body, "application/vnd.example+json"),
             );
             assert_eq!(StatusCode::OK, status);
         }
@@ -1154,6 +1150,28 @@ mod tests {
             vec!["savestate:quick".to_owned(), "loadstate:3".to_owned()],
             game.calls.lock().unwrap().clone()
         );
+    }
+
+    #[test]
+    fn game_state_model_routes_treat_missing_content_type_as_raw_before_dependencies() {
+        let game = Arc::new(FakeGame::new(Value::Null));
+        for (path, body) in [
+            ("/api/game/savestate", r#"{"tag":"quick"}"#),
+            ("/api/game/loadstate", r#"{"slot":3}"#),
+        ] {
+            let (status, _body, value) = response(
+                app(game.clone(), authorized()),
+                request_without_content_type("POST", path, body),
+            );
+            assert_eq!(StatusCode::UNPROCESSABLE_ENTITY, status);
+            assert_eq!(
+                json!({"detail":[{"type":"model_attributes_type","loc":["body"],
+                    "msg":"Input should be a valid dictionary or object to extract fields from",
+                    "input":body}]}),
+                value
+            );
+        }
+        assert!(game.calls.lock().unwrap().is_empty());
 
         for path in ["/api/game/savestate", "/api/game/loadstate"] {
             let unauthenticated = Arc::new(FakeAuth {
@@ -1163,11 +1181,39 @@ mod tests {
                 app(game.clone(), unauthenticated),
                 request_without_content_type("POST", path, "{"),
             );
+            assert_eq!(StatusCode::UNAUTHORIZED, status);
+            assert_eq!(json!({"detail":"Sign in required"}), value);
+
+            let unauthenticated = Arc::new(FakeAuth {
+                result: Err(AuthError::SignInRequired),
+            });
+            let (status, _body, value) = response(
+                app(game.clone(), unauthenticated),
+                request_without_content_type("POST", path, ""),
+            );
+            assert_eq!(StatusCode::UNAUTHORIZED, status);
+            assert_eq!(json!({"detail":"Sign in required"}), value);
+
+            let cross_origin_request = HttpRequest::builder()
+                .method("POST")
+                .uri(path)
+                .header(header::HOST, "desk.test")
+                .header(header::ORIGIN, "https://foreign.test")
+                .body(Body::from("{"))
+                .unwrap();
+            let (status, _body, value) =
+                response(app(game.clone(), authorized()), cross_origin_request);
+            assert_eq!(StatusCode::FORBIDDEN, status);
+            assert_eq!(json!({"detail":"Cross-origin request refused"}), value);
+
+            let (status, _body, value) = response(
+                app(game.clone(), authorized()),
+                request_without_content_type("POST", path, ""),
+            );
             assert_eq!(StatusCode::UNPROCESSABLE_ENTITY, status);
             assert_eq!(
-                json!({"detail":[{"type":"json_invalid","loc":["body",1],
-                    "msg":"JSON decode error","input":{},
-                    "ctx":{"error":"Expecting property name enclosed in double quotes"}}]}),
+                json!({"detail":[{"type":"missing","loc":["body"],
+                    "msg":"Field required","input":null}]}),
                 value
             );
         }
