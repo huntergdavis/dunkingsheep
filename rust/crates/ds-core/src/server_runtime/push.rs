@@ -804,7 +804,7 @@ mod tests {
         handle.block_on(adapter.next_jobs_tick());
 
         let panes = handle
-            .block_on(adapter.list_panes())
+            .block_on(async { adapter.list_panes().await })
             .expect("real terminal listing");
         let pane = panes
             .iter()
@@ -816,7 +816,7 @@ mod tests {
         assert!(adapter.may_review("w1:p1"));
         assert!(adapter.lane_agent_alive("w1:p1").is_some());
         // Real inbox writes occur through the worker-local terminal bridge.
-        handle.block_on(adapter.announce_task("w1:p1", &task, 30.0));
+        handle.block_on(async { adapter.announce_task("w1:p1", &task, 30.0).await });
         let messages = inbox.read("w1:p1", 50, true, false).unwrap();
         let subject = format!("TASK {}: {}", task.id, task.title);
         assert!(messages
@@ -827,7 +827,7 @@ mod tests {
             format!("Pushed task {} to w1:p1", task.id)
         );
         assert!(
-            !handle.block_on(adapter.unread_mail("w1:p1")),
+            !handle.block_on(async { adapter.unread_mail("w1:p1").await }),
             "own announcements do not hold the lane"
         );
         inbox
@@ -840,7 +840,7 @@ mod tests {
                 ..Outgoing::default()
             })
             .unwrap();
-        assert!(handle.block_on(adapter.unread_mail("w1:p1")));
+        assert!(handle.block_on(async { adapter.unread_mail("w1:p1").await }));
 
         services.allocator.stop_and_join();
         handle.block_on(adapter.allocator_tick());
