@@ -6,10 +6,10 @@
 
 mod delivery;
 mod inbox;
-mod push;
 mod inbox_metrics;
 mod inbox_stores;
 mod layout;
+mod push;
 mod status;
 mod submit;
 
