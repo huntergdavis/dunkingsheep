@@ -202,4 +202,70 @@ mod tests {
         drop(owner);
         assert!(weak.upgrade().is_none());
     }
+    #[test]
+    fn real_worker_drains_fifo_and_joins() {
+        use crate::flock::panes::Stores;
+        let dir = tempfile::tempdir().unwrap();
+        let flock = Arc::new(Flock::new(
+            dir.path().join("launches"),
+            dir.path().join("lanes"),
+            false,
+        ));
+        let store = Arc::new(
+            crate::inbox_store::Store::open(dir.path().join("inbox.db"), dir.path().join("blobs"))
+                .unwrap(),
+        );
+        flock.attach_stores(Stores {
+            inbox: Some(store),
+            ..Stores::default()
+        });
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let created = Arc::new(Mutex::new(Vec::new()));
+        let factory_threads = Arc::clone(&created);
+        let owner = OutboxRuntime::new(
+            Arc::clone(&flock),
+            runtime.handle().clone(),
+            Arc::new(move || {
+                factory_threads
+                    .lock()
+                    .unwrap()
+                    .push(std::thread::current().id());
+                Box::new(FakeTerminal::new())
+            }),
+        )
+        .unwrap();
+        let mut first = Message::new("m1", "w1:p1", "lane", "first", "test");
+        let mut second = Message::new("m2", "w1:p1", "lane", "second", "test");
+        for message in [&mut first, &mut second] {
+            message.hold_while_typing = false;
+            message.press_enter = false;
+        }
+        flock
+            .enqueue(first.clone(), owner.pool.as_ref(), &FlockSnapshot)
+            .unwrap();
+        flock
+            .enqueue(second.clone(), owner.pool.as_ref(), &FlockSnapshot)
+            .unwrap();
+        assert!(
+            first.done.wait_timeout(Duration::from_secs(5)),
+            "first message did not complete"
+        );
+        assert!(
+            second.done.wait_timeout(Duration::from_secs(5)),
+            "second message did not complete"
+        );
+        owner.stop_and_join();
+        let history = flock.message_history.lock().unwrap();
+        let completed: Vec<_> = history
+            .iter()
+            .map(|message| (message.id.as_str(), message.status.as_str()))
+            .collect();
+        assert_eq!(completed, [("m1", "sent"), ("m2", "sent")]);
+        let threads = created.lock().unwrap();
+        assert!(!threads.is_empty());
+        assert!(threads.iter().all(|id| *id != std::thread::current().id()));
+    }
 }

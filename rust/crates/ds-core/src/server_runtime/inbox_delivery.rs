@@ -79,23 +79,30 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-        let owner = OutboxRuntime::new(
-            Arc::clone(&flock),
-            runtime.handle().clone(),
-            Arc::new(|| Box::new(FakeTerminal::new())),
-        );
         let terminal: Mutex<Box<dyn Terminal>> = Mutex::new(Box::new(FakeTerminal::new()));
         let request = RequestCtx::default();
         let adapter = RequestRuntimeAdapter::new(&flock, &request, runtime.handle(), &terminal);
-        assert!(
-            InboxRuntimeView::new(adapter, Arc::clone(&flock), Arc::clone(&owner.pool)).is_err()
-        );
+        assert!(OutboxRuntime::new(
+            Arc::clone(&flock),
+            runtime.handle().clone(),
+            Arc::new(|| Box::new(FakeTerminal::new()))
+        )
+        .is_err());
         let store =
             Arc::new(Store::open(dir.path().join("inbox.db"), dir.path().join("blobs")).unwrap());
         flock.attach_stores(Stores {
             inbox: Some(store),
             ..Stores::default()
         });
+        let owner = OutboxRuntime::new(
+            Arc::clone(&flock),
+            runtime.handle().clone(),
+            Arc::new(|| Box::new(FakeTerminal::new())),
+        )
+        .unwrap();
+        assert!(
+            InboxRuntimeView::new(adapter, Arc::clone(&flock), Arc::clone(&owner.pool)).is_err()
+        );
         let adapter = RequestRuntimeAdapter::new(&flock, &request, runtime.handle(), &terminal);
         let view =
             InboxRuntimeView::new(adapter, Arc::clone(&flock), Arc::clone(&owner.pool)).unwrap();
@@ -116,18 +123,47 @@ mod tests {
         use std::time::{Duration, Instant};
 
         let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(Store::open(dir.path().join("inbox.db"), dir.path().join("blobs")).unwrap());
-        let outgoing = Outgoing { mailbox: "w1:p1", body: Some("body"), subject: None, sender: None, mailbox_label: None, pane_id: Some("w1:p1"), attachments: &[], transport: None, reply_to: None, external_id: None };
+        let store =
+            Arc::new(Store::open(dir.path().join("inbox.db"), dir.path().join("blobs")).unwrap());
+        let outgoing = Outgoing {
+            mailbox: "w1:p1",
+            body: Some("body"),
+            subject: None,
+            sender: None,
+            mailbox_label: None,
+            pane_id: Some("w1:p1"),
+            attachments: &[],
+            transport: None,
+            reply_to: None,
+            external_id: None,
+        };
         let first = store.send(&outgoing).unwrap();
         let second = store.send(&outgoing).unwrap();
-        let flock = Arc::new(Flock::new(dir.path().join("launches"), dir.path().join("lanes"), false));
-        flock.attach_stores(Stores { inbox: Some(Arc::clone(&store)), ..Stores::default() });
-        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
-        let owner = OutboxRuntime::new(Arc::clone(&flock), runtime.handle().clone(), Arc::new(|| Box::new(FakeTerminal::new()))).unwrap();
+        let flock = Arc::new(Flock::new(
+            dir.path().join("launches"),
+            dir.path().join("lanes"),
+            false,
+        ));
+        flock.attach_stores(Stores {
+            inbox: Some(Arc::clone(&store)),
+            ..Stores::default()
+        });
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let owner = OutboxRuntime::new(
+            Arc::clone(&flock),
+            runtime.handle().clone(),
+            Arc::new(|| Box::new(FakeTerminal::new())),
+        )
+        .unwrap();
         let request = RequestCtx::default();
         let local_terminal: Mutex<Box<dyn Terminal>> = Mutex::new(Box::new(FakeTerminal::new()));
-        let adapter = RequestRuntimeAdapter::new(&flock, &request, runtime.handle(), &local_terminal);
-        let view = InboxRuntimeView::new(adapter, Arc::clone(&flock), Arc::clone(&owner.pool)).unwrap();
+        let adapter =
+            RequestRuntimeAdapter::new(&flock, &request, runtime.handle(), &local_terminal);
+        let view =
+            InboxRuntimeView::new(adapter, Arc::clone(&flock), Arc::clone(&owner.pool)).unwrap();
         let mut message = Message::new("m1", "w1:p1", "lane", "notice", "test");
         message.is_notice = true;
         message.press_enter = false;
@@ -143,24 +179,40 @@ mod tests {
                 let mut fake = FakeTerminal::new();
                 fake.panes[0].pane_pid = Some(i64::from(std::process::id()));
                 let terminal: Mutex<Box<dyn Terminal>> = Mutex::new(Box::new(fake));
-                let mut env = TerminalCallAdapter { flock: &flock, terminal: &terminal, runtime: &handle };
+                let mut env = TerminalCallAdapter {
+                    flock: &flock,
+                    terminal: &terminal,
+                    runtime: &handle,
+                };
                 flock.deliver_message("m1", crate::clock::now_s(), &mut env, || None)
             });
             let deadline = Instant::now() + Duration::from_secs(5);
             loop {
-                let captured = outbox_lock(&view.flock.outbox).get("w1:p1").and_then(|rows| rows.first()).and_then(|row| row.attempt_generation.clone());
-                if captured.is_some() { break; }
-                assert!(Instant::now() < deadline, "delivery did not capture its generation");
+                let captured = outbox_lock(&view.flock.outbox)
+                    .get("w1:p1")
+                    .and_then(|rows| rows.first())
+                    .and_then(|row| row.attempt_generation.clone());
+                if captured.is_some() {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "delivery did not capture its generation"
+                );
                 std::thread::sleep(Duration::from_millis(5));
             }
-            assert_eq!(view.fold_notice("w1:p1", "updated", &second).as_deref(), Some("m1"));
+            assert_eq!(
+                view.fold_notice("w1:p1", "updated", &second).as_deref(),
+                Some("m1")
+            );
             drop(guard);
             worker.join().unwrap();
         });
-        let first_status = crate::inbox::status(store.read_pool(), &first, crate::clock::now_s()).unwrap();
-        let second_status = crate::inbox::status(store.read_pool(), &second, crate::clock::now_s()).unwrap();
+        let first_status =
+            crate::inbox::status(store.read_pool(), &first, crate::clock::now_s()).unwrap();
+        let second_status =
+            crate::inbox::status(store.read_pool(), &second, crate::clock::now_s()).unwrap();
         assert!(first_status.notify_state.is_some());
         assert_eq!(first_status.notify_state, second_status.notify_state);
     }
-
 }
