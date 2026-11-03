@@ -18,6 +18,7 @@ mod status;
 mod stuck;
 mod submit;
 mod summary;
+mod turn_plan;
 mod verify;
 
 use std::collections::BTreeSet;
