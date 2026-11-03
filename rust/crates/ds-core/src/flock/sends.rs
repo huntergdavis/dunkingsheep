@@ -1593,7 +1593,8 @@ pub struct Message {
     pub detail: Option<String>,
     pub holds: i64,
     pub next_attempt_at: Option<f64>,
-    pub hold_signature: Option<HoldSignature>,
+    pub hold_signature: Option<String>,
+    pub hold_signature_kind: Option<String>,
     pub created_at: f64,
     pub finished_at: Option<f64>,
     /// Completion event shared by clones and deliberately omitted from the wire form.
@@ -1622,6 +1623,7 @@ impl Message {
             holds: 0,
             next_attempt_at: None,
             hold_signature: None,
+            hold_signature_kind: None,
             created_at: clock::now_s(),
             finished_at: None,
             done: Arc::new(CompletionWaiter::default()),
@@ -1929,7 +1931,9 @@ pub(crate) fn message_snapshot(message: &Message) -> Value {
         "detail": message.detail,
         "holds": message.holds,
         "next_attempt_at": message.next_attempt_at,
-        "hold_signature": message.hold_signature,
+        "hold_signature": message.hold_signature.as_ref().map(|text| {
+            json!([message.hold_signature_kind.as_deref().unwrap_or("box"), text])
+        }),
         "created_at": message.created_at,
         "finished_at": message.finished_at,
         "typed_at": message.typed_at,
@@ -1980,7 +1984,10 @@ pub(crate) fn message_from_snapshot(value: &Value) -> Option<Message> {
     message.detail = string("detail");
     message.holds = field("holds").and_then(Value::as_i64).unwrap_or(0);
     message.next_attempt_at = field("next_attempt_at").and_then(Value::as_f64);
-    message.hold_signature = hold_signature();
+    if let Some((kind, text)) = hold_signature() {
+        message.hold_signature_kind = Some(kind);
+        message.hold_signature = Some(text);
+    }
     message.created_at = field("created_at")
         .and_then(Value::as_f64)
         .unwrap_or(message.created_at);
@@ -2149,7 +2156,8 @@ impl Flock {
                 } else {
                     let delay = hold_backoff_s(attempts);
                     stored.next_attempt_at = Some(now + delay);
-                    stored.hold_signature = Some(hold_signature);
+                    stored.hold_signature_kind = Some(hold_signature.0);
+                    stored.hold_signature = Some(hold_signature.1);
                     stored.detail = Some(if detail.is_empty() { "held" } else { &detail }.into());
                 }
                 message = stored.clone();

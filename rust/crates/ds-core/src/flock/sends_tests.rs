@@ -2128,10 +2128,8 @@ fn deliver_message_persists_hold_backoff_and_keeps_original_refusal() {
     assert_eq!(Some("disabled".into()), held.detail);
     assert_eq!(Some(105.0), held.next_attempt_at);
     assert_eq!(1, held.holds);
-    assert_eq!(
-        Some(("box".into(), "human draft".into())),
-        held.hold_signature
-    );
+    assert_eq!(Some("human draft".into()), held.hold_signature);
+    assert_eq!(Some("box".into()), held.hold_signature_kind);
     assert!(!held.done.is_set());
 
     let snapshot: serde_json::Value =
@@ -2148,6 +2146,36 @@ fn deliver_message_persists_hold_backoff_and_keeps_original_refusal() {
     let restored_message = &restored_outbox[P][0];
     assert_eq!(1, restored_message.holds);
     assert_eq!(Some(105.0), restored_message.next_attempt_at);
+    assert_eq!(
+        Some("human draft"),
+        restored_message.hold_signature.as_deref()
+    );
+    assert_eq!(Some("box"), restored_message.hold_signature_kind.as_deref());
+}
+
+#[test]
+fn python_hold_signature_list_survives_restore_and_resnapshot() {
+    let python_row = serde_json::json!({
+        "id": "m-held",
+        "pane_id": P,
+        "target_label": "worker",
+        "text": "held text",
+        "source": "test",
+        "hold_signature": ["modal", "Press Enter to confirm"],
+        "holds": 2,
+        "next_attempt_at": 80.0
+    });
+
+    let message = message_from_snapshot(&python_row).unwrap();
+    assert_eq!(Some("modal"), message.hold_signature_kind.as_deref());
+    assert_eq!(
+        Some("Press Enter to confirm"),
+        message.hold_signature.as_deref()
+    );
+    assert_eq!(
+        serde_json::json!(["modal", "Press Enter to confirm"]),
+        message_snapshot(&message)["hold_signature"]
+    );
 }
 
 #[test]
