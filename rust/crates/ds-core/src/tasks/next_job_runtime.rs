@@ -54,6 +54,8 @@ enum TransportResult {
     },
 }
 
+type GateEnvProvider = Arc<dyn Fn() -> Result<Env, ()> + Send + Sync + 'static>;
+
 #[allow(dead_code)] // Delivery and turn binding use the blocking receipt bridge.
 async fn record_next_job_notify(
     inbox: Arc<crate::inbox_store::Store>,
@@ -159,8 +161,8 @@ impl NextJobs {
         handoff: Handoff,
         restart: bool,
     ) -> Result<Option<Handoff>, DunkError> {
-        let env = process_gate_env();
-        self.deliver_with(handoff, restart, env, None).await
+        self.deliver_with_provider(handoff, restart, Arc::new(process_gate_env), None)
+            .await
     }
 
     #[allow(dead_code)] // Wired by the following next-job tick/recovery leaf.
@@ -169,6 +171,17 @@ impl NextJobs {
         handoff: Handoff,
         restart: bool,
         env: Result<Env, ()>,
+        factory: Option<LoopTerminalFactory>,
+    ) -> Result<Option<Handoff>, DunkError> {
+        self.deliver_with_provider(handoff, restart, Arc::new(move || env.clone()), factory)
+            .await
+    }
+
+    async fn deliver_with_provider(
+        &self,
+        handoff: Handoff,
+        restart: bool,
+        env_provider: GateEnvProvider,
         factory: Option<LoopTerminalFactory>,
     ) -> Result<Option<Handoff>, DunkError> {
         let field = |row: &Handoff, name: &str| {
@@ -299,11 +312,8 @@ impl NextJobs {
             return Ok(Some(handoff));
         }
 
-        let dispatch_reason = match &env {
-            Ok(env) => {
-                self.gate_with(&pane, None, env.clone(), factory.clone())
-                    .await
-            }
+        let dispatch_reason = match env_provider() {
+            Ok(env) => self.gate_with(&pane, None, env, factory.clone()).await,
             Err(()) => Some("readiness_unknown".into()),
         };
         if let Some(reason) = dispatch_reason {
@@ -365,6 +375,7 @@ impl NextJobs {
         }
         if !task.assignees.contains(&pane)
             || task.task.block_reason.is_some()
+            || !task.deps.blocked_by.is_empty()
             || !task.claimed_by.contains(&pane)
         {
             let reason = "claim_no_longer_valid".to_owned();
@@ -407,7 +418,7 @@ impl NextJobs {
         else {
             return Ok(None);
         };
-        let materialised = match env.clone() {
+        let materialised = match env_provider() {
             Ok(env) => self.materialise_with(&reserved, env, factory.clone()).await,
             Err(()) => Err(MaterialiseError::DispatchPaused("readiness_unknown".into())),
         };
@@ -448,7 +459,7 @@ impl NextJobs {
             }
         };
 
-        let final_reason = match env {
+        let final_reason = match env_provider() {
             Ok(env) => self.gate_with(&pane, None, env, factory.clone()).await,
             Err(()) => Some("readiness_unknown".into()),
         };
@@ -493,6 +504,9 @@ impl NextJobs {
             Some(factory) => factory,
             None => configured_loop_terminal_factory()?,
         };
+        let permission_factory = Arc::clone(&terminal_factory);
+        let permission_jobs = NextJobs::new(Arc::clone(&self.flock));
+        let permission_env_provider = Arc::clone(&env_provider);
         let adapter = LoopRuntimeAdapter::new(Arc::clone(&self.flock), terminal_factory);
         let sent = adapter
             .with_loop_terminal(
@@ -510,12 +524,26 @@ impl NextJobs {
                         allow_modal: false,
                         preserve_draft: true,
                     };
+                    let pane_for_permission = pane_for_send.clone();
+                    let permission_runtime = terminal.runtime.clone();
+                    let permission = move || {
+                        let env = match permission_env_provider() {
+                            Ok(env) => env,
+                            Err(()) => return Some("readiness_unknown".into()),
+                        };
+                        permission_runtime.block_on(permission_jobs.gate_with(
+                            &pane_for_permission,
+                            None,
+                            env,
+                            Some(Arc::clone(&permission_factory)),
+                        ))
+                    };
                     let (delivered, ok, detail) = sends::send_guarded(
                         flock,
                         terminal,
                         &pane_for_send,
                         options,
-                        || None,
+                        permission,
                         |env, guard| {
                             Ok(sends::submit_text(
                                 flock,
@@ -1695,6 +1723,177 @@ mod tests {
                 .await
                 .unwrap();
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn next_jobs_delivery_rejects_dependency_added_after_handoff() {
+        let (dir, jobs, tasks, inbox) = materialise_fixture().await;
+        let pane = "w1:p1";
+        let dependency = tasks
+            .add("global", "Open prerequisite", "body")
+            .await
+            .unwrap();
+        let task = tasks
+            .add("global", "Deliver dependent task", "body")
+            .await
+            .unwrap();
+        tasks.assign(&task.id, &[pane], "set").await.unwrap();
+        tasks.claim_for_test(&task.id, pane).await;
+        let details = json!({
+            "state":"pending",
+            "attempt":0,
+            "attempt_at":0.0,
+            "observed_turn":null,
+            "trigger":"completion"
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        tasks
+            .record_next_job_handoff(
+                &task.id,
+                pane,
+                Some("t-source"),
+                Some("nj-new-dependency"),
+                0,
+                None,
+                Some(1.0),
+                Some(details),
+            )
+            .await
+            .unwrap();
+        tasks
+            .update(
+                &task.id,
+                crate::tasks::FieldEdit {
+                    depends_on: Some(vec![dependency.id.clone()]),
+                    ..Default::default()
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        let decorated = tasks.decorate(&task.id, Some(pane)).await.unwrap();
+        assert_eq!(decorated.deps.blocked_by, vec![dependency.id]);
+
+        let inbox_for_seed = Arc::clone(&inbox);
+        tokio::task::spawn_blocking(move || {
+            inbox_for_seed.ensure_next_job("nj-new-dependency", pane, pane, "body", "subject")
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        let handoff = tasks.next_job_handoffs(Some(pane)).await.unwrap().remove(0);
+        let delivered = jobs
+            .deliver_with(
+                handoff,
+                false,
+                Ok(test_env(dir.path(), "1", pane)),
+                Some(fake_factory()),
+            )
+            .await
+            .unwrap()
+            .expect("invalid handoff remains journalled");
+
+        assert_eq!(
+            delivered.get("state").and_then(Value::as_str),
+            Some("undeliverable")
+        );
+        assert_eq!(
+            delivered.get("reason").and_then(Value::as_str),
+            Some("claim_no_longer_valid")
+        );
+        assert_eq!(delivered.get("attempt").and_then(Value::as_i64), Some(0));
+        let receipt = crate::inbox::status(
+            inbox.read_pool(),
+            "nj-new-dependency",
+            crate::clock::now_s(),
+        )
+        .unwrap();
+        assert_eq!(receipt.notify_state.as_deref(), Some("undeliverable"));
+        assert_eq!(receipt.notify_attempt, Some(0));
+        assert!(jobs.flock.outbox_snapshot().is_empty());
+
+        tokio::task::spawn_blocking(move || drop((jobs, inbox, tasks)))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn next_jobs_delivery_rechecks_permission_inside_send_guard() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let (dir, jobs, tasks, inbox) = materialise_fixture().await;
+        let pane = "w1:p1";
+        let task = tasks
+            .add("global", "Guarded next job", "body")
+            .await
+            .unwrap();
+        tasks.assign(&task.id, &[pane], "set").await.unwrap();
+        tasks.claim_for_test(&task.id, pane).await;
+        let details = json!({
+            "state":"pending",
+            "attempt":0,
+            "attempt_at":0.0,
+            "observed_turn":null,
+            "trigger":"completion"
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        tasks
+            .record_next_job_handoff(
+                &task.id,
+                pane,
+                Some("t-source"),
+                Some("nj-final-permission"),
+                0,
+                None,
+                Some(1.0),
+                Some(details),
+            )
+            .await
+            .unwrap();
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider_calls = Arc::clone(&calls);
+        let env_dir = dir.path().to_owned();
+        let provider: GateEnvProvider = Arc::new(move || {
+            let call = provider_calls.fetch_add(1, Ordering::SeqCst) + 1;
+            let switch = if call == 4 { "off" } else { "1" };
+            Ok(test_env(&env_dir, switch, pane))
+        });
+        let handoff = tasks.next_job_handoffs(Some(pane)).await.unwrap().remove(0);
+        let delivered = jobs
+            .deliver_with_provider(handoff, false, provider, Some(fake_factory()))
+            .await
+            .unwrap()
+            .expect("held handoff remains journalled");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
+        assert_eq!(
+            delivered.get("state").and_then(Value::as_str),
+            Some("pending")
+        );
+        assert_eq!(
+            delivered.get("reason").and_then(Value::as_str),
+            Some("disabled")
+        );
+        assert_eq!(delivered.get("attempt").and_then(Value::as_i64), Some(1));
+        let receipt = crate::inbox::status(
+            inbox.read_pool(),
+            "nj-final-permission",
+            crate::clock::now_s(),
+        )
+        .unwrap();
+        assert_eq!(receipt.notify_state.as_deref(), Some("queued"));
+        assert_eq!(receipt.notify_attempt, Some(1));
+        assert!(jobs.flock.outbox_snapshot().is_empty());
+
+        tokio::task::spawn_blocking(move || drop((jobs, inbox, tasks)))
+            .await
+            .unwrap();
     }
 
     async fn configured_jobs() -> (tempfile::TempDir, NextJobs, Arc<crate::tasks::Tasks>) {
