@@ -714,6 +714,18 @@ mod tests {
             services.flock().clear_caller();
         };
         set_ended(serde_json::json!({"pid":i32::MAX, "start":"1"}));
+        services
+            .flock()
+            .turn_states
+            .lock()
+            .unwrap()
+            .get_mut("w1:p1")
+            .unwrap()
+            .ended_at = Some(0.0);
+        let zero_end = handle.block_on(services.allocator_tick()).unwrap();
+        assert_eq!(zero_end["workers"]["w1:p1"], "not_idle");
+        set_ended(serde_json::json!({"pid":i32::MAX, "start":"1"}));
+        services.allocator.seed_cache(serde_json::json!({}));
         let foreign = handle.block_on(services.allocator_tick()).unwrap();
         assert_eq!(foreign["workers"]["w1:p1"], "caller_proc_missing");
         assert_eq!(foreign["allocated"], serde_json::json!([]));
@@ -724,6 +736,7 @@ mod tests {
         inbox
             .send(&crate::inbox_store::Outgoing {
                 mailbox: "w1:p1",
+                pane_id: Some("w1:p1"),
                 body: Some("unread"),
                 ..Default::default()
             })

@@ -268,7 +268,7 @@ async fn run(services: &Arc<RuntimeServices>) -> Result<Option<Value>, DunkError
                         Some(pane.to_owned()),
                         "agent",
                     );
-                    reason = if turn.ended_at.is_none() {
+                    reason = if turn.ended_at.is_none_or(|ended_at| ended_at == 0.0) {
                         Some("not_idle".into())
                     } else if pending {
                         Some("pending_delivery".into())
