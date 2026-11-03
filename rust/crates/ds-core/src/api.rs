@@ -482,7 +482,12 @@ impl Dispatcher {
     /// Register the T39 report run/list handlers over an explicit source adapter.
     pub fn register_report_run_list(&mut self) {
         self.register("report_run", crate::report::report_run_handler);
-        self.register("report_list", crate::report::report_list_handler);
+        self.register("report_list", h_report_list);
+    }
+
+    /// Register only the T39 report-list handler.
+    pub fn register_report_list(&mut self) {
+        self.register("report_list", h_report_list);
     }
 
     /// Register the T39 owner statistics, receipts and conversation views.
@@ -985,6 +990,11 @@ pub fn h_owner_receipts(context: &HandlerContext<'_>, args: Args) -> Result<Valu
         context.env.owner_push()?,
         &Value::Object(args),
     )
+}
+
+/// `dunk_api.h_report_list`.
+pub fn h_report_list(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    crate::report::report_list_handler(context, args)
 }
 
 /// `dunk_api.h_owner_conversation`.

@@ -729,6 +729,76 @@ fn dispatcher_report_run_list_handlers_use_sources_and_preserve_role_gates() {
 }
 
 #[test]
+fn h_report_list_matches_python() {
+    use std::fs;
+    use std::time::{Duration, SystemTime};
+
+    let temp = tempfile::tempdir().unwrap();
+    let (_flock_dir, flock) = staffed_flock("report-list-api");
+    let home = temp.path().join("home");
+    let output_dir = home.join("reports");
+    fs::create_dir_all(&output_dir).unwrap();
+    let older = output_dir.join("older.md");
+    let newer = output_dir.join("newer.md");
+    fs::write(&older, "old report").unwrap();
+    fs::write(&newer, "new report").unwrap();
+    fs::write(output_dir.join("ignored.txt"), "not a report").unwrap();
+    fs::File::open(&older)
+        .unwrap()
+        .set_times(
+            std::fs::FileTimes::new()
+                .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(100)),
+        )
+        .unwrap();
+    fs::File::open(&newer)
+        .unwrap()
+        .set_times(
+            std::fs::FileTimes::new()
+                .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(200)),
+        )
+        .unwrap();
+
+    let env = ReportApiEnv {
+        terminal: Mutex::new(Box::new(FakeTerminal::default())),
+        sources: ReportApiSources {
+            paths: ReportPaths::new(&output_dir, &home),
+            config_dir: temp.path().join("config"),
+        },
+    };
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_report_list();
+    let result = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w2:p2"),
+        "report_list",
+        args(json!({"out_dir": ""})),
+    )
+    .expect("report list via dispatcher");
+
+    assert_eq!(result["dir"], "~/reports");
+    assert_eq!(result["count"], 2);
+    assert_eq!(
+        result["reports"],
+        json!([
+            {
+                "name": "newer.md",
+                "path": newer,
+                "size": 10,
+                "at": 200.0
+            },
+            {
+                "name": "older.md",
+                "path": older,
+                "size": 10,
+                "at": 100.0
+            }
+        ])
+    );
+}
+
+#[test]
 fn h_lanes_matches_python() {
     let (_dir, flock) = staffed_flock("api-lanes");
     let env = ParityEnv::new(Some(std::process::id() as i64));
