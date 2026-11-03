@@ -870,8 +870,7 @@ fn hold_backoff_s(attempts: i64) -> f64 {
 pub type HoldSignature = (String, String);
 
 struct OutboxHold<'a> {
-    message_id: &'a str,
-    pane_id: &'a str,
+    message: &'a Message,
     now: f64,
     permanent: bool,
     reason: Option<&'a str>,
@@ -2291,6 +2290,21 @@ pub struct Message {
     pub finished_at: Option<f64>,
     /// Completion event shared by clones and deliberately omitted from the wire form.
     pub done: Arc<CompletionWaiter>,
+    /// Transient identity and receipt frame shared only by clones of this exact message.
+    /// It is deliberately omitted from snapshots; a restored message starts a new lifetime.
+    attempt_state: Arc<MessageAttemptState>,
+}
+
+#[derive(Debug, Default)]
+struct MessageAttemptState {
+    receipt_ids: Mutex<Vec<String>>,
+}
+
+// This state is process-local ownership evidence, not part of message value equality.
+impl PartialEq for MessageAttemptState {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
 }
 
 impl Message {
@@ -2319,7 +2333,53 @@ impl Message {
             created_at: clock::now_s(),
             finished_at: None,
             done: Arc::new(CompletionWaiter::default()),
+            attempt_state: Arc::new(MessageAttemptState::default()),
         }
+    }
+
+    /// Append an inbox receipt to this exact queued notice's completion frame.
+    /// The caller must hold the canonical outbox row while calling this method.
+    /// Returns false for a non-notice or a notice that is no longer queued.
+    pub fn append_notify_for(&mut self, inbox_message_id: &str) -> bool {
+        if !self.is_notice || self.status != "queued" {
+            return false;
+        }
+        self.notify_for.push(inbox_message_id.to_owned());
+        self.attempt_state
+            .receipt_ids
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(inbox_message_id.to_owned());
+        true
+    }
+
+    fn prepare_receipt_frame(&self) {
+        *self
+            .attempt_state
+            .receipt_ids
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = self.notify_for.clone();
+    }
+
+    fn receipt_frame(&self) -> Vec<String> {
+        let shared = self
+            .attempt_state
+            .receipt_ids
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if shared.is_empty() {
+            self.notify_for.clone()
+        } else {
+            shared.clone()
+        }
+    }
+
+    fn refresh_notify_for_from_frame(&mut self) {
+        self.notify_for = self.receipt_frame();
+    }
+
+    fn same_lifetime(&self, other: &Message) -> bool {
+        Arc::ptr_eq(&self.attempt_state, &other.attempt_state)
     }
 
     /// `_queued_message`.
@@ -3164,11 +3224,12 @@ pub(crate) fn outbox_step<E: SendPreparationEnv + PaneInfoEnv>(
             return OutboxStep::Empty;
         };
         queue.retain(|message| message.status == "queued");
-        let Some(head) = queue.first().cloned() else {
+        let Some(stored_head) = queue.first_mut() else {
             outbox.remove(pane_id);
             return OutboxStep::Empty;
         };
-        head
+        stored_head.prepare_receipt_frame();
+        stored_head.clone()
     };
 
     if let Some(due_at) = head.next_attempt_at {
@@ -3194,7 +3255,7 @@ pub(crate) fn outbox_step<E: SendPreparationEnv + PaneInfoEnv>(
             let mut outbox = outbox_lock(&flock.outbox);
             if let Some(stored) = outbox
                 .get_mut(pane_id)
-                .and_then(|queue| queue.iter_mut().find(|row| row.id == head.id))
+                .and_then(|queue| queue.iter_mut().find(|row| row.same_lifetime(&head)))
             {
                 stored.next_attempt_at = None;
                 stored.hold_signature = None;
@@ -3226,8 +3287,7 @@ pub(crate) fn outbox_step<E: SendPreparationEnv + PaneInfoEnv>(
         if kind != "dead" {
             let signature = hold_signature(flock, env, pane_id);
             return match flock.record_outbox_hold(OutboxHold {
-                message_id: &head.id,
-                pane_id,
+                message: &head,
                 now,
                 permanent: false,
                 reason: Some(&reason),
@@ -3249,7 +3309,7 @@ pub(crate) fn outbox_step<E: SendPreparationEnv + PaneInfoEnv>(
         };
         queue.retain(|message| message.status == "queued");
         match queue.first() {
-            Some(current) if current.id == head.id => {}
+            Some(current) if current.same_lifetime(&head) => {}
             Some(_) => return OutboxStep::Delivered,
             None => {
                 outbox.remove(pane_id);
@@ -3257,7 +3317,7 @@ pub(crate) fn outbox_step<E: SendPreparationEnv + PaneInfoEnv>(
             }
         }
     };
-    match flock.deliver_message(&head.id, now, env, permission) {
+    match flock.deliver_message_frame(&head, now, env, permission) {
         DeliveryOutcome::Sent | DeliveryOutcome::Failed | DeliveryOutcome::AlreadyDecided => {
             OutboxStep::Delivered
         }
@@ -3352,8 +3412,7 @@ pub(crate) fn outbox_lock(
 impl Flock {
     fn record_outbox_hold(&self, hold: OutboxHold<'_>) -> DeliveryOutcome {
         let OutboxHold {
-            message_id,
-            pane_id,
+            message,
             now,
             permanent,
             reason,
@@ -3362,10 +3421,11 @@ impl Flock {
         } = hold;
         let (message, attempts, terminal) = {
             let mut outbox = outbox_lock(&self.outbox);
+            let pane_id = &message.pane_id;
             let Some(queue) = outbox.get_mut(pane_id) else {
                 return DeliveryOutcome::Missing;
             };
-            let Some(stored) = queue.iter_mut().find(|row| row.id == message_id) else {
+            let Some(stored) = queue.iter_mut().find(|row| row.same_lifetime(message)) else {
                 return DeliveryOutcome::Missing;
             };
             if stored.status != "queued" {
@@ -3393,9 +3453,10 @@ impl Flock {
                     str::to_owned,
                 ));
             }
-            let message = stored.clone();
+            let mut message = stored.clone();
+            message.refresh_notify_for_from_frame();
             if terminal {
-                queue.retain(|row| row.id != message_id);
+                queue.retain(|row| !row.same_lifetime(&message));
                 if queue.is_empty() {
                     outbox.remove(pane_id);
                 }
@@ -3461,7 +3522,7 @@ impl Flock {
         env: &mut dyn SendPreparationEnv,
         permission: impl FnMut() -> Option<String>,
     ) -> DeliveryOutcome {
-        let mut message = {
+        let expected = {
             let mut outbox = outbox_lock(&self.outbox);
             let Some(message) = outbox
                 .values_mut()
@@ -3485,6 +3546,30 @@ impl Flock {
             }
             message.clone()
         };
+        self.deliver_message_frame(&expected, now, env, permission)
+    }
+
+    fn deliver_message_frame(
+        &self,
+        expected: &Message,
+        now: f64,
+        env: &mut dyn SendPreparationEnv,
+        permission: impl FnMut() -> Option<String>,
+    ) -> DeliveryOutcome {
+        let mut message = {
+            let mut outbox = outbox_lock(&self.outbox);
+            let Some(message) = outbox
+                .get_mut(&expected.pane_id)
+                .and_then(|queue| queue.iter_mut().find(|row| row.same_lifetime(expected)))
+            else {
+                return DeliveryOutcome::Missing;
+            };
+            if message.status != "queued" {
+                return DeliveryOutcome::AlreadyDecided;
+            }
+            message.prepare_receipt_frame();
+            message.clone()
+        };
 
         if message.attempt_generation.is_none() {
             // Capture identity before any terminal action, without holding the queue mutex.
@@ -3492,7 +3577,7 @@ impl Flock {
             let mut outbox = outbox_lock(&self.outbox);
             if let Some(stored) = outbox
                 .get_mut(&message.pane_id)
-                .and_then(|queue| queue.iter_mut().find(|row| row.id == message_id))
+                .and_then(|queue| queue.iter_mut().find(|row| row.same_lifetime(&message)))
             {
                 if stored.attempt_generation.is_none() {
                     stored.attempt_generation = message.attempt_generation.clone();
@@ -3540,8 +3625,7 @@ impl Flock {
             let permanent = detail.starts_with("dead session (")
                 || detail == "the lane's recorded process is gone";
             self.record_outbox_hold(OutboxHold {
-                message_id,
-                pane_id: &pane_id,
+                message: &message,
                 now,
                 permanent,
                 reason,
@@ -3564,12 +3648,12 @@ impl Flock {
             });
             {
                 let mut outbox = outbox_lock(&self.outbox);
-                let Some(queue) = outbox.get_mut(&pane_id) else {
-                    return DeliveryOutcome::Missing;
-                };
-                queue.retain(|row| row.id != message_id);
-                if queue.is_empty() {
-                    outbox.remove(&pane_id);
+                message.refresh_notify_for_from_frame();
+                if let Some(queue) = outbox.get_mut(&pane_id) {
+                    queue.retain(|row| !row.same_lifetime(&message));
+                    if queue.is_empty() {
+                        outbox.remove(&pane_id);
+                    }
                 }
             }
             self.remember(&message);
@@ -3641,9 +3725,9 @@ impl Flock {
         }
 
         if let Some(inbox) = stores.inbox.as_ref() {
-            for inbox_id in &message.notify_for {
+            for inbox_id in message.receipt_frame() {
                 let _ = inbox.record_notify(
-                    inbox_id,
+                    &inbox_id,
                     if ok { "sent" } else { "failed" },
                     detail,
                     None,
@@ -3961,6 +4045,7 @@ impl Flock {
         if message.pane_id != pane_id || message.text != text {
             return Ok(true);
         }
+        message.refresh_notify_for_from_frame();
         let previous_status = message.status.clone();
         message.press_enter = press_enter;
         message.typed_at = Some(clock::now_s());

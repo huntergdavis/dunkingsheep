@@ -265,6 +265,20 @@ impl RequestRuntimeAdapter<'_> {
             Ok(json!({}))
         })
     }
+
+    #[allow(dead_code)] // The complete CloseBackend assembly belongs to its dependent leaf.
+    pub(crate) fn helper_closebackend_close(
+        &mut self,
+        kind: &str,
+        target_id: &str,
+    ) -> Result<Value, String> {
+        self.terminal.with_terminal_mut(|terminal| {
+            terminal
+                .close(kind, target_id)
+                .map_err(|error| error.message)?;
+            Ok(json!({}))
+        })
+    }
 }
 
 #[cfg(test)]
@@ -463,6 +477,31 @@ mod tests {
                 Err("focus refused".to_owned()),
                 adapter.helper_layoutbackend_focus("pane", "w1:p1")
             );
+        });
+    }
+
+    #[test]
+    fn production_close_backend_calls_selected_terminal() {
+        with_adapter(FakeTerminal::new(), |adapter| {
+            assert!(adapter.helper_layoutbackend_get_pane("w1:p1").is_some());
+            assert_eq!(
+                Ok(json!({})),
+                adapter.helper_closebackend_close("pane", "w1:p1")
+            );
+            assert!(adapter.helper_layoutbackend_get_pane("w1:p1").is_none());
+        });
+
+        let mut refusing = FakeTerminal::new();
+        refusing.fail_layout = Some("terminal close refused".into());
+        with_adapter(refusing, |adapter| {
+            assert_eq!(
+                Err("terminal close refused".into()),
+                adapter.helper_closebackend_close("tab", "w1")
+            );
+            assert!(adapter
+                .helper_layoutbackend_list_tabs()
+                .iter()
+                .any(|tab| tab["tab_id"] == "w1"));
         });
     }
 }
