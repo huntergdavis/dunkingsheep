@@ -426,14 +426,15 @@ impl TurnHooks for ParityEnv {
             .unwrap()
             .push(format!("record {kind} {pane_id} {outcome}"));
     }
-    fn observe_turn(&self, pane_id: &str, state: &TurnState) {
+    fn observe_turn(&self, pane_id: &str, state: &TurnState) -> Result<(), DunkError> {
         self.turn_calls
             .lock()
             .unwrap()
             .push(format!("observe {pane_id} {}", state.turn_id.len()));
+        Ok(())
     }
-    fn dispatch_on_turn_end(&self, pane_id: &str) -> Value {
-        json!({"trigger": "turn.end", "action": "skip", "reason": pane_id, "delivered": false})
+    fn dispatch_on_turn_end(&self, pane_id: &str) -> Result<Value, DunkError> {
+        Ok(json!({"trigger": "turn.end", "action": "skip", "reason": pane_id, "delivered": false}))
     }
 }
 
