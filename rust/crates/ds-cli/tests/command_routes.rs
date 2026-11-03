@@ -64,7 +64,24 @@ fn assert_matches_python(args: &[&str]) {
     let rust = run_binary_without_command(args);
     let python = run_python_reference(args);
     assert_eq!(rust.status.code(), python.status.code(), "args: {args:?}");
-    assert_eq!(rust.stdout, python.stdout, "stdout for args: {args:?}");
+    if rust.stdout != python.stdout {
+        let first = rust
+            .stdout
+            .iter()
+            .zip(&python.stdout)
+            .take_while(|(left, right)| left == right)
+            .count();
+        let start = first.saturating_sub(100);
+        let rust_end = (first + 180).min(rust.stdout.len());
+        let python_end = (first + 180).min(python.stdout.len());
+        panic!(
+            "stdout differs for args {args:?} at byte {first}; lengths Rust={} Python={}; Rust={:?}; Python={:?}",
+            rust.stdout.len(),
+            python.stdout.len(),
+            String::from_utf8_lossy(&rust.stdout[start..rust_end]),
+            String::from_utf8_lossy(&python.stdout[start..python_end]),
+        );
+    }
     assert_eq!(rust.stderr, python.stderr, "stderr for args: {args:?}");
 }
 
