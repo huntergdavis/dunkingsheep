@@ -173,6 +173,8 @@ pub struct Dunker {
     pub hold_while_typing: bool,
     pub hold_count: i64,
     pub last_held_at: Option<f64>,
+    /// Volatile detector fallback state from Python; intentionally excluded from FIELDS.
+    detector_fallback: bool,
     /// Volatile, not persisted.
     pub status: String,
 }
@@ -264,6 +266,7 @@ impl Dunker {
                 .is_none_or(|v| truthy(Some(v))),
             hold_count: int_or_zero(kwargs, "hold_count"),
             last_held_at: opt_f64(kwargs, "last_held_at"),
+            detector_fallback: false,
             status: opt_str(kwargs, "status").unwrap_or_else(|| "Ready".to_string()),
         }
     }

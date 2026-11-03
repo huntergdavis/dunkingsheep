@@ -964,7 +964,7 @@ pub struct SendAction {
     dunk_attempt: Option<DunkAttempt>,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 struct DunkAttempt {
     action: Arc<DunkDeliveryAction>,
     message: Message,
