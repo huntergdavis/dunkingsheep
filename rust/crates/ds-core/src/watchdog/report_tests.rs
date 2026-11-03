@@ -71,6 +71,26 @@ fn finding_line_matches_python_format_and_ascii_sorted_evidence_json() {
 }
 
 #[test]
+fn evidence_floats_match_python_json_notation_boundaries() {
+    let finding = json!({
+        "evidence": {
+            "tiny": 1e-6,
+            "small": 1e-5,
+            "fixed_lower_edge": 1e-4,
+            "fixed_upper_edge": 1e15,
+            "scientific_upper_edge": 1e16,
+            "integral_float": 1.0,
+            "negative_zero": -0.0
+        }
+    });
+
+    assert_eq!(
+        evidence(&finding),
+        r#"{"fixed_lower_edge":0.0001,"fixed_upper_edge":1000000000000000.0,"integral_float":1.0,"negative_zero":-0.0,"scientific_upper_edge":1e+16,"small":1e-05,"tiny":1e-06}"#
+    );
+}
+
+#[test]
 fn render_lines_and_digest_preserve_python_order_and_text() {
     let finding = json!({
         "rule": "host.disk_full", "key": "/tmp", "class": "ops", "severity": "critical",

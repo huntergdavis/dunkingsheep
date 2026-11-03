@@ -76,10 +76,76 @@ fn push_ascii_json_string(value: &str, output: &mut String) {
     output.push_str(&ascii);
 }
 
+fn python_float_json(value: f64) -> String {
+    if value == 0.0 {
+        return if value.is_sign_negative() {
+            "-0.0".into()
+        } else {
+            "0.0".into()
+        };
+    }
+
+    let scientific = format!("{value:e}");
+    let Some((mantissa, exponent)) = scientific.split_once('e') else {
+        return scientific;
+    };
+    let Ok(exponent) = exponent.parse::<i32>() else {
+        return scientific;
+    };
+    let negative = mantissa.starts_with('-');
+    let digits: String = mantissa.chars().filter(|ch| ch.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        return scientific;
+    }
+
+    let sign = if negative { "-" } else { "" };
+    if !(-4..16).contains(&exponent) {
+        let exponent_sign = if exponent < 0 { '-' } else { '+' };
+        return format!(
+            "{sign}{}{fraction}e{exponent_sign}{:02}",
+            &digits[..1],
+            exponent.unsigned_abs(),
+            fraction = if digits.len() > 1 {
+                format!(".{}", &digits[1..])
+            } else {
+                String::new()
+            }
+        );
+    }
+
+    let decimal_position = exponent + 1;
+    if decimal_position <= 0 {
+        format!(
+            "{sign}0.{}{}",
+            "0".repeat(decimal_position.unsigned_abs() as usize),
+            digits
+        )
+    } else if decimal_position as usize >= digits.len() {
+        format!(
+            "{sign}{}{}.0",
+            digits,
+            "0".repeat(decimal_position as usize - digits.len())
+        )
+    } else {
+        format!(
+            "{sign}{}.{}",
+            &digits[..decimal_position as usize],
+            &digits[decimal_position as usize..]
+        )
+    }
+}
+
 fn write_sorted_json(value: &Value, output: &mut String) {
     match value {
         Value::Null => output.push_str("null"),
         Value::Bool(value) => output.push_str(if *value { "true" } else { "false" }),
+        Value::Number(value) if value.is_f64() => {
+            if let Some(number) = value.as_f64() {
+                output.push_str(&python_float_json(number));
+            } else {
+                output.push_str(&value.to_string());
+            }
+        }
         Value::Number(value) => output.push_str(&value.to_string()),
         Value::String(value) => push_ascii_json_string(value, output),
         Value::Array(values) => {
