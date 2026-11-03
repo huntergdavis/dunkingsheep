@@ -3974,3 +3974,326 @@ fn h_owner_conversation_matches_python() {
         Err(DunkError::Refused(message)) if message == "could not convert string to float: 'not a timestamp'"
     ));
 }
+
+#[test]
+fn h_owner_reply_matches_python() {
+    let (_dir, flock, env) = owner_api_fixture("owner-reply-api");
+    let inbox = flock.stores().inbox.unwrap();
+    let question = inbox
+        .send(&crate::inbox_store::Outgoing {
+            mailbox: crate::flock::mailbox::OWNER_MAILBOX,
+            body: Some("question"),
+            sender: Some("web"),
+            mailbox_label: Some(crate::flock::mailbox::OWNER_MAILBOX),
+            transport: Some("telegram"),
+            ..crate::inbox_store::Outgoing::default()
+        })
+        .unwrap();
+    let other = inbox
+        .send(&crate::inbox_store::Outgoing {
+            mailbox: "other-mailbox",
+            body: Some("not an owner question"),
+            ..crate::inbox_store::Outgoing::default()
+        })
+        .unwrap();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_owner_reply_ingest_outbox();
+
+    let out = dispatch_owner_api(
+        &dispatcher,
+        &flock,
+        &env,
+        "owner_reply",
+        args(json!({"message_id": question, "body": 42})),
+        Some("w1:p1"),
+    )
+    .expect("owner reply through dispatcher");
+    assert_eq!(out["question"], question);
+    assert_eq!(out["acked"], question);
+    assert_eq!(out["transport"], "telegram");
+    assert_eq!(out["reply"]["body"], "42");
+    assert_eq!(out["reply"]["sender"], "w1:p1");
+    assert_eq!(out["reply"]["transport"], "telegram");
+    assert_eq!(out["reply"]["reply_to"], question);
+    assert_eq!(inbox.get_message(&question).unwrap().summary.state, "acked");
+
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_reply",
+            args(json!({"message_id": question, "body": "again"})),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message.contains("was already answered by")
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_reply",
+            args(json!({"message_id": other, "body": "answer"})),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message.contains("is not an owner message")
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_reply",
+            None,
+            Some("w1:p2"),
+        ),
+        Err(DunkError::Refused(message)) if message.contains("not permitted for role worker")
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_reply",
+            None,
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "owner_reply: missing required argument(s): message_id, body"
+    ));
+}
+
+#[test]
+fn h_owner_ingest_matches_python() {
+    let (dir, flock, env) = owner_api_fixture("owner-ingest-api");
+    let attachment = dir.path().join("attachment with spaces.txt");
+    std::fs::write(&attachment, b"fixture attachment").unwrap();
+    let attach = format!(",{}, ,{}", attachment.display(), attachment.display());
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_owner_reply_ingest_outbox();
+
+    let out = dispatch_owner_api(
+        &dispatcher,
+        &flock,
+        &env,
+        "owner_ingest",
+        args(json!({
+            "body": "incoming question",
+            "transport": " TELEGRAM ",
+            "external_id": "telegram:88",
+            "subject": " original subject ",
+            "attach": attach,
+        })),
+        Some("w1:p1"),
+    )
+    .expect("owner ingest through dispatcher");
+    let id = out["message"]["message_id"].as_str().unwrap().to_string();
+    assert_eq!(out["duplicate"], false);
+    assert_eq!(out["transport"], "telegram");
+    assert_eq!(out["message"]["body"], "incoming question");
+    assert_eq!(out["message"]["subject"], " original subject ");
+    assert_eq!(out["message"]["external_id"], "telegram:88");
+    assert_eq!(out["message"]["transport"], "telegram");
+    assert_eq!(out["message"]["sender"], Value::Null);
+    assert_eq!(out["message"]["attachments"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        out["message"]["attachments"][0]["filename"],
+        "attachment with spaces.txt"
+    );
+
+    let duplicate = dispatch_owner_api(
+        &dispatcher,
+        &flock,
+        &env,
+        "owner_ingest",
+        args(json!({
+            "body": "redelivery",
+            "transport": "telegram",
+            "external_id": "telegram:88",
+            "attach": "missing-file-must-not-be-opened",
+        })),
+        Some("w1:p1"),
+    )
+    .expect("duplicate returns the original message before attachment IO");
+    assert_eq!(duplicate["duplicate"], true);
+    assert_eq!(duplicate["message"]["message_id"], id);
+    assert_eq!(duplicate["message"]["body"], "incoming question");
+
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_ingest",
+            args(json!({"body": "x", "transport": "bogus"})),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "transport must be one of web, telegram, report; got 'bogus'"
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_ingest",
+            args(json!({"body": "x", "transport": "web", "attach": [attachment, 17]})),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "no such file to attach: 17"
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_ingest",
+            args(json!({"body": "x", "transport": "web", "attach": 17})),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "'int' object is not iterable"
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_ingest",
+            args(json!({"body": "denied", "transport": "web"})),
+            Some("w1:p2"),
+        ),
+        Err(DunkError::Refused(message)) if message.contains("not permitted for role worker")
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_ingest",
+            None,
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "owner_ingest: missing required argument(s): body, transport"
+    ));
+}
+
+#[test]
+fn h_owner_outbox_matches_python() {
+    let (_dir, flock, env) = owner_api_fixture("owner-outbox-api");
+    let inbox = flock.stores().inbox.unwrap();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_owner_reply_ingest_outbox();
+    let mut telegram_questions = Vec::new();
+    for body in ["first", "second"] {
+        let question = inbox
+            .send(&crate::inbox_store::Outgoing {
+                mailbox: crate::flock::mailbox::OWNER_MAILBOX,
+                body: Some(body),
+                transport: Some("telegram"),
+                ..crate::inbox_store::Outgoing::default()
+            })
+            .unwrap();
+        telegram_questions.push(question);
+    }
+    let web_question = inbox
+        .send(&crate::inbox_store::Outgoing {
+            mailbox: crate::flock::mailbox::OWNER_MAILBOX,
+            body: Some("web question"),
+            transport: Some("web"),
+            ..crate::inbox_store::Outgoing::default()
+        })
+        .unwrap();
+    for question in telegram_questions
+        .iter()
+        .chain(std::iter::once(&web_question))
+    {
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_reply",
+            args(json!({"message_id": question, "body": "answer"})),
+            Some("w1:p1"),
+        )
+        .unwrap();
+    }
+
+    let one = dispatch_owner_api(
+        &dispatcher,
+        &flock,
+        &env,
+        "owner_outbox",
+        args(json!({"transport": " TELEGRAM ", "limit": "1"})),
+        Some("w1:p1"),
+    )
+    .unwrap();
+    assert_eq!(one["transport"], " TELEGRAM ");
+    assert_eq!(one["count"], 1);
+    assert_eq!(one["messages"][0]["reply_to"], telegram_questions[0]);
+    assert_eq!(one["messages"][0]["sender"], "w1:p1");
+    assert_eq!(one["messages"][0]["transport"], "telegram");
+    assert_eq!(one["messages"][0]["read_at"], Value::Null);
+
+    let all = dispatch_owner_api(
+        &dispatcher,
+        &flock,
+        &env,
+        "owner_outbox",
+        args(json!({"transport": "telegram", "limit": -1})),
+        Some("w1:p1"),
+    )
+    .unwrap();
+    assert_eq!(all["count"], 2);
+    let zero = dispatch_owner_api(
+        &dispatcher,
+        &flock,
+        &env,
+        "owner_outbox",
+        args(json!({"transport": "telegram", "limit": 0})),
+        Some("w1:p1"),
+    )
+    .unwrap();
+    assert_eq!(zero["count"], 0);
+    let defaulted = dispatch_owner_api(
+        &dispatcher,
+        &flock,
+        &env,
+        "owner_outbox",
+        args(json!({"transport": "telegram", "limit": null})),
+        Some("w1:p1"),
+    )
+    .unwrap();
+    assert_eq!(defaulted["count"], 2);
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_outbox",
+            args(json!({"transport": "telegram", "limit": "bad"})),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "invalid literal for int() with base 10: 'bad'"
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_outbox",
+            None,
+            Some("w1:p2"),
+        ),
+        Err(DunkError::Refused(message)) if message.contains("not permitted for role worker")
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_outbox",
+            None,
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "owner_outbox: missing required argument(s): transport"
+    ));
+}

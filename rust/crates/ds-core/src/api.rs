@@ -306,9 +306,9 @@ fn task_string_arg<'a>(
     }
 }
 
-fn task_list_limit(args: &Args) -> Result<i64, DunkError> {
-    let Some(value) = args.get("limit").filter(|value| !value.is_null()) else {
-        return Ok(200);
+fn python_int_arg(args: &Args, key: &str, default: i64) -> Result<i64, DunkError> {
+    let Some(value) = args.get(key).filter(|value| !value.is_null()) else {
+        return Ok(default);
     };
     match value {
         Value::Bool(value) => Ok(i64::from(*value)),
@@ -532,6 +532,13 @@ impl Dispatcher {
         self.register("owner_stats", h_owner_stats);
         self.register("owner_receipts", h_owner_receipts);
         self.register("owner_conversation", h_owner_conversation);
+    }
+
+    /// Register only the T39 owner reply, ingest and outbox handlers.
+    pub fn register_owner_reply_ingest_outbox(&mut self) {
+        self.register("owner_reply", h_owner_reply);
+        self.register("owner_ingest", h_owner_ingest);
+        self.register("owner_outbox", h_owner_outbox);
     }
 
     /// Register only the T39 task-following API leaf.
@@ -1056,6 +1063,132 @@ pub fn h_owner_conversation(context: &HandlerContext<'_>, args: Args) -> Result<
     let conversation = crate::owner::OwnerConversations::new(context.flock, context.env)
         .conversation(Some(limit), before, context.self_pane_id())?;
     serde_json::to_value(conversation).map_err(DunkError::from)
+}
+
+/// `dunk_api.h_owner_reply`.
+pub fn h_owner_reply(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let message_id = args
+        .get("message_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| DunkError::Refused("message_id must be a string".into()))?;
+    let reply = crate::owner::OwnerConversations::new(context.flock, context.env).reply(
+        message_id,
+        args.get("body"),
+        context.self_pane_id(),
+    )?;
+    Ok(json!({
+        "reply": owner_message_value(&reply.reply),
+        "question": reply.question,
+        "transport": reply.transport,
+        "acked": reply.acked,
+    }))
+}
+
+fn owner_message_value(message: &crate::inbox_store::Message) -> Value {
+    let summary = &message.summary;
+    json!({
+        "message_id": summary.message_id,
+        "mailbox": summary.mailbox,
+        "destination": summary.destination,
+        "sender": summary.sender,
+        "subject": summary.subject,
+        "state": summary.state,
+        "created_at": summary.created_at,
+        "waiting_s": summary.waiting_s,
+        "body_bytes": summary.body_bytes,
+        "digest_id": summary.digest_id,
+        "transport": summary.transport,
+        "reply_to": summary.reply_to,
+        "external_id": summary.external_id,
+        "delivered_at": summary.delivered_at,
+        "delivery_transport": summary.delivery_transport,
+        "attachments": message.attachments.iter().map(|attachment| json!({
+            "id": attachment.id,
+            "filename": attachment.filename,
+            "media_type": attachment.media_type,
+            "size": attachment.size,
+        })).collect::<Vec<_>>(),
+        "body": message.body,
+        "read_at": message.read_at,
+    })
+}
+
+fn owner_ingest_attachments(args: &Args) -> Result<Vec<PathBuf>, DunkError> {
+    let Some(value) = args.get("attach").filter(|value| truthy(value)) else {
+        return Ok(Vec::new());
+    };
+    let paths: Vec<String> = match value {
+        Value::String(paths) => paths
+            .split(',')
+            .filter(|path| !path.trim().is_empty())
+            .map(str::to_string)
+            .collect(),
+        Value::Array(paths) => paths.iter().map(python_value_string).collect(),
+        // Python's `for path in attachments` iterates object keys.
+        Value::Object(paths) => paths.keys().cloned().collect(),
+        Value::Bool(_) => return Err(DunkError::Refused("'bool' object is not iterable".into())),
+        Value::Number(number) => {
+            let kind = if number.is_f64() { "float" } else { "int" };
+            return Err(DunkError::Refused(format!(
+                "'{kind}' object is not iterable"
+            )));
+        }
+        Value::Null => unreachable!("falsey attachment value"),
+    };
+    Ok(paths.into_iter().map(PathBuf::from).collect())
+}
+
+/// `dunk_api.h_owner_ingest`.
+pub fn h_owner_ingest(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let transport = args.get("transport").map(python_value_string);
+    let external_id = args
+        .get("external_id")
+        .filter(|value| truthy(value))
+        .map(python_value_string);
+    let subject = match args.get("subject") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(subject)) => Some(subject.as_str()),
+        Some(_) => {
+            return Err(DunkError::Refused(
+                "owner_ingest subject must be a string".into(),
+            ));
+        }
+    };
+    let attachments = owner_ingest_attachments(&args)?;
+    let ingested = crate::owner::OwnerConversations::new(context.flock, context.env).ingest(
+        crate::owner::OwnerIngest {
+            body: args.get("body"),
+            transport: transport.as_deref(),
+            external_id: external_id.as_deref(),
+            subject,
+            attachments: &attachments,
+        },
+        context.self_pane_id(),
+    )?;
+    Ok(json!({
+        "message": owner_message_value(&ingested.message),
+        "duplicate": ingested.duplicate,
+        "transport": ingested.transport,
+    }))
+}
+
+/// `dunk_api.h_owner_outbox`.
+pub fn h_owner_outbox(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let transport = args
+        .get("transport")
+        .map(python_value_string)
+        .unwrap_or_default();
+    let limit = python_int_arg(&args, "limit", 20)?;
+    let outbox = crate::owner::OwnerConversations::new(context.flock, context.env).outbox(
+        Some(&transport),
+        Some(limit),
+        context.self_pane_id(),
+    )?;
+    Ok(json!({
+        "transport": outbox.transport,
+        "messages": outbox.messages.iter().map(owner_message_value).collect::<Vec<_>>(),
+        "count": outbox.count,
+    }))
 }
 
 fn poolrad_limit(args: &Args) -> Result<usize, DunkError> {
@@ -1790,7 +1923,7 @@ pub fn h_task_list(context: &HandlerContext<'_>, args: Args) -> Result<Value, Du
     let status = task_string_arg(&args, "status", "task_list")?;
     let assignee = task_string_arg(&args, "assignee", "task_list")?;
     let kind = task_string_arg(&args, "kind", "task_list")?;
-    let limit = task_list_limit(&args)?;
+    let limit = python_int_arg(&args, "limit", 200)?;
     let (scope, tasks) = context.block_on(context.flock.task_list_wire(
         scope,
         status,
