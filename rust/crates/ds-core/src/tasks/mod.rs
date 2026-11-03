@@ -34,6 +34,7 @@ mod claim;
 pub mod next_job;
 pub mod next_job_runtime;
 mod pane_view;
+pub mod wire;
 pub use claim::{
     claimable, refusal, CallerAlive, Candidate, ClaimOptions, ClaimOutcome, Refusal, Requeued,
 };
@@ -1934,8 +1935,9 @@ pub fn validate_kind(kind: &str) -> Result<String, DunkError> {
         return Ok(kind);
     }
     Err(DunkError::Refused(format!(
-        "kind must be one of {}; got {kind:?}",
-        KINDS.join(", ")
+        "kind must be one of {}; got {}",
+        KINDS.join(", "),
+        crate::context::store::py_repr(&kind)
     )))
 }
 
@@ -3545,7 +3547,7 @@ mod tests {
         assert!(validate_kind("x")
             .unwrap_err()
             .to_string()
-            .contains("kind must be one of work, review, verify, report; got \"x\""));
+            .contains("kind must be one of work, review, verify, report; got 'x'"));
         assert_eq!(validate_verdict("ACCEPT").unwrap(), "accept");
         assert!(validate_verdict("maybe").is_err());
     }
