@@ -14,6 +14,9 @@ use axum::{
 use ds_web::{
     router_with_scheme,
     routes::auth::{AuthBackend, AuthError, AuthFuture, Identity},
+    routes::owner::{
+        router as owner_router, OwnerWebBackend, OwnerWebError, OwnerWebFuture, OwnerWebState,
+    },
     RequestScheme,
 };
 use serde_json::{json, Value};
@@ -121,6 +124,74 @@ fn auth_login_origin_refusal_matches_python_fixture() {
     );
     assert_eq!(
         json!({"detail": "Cross-origin request refused"}),
+        expected["json"]
+    );
+}
+
+struct CapabilityBackend(Value);
+
+impl OwnerWebBackend for CapabilityBackend {
+    fn rpc<'a>(
+        &'a self,
+        method: &'a str,
+        args: Value,
+    ) -> OwnerWebFuture<'a, Result<Value, OwnerWebError>> {
+        assert_eq!(method, "delivery_capability");
+        assert_eq!(args, json!({"target": "%9"}));
+        let value = self.0.clone();
+        Box::pin(async move { Ok(value) })
+    }
+
+    fn desk_channel(&self) -> Option<Value> {
+        None
+    }
+
+    fn now_seconds(&self) -> f64 {
+        100.0
+    }
+}
+
+#[test]
+fn owner_capability_matches_python_fixture() {
+    let fixture: Value = serde_json::from_str(include_str!("fixtures/owner_capability.json"))
+        .expect("valid shared Python/Rust fixture");
+    let request_fixture = &fixture["request"];
+    let backend = Arc::new(CapabilityBackend(fixture["backend"]["response"].clone()));
+    let state = Arc::new(OwnerWebState::new(backend));
+    let app = owner_router().layer(Extension(state));
+    let request = Request::builder()
+        .method(request_fixture["method"].as_str().unwrap())
+        .uri(request_fixture["path"].as_str().unwrap())
+        .header(
+            header::HOST,
+            request_fixture["headers"]["host"].as_str().unwrap(),
+        )
+        .body(Body::empty())
+        .expect("valid fixture request");
+
+    let response = block_on(app.oneshot(request)).expect("in-process router response");
+    let expected = &fixture["response"];
+    assert_eq!(
+        response.status().as_u16(),
+        expected["status"].as_u64().unwrap() as u16
+    );
+    for (name, value) in expected["headers"].as_object().unwrap() {
+        assert_eq!(
+            response.headers().get(name).unwrap().to_str().unwrap(),
+            value.as_str().unwrap(),
+            "header {name}"
+        );
+    }
+    let set_cookie = response
+        .headers()
+        .get(header::SET_COOKIE)
+        .map(|value| value.to_str().unwrap());
+    assert_eq!(set_cookie, expected["set_cookie"].as_str());
+    let bytes = block_on(to_bytes(response.into_body(), usize::MAX)).expect("response body");
+    let raw = String::from_utf8(bytes.to_vec()).expect("UTF-8 JSON body");
+    assert_eq!(raw, expected["body"].as_str().unwrap());
+    assert_eq!(
+        serde_json::from_str::<Value>(&raw).unwrap(),
         expected["json"]
     );
 }
