@@ -619,6 +619,111 @@ fn pull_detail_preserves_mergeability_and_post_status_limits_description() {
 }
 
 #[test]
+fn review_status_reads_only_the_review_context_and_rejects_bad_payloads() {
+    let fake = FakeTransport::default();
+    fake.enqueue(response(
+        br#"{"statuses":[{"context":"other","state":"failure"},{"context":"dunkingsheep/review","state":"pending"}]}"#.to_vec(),
+    ));
+    fake.enqueue(response(br#"{"statuses":[]}"#.to_vec()));
+    let (transport, recorded) = recorded_transport(fake);
+    assert_eq!(
+        Some("pending".into()),
+        futuresless_block_on(review_status(
+            &*transport,
+            DEFAULT_API,
+            "o/r",
+            "abc123",
+            "fake-token"
+        ))
+        .unwrap()
+    );
+    assert_eq!(
+        None,
+        futuresless_block_on(review_status(
+            &*transport,
+            DEFAULT_API,
+            "o/r",
+            "abc123",
+            "fake-token"
+        ))
+        .unwrap()
+    );
+
+    let bad_payloads = [
+        (json!(null), "expected a statuses list"),
+        (json!({}), "expected a statuses list"),
+        (json!({"statuses": [null]}), "expected a status object"),
+        (json!({"statuses": [{}]}), "missing status context"),
+        (
+            json!({"statuses": [
+                {"context": "dunkingsheep/review", "state": "success"}, {}
+            ]}),
+            "missing status context",
+        ),
+        (
+            json!({"statuses": [
+                {"context": "dunkingsheep/review", "state": "success"},
+                {"context": "dunkingsheep/review", "state": "pending"}
+            ]}),
+            "duplicate review context",
+        ),
+        (
+            json!({"statuses": [{"context": "other"}]}),
+            "invalid status state",
+        ),
+        (
+            json!({"statuses": [{"context": "dunkingsheep/review", "state": "unknown"}]}),
+            "invalid status state",
+        ),
+    ];
+    let fake = FakeTransport::default();
+    for (payload, _) in &bad_payloads {
+        fake.enqueue(response(serde_json::to_vec(payload).unwrap()));
+    }
+    let (transport, _) = recorded_transport(fake);
+    for (_, expected) in bad_payloads {
+        let error = futuresless_block_on(review_status(
+            &*transport,
+            DEFAULT_API,
+            "o/r",
+            "abc123",
+            "fake-token",
+        ))
+        .unwrap_err()
+        .to_string();
+        assert_eq!(format!("GitHub commit status: {expected}"), error);
+    }
+
+    let fake = FakeTransport::default();
+    fake.enqueue(GitHubResponse {
+        status: 200,
+        reason: "OK".into(),
+        body: b"{".to_vec(),
+    });
+    let (transport, _) = recorded_transport(fake);
+    assert!(futuresless_block_on(review_status(
+        &*transport,
+        DEFAULT_API,
+        "o/r",
+        "abc123",
+        "fake-token",
+    ))
+    .unwrap_err()
+    .to_string()
+    .starts_with("GitHub commit status: invalid JSON:"));
+
+    let requests = recorded.lock().unwrap();
+    assert_eq!(2, requests.len());
+    assert_eq!(
+        "https://api.github.com/repos/o/r/commits/abc123/status",
+        requests[0].url
+    );
+    assert_eq!("GET", requests[0].method);
+    assert_eq!("token fake-token", requests[0].headers["Authorization"]);
+    assert!(requests[0].body.is_none());
+}
+
+#[test]
 fn merge_review_and_graphql_requests_keep_methods_payloads_and_errors() {
     let fake = FakeTransport::default();
     fake.enqueue(response(br#"{"merged":true}"#.to_vec()));
