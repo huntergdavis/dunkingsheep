@@ -17,6 +17,7 @@ mod status;
 mod stuck;
 mod submit;
 mod summary;
+mod verify;
 
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
