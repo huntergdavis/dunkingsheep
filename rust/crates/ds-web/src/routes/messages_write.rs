@@ -782,6 +782,7 @@ mod tests {
             *backend.calls.lock().unwrap(),
             vec![
                 "post:Owner:pane-worker:hello",
+                "post:Owner:pane-worker:hello",
                 "post:Owner:pane-worker:hello"
             ]
         );
