@@ -211,6 +211,7 @@ fn dispatch_entries(env: &Env) -> Result<Vec<String>, ()> {
                 Value::Null => {}
                 Value::Bool(false) => {}
                 Value::Number(number) if number.as_f64() == Some(0.0) => {}
+                Value::Object(object) if object.is_empty() => {}
                 Value::String(text) => entries.extend(
                     text.split(',')
                         .map(str::trim)
@@ -626,7 +627,7 @@ mod tests {
             None
         );
         assert_eq!(calls.load(Ordering::SeqCst), 0);
-        for content in ["false", "0", r#"{"lanes":false}"#] {
+        for content in ["false", "0", r#"{"lanes":false}"#, r#"{"lanes":{}}"#] {
             std::fs::write(dir.path().join("dispatch_lanes.json"), content).unwrap();
             assert_eq!(
                 jobs.gate_with(
