@@ -272,61 +272,114 @@ fn multipart_boundary(content_type: &str) -> Option<String> {
 
 fn multipart_file(body: &[u8], boundary: &str) -> Option<(String, Option<String>, Vec<u8>)> {
     let delimiter = format!("--{boundary}").into_bytes();
-    let header_end = body.windows(4).position(|window| window == b"\r\n\r\n")?;
-    if !body.starts_with(&delimiter) || header_end > MAX_MULTIPART_OVERHEAD {
+    if !body.starts_with(&delimiter) {
         return None;
     }
-    let headers = std::str::from_utf8(&body[delimiter.len()..header_end]).ok()?;
-    let mut filename = None;
-    let mut mime = None;
-    for line in headers.trim_start_matches("\r\n").split("\r\n") {
-        if let Some(value) = line
-            .strip_prefix("Content-Disposition:")
-            .or_else(|| line.strip_prefix("content-disposition:"))
-        {
-            if !value.to_ascii_lowercase().contains("form-data") || !value.contains("name=\"file\"")
-            {
-                return None;
-            }
-            filename = disposition_filename(value);
-        } else if let Some(value) = line
-            .strip_prefix("Content-Type:")
-            .or_else(|| line.strip_prefix("content-type:"))
-        {
-            mime = Some(value.trim().to_owned());
-        }
-    }
-    let filename = filename?;
-    let data_start = header_end.checked_add(4)?;
-    let tail = &body[data_start..];
     let mut marker = b"\r\n".to_vec();
     marker.extend_from_slice(&delimiter);
-    let data_end = tail
-        .windows(marker.len())
-        .enumerate()
-        .find_map(|(at, window)| {
-            if window != marker.as_slice() {
-                return None;
-            }
-            let suffix = &tail[at + marker.len()..];
-            (suffix.starts_with(b"--") || suffix.starts_with(b"\r\n")).then_some(at)
-        })?;
-    Some((filename, mime, tail[..data_end].to_vec()))
-}
-
-fn disposition_filename(value: &str) -> Option<String> {
-    value.split(';').find_map(|part| {
-        let (name, value) = part.trim().split_once('=')?;
-        if !name.trim().eq_ignore_ascii_case("filename") {
+    let mut part_start = 0;
+    loop {
+        if !body.get(part_start..)?.starts_with(&delimiter) {
             return None;
         }
-        let value = value.trim();
-        let value = value
+        let mut header_start = part_start.checked_add(delimiter.len())?;
+        let after_delimiter = body.get(header_start..)?;
+        if after_delimiter.starts_with(b"--") {
+            return None;
+        }
+        if !after_delimiter.starts_with(b"\r\n") {
+            return None;
+        }
+        header_start = header_start.checked_add(2)?;
+        let header_end_relative = body
+            .get(header_start..)?
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")?;
+        let header_end = header_start.checked_add(header_end_relative)?;
+        if header_end > MAX_MULTIPART_OVERHEAD {
+            return None;
+        }
+        let headers = std::str::from_utf8(body.get(header_start..header_end)?).ok()?;
+        let mut field_name = None;
+        let mut filename = None;
+        let mut mime = None;
+        for line in headers.split("\r\n") {
+            let Some((name, value)) = line.split_once(':') else {
+                continue;
+            };
+            if name.trim().eq_ignore_ascii_case("content-disposition") {
+                let (field, part_filename) = disposition_parameters(value)?;
+                field_name = Some(field);
+                filename = part_filename;
+            } else if name.trim().eq_ignore_ascii_case("content-type") {
+                mime = Some(value.trim().to_owned());
+            }
+        }
+        let data_start = header_end.checked_add(4)?;
+        let tail = body.get(data_start..)?;
+        let data_end = tail
+            .windows(marker.len())
+            .enumerate()
+            .find_map(|(at, window)| {
+                if window != marker.as_slice() {
+                    return None;
+                }
+                let suffix = &tail[at + marker.len()..];
+                (suffix.starts_with(b"--") || suffix.starts_with(b"\r\n")).then_some(at)
+            })?;
+        if field_name.as_deref() == Some("file") {
+            let filename = filename?;
+            return Some((filename, mime, tail[..data_end].to_vec()));
+        }
+        let next_delimiter = data_start.checked_add(data_end)?.checked_add(2)?;
+        let suffix = body.get(next_delimiter.checked_add(delimiter.len())?)?;
+        if suffix.starts_with(b"--") {
+            return None;
+        }
+        part_start = next_delimiter;
+    }
+}
+
+fn disposition_parameters(value: &str) -> Option<(String, Option<String>)> {
+    let mut parts = Vec::new();
+    let mut quoted = false;
+    let mut escaped = false;
+    let mut start = 0;
+    for (index, character) in value.char_indices() {
+        if escaped {
+            escaped = false;
+        } else if quoted && character == '\\' {
+            escaped = true;
+        } else if character == '"' {
+            quoted = !quoted;
+        } else if character == ';' && !quoted {
+            parts.push(value[start..index].trim());
+            start = index + character.len_utf8();
+        }
+    }
+    parts.push(value[start..].trim());
+    if !parts.first()?.eq_ignore_ascii_case("form-data") {
+        return None;
+    }
+    let mut field_name = None;
+    let mut filename = None;
+    for part in parts.into_iter().skip(1) {
+        let Some((name, raw_value)) = part.split_once('=') else {
+            continue;
+        };
+        let raw_value = raw_value.trim();
+        let parsed_value = raw_value
             .strip_prefix('"')
-            .and_then(|v| v.strip_suffix('"'))
-            .unwrap_or(value);
-        Some(value.replace("\\\"", "\"").replace("\\\\", "\\"))
-    })
+            .and_then(|value| value.strip_suffix('"'))
+            .map(|value| value.replace("\\\"", "\"").replace("\\\\", "\\"))
+            .unwrap_or_else(|| raw_value.to_owned());
+        if name.trim().eq_ignore_ascii_case("name") {
+            field_name = Some(parsed_value);
+        } else if name.trim().eq_ignore_ascii_case("filename") {
+            filename = Some(parsed_value);
+        }
+    }
+    Some((field_name?, filename))
 }
 
 fn sanitize_filename(filename: &str) -> String {
@@ -790,6 +843,67 @@ mod tests {
         let response = block_on(app(backend.clone()).oneshot(request)).unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(backend.uploads.lock().unwrap()[0].bytes, payload);
+    }
+
+    #[test]
+    fn upload_selects_file_after_normal_form_field() {
+        let backend = Arc::new(FakeBackend::default());
+        let multipart = b"--b\r\nContent-Disposition: form-data; name=\"description\"\r\n\r\nnotes\r\n--b\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.txt\"\r\nContent-Type: text/plain\r\n\r\nfile bytes\r\n--b--\r\n";
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/uploads")
+            .header("host", "desk.test")
+            .header("origin", "http://desk.test")
+            .header("authorization", "Bearer owner-token")
+            .header("content-type", "multipart/form-data; boundary=b")
+            .body(Body::from(multipart.as_slice()))
+            .unwrap();
+        let response = block_on(app(backend.clone()).oneshot(request)).unwrap();
+        let (status, body) = json_response(response);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["filename"], "a.txt");
+        assert_eq!(body["size"], 10);
+        assert_eq!(backend.uploads.lock().unwrap()[0].bytes, b"file bytes");
+    }
+
+    #[test]
+    fn upload_matches_mixed_case_part_header_names() {
+        let backend = Arc::new(FakeBackend::default());
+        let multipart = b"--b\r\ncOnTeNt-dIsPoSiTiOn: form-data; name=\"file\"; filename=\"a.txt\"\r\ncOnTeNt-tYpE: text/plain\r\n\r\nabc\r\n--b--\r\n";
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/uploads")
+            .header("host", "desk.test")
+            .header("origin", "http://desk.test")
+            .header("authorization", "Bearer owner-token")
+            .header("content-type", "multipart/form-data; boundary=b")
+            .body(Body::from(multipart.as_slice()))
+            .unwrap();
+        let response = block_on(app(backend.clone()).oneshot(request)).unwrap();
+        let (status, body) = json_response(response);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["mime"], "text/plain");
+        assert_eq!(backend.uploads.lock().unwrap()[0].bytes, b"abc");
+    }
+
+    #[test]
+    fn upload_preserves_quoted_semicolon_in_filename_before_sanitizing() {
+        let backend = Arc::new(FakeBackend::default());
+        let multipart = b"--b\r\nContent-Disposition: form-data; name=\"file\"; filename=\"foo;bar.txt\"\r\n\r\nabc\r\n--b--\r\n";
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/uploads")
+            .header("host", "desk.test")
+            .header("origin", "http://desk.test")
+            .header("authorization", "Bearer owner-token")
+            .header("content-type", "multipart/form-data; boundary=b")
+            .body(Body::from(multipart.as_slice()))
+            .unwrap();
+        let response = block_on(app(backend.clone()).oneshot(request)).unwrap();
+        let (status, body) = json_response(response);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["filename"], "foo_bar.txt");
+        assert_eq!(backend.uploads.lock().unwrap()[0].bytes, b"abc");
     }
 
     #[test]
