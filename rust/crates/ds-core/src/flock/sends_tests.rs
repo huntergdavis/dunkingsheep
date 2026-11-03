@@ -916,8 +916,10 @@ fn direct_key_send_serializes_keys_and_immediate_mode_delivers_without_queueing(
         dir.path(),
         false,
     ));
-    let mut pane = Pane::default();
-    pane.panes = vec![serde_json::json!({"pane_id": P, "tab_label": "Agent A"})];
+    let mut pane = Pane {
+        panes: vec![serde_json::json!({"pane_id": P, "tab_label": "Agent A"})],
+        ..Pane::default()
+    };
     let result = flock
         .send_keys_now(
             &serde_json::json!(P),
@@ -963,8 +965,10 @@ fn direct_key_send_preserves_whitespace_inside_one_argument_and_multiple_argumen
         dir.path(),
         false,
     ));
-    let mut pane = Pane::default();
-    pane.panes = vec![serde_json::json!({"pane_id": P, "tab_label": "Agent A"})];
+    let mut pane = Pane {
+        panes: vec![serde_json::json!({"pane_id": P, "tab_label": "Agent A"})],
+        ..Pane::default()
+    };
     let options = DirectSendOptions {
         hold_while_typing: false,
         ..DirectSendOptions::default()
