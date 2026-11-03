@@ -456,9 +456,18 @@ struct FakeReviewTransport {
     requests: Mutex<Vec<crate::github::GitHubRequest>>,
     responses: Mutex<VecDeque<Result<crate::github::GitHubResponse, String>>>,
     completion_on_request: Mutex<Option<CompletionOnRequest>>,
+    completion_on_request_index: Mutex<Option<CompletionOnRequestIndex>>,
 }
 
 type CompletionOnRequest = (String, usize, Arc<Tasks>, String, String, String);
+struct CompletionOnRequestIndex {
+    index: usize,
+    tasks: Arc<Tasks>,
+    number: i64,
+    head: String,
+    by: String,
+    verdict: String,
+}
 
 impl FakeReviewTransport {
     fn with_responses(
@@ -468,6 +477,7 @@ impl FakeReviewTransport {
             requests: Mutex::new(Vec::new()),
             responses: Mutex::new(responses.into_iter().collect()),
             completion_on_request: Mutex::new(None),
+            completion_on_request_index: Mutex::new(None),
         }
     }
 
@@ -489,23 +499,23 @@ impl FakeReviewTransport {
         ));
     }
 
-    fn complete_review_after_matching_requests(
+    fn complete_new_review_on_request_index(
         &self,
-        url_fragment: &str,
-        skip_matches: usize,
+        index: usize,
         tasks: Arc<Tasks>,
-        id: &str,
+        number: i64,
+        head: &str,
         by: &str,
         verdict: &str,
     ) {
-        *self.completion_on_request.lock().unwrap() = Some((
-            url_fragment.to_string(),
-            skip_matches,
+        *self.completion_on_request_index.lock().unwrap() = Some(CompletionOnRequestIndex {
+            index,
             tasks,
-            id.to_string(),
-            by.to_string(),
-            verdict.to_string(),
-        ));
+            number,
+            head: head.to_string(),
+            by: by.to_string(),
+            verdict: verdict.to_string(),
+        });
     }
 }
 
@@ -516,7 +526,11 @@ impl GitHubTransport for FakeReviewTransport {
     ) -> crate::github::PinBoxFuture<'a, Result<crate::github::GitHubResponse, String>> {
         Box::pin(async move {
             let url = request.url.clone();
-            self.requests.lock().unwrap().push(request);
+            let request_index = {
+                let mut requests = self.requests.lock().unwrap();
+                requests.push(request);
+                requests.len()
+            };
             let response = self
                 .responses
                 .lock()
@@ -552,6 +566,27 @@ impl GitHubTransport for FakeReviewTransport {
                     .task_complete(&id, Some(&by), true)
                     .await
                     .map_err(|error| error.to_string())?;
+            }
+            let body_fetch_effect = {
+                let mut effect = self.completion_on_request_index.lock().unwrap();
+                if effect
+                    .as_ref()
+                    .is_some_and(|effect| effect.index == request_index)
+                {
+                    effect.take()
+                } else {
+                    None
+                }
+            };
+            if let Some(effect) = body_fetch_effect {
+                let task = add_actual_review(
+                    &effect.tasks,
+                    effect.number,
+                    &effect.head,
+                    "peer review completed during body fetch",
+                )
+                .await;
+                finish_review(&effect.tasks, &task.id, &effect.by, &effect.verdict).await;
             }
             response
         })
@@ -1725,27 +1760,25 @@ async fn run_refreshes_verdicts_during_github_listing_and_reads_history_past_one
 
     let dir = crate::testsupport::dir("review-sync-run-verdict-during-body-fetch");
     let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
-    let first = add_actual_review(&store, 7, "head-current", "first during body fetch").await;
     let effect_tasks = Arc::new(Tasks::open(dir.path().join("tasks.db")).await.unwrap());
     let transport = FakeReviewTransport::with_responses([
         github_response(200, open_pull(7, "head-current", "work/topic")),
         github_response(200, json!({"mergeable": true, "state": "open"})),
         github_response(200, json!({"body": "review details"})),
     ]);
-    transport.complete_review_after_matching_requests(
-        "",
-        2,
+    transport.complete_new_review_on_request_index(
+        3,
         effect_tasks,
-        &first.id,
+        7,
+        "head-current",
         "%1",
         "accept",
     );
     let (sync, _, report) = run_actual_review_sync(store, transport, 2).await;
-    assert_eq!("done", sync.flock.get(&first.id).await.unwrap().status);
-    assert_eq!(
-        1,
-        sync.flock.list_review_rows_visible().await.unwrap().len()
-    );
+    let rows = sync.flock.list_review_rows_visible().await.unwrap();
+    assert_eq!(1, rows.len());
+    assert_eq!("done", rows[0].status);
+    assert_eq!("accept", rows[0].verdict.as_deref().unwrap());
     assert!(report["filed"].as_array().unwrap().is_empty());
 
     let dir = crate::testsupport::dir("review-sync-run-history-over-1000");
