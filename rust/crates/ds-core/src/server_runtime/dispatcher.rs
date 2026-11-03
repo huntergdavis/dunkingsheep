@@ -116,6 +116,7 @@ impl Dispatcher for RuntimeDispatcher {
                 .into_inner()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
             {
+                self.flock.forget_role_pane(pane_id);
                 return Err(error);
             }
         }

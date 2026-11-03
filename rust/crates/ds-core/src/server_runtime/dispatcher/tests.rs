@@ -152,10 +152,12 @@ fn pane_lookup_preserves_absence_and_backend_failure_and_metrics_are_best_effort
         runtime.handle(),
         failing_factory,
     );
-    assert_eq!(
-        failing.pane_info("w1:p1").unwrap_err().to_string(),
-        "fixture pane listing failed"
-    );
+    for _ in 0..2 {
+        assert_eq!(
+            failing.pane_info("w1:p1").unwrap_err().to_string(),
+            "fixture pane listing failed"
+        );
+    }
 
     failing.record_identity_mismatch("w1:p1", "pane_not_in_ancestry");
     let events = metrics
