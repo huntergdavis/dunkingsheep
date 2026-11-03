@@ -96,7 +96,7 @@ mod tests {
         config::Env,
         flock::{panes::Stores, status_runtime::StatusState, Flock},
         server::RequestCtx,
-        tasks::{claim::ClaimOptions, Tasks},
+        tasks::{ClaimOptions, Tasks},
         terminal::{fakes::FakeTerminal, Terminal},
     };
 
@@ -150,8 +150,8 @@ mod tests {
             ..Stores::default()
         });
         let terminal: Mutex<Box<dyn Terminal>> = Mutex::new(Box::new(FakeTerminal::new()));
-        let adapter =
-            RequestRuntimeAdapter::new(&flock, &RequestCtx::default(), runtime.handle(), &terminal);
+        let request = RequestCtx::default();
+        let adapter = RequestRuntimeAdapter::new(&flock, &request, runtime.handle(), &terminal);
 
         assert!(!adapter.helper_turndispatchenv_dispatch_enabled());
         assert_eq!(
@@ -180,8 +180,8 @@ mod tests {
             .build()
             .unwrap();
         let terminal: Mutex<Box<dyn Terminal>> = Mutex::new(Box::new(FakeTerminal::new()));
-        let adapter =
-            RequestRuntimeAdapter::new(&flock, &RequestCtx::default(), runtime.handle(), &terminal);
+        let request = RequestCtx::default();
+        let adapter = RequestRuntimeAdapter::new(&flock, &request, runtime.handle(), &terminal);
 
         assert_eq!(
             adapter.helper_turndispatchenv_unread_count("%9"),
