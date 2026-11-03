@@ -4,6 +4,7 @@ use super::*;
 use serde_json::{json, Value};
 use std::cell::RefCell;
 use std::collections::VecDeque;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 const PARTIAL: &str =
@@ -775,21 +776,15 @@ async fn add_poolrad_review_at(
     (task, value)
 }
 
-async fn review_event_meta(tasks: &Tasks, task_id: &str, event: &str) -> Value {
-    let task_id = task_id.to_string();
-    let event = event.to_string();
-    let raw: Option<String> = tasks
-        .writer
-        .call(move |conn| {
-            conn.query_row(
-                "SELECT meta FROM task_events WHERE task_id = ? AND event = ? ORDER BY id DESC LIMIT 1",
-                rusqlite::params![task_id, event],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(crate::db::map_sqlite)
-        })
-        .await
+fn review_event_meta(db_path: &Path, task_id: &str, event: &str) -> Value {
+    let conn = rusqlite::Connection::open(db_path).unwrap();
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT meta FROM task_events WHERE task_id = ? AND event = ? ORDER BY id DESC LIMIT 1",
+            rusqlite::params![task_id, event],
+            |row| row.get(0),
+        )
+        .optional()
         .unwrap();
     raw.and_then(|meta| serde_json::from_str(&meta).ok())
         .unwrap_or_else(|| json!({}))
@@ -1422,7 +1417,7 @@ async fn account_refuses_an_already_credited_row_and_records_the_reason() {
     );
     assert!(out["accounting_pr"].is_null());
     assert_eq!(4, sync.transport.requests.lock().unwrap().len());
-    let accounting = review_event_meta(&sync.flock, &stored.id, "accounting").await;
+    let accounting = review_event_meta(&dir.path().join("tasks.db"), &stored.id, "accounting");
     assert!(accounting["reason"]
         .as_str()
         .unwrap()
@@ -1459,7 +1454,7 @@ async fn account_refuses_an_evidence_document_missing_from_base() {
     assert_eq!("the evidence document docs/re/U7F_STATE_FLAGS_0F7E.md does not exist on main: the body PR #7 is not merged, so this row would credit a document that is not there (t833)", out["reason"]);
     assert!(out["accounting_pr"].is_null());
     assert_eq!(7, sync.transport.requests.lock().unwrap().len());
-    let accounting = review_event_meta(&sync.flock, &stored.id, "accounting").await;
+    let accounting = review_event_meta(&dir.path().join("tasks.db"), &stored.id, "accounting");
     assert!(accounting["reason"]
         .as_str()
         .unwrap()
@@ -1536,7 +1531,7 @@ async fn account_opens_approves_and_queues_a_deterministic_ledger_pr() {
         .contains("accepted content in #7"));
     assert_eq!("POST", requests[15].method);
     assert!(requests[15].url.ends_with("/graphql"));
-    let accounting = review_event_meta(&sync.flock, &stored.id, "accounting").await;
+    let accounting = review_event_meta(&dir.path().join("tasks.db"), &stored.id, "accounting");
     assert!(accounting["reason"]
         .as_str()
         .unwrap()
@@ -1587,7 +1582,7 @@ async fn held_accept_files_second_review_without_approving_or_fetching_author_to
         "pending",
         serde_json::from_slice::<Value>(requests[0].body.as_ref().unwrap()).unwrap()["state"]
     );
-    let held = review_event_meta(&sync.flock, &first.id, "verdict_held").await;
+    let held = review_event_meta(&dir.path().join("tasks.db"), &first.id, "verdict_held");
     assert!(held["reason"]
         .as_str()
         .unwrap()
