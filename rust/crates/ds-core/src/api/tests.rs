@@ -4300,6 +4300,399 @@ fn h_owner_receipts_matches_python() {
 }
 
 #[test]
+fn h_owner_delivered_matches_python() {
+    let (_dir, flock, env) = owner_api_fixture("owner-delivered");
+    let inbox = flock.stores().inbox.unwrap();
+    let message_id = inbox
+        .send(&crate::inbox_store::Outgoing {
+            mailbox: crate::flock::mailbox::OWNER_MAILBOX,
+            body: Some("question"),
+            mailbox_label: Some(crate::flock::mailbox::OWNER_MAILBOX),
+            transport: Some("telegram"),
+            ..crate::inbox_store::Outgoing::default()
+        })
+        .unwrap();
+    let dispatcher = owner_view_dispatcher();
+
+    let out = dispatch_owner_api(
+        &dispatcher,
+        &flock,
+        &env,
+        "owner_delivered",
+        args(json!({
+            "message_id": message_id,
+            "transport": "telegram",
+            "external_id": "telegram-123"
+        })),
+        Some("w1:p1"),
+    )
+    .expect("owner delivery receipt via dispatcher");
+
+    assert_eq!(out["message"]["message_id"], message_id);
+    assert_eq!(out["message"]["external_id"], "telegram-123");
+    assert_eq!(out["message"]["delivery_transport"], "telegram");
+    assert!(out["delivered_at"].as_f64().is_some_and(|at| at > 0.0));
+    assert_eq!(out["transport"], "telegram");
+
+    let delivered_at = out["delivered_at"].clone();
+    let retry = dispatch_owner_api(
+        &dispatcher,
+        &flock,
+        &env,
+        "owner_delivered",
+        args(json!({
+            "message_id": message_id,
+            "transport": "telegram",
+            "external_id": "telegram-retry"
+        })),
+        Some("w1:p1"),
+    )
+    .expect("idempotent owner delivery receipt");
+    assert_eq!(retry["delivered_at"], delivered_at);
+    assert_eq!(retry["message"]["external_id"], "telegram-123");
+
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_delivered",
+            args(json!({
+                "message_id": message_id,
+                "transport": "telegram"
+            })),
+            Some("w1:p2"),
+        ),
+        Err(DunkError::Refused(message)) if message.contains("not permitted for role worker")
+    ));
+}
+
+struct FakeOwnerViews {
+    app_db: PathBuf,
+    inbox_rows: std::collections::HashMap<String, Value>,
+    stats: Vec<Value>,
+    latencies: std::collections::HashMap<String, Vec<f64>>,
+    now: f64,
+    inbox_error: Option<String>,
+    stats_error: Option<String>,
+    latency_error: Option<String>,
+    latency_calls: Mutex<Vec<(String, usize)>>,
+}
+
+impl Default for FakeOwnerViews {
+    fn default() -> Self {
+        Self {
+            app_db: PathBuf::from("/nonexistent/application-messages.sqlite3"),
+            inbox_rows: std::collections::HashMap::new(),
+            stats: Vec::new(),
+            latencies: std::collections::HashMap::new(),
+            now: 2_000.0,
+            inbox_error: None,
+            stats_error: None,
+            latency_error: None,
+            latency_calls: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl OwnerViewEnv for FakeOwnerViews {
+    fn app_db_path(&self) -> Result<PathBuf, DunkError> {
+        Ok(self.app_db.clone())
+    }
+
+    fn inbox_status(&self, message_id: &str, _now: f64) -> Result<Option<Value>, DunkError> {
+        if let Some(error) = &self.inbox_error {
+            return Err(DunkError::Refused(error.clone()));
+        }
+        Ok(self.inbox_rows.get(message_id).cloned())
+    }
+
+    fn inbox_stats(&self, _now: f64) -> Result<Vec<Value>, DunkError> {
+        if let Some(error) = &self.stats_error {
+            return Err(DunkError::Refused(error.clone()));
+        }
+        Ok(self.stats.clone())
+    }
+
+    fn seen_latencies(&self, mailbox: &str, limit: usize) -> Result<Vec<f64>, DunkError> {
+        self.latency_calls
+            .lock()
+            .unwrap()
+            .push((mailbox.to_string(), limit));
+        if let Some(error) = &self.latency_error {
+            return Err(DunkError::Refused(error.clone()));
+        }
+        Ok(self.latencies.get(mailbox).cloned().unwrap_or_default())
+    }
+
+    fn now(&self) -> f64 {
+        self.now
+    }
+}
+
+struct OwnerViewApiEnv {
+    terminal: Mutex<Box<dyn Terminal>>,
+    views: FakeOwnerViews,
+}
+
+impl OwnerViewApiEnv {
+    fn new(views: FakeOwnerViews) -> Self {
+        Self {
+            terminal: Mutex::new(Box::new(FakeTerminal::default())),
+            views,
+        }
+    }
+}
+
+impl PaneInfoEnv for OwnerViewApiEnv {
+    fn list_panes_grouped(&self) -> Vec<Value> {
+        Vec::new()
+    }
+
+    fn get_pane(&self, _pane_id: &str) -> Option<Value> {
+        None
+    }
+}
+
+impl CommandEnv for OwnerViewApiEnv {
+    fn terminal(&self) -> &Mutex<Box<dyn Terminal>> {
+        &self.terminal
+    }
+
+    fn now_s(&self) -> f64 {
+        self.views.now
+    }
+
+    fn owner_views(&self) -> Result<&dyn OwnerViewEnv, DunkError> {
+        Ok(&self.views)
+    }
+}
+
+fn owner_view_dispatcher() -> Dispatcher {
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_owner_delivered_message_state_reply_stats();
+    dispatcher
+}
+
+#[test]
+fn h_message_state_matches_python() {
+    let (_dir, flock) = staffed_flock("message-state");
+    let dir = tempfile::tempdir().unwrap();
+    let app_db = dir.path().join("messages.sqlite3");
+    let connection = rusqlite::Connection::open(&app_db).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE messages (id INTEGER PRIMARY KEY, role TEXT, channel TEXT, body TEXT, delivery TEXT, delivery_detail TEXT, created_at TEXT, answer_id INTEGER, answered_at TEXT);
+             INSERT INTO messages VALUES (10, 'owner', 'vp', 'question', 'sent', NULL, '2026-11-03T01:00:00Z', NULL, NULL);",
+        )
+        .unwrap();
+    drop(connection);
+
+    let mut views = FakeOwnerViews {
+        app_db,
+        ..FakeOwnerViews::default()
+    };
+    views.inbox_rows.insert(
+        "i42".into(),
+        json!({"id":"i42", "mailbox":"worker", "sender":"owner", "created_at":1900.0,
+            "notify_state":"notified", "notify_reason":null, "read_at":1950.0,
+            "acked_at":1960.0, "state":"acked"}),
+    );
+    let env = OwnerViewApiEnv::new(views);
+    let dispatcher = owner_view_dispatcher();
+    let result = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p1"),
+        "message_state",
+        args(json!({"message_ids":"10, i42, 99, absent"})),
+    )
+    .unwrap();
+    let messages = result["messages"].as_array().unwrap();
+    assert_eq!(messages[0]["source"], "application");
+    assert_eq!(messages[0]["id"], 10);
+    assert_eq!(messages[0]["delivered"]["transport"], "sent");
+    assert_eq!(messages[1]["source"], "inbox");
+    assert_eq!(messages[1]["delivered"]["ok"], true);
+    assert_eq!(messages[1]["seen"]["acked_at"], "1970-01-01T00:32:40Z");
+    assert_eq!(messages[2]["found"], false);
+    assert_eq!(messages[2]["source"], "application");
+    assert_eq!(messages[3], json!({"id":"absent", "found":false}));
+}
+
+#[test]
+fn h_message_state_keeps_missing_unreadable_and_nonnumeric_ids_distinct() {
+    let (_dir, flock) = staffed_flock("message-state-missing");
+    let env = OwnerViewApiEnv::new(FakeOwnerViews::default());
+    let dispatcher = owner_view_dispatcher();
+    let result = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p1"),
+        "message_state",
+        args(json!({"message_ids":"7, no-such-inbox"})),
+    )
+    .unwrap();
+    assert_eq!(result["messages"][0]["found"], false);
+    assert_eq!(result["messages"][0]["source"], "application");
+    assert_eq!(
+        result["messages"][0],
+        json!({"id":"7", "found":false, "source":"application", "reason":"no application row with this id"})
+    );
+    assert_eq!(
+        result["messages"][1],
+        json!({"id":"no-such-inbox", "found":false})
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let unreadable = dir.path().join("not-a-database.sqlite3");
+    std::fs::write(&unreadable, "not sqlite").unwrap();
+    let env = OwnerViewApiEnv::new(FakeOwnerViews {
+        app_db: unreadable,
+        ..FakeOwnerViews::default()
+    });
+    let unreadable_result = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p1"),
+        "message_state",
+        args(json!({"message_ids":"8"})),
+    )
+    .unwrap();
+    assert_eq!(
+        unreadable_result["messages"][0],
+        json!({"id":"8", "found":false, "source":"application", "reason":"no application row with this id"})
+    );
+
+    let query_error = dir.path().join("wrong-schema.sqlite3");
+    rusqlite::Connection::open(&query_error)
+        .unwrap()
+        .execute_batch("CREATE TABLE unrelated (id INTEGER);")
+        .unwrap();
+    let env = OwnerViewApiEnv::new(FakeOwnerViews {
+        app_db: query_error,
+        ..FakeOwnerViews::default()
+    });
+    let query_error_result = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p1"),
+        "message_state",
+        args(json!({"message_ids":"9"})),
+    )
+    .unwrap();
+    assert_eq!(
+        query_error_result["messages"][0],
+        json!({"id":"9", "found":false, "source":"application", "reason":"no application row with this id"})
+    );
+}
+
+#[test]
+fn h_reply_stats_matches_python() {
+    let (_dir, flock) = staffed_flock("reply-stats");
+    let mut views = FakeOwnerViews {
+        stats: vec![
+            json!({"mailbox":"b"}),
+            json!({"mailbox":"a"}),
+            json!({"mailbox":"c"}),
+        ],
+        latencies: std::collections::HashMap::from([
+            ("a".into(), vec![1.0, 3.0, 5.0]),
+            ("c".into(), vec![7.0]),
+        ]),
+        ..FakeOwnerViews::default()
+    };
+    views.now = 2_000.0;
+    let env = OwnerViewApiEnv::new(views);
+    let dispatcher = owner_view_dispatcher();
+    let result = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p1"),
+        "reply_stats",
+        args(json!({"mailboxes":"b, a"})),
+    )
+    .unwrap();
+    let boxes = result["mailboxes"].as_array().unwrap();
+    assert_eq!(boxes.len(), 2);
+    assert_eq!(boxes[0]["mailbox"], "a");
+    assert_eq!(boxes[0]["seen_latency_s"]["value"], 3.0);
+    assert_eq!(boxes[0]["seen_latency_last_s"]["value"], 5.0);
+    assert_eq!(boxes[1]["mailbox"], "b");
+    assert_eq!(
+        boxes[1]["seen_latency_s"]["reason"],
+        "no message has been read yet"
+    );
+    assert_eq!(
+        env.views.latency_calls.lock().unwrap().as_slice(),
+        [("a".into(), 200), ("b".into(), 200)]
+    );
+}
+
+#[test]
+fn message_state_maps_inbox_lookup_failure_to_missing_row() {
+    let (_dir, flock) = staffed_flock("owner-view-errors");
+    let dispatcher = owner_view_dispatcher();
+    let env = OwnerViewApiEnv::new(FakeOwnerViews {
+        inbox_error: Some("inbox lookup failed".into()),
+        ..FakeOwnerViews::default()
+    });
+    let result = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p1"),
+        "message_state",
+        args(json!({"message_ids":"i1"})),
+    )
+    .unwrap();
+    assert_eq!(result["messages"][0], json!({"id":"i1", "found":false}));
+}
+
+#[test]
+fn reply_stats_propagates_inbox_query_failures() {
+    let (_dir, flock) = staffed_flock("reply-stats-errors");
+    let dispatcher = owner_view_dispatcher();
+    let env = OwnerViewApiEnv::new(FakeOwnerViews {
+        stats_error: Some("inbox stats failed".into()),
+        ..FakeOwnerViews::default()
+    });
+    let error = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p1"),
+        "reply_stats",
+        None,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("inbox stats failed"));
+
+    let env = OwnerViewApiEnv::new(FakeOwnerViews {
+        stats: vec![json!({"mailbox":"a"})],
+        latency_error: Some("latency query failed".into()),
+        ..FakeOwnerViews::default()
+    });
+    let error = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p1"),
+        "reply_stats",
+        None,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("latency query failed"));
+}
+
+#[test]
 fn h_owner_conversation_matches_python() {
     let (_dir, flock, env) = owner_api_fixture("owner-conversation");
     let inbox = flock.stores().inbox.unwrap();
