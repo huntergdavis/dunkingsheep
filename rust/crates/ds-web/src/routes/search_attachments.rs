@@ -1671,11 +1671,10 @@ mod tests {
 
     #[test]
     fn download_matches_python_range_integer_lexemes_and_range_limit() {
-        let mut request = request("GET", "/api/uploads/a1", Body::empty());
-        request
-            .headers_mut()
+        let mut req = request("GET", "/api/uploads/a1", Body::empty());
+        req.headers_mut()
             .insert(header::RANGE, HeaderValue::from_static("bytes=+1-+2"));
-        let response = block_on(app(range_fixture()).oneshot(request)).unwrap();
+        let response = block_on(app(range_fixture()).oneshot(req)).unwrap();
         assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
         assert_eq!(response.headers()[header::CONTENT_RANGE], "bytes 1-2/6");
         assert_eq!(
@@ -1688,12 +1687,12 @@ mod tests {
         );
 
         let ranges = (0..101).map(|_| "0-0").collect::<Vec<_>>().join(",");
-        let mut request = request("GET", "/api/uploads/a1", Body::empty());
-        request.headers_mut().insert(
+        let mut req = request("GET", "/api/uploads/a1", Body::empty());
+        req.headers_mut().insert(
             header::RANGE,
             HeaderValue::from_str(&format!("bytes={ranges}")).unwrap(),
         );
-        let response = block_on(app(range_fixture()).oneshot(request)).unwrap();
+        let response = block_on(app(range_fixture()).oneshot(req)).unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
             block_on(to_bytes(response.into_body(), usize::MAX)).unwrap(),
