@@ -382,8 +382,9 @@ mod tests {
 
     #[test]
     fn missing_bundle_is_404_and_auth_backend_failure_is_generic_500() {
-        let (app, _) = app(None);
-        let response = block_on(app.oneshot(request("/dash/cos", Some("session")))).unwrap();
+        let (missing_app, _) = app(None);
+        let response =
+            block_on(missing_app.oneshot(request("/dash/cos", Some("session")))).unwrap();
         let status = response.status();
         let bytes = block_on(to_bytes(response.into_body(), usize::MAX)).unwrap();
         assert_eq!(status, StatusCode::NOT_FOUND);
