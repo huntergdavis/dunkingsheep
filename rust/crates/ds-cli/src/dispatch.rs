@@ -1452,9 +1452,10 @@ fn guard_status() -> Value {
     let installed = target.exists();
     let path = std::env::var_os("PATH").unwrap_or_default();
     let resolved = find_executable("herdr", &path.to_string_lossy());
-    let active = resolved
-        .as_ref()
-        .is_some_and(|path| path.parent() == Some(guard_dir.as_path()));
+    let active = resolved.as_ref().is_some_and(|path| {
+        path.parent()
+            .is_some_and(|parent| real_path(parent) == real_path(&guard_dir))
+    });
     let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
     let bashrc = home.join(".bashrc");
     let shell_configured = std::fs::read_to_string(bashrc)

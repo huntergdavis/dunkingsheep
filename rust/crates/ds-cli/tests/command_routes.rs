@@ -4630,6 +4630,28 @@ fn cli_route_guard_actions_1() {
     );
     assert_eq!(value["tmux_guard"]["installed"], false);
 
+    let physical_config = temp.path().join("physical-config");
+    let config_alias = temp.path().join("config-alias");
+    let physical_guard_bin = physical_config.join("bin");
+    write_guard_fixture(
+        &physical_guard_bin.join("herdr"),
+        "#!/bin/sh\n# dunkingsheep-herdr-guard\nexit 0\n",
+    );
+    std::os::unix::fs::symlink(&physical_config, &config_alias).unwrap();
+    let aliased_status = run_guard_fixture(
+        &home,
+        &config_alias,
+        &physical_guard_bin,
+        &["guard", "status", "--json"],
+    );
+    assert!(
+        aliased_status.status.success(),
+        "{}",
+        String::from_utf8_lossy(&aliased_status.stderr)
+    );
+    let value: Value = serde_json::from_slice(&aliased_status.stdout).unwrap();
+    assert_eq!(value["active_in_this_shell"], true);
+
     let missing = run_guard_fixture(&home, &config, &bin, &["guard", "check", "--json"]);
     assert_eq!(missing.status.code(), Some(1));
     assert_eq!(
