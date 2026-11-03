@@ -72,14 +72,18 @@ async fn game_savestate(
     Extension(scheme): Extension<RequestScheme>,
     request: Request,
 ) -> Response {
-    if let Err(response) = authenticate(auth.as_ref(), request.headers(), scheme).await {
+    let headers = request.headers().clone();
+    let parsed_body = match request_json(request).await {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
+    if let Err(response) = authenticate(auth.as_ref(), &headers, scheme).await {
         return response;
     }
-    let body = match request_json(request).await {
-        Ok(Some(Value::Object(body))) => body,
-        Ok(Some(input)) => return model_error(input),
-        Ok(None) => return missing_body_error(),
-        Err(response) => return response,
+    let body = match parsed_body {
+        Some(Value::Object(body)) => body,
+        Some(input) => return model_error(input),
+        None => return missing_body_error(),
     };
     let tag = match body.get("tag") {
         None => String::new(),
@@ -117,14 +121,18 @@ async fn game_loadstate(
     Extension(scheme): Extension<RequestScheme>,
     request: Request,
 ) -> Response {
-    if let Err(response) = authenticate(auth.as_ref(), request.headers(), scheme).await {
+    let headers = request.headers().clone();
+    let parsed_body = match request_json(request).await {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
+    if let Err(response) = authenticate(auth.as_ref(), &headers, scheme).await {
         return response;
     }
-    let body = match request_json(request).await {
-        Ok(Some(Value::Object(body))) => body,
-        Ok(Some(input)) => return model_error(input),
-        Ok(None) => return missing_body_error(),
-        Err(response) => return response,
+    let body = match parsed_body {
+        Some(Value::Object(body)) => body,
+        Some(input) => return model_error(input),
+        None => return missing_body_error(),
     };
     let Some(input) = body.get("slot") else {
         return validation_error(
@@ -136,6 +144,12 @@ async fn game_loadstate(
         );
     };
     let Some(slot) = python_integer(input) else {
+        if input
+            .as_u64()
+            .is_some_and(|slot| slot > i64::MAX as u64)
+        {
+            return slot_exceeds_maximum_error(input);
+        }
         let (kind, message) = match input {
             Value::String(_) => (
                 "int_parsing",
@@ -165,13 +179,7 @@ async fn game_loadstate(
         );
     }
     if slot > 99 {
-        return validation_error(
-            "less_than_equal",
-            vec![json!("body"), json!("slot")],
-            "Input should be less than or equal to 99",
-            input.clone(),
-            Some(json!({"le": 99})),
-        );
+        return slot_exceeds_maximum_error(input);
     }
 
     match game.loadstate(slot).await {
@@ -331,6 +339,16 @@ fn model_error(input: Value) -> Response {
         "Input should be a valid dictionary or object to extract fields from",
         input,
         None,
+    )
+}
+
+fn slot_exceeds_maximum_error(input: &Value) -> Response {
+    validation_error(
+        "less_than_equal",
+        vec![json!("body"), json!("slot")],
+        "Input should be less than or equal to 99",
+        input.clone(),
+        Some(json!({"le": 99})),
     )
 }
 
@@ -674,6 +692,25 @@ mod tests {
     }
 
     #[test]
+    fn game_loadstate_rejects_large_unsigned_slot_with_python_upper_bound_error() {
+        let game = Arc::new(FakeGame::new(Value::Null));
+        let slot = 9_223_372_036_854_775_908u64;
+        let body = format!(r#"{{"slot":{slot}}}"#);
+        let (status, _body, value) = response(
+            app(game.clone(), authorized()),
+            request("POST", "/api/game/loadstate", &body),
+        );
+        assert_eq!(StatusCode::UNPROCESSABLE_ENTITY, status);
+        assert_eq!(
+            json!({"detail":[{"type":"less_than_equal","loc":["body","slot"],
+                "msg":"Input should be less than or equal to 99",
+                "input":9_223_372_036_854_775_908u64,"ctx":{"le":99}}]}),
+            value
+        );
+        assert!(game.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn game_loadstate_requires_slot_with_python_validation_shape() {
         let game = Arc::new(FakeGame::new(Value::Null));
         let (status, _body, value) = response(
@@ -752,6 +789,49 @@ mod tests {
                 "ctx":{"error":"Unterminated string starting at"}}]}),
             value
         );
+        assert!(game.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn game_savestate_decodes_malformed_json_before_auth_and_origin_checks() {
+        let game = Arc::new(FakeGame::new(Value::Null));
+        for path in ["/api/game/savestate", "/api/game/loadstate"] {
+            let unauthenticated = Arc::new(FakeAuth {
+                result: Err(AuthError::SignInRequired),
+            });
+            let (status, _body, value) = response(
+                app(game.clone(), unauthenticated.clone()),
+                request("POST", path, "{"),
+            );
+            assert_eq!(StatusCode::UNPROCESSABLE_ENTITY, status);
+            assert_eq!(
+                json!({"detail":[{"type":"json_invalid","loc":["body",1],
+                    "msg":"JSON decode error","input":{},
+                    "ctx":{"error":"Expecting property name enclosed in double quotes"}}]}),
+                value
+            );
+
+            let cross_origin_request = HttpRequest::builder()
+                .method("POST")
+                .uri(path)
+                .header(header::HOST, "desk.test")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::ORIGIN, "https://foreign.test")
+                .body(Body::from("{"))
+                .unwrap();
+            let (status, _body, value) =
+                response(app(game.clone(), authorized()), cross_origin_request);
+            assert_eq!(StatusCode::UNPROCESSABLE_ENTITY, status);
+            assert_eq!("json_invalid", value["detail"][0]["type"]);
+            assert_eq!(1, value["detail"][0]["loc"][1]);
+
+            let (status, _body, value) = response(
+                app(game.clone(), unauthenticated),
+                request("POST", path, "{}"),
+            );
+            assert_eq!(StatusCode::UNAUTHORIZED, status);
+            assert_eq!(json!({"detail":"Sign in required"}), value);
+        }
         assert!(game.calls.lock().unwrap().is_empty());
     }
 
