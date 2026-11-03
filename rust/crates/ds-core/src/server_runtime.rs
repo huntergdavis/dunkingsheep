@@ -16,6 +16,7 @@ mod layout;
 mod outbox_runtime;
 mod push;
 mod push_eligibility;
+mod registrations;
 mod retire_inbox;
 mod retire_roles;
 mod roster;
