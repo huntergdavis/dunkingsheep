@@ -4,8 +4,8 @@
 //! the same async mutex, while different panes can progress independently. The
 //! standard mutex protects only the map and is never held across an await.
 
-use std::collections::BTreeSet;
 use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
@@ -144,14 +144,24 @@ impl NextJobs {
             Err(_) => return Some("readiness_unknown".into()),
         };
         let owned_pane = pane.to_owned();
-        match tokio::task::spawn_blocking(move || crate::panes::is_retired(&owned_pane, &path))
-            .await
-        {
-            Ok(true) => Some("unavailable_lane".into()),
-            Ok(false) => None,
-            Err(_) => Some("readiness_unknown".into()),
+        match tokio::task::spawn_blocking(move || retirement_status(&owned_pane, &path)).await {
+            Ok(Ok(true)) => Some("unavailable_lane".into()),
+            Ok(Ok(false)) => None,
+            _ => Some("readiness_unknown".into()),
         }
     }
+}
+
+/// Read one snapshot so an unreadable or corrupt retirement registry cannot become
+/// permission. A missing file has the shared store's accepted empty semantics.
+fn retirement_status(pane: &str, path: &std::path::Path) -> Result<bool, ()> {
+    let records: BTreeMap<String, Value> =
+        crate::atomic_json::read_or_default(path).map_err(|_| ())?;
+    let Some(record) = records.get(pane.trim()) else {
+        return Ok(false);
+    };
+    serde_json::from_value::<crate::panes::Retired>(record.clone()).map_err(|_| ())?;
+    Ok(true)
 }
 
 fn process_gate_env() -> Result<Env, ()> {
@@ -199,6 +209,8 @@ fn dispatch_entries(env: &Env) -> Result<Vec<String>, ()> {
             };
             match listed {
                 Value::Null => {}
+                Value::Bool(false) => {}
+                Value::Number(number) if number.as_f64() == Some(0.0) => {}
                 Value::String(text) => entries.extend(
                     text.split(',')
                         .map(str::trim)
@@ -498,6 +510,41 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn next_jobs_gate_fails_closed_on_retirement_read_error() {
+        let (dir, jobs, _) = configured_jobs().await;
+        let path = dir.path().join("retired-panes.json");
+        let lanes = vec![json!({"pane_id":"%1"})];
+        let env = || test_env(dir.path(), "1", "%1");
+        // The existing store treats a missing file as empty.
+        assert_eq!(
+            jobs.gate_with("%1", Some(lanes.clone()), env(), None).await,
+            None
+        );
+        for bad in ["{", r#"{"%1":{}}"#] {
+            std::fs::write(&path, bad).unwrap();
+            assert_eq!(
+                jobs.gate_with("%1", Some(lanes.clone()), env(), None)
+                    .await
+                    .as_deref(),
+                Some("readiness_unknown")
+            );
+        }
+        std::fs::write(&path, r#"{"%2":{}}"#).unwrap();
+        assert_eq!(
+            jobs.gate_with("%1", Some(lanes.clone()), env(), None).await,
+            None
+        );
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert_eq!(
+            jobs.gate_with("%1", Some(lanes), env(), None)
+                .await
+                .as_deref(),
+            Some("readiness_unknown")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_registration_is_dispatch_opt_in_but_not_kill_switch_override() {
         let (dir, jobs, tasks) = configured_jobs().await;
         tasks
@@ -579,6 +626,19 @@ mod tests {
             None
         );
         assert_eq!(calls.load(Ordering::SeqCst), 0);
+        for content in ["false", "0", r#"{"lanes":false}"#] {
+            std::fs::write(dir.path().join("dispatch_lanes.json"), content).unwrap();
+            assert_eq!(
+                jobs.gate_with(
+                    "%1",
+                    Some(vec![json!({"pane_id":"%1"})]),
+                    test_env(dir.path(), "1", "%1"),
+                    None
+                )
+                .await,
+                None
+            );
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
