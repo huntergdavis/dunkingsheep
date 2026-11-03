@@ -337,7 +337,11 @@ class Sync:
         return True
 
     def _reconcile_terminal_status(self, repo, pr, token, report):
-        """Repair a stale review context only for the authoritative current PR head."""
+        """Repair the review context only for the authoritative current PR head.
+
+        Re-read verdicts after the GitHub calls, since a new veto may have landed
+        while those calls were in flight. Rust Sync.run parity is tracked in t1723.
+        """
         head, number = pr["head"], pr["number"]
         try:
             detail = self.github.pull_detail(repo, number, token)
