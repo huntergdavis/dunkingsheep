@@ -92,7 +92,7 @@ impl Flock {
         env: &mut dyn ClearBoxEnv,
         target: &Value,
         self_pane_id: Option<&str>,
-        reason: Option<&str>,
+        reason: Option<&Value>,
     ) -> Result<Value, DunkError> {
         // Authorization deliberately precedes target resolution, matching the destructive
         // Python API and preventing non-owners from probing pane names through this action.

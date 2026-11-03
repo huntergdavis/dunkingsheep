@@ -5,7 +5,8 @@
 
 use super::*;
 use serde_json::json;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 use crate::config::Env;
@@ -5125,6 +5126,442 @@ fn send_api_fixture(tag: &str) -> (tempfile::TempDir, Flock, SendApiEnv, Dispatc
     let mut dispatcher = Dispatcher::new();
     dispatcher.register_send_text_keys_flush_box();
     (dir, flock, SendApiEnv::new(), dispatcher)
+}
+
+const API_CLEAR_OWNER: &str = "w1:p1";
+const API_CLEAR_WORKER: &str = "w2:p2";
+
+struct ApiClearBoxBackend {
+    panes: Vec<Value>,
+    screens: BTreeMap<String, Option<String>>,
+    statuses: BTreeMap<String, String>,
+    keys: Vec<String>,
+    fail_at: Option<usize>,
+}
+
+impl ApiClearBoxBackend {
+    fn new(panes: Vec<Value>) -> Self {
+        Self {
+            panes,
+            screens: BTreeMap::from([(
+                API_CLEAR_WORKER.to_owned(),
+                Some("Context is full - please /clear\n".into()),
+            )]),
+            statuses: BTreeMap::new(),
+            keys: Vec::new(),
+            fail_at: None,
+        }
+    }
+}
+
+impl crate::flock::sends::SendEnv for ApiClearBoxBackend {
+    fn read_pane(&self, pane_id: &str, _: i64, _: bool) -> Option<String> {
+        self.screens.get(pane_id).cloned().flatten()
+    }
+
+    fn pane_harness(&self, _: &str) -> Option<String> {
+        None
+    }
+
+    fn session_process_gone(&self, _: &str) -> bool {
+        false
+    }
+
+    fn read_status(&self, pane_id: &str) -> Option<String> {
+        self.statuses.get(pane_id).cloned()
+    }
+
+    fn send_key(&mut self, pane_id: &str, key: &str) -> (bool, String) {
+        self.keys.push(key.to_owned());
+        let ok = self.fail_at != Some(self.keys.len());
+        if ok && key == "Escape" {
+            self.screens.insert(
+                pane_id.to_owned(),
+                Some("› Ask Codex to do anything\n".into()),
+            );
+            self.statuses.insert(pane_id.to_owned(), "idle".into());
+        }
+        (
+            ok,
+            if ok {
+                "sent".into()
+            } else {
+                "terminal refused key".into()
+            },
+        )
+    }
+
+    fn federated_input(&self) -> bool {
+        false
+    }
+}
+
+impl PaneInfoEnv for ApiClearBoxBackend {
+    fn list_panes_grouped(&self) -> Vec<Value> {
+        self.panes.clone()
+    }
+
+    fn get_pane(&self, pane_id: &str) -> Option<Value> {
+        self.panes
+            .iter()
+            .find(|pane| pane["pane_id"] == pane_id)
+            .cloned()
+    }
+}
+
+impl crate::flock::clear_box::ClearBoxEnv for ApiClearBoxBackend {
+    fn server_error_hint(&self) -> String {
+        "test terminal unavailable".into()
+    }
+}
+
+struct SendHandlerApiEnv {
+    terminal: Mutex<Box<dyn Terminal>>,
+    panes: Vec<Value>,
+    clear_box: RefCell<ApiClearBoxBackend>,
+    clear_box_calls: Cell<usize>,
+    delivery_env_calls: Cell<usize>,
+    owner_push: crate::owner::OwnerPush,
+    now_s: f64,
+}
+
+impl SendHandlerApiEnv {
+    fn new(path: &Path) -> Self {
+        let panes = vec![
+            json!({"pane_id":API_CLEAR_OWNER, "agent":"owner", "tab_label":"owner"}),
+            json!({"pane_id":API_CLEAR_WORKER, "agent":"claude", "label":"worker", "tab_label":"worker"}),
+        ];
+        Self {
+            terminal: Mutex::new(Box::new(FakeTerminal::default())),
+            clear_box: RefCell::new(ApiClearBoxBackend::new(panes.clone())),
+            panes,
+            clear_box_calls: Cell::new(0),
+            delivery_env_calls: Cell::new(0),
+            owner_push: crate::owner::OwnerPush::open(path.join("owner-push.db")).unwrap(),
+            now_s: 10_000.0,
+        }
+    }
+}
+
+impl PaneInfoEnv for SendHandlerApiEnv {
+    fn list_panes_grouped(&self) -> Vec<Value> {
+        self.panes.clone()
+    }
+
+    fn get_pane(&self, pane_id: &str) -> Option<Value> {
+        self.panes
+            .iter()
+            .find(|pane| pane["pane_id"] == pane_id)
+            .cloned()
+    }
+}
+
+impl crate::flock::mailbox::MailboxEnv for SendHandlerApiEnv {
+    fn list_panes(&self) -> Vec<Value> {
+        self.panes.clone()
+    }
+
+    fn list_panes_grouped(&self) -> Vec<Value> {
+        self.panes.clone()
+    }
+
+    fn registered_pane(&self, _: &str) -> (bool, bool, Option<String>) {
+        (false, false, None)
+    }
+}
+
+impl crate::flock::delivery::DeliveryEnv for SendHandlerApiEnv {
+    fn get_pane(&self, pane_id: &str) -> Option<Value> {
+        self.panes
+            .iter()
+            .find(|pane| pane["pane_id"] == pane_id)
+            .cloned()
+    }
+
+    fn agent_alive(&self, _: &str) -> Option<bool> {
+        Some(true)
+    }
+
+    fn has_web_token(&self) -> Result<bool, DunkError> {
+        Ok(false)
+    }
+
+    fn server_error_hint(&self) -> String {
+        "test terminal unavailable".into()
+    }
+}
+
+impl CommandEnv for SendHandlerApiEnv {
+    fn terminal(&self) -> &Mutex<Box<dyn Terminal>> {
+        &self.terminal
+    }
+
+    fn now_s(&self) -> f64 {
+        self.now_s
+    }
+
+    fn delivery_env(&self) -> Result<&dyn crate::flock::delivery::DeliveryEnv, DunkError> {
+        self.delivery_env_calls
+            .set(self.delivery_env_calls.get() + 1);
+        Ok(self)
+    }
+
+    fn with_clear_box_env(
+        &self,
+        operation: &mut dyn FnMut(
+            &mut dyn crate::flock::clear_box::ClearBoxEnv,
+        ) -> Result<Value, DunkError>,
+    ) -> Result<Value, DunkError> {
+        self.clear_box_calls.set(self.clear_box_calls.get() + 1);
+        operation(&mut *self.clear_box.borrow_mut())
+    }
+
+    fn owner_push(&self) -> Result<&crate::owner::OwnerPush, DunkError> {
+        Ok(&self.owner_push)
+    }
+}
+
+fn send_handler_api_fixture(
+    tag: &str,
+) -> (tempfile::TempDir, Flock, SendHandlerApiEnv, Dispatcher) {
+    let (dir, flock) = flock();
+    let mut roles = Roles::new(
+        &Env::default(),
+        Some(dir.path().join(format!("{tag}-roles.json"))),
+        Some(dir.path().join(format!("{tag}-tokens.json"))),
+        None,
+    )
+    .unwrap();
+    roles
+        .register(API_CLEAR_OWNER, "owner", None, None, None, None, None, None)
+        .unwrap();
+    roles
+        .register(
+            API_CLEAR_WORKER,
+            "worker",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    flock.attach_roles(roles, None);
+    let env = SendHandlerApiEnv::new(dir.path());
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_clear_box_delivery_capability();
+    (dir, flock, env, dispatcher)
+}
+
+#[test]
+fn api_t39_clear_box_dispatch_preserves_raw_reason_and_authorization_order() {
+    let (_dir, flock, env, dispatcher) = send_handler_api_fixture("api-clear-box");
+    assert_eq!(
+        dispatcher.registration_attempts(),
+        &["clear_box", "delivery", "delivery_capability"]
+    );
+
+    let result = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some(API_CLEAR_OWNER),
+        "clear_box",
+        args(json!({
+            "target":{"pane_id":API_CLEAR_WORKER, "extra":7},
+            "reason":17
+        })),
+    )
+    .expect("owner clear handler delegates to the real Flock operation");
+    assert_eq!(result["reason"], 17);
+    assert_eq!(result["before"]["state"], "blocked");
+    assert_eq!(result["after"]["state"], "ready");
+    assert_eq!(result["flushed"], true);
+    assert_eq!(env.clear_box.borrow().keys, ["C-u", "Escape"]);
+    assert_eq!(env.clear_box_calls.get(), 1);
+
+    let missing = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some(API_CLEAR_OWNER),
+        "clear_box",
+        args(json!({})),
+    )
+    .unwrap_err();
+    assert!(missing
+        .to_string()
+        .contains("missing required argument(s): target"));
+    assert_eq!(
+        env.clear_box_calls.get(),
+        1,
+        "required args precede the adapter"
+    );
+
+    let denied = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some(API_CLEAR_WORKER),
+        "clear_box",
+        args(json!({"target":"unknown target"})),
+    )
+    .unwrap_err();
+    assert!(denied.to_string().contains("not permitted for role worker"));
+    assert_eq!(
+        env.clear_box_calls.get(),
+        1,
+        "role gate precedes the adapter"
+    );
+}
+
+#[test]
+fn api_t39_delivery_dispatch_preserves_target_and_falsey_status_semantics() {
+    let (_dir, flock, env, dispatcher) = send_handler_api_fixture("api-delivery");
+    {
+        let mut backend = env.clear_box.borrow_mut();
+        backend.screens.insert(
+            API_CLEAR_WORKER.into(),
+            Some("› Ask Codex to do anything\n".into()),
+        );
+        backend
+            .statuses
+            .insert(API_CLEAR_WORKER.into(), "busy".into());
+    }
+
+    for (label, args_value, expected) in [
+        (
+            "omitted status falls back",
+            json!({"target":{"pane_id":API_CLEAR_WORKER, "extra":7}}),
+            "working",
+        ),
+        (
+            "null status falls back",
+            json!({"target":"worker", "status":null}),
+            "working",
+        ),
+        (
+            "false suppresses fallback",
+            json!({"target":"worker", "status":false}),
+            "ready",
+        ),
+        (
+            "zero suppresses fallback",
+            json!({"target":"worker", "status":0}),
+            "ready",
+        ),
+        (
+            "empty string suppresses fallback",
+            json!({"target":"worker", "status":""}),
+            "ready",
+        ),
+    ] {
+        let result = dispatch_as_flock_role(
+            &dispatcher,
+            &flock,
+            &env,
+            Some(API_CLEAR_WORKER),
+            "delivery",
+            args(args_value),
+        )
+        .unwrap_or_else(|error| panic!("{label}: {error}"));
+        assert_eq!(result["state"], expected, "{label}");
+    }
+    assert_eq!(env.clear_box_calls.get(), 5);
+
+    let invalid_dict = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some(API_CLEAR_WORKER),
+        "delivery",
+        args(json!({"target":{"extra":7}})),
+    )
+    .unwrap_err();
+    assert_eq!(invalid_dict.to_string(), "target dict has no pane_id");
+    assert_eq!(
+        env.clear_box_calls.get(),
+        5,
+        "target resolution precedes screen reads"
+    );
+
+    let missing = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some(API_CLEAR_WORKER),
+        "delivery",
+        args(json!({})),
+    )
+    .unwrap_err();
+    assert!(missing
+        .to_string()
+        .contains("missing required argument(s): target"));
+}
+
+#[test]
+fn api_t39_delivery_capability_dispatch_preserves_python_falsey_and_type_errors() {
+    let (_dir, flock, env, dispatcher) = send_handler_api_fixture("api-delivery-capability");
+    for (label, args_value) in [
+        ("absent", json!({})),
+        ("null", json!({"target":null})),
+        ("false", json!({"target":false})),
+        ("zero", json!({"target":0})),
+        ("empty string", json!({"target":""})),
+        ("whitespace", json!({"target":"  \t"})),
+        ("empty list", json!({"target":[]})),
+        ("empty object", json!({"target":{}})),
+    ] {
+        let error = dispatch_as_flock_role(
+            &dispatcher,
+            &flock,
+            &env,
+            Some(API_CLEAR_WORKER),
+            "delivery_capability",
+            args(args_value),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "delivery_capability must be given a target (a pane id like %9 or a pinned lane name)",
+            "{label}"
+        );
+    }
+    for (value, expected) in [
+        (json!(1), "'int' object has no attribute 'strip'"),
+        (json!(true), "'bool' object has no attribute 'strip'"),
+        (json!(["worker"]), "'list' object has no attribute 'strip'"),
+    ] {
+        let error = dispatch_as_flock_role(
+            &dispatcher,
+            &flock,
+            &env,
+            Some(API_CLEAR_WORKER),
+            "delivery_capability",
+            args(json!({"target":value})),
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), expected);
+    }
+    assert_eq!(
+        env.delivery_env_calls.get(),
+        0,
+        "invalid targets fail before lookup"
+    );
+
+    let capability = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some(API_CLEAR_WORKER),
+        "delivery_capability",
+        args(json!({"target":format!("  {API_CLEAR_WORKER}  ")})),
+    )
+    .expect("trimmed pane id resolves through Flock delivery capability");
+    assert_eq!(capability["pane_id"], API_CLEAR_WORKER);
+    assert_eq!(capability["send"], "guarded");
+    assert_eq!(env.delivery_env_calls.get(), 1);
 }
 
 #[test]

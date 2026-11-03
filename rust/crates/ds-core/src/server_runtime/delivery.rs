@@ -469,12 +469,19 @@ mod tests {
             )
             .expect("temporary registered lane");
         role_store
+            .register("w1:p1", "owner", None, None, None, None, None, None)
+            .expect("temporary owner lane");
+        role_store
             .issue_token("web", Some("fixture-web"), Some("test"))
             .expect("temporary fixture token");
         flock.attach_roles(role_store, None);
         flock.remember_lane("w2:p2", "worker two", true);
 
-        let terminal: Mutex<Box<dyn Terminal>> = Mutex::new(Box::new(FakeTerminal::new()));
+        let mut fake_terminal = FakeTerminal::new();
+        fake_terminal
+            .screens
+            .insert("w2:p2".into(), "Context is full - please /clear\n".into());
+        let terminal: Mutex<Box<dyn Terminal>> = Mutex::new(Box::new(fake_terminal));
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -483,6 +490,31 @@ mod tests {
         let adapter = request_adapter(&flock, &request, &runtime, &terminal);
         let owner =
             OwnerPush::open(dir.path().join("owner-push.db")).expect("temporary owner store");
+
+        let api_env: &dyn crate::api::CommandEnv = &adapter;
+        assert!(api_env.delivery_env().is_ok());
+        let mut clear_calls = 0;
+        let mut clear = |env: &mut dyn crate::flock::clear_box::ClearBoxEnv| {
+            clear_calls += 1;
+            flock.clear_box(
+                env,
+                &json!({"pane_id":"w2:p2"}),
+                Some("w1:p1"),
+                Some(&json!(17)),
+            )
+        };
+        let cleared = api_env
+            .with_clear_box_env(&mut clear)
+            .expect("runtime callback calls the existing Flock clear operation");
+        assert_eq!(
+            clear_calls, 1,
+            "the runtime adapter invokes the callback once"
+        );
+        assert_eq!(
+            cleared["reason"], 17,
+            "the request preserves the raw JSON reason"
+        );
+        assert_eq!(cleared["flushed"], true);
 
         let target = flock
             .delivery_target(&adapter, "worker two", None)
