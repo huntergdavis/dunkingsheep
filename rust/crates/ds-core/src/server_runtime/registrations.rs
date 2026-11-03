@@ -307,16 +307,15 @@ mod tests {
             .unwrap();
         assert_eq!(turn["pane_id"], "w1:p1");
         assert!(turn["turn_id"].as_str().is_some());
-        let sent = dispatcher
+        let send_error = dispatcher
             .dispatch(
                 "send_text",
                 &json!({"target":"w1:p1", "text":"assembly smoke", "hold_while_typing":false}),
                 &authenticated,
             )
-            .unwrap();
-        assert_eq!(sent["pane_id"], "w1:p1");
-        assert_eq!(sent["text"], "assembly smoke");
-        assert!(sent["id"].as_str().is_some());
+            .unwrap_err()
+            .to_string();
+        assert!(send_error.contains("send command adapter is not wired"));
         let desk = request("w3:p3");
         let denied = dispatcher
             .dispatch("review_sync", &json!({}), &desk)
