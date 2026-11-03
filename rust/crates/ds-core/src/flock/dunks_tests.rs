@@ -740,6 +740,25 @@ fn manual_fire_with_max_sends_does_not_remove_the_dunk() {
 }
 
 #[test]
+fn scheduled_cancellation_at_guard_prevents_the_delivery_attempt() {
+    let (_dir, flock) = new_flock();
+    load_one_fire_dunk(&flock, "scheduled text", Some(1));
+    let flock = Arc::new(flock);
+    let handle = flock.dunks.handle("d1").unwrap();
+    let mut env = fire_env(false);
+    let store = Arc::new(CapturingSnapshotStore::default());
+    let result = flock.scheduled_dunk_send(&handle, &mut env, store.clone(), || {
+        Some("scheduled dunk cancelled before attempt".into())
+    });
+    assert!(!result.0);
+    assert!(env.typed.is_empty());
+    assert!(env.keys.is_empty());
+    assert!(env.attempts.is_empty());
+    assert_eq!(json!(0), flock.dunks.get("d1").unwrap()["send_count"]);
+    assert_eq!(0, store.calls.load(Ordering::SeqCst));
+}
+
+#[test]
 fn successful_dunk_attempt_surfaces_and_clears_detector_fallback() {
     let (_dir, flock) = new_flock();
     load_one_fire_dunk(&flock, "continue", None);

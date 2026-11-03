@@ -1148,9 +1148,10 @@ impl Flock {
         handle: &DunkerHandle,
         env: &mut dyn SendPreparationEnv,
         store: Arc<dyn SnapshotStore>,
+        permission: impl FnMut() -> Option<String>,
     ) -> (bool, Option<bool>, String, Option<String>) {
         let action = DunkDeliveryAction::new(Arc::clone(handle), store);
-        super::sends::send_dunk_now(self, &action, env, || None)
+        super::sends::send_dunk_now(self, &action, env, permission)
     }
 
     /// Extract the dunk-owned fields from the already-decoded whole-state payload.

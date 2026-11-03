@@ -293,8 +293,14 @@ impl DunkTimerOwner {
             .unwrap_or_else(|e| e.into_inner())
             .remove(&Self::key(handle));
         if let Some(worker) = worker {
+            let guard = worker
+                .signal
+                .generation
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             worker.signal.cancelled.store(true, Ordering::Release);
             worker.signal.changed.notify_all();
+            drop(guard);
             let _ = worker.join.join();
         }
     }
@@ -302,8 +308,14 @@ impl DunkTimerOwner {
     fn stop_all(&self) {
         let workers = std::mem::take(&mut *self.workers.lock().unwrap_or_else(|e| e.into_inner()));
         for (_, worker) in workers {
+            let guard = worker
+                .signal
+                .generation
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             worker.signal.cancelled.store(true, Ordering::Release);
             worker.signal.changed.notify_all();
+            drop(guard);
             let _ = worker.join.join();
         }
     }
@@ -317,6 +329,9 @@ impl Drop for DunkTimerOwner {
 
 fn timer_wait(signal: &TimerSignal, seconds: f64) -> bool {
     let generation = signal.generation.lock().unwrap_or_else(|e| e.into_inner());
+    if signal.cancelled.load(Ordering::Acquire) {
+        return true;
+    }
     let before = *generation;
     let duration = Duration::from_secs_f64(seconds.max(0.0));
     let (generation, _) = signal
@@ -473,7 +488,13 @@ fn run_dunk_timer(
         }
         crate::flock::dunks::DunkList::set_timer_status(&handle, "Sending...");
         let (sent, ok, detail, blocker) =
-            flock.scheduled_dunk_send(&handle, &mut env, Arc::clone(&store));
+            flock.scheduled_dunk_send(&handle, &mut env, Arc::clone(&store), || {
+                (signal.cancelled.load(Ordering::Acquire) || !flock.dunks.is_running(&handle))
+                    .then(|| "scheduled dunk cancelled before attempt".to_owned())
+            });
+        if signal.cancelled.load(Ordering::Acquire) || !flock.dunks.is_running(&handle) {
+            break;
+        }
         if sent {
             let done =
                 crate::flock::dunks::DunkList::timer_after_send(&handle, true, ok.unwrap_or(false));
