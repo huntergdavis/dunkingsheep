@@ -185,12 +185,12 @@ fn task_event_python_error(message: &str, inputs: &Inputs<'_>) -> Option<String>
         return None;
     }
     let event_id = message.strip_prefix("task_events ")?.split(' ').next()?;
+    let event_id = event_id.parse::<i64>().ok()?;
     let data = inputs.tasks().ok()?;
-    let event = data.events.iter().find(|event| {
-        event["id"]
-            .as_str()
-            .map_or_else(|| event["id"].to_string() == event_id, |id| id == event_id)
-    })?;
+    let event = data
+        .events
+        .iter()
+        .find(|event| event["id"].as_i64() == Some(event_id))?;
     let raw = event["meta"]
         .as_str()
         .filter(|text| !text.is_empty())
