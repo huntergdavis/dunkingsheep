@@ -2074,9 +2074,11 @@ impl Flock {
                     stored.detail = Some(if detail.is_empty() { "held" } else { &detail }.into());
                 }
                 message = stored.clone();
-                let empty = {
+                let empty = if terminal {
                     queue.retain(|row| row.id != message_id);
                     queue.is_empty()
+                } else {
+                    false
                 };
                 if empty {
                     outbox.remove(&pane_id);
