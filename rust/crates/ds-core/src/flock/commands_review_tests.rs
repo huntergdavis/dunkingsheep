@@ -178,7 +178,7 @@ async fn test_accept_posts_success_and_approves_as_the_reviewer_app() {
             &TestTokens(Ok("reviewer-app-token".into())),
             TestPolicy,
             "https://api.example.test",
-            &transport,
+            BorrowedGitHubTransport(&transport),
             &task,
             "accept",
             Some("%2"),
@@ -237,7 +237,7 @@ async fn after_review_verdict_contains_token_failure_without_rolling_back_verdic
             &TestTokens(Err("token cache unavailable".into())),
             TestPolicy,
             "https://api.example.test",
-            &transport,
+            BorrowedGitHubTransport(&transport),
             &task,
             "accept",
             Some("%2"),
@@ -285,7 +285,7 @@ async fn after_review_verdict_contains_transport_failure_without_rolling_back_ve
             &TestTokens(Ok("reviewer-app-token".into())),
             TestPolicy,
             "https://api.example.test",
-            &transport,
+            BorrowedGitHubTransport(&transport),
             &task,
             "accept",
             Some("%2"),
@@ -328,7 +328,7 @@ async fn test_a_pr_becomes_one_review_task_with_a_pending_status() {
             &TestTokens(Ok("reviewer-app-token".into())),
             TestPolicy,
             "https://api.example.test",
-            &transport,
+            BorrowedGitHubTransport(&transport),
             false,
         )
         .await
@@ -402,7 +402,7 @@ async fn test_an_accepted_head_is_never_refiled_and_is_merged_when_protection_al
             &TestTokens(Ok("reviewer-app-token".into())),
             TestPolicy,
             "https://api.example.test",
-            &transport,
+            BorrowedGitHubTransport(&transport),
             false,
         )
         .await

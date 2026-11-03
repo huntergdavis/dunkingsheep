@@ -1817,7 +1817,7 @@ pub fn h_review_sync(context: &HandlerContext<'_>, args: Args) -> Result<Value, 
         tokens,
         policy,
         tokens.api_root(),
-        transport,
+        crate::flock::commands_review::BorrowedGitHubTransport(transport),
         python_bool_arg(&args, "dry_run", false),
     ))?;
     result.map_err(DunkError::Refused)

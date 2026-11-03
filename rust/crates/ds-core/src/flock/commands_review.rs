@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 
 use super::Flock;
 use crate::error::DunkError;
-use crate::github::GitHubTransport;
+use crate::github::{GitHubRequest, GitHubResponse, GitHubTransport, PinBoxFuture};
 use crate::review::{
     ReviewFuture, ReviewPolicy, ReviewRepoConfig, ReviewRunContext, ReviewSync, ReviewTaskActor,
     ReviewTaskCreator, ReviewTaskRequest, ReviewTokenSource,
@@ -20,6 +20,17 @@ impl ReviewTokenSource for BorrowedReviewTokens<'_> {
 
     fn author_token(&self) -> ReviewFuture<'_, Result<String, String>> {
         self.0.author_token()
+    }
+}
+
+pub(crate) struct BorrowedGitHubTransport<'a>(pub(crate) &'a dyn GitHubTransport);
+
+impl GitHubTransport for BorrowedGitHubTransport<'_> {
+    fn send<'a>(
+        &'a self,
+        request: GitHubRequest,
+    ) -> PinBoxFuture<'a, Result<GitHubResponse, String>> {
+        self.0.send(request)
     }
 }
 
@@ -135,7 +146,7 @@ impl Flock {
         dry_run: bool,
     ) -> Result<Value, String>
     where
-        T: ReviewTokenSource + ?Sized,
+        T: ReviewTokenSource,
         G: ReviewPolicy + ReviewRepoConfig,
         X: GitHubTransport,
     {
@@ -174,24 +185,25 @@ impl Flock {
         let mut reviews: Vec<Value> = rows
             .into_iter()
             .map(|row| {
-                let task = row.typed.task;
+                let wire = row.wire;
                 let reviewer = if row.typed.claimed_by.is_empty() {
                     row.typed.assignees
                 } else {
                     row.typed.claimed_by
                 };
-                let age_s = (now - task.created_at).round_ties_even() as i64;
+                let age_s = (now - wire["created_at"].as_f64().unwrap_or_default())
+                    .round_ties_even() as i64;
                 json!({
-                    "task": task.id,
-                    "status": task.status,
-                    "repo": task.repo,
-                    "pr": task.pr,
-                    "head": task.head.unwrap_or_default().chars().take(12).collect::<String>(),
-                    "author": task.author,
+                    "task": wire["id"].clone(),
+                    "status": wire["status"].clone(),
+                    "repo": wire.get("repo").cloned().unwrap_or(Value::Null),
+                    "pr": wire.get("pr").cloned().unwrap_or(Value::Null),
+                    "head": wire.get("head").and_then(Value::as_str).unwrap_or_default().chars().take(12).collect::<String>(),
+                    "author": wire.get("author").cloned().unwrap_or(Value::Null),
                     "reviewer": reviewer,
                     "age_s": age_s,
-                    "verdict": task.verdict,
-                    "title": task.title,
+                    "verdict": wire.get("verdict").cloned().unwrap_or(Value::Null),
+                    "title": wire["title"].clone(),
                 })
             })
             .collect();
@@ -225,7 +237,7 @@ impl Flock {
         by: Option<&str>,
     ) -> Value
     where
-        T: ReviewTokenSource + ?Sized,
+        T: ReviewTokenSource,
         G: ReviewPolicy,
         X: GitHubTransport,
     {
