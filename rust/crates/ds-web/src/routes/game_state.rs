@@ -357,8 +357,8 @@ mod tests {
     use std::{
         future::Future,
         pin::pin,
-        sync::{Mutex, Waker},
-        task::{Context, Poll},
+        sync::Mutex,
+        task::{Context, Poll, Waker},
     };
     use tower::ServiceExt;
 
