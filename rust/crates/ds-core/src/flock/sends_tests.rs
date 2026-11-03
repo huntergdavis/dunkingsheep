@@ -21,6 +21,7 @@ struct Pane {
     federated: bool,
     keys: Vec<(String, String)>,
     after_key_screen: Option<String>,
+    key_refusal: Option<String>,
     reads: RefCell<Vec<(String, bool)>>,
     screen_script: RefCell<VecDeque<Option<String>>>,
     status_script: RefCell<VecDeque<Option<String>>>,
@@ -59,6 +60,9 @@ impl SendEnv for Pane {
     }
     fn send_key(&mut self, pane_id: &str, key: &str) -> (bool, String) {
         self.events.push("key");
+        if let Some(reason) = &self.key_refusal {
+            return (false, reason.clone());
+        }
         self.keys.push((pane_id.to_string(), key.to_string()));
         if let Some(screen) = self.after_key_screen.take() {
             self.screens.insert(pane_id.to_string(), screen);
@@ -2571,9 +2575,56 @@ fn press_stuck_enter_refuses_replaced_pane_before_sending_key() {
         None,
         false,
         None,
-        100.0,
     );
     assert!(!pressed);
+    assert!(env.keys.is_empty());
+}
+
+#[test]
+fn press_stuck_enter_honors_backend_refusal_and_busy_status() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Flock::new(dir.path().join("launches"), dir.path().join("lanes"), false);
+    let mut env = Pane::default();
+    env.panes
+        .push(serde_json::json!({"pane_id":"%1", "pane_pid":std::process::id()}));
+    env.screens.insert("%1".into(), frame("stuck body", &[]));
+    env.statuses.insert("%1".into(), "working".into());
+    flock
+        .sent_text_by_pane
+        .lock()
+        .unwrap()
+        .insert("%1".into(), vec!["stuck body".into()]);
+    let generation = pane_generation(&env, "%1").unwrap();
+    let fingerprint = crate::stuck::fingerprint("stuck body");
+    let (pressed, _) = flock.press_stuck_enter(
+        &mut env,
+        "%1",
+        &fingerprint,
+        &generation,
+        "m1",
+        Some("stuck body"),
+        None,
+        false,
+        None,
+    );
+    assert!(!pressed);
+    assert!(env.events.is_empty());
+    env.statuses.insert("%1".into(), "idle".into());
+    env.key_refusal = Some("backend refused".into());
+    let (pressed, detail) = flock.press_stuck_enter(
+        &mut env,
+        "%1",
+        &fingerprint,
+        &generation,
+        "m1",
+        Some("stuck body"),
+        None,
+        false,
+        None,
+    );
+    assert!(!pressed);
+    assert_eq!(detail, "backend refused");
+    assert_eq!(env.events, vec!["key"]);
     assert!(env.keys.is_empty());
 }
 
@@ -2634,6 +2685,7 @@ fn scheduled_recovery_requires_current_schedule_for_styled_and_real_native_evide
             (true, false, "instruction", "%1", 101.0, false),
             (true, true, "changed", "%1", 101.0, false),
             (true, true, "instruction", "%1", 1000.0, false),
+            (true, true, "instruction", "%1", 99.0, false),
             (false, true, "instruction", "%1", 101.0, false),
             (true, true, "instruction", "%2", 101.0, false),
         ] {
@@ -2679,6 +2731,19 @@ fn scheduled_recovery_requires_current_schedule_for_styled_and_real_native_evide
                 expected,
                 "native={native} running={running} template={template} now={now}"
             );
+            if native && expected {
+                assert!(flock
+                    .owned_recovery_evidence(&env, "%1", "› human edit\n\n  model · /tmp/test\n")
+                    .is_none());
+                flock
+                    .stuck_candidates
+                    .lock()
+                    .unwrap()
+                    .get_mut("%1")
+                    .unwrap()
+                    .native_binding = Some((pid, "wrong-start".into(), session.into()));
+                assert!(flock.owned_recovery_evidence(&env, "%1", &screen).is_none());
+            }
         }
     }
 }

@@ -345,7 +345,6 @@ impl Flock {
         message: Option<&Message>,
         require_intent: bool,
         created_at: Option<f64>,
-        _observed_at: f64,
     ) -> (bool, String) {
         let pane_lock = self.send_lock_for(pane_id);
         let Ok(_pane_guard) = pane_lock.lock() else {
@@ -652,7 +651,6 @@ impl Flock {
             head.as_ref(),
             require_intent,
             head.as_ref().map(|m| m.created_at),
-            now,
         );
         if !pressed {
             self.record_stuck_recovery(
