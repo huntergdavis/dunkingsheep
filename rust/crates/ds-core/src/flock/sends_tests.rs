@@ -934,7 +934,7 @@ mod guarded_preparation_tests {
             |_, _| Ok(SendAction::completed(true, "unexpected")),
         );
         assert_eq!(1, pane.keys.len());
-        assert_eq!(false, result.0);
+        assert!(!result.0);
         assert_eq!(None, result.1);
         assert!(result.2.starts_with(BOX_HOLD));
         assert!(result.2.contains("federated-pending-input"));
