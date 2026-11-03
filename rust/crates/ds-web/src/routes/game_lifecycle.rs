@@ -381,10 +381,11 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "ds-web-game-lifecycle-{label}-{}-{nonce}",
-            std::process::id()
-        ));
+        let path = std::env::temp_dir() // tempdir-ok: route tests need a real isolated filesystem root.
+            .join(format!(
+                "ds-web-game-lifecycle-{label}-{}-{nonce}",
+                std::process::id()
+            ));
         fs::create_dir_all(&path).unwrap();
         path
     }
@@ -484,7 +485,7 @@ mod tests {
                 json!({"running": true, "run_name": "vp-test"})
             )
         );
-        let response = block_on(service.oneshot(request(
+        let response = block_on(service.clone().oneshot(request(
             "POST",
             "/api/game/start",
             Body::from(r#"{"fresh":true}"#),
