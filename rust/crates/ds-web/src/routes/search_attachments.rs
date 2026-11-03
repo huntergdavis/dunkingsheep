@@ -3,7 +3,15 @@
 //! Database and upload-root access remain behind the injected backend. This module
 //! owns query/form parsing, authentication, response headers, and pagination.
 
-use std::sync::Arc;
+use std::{
+    collections::hash_map::RandomState,
+    hash::{BuildHasher, Hasher},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use axum::{
     body::{to_bytes, Body},
@@ -49,6 +57,18 @@ pub struct DownloadFile {
     pub filename: String,
     pub mime: String,
     pub bytes: Vec<u8>,
+    /// Required values from the same filesystem stat used to read `bytes`.
+    /// Runtime adapters must not synthesize defaults when stat metadata is absent.
+    pub metadata: DownloadMetadata,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DownloadMetadata {
+    pub content_length: u64,
+    /// RFC 7231 HTTP-date formatted from the file's stat mtime.
+    pub last_modified: String,
+    /// Strong ETag generated from the file's stat metadata.
+    pub etag: String,
 }
 
 /// Search and attachment storage operations supplied by the application runtime.
@@ -74,7 +94,10 @@ pub fn router(
     Router::new()
         .route("/api/search", get(search))
         .route("/api/uploads", post(upload))
-        .route("/api/uploads/{attachment_id}", get(download))
+        .route(
+            "/api/uploads/{attachment_id}",
+            get(download).head(download_head_not_allowed),
+        )
         .layer(Extension(scheme))
         .layer(Extension(auth))
         .layer(Extension(backend))
@@ -223,29 +246,318 @@ async fn download(
             "image/png" | "image/jpeg" | "image/gif" | "image/webp"
         );
     let disposition = content_disposition(&file.filename, inline);
-    let content_length = file.bytes.len();
-    let mut response = Response::new(Body::from(file.bytes));
-    *response.status_mut() = StatusCode::OK;
+    download_response(file, &disposition, request.headers())
+}
+
+async fn download_head_not_allowed() -> Response {
+    let mut response = detail_response(StatusCode::METHOD_NOT_ALLOWED, "Method Not Allowed");
+    response
+        .headers_mut()
+        .insert(header::ALLOW, HeaderValue::from_static("GET"));
+    response
+}
+
+fn download_response(
+    file: DownloadFile,
+    disposition: &str,
+    request_headers: &HeaderMap,
+) -> Response {
+    let Ok(content_length) = usize::try_from(file.metadata.content_length) else {
+        return internal_error();
+    };
+    if content_length != file.bytes.len() {
+        return internal_error();
+    }
+
+    let content_type = file_response_content_type(&file.mime);
+    let range = request_headers
+        .get(header::RANGE)
+        .map(|value| value.to_str().unwrap_or_default());
+    let if_range = request_headers
+        .get(header::IF_RANGE)
+        .map(|value| value.to_str().unwrap_or_default());
+    let use_range = range.is_some()
+        && if_range.is_none_or(|value| {
+            !value.starts_with("W/")
+                && (value == file.metadata.last_modified || value == file.metadata.etag)
+        });
+
+    let mut response = Response::new(Body::empty());
+    let headers = response.headers_mut();
+    let content_length_header = file.metadata.content_length.to_string();
+    let metadata_headers = [
+        (header::CONTENT_TYPE, content_type.as_str()),
+        (header::CONTENT_DISPOSITION, disposition),
+        (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        (header::ACCEPT_RANGES, "bytes"),
+        (header::CONTENT_LENGTH, content_length_header.as_str()),
+        (header::LAST_MODIFIED, file.metadata.last_modified.as_str()),
+        (header::ETAG, file.metadata.etag.as_str()),
+    ];
+    for (name, value) in metadata_headers {
+        let Ok(value) = HeaderValue::from_str(value) else {
+            return internal_error();
+        };
+        headers.insert(name, value);
+    }
+
+    if !use_range {
+        *response.status_mut() = StatusCode::OK;
+        *response.body_mut() = Body::from(file.bytes);
+        return response;
+    }
+
+    let parsed = match parse_byte_ranges(range.unwrap_or_default(), content_length) {
+        Ok(ranges) => ranges,
+        Err(ByteRangeError::Malformed(message)) => {
+            return range_error(StatusCode::BAD_REQUEST, &message, None)
+        }
+        Err(ByteRangeError::Unsatisfiable) => {
+            return range_error(
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                "",
+                Some(format!("bytes */{}", file.metadata.content_length)),
+            )
+        }
+    };
+    match parsed.as_slice() {
+        [] => range_error(
+            StatusCode::BAD_REQUEST,
+            "Range header: range must be requested",
+            None,
+        ),
+        [range] => single_range_response(response, file, range),
+        ranges => multiple_ranges_response(response, file, ranges, &content_type),
+    }
+}
+
+fn file_response_content_type(mime: &str) -> String {
+    if mime.to_ascii_lowercase().starts_with("text/")
+        && !mime.to_ascii_lowercase().contains("charset=")
+    {
+        format!("{mime}; charset=utf-8")
+    } else {
+        mime.to_owned()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ByteRange {
+    start: usize,
+    end: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ByteRangeError {
+    Malformed(String),
+    Unsatisfiable,
+}
+
+fn parse_byte_ranges(value: &str, file_size: usize) -> Result<Vec<ByteRange>, ByteRangeError> {
+    let Some((units, value)) = value.split_once('=') else {
+        return Err(ByteRangeError::Malformed(
+            "Range header: range must be requested".into(),
+        ));
+    };
+    if !units.trim().eq_ignore_ascii_case("bytes") {
+        return Err(ByteRangeError::Malformed("Only support bytes range".into()));
+    }
+    if value.matches(',').count() + 1 > 100 {
+        return Ok(Vec::new());
+    }
+
+    let mut ranges = Vec::new();
+    for part in value.split(',') {
+        let part = part.trim();
+        if part.is_empty() || part == "-" {
+            continue;
+        }
+        let Some((start_text, end_text)) = part.split_once('-') else {
+            continue;
+        };
+        let start_text = start_text.trim();
+        let end_text = end_text.trim();
+        let parsed = if start_text.is_empty() {
+            let Some(suffix) = parse_decimal(end_text) else {
+                continue;
+            };
+            let start = file_size.saturating_sub(suffix);
+            (start, file_size)
+        } else {
+            let Some(start) = parse_decimal(start_text) else {
+                continue;
+            };
+            let end = if end_text.is_empty() {
+                file_size
+            } else {
+                let Some(end_inclusive) = parse_decimal(end_text) else {
+                    continue;
+                };
+                if end_inclusive < file_size {
+                    end_inclusive.saturating_add(1)
+                } else {
+                    file_size
+                }
+            };
+            (start, end)
+        };
+        if parsed.0 >= file_size {
+            return Err(ByteRangeError::Unsatisfiable);
+        }
+        if parsed.0 >= parsed.1 {
+            return Err(ByteRangeError::Malformed(
+                "Range header: start must be less than end".into(),
+            ));
+        }
+        ranges.push(ByteRange {
+            start: parsed.0,
+            end: parsed.1,
+        });
+    }
+    if ranges.is_empty() {
+        return Err(ByteRangeError::Malformed(
+            "Range header: range must be requested".into(),
+        ));
+    }
+    ranges.sort_by_key(|range| (range.start, range.end));
+    let mut merged = Vec::<ByteRange>::with_capacity(ranges.len());
+    for range in ranges {
+        if let Some(last) = merged.last_mut() {
+            if range.start <= last.end {
+                last.end = last.end.max(range.end);
+                continue;
+            }
+        }
+        merged.push(range);
+    }
+    Ok(merged)
+}
+
+fn parse_decimal(value: &str) -> Option<usize> {
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    Some(value.bytes().fold(0usize, |number, digit| {
+        number
+            .saturating_mul(10)
+            .saturating_add(usize::from(digit - b'0'))
+    }))
+}
+
+fn range_error(status: StatusCode, message: &str, content_range: Option<String>) -> Response {
+    let body = Body::from(message.to_owned());
+    let mut response = Response::new(body);
+    *response.status_mut() = status;
     response.headers_mut().insert(
         header::CONTENT_TYPE,
-        HeaderValue::from_str(&file.mime)
-            .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream")),
+        HeaderValue::from_static("text/plain; charset=utf-8"),
     );
-    response.headers_mut().insert(
-        header::CONTENT_DISPOSITION,
-        HeaderValue::from_str(&disposition)
-            .unwrap_or_else(|_| HeaderValue::from_static("attachment")),
-    );
-    response.headers_mut().insert(
-        header::X_CONTENT_TYPE_OPTIONS,
-        HeaderValue::from_static("nosniff"),
-    );
-    if let Ok(length) = HeaderValue::from_str(&content_length.to_string()) {
-        response
-            .headers_mut()
-            .insert(header::CONTENT_LENGTH, length);
+    let Ok(content_length) = HeaderValue::from_str(&message.len().to_string()) else {
+        return internal_error();
+    };
+    response
+        .headers_mut()
+        .insert(header::CONTENT_LENGTH, content_length);
+    if let Some(value) = content_range {
+        let Ok(value) = HeaderValue::from_str(&value) else {
+            return internal_error();
+        };
+        response.headers_mut().insert(header::CONTENT_RANGE, value);
     }
     response
+}
+
+fn single_range_response(
+    mut response: Response,
+    file: DownloadFile,
+    range: &ByteRange,
+) -> Response {
+    let content_range = format!(
+        "bytes {}-{}/{}",
+        range.start,
+        range.end - 1,
+        file.metadata.content_length
+    );
+    *response.status_mut() = StatusCode::PARTIAL_CONTENT;
+    let Ok(content_range) = HeaderValue::from_str(&content_range) else {
+        return internal_error();
+    };
+    let Ok(content_length) = HeaderValue::from_str(&(range.end - range.start).to_string()) else {
+        return internal_error();
+    };
+    response
+        .headers_mut()
+        .insert(header::CONTENT_RANGE, content_range);
+    response
+        .headers_mut()
+        .insert(header::CONTENT_LENGTH, content_length);
+    *response.body_mut() = Body::from(file.bytes[range.start..range.end].to_vec());
+    response
+}
+
+fn multiple_ranges_response(
+    mut response: Response,
+    file: DownloadFile,
+    ranges: &[ByteRange],
+    content_type: &str,
+) -> Response {
+    let boundary = range_boundary();
+    let mut body = Vec::new();
+    for range in ranges {
+        body.extend_from_slice(
+            format!(
+                "--{boundary}\r\nContent-Type: {content_type}\r\nContent-Range: bytes {}-{}/{}\r\n\r\n",
+                range.start,
+                range.end - 1,
+                file.metadata.content_length
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(&file.bytes[range.start..range.end]);
+        body.extend_from_slice(b"\r\n");
+    }
+    body.extend_from_slice(format!("--{boundary}--").as_bytes());
+    *response.status_mut() = StatusCode::PARTIAL_CONTENT;
+    let Ok(content_type) =
+        HeaderValue::from_str(&format!("multipart/byteranges; boundary={boundary}"))
+    else {
+        return internal_error();
+    };
+    let Ok(content_length) = HeaderValue::from_str(&body.len().to_string()) else {
+        return internal_error();
+    };
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, content_type);
+    response
+        .headers_mut()
+        .insert(header::CONTENT_LENGTH, content_length);
+    *response.body_mut() = Body::from(body);
+    response
+}
+
+fn range_boundary() -> String {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    let counter = NEXT.fetch_add(1, Ordering::Relaxed);
+    let first = RandomState::new();
+    let mut first_hasher = first.build_hasher();
+    first_hasher.write_u128(now);
+    first_hasher.write_u64(counter);
+    let second = RandomState::new();
+    let mut second_hasher = second.build_hasher();
+    second_hasher.write_u128(now);
+    second_hasher.write_u64(counter);
+    format!(
+        "{:016x}{:016x}",
+        first_hasher.finish(),
+        second_hasher.finish()
+    )
+    .chars()
+    .take(26)
+    .collect()
 }
 
 fn multipart_boundary(content_type: &str) -> Option<String> {
@@ -994,6 +1306,11 @@ mod tests {
                 filename: "sheep.png".into(),
                 mime: "image/png".into(),
                 bytes: b"png".to_vec(),
+                metadata: DownloadMetadata {
+                    content_length: 3,
+                    last_modified: "Tue, 14 Nov 2023 22:13:20 GMT".into(),
+                    etag: "\"fixture-three-byte-file\"".into(),
+                },
             }),
             ..FakeBackend::default()
         });
@@ -1013,10 +1330,198 @@ mod tests {
             response.headers()[header::X_CONTENT_TYPE_OPTIONS],
             "nosniff"
         );
+        assert_eq!(response.headers()[header::ACCEPT_RANGES], "bytes");
+        assert_eq!(response.headers()[header::CONTENT_LENGTH], "3");
+        assert_eq!(
+            response.headers()[header::LAST_MODIFIED],
+            "Tue, 14 Nov 2023 22:13:20 GMT"
+        );
+        assert_eq!(
+            response.headers()[header::ETAG],
+            "\"fixture-three-byte-file\""
+        );
         assert_eq!(
             block_on(to_bytes(response.into_body(), usize::MAX)).unwrap(),
             "png"
         );
+    }
+
+    fn range_fixture() -> Arc<FakeBackend> {
+        Arc::new(FakeBackend {
+            file: Some(DownloadFile {
+                filename: "report.txt".into(),
+                mime: "text/plain".into(),
+                bytes: b"abcdef".to_vec(),
+                metadata: DownloadMetadata {
+                    content_length: 6,
+                    last_modified: "Tue, 14 Nov 2023 22:13:20 GMT".into(),
+                    etag: "\"7a7d5b4bd1e88dca4470ebf19361f0c1\"".into(),
+                },
+            }),
+            ..FakeBackend::default()
+        })
+    }
+
+    #[test]
+    fn download_matches_file_response_base_metadata_headers() {
+        let response = block_on(app(range_fixture()).oneshot(request(
+            "GET",
+            "/api/uploads/a1",
+            Body::empty(),
+        )))
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "text/plain; charset=utf-8"
+        );
+        assert_eq!(response.headers()[header::CONTENT_LENGTH], "6");
+        assert_eq!(response.headers()[header::ACCEPT_RANGES], "bytes");
+        assert_eq!(
+            response.headers()[header::LAST_MODIFIED],
+            "Tue, 14 Nov 2023 22:13:20 GMT"
+        );
+        assert_eq!(
+            response.headers()[header::ETAG],
+            "\"7a7d5b4bd1e88dca4470ebf19361f0c1\""
+        );
+        assert_eq!(
+            response.headers()[header::X_CONTENT_TYPE_OPTIONS],
+            "nosniff"
+        );
+        assert_eq!(
+            block_on(to_bytes(response.into_body(), usize::MAX)).unwrap(),
+            "abcdef"
+        );
+    }
+
+    #[test]
+    fn download_serves_single_range_and_honors_if_range() {
+        let mut request = request("GET", "/api/uploads/a1", Body::empty());
+        request
+            .headers_mut()
+            .insert(header::RANGE, HeaderValue::from_static("bytes=1-3"));
+        request.headers_mut().insert(
+            header::IF_RANGE,
+            HeaderValue::from_static("\"7a7d5b4bd1e88dca4470ebf19361f0c1\""),
+        );
+        let response = block_on(app(range_fixture()).oneshot(request)).unwrap();
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(response.headers()[header::CONTENT_RANGE], "bytes 1-3/6");
+        assert_eq!(response.headers()[header::CONTENT_LENGTH], "3");
+        assert_eq!(
+            block_on(to_bytes(response.into_body(), usize::MAX)).unwrap(),
+            "bcd"
+        );
+
+        let mut request = request("GET", "/api/uploads/a1", Body::empty());
+        request
+            .headers_mut()
+            .insert(header::RANGE, HeaderValue::from_static("bytes=1-3"));
+        request.headers_mut().insert(
+            header::IF_RANGE,
+            HeaderValue::from_static("Tue, 14 Nov 2023 22:13:20 GMT"),
+        );
+        let response = block_on(app(range_fixture()).oneshot(request)).unwrap();
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(response.headers()[header::CONTENT_RANGE], "bytes 1-3/6");
+        assert_eq!(
+            block_on(to_bytes(response.into_body(), usize::MAX)).unwrap(),
+            "bcd"
+        );
+
+        let mut request = request("GET", "/api/uploads/a1", Body::empty());
+        request
+            .headers_mut()
+            .insert(header::RANGE, HeaderValue::from_static("bytes=1-3"));
+        request
+            .headers_mut()
+            .insert(header::IF_RANGE, HeaderValue::from_static("\"stale\""));
+        let response = block_on(app(range_fixture()).oneshot(request)).unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(!response.headers().contains_key(header::CONTENT_RANGE));
+        assert_eq!(
+            block_on(to_bytes(response.into_body(), usize::MAX)).unwrap(),
+            "abcdef"
+        );
+    }
+
+    #[test]
+    fn download_rejects_malformed_and_unsatisfiable_ranges() {
+        let mut request = request("GET", "/api/uploads/a1", Body::empty());
+        request
+            .headers_mut()
+            .insert(header::RANGE, HeaderValue::from_static("bytes=not-a-range"));
+        let response = block_on(app(range_fixture()).oneshot(request)).unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            block_on(to_bytes(response.into_body(), usize::MAX)).unwrap(),
+            "Range header: range must be requested"
+        );
+
+        let mut request = request("GET", "/api/uploads/a1", Body::empty());
+        request
+            .headers_mut()
+            .insert(header::RANGE, HeaderValue::from_static("bytes=99-"));
+        let response = block_on(app(range_fixture()).oneshot(request)).unwrap();
+        assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(response.headers()[header::CONTENT_RANGE], "bytes */6");
+        assert_eq!(response.headers()[header::CONTENT_LENGTH], "0");
+        assert!(block_on(to_bytes(response.into_body(), usize::MAX))
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn download_serves_multipart_ranges() {
+        let mut request = request("GET", "/api/uploads/a1", Body::empty());
+        request
+            .headers_mut()
+            .insert(header::RANGE, HeaderValue::from_static("bytes=0-1,4-5"));
+        let response = block_on(app(range_fixture()).oneshot(request)).unwrap();
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        let content_type = response.headers()[header::CONTENT_TYPE]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let boundary = content_type
+            .strip_prefix("multipart/byteranges; boundary=")
+            .unwrap();
+        assert_eq!(response.headers()[header::ACCEPT_RANGES], "bytes");
+        let body = block_on(to_bytes(response.into_body(), usize::MAX)).unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains(&format!(
+            "--{boundary}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Range: bytes 0-1/6\r\n\r\nab\r\n"
+        )));
+        assert!(body.contains(&format!(
+            "--{boundary}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Range: bytes 4-5/6\r\n\r\nef\r\n"
+        )));
+        assert!(body.ends_with(&format!("--{boundary}--")));
+
+        let mut request = request("GET", "/api/uploads/a1", Body::empty());
+        request
+            .headers_mut()
+            .insert(header::RANGE, HeaderValue::from_static("bytes=0-2,2-4"));
+        let response = block_on(app(range_fixture()).oneshot(request)).unwrap();
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(response.headers()[header::CONTENT_RANGE], "bytes 0-4/6");
+        assert_eq!(response.headers()[header::CONTENT_LENGTH], "5");
+        assert_eq!(
+            block_on(to_bytes(response.into_body(), usize::MAX)).unwrap(),
+            "abcde"
+        );
+    }
+
+    #[test]
+    fn download_head_matches_get_only_route() {
+        let response = block_on(app(range_fixture()).oneshot(request(
+            "HEAD",
+            "/api/uploads/a1",
+            Body::empty(),
+        )))
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(response.headers()[header::ALLOW], "GET");
     }
 
     #[test]
@@ -1026,6 +1531,11 @@ mod tests {
                 filename: "note.txt".into(),
                 mime: "text/plain".into(),
                 bytes: b"note".to_vec(),
+                metadata: DownloadMetadata {
+                    content_length: 4,
+                    last_modified: "Tue, 14 Nov 2023 22:13:20 GMT".into(),
+                    etag: "\"fixture-four-byte-file\"".into(),
+                },
             }),
             ..FakeBackend::default()
         });
