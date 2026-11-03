@@ -135,6 +135,11 @@ async fn game_type(
 }
 
 async fn request_json(request: axum::extract::Request) -> Result<Option<Value>, Response> {
+    let is_json = request
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(is_json_media_type);
     let bytes = to_bytes(request.into_body(), usize::MAX)
         .await
         .map_err(|_| {
@@ -145,6 +150,11 @@ async fn request_json(request: axum::extract::Request) -> Result<Option<Value>, 
         })?;
     if bytes.is_empty() {
         return Ok(None);
+    }
+    if !is_json {
+        return Ok(Some(Value::String(
+            String::from_utf8_lossy(&bytes).into_owned(),
+        )));
     }
     serde_json::from_slice(&bytes).map_err(|error| {
         let input = String::from_utf8_lossy(&bytes);
@@ -162,6 +172,21 @@ async fn request_json(request: axum::extract::Request) -> Result<Option<Value>, 
         )
             .into_response()
     }).map(Some)
+}
+
+fn is_json_media_type(content_type: &str) -> bool {
+    let media_type = content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim();
+    let Some((main_type, subtype)) = media_type.split_once('/') else {
+        return false;
+    };
+    let subtype = subtype.trim();
+    main_type.trim().eq_ignore_ascii_case("application")
+        && (subtype.eq_ignore_ascii_case("json")
+            || subtype.to_ascii_lowercase().ends_with("+json"))
 }
 
 fn required_body_error() -> Response {
@@ -698,6 +723,33 @@ mod tests {
                 "input": null
             }]})
         );
+        assert!(backend.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn game_key_rejects_json_text_without_json_content_type() {
+        let backend = Arc::new(FakeGameInput::default());
+        let auth = Arc::new(FakeAuth::default());
+        let app = app(backend.clone(), auth.clone());
+        let mut request = request("/api/game/key", r#"{"key":"Return"}"#, true);
+        request.headers_mut().insert(
+            header::CONTENT_TYPE,
+            "text/plain".parse().expect("content type"),
+        );
+
+        let response = block_on(app.oneshot(request)).expect("text/plain body response");
+        let (status, body) = block_response(response);
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            serde_json::from_str::<Value>(&body).unwrap(),
+            json!({"detail": [{
+                "type": "model_type",
+                "loc": ["body"],
+                "msg": "Input should be a valid dictionary or instance of GameKey",
+                "input": "{\"key\":\"Return\"}"
+            }]})
+        );
+        assert_eq!(auth.seen.lock().unwrap().len(), 1);
         assert!(backend.calls.lock().unwrap().is_empty());
     }
 
