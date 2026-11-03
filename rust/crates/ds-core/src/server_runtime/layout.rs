@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use crate::flock::mailbox::MailboxEnv;
 use crate::flock::panes::PaneInfoEnv;
 use crate::server_runtime::RequestRuntimeAdapter;
-use crate::terminal::{Pane, Tab, Terminal, Workspace};
+use crate::terminal::{AgentSpec, Pane, Tab, Terminal, Workspace};
 
 fn workspace_value(workspace: Workspace, tabs: &[Tab]) -> Value {
     let active_tab_id = tabs
@@ -174,6 +174,92 @@ impl RequestRuntimeAdapter<'_> {
             Ok(json!({ "root_pane": pane }))
         })
     }
+
+    #[allow(dead_code)] // The complete LayoutBackend assembly belongs to its dependent leaf.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn helper_layoutbackend_start_agent(
+        &mut self,
+        name: &str,
+        argv: &[String],
+        workspace_id: Option<&str>,
+        tab_id: Option<&str>,
+        split: Option<&str>,
+        cwd: Option<&str>,
+        focus: bool,
+    ) -> Result<Value, String> {
+        self.terminal.with_terminal_mut(|terminal| {
+            let spec = AgentSpec {
+                name: name.to_owned(),
+                argv: argv.to_vec(),
+                workspace_id: workspace_id.map(str::to_owned),
+                tab_id: tab_id.map(str::to_owned),
+                split: split.map(str::to_owned),
+                cwd: cwd.map(str::to_owned),
+                label: Some(name.to_owned()),
+                ..AgentSpec::default()
+            };
+            let pane = terminal.start_agent(&spec).map_err(|error| error.message)?;
+            let mut agent = pane_value(terminal, &pane);
+            agent["name"] = json!(name);
+            Ok(json!({
+                "agent": agent,
+                "argv": argv,
+                "pane_id": pane.pane_id,
+            }))
+        })
+    }
+
+    #[allow(dead_code)] // The complete LayoutBackend assembly belongs to its dependent leaf.
+    pub(crate) fn helper_layoutbackend_rename(
+        &mut self,
+        kind: &str,
+        target_id: &str,
+        label: &str,
+    ) -> Result<Value, String> {
+        self.terminal.with_terminal_mut(|terminal| {
+            terminal
+                .rename(kind, target_id, label)
+                .map_err(|error| error.message)?;
+            let item = match kind {
+                "pane" => terminal
+                    .get_pane_with_status(target_id)
+                    .map(|(pane, status)| {
+                        crate::flock::lanes::pane_to_json(&pane, status.as_deref())
+                    }),
+                "tab" => terminal
+                    .list_tabs()
+                    .into_iter()
+                    .find(|tab| tab.tab_id == target_id)
+                    .map(tab_value),
+                "workspace" => {
+                    let tabs = terminal.list_tabs();
+                    terminal
+                        .list_workspaces()
+                        .into_iter()
+                        .find(|workspace| workspace.workspace_id == target_id)
+                        .map(|workspace| workspace_value(workspace, &tabs))
+                }
+                _ => None,
+            };
+            let mut result = serde_json::Map::new();
+            result.insert(kind.to_owned(), item.unwrap_or(Value::Null));
+            Ok(Value::Object(result))
+        })
+    }
+
+    #[allow(dead_code)] // The complete LayoutBackend assembly belongs to its dependent leaf.
+    pub(crate) fn helper_layoutbackend_focus(
+        &mut self,
+        kind: &str,
+        target_id: &str,
+    ) -> Result<Value, String> {
+        self.terminal.with_terminal_mut(|terminal| {
+            terminal
+                .focus(kind, target_id)
+                .map_err(|error| error.message)?;
+            Ok(json!({}))
+        })
+    }
 }
 
 #[cfg(test)]
@@ -304,6 +390,73 @@ mod tests {
             assert_eq!(
                 Err("split refused".to_string()),
                 adapter.helper_layoutbackend_split_pane("w1:p1", "right", None, true)
+            );
+        });
+    }
+
+    #[test]
+    fn production_env_layout_agent_uses_concrete_services() {
+        with_adapter(FakeTerminal::new(), |adapter| {
+            let argv = vec!["claude".to_owned(), "--model".to_owned(), "demo".to_owned()];
+            let started = adapter
+                .helper_layoutbackend_start_agent(
+                    "worker",
+                    &argv,
+                    Some("s1"),
+                    Some("w1"),
+                    Some("down"),
+                    Some("/tmp/work"),
+                    true,
+                )
+                .unwrap();
+            assert_eq!(json!("w1:p-worker"), started["pane_id"]);
+            assert_eq!(json!(argv), started["argv"]);
+            assert_eq!(json!("worker"), started["agent"]["name"]);
+            assert_eq!(json!("claude"), started["agent"]["agent"]);
+            assert_eq!(json!("/tmp/work"), started["agent"]["cwd"]);
+
+            let renamed = adapter
+                .helper_layoutbackend_rename("tab", "w1", "Ops")
+                .unwrap();
+            assert_eq!(json!("Ops"), renamed["tab"]["label"]);
+            assert_eq!(
+                json!({}),
+                adapter.helper_layoutbackend_focus("pane", "w1:p1").unwrap()
+            );
+        });
+
+        let mut failed_start = FakeTerminal::new();
+        failed_start.fail_layout = Some("start refused".into());
+        with_adapter(failed_start, |adapter| {
+            assert_eq!(
+                Err("start refused".to_owned()),
+                adapter.helper_layoutbackend_start_agent(
+                    "worker",
+                    &["claude".to_owned()],
+                    Some("s1"),
+                    Some("w1"),
+                    None,
+                    None,
+                    false,
+                )
+            );
+        });
+
+        let mut failed_rename = FakeTerminal::new();
+        failed_rename.fail_layout = Some("rename refused".into());
+        with_adapter(failed_rename, |adapter| {
+            assert_eq!(
+                Err("rename refused".to_owned()),
+                adapter.helper_layoutbackend_rename("tab", "w1", "Ops")
+            );
+        });
+
+        let mut failed_focus = FakeTerminal::new();
+        failed_focus.fail_layout = Some("focus refused".into());
+        with_adapter(failed_focus, |adapter| {
+            assert_eq!(
+                Err("focus refused".to_owned()),
+                adapter.helper_layoutbackend_focus("pane", "w1:p1")
             );
         });
     }
