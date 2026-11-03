@@ -353,6 +353,70 @@ class TimerTests(unittest.TestCase):
         self.assertEqual([], self.github.reviews)
         second.assert_not_called()
 
+    def test_required_second_review_survives_ticks_and_counts_distinct_completion(self):
+        self._review("accept")
+        with patch.object(dunk_github, "required_verdicts", return_value=2):
+            second = self.sync._second_review("o/r", 7, "a" * 40, REVIEWER)
+            for _ in range(2):
+                report = self.sync.run()
+                self.assertEqual([], report["cancelled"])
+                self.assertEqual("open", self.flock.tasks.get(second)["status"])
+            self.flock.tasks.complete(second, by=SECOND_REVIEWER, verdict="accept")
+            self.github.merge_blocked = True
+            report = self.sync.run()
+        self.assertEqual([], report["filed"])
+        self.assertEqual(2, len(self.flock.tasks.list_review_rows_visible()))
+        self.assertEqual(sorted([REVIEWER, SECOND_REVIEWER]),
+                         self.sync.head_verdicts("o/r", "a" * 40, 7)[0])
+
+    def _stale_live_review_with_accepted_current_head(self, required):
+        accepted = self._review("accept")
+        stale = self.flock.tasks.add("global", "stale review", kind="review",
+                                    repo="o/r", pr=7, head="b" * 40, priority="high")
+        self.github.merge_blocked = True
+        with patch.object(dunk_github, "required_verdicts", return_value=required):
+            report = self.sync.run()
+            self.assertEqual([stale["id"]], report["cancelled"])
+            self.assertEqual("cancelled", self.flock.tasks.get(stale["id"])["status"])
+            rows = self.flock.tasks.list_review_rows_visible()
+            live = [row for row in rows if row["status"] not in ("done", "cancelled")]
+            if required == 2:
+                self.assertEqual(1, len(live))
+                self.assertEqual("a" * 40, live[0]["head"])
+                for _ in range(2):
+                    self.assertEqual([], self.sync.run()["cancelled"])
+                    self.assertEqual("open", self.flock.tasks.get(live[0]["id"])["status"])
+                self.flock.tasks.complete(live[0]["id"], by=SECOND_REVIEWER,
+                                          verdict="accept")
+                self.sync.run()
+                self.assertEqual(sorted([REVIEWER, SECOND_REVIEWER]),
+                                 self.sync.head_verdicts("o/r", "a" * 40, 7)[0])
+            else:
+                self.assertEqual([], live)
+            self.assertEqual("done", self.flock.tasks.get(accepted["id"])["status"])
+
+    def test_stale_head_is_cancelled_before_required_second_review_is_filed(self):
+        self._stale_live_review_with_accepted_current_head(2)
+
+    def test_stale_head_is_cancelled_when_current_accept_threshold_is_met(self):
+        self._stale_live_review_with_accepted_current_head(1)
+
+    def test_first_accept_during_listing_files_required_second_without_cancel(self):
+        task = self._review()
+        original = self.github.open_pulls
+
+        def pulls(repo, token):
+            self.flock.tasks.complete(task["id"], by=REVIEWER, verdict="accept")
+            return original(repo, token)
+
+        with patch.object(dunk_github, "required_verdicts", return_value=2), \
+                patch.object(self.github, "open_pulls", side_effect=pulls):
+            report = self.sync.run()
+        self.assertEqual([], report["cancelled"])
+        rows = self.flock.tasks.list_review_rows_visible()
+        self.assertEqual(2, len(rows))
+        self.assertEqual(1, sum(row["status"] == "open" for row in rows))
+
     def test_review_completed_during_github_listing_is_not_refiled_or_cancelled(self):
         self._old_review_history()
         task = self._review()

@@ -385,8 +385,24 @@ class Sync:
                 # GitHub reads can outlive another lane's completed verdict.
                 # Refresh after those reads, without the task-card history cap.
                 done = self._judged_heads().get((repo, pr["number"], pr["head"]))
+                if current and current.get("head") != pr["head"]:
+                    if not dry_run:
+                        if self._cancel_review_if_live(
+                                current["id"], f"head moved to {pr['head'][:12]}; "
+                                               "delta review filed"):
+                            report["cancelled"].append(current["id"])
+                    else:
+                        report["cancelled"].append(current["id"])
+                    current = None
                 if done is not None and current and current.get("head") == pr["head"] \
                         and not dry_run:
+                    final, _, needs_fix, _ = self._is_final(repo, pr["head"], pr["number"])
+                    if (done.get("verdict") == "accept" and not final and not needs_fix
+                            and self.flock.tasks.get(current["id"])["status"]
+                            not in ("done", "cancelled")):
+                        # This is the still-needed additional reviewer, not a
+                        # redundant review of a head whose lane count is final.
+                        continue
                     # A judged head with a live duplicate (filed by an older tick):
                     # the verdict stands, the duplicate goes.
                     if self._cancel_review_if_live(
@@ -406,20 +422,12 @@ class Sync:
                         if final:
                             self._merge(repo, pr["number"], pr["head"], token, report,
                                         done["id"])
-                        elif not needs_fix and not live.get(key):
+                        elif not needs_fix and current is None:
                             # 1 of 2 accepted and nobody is reviewing: keep a second
                             # review in the queue rather than waiting forever.
                             self._second_review(repo, pr["number"], pr["head"],
                                                 accepts[0] if accepts else None, report)
                     continue
-                if current:
-                    if not dry_run:
-                        if self._cancel_review_if_live(
-                                current["id"], f"head moved to {pr['head'][:12]}; "
-                                               "delta review filed"):
-                            report["cancelled"].append(current["id"])
-                    else:
-                        report["cancelled"].append(current["id"])
                 author = attribute_author(pr, lanes, mints)
                 if author is None:
                     author = author_from_tasks(repo, pr["number"], self.flock)
