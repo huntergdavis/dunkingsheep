@@ -650,12 +650,17 @@ mod tests {
             started_at: f64,
         ) {
             let task = tasks.add("global", "Bind turn", "body").await.unwrap();
-            inbox
-                .ensure_next_job(message_id, pane, pane, "body", "subject")
-                .unwrap();
-            inbox
-                .record_notify(message_id, notify_state, None, Some("transport"), Some(1))
-                .unwrap();
+            let inbox = Arc::clone(inbox);
+            let message_id = message_id.to_owned();
+            let pane = pane.to_owned();
+            let notify_state = notify_state.to_owned();
+            tokio::task::spawn_blocking(move || {
+                inbox.ensure_next_job(&message_id, &pane, &pane, "body", "subject")?;
+                inbox.record_notify(&message_id, &notify_state, None, Some("transport"), Some(1))
+            })
+            .await
+            .unwrap()
+            .unwrap();
             let details = json!({
                 "state": "sent",
                 "attempt_at": 100.0,
