@@ -75,6 +75,8 @@ impl StuckEnv for Fake {
     }
     fn note_stale_panel(&self, pane_id: &str, text: &str, since: f64) -> LoopFuture<'_, ()> {
         self.observed.lock().unwrap().push("note");
+        let pane_id = pane_id.to_owned();
+        let text = text.to_owned();
         Box::pin(async move {
             self.notes
                 .lock()
