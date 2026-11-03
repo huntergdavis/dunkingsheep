@@ -3920,10 +3920,22 @@ fn h_gh_token_matches_python() {
         .as_str()
         .unwrap()
         .to_owned();
-    flock.clear_caller();
-    flock.set_service_token(Some(&system_token));
-
-    let system = dispatch_as_flock_role(&dispatcher, &flock, &env, None, "gh_token", None).unwrap();
+    let request = RequestCtx {
+        service_token: Some(system_token),
+        ..RequestCtx::default()
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let context = HandlerContext {
+        flock: &flock,
+        request: &request,
+        env: &env,
+        runtime: runtime.handle(),
+    };
+    let system = dispatcher
+        .dispatch(&context, &FlockGate(&context), "gh_token", None)
+        .unwrap();
 
     assert_eq!(
         json!({
