@@ -16,7 +16,7 @@ use axum::{
 };
 use serde_json::{json, Value};
 
-use super::auth::{AuthBackend, AuthError, Identity};
+use super::auth::{AuthBackend, AuthError, Identity, RequestScheme};
 
 /// Operations supplied by the runtime adapter for the private game session.
 pub trait GameLifecycleBackend: Send + Sync + 'static {
@@ -41,20 +41,29 @@ impl GameLifecycleState {
 
 /// Mount only the lifecycle routes. The caller supplies the auth backend;
 /// production registration is intentionally left to the runtime task.
-pub fn router(state: GameLifecycleState, auth_backend: Arc<dyn AuthBackend>) -> Router {
+pub fn router(
+    state: GameLifecycleState,
+    auth_backend: Arc<dyn AuthBackend>,
+    request_scheme: RequestScheme,
+) -> Router {
     Router::new()
         .route("/api/game/status", get(game_status))
         .route("/api/game/codewheel/{filename}", get(game_codewheel_image))
         .route("/api/game/start", post(game_start))
         .with_state(state)
+        .layer(Extension(request_scheme))
         .layer(Extension(auth_backend))
 }
 
 async fn game_status(
     State(state): State<GameLifecycleState>,
     Extension(auth): Extension<Arc<dyn AuthBackend>>,
+    Extension(request_scheme): Extension<RequestScheme>,
     headers: HeaderMap,
 ) -> Response {
+    if let Some(response) = same_origin(&headers, request_scheme) {
+        return response;
+    }
     if let Err(error) = authenticate(&auth, &headers).await {
         return auth_error_response(error);
     }
@@ -67,9 +76,13 @@ async fn game_status(
 async fn game_codewheel_image(
     State(state): State<GameLifecycleState>,
     Extension(auth): Extension<Arc<dyn AuthBackend>>,
+    Extension(request_scheme): Extension<RequestScheme>,
     headers: HeaderMap,
     Path(filename): Path<String>,
 ) -> Response {
+    if let Some(response) = same_origin(&headers, request_scheme) {
+        return response;
+    }
     if let Err(error) = authenticate(&auth, &headers).await {
         return auth_error_response(error);
     }
@@ -114,9 +127,13 @@ async fn game_codewheel_image(
 async fn game_start(
     State(state): State<GameLifecycleState>,
     Extension(auth): Extension<Arc<dyn AuthBackend>>,
+    Extension(request_scheme): Extension<RequestScheme>,
     headers: HeaderMap,
     body: Result<Json<Value>, axum::extract::rejection::JsonRejection>,
 ) -> Response {
+    if let Some(response) = same_origin(&headers, request_scheme) {
+        return response;
+    }
     if let Err(error) = authenticate(&auth, &headers).await {
         return auth_error_response(error);
     }
@@ -197,6 +214,38 @@ fn valid_codewheel_filename(filename: &str) -> bool {
         return false;
     }
     matches!(number.parse::<u8>(), Ok(1..=36))
+}
+
+fn same_origin(headers: &HeaderMap, scheme: RequestScheme) -> Option<Response> {
+    let origin = headers.get(header::ORIGIN)?;
+    let origin = match origin.to_str() {
+        Ok(origin) => origin,
+        Err(_) => return Some(cross_origin_response()),
+    };
+    if origin.is_empty() {
+        return None;
+    }
+    let host = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("None");
+    let scheme = match scheme {
+        RequestScheme::Http => "http",
+        RequestScheme::Https => "https",
+    };
+    if origin != format!("{scheme}://{host}") {
+        Some(cross_origin_response())
+    } else {
+        None
+    }
+}
+
+fn cross_origin_response() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(json!({"detail": "Cross-origin request refused"})),
+    )
+        .into_response()
 }
 
 async fn authenticate(
@@ -292,7 +341,10 @@ mod tests {
     use std::{
         future::Future,
         pin::pin,
-        sync::Mutex,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Mutex,
+        },
         task::{Context, Poll, Waker},
         time::{SystemTime, UNIX_EPOCH},
     };
@@ -300,7 +352,9 @@ mod tests {
     use axum::{body::to_bytes, http::Request};
     use tower::ServiceExt;
 
-    struct FakeAuth;
+    struct FakeAuth {
+        identity_calls: Arc<AtomicUsize>,
+    }
 
     impl AuthBackend for FakeAuth {
         fn login<'a>(
@@ -316,6 +370,7 @@ mod tests {
             bearer: Option<&'a str>,
             cookie: Option<&'a str>,
         ) -> super::super::auth::AuthFuture<'a, Result<Identity, AuthError>> {
+            self.identity_calls.fetch_add(1, Ordering::SeqCst);
             Box::pin(async move {
                 if bearer == Some("test-token") || cookie == Some("test-cookie") {
                     Ok(Identity::Owner)
@@ -390,21 +445,32 @@ mod tests {
         path
     }
 
-    fn app(start_result: Result<Value, String>) -> (Router, Arc<FakeGame>, PathBuf) {
+    fn app(
+        start_result: Result<Value, String>,
+    ) -> (Router, Arc<FakeGame>, PathBuf, Arc<AtomicUsize>) {
         let directory = temp_dir("routes");
         let game = Arc::new(FakeGame {
             start_result,
             fresh_values: Mutex::new(Vec::new()),
         });
         let state = GameLifecycleState::new(directory.clone(), game.clone());
-        let auth: Arc<dyn AuthBackend> = Arc::new(FakeAuth);
-        (router(state, auth), game, directory)
+        let identity_calls = Arc::new(AtomicUsize::new(0));
+        let auth: Arc<dyn AuthBackend> = Arc::new(FakeAuth {
+            identity_calls: identity_calls.clone(),
+        });
+        (
+            router(state, auth, RequestScheme::Http),
+            game,
+            directory,
+            identity_calls,
+        )
     }
 
     fn request(method: &str, uri: &str, body: Body) -> Request<Body> {
         Request::builder()
             .method(method)
             .uri(uri)
+            .header(header::HOST, "game.example")
             .header(header::AUTHORIZATION, "Bearer test-token")
             .header(header::CONTENT_TYPE, "application/json")
             .body(body)
@@ -436,7 +502,7 @@ mod tests {
 
     #[test]
     fn game_status_returns_backend_json_and_requires_authentication() {
-        let (service, _, directory) = app(Ok(json!({"started": true})));
+        let (service, _, directory, _) = app(Ok(json!({"started": true})));
         let response = block_on(service.clone().oneshot(request(
             "GET",
             "/api/game/status",
@@ -471,7 +537,8 @@ mod tests {
 
     #[test]
     fn game_start_defaults_fresh_and_maps_game_errors_to_503() {
-        let (service, game, directory) = app(Ok(json!({"running": true, "run_name": "vp-test"})));
+        let (service, game, directory, _) =
+            app(Ok(json!({"running": true, "run_name": "vp-test"})));
         let response = block_on(service.clone().oneshot(request(
             "POST",
             "/api/game/start",
@@ -520,7 +587,7 @@ mod tests {
         );
         fs::remove_dir_all(directory).unwrap();
 
-        let (service, _, directory) = app(Err("Poolrad checkout is unavailable".into()));
+        let (service, _, directory, _) = app(Err("Poolrad checkout is unavailable".into()));
         let response =
             block_on(service.oneshot(request("POST", "/api/game/start", Body::from("{}"))))
                 .unwrap();
@@ -535,8 +602,34 @@ mod tests {
     }
 
     #[test]
+    fn routes_reject_cross_origin_before_checking_identity() {
+        let (service, _, directory, identity_calls) = app(Ok(json!({"running": false})));
+        for (method, uri, body) in [
+            ("GET", "/api/game/status", ""),
+            ("GET", "/api/game/codewheel/esp01.gif", ""),
+            ("POST", "/api/game/start", "{}"),
+        ] {
+            let mut request = request(method, uri, Body::from(body));
+            request
+                .headers_mut()
+                .insert(header::ORIGIN, "http://evil.example".parse().unwrap());
+            let response = block_on(service.clone().oneshot(request)).unwrap();
+            assert_eq!(
+                json_body(response),
+                (
+                    StatusCode::FORBIDDEN,
+                    json!({"detail": "Cross-origin request refused"})
+                ),
+                "{method} {uri}"
+            );
+        }
+        assert_eq!(identity_calls.load(Ordering::SeqCst), 0);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn codewheel_returns_gif_headers_and_rejects_invalid_or_symlink_files() {
-        let (service, _, directory) = app(Ok(json!({})));
+        let (service, _, directory, _) = app(Ok(json!({})));
         fs::write(directory.join("esp01.gif"), b"GIF89a-test").unwrap();
         let response = block_on(service.clone().oneshot(request(
             "GET",
