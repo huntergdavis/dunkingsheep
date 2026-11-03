@@ -759,6 +759,42 @@ fn scheduled_cancellation_at_guard_prevents_the_delivery_attempt() {
 }
 
 #[test]
+fn scheduled_max_removal_cannot_remove_a_same_id_replacement() {
+    let (_dir, flock) = new_flock();
+    load_one_fire_dunk(&flock, "old", Some(1));
+    let old = flock.dunks.handle("d1").unwrap();
+    flock.dunks.remove("d1").unwrap();
+    load_one_fire_dunk(&flock, "replacement", Some(1));
+    let replacement = flock.dunks.handle("d1").unwrap();
+    assert!(!Arc::ptr_eq(&old, &replacement));
+    assert!(!flock.dunks.remove_handle(&old));
+    assert_eq!(json!("replacement"), flock.dunks.get("d1").unwrap()["text"]);
+    assert_eq!(json!(0), flock.dunks.get("d1").unwrap()["send_count"]);
+}
+
+#[test]
+fn restored_running_timer_gets_five_second_grace_and_preserves_future_deadline() {
+    let (_dir, flock) = new_flock();
+    let before = crate::clock::now_s();
+    let future = before + 600.0;
+    flock._load_dunks(&map(json!({"dunkers": [
+        {"id": "d1", "running": true, "target_pane_id": "w1:p1", "next_send_at": before - 10.0},
+        {"id": "d2", "running": true, "target_pane_id": "w1:p1", "next_send_at": future},
+        {"id": "d3", "running": false, "target_pane_id": "w1:p1"}
+    ]})));
+    let after = crate::clock::now_s();
+    let restored = flock.dunks.get("d1").unwrap()["next_send_at"]
+        .as_f64()
+        .unwrap();
+    assert!(restored >= before + 5.0 && restored <= after + 5.0);
+    assert_eq!(
+        json!(future),
+        flock.dunks.get("d2").unwrap()["next_send_at"]
+    );
+    assert_eq!(2, flock.dunks.running_handles().len());
+}
+
+#[test]
 fn successful_dunk_attempt_surfaces_and_clears_detector_fallback() {
     let (_dir, flock) = new_flock();
     load_one_fire_dunk(&flock, "continue", None);
