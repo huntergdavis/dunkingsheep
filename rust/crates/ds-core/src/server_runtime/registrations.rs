@@ -603,12 +603,24 @@ mod tests {
             .text
             .iter()
             .any(|(pane, text)| pane == "w1:p1" && text == "assembly smoke"));
-        assert!(observed.keys.iter().any(|observation| {
-            observation.pane == "w1:p1"
-                && observation.keys.len() == 2
-                && observation.keys[0] == "ctrl+c"
-                && observation.keys[1] == "Enter"
+        let key_batches: Vec<_> = observed
+            .keys
+            .iter()
+            .filter(|observation| observation.pane == "w1:p1")
+            .collect();
+        assert!(key_batches.windows(2).any(|batches| {
+            batches[0].keys.len() == 1
+                && batches[0].keys[0] == "ctrl+c"
+                && batches[1].keys.len() == 1
+                && batches[1].keys[0] == "Enter"
         }));
+        assert!(
+            key_batches
+                .iter()
+                .filter(|observation| observation.keys.len() == 1 && observation.keys[0] == "Enter")
+                .count()
+                >= 2
+        );
         assert!(
             observed
                 .factory_threads
