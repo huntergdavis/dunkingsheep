@@ -574,6 +574,13 @@ impl Flock {
             .filter(|e| e.typed_at.is_some() || e.native_recovery.unwrap_or(false))
             .map(|e| format!("{}@{}", identity, crate::usage::py_float_repr(e.created_at)))
             .unwrap_or_else(|| identity.clone());
+        if budget_id != identity
+            && authority.as_ref().is_some_and(|entry| {
+                !entry.created_at.is_finite() || entry.created_at.abs() > 9_007_199_254_740_992.0
+            })
+        {
+            return false; // A lossy numeric identity cannot safely carry a budget.
+        }
         let mut observation = crate::stuck::Observation::new(
             pane_id,
             Some(&budget_id),
@@ -593,15 +600,32 @@ impl Flock {
                 .stuck_tracker
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if native.is_some() {
+            if budget_id != identity || native.is_some() {
                 let fingerprint = crate::stuck::fingerprint(content);
-                let old = tracker.reserved(pane_id, &identity, Some(&generation), &fingerprint);
-                let legacy_used =
-                    tracker.legacy_attempt_seen(pane_id, &identity, Some(&generation), content);
+                let mut aliases = Vec::new();
+                if native.is_some() {
+                    aliases.push(identity.clone());
+                }
+                if let Some(entry) = authority
+                    .as_ref()
+                    .filter(|entry| entry.created_at.fract() == 0.0)
+                {
+                    aliases.push(format!("{}@{:.0}", identity, entry.created_at));
+                }
+                let mut old = 0;
+                let mut legacy_used = false;
+                for alias in aliases {
+                    old =
+                        old.max(tracker.reserved(pane_id, &alias, Some(&generation), &fingerprint));
+                    legacy_used |=
+                        tracker.legacy_attempt_seen(pane_id, &alias, Some(&generation), content);
+                }
                 let key =
                     crate::stuck::ledger_key(pane_id, &budget_id, Some(&generation), &fingerprint);
                 let spent = tracker.spent.entry(key).or_default();
                 *spent = (*spent).max(if legacy_used { u32::MAX } else { old });
+            }
+            if native.is_some() {
                 config.max_attempts = 1;
             }
             if !tracker.records.contains_key(pane_id) {

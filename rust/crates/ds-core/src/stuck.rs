@@ -508,7 +508,7 @@ impl Tracker {
         );
         if let Some(record) = self.records.get_mut(&obs.pane_id) {
             if record.message_id.as_deref() == Some(message_id)
-                && record.generation == obs.generation
+                && (record.generation.is_none() || record.generation == obs.generation)
                 && record.fingerprint.as_deref() == Some(&legacy)
                 && legacy != current
             {
@@ -516,13 +516,13 @@ impl Tracker {
             }
             if legacy_used
                 && record.message_id.as_deref() == Some(message_id)
-                && record.generation == obs.generation
+                && (record.generation.is_none() || record.generation == obs.generation)
                 && record.fingerprint.as_deref() == Some(&current)
             {
                 record.attempts = u32::MAX;
             }
             if record.message_id.as_deref() == Some(message_id)
-                && record.generation == obs.generation
+                && (record.generation.is_none() || record.generation == obs.generation)
                 && record.fingerprint.as_deref() == Some(&current)
             {
                 record.attempts = record.attempts.max(reserved);
@@ -679,10 +679,20 @@ impl Tracker {
         generation: Option<&str>,
         fingerprint: &str,
     ) -> u32 {
-        *self
+        let exact = *self
             .spent
             .get(&ledger_key(pane_id, message_id, generation, fingerprint))
-            .unwrap_or(&0)
+            .unwrap_or(&0);
+        if generation.is_some() {
+            exact.max(
+                *self
+                    .spent
+                    .get(&ledger_key(pane_id, message_id, None, fingerprint))
+                    .unwrap_or(&0),
+            )
+        } else {
+            exact
+        }
     }
 
     /// Whether this exact intent has an old Rust FNV budget or attempted record.
@@ -697,9 +707,14 @@ impl Tracker {
         let legacy = legacy_fingerprint(text);
         let key = ledger_key(pane_id, message_id, generation, &legacy);
         self.spent.get(&key).is_some_and(|count| *count > 0)
+            || (generation.is_some()
+                && self
+                    .spent
+                    .get(&ledger_key(pane_id, message_id, None, &legacy))
+                    .is_some_and(|count| *count > 0))
             || self.records.get(pane_id).is_some_and(|record| {
                 record.message_id.as_deref() == Some(message_id)
-                    && record.generation.as_deref() == generation
+                    && (record.generation.is_none() || record.generation.as_deref() == generation)
                     && record.fingerprint.as_deref() == Some(&legacy)
                     && record.attempts > 0
             })
@@ -778,17 +793,21 @@ mod tests {
             obs.generation.as_deref(),
             &fingerprint(text),
         );
-        for has_record in [false, true] {
+        for record_kind in 0..3 {
             let mut tracker = Tracker::default();
             tracker.spent.insert(legacy_key.clone(), 1);
             tracker.spent.insert(canonical_key.clone(), 1);
-            if has_record {
+            if record_kind != 0 {
                 tracker.records.insert(
                     obs.pane_id.clone(),
                     Record {
                         message_id: obs.message_id.clone(),
                         generation: obs.generation.clone(),
-                        fingerprint: Some(legacy_fingerprint(text)),
+                        fingerprint: Some(if record_kind == 1 {
+                            legacy_fingerprint(text)
+                        } else {
+                            fingerprint(text)
+                        }),
                         first_seen: Some(0.0),
                         last_attempt_at: Some(0.5),
                         attempts: 1,
@@ -863,6 +882,48 @@ mod tests {
             ),
             u32::MAX
         );
+    }
+
+    #[test]
+    fn legacy_unknown_generation_budget_and_record_cannot_refund_on_binding() {
+        let obs = observation("stuck body");
+        let config = Config {
+            threshold_s: 1.0,
+            max_attempts: 2,
+            ..Config::default()
+        };
+        for record_only in [false, true] {
+            let mut tracker = Tracker::default();
+            if record_only {
+                tracker.records.insert(
+                    obs.pane_id.clone(),
+                    Record {
+                        message_id: obs.message_id.clone(),
+                        generation: None,
+                        fingerprint: Some(legacy_fingerprint("stuck body")),
+                        first_seen: Some(0.0),
+                        last_attempt_at: Some(1.0),
+                        attempts: 1,
+                        terminal: None,
+                    },
+                );
+            } else {
+                tracker.spent.insert(
+                    ledger_key(&obs.pane_id, "m1", None, &legacy_fingerprint("stuck body")),
+                    1,
+                );
+            }
+            assert!(!tracker.decide(&obs, &config, 10.0).recovers());
+            assert_eq!(
+                tracker.reserved(
+                    &obs.pane_id,
+                    "m1",
+                    obs.generation.as_deref(),
+                    &fingerprint("stuck body")
+                ),
+                u32::MAX
+            );
+        }
     }
 
     #[test]
