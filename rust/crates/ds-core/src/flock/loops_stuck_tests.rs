@@ -759,6 +759,49 @@ fn strict_stuck_scan_repairs_consumed_receipt_even_when_pane_is_queued() {
 }
 
 #[test]
+fn strict_stuck_scan_records_consumed_at_when_composer_is_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = persisted_flock(&dir);
+    let mut probe = federated_probe();
+    probe.federated = false;
+    let empty_frame = format!(
+        "  >_ OpenAI Codex (v0.165.0)\n     ~/workspace/fixture\n  permissions: YOLO mode\n{}\u{203a} Ask Codex to do anything\n\n  GPT-6-Astra high \u{b7} ~/workspace/fixture\n  ? for shortcuts                                      \u{26a0} 1 warning \u{b7} f2 to view",
+        "\n".repeat(16)
+    );
+    assert_eq!(
+        Some(String::new()),
+        crate::terminal::screen::typed_text(&empty_frame)
+    );
+    *probe.screen.lock().unwrap() = empty_frame;
+
+    let mut candidate = failed_federated_candidate(&probe);
+    candidate.created_at = 10.0;
+    flock.note_stuck_candidate(&candidate);
+
+    assert_eq!(
+        0,
+        strict_stuck_observer_scan(&flock, &mut probe, 221.0).unwrap()
+    );
+
+    let candidates = flock.stuck_candidates.lock().unwrap();
+    let consumed = &candidates["%1"];
+    assert_eq!("consumed", consumed.status);
+    assert!(!consumed.eligible);
+    assert_eq!(Some(221.0), consumed.consumed_at);
+    assert_eq!(None, consumed.retired_at);
+    drop(candidates);
+
+    let snapshot = flock.snapshot();
+    assert_eq!(
+        221.0,
+        snapshot["stuck_candidates"]["%1"]["consumed_at"]
+            .as_f64()
+            .unwrap()
+    );
+    assert!(snapshot["stuck_candidates"]["%1"]["retired_at"].is_null());
+}
+
+#[test]
 fn federated_recovery_refuses_no_enter_intent_and_queued_panes() {
     let dir = tempfile::tempdir().unwrap();
     let flock = Flock::new(

@@ -77,13 +77,7 @@ fn outbox_owns_pane(flock: &Flock, pane_id: &str) -> bool {
         .is_some_and(|queue| queue.iter().any(|message| message.status == "queued"))
 }
 
-fn retire_candidate(
-    flock: &Flock,
-    pane_id: &str,
-    observed: &StuckCandidate,
-    status: &str,
-    now: f64,
-) {
+fn retire_candidate(flock: &Flock, pane_id: &str, observed: &StuckCandidate, now: f64) {
     let mut candidates = flock
         .stuck_candidates
         .lock()
@@ -91,8 +85,22 @@ fn retire_candidate(
     if let Some(live) = candidates.get_mut(pane_id) {
         if live.message_id == observed.message_id && live.created_at == observed.created_at {
             live.eligible = false;
-            live.status = status.into();
+            live.status = "generation-changed".into();
             live.retired_at = Some(now);
+        }
+    }
+}
+
+fn consume_candidate(flock: &Flock, pane_id: &str, observed: &StuckCandidate, now: f64) {
+    let mut candidates = flock
+        .stuck_candidates
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(live) = candidates.get_mut(pane_id) {
+        if live.message_id == observed.message_id && live.created_at == observed.created_at {
+            live.eligible = false;
+            live.status = "consumed".into();
+            live.consumed_at = Some(now);
         }
     }
 }
@@ -143,7 +151,7 @@ pub(crate) fn strict_stuck_observer_scan<E: SendEnv + PaneInfoEnv>(
             continue;
         };
         if entry.generation.as_deref() != Some(generation.as_str()) {
-            retire_candidate(flock, &pane_id, &entry, "generation-changed", now);
+            retire_candidate(flock, &pane_id, &entry, now);
             flock
                 .stuck_tracker
                 .lock()
@@ -173,7 +181,7 @@ pub(crate) fn strict_stuck_observer_scan<E: SendEnv + PaneInfoEnv>(
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .forget(&pane_id);
-            retire_candidate(flock, &pane_id, &entry, "consumed", now);
+            consume_candidate(flock, &pane_id, &entry, now);
             continue;
         }
         let history_message = flock
