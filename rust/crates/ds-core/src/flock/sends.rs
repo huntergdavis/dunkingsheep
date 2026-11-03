@@ -870,8 +870,7 @@ fn hold_backoff_s(attempts: i64) -> f64 {
 pub type HoldSignature = (String, String);
 
 struct OutboxHold<'a> {
-    message_id: &'a str,
-    pane_id: &'a str,
+    message: &'a Message,
     now: f64,
     permanent: bool,
     reason: Option<&'a str>,
@@ -926,8 +925,11 @@ pub(crate) enum DeliveryOutcome {
 pub trait SendPreparationEnv: FlushEnv + super::send_keys::KeyPressEnv {
     fn send_text(&mut self, pane_id: &str, text: &str) -> (bool, String);
     fn attempt_generation(&self, pane_id: &str) -> Option<String>;
+    /// Persist typed-attempt state for the actual message when a delivery frame exists.
+    /// `None` preserves the low-level `submit_text` path, which has no message authority.
     fn persist_typed_attempt(
         &mut self,
+        message: Option<&mut Message>,
         pane_id: &str,
         text: &str,
         press_enter: bool,
@@ -1091,22 +1093,23 @@ pub fn submit_text(
             press_enter,
             check_box,
             attempt_generation: AttemptGeneration::Capture,
+            message: None,
         },
         guard,
     )
 }
 
-#[derive(Clone, Copy)]
 struct SubmitOptions<'a> {
     press_enter: bool,
     check_box: bool,
-    attempt_generation: AttemptGeneration<'a>,
+    attempt_generation: AttemptGeneration,
+    message: Option<&'a mut Message>,
 }
 
-#[derive(Clone, Copy)]
-enum AttemptGeneration<'a> {
+#[derive(Clone)]
+enum AttemptGeneration {
     Capture,
-    Captured(Option<&'a str>),
+    Captured(Option<String>),
 }
 
 /// Delivery passes its pre-guard generation snapshot so a pane replacement during preflight
@@ -1116,11 +1119,11 @@ fn submit_text_with_options(
     env: &mut dyn SendPreparationEnv,
     pane_id: &str,
     text: &str,
-    options: SubmitOptions<'_>,
+    mut options: SubmitOptions<'_>,
     guard: Option<&TypingGuard<'_>>,
 ) -> SendAction {
     let guarded = guard.is_some();
-    let mut perform = |guard: &TypingGuard<'_>| {
+    let mut perform = Some(|guard: &TypingGuard<'_>| {
         if let Some(dead) = dead_session(env, pane_id) {
             return Err(format!(
                 "agent session is dead ({dead}); not submitting into a dead composer"
@@ -1135,7 +1138,7 @@ fn submit_text_with_options(
         let baseline = env.read_status(pane_id);
         let generation = match options.attempt_generation {
             AttemptGeneration::Capture => env.attempt_generation(pane_id),
-            AttemptGeneration::Captured(generation) => generation.map(str::to_owned),
+            AttemptGeneration::Captured(generation) => generation,
         };
         let before = env
             .read_pane(pane_id, CONSUMPTION_READ_LINES, true)
@@ -1158,7 +1161,13 @@ fn submit_text_with_options(
             return Err(detail);
         }
         flock.remember_typed(pane_id, text);
-        if !env.persist_typed_attempt(pane_id, text, options.press_enter, generation.as_deref()) {
+        if !env.persist_typed_attempt(
+            options.message.take(),
+            pane_id,
+            text,
+            options.press_enter,
+            generation.as_deref(),
+        ) {
             return Err("typed but not submitted: durable attempt receipt failed".into());
         }
         if !options.press_enter {
@@ -1180,12 +1189,12 @@ fn submit_text_with_options(
             }),
             key_confirmation: None,
         })
-    };
+    });
 
     let prepared = match guard {
-        Some(guard) => perform(guard),
+        Some(guard) => perform.take().expect("submit operation is available")(guard),
         None => match flock.typing_guard(pane_id) {
-            Ok(guard) => perform(&guard),
+            Ok(guard) => perform.take().expect("submit operation is available")(&guard),
             Err(error) => return SendAction::completed(false, error.to_string()),
         },
     };
@@ -2281,6 +2290,22 @@ pub struct Message {
     pub finished_at: Option<f64>,
     /// Completion event shared by clones and deliberately omitted from the wire form.
     pub done: Arc<CompletionWaiter>,
+    /// Transient identity and receipt frame shared only by clones of this exact message.
+    /// It is deliberately omitted from snapshots; a restored message starts a new lifetime.
+    attempt_state: Arc<MessageAttemptState>,
+}
+
+#[derive(Debug, Default)]
+struct MessageAttemptState {
+    receipt_ids: Mutex<Vec<String>>,
+    folded_text: Mutex<Option<String>>,
+}
+
+// This state is process-local ownership evidence, not part of message value equality.
+impl PartialEq for MessageAttemptState {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
 }
 
 impl Message {
@@ -2309,7 +2334,73 @@ impl Message {
             created_at: clock::now_s(),
             finished_at: None,
             done: Arc::new(CompletionWaiter::default()),
+            attempt_state: Arc::new(MessageAttemptState::default()),
         }
+    }
+
+    /// Append an inbox receipt to this exact queued notice's completion frame.
+    /// The caller must hold the canonical outbox row while calling this method.
+    /// Returns false for a non-notice or a notice that is no longer queued.
+    pub fn append_notify_for(&mut self, inbox_message_id: &str) -> bool {
+        if !self.is_notice || self.status != "queued" {
+            return false;
+        }
+        self.notify_for.push(inbox_message_id.to_owned());
+        self.attempt_state
+            .receipt_ids
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(inbox_message_id.to_owned());
+        true
+    }
+
+    /// Update text on the exact queued notice and its in-flight delivery frame.
+    /// The caller holds the canonical outbox row.
+    pub(crate) fn set_folded_notice_text(&mut self, text: &str) {
+        self.text = text.to_owned();
+        *self
+            .attempt_state
+            .folded_text
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(text.to_owned());
+    }
+
+    fn folded_text(&self) -> String {
+        self.attempt_state
+            .folded_text
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .unwrap_or_else(|| self.text.clone())
+    }
+
+    fn prepare_receipt_frame(&self) {
+        *self
+            .attempt_state
+            .receipt_ids
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = self.notify_for.clone();
+    }
+
+    fn receipt_frame(&self) -> Vec<String> {
+        let shared = self
+            .attempt_state
+            .receipt_ids
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if shared.is_empty() {
+            self.notify_for.clone()
+        } else {
+            shared.clone()
+        }
+    }
+
+    fn refresh_notify_for_from_frame(&mut self) {
+        self.notify_for = self.receipt_frame();
+    }
+
+    fn same_lifetime(&self, other: &Message) -> bool {
+        Arc::ptr_eq(&self.attempt_state, &other.attempt_state)
     }
 
     /// `_queued_message`.
@@ -3154,11 +3245,12 @@ pub(crate) fn outbox_step<E: SendPreparationEnv + PaneInfoEnv>(
             return OutboxStep::Empty;
         };
         queue.retain(|message| message.status == "queued");
-        let Some(head) = queue.first().cloned() else {
+        let Some(stored_head) = queue.first_mut() else {
             outbox.remove(pane_id);
             return OutboxStep::Empty;
         };
-        head
+        stored_head.prepare_receipt_frame();
+        stored_head.clone()
     };
 
     if let Some(due_at) = head.next_attempt_at {
@@ -3184,7 +3276,7 @@ pub(crate) fn outbox_step<E: SendPreparationEnv + PaneInfoEnv>(
             let mut outbox = outbox_lock(&flock.outbox);
             if let Some(stored) = outbox
                 .get_mut(pane_id)
-                .and_then(|queue| queue.iter_mut().find(|row| row.id == head.id))
+                .and_then(|queue| queue.iter_mut().find(|row| row.same_lifetime(&head)))
             {
                 stored.next_attempt_at = None;
                 stored.hold_signature = None;
@@ -3216,8 +3308,7 @@ pub(crate) fn outbox_step<E: SendPreparationEnv + PaneInfoEnv>(
         if kind != "dead" {
             let signature = hold_signature(flock, env, pane_id);
             return match flock.record_outbox_hold(OutboxHold {
-                message_id: &head.id,
-                pane_id,
+                message: &head,
                 now,
                 permanent: false,
                 reason: Some(&reason),
@@ -3239,7 +3330,7 @@ pub(crate) fn outbox_step<E: SendPreparationEnv + PaneInfoEnv>(
         };
         queue.retain(|message| message.status == "queued");
         match queue.first() {
-            Some(current) if current.id == head.id => {}
+            Some(current) if current.same_lifetime(&head) => {}
             Some(_) => return OutboxStep::Delivered,
             None => {
                 outbox.remove(pane_id);
@@ -3247,7 +3338,7 @@ pub(crate) fn outbox_step<E: SendPreparationEnv + PaneInfoEnv>(
             }
         }
     };
-    match flock.deliver_message(&head.id, now, env, permission) {
+    match flock.deliver_message_frame(&head, now, env, permission) {
         DeliveryOutcome::Sent | DeliveryOutcome::Failed | DeliveryOutcome::AlreadyDecided => {
             OutboxStep::Delivered
         }
@@ -3260,9 +3351,10 @@ pub(crate) fn outbox_step<E: SendPreparationEnv + PaneInfoEnv>(
 /// owned-text recovery transition when the same box remains visible. Runtime adapters provide
 /// terminal I/O and a stop-aware wait; tests can advance a fake clock without spawning threads.
 #[allow(dead_code)] // Production worker startup is gated to a separate runtime task.
-pub(crate) fn outbox_worker<E: SendPreparationEnv + PaneInfoEnv + InboxEnv>(
+pub(crate) fn outbox_worker<E: SendPreparationEnv + PaneInfoEnv>(
     flock: &Flock,
     env: &mut E,
+    inbox: &dyn InboxEnv,
     pane_id: &str,
     stopped: &AtomicBool,
     reporter: &mut super::loops_stuck::StalePanelReporter,
@@ -3294,7 +3386,7 @@ pub(crate) fn outbox_worker<E: SendPreparationEnv + PaneInfoEnv + InboxEnv>(
             let generation = pane_generation(env, pane_id);
             reporter.note(
                 flock,
-                env,
+                inbox,
                 pane_id,
                 "modal",
                 generation.as_deref(),
@@ -3341,8 +3433,7 @@ pub(crate) fn outbox_lock(
 impl Flock {
     fn record_outbox_hold(&self, hold: OutboxHold<'_>) -> DeliveryOutcome {
         let OutboxHold {
-            message_id,
-            pane_id,
+            message,
             now,
             permanent,
             reason,
@@ -3351,10 +3442,11 @@ impl Flock {
         } = hold;
         let (message, attempts, terminal) = {
             let mut outbox = outbox_lock(&self.outbox);
+            let pane_id = &message.pane_id;
             let Some(queue) = outbox.get_mut(pane_id) else {
                 return DeliveryOutcome::Missing;
             };
-            let Some(stored) = queue.iter_mut().find(|row| row.id == message_id) else {
+            let Some(stored) = queue.iter_mut().find(|row| row.same_lifetime(message)) else {
                 return DeliveryOutcome::Missing;
             };
             if stored.status != "queued" {
@@ -3382,9 +3474,10 @@ impl Flock {
                     str::to_owned,
                 ));
             }
-            let message = stored.clone();
+            let mut message = stored.clone();
+            message.refresh_notify_for_from_frame();
             if terminal {
-                queue.retain(|row| row.id != message_id);
+                queue.retain(|row| !row.same_lifetime(&message));
                 if queue.is_empty() {
                     outbox.remove(pane_id);
                 }
@@ -3450,7 +3543,7 @@ impl Flock {
         env: &mut dyn SendPreparationEnv,
         permission: impl FnMut() -> Option<String>,
     ) -> DeliveryOutcome {
-        let mut message = {
+        let expected = {
             let mut outbox = outbox_lock(&self.outbox);
             let Some(message) = outbox
                 .values_mut()
@@ -3474,6 +3567,30 @@ impl Flock {
             }
             message.clone()
         };
+        self.deliver_message_frame(&expected, now, env, permission)
+    }
+
+    fn deliver_message_frame(
+        &self,
+        expected: &Message,
+        now: f64,
+        env: &mut dyn SendPreparationEnv,
+        permission: impl FnMut() -> Option<String>,
+    ) -> DeliveryOutcome {
+        let mut message = {
+            let mut outbox = outbox_lock(&self.outbox);
+            let Some(message) = outbox
+                .get_mut(&expected.pane_id)
+                .and_then(|queue| queue.iter_mut().find(|row| row.same_lifetime(expected)))
+            else {
+                return DeliveryOutcome::Missing;
+            };
+            if message.status != "queued" {
+                return DeliveryOutcome::AlreadyDecided;
+            }
+            message.prepare_receipt_frame();
+            message.clone()
+        };
 
         if message.attempt_generation.is_none() {
             // Capture identity before any terminal action, without holding the queue mutex.
@@ -3481,7 +3598,7 @@ impl Flock {
             let mut outbox = outbox_lock(&self.outbox);
             if let Some(stored) = outbox
                 .get_mut(&message.pane_id)
-                .and_then(|queue| queue.iter_mut().find(|row| row.id == message_id))
+                .and_then(|queue| queue.iter_mut().find(|row| row.same_lifetime(&message)))
             {
                 if stored.attempt_generation.is_none() {
                     stored.attempt_generation = message.attempt_generation.clone();
@@ -3496,24 +3613,30 @@ impl Flock {
             allow_modal: message.kind == "keys",
             preserve_draft: false,
         };
+        let is_keys = message.kind == "keys";
+        let press_enter = message.press_enter;
+        let attempt_generation = message.attempt_generation.clone();
         let (sent, ok, detail, blocker_reason) =
             send_guarded_with_reason(self, env, &pane_id, options, permission, |env, guard| {
-                if message.kind == "keys" {
+                // The exact message frame survives cancellation and same-ID replacement.
+                // Read folded text after acquiring the pane and typing guards.
+                let message_text = message.folded_text();
+                message.text = message_text.clone();
+                if is_keys {
                     let keys: Vec<String> =
-                        message.text.split_whitespace().map(str::to_owned).collect();
+                        message_text.split_whitespace().map(str::to_owned).collect();
                     Ok(press_keys(env, &pane_id, &keys, guard))
                 } else {
                     Ok(submit_text_with_options(
                         self,
                         env,
                         &pane_id,
-                        &message.text,
+                        &message_text,
                         SubmitOptions {
-                            press_enter: message.press_enter,
+                            press_enter,
                             check_box: false,
-                            attempt_generation: AttemptGeneration::Captured(
-                                message.attempt_generation.as_deref(),
-                            ),
+                            attempt_generation: AttemptGeneration::Captured(attempt_generation),
+                            message: Some(&mut message),
                         },
                         Some(guard),
                     ))
@@ -3526,8 +3649,7 @@ impl Flock {
             let permanent = detail.starts_with("dead session (")
                 || detail == "the lane's recorded process is gone";
             self.record_outbox_hold(OutboxHold {
-                message_id,
-                pane_id: &pane_id,
+                message: &message,
                 now,
                 permanent,
                 reason,
@@ -3550,12 +3672,12 @@ impl Flock {
             });
             {
                 let mut outbox = outbox_lock(&self.outbox);
-                let Some(queue) = outbox.get_mut(&pane_id) else {
-                    return DeliveryOutcome::Missing;
-                };
-                queue.retain(|row| row.id != message_id);
-                if queue.is_empty() {
-                    outbox.remove(&pane_id);
+                message.refresh_notify_for_from_frame();
+                if let Some(queue) = outbox.get_mut(&pane_id) {
+                    queue.retain(|row| !row.same_lifetime(&message));
+                    if queue.is_empty() {
+                        outbox.remove(&pane_id);
+                    }
                 }
             }
             self.remember(&message);
@@ -3627,9 +3749,9 @@ impl Flock {
         }
 
         if let Some(inbox) = stores.inbox.as_ref() {
-            for inbox_id in &message.notify_for {
+            for inbox_id in message.receipt_frame() {
                 let _ = inbox.record_notify(
-                    inbox_id,
+                    &inbox_id,
                     if ok { "sent" } else { "failed" },
                     detail,
                     None,
@@ -3947,6 +4069,7 @@ impl Flock {
         if message.pane_id != pane_id || message.text != text {
             return Ok(true);
         }
+        message.refresh_notify_for_from_frame();
         let previous_status = message.status.clone();
         message.press_enter = press_enter;
         message.typed_at = Some(clock::now_s());
@@ -4334,24 +4457,27 @@ impl Flock {
             allow_modal: message.kind == "keys",
             preserve_draft: false,
         };
+        let is_keys = message.kind == "keys";
+        let message_text = message.text.clone();
+        let press_enter = message.press_enter;
+        let attempt_generation = message.attempt_generation.clone();
         let (sent, ok, detail, _) =
             send_guarded_with_reason(self, env, &pane_id, options, permission, |env, guard| {
-                if message.kind == "keys" {
+                if is_keys {
                     let keys: Vec<String> =
-                        message.text.split_whitespace().map(str::to_owned).collect();
+                        message_text.split_whitespace().map(str::to_owned).collect();
                     Ok(press_keys(env, &pane_id, &keys, guard))
                 } else {
                     Ok(submit_text_with_options(
                         self,
                         env,
                         &pane_id,
-                        &message.text,
+                        &message_text,
                         SubmitOptions {
-                            press_enter: message.press_enter,
+                            press_enter,
                             check_box: false,
-                            attempt_generation: AttemptGeneration::Captured(
-                                message.attempt_generation.as_deref(),
-                            ),
+                            attempt_generation: AttemptGeneration::Captured(attempt_generation),
+                            message: Some(&mut message),
                         },
                         Some(guard),
                     ))

@@ -29,6 +29,116 @@ impl RequestRuntimeAdapter<'_> {
     }
 }
 
+use super::outbox_runtime::FlockSnapshot;
+use crate::flock::commands_inbox::{InboxEnv, Nudge, RouteEntry};
+use crate::flock::mailbox::MailboxEnv;
+use crate::flock::sends::OutboxWorkerPool;
+use crate::flock::Flock;
+use crate::inbox_store::Store;
+use serde_json::Value;
+use std::sync::Arc;
+
+#[allow(dead_code)]
+pub(super) struct InboxRuntimeView<'a> {
+    pub(super) adapter: RequestRuntimeAdapter<'a>,
+    pub(super) store: Arc<Store>,
+    pub(super) flock: Arc<Flock>,
+    pub(super) pool: Arc<OutboxWorkerPool>,
+}
+impl<'a> InboxRuntimeView<'a> {
+    pub(super) fn new(
+        adapter: RequestRuntimeAdapter<'a>,
+        flock: Arc<Flock>,
+        pool: Arc<OutboxWorkerPool>,
+    ) -> Result<Self, DunkError> {
+        if !std::ptr::eq(adapter.terminal.flock, flock.as_ref()) {
+            return Err(DunkError::Refused("inbox outbox flock mismatch".into()));
+        }
+        let store = adapter
+            .inbox
+            .clone()
+            .ok_or_else(|| DunkError::Refused("inbox store is not attached".into()))?;
+        Ok(Self {
+            adapter,
+            store,
+            flock,
+            pool,
+        })
+    }
+}
+impl MailboxEnv for InboxRuntimeView<'_> {
+    fn list_panes(&self) -> Vec<Value> {
+        self.adapter.list_panes()
+    }
+    fn list_panes_grouped(&self) -> Vec<Value> {
+        self.adapter.list_panes_grouped()
+    }
+    fn try_list_panes_grouped(&self) -> Result<Vec<Value>, DunkError> {
+        self.adapter.try_list_panes_grouped()
+    }
+    fn registered_pane(&self, pane: &str) -> (bool, bool, Option<String>) {
+        self.adapter.registered_pane(pane)
+    }
+}
+impl InboxEnv for InboxRuntimeView<'_> {
+    fn caller_role(&self, pane: &str) -> Result<String, DunkError> {
+        self.adapter.helper_inboxenv_caller_role(pane)
+    }
+    fn mailbox_override(&self) -> Option<String> {
+        self.adapter.helper_inboxenv_mailbox_override()
+    }
+    fn backend_name(&self) -> Result<String, DunkError> {
+        self.adapter.helper_inboxenv_backend_name()
+    }
+    fn lane_panes(&self) -> Vec<String> {
+        self.adapter.helper_inboxenv_lane_panes()
+    }
+    fn pool(&self) -> &crate::db::ReadPool {
+        self.store.read_pool()
+    }
+    fn store(&self) -> &Store {
+        &self.store
+    }
+    fn now(&self) -> f64 {
+        self.adapter.helper_inboxenv_now()
+    }
+    fn record_metric(
+        &self,
+        kind: &str,
+        pane: Option<&str>,
+        mailbox: &str,
+        sender: Option<&str>,
+        duration: Option<i64>,
+        bytes: Option<i64>,
+    ) {
+        self.adapter
+            .helper_inboxenv_record_metric(kind, pane, mailbox, sender, duration, bytes)
+    }
+    fn pm_routing(&self) -> Vec<RouteEntry> {
+        self.adapter.helper_inboxenv_pm_routing()
+    }
+    fn fold_into_queued_notice(&self, pane: &str, text: &str, id: &str) -> Option<String> {
+        self.fold_notice(pane, text, id)
+    }
+    fn send_now(&self, pane: &str, text: &str, id: &str) -> Result<Nudge, DunkError> {
+        self.send_notice(pane, text, id, &FlockSnapshot)
+    }
+    fn record_sent(
+        &self,
+        pane: Option<&str>,
+        mailbox: &str,
+        sender: Option<&str>,
+        bytes: usize,
+        attachments: usize,
+    ) {
+        self.adapter
+            .helper_inboxenv_record_sent(pane, mailbox, sender, bytes, attachments)
+    }
+    fn tasks_for_pane(&self, pane: &str) -> Result<Value, DunkError> {
+        self.adapter.helper_inboxenv_tasks_for_pane(pane)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

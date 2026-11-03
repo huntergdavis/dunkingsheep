@@ -17,6 +17,7 @@ use crate::error::DunkError;
 
 pub mod config;
 pub mod evaluate;
+pub mod planner;
 pub mod report;
 pub mod rules;
 pub mod rules_delivery;

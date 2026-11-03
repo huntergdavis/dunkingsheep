@@ -729,6 +729,76 @@ fn dispatcher_report_run_list_handlers_use_sources_and_preserve_role_gates() {
 }
 
 #[test]
+fn h_report_list_matches_python() {
+    use std::fs;
+    use std::time::{Duration, SystemTime};
+
+    let temp = tempfile::tempdir().unwrap();
+    let (_flock_dir, flock) = staffed_flock("report-list-api");
+    let home = temp.path().join("home");
+    let output_dir = home.join("reports");
+    fs::create_dir_all(&output_dir).unwrap();
+    let older = output_dir.join("older.md");
+    let newer = output_dir.join("newer.md");
+    fs::write(&older, "old report").unwrap();
+    fs::write(&newer, "new report").unwrap();
+    fs::write(output_dir.join("ignored.txt"), "not a report").unwrap();
+    fs::File::open(&older)
+        .unwrap()
+        .set_times(
+            std::fs::FileTimes::new()
+                .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(100)),
+        )
+        .unwrap();
+    fs::File::open(&newer)
+        .unwrap()
+        .set_times(
+            std::fs::FileTimes::new()
+                .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(200)),
+        )
+        .unwrap();
+
+    let env = ReportApiEnv {
+        terminal: Mutex::new(Box::new(FakeTerminal::default())),
+        sources: ReportApiSources {
+            paths: ReportPaths::new(&output_dir, &home),
+            config_dir: temp.path().join("config"),
+        },
+    };
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_report_list();
+    let result = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w2:p2"),
+        "report_list",
+        args(json!({"out_dir": ""})),
+    )
+    .expect("report list via dispatcher");
+
+    assert_eq!(result["dir"], "~/reports");
+    assert_eq!(result["count"], 2);
+    assert_eq!(
+        result["reports"],
+        json!([
+            {
+                "name": "newer.md",
+                "path": newer,
+                "size": 10,
+                "at": 200.0
+            },
+            {
+                "name": "older.md",
+                "path": older,
+                "size": 10,
+                "at": 100.0
+            }
+        ])
+    );
+}
+
+#[test]
 fn h_lanes_matches_python() {
     let (_dir, flock) = staffed_flock("api-lanes");
     let env = ParityEnv::new(Some(std::process::id() as i64));
@@ -3863,6 +3933,329 @@ fn dispatch_owner_api(
     dispatcher.dispatch(&context, &FlockGate(&context), command, args)
 }
 
+#[derive(Default)]
+struct FakeSendCommands {
+    calls: Mutex<Vec<Value>>,
+    failure: Mutex<Option<String>>,
+}
+
+impl FakeSendCommands {
+    fn record(&self, call: Value) -> Result<Value, DunkError> {
+        self.calls.lock().unwrap().push(call.clone());
+        if let Some(message) = self.failure.lock().unwrap().clone() {
+            Err(DunkError::Refused(message))
+        } else {
+            Ok(json!({"operation": call["operation"], "pane_id": call["target"]["pane_id"]}))
+        }
+    }
+}
+
+impl SendCommandEnv for FakeSendCommands {
+    fn send_text(
+        &self,
+        target: &Value,
+        text: &str,
+        self_pane_id: Option<&str>,
+        hold_while_typing: bool,
+        wait_s: f64,
+        press_enter: bool,
+    ) -> Result<Value, DunkError> {
+        self.record(
+            json!({"operation":"send_text", "target":target, "text":text,
+            "self_pane_id":self_pane_id, "hold_while_typing":hold_while_typing,
+            "wait_s":wait_s, "press_enter":press_enter}),
+        )
+    }
+
+    fn send_keys(
+        &self,
+        target: &Value,
+        keys: &str,
+        self_pane_id: Option<&str>,
+        hold_while_typing: bool,
+        wait_s: f64,
+    ) -> Result<Value, DunkError> {
+        self.record(
+            json!({"operation":"send_keys", "target":target, "keys":keys,
+            "self_pane_id":self_pane_id, "hold_while_typing":hold_while_typing,
+            "wait_s":wait_s}),
+        )
+    }
+
+    fn flush_box(&self, target: &Value, self_pane_id: Option<&str>) -> Result<Value, DunkError> {
+        self.record(json!({"operation":"flush_box", "target":target,
+            "self_pane_id":self_pane_id}))
+    }
+}
+
+struct SendApiEnv {
+    terminal: Mutex<Box<dyn Terminal>>,
+    send: FakeSendCommands,
+    panes: Vec<Value>,
+}
+
+impl SendApiEnv {
+    fn new() -> Self {
+        Self {
+            terminal: Mutex::new(Box::new(FakeTerminal::default())),
+            send: FakeSendCommands::default(),
+            panes: vec![
+                json!({"pane_id":"w1:p1", "agent":"owner", "tab_label":"owner"}),
+                json!({"pane_id":"w2:p2", "agent":"worker", "tab_label":"worker"}),
+                json!({"pane_id":"w3:p3", "agent":"reviewer", "tab_label":"reviewer"}),
+                json!({"pane_id":"w4:p4", "agent":"planner", "tab_label":"planner"}),
+            ],
+        }
+    }
+}
+
+impl PaneInfoEnv for SendApiEnv {
+    fn list_panes_grouped(&self) -> Vec<Value> {
+        self.panes.clone()
+    }
+
+    fn get_pane(&self, pane_id: &str) -> Option<Value> {
+        self.panes
+            .iter()
+            .find(|pane| pane.get("pane_id").and_then(Value::as_str) == Some(pane_id))
+            .cloned()
+    }
+}
+
+impl CommandEnv for SendApiEnv {
+    fn terminal(&self) -> &Mutex<Box<dyn Terminal>> {
+        &self.terminal
+    }
+
+    fn now_s(&self) -> f64 {
+        1_800_000_000.0
+    }
+
+    fn send_commands(&self) -> Result<&dyn SendCommandEnv, DunkError> {
+        Ok(&self.send)
+    }
+}
+
+fn send_api_fixture(tag: &str) -> (tempfile::TempDir, Flock, SendApiEnv, Dispatcher) {
+    let (dir, flock) = flock();
+    let mut roles = Roles::new(
+        &Env::default(),
+        Some(dir.path().join(format!("{tag}-roles.json"))),
+        Some(dir.path().join(format!("{tag}-tokens.json"))),
+        None,
+    )
+    .unwrap();
+    for (pane, role) in [
+        ("w1:p1", "owner"),
+        ("w2:p2", "worker"),
+        ("w3:p3", "reviewer"),
+        ("w4:p4", "planner"),
+    ] {
+        roles
+            .register(pane, role, None, None, None, None, None, None)
+            .unwrap();
+    }
+    flock.attach_roles(roles, None);
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_send_text_keys_flush_box();
+    (dir, flock, SendApiEnv::new(), dispatcher)
+}
+
+#[test]
+fn send_text_dispatch_preserves_defaults_and_adapter_result() {
+    let (_dir, flock, env, dispatcher) = send_api_fixture("send-text");
+    let result = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p1"),
+        "send_text",
+        args(json!({"target":"worker", "text":"hello"})),
+    )
+    .unwrap();
+    assert_eq!(result, json!({"operation":"send_text", "pane_id":"w2:p2"}));
+    let calls = env.send.calls.lock().unwrap();
+    assert_eq!(calls[0]["hold_while_typing"], true);
+    assert_eq!(calls[0]["wait_s"], 3.0);
+    assert_eq!(calls[0]["press_enter"], true);
+    assert_eq!(calls[0]["self_pane_id"], "w1:p1");
+}
+
+#[test]
+fn send_text_and_keys_forward_explicit_options() {
+    let (_dir, flock, env, dispatcher) = send_api_fixture("send-options");
+    dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p1"),
+        "send_text",
+        args(
+            json!({"target":"worker", "text":"draft", "hold_while_typing":false,
+            "wait_s":"0.25", "press_enter":false}),
+        ),
+    )
+    .unwrap();
+    dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p1"),
+        "send_keys",
+        args(
+            json!({"target":"worker", "keys":"ctrl+c", "hold_while_typing":false,
+            "wait_s":0}),
+        ),
+    )
+    .unwrap();
+    let calls = env.send.calls.lock().unwrap();
+    assert_eq!(calls[0]["press_enter"], false);
+    assert_eq!(calls[0]["wait_s"], 0.25);
+    assert_eq!(calls[1]["operation"], "send_keys");
+    assert_eq!(calls[1]["hold_while_typing"], false);
+    assert_eq!(calls[1]["wait_s"], 0.0);
+}
+
+#[test]
+fn send_keys_and_flush_dispatch_to_their_named_operations() {
+    let (_dir, flock, env, dispatcher) = send_api_fixture("send-operations");
+    for (command, call) in [
+        ("send_keys", json!({"target":"worker", "keys":"Enter"})),
+        ("flush_box", json!({"target":"worker"})),
+    ] {
+        dispatch_as_flock_role(
+            &dispatcher,
+            &flock,
+            &env,
+            Some("w1:p1"),
+            command,
+            args(call),
+        )
+        .unwrap();
+    }
+    let calls = env.send.calls.lock().unwrap();
+    assert_eq!(calls[0]["operation"], "send_keys");
+    assert_eq!(calls[0]["hold_while_typing"], true);
+    assert_eq!(calls[0]["wait_s"], 3.0);
+    assert_eq!(calls[1]["operation"], "flush_box");
+}
+
+#[test]
+fn worker_and_reviewer_send_gates_allow_self_and_refuse_other_panes() {
+    let (_dir, flock, env, dispatcher) = send_api_fixture("send-role-gate");
+    dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w2:p2"),
+        "send_text",
+        args(json!({"target":"self", "text":"hello"})),
+    )
+    .unwrap();
+    let error = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w2:p2"),
+        "send_keys",
+        args(json!({"target":"owner", "keys":"Enter"})),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("send_keys to another pane requires a superuser"));
+    let reviewer_error = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w3:p3"),
+        "flush_box",
+        args(json!({"target":"owner"})),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(reviewer_error.contains("flush_box to another pane requires a superuser"));
+    assert_eq!(env.send.calls.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn dispatcher_role_gate_precedes_retired_token_handler_gate() {
+    let (_dir, flock, env, dispatcher) = send_api_fixture("send-role-order");
+    let error = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w4:p4"),
+        "send_text",
+        args(json!({"target":"worker", "text":"hello", "desk_token":"old"})),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("send_text is not permitted for role planner"));
+    assert!(!error.contains("desk_token is retired"));
+    assert!(env.send.calls.lock().unwrap().is_empty());
+}
+
+#[test]
+fn send_rejects_retired_desk_token_invalid_wait_and_propagates_operation_error() {
+    let (_dir, flock, env, dispatcher) = send_api_fixture("send-errors");
+    let retired = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p1"),
+        "send_text",
+        args(json!({"target":"worker", "text":"hello", "desk_token":"old"})),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(retired.contains("desk_token is retired"));
+
+    let retired_before_self_gate = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w2:p2"),
+        "send_text",
+        args(json!({"target":"owner", "text":"hello", "desk_token":"old"})),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(retired_before_self_gate.contains("desk_token is retired"));
+
+    let invalid_wait = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p1"),
+        "send_keys",
+        args(json!({"target":"worker", "keys":"Enter", "wait_s":3601})),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(invalid_wait.contains("wait_s must be between 0 and 3600"));
+    assert!(env.send.calls.lock().unwrap().is_empty());
+
+    *env.send.failure.lock().unwrap() = Some("send backend failed".into());
+    for (command, call) in [
+        ("send_text", json!({"target":"worker", "text":"hello"})),
+        ("send_keys", json!({"target":"worker", "keys":"Enter"})),
+        ("flush_box", json!({"target":"worker"})),
+    ] {
+        let operation_error = dispatch_as_flock_role(
+            &dispatcher,
+            &flock,
+            &env,
+            Some("w1:p1"),
+            command,
+            args(call),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(operation_error.contains("send backend failed"));
+    }
+    assert_eq!(env.send.calls.lock().unwrap().len(), 3);
+}
+
 #[test]
 fn h_owner_stats_matches_python() {
     let (_dir, flock, env) = owner_api_fixture("owner-stats");
@@ -3973,4 +4366,683 @@ fn h_owner_conversation_matches_python() {
         ),
         Err(DunkError::Refused(message)) if message == "could not convert string to float: 'not a timestamp'"
     ));
+}
+
+#[test]
+fn h_owner_reply_matches_python() {
+    let (_dir, flock, env) = owner_api_fixture("owner-reply-api");
+    let inbox = flock.stores().inbox.unwrap();
+    let question = inbox
+        .send(&crate::inbox_store::Outgoing {
+            mailbox: crate::flock::mailbox::OWNER_MAILBOX,
+            body: Some("question"),
+            sender: Some("web"),
+            mailbox_label: Some(crate::flock::mailbox::OWNER_MAILBOX),
+            transport: Some("telegram"),
+            ..crate::inbox_store::Outgoing::default()
+        })
+        .unwrap();
+    let other = inbox
+        .send(&crate::inbox_store::Outgoing {
+            mailbox: "other-mailbox",
+            body: Some("not an owner question"),
+            ..crate::inbox_store::Outgoing::default()
+        })
+        .unwrap();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_owner_reply_ingest_outbox();
+
+    let out = dispatch_owner_api(
+        &dispatcher,
+        &flock,
+        &env,
+        "owner_reply",
+        args(json!({"message_id": question, "body": 42})),
+        Some("w1:p1"),
+    )
+    .expect("owner reply through dispatcher");
+    assert_eq!(out["question"], question);
+    assert_eq!(out["acked"], question);
+    assert_eq!(out["transport"], "telegram");
+    assert_eq!(out["reply"]["body"], "42");
+    assert_eq!(out["reply"]["sender"], "w1:p1");
+    assert_eq!(out["reply"]["transport"], "telegram");
+    assert_eq!(out["reply"]["reply_to"], question);
+    assert_eq!(inbox.get_message(&question).unwrap().summary.state, "acked");
+
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_reply",
+            args(json!({"message_id": question, "body": "again"})),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message.contains("was already answered by")
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_reply",
+            args(json!({"message_id": other, "body": "answer"})),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message.contains("is not an owner message")
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_reply",
+            None,
+            Some("w1:p2"),
+        ),
+        Err(DunkError::Refused(message)) if message.contains("not permitted for role worker")
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_reply",
+            None,
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "owner_reply: missing required argument(s): message_id, body"
+    ));
+}
+
+#[test]
+fn h_owner_ingest_matches_python() {
+    let (dir, flock, env) = owner_api_fixture("owner-ingest-api");
+    let attachment = dir.path().join("attachment with spaces.txt");
+    std::fs::write(&attachment, b"fixture attachment").unwrap();
+    let attach = format!(",{}, ,{}", attachment.display(), attachment.display());
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_owner_reply_ingest_outbox();
+
+    let out = dispatch_owner_api(
+        &dispatcher,
+        &flock,
+        &env,
+        "owner_ingest",
+        args(json!({
+            "body": "incoming question",
+            "transport": " TELEGRAM ",
+            "external_id": "telegram:88",
+            "subject": " original subject ",
+            "attach": attach,
+        })),
+        Some("w1:p1"),
+    )
+    .expect("owner ingest through dispatcher");
+    let id = out["message"]["message_id"].as_str().unwrap().to_string();
+    assert_eq!(out["duplicate"], false);
+    assert_eq!(out["transport"], "telegram");
+    assert_eq!(out["message"]["body"], "incoming question");
+    assert_eq!(out["message"]["subject"], " original subject ");
+    assert_eq!(out["message"]["external_id"], "telegram:88");
+    assert_eq!(out["message"]["transport"], "telegram");
+    assert_eq!(out["message"]["sender"], Value::Null);
+    assert_eq!(out["message"]["attachments"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        out["message"]["attachments"][0]["filename"],
+        "attachment with spaces.txt"
+    );
+
+    for (subject, expected) in [
+        (json!(42), json!("42")),
+        (json!(true), json!("1")),
+        (json!(false), json!("0")),
+        (Value::Null, Value::Null),
+    ] {
+        let scalar = dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_ingest",
+            args(json!({
+                "body": "scalar subject",
+                "transport": "web",
+                "external_id": format!("scalar:{}", expected),
+                "subject": subject,
+            })),
+            Some("w1:p1"),
+        )
+        .expect("scalar SQLite subject binding");
+        assert_eq!(scalar["message"]["subject"], expected);
+    }
+    let omitted = dispatch_owner_api(
+        &dispatcher,
+        &flock,
+        &env,
+        "owner_ingest",
+        args(json!({"body": "no subject", "transport": "web", "external_id": "scalar:omitted"})),
+        Some("w1:p1"),
+    )
+    .expect("omitted subject");
+    assert_eq!(omitted["message"]["subject"], Value::Null);
+
+    let oversized: Value = serde_json::from_str(
+        r#"{"body":"too large","transport":"web","external_id":"raw-overflow-subject","subject":18446744073709551616}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_ingest",
+            args(oversized),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "Python int too large to convert to SQLite INTEGER"
+    ));
+    let oversized_negative: Value = serde_json::from_str(
+        r#"{"body":"too small","transport":"web","external_id":"raw-overflow-negative-subject","subject":-9223372036854775809}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_ingest",
+            args(oversized_negative),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "Python int too large to convert to SQLite INTEGER"
+    ));
+    for (wire, expected) in [
+        (
+            r#"{"body":"float","transport":"web","external_id":"float-decimal-pos","subject":18446744073709551616.0}"#,
+            "1.84467440737096e+19",
+        ),
+        (
+            r#"{"body":"float","transport":"web","external_id":"float-exponent-pos","subject":1.8446744073709552e19}"#,
+            "1.84467440737096e+19",
+        ),
+        (
+            r#"{"body":"float","transport":"web","external_id":"float-decimal-neg","subject":-9223372036854775809.0}"#,
+            "-9.22337203685478e+18",
+        ),
+        (
+            r#"{"body":"float","transport":"web","external_id":"float-exponent-neg","subject":-9.223372036854776e18}"#,
+            "-9.22337203685478e+18",
+        ),
+    ] {
+        let wire: Value = serde_json::from_str(wire).unwrap();
+        let out = dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_ingest",
+            args(wire),
+            Some("w1:p1"),
+        )
+        .expect("floating-point subjects remain SQLite REAL binds");
+        assert_eq!(out["message"]["subject"], expected);
+    }
+    assert!(flock
+        .stores()
+        .inbox
+        .unwrap()
+        .find_by_external_id("owner", Some("raw-overflow-subject"))
+        .unwrap()
+        .is_none());
+    assert!(flock
+        .stores()
+        .inbox
+        .unwrap()
+        .find_by_external_id("owner", Some("raw-overflow-negative-subject"))
+        .unwrap()
+        .is_none());
+
+    let duplicate = dispatch_owner_api(
+        &dispatcher,
+        &flock,
+        &env,
+        "owner_ingest",
+        args(json!({
+            "body": "redelivery",
+            "transport": "telegram",
+            "external_id": "telegram:88",
+            "attach": "missing-file-must-not-be-opened",
+        })),
+        Some("w1:p1"),
+    )
+    .expect("duplicate returns the original message before attachment IO");
+    assert_eq!(duplicate["duplicate"], true);
+    assert_eq!(duplicate["message"]["message_id"], id);
+    assert_eq!(duplicate["message"]["body"], "incoming question");
+
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_ingest",
+            args(json!({"body": "x", "transport": "bogus"})),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "transport must be one of web, telegram, report; got 'bogus'"
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_ingest",
+            args(json!({"body": "x", "transport": "web", "attach": [attachment, 17]})),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "no such file to attach: 17"
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_ingest",
+            args(json!({"body": "x", "transport": "web", "attach": 17})),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "'int' object is not iterable"
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_ingest",
+            args(json!({"body": "denied", "transport": "web"})),
+            Some("w1:p2"),
+        ),
+        Err(DunkError::Refused(message)) if message.contains("not permitted for role worker")
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_ingest",
+            None,
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "owner_ingest: missing required argument(s): body, transport"
+    ));
+}
+
+#[test]
+fn h_owner_outbox_matches_python() {
+    let (_dir, flock, env) = owner_api_fixture("owner-outbox-api");
+    let inbox = flock.stores().inbox.unwrap();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_owner_reply_ingest_outbox();
+    let mut telegram_questions = Vec::new();
+    for body in ["first", "second"] {
+        let question = inbox
+            .send(&crate::inbox_store::Outgoing {
+                mailbox: crate::flock::mailbox::OWNER_MAILBOX,
+                body: Some(body),
+                transport: Some("telegram"),
+                ..crate::inbox_store::Outgoing::default()
+            })
+            .unwrap();
+        telegram_questions.push(question);
+    }
+    let web_question = inbox
+        .send(&crate::inbox_store::Outgoing {
+            mailbox: crate::flock::mailbox::OWNER_MAILBOX,
+            body: Some("web question"),
+            transport: Some("web"),
+            ..crate::inbox_store::Outgoing::default()
+        })
+        .unwrap();
+    for question in telegram_questions
+        .iter()
+        .chain(std::iter::once(&web_question))
+    {
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_reply",
+            args(json!({"message_id": question, "body": "answer"})),
+            Some("w1:p1"),
+        )
+        .unwrap();
+    }
+
+    let one = dispatch_owner_api(
+        &dispatcher,
+        &flock,
+        &env,
+        "owner_outbox",
+        args(json!({"transport": " TELEGRAM ", "limit": "1"})),
+        Some("w1:p1"),
+    )
+    .unwrap();
+    assert_eq!(one["transport"], " TELEGRAM ");
+    assert_eq!(one["count"], 1);
+    assert_eq!(one["messages"][0]["reply_to"], telegram_questions[0]);
+    assert_eq!(one["messages"][0]["sender"], "w1:p1");
+    assert_eq!(one["messages"][0]["transport"], "telegram");
+    assert_eq!(one["messages"][0]["read_at"], Value::Null);
+
+    let all = dispatch_owner_api(
+        &dispatcher,
+        &flock,
+        &env,
+        "owner_outbox",
+        args(json!({"transport": "telegram", "limit": -1})),
+        Some("w1:p1"),
+    )
+    .unwrap();
+    assert_eq!(all["count"], 2);
+    let zero = dispatch_owner_api(
+        &dispatcher,
+        &flock,
+        &env,
+        "owner_outbox",
+        args(json!({"transport": "telegram", "limit": 0})),
+        Some("w1:p1"),
+    )
+    .unwrap();
+    assert_eq!(zero["count"], 0);
+    let defaulted = dispatch_owner_api(
+        &dispatcher,
+        &flock,
+        &env,
+        "owner_outbox",
+        args(json!({"transport": "telegram", "limit": null})),
+        Some("w1:p1"),
+    )
+    .unwrap();
+    assert_eq!(defaulted["count"], 2);
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_outbox",
+            args(json!({"transport": "telegram", "limit": "bad"})),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "invalid literal for int() with base 10: 'bad'"
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_outbox",
+            args(json!({"transport": "telegram", "limit": 9223372036854775808_u64})),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "Python int too large to convert to SQLite INTEGER"
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_outbox",
+            args(serde_json::from_str(
+                r#"{"transport":"web","limit":-9223372036854775809}"#
+            )
+            .unwrap()),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "Python int too large to convert to SQLite INTEGER"
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_outbox",
+            args(json!({"transport": "bogus", "limit": 18446744073709551616_u128})),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "transport must be one of web, telegram, report; got 'bogus'"
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_outbox",
+            args(json!({"transport": null, "limit": 18446744073709551616_u128})),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "owner_outbox: missing required argument(s): transport"
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_outbox",
+            args(json!({"transport": null, "limit": "bad"})),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "owner_outbox: missing required argument(s): transport"
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_outbox",
+            args(json!({"transport": "web", "limit": 18446744073709551616_u128})),
+            Some("w1:p2"),
+        ),
+        Err(DunkError::Refused(message)) if message.contains("not permitted for role worker")
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_outbox",
+            args(json!({"transport": "web", "limit": "bad"})),
+            Some("w1:p2"),
+        ),
+        Err(DunkError::Refused(message)) if message.contains("not permitted for role worker")
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_outbox",
+            args(json!({"transport": null, "limit": 20})),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "owner_outbox: missing required argument(s): transport"
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_outbox",
+            args(json!({"transport": "telegram", "limit": "9223372036854775808"})),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "Python int too large to convert to SQLite INTEGER"
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_outbox",
+            None,
+            Some("w1:p2"),
+        ),
+        Err(DunkError::Refused(message)) if message.contains("not permitted for role worker")
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_outbox",
+            None,
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "owner_outbox: missing required argument(s): transport"
+    ));
+}
+
+#[test]
+fn h_owner_ingest_duplicate_preserves_raw_wire_order() {
+    let (_dir, flock, env) = owner_api_fixture("owner-ingest-duplicate-wire-order");
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_owner_reply_ingest_outbox();
+    let first = dispatch_owner_api(
+        &dispatcher,
+        &flock,
+        &env,
+        "owner_ingest",
+        args(json!({"body": "original", "transport": "web", "external_id": "wire-duplicate"})),
+        Some("w1:p1"),
+    )
+    .unwrap();
+    let message_id = first["message"]["message_id"].clone();
+
+    for subject in [json!(["unsupported"]), json!({"unsupported": true})] {
+        let duplicate = dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_ingest",
+            args(json!({
+                "body": "redelivery",
+                "transport": "web",
+                "external_id": "wire-duplicate",
+                "attach": 17,
+                "subject": subject,
+            })),
+            Some("w1:p1"),
+        )
+        .expect("duplicate must return before raw attachment/subject handling");
+        assert_eq!(duplicate["duplicate"], true);
+        assert_eq!(duplicate["message"]["message_id"], message_id);
+    }
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_ingest",
+            args(json!({
+                "body": "redelivery",
+                "transport": "bogus",
+                "external_id": "wire-duplicate",
+                "attach": 17,
+                "subject": [],
+            })),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "transport must be one of web, telegram, report; got 'bogus'"
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_ingest",
+            args(json!({"body": "redelivery", "transport": "bogus", "external_id": "wire-duplicate", "attach": 17})),
+            Some("w1:p2"),
+        ),
+        Err(DunkError::Refused(message)) if message.contains("not permitted for role worker")
+    ));
+}
+
+#[test]
+fn h_owner_ingest_raw_errors_match_python_order() {
+    let (dir, flock, env) = owner_api_fixture("owner-ingest-raw-errors");
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_owner_reply_ingest_outbox();
+    let inbox = flock.stores().inbox.unwrap();
+    let missing = dir.path().join("missing-before-subject-bind.txt");
+    let attachment = dir.path().join("staged-before-subject-bind.txt");
+    std::fs::write(&attachment, b"attachment fixture").unwrap();
+
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher, &flock, &env, "owner_ingest",
+            args(json!({"body": "  ", "transport": "web", "external_id": "raw-empty-body", "attach": []})),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "a message needs a body or an attachment"
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher, &flock, &env, "owner_ingest",
+            args(json!({"body": "  ", "transport": "web", "external_id": "raw-noniterable", "attach": 17})),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "'int' object is not iterable"
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher, &flock, &env, "owner_ingest",
+            args(json!({"body": "x", "transport": "web", "external_id": "raw-missing-path", "attach": [missing.to_string_lossy()], "subject": []})),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message.starts_with("no such file to attach:")
+    ));
+    assert!(matches!(
+        dispatch_owner_api(
+            &dispatcher, &flock, &env, "owner_ingest",
+            args(json!({"body": "x", "transport": "web", "external_id": "raw-python-dict-path", "attach": [{"x": true}]})),
+            Some("w1:p1"),
+        ),
+        Err(DunkError::Refused(message)) if message == "no such file to attach: {'x': True}"
+    ));
+    for (external_id, subject, expected) in [
+        (
+            "raw-list-subject",
+            json!([]),
+            "Error binding parameter 6: type 'list' is not supported",
+        ),
+        (
+            "raw-dict-subject",
+            json!({"x": 1}),
+            "Error binding parameter 6: type 'dict' is not supported",
+        ),
+    ] {
+        assert!(matches!(
+            dispatch_owner_api(
+                &dispatcher, &flock, &env, "owner_ingest",
+                args(json!({"body": "x", "transport": "web", "external_id": external_id, "attach": [attachment.to_string_lossy()], "subject": subject})),
+                Some("w1:p1"),
+            ),
+            Err(DunkError::Refused(message)) if message == expected
+        ));
+    }
+    for external_id in [
+        "raw-empty-body",
+        "raw-noniterable",
+        "raw-missing-path",
+        "raw-python-dict-path",
+        "raw-list-subject",
+        "raw-dict-subject",
+    ] {
+        assert!(
+            inbox
+                .find_by_external_id("owner", Some(external_id))
+                .unwrap()
+                .is_none(),
+            "failed request inserted {external_id}"
+        );
+    }
 }

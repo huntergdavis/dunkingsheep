@@ -710,6 +710,16 @@ pub fn created_error(result: &Value) -> Option<String> {
     truthy(get(result, "error")).then(|| format!("{}\n", py_str(get(result, "error"))))
 }
 
+/// `print_rename`: preserve Python's repr formatting for the new label.
+pub fn render_renamed(result: &Value) -> String {
+    format!(
+        "renamed {} {} -> {}\n",
+        py_str(get(result, "kind")),
+        py_str(get(result, "id")),
+        py_repr(get(result, "label"))
+    )
+}
+
 pub fn render_poll(result: &Value) -> String {
     let status = get(result, "status");
     let count = get(result, "inbox_count");
