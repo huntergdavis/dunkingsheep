@@ -321,7 +321,7 @@ impl LoopRuntimeAdapter {
         let runtime = Handle::current();
         tokio::task::spawn_blocking(move || {
             let terminal = Mutex::new(factory());
-            let adapter = TerminalCallAdapter {
+            let mut adapter = TerminalCallAdapter {
                 flock: &flock,
                 terminal: &terminal,
                 runtime: &runtime,
