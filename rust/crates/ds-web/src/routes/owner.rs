@@ -13,14 +13,13 @@ use std::{
 
 use axum::{
     body::to_bytes,
-    extract::{Extension, Query, Request},
+    extract::{Extension, Request},
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
 use ds_core::owner::{owner_thread_role, OwnerThreadRole};
-use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
 use super::auth::{AuthBackend, AuthError, Identity, RequestScheme};
@@ -131,20 +130,22 @@ pub fn router_with_scheme(scheme: RequestScheme) -> Router {
         .layer(Extension(scheme))
 }
 
-#[derive(Deserialize)]
-struct CapabilityQuery {
-    pane: Option<String>,
-}
-
 async fn api_capability(
     Extension(state): Extension<Arc<OwnerWebState>>,
-    Query(query): Query<CapabilityQuery>,
+    request: Request,
 ) -> Response {
-    let Some(pane) = query.pane else {
-        return detail_response(
+    let query = match parse_query(request.uri().query()) {
+        Ok(query) => query,
+        Err(()) => return detail_response(StatusCode::BAD_REQUEST, "invalid query".to_owned()),
+    };
+    let Some(pane) = query.get("pane") else {
+        return (
             StatusCode::UNPROCESSABLE_ENTITY,
-            "pane is required".to_owned(),
-        );
+            Json(json!({"detail": [{
+                "type": "missing", "loc": ["query", "pane"], "msg": "Field required"
+            }]})),
+        )
+            .into_response();
     };
     let pane = pane.trim();
     let capability = state.capability(pane).await;
@@ -323,22 +324,20 @@ async fn api_owner_send(
     nudge_or_report(state.as_ref(), result, pane_id, &direct_detail, &text).await
 }
 
-#[derive(Deserialize)]
-struct ThreadQuery {
-    limit: Option<String>,
-}
-
 async fn api_owner_thread(
     Extension(state): Extension<Arc<OwnerWebState>>,
     Extension(auth): Extension<Arc<dyn AuthBackend>>,
     Extension(scheme): Extension<RequestScheme>,
-    headers: HeaderMap,
-    Query(query): Query<ThreadQuery>,
+    request: Request,
 ) -> Response {
-    if let Err(response) = authenticate(auth.as_ref(), &headers, scheme).await {
+    if let Err(response) = authenticate(auth.as_ref(), request.headers(), scheme).await {
         return response;
     }
-    let limit = match parse_thread_limit(query.limit.as_deref()) {
+    let query = match parse_query(request.uri().query()) {
+        Ok(query) => query,
+        Err(()) => return detail_response(StatusCode::BAD_REQUEST, "invalid query".to_owned()),
+    };
+    let limit = match parse_thread_limit(query.get("limit").map(String::as_str)) {
         Ok(limit) => limit,
         Err(response) => return response,
     };
@@ -415,6 +414,59 @@ fn auth_error_response(error: AuthError) -> Response {
 
 fn detail_response(status: StatusCode, detail: String) -> Response {
     (status, Json(json!({"detail": detail}))).into_response()
+}
+
+fn parse_query(raw: Option<&str>) -> Result<HashMap<String, String>, ()> {
+    fn decode(component: &str) -> Result<String, ()> {
+        let bytes = component.as_bytes();
+        let mut decoded = Vec::with_capacity(bytes.len());
+        let mut index = 0;
+        while index < bytes.len() {
+            match bytes[index] {
+                b'+' => {
+                    decoded.push(b' ');
+                    index += 1;
+                }
+                b'%' => {
+                    let high = bytes
+                        .get(index + 1)
+                        .and_then(|byte| hex_value(*byte))
+                        .ok_or(())?;
+                    let low = bytes
+                        .get(index + 2)
+                        .and_then(|byte| hex_value(*byte))
+                        .ok_or(())?;
+                    decoded.push((high << 4) | low);
+                    index += 3;
+                }
+                byte => {
+                    decoded.push(byte);
+                    index += 1;
+                }
+            }
+        }
+        String::from_utf8(decoded).map_err(|_| ())
+    }
+
+    fn hex_value(byte: u8) -> Option<u8> {
+        match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            b'A'..=b'F' => Some(byte - b'A' + 10),
+            _ => None,
+        }
+    }
+
+    let mut query = HashMap::new();
+    for pair in raw
+        .unwrap_or_default()
+        .split('&')
+        .filter(|pair| !pair.is_empty())
+    {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        query.insert(decode(key)?, decode(value)?);
+    }
+    Ok(query)
 }
 
 fn parse_thread_limit(raw: Option<&str>) -> Result<i64, Response> {
