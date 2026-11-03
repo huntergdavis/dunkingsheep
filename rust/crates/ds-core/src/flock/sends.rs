@@ -189,7 +189,7 @@ impl Flock {
         self.typing_guard_with_timeout(pane_id, typing_timeout())
     }
 
-    fn typing_guard_with_timeout(
+    pub(super) fn typing_guard_with_timeout(
         &self,
         pane_id: &str,
         timeout: Duration,
@@ -394,16 +394,16 @@ pub fn submit_text(
 ) -> SendAction {
     let guarded = guard.is_some();
     let mut perform = |guard: &TypingGuard<'_>| {
+        if let Some(dead) = dead_session(env, pane_id) {
+            return Err(format!(
+                "agent session is dead ({dead}); not submitting into a dead composer"
+            ));
+        }
         if check_box {
             match ensure_box_clear(flock, env, pane_id, false, false, false, guard) {
                 Ok(()) => {}
                 Err(reason) => return Err(format!("{BOX_HOLD} ({reason})")),
             }
-        }
-        if let Some(dead) = dead_session(env, pane_id) {
-            return Err(format!(
-                "agent session is dead ({dead}); not submitting into a dead composer"
-            ));
         }
         let baseline = env.read_status(pane_id);
         let generation = env.attempt_generation(pane_id);
@@ -448,6 +448,7 @@ pub fn submit_text(
                 busy_hint,
                 guarded,
             }),
+            key_confirmation: None,
         })
     };
 

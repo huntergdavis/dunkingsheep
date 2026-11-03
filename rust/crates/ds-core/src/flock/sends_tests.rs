@@ -737,6 +737,23 @@ mod guarded_preparation_tests {
     }
 
     #[test]
+    fn submit_text_refuses_a_dead_session_before_box_preflight_can_press_enter() {
+        let flock = flock();
+        let mut pane = Pane::default();
+        pane.screen_script.borrow_mut().push_back(Some(
+            "\u{25a0} Server connection could not be restored\n".into(),
+        ));
+        let guard = flock.typing_guard(P).unwrap();
+
+        let action = submit_text(&flock, &mut pane, P, "ours", true, true, Some(&guard));
+
+        assert!(!action.ok);
+        assert!(action.detail.starts_with("agent session is dead"));
+        assert!(pane.keys.is_empty());
+        assert!(pane.typed.is_empty());
+    }
+
+    #[test]
     fn composer_preflight_submits_foreign_text_once_only_when_draft_preservation_is_disabled() {
         let flock = flock();
         let mut pane = submit_pane("idle");
