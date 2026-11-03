@@ -11,6 +11,7 @@ use super::*;
 use crate::api::{CommandEnv, HandlerContext};
 use crate::config::Env;
 use crate::flock::panes::Stores;
+use crate::flock::status_runtime::StatusState;
 use crate::github::{GitHubRequest, GitHubResponse, GitHubTransport, PinBoxFuture, Tokens};
 use crate::proc::Caller;
 use crate::roles::Roles;
@@ -226,7 +227,16 @@ fn completion_services(
             if dispatch { "1" } else { "0" },
         ),
         ("DUNKINGSHEEP_DISPATCH_LANES", pane.as_str()),
+        ("DUNKINGSHEEP_MAILBOX", pane.as_str()),
     ]);
+    flock
+        .attach_status_state(StatusState::at_start(
+            "test",
+            dir.path().join("status.json"),
+            std::env::current_exe().unwrap(),
+            env.clone(),
+        ))
+        .unwrap();
     let factory: crate::flock::loop_env::LoopTerminalFactory =
         Arc::new(|| Box::new(FakeTerminal::default()));
     let jobs = NextJobs::with_providers(
