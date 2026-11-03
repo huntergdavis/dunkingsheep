@@ -14,6 +14,7 @@ mod inbox_stores;
 mod keypress;
 mod layout;
 mod outbox_runtime;
+mod owner_push;
 mod push;
 mod push_eligibility;
 mod registrations;
@@ -69,6 +70,7 @@ pub(crate) struct RequestRuntimeAdapter<'a> {
     inbox: Option<Arc<crate::inbox_store::Store>>,
     outbox: Option<&'a outbox_runtime::OutboxRuntime>,
     next_jobs: Option<&'a crate::tasks::next_job_runtime::NextJobs>,
+    owner_push: Option<&'a owner_push::OwnerPushService>,
 }
 
 /// Terminal access shared by the request and loop adapters. A lock is held only while a
@@ -108,7 +110,20 @@ impl<'a> RequestRuntimeAdapter<'a> {
             inbox,
             outbox: None,
             next_jobs: None,
+            owner_push: None,
         }
+    }
+
+    /// Borrow the process-owned store only from the services owning this request's Flock.
+    pub(crate) fn with_owner_push(
+        mut self,
+        services: &'a RuntimeServices,
+    ) -> Result<Self, DunkError> {
+        if !std::ptr::eq(self.terminal.flock, services.flock.as_ref()) {
+            return Err(refusal("request owner push flock mismatch"));
+        }
+        self.owner_push = Some(&services.owner_push);
+        Ok(self)
     }
 
     /// Bind the existing outbox owner for this request; never substitute another flock.
@@ -391,6 +406,12 @@ impl PaneInfoEnv for RequestRuntimeAdapter<'_> {
 }
 
 impl crate::api::CommandEnv for RequestRuntimeAdapter<'_> {
+    fn owner_push(&self) -> Result<&crate::owner::OwnerPush, DunkError> {
+        self.owner_push
+            .ok_or_else(|| refusal("owner push adapter is not wired"))?
+            .get()
+    }
+
     fn send_commands(&self) -> Result<&dyn crate::api::SendCommandEnv, DunkError> {
         self.require_send_outbox()?;
         Ok(self)
