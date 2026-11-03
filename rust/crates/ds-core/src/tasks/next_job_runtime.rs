@@ -321,7 +321,7 @@ impl NextJobs {
 
 /// Read one snapshot so an unreadable or corrupt retirement registry cannot become
 /// permission. A missing file has the shared store's accepted empty semantics.
-fn retirement_status(pane: &str, path: &std::path::Path) -> Result<bool, ()> {
+pub(crate) fn retirement_status(pane: &str, path: &std::path::Path) -> Result<bool, ()> {
     let records: BTreeMap<String, Value> =
         crate::atomic_json::read_or_default(path).map_err(|_| ())?;
     let Some(record) = records.get(pane.trim()) else {
@@ -331,7 +331,7 @@ fn retirement_status(pane: &str, path: &std::path::Path) -> Result<bool, ()> {
     Ok(true)
 }
 
-fn process_gate_env() -> Result<Env, ()> {
+pub(crate) fn process_gate_env() -> Result<Env, ()> {
     let mut values = Vec::new();
     for key in [
         "DUNKINGSHEEP_TURN_END_DISPATCH",
@@ -361,7 +361,7 @@ fn process_gate_env() -> Result<Env, ()> {
 }
 
 /// Config file precedes the environment; an empty/missing list falls back to the environment.
-fn dispatch_entries(env: &Env) -> Result<Vec<String>, ()> {
+pub(crate) fn dispatch_entries(env: &Env) -> Result<Vec<String>, ()> {
     let path = crate::config::config_dir(env)
         .map_err(|_| ())?
         .join("dispatch_lanes.json");
@@ -421,7 +421,7 @@ fn dispatch_entries(env: &Env) -> Result<Vec<String>, ()> {
     Ok(entries)
 }
 
-fn dispatch_allowlist(entries: &[String], lanes: &[Value]) -> BTreeSet<String> {
+pub(crate) fn dispatch_allowlist(entries: &[String], lanes: &[Value]) -> BTreeSet<String> {
     let mut resolved = BTreeSet::new();
     for entry in entries {
         let wanted = entry.to_lowercase();
