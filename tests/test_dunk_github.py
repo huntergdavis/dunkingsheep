@@ -369,6 +369,38 @@ class TimerTests(unittest.TestCase):
         self.assertEqual(sorted([REVIEWER, SECOND_REVIEWER]),
                          self.sync.head_verdicts("o/r", "a" * 40, 7)[0])
 
+    def _stale_live_review_with_accepted_current_head(self, required):
+        accepted = self._review("accept")
+        stale = self.flock.tasks.add("global", "stale review", kind="review",
+                                    repo="o/r", pr=7, head="b" * 40, priority="high")
+        self.github.merge_blocked = True
+        with patch.object(dunk_github, "required_verdicts", return_value=required):
+            report = self.sync.run()
+            self.assertEqual([stale["id"]], report["cancelled"])
+            self.assertEqual("cancelled", self.flock.tasks.get(stale["id"])["status"])
+            rows = self.flock.tasks.list_review_rows_visible()
+            live = [row for row in rows if row["status"] not in ("done", "cancelled")]
+            if required == 2:
+                self.assertEqual(1, len(live))
+                self.assertEqual("a" * 40, live[0]["head"])
+                for _ in range(2):
+                    self.assertEqual([], self.sync.run()["cancelled"])
+                    self.assertEqual("open", self.flock.tasks.get(live[0]["id"])["status"])
+                self.flock.tasks.complete(live[0]["id"], by=SECOND_REVIEWER,
+                                          verdict="accept")
+                self.sync.run()
+                self.assertEqual(sorted([REVIEWER, SECOND_REVIEWER]),
+                                 self.sync.head_verdicts("o/r", "a" * 40, 7)[0])
+            else:
+                self.assertEqual([], live)
+            self.assertEqual("done", self.flock.tasks.get(accepted["id"])["status"])
+
+    def test_stale_head_is_cancelled_before_required_second_review_is_filed(self):
+        self._stale_live_review_with_accepted_current_head(2)
+
+    def test_stale_head_is_cancelled_when_current_accept_threshold_is_met(self):
+        self._stale_live_review_with_accepted_current_head(1)
+
     def test_first_accept_during_listing_files_required_second_without_cancel(self):
         task = self._review()
         original = self.github.open_pulls

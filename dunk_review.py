@@ -385,6 +385,15 @@ class Sync:
                 # GitHub reads can outlive another lane's completed verdict.
                 # Refresh after those reads, without the task-card history cap.
                 done = self._judged_heads().get((repo, pr["number"], pr["head"]))
+                if current and current.get("head") != pr["head"]:
+                    if not dry_run:
+                        if self._cancel_review_if_live(
+                                current["id"], f"head moved to {pr['head'][:12]}; "
+                                               "delta review filed"):
+                            report["cancelled"].append(current["id"])
+                    else:
+                        report["cancelled"].append(current["id"])
+                    current = None
                 if done is not None and current and current.get("head") == pr["head"] \
                         and not dry_run:
                     final, _, needs_fix, _ = self._is_final(repo, pr["head"], pr["number"])
@@ -419,14 +428,6 @@ class Sync:
                             self._second_review(repo, pr["number"], pr["head"],
                                                 accepts[0] if accepts else None, report)
                     continue
-                if current:
-                    if not dry_run:
-                        if self._cancel_review_if_live(
-                                current["id"], f"head moved to {pr['head'][:12]}; "
-                                               "delta review filed"):
-                            report["cancelled"].append(current["id"])
-                    else:
-                        report["cancelled"].append(current["id"])
                 author = attribute_author(pr, lanes, mints)
                 if author is None:
                     author = author_from_tasks(repo, pr["number"], self.flock)
