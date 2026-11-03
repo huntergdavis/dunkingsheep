@@ -173,7 +173,7 @@ fn full_conn(
     let wanted = id;
     let id = id.trim();
     let typed = conn.query_row(
-        "SELECT id, scope, title, body, status, priority, kind, assignees, depends_on, block_reason, created_at, updated_at FROM tasks WHERE id = ?",
+        "SELECT id, scope, title, body, status, priority, kind, assignees, depends_on, block_reason, created_at, updated_at, completed_by, completed_at FROM tasks WHERE id = ?",
         [id], row_to_task,
     ).optional().map_err(map_sqlite)?
         .ok_or_else(|| DunkError::Refused(format!("no task with id {wanted:?}")))?;

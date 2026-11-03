@@ -149,6 +149,10 @@ pub struct Task {
     pub created_at: f64,
     /// Unix seconds.
     pub updated_at: f64,
+    /// Pane or actor that completed this task, when status is done.
+    pub completed_by: Option<String>,
+    /// Unix seconds when status became done.
+    pub completed_at: Option<f64>,
 }
 
 /// The task store: one writer actor, as `db.rs` provides.
@@ -365,7 +369,7 @@ impl Tasks {
         let id = wanted.clone();
         let found = self.writer.call(move |conn| {
             conn.query_row(
-                "SELECT id, scope, title, body, status, priority, kind, assignees, depends_on, block_reason, created_at, updated_at FROM tasks WHERE id = ?",
+                "SELECT id, scope, title, body, status, priority, kind, assignees, depends_on, block_reason, created_at, updated_at, completed_by, completed_at FROM tasks WHERE id = ?",
                 params![id], row_to_task).optional().map_err(db::map_sqlite)
         }).await?;
         found.ok_or_else(|| DunkError::Refused(format!("no task with id {wanted:?}")))
@@ -376,7 +380,7 @@ impl Tasks {
         let scope = scope.to_string();
         self.writer.call(move |conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, scope, title, body, status, priority, kind, assignees, depends_on, block_reason, created_at, updated_at FROM tasks WHERE scope = ? ORDER BY created_at, id").map_err(db::map_sqlite)?;
+                "SELECT id, scope, title, body, status, priority, kind, assignees, depends_on, block_reason, created_at, updated_at, completed_by, completed_at FROM tasks WHERE scope = ? ORDER BY created_at, id").map_err(db::map_sqlite)?;
             let rows = stmt.query_map(params![scope], row_to_task).map_err(db::map_sqlite)?;
             let collected: Result<Vec<_>, _> = rows.collect();
             Ok(collected.map_err(db::map_sqlite)?)
@@ -1799,6 +1803,8 @@ fn row_to_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
         block_reason: row.get(9)?,
         created_at: row.get(10)?,
         updated_at: row.get(11)?,
+        completed_by: row.get(12)?,
+        completed_at: row.get(13)?,
     })
 }
 
@@ -2231,7 +2237,7 @@ fn dependency_state_conn(
 ) -> Result<(Task, DependencyState), DunkError> {
     let task = conn
         .query_row(
-            "SELECT id, scope, title, body, status, priority, kind, assignees, depends_on, block_reason, created_at, updated_at FROM tasks WHERE id = ?",
+            "SELECT id, scope, title, body, status, priority, kind, assignees, depends_on, block_reason, created_at, updated_at, completed_by, completed_at FROM tasks WHERE id = ?",
             params![wanted],
             row_to_task,
         )
