@@ -173,8 +173,13 @@ mod tests {
             dir.path().join("lanes"),
             false,
         ));
+        let inbox = Arc::new(
+            crate::inbox_store::Store::open(dir.path().join("inbox.db"), dir.path().join("blobs"))
+                .unwrap(),
+        );
         flock.attach_stores(Stores {
             tasks: Some(Arc::clone(&tasks)),
+            inbox: Some(inbox),
             ..Stores::default()
         });
         let jobs = crate::tasks::next_job_runtime::NextJobs::new(Arc::clone(&flock));
@@ -195,9 +200,22 @@ mod tests {
                 .with_next_jobs(&jobs)
                 .is_err()
         );
+        let outbox = crate::server_runtime::outbox_runtime::OutboxRuntime::new(
+            Arc::clone(&flock),
+            runtime.handle().clone(),
+            Arc::new(|| Box::new(FakeTerminal::new())),
+        )
+        .unwrap();
         let adapter = RequestRuntimeAdapter::new(&flock, &request, runtime.handle(), &terminal)
             .with_next_jobs(&jobs)
+            .unwrap()
+            .with_outbox(&outbox)
             .unwrap();
+        let hooks = crate::api::CommandEnv::turn_hooks(&adapter).unwrap();
+        let started = flock
+            .turn_start(Some("w1:p1"), Some(30.0), Some("test"), None, None, hooks)
+            .unwrap();
+        assert_eq!(started["pane_id"], "w1:p1");
         let env: &dyn TurnDispatchEnv = &adapter;
         // A cancelled handoff still blocks while its task is open, even after reassignment.
         runtime
@@ -207,6 +225,19 @@ mod tests {
         assert!(!env.open_handoffs("w1:p1", false).unwrap());
         runtime.block_on(tasks.cancel(&task.id, "test")).unwrap();
         assert!(!env.open_handoffs("w1:p1", true).unwrap());
+        runtime.block_on(tasks.delete(&task.id)).unwrap();
+        assert!(
+            env.open_handoffs("w1:p1", true).is_err(),
+            "missing referenced task must not permit a nudge"
+        );
+        rusqlite::Connection::open(dir.path().join("tasks.db"))
+            .unwrap()
+            .execute_batch("DROP TABLE task_events")
+            .unwrap();
+        assert!(
+            env.open_handoffs("w1:p1", false).is_err(),
+            "even a claim must surface the handoff read failure"
+        );
     }
 
     #[test]
