@@ -84,7 +84,7 @@ impl RuntimeDispatcher {
             runtime: &self.runtime,
         };
         let list_panes_grouped = || terminal.try_list_panes_grouped();
-        let get_pane = |id| PaneInfoEnv::get_pane(&terminal, id);
+        let get_pane = |id: &str| PaneInfoEnv::get_pane(&terminal, id);
         let query = RolePaneQuery {
             list_panes_grouped: &list_panes_grouped,
             get_pane: &get_pane,
