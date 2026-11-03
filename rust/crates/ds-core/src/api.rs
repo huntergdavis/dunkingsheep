@@ -53,6 +53,17 @@ pub trait SendCommandEnv {
     fn flush_box(&self, target: &Value, self_pane_id: Option<&str>) -> Result<Value, DunkError>;
 }
 
+/// Read-only data sources composed by T39 owner views. Inbox/app lookup errors stay fallible;
+/// production composition belongs to t1605, while the pure response transformations remain in
+/// `flock::views`.
+pub trait OwnerViewEnv {
+    fn app_db_path(&self) -> Result<PathBuf, DunkError>;
+    fn inbox_status(&self, message_id: &str, now: f64) -> Result<Option<Value>, DunkError>;
+    fn inbox_stats(&self, now: f64) -> Result<Vec<Value>, DunkError>;
+    fn seen_latencies(&self, mailbox: &str, limit: usize) -> Result<Vec<f64>, DunkError>;
+    fn now(&self) -> f64;
+}
+
 /// A synchronous adapter for command dependencies. All methods are object-safe so a daemon can
 /// supply one per request without putting backend types in handler signatures.
 pub trait CommandEnv: PaneInfoEnv {
@@ -124,6 +135,11 @@ pub trait CommandEnv: PaneInfoEnv {
         Err(DunkError::Refused(
             "send command adapter is not wired".into(),
         ))
+    }
+
+    /// Read-only data sources for the owner message-state and reply-stat views.
+    fn owner_views(&self) -> Result<&dyn OwnerViewEnv, DunkError> {
+        Err(DunkError::Refused("owner view adapter is not wired".into()))
     }
 }
 
@@ -528,6 +544,13 @@ impl Dispatcher {
         self.register("owner_stats", h_owner_stats);
         self.register("owner_receipts", h_owner_receipts);
         self.register("owner_conversation", h_owner_conversation);
+    }
+
+    /// Register the T39 owner delivery and mailbox view handlers.
+    pub fn register_owner_delivered_message_state_reply_stats(&mut self) {
+        self.register("owner_delivered", h_owner_delivered);
+        self.register("message_state", h_message_state);
+        self.register("reply_stats", h_reply_stats);
     }
 
     /// Register only the T39 owner reply, ingest and outbox handlers.
@@ -1163,9 +1186,110 @@ pub fn h_owner_receipts(context: &HandlerContext<'_>, args: Args) -> Result<Valu
     )
 }
 
+fn view_string_list(args: &Args, key: &str, command: &str) -> Result<Vec<String>, DunkError> {
+    let Some(value) = args.get(key).filter(|value| truthy(value)) else {
+        return Ok(Vec::new());
+    };
+    let values = match value {
+        Value::String(text) => text
+            .split(',')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .map(str::to_string)
+            .collect(),
+        Value::Array(items) => items
+            .iter()
+            .map(python_value_string)
+            .filter(|item| !item.trim().is_empty())
+            .collect(),
+        _ => {
+            return Err(DunkError::Refused(format!(
+                "{command}: {key} must be a string or array"
+            )))
+        }
+    };
+    Ok(values)
+}
+
+/// `dunk_api.h_message_state`: combine application rows with inbox receipt/read state.
+pub fn h_message_state(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let ids = view_string_list(&args, "message_ids", "message_state")?;
+    let views = context.env.owner_views()?;
+    let now = views.now();
+    let app_db = views.app_db_path()?;
+    let mut inbox_rows = std::collections::HashMap::new();
+    for id in &ids {
+        if !id.is_empty() && id.chars().all(|character| character.is_ascii_digit()) {
+            continue;
+        }
+        // Python's `message_state` treats inbox.get failures like missing rows.
+        // Keep the adapter fallible for other operations, but preserve that local boundary.
+        if let Ok(Some(row)) = views.inbox_status(id, now) {
+            inbox_rows.insert(id.clone(), row);
+        }
+    }
+    Ok(crate::flock::views::message_state(
+        &app_db,
+        &|message_id| inbox_rows.get(message_id).cloned(),
+        &ids,
+        now,
+    ))
+}
+
+/// `dunk_api.h_reply_stats`: aggregate inbox stats and bounded read-latency samples.
+pub fn h_reply_stats(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let wanted = view_string_list(&args, "mailboxes", "reply_stats")?;
+    let views = context.env.owner_views()?;
+    let now = views.now();
+    let rows = views.inbox_stats(now)?;
+    let mut latencies = std::collections::HashMap::new();
+    for row in &rows {
+        let Some(mailbox) = row.get("mailbox").and_then(Value::as_str) else {
+            continue;
+        };
+        if !wanted.is_empty() && !wanted.iter().any(|name| name == mailbox) {
+            continue;
+        }
+        latencies.insert(mailbox.to_string(), views.seen_latencies(mailbox, 200)?);
+    }
+    Ok(crate::flock::views::reply_stats(
+        &rows,
+        &|mailbox| latencies.get(mailbox).cloned().unwrap_or_default(),
+        &wanted,
+        now,
+    ))
+}
+
 /// `dunk_api.h_report_list`.
 pub fn h_report_list(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
     crate::report::report_list_handler(context, args)
+}
+
+/// `dunk_api.h_owner_delivered`.
+pub fn h_owner_delivered(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let message_id = args
+        .get("message_id")
+        .map(python_value_string)
+        .ok_or_else(|| DunkError::Refused("'message_id' is required".into()))?;
+    let transport_value = args.get("transport");
+    let transport = transport_value
+        .filter(|value| !value.is_null())
+        .map(python_value_string);
+    let external_id = args
+        .get("external_id")
+        .filter(|value| truthy(value))
+        .map(python_value_string);
+    let delivered = crate::owner::OwnerConversations::new(context.flock, context.env).delivered(
+        &message_id,
+        transport.as_deref(),
+        external_id.as_deref(),
+        context.self_pane_id(),
+    )?;
+    Ok(json!({
+        "message": owner_message_value(&delivered.message),
+        "transport": transport_value.cloned().unwrap_or(Value::Null),
+        "delivered_at": delivered.delivered_at,
+    }))
 }
 
 /// `dunk_api.h_owner_conversation`.

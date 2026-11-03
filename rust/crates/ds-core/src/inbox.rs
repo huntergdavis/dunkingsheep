@@ -631,6 +631,38 @@ pub fn stats(pool: &ReadPool, now: f64) -> Result<Vec<MailboxStats>, DunkError> 
     })
 }
 
+/// `_seen_latencies`: recent read delays for one mailbox, ascending for median/last views.
+/// The SQL selects the newest `limit` non-null reads first, matching Python's query before
+/// sorting the resulting durations. A zero limit returns no samples.
+pub fn seen_latencies(pool: &ReadPool, mailbox: &str, limit: usize) -> Result<Vec<f64>, DunkError> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let (where_sql, mailbox_params) = mailbox_where(mailbox, "mailbox");
+    let sql = format!(
+        "SELECT created_at, read_at FROM messages WHERE {where_sql} AND read_at IS NOT NULL \
+         ORDER BY read_at DESC LIMIT ?"
+    );
+    let mut params: Vec<rusqlite::types::Value> = mailbox_params
+        .into_iter()
+        .map(rusqlite::types::Value::Text)
+        .collect();
+    params.push((limit.min(i64::MAX as usize) as i64).into());
+    pool.with(|connection: &Connection| {
+        let mut statement = connection.prepare(&sql).map_err(map_sqlite)?;
+        let rows = statement
+            .query_map(rusqlite::params_from_iter(params.iter()), |row| {
+                let created_at: f64 = row.get("created_at")?;
+                let read_at: f64 = row.get("read_at")?;
+                Ok((read_at - created_at).max(0.0))
+            })
+            .map_err(map_sqlite)?;
+        let mut latencies = rows.collect::<Result<Vec<_>, _>>().map_err(map_sqlite)?;
+        latencies.sort_by(f64::total_cmp);
+        Ok(latencies)
+    })
+}
+
 /// `pending_delivery(mailbox)`: the recovery receipt, or `None`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Receipt {
