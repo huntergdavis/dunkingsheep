@@ -85,6 +85,7 @@ impl LoopRuntimeAdapter {
             });
         };
         let pane_id = pane_id.to_owned();
+        let worker_pane_id = pane_id.clone();
         let signature_text = signature_text.to_owned();
         Box::pin(async move {
             let worker_services = std::sync::Arc::clone(&services);
@@ -113,7 +114,7 @@ impl LoopRuntimeAdapter {
                         return;
                     }
                 };
-                let generation = crate::flock::sends::pane_generation(terminal, &pane_id);
+                let generation = crate::flock::sends::pane_generation(terminal, &worker_pane_id);
                 let mut reporter = worker_services
                     .stuck_reporter
                     .lock()
@@ -121,7 +122,7 @@ impl LoopRuntimeAdapter {
                 reporter.note(
                     flock,
                     &inbox,
-                    &pane_id,
+                    &worker_pane_id,
                     "modal",
                     generation.as_deref(),
                     Some(&signature_text),
@@ -383,7 +384,7 @@ mod tests {
                 now + 10.0,
             ));
         let owner_calls = std::env::var("DUNKINGSHEEP_DIR")
-            .map(|path| Path::new(&path))
+            .map(std::path::PathBuf::from)
             .expect("isolated alert config")
             .join("owner-calls");
         assert!(!owner_calls.exists(), "modal delay suppresses alert sinks");
@@ -437,8 +438,8 @@ mod tests {
             .expect("count durable VP alerts");
         assert_eq!(vp_messages, 1, "the real inbox accepted the VP alert");
         drop(inbox_db);
-        let alert_db =
-            Path::new(&std::env::var("DUNKINGSHEEP_DIR").unwrap()).join("dialog-alerts.db");
+        let alert_db = std::path::PathBuf::from(std::env::var("DUNKINGSHEEP_DIR").unwrap())
+            .join("dialog-alerts.db");
         let connection = rusqlite::Connection::open(alert_db).expect("alert database");
         connection
             .execute(
