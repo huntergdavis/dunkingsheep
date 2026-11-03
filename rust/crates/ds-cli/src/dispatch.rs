@@ -14,6 +14,7 @@ use std::cell::RefCell;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use crate::context_cmd::context_read;
 use crate::usage_cmd::{ordered_json, sorted_json, usage_command, Outcome};
@@ -1545,6 +1546,10 @@ fn guard_uninstall() -> Result<Value, String> {
         false
     };
     let bashrc = PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".bashrc");
+    let path_line = format!(
+        "export PATH=\"{}:$PATH\"",
+        guard_config_dir().join("bin").display()
+    );
     let mut bashrc_cleaned = false;
     if let Ok(contents) = std::fs::read_to_string(&bashrc) {
         let mut lines = Vec::new();
@@ -1555,13 +1560,7 @@ fn guard_uninstall() -> Result<Value, String> {
                 bashrc_cleaned = true;
                 continue;
             }
-            if skip_path_line
-                && line
-                    == format!(
-                        "export PATH=\"{}:$PATH\"",
-                        guard_config_dir().join("bin").display()
-                    )
-            {
+            if skip_path_line && line.trim() == path_line {
                 skip_path_line = false;
                 continue;
             }
@@ -1595,7 +1594,8 @@ fn guard_check() -> Result<Value, String> {
         .env_remove("HERDR_GUARD_OFF")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let output = command.output().map_err(|error| error.to_string())?;
+    command.stdin(Stdio::null());
+    let output = command_output_timeout(&mut command, Duration::from_secs(60))?;
     let mut detail = String::from_utf8_lossy(&output.stdout).into_owned();
     detail.push_str(&String::from_utf8_lossy(&output.stderr));
     let ok = {
@@ -1606,6 +1606,47 @@ fn guard_check() -> Result<Value, String> {
     };
     let detail: String = detail.trim().chars().take(300).collect();
     Ok(serde_json::json!({"ok": ok, "detail": detail}))
+}
+
+fn command_output_timeout(
+    command: &mut Command,
+    timeout: Duration,
+) -> Result<std::process::Output, String> {
+    let mut child = command.spawn().map_err(|error| error.to_string())?;
+    let started = Instant::now();
+    loop {
+        if child
+            .try_wait()
+            .map_err(|error| error.to_string())?
+            .is_some()
+        {
+            return child.wait_with_output().map_err(|error| error.to_string());
+        }
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait_with_output();
+            return Err(format!(
+                "guard check timed out after {} seconds",
+                timeout.as_secs()
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(test)]
+mod guard_timeout_tests {
+    use super::command_output_timeout;
+    use std::process::Command;
+    use std::time::Duration;
+
+    #[test]
+    fn guard_check_child_obeys_timeout() {
+        let mut command = Command::new("sleep");
+        command.arg("5");
+        let error = command_output_timeout(&mut command, Duration::from_millis(30)).unwrap_err();
+        assert!(error.contains("timed out"), "{error}");
+    }
 }
 
 fn owner_command(ns: &Map<String, Value>) -> Outcome {

@@ -4675,7 +4675,7 @@ fn cli_route_guard_actions_2() {
     std::fs::write(
         home.join(".bashrc"),
         format!(
-            "before\n# dunkingsheep herdr guard\nexport PATH=\"{}:$PATH\"\nafter\n",
+            "before\n# dunkingsheep herdr guard\n \t export PATH=\"{}:$PATH\"  \t\nafter\n",
             config.join("bin").display()
         ),
     )
