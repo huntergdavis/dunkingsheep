@@ -1,7 +1,10 @@
 //! Ports of `evaluate`, skipped/error handling, filtering and ordering in
 //! `tests/test_dunk_watchdog.py`.
 
+use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::process::Command;
 
 use rusqlite::Connection;
 use serde_json::{json, Value};
@@ -145,10 +148,61 @@ fn test_evaluate_reports_rule_failures_instead_of_returning_a_quiet_pass() {
     assert!(result["skipped"].as_array().unwrap().is_empty());
     assert_eq!(1, result["errors"].as_array().unwrap().len());
     assert_eq!("task.lease_stale", result["errors"][0]["rule"]);
-    assert!(result["errors"][0]["error"]
-        .as_str()
-        .unwrap()
-        .contains("malformed meta JSON"));
+    assert_eq!(python_json_load_error("{bad"), result["errors"][0]["error"]);
+}
+
+#[test]
+fn test_evaluate_reuses_host_samples_by_exact_path() {
+    let fixture = Fixture::new();
+    let mut config = fixture.config(&["host.load", "host.tmp", "host.disk_full"]);
+    config["panes"]["source"] = json!("none");
+    config["rules"]["host.disk_full"]["paths"] = json!(["/", "/tmp"]);
+    let calls = RefCell::new(BTreeMap::<String, usize>::new());
+    let sampler = |path: &std::path::Path| {
+        *calls
+            .borrow_mut()
+            .entry(path.to_string_lossy().into_owned())
+            .or_default() += 1;
+        Ok(HostSample {
+            load1: 0.1,
+            load5: Some(0.1),
+            cpus: 4,
+            used_fraction: 0.5,
+            free_bytes: 1_000_000,
+            inode_used_fraction: 0.5,
+        })
+    };
+
+    let result = evaluate(
+        &config,
+        NOW,
+        None,
+        Some(&sampler),
+        Some(&["host.load", "host.tmp", "host.disk_full"]),
+    );
+    assert!(result["errors"].as_array().unwrap().is_empty());
+    assert_eq!(1, calls.borrow().get("/").copied().unwrap_or_default());
+    assert_eq!(1, calls.borrow().get("/tmp").copied().unwrap_or_default());
+}
+
+#[test]
+fn test_evaluate_preserves_json_decode_error_for_other_rule_inputs() {
+    let fixture = Fixture::new();
+    std::fs::write(fixture.path("health.json"), "{bad").unwrap();
+    let config = fixture.config(&["health.failed"]);
+    let result = evaluate(&config, NOW, None, None, Some(&["health.failed"]));
+    assert_eq!(1, result["errors"].as_array().unwrap().len());
+    assert_eq!(python_json_load_error("{bad"), result["errors"][0]["error"]);
+}
+
+#[test]
+fn test_evaluate_preserves_file_error_for_json_input() {
+    let fixture = Fixture::new();
+    let missing = fixture.path("health.json");
+    let config = fixture.config(&["health.failed"]);
+    let result = evaluate(&config, NOW, None, None, Some(&["health.failed"]));
+    assert_eq!(1, result["errors"].as_array().unwrap().len());
+    assert_eq!(python_open_error(&missing), result["errors"][0]["error"]);
 }
 
 #[test]
@@ -178,4 +232,30 @@ fn test_self_error_contains_all_raw_problems_once() {
     assert_eq!("self", finding["severity"]);
     assert_eq!(json!(problems), finding["evidence"]["problems"]);
     assert_eq!("2 problem(s)", finding["measured"]);
+}
+
+fn python_json_load_error(raw: &str) -> String {
+    let output = Command::new("python3")
+        .args([
+            "-c",
+            "import json,sys\ntry: json.loads(sys.argv[1])\nexcept Exception as error: print(type(error).__name__ + ': ' + str(error))",
+            raw,
+        ])
+        .output()
+        .expect("python3 JSON error oracle");
+    assert!(output.status.success());
+    String::from_utf8(output.stdout).unwrap().trim().to_string()
+}
+
+fn python_open_error(path: &std::path::Path) -> String {
+    let output = Command::new("python3")
+        .args([
+            "-c",
+            "import sys\ntry: open(sys.argv[1]).read()\nexcept Exception as error: print(type(error).__name__ + ': ' + str(error))",
+        ])
+        .arg(path)
+        .output()
+        .expect("python3 file error oracle");
+    assert!(output.status.success());
+    String::from_utf8(output.stdout).unwrap().trim().to_string()
 }

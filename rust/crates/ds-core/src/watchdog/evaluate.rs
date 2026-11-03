@@ -4,7 +4,7 @@
 //! stay attached to the rule that encountered them, unavailable sources are reported as skipped,
 //! and findings are ordered by the shared `sort_findings` implementation.
 
-use std::cell::OnceCell;
+use std::cell::{OnceCell, RefCell};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -62,6 +62,7 @@ struct Inputs<'a> {
     panes: OnceCell<Result<Option<Panes>, DunkError>>,
     names: OnceCell<Result<BTreeMap<String, String>, DunkError>>,
     starvation: OnceCell<Result<Starvation, DunkError>>,
+    host_samples: RefCell<BTreeMap<String, HostSample>>,
 }
 
 impl Inputs<'_> {
@@ -124,16 +125,17 @@ impl Inputs<'_> {
     }
 
     fn host(&self, path: &Path) -> Result<HostSample, DunkError> {
-        match self.host_sampler {
+        let key = path.to_string_lossy().into_owned();
+        if let Some(sample) = self.host_samples.borrow().get(&key) {
+            return Ok(sample.clone());
+        }
+        let result = match self.host_sampler {
             Some(sampler) => sampler(path),
             None => rules_host::sample_host(path),
-        }
+        }?;
+        self.host_samples.borrow_mut().insert(key, result.clone());
+        Ok(result)
     }
-}
-
-fn config_dir(config: &Value) -> PathBuf {
-    let raw = config["stores"]["config_dir"].as_str().unwrap_or("");
-    PathBuf::from(crate::native_session::expanduser(raw))
 }
 
 fn clone_error(error: &DunkError) -> DunkError {
@@ -147,12 +149,188 @@ fn clone_error(error: &DunkError) -> DunkError {
     }
 }
 
-fn error_text(error: &DunkError) -> String {
+fn python_json_decode_error(raw: &str, error: &serde_json::Error) -> String {
+    let serde_error = error.to_string();
+    let reason = if serde_error.starts_with("key must be a string") {
+        "Expecting property name enclosed in double quotes"
+    } else if serde_error.starts_with("EOF while parsing a value")
+        || serde_error.starts_with("expected value")
+    {
+        "Expecting value"
+    } else if serde_error.starts_with("expected `:`") {
+        "Expecting ':' delimiter"
+    } else if serde_error.starts_with("expected `,`") {
+        "Expecting ',' delimiter"
+    } else {
+        "Invalid JSON"
+    };
+    let line = error.line().max(1);
+    let column = error.column().max(1);
+    let char_offset = raw
+        .split('\n')
+        .take(line.saturating_sub(1))
+        .map(|part| part.chars().count() + 1)
+        .sum::<usize>()
+        + column.saturating_sub(1);
+    format!("{reason}: line {line} column {column} (char {char_offset})")
+}
+
+fn task_event_python_error(message: &str, inputs: &Inputs<'_>) -> Option<String> {
+    if !(message.contains("malformed meta JSON") || message.contains("meta is not an object")) {
+        return None;
+    }
+    let event_id = message.strip_prefix("task_events ")?.split(' ').next()?;
+    let data = inputs.tasks().ok()?;
+    let event = data.events.iter().find(|event| {
+        event["id"]
+            .as_str()
+            .map_or_else(|| event["id"].to_string() == event_id, |id| id == event_id)
+    })?;
+    let raw = event["meta"]
+        .as_str()
+        .filter(|text| !text.is_empty())
+        .unwrap_or("{}");
+    match serde_json::from_str::<Value>(raw) {
+        Err(error) => Some(format!(
+            "JSONDecodeError: {}",
+            python_json_decode_error(raw, &error)
+        )),
+        Ok(value) if !value.is_object() => {
+            let python_type = match value {
+                Value::Null => "NoneType",
+                Value::Bool(_) => "bool",
+                Value::Number(ref number) if number.is_i64() || number.is_u64() => "int",
+                Value::Number(_) => "float",
+                Value::String(_) => "str",
+                Value::Array(_) => "list",
+                Value::Object(_) => "dict",
+            };
+            Some(format!(
+                "AttributeError: '{python_type}' object has no attribute 'get'"
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn error_text(rule_id: &str, error: &DunkError, inputs: &Inputs<'_>) -> String {
+    if let Some(python_error) = task_event_python_error(&error.to_string(), inputs) {
+        return python_error;
+    }
+    match error {
+        DunkError::Refused(message)
+            if message.starts_with("JSONDecodeError: ")
+                || message.starts_with("FileNotFoundError: ")
+                || message.starts_with("PermissionError: ")
+                || message.starts_with("IsADirectoryError: ")
+                || message.starts_with("NotADirectoryError: ") =>
+        {
+            message.clone()
+        }
+        DunkError::Refused(message) => {
+            if message.starts_with("invalid JSON:") {
+                if let Ok(raw) = fs::read_to_string(inputs.path("dunks.json")) {
+                    if let Err(error) = serde_json::from_str::<Value>(&raw) {
+                        return format!(
+                            "JSONDecodeError: {}",
+                            python_json_decode_error(&raw, &error)
+                        );
+                    }
+                }
+            }
+            if let Some(task_id) = malformed_assignees_task(message) {
+                if let Some(raw) = task_assignees(&inputs.path("tasks.db"), task_id) {
+                    if let Err(error) = serde_json::from_str::<Value>(&raw) {
+                        return format!(
+                            "JSONDecodeError: {}",
+                            python_json_decode_error(&raw, &error)
+                        );
+                    }
+                }
+            }
+            if matches!(
+                rule_id,
+                "dunk.skip_loop"
+                    | "dunk.overdue"
+                    | "delivery.ambiguous_queued"
+                    | "security.secret_text"
+            ) {
+                if let Some(errno) = os_error_number(message) {
+                    return python_os_error(&inputs.path("dunks.json"), errno);
+                }
+            }
+            // SQLite's Python reader surfaces sqlite3.OperationalError. The Rust SQLite adapter
+            // preserves its diagnostic text in Refused; recover the source exception here.
+            // These diagnostics come from rusqlite calls in watchdog rules; Python's
+            // sqlite3 exposes them as sqlite3.OperationalError.
+            if message.contains("no such table")
+                || message.contains("no such column")
+                || message.contains("unable to open database")
+                || message.contains("database disk image is malformed")
+                || message.contains("file is not a database")
+            {
+                format!("OperationalError: {message}")
+            } else {
+                format!("DunkError: {message}")
+            }
+        }
+        DunkError::Busy => "OperationalError: database is locked".into(),
+        other => error_text_for_transport(other),
+    }
+}
+
+fn malformed_assignees_task(message: &str) -> Option<&str> {
+    let rest = message.strip_prefix("task ")?;
+    rest.split_once(" has malformed assignees JSON")
+        .map(|(id, _)| id)
+}
+
+fn task_assignees(path: &Path, task_id: &str) -> Option<String> {
+    let connection =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .ok()?;
+    connection
+        .query_row(
+            "SELECT assignees FROM tasks WHERE id=?1",
+            [task_id],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+}
+
+fn os_error_number(message: &str) -> Option<i32> {
+    let (_, suffix) = message.rsplit_once("(os error ")?;
+    suffix.strip_suffix(')')?.parse().ok()
+}
+
+fn python_os_error(path: &Path, errno: i32) -> String {
+    let python_type = match errno {
+        2 => "FileNotFoundError",
+        13 => "PermissionError",
+        20 => "NotADirectoryError",
+        21 => "IsADirectoryError",
+        _ => "OSError",
+    };
+    let detail = std::io::Error::from_raw_os_error(errno)
+        .to_string()
+        .split(" (os error ")
+        .next()
+        .unwrap_or("I/O error")
+        .to_string();
+    format!(
+        "{python_type}: [Errno {errno}] {detail}: '{}'",
+        path.display()
+    )
+}
+
+fn error_text_for_transport(error: &DunkError) -> String {
     let kind = match error {
         DunkError::Refused(_) => "DunkError",
         DunkError::Retryable(_) => "RetryableDunkError",
         DunkError::Ambiguous(_) => "AmbiguousTarget",
-        DunkError::Identity(_) => "IdentityError",
+        // Identity refusals are surfaced by Python as the base DunkError class.
+        DunkError::Identity(_) => "DunkError",
+        // The pane client raises ConnectionError when its daemon is unavailable.
         DunkError::Unavailable(_) => "ConnectionError",
         DunkError::Busy => "OperationalError",
     };
@@ -160,8 +338,16 @@ fn error_text(error: &DunkError) -> String {
 }
 
 fn read_json(path: &Path) -> Result<Value, DunkError> {
-    let text = fs::read_to_string(path)?;
-    serde_json::from_str(&text).map_err(Into::into)
+    let text = fs::read_to_string(path).map_err(|error| {
+        let errno = error.raw_os_error().unwrap_or(5);
+        DunkError::Refused(python_os_error(path, errno))
+    })?;
+    serde_json::from_str(&text).map_err(|error| {
+        DunkError::Refused(format!(
+            "JSONDecodeError: {}",
+            python_json_decode_error(&text, &error)
+        ))
+    })
 }
 
 fn read_outbox(path: &Path) -> Result<Vec<Value>, DunkError> {
@@ -363,6 +549,7 @@ pub fn evaluate(
         panes: OnceCell::new(),
         names: OnceCell::new(),
         starvation: OnceCell::new(),
+        host_samples: RefCell::new(BTreeMap::new()),
     };
     let mut findings = Vec::new();
     let mut errors = Vec::new();
@@ -400,7 +587,10 @@ pub fn evaluate(
             Err(error) if *rule_id == "money.spend_projection" => {
                 skipped.push(json!({"rule": rule_id, "error": error.to_string()}));
             }
-            Err(error) => errors.push(json!({"rule": rule_id, "error": error_text(&error)})),
+            Err(error) => errors.push(json!({
+                "rule": rule_id,
+                "error": error_text(rule_id, &error, &inputs)
+            })),
         }
     }
     sort_findings(&mut findings);
