@@ -22,6 +22,14 @@ pub type MessagesReadFuture<'a> =
 pub type MessageContextFuture<'a> =
     Pin<Box<dyn Future<Output = Result<Option<Value>, MessagesReadError>> + Send + 'a>>;
 
+/// Parsed Python `int` values outside SQLite's signed 64-bit range remain
+/// distinguishable so the backend can preserve SQLite's overflow failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DeliveryId {
+    Integer(i64),
+    OutOfRange { negative: bool },
+}
+
 /// Database/client boundary for the read routes. Implementations perform the
 /// same reconciliation and SQL reads as `web.app.messages`, `deliveries`, and
 /// `message_context`; tests inject deterministic results without live state.
@@ -30,7 +38,7 @@ pub trait MessagesReadBackend: Send + Sync + 'static {
 
     fn messages<'a>(&'a self, channel: &'a str, before: i64, limit: i64) -> MessagesReadFuture<'a>;
 
-    fn deliveries<'a>(&'a self, channel: &'a str, ids: &'a [i64]) -> MessagesReadFuture<'a>;
+    fn deliveries<'a>(&'a self, channel: &'a str, ids: &'a [DeliveryId]) -> MessagesReadFuture<'a>;
 
     fn message_context(&self, message_id: i64) -> MessageContextFuture<'_>;
 }
@@ -63,25 +71,39 @@ async fn messages(
         Ok(query) => query,
         Err(()) => return detail_response(StatusCode::BAD_REQUEST, "invalid query"),
     };
-    let Some(channel) = query.get("channel") else {
-        return missing_query("channel");
-    };
+    let mut validation_errors = Vec::new();
+    let channel = query.get("channel");
+    if channel.is_none() {
+        validation_errors.push(missing_query_error("channel"));
+    }
     let before = match query.get("before") {
         Some(value) => match parse_python_int(value) {
-            Some(value) => value,
-            None => return invalid_integer("query", "before", value),
+            Some(value) => Some(value),
+            None => {
+                validation_errors.push(invalid_integer_error("query", "before", value));
+                None
+            }
         },
-        None => i64::MAX,
+        None => Some(i64::MAX),
     };
-    let before = if before == 0 { i64::MAX } else { before };
+    let before = before.map(|value| if value == 0 { i64::MAX } else { value });
     let limit = match query.get("limit") {
         Some(value) => match parse_python_int(value) {
-            Some(value) => value,
-            None => return invalid_integer("query", "limit", value),
+            Some(value) => Some(value),
+            None => {
+                validation_errors.push(invalid_integer_error("query", "limit", value));
+                None
+            }
         },
-        None => 50,
+        None => Some(50),
     }
-    .clamp(1, 100);
+    .map(|value| value.clamp(1, 100));
+    if !validation_errors.is_empty() {
+        return validation_error_response(validation_errors);
+    }
+    let channel = channel.expect("required channel was validated");
+    let before = before.expect("valid before value or default");
+    let limit = limit.expect("valid limit value or default");
     if !backend.known_channel(channel) {
         return detail_response(StatusCode::NOT_FOUND, "Unknown channel");
     }
@@ -104,12 +126,20 @@ async fn deliveries(
         Ok(query) => query,
         Err(()) => return detail_response(StatusCode::BAD_REQUEST, "invalid query"),
     };
-    let Some(channel) = query.get("channel") else {
-        return missing_query("channel");
-    };
-    let Some(raw_ids) = query.get("ids") else {
-        return missing_query("ids");
-    };
+    let mut validation_errors = Vec::new();
+    let channel = query.get("channel");
+    let raw_ids = query.get("ids");
+    if channel.is_none() {
+        validation_errors.push(missing_query_error("channel"));
+    }
+    if raw_ids.is_none() {
+        validation_errors.push(missing_query_error("ids"));
+    }
+    if !validation_errors.is_empty() {
+        return validation_error_response(validation_errors);
+    }
+    let channel = channel.expect("required channel was validated");
+    let raw_ids = raw_ids.expect("required ids were validated");
     if !backend.known_channel(channel) {
         return detail_response(StatusCode::NOT_FOUND, "Unknown channel");
     }
@@ -117,7 +147,12 @@ async fn deliveries(
         Ok(ids) => ids,
         Err(()) => return detail_response(StatusCode::UNPROCESSABLE_ENTITY, "Invalid message IDs"),
     };
-    if ids.len() > 100 || ids.iter().any(|id| *id < 1) {
+    if ids.len() > 100
+        || ids.iter().any(|id| match id {
+            DeliveryId::Integer(value) => *value < 1,
+            DeliveryId::OutOfRange { negative } => *negative,
+        })
+    {
         return detail_response(
             StatusCode::UNPROCESSABLE_ENTITY,
             "Too many or invalid message IDs",
@@ -144,9 +179,10 @@ async fn message_context(
         .strip_prefix("/api/messages/")
         .and_then(|suffix| suffix.strip_suffix("/context"))
         .unwrap_or_default();
-    let message_id = match parse_python_int(raw_id) {
+    let decoded_id = decode_path_component(raw_id);
+    let message_id = match parse_python_int(&decoded_id) {
         Some(value) => value,
-        None => return invalid_integer("path", "message_id", raw_id),
+        None => return invalid_integer("path", "message_id", &decoded_id),
     };
     match backend.message_context(message_id).await {
         Ok(Some(result)) => Json(result).into_response(),
@@ -175,7 +211,7 @@ async fn authenticate(
 }
 
 fn same_origin_refusal(headers: &HeaderMap, scheme: RequestScheme) -> Option<Response> {
-    let origin = headers.get(header::ORIGIN)?.to_str().ok()?;
+    let origin = headers.get(header::ORIGIN)?;
     let host = headers
         .get(header::HOST)
         .and_then(|value| value.to_str().ok())
@@ -184,8 +220,36 @@ fn same_origin_refusal(headers: &HeaderMap, scheme: RequestScheme) -> Option<Res
         RequestScheme::Http => "http",
         RequestScheme::Https => "https",
     };
-    (origin != format!("{scheme}://{host}"))
+    let expected = format!("{scheme}://{host}");
+    (origin.to_str().ok() != Some(expected.as_str()))
         .then(|| detail_response(StatusCode::FORBIDDEN, "Cross-origin request refused"))
+}
+
+fn decode_path_component(component: &str) -> String {
+    fn hex(byte: u8) -> Option<u8> {
+        match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            b'A'..=b'F' => Some(byte - b'A' + 10),
+            _ => None,
+        }
+    }
+
+    let bytes = component.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            if let (Some(high), Some(low)) = (hex(bytes[index + 1]), hex(bytes[index + 2])) {
+                decoded.push((high << 4) | low);
+                index += 3;
+                continue;
+            }
+        }
+        decoded.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&decoded).into_owned()
 }
 
 fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
@@ -218,27 +282,34 @@ fn detail_response(status: StatusCode, detail: impl Into<String>) -> Response {
     (status, Json(json!({"detail": detail.into()}))).into_response()
 }
 
-fn missing_query(field: &'static str) -> Response {
+fn missing_query_error(field: &'static str) -> Value {
+    json!({
+        "type": "missing",
+        "loc": ["query", field],
+        "msg": "Field required",
+        "input": null
+    })
+}
+
+fn invalid_integer_error(location: &'static str, field: &'static str, input: &str) -> Value {
+    json!({
+        "type": "int_parsing",
+        "loc": [location, field],
+        "msg": "Input should be a valid integer, unable to parse string as an integer",
+        "input": input
+    })
+}
+
+fn validation_error_response(errors: Vec<Value>) -> Response {
     (
         StatusCode::UNPROCESSABLE_ENTITY,
-        Json(json!({"detail": [{
-            "type": "missing", "loc": ["query", field], "msg": "Field required"
-        }]})),
+        Json(json!({"detail": errors})),
     )
         .into_response()
 }
 
 fn invalid_integer(location: &'static str, field: &'static str, input: &str) -> Response {
-    (
-        StatusCode::UNPROCESSABLE_ENTITY,
-        Json(json!({"detail": [{
-            "type": "int_parsing",
-            "loc": [location, field],
-            "msg": "Input should be a valid integer, unable to parse string as an integer",
-            "input": input
-        }]})),
-    )
-        .into_response()
+    validation_error_response(vec![invalid_integer_error(location, field, input)])
 }
 
 fn internal_error_response() -> Response {
@@ -297,18 +368,74 @@ fn parse_query(raw: Option<&str>) -> Result<HashMap<String, String>, ()> {
     Ok(query)
 }
 
-fn parse_message_ids(raw: &str) -> Result<Vec<i64>, ()> {
+fn parse_message_ids(raw: &str) -> Result<Vec<DeliveryId>, ()> {
     raw.split(',')
         .filter(|part| !part.is_empty())
-        .map(|part| {
-            // The Python route uses built-in int() here, which rejects a
-            // decimal point even when the fractional part is all zeroes.
-            (!part.contains('.'))
-                .then(|| parse_python_int(part))
-                .flatten()
-        })
+        .map(parse_builtin_int)
         .collect::<Option<Vec<_>>>()
         .ok_or(())
+}
+
+fn parse_builtin_int(raw: &str) -> Option<DeliveryId> {
+    const DECIMAL_ZEROES: &[u32] = &[
+        0x0030, 0x0660, 0x06F0, 0x07C0, 0x0966, 0x09E6, 0x0A66, 0x0AE6, 0x0B66, 0x0BE6, 0x0C66,
+        0x0CE6, 0x0D66, 0x0DE6, 0x0E50, 0x0ED0, 0x0F20, 0x1040, 0x1090, 0x17E0, 0x1810, 0x1946,
+        0x19D0, 0x1A80, 0x1A90, 0x1B50, 0x1BB0, 0x1C40, 0x1C50, 0xA620, 0xA8D0, 0xA900, 0xA9D0,
+        0xA9F0, 0xAA50, 0xABF0, 0xFF10, 0x104A0, 0x10D30, 0x10D40, 0x11066, 0x110F0, 0x11136,
+        0x111D0, 0x112F0, 0x11450, 0x114D0, 0x11650, 0x116C0, 0x116D0, 0x116DA, 0x11730, 0x118E0,
+        0x11950, 0x11BF0, 0x11C50, 0x11D50, 0x11DA0, 0x11F50, 0x16130, 0x16A60, 0x16AC0, 0x16B50,
+        0x16D70, 0x1CCF0, 0x1D7CE, 0x1D7D8, 0x1D7E2, 0x1D7EC, 0x1D7F6, 0x1E140, 0x1E2F0, 0x1E4F0,
+        0x1E5F1, 0x1E950, 0x1FBF0,
+    ];
+
+    fn decimal_digit(character: char) -> Option<u8> {
+        let codepoint = u32::from(character);
+        DECIMAL_ZEROES.iter().find_map(|zero| {
+            (codepoint >= *zero && codepoint < *zero + 10).then_some((codepoint - *zero) as u8)
+        })
+    }
+
+    let value = raw.trim();
+    if value.chars().count() > 8_601 {
+        return None;
+    }
+    let (negative, digits) = match value.as_bytes().first() {
+        Some(b'-') => (true, &value[1..]),
+        Some(b'+') => (false, &value[1..]),
+        _ => (false, value),
+    };
+    let characters: Vec<char> = digits.chars().collect();
+    let mut normalized = String::with_capacity(digits.len());
+    let mut digit_count = 0;
+    for (index, character) in characters.iter().copied().enumerate() {
+        if character == '_' {
+            if index == 0
+                || index + 1 == characters.len()
+                || decimal_digit(characters[index - 1]).is_none()
+                || decimal_digit(characters[index + 1]).is_none()
+            {
+                return None;
+            }
+            continue;
+        }
+        normalized.push(char::from(b'0' + decimal_digit(character)?));
+        digit_count += 1;
+        if digit_count > 4_300 {
+            return None;
+        }
+    }
+    if normalized.is_empty() {
+        return None;
+    }
+    let signed = if negative {
+        format!("-{normalized}")
+    } else {
+        normalized
+    };
+    Some(match signed.parse::<i64>() {
+        Ok(value) => DeliveryId::Integer(value),
+        Err(_) => DeliveryId::OutOfRange { negative },
+    })
 }
 
 /// Pydantic's query integer conversion accepts whitespace, signs, underscores,
@@ -423,13 +550,28 @@ mod tests {
             })
         }
 
-        fn deliveries<'a>(&'a self, channel: &'a str, ids: &'a [i64]) -> MessagesReadFuture<'a> {
+        fn deliveries<'a>(
+            &'a self,
+            channel: &'a str,
+            ids: &'a [DeliveryId],
+        ) -> MessagesReadFuture<'a> {
             self.calls.lock().unwrap().push(format!(
                 "deliveries:{channel}:{}",
-                ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",")
+                ids.iter()
+                    .map(|id| match id {
+                        DeliveryId::Integer(value) => value.to_string(),
+                        DeliveryId::OutOfRange { negative: true } => "negative-overflow".into(),
+                        DeliveryId::OutOfRange { negative: false } => "positive-overflow".into(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",")
             ));
             Box::pin(async move {
-                if self.fail {
+                if self.fail
+                    || ids
+                        .iter()
+                        .any(|id| matches!(id, DeliveryId::OutOfRange { negative: false }))
+                {
                     Err(MessagesReadError)
                 } else if ids.is_empty() {
                     Ok(json!({"deliveries": {}}))
@@ -580,6 +722,45 @@ mod tests {
     }
 
     #[test]
+    fn messages_aggregates_query_validation_errors() {
+        let backend = Arc::new(FakeBackend::default());
+        let response = block_on(
+            app(backend.clone(), authorized())
+                .oneshot(request("/api/messages?before=nope&limit=bogus")),
+        )
+        .unwrap();
+        let (status, body) = response_json(response);
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            body["detail"],
+            json!([
+                {"type":"missing", "loc":["query", "channel"], "msg":"Field required", "input":null},
+                {"type":"int_parsing", "loc":["query", "before"], "msg":"Input should be a valid integer, unable to parse string as an integer", "input":"nope"},
+                {"type":"int_parsing", "loc":["query", "limit"], "msg":"Input should be a valid integer, unable to parse string as an integer", "input":"bogus"}
+            ])
+        );
+        assert!(backend.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn deliveries_aggregates_missing_query_errors() {
+        let backend = Arc::new(FakeBackend::default());
+        let response =
+            block_on(app(backend.clone(), authorized()).oneshot(request("/api/deliveries")))
+                .unwrap();
+        let (status, body) = response_json(response);
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            body["detail"],
+            json!([
+                {"type":"missing", "loc":["query", "channel"], "msg":"Field required", "input":null},
+                {"type":"missing", "loc":["query", "ids"], "msg":"Field required", "input":null}
+            ])
+        );
+        assert!(backend.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn deliveries_parses_ids_and_returns_python_shape() {
         let backend = Arc::new(FakeBackend::default());
         let response = block_on(
@@ -624,6 +805,34 @@ mod tests {
     }
 
     #[test]
+    fn deliveries_matches_python_integer_digits_and_overflow() {
+        let backend = Arc::new(FakeBackend::default());
+        let unicode = block_on(
+            app(backend.clone(), authorized())
+                .oneshot(request("/api/deliveries?channel=cos&ids=%D9%A7")),
+        )
+        .unwrap();
+        let (status, body) = response_json(unicode);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["deliveries"]["7"]["delivery"], "delivered");
+        assert_eq!(
+            backend.calls.lock().unwrap().as_slice(),
+            ["deliveries:cos:7"]
+        );
+
+        let overflow = block_on(app(backend.clone(), authorized()).oneshot(request(
+            "/api/deliveries?channel=cos&ids=9223372036854775808",
+        )))
+        .unwrap();
+        let bytes = block_on(to_bytes(overflow.into_body(), usize::MAX)).unwrap();
+        assert_eq!(bytes.as_ref(), b"Internal Server Error");
+        assert_eq!(
+            backend.calls.lock().unwrap().as_slice(),
+            ["deliveries:cos:7", "deliveries:cos:positive-overflow"]
+        );
+    }
+
+    #[test]
     fn message_context_returns_item_and_not_found_error() {
         let backend = Arc::new(FakeBackend {
             context: Some(
@@ -657,6 +866,40 @@ mod tests {
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(body["detail"][0]["loc"], json!(["path", "message_id"]));
         assert_eq!(body["detail"][0]["input"], "nope");
+    }
+
+    #[test]
+    fn message_context_decodes_percent_encoded_path_id() {
+        let backend = Arc::new(FakeBackend {
+            context: Some(json!({"channel": "cos"})),
+            ..Default::default()
+        });
+        let response = block_on(
+            app(backend.clone(), authorized()).oneshot(request("/api/messages/%37/context")),
+        )
+        .unwrap();
+        let (status, body) = response_json(response);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["channel"], "cos");
+        assert_eq!(backend.calls.lock().unwrap().as_slice(), ["context:7"]);
+    }
+
+    #[test]
+    fn non_ascii_origin_is_refused() {
+        let backend = Arc::new(FakeBackend::default());
+        let request = Request::builder()
+            .uri("/api/messages?channel=cos")
+            .header("host", "desk.test")
+            .header(
+                header::ORIGIN,
+                axum::http::HeaderValue::from_bytes(&[0xff]).unwrap(),
+            )
+            .body(Body::empty())
+            .unwrap();
+        let response = block_on(app(backend, authorized()).oneshot(request)).unwrap();
+        let (status, body) = response_json(response);
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body, json!({"detail": "Cross-origin request refused"}));
     }
 
     #[test]
