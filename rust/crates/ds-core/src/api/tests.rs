@@ -929,6 +929,33 @@ fn h_pm_digest_matches_python_store_update_checkpoint_and_notify_contract() {
         .unwrap()
         .contains("payload value: 7"));
 
+    let object_sections = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w2:p2"),
+        "pm_digest",
+        args(json!({"project":"objects", "payload":"{\"changed\":{\"module\":\"routing\"},\"blocked\":{\"ticket\":\"stale\"},\"owner_decisions\":{\"owner\":\"decision\"},\"numbers\":{\"latest\":{\"value\":9}}}"})),
+    )
+    .unwrap();
+    let object_body = object_sections["body"].as_str().unwrap();
+    assert!(
+        object_body.contains("## Changed\n- module\n"),
+        "{object_body}"
+    );
+    assert!(
+        object_body.contains("## Blocked\n- ticket\n"),
+        "{object_body}"
+    );
+    assert!(
+        object_body.contains("## Owner decisions\n- owner\n"),
+        "{object_body}"
+    );
+    assert!(
+        object_body.contains("## Numbers\n- latest\n"),
+        "{object_body}"
+    );
+
     let failed_notify = PmApiEnv::new(
         Env::from_pairs(&[("HOME", &home), ("DUNKINGSHEEP_VP_PANE", "w9:pH")]),
         true,

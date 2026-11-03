@@ -407,6 +407,7 @@ pub fn digest_id(project: &str) -> String {
 fn payload_items(payload: Option<&Value>, key: &str) -> Vec<String> {
     match payload.and_then(|value| value.get(key)) {
         Some(Value::Array(items)) => items.iter().map(py_str).collect(),
+        Some(Value::Object(items)) => items.keys().cloned().collect(),
         Some(Value::String(text)) => text.chars().map(|ch| ch.to_string()).collect(),
         _ => Vec::new(),
     }
@@ -415,6 +416,7 @@ fn payload_items(payload: Option<&Value>, key: &str) -> Vec<String> {
 fn payload_numbers(payload: Option<&Value>) -> Vec<Value> {
     match payload.and_then(|value| value.get("numbers")) {
         Some(Value::Array(items)) => items.clone(),
+        Some(Value::Object(items)) => items.keys().map(|key| json!(key)).collect(),
         Some(Value::String(text)) => text.chars().map(|ch| json!(ch.to_string())).collect(),
         _ => Vec::new(),
     }
