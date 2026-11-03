@@ -3933,6 +3933,302 @@ fn dispatch_owner_api(
     dispatcher.dispatch(&context, &FlockGate(&context), command, args)
 }
 
+#[derive(Default)]
+struct FakeSendCommands {
+    calls: Mutex<Vec<Value>>,
+    failure: Mutex<Option<String>>,
+}
+
+impl FakeSendCommands {
+    fn record(&self, call: Value) -> Result<Value, DunkError> {
+        self.calls.lock().unwrap().push(call.clone());
+        if let Some(message) = self.failure.lock().unwrap().clone() {
+            Err(DunkError::Refused(message))
+        } else {
+            Ok(json!({"operation": call["operation"], "pane_id": call["target"]["pane_id"]}))
+        }
+    }
+}
+
+impl SendCommandEnv for FakeSendCommands {
+    fn send_text(
+        &self,
+        target: &Value,
+        text: &str,
+        self_pane_id: Option<&str>,
+        hold_while_typing: bool,
+        wait_s: f64,
+        press_enter: bool,
+    ) -> Result<Value, DunkError> {
+        self.record(
+            json!({"operation":"send_text", "target":target, "text":text,
+            "self_pane_id":self_pane_id, "hold_while_typing":hold_while_typing,
+            "wait_s":wait_s, "press_enter":press_enter}),
+        )
+    }
+
+    fn send_keys(
+        &self,
+        target: &Value,
+        keys: &str,
+        self_pane_id: Option<&str>,
+        hold_while_typing: bool,
+        wait_s: f64,
+    ) -> Result<Value, DunkError> {
+        self.record(
+            json!({"operation":"send_keys", "target":target, "keys":keys,
+            "self_pane_id":self_pane_id, "hold_while_typing":hold_while_typing,
+            "wait_s":wait_s}),
+        )
+    }
+
+    fn flush_box(&self, target: &Value, self_pane_id: Option<&str>) -> Result<Value, DunkError> {
+        self.record(json!({"operation":"flush_box", "target":target,
+            "self_pane_id":self_pane_id}))
+    }
+}
+
+struct SendApiEnv {
+    terminal: Mutex<Box<dyn Terminal>>,
+    send: FakeSendCommands,
+    panes: Vec<Value>,
+}
+
+impl SendApiEnv {
+    fn new() -> Self {
+        Self {
+            terminal: Mutex::new(Box::new(FakeTerminal::default())),
+            send: FakeSendCommands::default(),
+            panes: vec![
+                json!({"pane_id":"w1:p1", "agent":"owner", "tab_label":"owner"}),
+                json!({"pane_id":"w2:p2", "agent":"worker", "tab_label":"worker"}),
+                json!({"pane_id":"w3:p3", "agent":"reviewer", "tab_label":"reviewer"}),
+            ],
+        }
+    }
+}
+
+impl PaneInfoEnv for SendApiEnv {
+    fn list_panes_grouped(&self) -> Vec<Value> {
+        self.panes.clone()
+    }
+
+    fn get_pane(&self, pane_id: &str) -> Option<Value> {
+        self.panes
+            .iter()
+            .find(|pane| pane.get("pane_id").and_then(Value::as_str) == Some(pane_id))
+            .cloned()
+    }
+}
+
+impl CommandEnv for SendApiEnv {
+    fn terminal(&self) -> &Mutex<Box<dyn Terminal>> {
+        &self.terminal
+    }
+
+    fn now_s(&self) -> f64 {
+        1_800_000_000.0
+    }
+
+    fn send_commands(&self) -> Result<&dyn SendCommandEnv, DunkError> {
+        Ok(&self.send)
+    }
+}
+
+fn send_api_fixture(tag: &str) -> (tempfile::TempDir, Flock, SendApiEnv, Dispatcher) {
+    let (dir, flock) = flock();
+    let mut roles = Roles::new(
+        &Env::default(),
+        Some(dir.path().join(format!("{tag}-roles.json"))),
+        Some(dir.path().join(format!("{tag}-tokens.json"))),
+        None,
+    )
+    .unwrap();
+    for (pane, role) in [
+        ("w1:p1", "owner"),
+        ("w2:p2", "worker"),
+        ("w3:p3", "reviewer"),
+    ] {
+        roles
+            .register(pane, role, None, None, None, None, None, None)
+            .unwrap();
+    }
+    flock.attach_roles(roles, None);
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_send_text_keys_flush_box();
+    (dir, flock, SendApiEnv::new(), dispatcher)
+}
+
+#[test]
+fn send_text_dispatch_preserves_defaults_and_adapter_result() {
+    let (_dir, flock, env, dispatcher) = send_api_fixture("send-text");
+    let result = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p1"),
+        "send_text",
+        args(json!({"target":"worker", "text":"hello"})),
+    )
+    .unwrap();
+    assert_eq!(result, json!({"operation":"send_text", "pane_id":"w2:p2"}));
+    let calls = env.send.calls.lock().unwrap();
+    assert_eq!(calls[0]["hold_while_typing"], true);
+    assert_eq!(calls[0]["wait_s"], 3.0);
+    assert_eq!(calls[0]["press_enter"], true);
+    assert_eq!(calls[0]["self_pane_id"], "w1:p1");
+}
+
+#[test]
+fn send_text_and_keys_forward_explicit_options() {
+    let (_dir, flock, env, dispatcher) = send_api_fixture("send-options");
+    dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p1"),
+        "send_text",
+        args(
+            json!({"target":"worker", "text":"draft", "hold_while_typing":false,
+            "wait_s":"0.25", "press_enter":false}),
+        ),
+    )
+    .unwrap();
+    dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p1"),
+        "send_keys",
+        args(
+            json!({"target":"worker", "keys":"ctrl+c", "hold_while_typing":false,
+            "wait_s":0}),
+        ),
+    )
+    .unwrap();
+    let calls = env.send.calls.lock().unwrap();
+    assert_eq!(calls[0]["press_enter"], false);
+    assert_eq!(calls[0]["wait_s"], 0.25);
+    assert_eq!(calls[1]["operation"], "send_keys");
+    assert_eq!(calls[1]["hold_while_typing"], false);
+    assert_eq!(calls[1]["wait_s"], 0.0);
+}
+
+#[test]
+fn send_keys_and_flush_dispatch_to_their_named_operations() {
+    let (_dir, flock, env, dispatcher) = send_api_fixture("send-operations");
+    for (command, call) in [
+        ("send_keys", json!({"target":"worker", "keys":"Enter"})),
+        ("flush_box", json!({"target":"worker"})),
+    ] {
+        dispatch_as_flock_role(
+            &dispatcher,
+            &flock,
+            &env,
+            Some("w1:p1"),
+            command,
+            args(call),
+        )
+        .unwrap();
+    }
+    let calls = env.send.calls.lock().unwrap();
+    assert_eq!(calls[0]["operation"], "send_keys");
+    assert_eq!(calls[0]["hold_while_typing"], true);
+    assert_eq!(calls[0]["wait_s"], 3.0);
+    assert_eq!(calls[1]["operation"], "flush_box");
+}
+
+#[test]
+fn worker_and_reviewer_send_gates_allow_self_and_refuse_other_panes() {
+    let (_dir, flock, env, dispatcher) = send_api_fixture("send-role-gate");
+    dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w2:p2"),
+        "send_text",
+        args(json!({"target":"self", "text":"hello"})),
+    )
+    .unwrap();
+    let error = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w2:p2"),
+        "send_keys",
+        args(json!({"target":"owner", "keys":"Enter"})),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("send_keys to another pane requires a superuser"));
+    let reviewer_error = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w3:p3"),
+        "flush_box",
+        args(json!({"target":"owner"})),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(reviewer_error.contains("flush_box to another pane requires a superuser"));
+    assert_eq!(env.send.calls.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn send_rejects_retired_desk_token_invalid_wait_and_propagates_operation_error() {
+    let (_dir, flock, env, dispatcher) = send_api_fixture("send-errors");
+    let retired = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p1"),
+        "send_text",
+        args(json!({"target":"worker", "text":"hello", "desk_token":"old"})),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(retired.contains("desk_token is retired"));
+
+    let retired_before_self_gate = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w2:p2"),
+        "send_text",
+        args(json!({"target":"owner", "text":"hello", "desk_token":"old"})),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(retired_before_self_gate.contains("desk_token is retired"));
+
+    let invalid_wait = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p1"),
+        "send_keys",
+        args(json!({"target":"worker", "keys":"Enter", "wait_s":3601})),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(invalid_wait.contains("wait_s must be between 0 and 3600"));
+    assert!(env.send.calls.lock().unwrap().is_empty());
+
+    *env.send.failure.lock().unwrap() = Some("send backend failed".into());
+    let operation_error = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p1"),
+        "flush_box",
+        args(json!({"target":"worker"})),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(operation_error.contains("send backend failed"));
+}
+
 #[test]
 fn h_owner_stats_matches_python() {
     let (_dir, flock, env) = owner_api_fixture("owner-stats");
