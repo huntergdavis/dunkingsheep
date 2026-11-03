@@ -14,6 +14,25 @@ use crate::flock::Flock;
 use crate::github::{GitHubTransport, StatusUpdate};
 use crate::tasks::{AddOptions, ReviewTaskRow, TaskNote, Tasks};
 
+#[derive(Clone, Copy)]
+struct AccountingLedgerConfig {
+    ledger: &'static str,
+    base: &'static str,
+    docs_dir: &'static str,
+    partial_table: &'static str,
+    kind_table: &'static str,
+}
+
+fn accounting_ledger(repo: &str) -> Option<AccountingLedgerConfig> {
+    (repo == "huntergdavis/poolrad-decomp").then_some(AccountingLedgerConfig {
+        ledger: "docs/re/strict_full_c_addresses.csv",
+        base: "main",
+        docs_dir: "docs/re/",
+        partial_table: "docs/re/partial_callee_models.csv",
+        kind_table: "docs/re/credit_evidence_kind.csv",
+    })
+}
+
 pub type ReviewPrKey = (Option<Value>, Option<Value>);
 pub type JudgedHeadKey = (Option<Value>, Option<Value>, Option<Value>);
 pub type FinalVerdict = (bool, Vec<String>, Vec<String>, usize);
@@ -66,6 +85,16 @@ pub trait ReviewTaskActor {
     ) -> ReviewFuture<'a, Result<Vec<String>, String>>;
 
     fn notes<'a>(&'a self, id: &'a str) -> ReviewFuture<'a, Result<Vec<TaskNote>, String>>;
+
+    fn add_followup_task<'a>(
+        &'a self,
+        title: &'a str,
+        body: &'a str,
+        author: Option<&'a str>,
+        repo: &'a str,
+        number: i64,
+        head: &'a str,
+    ) -> ReviewFuture<'a, Result<String, String>>;
 }
 
 impl ReviewTaskActor for Tasks {
@@ -139,6 +168,45 @@ impl ReviewTaskActor for Tasks {
             Tasks::notes(self, id)
                 .await
                 .map_err(|error| error.to_string())
+        })
+    }
+
+    fn add_followup_task<'a>(
+        &'a self,
+        title: &'a str,
+        body: &'a str,
+        author: Option<&'a str>,
+        repo: &'a str,
+        number: i64,
+        head: &'a str,
+    ) -> ReviewFuture<'a, Result<String, String>> {
+        Box::pin(async move {
+            Tasks::add_with(
+                self,
+                "global",
+                title,
+                body,
+                AddOptions {
+                    priority: Some("high".into()),
+                    assignees: author
+                        .filter(|author| !author.is_empty())
+                        .map(str::to_owned)
+                        .into_iter()
+                        .collect(),
+                    created_by: Some("review-sync".into()),
+                    kind: Some("work".into()),
+                    author: author
+                        .filter(|author| !author.is_empty())
+                        .map(str::to_owned),
+                    repo: Some(repo.into()),
+                    pr: Some(number.to_string()),
+                    head: Some(head.into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map(|task| task.id)
+            .map_err(|error| error.to_string())
         })
     }
 }
@@ -239,6 +307,47 @@ impl ReviewTaskActor for Flock {
                 .map_err(|error| error.to_string())
         })
     }
+
+    fn add_followup_task<'a>(
+        &'a self,
+        title: &'a str,
+        body: &'a str,
+        author: Option<&'a str>,
+        repo: &'a str,
+        number: i64,
+        head: &'a str,
+    ) -> ReviewFuture<'a, Result<String, String>> {
+        let tasks = attached_review_tasks(self);
+        Box::pin(async move {
+            let tasks = tasks.map_err(|error| error.to_string())?;
+            Tasks::add_with(
+                tasks.as_ref(),
+                "global",
+                title,
+                body,
+                AddOptions {
+                    priority: Some("high".into()),
+                    assignees: author
+                        .filter(|author| !author.is_empty())
+                        .map(str::to_owned)
+                        .into_iter()
+                        .collect(),
+                    created_by: Some("review-sync".into()),
+                    kind: Some("work".into()),
+                    author: author
+                        .filter(|author| !author.is_empty())
+                        .map(str::to_owned),
+                    repo: Some(repo.into()),
+                    pr: Some(number.to_string()),
+                    head: Some(head.into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map(|task| task.id)
+            .map_err(|error| error.to_string())
+        })
+    }
 }
 
 impl ReviewRunContext for Flock {
@@ -335,6 +444,10 @@ impl ReviewRepoConfig for ConfiguredReviewPolicy {
 /// Token interface for the real GitHub token cache and deterministic tests.
 pub trait ReviewTokenSource {
     fn reviewer_token(&self) -> ReviewFuture<'_, Result<String, String>>;
+
+    fn author_token(&self) -> ReviewFuture<'_, Result<String, String>> {
+        Box::pin(async { Err("author token source is unavailable".into()) })
+    }
 }
 
 /// The merge/accounting operation supplied by the adjacent accepted ReviewSync merge slice.
@@ -363,6 +476,20 @@ impl ReviewTokenSource for crate::github::Tokens {
                 .and_then(Value::as_str)
                 .map(str::to_owned)
                 .ok_or_else(|| "reviewer token response has no token".to_string())
+        })
+    }
+
+    fn author_token(&self) -> ReviewFuture<'_, Result<String, String>> {
+        Box::pin(async move {
+            let token = self
+                .get("author", None)
+                .await
+                .map_err(|error| error.to_string())?;
+            token
+                .get("token")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| "author token response has no token".to_string())
         })
     }
 }
@@ -602,22 +729,66 @@ impl<S: ReviewTaskStore, T, G: ReviewPolicy> ReviewSync<S, T, G> {
     where
         S::Error: std::fmt::Display,
     {
-        let (mut accepts, needs_fix) = self
+        let (accepts, needs_fix) = self
             .head_verdicts(repo, head, number)
             .map_err(|error| error.to_string())?;
-        if let Some(lane) = lane.filter(|lane| !lane.is_empty()) {
-            if accepts
-                .binary_search_by(|candidate| candidate.as_str().cmp(lane))
-                .is_err()
-            {
-                accepts.push(lane.to_string());
-                accepts.sort();
-            }
-        }
         let required = self.github.required_verdicts(repo)?.max(1);
-        let final_verdict = needs_fix.is_empty() && accepts.len() >= required;
-        Ok((final_verdict, accepts, needs_fix, required))
+        Ok(final_verdict(accepts, needs_fix, lane, required))
     }
+}
+
+fn final_verdict(
+    mut accepts: Vec<String>,
+    needs_fix: Vec<String>,
+    lane: Option<&str>,
+    required: usize,
+) -> FinalVerdict {
+    if let Some(lane) = lane.filter(|lane| !lane.is_empty()) {
+        if accepts
+            .binary_search_by(|candidate| candidate.as_str().cmp(lane))
+            .is_err()
+        {
+            accepts.push(lane.to_string());
+            accepts.sort();
+        }
+    }
+    let is_final = needs_fix.is_empty() && accepts.len() >= required.max(1);
+    (is_final, accepts, needs_fix, required.max(1))
+}
+
+fn verdict_lanes_from_rows(
+    rows: &[ReviewTaskRow],
+    repo: &str,
+    head: &str,
+    number: Option<i64>,
+) -> (Vec<String>, Vec<String>) {
+    let mut accepts = BTreeSet::new();
+    let mut needs_fix = BTreeSet::new();
+    for row in rows {
+        if row.repo.as_deref() != Some(repo)
+            || row.head.as_deref() != Some(head)
+            || number.is_some_and(|number| row.pr != Some(number))
+            || row.status != "done"
+        {
+            continue;
+        }
+        let Some(lane) = row.completed_by.as_deref().filter(|lane| !lane.is_empty()) else {
+            continue;
+        };
+        match row.verdict.as_deref() {
+            Some("accept") => {
+                accepts.insert(lane.to_string());
+            }
+            Some("needs-fix") => {
+                needs_fix.insert(lane.to_string());
+            }
+            _ => {}
+        }
+    }
+    (
+        accepts.into_iter().collect(),
+        needs_fix.into_iter().collect(),
+    )
 }
 
 impl<S, T, G, X> ReviewSync<S, T, G, X>
@@ -837,6 +1008,524 @@ where
 
 impl<S, T, G, X> ReviewSync<S, T, G, X>
 where
+    S: ReviewTaskActor,
+    T: ReviewTokenSource,
+    X: GitHubTransport,
+{
+    /// Join all note text on the review task in event order; a missing note store is empty.
+    pub async fn _verdict_text(&self, task: &Value) -> String {
+        let id = task.get("id").map(python_string).unwrap_or_default();
+        self.flock
+            .notes(&id)
+            .await
+            .map(|notes| {
+                notes
+                    .into_iter()
+                    .filter(|note| !note.text.is_empty())
+                    .map(|note| note.text)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default()
+    }
+
+    /// Open and queue the accounting PR for an accepted body, refusing any row whose
+    /// evidence is ambiguous, incomplete, already credited, or not yet on the base branch.
+    pub async fn account(
+        &self,
+        task: &Value,
+        by: Option<&str>,
+        dry_run: bool,
+    ) -> Result<Value, String> {
+        let repo = task
+            .get("repo")
+            .filter(|value| python_truthy(value))
+            .map(python_string)
+            .unwrap_or_default();
+        let body_pr = task.get("pr").cloned().unwrap_or(Value::Null);
+        let mut out = serde_json::json!({
+            "repo": task.get("repo").cloned().unwrap_or(Value::Null),
+            "body_pr": body_pr,
+            "ledger": null,
+            "row": null,
+            "accounting_pr": null,
+            "url": null,
+            "review": null,
+            "auto_merge": null,
+            "state": null,
+            "reason": null,
+            "errors": []
+        });
+        let Some(config) = accounting_ledger(&repo) else {
+            out["reason"] = Value::String(format!(
+                "no accounting ledger is configured for {}",
+                if repo.is_empty() { "this repo" } else { &repo }
+            ));
+            return Ok(out);
+        };
+        out["ledger"] = Value::String(config.ledger.into());
+
+        // Preserve the source order: both Apps are obtained before any GitHub request.
+        let reviewer = match self.tokens.reviewer_token().await {
+            Ok(token) => token,
+            Err(error) => {
+                append_report(
+                    &mut out,
+                    "errors",
+                    Value::String(format!("tokens: {error}")),
+                );
+                return Ok(out);
+            }
+        };
+        let author = match self.tokens.author_token().await {
+            Ok(token) => token,
+            Err(error) => {
+                append_report(
+                    &mut out,
+                    "errors",
+                    Value::String(format!("tokens: {error}")),
+                );
+                return Ok(out);
+            }
+        };
+
+        let base_sha = match crate::github::get_ref(
+            &self.transport,
+            &self.api_root,
+            &repo,
+            config.base,
+            &reviewer,
+        )
+        .await
+        {
+            Ok(sha) => sha,
+            Err(error) => {
+                append_report(
+                    &mut out,
+                    "errors",
+                    Value::String(format!("read {}@{}: {error}", config.ledger, config.base)),
+                );
+                return Ok(out);
+            }
+        };
+        let (ledger_text, _) = match crate::github::file_text(
+            &self.transport,
+            &self.api_root,
+            &repo,
+            config.ledger,
+            &base_sha,
+            &reviewer,
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                append_report(
+                    &mut out,
+                    "errors",
+                    Value::String(format!("read {}@{}: {error}", config.ledger, config.base)),
+                );
+                return Ok(out);
+            }
+        };
+        let Some(ledger_text) = ledger_text else {
+            append_report(
+                &mut out,
+                "errors",
+                Value::String(format!(
+                    "{repo}/{} does not exist on {}",
+                    config.ledger, config.base
+                )),
+            );
+            return Ok(out);
+        };
+
+        let Some(number) = body_pr.as_i64() else {
+            return Err("pr must be a number".into());
+        };
+        let files = match crate::github::pr_files(
+            &self.transport,
+            &self.api_root,
+            &repo,
+            number,
+            &reviewer,
+        )
+        .await
+        {
+            Ok(files) => files,
+            Err(error) => {
+                append_report(
+                    &mut out,
+                    "errors",
+                    Value::String(format!("list PR #{number} files: {error}")),
+                );
+                return Ok(out);
+            }
+        };
+        let added_docs: Vec<String> = files
+            .iter()
+            .filter_map(|item| {
+                let filename = item.get("filename").and_then(Value::as_str)?;
+                (item.get("status").and_then(Value::as_str) == Some("added")
+                    && filename.starts_with(config.docs_dir)
+                    && filename.ends_with(".md"))
+                .then(|| filename.to_string())
+            })
+            .collect();
+        let detail =
+            crate::github::pull_detail(&self.transport, &self.api_root, &repo, number, &reviewer)
+                .await
+                .unwrap_or(Value::Null);
+        let notes = self._verdict_text(task).await;
+        let title = task
+            .get("title")
+            .filter(|value| python_truthy(value))
+            .map(python_string)
+            .unwrap_or_default();
+        let detail_body = detail
+            .get("body")
+            .filter(|value| python_truthy(value))
+            .map(python_string)
+            .unwrap_or_default();
+        let added_refs = added_docs.iter().map(String::as_str).collect::<Vec<_>>();
+        let (row, reason) = choose_row(
+            &[
+                ("verdict notes", Some(&notes)),
+                ("review task title", Some(&title)),
+                ("PR body", Some(&detail_body)),
+            ],
+            &added_refs,
+            Some(&ledger_text),
+        );
+        let Some((ident, doc)) = row else {
+            out["reason"] = Value::String(reason);
+            let _ = self._record_accounting(task, &out).await;
+            return Ok(out);
+        };
+        out["row"] = Value::String(format!("{ident},{doc}"));
+
+        let (partial_text, _) = match crate::github::file_text(
+            &self.transport,
+            &self.api_root,
+            &repo,
+            config.partial_table,
+            &base_sha,
+            &reviewer,
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                append_report(
+                    &mut out,
+                    "errors",
+                    Value::String(format!(
+                        "read {}@{}: {error}",
+                        config.partial_table, config.base
+                    )),
+                );
+                let _ = self._record_accounting(task, &out).await;
+                return Ok(out);
+            }
+        };
+        if let Some(reason) = partial_text
+            .as_deref()
+            .and_then(|text| partial_gate(&ident, config.partial_table, text))
+        {
+            out["reason"] = Value::String(reason);
+            let _ = self._record_accounting(task, &out).await;
+            return Ok(out);
+        }
+
+        let (kind_text, _) = match crate::github::file_text(
+            &self.transport,
+            &self.api_root,
+            &repo,
+            config.kind_table,
+            &base_sha,
+            &reviewer,
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                append_report(
+                    &mut out,
+                    "errors",
+                    Value::String(format!(
+                        "read {}@{}: {error}",
+                        config.kind_table, config.base
+                    )),
+                );
+                (None, None)
+            }
+        };
+        if let Some(kind_text) = kind_text.as_deref() {
+            if !labelled_ids(kind_text).contains(&ident) {
+                out["reason"] = Value::String(format!(
+                    "{ident} has no row in {}, which every strict credit needs; that table is generated by tools/overlay/credit_evidence_kind.py --write. The automation does not guess the label - regenerate the table in the accounting branch and re-run.",
+                    config.kind_table
+                ));
+                let _ = self._record_accounting(task, &out).await;
+                return Ok(out);
+            }
+        }
+
+        let (doc_text, _) = match crate::github::file_text(
+            &self.transport,
+            &self.api_root,
+            &repo,
+            &doc,
+            &base_sha,
+            &reviewer,
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                append_report(
+                    &mut out,
+                    "errors",
+                    Value::String(format!("read {doc}@{}: {error}", config.base)),
+                );
+                let _ = self._record_accounting(task, &out).await;
+                return Ok(out);
+            }
+        };
+        if doc_text.is_none() {
+            out["reason"] = Value::String(format!(
+                "the evidence document {doc} does not exist on {}: the body PR #{number} is not merged, so this row would credit a document that is not there (t833)",
+                config.base
+            ));
+            let _ = self._record_accounting(task, &out).await;
+            return Ok(out);
+        }
+
+        let branch = format!("accounting/pr{number}-{ident}");
+        let branch_exists = match crate::github::ref_exists(
+            &self.transport,
+            &self.api_root,
+            &repo,
+            &branch,
+            &reviewer,
+        )
+        .await
+        {
+            Ok(exists) => exists,
+            Err(error) => {
+                append_report(
+                    &mut out,
+                    "errors",
+                    Value::String(format!("look up {branch}: {error}")),
+                );
+                return Ok(out);
+            }
+        };
+        if branch_exists {
+            let open_pulls = match crate::github::pulls_for_head(
+                &self.transport,
+                &self.api_root,
+                &repo,
+                &branch,
+                &reviewer,
+            )
+            .await
+            {
+                Ok(pulls) => pulls,
+                Err(error) => {
+                    append_report(
+                        &mut out,
+                        "errors",
+                        Value::String(format!("look up {branch}: {error}")),
+                    );
+                    return Ok(out);
+                }
+            };
+            if let Some(open) = open_pulls.first() {
+                out["accounting_pr"] = open.get("number").cloned().unwrap_or(Value::Null);
+                out["url"] = open.get("url").cloned().unwrap_or(Value::Null);
+                out["reason"] =
+                    Value::String(format!("an accounting PR for {ident} is already open"));
+                let _ = self._record_accounting(task, &out).await;
+                return Ok(out);
+            }
+            out["reason"] = Value::String(format!(
+                "branch {branch} exists without an open PR; refusing to overwrite a commit nobody reviewed"
+            ));
+            let _ = self._record_accounting(task, &out).await;
+            return Ok(out);
+        }
+
+        let task_id = task
+            .get("id")
+            .map(python_string)
+            .ok_or_else(|| "task has no id".to_string())?;
+        let task_head = task
+            .get("head")
+            .filter(|value| python_truthy(value))
+            .map(python_string)
+            .unwrap_or_default();
+        let author_lane = by.filter(|value| !value.is_empty()).unwrap_or("reviewer");
+        let message = format!(
+            "Accept {ident}: accounting row for #{number}\n\nDerived from review {task_id} (verdict accept by {author_lane}) and PR #{number} at head {}.\nThe reviewed content is PR #{number}; this commit only adds {ident},{doc} to {}.\n",
+            task_head.chars().take(12).collect::<String>(),
+            config.ledger
+        );
+        let new_text = with_row(Some(&ledger_text), &ident, &doc).map_err(str::to_owned)?;
+        if dry_run {
+            out["reason"] = Value::String("dry run: no commit, no PR".into());
+            return Ok(out);
+        }
+
+        let creation = async {
+            let base_tree = crate::github::commit_tree(
+                &self.transport,
+                &self.api_root,
+                &repo,
+                &base_sha,
+                &reviewer,
+            )
+            .await?;
+            let tree = crate::github::create_tree(
+                &self.transport,
+                &self.api_root,
+                &repo,
+                &base_tree,
+                &[serde_json::json!({
+                    "path": config.ledger,
+                    "mode": "100644",
+                    "type": "blob",
+                    "content": new_text,
+                })],
+                &reviewer,
+            )
+            .await?;
+            let commit = crate::github::create_commit(
+                &self.transport,
+                &self.api_root,
+                &repo,
+                &message,
+                &tree,
+                std::slice::from_ref(&base_sha),
+                &reviewer,
+            )
+            .await?;
+            crate::github::create_ref(
+                &self.transport,
+                &self.api_root,
+                &repo,
+                &branch,
+                &commit,
+                &reviewer,
+            )
+            .await?;
+            Ok::<(), crate::github::GitHubError>(())
+        }
+        .await;
+        if let Err(error) = creation {
+            append_report(
+                &mut out,
+                "errors",
+                Value::String(format!("commit the ledger row: {error}")),
+            );
+            let _ = self._record_accounting(task, &out).await;
+            return Ok(out);
+        }
+
+        let accounting_title = format!("Accept {ident}: accounting row for #{number}");
+        let accounting_body = self._accounting_body(task, &ident, &doc, config.ledger, number, by);
+        let opened = match crate::github::open_pull(
+            &self.transport,
+            &self.api_root,
+            crate::github::OpenPullRequest {
+                repo: &repo,
+                title: &accounting_title,
+                head: &branch,
+                base: config.base,
+                body: &accounting_body,
+            },
+            &reviewer,
+        )
+        .await
+        {
+            Ok(opened) => opened,
+            Err(error) => {
+                append_report(
+                    &mut out,
+                    "errors",
+                    Value::String(format!("open the accounting PR: {error}")),
+                );
+                let _ = self._record_accounting(task, &out).await;
+                return Ok(out);
+            }
+        };
+        let accounting_number = opened
+            .get("number")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| "'number'".to_string())?;
+        out["accounting_pr"] = Value::from(accounting_number);
+        out["url"] = opened.get("url").cloned().unwrap_or(Value::Null);
+        let accounting_head = task_head.chars().take(12).collect::<String>();
+        match crate::github::review_pull(
+            &self.transport,
+            &self.api_root,
+            &repo,
+            accounting_number,
+            "APPROVE",
+            &format!(
+                "Accounting row derived from review {task_id} and the accepted content in #{number} at {accounting_head}."
+            ),
+            &author,
+        )
+        .await
+        {
+            Ok(_) => out["review"] = Value::String("approved_by_author_app".into()),
+            Err(error) => append_report(
+                &mut out,
+                "errors",
+                Value::String(format!("approve as the author App: {error}")),
+            ),
+        }
+        match crate::github::enable_auto_merge(
+            &self.transport,
+            &self.api_root,
+            &repo,
+            accounting_number,
+            &author,
+            None,
+        )
+        .await
+        {
+            Ok(_) => out["auto_merge"] = Value::String("enabled".into()),
+            Err(error) => append_report(
+                &mut out,
+                "errors",
+                Value::String(format!("enable auto-merge: {error}")),
+            ),
+        }
+        match crate::github::pull_state(
+            &self.transport,
+            &self.api_root,
+            &repo,
+            accounting_number,
+            &author,
+        )
+        .await
+        {
+            Ok(state) => out["state"] = state,
+            Err(error) => append_report(
+                &mut out,
+                "errors",
+                Value::String(format!("read the accounting PR state: {error}")),
+            ),
+        }
+        let _ = self._record_accounting(task, &out).await;
+        Ok(out)
+    }
+}
+
+impl<S, T, G, X> ReviewSync<S, T, G, X>
+where
     S: ReviewTaskActor + ReviewTaskCreator,
     G: ReviewPolicy,
 {
@@ -946,6 +1635,323 @@ where
                 None
             }
         }
+    }
+}
+
+impl<S, T, G, X> ReviewSync<S, T, G, X>
+where
+    S: ReviewTaskActor + ReviewTaskCreator,
+    T: ReviewTokenSource,
+    G: ReviewPolicy,
+    X: GitHubTransport,
+{
+    /// Apply a completed review verdict: status, approval/changes request, and follow-up.
+    pub async fn on_verdict(
+        &self,
+        task: &Value,
+        verdict: &str,
+        by: Option<&str>,
+    ) -> Result<Value, String> {
+        let mut out = serde_json::json!({
+            "task": task.get("id").cloned().unwrap_or(Value::Null),
+            "verdict": verdict,
+            "status": null,
+            "review": null,
+            "followup": null,
+            "accounting": null,
+            "errors": []
+        });
+        let repo_value = task.get("repo").filter(|value| python_truthy(value));
+        let number_value = task.get("pr").filter(|value| python_truthy(value));
+        let head_value = task.get("head").filter(|value| python_truthy(value));
+        let (Some(repo_value), Some(number_value), Some(head_value)) =
+            (repo_value, number_value, head_value)
+        else {
+            return Ok(out);
+        };
+        let repo = python_string(repo_value);
+        let Some(number) = number_value.as_i64() else {
+            return Ok(out);
+        };
+        let head = python_string(head_value);
+        let token = match self.tokens.reviewer_token().await {
+            Ok(token) => token,
+            Err(error) => {
+                append_report(&mut out, "errors", Value::String(error));
+                return Ok(out);
+            }
+        };
+
+        if verdict == "accept" {
+            let rows = self.flock.list_review_rows().await?;
+            let (accepts, needs_fix) = verdict_lanes_from_rows(&rows, &repo, &head, Some(number));
+            let required = self.github.required_verdicts(&repo)?.max(1);
+            let (final_accept, accepts, needs_fix, required) =
+                final_verdict(accepts, needs_fix, by, required);
+            out["accepts"] = serde_json::json!(accepts);
+            out["required"] = Value::from(required as u64);
+
+            if !needs_fix.is_empty() && !final_accept {
+                let description = format!("needs-fix stands from {}", needs_fix.join(", "));
+                match crate::github::post_status(
+                    &self.transport,
+                    &self.api_root,
+                    &token,
+                    StatusUpdate {
+                        repo: &repo,
+                        sha: &head,
+                        state: "failure",
+                        description: &description,
+                        target_url: None,
+                    },
+                )
+                .await
+                {
+                    Ok(_) => out["status"] = Value::String("failure".into()),
+                    Err(error) => append_report(
+                        &mut out,
+                        "errors",
+                        Value::String(format!("status: {error}")),
+                    ),
+                }
+                return Ok(out);
+            }
+
+            if !final_accept {
+                let description = format!(
+                    "accepted by {} of {required} distinct reviewer lanes ({}) - second review filed",
+                    accepts.len(),
+                    accepts.join(", ")
+                );
+                match crate::github::post_status(
+                    &self.transport,
+                    &self.api_root,
+                    &token,
+                    StatusUpdate {
+                        repo: &repo,
+                        sha: &head,
+                        state: "pending",
+                        description: &description,
+                        target_url: None,
+                    },
+                )
+                .await
+                {
+                    Ok(_) => out["status"] = Value::String("pending".into()),
+                    Err(error) => append_report(
+                        &mut out,
+                        "errors",
+                        Value::String(format!("status: {error}")),
+                    ),
+                }
+                let second = self
+                    ._second_review(
+                        &repo,
+                        number,
+                        &head,
+                        by.filter(|lane| !lane.is_empty()).unwrap_or(""),
+                        None,
+                    )
+                    .await;
+                out["second_review"] = second.clone().map(Value::String).unwrap_or(Value::Null);
+                out["merged"] = Value::Bool(false);
+                out["held"] = serde_json::json!({
+                    "reason": "not final: a second DISTINCT reviewer lane must accept",
+                    "accepts": accepts,
+                    "required": required,
+                    "second_review": second,
+                    "postponed": ["approval", "merge", "accounting"],
+                });
+                let reason = format!(
+                    "accepted by {} of {required} distinct reviewer lanes ({}); a second distinct lane must accept before the approval, the merge and the accounting row are written",
+                    accepts.len(),
+                    accepts.join(", ")
+                );
+                let held_meta = serde_json::json!({
+                    "reason": reason,
+                    "second_review": second,
+                    "head": head,
+                });
+                let held_task_id = task
+                    .get("id")
+                    .map(python_string)
+                    .unwrap_or_else(|| "None".into());
+                let _ = self
+                    .flock
+                    .note_with_meta(&held_task_id, "verdict_held", "review-sync", &held_meta)
+                    .await;
+                return Ok(out);
+            }
+
+            let description = format!(
+                "accepted by {} distinct reviewer lanes ({})",
+                accepts.len(),
+                accepts.join(", ")
+            );
+            match crate::github::post_status(
+                &self.transport,
+                &self.api_root,
+                &token,
+                StatusUpdate {
+                    repo: &repo,
+                    sha: &head,
+                    state: "success",
+                    description: &description,
+                    target_url: None,
+                },
+            )
+            .await
+            {
+                Ok(_) => out["status"] = Value::String("success".into()),
+                Err(error) => append_report(
+                    &mut out,
+                    "errors",
+                    Value::String(format!("status: {error}")),
+                ),
+            }
+            let task_id = python_string(task.get("id").unwrap_or(&Value::Null));
+            let review_body = format!(
+                "Accepted in {task_id} by reviewer lane {} at head {head}.",
+                by.filter(|lane| !lane.is_empty()).unwrap_or("?")
+            );
+            match crate::github::review_pull(
+                &self.transport,
+                &self.api_root,
+                &repo,
+                number,
+                "APPROVE",
+                &review_body,
+                &token,
+            )
+            .await
+            {
+                Ok(_) => out["review"] = Value::String("approved".into()),
+                Err(error) => append_report(
+                    &mut out,
+                    "errors",
+                    Value::String(format!("approve: {error}")),
+                ),
+            }
+            match crate::github::merge_pull(
+                &self.transport,
+                &self.api_root,
+                &repo,
+                number,
+                &token,
+                Some(&head),
+            )
+            .await
+            {
+                Ok(_) => out["merged"] = Value::Bool(true),
+                Err(error) => {
+                    out["merged"] = Value::Bool(false);
+                    if !error.to_string().contains("405") {
+                        append_report(&mut out, "errors", Value::String(format!("merge: {error}")));
+                    }
+                }
+            }
+            if out["merged"] == Value::Bool(true) {
+                match self.account(task, by, false).await {
+                    Ok(accounting) => out["accounting"] = accounting,
+                    Err(error) => out["accounting"] = serde_json::json!({"errors": [error]}),
+                }
+            } else {
+                out["accounting"] = serde_json::json!({
+                    "skipped": "the body PR is not merged yet; the accounting row is written by the sync that observes the merge (t835)"
+                });
+            }
+            return Ok(out);
+        }
+
+        let evidence = self._evidence(task).await;
+        let standing = self._standing_accept(task).await;
+        if let Some(standing) = standing {
+            out["status"] = Value::String("skipped_standing_accept".into());
+            out["standing_accept"] = Value::String(standing.clone());
+            append_report(
+                &mut out,
+                "errors",
+                Value::String(format!(
+                    "failure status not posted: {repo}#{number} @ {} already carries an accept verdict from {standing}",
+                    head.chars().take(12).collect::<String>()
+                )),
+            );
+        } else {
+            let description = format!(
+                "needs-fix per {}",
+                task.get("id")
+                    .map(python_string)
+                    .unwrap_or_else(|| "None".into())
+            );
+            match crate::github::post_status(
+                &self.transport,
+                &self.api_root,
+                &token,
+                StatusUpdate {
+                    repo: &repo,
+                    sha: &head,
+                    state: "failure",
+                    description: &description,
+                    target_url: None,
+                },
+            )
+            .await
+            {
+                Ok(_) => out["status"] = Value::String("failure".into()),
+                Err(error) => append_report(
+                    &mut out,
+                    "errors",
+                    Value::String(format!("status: {error}")),
+                ),
+            }
+        }
+        let request_changes_body = self._review_body(task, by, &head, &evidence);
+        match crate::github::review_pull(
+            &self.transport,
+            &self.api_root,
+            &repo,
+            number,
+            "REQUEST_CHANGES",
+            &request_changes_body,
+            &token,
+        )
+        .await
+        {
+            Ok(_) => out["review"] = Value::String("changes_requested".into()),
+            Err(error) => append_report(
+                &mut out,
+                "errors",
+                Value::String(format!("request-changes: {error}")),
+            ),
+        }
+        let task_id = task
+            .get("id")
+            .map(python_string)
+            .unwrap_or_else(|| "None".into());
+        let title = format!(
+            "Fix {} PR #{number} per {task_id}",
+            repo.rsplit('/').next().unwrap_or(&repo)
+        );
+        let body = format!(
+            "Reviewer verdict needs-fix on {repo}#{number} @ {head}.\n\nThe reviewer's evidence, verbatim:\n\n{evidence}\n\nPush a fix to the same branch; the review timer files a new review for the new head."
+        );
+        let author = task
+            .get("author")
+            .filter(|value| python_truthy(value))
+            .map(python_string);
+        match self
+            .flock
+            .add_followup_task(&title, &body, author.as_deref(), &repo, number, &head)
+            .await
+        {
+            Ok(id) => out["followup"] = Value::String(id),
+            Err(error) => append_report(
+                &mut out,
+                "errors",
+                Value::String(format!("followup: {error}")),
+            ),
+        }
+        Ok(out)
     }
 }
 
