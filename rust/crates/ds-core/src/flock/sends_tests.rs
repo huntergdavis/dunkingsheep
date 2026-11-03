@@ -796,6 +796,149 @@ mod guarded_preparation_tests {
         assert!(pane.keys.is_empty());
     }
 
+    fn styled_echo_frame(echo_rows: &str, composer: &str) -> String {
+        let frame = format!(
+            "\x1b[1;2m\u{203a}\x1b[0m {echo_rows}\n\x1b[1m\u{203a}\x1b[0m {composer}\n\n\n  gpt \u{b7} ~/w\n"
+        );
+        let (_, detail) = box_text(&frame);
+        assert!(
+            detail.starts_with(AMBIGUOUS_COMPOSER),
+            "fixture must exercise styled ambiguity, got {detail:?}"
+        );
+        frame
+    }
+
+    #[test]
+    fn ambiguous_preflight_flushes_exact_owned_region_when_dim_span_is_accounted() {
+        let flock = flock();
+        let mut pane = submit_pane("idle");
+        let frame = styled_echo_frame("old prompt", "live draft");
+        flock.remember_typed(P, "live draft");
+        flock.remember_typed(P, "old prompt");
+        pane.screen_script.borrow_mut().clear();
+        pane.screen_script.borrow_mut().extend([
+            Some(frame.clone()), // ambiguous composer preflight
+            Some(frame),         // one-shot submit key decision
+            Some(submit_live_screen()),
+        ]);
+        let guard = flock.typing_guard(P).unwrap();
+
+        assert_eq!(
+            Ok(()),
+            ensure_box_clear(&flock, &mut pane, P, false, false, false, &guard)
+        );
+        assert_eq!(1, pane.keys.len());
+    }
+
+    #[test]
+    fn styled_dim_span_requires_exact_full_text_and_checks_all_outbox_statuses() {
+        let flock = flock();
+        let mut pane = submit_pane("idle");
+        // The entire span through the next sigil is evidence. Prefix ownership of only the
+        // first dim row must not authorize the composer.
+        let frame = styled_echo_frame("old prompt\nadded transcript output", "live draft");
+        flock.remember_typed(P, "live draft");
+        flock.remember_typed(P, "old prompt");
+        let mut message = flock
+            .new_message(P, "test", "old prompt added transcript output", "t2457")
+            .unwrap();
+        message.text = "old prompt".into();
+        message.status = "sent".into();
+        flock.outbox.lock().unwrap().insert(P.into(), vec![message]);
+        pane.screen_script.borrow_mut().clear();
+        pane.screens.insert(P.into(), frame);
+        let guard = flock.typing_guard(P).unwrap();
+
+        assert_eq!(
+            Err("ambiguous-composer"),
+            ensure_box_clear(&flock, &mut pane, P, false, false, false, &guard)
+        );
+        assert!(pane.keys.is_empty());
+
+        // Exact complete-span provenance is accepted even when the outbox row is not queued.
+        flock.outbox.lock().unwrap().get_mut(P).unwrap()[0].text =
+            "old prompt added transcript output".into();
+        let frame = styled_echo_frame("old prompt\nadded transcript output", "live draft");
+        pane.screen_script.borrow_mut().clear();
+        pane.screen_script.borrow_mut().extend([
+            Some(frame.clone()),
+            Some(frame),
+            Some(submit_live_screen()),
+        ]);
+        assert_eq!(
+            Ok(()),
+            ensure_box_clear(&flock, &mut pane, P, false, false, false, &guard)
+        );
+        assert_eq!(1, pane.keys.len());
+    }
+
+    #[test]
+    fn guarded_send_routes_owned_ambiguous_text_through_preflight_before_any_blocker() {
+        let flock = flock();
+        let mut pane = submit_pane("idle");
+        let frame = styled_echo_frame("old prompt", "ours");
+        flock.remember_typed(P, "old prompt");
+        flock.remember_typed(P, "ours");
+        pane.screen_script.borrow_mut().clear();
+        pane.screen_script.borrow_mut().extend([
+            Some(frame.clone()), // dead-session check
+            Some(frame.clone()), // ownership-aware preflight
+            Some(frame),         // one-shot submit key decision
+            Some(submit_live_screen()),
+        ]);
+        let mut action_ran = false;
+
+        let result = send_guarded(
+            &flock,
+            &mut pane,
+            P,
+            SendGuardOptions::default(),
+            || None,
+            |_, _| {
+                action_ran = true;
+                Ok(SendAction::completed(true, "sent"))
+            },
+        );
+
+        assert!(action_ran);
+        assert_eq!((true, Some(true), "sent".into()), result);
+        assert_eq!(1, pane.keys.len());
+    }
+
+    #[test]
+    fn federated_one_shot_failure_preserves_its_pending_input_hold_reason() {
+        let flock = flock();
+        let mut pane = submit_pane("idle");
+        pane.federated = true;
+        let frame = concat!(
+            ">_ OpenAI Codex (v0.165.0)\n\n",
+            "\x1b[1m\u{203a} pending text\x1b[0m\n\n",
+            "  GPT-6-Astra high \u{b7} ~/workspace/x\n",
+            "  ? for shortcuts\n"
+        );
+        pane.screen_script.borrow_mut().clear();
+        pane.screen_script.borrow_mut().extend([
+            Some(frame.into()),
+            Some(frame.into()),
+            Some(frame.into()),
+            Some(frame.into()),
+        ]);
+
+        let result = send_guarded(
+            &flock,
+            &mut pane,
+            P,
+            SendGuardOptions::default(),
+            || None,
+            |_, _| Ok(SendAction::completed(true, "unexpected")),
+        );
+        assert_eq!(1, pane.keys.len());
+        assert_eq!(false, result.0);
+        assert_eq!(None, result.1);
+        assert!(result.2.starts_with(BOX_HOLD));
+        assert!(result.2.contains("federated-pending-input"));
+    }
+
     #[test]
     fn press_keys_defers_pending_text_confirmation_until_after_guard_release() {
         let flock = flock();
@@ -895,8 +1038,7 @@ mod guarded_preparation_tests {
         pane.receipt_ok = true;
         pane.screen_script.borrow_mut().clear();
         pane.screen_script.borrow_mut().extend([
-            Some(submit_pending_screen("foreign text")), // dead-session blocker read
-            Some(submit_pending_screen("foreign text")), // send blocker box read
+            Some(submit_pending_screen("foreign text")), // dead-session check
             Some(submit_pending_screen("foreign text")), // final preflight
             Some(submit_pending_screen("foreign text")), // one-shot Enter decision
             Some(submit_live_screen()),                  // one-shot box check

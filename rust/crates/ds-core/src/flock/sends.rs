@@ -6,8 +6,8 @@
 //!
 //! The Python reaches the backend, the lease table and the clock through `self`; here they are
 //! [`SendEnv`], so every decision is testable with a scripted pane. NOT in this slice (next
-//! NOT in these slices (later t801 work): `send_now`/`send_keys_now`, `_enqueue`/`_deliver` and
-//! the per-pane outbox task, `submit_text`/`press_keys`, `_flush_once`, clear_box.
+//! NOT in these slices (later t801 work): `send_now`/`send_keys_now`, `_enqueue`/`_deliver`,
+//! the per-pane outbox task, and public `clear_box`.
 //!
 //! POLICY (owner, 2026-10-23/24) kept verbatim: a busy agent is NOT a hold reason, and there
 //! is NO "a human is typing" hold - every message goes through this daemon, so a non-empty box
@@ -32,10 +32,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use super::Flock;
 use crate::clock;
 use crate::error::DunkError;
-use crate::terminal::composer::federated_composer;
+use crate::terminal::composer::{
+    composer_region_text, federated_composer, styled_composer_boundary, styled_sigil_state,
+};
 use crate::terminal::screen::{
-    banner_marker, box_text, is_our_send, modal_open, status_marker, strip_ansi, typed_text,
-    AMBIGUOUS_COMPOSER, DEAD_SESSION_MARKERS, WORKING_MARKERS,
+    banner_marker, box_text, is_our_send, modal_open, prompt_body, splitlines, status_marker,
+    strip_ansi, typed_text, AMBIGUOUS_COMPOSER, DEAD_SESSION_MARKERS, WORKING_MARKERS,
 };
 use crate::terminal::screen::{collapse, CONSUMPTION_PREFIX_CHARS};
 
@@ -330,19 +332,14 @@ pub fn ensure_box_clear(
         return if flush_once(env, pane_id, &federated, busy_hint, guard) {
             Ok(())
         } else {
-            Err("stranded-will-not-submit")
+            Err("federated-pending-input")
         };
     }
 
     let (shown, detail) = box_text(&screen);
     let known = flock.known_send_texts(pane_id);
     if detail.starts_with(AMBIGUOUS_COMPOSER) {
-        let region = crate::terminal::composer::composer_region_text(&screen);
-        let owned = !region.is_empty()
-            && known
-                .iter()
-                .any(|candidate| collapse(candidate) == collapse(&region));
-        if owned {
+        if let Some(region) = owned_composer_region(flock, pane_id, &screen, &known) {
             return if flush_once(env, pane_id, &region, busy_hint, guard) {
                 Ok(())
             } else {
@@ -566,8 +563,15 @@ pub fn send_guarded(
         return (false, None, detail);
     }
     if options.hold_while_typing {
-        if let Some((_, detail)) = send_blocker(env, pane_id) {
-            return (false, None, detail);
+        if let Some(marker) = dead_session(env, pane_id) {
+            return (false, None, format!("dead session ({marker})"));
+        }
+        if env.session_process_gone(pane_id) {
+            return (
+                false,
+                None,
+                "the lane's recorded process is gone".to_string(),
+            );
         }
         match ensure_box_clear(
             flock,
@@ -595,6 +599,95 @@ pub fn send_guarded(
         }
         Err(detail) => (true, Some(false), detail),
     }
+}
+
+/// Python's `_composer_ownership`: use plain geometry when it delimits one prompt; otherwise
+/// permit the styled multi-sigil fallback only when the complete dim transcript spans are
+/// accounted for and the complete live region exactly matches text owned by this flock.
+fn owned_composer_region(
+    flock: &Flock,
+    pane_id: &str,
+    screen: &str,
+    known: &[String],
+) -> Option<String> {
+    let plain_region = composer_region_text(screen);
+    if !plain_region.is_empty() {
+        return exact_owned_region(&plain_region, known).then_some(plain_region);
+    }
+
+    let (status, region) = styled_composer_boundary(screen);
+    if status != "delimited"
+        || region.is_empty()
+        || !dim_bodies_accounted(flock, pane_id, screen)
+        || !exact_owned_region(&region, known)
+    {
+        return None;
+    }
+    Some(region)
+}
+
+fn exact_owned_region(region: &str, known: &[String]) -> bool {
+    let region = collapse(region);
+    !region.is_empty() && known.iter().any(|candidate| collapse(candidate) == region)
+}
+
+/// `_dim_bodies_accounted`: account each complete dim sigil span through the next sigil.
+/// Sent history and every nonempty outbox row are provenance; the latter intentionally includes
+/// statuses beyond `queued`, unlike the stricter live-composer ownership candidate set.
+fn dim_bodies_accounted(flock: &Flock, pane_id: &str, screen: &str) -> bool {
+    let rows = splitlines(screen);
+    let sigils: Vec<(usize, Option<String>, &'static str)> = rows
+        .iter()
+        .enumerate()
+        .filter_map(|(index, row)| {
+            prompt_body(row).map(|body| (index, Some(body), styled_sigil_state(row)))
+        })
+        .collect();
+
+    let mut known = flock
+        .sent_text_by_pane
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(pane_id)
+        .cloned()
+        .unwrap_or_default();
+    {
+        let outbox = outbox_lock(&flock.outbox);
+        known.extend(
+            outbox
+                .get(pane_id)
+                .into_iter()
+                .flatten()
+                .filter(|message| !message.text.is_empty())
+                .map(|message| message.text.clone()),
+        );
+    }
+    let exact: Vec<String> = known
+        .iter()
+        .filter(|text| !text.is_empty())
+        .map(|text| collapse(text))
+        .collect();
+
+    for (position, (index, body, state)) in sigils.iter().enumerate() {
+        if *state != "dim" {
+            continue;
+        }
+        let end = sigils
+            .get(position + 1)
+            .map(|(next, _, _)| *next)
+            .unwrap_or(rows.len());
+        let mut parts = vec![body.clone().unwrap_or_default()];
+        parts.extend(
+            rows[*index + 1..end]
+                .iter()
+                .map(|row| strip_ansi(row).trim().to_string()),
+        );
+        let body = collapse(&parts.join(" "));
+        if body.is_empty() || !exact.iter().any(|candidate| candidate == &body) {
+            return false;
+        }
+    }
+    true
 }
 
 /// `HARNESS_QUEUES_WHILE_BUSY` (measured, not assumed): claude, pi and codex queue what is typed
