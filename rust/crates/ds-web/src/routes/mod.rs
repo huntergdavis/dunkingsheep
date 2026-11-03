@@ -8,5 +8,6 @@ pub mod game_lifecycle;
 #[rustfmt::skip]
 pub mod game_input;
 pub mod activity_poolrad;
+pub mod messages_read;
 pub mod panes;
 pub mod system;
