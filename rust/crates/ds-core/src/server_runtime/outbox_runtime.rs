@@ -33,7 +33,14 @@ pub(crate) struct OutboxRuntime {
 }
 impl OutboxRuntime {
     #[allow(dead_code)]
-    pub(crate) fn new(flock: Arc<Flock>, runtime: Handle, factory: Arc<Factory>) -> Self {
+    pub(crate) fn new(
+        flock: Arc<Flock>,
+        runtime: Handle,
+        factory: Arc<Factory>,
+    ) -> Result<Self, DunkError> {
+        if flock.stores().inbox.is_none() {
+            return Err(DunkError::Refused("inbox store is not attached".into()));
+        }
         let pool = Arc::new_cyclic(|pool| {
             OutboxWorkerPool::new(Arc::new(Runner {
                 runtime,
@@ -41,7 +48,7 @@ impl OutboxRuntime {
                 pool: pool.clone(),
             }))
         });
-        Self { flock, pool }
+        Ok(Self { flock, pool })
     }
     #[allow(dead_code)]
     pub(crate) fn stop_and_join(&self) {
@@ -125,5 +132,74 @@ impl SendPreparationEnv for TerminalCallAdapter<'_> {
         self.flock
             .persist_typed_attempt(message, pane, text, press, &pane_record)
             .unwrap_or(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::terminal::fakes::FakeTerminal;
+
+    #[test]
+    fn typed_attempt_without_frame_succeeds_but_snapshot_failure_refuses() {
+        let dir = tempfile::tempdir().unwrap();
+        // Persistence is enabled but no status state is attached, so the real save fails.
+        let flock = Flock::new(dir.path().join("launches"), dir.path().join("lanes"), true);
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let terminal: Mutex<Box<dyn Terminal>> = Mutex::new(Box::new(FakeTerminal::new()));
+        let mut env = TerminalCallAdapter {
+            flock: &flock,
+            terminal: &terminal,
+            runtime: runtime.handle(),
+        };
+        assert!(env.persist_typed_attempt(None, "w1:p1", "hello", true, None));
+        let mut message = Message::new("m1", "w1:p1", "lane", "hello", "test");
+        message.attempt_generation = Some("captured".into());
+        assert!(!env.persist_typed_attempt(
+            Some(&mut message),
+            "w1:p1",
+            "hello",
+            true,
+            Some("captured")
+        ));
+        assert_eq!(message.status, "queued");
+    }
+
+    #[test]
+    fn runtime_shutdown_is_idempotent_and_releases_pool() {
+        let dir = tempfile::tempdir().unwrap();
+        let flock = Arc::new(Flock::new(
+            dir.path().join("launches"),
+            dir.path().join("lanes"),
+            false,
+        ));
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        flock.attach_stores(crate::flock::panes::Stores {
+            inbox: Some(Arc::new(
+                crate::inbox_store::Store::open(
+                    dir.path().join("inbox.db"),
+                    dir.path().join("blobs"),
+                )
+                .unwrap(),
+            )),
+            ..Default::default()
+        });
+        let owner = OutboxRuntime::new(
+            flock,
+            runtime.handle().clone(),
+            Arc::new(|| Box::new(FakeTerminal::new())),
+        )
+        .unwrap();
+        let weak = Arc::downgrade(&owner.pool);
+        owner.stop_and_join();
+        owner.stop_and_join();
+        drop(owner);
+        assert!(weak.upgrade().is_none());
     }
 }

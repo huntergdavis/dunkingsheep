@@ -110,4 +110,57 @@ mod tests {
         assert_eq!(outbox["%1"][1].text, "new");
         assert_eq!(outbox["%1"][1].notify_for, ["i1", "i2"]);
     }
+    #[test]
+    fn concurrent_fold_settles_both_inbox_receipts() {
+        use crate::inbox_store::Outgoing;
+        use std::time::{Duration, Instant};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(dir.path().join("inbox.db"), dir.path().join("blobs")).unwrap());
+        let outgoing = Outgoing { mailbox: "w1:p1", body: Some("body"), subject: None, sender: None, mailbox_label: None, pane_id: Some("w1:p1"), attachments: &[], transport: None, reply_to: None, external_id: None };
+        let first = store.send(&outgoing).unwrap();
+        let second = store.send(&outgoing).unwrap();
+        let flock = Arc::new(Flock::new(dir.path().join("launches"), dir.path().join("lanes"), false));
+        flock.attach_stores(Stores { inbox: Some(Arc::clone(&store)), ..Stores::default() });
+        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        let owner = OutboxRuntime::new(Arc::clone(&flock), runtime.handle().clone(), Arc::new(|| Box::new(FakeTerminal::new()))).unwrap();
+        let request = RequestCtx::default();
+        let local_terminal: Mutex<Box<dyn Terminal>> = Mutex::new(Box::new(FakeTerminal::new()));
+        let adapter = RequestRuntimeAdapter::new(&flock, &request, runtime.handle(), &local_terminal);
+        let view = InboxRuntimeView::new(adapter, Arc::clone(&flock), Arc::clone(&owner.pool)).unwrap();
+        let mut message = Message::new("m1", "w1:p1", "lane", "notice", "test");
+        message.is_notice = true;
+        message.press_enter = false;
+        message.hold_while_typing = false;
+        message.notify_for.push(first.clone());
+        outbox_lock(&flock.outbox).insert("w1:p1".into(), vec![message]);
+        let send_lock = flock.send_lock_for("w1:p1");
+        let guard = send_lock.lock().unwrap();
+        std::thread::scope(|scope| {
+            let flock = Arc::clone(&flock);
+            let handle = runtime.handle().clone();
+            let worker = scope.spawn(move || {
+                let mut fake = FakeTerminal::new();
+                fake.panes[0].pane_pid = Some(i64::from(std::process::id()));
+                let terminal: Mutex<Box<dyn Terminal>> = Mutex::new(Box::new(fake));
+                let mut env = TerminalCallAdapter { flock: &flock, terminal: &terminal, runtime: &handle };
+                flock.deliver_message("m1", crate::clock::now_s(), &mut env, || None)
+            });
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let captured = outbox_lock(&view.flock.outbox).get("w1:p1").and_then(|rows| rows.first()).and_then(|row| row.attempt_generation.clone());
+                if captured.is_some() { break; }
+                assert!(Instant::now() < deadline, "delivery did not capture its generation");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert_eq!(view.fold_notice("w1:p1", "updated", &second).as_deref(), Some("m1"));
+            drop(guard);
+            worker.join().unwrap();
+        });
+        let first_status = crate::inbox::status(store.read_pool(), &first, crate::clock::now_s()).unwrap();
+        let second_status = crate::inbox::status(store.read_pool(), &second, crate::clock::now_s()).unwrap();
+        assert!(first_status.notify_state.is_some());
+        assert_eq!(first_status.notify_state, second_status.notify_state);
+    }
+
 }
