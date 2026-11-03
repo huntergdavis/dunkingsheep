@@ -1579,6 +1579,72 @@ pub async fn post_status(
     .await
 }
 
+/// Return the latest `dunkingsheep/review` commit status, or `None` when the
+/// commit has no status for that context. Validate the whole combined response
+/// before a caller uses it to reconcile a terminal review verdict.
+pub async fn review_status(
+    transport: &dyn GitHubTransport,
+    api_root: &str,
+    repo: &str,
+    sha: &str,
+    token: &str,
+) -> Result<Option<String>, GitHubError> {
+    let url = format!("{api_root}/repos/{repo}/commits/{sha}/status");
+    let (_, combined) = request(
+        transport,
+        RequestOptions {
+            method: "GET",
+            url: &url,
+            token: Some(token),
+            bearer: None,
+            payload: None,
+            timeout_s: 20,
+            api_root,
+        },
+    )
+    .await
+    .map_err(|error| {
+        if let Some(detail) = error.0.strip_prefix("invalid JSON response: ") {
+            GitHubError(format!("GitHub commit status: invalid JSON: {detail}"))
+        } else {
+            error
+        }
+    })?;
+    let combined = combined.unwrap_or(Value::Null);
+    let statuses = combined
+        .get("statuses")
+        .and_then(Value::as_array)
+        .ok_or_else(|| GitHubError("GitHub commit status: expected a statuses list".into()))?;
+
+    let mut review = None;
+    for status in statuses {
+        let Some(status) = status.as_object() else {
+            return Err(GitHubError(
+                "GitHub commit status: expected a status object".into(),
+            ));
+        };
+        let context = status
+            .get("context")
+            .and_then(Value::as_str)
+            .filter(|context| !context.is_empty())
+            .ok_or_else(|| GitHubError("GitHub commit status: missing status context".into()))?;
+        let state = status
+            .get("state")
+            .and_then(Value::as_str)
+            .filter(|state| matches!(*state, "pending" | "success" | "failure" | "error"))
+            .ok_or_else(|| GitHubError("GitHub commit status: invalid status state".into()))?;
+        if context == REVIEW_CONTEXT {
+            if review.is_some() {
+                return Err(GitHubError(
+                    "GitHub commit status: duplicate review context".into(),
+                ));
+            }
+            review = Some(state.to_owned());
+        }
+    }
+    Ok(review)
+}
+
 pub async fn merge_pull(
     transport: &dyn GitHubTransport,
     api_root: &str,

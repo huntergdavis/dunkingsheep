@@ -891,20 +891,26 @@ where
     }
 
     /// Post the review status and record the source-compatible success/error report.
-    pub async fn _status(&self, token: &str, update: StatusUpdate<'_>, report: &mut Value) {
+    pub async fn _status(&self, token: &str, update: StatusUpdate<'_>, report: &mut Value) -> bool {
         let short_sha: String = update.sha.chars().take(12).collect();
         let (repo, state) = (update.repo, update.state);
         match crate::github::post_status(&self.transport, &self.api_root, token, update).await {
-            Ok(_) => append_report(
-                report,
-                "statuses",
-                serde_json::json!({"repo": repo, "head": short_sha, "state": state}),
-            ),
-            Err(error) => append_report(
-                report,
-                "errors",
-                Value::String(format!("status {repo}@{short_sha}: {error}")),
-            ),
+            Ok(_) => {
+                append_report(
+                    report,
+                    "statuses",
+                    serde_json::json!({"repo": repo, "head": short_sha, "state": state}),
+                );
+                true
+            }
+            Err(error) => {
+                append_report(
+                    report,
+                    "errors",
+                    Value::String(format!("status {repo}@{short_sha}: {error}")),
+                );
+                false
+            }
         }
     }
 }
@@ -2162,6 +2168,107 @@ where
     G: ReviewPolicy + ReviewRepoConfig,
     X: GitHubTransport,
 {
+    async fn reconcile_terminal_status(
+        &self,
+        repo: &str,
+        pr: &ReviewPull,
+        token: &str,
+        report: &mut Value,
+    ) -> Result<Option<FinalVerdict>, String> {
+        let detail = match self.raw_pull_detail(repo, pr.number, token).await {
+            Ok(detail) => detail,
+            Err(error) => {
+                append_report(
+                    report,
+                    "errors",
+                    Value::String(format!("status {repo}#{}: {error}", pr.number)),
+                );
+                return Ok(None);
+            }
+        };
+        if detail.get("state").and_then(Value::as_str) != Some("open")
+            || detail
+                .get("head")
+                .and_then(Value::as_object)
+                .and_then(|head| head.get("sha"))
+                .and_then(Value::as_str)
+                != Some(pr.head.as_str())
+        {
+            append_report(
+                report,
+                "errors",
+                Value::String(format!(
+                    "status {}#{}: current head unavailable or changed",
+                    repo, pr.number
+                )),
+            );
+            return Ok(None);
+        }
+        let current = match crate::github::review_status(
+            &self.transport,
+            &self.api_root,
+            repo,
+            &pr.head,
+            token,
+        )
+        .await
+        {
+            Ok(current) => current,
+            Err(error) => {
+                append_report(
+                    report,
+                    "errors",
+                    Value::String(format!("status {}#{}: {error}", repo, pr.number)),
+                );
+                return Ok(None);
+            }
+        };
+
+        // The GitHub detail and status reads may overlap a newly completed veto or
+        // acceptance. Rebuild the distinct-lane decision from the current task rows.
+        let rows = self.flock.list_review_rows().await?;
+        let (accepts, needs_fix) = verdict_lanes_from_rows(&rows, repo, &pr.head, Some(pr.number));
+        let required = self.github.required_verdicts(repo)?.max(1);
+        let final_accept = needs_fix.is_empty() && accepts.len() >= required;
+        let desired = if !needs_fix.is_empty() {
+            "failure"
+        } else if final_accept {
+            "success"
+        } else {
+            "pending"
+        };
+        if current.as_deref() != Some(desired) {
+            let description = if !needs_fix.is_empty() {
+                format!("needs-fix stands from {}", needs_fix.join(", "))
+            } else if final_accept {
+                format!(
+                    "accepted by {} distinct reviewer lanes ({})",
+                    accepts.len(),
+                    accepts.join(", ")
+                )
+            } else {
+                format!("awaiting {required} distinct accepting reviewer lanes")
+            };
+            if !self
+                ._status(
+                    token,
+                    StatusUpdate {
+                        repo,
+                        sha: &pr.head,
+                        state: desired,
+                        description: &description,
+                        target_url: Some(&pr.url),
+                    },
+                    report,
+                )
+                .await
+            {
+                return Ok(None);
+            }
+        }
+        Ok(Some((final_accept, accepts, needs_fix, required)))
+    }
+
     /// Run the deterministic ReviewSync sweep against the injected task, token,
     /// repository, identity, and transport sources.
     pub async fn run(&self, dry_run: bool) -> Result<Value, String> {
@@ -2302,7 +2409,14 @@ where
                                     "done" | "cancelled"
                                 )
                             {
-                                continue;
+                                match self
+                                    .reconcile_terminal_status(&repo, &pr, &token, &mut report)
+                                    .await?
+                                {
+                                    Some((true, _, _, _)) => {}
+                                    Some((_, _, needs_fix, _)) if !needs_fix.is_empty() => {}
+                                    _ => continue,
+                                }
                             }
                             let reason = format!("duplicate of judged review {}", done_row.id);
                             if self.cancel_review_if_live(&current_row.id, &reason).await? {
@@ -2325,31 +2439,36 @@ where
                 }
 
                 if let Some(done) = done {
-                    if done.verdict.as_deref() == Some("accept") && !dry_run {
-                        let (accepts, needs_fix) = verdict_lanes(&terminal_verdict_rows);
-                        let required = self.github.required_verdicts(&repo)?.max(1);
-                        let final_verdict = needs_fix.is_empty() && accepts.len() >= required;
-                        if final_verdict {
-                            self._merge(
-                                &repo,
-                                pr.number,
-                                &pr.head,
-                                &token,
-                                &mut report,
-                                Some(&done.id),
-                            )
-                            .await;
-                        } else if needs_fix.is_empty() && current.is_none() {
-                            if let Some(first_lane) = accepts.first() {
-                                let _ = self
-                                    ._second_review(
-                                        &repo,
-                                        pr.number,
-                                        &pr.head,
-                                        first_lane,
-                                        Some(&mut report),
-                                    )
-                                    .await;
+                    if !dry_run {
+                        if let Some((final_verdict, accepts, needs_fix, _)) = self
+                            .reconcile_terminal_status(&repo, &pr, &token, &mut report)
+                            .await?
+                        {
+                            if final_verdict {
+                                self._merge(
+                                    &repo,
+                                    pr.number,
+                                    &pr.head,
+                                    &token,
+                                    &mut report,
+                                    Some(&done.id),
+                                )
+                                .await;
+                            } else if needs_fix.is_empty()
+                                && !accepts.is_empty()
+                                && current.is_none()
+                            {
+                                if let Some(first_lane) = accepts.first() {
+                                    let _ = self
+                                        ._second_review(
+                                            &repo,
+                                            pr.number,
+                                            &pr.head,
+                                            first_lane,
+                                            Some(&mut report),
+                                        )
+                                        .await;
+                                }
                             }
                         }
                     }

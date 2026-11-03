@@ -690,6 +690,19 @@ fn open_pull(number: i64, head: &str, branch: &str) -> Value {
     }])
 }
 
+fn status_pull_detail(head: &str, state: &str) -> Value {
+    json!({
+        "state": state,
+        "head": {"sha": head},
+        "mergeable": true,
+        "mergeable_state": "clean"
+    })
+}
+
+fn combined_review_status(state: &str) -> Value {
+    json!({"statuses": [{"context": "dunkingsheep/review", "state": state}]})
+}
+
 async fn add_actual_review(
     tasks: &Tasks,
     number: i64,
@@ -2591,6 +2604,320 @@ async fn run_cancel_race_ignores_terminal_winner_and_propagates_live_refusal() {
 }
 
 #[tokio::test]
+async fn run_cancelled_duplicate_pending_is_repaired_before_merge() {
+    let dir = crate::testsupport::dir("review-sync-cancelled-duplicate-status-repair");
+    let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    let first = add_actual_review(&store, 7, "head-a", "first accept").await;
+    finish_review(&store, &first.id, "%1", "accept").await;
+    let second = add_actual_review(&store, 7, "head-a", "second accept").await;
+    finish_review(&store, &second.id, "%2", "accept").await;
+    let duplicate = add_actual_review(&store, 7, "head-a", "old duplicate").await;
+    store.cancel(&duplicate.id, "duplicate").await.unwrap();
+    let transport = FakeReviewTransport::with_responses([
+        github_response(200, open_pull(7, "head-a", "work/topic")),
+        github_response(200, json!({"mergeable": true, "mergeable_state": "clean"})),
+        github_response(200, status_pull_detail("head-a", "open")),
+        github_response(200, combined_review_status("pending")),
+        github_response(201, json!({"state": "success"})),
+        github_response(405, json!({"message": "required review is expected"})),
+    ]);
+    let (sync, report) = run_actual_review_sync(store, transport, 2).await;
+    let requests = sync.transport.requests.lock().unwrap();
+    assert_eq!(6, requests.len());
+    assert_eq!("GET", requests[3].method);
+    assert!(requests[3].url.ends_with("/commits/head-a/status"));
+    assert_eq!("POST", requests[4].method);
+    assert!(requests[4].url.ends_with("/statuses/head-a"));
+    assert_eq!("PUT", requests[5].method);
+    assert!(requests[5].url.ends_with("/pulls/7/merge"));
+    drop(requests);
+    assert!(report["errors"].as_array().unwrap().is_empty());
+    assert!(report["statuses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| { row["state"] == "success" && row["head"] == "head-a" }));
+}
+
+#[tokio::test]
+async fn run_terminal_status_requires_distinct_threshold_and_honors_veto() {
+    let dir = crate::testsupport::dir("review-sync-terminal-status-distinct-threshold");
+    let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    let first = add_actual_review(&store, 7, "head-a", "first accept").await;
+    finish_review(&store, &first.id, "%1", "accept").await;
+    let duplicate = add_actual_review(&store, 7, "head-a", "same lane accept").await;
+    finish_review(&store, &duplicate.id, "%1", "accept").await;
+    let transport = FakeReviewTransport::with_responses([
+        github_response(200, open_pull(7, "head-a", "work/topic")),
+        github_response(200, json!({"mergeable": true, "mergeable_state": "clean"})),
+        github_response(200, status_pull_detail("head-a", "open")),
+        github_response(200, combined_review_status("success")),
+        github_response(201, json!({"state": "pending"})),
+    ]);
+    let (sync, report) = run_actual_review_sync(store, transport, 2).await;
+    assert!(report["errors"].as_array().unwrap().is_empty());
+    assert_eq!("pending", report["statuses"][0]["state"]);
+    assert!(sync
+        .transport
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|request| !request.url.ends_with("/merge")));
+    assert!(sync
+        .flock
+        .list_review_rows_visible()
+        .await
+        .unwrap()
+        .iter()
+        .any(|row| row.status == "open" && row.head.as_deref() == Some("head-a")));
+
+    let dir = crate::testsupport::dir("review-sync-terminal-status-veto");
+    let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    for (lane, verdict) in [("%1", "accept"), ("%2", "accept"), ("%3", "needs-fix")] {
+        let task = add_actual_review(&store, 7, "head-a", "terminal verdict").await;
+        finish_review(&store, &task.id, lane, verdict).await;
+    }
+    let transport = FakeReviewTransport::with_responses([
+        github_response(200, open_pull(7, "head-a", "work/topic")),
+        github_response(200, json!({"mergeable": true, "mergeable_state": "clean"})),
+        github_response(200, status_pull_detail("head-a", "open")),
+        github_response(200, combined_review_status("success")),
+        github_response(201, json!({"state": "failure"})),
+    ]);
+    let (sync, report) = run_actual_review_sync(store, transport, 2).await;
+    assert!(report["errors"].as_array().unwrap().is_empty());
+    assert_eq!("failure", report["statuses"][0]["state"]);
+    assert!(sync
+        .transport
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|request| !request.url.ends_with("/merge")));
+}
+
+#[tokio::test]
+async fn run_needed_second_review_restores_stale_success_to_pending() {
+    let dir = crate::testsupport::dir("review-sync-needed-second-restores-pending");
+    let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    let first = add_actual_review(&store, 7, "head-a", "first accept").await;
+    finish_review(&store, &first.id, "%1", "accept").await;
+    let second = add_actual_review(&store, 7, "head-a", "needed second").await;
+    let transport = FakeReviewTransport::with_responses([
+        github_response(200, open_pull(7, "head-a", "work/topic")),
+        github_response(200, json!({"mergeable": true, "mergeable_state": "clean"})),
+        github_response(200, status_pull_detail("head-a", "open")),
+        github_response(200, combined_review_status("success")),
+        github_response(201, json!({"state": "pending"})),
+    ]);
+    let (sync, report) = run_actual_review_sync(store, transport, 2).await;
+    assert!(report["errors"].as_array().unwrap().is_empty());
+    assert_eq!("pending", report["statuses"][0]["state"]);
+    assert_eq!("open", sync.flock.get(&second.id).await.unwrap().status);
+    assert!(sync
+        .transport
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|request| !request.url.ends_with("/merge")));
+}
+
+#[tokio::test]
+async fn run_terminal_status_does_not_repair_stale_or_unreadable_head() {
+    for (tag, detail) in [
+        ("changed", status_pull_detail("head-b", "open")),
+        ("missing", json!({"state": "open", "head": null})),
+        ("closed", status_pull_detail("head-a", "closed")),
+        ("malformed", json!(["not", "an", "object"])),
+    ] {
+        let dir = crate::testsupport::dir(&format!("review-sync-terminal-head-{tag}"));
+        let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+        let accepted = add_actual_review(&store, 7, "head-a", "accepted").await;
+        finish_review(&store, &accepted.id, "%1", "accept").await;
+        let transport = FakeReviewTransport::with_responses([
+            github_response(200, open_pull(7, "head-a", "work/topic")),
+            github_response(200, json!({"mergeable": true, "mergeable_state": "clean"})),
+            github_response(200, detail),
+        ]);
+        let (sync, report) = run_actual_review_sync(store, transport, 1).await;
+        assert!(!report["errors"].as_array().unwrap().is_empty());
+        assert!(sync
+            .transport
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|request| !request.url.contains("/commits/")
+                && !request.url.contains("/statuses/")
+                && !request.url.ends_with("/merge")));
+    }
+}
+
+#[tokio::test]
+async fn run_terminal_status_rechecks_verdict_after_github_io() {
+    let dir = crate::testsupport::dir("review-sync-terminal-status-verdict-race");
+    let tasks = Arc::new(Tasks::open(dir.path().join("tasks.db")).await.unwrap());
+    let accepted = add_actual_review(&tasks, 7, "head-a", "accepted").await;
+    finish_review(&tasks, &accepted.id, "%1", "accept").await;
+    let transport = FakeReviewTransport::with_responses([
+        github_response(200, open_pull(7, "head-a", "work/topic")),
+        github_response(200, json!({"mergeable": true, "mergeable_state": "clean"})),
+        github_response(200, status_pull_detail("head-a", "open")),
+        github_response(200, combined_review_status("pending")),
+        github_response(201, json!({"state": "failure"})),
+    ]);
+    transport.complete_new_review_on_request_index(
+        4,
+        tasks.clone(),
+        7,
+        "head-a",
+        "%3",
+        "needs-fix",
+    );
+    let sync = ReviewSync::with_transport(
+        CancelRaceActor {
+            tasks: tasks.clone(),
+            mode: CancelRaceMode::RefuseLive,
+        },
+        FakeReviewTokens(Ok("test-token".into())),
+        FakeReviewPolicy { required: 1 },
+        "https://api.example.test",
+        transport,
+    );
+    let report = sync.run(false).await.unwrap();
+    assert!(report["errors"].as_array().unwrap().is_empty());
+    assert_eq!("failure", report["statuses"][0]["state"]);
+    assert!(tasks
+        .list_review_rows_visible()
+        .await
+        .unwrap()
+        .iter()
+        .any(|row| row.verdict.as_deref() == Some("needs-fix")));
+    assert!(sync
+        .transport
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|request| !request.url.ends_with("/merge")));
+}
+
+#[tokio::test]
+async fn run_terminal_status_lookup_or_publish_failure_defers_merge() {
+    for publish_failure in [false, true] {
+        let tag = if publish_failure { "publish" } else { "lookup" };
+        let dir = crate::testsupport::dir(&format!("review-sync-terminal-status-{tag}-failure"));
+        let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+        for (lane, title) in [("%1", "first accept"), ("%2", "second accept")] {
+            let task = add_actual_review(&store, 7, "head-a", title).await;
+            finish_review(&store, &task.id, lane, "accept").await;
+        }
+        let mut responses = vec![
+            github_response(200, open_pull(7, "head-a", "work/topic")),
+            github_response(200, json!({"mergeable": true, "mergeable_state": "clean"})),
+            github_response(200, status_pull_detail("head-a", "open")),
+        ];
+        if publish_failure {
+            responses.push(github_response(200, combined_review_status("pending")));
+            responses.push(github_response(
+                403,
+                json!({"message": "status permission denied"}),
+            ));
+        } else {
+            responses.push(github_response(
+                403,
+                json!({"message": "status lookup unavailable"}),
+            ));
+        }
+        let transport = FakeReviewTransport::with_responses(responses);
+        let (sync, report) = run_actual_review_sync(store, transport, 2).await;
+        assert!(!report["errors"].as_array().unwrap().is_empty());
+        assert!(sync
+            .transport
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|request| !request.url.ends_with("/merge")));
+    }
+}
+
+#[tokio::test]
+async fn run_malformed_status_object_cannot_publish_success_or_merge() {
+    let dir = crate::testsupport::dir("review-sync-malformed-status-object");
+    let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    for (lane, title) in [("%1", "first accept"), ("%2", "second accept")] {
+        let task = add_actual_review(&store, 7, "head-a", title).await;
+        finish_review(&store, &task.id, lane, "accept").await;
+    }
+    let transport = FakeReviewTransport::with_responses([
+        github_response(200, open_pull(7, "head-a", "work/topic")),
+        github_response(200, json!({"mergeable": true, "mergeable_state": "clean"})),
+        github_response(200, status_pull_detail("head-a", "open")),
+        github_response(200, json!({"statuses": [{}]})),
+    ]);
+    let (sync, report) = run_actual_review_sync(store, transport, 2).await;
+    assert!(report["errors"][0]
+        .as_str()
+        .unwrap()
+        .contains("GitHub commit status: missing status context"));
+    assert!(sync
+        .transport
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|request| !request.url.contains("/statuses/") && !request.url.ends_with("/merge")));
+}
+
+#[tokio::test]
+async fn run_terminal_status_success_does_not_republish_every_tick() {
+    let dir = crate::testsupport::dir("review-sync-terminal-status-idempotent");
+    let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    for (lane, title) in [("%1", "first accept"), ("%2", "second accept")] {
+        let task = add_actual_review(&store, 7, "head-a", title).await;
+        finish_review(&store, &task.id, lane, "accept").await;
+    }
+    let transport = FakeReviewTransport::with_responses([
+        github_response(200, open_pull(7, "head-a", "work/topic")),
+        github_response(200, json!({"mergeable": true, "mergeable_state": "clean"})),
+        github_response(200, status_pull_detail("head-a", "open")),
+        github_response(200, combined_review_status("success")),
+        github_response(405, json!({"message": "required check is expected"})),
+        github_response(200, open_pull(7, "head-a", "work/topic")),
+        github_response(200, json!({"mergeable": true, "mergeable_state": "clean"})),
+        github_response(200, status_pull_detail("head-a", "open")),
+        github_response(200, combined_review_status("success")),
+        github_response(405, json!({"message": "required check is expected"})),
+    ]);
+    let sync = ReviewSync::with_transport(
+        store,
+        FakeReviewTokens(Ok("test-token".into())),
+        FakeReviewPolicy { required: 2 },
+        "https://api.example.test",
+        transport,
+    );
+    for _ in 0..2 {
+        let report = sync.run(false).await.unwrap();
+        assert!(report["errors"].as_array().unwrap().is_empty());
+    }
+    let requests = sync.transport.requests.lock().unwrap();
+    assert_eq!(10, requests.len());
+    assert_eq!(
+        2,
+        requests
+            .iter()
+            .filter(|request| request.method == "PUT")
+            .count()
+    );
+    assert!(requests
+        .iter()
+        .all(|request| !(request.method == "POST" && request.url.contains("/statuses/"))));
+}
+
+#[tokio::test]
 async fn run_needs_fix_blocks_second_review_and_final_merge_even_with_later_accept() {
     let dir = crate::testsupport::dir("review-sync-run-needs-fix-blocks");
     let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
@@ -2601,6 +2928,9 @@ async fn run_needs_fix_blocks_second_review_and_final_merge_even_with_later_acce
     let transport = FakeReviewTransport::with_responses([
         github_response(200, open_pull(7, "head-a", "work/topic")),
         github_response(200, json!({"mergeable": true, "state": "open"})),
+        github_response(200, status_pull_detail("head-a", "open")),
+        github_response(200, combined_review_status("pending")),
+        github_response(201, json!({"state": "failure"})),
     ]);
     let (sync, report) = run_actual_review_sync(store, transport, 2).await;
     assert!(sync
@@ -2638,6 +2968,9 @@ async fn run_routes_final_accept_through_real_merge_and_landed_writer() {
     let transport = FakeReviewTransport::with_responses([
         github_response(200, open_pull(7, "exact-head", "work/topic")),
         github_response(200, json!({"mergeable":true,"mergeable_state":"clean"})),
+        github_response(200, status_pull_detail("exact-head", "open")),
+        github_response(200, combined_review_status("pending")),
+        github_response(201, json!({"state": "success"})),
         github_response(200, json!({"merged":true})),
     ]);
     let sync = ReviewSync::with_transport(
@@ -2670,8 +3003,11 @@ async fn run_routes_final_accept_through_real_merge_and_landed_writer() {
     let requests = sync.transport.requests.lock().unwrap();
     assert!(requests[0].url.contains("/pulls?state=open"));
     assert!(requests[1].url.ends_with("/pulls/7"));
-    assert!(requests[2].url.ends_with("/pulls/7/merge"));
-    let merge_body: Value = serde_json::from_slice(requests[2].body.as_ref().unwrap()).unwrap();
+    assert!(requests[2].url.ends_with("/pulls/7"));
+    assert!(requests[3].url.ends_with("/commits/exact-head/status"));
+    assert!(requests[4].url.ends_with("/statuses/exact-head"));
+    assert!(requests[5].url.ends_with("/pulls/7/merge"));
+    let merge_body: Value = serde_json::from_slice(requests[5].body.as_ref().unwrap()).unwrap();
     assert_eq!("exact-head", merge_body["sha"]);
 }
 
@@ -2684,6 +3020,8 @@ async fn run_fails_closed_when_required_verdict_policy_is_invalid() {
     let transport = FakeReviewTransport::with_responses([
         github_response(200, open_pull(7, "head-a", "work/topic")),
         github_response(200, json!({"mergeable": true, "state": "open"})),
+        github_response(200, status_pull_detail("head-a", "open")),
+        github_response(200, combined_review_status("pending")),
     ]);
     let sync = ReviewSync::with_transport(
         store,
@@ -2723,8 +3061,13 @@ async fn run_preserves_the_needed_second_review_and_retires_stale_head_before_re
     let transport = FakeReviewTransport::with_responses([
         github_response(200, open_pull(7, "head-current", "work/topic")),
         github_response(200, json!({"mergeable": true, "state": "open"})),
+        github_response(200, status_pull_detail("head-current", "open")),
+        github_response(200, combined_review_status("success")),
+        github_response(201, json!({"state": "pending"})),
         github_response(200, open_pull(7, "head-current", "work/topic")),
         github_response(200, json!({"mergeable": true, "state": "open"})),
+        github_response(200, status_pull_detail("head-current", "open")),
+        github_response(200, combined_review_status("pending")),
     ]);
     let (sync, first_report) = run_actual_review_sync(store, transport, 2).await;
     assert!(first_report["cancelled"].as_array().unwrap().is_empty());
@@ -2740,8 +3083,12 @@ async fn run_preserves_the_needed_second_review_and_retires_stale_head_before_re
     let transport = FakeReviewTransport::with_responses([
         github_response(200, open_pull(7, "head-current", "work/topic")),
         github_response(200, json!({"mergeable": true, "state": "open"})),
+        github_response(200, status_pull_detail("head-current", "open")),
+        github_response(200, combined_review_status("pending")),
         github_response(200, open_pull(7, "head-current", "work/topic")),
         github_response(200, json!({"mergeable": true, "state": "open"})),
+        github_response(200, status_pull_detail("head-current", "open")),
+        github_response(200, combined_review_status("pending")),
     ]);
     let (sync, report) = run_actual_review_sync(store, transport, 2).await;
     assert_eq!("cancelled", sync.flock.get(&stale.id).await.unwrap().status);
@@ -2778,6 +3125,8 @@ async fn run_refreshes_verdicts_during_github_listing_and_reads_history_past_one
     let transport = FakeReviewTransport::with_responses([
         github_response(200, open_pull(7, "head-current", "work/topic")),
         github_response(200, json!({"mergeable": true, "state": "open"})),
+        github_response(200, status_pull_detail("head-current", "open")),
+        github_response(200, combined_review_status("pending")),
     ]);
     transport.complete_review_on_request(
         "/pulls?state=open",
@@ -2835,6 +3184,8 @@ async fn run_refreshes_verdicts_during_github_listing_and_reads_history_past_one
     let transport = FakeReviewTransport::with_responses([
         github_response(200, open_pull(7, "head-current", "work/topic")),
         github_response(200, json!({"mergeable": true, "state": "open"})),
+        github_response(200, status_pull_detail("head-current", "open")),
+        github_response(200, combined_review_status("pending")),
     ]);
     let (sync, _) = run_actual_review_sync(store, transport, 2).await;
     let rows = sync.flock.list_review_rows_visible().await.unwrap();
