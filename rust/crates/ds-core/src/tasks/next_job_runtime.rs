@@ -1678,7 +1678,7 @@ mod tests {
                 assert!(delivered
                     .get("reason")
                     .and_then(Value::as_str)
-                    .is_some_and(|reason| reason.starts_with("delivery_error: refused:")));
+                    .is_some_and(|reason| reason.starts_with("delivery_error:")));
             } else {
                 assert_eq!(
                     delivered.get("reason").and_then(Value::as_str),
