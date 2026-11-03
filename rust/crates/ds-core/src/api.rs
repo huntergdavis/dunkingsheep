@@ -27,6 +27,32 @@ use crate::{registry, roles};
 /// A request's arguments (the Python `args` dict; insertion-ordered).
 pub type Args = Map<String, Value>;
 
+/// The three send operations exposed to T39 handlers. The API layer owns command parsing and
+/// role/target gates; the daemon composition supplies the real terminal and queue behavior.
+/// `target` is the resolved pane row, and `self_pane_id` is copied from the request context.
+pub trait SendCommandEnv {
+    fn send_text(
+        &self,
+        target: &Value,
+        text: &str,
+        self_pane_id: Option<&str>,
+        hold_while_typing: bool,
+        wait_s: f64,
+        press_enter: bool,
+    ) -> Result<Value, DunkError>;
+
+    fn send_keys(
+        &self,
+        target: &Value,
+        keys: &str,
+        self_pane_id: Option<&str>,
+        hold_while_typing: bool,
+        wait_s: f64,
+    ) -> Result<Value, DunkError>;
+
+    fn flush_box(&self, target: &Value, self_pane_id: Option<&str>) -> Result<Value, DunkError>;
+}
+
 /// A synchronous adapter for command dependencies. All methods are object-safe so a daemon can
 /// supply one per request without putting backend types in handler signatures.
 pub trait CommandEnv: PaneInfoEnv {
@@ -91,6 +117,13 @@ pub trait CommandEnv: PaneInfoEnv {
     /// The retired-pane archive used by `retire_pane`.
     fn retired_panes_path(&self) -> Result<PathBuf, DunkError> {
         crate::panes::default_path(&crate::config::Env::from_process())
+    }
+
+    /// The terminal send/queue service. Production wiring is owned by t1605.
+    fn send_commands(&self) -> Result<&dyn SendCommandEnv, DunkError> {
+        Err(DunkError::Refused(
+            "send command adapter is not wired".into(),
+        ))
     }
 }
 
@@ -523,6 +556,13 @@ impl Dispatcher {
         self.register("task_delete", h_task_delete);
     }
 
+    /// Register only the T39 direct-send handlers.
+    pub fn register_send_text_keys_flush_box(&mut self) {
+        self.register("send_text", h_send_text);
+        self.register("send_keys", h_send_keys);
+        self.register("flush_box", h_flush_box);
+    }
+
     /// `dunk_api.dispatch(flock, name, args, self_pane_id)`, with the acting pane read only from
     /// this request's [`RequestCtx`] and caller state scoped to this synchronous request thread.
     pub fn dispatch<G: CallerGate + ?Sized>(
@@ -776,6 +816,137 @@ pub fn h_read_pane(context: &HandlerContext<'_>, args: Args) -> Result<Value, Du
         "tab_label": pane.get("tab_label"),
         "text": text,
     }))
+}
+
+const DEFAULT_SEND_WAIT_S: f64 = 3.0;
+
+fn send_target(
+    context: &HandlerContext<'_>,
+    args: &Args,
+    command: &str,
+) -> Result<Value, DunkError> {
+    let target = args
+        .get("target")
+        .and_then(Value::as_str)
+        .ok_or_else(|| DunkError::Refused(format!("{command}: target must be a string")))?;
+    let self_pane_id = context.self_pane_id().filter(|pane| !pane.is_empty());
+    let role = context
+        .flock
+        .caller_role(context.self_pane_id(), context.env)?;
+
+    // Python's Flock.require_send_self lets owner/web/system act on any pane. Worker and
+    // reviewer service tokens are constrained to their bound pane before adapter invocation.
+    if matches!(role.as_str(), "worker" | "reviewer") {
+        let self_pane_id = self_pane_id.ok_or_else(|| {
+            DunkError::Refused(format!(
+                "{command} requires the owner role or a service token; anonymous callers use the inbox and task queue"
+            ))
+        })?;
+        let panes = context.env.list_panes_grouped();
+        let hint = context
+            .env
+            .terminal()
+            .lock()
+            .map_err(|_| DunkError::Refused("terminal adapter lock poisoned".into()))?
+            .server_error_hint();
+        let resolved =
+            crate::flock::resolve::resolve_target(&panes, target, Some(self_pane_id), &hint)?;
+        if resolved.get("pane_id").and_then(Value::as_str) != Some(self_pane_id) {
+            return Err(DunkError::Refused(format!(
+                "{command} to another pane requires a superuser; use `dunkingsheep inbox send` instead"
+            )));
+        }
+        return Ok(resolved.clone());
+    }
+
+    let panes = context.env.list_panes_grouped();
+    let hint = context
+        .env
+        .terminal()
+        .lock()
+        .map_err(|_| DunkError::Refused("terminal adapter lock poisoned".into()))?
+        .server_error_hint();
+    Ok(
+        crate::flock::resolve::resolve_target(&panes, target, context.self_pane_id(), &hint)?
+            .clone(),
+    )
+}
+
+fn send_wait_s(args: &Args, command: &str) -> Result<f64, DunkError> {
+    let wait_s = match args.get("wait_s").filter(|value| !value.is_null()) {
+        Some(value) => python_float(value)?,
+        None => DEFAULT_SEND_WAIT_S,
+    };
+    if !wait_s.is_finite() || !(0.0..=3600.0).contains(&wait_s) {
+        return Err(DunkError::Refused(format!(
+            "{command}: wait_s must be between 0 and 3600"
+        )));
+    }
+    Ok(wait_s)
+}
+
+fn reject_retired_desk_token(args: &Args) -> Result<(), DunkError> {
+    let Some(value) = args.get("desk_token") else {
+        return Ok(());
+    };
+    if value.is_null() || value.as_str().is_some_and(|token| token.trim().is_empty()) {
+        return Ok(());
+    }
+    if value.as_str().is_none() {
+        return Err(DunkError::Refused("desk_token must be a string".into()));
+    }
+    Err(DunkError::Refused(
+        "desk_token is retired; present a web service token instead (dunkingsheep token issue --role web)".into(),
+    ))
+}
+
+/// `dunk_api.h_send_text`: validate API inputs and gates, then delegate the actual send.
+pub fn h_send_text(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    reject_retired_desk_token(&args)?;
+    let target = send_target(context, &args, "send_text")?;
+    let text = args
+        .get("text")
+        .and_then(Value::as_str)
+        .ok_or_else(|| DunkError::Refused("send_text: text must be a string".into()))?;
+    let hold_while_typing = python_bool_arg(&args, "hold_while_typing", true);
+    let wait_s = send_wait_s(&args, "send_text")?;
+    let press_enter = python_bool_arg(&args, "press_enter", true);
+    context.env.send_commands()?.send_text(
+        &target,
+        text,
+        context.self_pane_id(),
+        hold_while_typing,
+        wait_s,
+        press_enter,
+    )
+}
+
+/// `dunk_api.h_send_keys`: validate API inputs and gates, then delegate the key send.
+pub fn h_send_keys(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    reject_retired_desk_token(&args)?;
+    let target = send_target(context, &args, "send_keys")?;
+    let keys = args
+        .get("keys")
+        .and_then(Value::as_str)
+        .ok_or_else(|| DunkError::Refused("send_keys: keys must be a string".into()))?;
+    let hold_while_typing = python_bool_arg(&args, "hold_while_typing", true);
+    let wait_s = send_wait_s(&args, "send_keys")?;
+    context.env.send_commands()?.send_keys(
+        &target,
+        keys,
+        context.self_pane_id(),
+        hold_while_typing,
+        wait_s,
+    )
+}
+
+/// `dunk_api.h_flush_box`: enforce the pane gate and delegate the flush operation.
+pub fn h_flush_box(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let target = send_target(context, &args, "flush_box")?;
+    context
+        .env
+        .send_commands()?
+        .flush_box(&target, context.self_pane_id())
 }
 
 struct ApiRetireEnv<'ctx, 'request> {
