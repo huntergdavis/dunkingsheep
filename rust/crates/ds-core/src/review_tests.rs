@@ -1611,7 +1611,7 @@ async fn run_needs_fix_blocks_second_review_and_final_merge_even_with_later_acce
         github_response(200, json!({"mergeable": true, "state": "open"})),
     ]);
     let (sync, merger, report) = run_actual_review_sync(store, transport, 2).await;
-    assert!(merger.merged.lock().unwrap().is_empty());
+    assert!(merger.calls.lock().unwrap().is_empty());
     assert!(sync
         .flock
         .list_review_rows_visible()
@@ -1634,7 +1634,7 @@ async fn run_closed_and_merged_details_cancel_only_after_authoritative_state() {
         ]);
         let (sync, _, report) = run_actual_review_sync(store, transport, 2).await;
         assert_eq!("cancelled", sync.flock.get(&task.id).await.unwrap().status);
-        assert_eq!(vec![json!(task.id)], report["cancelled"]);
+        assert_eq!(json!([task.id]), report["cancelled"]);
     }
 }
 
@@ -1653,7 +1653,7 @@ async fn run_preserves_the_needed_second_review_and_retires_stale_head_before_re
     ]);
     let (sync, _, first_report) = run_actual_review_sync(store, transport, 2).await;
     assert!(first_report["cancelled"].as_array().unwrap().is_empty());
-    let (_, _, second_report) = sync.run(&FakeReviewMerge::default(), false).await.unwrap();
+    let second_report = sync.run(&FakeReviewMerge::default(), false).await.unwrap();
     assert!(second_report["cancelled"].as_array().unwrap().is_empty());
     assert_eq!("open", sync.flock.get(&second.id).await.unwrap().status);
 
@@ -1670,7 +1670,7 @@ async fn run_preserves_the_needed_second_review_and_retires_stale_head_before_re
     ]);
     let (sync, _, report) = run_actual_review_sync(store, transport, 2).await;
     assert_eq!("cancelled", sync.flock.get(&stale.id).await.unwrap().status);
-    assert_eq!(vec![json!(stale.id)], report["cancelled"]);
+    assert_eq!(json!([stale.id]), report["cancelled"]);
     let current = sync.flock.list_review_rows_visible().await.unwrap();
     let second = current
         .iter()
@@ -1689,7 +1689,7 @@ async fn run_preserves_the_needed_second_review_and_retires_stale_head_before_re
         .unwrap()
         .title
         .contains("second reviewer"));
-    let (_, _, next_report) = sync.run(&FakeReviewMerge::default(), false).await.unwrap();
+    let next_report = sync.run(&FakeReviewMerge::default(), false).await.unwrap();
     assert!(next_report["cancelled"].as_array().unwrap().is_empty());
     assert_eq!("open", sync.flock.get(&second_id).await.unwrap().status);
 }
@@ -1740,21 +1740,16 @@ async fn run_refreshes_verdicts_during_github_listing_and_reads_history_past_one
 
     let dir = crate::testsupport::dir("review-sync-run-history-over-1000");
     let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
-    store
-        .writer
-        .call(|conn| {
-            for index in 0..1005 {
-                let id = format!("old{index:04}");
-                conn.execute(
-                    "INSERT INTO tasks (id, scope, title, body, status, priority, completed_by, assignees, depends_on, created_at, updated_at, kind, repo, pr, head, verdict) VALUES (?, 'global', ?, '', 'done', 'urgent', '%1', '[]', '[]', ?, ?, 'review', 'o/r', ?, 'old-head', 'accept')",
-                    rusqlite::params![id, id, index as f64, index as f64, index],
-                )
-                .map_err(crate::db::map_sqlite)?;
-            }
-            Ok(())
-        })
-        .await
-        .unwrap();
+    let connection = rusqlite::Connection::open(dir.path().join("tasks.db")).unwrap();
+    for index in 0..1005 {
+        let id = format!("old{index:04}");
+        connection
+            .execute(
+                "INSERT INTO tasks (id, scope, title, body, status, priority, completed_by, assignees, depends_on, created_at, updated_at, kind, repo, pr, head, verdict) VALUES (?, 'global', ?, '', 'done', 'urgent', '%1', '[]', '[]', ?, ?, 'review', 'o/r', ?, 'old-head', 'accept')",
+                rusqlite::params![id, id, index as f64, index as f64, index],
+            )
+            .unwrap();
+    }
     let first = add_actual_review(&store, 7, "head-current", "first after history").await;
     finish_review(&store, &first.id, "%1", "accept").await;
     let transport = FakeReviewTransport::with_responses([

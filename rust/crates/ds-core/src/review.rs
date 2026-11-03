@@ -210,7 +210,10 @@ impl ReviewTaskActor for Flock {
         reason: &'a str,
     ) -> ReviewFuture<'a, Result<(), crate::error::DunkError>> {
         let tasks = attached_review_tasks(self);
-        Box::pin(async move { Tasks::cancel(&tasks?, id, reason).await.map(|_| ()) })
+        Box::pin(async move {
+            let tasks = tasks?;
+            Tasks::cancel(tasks.as_ref(), id, reason).await.map(|_| ())
+        })
     }
 
     fn authors_of<'a>(
@@ -1046,8 +1049,8 @@ where
                 // This read is deliberately after the GitHub conflict request. A verdict
                 // may have committed while GitHub was answering.
                 let latest_rows = self.flock.list_review_rows().await?;
-                let terminal_rows = terminal_rows(&latest_rows, &repo, pr.number, &pr.head);
-                let done = terminal_rows.last().cloned();
+                let terminal_verdict_rows = terminal_rows(&latest_rows, &repo, pr.number, &pr.head);
+                let done = terminal_verdict_rows.last().cloned();
 
                 // Cancel a stale head before handling the current head's verdict. The live
                 // review uniqueness constraint otherwise blocks the required second review.
@@ -1071,7 +1074,7 @@ where
                 if let Some(done_row) = done.as_ref() {
                     if let Some(current_row) = current.as_ref() {
                         if current_row.head.as_deref() == Some(pr.head.as_str()) && !dry_run {
-                            let (accepts, needs_fix) = verdict_lanes(&terminal_rows);
+                            let (accepts, needs_fix) = verdict_lanes(&terminal_verdict_rows);
                             let required = self.github.required_verdicts(&repo).max(1);
                             let final_verdict = needs_fix.is_empty() && accepts.len() >= required;
                             let still_needed = done_row.verdict.as_deref() == Some("accept")
@@ -1107,7 +1110,7 @@ where
 
                 if let Some(done) = done {
                     if done.verdict.as_deref() == Some("accept") && !dry_run {
-                        let (accepts, needs_fix) = verdict_lanes(&terminal_rows);
+                        let (accepts, needs_fix) = verdict_lanes(&terminal_verdict_rows);
                         let required = self.github.required_verdicts(&repo).max(1);
                         let final_verdict = needs_fix.is_empty() && accepts.len() >= required;
                         if final_verdict {
@@ -1399,7 +1402,7 @@ fn attribute_author_at(
     let created = _iso(created_at)? as f64;
     let recent = mints
         .iter()
-        .filter(|(_, minted)| **minted <= created && created - **minted < 2.0 * 60.0 * 60.0)
+        .filter(|(_, minted)| *minted <= created && created - *minted < 2.0 * 60.0 * 60.0)
         .map(|(pane, _)| pane)
         .collect::<Vec<_>>();
     (recent.len() == 1).then(|| recent[0].clone())
