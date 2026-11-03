@@ -190,6 +190,7 @@ struct ReviewApiEnv {
     now_s: f64,
     tokens: crate::github::Tokens,
     transport: ReviewApiTransport,
+    transport_error: Option<String>,
 }
 
 impl PaneInfoEnv for ReviewApiEnv {
@@ -216,7 +217,10 @@ impl CommandEnv for ReviewApiEnv {
     }
 
     fn review_transport(&self) -> Result<&dyn crate::github::GitHubTransport, DunkError> {
-        Ok(&self.transport)
+        match &self.transport_error {
+            Some(error) => Err(DunkError::Refused(error.clone())),
+            None => Ok(&self.transport),
+        }
     }
 }
 
@@ -249,6 +253,7 @@ fn review_api_env(dir: &Path, responses: impl IntoIterator<Item = Value>) -> Rev
             Some("https://github.invalid".into()),
         ),
         transport: ReviewApiTransport::with_json_responses(responses),
+        transport_error: None,
     }
 }
 
@@ -267,7 +272,7 @@ fn review_dispatch_context<'a>(
 }
 
 #[test]
-fn review_sync_handler_dispatches_to_the_canonical_engine_with_python_dry_run_default() {
+fn h_review_sync_matches_python() {
     let (dir, flock) = staffed_flock("review-sync-api");
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -280,10 +285,26 @@ fn review_sync_handler_dispatches_to_the_canonical_engine_with_python_dry_run_de
             .unwrap(),
     );
     flock.attach_stores(Stores {
-        tasks: Some(tasks),
+        tasks: Some(tasks.clone()),
         ..Default::default()
     });
-    let env = review_api_env(dir.path(), [json!([])]);
+    let env = review_api_env(
+        dir.path(),
+        [
+            json!([{
+                "number": 7,
+                "title": "candidate",
+                "html_url": "https://example.test/pull/7",
+                "draft": false,
+                "head": {"sha":"head-7", "ref":"work/topic"},
+                "base": {"ref":"main"},
+                "user": {"login":"author"}
+            }]),
+            json!({"mergeable":true, "mergeable_state":"clean"}),
+            json!({"state":"open", "body":""}),
+            json!({}),
+        ],
+    );
     {
         let request = RequestCtx::default();
         let context = review_dispatch_context(&flock, &request, &env, &runtime);
@@ -294,21 +315,31 @@ fn review_sync_handler_dispatches_to_the_canonical_engine_with_python_dry_run_de
             .dispatch(&context, &FixedRole("owner", true), "review_sync", None)
             .unwrap();
 
-        assert_eq!(json!([{"repo":"o/r", "open":0}]), report["repos"]);
+        assert_eq!(json!([{"repo":"o/r", "open":1}]), report["repos"]);
+        assert_eq!(1, report["filed"].as_array().unwrap().len());
         assert!(report["errors"].as_array().unwrap().is_empty());
+        let rows = runtime.block_on(tasks.list_review_rows_visible()).unwrap();
+        assert_eq!(1, rows.len());
+        assert_eq!("open", rows[0].status);
         let requests = env.transport.requests.lock().unwrap();
-        assert_eq!(1, requests.len());
-        assert!(requests[0].url.starts_with("https://github.invalid/"));
+        assert_eq!(4, requests.len());
+        assert!(requests
+            .iter()
+            .all(|request| request.url.starts_with("https://github.invalid/")));
         assert!(requests[0]
             .url
             .ends_with("/repos/o/r/pulls?state=open&per_page=100&page=1"));
+        assert!(requests[3].url.ends_with("/repos/o/r/statuses/head-7"));
+        let status: Value = serde_json::from_slice(requests[3].body.as_ref().unwrap()).unwrap();
+        assert_eq!("pending", status["state"]);
     }
+    drop(tasks);
     drop(flock);
     drop(runtime);
 }
 
 #[test]
-fn review_list_handler_dispatches_to_the_full_tasks_snapshot() {
+fn h_review_list_matches_python() {
     let (dir, flock) = flock();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -350,13 +381,19 @@ fn review_list_handler_dispatches_to_the_full_tasks_snapshot() {
         dispatcher.register_review_sync_list();
 
         let result = dispatcher
-            .dispatch(&context, &FixedRole("reviewer", true), "review_list", None)
+            .dispatch(&context, &FixedRole("worker", false), "review_list", None)
             .unwrap();
 
         assert_eq!(1, result["count"]);
         assert_eq!("123456789abc", result["reviews"][0]["head"]);
         assert_eq!(json!(["%9"]), result["reviews"][0]["reviewer"]);
         assert_eq!("review title", result["reviews"][0]["title"]);
+        assert_eq!("open", result["reviews"][0]["status"]);
+        assert_eq!("o/r", result["reviews"][0]["repo"]);
+        assert_eq!(7, result["reviews"][0]["pr"]);
+        assert_eq!(Value::Null, result["reviews"][0]["author"]);
+        assert_eq!(Value::Null, result["reviews"][0]["verdict"]);
+        assert_eq!(result["reviews"][0]["age_s"], result["oldest_age_s"]);
     }
     drop(tasks);
     drop(flock);
@@ -382,6 +419,54 @@ fn review_sync_dispatch_preserves_the_owner_gate_before_service_access() {
 
     assert_eq!("review_sync needs a superuser", error);
     assert!(env.transport.requests.lock().unwrap().is_empty());
+}
+
+#[test]
+fn review_sync_dispatch_forwards_transport_provider_errors() {
+    let (dir, flock) = staffed_flock("review-sync-transport-error");
+    let mut env = review_api_env(dir.path(), []);
+    env.transport_error = Some("review transport unavailable".into());
+    let request = RequestCtx::default();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let context = review_dispatch_context(&flock, &request, &env, &runtime);
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_review_sync_list();
+
+    let error = dispatcher
+        .dispatch(&context, &FixedRole("owner", true), "review_sync", None)
+        .unwrap_err()
+        .to_string();
+
+    assert_eq!("review transport unavailable", error);
+    assert!(env.transport.requests.lock().unwrap().is_empty());
+}
+
+#[test]
+fn review_list_dispatch_forwards_missing_task_store_error() {
+    let (_dir, flock) = flock();
+    let env = TestEnv::default();
+    let request = RequestCtx::default();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    {
+        let context = review_dispatch_context(&flock, &request, &env, &runtime);
+        let mut dispatcher = Dispatcher::new();
+        dispatcher.register_review_sync_list();
+
+        let error = dispatcher
+            .dispatch(&context, &FixedRole("worker", false), "review_list", None)
+            .unwrap_err()
+            .to_string();
+
+        assert_eq!("the task store is not attached", error);
+    }
+    drop(flock);
+    drop(runtime);
 }
 
 #[derive(Default)]
@@ -773,6 +858,7 @@ fn github_token_flock(tag: &str) -> (tempfile::TempDir, Flock) {
         ("w1:p1", "worker"),
         ("w1:p2", "reviewer"),
         ("w1:p3", "owner"),
+        ("w1:p4", "system"),
     ] {
         roles
             .register(pane, role, None, None, None, None, None, None)
@@ -3821,6 +3907,30 @@ fn test_gh_token_follows_the_role() {
     )
     .unwrap_err();
     assert!(bad_owner_kind.to_string().contains("unknown app kind 7"));
+}
+
+#[test]
+fn h_gh_token_matches_python() {
+    let (dir, flock) = github_token_flock("gh-token-system-default");
+    let env = github_token_api_env(dir.path());
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_gh_token();
+
+    let system =
+        dispatch_as_flock_role(&dispatcher, &flock, &env, Some("w1:p4"), "gh_token", None).unwrap();
+
+    assert_eq!(
+        json!({
+            "token": "fake-reviewer-token",
+            "kind": "reviewer",
+            "role": "system",
+            "slug": "reviewer-app",
+            "expires_at": 4_102_444_800.0,
+            "cached": true
+        }),
+        system
+    );
+    assert!(flock.gh_token_mints.lock().unwrap().is_empty());
 }
 
 #[test]
