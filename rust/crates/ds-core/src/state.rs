@@ -272,8 +272,7 @@ pub fn project_of(cwd: Option<&str>) -> Option<String> {
     cwd.trim()
         .trim_matches('/')
         .split('/')
-        .filter(|part| !part.is_empty())
-        .next_back()
+        .rfind(|part| !part.is_empty())
         .map(str::to_string)
 }
 
