@@ -100,7 +100,7 @@ async fn search(
     };
     let text = text.trim();
     let before = match query.get("before") {
-        Some(value) if !value.is_empty() => match value.parse::<i64>() {
+        Some(value) => match value.parse::<i64>() {
             Ok(before) if before != 0 => before,
             Ok(_) => i64::MAX,
             Err(_) => return query_integer_error("before", value),
@@ -147,14 +147,20 @@ async fn upload(
     request: Request,
 ) -> Response {
     let headers = request.headers().clone();
-    if let Err(response) = authenticate(auth.as_ref(), &headers, scheme).await {
-        return response;
-    }
     let content_type = headers
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
-    let Some(boundary) = multipart_boundary(content_type) else {
+    let boundary = multipart_boundary(content_type);
+    if content_type.split(';').next().is_some_and(|media_type| {
+        media_type
+            .trim()
+            .eq_ignore_ascii_case("multipart/form-data")
+    }) && boundary.is_none()
+    {
+        return detail_response(StatusCode::BAD_REQUEST, "Invalid multipart request");
+    }
+    let Some(boundary) = boundary else {
         return invalid_upload();
     };
     let bytes = match to_bytes(request.into_body(), MAX_UPLOAD + MAX_MULTIPART_OVERHEAD).await {
@@ -164,6 +170,9 @@ async fn upload(
     let Some((filename, mime, file_bytes)) = multipart_file(&bytes, &boundary) else {
         return invalid_upload();
     };
+    if let Err(response) = authenticate(auth.as_ref(), &headers, scheme).await {
+        return response;
+    }
     if file_bytes.len() > MAX_UPLOAD {
         return too_large();
     }
@@ -294,7 +303,14 @@ fn multipart_file(body: &[u8], boundary: &str) -> Option<(String, Option<String>
     marker.extend_from_slice(&delimiter);
     let data_end = tail
         .windows(marker.len())
-        .position(|window| window == marker.as_slice())?;
+        .enumerate()
+        .find_map(|(at, window)| {
+            if window != marker.as_slice() {
+                return None;
+            }
+            let suffix = &tail[at + marker.len()..];
+            (suffix.starts_with(b"--") || suffix.starts_with(b"\r\n")).then_some(at)
+        })?;
     Some((filename, mime, tail[..data_end].to_vec()))
 }
 
@@ -686,6 +702,21 @@ mod tests {
     }
 
     #[test]
+    fn search_rejects_empty_before_as_invalid_integer() {
+        let backend = Arc::new(FakeBackend::default());
+        let response = block_on(app(backend.clone()).oneshot(request(
+            "GET",
+            "/api/search?q=hi&before=",
+            Body::empty(),
+        )))
+        .unwrap();
+        let (status, body) = json_response(response);
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["detail"][0]["loc"], json!(["query", "before"]));
+        assert!(backend.search.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn search_requires_authentication_and_maps_storage_failures() {
         let backend = Arc::new(FakeBackend {
             error: Some(SearchAttachmentsError::Failure),
@@ -736,6 +767,44 @@ mod tests {
             backend.uploads.lock().unwrap()[0].storage_mime,
             "text/plain"
         );
+    }
+
+    #[test]
+    fn upload_preserves_boundary_like_bytes_with_invalid_suffix() {
+        let backend = Arc::new(FakeBackend::default());
+        let payload = b"first\r\n--bXsecond";
+        let mut multipart =
+            b"--b\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.txt\"\r\n\r\n"
+                .to_vec();
+        multipart.extend_from_slice(payload);
+        multipart.extend_from_slice(b"\r\n--b--\r\n");
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/uploads")
+            .header("host", "desk.test")
+            .header("origin", "http://desk.test")
+            .header("authorization", "Bearer owner-token")
+            .header("content-type", "multipart/form-data; boundary=b")
+            .body(Body::from(multipart))
+            .unwrap();
+        let response = block_on(app(backend.clone()).oneshot(request)).unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(backend.uploads.lock().unwrap()[0].bytes, payload);
+    }
+
+    #[test]
+    fn upload_parses_malformed_multipart_before_authentication() {
+        let backend = Arc::new(FakeBackend::default());
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/uploads")
+            .header("host", "desk.test")
+            .header("content-type", "multipart/form-data")
+            .body(Body::from("ignored"))
+            .unwrap();
+        let response = block_on(app(backend.clone()).oneshot(request)).unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(backend.uploads.lock().unwrap().is_empty());
     }
 
     #[test]
