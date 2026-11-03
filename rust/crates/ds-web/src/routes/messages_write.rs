@@ -1228,9 +1228,16 @@ mod tests {
     }
 
     #[test]
-    fn post_brief_rejects_json_float_and_boolean_as_strict_integers() {
+    fn post_brief_enforces_strict_positive_integer_token_types() {
         let backend = Arc::new(FakeMessages::default());
-        for token in ["1.0", "1e0", "true"] {
+        let huge_negative = "-1267650600228229401496703205376";
+        for (token, expected_type) in [
+            ("1.0", "int_type"),
+            ("1e0", "int_type"),
+            ("true", "int_type"),
+            ("\"1\"", "int_type"),
+            (huge_negative, "greater_than"),
+        ] {
             let result = block_on(app(backend.clone()).oneshot(request(
                 "/api/brief",
                 &format!(r#"{{"channel":"pane-worker","body":"done","answers":[{token}]}}"#),
@@ -1238,8 +1245,8 @@ mod tests {
             )))
             .unwrap();
             let (status, body) = response(result);
-            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "token {token}");
-            assert_eq!(body["detail"][0]["type"], "int_type", "token {token}");
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "token {token:?}");
+            assert_eq!(body["detail"][0]["type"], expected_type, "token {token:?}");
             assert_eq!(body["detail"][0]["loc"], json!(["body", "answers", 0]));
         }
         assert!(backend.calls.lock().unwrap().is_empty());
