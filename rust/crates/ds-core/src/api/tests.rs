@@ -858,7 +858,6 @@ fn github_token_flock(tag: &str) -> (tempfile::TempDir, Flock) {
         ("w1:p1", "worker"),
         ("w1:p2", "reviewer"),
         ("w1:p3", "owner"),
-        ("w1:p4", "system"),
     ] {
         roles
             .register(pane, role, None, None, None, None, None, None)
@@ -3915,9 +3914,16 @@ fn h_gh_token_matches_python() {
     let env = github_token_api_env(dir.path());
     let mut dispatcher = Dispatcher::new();
     dispatcher.register_gh_token();
+    let system_token = flock
+        .token_issue("system", Some("test-service"), Some("w1:p3"), &env)
+        .unwrap()["token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    flock.clear_caller();
+    flock.set_service_token(Some(&system_token));
 
-    let system =
-        dispatch_as_flock_role(&dispatcher, &flock, &env, Some("w1:p4"), "gh_token", None).unwrap();
+    let system = dispatch_as_flock_role(&dispatcher, &flock, &env, None, "gh_token", None).unwrap();
 
     assert_eq!(
         json!({
