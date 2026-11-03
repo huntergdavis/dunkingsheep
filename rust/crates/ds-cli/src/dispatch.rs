@@ -2111,7 +2111,11 @@ fn guard(ns: &Map<String, Value>) -> Outcome {
         Ok(value) if matches!(ns.get("json"), Some(Value::Bool(true))) => Outcome {
             stdout: crate::render_print::render_json_indent2(&value),
             stderr: String::new(),
-            code: 0,
+            code: if value.get("ok") == Some(&Value::Bool(false)) {
+                1
+            } else {
+                0
+            },
         },
         Ok(value) => Outcome {
             stdout: value

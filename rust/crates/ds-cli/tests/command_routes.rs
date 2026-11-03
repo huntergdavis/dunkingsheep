@@ -4690,7 +4690,7 @@ fn cli_route_guard_actions_2() {
     let shadowed: Value = serde_json::from_slice(&shadowed.stdout).unwrap();
     assert_eq!(shadowed["shadowed"], true);
     assert_eq!(shadowed["shadowing_herdr"], true);
-    assert!(config.join("bin/herdr-real").exists());
+    assert!(bin.join("herdr-real").exists());
     assert!(std::fs::read_to_string(bin.join("herdr"))
         .unwrap()
         .contains("dunkingsheep-herdr-guard"));
