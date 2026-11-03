@@ -2,6 +2,7 @@
 
 use serde_json::{json, Value};
 
+use crate::flock::commands_layout::CloseBackend;
 use crate::flock::mailbox::MailboxEnv;
 use crate::flock::panes::PaneInfoEnv;
 use crate::server_runtime::RequestRuntimeAdapter;
@@ -266,7 +267,6 @@ impl RequestRuntimeAdapter<'_> {
         })
     }
 
-    #[allow(dead_code)] // The complete CloseBackend assembly belongs to its dependent leaf.
     pub(crate) fn helper_closebackend_close(
         &mut self,
         kind: &str,
@@ -278,6 +278,12 @@ impl RequestRuntimeAdapter<'_> {
                 .map_err(|error| error.message)?;
             Ok(json!({}))
         })
+    }
+}
+
+impl CloseBackend for RequestRuntimeAdapter<'_> {
+    fn close(&mut self, kind: &str, target_id: &str) -> Result<Value, String> {
+        self.helper_closebackend_close(kind, target_id)
     }
 }
 
@@ -481,27 +487,23 @@ mod tests {
     }
 
     #[test]
-    fn production_close_backend_calls_selected_terminal() {
+    fn production_env_close_backend_uses_concrete_services() {
         with_adapter(FakeTerminal::new(), |adapter| {
-            assert!(adapter.helper_layoutbackend_get_pane("w1:p1").is_some());
-            assert_eq!(
-                Ok(json!({})),
-                adapter.helper_closebackend_close("pane", "w1:p1")
-            );
-            assert!(adapter.helper_layoutbackend_get_pane("w1:p1").is_none());
+            let backend: &mut dyn CloseBackend = adapter;
+            assert!(backend.get_pane("w1:p1").is_some());
+            assert_eq!(Ok(json!({})), backend.close("pane", "w1:p1"));
+            assert!(backend.get_pane("w1:p1").is_none());
         });
 
         let mut refusing = FakeTerminal::new();
         refusing.fail_layout = Some("terminal close refused".into());
         with_adapter(refusing, |adapter| {
+            let backend: &mut dyn CloseBackend = adapter;
             assert_eq!(
                 Err("terminal close refused".into()),
-                adapter.helper_closebackend_close("tab", "w1")
+                backend.close("tab", "w1")
             );
-            assert!(adapter
-                .helper_layoutbackend_list_tabs()
-                .iter()
-                .any(|tab| tab["tab_id"] == "w1"));
+            assert!(backend.list_tabs().iter().any(|tab| tab["tab_id"] == "w1"));
         });
     }
 }
