@@ -6,8 +6,8 @@
 //!
 //! The Python reaches the backend, the lease table and the clock through `self`; here they are
 //! [`SendEnv`], so every decision is testable with a scripted pane. NOT in this slice (next
-//! NOT in these slices (later t801 work): `send_now`/`send_keys_now`, `_enqueue`/`_deliver` and
-//! the per-pane outbox task, `submit_text`/`press_keys`, `_flush_once`, clear_box.
+//! NOT in these slices (later t801 work): `send_now`/`send_keys_now`, `_enqueue`/`_deliver`,
+//! the per-pane outbox task, and public `clear_box`.
 //!
 //! POLICY (owner, 2026-10-23/24) kept verbatim: a busy agent is NOT a hold reason, and there
 //! is NO "a human is typing" hold - every message goes through this daemon, so a non-empty box
@@ -20,6 +20,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::Ordering;
 
 use super::commands_inbox::NOTICE_PREFIX;
+use super::guarded_submit::confirm_guarded_submission;
 use super::panes::PaneInfoEnv;
 use super::resolve::{resolve_target, resolve_target_dict};
 use std::marker::PhantomData;
@@ -31,10 +32,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use super::Flock;
 use crate::clock;
 use crate::error::DunkError;
-use crate::terminal::composer::federated_composer;
+use crate::terminal::composer::{
+    composer_region_text, federated_composer, styled_composer_boundary, styled_sigil_state,
+};
 use crate::terminal::screen::{
-    banner_marker, box_text, is_our_send, modal_open, status_marker, strip_ansi, typed_text,
-    AMBIGUOUS_COMPOSER, DEAD_SESSION_MARKERS, WORKING_MARKERS,
+    banner_marker, box_text, is_our_send, modal_open, prompt_body, splitlines, status_marker,
+    strip_ansi, typed_text, AMBIGUOUS_COMPOSER, DEAD_SESSION_MARKERS, WORKING_MARKERS,
 };
 use crate::terminal::screen::{collapse, CONSUMPTION_PREFIX_CHARS};
 
@@ -188,7 +191,7 @@ impl Flock {
         self.typing_guard_with_timeout(pane_id, typing_timeout())
     }
 
-    fn typing_guard_with_timeout(
+    pub(super) fn typing_guard_with_timeout(
         &self,
         pane_id: &str,
         timeout: Duration,
@@ -220,6 +223,472 @@ pub const SUBMIT_KEY_AFTER: usize = 2;
 pub const SUBMIT_ATTEMPTS: usize = SUBMIT_GAPS.len();
 /// `_remember_typed`: how many recent texts to retain for each pane.
 const REMEMBERED_SENDS: usize = 4;
+
+/// Hold detail shared with Python's `BOX_HOLD` contract.
+pub const BOX_HOLD: &str = "the box would not clear (text left untouched)";
+
+/// Terminal services used by the bounded send preparation path. Composer ownership comes from
+/// the flock's recent-send history and queued outbox; a shape match alone never authorizes a key.
+pub trait SendPreparationEnv: FlushEnv + super::send_keys::KeyPressEnv {
+    fn send_text(&mut self, pane_id: &str, text: &str) -> (bool, String);
+    fn attempt_generation(&self, pane_id: &str) -> Option<String>;
+    fn persist_typed_attempt(
+        &mut self,
+        pane_id: &str,
+        text: &str,
+        press_enter: bool,
+        generation: Option<&str>,
+    ) -> bool;
+}
+
+/// Options that affect only the final, lock-protected composer preflight.
+#[derive(Debug, Clone, Copy)]
+pub struct SendGuardOptions {
+    pub hold_while_typing: bool,
+    pub allow_modal: bool,
+    pub preserve_draft: bool,
+}
+
+impl Default for SendGuardOptions {
+    fn default() -> Self {
+        Self {
+            hold_while_typing: true,
+            allow_modal: false,
+            preserve_draft: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SendAction {
+    pub ok: bool,
+    pub detail: String,
+    confirmation: Option<SubmitConfirmation>,
+    key_confirmation: Option<(String, String)>,
+}
+
+#[derive(Debug, Clone)]
+struct SubmitConfirmation {
+    pane_id: String,
+    text: String,
+    baseline: Option<String>,
+    busy_hint: bool,
+    guarded: bool,
+}
+
+impl SendAction {
+    pub fn completed(ok: bool, detail: impl Into<String>) -> Self {
+        Self {
+            ok,
+            detail: detail.into(),
+            confirmation: None,
+            key_confirmation: None,
+        }
+    }
+}
+
+/// One deliberately short submit flush. The guard remains held across the key, one poll, and
+/// the single box read; the long confirmation ladder must only run after it is dropped.
+pub fn flush_once(
+    env: &mut dyn FlushEnv,
+    pane_id: &str,
+    text: &str,
+    busy_hint: bool,
+    _guard: &TypingGuard<'_>,
+) -> bool {
+    let (ok, _detail, _) = send_submit_key(env, pane_id, "Enter", busy_hint);
+    if !ok {
+        return false;
+    }
+    env.sleep_s(SUBMIT_POLL_S[0]);
+    box_holds(env, pane_id, text) == Some(false)
+}
+
+/// Make the composer safe for this send. Unknown or human-draft content is never submitted.
+/// Foreign text is submitted once only when the caller explicitly permits preserving it, which
+/// matches `_ensure_box_clear`; a failed one-shot leaves the original text in place.
+pub fn ensure_box_clear(
+    flock: &Flock,
+    env: &mut dyn SendPreparationEnv,
+    pane_id: &str,
+    allow_modal: bool,
+    preserve_draft: bool,
+    busy_hint: bool,
+    guard: &TypingGuard<'_>,
+) -> Result<(), &'static str> {
+    let Some(screen) = env.read_pane(pane_id, CONSUMPTION_READ_LINES, true) else {
+        return Ok(());
+    };
+    if modal_open(&screen) {
+        return if allow_modal { Ok(()) } else { Err("dialog") };
+    }
+    if let Some(federated) = federated_composer(env.federated_input(), &screen) {
+        if federated.is_empty() {
+            return Ok(());
+        }
+        if preserve_draft {
+            return Err("human_draft");
+        }
+        return if flush_once(env, pane_id, &federated, busy_hint, guard) {
+            Ok(())
+        } else {
+            Err("federated-pending-input")
+        };
+    }
+
+    let (shown, detail) = box_text(&screen);
+    let known = flock.known_send_texts(pane_id);
+    if detail.starts_with(AMBIGUOUS_COMPOSER) {
+        if let Some(region) = owned_composer_region(flock, pane_id, &screen, &known) {
+            return if flush_once(env, pane_id, &region, busy_hint, guard) {
+                Ok(())
+            } else {
+                Err("stranded-will-not-submit")
+            };
+        }
+        return Err("ambiguous-composer");
+    }
+    let shown = if shown.is_empty() {
+        typed_text(&screen).unwrap_or_default()
+    } else {
+        shown
+    };
+    if shown.is_empty() {
+        return Ok(());
+    }
+
+    let shown_c = collapse(&shown);
+    if known.iter().any(|candidate| {
+        let candidate = collapse(candidate);
+        candidate.starts_with("/model ") && candidate != shown_c && candidate.ends_with(&shown_c)
+    }) {
+        return Err("partial-model-command");
+    }
+    let ours = flock.looks_like_ours(pane_id, &shown);
+    if preserve_draft && !ours {
+        return Err("human_draft");
+    }
+    if flush_once(env, pane_id, &shown, busy_hint, guard) {
+        Ok(())
+    } else if ours {
+        Err("stranded-will-not-submit")
+    } else {
+        Err("foreign-text-will-not-submit")
+    }
+}
+
+/// Type text and perform its initial submit key under one typing guard. The returned action owns
+/// the later confirmation; call [`confirm_send_action`] only after dropping the guard. The attempt
+/// baseline and generation are captured before the first terminal write.
+pub fn submit_text(
+    flock: &Flock,
+    env: &mut dyn SendPreparationEnv,
+    pane_id: &str,
+    text: &str,
+    press_enter: bool,
+    check_box: bool,
+    guard: Option<&TypingGuard<'_>>,
+) -> SendAction {
+    let guarded = guard.is_some();
+    let mut perform = |guard: &TypingGuard<'_>| {
+        if let Some(dead) = dead_session(env, pane_id) {
+            return Err(format!(
+                "agent session is dead ({dead}); not submitting into a dead composer"
+            ));
+        }
+        if check_box {
+            match ensure_box_clear(flock, env, pane_id, false, false, false, guard) {
+                Ok(()) => {}
+                Err(reason) => return Err(format!("{BOX_HOLD} ({reason})")),
+            }
+        }
+        let baseline = env.read_status(pane_id);
+        let generation = env.attempt_generation(pane_id);
+        let before = env
+            .read_pane(pane_id, CONSUMPTION_READ_LINES, true)
+            .unwrap_or_default();
+        let busy_hint = env.pane_harness(pane_id).as_deref() == Some("codex")
+            && (is_working_status(baseline.as_deref())
+                || status_marker(
+                    &before,
+                    &WORKING_MARKERS,
+                    CONSUMPTION_READ_LINES as usize,
+                    true,
+                    true,
+                )
+                .is_some()
+                || strip_ansi(&before)
+                    .to_lowercase()
+                    .contains("tab to queue message"));
+        let (ok, detail) = env.send_text(pane_id, text);
+        if !ok {
+            return Err(detail);
+        }
+        flock.remember_typed(pane_id, text);
+        if !env.persist_typed_attempt(pane_id, text, press_enter, generation.as_deref()) {
+            return Err("typed but not submitted: durable attempt receipt failed".into());
+        }
+        if !press_enter {
+            return Ok(SendAction::completed(true, "sent"));
+        }
+        let (ok, detail, _key) = send_submit_key(env, pane_id, "Enter", busy_hint);
+        if !ok {
+            return Err(detail);
+        }
+        Ok(SendAction {
+            ok: true,
+            detail: "sent".into(),
+            confirmation: Some(SubmitConfirmation {
+                pane_id: pane_id.to_owned(),
+                text: text.to_owned(),
+                baseline,
+                busy_hint,
+                guarded,
+            }),
+            key_confirmation: None,
+        })
+    };
+
+    let prepared = match guard {
+        Some(guard) => perform(guard),
+        None => match flock.typing_guard(pane_id) {
+            Ok(guard) => perform(&guard),
+            Err(error) => return SendAction::completed(false, error.to_string()),
+        },
+    };
+    drop(perform);
+    match prepared {
+        Ok(value) => value,
+        Err(detail) => SendAction::completed(false, detail),
+    }
+}
+
+/// Run confirmation after the typing guard has been released. `guarded=true` selects the bounded
+/// short rounds; otherwise the accepted long retry ladder is used.
+pub fn confirm_send_action(env: &mut dyn SendPreparationEnv, action: &mut SendAction) {
+    if let Some((pane_id, text)) = action.key_confirmation.take() {
+        let result = env.confirm_pending(&pane_id, &text);
+        action.ok = result.0;
+        action.detail = result.1;
+        return;
+    }
+    let Some(confirmation) = action.confirmation.take() else {
+        return;
+    };
+    let baseline = StatusBaseline::Captured(confirmation.baseline);
+    let result = if confirmation.guarded {
+        confirm_guarded_submission(
+            env,
+            &confirmation.pane_id,
+            &confirmation.text,
+            "Enter",
+            confirmation.busy_hint,
+            baseline,
+        )
+    } else {
+        press_until_submitted(
+            env,
+            &confirmation.pane_id,
+            &confirmation.text,
+            true,
+            confirmation.busy_hint,
+            baseline,
+        )
+    };
+    action.ok = result.0;
+    action.detail = result.1;
+}
+
+/// Route an already-normalized key list once while the caller holds the typing guard. Pending
+/// text confirmation is deferred into the returned action so its waits occur after lock release.
+pub fn press_keys(
+    env: &mut dyn SendPreparationEnv,
+    pane_id: &str,
+    normalized_keys: &[String],
+    _guard: &TypingGuard<'_>,
+) -> SendAction {
+    struct DeferConfirm<'a> {
+        inner: &'a mut dyn super::send_keys::KeyPressEnv,
+        pending: Option<String>,
+    }
+    impl super::send_keys::KeyPressEnv for DeferConfirm<'_> {
+        fn send_keys(&mut self, pane_id: &str, keys: &[String]) -> (bool, String) {
+            self.inner.send_keys(pane_id, keys)
+        }
+        fn pending_text(&mut self, pane_id: &str) -> Option<String> {
+            self.inner.pending_text(pane_id)
+        }
+        fn confirm_pending(&mut self, _pane_id: &str, text: &str) -> (bool, String) {
+            self.pending = Some(text.to_owned());
+            (
+                true,
+                "confirmation deferred until after typing guard release".into(),
+            )
+        }
+    }
+    let mut deferred = DeferConfirm {
+        inner: env,
+        pending: None,
+    };
+    let result = super::send_keys::press_keys_unlocked(&mut deferred, pane_id, normalized_keys);
+    if let Some(text) = deferred.pending {
+        SendAction {
+            ok: result.0,
+            detail: result.1,
+            confirmation: None,
+            key_confirmation: Some((pane_id.to_owned(), text)),
+        }
+    } else {
+        SendAction::completed(result.0, result.1)
+    }
+}
+
+/// Final guarded decision: same-pane lock, fleet typing guard, permission recheck, box policy,
+/// then one action. `ok=None` distinguishes a held send from an action that ran and failed.
+pub fn send_guarded(
+    flock: &Flock,
+    env: &mut dyn SendPreparationEnv,
+    pane_id: &str,
+    options: SendGuardOptions,
+    mut permission: impl FnMut() -> Option<String>,
+    action: impl FnOnce(&mut dyn SendPreparationEnv, &TypingGuard<'_>) -> Result<SendAction, String>,
+) -> (bool, Option<bool>, String) {
+    let pane_lock = flock.send_lock_for(pane_id);
+    let _pane_guard = lock_unpoison(&pane_lock);
+    let typing_guard = match flock.typing_guard(pane_id) {
+        Ok(guard) => guard,
+        Err(error) => return (false, None, error.to_string()),
+    };
+    if let Some(detail) = permission() {
+        return (false, None, detail);
+    }
+    if options.hold_while_typing {
+        if let Some(marker) = dead_session(env, pane_id) {
+            return (false, None, format!("dead session ({marker})"));
+        }
+        if env.session_process_gone(pane_id) {
+            return (
+                false,
+                None,
+                "the lane's recorded process is gone".to_string(),
+            );
+        }
+        match ensure_box_clear(
+            flock,
+            env,
+            pane_id,
+            options.allow_modal,
+            options.preserve_draft,
+            false,
+            &typing_guard,
+        ) {
+            Ok(()) => {}
+            Err(reason) => return (false, None, format!("{BOX_HOLD} ({reason})")),
+        }
+    }
+    let result = action(env, &typing_guard);
+    drop(typing_guard);
+    match result {
+        Ok(action) if !action.ok && action.detail.starts_with(BOX_HOLD) => {
+            (false, None, action.detail)
+        }
+        Ok(mut action) => {
+            // Keep the per-pane lock across confirmation, but release the global typing lock.
+            confirm_send_action(env, &mut action);
+            (true, Some(action.ok), action.detail)
+        }
+        Err(detail) => (true, Some(false), detail),
+    }
+}
+
+/// Python's `_composer_ownership`: use plain geometry when it delimits one prompt; otherwise
+/// permit the styled multi-sigil fallback only when the complete dim transcript spans are
+/// accounted for and the complete live region exactly matches text owned by this flock.
+fn owned_composer_region(
+    flock: &Flock,
+    pane_id: &str,
+    screen: &str,
+    known: &[String],
+) -> Option<String> {
+    let plain_region = composer_region_text(screen);
+    if !plain_region.is_empty() {
+        return exact_owned_region(&plain_region, known).then_some(plain_region);
+    }
+
+    let (status, region) = styled_composer_boundary(screen);
+    if status != "delimited"
+        || region.is_empty()
+        || !dim_bodies_accounted(flock, pane_id, screen)
+        || !exact_owned_region(&region, known)
+    {
+        return None;
+    }
+    Some(region)
+}
+
+fn exact_owned_region(region: &str, known: &[String]) -> bool {
+    let region = collapse(region);
+    !region.is_empty() && known.iter().any(|candidate| collapse(candidate) == region)
+}
+
+/// `_dim_bodies_accounted`: account each complete dim sigil span through the next sigil.
+/// Sent history and every nonempty outbox row are provenance; the latter intentionally includes
+/// statuses beyond `queued`, unlike the stricter live-composer ownership candidate set.
+fn dim_bodies_accounted(flock: &Flock, pane_id: &str, screen: &str) -> bool {
+    let rows = splitlines(screen);
+    let sigils: Vec<(usize, Option<String>, &'static str)> = rows
+        .iter()
+        .enumerate()
+        .filter_map(|(index, row)| {
+            prompt_body(row).map(|body| (index, Some(body), styled_sigil_state(row)))
+        })
+        .collect();
+
+    let mut known = flock
+        .sent_text_by_pane
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(pane_id)
+        .cloned()
+        .unwrap_or_default();
+    {
+        let outbox = outbox_lock(&flock.outbox);
+        known.extend(
+            outbox
+                .get(pane_id)
+                .into_iter()
+                .flatten()
+                .filter(|message| !message.text.is_empty())
+                .map(|message| message.text.clone()),
+        );
+    }
+    let exact: Vec<String> = known
+        .iter()
+        .filter(|text| !text.is_empty())
+        .map(|text| collapse(text))
+        .collect();
+
+    for (position, (index, body, state)) in sigils.iter().enumerate() {
+        if *state != "dim" {
+            continue;
+        }
+        let end = sigils
+            .get(position + 1)
+            .map(|(next, _, _)| *next)
+            .unwrap_or(rows.len());
+        let mut parts = vec![body.clone().unwrap_or_default()];
+        parts.extend(
+            rows[*index + 1..end]
+                .iter()
+                .map(|row| strip_ansi(row).trim().to_string()),
+        );
+        let body = collapse(&parts.join(" "));
+        if body.is_empty() || !exact.iter().any(|candidate| candidate == &body) {
+            return false;
+        }
+    }
+    true
+}
 
 /// `HARNESS_QUEUES_WHILE_BUSY` (measured, not assumed): claude, pi and codex queue what is typed
 /// while they work (codex via Tab). An unknown harness keeps the capability hold.
@@ -1988,6 +2457,27 @@ impl Flock {
             return false;
         }
 
+        let candidates = self.known_send_texts(pane_id);
+
+        let shown = collapse(shown);
+        for candidate in &candidates {
+            let full = collapse(candidate);
+            if full.is_empty() {
+                continue;
+            }
+            let consumption_prefix: String = full.chars().take(CONSUMPTION_PREFIX_CHARS).collect();
+            if full.starts_with(&shown) || shown.starts_with(&consumption_prefix) {
+                return true;
+            }
+        }
+        candidates
+            .iter()
+            .any(|candidate| is_our_send(shown.as_str(), Some(candidate), true))
+    }
+
+    /// Clone the exact ownership evidence used by composer preflight. Queued outbox text is
+    /// eligible only while its message is still queued.
+    fn known_send_texts(&self, pane_id: &str) -> Vec<String> {
         let mut candidates = self
             .sent_text_by_pane
             .lock()
@@ -2006,21 +2496,7 @@ impl Flock {
                     .map(|message| message.text.clone()),
             );
         }
-
-        let shown = collapse(shown);
-        for candidate in &candidates {
-            let full = collapse(candidate);
-            if full.is_empty() {
-                continue;
-            }
-            let consumption_prefix: String = full.chars().take(CONSUMPTION_PREFIX_CHARS).collect();
-            if full.starts_with(&shown) || shown.starts_with(&consumption_prefix) {
-                return true;
-            }
-        }
         candidates
-            .iter()
-            .any(|candidate| is_our_send(shown.as_str(), Some(candidate), true))
     }
 
     /// Allocate a unique monotonically increasing `mN` message identity and build
