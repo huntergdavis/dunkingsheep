@@ -28,7 +28,11 @@ use serde_json::{json, Value};
 use super::auth::{AuthBackend, AuthError, RequestScheme};
 
 const MAX_UPLOAD: usize = 25 * 1024 * 1024;
-const MAX_MULTIPART_HEADERS: usize = 64 * 1024;
+const MAX_MULTIPART_BOUNDARY_BYTES: usize = 256;
+const MAX_MULTIPART_HEADER_COUNT: usize = 8;
+const MAX_MULTIPART_HEADER_LINE_BYTES: usize = 4224;
+const MAX_MULTIPART_HEADER_BLOCK_BYTES: usize =
+    MAX_MULTIPART_HEADER_COUNT * (MAX_MULTIPART_HEADER_LINE_BYTES + 2) + 2;
 const MAX_NON_FILE_PART_SIZE: usize = 1024 * 1024;
 const MAX_MULTIPART_FILES: usize = 1000;
 const MAX_MULTIPART_FIELDS: usize = 1000;
@@ -128,11 +132,16 @@ async fn search(
         }));
     };
     let text = text.trim();
+    let mut before_overflow = false;
     let before = match query.get("before") {
-        Some(value) => match value.parse::<i64>() {
+        Some(value) => match parse_python_query_integer(value) {
             Ok(before) if before != 0 => before,
             Ok(_) => i64::MAX,
-            Err(_) => return query_integer_error("before", value),
+            Err(QueryIntegerError::Invalid) => return query_integer_error("before", value),
+            Err(QueryIntegerError::Overflow) => {
+                before_overflow = true;
+                i64::MAX
+            }
         },
         _ => i64::MAX,
     };
@@ -147,6 +156,9 @@ async fn search(
         if !backend.known_channel(channel) {
             return detail_response(StatusCode::NOT_FOUND, "Unknown channel");
         }
+    }
+    if before_overflow {
+        return internal_error();
     }
     let rows = match backend.search_messages(&format!("%{text}%"), channel, before, 51) {
         Ok(rows) => rows,
@@ -193,7 +205,10 @@ async fn upload(
         return invalid_upload();
     };
     let parsed = match multipart_file(request.into_body(), &boundary).await {
-        Ok(Some(file)) => file,
+        Ok(Some(ParsedFormField::Upload(file))) => file,
+        Ok(Some(ParsedFormField::Scalar(value))) => {
+            return invalid_upload_scalar(value);
+        }
         Ok(None) => return invalid_upload(),
         Err(MultipartFileError::BadRequest(detail)) => {
             return detail_response(StatusCode::BAD_REQUEST, detail);
@@ -650,10 +665,17 @@ struct ParsedUpload {
     bytes: Vec<u8>,
 }
 
+enum ParsedFormField {
+    Upload(ParsedUpload),
+    Scalar(String),
+}
+
 struct MultipartPart {
-    capture: bool,
+    selected: bool,
     is_file: bool,
     size: usize,
+    upload: Option<ParsedUpload>,
+    scalar: Vec<u8>,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -683,7 +705,6 @@ fn find_multipart_end(buffer: &[u8], marker: &[u8]) -> Option<(usize, MultipartE
 
 fn feed_part_data(
     part: &mut Option<MultipartPart>,
-    selected_file: &mut Option<ParsedUpload>,
     bytes: &[u8],
     part_too_large: &'static str,
 ) -> Result<(), MultipartFileError> {
@@ -694,30 +715,62 @@ fn feed_part_data(
     if !part.is_file && part.size > MAX_NON_FILE_PART_SIZE {
         return Err(MultipartFileError::BadRequest(part_too_large));
     }
-    if part.capture {
-        if let Some(file) = selected_file.as_mut() {
+    if part.selected {
+        if let Some(file) = part.upload.as_mut() {
             let remaining = MAX_UPLOAD
                 .saturating_add(1)
                 .saturating_sub(file.bytes.len());
             file.bytes
                 .extend_from_slice(&bytes[..bytes.len().min(remaining)]);
+        } else if !part.is_file {
+            part.scalar.extend_from_slice(bytes);
         }
     }
     Ok(())
 }
 
+fn finish_multipart_part(part: Option<MultipartPart>, selected: &mut Option<ParsedFormField>) {
+    let Some(part) = part.filter(|part| part.selected) else {
+        return;
+    };
+    *selected = Some(match part.upload {
+        Some(upload) => ParsedFormField::Upload(upload),
+        None => ParsedFormField::Scalar(decode_form_field(&part.scalar)),
+    });
+}
+
+fn latin1_text(bytes: &[u8]) -> String {
+    bytes.iter().copied().map(char::from).collect()
+}
+
+fn decode_latin1_parameter(value: String) -> String {
+    let bytes = value
+        .chars()
+        .map(|character| character as u32 as u8)
+        .collect::<Vec<_>>();
+    String::from_utf8(bytes.clone()).unwrap_or_else(|_| latin1_text(&bytes))
+}
+
+fn decode_form_field(bytes: &[u8]) -> String {
+    String::from_utf8(bytes.to_vec()).unwrap_or_else(|_| latin1_text(bytes))
+}
+
 async fn multipart_file(
     mut body: Body,
     boundary: &str,
-) -> Result<Option<ParsedUpload>, MultipartFileError> {
+) -> Result<Option<ParsedFormField>, MultipartFileError> {
     const MISSING_PART_NAME: &str =
         "The Content-Disposition header field \"name\" must be provided.";
     const PART_TOO_LARGE: &str = "Part exceeded maximum size of 1024KB.";
+    const INVALID_MULTIPART: &str = "Invalid multipart data.";
+    if boundary.len() > MAX_MULTIPART_BOUNDARY_BYTES {
+        return Err(MultipartFileError::BadRequest(INVALID_MULTIPART));
+    }
     let delimiter = format!("--{boundary}").into_bytes();
     let mut marker = b"\r\n".to_vec();
     marker.extend_from_slice(&delimiter);
     let mut buffer = Vec::new();
-    let mut selected_file: Option<ParsedUpload> = None;
+    let mut selected: Option<ParsedFormField> = None;
     let mut files = 0usize;
     let mut fields = 0usize;
     let mut part: Option<MultipartPart> = None;
@@ -728,7 +781,7 @@ async fn multipart_file(
             .transpose()
             .map_err(|_| MultipartFileError::BodyFailure)?;
         let Some(frame) = frame else {
-            return Ok(None);
+            return Ok(selected);
         };
         let Ok(data) = frame.into_data() else {
             continue;
@@ -745,7 +798,7 @@ async fn multipart_file(
                     }
                     let suffix = &buffer[delimiter.len()..];
                     if suffix.starts_with(b"--") {
-                        return Ok(selected_file);
+                        return Ok(selected);
                     }
                     if !suffix.starts_with(b"\r\n") {
                         return Ok(None);
@@ -757,17 +810,27 @@ async fn multipart_file(
 
                 if part.is_none() {
                     let Some(header_end) = buffer.windows(4).position(|w| w == b"\r\n\r\n") else {
-                        if buffer.len() > MAX_MULTIPART_HEADERS {
-                            return Ok(None);
+                        if buffer.len() > MAX_MULTIPART_HEADER_BLOCK_BYTES {
+                            return Err(MultipartFileError::BadRequest(INVALID_MULTIPART));
                         }
                         break;
                     };
-                    if header_end > MAX_MULTIPART_HEADERS {
-                        return Ok(None);
+                    if header_end > MAX_MULTIPART_HEADER_BLOCK_BYTES {
+                        return Err(MultipartFileError::BadRequest(INVALID_MULTIPART));
                     }
-                    let Ok(headers) = std::str::from_utf8(&buffer[..header_end]) else {
-                        return Ok(None);
-                    };
+                    let raw_headers = &buffer[..header_end];
+                    let header_lines = raw_headers
+                        .split(|byte| *byte == b'\n')
+                        .map(|line| line.strip_suffix(b"\r").unwrap_or(line))
+                        .collect::<Vec<_>>();
+                    if header_lines.len() > MAX_MULTIPART_HEADER_COUNT
+                        || header_lines
+                            .iter()
+                            .any(|line| line.len() > MAX_MULTIPART_HEADER_LINE_BYTES)
+                    {
+                        return Err(MultipartFileError::BadRequest(INVALID_MULTIPART));
+                    }
+                    let headers = latin1_text(raw_headers);
                     let mut field_name = None;
                     let mut filename = None;
                     let mut mime = None;
@@ -788,8 +851,10 @@ async fn multipart_file(
                     let Some(field_name) = field_name else {
                         return Err(MultipartFileError::BadRequest(MISSING_PART_NAME));
                     };
+                    let field_name = decode_latin1_parameter(field_name);
+                    let filename = filename.map(decode_latin1_parameter);
                     let is_file = filename.is_some();
-                    let capture = is_file && field_name == "file";
+                    let selected_part = field_name == "file";
                     if is_file {
                         files += 1;
                         if files > MAX_MULTIPART_FILES {
@@ -805,22 +870,22 @@ async fn multipart_file(
                             ));
                         }
                     }
-                    if field_name == "file" {
-                        if let Some(filename) = filename {
-                            selected_file = Some(ParsedUpload {
-                                filename,
-                                mime,
-                                bytes: Vec::new(),
-                            });
-                        } else {
-                            selected_file = None;
-                        }
-                    }
+                    let upload = if selected_part {
+                        filename.map(|filename| ParsedUpload {
+                            filename,
+                            mime,
+                            bytes: Vec::new(),
+                        })
+                    } else {
+                        None
+                    };
                     buffer.drain(..header_end + 4);
                     part = Some(MultipartPart {
-                        capture,
+                        selected: selected_part,
                         is_file,
                         size: 0,
+                        upload,
+                        scalar: Vec::new(),
                     });
                     continue;
                 }
@@ -831,21 +896,16 @@ async fn multipart_file(
                         break;
                     }
                     let emit = buffer.len() - keep;
-                    feed_part_data(
-                        &mut part,
-                        &mut selected_file,
-                        &buffer[..emit],
-                        PART_TOO_LARGE,
-                    )?;
+                    feed_part_data(&mut part, &buffer[..emit], PART_TOO_LARGE)?;
                     buffer.drain(..emit);
                     break;
                 };
-                feed_part_data(&mut part, &mut selected_file, &buffer[..at], PART_TOO_LARGE)?;
+                feed_part_data(&mut part, &buffer[..at], PART_TOO_LARGE)?;
                 let consumed = at + marker.len();
                 buffer.drain(..consumed);
-                part = None;
+                finish_multipart_part(part.take(), &mut selected);
                 if end_kind == MultipartEnd::Closing {
-                    return Ok(selected_file);
+                    return Ok(selected);
                 }
                 buffer.drain(..2);
             }
@@ -917,21 +977,21 @@ fn sanitize_filename(filename: &str) -> String {
 
 fn content_disposition(filename: &str, inline: bool) -> String {
     let kind = if inline { "inline" } else { "attachment" };
-    if filename.is_ascii() {
-        let escaped = filename.replace('\\', "\\\\").replace('"', "\\\"");
-        return format!("{kind}; filename=\"{escaped}\"");
-    }
     let encoded = filename
         .bytes()
         .map(|byte| {
-            if byte.is_ascii_alphanumeric() || b"!#$&+-.^_`|~".contains(&byte) {
+            if byte.is_ascii_alphanumeric() || b"_.-~/".contains(&byte) {
                 (byte as char).to_string()
             } else {
                 format!("%{byte:02X}")
             }
         })
         .collect::<String>();
-    format!("{kind}; filename*=utf-8''{encoded}")
+    if encoded == filename {
+        format!("{kind}; filename=\"{filename}\"")
+    } else {
+        format!("{kind}; filename*=utf-8''{encoded}")
+    }
 }
 
 async fn authenticate(
@@ -1038,6 +1098,62 @@ fn query_integer_error(name: &str, value: &str) -> Response {
     }))
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum QueryIntegerError {
+    Invalid,
+    Overflow,
+}
+
+fn parse_python_query_integer(value: &str) -> Result<i64, QueryIntegerError> {
+    fn integer_digits(value: &str) -> Option<String> {
+        let bytes = value.as_bytes();
+        if bytes.is_empty() || !bytes.first()?.is_ascii_digit() || !bytes.last()?.is_ascii_digit() {
+            return None;
+        }
+        let mut digits = String::with_capacity(value.len());
+        let mut previous_digit = false;
+        for &byte in bytes {
+            match byte {
+                b'0'..=b'9' => {
+                    digits.push(char::from(byte));
+                    previous_digit = true;
+                }
+                b'_' if previous_digit => previous_digit = false,
+                _ => return None,
+            }
+        }
+        previous_digit.then_some(digits)
+    }
+
+    let value = value.trim();
+    let (sign, unsigned) = match value.as_bytes().first().copied() {
+        Some(b'+') => ("", &value[1..]),
+        Some(b'-') => ("-", &value[1..]),
+        _ => ("", value),
+    };
+    let integer = match unsigned.split_once('.') {
+        Some((integer, fraction)) => {
+            if fraction.is_empty()
+                || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+                || !fraction.bytes().all(|byte| byte == b'0')
+            {
+                return Err(QueryIntegerError::Invalid);
+            }
+            integer
+        }
+        None => unsigned,
+    };
+    let digits = integer_digits(integer).ok_or(QueryIntegerError::Invalid)?;
+    format!("{sign}{digits}")
+        .parse::<i64>()
+        .map_err(|error| match error.kind() {
+            std::num::IntErrorKind::PosOverflow | std::num::IntErrorKind::NegOverflow => {
+                QueryIntegerError::Overflow
+            }
+            _ => QueryIntegerError::Invalid,
+        })
+}
+
 fn query_bool_error(name: &str, value: &str) -> Response {
     validation_error(json!({
         "type": "bool_parsing", "loc": ["query", name],
@@ -1061,6 +1177,16 @@ fn invalid_upload() -> Response {
     validation_error(
         json!({"type": "missing", "loc": ["body", "file"], "msg": "Field required", "input": null}),
     )
+}
+
+fn invalid_upload_scalar(value: String) -> Response {
+    validation_error(json!({
+        "type": "value_error",
+        "loc": ["body", "file"],
+        "msg": "Value error, Expected UploadFile, received: <class 'str'>",
+        "input": value,
+        "ctx": {"error": {}}
+    }))
 }
 
 fn too_large() -> Response {
@@ -1221,10 +1347,14 @@ mod tests {
     }
 
     fn multipart_request(body: Body) -> Request<Body> {
+        multipart_request_with_boundary(body, "b")
+    }
+
+    fn multipart_request_with_boundary(body: Body, boundary: &str) -> Request<Body> {
         let mut request = request("POST", "/api/uploads", body);
         request.headers_mut().insert(
             header::CONTENT_TYPE,
-            HeaderValue::from_static("multipart/form-data; boundary=b"),
+            HeaderValue::from_str(&format!("multipart/form-data; boundary={boundary}")).unwrap(),
         );
         request
     }
@@ -1316,6 +1446,55 @@ mod tests {
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(body["detail"][0]["loc"], json!(["query", "before"]));
         assert!(backend.search.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn search_matches_python_integer_query_coercion_and_overflow_order() {
+        for (before, expected) in [("+1", 1), ("1_0", 10), ("1.0", 1), ("%201%20", 1)] {
+            let backend = Arc::new(FakeBackend::default());
+            let response = block_on(app(backend.clone()).oneshot(request(
+                "GET",
+                &format!("/api/search?q=hi&before={before}"),
+                Body::empty(),
+            )))
+            .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "before={before}");
+            assert_eq!(backend.search.lock().unwrap()[0].2, expected);
+        }
+
+        let backend = Arc::new(FakeBackend::default());
+        let response = block_on(app(backend.clone()).oneshot(request(
+            "GET",
+            "/api/search?q=hi&before=1.5",
+            Body::empty(),
+        )))
+        .unwrap();
+        let (status, body) = json_response(response);
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["detail"][0]["input"], "1.5");
+        assert!(backend.search.lock().unwrap().is_empty());
+
+        let huge = "999999999999999999999999999999999999";
+        let backend = Arc::new(FakeBackend::default());
+        let response = block_on(app(backend.clone()).oneshot(request(
+            "GET",
+            &format!("/api/search?q=hi&before={huge}"),
+            Body::empty(),
+        )))
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(backend.search.lock().unwrap().is_empty());
+
+        let short = block_on(app(Arc::new(FakeBackend::default())).oneshot(request(
+            "GET",
+            &format!("/api/search?q=x&before={huge}"),
+            Body::empty(),
+        )))
+        .unwrap();
+        assert_eq!(
+            json_response(short).1,
+            json!({"items": [], "has_more": false})
+        );
     }
 
     #[test]
@@ -1548,6 +1727,154 @@ mod tests {
     }
 
     #[test]
+    fn upload_matches_python_boundary_and_header_limits() {
+        let max_boundary = "b".repeat(MAX_MULTIPART_BOUNDARY_BYTES);
+        let multipart = format!(
+            "--{max_boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.txt\"\r\n\r\nx\r\n--{max_boundary}--\r\n"
+        );
+        let backend = Arc::new(FakeBackend::default());
+        let response = block_on(
+            app(backend.clone()).oneshot(multipart_request_with_boundary(
+                Body::from(multipart),
+                &max_boundary,
+            )),
+        )
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(backend.uploads.lock().unwrap()[0].bytes, b"x");
+
+        let oversized_boundary = "b".repeat(MAX_MULTIPART_BOUNDARY_BYTES + 1);
+        let body = format!("--{oversized_boundary}--\r\n");
+        let response = block_on(app(Arc::new(FakeBackend::default())).oneshot(
+            multipart_request_with_boundary(Body::from(body), &oversized_boundary),
+        ))
+        .unwrap();
+        assert_eq!(
+            json_response(response),
+            (
+                StatusCode::BAD_REQUEST,
+                json!({"detail":"Invalid multipart data."})
+            )
+        );
+
+        let mut eight_headers =
+            b"Content-Disposition: form-data; name=\"file\"; filename=\"a.txt\"\r\n".to_vec();
+        for index in 0..7 {
+            eight_headers.extend_from_slice(format!("X-{index}: v\r\n").as_bytes());
+        }
+        let mut body = b"--b\r\n".to_vec();
+        body.extend_from_slice(&eight_headers);
+        body.extend_from_slice(b"\r\nx\r\n--b--\r\n");
+        let backend = Arc::new(FakeBackend::default());
+        let response =
+            block_on(app(backend.clone()).oneshot(multipart_request(Body::from(body)))).unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(backend.uploads.lock().unwrap()[0].bytes, b"x");
+
+        let mut nine_headers =
+            b"Content-Disposition: form-data; name=\"file\"; filename=\"a.txt\"\r\n".to_vec();
+        for index in 0..8 {
+            nine_headers.extend_from_slice(format!("X-{index}: v\r\n").as_bytes());
+        }
+        let mut body = b"--b\r\n".to_vec();
+        body.extend_from_slice(&nine_headers);
+        body.extend_from_slice(b"\r\n\r\nx\r\n--b--\r\n");
+        let response = block_on(
+            app(Arc::new(FakeBackend::default())).oneshot(multipart_request(Body::from(body))),
+        )
+        .unwrap();
+        assert_eq!(
+            json_response(response),
+            (
+                StatusCode::BAD_REQUEST,
+                json!({"detail":"Invalid multipart data."})
+            )
+        );
+
+        for (line_size, expected) in [
+            (MAX_MULTIPART_HEADER_LINE_BYTES, StatusCode::OK),
+            (MAX_MULTIPART_HEADER_LINE_BYTES + 1, StatusCode::BAD_REQUEST),
+        ] {
+            let mut headers =
+                b"Content-Disposition: form-data; name=\"file\"; filename=\"a.txt\"\r\n".to_vec();
+            headers.extend_from_slice(b"X: ");
+            headers.resize(headers.len() + line_size - 3, b'x');
+            let mut body = b"--b\r\n".to_vec();
+            body.extend_from_slice(&headers);
+            body.extend_from_slice(b"\r\n\r\nx\r\n--b--\r\n");
+            let backend = Arc::new(FakeBackend::default());
+            let response =
+                block_on(app(backend.clone()).oneshot(multipart_request(Body::from(body))))
+                    .unwrap();
+            assert_eq!(response.status(), expected, "header size {line_size}");
+            if expected == StatusCode::OK {
+                assert_eq!(backend.uploads.lock().unwrap()[0].bytes, b"x");
+            } else {
+                assert_eq!(
+                    json_response(response).1,
+                    json!({"detail":"Invalid multipart data."})
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn upload_decodes_utf8_and_latin1_filenames_like_starlette() {
+        for (encoded, expected) in [
+            (b"caf\xe9.txt".as_slice(), "café.txt"),
+            (b"caf\xc3\xa9.txt".as_slice(), "café.txt"),
+        ] {
+            let mut body =
+                b"--b\r\nContent-Disposition: form-data; name=\"file\"; filename=\"".to_vec();
+            body.extend_from_slice(encoded);
+            body.extend_from_slice(b"\"\r\n\r\nx\r\n--b--\r\n");
+            let backend = Arc::new(FakeBackend::default());
+            let response =
+                block_on(app(backend.clone()).oneshot(multipart_request(Body::from(body))))
+                    .unwrap();
+            let (status, body) = json_response(response);
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body["filename"], expected);
+            assert_eq!(backend.uploads.lock().unwrap()[0].filename, expected);
+        }
+    }
+
+    #[test]
+    fn upload_keeps_last_completed_file_when_next_part_is_incomplete() {
+        let backend = Arc::new(FakeBackend::default());
+        let body = b"--b\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.txt\"\r\n\r\ncomplete\r\n--b\r\nContent-Disposition: form-data; name=\"next\"\r\n\r\nincomplete";
+        let response =
+            block_on(app(backend.clone()).oneshot(multipart_request(Body::from(body.as_slice()))))
+                .unwrap();
+        let (status, response_body) = json_response(response);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response_body["filename"], "a.txt");
+        assert_eq!(backend.uploads.lock().unwrap()[0].bytes, b"complete");
+    }
+
+    #[test]
+    fn upload_reports_python_error_for_last_duplicate_scalar_value() {
+        let backend = Arc::new(FakeBackend::default());
+        let body = b"--b\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.txt\"\r\n\r\nfirst\r\n--b\r\nContent-Disposition: form-data; name=\"file\"\r\n\r\ntext\r\n--b--\r\n";
+        let response =
+            block_on(app(backend.clone()).oneshot(multipart_request(Body::from(body.as_slice()))))
+                .unwrap();
+        let (status, body) = json_response(response);
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            body,
+            json!({"detail":[{
+                "type":"value_error",
+                "loc":["body","file"],
+                "msg":"Value error, Expected UploadFile, received: <class 'str'>",
+                "input":"text",
+                "ctx":{"error":{}}
+            }]})
+        );
+        assert!(backend.uploads.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn upload_matches_mixed_case_part_header_names() {
         let backend = Arc::new(FakeBackend::default());
         let multipart = b"--b\r\ncOnTeNt-dIsPoSiTiOn: form-data; name=\"file\"; filename=\"a.txt\"\r\ncOnTeNt-tYpE: text/plain\r\n\r\nabc\r\n--b--\r\n";
@@ -1718,6 +2045,30 @@ mod tests {
         assert_eq!(
             block_on(to_bytes(response.into_body(), usize::MAX)).unwrap(),
             "png"
+        );
+    }
+
+    #[test]
+    fn content_disposition_matches_starlette_quoting() {
+        assert_eq!(
+            content_disposition("my sheep_.txt", false),
+            "attachment; filename*=utf-8''my%20sheep_.txt"
+        );
+        assert_eq!(
+            content_disposition("a\"b.txt", false),
+            "attachment; filename*=utf-8''a%22b.txt"
+        );
+        assert_eq!(
+            content_disposition("café.txt", false),
+            "attachment; filename*=utf-8''caf%C3%A9.txt"
+        );
+        assert_eq!(
+            content_disposition("a/b.txt", false),
+            "attachment; filename=\"a/b.txt\""
+        );
+        assert_eq!(
+            content_disposition("sheep.png", true),
+            "inline; filename=\"sheep.png\""
         );
     }
 
