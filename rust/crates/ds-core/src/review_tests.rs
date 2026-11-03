@@ -375,37 +375,6 @@ impl ReviewRunContext for Tasks {
 }
 
 #[derive(Default)]
-struct FakeReviewMerge {
-    calls: Mutex<Vec<(String, i64, String, String)>>,
-    error: Mutex<Option<String>>,
-}
-
-impl ReviewRunMerge for FakeReviewMerge {
-    fn merge<'a>(
-        &'a self,
-        repo: &'a str,
-        number: i64,
-        head: &'a str,
-        _token: &'a str,
-        task_id: &'a str,
-        _report: &'a mut Value,
-    ) -> ReviewFuture<'a, Result<(), String>> {
-        Box::pin(async move {
-            self.calls.lock().unwrap().push((
-                repo.to_string(),
-                number,
-                head.to_string(),
-                task_id.to_string(),
-            ));
-            match self.error.lock().unwrap().clone() {
-                Some(error) => Err(error),
-                None => Ok(()),
-            }
-        })
-    }
-}
-
-#[derive(Default)]
 struct FakeReviewActor {
     rows: RefCell<Vec<ReviewTaskRow>>,
     rows_error: RefCell<Option<String>>,
@@ -836,7 +805,7 @@ async fn run_actual_review_sync(
     tasks: Tasks,
     transport: FakeReviewTransport,
     required: usize,
-) -> (ActualReviewSync, FakeReviewMerge, Value) {
+) -> (ActualReviewSync, Value) {
     let sync = ReviewSync::with_transport(
         tasks,
         FakeReviewTokens(Ok("test-token".into())),
@@ -844,9 +813,8 @@ async fn run_actual_review_sync(
         "https://api.example.test",
         transport,
     );
-    let merger = FakeReviewMerge::default();
-    let report = sync.run(&merger, false).await.unwrap();
-    (sync, merger, report)
+    let report = sync.run(false).await.unwrap();
+    (sync, report)
 }
 
 #[derive(Clone, Copy)]
@@ -1654,6 +1622,305 @@ async fn final_accept_accounts_only_after_merge_confirmation() {
 }
 
 #[tokio::test]
+async fn merge_uses_full_task_snapshot_accounts_after_success_and_marks_landed_last() {
+    let dir = crate::testsupport::dir("review-merge-account-landed-order");
+    let tasks = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    let (stored, _) = add_poolrad_review_at(&tasks, "OVL_007F_0F7E", "reviewed-head-123456").await;
+    finish_review(&tasks, &stored.id, "%2", "accept").await;
+    rusqlite::Connection::open(dir.path().join("tasks.db"))
+        .unwrap()
+        .execute("UPDATE tasks SET landed = 0 WHERE id = ?", [&stored.id])
+        .unwrap();
+
+    let transport = FakeReviewTransport::with_responses([
+        github_response(200, json!({"merged":true})),
+        github_response(200, json!({"object":{"sha":"base-sha"}})),
+        github_file_response("id,evidence_doc\n"),
+        github_response(
+            200,
+            json!([{"filename":"docs/re/U7F_STATE_FLAGS_0F7E.md","status":"added"}]),
+        ),
+        github_response(200, json!({"body":""})),
+        github_file_response("id,status\nOVL_007F_0F7E,full\n"),
+        github_file_response("id,kind\nOVL_007F_0F7E,overlay\n"),
+        github_file_response("evidence exists on base\n"),
+        github_response(404, json!({"message":"Not Found"})),
+        github_response(200, json!({"tree":{"sha":"base-tree"}})),
+        github_response(201, json!({"sha":"new-tree"})),
+        github_response(201, json!({"sha":"new-commit"})),
+        github_response(201, json!({"object":{"sha":"new-commit"}})),
+        github_response(
+            201,
+            json!({"number":82,"html_url":"https://example.test/pr/82","node_id":"PR_node"}),
+        ),
+        github_response(200, json!({"id":1})),
+        github_response(200, json!({"node_id":"PR_node"})),
+        github_response(
+            200,
+            json!({"data":{"enablePullRequestAutoMerge":{"pullRequest":{"number":82}}}}),
+        ),
+        github_response(
+            200,
+            json!({"state":"open","merged":false,"merged_at":null,"mergeable_state":"blocked","auto_merge":true}),
+        ),
+    ]);
+    let tokens = FakeAccountingTokens::new(Ok("reviewer-token"), Ok("author-token"));
+    let token_calls = tokens.calls.clone();
+    let sync = ReviewSync::with_transport(
+        tasks,
+        tokens,
+        FakeReviewPolicy::default(),
+        "https://api.example.test",
+        transport,
+    );
+    let mut report = json!({"errors": []});
+
+    assert!(
+        sync._merge(
+            "huntergdavis/poolrad-decomp",
+            7,
+            "reviewed-head-123456",
+            "reviewer-token",
+            &mut report,
+            Some(&stored.id),
+        )
+        .await
+    );
+
+    assert_eq!("reviewed-hea", report["merged"][0]["head"]);
+    assert_eq!(stored.id, report["merged"][0]["task"]);
+    assert_eq!(82, report["accounting"][0]["accounting_pr"]);
+    assert_eq!(json!([]), report["accounting"][0]["errors"]);
+    assert_eq!(json!([stored.id]), report["landed"]);
+    assert_eq!(vec!["reviewer", "author"], *token_calls.lock().unwrap());
+
+    {
+        let requests = sync.transport.requests.lock().unwrap();
+        assert_eq!(18, requests.len());
+        assert!(requests[0].url.ends_with("/pulls/7/merge"));
+        let merge_body: Value = serde_json::from_slice(requests[0].body.as_ref().unwrap()).unwrap();
+        assert_eq!("reviewed-head-123456", merge_body["sha"]);
+        assert!(requests[1].url.ends_with("/git/ref/heads/main"));
+        assert_eq!("POST", requests[13].method);
+        assert!(requests[13].url.ends_with("/pulls"));
+        let accounting_body: Value =
+            serde_json::from_slice(requests[13].body.as_ref().unwrap()).unwrap();
+        assert!(accounting_body["body"]
+            .as_str()
+            .unwrap()
+            .contains("verdict `accept` by %2"));
+    }
+
+    let full = sync.flock.get_full_wire(&stored.id, None).await.unwrap();
+    assert_eq!("huntergdavis/poolrad-decomp", full.wire["repo"]);
+    assert_eq!(7, full.wire["pr"]);
+    assert_eq!("%2", full.wire["completed_by"]);
+    assert_eq!(82, full.wire["accounting_pr"]);
+    assert_eq!(Some(true), sync.flock.landed_of(&stored.id).await.unwrap());
+    let event_rows: Vec<(String, Option<String>, String)> =
+        rusqlite::Connection::open(dir.path().join("tasks.db"))
+        .unwrap()
+        .prepare("SELECT event, actor, meta FROM task_events WHERE task_id = ? AND event IN ('accounting','landed') ORDER BY id")
+        .unwrap()
+        .query_map([&stored.id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(3, event_rows.len());
+    assert_eq!("accounting", event_rows[0].0);
+    assert_eq!("accounting", event_rows[1].0);
+    assert_eq!("landed", event_rows[2].0);
+    assert_eq!(None, event_rows[0].1.as_deref());
+    let setter_meta: Value = serde_json::from_str(&event_rows[0].2).unwrap();
+    assert_eq!(json!({"accounting_pr": 82, "body_pr": 7}), setter_meta);
+    assert_eq!(Some("review-sync"), event_rows[1].1.as_deref());
+    let summary_meta: Value = serde_json::from_str(&event_rows[1].2).unwrap();
+    assert_eq!("accounting PR #82 for body PR #7", summary_meta["reason"]);
+    assert_eq!(82, summary_meta["accounting_pr"]);
+    assert_eq!(7, summary_meta["body_pr"]);
+    assert_eq!(Some("review-sync"), event_rows[2].1.as_deref());
+}
+
+#[tokio::test]
+async fn merge_405_is_ignored_and_skips_accounting_and_landed_writes() {
+    let dir = crate::testsupport::dir("review-merge-405-no-account");
+    let tasks = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    let (stored, _) = add_poolrad_review_at(&tasks, "OVL_007F_0F7E", "reviewed-head").await;
+    finish_review(&tasks, &stored.id, "%2", "accept").await;
+    rusqlite::Connection::open(dir.path().join("tasks.db"))
+        .unwrap()
+        .execute("UPDATE tasks SET landed = 0 WHERE id = ?", [&stored.id])
+        .unwrap();
+    let tokens = FakeAccountingTokens::new(Ok("reviewer-token"), Ok("author-token"));
+    let token_calls = tokens.calls.clone();
+    let sync = ReviewSync::with_transport(
+        tasks,
+        tokens,
+        FakeReviewPolicy::default(),
+        "https://api.example.test",
+        FakeReviewTransport::with_responses([github_response(405, json!({"message":"protected"}))]),
+    );
+    let mut report = json!({"errors": []});
+
+    assert!(
+        !sync
+            ._merge(
+                "huntergdavis/poolrad-decomp",
+                7,
+                "reviewed-head",
+                "reviewer-token",
+                &mut report,
+                Some(&stored.id),
+            )
+            .await
+    );
+
+    assert!(report["errors"].as_array().unwrap().is_empty());
+    assert!(report.get("accounting").is_none());
+    assert!(report.get("landed").is_none());
+    assert!(token_calls.lock().unwrap().is_empty());
+    assert_eq!(Some(false), sync.flock.landed_of(&stored.id).await.unwrap());
+
+    let failed = ReviewSync::with_transport(
+        FakeReviewActor::default(),
+        FakeAccountingTokens::new(Ok("reviewer-token"), Ok("author-token")),
+        FakeReviewPolicy::default(),
+        "https://api.example.test",
+        FakeReviewTransport::with_responses([github_response(
+            500,
+            json!({"message":"merge backend failed"}),
+        )]),
+    );
+    let mut failed_report = json!({"errors": []});
+    assert!(
+        !failed
+            ._merge(
+                "o/r",
+                7,
+                "reviewed-head",
+                "reviewer-token",
+                &mut failed_report,
+                None,
+            )
+            .await
+    );
+    assert!(failed_report["errors"][0]
+        .as_str()
+        .unwrap()
+        .starts_with("merge o/r#7:"));
+    assert!(failed_report.get("merged").is_none());
+}
+
+#[tokio::test]
+async fn merge_without_task_id_skips_accounting_but_still_marks_landed() {
+    let dir = crate::testsupport::dir("review-merge-no-task-id");
+    let tasks = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    let (stored, _) = add_poolrad_review(&tasks, "body review").await;
+    finish_review(&tasks, &stored.id, "%2", "accept").await;
+    rusqlite::Connection::open(dir.path().join("tasks.db"))
+        .unwrap()
+        .execute("UPDATE tasks SET landed = 0 WHERE id = ?", [&stored.id])
+        .unwrap();
+    let tokens = FakeAccountingTokens::new(Ok("reviewer-token"), Ok("author-token"));
+    let token_calls = tokens.calls.clone();
+    let sync = ReviewSync::with_transport(
+        tasks,
+        tokens,
+        FakeReviewPolicy::default(),
+        "https://api.example.test",
+        FakeReviewTransport::with_responses([github_response(200, json!({"merged":true}))]),
+    );
+    let mut report = json!({"errors": []});
+
+    assert!(
+        sync._merge(
+            "huntergdavis/poolrad-decomp",
+            7,
+            "body-head-123456",
+            "reviewer-token",
+            &mut report,
+            None,
+        )
+        .await
+    );
+
+    assert_eq!(Value::Null, report["merged"][0]["task"]);
+    assert!(report.get("accounting").is_none());
+    assert_eq!(json!([stored.id]), report["landed"]);
+    assert!(token_calls.lock().unwrap().is_empty());
+    assert_eq!(Some(true), sync.flock.landed_of(&stored.id).await.unwrap());
+}
+
+#[tokio::test]
+async fn post_merge_accounting_refuses_wrong_and_missing_full_task_rows() {
+    let dir = crate::testsupport::dir("review-post-merge-task-identity-refusal");
+    let tasks = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    let (stored, _) = add_poolrad_review(&tasks, "body review").await;
+    let sync = ReviewSync::with_transport(
+        tasks,
+        FakeAccountingTokens::new(Ok("reviewer-token"), Ok("author-token")),
+        FakeReviewPolicy::default(),
+        "https://api.example.test",
+        FakeReviewTransport::default(),
+    );
+    let mut wrong = json!({"errors": []});
+
+    sync._account_after_merge("o/other", 9, "head", &stored.id, &mut wrong)
+        .await;
+
+    assert_eq!(
+        json!([format!(
+            "accounting o/other#9: {} is huntergdavis/poolrad-decomp#7, not this PR",
+            stored.id
+        )]),
+        wrong["errors"]
+    );
+    assert!(wrong.get("accounting").is_none());
+
+    let mut missing = json!({"errors": []});
+    sync._account_after_merge("o/r", 7, "head", "t404", &mut missing)
+        .await;
+    assert!(missing["errors"][0]
+        .as_str()
+        .unwrap()
+        .starts_with("accounting o/r#7: read t404: no task with id"));
+}
+
+#[tokio::test]
+async fn merge_success_survives_full_row_and_landed_writer_failures() {
+    let actor = FakeReviewActor::default();
+    let sync = ReviewSync::with_transport(
+        actor,
+        FakeAccountingTokens::new(Ok("reviewer-token"), Ok("author-token")),
+        FakeReviewPolicy::default(),
+        "https://api.example.test",
+        FakeReviewTransport::with_responses([github_response(200, json!({"merged":true}))]),
+    );
+    let mut report = json!({"errors": []});
+
+    assert!(
+        sync._merge(
+            "o/r",
+            7,
+            "exact-head",
+            "reviewer-token",
+            &mut report,
+            Some("t9")
+        )
+        .await
+    );
+
+    assert_eq!("exact-head", report["merged"][0]["head"]);
+    assert_eq!(
+        json!([
+            "accounting o/r#7: read t9: full task wire snapshot is unavailable",
+            "landed o/r#7: landed task writer is unavailable"
+        ]),
+        report["errors"]
+    );
+}
+
+#[tokio::test]
 async fn needs_fix_preserves_standing_accept_and_reports_followup_writer_errors() {
     let actor = FakeReviewActor::default();
     actor.rows.borrow_mut().extend([
@@ -2219,7 +2486,7 @@ async fn run_keeps_an_open_same_head_and_an_open_conflicted_review() {
         github_response(200, open_pull(7, "head-a", "work/topic")),
         github_response(200, json!({"mergeable": true, "state": "open"})),
     ]);
-    let (sync, _, report) = run_actual_review_sync(store, transport, 2).await;
+    let (sync, report) = run_actual_review_sync(store, transport, 2).await;
     assert_eq!("open", sync.flock.get(&same_head.id).await.unwrap().status);
     assert!(report["cancelled"].as_array().unwrap().is_empty());
 
@@ -2231,7 +2498,7 @@ async fn run_keeps_an_open_same_head_and_an_open_conflicted_review() {
         github_response(200, json!({"mergeable": false, "state": "open"})),
         github_response(200, json!({"state": "open", "head": {"sha": "head-b"}})),
     ]);
-    let (sync, _, report) = run_actual_review_sync(store, transport, 2).await;
+    let (sync, report) = run_actual_review_sync(store, transport, 2).await;
     assert_eq!("open", sync.flock.get(&conflicted.id).await.unwrap().status);
     assert!(report["cancelled"].as_array().unwrap().is_empty());
     assert_eq!(3, sync.transport.requests.lock().unwrap().len());
@@ -2246,7 +2513,7 @@ async fn run_failed_repo_list_skips_cleanup_and_unknown_or_malformed_detail_pres
         500,
         json!({"message": "list unavailable"}),
     )]);
-    let (sync, _, report) = run_actual_review_sync(store, transport, 2).await;
+    let (sync, report) = run_actual_review_sync(store, transport, 2).await;
     assert_eq!("open", sync.flock.get(&task.id).await.unwrap().status);
     assert_eq!(1, sync.transport.requests.lock().unwrap().len());
     assert_eq!(1, report["errors"].as_array().unwrap().len());
@@ -2262,7 +2529,7 @@ async fn run_failed_repo_list_skips_cleanup_and_unknown_or_malformed_detail_pres
             github_response(200, json!([])),
             github_response(200, detail),
         ]);
-        let (sync, _, report) = run_actual_review_sync(store, transport, 2).await;
+        let (sync, report) = run_actual_review_sync(store, transport, 2).await;
         assert_eq!("open", sync.flock.get(&task.id).await.unwrap().status);
         assert_eq!(1, report["errors"].as_array().unwrap().len());
         assert!(report["errors"][0]
@@ -2278,7 +2545,7 @@ async fn run_failed_repo_list_skips_cleanup_and_unknown_or_malformed_detail_pres
         github_response(200, json!([])),
         github_response(500, json!({"message": "detail unavailable"})),
     ]);
-    let (sync, _, report) = run_actual_review_sync(store, transport, 2).await;
+    let (sync, report) = run_actual_review_sync(store, transport, 2).await;
     assert_eq!("open", sync.flock.get(&task.id).await.unwrap().status);
     assert_eq!(1, report["errors"].as_array().unwrap().len());
     assert!(report["errors"][0].as_str().unwrap().contains("cleanup:"));
@@ -2313,7 +2580,7 @@ async fn run_cancel_race_ignores_terminal_winner_and_propagates_live_refusal() {
             "https://api.example.test",
             transport,
         );
-        let result = sync.run(&FakeReviewMerge::default(), false).await;
+        let result = sync.run(false).await;
         assert_eq!(expected_status, tasks.get(&task.id).await.unwrap().status);
         if expect_error {
             assert!(result.unwrap_err().contains("synthetic refusal"));
@@ -2335,8 +2602,14 @@ async fn run_needs_fix_blocks_second_review_and_final_merge_even_with_later_acce
         github_response(200, open_pull(7, "head-a", "work/topic")),
         github_response(200, json!({"mergeable": true, "state": "open"})),
     ]);
-    let (sync, merger, report) = run_actual_review_sync(store, transport, 2).await;
-    assert!(merger.calls.lock().unwrap().is_empty());
+    let (sync, report) = run_actual_review_sync(store, transport, 2).await;
+    assert!(sync
+        .transport
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|request| !request.url.ends_with("/merge")));
     assert!(sync
         .flock
         .list_review_rows_visible()
@@ -2345,6 +2618,61 @@ async fn run_needs_fix_blocks_second_review_and_final_merge_even_with_later_acce
         .iter()
         .all(|row| row.status == "done"));
     assert!(report["errors"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn run_routes_final_accept_through_real_merge_and_landed_writer() {
+    let dir = crate::testsupport::dir("review-run-real-merge");
+    let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    let first = add_actual_review(&store, 7, "exact-head", "first accept").await;
+    finish_review(&store, &first.id, "%1", "accept").await;
+    let second = add_actual_review(&store, 7, "exact-head", "second accept").await;
+    finish_review(&store, &second.id, "%2", "accept").await;
+    rusqlite::Connection::open(dir.path().join("tasks.db"))
+        .unwrap()
+        .execute(
+            "UPDATE tasks SET landed = 0 WHERE repo = 'o/r' AND pr = 7",
+            [],
+        )
+        .unwrap();
+    let transport = FakeReviewTransport::with_responses([
+        github_response(200, open_pull(7, "exact-head", "work/topic")),
+        github_response(200, json!({"mergeable":true,"mergeable_state":"clean"})),
+        github_response(200, json!({"merged":true})),
+    ]);
+    let sync = ReviewSync::with_transport(
+        store,
+        FakeReviewTokens(Ok("test-token".into())),
+        FakeReviewPolicy { required: 2 },
+        "https://api.example.test",
+        transport,
+    );
+
+    let report = sync.run(false).await.unwrap();
+
+    assert_eq!(1, report["merged"].as_array().unwrap().len());
+    assert_eq!("exact-head", report["merged"][0]["head"]);
+    assert_eq!(second.id, report["merged"][0]["task"]);
+    assert_eq!(
+        "no accounting ledger is configured for o/r",
+        report["accounting"][0]["reason"]
+    );
+    let mut landed = report["landed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|id| id.as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    landed.sort();
+    let mut expected_landed = vec![first.id, second.id];
+    expected_landed.sort();
+    assert_eq!(expected_landed, landed);
+    let requests = sync.transport.requests.lock().unwrap();
+    assert!(requests[0].url.contains("/pulls?state=open"));
+    assert!(requests[1].url.ends_with("/pulls/7"));
+    assert!(requests[2].url.ends_with("/pulls/7/merge"));
+    let merge_body: Value = serde_json::from_slice(requests[2].body.as_ref().unwrap()).unwrap();
+    assert_eq!("exact-head", merge_body["sha"]);
 }
 
 #[tokio::test]
@@ -2364,12 +2692,9 @@ async fn run_fails_closed_when_required_verdict_policy_is_invalid() {
         "https://api.example.test",
         transport,
     );
-    let merger = FakeReviewMerge::default();
-
-    let error = sync.run(&merger, false).await.unwrap_err();
+    let error = sync.run(false).await.unwrap_err();
 
     assert!(error.contains("invalid required_verdicts config"));
-    assert!(merger.calls.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -2382,7 +2707,7 @@ async fn run_closed_and_merged_details_cancel_only_after_authoritative_state() {
             github_response(200, json!([])),
             github_response(200, json!({"state": state, "head": {"sha": "head-a"}})),
         ]);
-        let (sync, _, report) = run_actual_review_sync(store, transport, 2).await;
+        let (sync, report) = run_actual_review_sync(store, transport, 2).await;
         assert_eq!("cancelled", sync.flock.get(&task.id).await.unwrap().status);
         assert_eq!(json!([task.id]), report["cancelled"]);
     }
@@ -2401,9 +2726,9 @@ async fn run_preserves_the_needed_second_review_and_retires_stale_head_before_re
         github_response(200, open_pull(7, "head-current", "work/topic")),
         github_response(200, json!({"mergeable": true, "state": "open"})),
     ]);
-    let (sync, _, first_report) = run_actual_review_sync(store, transport, 2).await;
+    let (sync, first_report) = run_actual_review_sync(store, transport, 2).await;
     assert!(first_report["cancelled"].as_array().unwrap().is_empty());
-    let second_report = sync.run(&FakeReviewMerge::default(), false).await.unwrap();
+    let second_report = sync.run(false).await.unwrap();
     assert!(second_report["cancelled"].as_array().unwrap().is_empty());
     assert_eq!("open", sync.flock.get(&second.id).await.unwrap().status);
 
@@ -2418,7 +2743,7 @@ async fn run_preserves_the_needed_second_review_and_retires_stale_head_before_re
         github_response(200, open_pull(7, "head-current", "work/topic")),
         github_response(200, json!({"mergeable": true, "state": "open"})),
     ]);
-    let (sync, _, report) = run_actual_review_sync(store, transport, 2).await;
+    let (sync, report) = run_actual_review_sync(store, transport, 2).await;
     assert_eq!("cancelled", sync.flock.get(&stale.id).await.unwrap().status);
     assert_eq!(json!([stale.id]), report["cancelled"]);
     let current = sync.flock.list_review_rows_visible().await.unwrap();
@@ -2439,7 +2764,7 @@ async fn run_preserves_the_needed_second_review_and_retires_stale_head_before_re
         .unwrap()
         .title
         .contains("second reviewer"));
-    let next_report = sync.run(&FakeReviewMerge::default(), false).await.unwrap();
+    let next_report = sync.run(false).await.unwrap();
     assert!(next_report["cancelled"].as_array().unwrap().is_empty());
     assert_eq!("open", sync.flock.get(&second_id).await.unwrap().status);
 }
@@ -2461,7 +2786,7 @@ async fn run_refreshes_verdicts_during_github_listing_and_reads_history_past_one
         "%1",
         "accept",
     );
-    let (sync, _, report) = run_actual_review_sync(store, transport, 2).await;
+    let (sync, report) = run_actual_review_sync(store, transport, 2).await;
     assert_eq!("done", sync.flock.get(&first.id).await.unwrap().status);
     let rows = sync.flock.list_review_rows_visible().await.unwrap();
     assert_eq!(2, rows.len());
@@ -2486,7 +2811,7 @@ async fn run_refreshes_verdicts_during_github_listing_and_reads_history_past_one
         "%1",
         "accept",
     );
-    let (sync, _, report) = run_actual_review_sync(store, transport, 2).await;
+    let (sync, report) = run_actual_review_sync(store, transport, 2).await;
     let rows = sync.flock.list_review_rows_visible().await.unwrap();
     assert_eq!(1, rows.len());
     assert_eq!("done", rows[0].status);
@@ -2511,7 +2836,7 @@ async fn run_refreshes_verdicts_during_github_listing_and_reads_history_past_one
         github_response(200, open_pull(7, "head-current", "work/topic")),
         github_response(200, json!({"mergeable": true, "state": "open"})),
     ]);
-    let (sync, _, _) = run_actual_review_sync(store, transport, 2).await;
+    let (sync, _) = run_actual_review_sync(store, transport, 2).await;
     let rows = sync.flock.list_review_rows_visible().await.unwrap();
     assert_eq!(1007, rows.len());
     let second = rows
