@@ -743,7 +743,7 @@ mod tests {
         let game = Arc::new(FakeGame::new(Value::Null));
         let (status, _body, value) = response(
             app(game.clone(), authorized()),
-            request("POST", "/api/game/savestate", r##"{"tag":"quick##),
+            request("POST", "/api/game/savestate", "{\"tag\":\"quick"),
         );
         assert_eq!(StatusCode::UNPROCESSABLE_ENTITY, status);
         assert_eq!(
