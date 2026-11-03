@@ -199,6 +199,11 @@ impl RequestRuntimeAdapter<'_> {
                 ..AgentSpec::default()
             };
             let pane = terminal.start_agent(&spec).map_err(|error| error.message)?;
+            if focus {
+                terminal
+                    .focus("pane", &pane.pane_id)
+                    .map_err(|error| error.message)?;
+            }
             let mut agent = pane_value(terminal, &pane);
             agent["name"] = json!(name);
             Ok(json!({
