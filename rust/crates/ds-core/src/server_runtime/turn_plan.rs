@@ -40,7 +40,11 @@ impl RequestRuntimeAdapter<'_> {
                         .filter(|value| !value.is_empty())
                         .map(str::to_owned)
                 },
-                || super::normalize_backend_name(env.get("DUNKINGSHEEP_TERMINAL_BACKEND")),
+                || {
+                    Ok(super::normalize_backend_name(
+                        env.get("DUNKINGSHEEP_TERMINAL_BACKEND"),
+                    ))
+                },
             )
             .map_err(|error| error.to_string())?;
         let count = crate::inbox::count(
