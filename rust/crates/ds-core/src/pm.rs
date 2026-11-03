@@ -446,7 +446,7 @@ impl Flock {
         let demo = object
             .as_ref()
             .and_then(|payload| payload.get("demo"))
-            .is_some_and(|value| truthy(value));
+            .is_some_and(truthy);
         let body = if let Some(payload) = &object {
             let live = checkpoint_numbers(project, None, config);
             let object_value = Value::Object(payload.clone());
