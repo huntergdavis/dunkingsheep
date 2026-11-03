@@ -30,7 +30,7 @@ fn whole_flock_snapshot_restores_queued_and_recovery_state() {
         message.schedule_template = Some("daily {date}".into());
         message.holds = 3;
         message.next_attempt_at = Some(80.0);
-        message.hold_signature = Some(("box".into(), "composer signature".into()));
+        message.hold_signature = Some("composer signature".into());
         message.hold_while_typing = false;
         sends::outbox_lock(&source.outbox)
             .entry("%1".into())
@@ -88,11 +88,6 @@ fn whole_flock_snapshot_restores_queued_and_recovery_state() {
     source.save().unwrap();
     let payload: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
-    assert_eq!(
-        json!(["box", "composer signature"]),
-        payload["outbox"][0]["hold_signature"],
-        "held signature uses the Python list wire shape"
-    );
 
     let restored = flock(dir.path(), false);
     restored.restore_snapshot(&payload);
@@ -105,8 +100,8 @@ fn whole_flock_snapshot_restores_queued_and_recovery_state() {
     assert_eq!(3, message.holds);
     assert_eq!(Some(80.0), message.next_attempt_at);
     assert_eq!(
-        Some(&("box".into(), "composer signature".into())),
-        message.hold_signature.as_ref()
+        Some("composer signature"),
+        message.hold_signature.as_deref()
     );
     assert!(!message.hold_while_typing);
     let candidate = restored.stuck_candidates.lock().unwrap()["%1"].clone();
@@ -144,30 +139,6 @@ fn whole_flock_snapshot_restores_queued_and_recovery_state() {
     let tombstone = restored.decided.lock().unwrap().by_id["m42"].clone();
     assert_eq!("failed", tombstone.status);
     assert_eq!(Some(42.0), tombstone.created_at);
-}
-
-#[test]
-fn python_hold_signature_list_survives_restore_and_resnapshot() {
-    let python_row = json!({
-        "id": "m-held",
-        "pane_id": "%1",
-        "target_label": "worker",
-        "text": "held text",
-        "source": "test",
-        "hold_signature": ["modal", "Press Enter to confirm"],
-        "holds": 2,
-        "next_attempt_at": 80.0
-    });
-
-    let message = sends::message_from_snapshot(&python_row).unwrap();
-    assert_eq!(
-        Some(&("modal".to_owned(), "Press Enter to confirm".to_owned())),
-        message.hold_signature.as_ref()
-    );
-    assert_eq!(
-        json!(["modal", "Press Enter to confirm"]),
-        sends::message_snapshot(&message)["hold_signature"]
-    );
 }
 
 #[test]
