@@ -4389,7 +4389,7 @@ fn cli_route_48_agent() {
         "start_agent",
         json!({
             "name": "writer",
-            "command": "codex --model 'opus four' 'it'\"'\"'s",
+            "command": r#"codex --model 'opus four' 'it'"'"'s'"#,
             "workspace": "Site",
             "tab": "t4",
             "split": "down",
@@ -4403,7 +4403,11 @@ fn cli_route_48_agent() {
     );
     assert_eq!(Some(0), agent.status.code());
     assert_eq!(
-        "started agent writer in %51: codex --model 'opus four' 'it'\"'\"'s\n",
+        concat!(
+            "started agent writer in %51: ",
+            r#"codex --model 'opus four' 'it'"'"'s'"#,
+            "\n"
+        ),
         String::from_utf8(agent.stdout).unwrap()
     );
     assert!(agent.stderr.is_empty());
