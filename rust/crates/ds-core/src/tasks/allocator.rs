@@ -858,8 +858,8 @@ impl Tasks {
                     .then_some((pane, candidate.caller))
             }).collect::<BTreeMap<_, _>>();
             let previous_ms: u64 = conn.pragma_query_value(None, "busy_timeout", |r| r.get(0)).map_err(db::map_sqlite)?;
-            conn.busy_timeout(std::time::Duration::ZERO).map_err(db::map_sqlite)?;
             let mut restore = TimeoutRestore { conn, previous_ms, quarantine, restored: false };
+            conn.busy_timeout(std::time::Duration::ZERO).map_err(db::map_sqlite)?;
             let outcome = (|| {
                 let tx = match rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate) {
                     Ok(tx) => tx,

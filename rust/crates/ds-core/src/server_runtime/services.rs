@@ -220,6 +220,16 @@ impl RuntimeServices {
         let services = Arc::clone(self);
         LoopRuntimeAdapter::new(Arc::clone(&self.flock), Arc::clone(&self.terminal_factory))
             .with_loop_terminal(move |flock, terminal| {
+                struct TrustedWorker<'a>(&'a Flock);
+                impl Drop for TrustedWorker<'_> {
+                    fn drop(&mut self) {
+                        self.0.clear_caller();
+                        self.0.clear_socket_peer();
+                    }
+                }
+                flock.clear_caller();
+                flock.clear_socket_peer();
+                let _trusted = TrustedWorker(flock);
                 let request = crate::server::RequestCtx::default();
                 let adapter = super::RequestRuntimeAdapter::new(
                     flock,
@@ -399,6 +409,167 @@ mod tests {
             terminal.panes[0].pane_pid = Some(i64::from(std::process::id()));
             Box::new(terminal)
         })
+    }
+
+    #[test]
+    fn runtime_allocator_claims_real_offered_task_for_authenticated_idle_pane() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let handle = runtime.handle().clone();
+        let (tasks, inbox) = tasks_and_inbox(&runtime, &dir);
+        let task = handle
+            .block_on(tasks.add("global", "offered", "acceptance"))
+            .unwrap();
+        handle
+            .block_on(tasks.update(
+                &task.id,
+                crate::tasks::FieldEdit {
+                    assignees: Some(vec!["w2:p2".into()]),
+                    ..Default::default()
+                },
+                None,
+            ))
+            .unwrap();
+        handle
+            .block_on(tasks.allocation_offer(&task.id, "code", &serde_json::json!([]), "w2:p2"))
+            .unwrap();
+        handle
+            .block_on(tasks.allocation_register(
+                "w1:p1",
+                &serde_json::json!(["code"]),
+                &serde_json::json!(["worker"]),
+                &serde_json::json!([]),
+                "w2:p2",
+                &serde_json::json!(true),
+            ))
+            .unwrap();
+        let stores = Stores {
+            tasks: Some(Arc::clone(&tasks)),
+            inbox: Some(inbox),
+            ..Stores::default()
+        };
+        let env = configured_env(&dir, "1");
+        let factory: LoopTerminalFactory = Arc::new(|| {
+            let mut terminal = FakeTerminal::new();
+            terminal.panes[0].command = "codex".into();
+            terminal.panes[0].pane_pid = Some(i64::from(std::process::id()));
+            terminal
+                .screens
+                .insert("w1:p1".into(), "› Ask Codex to do anything\n".into());
+            Box::new(terminal)
+        });
+        let services =
+            RuntimeServices::new(startup_inputs(&dir, runtime, env, factory, stores)).unwrap();
+        let pid = i64::from(std::process::id());
+        services.flock().set_caller(Some(serde_json::json!({"pid":pid,"start":process_start(pid),"name":"codex","pane_id":"w1:p1","source":"agent"})));
+        services
+            .flock()
+            .turn_start(
+                None,
+                None,
+                None,
+                Some("w1:p1"),
+                None,
+                &crate::flock::commands_turns::NoHooks,
+            )
+            .unwrap();
+        services
+            .flock()
+            .turn_end(
+                None,
+                "done",
+                Some("w1:p1"),
+                None,
+                false,
+                &crate::flock::commands_turns::NoHooks,
+            )
+            .unwrap();
+        services.flock().clear_caller();
+        let result = handle.block_on(services.allocator_tick()).unwrap();
+        assert_eq!(result["allocated"][0]["task_id"], task.id);
+        assert_eq!(
+            handle.block_on(tasks.get(&task.id)).unwrap().status,
+            "in_progress"
+        );
+        assert_eq!(handle.block_on(services.allocator_tick()).unwrap(), result);
+        services.shutdown();
+    }
+
+    #[test]
+    fn runtime_allocator_obeys_disabled_gate_with_real_services() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let handle = runtime.handle().clone();
+        let (tasks, inbox) = tasks_and_inbox(&runtime, &dir);
+        handle
+            .block_on(tasks.allocation_register(
+                "w1:p1",
+                &serde_json::json!(["code"]),
+                &serde_json::json!(["worker"]),
+                &serde_json::json!([]),
+                "w2:p2",
+                &serde_json::json!(true),
+            ))
+            .unwrap();
+        let stores = Stores {
+            tasks: Some(tasks),
+            inbox: Some(inbox),
+            ..Stores::default()
+        };
+        let env = configured_env(&dir, "0");
+        let services = RuntimeServices::new(startup_inputs(
+            &dir,
+            runtime,
+            env,
+            fake_factory_with_current_pane(),
+            stores,
+        ))
+        .unwrap();
+        let result = handle.block_on(services.allocator_tick()).unwrap();
+        assert_eq!(result["workers"]["w1:p1"], "disabled");
+        assert_eq!(result["allocated"], serde_json::json!([]));
+        services.shutdown();
+    }
+
+    #[test]
+    fn runtime_allocator_no_workers_and_shutdown_use_owned_services() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let handle = runtime.handle().clone();
+        let (tasks, inbox) = tasks_and_inbox(&runtime, &dir);
+        let stores = Stores {
+            tasks: Some(tasks),
+            inbox: Some(inbox),
+            ..Stores::default()
+        };
+        let env = configured_env(&dir, "1");
+        let services = RuntimeServices::new(startup_inputs(
+            &dir,
+            runtime,
+            env,
+            fake_factory_with_current_pane(),
+            stores,
+        ))
+        .unwrap();
+        assert_eq!(
+            handle.block_on(services.allocator_tick()).unwrap(),
+            serde_json::json!({})
+        );
+        assert_eq!(
+            handle.block_on(services.allocator_tick()).unwrap(),
+            serde_json::json!({})
+        );
+        services.shutdown();
+        assert!(handle.block_on(services.allocator_tick()).is_err());
     }
 
     #[test]
