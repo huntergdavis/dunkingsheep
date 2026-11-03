@@ -617,7 +617,10 @@ mod tests {
             builder = builder.header(header::COOKIE, cookie);
         }
         builder
-            .body(body.map(Body::from).unwrap_or_else(Body::empty))
+            .body(
+                body.map(|body| Body::from(body.to_owned()))
+                    .unwrap_or_else(Body::empty),
+            )
             .unwrap()
     }
 
@@ -685,7 +688,10 @@ mod tests {
         assert_eq!(body["channels"], json!(backend.roster));
         assert_eq!(body["viewports"], json!([{"innerWidth": 1280}]));
         assert_eq!(body["checked_at"], "2026-11-03T00:00:00Z");
-        assert_eq!(backend.roster_inputs.lock().unwrap().as_slice(), &[vec![]]);
+        assert_eq!(
+            backend.roster_inputs.lock().unwrap().as_slice(),
+            &[Vec::<Value>::new()]
+        );
         assert_eq!(
             backend.calls.lock().unwrap().as_slice(),
             &[("list_panes".into(), json!({}))]
