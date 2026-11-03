@@ -1,0 +1,944 @@
+{
+  "build_cases": [
+    {
+      "name": "the_desk_channel_can_message_the_live_desk_pane",
+      "configured": [
+        {
+          "id": "cos",
+          "name": "Front Desk",
+          "match": "desk",
+          "kind": "active"
+        }
+      ],
+      "panes": [
+        {
+          "pane_id": "%3",
+          "agent": "",
+          "agent_status": null,
+          "tab_label": "bash",
+          "workspace_label": "par-a",
+          "cwd": "/home/hunter"
+        },
+        {
+          "pane_id": "%133",
+          "agent": "",
+          "agent_status": "working",
+          "tab_label": "sn-desk",
+          "workspace_label": "bootstrap",
+          "cwd": "/home/hunter/workspace/desk"
+        }
+      ],
+      "include_terminals": false,
+      "authority_responses": null,
+      "expected_calls": [],
+      "expected": [
+        {
+          "id": "cos",
+          "name": "Front Desk",
+          "kind": "active",
+          "dashboard": false,
+          "online": true,
+          "status": "working",
+          "activity_group": "active",
+          "pane_id": "%133",
+          "workspace": "bootstrap",
+          "tab_label": "sn-desk",
+          "agent": "",
+          "can_message": true
+        }
+      ]
+    },
+    {
+      "name": "a_missing_desk_stays_offline_and_unmessageable",
+      "configured": [
+        {
+          "id": "cos",
+          "name": "Front Desk",
+          "match": "desk",
+          "kind": "active"
+        }
+      ],
+      "panes": [
+        {
+          "pane_id": "%3",
+          "agent": "",
+          "agent_status": null,
+          "tab_label": "bash",
+          "workspace_label": "par-a",
+          "cwd": "/home/hunter"
+        }
+      ],
+      "include_terminals": false,
+      "authority_responses": null,
+      "expected_calls": [],
+      "expected": [
+        {
+          "id": "cos",
+          "name": "Front Desk",
+          "kind": "active",
+          "dashboard": false,
+          "online": false,
+          "status": "offline",
+          "activity_group": "standby",
+          "pane_id": null,
+          "workspace": null,
+          "tab_label": null,
+          "agent": null,
+          "can_message": false
+        }
+      ]
+    },
+    {
+      "name": "a_quiet_desk_is_messageable_when_the_daemon_has_process_evidence",
+      "configured": [
+        {
+          "id": "desklane",
+          "name": "Desk lane",
+          "match": "desk",
+          "kind": "active"
+        }
+      ],
+      "panes": [
+        {
+          "pane_id": "%3",
+          "agent": "",
+          "agent_status": null,
+          "tab_label": "bash",
+          "workspace_label": "par-a",
+          "cwd": "/home/hunter"
+        },
+        {
+          "pane_id": "%133",
+          "agent": "",
+          "agent_status": null,
+          "tab_label": "sn-desk",
+          "workspace_label": "bootstrap",
+          "cwd": "/home/hunter/workspace/desk"
+        }
+      ],
+      "include_terminals": false,
+      "authority_responses": [
+        true,
+        true
+      ],
+      "expected_calls": [
+        "%133",
+        "%133"
+      ],
+      "expected": [
+        {
+          "id": "desklane",
+          "name": "Desk lane",
+          "kind": "active",
+          "dashboard": false,
+          "online": true,
+          "status": "unknown",
+          "activity_group": "standby",
+          "pane_id": "%133",
+          "workspace": "bootstrap",
+          "tab_label": "sn-desk",
+          "agent": "",
+          "can_message": true
+        }
+      ]
+    },
+    {
+      "name": "the_authority_can_refuse_a_pane_the_heuristic_would_allow",
+      "configured": [
+        {
+          "id": "desklane",
+          "name": "Desk lane",
+          "match": "desk",
+          "kind": "active"
+        }
+      ],
+      "panes": [
+        {
+          "pane_id": "%133",
+          "agent": "",
+          "agent_status": "working",
+          "tab_label": "sn-desk",
+          "workspace_label": "bootstrap",
+          "cwd": "/home/hunter/workspace/desk"
+        }
+      ],
+      "include_terminals": false,
+      "authority_responses": [
+        false,
+        false
+      ],
+      "expected_calls": [
+        "%133",
+        "%133"
+      ],
+      "expected": [
+        {
+          "id": "desklane",
+          "name": "Desk lane",
+          "kind": "active",
+          "dashboard": false,
+          "online": true,
+          "status": "working",
+          "activity_group": "standby",
+          "pane_id": "%133",
+          "workspace": "bootstrap",
+          "tab_label": "sn-desk",
+          "agent": "",
+          "can_message": false
+        }
+      ]
+    },
+    {
+      "name": "the_desk_channel_is_messageable_while_quiet_because_it_goes_through_the_owner_mailbox",
+      "configured": [
+        {
+          "id": "cos",
+          "name": "Front Desk",
+          "match": "desk",
+          "kind": "active"
+        }
+      ],
+      "panes": [
+        {
+          "pane_id": "%133",
+          "agent": "",
+          "agent_status": null,
+          "tab_label": "sn-desk",
+          "workspace_label": "bootstrap",
+          "cwd": "/home/hunter/workspace/desk"
+        }
+      ],
+      "include_terminals": false,
+      "authority_responses": [
+        false
+      ],
+      "expected_calls": [
+        "%133"
+      ],
+      "expected": [
+        {
+          "id": "cos",
+          "name": "Front Desk",
+          "kind": "active",
+          "dashboard": false,
+          "online": true,
+          "status": "unknown",
+          "activity_group": "standby",
+          "pane_id": "%133",
+          "workspace": "bootstrap",
+          "tab_label": "sn-desk",
+          "agent": "",
+          "can_message": true
+        }
+      ]
+    },
+    {
+      "name": "the_owner_mailbox_rule_does_not_make_an_absent_desk_messageable",
+      "configured": [
+        {
+          "id": "cos",
+          "name": "Front Desk",
+          "match": "desk",
+          "kind": "active"
+        }
+      ],
+      "panes": [
+        {
+          "pane_id": "%3",
+          "agent": "",
+          "agent_status": null,
+          "tab_label": "bash",
+          "workspace_label": "par-a",
+          "cwd": "/home/hunter"
+        }
+      ],
+      "include_terminals": false,
+      "authority_responses": null,
+      "expected_calls": [],
+      "expected": [
+        {
+          "id": "cos",
+          "name": "Front Desk",
+          "kind": "active",
+          "dashboard": false,
+          "online": false,
+          "status": "offline",
+          "activity_group": "standby",
+          "pane_id": null,
+          "workspace": null,
+          "tab_label": null,
+          "agent": null,
+          "can_message": false
+        }
+      ]
+    },
+    {
+      "name": "other_channels_still_need_an_agent",
+      "configured": [
+        {
+          "id": "poolrad",
+          "name": "Poolrad PM",
+          "match": "bash",
+          "kind": "active"
+        }
+      ],
+      "panes": [
+        {
+          "pane_id": "%3",
+          "agent": "",
+          "agent_status": null,
+          "tab_label": "bash",
+          "workspace_label": "par-a",
+          "cwd": "/home/hunter"
+        }
+      ],
+      "include_terminals": false,
+      "authority_responses": null,
+      "expected_calls": [],
+      "expected": [
+        {
+          "id": "poolrad",
+          "name": "Poolrad PM",
+          "kind": "active",
+          "dashboard": false,
+          "online": true,
+          "status": "unknown",
+          "activity_group": "standby",
+          "pane_id": "%3",
+          "workspace": "par-a",
+          "tab_label": "bash",
+          "agent": "",
+          "can_message": false
+        }
+      ]
+    },
+    {
+      "name": "configured_duplicates_keep_order_and_only_suppress_the_used_pane",
+      "configured": [
+        {
+          "id": "first",
+          "name": "First",
+          "match": "desk",
+          "kind": "active"
+        },
+        {
+          "id": "second",
+          "name": "Second",
+          "match": "desk",
+          "kind": "active"
+        }
+      ],
+      "panes": [
+        {
+          "pane_id": "%133",
+          "agent": "",
+          "agent_status": "working",
+          "tab_label": "sn-desk",
+          "workspace_label": "bootstrap",
+          "cwd": "/home/hunter/workspace/desk"
+        },
+        {
+          "pane_id": "%140",
+          "agent": "pi",
+          "agent_status": "idle",
+          "tab_label": "pi-worker",
+          "workspace_label": "parallel",
+          "cwd": "/tmp/pi"
+        },
+        {
+          "pane_id": "%3",
+          "agent": "",
+          "agent_status": null,
+          "tab_label": "bash",
+          "workspace_label": "par-a",
+          "cwd": "/home/hunter"
+        }
+      ],
+      "include_terminals": false,
+      "authority_responses": null,
+      "expected_calls": [],
+      "expected": [
+        {
+          "id": "first",
+          "name": "First",
+          "kind": "active",
+          "dashboard": false,
+          "online": true,
+          "status": "working",
+          "activity_group": "active",
+          "pane_id": "%133",
+          "workspace": "bootstrap",
+          "tab_label": "sn-desk",
+          "agent": "",
+          "can_message": true
+        },
+        {
+          "id": "second",
+          "name": "Second",
+          "kind": "active",
+          "dashboard": false,
+          "online": true,
+          "status": "working",
+          "activity_group": "active",
+          "pane_id": "%133",
+          "workspace": "bootstrap",
+          "tab_label": "sn-desk",
+          "agent": "",
+          "can_message": true
+        },
+        {
+          "id": "pane-140",
+          "name": "pi-worker",
+          "kind": "discovered",
+          "dashboard": false,
+          "online": true,
+          "status": "idle",
+          "activity_group": "standby",
+          "pane_id": "%140",
+          "workspace": "parallel",
+          "tab_label": "pi-worker",
+          "agent": "pi",
+          "can_message": true
+        }
+      ]
+    },
+    {
+      "name": "include_terminals_keeps_shell_and_offline_status_distinct",
+      "configured": [
+        {
+          "id": "missing",
+          "name": "Missing",
+          "match": "absent",
+          "kind": "active"
+        }
+      ],
+      "panes": [
+        {
+          "pane_id": "%3",
+          "agent": "",
+          "agent_status": null,
+          "tab_label": "bash",
+          "workspace_label": "par-a",
+          "cwd": "/home/hunter"
+        },
+        {
+          "pane_id": "%135",
+          "agent": "",
+          "agent_status": null,
+          "tab_label": "sn-reviewer-4",
+          "workspace_label": "bootstrap",
+          "cwd": "/home/hunter/workspace"
+        },
+        {
+          "pane_id": "%150",
+          "agent": "pi",
+          "agent_status": "idle",
+          "tab_label": "",
+          "workspace_label": "parallel",
+          "cwd": "/tmp/pi"
+        },
+        {
+          "pane_id": "%151",
+          "agent": "",
+          "agent_status": "blocked",
+          "tab_label": "",
+          "workspace_label": "parallel",
+          "cwd": "/tmp/worker"
+        }
+      ],
+      "include_terminals": true,
+      "authority_responses": null,
+      "expected_calls": [],
+      "expected": [
+        {
+          "id": "missing",
+          "name": "Missing",
+          "kind": "active",
+          "dashboard": false,
+          "online": false,
+          "status": "offline",
+          "activity_group": "standby",
+          "pane_id": null,
+          "workspace": null,
+          "tab_label": null,
+          "agent": null,
+          "can_message": false
+        },
+        {
+          "id": "pane-3",
+          "name": "bash",
+          "kind": "discovered",
+          "dashboard": false,
+          "online": true,
+          "status": "unknown",
+          "activity_group": "standby",
+          "pane_id": "%3",
+          "workspace": "par-a",
+          "tab_label": "bash",
+          "agent": "",
+          "can_message": false
+        },
+        {
+          "id": "pane-135",
+          "name": "sn-reviewer-4",
+          "kind": "discovered",
+          "dashboard": false,
+          "online": true,
+          "status": "unknown",
+          "activity_group": "standby",
+          "pane_id": "%135",
+          "workspace": "bootstrap",
+          "tab_label": "sn-reviewer-4",
+          "agent": "",
+          "can_message": false
+        },
+        {
+          "id": "pane-150",
+          "name": "pi",
+          "kind": "discovered",
+          "dashboard": false,
+          "online": true,
+          "status": "idle",
+          "activity_group": "standby",
+          "pane_id": "%150",
+          "workspace": "parallel",
+          "tab_label": "",
+          "agent": "pi",
+          "can_message": true
+        },
+        {
+          "id": "pane-151",
+          "name": "%151",
+          "kind": "discovered",
+          "dashboard": false,
+          "online": true,
+          "status": "waiting",
+          "activity_group": "active",
+          "pane_id": "%151",
+          "workspace": "parallel",
+          "tab_label": "",
+          "agent": "",
+          "can_message": true
+        }
+      ]
+    },
+    {
+      "name": "activity_authority_call_order_and_short_circuit",
+      "configured": [
+        {
+          "id": "offline",
+          "name": "Offline",
+          "match": "never-here",
+          "kind": "active"
+        },
+        {
+          "id": "cos",
+          "name": "Front Desk",
+          "match": "desk",
+          "kind": "active"
+        },
+        {
+          "id": "other-channel",
+          "name": "Other channel",
+          "match": "desk",
+          "kind": "active"
+        }
+      ],
+      "panes": [
+        {
+          "pane_id": "%133",
+          "agent": "",
+          "agent_status": "working",
+          "tab_label": "sn-desk",
+          "workspace_label": "bootstrap",
+          "cwd": "/home/hunter/workspace/desk"
+        }
+      ],
+      "include_terminals": false,
+      "authority_responses": [
+        false,
+        false,
+        true,
+        false
+      ],
+      "expected_calls": [
+        null,
+        "%133",
+        "%133",
+        "%133"
+      ],
+      "expected": [
+        {
+          "id": "offline",
+          "name": "Offline",
+          "kind": "active",
+          "dashboard": false,
+          "online": false,
+          "status": "offline",
+          "activity_group": "standby",
+          "pane_id": null,
+          "workspace": null,
+          "tab_label": null,
+          "agent": null,
+          "can_message": false
+        },
+        {
+          "id": "cos",
+          "name": "Front Desk",
+          "kind": "active",
+          "dashboard": false,
+          "online": true,
+          "status": "working",
+          "activity_group": "standby",
+          "pane_id": "%133",
+          "workspace": "bootstrap",
+          "tab_label": "sn-desk",
+          "agent": "",
+          "can_message": true
+        },
+        {
+          "id": "other-channel",
+          "name": "Other channel",
+          "kind": "active",
+          "dashboard": false,
+          "online": true,
+          "status": "working",
+          "activity_group": "active",
+          "pane_id": "%133",
+          "workspace": "bootstrap",
+          "tab_label": "sn-desk",
+          "agent": "",
+          "can_message": false
+        }
+      ]
+    },
+    {
+      "name": "discovered_eligibility_uses_lane_heuristic_before_authority",
+      "configured": [],
+      "panes": [
+        {
+          "pane_id": "%133",
+          "agent": "",
+          "agent_status": "working",
+          "tab_label": "sn-desk",
+          "workspace_label": "bootstrap",
+          "cwd": "/home/hunter/workspace/desk"
+        },
+        {
+          "pane_id": "%3",
+          "agent": "",
+          "agent_status": null,
+          "tab_label": "bash",
+          "workspace_label": "par-a",
+          "cwd": "/home/hunter"
+        }
+      ],
+      "include_terminals": false,
+      "authority_responses": [
+        false,
+        true
+      ],
+      "expected_calls": [
+        "%133",
+        "%133"
+      ],
+      "expected": [
+        {
+          "id": "pane-133",
+          "name": "sn-desk",
+          "kind": "discovered",
+          "dashboard": false,
+          "online": true,
+          "status": "working",
+          "activity_group": "standby",
+          "pane_id": "%133",
+          "workspace": "bootstrap",
+          "tab_label": "sn-desk",
+          "agent": "",
+          "can_message": true
+        }
+      ]
+    },
+    {
+      "name": "blocked_pane_uses_waiting_activity_group",
+      "configured": [
+        {
+          "id": "desklane",
+          "name": "Desk lane",
+          "match": "desk",
+          "kind": "active"
+        }
+      ],
+      "panes": [
+        {
+          "pane_id": "%133",
+          "agent": "",
+          "agent_status": "blocked",
+          "tab_label": "sn-desk",
+          "workspace_label": "bootstrap",
+          "cwd": "/home/hunter/workspace/desk"
+        }
+      ],
+      "include_terminals": false,
+      "authority_responses": null,
+      "expected_calls": [],
+      "expected": [
+        {
+          "id": "desklane",
+          "name": "Desk lane",
+          "kind": "active",
+          "dashboard": false,
+          "online": true,
+          "status": "waiting",
+          "activity_group": "active",
+          "pane_id": "%133",
+          "workspace": "bootstrap",
+          "tab_label": "sn-desk",
+          "agent": "",
+          "can_message": true
+        }
+      ]
+    }
+  ],
+  "match_pane_cases": [
+    {
+      "name": "pinned_pane_wins_over_match",
+      "config": {
+        "pane": "%3",
+        "match": "desk"
+      },
+      "panes": [
+        {
+          "pane_id": "%133",
+          "agent": "",
+          "agent_status": "working",
+          "tab_label": "sn-desk",
+          "workspace_label": "bootstrap",
+          "cwd": "/home/hunter/workspace/desk"
+        },
+        {
+          "pane_id": "%3",
+          "agent": "",
+          "agent_status": null,
+          "tab_label": "bash",
+          "workspace_label": "par-a",
+          "cwd": "/home/hunter"
+        }
+      ],
+      "expected": {
+        "pane_id": "%3",
+        "agent": "",
+        "agent_status": null,
+        "tab_label": "bash",
+        "workspace_label": "par-a",
+        "cwd": "/home/hunter"
+      },
+      "expected_pane_id": "%3"
+    },
+    {
+      "name": "missing_pinned_pane_has_no_fallback",
+      "config": {
+        "pane": "%99",
+        "match": "desk"
+      },
+      "panes": [
+        {
+          "pane_id": "%133",
+          "agent": "",
+          "agent_status": "working",
+          "tab_label": "sn-desk",
+          "workspace_label": "bootstrap",
+          "cwd": "/home/hunter/workspace/desk"
+        },
+        {
+          "pane_id": "%3",
+          "agent": "",
+          "agent_status": null,
+          "tab_label": "bash",
+          "workspace_label": "par-a",
+          "cwd": "/home/hunter"
+        }
+      ],
+      "expected": null,
+      "expected_pane_id": null
+    },
+    {
+      "name": "exact_cwd_precedes_earlier_substring_match",
+      "config": {
+        "match": "desk"
+      },
+      "panes": [
+        {
+          "pane_id": "%133",
+          "agent": "",
+          "agent_status": "working",
+          "tab_label": "desk-helper",
+          "workspace_label": "bootstrap",
+          "cwd": "/tmp/elsewhere"
+        },
+        {
+          "pane_id": "%135",
+          "agent": "",
+          "agent_status": null,
+          "tab_label": "sn-reviewer-4",
+          "workspace_label": "bootstrap",
+          "cwd": "/home/team/desk/"
+        }
+      ],
+      "expected": {
+        "pane_id": "%135",
+        "agent": "",
+        "agent_status": null,
+        "tab_label": "sn-reviewer-4",
+        "workspace_label": "bootstrap",
+        "cwd": "/home/team/desk/"
+      },
+      "expected_pane_id": "%135"
+    },
+    {
+      "name": "first_exact_match_wins",
+      "config": {
+        "match": "desk"
+      },
+      "panes": [
+        {
+          "pane_id": "%133",
+          "agent": "",
+          "agent_status": "working",
+          "tab_label": "DESK",
+          "workspace_label": "bootstrap",
+          "cwd": "/home/hunter/workspace/desk"
+        },
+        {
+          "pane_id": "%135",
+          "agent": "",
+          "agent_status": null,
+          "tab_label": "desk",
+          "workspace_label": "bootstrap",
+          "cwd": "/home/hunter/workspace"
+        }
+      ],
+      "expected": {
+        "pane_id": "%133",
+        "agent": "",
+        "agent_status": "working",
+        "tab_label": "DESK",
+        "workspace_label": "bootstrap",
+        "cwd": "/home/hunter/workspace/desk"
+      },
+      "expected_pane_id": "%133"
+    },
+    {
+      "name": "casefold_and_trailing_slashes_match_cwd",
+      "config": {
+        "match": "TEAM"
+      },
+      "panes": [
+        {
+          "pane_id": "%135",
+          "agent": "",
+          "agent_status": null,
+          "tab_label": "sn-reviewer-4",
+          "workspace_label": "bootstrap",
+          "cwd": "/home/Team///"
+        }
+      ],
+      "expected": {
+        "pane_id": "%135",
+        "agent": "",
+        "agent_status": null,
+        "tab_label": "sn-reviewer-4",
+        "workspace_label": "bootstrap",
+        "cwd": "/home/Team///"
+      },
+      "expected_pane_id": "%135"
+    }
+  ],
+  "functions": {
+    "discovered_id": [
+      {
+        "input": "%Straße/Kelvin",
+        "expected": "pane-strasse-kelvin"
+      },
+      {
+        "input": "///Élan___Worker///",
+        "expected": "pane-lan-worker"
+      },
+      {
+        "input": "---",
+        "expected": "pane-"
+      }
+    ],
+    "is_lane": [
+      {
+        "input": {
+          "pane_id": "%133",
+          "agent": "",
+          "agent_status": "working",
+          "tab_label": "sn-desk",
+          "workspace_label": "bootstrap",
+          "cwd": "/home/hunter/workspace/desk"
+        },
+        "expected": true
+      },
+      {
+        "input": {
+          "agent": "claude",
+          "agent_status": null
+        },
+        "expected": true
+      },
+      {
+        "input": {
+          "pane_id": "%3",
+          "agent": "",
+          "agent_status": null,
+          "tab_label": "bash",
+          "workspace_label": "par-a",
+          "cwd": "/home/hunter"
+        },
+        "expected": false
+      },
+      {
+        "input": null,
+        "expected": false
+      },
+      {
+        "input": {
+          "agent": "",
+          "agent_status": "blocked"
+        },
+        "expected": true
+      },
+      {
+        "input": {
+          "agent": "",
+          "agent_status": "unknown"
+        },
+        "expected": false
+      }
+    ],
+    "presence": [
+      {
+        "input": "working",
+        "expected": "working"
+      },
+      {
+        "input": "idle",
+        "expected": "idle"
+      },
+      {
+        "input": "blocked",
+        "expected": "waiting"
+      },
+      {
+        "input": null,
+        "expected": "unknown"
+      },
+      {
+        "input": "offline",
+        "expected": "unknown"
+      }
+    ]
+  }
+}
