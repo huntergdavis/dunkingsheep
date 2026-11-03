@@ -182,6 +182,7 @@ async fn game_loadstate(
 }
 
 async fn request_json(request: Request) -> Result<Option<Value>, Response> {
+    let parse_as_json = request_json_content_type(request.headers());
     let bytes = to_bytes(request.into_body(), usize::MAX)
         .await
         .map_err(|_| {
@@ -193,10 +194,18 @@ async fn request_json(request: Request) -> Result<Option<Value>, Response> {
     if bytes.is_empty() {
         return Ok(None);
     }
+    if !parse_as_json {
+        return Ok(Some(Value::String(
+            String::from_utf8_lossy(&bytes).into_owned(),
+        )));
+    }
     serde_json::from_slice(&bytes).map(Some).map_err(|error| {
         let error_text = error.to_string();
         let offset = if error_text.starts_with("EOF while parsing an object") {
             String::from_utf8_lossy(&bytes).chars().count()
+        } else if error_text.starts_with("EOF while parsing a string") {
+            python_unterminated_string_offset(&bytes)
+                .unwrap_or_else(|| error.column().saturating_sub(1))
         } else if error_text.starts_with("trailing comma") {
             python_trailing_comma_offset(&bytes).unwrap_or_else(|| error.column().saturating_sub(1))
         } else {
@@ -212,6 +221,43 @@ async fn request_json(request: Request) -> Result<Option<Value>, Response> {
     })
 }
 
+fn request_json_content_type(headers: &HeaderMap) -> bool {
+    let Some(content_type) = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return true;
+    };
+    let media_type = content_type.split(';').next().unwrap_or_default().trim();
+    let Some((top_level, subtype)) = media_type.split_once('/') else {
+        return false;
+    };
+    top_level.eq_ignore_ascii_case("application")
+        && (subtype.eq_ignore_ascii_case("json") || subtype.to_ascii_lowercase().ends_with("+json"))
+}
+
+fn python_unterminated_string_offset(bytes: &[u8]) -> Option<usize> {
+    let text = String::from_utf8_lossy(bytes);
+    let mut string_start = None;
+    let mut escaped = false;
+
+    for (character_offset, character) in text.char_indices() {
+        if string_start.is_some() {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                string_start = None;
+            }
+        } else if character == '"' {
+            string_start = Some(character_offset);
+        }
+    }
+
+    string_start.map(|byte_offset| text[..byte_offset].chars().count())
+}
+
 fn python_json_error(error: &str) -> &'static str {
     if error.starts_with("key must be a string")
         || error.starts_with("EOF while parsing an object")
@@ -219,6 +265,8 @@ fn python_json_error(error: &str) -> &'static str {
         "Expecting property name enclosed in double quotes"
     } else if error.starts_with("trailing comma") {
         "Illegal trailing comma before end of object"
+    } else if error.starts_with("EOF while parsing a string") {
+        "Unterminated string starting at"
     } else if error.starts_with("EOF while parsing") || error.starts_with("expected value") {
         "Expecting value"
     } else if error.starts_with("expected `:`") {
@@ -484,11 +532,20 @@ mod tests {
     }
 
     fn request(method: &str, path: &str, body: &str) -> HttpRequest<Body> {
+        request_with_content_type(method, path, body, "application/json")
+    }
+
+    fn request_with_content_type(
+        method: &str,
+        path: &str,
+        body: &str,
+        content_type: &str,
+    ) -> HttpRequest<Body> {
         HttpRequest::builder()
             .method(method)
             .uri(path)
             .header(header::HOST, "desk.test")
-            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::CONTENT_TYPE, content_type)
             .body(Body::from(body.to_owned()))
             .unwrap()
     }
@@ -678,6 +735,46 @@ mod tests {
                 "ctx":{"error":"Illegal trailing comma before end of object"}}]}),
             value
         );
+        assert!(game.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn game_savestate_maps_unterminated_json_string_to_python_decode_error() {
+        let game = Arc::new(FakeGame::new(Value::Null));
+        let (status, _body, value) = response(
+            app(game.clone(), authorized()),
+            request("POST", "/api/game/savestate", r##"{"tag":"quick##),
+        );
+        assert_eq!(StatusCode::UNPROCESSABLE_ENTITY, status);
+        assert_eq!(
+            json!({"detail":[{"type":"json_invalid","loc":["body",7],
+                "msg":"JSON decode error","input":{},
+                "ctx":{"error":"Unterminated string starting at"}}]}),
+            value
+        );
+        assert!(game.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn game_state_model_routes_reject_json_text_with_non_json_content_type() {
+        let game = Arc::new(FakeGame::new(Value::Null));
+        let game_app = app(game.clone(), authorized());
+        for (path, body) in [
+            ("/api/game/savestate", r#"{"tag":"quick"}"#),
+            ("/api/game/loadstate", r#"{"slot":3}"#),
+        ] {
+            let (status, _body, value) = response(
+                game_app.clone(),
+                request_with_content_type("POST", path, body, "text/plain"),
+            );
+            assert_eq!(StatusCode::UNPROCESSABLE_ENTITY, status);
+            assert_eq!(
+                json!({"detail":[{"type":"model_attributes_type","loc":["body"],
+                    "msg":"Input should be a valid dictionary or object to extract fields from",
+                    "input":body}]}),
+                value
+            );
+        }
         assert!(game.calls.lock().unwrap().is_empty());
     }
 
