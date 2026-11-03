@@ -213,16 +213,16 @@ async fn request_json(request: Request) -> Result<Option<Value>, Response> {
     }
     serde_json::from_slice(&bytes).map(Some).map_err(|error| {
         let error_text = error.to_string();
-        let invalid_escape_offset = error_text
-            .starts_with("invalid escape")
-            .then(|| python_invalid_escape_offset(&bytes))
+        let invalid_escape = (error_text.starts_with("invalid escape")
+            || error_text.starts_with("EOF while parsing a string"))
+            .then(|| python_invalid_escape(&bytes))
             .flatten();
         let trailing_comma = error_text
             .starts_with("trailing comma")
             .then(|| python_trailing_comma(&bytes))
             .flatten();
-        let offset = if let Some(offset) = invalid_escape_offset {
-            offset
+        let offset = if let Some(invalid_escape) = invalid_escape {
+            invalid_escape.offset()
         } else if error_text.starts_with("EOF while parsing an object") {
             String::from_utf8_lossy(&bytes).chars().count()
         } else if error_text.starts_with("EOF while parsing a string") {
@@ -244,7 +244,7 @@ async fn request_json(request: Request) -> Result<Option<Value>, Response> {
                 "error": python_json_error(
                     &error_text,
                     trailing_comma.map(|(_, kind)| kind),
-                    invalid_escape_offset.is_some(),
+                    invalid_escape,
                 )
             })),
         )
@@ -289,27 +289,57 @@ fn python_unterminated_string_offset(bytes: &[u8]) -> Option<usize> {
     string_start.map(|byte_offset| text[..byte_offset].chars().count())
 }
 
-fn python_invalid_escape_offset(bytes: &[u8]) -> Option<usize> {
-    let text = String::from_utf8_lossy(bytes);
-    let mut in_string = false;
-    let mut escape_offset = None;
+#[derive(Clone, Copy)]
+enum PythonInvalidEscape {
+    General { offset: usize },
+    Unicode { offset: usize },
+}
 
-    for (character_offset, character) in text.chars().enumerate() {
+impl PythonInvalidEscape {
+    fn offset(self) -> usize {
+        match self {
+            Self::General { offset } | Self::Unicode { offset } => offset,
+        }
+    }
+}
+
+fn python_invalid_escape(bytes: &[u8]) -> Option<PythonInvalidEscape> {
+    let text = String::from_utf8_lossy(bytes);
+    let characters: Vec<char> = text.chars().collect();
+    let mut in_string = false;
+    let mut index = 0;
+
+    while index < characters.len() {
+        let character = characters[index];
         if !in_string {
             if character == '"' {
                 in_string = true;
             }
+            index += 1;
             continue;
         }
 
-        if let Some(offset) = escape_offset.take() {
-            if !matches!(character, '"' | '\\' | '/' | 'b' | 'f' | 'n' | 'r' | 't' | 'u') {
-                return Some(offset);
-            }
-        } else if character == '\\' {
-            escape_offset = Some(character_offset);
-        } else if character == '"' {
+        if character == '"' {
             in_string = false;
+            index += 1;
+        } else if character == '\\' {
+            let escape = characters.get(index + 1).copied()?;
+            if escape == 'u' {
+                let valid_hex_digits = characters
+                    .get(index + 2..index + 6)
+                    .is_some_and(|digits| digits.iter().all(|digit| digit.is_ascii_hexdigit()));
+                if !valid_hex_digits {
+                    // Python points at the `u` in "Invalid \\uXXXX escape".
+                    return Some(PythonInvalidEscape::Unicode { offset: index + 1 });
+                }
+                index += 6;
+            } else if matches!(escape, '"' | '\\' | '/' | 'b' | 'f' | 'n' | 'r' | 't') {
+                index += 2;
+            } else {
+                return Some(PythonInvalidEscape::General { offset: index });
+            }
+        } else {
+            index += 1;
         }
     }
 
@@ -325,7 +355,7 @@ enum JsonContainer {
 fn python_json_error(
     error: &str,
     trailing_container: Option<JsonContainer>,
-    invalid_escape: bool,
+    invalid_escape: Option<PythonInvalidEscape>,
 ) -> &'static str {
     if error.starts_with("key must be a string")
         || error.starts_with("EOF while parsing an object")
@@ -337,10 +367,15 @@ fn python_json_error(
             Some(JsonContainer::Array) => "Illegal trailing comma before end of array",
             None => "Invalid JSON",
         }
+    } else if matches!(invalid_escape, Some(PythonInvalidEscape::Unicode { .. })) {
+        "Invalid \\uXXXX escape"
     } else if error.starts_with("EOF while parsing a string") {
         "Unterminated string starting at"
-    } else if error.starts_with("invalid escape") && invalid_escape {
-        "Invalid \\escape"
+    } else if error.starts_with("invalid escape") {
+        match invalid_escape {
+            Some(PythonInvalidEscape::General { .. }) => "Invalid \\escape",
+            None => "Invalid JSON",
+        }
     } else if error.starts_with("EOF while parsing") || error.starts_with("expected value") {
         "Expecting value"
     } else if error.starts_with("expected `:`") {
@@ -1064,17 +1099,23 @@ mod tests {
     fn game_state_model_routes_map_invalid_json_escape_to_python_decode_error() {
         let game = Arc::new(FakeGame::new(Value::Null));
         for path in ["/api/game/savestate", "/api/game/loadstate"] {
-            let (status, _body, value) = response(
-                app(game.clone(), authorized()),
-                request("POST", path, r#"{"tag":"\q"}"#),
-            );
-            assert_eq!(StatusCode::UNPROCESSABLE_ENTITY, status);
-            assert_eq!(
-                json!({"detail":[{"type":"json_invalid","loc":["body",8],
-                    "msg":"JSON decode error","input":{},
-                    "ctx":{"error":"Invalid \\escape"}}]}),
-                value
-            );
+            for (body, offset, error) in [
+                (r#"{"tag":"\q"}"#, 8, r"Invalid \escape"),
+                (r#"{"tag":"\u12G4"}"#, 9, r"Invalid \uXXXX escape"),
+                (r#"{"tag":"\u12"}"#, 9, r"Invalid \uXXXX escape"),
+            ] {
+                let (status, _body, value) = response(
+                    app(game.clone(), authorized()),
+                    request("POST", path, body),
+                );
+                assert_eq!(StatusCode::UNPROCESSABLE_ENTITY, status);
+                assert_eq!(
+                    json!({"detail":[{"type":"json_invalid","loc":["body",offset],
+                        "msg":"JSON decode error","input":{},
+                        "ctx":{"error":error}}]}),
+                    value
+                );
+            }
         }
         assert!(game.calls.lock().unwrap().is_empty());
     }
