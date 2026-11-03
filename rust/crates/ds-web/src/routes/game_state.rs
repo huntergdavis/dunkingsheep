@@ -286,20 +286,28 @@ async fn request_json(request: Request) -> Result<Option<ParsedRequestJson>, Res
             ));
         }
     };
-    if python_json_integer_exceeds_digit_limit(&json_bytes) {
-        return Err(detail_response(
-            StatusCode::BAD_REQUEST,
-            "There was an error parsing the body",
-        ));
-    }
     match serde_json::from_slice(&json_bytes) {
-        Ok(value) => Ok(Some(ParsedRequestJson {
-            value,
-            surrogate_tag: None,
-        })),
+        Ok(value) => {
+            if python_json_integer_exceeds_digit_limit(&json_bytes) {
+                return Err(detail_response(
+                    StatusCode::BAD_REQUEST,
+                    "There was an error parsing the body",
+                ));
+            }
+            Ok(Some(ParsedRequestJson {
+                value,
+                surrogate_tag: None,
+            }))
+        }
         Err(error) => {
             if let Some(normalized) = replace_lone_surrogate_escapes(&json_bytes) {
                 if let Ok(value) = serde_json::from_slice(&normalized) {
+                    if python_json_integer_exceeds_digit_limit(&json_bytes) {
+                        return Err(detail_response(
+                            StatusCode::BAD_REQUEST,
+                            "There was an error parsing the body",
+                        ));
+                    }
                     let surrogate_tag = top_level_tag_python_string(&json_bytes)
                         .filter(PythonString::has_surrogate);
                     return Ok(Some(ParsedRequestJson {
@@ -1661,6 +1669,24 @@ mod tests {
                 assert_eq!(r#"{"detail":"There was an error parsing the body"}"#, body);
             }
         }
+        assert!(game.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn game_loadstate_parses_json_grammar_before_integer_digit_limit() {
+        let game = Arc::new(FakeGame::new(Value::Null));
+        let body = format!("{{\"slot\":1,{}:0}}", "9".repeat(4301));
+        let (status, _body, value) = response(
+            app(game.clone(), authorized()),
+            request("POST", "/api/game/loadstate", &body),
+        );
+
+        assert_eq!(StatusCode::UNPROCESSABLE_ENTITY, status);
+        assert_eq!("json_invalid", value["detail"][0]["type"]);
+        assert_eq!(
+            "Expecting property name enclosed in double quotes",
+            value["detail"][0]["ctx"]["error"]
+        );
         assert!(game.calls.lock().unwrap().is_empty());
     }
 
