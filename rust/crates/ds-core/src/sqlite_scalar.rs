@@ -23,7 +23,7 @@ pub(crate) fn python_sqlite_scalar(
             .as_u64()
             .and_then(|number| i64::try_from(number).ok())
             .map(SqlValue::Integer)
-            .ok_or_else(|| too_large()),
+            .ok_or_else(too_large),
         JsonValue::Number(value) => {
             let raw = value.to_string();
             if !raw
@@ -57,7 +57,7 @@ mod tests {
         assert_eq!(SqlValue::Null, python_sqlite_scalar(None, 4).unwrap());
         assert_eq!(
             SqlValue::Null,
-            python_sqlite_scalar(Some(&Value::Null), 4).unwrap()
+            python_sqlite_scalar(Some(&JsonValue::Null), 4).unwrap()
         );
         assert_eq!(
             SqlValue::Integer(1),
