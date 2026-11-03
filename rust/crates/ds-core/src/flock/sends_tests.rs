@@ -713,16 +713,7 @@ mod guarded_preparation_tests {
         ]);
         let guard = flock.typing_guard(P).unwrap();
 
-        let mut action = submit_text(
-            &flock,
-            &mut pane,
-            P,
-            "hello",
-            true,
-            false,
-            None,
-            Some(&guard),
-        );
+        let mut action = submit_text(&flock, &mut pane, P, "hello", true, false, Some(&guard));
         drop(guard);
         confirm_send_action(&mut pane, &mut action);
 
@@ -747,16 +738,7 @@ mod guarded_preparation_tests {
             .extend([Some(submit_live_screen()), Some(submit_live_screen())]);
         let guard = flock.typing_guard(P).unwrap();
 
-        let action = submit_text(
-            &flock,
-            &mut pane,
-            P,
-            "draft",
-            false,
-            false,
-            None,
-            Some(&guard),
-        );
+        let action = submit_text(&flock, &mut pane, P, "draft", false, false, Some(&guard));
         drop(guard);
 
         assert_eq!((true, "sent".to_string()), (action.ok, action.detail));
@@ -775,7 +757,7 @@ mod guarded_preparation_tests {
         ));
         let guard = flock.typing_guard(P).unwrap();
 
-        let action = submit_text(&flock, &mut pane, P, "ours", true, true, None, Some(&guard));
+        let action = submit_text(&flock, &mut pane, P, "ours", true, true, Some(&guard));
 
         assert!(!action.ok);
         assert!(action.detail.starts_with("agent session is dead"));
@@ -1085,14 +1067,7 @@ mod guarded_preparation_tests {
             || None,
             |env, guard| {
                 Ok(submit_text(
-                    &flock,
-                    env,
-                    P,
-                    "ours",
-                    true,
-                    false,
-                    None,
-                    Some(guard),
+                    &flock, env, P, "ours", true, false, Some(guard),
                 ))
             },
         );
@@ -2178,7 +2153,10 @@ fn hold_signature_preserves_modal_kind_and_collapsed_screen_text() {
     );
 
     assert_eq!(
-        ("modal".to_owned(), "Select Model and Effort enter select · esc back".to_owned()),
+        (
+            "modal".to_owned(),
+            "Select Model and Effort enter select · esc back".to_owned()
+        ),
         hold_signature(&pane, P)
     );
 }

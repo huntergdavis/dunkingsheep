@@ -241,7 +241,7 @@ fn hold_backoff_s(attempts: i64) -> f64 {
 
 pub type HoldSignature = (String, String);
 
-fn hold_signature(env: &dyn SendEnv, pane_id: &str) -> HoldSignature {
+pub(super) fn hold_signature(env: &dyn SendEnv, pane_id: &str) -> HoldSignature {
     let Some(screen) = env.read_pane(pane_id, CONSUMPTION_READ_LINES, true) else {
         return ("gone".into(), String::new());
     };
@@ -430,8 +430,7 @@ pub fn ensure_box_clear(
 }
 
 /// Type text and perform its initial submit key under one typing guard. The returned action owns
-/// the later confirmation; call [`confirm_send_action`] only after dropping the guard. Delivery
-/// supplies the generation it captured before entering the guarded send.
+/// the later confirmation; call [`confirm_send_action`] only after dropping the guard.
 pub fn submit_text(
     flock: &Flock,
     env: &mut dyn SendPreparationEnv,
@@ -439,7 +438,43 @@ pub fn submit_text(
     text: &str,
     press_enter: bool,
     check_box: bool,
-    attempt_generation: Option<&str>,
+    guard: Option<&TypingGuard<'_>>,
+) -> SendAction {
+    submit_text_with_options(
+        flock,
+        env,
+        pane_id,
+        text,
+        SubmitOptions {
+            press_enter,
+            check_box,
+            attempt_generation: AttemptGeneration::Capture,
+        },
+        guard,
+    )
+}
+
+#[derive(Clone, Copy)]
+struct SubmitOptions<'a> {
+    press_enter: bool,
+    check_box: bool,
+    attempt_generation: AttemptGeneration<'a>,
+}
+
+#[derive(Clone, Copy)]
+enum AttemptGeneration<'a> {
+    Capture,
+    Captured(Option<&'a str>),
+}
+
+/// Delivery passes its pre-guard generation snapshot so a pane replacement during preflight
+/// cannot transfer receipt authority to the replacement pane.
+fn submit_text_with_options(
+    flock: &Flock,
+    env: &mut dyn SendPreparationEnv,
+    pane_id: &str,
+    text: &str,
+    options: SubmitOptions<'_>,
     guard: Option<&TypingGuard<'_>>,
 ) -> SendAction {
     let guarded = guard.is_some();
@@ -449,13 +484,17 @@ pub fn submit_text(
                 "agent session is dead ({dead}); not submitting into a dead composer"
             ));
         }
-        if check_box {
+        if options.check_box {
             match ensure_box_clear(flock, env, pane_id, false, false, false, guard) {
                 Ok(()) => {}
                 Err(reason) => return Err(format!("{BOX_HOLD} ({reason})")),
             }
         }
         let baseline = env.read_status(pane_id);
+        let generation = match options.attempt_generation {
+            AttemptGeneration::Capture => env.attempt_generation(pane_id),
+            AttemptGeneration::Captured(generation) => generation.map(str::to_owned),
+        };
         let before = env
             .read_pane(pane_id, CONSUMPTION_READ_LINES, true)
             .unwrap_or_default();
@@ -477,10 +516,15 @@ pub fn submit_text(
             return Err(detail);
         }
         flock.remember_typed(pane_id, text);
-        if !env.persist_typed_attempt(pane_id, text, press_enter, attempt_generation) {
+        if !env.persist_typed_attempt(
+            pane_id,
+            text,
+            options.press_enter,
+            generation.as_deref(),
+        ) {
             return Err("typed but not submitted: durable attempt receipt failed".into());
         }
-        if !press_enter {
+        if !options.press_enter {
             return Ok(SendAction::completed(true, "sent"));
         }
         let (ok, detail, _key) = send_submit_key(env, pane_id, "Enter", busy_hint);
@@ -2068,14 +2112,18 @@ impl Flock {
                         message.text.split_whitespace().map(str::to_owned).collect();
                     Ok(press_keys(env, &pane_id, &keys, guard))
                 } else {
-                    Ok(submit_text(
+                    Ok(submit_text_with_options(
                         self,
                         env,
                         &pane_id,
                         &message.text,
-                        message.press_enter,
-                        false,
-                        message.attempt_generation.as_deref(),
+                        SubmitOptions {
+                            press_enter: message.press_enter,
+                            check_box: false,
+                            attempt_generation: AttemptGeneration::Captured(
+                                message.attempt_generation.as_deref(),
+                            ),
+                        },
                         Some(guard),
                     ))
                 }
