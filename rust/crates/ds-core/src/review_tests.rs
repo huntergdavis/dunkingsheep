@@ -775,6 +775,26 @@ async fn add_poolrad_review_at(
     (task, value)
 }
 
+async fn review_event_meta(tasks: &Tasks, task_id: &str, event: &str) -> Value {
+    let task_id = task_id.to_string();
+    let event = event.to_string();
+    let raw: Option<String> = tasks
+        .writer
+        .call(move |conn| {
+            conn.query_row(
+                "SELECT meta FROM task_events WHERE task_id = ? AND event = ? ORDER BY id DESC LIMIT 1",
+                rusqlite::params![task_id, event],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(crate::db::map_sqlite)
+        })
+        .await
+        .unwrap();
+    raw.and_then(|meta| serde_json::from_str(&meta).ok())
+        .unwrap_or_else(|| json!({}))
+}
+
 fn github_file_response(text: &str) -> Result<crate::github::GitHubResponse, String> {
     github_response(
         200,
@@ -1402,11 +1422,10 @@ async fn account_refuses_an_already_credited_row_and_records_the_reason() {
     );
     assert!(out["accounting_pr"].is_null());
     assert_eq!(4, sync.transport.requests.lock().unwrap().len());
-    let notes = sync.flock.notes(&stored.id).await.unwrap();
-    assert!(notes
-        .last()
+    let accounting = review_event_meta(&sync.flock, &stored.id, "accounting").await;
+    assert!(accounting["reason"]
+        .as_str()
         .unwrap()
-        .text
         .contains("no accounting PR for body PR #7"));
 }
 
@@ -1440,14 +1459,10 @@ async fn account_refuses_an_evidence_document_missing_from_base() {
     assert_eq!("the evidence document docs/re/U7F_STATE_FLAGS_0F7E.md does not exist on main: the body PR #7 is not merged, so this row would credit a document that is not there (t833)", out["reason"]);
     assert!(out["accounting_pr"].is_null());
     assert_eq!(7, sync.transport.requests.lock().unwrap().len());
-    assert!(sync
-        .flock
-        .notes(&stored.id)
-        .await
+    let accounting = review_event_meta(&sync.flock, &stored.id, "accounting").await;
+    assert!(accounting["reason"]
+        .as_str()
         .unwrap()
-        .last()
-        .unwrap()
-        .text
         .contains("not merged"));
 }
 
@@ -1521,11 +1536,10 @@ async fn account_opens_approves_and_queues_a_deterministic_ledger_pr() {
         .contains("accepted content in #7"));
     assert_eq!("POST", requests[15].method);
     assert!(requests[15].url.ends_with("/graphql"));
-    let notes = sync.flock.notes(&stored.id).await.unwrap();
-    assert!(notes
-        .last()
+    let accounting = review_event_meta(&sync.flock, &stored.id, "accounting").await;
+    assert!(accounting["reason"]
+        .as_str()
         .unwrap()
-        .text
         .contains("accounting PR #82 for body PR #7"));
 }
 
@@ -1573,16 +1587,11 @@ async fn held_accept_files_second_review_without_approving_or_fetching_author_to
         "pending",
         serde_json::from_slice::<Value>(requests[0].body.as_ref().unwrap()).unwrap()["state"]
     );
-    let held_note = sync
-        .flock
-        .notes(&first.id)
-        .await
+    let held = review_event_meta(&sync.flock, &first.id, "verdict_held").await;
+    assert!(held["reason"]
+        .as_str()
         .unwrap()
-        .last()
-        .unwrap()
-        .text
-        .clone();
-    assert!(held_note.contains("a second distinct lane must accept"));
+        .contains("a second distinct lane must accept"));
 }
 
 #[tokio::test]
@@ -1623,8 +1632,8 @@ async fn final_accept_accounts_only_after_merge_confirmation() {
         assert_eq!(expect_author_token, out["merged"] == Value::Bool(true));
         if expect_author_token {
             assert_eq!(
-                json!({"errors":["tokens: author unavailable"]}),
-                out["accounting"]
+                json!(["tokens: author unavailable"]),
+                out["accounting"]["errors"]
             );
             assert_eq!(
                 vec!["reviewer", "reviewer", "author"],
