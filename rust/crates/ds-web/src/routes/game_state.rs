@@ -219,6 +219,8 @@ async fn request_json(request: Request) -> Result<Option<Value>, Response> {
         } else if error_text.starts_with("EOF while parsing a string") {
             python_unterminated_string_offset(&bytes)
                 .unwrap_or_else(|| error.column().saturating_sub(1))
+        } else if error_text.starts_with("EOF while parsing") {
+            String::from_utf8_lossy(&bytes).chars().count()
         } else if let Some((offset, _)) = trailing_comma {
             offset
         } else {
