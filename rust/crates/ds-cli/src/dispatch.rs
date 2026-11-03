@@ -11,9 +11,11 @@
 
 use serde_json::{Map, Value};
 use std::cell::RefCell;
+use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use crate::context_cmd::context_read;
 use crate::usage_cmd::{ordered_json, sorted_json, usage_command, Outcome};
@@ -1444,6 +1446,263 @@ fn guard_install(no_shadow: bool) -> Result<Value, String> {
     Ok(value)
 }
 
+fn guard_status() -> Value {
+    let dir = guard_config_dir();
+    let guard_dir = dir.join("bin");
+    let target = guard_dir.join("herdr");
+    let installed = target.exists();
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let resolved = find_executable("herdr", &path.to_string_lossy());
+    let active = resolved.as_ref().is_some_and(|path| {
+        path.parent()
+            .is_some_and(|parent| real_path(parent) == real_path(&guard_dir))
+    });
+    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+    let bashrc = home.join(".bashrc");
+    let shell_configured = std::fs::read_to_string(bashrc)
+        .map(|contents| contents.contains("# dunkingsheep herdr guard"))
+        .unwrap_or(false);
+    let (herdr, real_herdr) = resolve_real_herdr(&guard_dir, &home);
+    let shadowing = file_has_marker(&herdr, b"dunkingsheep-herdr-guard") && real_herdr.exists();
+    let tmux_dir = dir.join("tmux-guard");
+    let tmux_wrapper = tmux_dir.join("tmux");
+    let tmux_real = tmux_dir.join("tmux-real");
+    serde_json::json!({
+        "installed": installed,
+        "wrapper": if installed { Some(target) } else { None::<PathBuf> },
+        "shell_configured": shell_configured,
+        "active_in_this_shell": active,
+        "shadowing_herdr": shadowing,
+        "covers_agents_started_by_herdr": shadowing,
+        "herdr_resolves_to": resolved,
+        "real_herdr": if shadowing { real_herdr } else { herdr },
+        "guarded_commands": ["pane run", "pane send-text", "pane send-keys", "agent send", "pane close", "pane kill", "tab close", "workspace close", "pane split/rename/focus", "tab create/rename/focus", "workspace create/rename/focus", "agent start"],
+        "tmux_guard": {
+            "installed": tmux_wrapper.exists(),
+            "wrapper": if tmux_wrapper.exists() { Some(tmux_wrapper) } else { None::<PathBuf> },
+            "real_tmux": if tmux_real.exists() { Some(tmux_real) } else { None::<PathBuf> },
+            "covers": "agent panes started by TmuxBackend (PATH prefix); user shells untouched"
+        }
+    })
+}
+
+fn guard_unshadow() -> Result<Value, String> {
+    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+    let guard_dir = guard_config_dir().join("bin");
+    let (herdr, real_herdr) = resolve_real_herdr(&guard_dir, &home);
+    let restored = if file_has_marker(&herdr, b"dunkingsheep-herdr-guard") && real_herdr.exists() {
+        std::fs::rename(&real_herdr, &herdr).map_err(|error| error.to_string())?;
+        true
+    } else {
+        false
+    };
+    let mut value = guard_status();
+    value["restored"] = Value::Bool(restored);
+    value["herdr"] = serde_json::to_value(herdr).unwrap();
+    Ok(value)
+}
+
+fn guard_shadow() -> Result<Value, String> {
+    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+    let dir = guard_config_dir();
+    let guard_dir = dir.join("bin");
+    let (herdr, real_herdr) = resolve_real_herdr(&guard_dir, &home);
+    if !herdr.exists() {
+        return Err(format!(
+            "cannot find the herdr binary (looked at {})",
+            herdr.display()
+        ));
+    }
+    if !file_has_marker(&herdr, b"dunkingsheep-herdr-guard") {
+        if real_herdr.exists() {
+            return Err(format!(
+                "{} already exists; move it aside first",
+                real_herdr.display()
+            ));
+        }
+        std::fs::rename(&herdr, &real_herdr).map_err(|error| error.to_string())?;
+    }
+    std::fs::create_dir_all(&guard_dir).map_err(|error| error.to_string())?;
+    let source = include_str!("../../../../dunk_guard_wrapper.py");
+    let cli = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../dunkingsheep");
+    let cli = std::fs::canonicalize(&cli).unwrap_or(cli);
+    let rendered = source.replace("__DUNKINGSHEEP__", &format!("{:?}", cli.to_string_lossy()));
+    let wrapper = guard_dir.join("herdr");
+    for target in [&herdr, &wrapper] {
+        std::fs::write(target, &rendered).map_err(|error| error.to_string())?;
+        std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o755))
+            .map_err(|error| error.to_string())?;
+    }
+    let mut value = guard_status();
+    value["shadowed"] = Value::Bool(true);
+    Ok(value)
+}
+
+fn guard_uninstall() -> Result<Value, String> {
+    let _ = guard_unshadow()?;
+    let target = guard_config_dir().join("bin/herdr");
+    let wrapper_removed = if target.exists() {
+        std::fs::remove_file(target).map_err(|error| error.to_string())?;
+        true
+    } else {
+        false
+    };
+    let bashrc = PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".bashrc");
+    let path_line = format!(
+        "export PATH=\"{}:$PATH\"",
+        guard_config_dir().join("bin").display()
+    );
+    let mut bashrc_cleaned = false;
+    if let Ok(contents) = std::fs::read_to_string(&bashrc) {
+        let mut lines = Vec::new();
+        let mut skip_path_line = false;
+        for line in contents.lines() {
+            if line.contains("# dunkingsheep herdr guard") {
+                skip_path_line = true;
+                bashrc_cleaned = true;
+                continue;
+            }
+            if skip_path_line && line.trim() == path_line {
+                skip_path_line = false;
+                continue;
+            }
+            skip_path_line = false;
+            lines.push(line);
+        }
+        if bashrc_cleaned {
+            let mut cleaned = lines.join("\n");
+            if contents.ends_with('\n') && !cleaned.is_empty() {
+                cleaned.push('\n');
+            }
+            std::fs::write(bashrc, cleaned).map_err(|error| error.to_string())?;
+        }
+    }
+    let mut value = guard_status();
+    value["wrapper_removed"] = Value::Bool(wrapper_removed);
+    value["bashrc_cleaned"] = Value::Bool(bashrc_cleaned);
+    Ok(value)
+}
+
+fn guard_check() -> Result<Value, String> {
+    let path = guard_config_dir().join("bin/herdr");
+    if !path.exists() {
+        return Ok(serde_json::json!({"ok": false, "detail": "guard is not installed"}));
+    }
+    let mut command = Command::new("python3");
+    command
+        .arg(&path)
+        .args(["pane", "run", "no-such-pane-xyz", "echo hi"])
+        .env_remove("DUNKINGSHEEP_GUARD")
+        .env_remove("HERDR_GUARD_OFF")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    command.stdin(Stdio::null());
+    let output = command_output_timeout(&mut command, Duration::from_secs(60))?;
+    let mut detail = String::from_utf8_lossy(&output.stdout).into_owned();
+    detail.push_str(&String::from_utf8_lossy(&output.stderr));
+    let ok = {
+        let lower = detail.to_lowercase();
+        lower.contains("no pane matches")
+            || lower.contains("no herdr pane matches")
+            || lower.contains("dunk")
+    };
+    let detail: String = detail.trim().chars().take(300).collect();
+    Ok(serde_json::json!({"ok": ok, "detail": detail}))
+}
+
+fn command_output_timeout(
+    command: &mut Command,
+    timeout: Duration,
+) -> Result<std::process::Output, String> {
+    let mut child = command.spawn().map_err(|error| error.to_string())?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "guard check stdout was not captured".to_string())?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "guard check stderr was not captured".to_string())?;
+    let stdout_reader = std::thread::spawn(move || {
+        let mut output = Vec::new();
+        stdout.read_to_end(&mut output).map(|_| output)
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut output = Vec::new();
+        stderr.read_to_end(&mut output).map(|_| output)
+    });
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) if started.elapsed() < timeout => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break Err(format!(
+                    "guard check timed out after {} seconds",
+                    timeout.as_secs()
+                ));
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break Err(error.to_string());
+            }
+        }
+    };
+    let stdout = stdout_reader
+        .join()
+        .map_err(|_| "guard check stdout reader panicked".to_string())?
+        .map_err(|error| error.to_string())?;
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_| "guard check stderr reader panicked".to_string())?
+        .map_err(|error| error.to_string())?;
+    Ok(std::process::Output {
+        status: status?,
+        stdout,
+        stderr,
+    })
+}
+
+#[cfg(test)]
+mod guard_timeout_tests {
+    use super::command_output_timeout;
+    use std::process::Command;
+    use std::time::Duration;
+
+    #[test]
+    fn guard_check_child_obeys_timeout() {
+        let mut command = Command::new("sleep");
+        command
+            .arg("5")
+            .stdout(super::Stdio::piped())
+            .stderr(super::Stdio::piped());
+        let error = command_output_timeout(&mut command, Duration::from_millis(30)).unwrap_err();
+        assert!(error.contains("timed out"), "{error}");
+    }
+
+    #[test]
+    fn guard_check_drains_large_child_output() {
+        let mut command = Command::new("python3");
+        command
+            .args([
+                "-c",
+                "import sys; sys.stdout.write('o' * 1048576); sys.stderr.write('e' * 1048576)",
+            ])
+            .stdout(super::Stdio::piped())
+            .stderr(super::Stdio::piped());
+        let output = command_output_timeout(&mut command, Duration::from_secs(10)).unwrap();
+        assert_eq!(output.stdout.len(), 1_048_576);
+        assert_eq!(output.stderr.len(), 1_048_576);
+        assert!(output.stdout.iter().all(|byte| *byte == b'o'));
+        assert!(output.stderr.iter().all(|byte| *byte == b'e'));
+    }
+}
+
 fn owner_command(ns: &Map<String, Value>) -> Outcome {
     match text(ns, "owner_command") {
         Some("push") => {
@@ -1932,16 +2191,26 @@ fn pm(ns: &Map<String, Value>) -> Outcome {
 }
 
 fn guard(ns: &Map<String, Value>) -> Outcome {
-    let result = match text(ns, "action").unwrap_or("status") {
+    let action = text(ns, "action").unwrap_or("status");
+    let result = match action {
+        "status" => Ok(guard_status()),
         "install" => guard_install(matches!(ns.get("no_shadow"), Some(Value::Bool(true)))),
         "install-tmux" => guard_install_tmux(),
+        "check" => guard_check(),
+        "shadow" => guard_shadow(),
+        "unshadow" => guard_unshadow(),
+        "uninstall" => guard_uninstall(),
         other => return not_ported(&format!("guard {other}")),
     };
     match result {
         Ok(value) if matches!(ns.get("json"), Some(Value::Bool(true))) => Outcome {
             stdout: crate::render_print::render_json_indent2(&value),
             stderr: String::new(),
-            code: 0,
+            code: if value.get("ok") == Some(&Value::Bool(false)) {
+                1
+            } else {
+                0
+            },
         },
         Ok(value) => Outcome {
             stdout: value
@@ -1951,7 +2220,11 @@ fn guard(ns: &Map<String, Value>) -> Outcome {
                 .map(|(k, v)| format!("{k:<22} {v}\n"))
                 .collect(),
             stderr: String::new(),
-            code: 0,
+            code: if value.get("ok") == Some(&Value::Bool(false)) {
+                1
+            } else {
+                0
+            },
         },
         Err(message) => Outcome {
             stdout: String::new(),
