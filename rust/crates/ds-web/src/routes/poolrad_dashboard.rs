@@ -234,6 +234,7 @@ mod tests {
         body::{to_bytes, Body},
         http::Request,
     };
+    use serde_json::Value;
     use tower::ServiceExt;
 
     use super::*;
@@ -528,7 +529,7 @@ mod tests {
             )
         );
         assert_eq!(
-            backend.calls.lock().unwrap(),
+            *backend.calls.lock().unwrap(),
             vec!["report:SLOT_A_ROW6_COL38_PRINTER_PAGE.md"]
         );
     }
