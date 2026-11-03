@@ -24,7 +24,7 @@ pub fn recoveries(state: &Value, findings: &[Value]) -> Value {
         })
         .collect();
 
-    let vp = state["alerts"]
+    let mut vp = state["alerts"]
         .as_object()
         .into_iter()
         .flat_map(|alerts| alerts.iter())
@@ -32,7 +32,7 @@ pub fn recoveries(state: &Value, findings: &[Value]) -> Value {
         .map(|(key, _)| key.clone())
         .collect::<Vec<_>>();
 
-    let owner = state["owner_pages"]
+    let mut owner = state["owner_pages"]
         .as_object()
         .into_iter()
         .flat_map(|pages| pages.iter())
@@ -40,6 +40,8 @@ pub fn recoveries(state: &Value, findings: &[Value]) -> Value {
         .map(|(key, _)| key.clone())
         .collect::<Vec<_>>();
 
+    vp.sort();
+    owner.sort();
     json!({"vp": vp, "owner": owner})
 }
 
