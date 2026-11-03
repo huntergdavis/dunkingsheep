@@ -2915,7 +2915,7 @@ impl OutboxWorkerPool {
                 let _ = handle.join();
             }
         }
-        for (_, handle) in retired.drain(..) {
+        for handle in retired.drain(..) {
             let _ = handle.join();
         }
     }
@@ -3103,16 +3103,17 @@ pub(crate) fn outbox_step<E: SendPreparationEnv + PaneInfoEnv>(
         }
     }
 
-    let mut interrupted = false;
+    let interrupted = std::cell::Cell::new(false);
     let _clear = if head.hold_while_typing {
         clear_to_send(env, pane_id, &|seconds| {
-            interrupted = wait(seconds);
-            interrupted
+            let was_interrupted = wait(seconds);
+            interrupted.set(was_interrupted);
+            was_interrupted
         })
     } else {
         true
     };
-    if stopped.load(Ordering::Acquire) && interrupted {
+    if stopped.load(Ordering::Acquire) && interrupted.get() {
         return OutboxStep::Stopped;
     }
     if stopped.load(Ordering::Acquire) {

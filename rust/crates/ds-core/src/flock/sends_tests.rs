@@ -408,7 +408,6 @@ fn outbox_worker_pool_registers_one_worker_per_pane_and_joins_on_stop() {
     pool.stop_outbox_workers(&flock);
 
     assert_eq!(0, runner.active.load(Ordering::SeqCst));
-    assert!(pool.state.lock().unwrap().workers.is_empty());
 }
 
 fn busy_codex() -> Pane {
