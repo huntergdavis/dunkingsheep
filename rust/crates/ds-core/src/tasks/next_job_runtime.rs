@@ -641,7 +641,7 @@ mod tests {
 
         async fn seed_handoff(
             tasks: &crate::tasks::Tasks,
-            inbox: &crate::inbox_store::Store,
+            inbox: &Arc<crate::inbox_store::Store>,
             pane: &str,
             message_id: &str,
             notify_state: &str,
@@ -679,9 +679,9 @@ mod tests {
             tasks
                 .record_next_job_handoff(
                     &task.id,
-                    pane,
+                    &pane,
                     None,
-                    Some(message_id),
+                    Some(&message_id),
                     1,
                     None,
                     Some(201.0),
