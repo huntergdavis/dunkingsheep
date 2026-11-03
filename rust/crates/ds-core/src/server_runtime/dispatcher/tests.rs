@@ -190,9 +190,10 @@ fn pane_lookup_uses_last_good_role_record_after_empty_backend_answer() {
     });
     let dispatcher = make_dispatcher(Arc::clone(&flock), runtime.handle(), terminal_factory);
 
-    let initial = dispatcher.pane_info_at("w1:p1", 100.0).unwrap().unwrap();
+    let initial = dispatcher.pane_info("w1:p1").unwrap().unwrap();
     assert_eq!(initial.pane_pid, Some(1101));
+    std::thread::sleep(std::time::Duration::from_millis(2_100));
     empty.store(true, std::sync::atomic::Ordering::Relaxed);
-    let held = dispatcher.pane_info_at("w1:p1", 103.0).unwrap().unwrap();
+    let held = dispatcher.pane_info("w1:p1").unwrap().unwrap();
     assert_eq!(held.pane_pid, Some(1101));
 }
