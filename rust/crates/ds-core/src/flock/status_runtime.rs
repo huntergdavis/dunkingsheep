@@ -19,6 +19,7 @@ pub struct StatusState {
     pub(crate) code: CodeIdentity,
     pub(crate) state_file: PathBuf,
     pub(crate) env: Env,
+    pub(crate) idle_claim_s: f64,
 }
 
 impl StatusState {
@@ -38,6 +39,7 @@ impl StatusState {
             code: CodeIdentity::at_start(executable),
             state_file: state_file.into(),
             env,
+            idle_claim_s: crate::activity::IDLE_CLAIM_S,
         }
     }
 }
@@ -45,7 +47,8 @@ impl StatusState {
 impl Flock {
     /// Attach the real startup snapshot exactly once. `Flock::new` intentionally leaves it
     /// unconfigured: its legacy arguments contain neither release nor whole-state path.
-    pub fn attach_status_state(&self, state: StatusState) -> Result<(), DunkError> {
+    pub fn attach_status_state(&self, mut state: StatusState) -> Result<(), DunkError> {
+        state.idle_claim_s = crate::activity::idle_claim_s_from(&state.env)?;
         self.status_runtime
             .set(state)
             .map_err(|_| DunkError::Refused("status startup state is already configured".into()))

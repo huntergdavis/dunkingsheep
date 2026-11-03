@@ -175,7 +175,7 @@ impl Flock {
         // Startup captures the process environment once, matching Python's import-time setting.
         let idle_claim_s = self
             .status_state()
-            .map(|state| activity::idle_claim_s_from(&state.env))
+            .map(|state| state.idle_claim_s)
             .unwrap_or(IDLE_CLAIM_S);
         let activity = activity::activity(
             pane_id,
