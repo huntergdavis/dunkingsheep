@@ -325,7 +325,11 @@ mod tests {
             completed_at: None,
         };
 
-        runtime.block_on(adapter.helper_pushenv_announce_task("w1:p1", &task, 12.8));
+        runtime.block_on(async {
+            adapter
+                .helper_pushenv_announce_task("w1:p1", &task, 12.8)
+                .await
+        });
         assert_eq!(flock.last_message(), "Pushed task t42 to w1:p1");
         let messages = store
             .read("w1:p1", 50, true, false)
@@ -339,7 +343,7 @@ mod tests {
         assert!(announcement.body.contains("depends on: t40, t41"));
 
         // Task announcement mail is ignored by the unread gate; actionable mail holds it.
-        assert!(!runtime.block_on(adapter.helper_pushenv_unread_mail("w1:p1")));
+        assert!(!runtime.block_on(async { adapter.helper_pushenv_unread_mail("w1:p1").await }));
         store
             .send(&Outgoing {
                 mailbox: "w1:p1",
@@ -350,11 +354,11 @@ mod tests {
                 ..Outgoing::default()
             })
             .expect("store actionable mail");
-        assert!(runtime.block_on(adapter.helper_pushenv_unread_mail("w1:p1")));
+        assert!(runtime.block_on(async { adapter.helper_pushenv_unread_mail("w1:p1").await }));
         store
             .read("w1:p1", 50, false, true)
             .expect("read queued mail");
-        assert!(!runtime.block_on(adapter.helper_pushenv_unread_mail("w1:p1")));
+        assert!(!runtime.block_on(async { adapter.helper_pushenv_unread_mail("w1:p1").await }));
     }
 
     #[test]
@@ -394,7 +398,7 @@ mod tests {
             })
             .expect("store actionable mail");
         let adapter = LoopRuntimeAdapter::new(Arc::clone(&flock), Arc::new(fake_push_terminal));
-        let unread = runtime.block_on(adapter.helper_pushenv_unread_mail("w1:p1"));
+        let unread = runtime.block_on(async { adapter.helper_pushenv_unread_mail("w1:p1").await });
         assert!(unread, "the production helper sees actionable unread mail");
 
         let task = runtime
