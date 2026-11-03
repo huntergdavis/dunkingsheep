@@ -298,10 +298,12 @@ fn direct_text_send_preserves_metadata_and_queues_by_default() {
 
 #[test]
 fn completion_waiter_timeout_is_bounded_and_observes_release() {
-    let waiter = CompletionWaiter::default();
-    assert!(!waiter.wait_timeout(std::time::Duration::ZERO));
-    waiter.settle();
-    assert!(waiter.wait_timeout(std::time::Duration::ZERO));
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Flock::new(dir.path().join("launches.json"), dir.path(), false);
+    let message = Message::new("m1", P, "Agent A", "hello", "test");
+    assert!(!message.done.wait_timeout(std::time::Duration::ZERO));
+    flock.record_delivery_outcome(&message, true, None, "ok", None);
+    assert!(message.done.wait_timeout(std::time::Duration::ZERO));
 }
 
 #[test]
