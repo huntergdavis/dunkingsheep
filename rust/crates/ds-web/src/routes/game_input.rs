@@ -227,7 +227,10 @@ fn python_json_error(error: &serde_json::Error) -> String {
     }
 }
 
-fn model_object(body: &Value, model_name: &str) -> Result<&Map<String, Value>, Response> {
+fn model_object<'a>(
+    body: &'a Value,
+    model_name: &str,
+) -> Result<&'a Map<String, Value>, Response> {
     body.as_object().ok_or_else(|| {
         validation_error(json!({
             "type": "model_type",
