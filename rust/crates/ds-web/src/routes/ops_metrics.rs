@@ -18,6 +18,7 @@ use serde_json::{json, Value};
 use super::auth::{AuthBackend, AuthError, Identity, RequestScheme};
 
 const HISTORY_WINDOW_ERROR: &str = "History window must be 1 to 168 hours";
+const PYTHON_INT_MAX_DIGITS: usize = 4_300;
 
 pub type OpsMetricsFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -141,10 +142,9 @@ async fn operations_board(
 
 fn parse_hours(raw: Option<&str>) -> Result<u16, Response> {
     let Some(raw) = raw else { return Ok(24) };
-    let parsed = raw.trim().parse::<i128>();
-    let hours = match parsed {
-        Ok(hours) => hours,
-        Err(_) => {
+    let parsed = match parse_python_decimal(raw) {
+        Ok(parsed) => parsed,
+        Err(PythonIntParseError::Invalid) => {
             return Err((
                 StatusCode::UNPROCESSABLE_ENTITY,
                 Json(json!({"detail": [{
@@ -156,14 +156,106 @@ fn parse_hours(raw: Option<&str>) -> Result<u16, Response> {
             )
                 .into_response());
         }
+        Err(PythonIntParseError::TooManyDigits) => {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({"detail": [{
+                    "type": "int_parsing_size",
+                    "loc": ["query", "hours"],
+                    "msg": "Unable to parse input string as an integer, exceeded maximum size",
+                    "input": raw
+                }]})),
+            )
+                .into_response());
+        }
     };
-    if !(1..=168).contains(&hours) {
-        return Err(detail_response(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            HISTORY_WINDOW_ERROR,
-        ));
+    match parsed {
+        ParsedPythonInteger::OutOfRange => {
+            return Err(detail_response(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                HISTORY_WINDOW_ERROR,
+            ));
+        }
+        ParsedPythonInteger::InRange(hours) => Ok(hours),
     }
-    Ok(hours as u16)
+}
+
+enum PythonIntParseError {
+    Invalid,
+    TooManyDigits,
+}
+
+enum ParsedPythonInteger {
+    InRange(u16),
+    OutOfRange,
+}
+
+fn parse_python_decimal(raw: &str) -> Result<ParsedPythonInteger, PythonIntParseError> {
+    let value = raw.trim().as_bytes();
+    if value.is_empty() {
+        return Err(PythonIntParseError::Invalid);
+    }
+    let mut index = 0;
+    let negative = match value[0] {
+        b'+' => {
+            index = 1;
+            false
+        }
+        b'-' => {
+            index = 1;
+            true
+        }
+        _ => false,
+    };
+    let mut digits = Vec::with_capacity(
+        value
+            .len()
+            .saturating_sub(index)
+            .min(PYTHON_INT_MAX_DIGITS + 1),
+    );
+    let mut previous_was_digit = false;
+    while index < value.len() {
+        match value[index] {
+            digit @ b'0'..=b'9' => {
+                digits.push(digit);
+                previous_was_digit = true;
+                if digits.len() > PYTHON_INT_MAX_DIGITS {
+                    return Err(PythonIntParseError::TooManyDigits);
+                }
+                index += 1;
+            }
+            b'_' if previous_was_digit
+                && value
+                    .get(index + 1)
+                    .is_some_and(|byte| byte.is_ascii_digit()) =>
+            {
+                previous_was_digit = false;
+                index += 1;
+            }
+            _ => return Err(PythonIntParseError::Invalid),
+        }
+    }
+    if digits.is_empty() || !previous_was_digit {
+        return Err(PythonIntParseError::Invalid);
+    }
+
+    let significant = digits
+        .iter()
+        .position(|digit| *digit != b'0')
+        .map_or(&digits[digits.len() - 1..], |first| &digits[first..]);
+    if negative && (significant.len() != 1 || significant[0] != b'0') {
+        return Ok(ParsedPythonInteger::OutOfRange);
+    }
+    if significant.len() > 3 {
+        return Ok(ParsedPythonInteger::OutOfRange);
+    }
+    let magnitude = significant.iter().fold(0_u16, |number, digit| {
+        number * 10 + u16::from(*digit - b'0')
+    });
+    if !(1..=168).contains(&magnitude) {
+        return Ok(ParsedPythonInteger::OutOfRange);
+    }
+    Ok(ParsedPythonInteger::InRange(magnitude))
 }
 
 async fn authenticate(
@@ -500,6 +592,116 @@ mod tests {
         );
         assert_eq!(
             vec![("history".into(), Some(24))],
+            *backend.calls.lock().unwrap()
+        );
+    }
+
+    #[test]
+    fn operations_metrics_history_matches_python_underscore_and_large_integer_parsing() {
+        let backend = Arc::new(FakeOpsMetrics::default());
+        let auth = Arc::new(FakeAuth::accepting());
+        let app = app(backend.clone(), auth);
+
+        let response = block_on(
+            app.clone()
+                .oneshot(request("GET", "/api/ops-metrics/history?hours=1_0")),
+        )
+        .unwrap();
+        assert_eq!(
+            (200, json!({"window_hours": 10})),
+            block_on(response_json(response))
+        );
+
+        let response = block_on(
+            app.clone()
+                .oneshot(request("GET", "/api/ops-metrics/history?hours=%201_0%20")),
+        )
+        .unwrap();
+        assert_eq!(
+            (200, json!({"window_hours": 10})),
+            block_on(response_json(response))
+        );
+
+        let response = block_on(
+            app.clone()
+                .oneshot(request("GET", "/api/ops-metrics/history?hours=%2B1_0")),
+        )
+        .unwrap();
+        assert_eq!(
+            (200, json!({"window_hours": 10})),
+            block_on(response_json(response))
+        );
+
+        let response = block_on(
+            app.clone()
+                .oneshot(request("GET", "/api/ops-metrics/history?hours=-1_0")),
+        )
+        .unwrap();
+        assert_eq!(
+            (422, json!({"detail": HISTORY_WINDOW_ERROR})),
+            block_on(response_json(response))
+        );
+
+        for (query, input) in [
+            ("hours=1__0", "1__0"),
+            ("hours=%D9%A1%D9%A0", "١٠"),
+            ("hours=%EF%BC%99", "９"),
+        ] {
+            let uri = format!("/api/ops-metrics/history?{query}");
+            let response = block_on(app.clone().oneshot(request("GET", &uri))).unwrap();
+            assert_eq!(
+                (
+                    422,
+                    json!({"detail": [{
+                        "type": "int_parsing",
+                        "loc": ["query", "hours"],
+                        "msg": "Input should be a valid integer, unable to parse string as an integer",
+                        "input": input
+                    }]})
+                ),
+                block_on(response_json(response))
+            );
+        }
+
+        // Python integers do not stop at i128. A syntactically valid value beyond
+        // i128 reaches the route's range check and keeps its range-specific 422.
+        let response = block_on(app.clone().oneshot(request(
+            "GET",
+            "/api/ops-metrics/history?hours=170141183460469231731687303715884105728",
+        )))
+        .unwrap();
+        assert_eq!(
+            (422, json!({"detail": HISTORY_WINDOW_ERROR})),
+            block_on(response_json(response))
+        );
+        let at_limit = "9".repeat(PYTHON_INT_MAX_DIGITS);
+        let uri = format!("/api/ops-metrics/history?hours={at_limit}");
+        let response = block_on(app.clone().oneshot(request("GET", &uri))).unwrap();
+        assert_eq!(
+            (422, json!({"detail": HISTORY_WINDOW_ERROR})),
+            block_on(response_json(response))
+        );
+        let too_many_digits = "9".repeat(PYTHON_INT_MAX_DIGITS + 1);
+        let uri = format!("/api/ops-metrics/history?hours={too_many_digits}");
+        let response = block_on(app.oneshot(request("GET", &uri))).unwrap();
+        assert_eq!(
+            (
+                422,
+                json!({"detail": [{
+                    "type": "int_parsing_size",
+                    "loc": ["query", "hours"],
+                    "msg": "Unable to parse input string as an integer, exceeded maximum size",
+                    "input": too_many_digits
+                }]})
+            ),
+            block_on(response_json(response))
+        );
+        assert_eq!(
+            vec![
+                ("history".into(), Some(10)),
+                ("history".into(), Some(10)),
+                ("history".into(), Some(10))
+            ],
             *backend.calls.lock().unwrap()
         );
     }
