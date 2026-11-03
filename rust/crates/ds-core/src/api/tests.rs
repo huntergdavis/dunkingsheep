@@ -269,7 +269,9 @@ fn review_dispatch_context<'a>(
 #[test]
 fn review_sync_handler_dispatches_to_the_canonical_engine_with_python_dry_run_default() {
     let (dir, flock) = staffed_flock("review-sync-api");
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
         .build()
         .unwrap();
     let tasks = Arc::new(
@@ -299,12 +301,18 @@ fn review_sync_handler_dispatches_to_the_canonical_engine_with_python_dry_run_de
     assert!(requests[0]
         .url
         .ends_with("/repos/o/r/pulls?state=open&per_page=100&page=1"));
+    drop(requests);
+    drop(context);
+    drop(flock);
+    drop(runtime);
 }
 
 #[test]
 fn review_list_handler_dispatches_to_the_full_tasks_snapshot() {
     let (dir, flock) = flock();
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
         .build()
         .unwrap();
     let tasks = Arc::new(
@@ -348,6 +356,10 @@ fn review_list_handler_dispatches_to_the_full_tasks_snapshot() {
     assert_eq!("123456789abc", result["reviews"][0]["head"]);
     assert_eq!(json!(["%9"]), result["reviews"][0]["reviewer"]);
     assert_eq!("review title", result["reviews"][0]["title"]);
+    drop(context);
+    drop(tasks);
+    drop(flock);
+    drop(runtime);
 }
 
 #[test]
