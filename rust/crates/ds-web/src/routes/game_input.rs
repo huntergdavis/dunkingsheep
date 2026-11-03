@@ -213,13 +213,20 @@ fn bool_field(object: &Map<String, Value>, name: &str) -> Result<bool, Response>
     if let Some(value) = value.as_bool() {
         return Ok(value);
     }
+    if value.is_f64() {
+        if let Some(value) = value.as_f64() {
+            if value == 0.0 || value == 1.0 {
+                return Ok(value == 1.0);
+            }
+        }
+    }
     if let Some(value) = value.as_i64() {
         if value == 0 || value == 1 {
             return Ok(value == 1);
         }
     }
     if let Some(value) = value.as_str() {
-        return match value.trim().to_ascii_lowercase().as_str() {
+        return match value.to_ascii_lowercase().as_str() {
             "0" | "f" | "false" | "n" | "no" | "off" => Ok(false),
             "1" | "t" | "true" | "y" | "yes" | "on" => Ok(true),
             _ => Err(validation_error(json!({
@@ -642,6 +649,58 @@ mod tests {
             json!({
                 "detail": "Poolrad is not running"
             })
+        );
+        assert_eq!(*backend.calls.lock().unwrap(), vec!["type:look:false"]);
+    }
+
+    #[test]
+    fn game_type_accepts_integral_float_submit_values() {
+        let backend = Arc::new(FakeGameInput::default());
+        let app = app(backend.clone(), Arc::new(FakeAuth::default()));
+        let response = block_on(app.oneshot(request(
+            "/api/game/type",
+            r#"{"text":"look","submit":1.0}"#,
+            true,
+        )))
+        .expect("route response");
+        let (status, body) = block_response(response);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            serde_json::from_str::<Value>(&body).unwrap(),
+            json!({"ok": true})
+        );
+        assert_eq!(*backend.calls.lock().unwrap(), vec!["type:look:true"]);
+    }
+
+    #[test]
+    fn game_type_matches_pydantic_boolean_string_whitespace_and_case() {
+        let backend = Arc::new(FakeGameInput::default());
+        let app = app(backend.clone(), Arc::new(FakeAuth::default()));
+        let response = block_on(app.clone().oneshot(request(
+            "/api/game/type",
+            r#"{"text":"look","submit":"FALSE"}"#,
+            true,
+        )))
+        .expect("case-insensitive boolean response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(*backend.calls.lock().unwrap(), vec!["type:look:false"]);
+
+        let response = block_on(app.oneshot(request(
+            "/api/game/type",
+            r#"{"text":"look","submit":" false "}"#,
+            true,
+        )))
+        .expect("whitespace-padded boolean response");
+        let (status, body) = block_response(response);
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            serde_json::from_str::<Value>(&body).unwrap(),
+            json!({"detail": [{
+                "type": "bool_parsing",
+                "loc": ["body", "submit"],
+                "msg": "Input should be a valid boolean, unable to interpret input",
+                "input": " false "
+            }]})
         );
         assert_eq!(*backend.calls.lock().unwrap(), vec!["type:look:false"]);
     }
