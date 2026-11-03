@@ -205,6 +205,7 @@ fn decode_prompt_bodies(transcript: &str) -> Result<String, NativeSessionError> 
             Some("response_item")
                 if payload.get("type").and_then(Value::as_str) == Some("message") =>
             {
+                refuse_lossy_integer_tokens(line)?;
                 let Some(content) = payload.get("content") else {
                     continue;
                 };
@@ -223,12 +224,61 @@ fn decode_prompt_bodies(transcript: &str) -> Result<String, NativeSessionError> 
                     Some("user_message" | "agent_message")
                 ) =>
             {
+                refuse_lossy_integer_tokens(line)?;
                 bodies.push(prompt_str_or_empty(payload.get("message")));
             }
             _ => {}
         }
     }
     Ok(bodies.join("\n"))
+}
+
+// The line was already validated as JSON. Scan numeric tokens outside strings before
+// trusting the decoded Value: serde_json converts out-of-range integers and integer -0
+// to f64, whereas Python retains integer semantics. Conservatively refuse the whole
+// selected record, including ancillary fields, rather than use altered evidence.
+fn refuse_lossy_integer_tokens(line: &str) -> Result<(), NativeSessionError> {
+    let bytes = line.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' => {
+                index += 1;
+                while index < bytes.len() {
+                    match bytes[index] {
+                        b'\\' => index += 2,
+                        b'"' => {
+                            index += 1;
+                            break;
+                        }
+                        _ => index += 1,
+                    }
+                }
+            }
+            b'-' | b'0'..=b'9' => {
+                let start = index;
+                index += 1;
+                while index < bytes.len()
+                    && matches!(bytes[index], b'0'..=b'9' | b'.' | b'e' | b'E' | b'+' | b'-')
+                {
+                    index += 1;
+                }
+                let token = &line[start..index];
+                if !token.contains(['.', 'e', 'E']) {
+                    let representable = if token.starts_with('-') {
+                        token != "-0" && token.parse::<i64>().is_ok()
+                    } else {
+                        token.parse::<u64>().is_ok()
+                    };
+                    if !representable {
+                        return refuse("native session selected record contains an integer that cannot be represented without loss");
+                    }
+                }
+            }
+            _ => index += 1,
+        }
+    }
+    Ok(())
 }
 
 fn prompt_truthy(value: Option<&Value>) -> bool {

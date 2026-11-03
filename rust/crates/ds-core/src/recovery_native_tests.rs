@@ -291,6 +291,43 @@ fn test_read_prompt_session_float_text_matches_python_json_oracle() {
 }
 
 #[test]
+fn test_read_prompt_session_refuses_lossy_integer_tokens() {
+    let fixture = Fixture::new();
+    let binding = fixture.binding();
+    let meta = json!({"type":"session_meta", "payload":{"session_id":SESSION,"cwd":fixture.cwd}});
+    let read = |record: &str| {
+        std::fs::write(&fixture.rollout, format!("{meta}\n{record}\n")).unwrap();
+        let cache = Mutex::new(PromptSessionCache::default());
+        read_prompt_session_from_binding(&binding, &cache)
+    };
+    // Selected message values and ancillary fields refuse without yielding partial text.
+    for record in [
+        r#"{"type":"event_msg","payload":{"type":"user_message","message":18446744073709551616}}"#,
+        r#"{"type":"event_msg","payload":{"type":"agent_message","message":[-9223372036854775809]}}"#,
+        r#"{"type":"response_item","payload":{"type":"message","content":[{"text":{"nested":-0}}]}}"#,
+        r#"{"type":"event_msg","payload":{"type":"user_message","message":"ok","extra":18446744073709551616}}"#,
+    ] {
+        let error = read(record).unwrap_err().to_string();
+        assert!(
+            error.contains("integer that cannot be represented without loss"),
+            "{error}"
+        );
+    }
+    let valid = r#"{"type":"event_msg","payload":{"type":"user_message","message":"earlier"}}"#;
+    let invalid =
+        r#"{"type":"event_msg","payload":{"type":"user_message","message":18446744073709551616}}"#;
+    std::fs::write(&fixture.rollout, format!("{meta}\n{valid}\n{invalid}\n")).unwrap();
+    let cache = Mutex::new(PromptSessionCache::default());
+    assert!(read_prompt_session_from_binding(&binding, &cache).is_err());
+    let allowed = r#"{"type":"event_msg","payload":{"type":"user_message","message":[18446744073709551615,-9223372036854775808,1e20,-0.0,"escaped \"18446744073709551616\" and -0"]}}"#;
+    assert_eq!(read(allowed).unwrap().text,
+        "[18446744073709551615, -9223372036854775808, 1e+20, -0.0, 'escaped \"18446744073709551616\" and -0']");
+    let unrelated =
+        r#"{"type":"event_msg","payload":{"type":"token_count","count":18446744073709551616}}"#;
+    assert_eq!(read(unrelated).unwrap().text, "");
+}
+
+#[test]
 fn test_prompt_text_conversion_matches_python_truthiness_and_str_fixtures() {
     assert_eq!("", prompt_str_or_empty(None));
     for value in [
