@@ -371,6 +371,7 @@ mod tests {
             .stuck_loop_adapter()
             .expect("canonical stuck adapter");
         assert!(!adapter.helper_stuckenv_closed());
+        services.flock.stuck_config.lock().unwrap().enabled = false;
         assert!(!adapter.helper_stuckenv_stuck_recovery_enabled());
         services.flock.stuck_config.lock().unwrap().enabled = true;
         assert!(adapter.helper_stuckenv_stuck_recovery_enabled());
