@@ -144,6 +144,13 @@ async fn game_loadstate(
         );
     };
     let Some(slot) = python_integer(input) else {
+        if let Value::String(value) = input {
+            match numeric_string_slot_bound(value) {
+                Some(SlotBound::Minimum) => return slot_below_minimum_error(input),
+                Some(SlotBound::Maximum) => return slot_exceeds_maximum_error(input),
+                None => {}
+            }
+        }
         if input
             .as_u64()
             .is_some_and(|slot| slot > i64::MAX as u64)
@@ -170,13 +177,7 @@ async fn game_loadstate(
         );
     };
     if slot < 1 {
-        return validation_error(
-            "greater_than_equal",
-            vec![json!("body"), json!("slot")],
-            "Input should be greater than or equal to 1",
-            input.clone(),
-            Some(json!({"ge": 1})),
-        );
+        return slot_below_minimum_error(input);
     }
     if slot > 99 {
         return slot_exceeds_maximum_error(input);
@@ -332,6 +333,34 @@ fn python_integer(value: &Value) -> Option<i64> {
     }
 }
 
+#[derive(Clone, Copy)]
+enum SlotBound {
+    Minimum,
+    Maximum,
+}
+
+fn numeric_string_slot_bound(value: &str) -> Option<SlotBound> {
+    let value = value.trim();
+    let (negative, digits) = if let Some(digits) = value.strip_prefix('-') {
+        (true, digits)
+    } else if let Some(digits) = value.strip_prefix('+') {
+        (false, digits)
+    } else {
+        (false, value)
+    };
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let significant = digits.trim_start_matches('0');
+    if negative || significant.is_empty() {
+        Some(SlotBound::Minimum)
+    } else if significant.len() > 2 || significant > "99" {
+        Some(SlotBound::Maximum)
+    } else {
+        None
+    }
+}
+
 fn model_error(input: Value) -> Response {
     validation_error(
         "model_attributes_type",
@@ -349,6 +378,16 @@ fn slot_exceeds_maximum_error(input: &Value) -> Response {
         "Input should be less than or equal to 99",
         input.clone(),
         Some(json!({"le": 99})),
+    )
+}
+
+fn slot_below_minimum_error(input: &Value) -> Response {
+    validation_error(
+        "greater_than_equal",
+        vec![json!("body"), json!("slot")],
+        "Input should be greater than or equal to 1",
+        input.clone(),
+        Some(json!({"ge": 1})),
     )
 }
 
@@ -705,6 +744,27 @@ mod tests {
             json!({"detail":[{"type":"less_than_equal","loc":["body","slot"],
                 "msg":"Input should be less than or equal to 99",
                 "input":9_223_372_036_854_775_908u64,"ctx":{"le":99}}]}),
+            value
+        );
+        assert!(game.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn game_loadstate_maps_large_numeric_string_to_python_upper_bound_error() {
+        let game = Arc::new(FakeGame::new(Value::Null));
+        let (status, _body, value) = response(
+            app(game.clone(), authorized()),
+            request(
+                "POST",
+                "/api/game/loadstate",
+                r#"{"slot":"9223372036854775808"}"#,
+            ),
+        );
+        assert_eq!(StatusCode::UNPROCESSABLE_ENTITY, status);
+        assert_eq!(
+            json!({"detail":[{"type":"less_than_equal","loc":["body","slot"],
+                "msg":"Input should be less than or equal to 99",
+                "input":"9223372036854775808","ctx":{"le":99}}]}),
             value
         );
         assert!(game.calls.lock().unwrap().is_empty());
