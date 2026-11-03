@@ -163,11 +163,7 @@ impl Flock {
 
     /// `Flock.review_list`: expose the Python review summary from one decorated
     /// task-list snapshot, keeping Python's stable oldest-first age ordering.
-    pub async fn review_list(
-        &self,
-        self_pane_id: Option<&str>,
-        now: f64,
-    ) -> Result<Value, DunkError> {
+    pub async fn review_list(&self, now: f64) -> Result<Value, DunkError> {
         let tasks = self.task_store()?;
         let rows = tasks
             .list_visible_wire(
@@ -176,7 +172,7 @@ impl Flock {
                 None,
                 false,
                 Some(500),
-                self_pane_id,
+                None,
                 Some("review"),
                 false,
             )
