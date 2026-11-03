@@ -473,6 +473,15 @@ mod tests {
     fn response(app: Router, request: HttpRequest<Body>) -> (StatusCode, String, Value) {
         let response = block_on(app.oneshot(request)).unwrap();
         let status = response.status();
+        assert_eq!(
+            "application/json",
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .unwrap()
+                .to_str()
+                .unwrap()
+        );
         let bytes = block_on(to_bytes(response.into_body(), usize::MAX)).unwrap();
         let body = String::from_utf8(bytes.to_vec()).unwrap();
         let json = serde_json::from_str(&body).unwrap_or(Value::Null);
