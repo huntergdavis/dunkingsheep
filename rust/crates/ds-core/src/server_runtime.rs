@@ -24,6 +24,7 @@ mod stuck;
 mod submit;
 mod summary;
 mod turn_plan;
+mod turn_send;
 mod verify;
 
 use std::collections::BTreeSet;
@@ -60,6 +61,7 @@ pub(crate) struct RequestRuntimeAdapter<'a> {
     request: &'a RequestCtx,
     runtime: &'a Handle,
     inbox: Option<Arc<crate::inbox_store::Store>>,
+    outbox: Option<&'a outbox_runtime::OutboxRuntime>,
 }
 
 /// Terminal access shared by the request and loop adapters. A lock is held only while a
@@ -96,7 +98,21 @@ impl<'a> RequestRuntimeAdapter<'a> {
             request,
             runtime,
             inbox,
+            outbox: None,
         }
+    }
+
+    /// Bind the existing outbox owner for this request; never substitute another flock.
+    #[allow(dead_code)]
+    pub(crate) fn with_outbox(
+        mut self,
+        outbox: &'a outbox_runtime::OutboxRuntime,
+    ) -> Result<Self, DunkError> {
+        if !std::ptr::eq(self.terminal.flock, outbox.flock.as_ref()) {
+            return Err(DunkError::Refused("request outbox flock mismatch".into()));
+        }
+        self.outbox = Some(outbox);
+        Ok(self)
     }
 
     #[allow(dead_code)] // Wired by the production server dispatcher in the runtime integration.
