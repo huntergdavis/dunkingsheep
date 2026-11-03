@@ -8,6 +8,7 @@
 use super::sends::*;
 use super::Flock;
 use crate::flock::panes::PaneInfoEnv;
+use crate::terminal::screen::{box_text, AMBIGUOUS_COMPOSER};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 
@@ -19,7 +20,10 @@ struct Pane {
     gone: bool,
     federated: bool,
     keys: Vec<(String, String)>,
+    after_key_screen: Option<String>,
+    key_refusal: Option<String>,
     reads: RefCell<Vec<(String, bool)>>,
+    on_read: RefCell<Option<Box<dyn FnMut()>>>,
     screen_script: RefCell<VecDeque<Option<String>>>,
     status_script: RefCell<VecDeque<Option<String>>>,
     now: f64,
@@ -28,11 +32,19 @@ struct Pane {
     submit_metrics: Vec<(String, String, usize, usize)>,
     panes: Vec<serde_json::Value>,
     hint: String,
+    typed: Vec<(String, String)>,
+    typed_attempts: Vec<(String, String, bool, Option<String>)>,
+    receipt_ok: bool,
+    events: Vec<&'static str>,
+    pending_override: Option<String>,
 }
 
 impl SendEnv for Pane {
     fn read_pane(&self, pane_id: &str, _lines: i64, ansi: bool) -> Option<String> {
         self.reads.borrow_mut().push((pane_id.to_string(), ansi));
+        if let Some(callback) = self.on_read.borrow_mut().as_mut() {
+            callback();
+        }
         if let Some(screen) = self.screen_script.borrow_mut().pop_front() {
             return screen;
         }
@@ -51,7 +63,14 @@ impl SendEnv for Pane {
         self.statuses.get(pane_id).cloned()
     }
     fn send_key(&mut self, pane_id: &str, key: &str) -> (bool, String) {
+        self.events.push("key");
+        if let Some(reason) = &self.key_refusal {
+            return (false, reason.clone());
+        }
         self.keys.push((pane_id.to_string(), key.to_string()));
+        if let Some(screen) = self.after_key_screen.take() {
+            self.screens.insert(pane_id.to_string(), screen);
+        }
         (true, "sent".to_string())
     }
     fn federated_input(&self) -> bool {
@@ -114,6 +133,61 @@ impl PaneInfoEnv for Pane {
 impl FlushEnv for Pane {
     fn server_error_hint(&self) -> String {
         self.hint.clone()
+    }
+}
+
+impl super::send_keys::KeyPressEnv for Pane {
+    fn send_keys(&mut self, pane_id: &str, keys: &[String]) -> (bool, String) {
+        for key in keys {
+            self.keys.push((pane_id.to_string(), key.clone()));
+        }
+        (true, "sent".into())
+    }
+
+    fn pending_text(&mut self, pane_id: &str) -> Option<String> {
+        if self.pending_override.is_some() {
+            return self.pending_override.clone();
+        }
+        let screen = self.read_pane(pane_id, CONSUMPTION_READ_LINES, true)?;
+        let (text, detail) = crate::terminal::screen::box_text(&screen);
+        if detail.starts_with(crate::terminal::screen::AMBIGUOUS_COMPOSER) {
+            None
+        } else {
+            Some(text)
+        }
+    }
+
+    fn confirm_pending(&mut self, pane_id: &str, text: &str) -> (bool, String) {
+        press_until_submitted(self, pane_id, text, false, false, StatusBaseline::ReadNow)
+    }
+}
+
+impl SendPreparationEnv for Pane {
+    fn send_text(&mut self, pane_id: &str, text: &str) -> (bool, String) {
+        self.events.push("typed");
+        self.typed.push((pane_id.into(), text.into()));
+        (true, "typed".into())
+    }
+
+    fn attempt_generation(&self, pane_id: &str) -> Option<String> {
+        pane_generation(self, pane_id)
+    }
+
+    fn persist_typed_attempt(
+        &mut self,
+        pane_id: &str,
+        text: &str,
+        press_enter: bool,
+        generation: Option<&str>,
+    ) -> bool {
+        self.events.push("receipt");
+        self.typed_attempts.push((
+            pane_id.into(),
+            text.into(),
+            press_enter,
+            generation.map(str::to_owned),
+        ));
+        self.receipt_ok
     }
 }
 
@@ -617,6 +691,404 @@ mod press_until_submitted_tests {
             "{detail}"
         );
         assert_eq!(SUBMIT_ATTEMPTS, pane.keys.len());
+    }
+}
+
+mod guarded_preparation_tests {
+    use super::*;
+
+    fn flock() -> Flock {
+        Flock::new(
+            "/tmp/ds-sends-test-launches.json",
+            "/tmp/ds-sends-test-lanes.json",
+            false,
+        )
+    }
+
+    #[test]
+    fn guarded_text_captures_and_persists_before_first_key_then_uses_short_rounds() {
+        let flock = flock();
+        let mut pane = submit_pane("idle");
+        pane.receipt_ok = true;
+        pane.screen_script.borrow_mut().clear();
+        pane.screen_script.borrow_mut().extend([
+            Some(submit_live_screen()),           // dead-session check
+            Some(submit_live_screen()),           // pre-type turn indicator
+            Some(submit_pending_screen("hello")), // first submit key check
+            Some(submit_live_screen()),           // short confirmation
+            Some(submit_live_screen()),           // first verification
+            Some(submit_live_screen()),           // second verification
+        ]);
+        let guard = flock.typing_guard(P).unwrap();
+
+        let mut action = submit_text(&flock, &mut pane, P, "hello", true, false, Some(&guard));
+        drop(guard);
+        confirm_send_action(&mut pane, &mut action);
+
+        assert_eq!((true, "sent".to_string()), (action.ok, action.detail));
+
+        assert_eq!(vec!["typed", "receipt", "key"], pane.events);
+        assert_eq!(
+            vec![(P.to_string(), "hello".to_string(), true, None)],
+            pane.typed_attempts
+        );
+        assert_eq!(vec![(P.to_string(), "Enter".to_string())], pane.keys);
+        assert_eq!(vec![SUBMIT_POLL_S[0], 0.2, 0.4], pane.sleeps);
+    }
+
+    #[test]
+    fn press_enter_false_records_typed_attempt_without_a_key_or_confirmation() {
+        let flock = flock();
+        let mut pane = submit_pane("idle");
+        pane.receipt_ok = true;
+        pane.screen_script
+            .borrow_mut()
+            .extend([Some(submit_live_screen()), Some(submit_live_screen())]);
+        let guard = flock.typing_guard(P).unwrap();
+
+        let action = submit_text(&flock, &mut pane, P, "draft", false, false, Some(&guard));
+        drop(guard);
+
+        assert_eq!((true, "sent".to_string()), (action.ok, action.detail));
+
+        assert_eq!(vec!["typed", "receipt"], pane.events);
+        assert!(pane.keys.is_empty());
+        assert!(pane.sleeps.is_empty());
+    }
+
+    #[test]
+    fn submit_text_refuses_a_dead_session_before_box_preflight_can_press_enter() {
+        let flock = flock();
+        let mut pane = Pane::default();
+        pane.screen_script.borrow_mut().push_back(Some(
+            "\u{25a0} Server connection could not be restored\n".into(),
+        ));
+        let guard = flock.typing_guard(P).unwrap();
+
+        let action = submit_text(&flock, &mut pane, P, "ours", true, true, Some(&guard));
+
+        assert!(!action.ok);
+        assert!(action.detail.starts_with("agent session is dead"));
+        assert!(pane.keys.is_empty());
+        assert!(pane.typed.is_empty());
+    }
+
+    #[test]
+    fn composer_preflight_submits_foreign_text_once_only_when_draft_preservation_is_disabled() {
+        let flock = flock();
+        let mut pane = submit_pane("idle");
+        pane.screen_script.borrow_mut().clear();
+        pane.screen_script.borrow_mut().extend([
+            Some(submit_pending_screen("foreign draft")),
+            Some(submit_pending_screen("foreign draft")),
+            Some(submit_live_screen()),
+        ]);
+        let guard = flock.typing_guard(P).unwrap();
+
+        assert_eq!(
+            Ok(()),
+            ensure_box_clear(&flock, &mut pane, P, false, false, false, &guard)
+        );
+        assert_eq!(1, pane.keys.len());
+        assert_eq!(vec![SUBMIT_POLL_S[0]], pane.sleeps);
+    }
+
+    #[test]
+    fn composer_preflight_preserves_a_draft_and_does_not_send_a_key() {
+        let flock = flock();
+        let mut pane = submit_pane("idle");
+        pane.screen_script.borrow_mut().clear();
+        pane.screens
+            .insert(P.into(), submit_pending_screen("human draft"));
+        let guard = flock.typing_guard(P).unwrap();
+
+        assert_eq!(
+            Err("human_draft"),
+            ensure_box_clear(&flock, &mut pane, P, false, true, false, &guard)
+        );
+        assert!(pane.keys.is_empty());
+    }
+
+    fn styled_echo_frame(echo_rows: &str, composer: &str) -> String {
+        let frame = format!(
+            "\x1b[1;2m\u{203a}\x1b[0m {echo_rows}\n\x1b[1m\u{203a}\x1b[0m {composer}\n\n\n  gpt \u{b7} ~/w\n"
+        );
+        let (_, detail) = box_text(&frame);
+        assert!(
+            detail.starts_with(AMBIGUOUS_COMPOSER),
+            "fixture must exercise styled ambiguity, got {detail:?}"
+        );
+        frame
+    }
+
+    #[test]
+    fn ambiguous_preflight_flushes_exact_owned_region_when_dim_span_is_accounted() {
+        let flock = flock();
+        let mut pane = submit_pane("idle");
+        let frame = styled_echo_frame("old prompt", "live draft");
+        flock.remember_typed(P, "live draft");
+        flock.remember_typed(P, "old prompt");
+        pane.screen_script.borrow_mut().clear();
+        pane.screen_script.borrow_mut().extend([
+            Some(frame.clone()), // ambiguous composer preflight
+            Some(frame),         // one-shot submit key decision
+            Some(submit_live_screen()),
+        ]);
+        let guard = flock.typing_guard(P).unwrap();
+
+        assert_eq!(
+            Ok(()),
+            ensure_box_clear(&flock, &mut pane, P, false, false, false, &guard)
+        );
+        assert_eq!(1, pane.keys.len());
+    }
+
+    #[test]
+    fn styled_dim_span_requires_exact_full_text_and_checks_all_outbox_statuses() {
+        let flock = flock();
+        let mut pane = submit_pane("idle");
+        // The entire span through the next sigil is evidence. Prefix ownership of only the
+        // first dim row must not authorize the composer.
+        let frame = styled_echo_frame("old prompt\nadded transcript output", "live draft");
+        flock.remember_typed(P, "live draft");
+        flock.remember_typed(P, "old prompt");
+        let mut message = flock
+            .new_message(P, "test", "old prompt added transcript output", "t2457")
+            .unwrap();
+        message.text = "old prompt".into();
+        message.status = "sent".into();
+        flock.outbox.lock().unwrap().insert(P.into(), vec![message]);
+        pane.screen_script.borrow_mut().clear();
+        pane.screens.insert(P.into(), frame);
+        let guard = flock.typing_guard(P).unwrap();
+
+        assert_eq!(
+            Err("ambiguous-composer"),
+            ensure_box_clear(&flock, &mut pane, P, false, false, false, &guard)
+        );
+        assert!(pane.keys.is_empty());
+
+        // Exact complete-span provenance is accepted even when the outbox row is not queued.
+        flock.outbox.lock().unwrap().get_mut(P).unwrap()[0].text =
+            "old prompt added transcript output".into();
+        let frame = styled_echo_frame("old prompt\nadded transcript output", "live draft");
+        pane.screen_script.borrow_mut().clear();
+        pane.screen_script.borrow_mut().extend([
+            Some(frame.clone()),
+            Some(frame),
+            Some(submit_live_screen()),
+        ]);
+        assert_eq!(
+            Ok(()),
+            ensure_box_clear(&flock, &mut pane, P, false, false, false, &guard)
+        );
+        assert_eq!(1, pane.keys.len());
+    }
+
+    #[test]
+    fn guarded_send_routes_owned_ambiguous_text_through_preflight_before_any_blocker() {
+        let flock = flock();
+        let mut pane = submit_pane("idle");
+        let frame = styled_echo_frame("old prompt", "ours");
+        flock.remember_typed(P, "old prompt");
+        flock.remember_typed(P, "ours");
+        pane.screen_script.borrow_mut().clear();
+        pane.screen_script.borrow_mut().extend([
+            Some(frame.clone()), // dead-session check
+            Some(frame.clone()), // ownership-aware preflight
+            Some(frame),         // one-shot submit key decision
+            Some(submit_live_screen()),
+        ]);
+        let mut action_ran = false;
+
+        let result = send_guarded(
+            &flock,
+            &mut pane,
+            P,
+            SendGuardOptions::default(),
+            || None,
+            |_, _| {
+                action_ran = true;
+                Ok(SendAction::completed(true, "sent"))
+            },
+        );
+
+        assert!(action_ran);
+        assert_eq!((true, Some(true), "sent".into()), result);
+        assert_eq!(1, pane.keys.len());
+    }
+
+    #[test]
+    fn federated_one_shot_failure_preserves_its_pending_input_hold_reason() {
+        let flock = flock();
+        let mut pane = submit_pane("idle");
+        pane.federated = true;
+        let frame = concat!(
+            ">_ OpenAI Codex (v0.165.0)\n\n",
+            "\x1b[1m\u{203a} pending text\x1b[0m\n\n",
+            "  GPT-6-Astra high \u{b7} ~/workspace/x\n",
+            "  ? for shortcuts\n"
+        );
+        pane.screen_script.borrow_mut().clear();
+        pane.screen_script.borrow_mut().extend([
+            Some(frame.into()),
+            Some(frame.into()),
+            Some(frame.into()),
+            Some(frame.into()),
+        ]);
+
+        let result = send_guarded(
+            &flock,
+            &mut pane,
+            P,
+            SendGuardOptions::default(),
+            || None,
+            |_, _| Ok(SendAction::completed(true, "unexpected")),
+        );
+        assert_eq!(1, pane.keys.len());
+        assert!(!result.0);
+        assert_eq!(None, result.1);
+        assert!(result.2.starts_with(BOX_HOLD));
+        assert!(result.2.contains("federated-pending-input"));
+    }
+
+    #[test]
+    fn press_keys_defers_pending_text_confirmation_until_after_guard_release() {
+        let flock = flock();
+        let mut pane = submit_pane("idle");
+        pane.pending_override = Some("existing text".into());
+        let guard = flock.typing_guard(P).unwrap();
+        let mut action = press_keys(&mut pane, P, &["Enter".into()], &guard);
+
+        assert!(pane.keys.is_empty());
+        drop(guard);
+        pane.screen_script.borrow_mut().clear();
+        pane.screen_script.borrow_mut().extend([
+            Some(submit_live_screen()),
+            Some(submit_pending_screen("existing text")),
+            Some(submit_live_screen()),
+            Some(submit_live_screen()),
+            Some(submit_live_screen()),
+        ]);
+        confirm_send_action(&mut pane, &mut action);
+
+        assert!(action.ok, "{}", action.detail);
+        assert_eq!(1, pane.keys.len());
+    }
+
+    #[test]
+    fn guarded_send_rechecks_permission_under_lock_and_keeps_terminal_failure_distinct() {
+        let flock = flock();
+        let mut pane = submit_pane("idle");
+        let mut permission_checks = 0;
+
+        let result = send_guarded(
+            &flock,
+            &mut pane,
+            P,
+            SendGuardOptions::default(),
+            || {
+                permission_checks += 1;
+                let lock_was_held = std::thread::scope(|scope| {
+                    scope
+                        .spawn(|| {
+                            flock
+                                .typing_guard_with_timeout(P, std::time::Duration::ZERO)
+                                .is_err()
+                        })
+                        .join()
+                        .unwrap()
+                });
+                assert!(
+                    lock_was_held,
+                    "permission check must be inside typing guard"
+                );
+                None
+            },
+            |_, _| Err("terminal failure".into()),
+        );
+
+        assert_eq!(1, permission_checks);
+        assert_eq!((true, Some(false), "terminal failure".into()), result);
+    }
+
+    #[test]
+    fn guarded_send_reports_a_box_hold_without_running_the_action() {
+        let flock = flock();
+        let mut pane = submit_pane("idle");
+        pane.screen_script.borrow_mut().clear();
+        pane.screens
+            .insert(P.into(), submit_pending_screen("human draft"));
+        let mut action_ran = false;
+
+        let result = send_guarded(
+            &flock,
+            &mut pane,
+            P,
+            SendGuardOptions {
+                hold_while_typing: true,
+                allow_modal: false,
+                preserve_draft: true,
+            },
+            || None,
+            |_, _| {
+                action_ran = true;
+                Ok(SendAction::completed(true, "unexpected"))
+            },
+        );
+
+        assert!(!action_ran);
+        assert!(!result.0);
+        assert_eq!(None, result.1);
+        assert!(result.2.starts_with(BOX_HOLD));
+        assert!(pane.keys.is_empty());
+    }
+
+    #[test]
+    fn guarded_send_preserves_foreign_text_before_typing_ours() {
+        let flock = flock();
+        let mut pane = submit_pane("idle");
+        pane.receipt_ok = true;
+        pane.screen_script.borrow_mut().clear();
+        pane.screen_script.borrow_mut().extend([
+            Some(submit_pending_screen("foreign text")), // dead-session check
+            Some(submit_pending_screen("foreign text")), // final preflight
+            Some(submit_pending_screen("foreign text")), // one-shot Enter decision
+            Some(submit_live_screen()),                  // one-shot box check
+            Some(submit_live_screen()),                  // submit_text dead check
+            Some(submit_live_screen()),                  // pre-type status context
+            Some(submit_pending_screen("ours")),         // first submit key decision
+            Some(submit_live_screen()),                  // short confirmation
+            Some(submit_live_screen()),                  // first verification
+            Some(submit_live_screen()),                  // second verification
+        ]);
+
+        let result = send_guarded(
+            &flock,
+            &mut pane,
+            P,
+            SendGuardOptions {
+                hold_while_typing: true,
+                allow_modal: false,
+                preserve_draft: false,
+            },
+            || None,
+            |env, guard| {
+                Ok(submit_text(
+                    &flock,
+                    env,
+                    P,
+                    "ours",
+                    true,
+                    false,
+                    Some(guard),
+                ))
+            },
+        );
+
+        assert_eq!((true, Some(true), "sent".to_string()), result);
+        assert_eq!(vec!["key", "typed", "receipt", "key"], pane.events);
+        assert_eq!(2, pane.keys.len());
     }
 }
 
@@ -1890,6 +2362,481 @@ fn persistent_recovery_flock(dir: &std::path::Path, state_path: &std::path::Path
         ))
         .unwrap();
     flock
+}
+
+#[test]
+fn unwedge_reserves_before_one_key_and_does_not_claim_unchanged_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state.json");
+    let flock = persistent_recovery_flock(dir.path(), &state);
+    {
+        let mut config = flock.stuck_config.lock().unwrap();
+        config.threshold_s = 1.0;
+        config.observation_interval_s = 0.1;
+        config.max_attempts = 1;
+    }
+    let mut env = Pane::default();
+    env.panes
+        .push(serde_json::json!({"pane_id": "%1", "pane_pid": std::process::id()}));
+    env.statuses.insert("%1".into(), "idle".into());
+    env.screens.insert("%1".into(), frame("stuck body", &[]));
+    flock
+        .sent_text_by_pane
+        .lock()
+        .unwrap()
+        .insert("%1".into(), vec!["stuck body".into()]);
+    let mut message = Message::new("m1", "%1", "writer", "stuck body", "send_text");
+    message.created_at = 1.0;
+    message.status = "failed".into();
+    message.attempt_generation = pane_generation(&env, "%1");
+    flock.note_stuck_candidate(&message);
+
+    assert!(!flock.unwedge(
+        &mut env,
+        "%1",
+        "stuck body",
+        Some(98.0),
+        Some(&message),
+        100.0,
+        None,
+        true
+    ));
+    assert_eq!(vec![("%1".into(), "Enter".into())], env.keys);
+    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap();
+    assert!(saved.to_string().contains("spent"));
+    assert!(!flock.unwedge(
+        &mut env,
+        "%1",
+        "stuck body",
+        None,
+        Some(&message),
+        102.0,
+        None,
+        true
+    ));
+    assert_eq!(1, env.keys.len());
+}
+
+#[test]
+fn unwedge_verifies_a_newly_cleared_composer_after_the_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state.json");
+    let flock = persistent_recovery_flock(dir.path(), &state);
+    {
+        let mut config = flock.stuck_config.lock().unwrap();
+        config.threshold_s = 1.0;
+        config.observation_interval_s = 0.1;
+    }
+    let mut env = Pane::default();
+    env.panes
+        .push(serde_json::json!({"pane_id": "%1", "pane_pid": std::process::id()}));
+    env.statuses.insert("%1".into(), "idle".into());
+    env.screens.insert("%1".into(), frame("stuck body", &[]));
+    env.after_key_screen = Some(frame("\x1b[2mAsk Codex to do anything\x1b[0m", &[]));
+    flock
+        .sent_text_by_pane
+        .lock()
+        .unwrap()
+        .insert("%1".into(), vec!["stuck body".into()]);
+    let mut message = Message::new("m1", "%1", "writer", "stuck body", "send_text");
+    message.created_at = 1.0;
+    message.status = "failed".into();
+    message.attempt_generation = pane_generation(&env, "%1");
+    flock.note_stuck_candidate(&message);
+    assert!(flock.unwedge(
+        &mut env,
+        "%1",
+        "stuck body",
+        Some(98.0),
+        Some(&message),
+        100.0,
+        None,
+        true
+    ));
+    assert_eq!(1, env.keys.len());
+    assert_eq!(
+        flock.stuck_candidates.lock().unwrap()["%1"]
+            .recovery_outcome
+            .as_deref(),
+        Some("consumed")
+    );
+}
+
+#[test]
+fn unwedge_refuses_disabled_persistence_and_edited_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Flock::new(dir.path().join("launches"), dir.path().join("lanes"), false);
+    let mut env = Pane::default();
+    env.panes
+        .push(serde_json::json!({"pane_id": "%1", "pane_pid": std::process::id()}));
+    env.statuses.insert("%1".into(), "idle".into());
+    env.screens
+        .insert("%1".into(), frame("stuck body plus edit", &[]));
+    flock
+        .sent_text_by_pane
+        .lock()
+        .unwrap()
+        .insert("%1".into(), vec!["stuck body".into()]);
+    let mut message = Message::new("m1", "%1", "writer", "stuck body", "send_text");
+    message.status = "failed".into();
+    message.attempt_generation = pane_generation(&env, "%1");
+    flock.note_stuck_candidate(&message);
+    assert!(!flock.unwedge(
+        &mut env,
+        "%1",
+        "stuck body plus edit",
+        Some(1.0),
+        Some(&message),
+        200.0,
+        None,
+        true
+    ));
+    assert!(env.keys.is_empty());
+    env.screens.insert("%1".into(), frame("stuck body", &[]));
+    assert!(!flock.unwedge(
+        &mut env,
+        "%1",
+        "stuck body",
+        Some(1.0),
+        Some(&message),
+        400.0,
+        None,
+        true
+    ));
+    assert!(env.keys.is_empty());
+}
+
+#[test]
+fn owned_recovery_evidence_preserves_malformed_binding_as_a_refusal() {
+    let row = serde_json::json!({
+        "message_id": "m1", "created_at": 1.0, "text": "stuck body",
+        "generation": "pid:1:start:2", "eligible": true,
+        "native_binding": [1, "2", "session", "extra"]
+    });
+    let candidate = candidate_from_snapshot(&row).unwrap();
+    assert!(candidate.native_binding.is_none());
+    assert_eq!(
+        candidate.native_binding_invalid,
+        Some(row["native_binding"].clone())
+    );
+    let round_trip = candidate_snapshot(&candidate);
+    assert_eq!(round_trip["native_binding"], row["native_binding"]);
+    assert!(round_trip.get("typed_at").is_none());
+}
+
+#[test]
+fn stuck_status_never_resolves_busy_dead_modal_or_unreadable_to_ready() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Flock::new(dir.path().join("launches"), dir.path().join("lanes"), false);
+    let mut env = Pane::default();
+    assert_eq!(flock.stuck_status(&env, "%1"), "unknown");
+    env.screens.insert("%1".into(), frame("stuck body", &[]));
+    assert_eq!(flock.stuck_status(&env, "%1"), "unknown");
+    env.statuses.insert("%1".into(), "working".into());
+    assert_eq!(flock.stuck_status(&env, "%1"), "working");
+    env.statuses.insert("%1".into(), "idle".into());
+    env.gone = true;
+    assert_eq!(flock.stuck_status(&env, "%1"), "dead");
+    env.gone = false;
+    env.screens.insert(
+        "%1".into(),
+        "Press Enter to confirm or Esc to cancel\n".into(),
+    );
+    assert_eq!(flock.stuck_status(&env, "%1"), "blocked");
+}
+
+#[test]
+fn stuck_text_is_ours_requires_complete_matching_text_and_readable_screen() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Flock::new(dir.path().join("launches"), dir.path().join("lanes"), false);
+    let mut env = Pane::default();
+    flock
+        .sent_text_by_pane
+        .lock()
+        .unwrap()
+        .insert("%1".into(), vec!["stuck body".into()]);
+    assert!(!flock.stuck_text_is_ours(&env, "%1", Some("stuck body"), "stuck body"));
+    env.screens.insert("%1".into(), frame("stuck body", &[]));
+    assert!(flock.stuck_text_is_ours(&env, "%1", Some("stuck body"), "stuck body"));
+    assert!(!flock.stuck_text_is_ours(&env, "%1", Some("stuck body"), "stuck body plus edit"));
+}
+
+#[test]
+fn press_stuck_enter_refuses_replaced_pane_before_sending_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Flock::new(dir.path().join("launches"), dir.path().join("lanes"), false);
+    let mut env = Pane::default();
+    env.panes
+        .push(serde_json::json!({"pane_id": "%1", "pane_pid": std::process::id()}));
+    env.screens.insert("%1".into(), frame("stuck body", &[]));
+    let (pressed, _) = flock.press_stuck_enter(
+        &mut env,
+        "%1",
+        &crate::stuck::fingerprint("stuck body"),
+        "pid:wrong:start:wrong",
+        "m1",
+        Some("stuck body"),
+        None,
+        false,
+        None,
+    );
+    assert!(!pressed);
+    assert!(env.keys.is_empty());
+}
+
+#[test]
+fn press_stuck_enter_honors_backend_refusal_and_busy_status() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Flock::new(dir.path().join("launches"), dir.path().join("lanes"), false);
+    let mut env = Pane::default();
+    env.panes
+        .push(serde_json::json!({"pane_id":"%1", "pane_pid":std::process::id()}));
+    env.screens.insert("%1".into(), frame("stuck body", &[]));
+    env.statuses.insert("%1".into(), "working".into());
+    flock
+        .sent_text_by_pane
+        .lock()
+        .unwrap()
+        .insert("%1".into(), vec!["stuck body".into()]);
+    let generation = pane_generation(&env, "%1").unwrap();
+    let fingerprint = crate::stuck::fingerprint("stuck body");
+    let (pressed, _) = flock.press_stuck_enter(
+        &mut env,
+        "%1",
+        &fingerprint,
+        &generation,
+        "m1",
+        Some("stuck body"),
+        None,
+        false,
+        None,
+    );
+    assert!(!pressed);
+    assert!(env.events.is_empty());
+    env.statuses.insert("%1".into(), "idle".into());
+    env.key_refusal = Some("backend refused".into());
+    let (pressed, detail) = flock.press_stuck_enter(
+        &mut env,
+        "%1",
+        &fingerprint,
+        &generation,
+        "m1",
+        Some("stuck body"),
+        None,
+        false,
+        None,
+    );
+    assert!(!pressed);
+    assert_eq!(detail, "backend refused");
+    assert_eq!(env.events, vec!["key"]);
+    assert!(env.keys.is_empty());
+}
+
+#[test]
+fn press_stuck_enter_refuses_intent_superseded_during_final_preflight() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = std::sync::Arc::new(Flock::new(
+        dir.path().join("launches"),
+        dir.path().join("lanes"),
+        false,
+    ));
+    let mut env = Pane::default();
+    env.panes
+        .push(serde_json::json!({"pane_id":"%1", "pane_pid":std::process::id()}));
+    env.screens.insert("%1".into(), frame("stuck body", &[]));
+    env.statuses.insert("%1".into(), "idle".into());
+    flock
+        .sent_text_by_pane
+        .lock()
+        .unwrap()
+        .insert("%1".into(), vec!["stuck body".into()]);
+    let generation = pane_generation(&env, "%1").unwrap();
+    let mut original = Message::new("m1", "%1", "writer", "stuck body", "send_text");
+    original.created_at = 1.0;
+    original.status = "failed".into();
+    original.attempt_generation = Some(generation.clone());
+    flock.note_stuck_candidate(&original);
+    let mut replacement = Message::new("m2", "%1", "writer", "new intent", "send_text");
+    replacement.created_at = 2.0;
+    replacement.status = "cancelled".into();
+    replacement.press_enter = false;
+    let owner = std::sync::Arc::clone(&flock);
+    let mut reads = 0;
+    *env.on_read.borrow_mut() = Some(Box::new(move || {
+        reads += 1;
+        if reads == 2 {
+            owner.note_stuck_candidate(&replacement);
+        }
+    }));
+    let (pressed, _) = flock.press_stuck_enter(
+        &mut env,
+        "%1",
+        &crate::stuck::fingerprint("stuck body"),
+        &generation,
+        "m1",
+        Some("stuck body"),
+        Some(&original),
+        true,
+        Some(1.0),
+    );
+    assert!(!pressed);
+    assert_eq!(
+        flock.stuck_candidates.lock().unwrap()["%1"].message_id,
+        "m2"
+    );
+    assert!(env.keys.is_empty());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn scheduled_recovery_requires_current_schedule_for_styled_and_real_native_evidence() {
+    struct ChildGuard(std::process::Child);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let hooks = dir.path().join("hooks");
+    let cwd = dir.path().join("cwd");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&hooks).unwrap();
+    std::fs::create_dir_all(&cwd).unwrap();
+    let binary = dir.path().join("codex");
+    std::fs::copy("/bin/sleep", &binary).unwrap();
+    let child = std::process::Command::new(binary)
+        .arg("300")
+        .env("CODEX_HOME", &home)
+        .env("DUNKINGSHEEP_CODEX_STATE_DIR", &hooks)
+        .spawn()
+        .unwrap();
+    let child = ChildGuard(child);
+    let pid = i64::from(child.0.id());
+    let start = crate::proc::process_start(pid).unwrap();
+    let session = "01a173ee-beed-7461-a560-e5f6c1f666a7";
+    let rollout = home.join(format!("rollout-{session}.jsonl"));
+    std::fs::write(
+        &rollout,
+        format!(
+            "{}\n",
+            serde_json::json!({"type":"session_meta", "payload":{"session_id":session,"cwd":cwd}})
+        ),
+    )
+    .unwrap();
+    let db = rusqlite::Connection::open(home.join("state_5.sqlite")).unwrap();
+    db.execute(
+        "create table threads (id text primary key, rollout_path text, cwd text)",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "insert into threads values (?,?,?)",
+        (session, rollout.to_str().unwrap(), cwd.to_str().unwrap()),
+    )
+    .unwrap();
+    std::fs::write(hooks.join("bound.json"), serde_json::json!({"session_id":session,"pane_id":"%1","root_pid":pid,"root_start":start,"cwd":cwd}).to_string()).unwrap();
+
+    for native in [false, true] {
+        for (present, running, template, target, now, expected) in [
+            (true, true, "instruction", "%1", 101.0, true),
+            (true, false, "instruction", "%1", 101.0, false),
+            (true, true, "changed", "%1", 101.0, false),
+            (true, true, "instruction", "%1", 1000.0, false),
+            (true, true, "instruction", "%1", 99.0, false),
+            (false, true, "instruction", "%1", 101.0, false),
+            (true, true, "instruction", "%2", 101.0, false),
+        ] {
+            let flock = Flock::new(dir.path().join("launches"), dir.path().join("lanes"), false);
+            let rows = if present {
+                serde_json::json!({"dunkers":[{"id":"d1","target_pane_id":target,"text":template,"running":running}]})
+            } else {
+                serde_json::json!({"dunkers":[]})
+            };
+            flock.dunks.load(rows.as_object().unwrap());
+            let mut env = Pane::default();
+            env.panes
+                .push(serde_json::json!({"pane_id":"%1","pane_pid":pid,"agent":"codex","cwd":cwd}));
+            env.statuses.insert("%1".into(), "idle".into());
+            flock
+                .sent_text_by_pane
+                .lock()
+                .unwrap()
+                .insert("%1".into(), vec!["previous".into(), "stuck body".into()]);
+            let screen = if native {
+                "› stuck body\n\n  model · /tmp/test\n".to_string()
+            } else {
+                "\x1b[1;2m›\x1b[0m previous\n\x1b[1m›\x1b[0m stuck body\n\n\n  model · /tmp/test\n"
+                    .to_string()
+            };
+            let mut message = Message::new("m1", "%1", "writer", "stuck body", "d1");
+            message.status = "sent".into();
+            message.scheduled = true;
+            message.created_at = 100.0;
+            message.schedule_template = Some("instruction".into());
+            message.attempt_generation = pane_generation(&env, "%1");
+            message.typed_at = native.then_some(100.0);
+            flock.note_stuck_candidate(&message);
+            let entry = flock.stuck_candidates.lock().unwrap()["%1"].clone();
+            if native {
+                assert!(
+                    flock.owned_recovery_evidence(&env, "%1", &screen).is_some(),
+                    "native fixture must authenticate"
+                );
+            }
+            assert_eq!(
+                flock.sent_schedule_pending(&env, "%1", &entry, &screen, now),
+                expected,
+                "native={native} running={running} template={template} now={now}"
+            );
+            if native && expected {
+                env.screens.insert("%1".into(), screen.clone());
+                let generation = message.attempt_generation.as_deref().unwrap();
+                for (old_id, old_hash, expected_spent) in [
+                    ("m1", "dbe71a6e223b4ec1", u32::MAX),
+                    ("m1@100", "dbe71a6e223b4ec1", u32::MAX),
+                    ("m1@100", "51d09990b82bd9c5", u32::MAX),
+                    ("m1@100", "b2d4ddd55ad59b5e", 1),
+                ] {
+                    *flock.stuck_tracker.lock().unwrap() = crate::stuck::Tracker::default();
+                    flock.stuck_last_check.lock().unwrap().clear();
+                    let old_key =
+                        crate::stuck::ledger_key("%1", old_id, Some(generation), old_hash);
+                    flock.stuck_tracker.lock().unwrap().spent.insert(old_key, 1);
+                    assert!(!flock.unwedge(
+                        &mut env,
+                        "%1",
+                        "stuck body",
+                        Some(1.0),
+                        Some(&message),
+                        101.0,
+                        None,
+                        true
+                    ));
+                    let canonical = crate::stuck::fingerprint("stuck body");
+                    let migrated =
+                        crate::stuck::ledger_key("%1", "m1@100.0", Some(generation), &canonical);
+                    assert_eq!(
+                        flock.stuck_tracker.lock().unwrap().spent[&migrated],
+                        expected_spent
+                    );
+                    assert!(env.keys.is_empty());
+                }
+                assert!(flock
+                    .owned_recovery_evidence(&env, "%1", "› human edit\n\n  model · /tmp/test\n")
+                    .is_none());
+                flock
+                    .stuck_candidates
+                    .lock()
+                    .unwrap()
+                    .get_mut("%1")
+                    .unwrap()
+                    .native_binding = Some((pid, "wrong-start".into(), session.into()));
+                assert!(flock.owned_recovery_evidence(&env, "%1", &screen).is_none());
+            }
+        }
+    }
 }
 
 #[test]

@@ -84,6 +84,20 @@ fn lane_agent_alive_with_snapshot(
     })
 }
 
+pub(super) fn lane_agent_alive_for_pane_pid(root_pid: i64) -> Option<bool> {
+    let entries = crate::proc::pane_agent_pids(Some(root_pid));
+    let direct: Option<Vec<crate::push::ChildProc>> = entries.as_ref().map(|entries| {
+        entries
+            .iter()
+            .map(|entry| crate::push::ChildProc {
+                comm: entry.comm.clone(),
+                state: entry.state.clone(),
+            })
+            .collect()
+    });
+    lane_agent_alive_with_snapshot(root_pid, direct.as_deref(), read_process_snapshot)
+}
+
 impl TerminalCallAdapter<'_> {
     fn helper_deliveryenv_get_pane(&self, pane_id: &str) -> Option<Value> {
         PaneInfoEnv::get_pane(self, pane_id)

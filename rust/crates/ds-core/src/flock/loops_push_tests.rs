@@ -18,7 +18,10 @@ use serde_json::{json, Value};
 use super::loops_push::{claim_filters, run_push, PushDecision, PushEnv};
 use super::panes::Stores;
 use super::Flock;
+use crate::config::Env;
 use crate::error::DunkError;
+use crate::roles::Roles;
+use crate::server_runtime::LoopRuntimeAdapter;
 use crate::tasks::{ClaimOptions, Task, Tasks};
 
 const IDLE_WORKER: &str = "w2:p1";
@@ -30,7 +33,10 @@ struct Fake {
     /// pane -> agent_status
     panes: Mutex<BTreeMap<String, String>>,
     /// pane -> resolved role (a pane absent here is "anonymous": not a lane)
-    roles: Mutex<BTreeMap<String, String>>,
+    roles: Mutex<BTreeMap<String, (String, Option<i64>)>>,
+    pane_pids: Mutex<BTreeMap<String, i64>>,
+    fail_pane_list: Mutex<bool>,
+    pane_list_calls: Mutex<usize>,
     may_review: Mutex<BTreeSet<String>>,
     alive: Mutex<BTreeMap<String, bool>>,
     unread: Mutex<BTreeSet<String>>,
@@ -47,30 +53,53 @@ impl Fake {
             panes.insert(IDLE_SHELL.into(), "unknown".into());
             panes.insert(BUSY_CLAUDE.into(), "working".into());
         }
+        fake.pane_pids.lock().unwrap().extend([
+            (IDLE_WORKER.into(), 1101),
+            (IDLE_SHELL.into(), 2202),
+            (BUSY_CLAUDE.into(), 3303),
+        ]);
         fake
     }
     fn register(&self, pane: &str, role: &str) {
-        self.roles.lock().unwrap().insert(pane.into(), role.into());
+        self.register_pid(pane, role, None);
+    }
+    fn register_pid(&self, pane: &str, role: &str, pane_pid: Option<i64>) {
+        self.roles
+            .lock()
+            .unwrap()
+            .insert(pane.into(), (role.into(), pane_pid));
     }
 }
 
 impl PushEnv for Fake {
     fn list_panes(&self) -> Result<Vec<Value>, DunkError> {
+        *self.pane_list_calls.lock().unwrap() += 1;
+        if *self.fail_pane_list.lock().unwrap() {
+            return Err(DunkError::Refused("pane listing unavailable".into()));
+        }
         Ok(self
             .panes
             .lock()
             .unwrap()
             .iter()
-            .map(|(id, status)| json!({"pane_id": id, "agent_status": status}))
+            .map(|(id, status)| {
+                json!({"pane_id": id, "agent_status": status, "pane_pid": self.pane_pids.lock().unwrap().get(id).copied()})
+            })
             .collect())
     }
-    fn caller_role(&self, pane_id: &str) -> String {
-        self.roles
-            .lock()
-            .unwrap()
-            .get(pane_id)
-            .cloned()
-            .unwrap_or_else(|| "anonymous".into())
+    fn caller_role(&self, pane_id: &str, pane_info: Option<&Value>) -> String {
+        let Some((role, wanted_pid)) = self.roles.lock().unwrap().get(pane_id).cloned() else {
+            return "anonymous".into();
+        };
+        if let Some(wanted_pid) = wanted_pid {
+            let live_pid = pane_info
+                .and_then(|info| info.get("pane_pid"))
+                .and_then(Value::as_i64);
+            if live_pid != Some(wanted_pid) {
+                return "anonymous".into();
+            }
+        }
+        role
     }
     fn registered_lanes(&self) -> Option<BTreeSet<String>> {
         Some(self.roles.lock().unwrap().keys().cloned().collect())
@@ -104,6 +133,36 @@ impl PushEnv for Fake {
     }
 }
 
+struct RuntimePushEnv<'a> {
+    adapter: &'a LoopRuntimeAdapter,
+    panes: Vec<Value>,
+}
+
+impl PushEnv for RuntimePushEnv<'_> {
+    fn list_panes(&self) -> Result<Vec<Value>, DunkError> {
+        Ok(self.panes.clone())
+    }
+    fn caller_role(&self, pane_id: &str, pane_info: Option<&Value>) -> String {
+        self.adapter.helper_pushenv_caller_role(pane_id, pane_info)
+    }
+    fn registered_lanes(&self) -> Option<BTreeSet<String>> {
+        self.adapter.helper_pushenv_registered_lanes()
+    }
+    fn may_review(&self, _: &str) -> bool {
+        false
+    }
+    fn provider_of(&self, _: &str) -> Option<String> {
+        None
+    }
+    fn lane_agent_alive(&self, _: &str) -> Option<bool> {
+        None
+    }
+    fn unread_mail(&self, _: &str) -> bool {
+        false
+    }
+    fn announce_task(&self, _: &str, _: &Task, _: f64) {}
+}
+
 async fn setup(tag: &str) -> (Arc<Flock>, Arc<Tasks>, tempfile::TempDir) {
     let scratch = crate::testsupport::dir(&format!("push-{tag}"));
     let dir = scratch.path().to_path_buf();
@@ -118,6 +177,75 @@ async fn setup(tag: &str) -> (Arc<Flock>, Arc<Tasks>, tempfile::TempDir) {
         ..Stores::default()
     });
     (flock, tasks, scratch)
+}
+
+#[tokio::test]
+async fn production_env_push_core_uses_pid_bound_pane_info() {
+    let dir = crate::testsupport::dir("push-pid-bound");
+    let flock = Arc::new(Flock::new(
+        dir.path().join("launches.json"),
+        dir.path().join("lanes.json"),
+        false,
+    ));
+    let mut roles = Roles::new(
+        &Env::default(),
+        Some(dir.path().join("roles.json")),
+        Some(dir.path().join("tokens.json")),
+        None,
+    )
+    .expect("roles store");
+    roles
+        .register("w1:p1", "worker", Some(1101), None, None, None, None, None)
+        .unwrap();
+    roles
+        .register(
+            "w2:p2",
+            "reviewer",
+            Some(2202),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    roles
+        .register("w3:p3", "worker", Some(9999), None, None, None, None, None)
+        .unwrap();
+    flock.attach_roles(roles, None);
+    let adapter = LoopRuntimeAdapter::new(
+        Arc::clone(&flock),
+        Arc::new(|| Box::new(crate::terminal::fakes::FakeTerminal::new())),
+    );
+    let panes = adapter
+        .helper_pushenv_list_panes()
+        .await
+        .expect("list live fake panes");
+    let pane_map: BTreeMap<String, Value> = panes
+        .iter()
+        .filter_map(|pane| {
+            pane.get("pane_id")
+                .and_then(Value::as_str)
+                .map(|id| (id.to_owned(), pane.clone()))
+        })
+        .collect();
+    let env = RuntimePushEnv {
+        adapter: &adapter,
+        panes,
+    };
+
+    assert_eq!(env.caller_role("w1:p1", pane_map.get("w1:p1")), "worker");
+    assert_eq!(env.caller_role("w2:p2", pane_map.get("w2:p2")), "reviewer");
+    assert_eq!(env.caller_role("w1:p1", None), crate::roles::DEFAULT_ROLE);
+    assert_eq!(
+        env.caller_role("w3:p3", pane_map.get("w3:p3")),
+        crate::roles::DEFAULT_ROLE
+    );
+
+    let targets = flock.push_target_map(&env);
+    assert!(targets.contains_key("w1:p1"));
+    assert!(targets.contains_key("w2:p2"));
+    assert!(!targets.contains_key("w3:p3"));
 }
 
 async fn status(tasks: &Tasks, id: &str) -> String {
@@ -154,6 +282,19 @@ async fn test_a_stale_registration_is_not_a_push_target() {
     let task = tasks.add("global", "waiting work", "").await.unwrap();
     assert!(flock.push_tasks(&fake).await.is_empty());
     assert_eq!(status(&tasks, &task.id).await, "open");
+}
+
+#[tokio::test]
+async fn test_unavailable_pane_listing_makes_no_push_claims() {
+    let (flock, tasks, _dir) = setup("pane-list-unavailable").await;
+    let fake = Fake::standard();
+    fake.register(IDLE_WORKER, "worker");
+    *fake.fail_pane_list.lock().unwrap() = true;
+    let task = tasks.add("global", "waiting work", "").await.unwrap();
+
+    assert!(flock.push_tasks(&fake).await.is_empty());
+    assert_eq!(status(&tasks, &task.id).await, "open");
+    assert_eq!(*fake.pane_list_calls.lock().unwrap(), 1);
 }
 
 #[tokio::test]

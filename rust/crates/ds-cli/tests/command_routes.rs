@@ -4070,3 +4070,192 @@ fn cli_route_42_retired() {
     );
     assert!(unretired.stderr.is_empty());
 }
+
+#[test]
+fn cli_route_43_dispatch_a() {
+    let added = run_daemon_cli(
+        &[
+            "dispatch",
+            "add",
+            "review",
+            "the",
+            "patch",
+            "--task-id",
+            "t9",
+            "--lane",
+            "codex",
+        ],
+        "dispatch",
+        json!({"action":"add", "brief":"review the patch", "task_id":"t9", "lane":"codex"}),
+        json!({"id":7, "brief":"review the patch", "task_id":"t9", "lane":"codex"}),
+    );
+    assert_eq!(Some(0), added.status.code());
+    assert_eq!(
+        "added standby item 7 for t9 (reserved for codex)\n",
+        String::from_utf8(added.stdout).unwrap()
+    );
+    assert!(added.stderr.is_empty());
+
+    let listed = run_daemon_cli(
+        &["dispatch", "list"],
+        "dispatch",
+        json!({"action":"list"}),
+        json!({"items": []}),
+    );
+    assert_eq!(Some(0), listed.status.code());
+    assert_eq!(
+        "standby queue is empty\n",
+        String::from_utf8(listed.stdout).unwrap()
+    );
+    assert!(listed.stderr.is_empty());
+
+    let removed = run_daemon_cli(
+        &["dispatch", "remove", "7", "--json"],
+        "dispatch",
+        json!({"action":"remove", "id":7}),
+        json!({"removed": 7}),
+    );
+    assert_eq!(Some(0), removed.status.code());
+    assert_eq!(
+        "{\n  \"removed\": 7\n}\n",
+        String::from_utf8(removed.stdout).unwrap()
+    );
+    assert!(removed.stderr.is_empty());
+}
+
+#[test]
+fn cli_route_44_dispatch_b() {
+    let ticked = run_daemon_cli(
+        &["dispatch", "tick", "--dry-run", "--lanes", "%5,%6"],
+        "dispatch",
+        // The Python run_client_command currently omits its parsed --lanes option.
+        json!({"action":"tick", "dry_run":true}),
+        json!({
+            "idle_unfilled": ["%6"],
+            "dispatched_1h": 2,
+            "blocked": [{"name":"Llama", "reason":"mailbox busy"}],
+            "dead": [{"name":"offline"}],
+            "queue_empty": true,
+            "dispatched": [
+                {"pane_id":"%5", "sent":true, "text":"review patch"},
+                {"pane_id":"%6", "sent":false, "error":"blocked", "text":"next patch"}
+            ]
+        }),
+    );
+    assert_eq!(Some(0), ticked.status.code());
+    assert_eq!(
+        "idle lanes: 1\ndispatched this hour: 2\nblocked lanes: 1 (Llama: mailbox busy)\ndead lanes: 1 (offline)\nthe standby queue is empty and 1 lane(s) are idle\n  sent %5: review patch\n  FAILED %6: next patch [blocked]\n",
+        String::from_utf8(ticked.stdout).unwrap()
+    );
+    assert!(ticked.stderr.is_empty());
+
+    let status = run_daemon_cli(
+        &["dispatch", "status", "--json"],
+        "dispatch",
+        json!({"action":"status"}),
+        json!({"summary":"last dispatch tick", "pending":2}),
+    );
+    assert_eq!(Some(0), status.status.code());
+    assert_eq!(
+        "{\n  \"summary\": \"last dispatch tick\",\n  \"pending\": 2\n}\n",
+        String::from_utf8(status.stdout).unwrap()
+    );
+    assert!(status.stderr.is_empty());
+}
+
+#[test]
+fn cli_route_45_send_queue() {
+    let cleared = run_daemon_cli(
+        &["clear-box", "Pane A", "--reason", "stale draft"],
+        "clear_box",
+        json!({"target":"Pane A", "reason":"stale draft"}),
+        json!({
+            "target_label":"Pane A", "pane_id":"%5", "flushed":true,
+            "before":{"state":"draft"}, "after":{"state":"empty"}, "reason":"stale draft"
+        }),
+    );
+    assert_eq!(Some(0), cleared.status.code());
+    assert_eq!(
+        "cleared Pane A (%5): draft -> empty [stale draft]\n",
+        String::from_utf8(cleared.stdout).unwrap()
+    );
+    assert!(cleared.stderr.is_empty());
+
+    let delivery = run_daemon_cli(
+        &["delivery", "Pane A"],
+        "delivery",
+        json!({"target":"Pane A", "status":null}),
+        json!({"state":"blocked", "reason":"typing"}),
+    );
+    assert_eq!(Some(0), delivery.status.code());
+    assert_eq!(
+        "Pane A: blocked - typing\n",
+        String::from_utf8(delivery.stdout).unwrap()
+    );
+    assert!(delivery.stderr.is_empty());
+
+    let flushed = run_daemon_cli(
+        &["flush", "Pane A"],
+        "flush_box",
+        json!({"target":"Pane A"}),
+        json!({"target_label":"Pane A", "pane_id":"%5", "message":"submitted", "text":"hello"}),
+    );
+    assert_eq!(Some(0), flushed.status.code());
+    assert_eq!(
+        "Pane A (%5): submitted -> 'hello'\n",
+        String::from_utf8(flushed.stdout).unwrap()
+    );
+    assert!(flushed.stderr.is_empty());
+}
+
+#[test]
+fn cli_route_46_messages() {
+    let messages = run_daemon_cli(
+        &["messages"],
+        "list_messages",
+        json!({}),
+        json!({"queued": [], "recent": []}),
+    );
+    assert_eq!(Some(0), messages.status.code());
+    assert_eq!("no messages\n", String::from_utf8(messages.stdout).unwrap());
+    assert!(messages.stderr.is_empty());
+
+    let queue = run_daemon_cli(
+        &["queue", "--json"],
+        "list_messages",
+        json!({}),
+        json!({"queued": [], "recent": []}),
+    );
+    assert_eq!(Some(0), queue.status.code());
+    assert_eq!(
+        "{\n  \"queued\": [],\n  \"recent\": []\n}\n",
+        String::from_utf8(queue.stdout).unwrap()
+    );
+    assert!(queue.stderr.is_empty());
+
+    let cancelled = run_daemon_cli(
+        &["cancel", "m7"],
+        "cancel_message",
+        json!({"message_id":"m7"}),
+        json!({"message_id":"m7", "target_label":"Pane A"}),
+    );
+    assert_eq!(Some(0), cancelled.status.code());
+    assert_eq!(
+        "cancelled m7 for Pane A\n",
+        String::from_utf8(cancelled.stdout).unwrap()
+    );
+    assert!(cancelled.stderr.is_empty());
+
+    let metrics = run_daemon_cli(
+        &["metrics", "--since", "10", "--until", "20"],
+        "metrics",
+        json!({"window_s":3600, "since":10.0, "until":20.0}),
+        json!({"deliveries":3}),
+    );
+    assert_eq!(Some(0), metrics.status.code());
+    assert_eq!(
+        "{\n  \"deliveries\": 3\n}\n",
+        String::from_utf8(metrics.stdout).unwrap()
+    );
+    assert!(metrics.stderr.is_empty());
+}

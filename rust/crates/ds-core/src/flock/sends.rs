@@ -6,8 +6,8 @@
 //!
 //! The Python reaches the backend, the lease table and the clock through `self`; here they are
 //! [`SendEnv`], so every decision is testable with a scripted pane. NOT in this slice (next
-//! NOT in these slices (later t801 work): `send_now`/`send_keys_now`, `_enqueue`/`_deliver` and
-//! the per-pane outbox task, `submit_text`/`press_keys`, `_flush_once`, clear_box.
+//! NOT in these slices (later t801 work): `send_now`/`send_keys_now`, `_enqueue`/`_deliver`,
+//! the per-pane outbox task, and public `clear_box`.
 //!
 //! POLICY (owner, 2026-10-23/24) kept verbatim: a busy agent is NOT a hold reason, and there
 //! is NO "a human is typing" hold - every message goes through this daemon, so a non-empty box
@@ -20,6 +20,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::Ordering;
 
 use super::commands_inbox::NOTICE_PREFIX;
+use super::guarded_submit::confirm_guarded_submission;
 use super::panes::PaneInfoEnv;
 use super::resolve::{resolve_target, resolve_target_dict};
 use std::marker::PhantomData;
@@ -31,10 +32,14 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use super::Flock;
 use crate::clock;
 use crate::error::DunkError;
-use crate::terminal::composer::federated_composer;
+use crate::terminal::composer::{
+    composer_region_text, federated_composer, native_prefix_accounted, styled_composer_boundary,
+    styled_sigil_state, trailing_prompt_region,
+};
 use crate::terminal::screen::{
-    banner_marker, box_text, is_our_send, modal_open, status_marker, strip_ansi, typed_text,
-    AMBIGUOUS_COMPOSER, DEAD_SESSION_MARKERS, WORKING_MARKERS,
+    banner_marker, box_text, classify_delivery, is_our_send, modal_open, prompt_body, splitlines,
+    status_marker, strip_ansi, typed_text, AMBIGUOUS_COMPOSER, DEAD_SESSION_MARKERS,
+    WORKING_MARKERS,
 };
 use crate::terminal::screen::{collapse, CONSUMPTION_PREFIX_CHARS};
 
@@ -171,6 +176,629 @@ impl TypingLock {
 }
 
 impl Flock {
+    fn recovery_box_text<E: SendEnv + PaneInfoEnv>(
+        &self,
+        env: &E,
+        pane_id: &str,
+        screen: &str,
+    ) -> Option<String> {
+        if let Some(region) = federated_composer(env.federated_input(), screen) {
+            return Some(region);
+        }
+        if let Some(region) =
+            owned_composer_region(self, pane_id, screen, &self.known_send_texts(pane_id))
+        {
+            return Some(region);
+        }
+        if let Some(evidence) = self.owned_recovery_evidence(env, pane_id, screen) {
+            return Some(evidence.text);
+        }
+        if box_text(screen).1.starts_with(AMBIGUOUS_COMPOSER) {
+            return None;
+        }
+        typed_text(screen)
+    }
+
+    pub(super) fn stuck_status<E: SendEnv + PaneInfoEnv>(&self, env: &E, pane_id: &str) -> String {
+        let Some(screen) = read_screen(env, pane_id, None, true) else {
+            return "unknown".into();
+        };
+        let status = env.read_status(pane_id);
+        if env.session_process_gone(pane_id) {
+            return "dead".into();
+        }
+        if modal_open(&screen) || self.turn_active(pane_id) {
+            return "blocked".into();
+        }
+        if is_working_status(status.as_deref()) {
+            return "working".into();
+        }
+        if !matches!(status.as_deref(), Some("idle" | "ready")) {
+            return if self
+                .owned_recovery_evidence(env, pane_id, &screen)
+                .is_some()
+            {
+                "ready".into()
+            } else {
+                "unknown".into()
+            };
+        }
+        let typed = if modal_open(&screen) {
+            None
+        } else {
+            typed_text(&screen)
+        };
+        let (state, _) =
+            classify_delivery(&screen, status.as_deref(), typed.as_deref(), None, false);
+        let ambiguous = box_text(&screen).1.starts_with(AMBIGUOUS_COMPOSER);
+        if matches!(state, "ready" | "working") && ambiguous {
+            if matches!(status.as_deref(), Some("idle" | "ready"))
+                && !modal_open(&screen)
+                && !env.session_process_gone(pane_id)
+                && owned_composer_region(self, pane_id, &screen, &self.known_send_texts(pane_id))
+                    .is_some()
+            {
+                return classify_delivery(&screen, status.as_deref(), Some(""), None, false)
+                    .0
+                    .into();
+            }
+            if self
+                .owned_recovery_evidence(env, pane_id, &screen)
+                .is_some()
+            {
+                return "ready".into();
+            }
+            return "unknown".into();
+        }
+        state.into()
+    }
+
+    fn scheduled_recovery_current(&self, pane_id: &str, entry: &StuckCandidate, now: f64) -> bool {
+        let config = *self
+            .stuck_config
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let age = now - entry.created_at;
+        if age < 0.0 || age > config.threshold_s + 2.0 * config.observation_interval_s {
+            return false;
+        }
+        self.dunks.list().iter().any(|dunk| {
+            dunk.get("id").and_then(Value::as_str) == Some(entry.source.as_str())
+                && dunk.get("running").and_then(Value::as_bool) == Some(true)
+                && dunk.get("target_pane_id").and_then(Value::as_str) == Some(pane_id)
+                && dunk.get("text").and_then(Value::as_str) == entry.schedule_template.as_deref()
+        })
+    }
+
+    pub(super) fn sent_schedule_pending<E: SendEnv + PaneInfoEnv>(
+        &self,
+        env: &E,
+        pane_id: &str,
+        entry: &StuckCandidate,
+        screen: &str,
+        now: f64,
+    ) -> bool {
+        if entry.status != "sent" {
+            return true;
+        }
+        if !entry.scheduled {
+            return false;
+        }
+        if self.owned_recovery_evidence(env, pane_id, screen).is_some() {
+            return self.scheduled_recovery_current(pane_id, entry, now);
+        }
+        let (boundary, region) = styled_composer_boundary(screen);
+        self.scheduled_recovery_current(pane_id, entry, now)
+            && boundary == "delimited"
+            && !region.is_empty()
+            && crate::stuck::collapse(&region) == crate::stuck::collapse(&entry.text)
+            && dim_bodies_accounted(self, pane_id, screen)
+            && owned_composer_region(self, pane_id, screen, &self.known_send_texts(pane_id))
+                .is_some()
+    }
+
+    pub(super) fn stuck_text_is_ours<E: SendEnv + PaneInfoEnv>(
+        &self,
+        env: &E,
+        pane_id: &str,
+        tracked: Option<&str>,
+        content: &str,
+    ) -> bool {
+        let flat = crate::stuck::collapse(content);
+        if flat.is_empty() {
+            return false;
+        }
+        let owned = tracked.map(str::to_owned).or_else(|| {
+            self.sent_text_by_pane
+                .lock()
+                .ok()?
+                .get(pane_id)?
+                .iter()
+                .rev()
+                .find(|text| !text.is_empty() && crate::stuck::collapse(text) == flat)
+                .cloned()
+        });
+        if owned
+            .as_deref()
+            .is_none_or(|text| crate::stuck::collapse(text) != flat)
+        {
+            return false;
+        }
+        let Some(screen) = read_screen(env, pane_id, None, true) else {
+            return false;
+        };
+        owned_composer_region(self, pane_id, &screen, &self.known_send_texts(pane_id)).is_some()
+            || self
+                .owned_recovery_evidence(env, pane_id, &screen)
+                .is_some()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn press_stuck_enter<E: SendEnv + PaneInfoEnv>(
+        &self,
+        env: &mut E,
+        pane_id: &str,
+        fingerprint: &str,
+        generation: &str,
+        message_id: &str,
+        tracked: Option<&str>,
+        message: Option<&Message>,
+        require_intent: bool,
+        created_at: Option<f64>,
+    ) -> (bool, String) {
+        let pane_lock = self.send_lock_for(pane_id);
+        let Ok(_pane_guard) = pane_lock.lock() else {
+            return (false, "pane lock unavailable".into());
+        };
+        let Ok(_typing_guard) = self.typing_guard(pane_id) else {
+            return (false, "typing lock unavailable".into());
+        };
+        // The reservation and lock acquisition can take time; schedule freshness is a
+        // wall-clock precondition at the key boundary, not the earlier observation time.
+        let now = clock::now_s();
+        let Some(screen) = read_screen(env, pane_id, None, true) else {
+            return (false, "pane unreadable".into());
+        };
+        if pane_generation(env, pane_id).as_deref() != Some(generation) {
+            return (false, "pane changed".into());
+        }
+        if require_intent {
+            let entry = self
+                .stuck_candidates
+                .lock()
+                .ok()
+                .and_then(|c| c.get(pane_id).cloned());
+            let Some(entry) = entry else {
+                return (false, "intent missing".into());
+            };
+            if entry.message_id != message_id
+                || created_at.is_some_and(|at| at != entry.created_at)
+                || !entry.press_enter
+                || entry.generation.as_deref() != Some(generation)
+                || !entry.eligible
+                || !matches!(entry.status.as_str(), "failed" | "sent" | "typed")
+                || !self.sent_schedule_pending(env, pane_id, &entry, &screen, now)
+            {
+                return (false, "intent no longer authorizes the press".into());
+            }
+        }
+        if message.is_some_and(|m| m.status == "cancelled" || m.id != message_id) {
+            return (false, "message changed or cancelled".into());
+        }
+        {
+            let rows = outbox_lock(&self.outbox);
+            let matching: Vec<_> = rows
+                .get(pane_id)
+                .into_iter()
+                .flatten()
+                .filter(|m| m.id == message_id)
+                .collect();
+            if !matching.is_empty() && !matching.iter().any(|m| m.status == "queued") {
+                return (false, "message no longer queued".into());
+            }
+        }
+        let native = self.owned_recovery_evidence(env, pane_id, &screen);
+        let native_required = self
+            .stuck_candidates
+            .lock()
+            .ok()
+            .and_then(|c| {
+                c.get(pane_id).map(|e| {
+                    e.native_recovery.unwrap_or(false)
+                        || e.native_binding.is_some()
+                        || e.native_binding_invalid.is_some()
+                })
+            })
+            .unwrap_or(false);
+        if native_required && native.is_none() {
+            return (false, "native evidence changed".into());
+        }
+        if native.is_none() && self.stuck_status(env, pane_id) != "ready" {
+            return (false, "target not ready".into());
+        }
+        if modal_open(&screen) {
+            return (false, "dialog open".into());
+        }
+        let Some(content) = self.recovery_box_text(env, pane_id, &screen) else {
+            return (false, "composer unreadable".into());
+        };
+        if crate::stuck::fingerprint(&content) != fingerprint
+            || tracked.is_some_and(|text| {
+                crate::stuck::collapse(text) != crate::stuck::collapse(&content)
+            })
+        {
+            return (false, "composer changed".into());
+        }
+        if native.is_none()
+            && owned_composer_region(self, pane_id, &screen, &self.known_send_texts(pane_id))
+                .is_none()
+        {
+            return (false, "composer is not owned".into());
+        }
+        // Candidate and outbox writers do not acquire the pane/typing locks. Hold their
+        // guards from this last validation through the one backend key call so a newer
+        // intent or cancellation cannot race between the check and the press.
+        let rows = outbox_lock(&self.outbox);
+        let matching: Vec<_> = rows
+            .get(pane_id)
+            .into_iter()
+            .flatten()
+            .filter(|m| m.id == message_id)
+            .collect();
+        if !matching.is_empty() && !matching.iter().any(|m| m.status == "queued") {
+            return (false, "message no longer queued".into());
+        }
+        let Ok(candidates) = self.stuck_candidates.lock() else {
+            return (false, "intent registry unavailable".into());
+        };
+        let live = candidates.get(pane_id);
+        if require_intent {
+            let Some(entry) = live else {
+                return (false, "intent missing".into());
+            };
+            if entry.message_id != message_id
+                || created_at.is_some_and(|at| at != entry.created_at)
+                || !entry.press_enter
+                || entry.kind != "text"
+                || !entry.eligible
+                || entry.generation.as_deref() != Some(generation)
+                || !matches!(entry.status.as_str(), "failed" | "sent" | "typed")
+                || crate::stuck::collapse(&entry.text) != crate::stuck::collapse(&content)
+                || (entry.scheduled
+                    && entry.status == "sent"
+                    && !self.scheduled_recovery_current(pane_id, entry, clock::now_s()))
+            {
+                return (false, "intent no longer authorizes the press".into());
+            }
+        }
+        if live.is_some_and(|entry| {
+            entry.native_recovery.unwrap_or(false)
+                || entry.native_binding.is_some()
+                || entry.native_binding_invalid.is_some()
+        }) && native.is_none()
+        {
+            return (false, "native evidence changed".into());
+        }
+        if let Some(evidence) = native {
+            if live.is_none_or(|entry| {
+                entry.message_id != evidence.entry.message_id
+                    || entry.created_at != evidence.entry.created_at
+                    || !entry.eligible
+                    || !entry.press_enter
+                    || entry.kind != "text"
+                    || entry.status != evidence.entry.status
+                    || entry.generation != evidence.entry.generation
+                    || entry.typed_at != evidence.entry.typed_at
+                    || entry.text != evidence.entry.text
+                    || entry.native_binding_invalid.is_some()
+                    || entry.native_binding.as_ref()
+                        != Some(&(
+                            evidence.native.pid,
+                            evidence.native.start.clone(),
+                            evidence.native.snapshot.session_id.clone(),
+                        ))
+            }) || evidence.entry.message_id != message_id
+                || (evidence.entry.scheduled
+                    && !self.scheduled_recovery_current(pane_id, &evidence.entry, clock::now_s()))
+                || evidence.native.assert_unchanged().is_err()
+            {
+                return (false, "native evidence changed".into());
+            }
+        }
+        let result = env.send_key(pane_id, "Enter");
+        drop(candidates);
+        drop(rows);
+        result
+    }
+
+    /// Perform at most one recovery transition. The caller supplies its clock; terminal reads
+    /// and the post-key observation are independent, and the ledger is saved before the key.
+    #[allow(dead_code)] // Wired to the observer by the dependent runtime leaf.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn unwedge<E: SendEnv + PaneInfoEnv>(
+        &self,
+        env: &mut E,
+        pane_id: &str,
+        content: &str,
+        since: Option<f64>,
+        message: Option<&Message>,
+        now: f64,
+        expected_id: Option<&str>,
+        mut require_intent: bool,
+    ) -> bool {
+        let mut config = *self
+            .stuck_config
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !config.enabled {
+            return false;
+        }
+        {
+            let mut last = self
+                .stuck_last_check
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if last
+                .get(pane_id)
+                .is_some_and(|at| now - at < config.observation_interval_s)
+            {
+                return false;
+            }
+            last.insert(pane_id.into(), now);
+        }
+        let head = message
+            .cloned()
+            .or_else(|| self.stranded_message(pane_id, content, env));
+        let candidate = self
+            .stuck_candidates
+            .lock()
+            .ok()
+            .and_then(|c| c.get(pane_id).cloned());
+        if let Some(entry) = &candidate {
+            if !entry.text.is_empty()
+                && crate::stuck::collapse(&entry.text) == crate::stuck::collapse(content)
+                && (!entry.eligible || head.as_ref().is_none_or(|head| head.id != entry.message_id))
+            {
+                self.stuck_tracker
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .forget(pane_id);
+                return false;
+            }
+            if head
+                .as_ref()
+                .is_some_and(|head| head.id == entry.message_id)
+            {
+                require_intent = true;
+                let Some(screen) = read_screen(env, pane_id, None, true) else {
+                    return false;
+                };
+                if !self.sent_schedule_pending(env, pane_id, entry, &screen, now) {
+                    self.stuck_tracker
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .forget(pane_id);
+                    return false;
+                }
+            }
+        }
+        let identity = head
+            .as_ref()
+            .map(|m| m.id.clone())
+            .or_else(|| expected_id.map(str::to_owned))
+            .or_else(|| text_identity(content));
+        let Some(identity) = identity else {
+            return false;
+        };
+        let Some(generation) = pane_generation(env, pane_id) else {
+            self.stuck_tracker
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .forget(pane_id);
+            return false;
+        };
+        let native = read_screen(env, pane_id, None, true)
+            .and_then(|screen| self.owned_recovery_evidence(env, pane_id, &screen));
+        let authority = self
+            .stuck_candidates
+            .lock()
+            .ok()
+            .and_then(|c| c.get(pane_id).cloned());
+        if authority.as_ref().is_some_and(|e| {
+            e.native_recovery.unwrap_or(false)
+                || e.native_binding.is_some()
+                || e.native_binding_invalid.is_some()
+        }) && native.is_none()
+        {
+            self.stuck_tracker
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .forget(pane_id);
+            return false;
+        }
+        let budget_id = authority
+            .as_ref()
+            .filter(|e| e.typed_at.is_some() || e.native_recovery.unwrap_or(false))
+            .map(|e| format!("{}@{}", identity, crate::usage::py_float_repr(e.created_at)))
+            .unwrap_or_else(|| identity.clone());
+        if budget_id != identity
+            && authority.as_ref().is_some_and(|entry| {
+                !entry.created_at.is_finite() || entry.created_at.abs() > 9_007_199_254_740_992.0
+            })
+        {
+            return false; // A lossy numeric identity cannot safely carry a budget.
+        }
+        let mut observation = crate::stuck::Observation::new(
+            pane_id,
+            Some(&budget_id),
+            Some(content),
+            &self.stuck_status(env, pane_id),
+        );
+        observation.owned = self.stuck_text_is_ours(
+            env,
+            pane_id,
+            head.as_ref().map(|m| m.text.as_str()),
+            content,
+        );
+        observation.generation = Some(generation.clone());
+        observation.cancelled = head.as_ref().is_some_and(|m| m.status == "cancelled");
+        let decision = {
+            let mut tracker = self
+                .stuck_tracker
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if budget_id != identity || native.is_some() {
+                let fingerprint = crate::stuck::fingerprint(content);
+                let mut aliases = Vec::new();
+                if native.is_some() {
+                    aliases.push(identity.clone());
+                }
+                if let Some(entry) = authority
+                    .as_ref()
+                    .filter(|entry| entry.created_at.fract() == 0.0)
+                {
+                    aliases.push(format!("{}@{:.0}", identity, entry.created_at));
+                }
+                let mut old = 0;
+                let mut legacy_used = false;
+                for alias in aliases {
+                    old =
+                        old.max(tracker.reserved(pane_id, &alias, Some(&generation), &fingerprint));
+                    legacy_used |=
+                        tracker.legacy_attempt_seen(pane_id, &alias, Some(&generation), content);
+                }
+                let key =
+                    crate::stuck::ledger_key(pane_id, &budget_id, Some(&generation), &fingerprint);
+                let spent = tracker.spent.entry(key).or_default();
+                *spent = (*spent).max(if legacy_used { u32::MAX } else { old });
+            }
+            if native.is_some() {
+                config.max_attempts = 1;
+            }
+            if !tracker.records.contains_key(pane_id) {
+                if let Some(since) = since.filter(|s| *s != 0.0) {
+                    tracker.decide(&observation, &config, since.min(now));
+                }
+            }
+            tracker.decide(&observation, &config, now)
+        };
+        if !decision.recovers() {
+            if decision.action == "terminal" {
+                self.reconcile_stuck(
+                    pane_id,
+                    &identity,
+                    "exhausted",
+                    &decision.reason,
+                    head.as_ref().map(|m| m.created_at),
+                );
+            }
+            return false;
+        }
+        if head.as_ref().is_some_and(|m| {
+            !m.text.is_empty() && crate::stuck::collapse(&m.text) != crate::stuck::collapse(content)
+        }) {
+            self.stuck_tracker
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .mark_terminal(pane_id, "the composer holds only part of our text");
+            let _ = self.save();
+            return false;
+        }
+        if !self.persist_enabled || self.save().is_err() {
+            self.record_stuck_recovery(
+                pane_id,
+                head.as_ref(),
+                "refused",
+                "reservation not durable",
+                decision.attempts,
+            );
+            return false;
+        }
+        let (pressed, press_detail) = self.press_stuck_enter(
+            env,
+            pane_id,
+            &crate::stuck::fingerprint(content),
+            &generation,
+            &identity,
+            head.as_ref().map(|m| m.text.as_str()),
+            head.as_ref(),
+            require_intent,
+            head.as_ref().map(|m| m.created_at),
+        );
+        if !pressed {
+            self.record_stuck_recovery(
+                pane_id,
+                head.as_ref(),
+                "refused",
+                &press_detail,
+                decision.attempts,
+            );
+            let _ = self.save();
+            return false;
+        }
+        let after_screen = read_screen(env, pane_id, None, true);
+        let after_text = after_screen
+            .as_deref()
+            .and_then(|screen| self.recovery_box_text(env, pane_id, screen));
+        let mut after = crate::stuck::Observation::new(
+            pane_id,
+            Some(&identity),
+            after_text.as_deref(),
+            &self.stuck_status(env, pane_id),
+        );
+        after.generation = pane_generation(env, pane_id);
+        after.dialog = after_screen.as_deref().is_some_and(modal_open);
+        let (outcome, detail) = if after.generation.as_deref() != Some(&generation) {
+            (
+                "unverified",
+                "the pane was replaced during the press".to_string(),
+            )
+        } else {
+            crate::stuck::verify(&observation, Some(&after))
+        };
+        self.record_stuck_recovery(pane_id, head.as_ref(), outcome, &detail, decision.attempts);
+        if outcome == "consumed" {
+            self.stuck_tracker
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .forget(pane_id);
+        }
+        self.reconcile_stuck(
+            pane_id,
+            &identity,
+            outcome,
+            &detail,
+            head.as_ref().map(|m| m.created_at),
+        );
+        let _ = self.save();
+        outcome == "consumed"
+    }
+
+    fn record_stuck_recovery(
+        &self,
+        pane_id: &str,
+        head: Option<&Message>,
+        outcome: &str,
+        reason: &str,
+        attempts: u32,
+    ) {
+        if let Some(metrics) = self.stores().metrics.as_ref() {
+            metrics.record(&crate::metrics::Event {
+                at: 0.0,
+                kind: "stuck.recover".into(),
+                pane_id: Some(pane_id.into()),
+                mailbox: head.map(|m| m.target_label.clone()),
+                sender: None,
+                source: Some("stuck_watchdog".into()),
+                outcome: Some(outcome.into()),
+                reason: Some(reason.into()),
+                duration_ms: None,
+                attempts: Some(i64::from(attempts)),
+                bytes: None,
+            });
+        }
+    }
+
     /// Return the stable mutex for one pane. Acquire this lock before
     /// [`Flock::typing_guard`] and hold it across the whole send/confirmation path.
     pub fn send_lock_for(&self, pane_id: &str) -> Arc<Mutex<()>> {
@@ -188,7 +816,7 @@ impl Flock {
         self.typing_guard_with_timeout(pane_id, typing_timeout())
     }
 
-    fn typing_guard_with_timeout(
+    pub(super) fn typing_guard_with_timeout(
         &self,
         pane_id: &str,
         timeout: Duration,
@@ -220,6 +848,472 @@ pub const SUBMIT_KEY_AFTER: usize = 2;
 pub const SUBMIT_ATTEMPTS: usize = SUBMIT_GAPS.len();
 /// `_remember_typed`: how many recent texts to retain for each pane.
 const REMEMBERED_SENDS: usize = 4;
+
+/// Hold detail shared with Python's `BOX_HOLD` contract.
+pub const BOX_HOLD: &str = "the box would not clear (text left untouched)";
+
+/// Terminal services used by the bounded send preparation path. Composer ownership comes from
+/// the flock's recent-send history and queued outbox; a shape match alone never authorizes a key.
+pub trait SendPreparationEnv: FlushEnv + super::send_keys::KeyPressEnv {
+    fn send_text(&mut self, pane_id: &str, text: &str) -> (bool, String);
+    fn attempt_generation(&self, pane_id: &str) -> Option<String>;
+    fn persist_typed_attempt(
+        &mut self,
+        pane_id: &str,
+        text: &str,
+        press_enter: bool,
+        generation: Option<&str>,
+    ) -> bool;
+}
+
+/// Options that affect only the final, lock-protected composer preflight.
+#[derive(Debug, Clone, Copy)]
+pub struct SendGuardOptions {
+    pub hold_while_typing: bool,
+    pub allow_modal: bool,
+    pub preserve_draft: bool,
+}
+
+impl Default for SendGuardOptions {
+    fn default() -> Self {
+        Self {
+            hold_while_typing: true,
+            allow_modal: false,
+            preserve_draft: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SendAction {
+    pub ok: bool,
+    pub detail: String,
+    confirmation: Option<SubmitConfirmation>,
+    key_confirmation: Option<(String, String)>,
+}
+
+#[derive(Debug, Clone)]
+struct SubmitConfirmation {
+    pane_id: String,
+    text: String,
+    baseline: Option<String>,
+    busy_hint: bool,
+    guarded: bool,
+}
+
+impl SendAction {
+    pub fn completed(ok: bool, detail: impl Into<String>) -> Self {
+        Self {
+            ok,
+            detail: detail.into(),
+            confirmation: None,
+            key_confirmation: None,
+        }
+    }
+}
+
+/// One deliberately short submit flush. The guard remains held across the key, one poll, and
+/// the single box read; the long confirmation ladder must only run after it is dropped.
+pub fn flush_once(
+    env: &mut dyn FlushEnv,
+    pane_id: &str,
+    text: &str,
+    busy_hint: bool,
+    _guard: &TypingGuard<'_>,
+) -> bool {
+    let (ok, _detail, _) = send_submit_key(env, pane_id, "Enter", busy_hint);
+    if !ok {
+        return false;
+    }
+    env.sleep_s(SUBMIT_POLL_S[0]);
+    box_holds(env, pane_id, text) == Some(false)
+}
+
+/// Make the composer safe for this send. Unknown or human-draft content is never submitted.
+/// Foreign text is submitted once only when the caller explicitly permits preserving it, which
+/// matches `_ensure_box_clear`; a failed one-shot leaves the original text in place.
+pub fn ensure_box_clear(
+    flock: &Flock,
+    env: &mut dyn SendPreparationEnv,
+    pane_id: &str,
+    allow_modal: bool,
+    preserve_draft: bool,
+    busy_hint: bool,
+    guard: &TypingGuard<'_>,
+) -> Result<(), &'static str> {
+    let Some(screen) = env.read_pane(pane_id, CONSUMPTION_READ_LINES, true) else {
+        return Ok(());
+    };
+    if modal_open(&screen) {
+        return if allow_modal { Ok(()) } else { Err("dialog") };
+    }
+    if let Some(federated) = federated_composer(env.federated_input(), &screen) {
+        if federated.is_empty() {
+            return Ok(());
+        }
+        if preserve_draft {
+            return Err("human_draft");
+        }
+        return if flush_once(env, pane_id, &federated, busy_hint, guard) {
+            Ok(())
+        } else {
+            Err("federated-pending-input")
+        };
+    }
+
+    let (shown, detail) = box_text(&screen);
+    let known = flock.known_send_texts(pane_id);
+    if detail.starts_with(AMBIGUOUS_COMPOSER) {
+        if let Some(region) = owned_composer_region(flock, pane_id, &screen, &known) {
+            return if flush_once(env, pane_id, &region, busy_hint, guard) {
+                Ok(())
+            } else {
+                Err("stranded-will-not-submit")
+            };
+        }
+        return Err("ambiguous-composer");
+    }
+    let shown = if shown.is_empty() {
+        typed_text(&screen).unwrap_or_default()
+    } else {
+        shown
+    };
+    if shown.is_empty() {
+        return Ok(());
+    }
+
+    let shown_c = collapse(&shown);
+    if known.iter().any(|candidate| {
+        let candidate = collapse(candidate);
+        candidate.starts_with("/model ") && candidate != shown_c && candidate.ends_with(&shown_c)
+    }) {
+        return Err("partial-model-command");
+    }
+    let ours = flock.looks_like_ours(pane_id, &shown);
+    if preserve_draft && !ours {
+        return Err("human_draft");
+    }
+    if flush_once(env, pane_id, &shown, busy_hint, guard) {
+        Ok(())
+    } else if ours {
+        Err("stranded-will-not-submit")
+    } else {
+        Err("foreign-text-will-not-submit")
+    }
+}
+
+/// Type text and perform its initial submit key under one typing guard. The returned action owns
+/// the later confirmation; call [`confirm_send_action`] only after dropping the guard. The attempt
+/// baseline and generation are captured before the first terminal write.
+pub fn submit_text(
+    flock: &Flock,
+    env: &mut dyn SendPreparationEnv,
+    pane_id: &str,
+    text: &str,
+    press_enter: bool,
+    check_box: bool,
+    guard: Option<&TypingGuard<'_>>,
+) -> SendAction {
+    let guarded = guard.is_some();
+    let mut perform = |guard: &TypingGuard<'_>| {
+        if let Some(dead) = dead_session(env, pane_id) {
+            return Err(format!(
+                "agent session is dead ({dead}); not submitting into a dead composer"
+            ));
+        }
+        if check_box {
+            match ensure_box_clear(flock, env, pane_id, false, false, false, guard) {
+                Ok(()) => {}
+                Err(reason) => return Err(format!("{BOX_HOLD} ({reason})")),
+            }
+        }
+        let baseline = env.read_status(pane_id);
+        let generation = env.attempt_generation(pane_id);
+        let before = env
+            .read_pane(pane_id, CONSUMPTION_READ_LINES, true)
+            .unwrap_or_default();
+        let busy_hint = env.pane_harness(pane_id).as_deref() == Some("codex")
+            && (is_working_status(baseline.as_deref())
+                || status_marker(
+                    &before,
+                    &WORKING_MARKERS,
+                    CONSUMPTION_READ_LINES as usize,
+                    true,
+                    true,
+                )
+                .is_some()
+                || strip_ansi(&before)
+                    .to_lowercase()
+                    .contains("tab to queue message"));
+        let (ok, detail) = env.send_text(pane_id, text);
+        if !ok {
+            return Err(detail);
+        }
+        flock.remember_typed(pane_id, text);
+        if !env.persist_typed_attempt(pane_id, text, press_enter, generation.as_deref()) {
+            return Err("typed but not submitted: durable attempt receipt failed".into());
+        }
+        if !press_enter {
+            return Ok(SendAction::completed(true, "sent"));
+        }
+        let (ok, detail, _key) = send_submit_key(env, pane_id, "Enter", busy_hint);
+        if !ok {
+            return Err(detail);
+        }
+        Ok(SendAction {
+            ok: true,
+            detail: "sent".into(),
+            confirmation: Some(SubmitConfirmation {
+                pane_id: pane_id.to_owned(),
+                text: text.to_owned(),
+                baseline,
+                busy_hint,
+                guarded,
+            }),
+            key_confirmation: None,
+        })
+    };
+
+    let prepared = match guard {
+        Some(guard) => perform(guard),
+        None => match flock.typing_guard(pane_id) {
+            Ok(guard) => perform(&guard),
+            Err(error) => return SendAction::completed(false, error.to_string()),
+        },
+    };
+    drop(perform);
+    match prepared {
+        Ok(value) => value,
+        Err(detail) => SendAction::completed(false, detail),
+    }
+}
+
+/// Run confirmation after the typing guard has been released. `guarded=true` selects the bounded
+/// short rounds; otherwise the accepted long retry ladder is used.
+pub fn confirm_send_action(env: &mut dyn SendPreparationEnv, action: &mut SendAction) {
+    if let Some((pane_id, text)) = action.key_confirmation.take() {
+        let result = env.confirm_pending(&pane_id, &text);
+        action.ok = result.0;
+        action.detail = result.1;
+        return;
+    }
+    let Some(confirmation) = action.confirmation.take() else {
+        return;
+    };
+    let baseline = StatusBaseline::Captured(confirmation.baseline);
+    let result = if confirmation.guarded {
+        confirm_guarded_submission(
+            env,
+            &confirmation.pane_id,
+            &confirmation.text,
+            "Enter",
+            confirmation.busy_hint,
+            baseline,
+        )
+    } else {
+        press_until_submitted(
+            env,
+            &confirmation.pane_id,
+            &confirmation.text,
+            true,
+            confirmation.busy_hint,
+            baseline,
+        )
+    };
+    action.ok = result.0;
+    action.detail = result.1;
+}
+
+/// Route an already-normalized key list once while the caller holds the typing guard. Pending
+/// text confirmation is deferred into the returned action so its waits occur after lock release.
+pub fn press_keys(
+    env: &mut dyn SendPreparationEnv,
+    pane_id: &str,
+    normalized_keys: &[String],
+    _guard: &TypingGuard<'_>,
+) -> SendAction {
+    struct DeferConfirm<'a> {
+        inner: &'a mut dyn super::send_keys::KeyPressEnv,
+        pending: Option<String>,
+    }
+    impl super::send_keys::KeyPressEnv for DeferConfirm<'_> {
+        fn send_keys(&mut self, pane_id: &str, keys: &[String]) -> (bool, String) {
+            self.inner.send_keys(pane_id, keys)
+        }
+        fn pending_text(&mut self, pane_id: &str) -> Option<String> {
+            self.inner.pending_text(pane_id)
+        }
+        fn confirm_pending(&mut self, _pane_id: &str, text: &str) -> (bool, String) {
+            self.pending = Some(text.to_owned());
+            (
+                true,
+                "confirmation deferred until after typing guard release".into(),
+            )
+        }
+    }
+    let mut deferred = DeferConfirm {
+        inner: env,
+        pending: None,
+    };
+    let result = super::send_keys::press_keys_unlocked(&mut deferred, pane_id, normalized_keys);
+    if let Some(text) = deferred.pending {
+        SendAction {
+            ok: result.0,
+            detail: result.1,
+            confirmation: None,
+            key_confirmation: Some((pane_id.to_owned(), text)),
+        }
+    } else {
+        SendAction::completed(result.0, result.1)
+    }
+}
+
+/// Final guarded decision: same-pane lock, fleet typing guard, permission recheck, box policy,
+/// then one action. `ok=None` distinguishes a held send from an action that ran and failed.
+pub fn send_guarded(
+    flock: &Flock,
+    env: &mut dyn SendPreparationEnv,
+    pane_id: &str,
+    options: SendGuardOptions,
+    mut permission: impl FnMut() -> Option<String>,
+    action: impl FnOnce(&mut dyn SendPreparationEnv, &TypingGuard<'_>) -> Result<SendAction, String>,
+) -> (bool, Option<bool>, String) {
+    let pane_lock = flock.send_lock_for(pane_id);
+    let _pane_guard = lock_unpoison(&pane_lock);
+    let typing_guard = match flock.typing_guard(pane_id) {
+        Ok(guard) => guard,
+        Err(error) => return (false, None, error.to_string()),
+    };
+    if let Some(detail) = permission() {
+        return (false, None, detail);
+    }
+    if options.hold_while_typing {
+        if let Some(marker) = dead_session(env, pane_id) {
+            return (false, None, format!("dead session ({marker})"));
+        }
+        if env.session_process_gone(pane_id) {
+            return (
+                false,
+                None,
+                "the lane's recorded process is gone".to_string(),
+            );
+        }
+        match ensure_box_clear(
+            flock,
+            env,
+            pane_id,
+            options.allow_modal,
+            options.preserve_draft,
+            false,
+            &typing_guard,
+        ) {
+            Ok(()) => {}
+            Err(reason) => return (false, None, format!("{BOX_HOLD} ({reason})")),
+        }
+    }
+    let result = action(env, &typing_guard);
+    drop(typing_guard);
+    match result {
+        Ok(action) if !action.ok && action.detail.starts_with(BOX_HOLD) => {
+            (false, None, action.detail)
+        }
+        Ok(mut action) => {
+            // Keep the per-pane lock across confirmation, but release the global typing lock.
+            confirm_send_action(env, &mut action);
+            (true, Some(action.ok), action.detail)
+        }
+        Err(detail) => (true, Some(false), detail),
+    }
+}
+
+/// Python's `_composer_ownership`: use plain geometry when it delimits one prompt; otherwise
+/// permit the styled multi-sigil fallback only when the complete dim transcript spans are
+/// accounted for and the complete live region exactly matches text owned by this flock.
+fn owned_composer_region(
+    flock: &Flock,
+    pane_id: &str,
+    screen: &str,
+    known: &[String],
+) -> Option<String> {
+    let plain_region = composer_region_text(screen);
+    if !plain_region.is_empty() {
+        return exact_owned_region(&plain_region, known).then_some(plain_region);
+    }
+
+    let (status, region) = styled_composer_boundary(screen);
+    if status != "delimited"
+        || region.is_empty()
+        || !dim_bodies_accounted(flock, pane_id, screen)
+        || !exact_owned_region(&region, known)
+    {
+        return None;
+    }
+    Some(region)
+}
+
+fn exact_owned_region(region: &str, known: &[String]) -> bool {
+    let region = collapse(region);
+    !region.is_empty() && known.iter().any(|candidate| collapse(candidate) == region)
+}
+
+/// `_dim_bodies_accounted`: account each complete dim sigil span through the next sigil.
+/// Sent history and every nonempty outbox row are provenance; the latter intentionally includes
+/// statuses beyond `queued`, unlike the stricter live-composer ownership candidate set.
+fn dim_bodies_accounted(flock: &Flock, pane_id: &str, screen: &str) -> bool {
+    let rows = splitlines(screen);
+    let sigils: Vec<(usize, Option<String>, &'static str)> = rows
+        .iter()
+        .enumerate()
+        .filter_map(|(index, row)| {
+            prompt_body(row).map(|body| (index, Some(body), styled_sigil_state(row)))
+        })
+        .collect();
+
+    let mut known = flock
+        .sent_text_by_pane
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(pane_id)
+        .cloned()
+        .unwrap_or_default();
+    {
+        let outbox = outbox_lock(&flock.outbox);
+        known.extend(
+            outbox
+                .get(pane_id)
+                .into_iter()
+                .flatten()
+                .filter(|message| !message.text.is_empty())
+                .map(|message| message.text.clone()),
+        );
+    }
+    let exact: Vec<String> = known
+        .iter()
+        .filter(|text| !text.is_empty())
+        .map(|text| collapse(text))
+        .collect();
+
+    for (position, (index, body, state)) in sigils.iter().enumerate() {
+        if *state != "dim" {
+            continue;
+        }
+        let end = sigils
+            .get(position + 1)
+            .map(|(next, _, _)| *next)
+            .unwrap_or(rows.len());
+        let mut parts = vec![body.clone().unwrap_or_default()];
+        parts.extend(
+            rows[*index + 1..end]
+                .iter()
+                .map(|row| strip_ansi(row).trim().to_string()),
+        );
+        let body = collapse(&parts.join(" "));
+        if body.is_empty() || !exact.iter().any(|candidate| candidate == &body) {
+            return false;
+        }
+    }
+    true
+}
 
 /// `HARNESS_QUEUES_WHILE_BUSY` (measured, not assumed): claude, pi and codex queue what is typed
 /// while they work (codex via Tab). An unknown harness keeps the capability hold.
@@ -1144,7 +2238,11 @@ pub(crate) struct StuckCandidate {
     pub superseded_by: String,
     pub transcript_texts: Vec<String>,
     pub typed_at: Option<f64>,
+    /// Old snapshots may omit this field; explicit null/zero is not a typed attempt.
+    pub typed_at_present: bool,
     pub native_binding: Option<(i64, String, String)>,
+    /// Preserve malformed persisted bindings as a refusal, never as unbound authority.
+    pub native_binding_invalid: Option<Value>,
     pub recovery_outcome: Option<String>,
     pub recovery_detail: Option<String>,
     pub recovered_at: Option<f64>,
@@ -1157,6 +2255,132 @@ pub(crate) struct StuckCandidate {
     pub consumed_at: Option<f64>,
     /// Unknown Python candidate keys are retained at top level for forward-compatible saves.
     pub extra_fields: Map<String, Value>,
+}
+
+/// Native evidence is retained until the final key boundary so its process and rollout can
+/// be checked again immediately before the key is sent.
+pub(crate) struct OwnedRecoveryEvidence {
+    pub text: String,
+    pub native: crate::recovery_native::PromptSession,
+    pub entry: StuckCandidate,
+}
+
+impl Flock {
+    pub(crate) fn owned_recovery_evidence<E: SendEnv + PaneInfoEnv>(
+        &self,
+        env: &E,
+        pane_id: &str,
+        screen: &str,
+    ) -> Option<OwnedRecoveryEvidence> {
+        if screen.is_empty() || modal_open(screen) || self.turn_active(pane_id) {
+            return None;
+        }
+        let entry = self.stuck_candidates.lock().ok()?.get(pane_id)?.clone();
+        let generation = pane_generation(env, pane_id)?;
+        if !entry.eligible
+            || !entry.press_enter
+            || entry.kind != "text"
+            || !matches!(entry.status.as_str(), "failed" | "sent" | "typed")
+            || (entry.typed_at_present && entry.typed_at.is_none_or(|at| at == 0.0))
+            || entry.generation.as_deref() != Some(&generation)
+            || entry.native_binding_invalid.is_some()
+        {
+            return None;
+        }
+        let pane = env.get_pane(pane_id)?;
+        if !matches!(pane.get("agent"), None | Some(Value::Null))
+            && !matches!(
+                pane.get("agent").and_then(Value::as_str),
+                Some("" | "codex")
+            )
+        {
+            return None;
+        }
+        if !matches!(
+            env.read_status(pane_id).as_deref(),
+            None | Some("unknown" | "idle" | "ready")
+        ) || env.session_process_gone(pane_id)
+            || classify_delivery(screen, Some("idle"), Some(""), None, false).0 != "ready"
+        {
+            return None;
+        }
+        let region = trailing_prompt_region(screen);
+        if region.is_empty()
+            || crate::stuck::collapse(&region) != crate::stuck::collapse(&entry.text)
+        {
+            return None;
+        }
+        let native = match crate::recovery_native::read_prompt_session(&pane) {
+            Ok(native) => native,
+            Err(error) => {
+                if let Ok(mut candidates) = self.stuck_candidates.lock() {
+                    if let Some(live) = candidates.get_mut(pane_id) {
+                        if live.message_id == entry.message_id
+                            && live.created_at == entry.created_at
+                            && live.native_refusal.is_none()
+                        {
+                            live.native_refusal = Some(error.to_string());
+                            tracing::warn!(pane_id, message_id = %entry.message_id, created_at = entry.created_at, error = %error, "recovery not observable");
+                        }
+                    }
+                }
+                return None;
+            }
+        };
+        if !native_prefix_accounted(screen, &native.text) {
+            return None;
+        }
+        let binding = (
+            native.pid,
+            native.start.clone(),
+            native.snapshot.session_id.clone(),
+        );
+        if let Some(expected) = &entry.native_binding {
+            if expected != &binding {
+                return None;
+            }
+        } else {
+            let pid = pane
+                .get("pane_pid")
+                .filter(|v| json_truthy(v))
+                .or_else(|| pane.get("pid"));
+            let pid = pid.and_then(|v| {
+                v.as_i64()
+                    .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+            });
+            if pid != Some(native.pid) {
+                return None;
+            }
+        }
+        let attempt = json!({"attempt_id": entry.message_id, "text": entry.text,
+            "state": if entry.status == "typed" { "typed" } else { "unconfirmed" }, "generation": generation});
+        let frame = json!({"prompt_text": region, "ambiguous": true, "dialog_open": false});
+        let pane_state =
+            json!({"pane_id": pane_id, "generation": generation, "turn_state": "idle"});
+        if crate::recovery::plan_recovery(&attempt, &frame, &pane_state, Some(&native.text), 0, 1)
+            .ok()?
+            .get("action")
+            .and_then(Value::as_str)
+            != Some("submit_once")
+        {
+            return None;
+        }
+        let mut candidates = self.stuck_candidates.lock().ok()?;
+        let live = candidates.get_mut(pane_id)?;
+        if live.message_id != entry.message_id
+            || live.created_at != entry.created_at
+            || !live.eligible
+        {
+            return None;
+        }
+        live.native_binding = Some(binding);
+        live.native_recovery = Some(true);
+        Some(OwnedRecoveryEvidence {
+            text: region,
+            native,
+            entry,
+        })
+    }
 }
 
 impl StuckCandidate {
@@ -1187,7 +2411,9 @@ impl StuckCandidate {
             superseded_by: message.id.clone(),
             transcript_texts: Vec::new(),
             typed_at: message.typed_at,
+            typed_at_present: true,
             native_binding: None,
+            native_binding_invalid: None,
             recovery_outcome: None,
             recovery_detail: None,
             recovered_at: None,
@@ -1269,6 +2495,12 @@ pub(crate) fn candidate_snapshot(candidate: &StuckCandidate) -> Value {
     if let Some(fields) = known.as_object() {
         snapshot.extend(fields.clone());
     }
+    if !candidate.typed_at_present {
+        snapshot.remove("typed_at");
+    }
+    if let Some(invalid) = &candidate.native_binding_invalid {
+        snapshot.insert("native_binding".into(), invalid.clone());
+    }
     Value::Object(snapshot)
 }
 
@@ -1279,12 +2511,19 @@ pub(crate) fn candidate_from_snapshot(value: &Value) -> Option<StuckCandidate> {
         .get("native_binding")
         .and_then(Value::as_array)
         .and_then(|parts| {
+            if parts.len() != 3 {
+                return None;
+            }
             Some((
                 parts.first()?.as_i64()?,
                 parts.get(1)?.as_str()?.to_owned(),
                 parts.get(2)?.as_str()?.to_owned(),
             ))
         });
+    let native_binding_invalid = row
+        .get("native_binding")
+        .filter(|value| json_truthy(value) && native_binding.is_none())
+        .cloned();
     let extra_fields = row
         .iter()
         .filter(|(key, _)| !CANDIDATE_SNAPSHOT_FIELDS.contains(&key.as_str()))
@@ -1335,7 +2574,9 @@ pub(crate) fn candidate_from_snapshot(value: &Value) -> Option<StuckCandidate> {
             })
             .unwrap_or_default(),
         typed_at: row.get("typed_at").and_then(Value::as_f64),
+        typed_at_present: row.contains_key("typed_at"),
         native_binding,
+        native_binding_invalid,
         recovery_outcome: string("recovery_outcome"),
         recovery_detail: string("recovery_detail"),
         recovered_at: row.get("recovered_at").and_then(Value::as_f64),
@@ -1607,6 +2848,7 @@ impl Flock {
         {
             candidate.typed_at = message.typed_at.or(existing.typed_at);
             candidate.native_binding = existing.native_binding.clone();
+            candidate.native_binding_invalid = existing.native_binding_invalid.clone();
             candidate.recovery_outcome = existing.recovery_outcome.clone();
             candidate.recovery_detail = existing.recovery_detail.clone();
             candidate.recovered_at = existing.recovered_at;
@@ -1988,6 +3230,27 @@ impl Flock {
             return false;
         }
 
+        let candidates = self.known_send_texts(pane_id);
+
+        let shown = collapse(shown);
+        for candidate in &candidates {
+            let full = collapse(candidate);
+            if full.is_empty() {
+                continue;
+            }
+            let consumption_prefix: String = full.chars().take(CONSUMPTION_PREFIX_CHARS).collect();
+            if full.starts_with(&shown) || shown.starts_with(&consumption_prefix) {
+                return true;
+            }
+        }
+        candidates
+            .iter()
+            .any(|candidate| is_our_send(shown.as_str(), Some(candidate), true))
+    }
+
+    /// Clone the exact ownership evidence used by composer preflight. Queued outbox text is
+    /// eligible only while its message is still queued.
+    fn known_send_texts(&self, pane_id: &str) -> Vec<String> {
         let mut candidates = self
             .sent_text_by_pane
             .lock()
@@ -2006,21 +3269,7 @@ impl Flock {
                     .map(|message| message.text.clone()),
             );
         }
-
-        let shown = collapse(shown);
-        for candidate in &candidates {
-            let full = collapse(candidate);
-            if full.is_empty() {
-                continue;
-            }
-            let consumption_prefix: String = full.chars().take(CONSUMPTION_PREFIX_CHARS).collect();
-            if full.starts_with(&shown) || shown.starts_with(&consumption_prefix) {
-                return true;
-            }
-        }
         candidates
-            .iter()
-            .any(|candidate| is_our_send(shown.as_str(), Some(candidate), true))
     }
 
     /// Allocate a unique monotonically increasing `mN` message identity and build

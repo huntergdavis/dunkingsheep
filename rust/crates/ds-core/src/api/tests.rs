@@ -14,6 +14,7 @@ use crate::flock::dunks::DunkList;
 use crate::flock::panes::{PaneInfoEnv, Stores};
 use crate::flock::status::{StatusEnv, ViewCache};
 use crate::proc::Caller;
+use crate::report::{ReportPaths, ReportSources};
 use crate::roles::Roles;
 use crate::server::RequestCtx;
 use crate::terminal::{fakes::FakeTerminal, Terminal};
@@ -563,6 +564,128 @@ fn dispatch_as_flock_role(
         runtime: runtime.handle(),
     };
     dispatcher.dispatch(&context, &FlockGate(&context), name, args)
+}
+
+struct ReportApiSources {
+    paths: ReportPaths,
+    config_dir: PathBuf,
+}
+
+impl ReportSources for ReportApiSources {
+    fn now_s(&self) -> f64 {
+        1_800_000_000.0
+    }
+    fn report_paths(&self) -> ReportPaths {
+        self.paths.clone()
+    }
+    fn config_dir(&self) -> PathBuf {
+        self.config_dir.clone()
+    }
+    fn task_metrics(&self, _window_s: f64) -> Result<Value, String> {
+        Ok(json!({"window":{"seconds":86400},"current":{},"throughput":{},"latency_ms":{}}))
+    }
+    fn list_panes(&self) -> Result<Vec<Value>, String> {
+        Ok(Vec::new())
+    }
+    fn list_tasks(&self, _limit: usize) -> Result<Vec<Value>, String> {
+        Ok(Vec::new())
+    }
+    fn needs_owner_tasks(&self, _limit: usize) -> Result<Value, String> {
+        Ok(json!({"tasks": []}))
+    }
+    fn lane_registry(&self) -> Result<Value, String> {
+        Ok(json!({"lanes": {}}))
+    }
+    fn review_list(&self) -> Result<Value, String> {
+        Ok(json!({"reviews": [], "count": 0, "oldest_age_s": null}))
+    }
+    fn poolrad_progress(&self) -> Result<Value, String> {
+        Ok(json!({"credited": 0}))
+    }
+    fn post_report(&self, _report: &Value, _text: &str) -> Result<Value, String> {
+        Ok(json!({"message_id": "m-test", "transport": "report"}))
+    }
+}
+
+struct ReportApiEnv {
+    terminal: Mutex<Box<dyn Terminal>>,
+    sources: ReportApiSources,
+}
+
+impl PaneInfoEnv for ReportApiEnv {
+    fn list_panes_grouped(&self) -> Vec<Value> {
+        Vec::new()
+    }
+    fn get_pane(&self, _pane_id: &str) -> Option<Value> {
+        None
+    }
+}
+
+impl CommandEnv for ReportApiEnv {
+    fn terminal(&self) -> &Mutex<Box<dyn Terminal>> {
+        &self.terminal
+    }
+    fn now_s(&self) -> f64 {
+        self.sources.now_s()
+    }
+    fn report_sources(&self) -> Result<&dyn ReportSources, DunkError> {
+        Ok(&self.sources)
+    }
+}
+
+#[test]
+fn dispatcher_report_run_list_handlers_use_sources_and_preserve_role_gates() {
+    let temp = tempfile::tempdir().unwrap();
+    let (_flock_dir, flock) = staffed_flock("report-api");
+    let config_dir = temp.path().join("config");
+    let sources = ReportApiSources {
+        paths: ReportPaths::new(temp.path().join("reports"), temp.path().join("home")),
+        config_dir,
+    };
+    let env = ReportApiEnv {
+        terminal: Mutex::new(Box::new(FakeTerminal::default())),
+        sources,
+    };
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_report_run_list();
+
+    let mut empty_out_dir = Args::new();
+    empty_out_dir.insert("out_dir".to_owned(), json!(""));
+    let run = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p1"),
+        "report_run",
+        Some(empty_out_dir),
+    )
+    .unwrap();
+    let report_path = Path::new(run["path"].as_str().unwrap());
+    assert!(report_path.is_file());
+    assert_eq!(
+        report_path.parent(),
+        Some(env.sources.paths.output_dir.as_path())
+    );
+    assert_eq!(run["posted"]["transport"], "report");
+    assert_eq!(run["generated_at"], "2027-01-15T08:00:00Z");
+
+    let mut empty_list_dir = Args::new();
+    empty_list_dir.insert("out_dir".to_owned(), json!(""));
+    let list = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w2:p2"),
+        "report_list",
+        Some(empty_list_dir),
+    )
+    .unwrap();
+    assert_eq!(list["count"], 1);
+
+    let denied =
+        dispatch_as_flock_role(&dispatcher, &flock, &env, Some("w2:p2"), "report_run", None)
+            .unwrap_err();
+    assert!(denied.to_string().contains("not permitted for role worker"));
 }
 
 #[test]
@@ -3229,4 +3352,289 @@ fn test_poolrad_progress_reports_the_recorded_count() {
         refusal(TestEnv::default().poolrad_progress()),
         "poolrad progress adapter is not wired"
     );
+}
+
+fn task_api_fixture() -> (
+    tokio::runtime::Runtime,
+    tempfile::TempDir,
+    Flock,
+    Arc<crate::tasks::Tasks>,
+    Dispatcher,
+) {
+    let (dir, flock) = flock();
+    let mut roles = Roles::new(
+        &Env::default(),
+        Some(dir.path().join("roles.json")),
+        Some(dir.path().join("tokens.json")),
+        None,
+    )
+    .expect("role registry");
+    for (pane, role) in [("w1:p1", "worker"), ("w1:p2", "owner"), ("w1:p3", "worker")] {
+        roles
+            .register(pane, role, None, None, None, None, None, None)
+            .expect("role registration");
+    }
+    flock.attach_roles(roles, None);
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let tasks = Arc::new(
+        runtime
+            .block_on(crate::tasks::Tasks::open(dir.path().join("tasks.db")))
+            .expect("task store"),
+    );
+    flock.attach_stores(Stores {
+        tasks: Some(tasks.clone()),
+        ..Stores::default()
+    });
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_task_add_list_read();
+    (runtime, dir, flock, tasks, dispatcher)
+}
+
+fn dispatch_task_api(
+    dispatcher: &Dispatcher,
+    flock: &Flock,
+    runtime: &tokio::runtime::Runtime,
+    name: &str,
+    input: Value,
+    pane: &str,
+) -> Result<Value, DunkError> {
+    let env = TestEnv::default();
+    let request = RequestCtx {
+        self_pane_id: Some(pane.to_string()),
+        ..RequestCtx::default()
+    };
+    let context = HandlerContext {
+        flock,
+        request: &request,
+        env: &env,
+        runtime: runtime.handle(),
+    };
+    let gate = FlockGate(&context);
+    dispatcher.dispatch(&context, &gate, name, args(input))
+}
+
+#[test]
+fn h_task_add_matches_python_defaults_and_role_gate() {
+    let (runtime, _dir, flock, _tasks, dispatcher) = task_api_fixture();
+    let plain = dispatch_task_api(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_add",
+        json!({"title": "default"}),
+        "w1:p1",
+    )
+    .expect("default task");
+    assert_eq!(plain["scope"], "global");
+    assert_eq!(plain["status"], "open");
+    assert_eq!(plain["priority"], "low");
+    assert_eq!(plain["body"], "");
+    assert_eq!(plain["created_by"], "w1:p1");
+    assert_eq!(plain["assignees"], json!([]));
+    assert_eq!(plain["children"], json!([]));
+
+    let high = dispatch_task_api(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_add",
+        json!({
+            "title": "explicit",
+            "priority": "high",
+            "scope": "self",
+            "body": "details"
+        }),
+        "w1:p1",
+    )
+    .expect("explicit high-priority task");
+    assert_eq!(high["scope"], "w1:p1");
+    assert_eq!(high["priority"], "high");
+    assert_eq!(high["body"], "details");
+
+    assert!(matches!(
+        dispatch_task_api(
+            &dispatcher,
+            &flock,
+            &runtime,
+            "task_add",
+            json!({"title": "not assignable", "assignees": ["w1:p3"]}),
+            "w1:p1",
+        ),
+        Err(DunkError::Refused(message)) if message.contains("only to yourself")
+    ));
+
+    let owner_assigned = dispatch_task_api(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_add",
+        json!({"title": "owner assigned", "assignees": ["w1:p3"]}),
+        "w1:p2",
+    )
+    .expect("owner assignment");
+    assert_eq!(owner_assigned["assignees"], json!(["w1:p3"]));
+}
+
+#[test]
+fn h_task_read_returns_full_wire_and_latest_three_note_reasons() {
+    let (runtime, _dir, flock, tasks, dispatcher) = task_api_fixture();
+    let created = dispatch_task_api(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_add",
+        json!({"title": "read me", "scope": "self", "body": "full row"}),
+        "w1:p1",
+    )
+    .expect("create task");
+    let id = created["id"].as_str().expect("task id");
+    for index in 0..5 {
+        runtime
+            .block_on(tasks.note(id, "note", "w1:p1", Some(&format!("note {index}"))))
+            .expect("append note");
+    }
+
+    let read = dispatch_task_api(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_read",
+        json!({"id": id}),
+        "w1:p1",
+    )
+    .expect("read task");
+    assert_eq!(read["id"], id);
+    assert_eq!(read["scope"], "w1:p1");
+    assert_eq!(read["body"], "full row");
+    assert_eq!(read["children"], json!([]));
+    assert!(read["leases"].is_array());
+    assert_eq!(
+        read["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|note| note["reason"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["note 2", "note 3", "note 4"]
+    );
+    assert_eq!(read["notes"][0]["actor"], "w1:p1");
+
+    assert!(matches!(
+        dispatch_task_api(
+            &dispatcher,
+            &flock,
+            &runtime,
+            "task_read",
+            json!({"id": id}),
+            "w1:p3",
+        ),
+        Err(DunkError::Refused(message))
+            if message == format!("task {id} belongs to another pane's private queue (w1:p1)")
+    ));
+    assert!(matches!(
+        dispatch_task_api(
+            &dispatcher,
+            &flock,
+            &runtime,
+            "task_read",
+            json!({"id": "t999999"}),
+            "w1:p1",
+        ),
+        Err(DunkError::Refused(message)) if message.contains("no task with id")
+    ));
+}
+
+#[test]
+fn h_task_list_matches_python_defaults_and_slice_limits() {
+    let (runtime, _dir, flock, tasks, dispatcher) = task_api_fixture();
+    let mut ids = Vec::new();
+    for title in ["first", "second", "third", "fourth"] {
+        let created = dispatch_task_api(
+            &dispatcher,
+            &flock,
+            &runtime,
+            "task_add",
+            json!({"title": title}),
+            "w1:p1",
+        )
+        .expect("create list fixture");
+        ids.push(created["id"].as_str().unwrap().to_string());
+    }
+    runtime
+        .block_on(tasks.complete(&ids[0]))
+        .expect("complete first task");
+
+    for args in [json!({}), json!({"limit": null}), json!({"limit": 0})] {
+        let listed = dispatch_task_api(&dispatcher, &flock, &runtime, "task_list", args, "w1:p1")
+            .expect("default task list");
+        assert_eq!(listed["scope"], "visible");
+        assert_eq!(listed["pane_id"], "w1:p1");
+        assert_eq!(listed["tasks"].as_array().unwrap().len(), 4);
+    }
+
+    let two = dispatch_task_api(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_list",
+        json!({"limit": "2"}),
+        "w1:p1",
+    )
+    .expect("positive limit");
+    assert_eq!(two["tasks"].as_array().unwrap().len(), 2);
+
+    let negative = dispatch_task_api(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_list",
+        json!({"limit": -1}),
+        "w1:p1",
+    )
+    .expect("negative Python slice");
+    assert_eq!(negative["tasks"].as_array().unwrap().len(), 3);
+
+    let active = dispatch_task_api(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_list",
+        json!({"include_done": false}),
+        "w1:p1",
+    )
+    .expect("exclude completed tasks");
+    assert_eq!(active["tasks"].as_array().unwrap().len(), 3);
+    assert!(active["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|task| task["status"] != "done"));
+
+    assert!(matches!(
+        dispatch_task_api(
+            &dispatcher,
+            &flock,
+            &runtime,
+            "task_list",
+            json!({"limit": "nope"}),
+            "w1:p1",
+        ),
+        Err(DunkError::Refused(message)) if message == "invalid literal for int() with base 10: 'nope'"
+    ));
+    assert!(matches!(
+        dispatch_task_api(
+            &dispatcher,
+            &flock,
+            &runtime,
+            "task_list",
+            json!({"scope": "w1:p3"}),
+            "w1:p1",
+        ),
+        Err(DunkError::Refused(_))
+    ));
 }

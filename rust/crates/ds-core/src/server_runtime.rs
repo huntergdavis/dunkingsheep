@@ -5,12 +5,17 @@
 //! explicitly instead of being silently replaced with tmux.
 
 mod delivery;
+mod dispatcher;
 mod inbox;
 mod inbox_metrics;
 mod inbox_stores;
 mod layout;
+mod push;
+mod push_eligibility;
 mod status;
+mod stuck;
 mod submit;
+mod summary;
 
 use std::collections::BTreeSet;
 use std::ffi::OsStr;

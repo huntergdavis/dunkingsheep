@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from urllib.parse import urlsplit
 from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -18,8 +19,9 @@ sys.path.insert(0, str(ROOT))
 
 def _asgi_request(app, request):
     """Dispatch through FastAPI's real router without a listener or HTTP-client extra."""
-    body = json.dumps(request["json"], separators=(",", ":")).encode("utf-8")
-    path = request["path"]
+    body = json.dumps(request.get("json", {}), separators=(",", ":")).encode("utf-8")
+    parsed = urlsplit(request["path"])
+    path = parsed.path
     scope = {
         "type": "http",
         "asgi": {"version": "3.0", "spec_version": "2.3"},
@@ -28,7 +30,7 @@ def _asgi_request(app, request):
         "scheme": "http",
         "path": path,
         "raw_path": path.encode("ascii"),
-        "query_string": b"",
+        "query_string": parsed.query.encode("ascii"),
         "root_path": "",
         "headers": [(name.encode("ascii"), value.encode("latin-1"))
                     for name, value in request["headers"].items()],
@@ -86,6 +88,27 @@ class T62HttpParityFixtureTests(unittest.TestCase):
             status, headers, raw = _asgi_request(self.desk.app, request)
 
         expected = self.fixture["response"]
+        self.assertEqual(status, expected["status"])
+        for name, value in expected["headers"].items():
+            self.assertEqual(headers.get(name), value, name)
+        self.assertEqual(raw.decode("utf-8"), expected["body"])
+        self.assertEqual(json.loads(raw), expected["json"])
+        self.assertEqual(headers.get("set-cookie"), expected["set_cookie"])
+
+    def test_python_owner_capability_matches_fixture(self):
+        fixture = json.loads((FIXTURE.parent / "owner_capability.json").read_text(encoding="utf-8"))
+
+        class FakeDaemon:
+            def call(self, method, **args):
+                if method != fixture["backend"]["method"] or args != fixture["backend"]["args"]:
+                    raise AssertionError(f"unexpected daemon call: {method} {args}")
+                return fixture["backend"]["response"]
+
+        self.desk._CAP_CACHE.pop("%9", None)
+        with mock.patch.object(self.desk, "_flock", return_value=FakeDaemon()):
+            status, headers, raw = _asgi_request(self.desk.app, fixture["request"])
+        self.desk._CAP_CACHE.pop("%9", None)
+        expected = fixture["response"]
         self.assertEqual(status, expected["status"])
         for name, value in expected["headers"].items():
             self.assertEqual(headers.get(name), value, name)

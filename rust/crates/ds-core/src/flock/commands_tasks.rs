@@ -195,7 +195,7 @@ impl Flock {
         Ok(owners)
     }
 
-    fn task_store(&self) -> Result<Arc<Tasks>, DunkError> {
+    pub(super) fn task_store(&self) -> Result<Arc<Tasks>, DunkError> {
         self.stores()
             .tasks
             .ok_or_else(|| DunkError::Refused("the task store is not attached".into()))

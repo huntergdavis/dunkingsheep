@@ -74,7 +74,9 @@ pub fn unread_mail(unread: i64, messages: &[Mail], now: f64, grace_s: f64) -> bo
             return false;
         }
         let created = message.created_at.filter(|at| *at != 0.0).unwrap_or(now);
-        !(now - created > grace_s)
+        (now - created)
+            .partial_cmp(&grace_s)
+            .is_none_or(|ordering| ordering != std::cmp::Ordering::Greater)
     })
 }
 
@@ -119,9 +121,9 @@ pub enum Via {
 /// `None` when the registry is unavailable (followers only). `role_of` is `caller_role`:
 /// the RESOLVED role, not the registry string (t975: a reused pane id must not become a
 /// target). Only `worker` and `reviewer` pull work; a desk/planner/owner pane never does.
-pub fn push_targets<'a>(
+pub fn push_targets(
     followers: &BTreeMap<String, String>,
-    lanes: Option<&'a BTreeSet<String>>,
+    lanes: Option<&BTreeSet<String>>,
     role_of: impl Fn(&str) -> String,
 ) -> BTreeMap<String, (String, Via)> {
     let mut targets: BTreeMap<String, (String, Via)> = followers

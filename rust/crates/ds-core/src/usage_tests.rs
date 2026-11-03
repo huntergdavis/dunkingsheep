@@ -200,3 +200,45 @@ fn shlex_split_matches_pythons_posix_rules_inside_double_quotes_and_elsewhere() 
         assert_eq!(want, got, "shlex.split({input:?})");
     }
 }
+
+#[test]
+fn py_float_repr_matches_python_for_midpoints_and_bounded_bit_corpus() {
+    use std::process::Command;
+    let mut bits = vec![
+        5.960464477539062e-7_f64.to_bits(),
+        (-5.960464477539062e-7_f64).to_bits(),
+        1e-5_f64.to_bits(),
+        1e-4_f64.to_bits(),
+        1e15_f64.to_bits(),
+        1e16_f64.to_bits(),
+        0.0_f64.to_bits(),
+        (-0.0_f64).to_bits(),
+    ];
+    let mut state = 2366_u64;
+    for _ in 0..1024 {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        if f64::from_bits(state).is_finite() {
+            bits.push(state);
+        }
+    }
+    let input = bits
+        .iter()
+        .map(|value| format!("{value:016x}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let output = Command::new("python3")
+        .args(["-c", "import struct,sys; [print(repr(struct.unpack('>d', bytes.fromhex(x))[0])) for x in sys.argv[1].split(',')]", &input])
+        .output().expect("python3 oracle");
+    assert!(output.status.success());
+    let oracle = String::from_utf8(output.stdout).unwrap();
+    let actual: Vec<_> = bits
+        .iter()
+        .map(|bits| super::py_float_repr(f64::from_bits(*bits)))
+        .collect();
+    assert_eq!(actual, oracle.lines().collect::<Vec<_>>());
+    assert_eq!(super::py_float_repr(f64::NAN), "nan");
+    assert_eq!(super::py_float_repr(f64::INFINITY), "inf");
+    assert_eq!(super::py_float_repr(f64::NEG_INFINITY), "-inf");
+}

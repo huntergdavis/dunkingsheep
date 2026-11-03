@@ -98,6 +98,8 @@ pub struct Flock {
     pub(crate) stuck_tracker: Mutex<crate::stuck::Tracker>,
     /// Recovery policy persisted alongside the attempt ledger.
     pub(crate) stuck_config: Mutex<crate::stuck::Config>,
+    /// Volatile per-pane observation throttling; the spent ledger is persisted separately.
+    pub(crate) stuck_last_check: Mutex<BTreeMap<String, f64>>,
     /// pane_id -> the bounded recent text this flock typed into its composer.
     #[allow(dead_code)] // The send integration callers are assigned to dependent T33 leaves.
     pub(crate) sent_text_by_pane: Mutex<BTreeMap<String, Vec<String>>>,
@@ -157,6 +159,7 @@ impl Flock {
             decided: Mutex::new(sends::DecidedMessages::default()),
             stuck_tracker: Mutex::new(crate::stuck::Tracker::default()),
             stuck_config: Mutex::new(crate::stuck::Config::default()),
+            stuck_last_check: Mutex::new(BTreeMap::new()),
             sent_text_by_pane: Mutex::new(BTreeMap::new()),
             next_message_id: AtomicU64::new(1),
             pane_send_locks: Mutex::new(BTreeMap::new()),
@@ -774,6 +777,7 @@ fn truthy(value: &Value) -> bool {
 }
 
 pub mod agent_verify;
+pub mod clear_box;
 pub mod commands_inbox;
 pub mod commands_layout;
 pub mod commands_owner_views;
@@ -801,8 +805,11 @@ pub mod send_keys;
 pub mod sends;
 pub mod status;
 pub mod status_runtime;
+pub mod task_wire;
 pub mod views;
 
+#[cfg(test)]
+mod clear_box_tests;
 #[cfg(test)]
 mod commands_inbox_tests;
 #[cfg(test)]

@@ -1,0 +1,33 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/api/capability?pane=%20%259%20",
+    "headers": {
+      "host": "testserver"
+    }
+  },
+  "backend": {
+    "method": "delivery_capability",
+    "args": {
+      "target": "%9"
+    },
+    "response": {
+      "alive": true,
+      "pane_id": "%9",
+      "send": "guarded"
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json"
+    },
+    "body": "{\"alive\":true,\"pane_id\":\"%9\",\"send\":\"guarded\"}",
+    "json": {
+      "alive": true,
+      "pane_id": "%9",
+      "send": "guarded"
+    },
+    "set_cookie": null
+  }
+}
