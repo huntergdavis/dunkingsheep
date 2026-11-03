@@ -284,25 +284,25 @@ fn review_sync_handler_dispatches_to_the_canonical_engine_with_python_dry_run_de
         ..Default::default()
     });
     let env = review_api_env(dir.path(), [json!([])]);
-    let request = RequestCtx::default();
-    let context = review_dispatch_context(&flock, &request, &env, &runtime);
-    let mut dispatcher = Dispatcher::new();
-    dispatcher.register_review_sync_list();
+    {
+        let request = RequestCtx::default();
+        let context = review_dispatch_context(&flock, &request, &env, &runtime);
+        let mut dispatcher = Dispatcher::new();
+        dispatcher.register_review_sync_list();
 
-    let report = dispatcher
-        .dispatch(&context, &FixedRole("owner", true), "review_sync", None)
-        .unwrap();
+        let report = dispatcher
+            .dispatch(&context, &FixedRole("owner", true), "review_sync", None)
+            .unwrap();
 
-    assert_eq!(json!([{"repo":"o/r", "open":0}]), report["repos"]);
-    assert!(report["errors"].as_array().unwrap().is_empty());
-    let requests = env.transport.requests.lock().unwrap();
-    assert_eq!(1, requests.len());
-    assert!(requests[0].url.starts_with("https://github.invalid/"));
-    assert!(requests[0]
-        .url
-        .ends_with("/repos/o/r/pulls?state=open&per_page=100&page=1"));
-    drop(requests);
-    drop(context);
+        assert_eq!(json!([{"repo":"o/r", "open":0}]), report["repos"]);
+        assert!(report["errors"].as_array().unwrap().is_empty());
+        let requests = env.transport.requests.lock().unwrap();
+        assert_eq!(1, requests.len());
+        assert!(requests[0].url.starts_with("https://github.invalid/"));
+        assert!(requests[0]
+            .url
+            .ends_with("/repos/o/r/pulls?state=open&per_page=100&page=1"));
+    }
     drop(flock);
     drop(runtime);
 }
@@ -339,24 +339,25 @@ fn review_list_handler_dispatches_to_the_full_tasks_snapshot() {
             },
         ))
         .unwrap();
-    let env = TestEnv::default();
-    let request = RequestCtx {
-        self_pane_id: Some("%2".into()),
-        ..RequestCtx::default()
-    };
-    let context = review_dispatch_context(&flock, &request, &env, &runtime);
-    let mut dispatcher = Dispatcher::new();
-    dispatcher.register_review_sync_list();
+    {
+        let env = TestEnv::default();
+        let request = RequestCtx {
+            self_pane_id: Some("%2".into()),
+            ..RequestCtx::default()
+        };
+        let context = review_dispatch_context(&flock, &request, &env, &runtime);
+        let mut dispatcher = Dispatcher::new();
+        dispatcher.register_review_sync_list();
 
-    let result = dispatcher
-        .dispatch(&context, &FixedRole("reviewer", true), "review_list", None)
-        .unwrap();
+        let result = dispatcher
+            .dispatch(&context, &FixedRole("reviewer", true), "review_list", None)
+            .unwrap();
 
-    assert_eq!(1, result["count"]);
-    assert_eq!("123456789abc", result["reviews"][0]["head"]);
-    assert_eq!(json!(["%9"]), result["reviews"][0]["reviewer"]);
-    assert_eq!("review title", result["reviews"][0]["title"]);
-    drop(context);
+        assert_eq!(1, result["count"]);
+        assert_eq!("123456789abc", result["reviews"][0]["head"]);
+        assert_eq!(json!(["%9"]), result["reviews"][0]["reviewer"]);
+        assert_eq!("review title", result["reviews"][0]["title"]);
+    }
     drop(tasks);
     drop(flock);
     drop(runtime);
