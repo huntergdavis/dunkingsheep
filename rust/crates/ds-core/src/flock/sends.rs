@@ -380,7 +380,13 @@ impl Flock {
             .stuck_candidates
             .lock()
             .ok()
-            .and_then(|c| c.get(pane_id).and_then(|e| e.native_recovery))
+            .and_then(|c| {
+                c.get(pane_id).map(|e| {
+                    e.native_recovery.unwrap_or(false)
+                        || e.native_binding.is_some()
+                        || e.native_binding_invalid.is_some()
+                })
+            })
             .unwrap_or(false);
         if native_required && native.is_none() {
             return (false, "native evidence changed".into());
@@ -512,11 +518,11 @@ impl Flock {
             .lock()
             .ok()
             .and_then(|c| c.get(pane_id).cloned());
-        if authority
-            .as_ref()
-            .and_then(|e| e.native_recovery)
-            .unwrap_or(false)
-            && native.is_none()
+        if authority.as_ref().is_some_and(|e| {
+            e.native_recovery.unwrap_or(false)
+                || e.native_binding.is_some()
+                || e.native_binding_invalid.is_some()
+        }) && native.is_none()
         {
             self.stuck_tracker
                 .lock()
@@ -2124,6 +2130,8 @@ pub(crate) struct StuckCandidate {
     /// Old snapshots may omit this field; explicit null/zero is not a typed attempt.
     pub typed_at_present: bool,
     pub native_binding: Option<(i64, String, String)>,
+    /// Preserve malformed persisted bindings as a refusal, never as unbound authority.
+    pub native_binding_invalid: Option<Value>,
     pub recovery_outcome: Option<String>,
     pub recovery_detail: Option<String>,
     pub recovered_at: Option<f64>,
@@ -2164,6 +2172,7 @@ impl Flock {
             || !matches!(entry.status.as_str(), "failed" | "sent" | "typed")
             || (entry.typed_at_present && entry.typed_at.is_none_or(|at| at == 0.0))
             || entry.generation.as_deref() != Some(&generation)
+            || entry.native_binding_invalid.is_some()
         {
             return None;
         }
@@ -2293,6 +2302,7 @@ impl StuckCandidate {
             typed_at: message.typed_at,
             typed_at_present: true,
             native_binding: None,
+            native_binding_invalid: None,
             recovery_outcome: None,
             recovery_detail: None,
             recovered_at: None,
@@ -2377,6 +2387,9 @@ pub(crate) fn candidate_snapshot(candidate: &StuckCandidate) -> Value {
     if !candidate.typed_at_present {
         snapshot.remove("typed_at");
     }
+    if let Some(invalid) = &candidate.native_binding_invalid {
+        snapshot.insert("native_binding".into(), invalid.clone());
+    }
     Value::Object(snapshot)
 }
 
@@ -2387,12 +2400,19 @@ pub(crate) fn candidate_from_snapshot(value: &Value) -> Option<StuckCandidate> {
         .get("native_binding")
         .and_then(Value::as_array)
         .and_then(|parts| {
+            if parts.len() != 3 {
+                return None;
+            }
             Some((
                 parts.first()?.as_i64()?,
                 parts.get(1)?.as_str()?.to_owned(),
                 parts.get(2)?.as_str()?.to_owned(),
             ))
         });
+    let native_binding_invalid = row
+        .get("native_binding")
+        .filter(|value| json_truthy(value) && native_binding.is_none())
+        .cloned();
     let extra_fields = row
         .iter()
         .filter(|(key, _)| !CANDIDATE_SNAPSHOT_FIELDS.contains(&key.as_str()))
@@ -2445,6 +2465,7 @@ pub(crate) fn candidate_from_snapshot(value: &Value) -> Option<StuckCandidate> {
         typed_at: row.get("typed_at").and_then(Value::as_f64),
         typed_at_present: row.contains_key("typed_at"),
         native_binding,
+        native_binding_invalid,
         recovery_outcome: string("recovery_outcome"),
         recovery_detail: string("recovery_detail"),
         recovered_at: row.get("recovered_at").and_then(Value::as_f64),
@@ -2716,6 +2737,7 @@ impl Flock {
         {
             candidate.typed_at = message.typed_at.or(existing.typed_at);
             candidate.native_binding = existing.native_binding.clone();
+            candidate.native_binding_invalid = existing.native_binding_invalid.clone();
             candidate.recovery_outcome = existing.recovery_outcome.clone();
             candidate.recovery_detail = existing.recovery_detail.clone();
             candidate.recovered_at = existing.recovered_at;

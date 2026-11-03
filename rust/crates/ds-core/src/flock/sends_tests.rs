@@ -20,6 +20,7 @@ struct Pane {
     gone: bool,
     federated: bool,
     keys: Vec<(String, String)>,
+    after_key_screen: Option<String>,
     reads: RefCell<Vec<(String, bool)>>,
     screen_script: RefCell<VecDeque<Option<String>>>,
     status_script: RefCell<VecDeque<Option<String>>>,
@@ -59,6 +60,9 @@ impl SendEnv for Pane {
     fn send_key(&mut self, pane_id: &str, key: &str) -> (bool, String) {
         self.events.push("key");
         self.keys.push((pane_id.to_string(), key.to_string()));
+        if let Some(screen) = self.after_key_screen.take() {
+            self.screens.insert(pane_id.to_string(), screen);
+        }
         (true, "sent".to_string())
     }
     fn federated_input(&self) -> bool {
@@ -2367,8 +2371,7 @@ fn unwedge_reserves_before_one_key_and_does_not_claim_unchanged_text() {
     env.panes
         .push(serde_json::json!({"pane_id": "%1", "pane_pid": std::process::id()}));
     env.statuses.insert("%1".into(), "idle".into());
-    env.screens
-        .insert("%1".into(), "│ ❯ stuck body\n────────────\n".into());
+    env.screens.insert("%1".into(), frame("stuck body", &[]));
     flock
         .sent_text_by_pane
         .lock()
@@ -2407,6 +2410,51 @@ fn unwedge_reserves_before_one_key_and_does_not_claim_unchanged_text() {
 }
 
 #[test]
+fn unwedge_verifies_a_newly_cleared_composer_after_the_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state.json");
+    let flock = persistent_recovery_flock(dir.path(), &state);
+    {
+        let mut config = flock.stuck_config.lock().unwrap();
+        config.threshold_s = 1.0;
+        config.observation_interval_s = 0.1;
+    }
+    let mut env = Pane::default();
+    env.panes
+        .push(serde_json::json!({"pane_id": "%1", "pane_pid": std::process::id()}));
+    env.statuses.insert("%1".into(), "idle".into());
+    env.screens.insert("%1".into(), frame("stuck body", &[]));
+    env.after_key_screen = Some(frame("\x1b[2mAsk Codex to do anything\x1b[0m", &[]));
+    flock
+        .sent_text_by_pane
+        .lock()
+        .unwrap()
+        .insert("%1".into(), vec!["stuck body".into()]);
+    let mut message = Message::new("m1", "%1", "writer", "stuck body", "send_text");
+    message.created_at = 1.0;
+    message.status = "failed".into();
+    message.attempt_generation = pane_generation(&env, "%1");
+    flock.note_stuck_candidate(&message);
+    assert!(flock.unwedge(
+        &mut env,
+        "%1",
+        "stuck body",
+        Some(98.0),
+        Some(&message),
+        100.0,
+        None,
+        true
+    ));
+    assert_eq!(1, env.keys.len());
+    assert_eq!(
+        flock.stuck_candidates.lock().unwrap()["%1"]
+            .recovery_outcome
+            .as_deref(),
+        Some("consumed")
+    );
+}
+
+#[test]
 fn unwedge_refuses_disabled_persistence_and_edited_text() {
     let dir = tempfile::tempdir().unwrap();
     let flock = Flock::new(dir.path().join("launches"), dir.path().join("lanes"), false);
@@ -2414,10 +2462,8 @@ fn unwedge_refuses_disabled_persistence_and_edited_text() {
     env.panes
         .push(serde_json::json!({"pane_id": "%1", "pane_pid": std::process::id()}));
     env.statuses.insert("%1".into(), "idle".into());
-    env.screens.insert(
-        "%1".into(),
-        "│ ❯ stuck body plus edit\n────────────\n".into(),
-    );
+    env.screens
+        .insert("%1".into(), frame("stuck body plus edit", &[]));
     flock
         .sent_text_by_pane
         .lock()
@@ -2438,8 +2484,7 @@ fn unwedge_refuses_disabled_persistence_and_edited_text() {
         true
     ));
     assert!(env.keys.is_empty());
-    env.screens
-        .insert("%1".into(), "│ ❯ stuck body\n────────────\n".into());
+    env.screens.insert("%1".into(), frame("stuck body", &[]));
     assert!(!flock.unwedge(
         &mut env,
         "%1",
@@ -2451,6 +2496,24 @@ fn unwedge_refuses_disabled_persistence_and_edited_text() {
         true
     ));
     assert!(env.keys.is_empty());
+}
+
+#[test]
+fn owned_recovery_evidence_preserves_malformed_binding_as_a_refusal() {
+    let row = serde_json::json!({
+        "message_id": "m1", "created_at": 1.0, "text": "stuck body",
+        "generation": "pid:1:start:2", "eligible": true,
+        "native_binding": [1, "2", "session", "extra"]
+    });
+    let candidate = candidate_from_snapshot(&row).unwrap();
+    assert!(candidate.native_binding.is_none());
+    assert_eq!(
+        candidate.native_binding_invalid,
+        Some(row["native_binding"].clone())
+    );
+    let round_trip = candidate_snapshot(&candidate);
+    assert_eq!(round_trip["native_binding"], row["native_binding"]);
+    assert!(round_trip.get("typed_at").is_none());
 }
 
 #[test]
