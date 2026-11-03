@@ -20,7 +20,7 @@ impl LoopRuntimeAdapter {
 
     #[allow(dead_code)] // The complete PushEnv implementation belongs to its assembly leaf.
     pub(crate) fn helper_pushenv_lane_agent_alive(&self, pane_id: &str) -> Option<bool> {
-        let Some(registered_pane_pid) = self
+        let registered_pane_pid = self
             .flock
             .with_roles(|roles, _| {
                 Ok(roles.entry(pane_id)?.map(|entry| {
@@ -30,25 +30,26 @@ impl LoopRuntimeAdapter {
                     })
                 }))
             })
-            .ok()?
-        else {
-            return None;
+            .ok()?;
+        let pane_pid = match registered_pane_pid {
+            Some(Some(pid)) => pid,
+            Some(None) => {
+                let terminal_factory = std::sync::Arc::clone(&self.terminal_factory);
+                let pane_id = pane_id.to_owned();
+                std::thread::Builder::new()
+                    .name("push-lane-pane-info".into())
+                    .spawn(move || {
+                        (terminal_factory)()
+                            .get_pane(&pane_id)
+                            .and_then(|pane| pane.pane_pid)
+                    })
+                    .ok()?
+                    .join()
+                    .ok()
+                    .flatten()?
+            }
+            None => return None,
         };
-        let pane_pid = registered_pane_pid.or_else(|| {
-            let terminal_factory = std::sync::Arc::clone(&self.terminal_factory);
-            let pane_id = pane_id.to_owned();
-            std::thread::Builder::new()
-                .name("push-lane-pane-info".into())
-                .spawn(move || {
-                    (terminal_factory)()
-                        .get_pane(&pane_id)
-                        .and_then(|pane| pane.pane_pid)
-                })
-                .ok()?
-                .join()
-                .ok()
-                .flatten()
-        })?;
         super::delivery::lane_agent_alive_for_pane_pid(pane_pid)
     }
 }
