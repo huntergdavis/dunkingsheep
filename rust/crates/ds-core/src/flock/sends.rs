@@ -3121,8 +3121,34 @@ fn candidate_is_newer(left: &StuckCandidate, right: &StuckCandidate) -> bool {
 /// outbox mutex is released, matching Python's `_enqueue` then `_save` ordering.
 /// The store reads the current whole-Flock state when called, so a fast worker may
 /// already have changed the queue by then.
+#[derive(Debug)]
+pub enum SnapshotSaveFailure {
+    Io(DunkError),
+    Other(DunkError),
+}
+
+impl SnapshotSaveFailure {
+    pub fn into_dunk_error(self) -> DunkError {
+        match self {
+            Self::Io(error) | Self::Other(error) => error,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum EnqueueFailure {
+    Worker(DunkError),
+    Snapshot(SnapshotSaveFailure),
+}
+
 pub trait SnapshotStore: Send + Sync {
     fn save(&self, flock: &Flock) -> Result<(), DunkError>;
+
+    /// Classify the persistence boundary for Python paths that ignore only OSError.
+    /// Test or alternate stores default to non-I/O errors unless they can prove otherwise.
+    fn save_classified(&self, flock: &Flock) -> Result<(), SnapshotSaveFailure> {
+        self.save(flock).map_err(SnapshotSaveFailure::Other)
+    }
 }
 
 /// Ensure the per-pane delivery worker exists. `enqueue` calls this while holding
@@ -4506,6 +4532,26 @@ impl Flock {
             wake.ensure_worker(self, &pane_id)?;
         }
         store.save(self)
+    }
+
+    /// The dunk `_enqueue` compatibility path: worker creation errors remain visible,
+    /// while the later save retains its classified I/O boundary for the caller.
+    pub fn enqueue_classified(
+        self: &Arc<Self>,
+        message: Message,
+        wake: &dyn OutboxWake,
+        store: &dyn SnapshotStore,
+    ) -> Result<(), EnqueueFailure> {
+        let pane_id = message.pane_id.clone();
+        {
+            let mut outbox = outbox_lock(&self.outbox);
+            outbox.entry(pane_id.clone()).or_default().push(message);
+            wake.ensure_worker(self, &pane_id)
+                .map_err(EnqueueFailure::Worker)?;
+        }
+        store
+            .save_classified(self)
+            .map_err(EnqueueFailure::Snapshot)
     }
 
     /// Send one text message through the shared guarded delivery path. With the default hold

@@ -11,7 +11,10 @@ use std::sync::{Arc, OnceLock};
 use regex::Regex;
 use serde_json::{json, Map, Value};
 
-use super::sends::{DunkDeliveryAction, OutboxWake, SendPreparationEnv, SnapshotStore};
+use super::sends::{
+    DunkDeliveryAction, EnqueueFailure, OutboxWake, SendPreparationEnv, SnapshotSaveFailure,
+    SnapshotStore,
+};
 use super::Flock;
 use crate::clock;
 use crate::error::DunkError;
@@ -676,6 +679,11 @@ impl DunkList {
         }
     }
 
+    /// Manual test-send status is independent of the scheduled timer running bit/deadline.
+    pub(crate) fn set_fire_status(handle: &DunkerHandle, status: &str) {
+        Self::lock_dunker(handle).status = status.to_owned();
+    }
+
     pub(crate) fn set_timer_error(handle: &DunkerHandle, error: &str) {
         let Some(mut dunker) = Self::lock_running_dunker(handle) else {
             return;
@@ -815,7 +823,7 @@ impl DunkList {
 
     /// Apply the synchronous fire outcome to the dunk if it still exists. Removing a dunk
     /// concurrently with its send leaves the in-flight transition operating on its own handle.
-    fn finish_fire(handle: &DunkerHandle, ok: bool, detail: &str) {
+    pub(crate) fn finish_fire(handle: &DunkerHandle, ok: bool, detail: &str) {
         let mut dunker = Self::lock_dunker(handle);
         if ok {
             dunker.status = format!("Tested {}", chrono::Local::now().format("%H:%M:%S"));
@@ -1325,9 +1333,15 @@ impl Flock {
         store.save(self)
     }
 
-    /// `Flock.fire` with `wait=true`: expand and synchronously fire one dunk through the shared
-    /// guarded direct-send path, then persist the resulting dunk counters via the whole-state
-    /// snapshot seam. Timer scheduling and asynchronous fire workers belong to later slices.
+    /// Capture one actual Dunker lifetime and mark it as sending before any countdown elapses.
+    /// Manual-fire workers retain this handle even if the visible row is later removed/replaced.
+    pub(crate) fn capture_fire(&self, dunk_id: &str) -> Result<DunkerHandle, DunkError> {
+        self.dunks.begin_fire(dunk_id)
+    }
+
+    /// `Flock.fire` with `wait=true`: expand and synchronously fire one captured dunk through
+    /// the shared guarded direct-send path. Kept as the immediate public operation; the runtime
+    /// manual-fire owner uses `capture_fire` once before countdown and this same captured path.
     pub fn fire(
         self: &Arc<Self>,
         dunk_id: &str,
@@ -1336,11 +1350,22 @@ impl Flock {
         store: Arc<impl SnapshotStore + 'static>,
         permission: impl FnMut() -> Option<String>,
     ) -> Result<Value, DunkError> {
-        let handle = self.dunks.begin_fire(dunk_id)?;
-        let dunker = DunkList::lock_dunker(&handle).clone();
-        let snapshot = DunkList::send_snapshot(&handle);
+        let handle = self.capture_fire(dunk_id)?;
+        self.fire_captured(&handle, env, wake, store, permission)
+    }
+
+    pub(crate) fn fire_captured(
+        self: &Arc<Self>,
+        handle: &DunkerHandle,
+        env: &mut dyn SendPreparationEnv,
+        wake: &dyn OutboxWake,
+        store: Arc<impl SnapshotStore + 'static>,
+        permission: impl FnMut() -> Option<String>,
+    ) -> Result<Value, DunkError> {
+        let dunker = DunkList::lock_dunker(handle).clone();
+        let snapshot = DunkList::send_snapshot(handle);
         let action_store: Arc<dyn SnapshotStore> = store.clone();
-        let action = DunkDeliveryAction::new(Arc::clone(&handle), action_store);
+        let action = DunkDeliveryAction::new(Arc::clone(handle), action_store);
         let (sent, send_ok, detail, blocker) =
             super::sends::send_dunk_now(self, &action, env, permission);
         if !sent && blocker.is_some() && snapshot.hold_while_typing {
@@ -1351,9 +1376,15 @@ impl Flock {
                 &dunker.id,
             )?;
             outer.set_dunk_delivery(action);
-            DunkList::queue_fire(&handle);
+            DunkList::queue_fire(handle);
             let message_id = outer.id.clone();
-            self.enqueue(outer, wake, store.as_ref())?;
+            match self.enqueue_classified(outer, wake, store.as_ref()) {
+                Ok(()) | Err(EnqueueFailure::Snapshot(SnapshotSaveFailure::Io(_))) => {}
+                Err(EnqueueFailure::Worker(error))
+                | Err(EnqueueFailure::Snapshot(SnapshotSaveFailure::Other(error))) => {
+                    return Err(error);
+                }
+            }
             let message = format!(
                 "queued: the box in {} would not clear",
                 snapshot.target_label
@@ -1367,7 +1398,7 @@ impl Flock {
             }));
         }
         let ok = sent && send_ok.unwrap_or(false);
-        DunkList::finish_fire(&handle, ok, &detail);
+        DunkList::finish_fire(handle, ok, &detail);
         Ok(json!({
             "id": dunker.id,
             "ok": ok,

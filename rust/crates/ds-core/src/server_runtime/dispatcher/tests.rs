@@ -1,4 +1,6 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::thread::ThreadId;
+use std::time::Duration;
 
 use serde_json::json;
 use tokio::runtime::Builder;
@@ -20,12 +22,48 @@ fn handlers() -> api::Dispatcher {
     handlers
 }
 
+fn dunk_handlers() -> api::Dispatcher {
+    let mut handlers = api::Dispatcher::new();
+    handlers.register_stop_all_fire_list_dunks();
+    handlers
+}
+
 fn factory(fail_grouped_panes: Option<TerminalError>) -> LoopTerminalFactory {
     Arc::new(move || {
         let mut terminal = FakeTerminal::new();
         terminal.fail_grouped_panes = fail_grouped_panes.clone();
         Box::new(terminal)
     })
+}
+
+fn thread_tracking_factory(threads: Arc<Mutex<Vec<ThreadId>>>) -> LoopTerminalFactory {
+    Arc::new(move || {
+        threads.lock().unwrap().push(std::thread::current().id());
+        Box::new(FakeTerminal::new())
+    })
+}
+
+fn add_dunk(
+    services: &RuntimeServices,
+    text: &str,
+    start: bool,
+    interval: &str,
+    max_sends: Option<&str>,
+) {
+    let pane = json!({"pane_id": "w1:p1", "tab_label": "1"});
+    services
+        .add_dunk(
+            pane.as_object(),
+            &crate::flock::dunks::AddArgs {
+                text: Some(text.into()),
+                interval: Some(interval.into()),
+                start,
+                max_sends: max_sends.map(str::to_owned),
+                hold_while_typing: Some("false".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
 }
 
 fn make_services(
@@ -194,6 +232,369 @@ fn dispatcher_close_keeps_real_outbox_workers_until_owner_shutdown() {
         .recv_timeout(Duration::from_secs(2))
         .expect("owner shutdown did not join the outbox worker");
     shutdown.join().unwrap();
+}
+
+#[test]
+fn dispatcher_fire_dunk_is_synchronous_expands_text_and_keeps_manual_max_sends() {
+    let threads = Arc::new(Mutex::new(Vec::new()));
+    let (_dir, services) = make_services(
+        "dispatcher-manual-fire-sync",
+        thread_tracking_factory(Arc::clone(&threads)),
+        None,
+    );
+    add_dunk(&services, "hello from {id}", false, "60", Some("1"));
+    let dispatcher = services.dispatcher(dunk_handlers());
+    let request_thread = std::thread::current().id();
+    let result = dispatcher
+        .dispatch(
+            "fire_dunk",
+            &json!({"id": "d1", "countdown_s": 0, "wait": true}),
+            &request("w2:p2"),
+        )
+        .unwrap();
+
+    assert_eq!(result["id"], "d1");
+    assert_eq!(result["ok"], true);
+    assert_eq!(result["queued"], false);
+    let row = services.flock().dunks.get("d1").unwrap();
+    assert_eq!(row["send_count"], 1);
+    assert_eq!(row["last_sent_text"], "hello from d1");
+    assert!(
+        services.flock().dunks.get("d1").is_ok(),
+        "manual fire never applies max_sends removal"
+    );
+    assert!(threads
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|thread| *thread != request_thread));
+    services.shutdown();
+}
+
+#[test]
+fn dispatcher_stop_all_uses_runtime_and_invalidates_shared_dunk_view() {
+    let (_dir, services) = make_services("dispatcher-stop-all", factory(None), None);
+    add_dunk(&services, "scheduled", true, "60", None);
+    let dispatcher = services.dispatcher(dunk_handlers());
+    let owner = request("w2:p2");
+    let before = dispatcher
+        .dispatch("list_dunks", &json!({}), &owner)
+        .unwrap();
+    assert_eq!(before["dunks"][0]["running"], true);
+
+    let stopped = dispatcher.dispatch("stop_all", &json!({}), &owner).unwrap();
+    assert_eq!(stopped["dunks"][0]["running"], false);
+    let after = dispatcher
+        .dispatch("list_dunks", &json!({}), &owner)
+        .unwrap();
+    assert_eq!(after["dunks"][0]["running"], false);
+    services.shutdown();
+}
+
+#[test]
+fn dispatcher_fire_wait_false_runs_countdown_and_joins_before_shutdown_teardown() {
+    let threads = Arc::new(Mutex::new(Vec::new()));
+    let (_dir, services) = make_services(
+        "dispatcher-manual-fire-async",
+        thread_tracking_factory(Arc::clone(&threads)),
+        None,
+    );
+    add_dunk(&services, "async {id}", false, "60", None);
+    let dispatcher = services.dispatcher(dunk_handlers());
+    let (countdown, step_rx, release_step) = super::super::CountdownGate::channel();
+    let (submit, submit_rx, release_submit) = super::super::SubmitGate::channel();
+    services.set_manual_fire_test_gates(Some(countdown), Some(submit));
+    let request_thread = std::thread::current().id();
+    let scheduled = dispatcher
+        .dispatch(
+            "fire_dunk",
+            &json!({"id": "d1", "countdown_s": 2, "wait": false}),
+            &request("w2:p2"),
+        )
+        .unwrap();
+    assert_eq!(
+        scheduled,
+        json!({"id": "d1", "ok": null, "message": "test send scheduled"})
+    );
+    assert_eq!(step_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 2);
+    assert_eq!(
+        services.flock().dunks.get("d1").unwrap()["status"],
+        "Test in 2..."
+    );
+    release_step.send(()).unwrap();
+    assert_eq!(step_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 1);
+    assert_eq!(
+        services.flock().dunks.get("d1").unwrap()["status"],
+        "Test in 1..."
+    );
+    release_step.send(()).unwrap();
+    submit_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(services.flock().dunks.get("d1").unwrap()["send_count"], 0);
+
+    let stopping = Arc::clone(&services);
+    let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel();
+    let shutdown = std::thread::spawn(move || {
+        stopping.shutdown();
+        shutdown_tx.send(()).unwrap();
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !services.manual_fire_is_stopped() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "shutdown did not close manual-fire admission"
+        );
+        std::thread::yield_now();
+    }
+    assert!(
+        shutdown_rx.try_recv().is_err(),
+        "shutdown must wait for the active submit worker"
+    );
+    release_submit.send(()).unwrap();
+    shutdown_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("shutdown joins the active manual-fire worker");
+    shutdown.join().unwrap();
+
+    let row = services.flock().dunks.get("d1").unwrap();
+    assert_eq!(row["send_count"], 1);
+    assert_eq!(row["last_sent_text"], "async d1");
+    assert!(threads
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|thread| *thread != request_thread));
+    assert_eq!(services.completed_manual_fires().len(), 1);
+    services.shutdown(); // repeated shutdown is harmless
+}
+
+#[test]
+fn dispatcher_shutdown_cancels_manual_countdown_before_worker_terminal_creation() {
+    let threads = Arc::new(Mutex::new(Vec::new()));
+    let (_dir, services) = make_services(
+        "dispatcher-manual-fire-cancel",
+        thread_tracking_factory(Arc::clone(&threads)),
+        None,
+    );
+    add_dunk(&services, "cancel {id}", false, "60", None);
+    let dispatcher = services.dispatcher(dunk_handlers());
+    let (countdown, step_rx, release_step) = super::super::CountdownGate::channel();
+    services.set_manual_fire_test_gates(Some(countdown), None);
+    let request_thread = std::thread::current().id();
+    dispatcher
+        .dispatch(
+            "fire_dunk",
+            &json!({"id": "d1", "countdown_s": 1, "wait": false}),
+            &request("w2:p2"),
+        )
+        .unwrap();
+    assert_eq!(step_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 1);
+    assert_eq!(
+        services.flock().dunks.get("d1").unwrap()["status"],
+        "Test in 1..."
+    );
+
+    let stopping = Arc::clone(&services);
+    let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel();
+    let shutdown = std::thread::spawn(move || {
+        stopping.shutdown();
+        shutdown_tx.send(()).unwrap();
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !services.manual_fire_is_stopped() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "shutdown did not close manual-fire admission"
+        );
+        std::thread::yield_now();
+    }
+    release_step.send(()).unwrap();
+    shutdown_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("shutdown wakes and joins the countdown worker");
+    shutdown.join().unwrap();
+    let row = services.flock().dunks.get("d1").unwrap();
+    assert_eq!(row["status"], "Test failed");
+    assert_eq!(
+        row["last_error"],
+        "manual dunk fire cancelled during runtime shutdown"
+    );
+    assert_eq!(services.completed_manual_fires().len(), 1);
+    assert!(threads
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|thread| *thread == request_thread));
+}
+
+#[test]
+fn dispatcher_manual_fire_retains_captured_lifetime_across_same_id_replacement() {
+    let (_dir, services) = make_services("dispatcher-manual-fire-replacement", factory(None), None);
+    add_dunk(&services, "old {id}", false, "60", None);
+    let old_handle = services.flock().dunks.handle("d1").unwrap();
+    let dispatcher = services.dispatcher(dunk_handlers());
+    let (countdown, step_rx, release_step) = super::super::CountdownGate::channel();
+    services.set_manual_fire_test_gates(Some(countdown), None);
+    let dispatching = Arc::clone(&dispatcher);
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
+    let request_ctx = request("w2:p2");
+    let request_thread = std::thread::spawn(move || {
+        result_tx
+            .send(dispatching.dispatch(
+                "fire_dunk",
+                &json!({"id": "d1", "countdown_s": 1, "wait": true}),
+                &request_ctx,
+            ))
+            .unwrap();
+    });
+    assert_eq!(step_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 1);
+
+    services.remove_dunk("d1").unwrap();
+    let replacement = json!({
+        "next_id": 2,
+        "dunkers": [{
+            "id": "d1",
+            "target_pane_id": "w1:p1",
+            "target_tab": "1",
+            "text": "replacement {id}",
+            "created_at": 3.0,
+            "hold_while_typing": false
+        }]
+    });
+    services
+        .flock()
+        ._load_dunks(replacement.as_object().unwrap());
+    release_step.send(()).unwrap();
+    let result = result_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("captured fire completed")
+        .unwrap();
+    request_thread.join().unwrap();
+    assert_eq!(result["ok"], true);
+    let old = crate::flock::dunks::DunkList::handle_row(&old_handle);
+    assert_eq!(old["last_sent_text"], "old d1");
+    assert_eq!(old["send_count"], 1);
+    let replacement = services.flock().dunks.get("d1").unwrap();
+    assert_eq!(replacement["text"], "replacement {id}");
+    assert_eq!(replacement["send_count"], 0);
+    services.shutdown();
+}
+
+#[test]
+fn dispatcher_fire_argument_errors_precede_lookup_and_invalid_targets_do_not_spawn() {
+    let threads = Arc::new(Mutex::new(Vec::new()));
+    let (_dir, services) = make_services(
+        "dispatcher-manual-fire-errors",
+        thread_tracking_factory(Arc::clone(&threads)),
+        None,
+    );
+    let pane = None;
+    services
+        .add_dunk(
+            pane,
+            &crate::flock::dunks::AddArgs {
+                text: Some("no target".into()),
+                start: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let dispatcher = services.dispatcher(dunk_handlers());
+    let owner = request("w2:p2");
+    let bad_integer = dispatcher
+        .dispatch(
+            "fire_dunk",
+            &json!({"id": "not-a-dunk", "countdown_s": "bad"}),
+            &owner,
+        )
+        .unwrap_err();
+    assert_eq!(
+        bad_integer.to_string(),
+        "invalid literal for int() with base 10: 'bad'"
+    );
+    let missing_id = dispatcher
+        .dispatch(
+            "fire_dunk",
+            &json!({"id": "missing", "countdown_s": 0}),
+            &owner,
+        )
+        .unwrap_err();
+    assert_eq!(missing_id.to_string(), "no dunk with id \"missing\"");
+    let no_target = dispatcher
+        .dispatch("fire_dunk", &json!({"id": "d1", "countdown_s": 0}), &owner)
+        .unwrap_err();
+    assert_eq!(no_target.to_string(), "d1 has no target");
+    assert!(threads
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|thread| *thread == std::thread::current().id()));
+    services.shutdown();
+}
+
+#[test]
+fn dispatcher_manual_fire_spawn_failure_records_error_without_orphan_worker() {
+    let (_dir, services) = make_services("dispatcher-manual-fire-spawn-error", factory(None), None);
+    add_dunk(&services, "spawn failure", false, "60", None);
+    services.fail_next_manual_fire_spawn();
+    let dispatcher = services.dispatcher(dunk_handlers());
+    let error = dispatcher
+        .dispatch(
+            "fire_dunk",
+            &json!({"id": "d1", "countdown_s": 0, "wait": true}),
+            &request("w2:p2"),
+        )
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "could not start manual dunk fire: injected thread spawn failure"
+    );
+    let row = services.flock().dunks.get("d1").unwrap();
+    assert_eq!(row["status"], "Test failed");
+    assert_eq!(row["last_error"], "injected thread spawn failure");
+    assert!(services.completed_manual_fires().is_empty());
+    services.shutdown();
+}
+
+#[test]
+fn dispatcher_manual_fire_preserves_running_timer_deadline() {
+    let (_dir, services) = make_services(
+        "dispatcher-manual-fire-timer-preserved",
+        factory(None),
+        None,
+    );
+    add_dunk(&services, "timer {id}", true, "60", None);
+    let before = services.flock().dunks.get("d1").unwrap();
+    let deadline = before["next_send_at"].as_f64().unwrap();
+    let dispatcher = services.dispatcher(dunk_handlers());
+    let (countdown, step_rx, release_step) = super::super::CountdownGate::channel();
+    services.set_manual_fire_test_gates(Some(countdown), None);
+    let dispatching = Arc::clone(&dispatcher);
+    let request_ctx = request("w2:p2");
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        result_tx
+            .send(dispatching.dispatch(
+                "fire_dunk",
+                &json!({"id":"d1","countdown_s":1,"wait":true}),
+                &request_ctx,
+            ))
+            .unwrap();
+    });
+    assert_eq!(step_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 1);
+    release_step.send(()).unwrap();
+    assert_eq!(
+        result_rx
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap()["ok"],
+        true
+    );
+    worker.join().unwrap();
+    let after = services.flock().dunks.get("d1").unwrap();
+    assert_eq!(after["running"], true);
+    assert_eq!(after["next_send_at"].as_f64().unwrap(), deadline);
+    services.stop_dunk("d1").unwrap();
+    services.shutdown();
 }
 
 #[test]

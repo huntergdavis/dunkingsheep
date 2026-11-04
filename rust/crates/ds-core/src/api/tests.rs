@@ -84,6 +84,7 @@ struct DunkHandlerEnv {
     terminal: Mutex<Box<dyn Terminal>>,
     panes: Vec<Value>,
     dunks: DunkList,
+    fire_calls: Mutex<Vec<(String, i64, bool)>>,
 }
 
 impl DunkHandlerEnv {
@@ -102,6 +103,7 @@ impl DunkHandlerEnv {
                 "workspace_label": "project"
             })],
             dunks: DunkList::new(),
+            fire_calls: Mutex::new(Vec::new()),
         }
     }
 }
@@ -143,6 +145,18 @@ impl CommandEnv for DunkHandlerEnv {
 
     fn remove_dunk(&self, id: &str) -> Result<serde_json::Map<String, Value>, DunkError> {
         self.dunks.remove(id)
+    }
+
+    fn stop_all_dunks(&self) -> Result<Vec<serde_json::Map<String, Value>>, DunkError> {
+        Ok(self.dunks.stop_all())
+    }
+
+    fn fire_dunk(&self, id: &str, countdown_s: i64, wait: bool) -> Result<Value, DunkError> {
+        self.fire_calls
+            .lock()
+            .unwrap()
+            .push((id.into(), countdown_s, wait));
+        Ok(json!({"id": id, "countdown_s": countdown_s, "wait": wait}))
     }
 
     fn now_s(&self) -> f64 {
@@ -2336,6 +2350,99 @@ fn h_remove_dunk_stops_and_deletes() {
 }
 
 #[test]
+fn h_stop_all_matches_python_and_stops_every_running_dunk() {
+    let (_dir, flock) = flock();
+    let env = DunkHandlerEnv::new();
+    let pane = env.panes[0].as_object().unwrap().clone();
+    for text in ["one", "two"] {
+        env.dunks
+            .add(
+                Some(&pane),
+                &crate::flock::dunks::AddArgs {
+                    text: Some(text.into()),
+                    start: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+    }
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_stop_all_fire_list_dunks();
+    let request = RequestCtx::default();
+    let result = dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("owner", true),
+        "stop_all",
+        None,
+        &request,
+        &env,
+    )
+    .unwrap();
+    assert_eq!(result["dunks"].as_array().unwrap().len(), 2);
+    assert!(result["dunks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|row| !row["running"].as_bool().unwrap()));
+    assert_eq!(
+        dispatcher.registration_attempts(),
+        &["stop_all", "fire_dunk", "list_dunks"]
+    );
+}
+
+#[test]
+fn h_fire_dunk_parses_python_arguments_before_runtime_lookup_and_enforces_owner_gate() {
+    let (_dir, flock) = flock();
+    let env = DunkHandlerEnv::new();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_stop_all_fire_list_dunks();
+    let request = RequestCtx::default();
+    let result = dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("owner", true),
+        "fire_dunk",
+        args(json!({"id": "d3", "countdown_s": "2", "wait": "no"})),
+        &request,
+        &env,
+    )
+    .unwrap();
+    assert_eq!(result, json!({"id": "d3", "countdown_s": 2, "wait": false}));
+    assert_eq!(
+        *env.fire_calls.lock().unwrap(),
+        vec![("d3".into(), 2, false)]
+    );
+
+    let invalid = refusal(dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("owner", true),
+        "fire_dunk",
+        args(json!({"id": "missing", "countdown_s": "not-an-int"})),
+        &request,
+        &env,
+    ));
+    assert_eq!(
+        invalid,
+        "invalid literal for int() with base 10: 'not-an-int'"
+    );
+    assert_eq!(env.fire_calls.lock().unwrap().len(), 1);
+
+    let denied = refusal(dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("worker", false),
+        "fire_dunk",
+        args(json!({"id": "d3"})),
+        &request,
+        &env,
+    ));
+    assert_eq!(denied, "fire_dunk needs a superuser");
+    assert_eq!(env.fire_calls.lock().unwrap().len(), 1);
+}
+
+#[test]
 fn dunk_lifecycle_handlers_register_only_this_group_and_refuse_without_provider() {
     let (_dir, flock) = flock();
     let mut dispatcher = Dispatcher::new();
@@ -2937,6 +3044,70 @@ fn h_status_matches_python() {
     .expect("explicit availability probe");
     assert_eq!(checked["herdr_available"], true);
     assert_eq!(env.probes.get(), 2);
+}
+
+#[test]
+fn h_list_dunks_matches_python_and_honors_fresh() {
+    let (_dir, flock) = flock();
+    let env = ParityEnv::new(None);
+    let mut d = Dispatcher::new();
+    d.register_stop_all_fire_list_dunks();
+    let role = FixedRole("anonymous", false);
+
+    env.dunks
+        .add(
+            None,
+            &crate::flock::dunks::AddArgs {
+                text: Some("first".into()),
+                ..Default::default()
+            },
+        )
+        .expect("first dunk");
+    let first = dispatch_with_env(
+        &d,
+        &flock,
+        &role,
+        "list_dunks",
+        None,
+        &RequestCtx::default(),
+        &env,
+    )
+    .expect("list dunks");
+    assert_eq!(first["dunks"].as_array().unwrap().len(), 1);
+    assert_eq!(first["dunks"][0]["text"], "first");
+
+    env.dunks
+        .add(
+            None,
+            &crate::flock::dunks::AddArgs {
+                text: Some("second".into()),
+                ..Default::default()
+            },
+        )
+        .expect("second dunk");
+    let cached = dispatch_with_env(
+        &d,
+        &flock,
+        &role,
+        "list_dunks",
+        None,
+        &RequestCtx::default(),
+        &env,
+    )
+    .expect("cached list dunks");
+    assert_eq!(cached["dunks"].as_array().unwrap().len(), 1);
+
+    let fresh = dispatch_with_env(
+        &d,
+        &flock,
+        &role,
+        "list_dunks",
+        args(json!({"fresh": true})),
+        &RequestCtx::default(),
+        &env,
+    )
+    .expect("fresh list dunks");
+    assert_eq!(fresh["dunks"].as_array().unwrap().len(), 2);
 }
 
 #[test]

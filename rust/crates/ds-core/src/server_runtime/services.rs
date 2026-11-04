@@ -247,6 +247,42 @@ impl RuntimeServices {
         self.outbox.stop_all_dunks()
     }
 
+    pub fn fire_dunk(
+        &self,
+        id: &str,
+        countdown_s: i64,
+        wait: bool,
+    ) -> Result<serde_json::Value, DunkError> {
+        if self.is_stopped() {
+            return Err(refusal("manual dunk fire runtime is shutting down"));
+        }
+        self.outbox.fire_dunk(id, countdown_s, wait)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_manual_fire_test_gates(
+        &self,
+        countdown: Option<Arc<super::outbox_runtime::CountdownGate>>,
+        submit: Option<Arc<super::outbox_runtime::SubmitGate>>,
+    ) {
+        self.outbox.set_manual_fire_test_gates(countdown, submit);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn manual_fire_is_stopped(&self) -> bool {
+        self.outbox.manual_fire_is_stopped()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_manual_fire_spawn(&self) {
+        self.outbox.fail_next_manual_fire_spawn();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn completed_manual_fires(&self) -> Vec<(String, String)> {
+        self.outbox.completed_manual_fires()
+    }
+
     pub fn halt_dunks_aimed_at(&self, panes: &[String]) -> Result<Vec<String>, DunkError> {
         self.outbox.halt_dunks_aimed_at(panes)
     }
@@ -380,6 +416,7 @@ impl RuntimeServices {
     /// its request threads (the remaining t1605 shutdown gate).
     pub fn shutdown(&self) {
         if !self.stopped.swap(true, Ordering::AcqRel) {
+            self.outbox.stop_manual_fire_workers();
             self.outbox.stop_timer_workers();
             self.allocator.stop_and_join();
             self.outbox.stop_outbox_workers();

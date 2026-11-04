@@ -39,6 +39,7 @@ pub(crate) fn production_handlers() -> Dispatcher {
     handlers.register_dunk_mutations();
     handlers.register_dunk_lifecycle();
     handlers.register_get_dunk();
+    handlers.register_stop_all_fire_list_dunks();
     handlers.register_send_text_keys_flush_box();
     handlers.register_clear_box_delivery_capability();
     handlers.register_respawn_pane();
@@ -99,6 +100,7 @@ mod tests {
         inner: FakeTerminal,
         observations: Arc<Mutex<SendObservations>>,
         read_script: Mutex<VecDeque<Option<String>>>,
+        shared_screen: Option<Arc<Mutex<String>>>,
     }
 
     fn tail_lines(screen: &str, lines: i64) -> String {
@@ -215,6 +217,9 @@ mod tests {
             lines: i64,
             ansi: bool,
         ) -> Result<Option<String>, TerminalError> {
+            if let Some(screen) = &self.shared_screen {
+                return Ok(Some(tail_lines(&screen.lock().unwrap(), lines)));
+            }
             if let Some(screen) = self.read_script.lock().unwrap().pop_front() {
                 return Ok(screen.map(|screen| tail_lines(&screen, lines)));
             }
@@ -270,6 +275,46 @@ mod tests {
                 inner,
                 observations: Arc::clone(&observations),
                 read_script: Mutex::new(read_script),
+                shared_screen: None,
+            })
+        })
+    }
+
+    fn manual_fire_factory(
+        observations: Arc<Mutex<SendObservations>>,
+        screen: Arc<Mutex<String>>,
+        outbox_started: std::sync::mpsc::Sender<()>,
+        release_outbox: Arc<(Mutex<bool>, Condvar)>,
+    ) -> LoopTerminalFactory {
+        let request_thread = std::thread::current().id();
+        let worker_factory_calls = Arc::new(AtomicUsize::new(0));
+        Arc::new(move || {
+            let current_thread = std::thread::current().id();
+            observations
+                .lock()
+                .unwrap()
+                .factory_threads
+                .push(current_thread);
+            if current_thread != request_thread {
+                let invocation = worker_factory_calls.fetch_add(1, Ordering::SeqCst);
+                if invocation == 1 {
+                    let _ = outbox_started.send(());
+                    let (released, wake) = &*release_outbox;
+                    let mut released = released.lock().unwrap();
+                    while !*released {
+                        released = wake.wait(released).unwrap();
+                    }
+                }
+            }
+            let mut inner = FakeTerminal::new();
+            for pane in &mut inner.panes {
+                pane.pane_pid = Some(std::process::id() as i64);
+            }
+            Box::new(DispatcherTerminal {
+                inner,
+                observations: Arc::clone(&observations),
+                read_script: Mutex::new(VecDeque::new()),
+                shared_screen: Some(Arc::clone(&screen)),
             })
         })
     }
@@ -515,6 +560,9 @@ mod tests {
             "start_dunk",
             "stop_dunk",
             "toggle_dunk",
+            "stop_all",
+            "fire_dunk",
+            "list_dunks",
             "owner_push",
             "owner_poll",
             "owner_take",
@@ -2082,6 +2130,224 @@ mod tests {
             .dispatch("task_cancel", &json!({"id":id,"reason":"done"}), &owner)
             .unwrap();
         assert_eq!(cancelled["status"], "cancelled");
+        services.shutdown();
+    }
+
+    #[test]
+    fn dispatcher_manual_fire_holds_then_delivers_through_real_outbox_callback() {
+        let observations = Arc::new(Mutex::new(SendObservations::default()));
+        let screen = Arc::new(Mutex::new("❯ human draft".to_owned()));
+        let (outbox_started_tx, outbox_started_rx) = std::sync::mpsc::channel();
+        let release_outbox = Arc::new((Mutex::new(false), Condvar::new()));
+        let terminal_factory = manual_fire_factory(
+            Arc::clone(&observations),
+            Arc::clone(&screen),
+            outbox_started_tx,
+            Arc::clone(&release_outbox),
+        );
+        let (_dir, services) = make_services("manual-fire-held", terminal_factory, None);
+        let pane = json!({"pane_id":"w1:p1","tab_label":"1"});
+        services
+            .add_dunk(
+                pane.as_object(),
+                &crate::flock::dunks::AddArgs {
+                    text: Some("held {id}".into()),
+                    start: false,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let mut handlers = crate::api::Dispatcher::new();
+        handlers.register_stop_all_fire_list_dunks();
+        let dispatcher = services.dispatcher(handlers);
+        let result = dispatcher
+            .dispatch(
+                "fire_dunk",
+                &json!({"id":"d1","wait":true}),
+                &request("w2:p2"),
+            )
+            .unwrap();
+        assert_eq!(result["queued"], true);
+        let message_id = result["message_id"].as_str().expect("queued message id");
+        assert!(services
+            .flock()
+            .outbox
+            .lock()
+            .unwrap()
+            .get("w1:p1")
+            .unwrap()
+            .iter()
+            .any(|message| message.id == message_id));
+
+        outbox_started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("canonical outbox worker created its own terminal");
+        *screen.lock().unwrap() = "❯ ".into();
+        let (released, wake) = &*release_outbox;
+        *released.lock().unwrap() = true;
+        wake.notify_all();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(8);
+        loop {
+            if services.flock().dunks.get("d1").unwrap()["send_count"] == 1 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "queued fire action was not delivered by the outbox callback"
+            );
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            services.flock().dunks.get("d1").unwrap()["last_sent_text"],
+            "held d1"
+        );
+        assert_eq!(observations.lock().unwrap().text.len(), 1);
+        services.shutdown();
+    }
+
+    #[test]
+    fn stop_all_ignores_snapshot_oserror_after_halt_and_invalidates_cached_rows() {
+        let (_dir, services) = make_services_with_persistence(
+            "stop-all-save-oserror",
+            Arc::new(|| Box::new(FakeTerminal::new())),
+            None,
+            true,
+        );
+        let pane = json!({"pane_id":"w1:p1","tab_label":"1"});
+        for text in ["first", "second"] {
+            services
+                .add_dunk(
+                    Some(pane.as_object().unwrap()),
+                    &crate::flock::dunks::AddArgs {
+                        text: Some(text.into()),
+                        interval: Some("60".into()),
+                        start: true,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+        }
+        assert_eq!(services.outbox.dunk_timer_worker_count(), 2);
+        let mut handlers = crate::api::Dispatcher::new();
+        handlers.register_stop_all_fire_list_dunks();
+        let dispatcher = services.dispatcher(handlers);
+        let owner = request("w2:p2");
+        assert!(dispatcher
+            .dispatch("list_dunks", &json!({}), &owner)
+            .unwrap()["dunks"][0]["running"]
+            .as_bool()
+            .unwrap());
+
+        let state_path = _dir.path().join("stop-all-save-oserror-whole-state.json");
+        std::fs::remove_file(&state_path).unwrap();
+        std::fs::create_dir(&state_path).unwrap();
+        let stopped = dispatcher
+            .dispatch("stop_all", &json!({}), &owner)
+            .expect("Python returns stopped rows when _save catches OSError");
+        assert_eq!(stopped["dunks"].as_array().unwrap().len(), 2);
+        assert!(stopped["dunks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["running"] == false && row["status"] == "Stopped"));
+        assert_eq!(services.outbox.dunk_timer_worker_count(), 0);
+        let listed = dispatcher
+            .dispatch("list_dunks", &json!({}), &owner)
+            .unwrap();
+        assert!(listed["dunks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["running"] == false));
+        std::fs::remove_dir(&state_path).unwrap();
+        services.shutdown();
+    }
+
+    #[test]
+    fn held_fire_ignores_snapshot_oserror_but_keeps_queue_live_and_cache_fresh() {
+        let observations = Arc::new(Mutex::new(SendObservations::default()));
+        let screen = Arc::new(Mutex::new("❯ human draft".to_owned()));
+        let (outbox_started_tx, outbox_started_rx) = std::sync::mpsc::channel();
+        let release_outbox = Arc::new((Mutex::new(false), Condvar::new()));
+        let terminal_factory = manual_fire_factory(
+            Arc::clone(&observations),
+            Arc::clone(&screen),
+            outbox_started_tx,
+            Arc::clone(&release_outbox),
+        );
+        let (dir, services) = make_services_with_persistence(
+            "manual-fire-save-oserror",
+            terminal_factory,
+            None,
+            true,
+        );
+        let pane = json!({"pane_id":"w1:p1","tab_label":"1"});
+        services
+            .add_dunk(
+                Some(pane.as_object().unwrap()),
+                &crate::flock::dunks::AddArgs {
+                    text: Some("held {id}".into()),
+                    start: false,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let mut handlers = crate::api::Dispatcher::new();
+        handlers.register_stop_all_fire_list_dunks();
+        let dispatcher = services.dispatcher(handlers);
+        let owner = request("w2:p2");
+        dispatcher
+            .dispatch("list_dunks", &json!({}), &owner)
+            .unwrap();
+
+        let state_path = dir.path().join("manual-fire-save-oserror-whole-state.json");
+        std::fs::remove_file(&state_path).unwrap();
+        std::fs::create_dir(&state_path).unwrap();
+        let result = dispatcher
+            .dispatch("fire_dunk", &json!({"id":"d1","wait":true}), &owner)
+            .expect("Python returns queued after _enqueue's _save catches OSError");
+        assert_eq!(result["queued"], true);
+        let message_id = result["message_id"].as_str().unwrap();
+        assert!(services
+            .flock
+            .outbox
+            .lock()
+            .unwrap()
+            .get("w1:p1")
+            .unwrap()
+            .iter()
+            .any(|message| message.id == message_id));
+        assert_eq!(
+            services.flock.dunks.get("d1").unwrap()["status"],
+            "Queued (typing)"
+        );
+        let cached = dispatcher
+            .dispatch("list_dunks", &json!({}), &owner)
+            .unwrap();
+        assert_eq!(cached["dunks"][0]["status"], "Queued (typing)");
+
+        outbox_started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("canonical outbox worker started and is held at its barrier");
+        std::fs::remove_dir(&state_path).unwrap();
+        *screen.lock().unwrap() = "❯ ".into();
+        let (released, wake) = &*release_outbox;
+        *released.lock().unwrap() = true;
+        wake.notify_all();
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while services.flock.dunks.get("d1").unwrap()["send_count"] != 1 {
+            assert!(
+                Instant::now() < deadline,
+                "queued fire callback did not send"
+            );
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            services.flock.dunks.get("d1").unwrap()["last_sent_text"],
+            "held d1"
+        );
+        assert_eq!(observations.lock().unwrap().text.len(), 1);
         services.shutdown();
     }
 }
