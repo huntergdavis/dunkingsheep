@@ -883,11 +883,40 @@ pub trait PoolradTaskStore {
 /// read-only candidate exporter; stores and exporters can be faked in tests.
 type PoolradExporter<'a> = dyn Fn(&Path) -> Result<Value, String> + 'a;
 
+/// Complete startup-captured paths; constructing a sync from these never reads
+/// the live process environment, including inside the default exporter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PoolradConfig {
+    pub repo: PathBuf,
+    pub queue_path: PathBuf,
+    pub credit_path: PathBuf,
+}
+
+impl PoolradConfig {
+    pub fn from_env(
+        env: &crate::config::Env,
+        home: &crate::config::CapturedPythonHome,
+    ) -> Result<Self, String> {
+        // Python evaluates os.environ.get's default eagerly at module import,
+        // even with an explicit (possibly empty) DUNKINGSHEEP_DIR.
+        let root = home.config_dir(env)?;
+        Ok(Self {
+            repo: env
+                .get("DUNKINGSHEEP_POOLRAD_REPO")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("/home/hunter/workspace/poolrad-decomp")),
+            queue_path: root.join("poolrad/strict-queue.json"),
+            credit_path: root.join("poolrad/credit-pending.json"),
+        })
+    }
+}
+
 pub struct PoolradSync<'a> {
     store: &'a dyn PoolradTaskStore,
     repo: PathBuf,
     exporter: Option<&'a PoolradExporter<'a>>,
     credit_path: Option<PathBuf>,
+    queue_path: Option<PathBuf>,
 }
 
 impl<'a> PoolradSync<'a> {
@@ -900,6 +929,17 @@ impl<'a> PoolradSync<'a> {
             repo,
             exporter: None,
             credit_path: None,
+            queue_path: None,
+        }
+    }
+
+    pub fn from_config(store: &'a dyn PoolradTaskStore, config: &PoolradConfig) -> Self {
+        Self {
+            store,
+            repo: config.repo.clone(),
+            exporter: None,
+            credit_path: Some(config.credit_path.clone()),
+            queue_path: Some(config.queue_path.clone()),
         }
     }
 
@@ -1131,7 +1171,7 @@ impl<'a> PoolradSync<'a> {
         if let Some(exporter) = self.exporter {
             return exporter(&self.repo);
         }
-        let out = poolrad_queue_path();
+        let out = self.queue_path.clone().unwrap_or_else(poolrad_queue_path);
         export_queue(&self.repo, out, Duration::from_secs(300))
     }
 }

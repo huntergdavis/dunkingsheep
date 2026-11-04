@@ -16,6 +16,7 @@ mod keypress;
 mod layout;
 mod outbox_runtime;
 mod owner_push;
+mod poolrad;
 mod push;
 mod push_eligibility;
 mod registrations;
@@ -424,6 +425,18 @@ impl PaneInfoEnv for RequestRuntimeAdapter<'_> {
 }
 
 impl crate::api::CommandEnv for RequestRuntimeAdapter<'_> {
+    fn poolrad_sync_args(&self, args: &crate::api::Args) -> Result<Value, DunkError> {
+        self.runtime_poolrad_sync_args(args)
+    }
+
+    fn poolrad_sync(&self, limit: usize, dry_run: bool) -> Result<Value, DunkError> {
+        self.runtime_poolrad_sync(limit, dry_run)
+    }
+
+    fn poolrad_progress(&self) -> Result<Value, DunkError> {
+        self.runtime_poolrad_progress()
+    }
+
     fn with_inbox_env(
         &self,
         operation: &mut dyn FnMut(

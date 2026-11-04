@@ -1,0 +1,121 @@
+{
+  "python_version": [
+    3,
+    14,
+    4
+  ],
+  "oracle": "Python 3.14.4 pathlib.Path.home and exact-head dunk_poolrad.CONFIG_DIR imports; absent uses actual getpwuid(real uid), missing-passwd injects KeyError only",
+  "cases": [
+    {
+      "name": "exact-tilde",
+      "home": "~",
+      "account_home": null,
+      "expanduser": "~",
+      "path": {
+        "error": "Could not determine home directory.",
+        "exception": "RuntimeError"
+      },
+      "config_default": {
+        "error": "Could not determine home directory.",
+        "exception": "RuntimeError"
+      },
+      "config_explicit": {
+        "error": "Could not determine home directory.",
+        "exception": "RuntimeError"
+      }
+    },
+    {
+      "name": "tilde-name",
+      "home": "~unknown",
+      "account_home": null,
+      "expanduser": "~unknown",
+      "path": {
+        "ok": "~unknown"
+      },
+      "config_default": {
+        "ok": "~unknown/.config/dunkingsheep"
+      },
+      "config_explicit": {
+        "ok": "/explicit"
+      }
+    },
+    {
+      "name": "tilde-path",
+      "home": "~/a",
+      "account_home": null,
+      "expanduser": "~/a",
+      "path": {
+        "ok": "~/a"
+      },
+      "config_default": {
+        "ok": "~/a/.config/dunkingsheep"
+      },
+      "config_explicit": {
+        "ok": "/explicit"
+      }
+    },
+    {
+      "name": "empty",
+      "home": "",
+      "account_home": null,
+      "expanduser": "/",
+      "path": {
+        "ok": "/"
+      },
+      "config_default": {
+        "ok": "/.config/dunkingsheep"
+      },
+      "config_explicit": {
+        "ok": "/explicit"
+      }
+    },
+    {
+      "name": "all-slashes",
+      "home": "////",
+      "account_home": null,
+      "expanduser": "/",
+      "path": {
+        "ok": "/"
+      },
+      "config_default": {
+        "ok": "/.config/dunkingsheep"
+      },
+      "config_explicit": {
+        "ok": "/explicit"
+      }
+    },
+    {
+      "name": "absent",
+      "home": null,
+      "account_home": "/home/hunter",
+      "expanduser": "/home/hunter",
+      "path": {
+        "ok": "/home/hunter"
+      },
+      "config_default": {
+        "ok": "/home/hunter/.config/dunkingsheep"
+      },
+      "config_explicit": {
+        "ok": "/explicit"
+      }
+    },
+    {
+      "name": "missing-passwd",
+      "home": null,
+      "account_home": null,
+      "expanduser": "~",
+      "path": {
+        "error": "Could not determine home directory.",
+        "exception": "RuntimeError"
+      },
+      "config_default": {
+        "error": "Could not determine home directory.",
+        "exception": "RuntimeError"
+      },
+      "config_explicit": {
+        "error": "Could not determine home directory.",
+        "exception": "RuntimeError"
+      }
+    }
+  ]
+}
