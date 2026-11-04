@@ -1,17 +1,25 @@
 use super::*;
 
 fn startup(flock: &Flock, root: &Path) {
+    startup_with_ledger(flock, root, None);
+}
+
+fn startup_with_ledger(flock: &Flock, root: &Path, ledger: Option<&str>) {
     let home = root.join("home");
     let config = root.join("config");
+    let mut pairs = vec![
+        ("HOME", home.to_str().unwrap()),
+        ("DUNKINGSHEEP_DIR", config.to_str().unwrap()),
+    ];
+    if let Some(ledger) = ledger {
+        pairs.push(("DUNKINGSHEEP_CONTEXT_LEDGER", ledger));
+    }
     flock
         .attach_status_state(crate::flock::status_runtime::StatusState::at_start(
             "test",
             root.join("state.json"),
             root.join("test-bin"),
-            Env::from_pairs(&[
-                ("HOME", home.to_str().unwrap()),
-                ("DUNKINGSHEEP_DIR", config.to_str().unwrap()),
-            ]),
+            Env::from_pairs(&pairs),
         ))
         .unwrap();
 }
@@ -320,4 +328,170 @@ fn memory_backfill_limit_errors_match_python_digit_boundary() {
         )
     );
     assert!(limit_reached(&json!("  +０_０ "), 0).unwrap());
+}
+
+fn recorded_hash(path: &Path, slug: &str) -> String {
+    rusqlite::Connection::open(path)
+        .unwrap()
+        .query_row("SELECT sha256 FROM entries WHERE slug=?1", [slug], |row| {
+            row.get(0)
+        })
+        .unwrap()
+}
+
+#[test]
+fn context_add_and_promote_honor_captured_ledger_override() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = context_flock(dir.path());
+    let custom = dir.path().join("custom/provenance.db");
+    startup_with_ledger(&flock, dir.path(), Some(custom.to_str().unwrap()));
+    let env = TestEnv::default();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_context_mutations();
+    let first = dispatch_context_command(&dispatcher,&flock,&env,"worker","w1:p2","context_add",json!({"body":"first\r\nsecond", "cls":"fact", "subject":"override", "stated":"2026-11-04"})).unwrap();
+    assert!(custom.exists());
+    assert!(!dir.path().join("config/context-ledger.db").exists());
+    let promoted = dispatch_context_command(
+        &dispatcher,
+        &flock,
+        &env,
+        "owner",
+        "w1:p1",
+        "context_promote",
+        json!({"slug":first["slug"]}),
+    )
+    .unwrap();
+    for article in [&first, &promoted] {
+        let text = std::fs::read_to_string(article["path"].as_str().unwrap())
+            .unwrap()
+            .replace("\r\n", "\n")
+            .replace('\r', "\n");
+        assert_eq!(
+            recorded_hash(&custom, article["slug"].as_str().unwrap()),
+            crate::context::ledger::sha(&text)
+        );
+    }
+    assert!(!dir.path().join("config/context-ledger.db").exists());
+    // An empty captured override selects the normal configured base.
+    let fallback = tempfile::tempdir().unwrap();
+    let fallback_flock = context_flock(fallback.path());
+    startup_with_ledger(&fallback_flock, fallback.path(), Some(""));
+    dispatch_context_command(
+        &dispatcher,
+        &fallback_flock,
+        &env,
+        "worker",
+        "w1:p2",
+        "context_add",
+        json!({"body":"fallback", "cls":"fact", "subject":"fallback"}),
+    )
+    .unwrap();
+    assert!(fallback.path().join("config/context-ledger.db").exists());
+}
+
+#[test]
+fn context_captured_ledger_failure_keeps_add_and_promote_partial_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = context_flock(dir.path());
+    let blocked = dir.path().join("custom-is-directory");
+    std::fs::create_dir(&blocked).unwrap();
+    startup_with_ledger(&flock, dir.path(), Some(blocked.to_str().unwrap()));
+    let env = TestEnv::default();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_context_mutations();
+    let added = dispatch_context_command(
+        &dispatcher,
+        &flock,
+        &env,
+        "worker",
+        "w1:p2",
+        "context_add",
+        json!({"body":"remains written", "cls":"fact", "subject":"blocked", "stated":"2026-11-04"}),
+    );
+    assert!(added.is_err());
+    let old = dir.path().join("config/context/fact/2026-11-04-blocked.md");
+    assert!(old.exists());
+    assert!(!dir.path().join("config/context-ledger.db").exists());
+    let promoted = dispatch_context_command(
+        &dispatcher,
+        &flock,
+        &env,
+        "owner",
+        "w1:p1",
+        "context_promote",
+        json!({"slug":"2026-11-04-blocked"}),
+    );
+    assert!(promoted.is_err());
+    let (meta, _) =
+        crate::context::store::parse_front(&std::fs::read_to_string(&old).unwrap()).unwrap();
+    assert!(
+        meta["superseded_by"].is_some(),
+        "predecessor write precedes failing configured ledger"
+    );
+    assert_eq!(
+        std::fs::read_dir(dir.path().join("config/context/ground-truth"))
+            .unwrap()
+            .count(),
+        0,
+        "ledger failure prevents new promoted article"
+    );
+    assert!(!dir.path().join("config/context-ledger.db").exists());
+}
+
+#[test]
+fn context_postwrite_ledger_hashes_match_actual_python_newline_oracle() {
+    // Python3.14.4 Store.add + Store._record, isolated real SQLite/file oracle:
+    // p175-t1594-evidence/repair-python-newlines.json. Literal expected hashes
+    // cover both the first write and the predecessor rewrite, independent of
+    // the Rust normalization helper.
+    for (name, body, first_sha, old_sha) in [
+        (
+            "crlf",
+            "first\r\nsecond",
+            "2a1ca1cde668efa20242bb40f2af229184e6e7367bfbf36b452624ed25d66cd3",
+            "ece6e4db6c1632170d5844763587c894f88f01f892e57ab8df1dbfea4dbb2b0c",
+        ),
+        (
+            "cr",
+            "first\rsecond",
+            "4cf36a9526a508fa03e838edba60eeafa05031d77f160d5cc7c68e4d6bda6eb9",
+            "70d077272b0807c973a0885fbbcf0c239310a38a9b89028bc55b5ef5f897673d",
+        ),
+        (
+            "mixed",
+            "first\r\nsecond\rthird\nfourth\u{85}\u{2028}\u{2029} café",
+            "6251574683cc39d686086b7b429eeaac7cda2191860e5aa6f60f46d97872abcd",
+            "301a419ecd96f579b5c57d023ab737ffc739a95aab7aab26ba93f74d70bfb49c",
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let flock = context_flock(dir.path());
+        let custom = dir.path().join("custom.db");
+        startup_with_ledger(&flock, dir.path(), Some(custom.to_str().unwrap()));
+        let env = TestEnv::default();
+        let mut dispatcher = Dispatcher::new();
+        dispatcher.register_context_mutations();
+        let first = dispatch_context_command(
+            &dispatcher,
+            &flock,
+            &env,
+            "worker",
+            "w1:p2",
+            "context_add",
+            json!({"body":body,"cls":"fact","subject":name,"stated":"2026-11-04"}),
+        )
+        .unwrap();
+        assert_eq!(
+            recorded_hash(&custom, first["slug"].as_str().unwrap()),
+            first_sha
+        );
+        let raw = std::fs::read_to_string(first["path"].as_str().unwrap()).unwrap();
+        assert!(raw.contains('\r'), "writing itself must not normalize");
+        assert_ne!(crate::context::ledger::sha(&raw), first_sha);
+        dispatch_context_command(&dispatcher,&flock,&env,"worker","w1:p2","context_add",json!({"body":"replacement","cls":"fact","subject":format!("{name}-replacement"),"stated":"2026-11-04","supersedes":first["slug"]})).unwrap();
+        assert_eq!(
+            recorded_hash(&custom, first["slug"].as_str().unwrap()),
+            old_sha
+        );
+    }
 }

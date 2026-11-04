@@ -21,6 +21,12 @@ impl Flock {
             .python_home
             .config_dir(&state.env)
             .map_err(DunkError::Refused)?;
+        let ledger_path = state
+            .env
+            .get("DUNKINGSHEEP_CONTEXT_LEDGER")
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| base.join("context-ledger.db"));
         let global = global || !truthy(project);
         let path = if global {
             base.join("context")
@@ -35,7 +41,7 @@ impl Flock {
                 root: path,
                 scope: if global { "global" } else { "project" },
             },
-            Ledger::new(Some(&base.join("context-ledger.db"))),
+            Ledger::new(Some(&ledger_path)),
         ))
     }
 

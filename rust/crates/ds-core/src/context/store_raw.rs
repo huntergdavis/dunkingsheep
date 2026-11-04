@@ -104,6 +104,7 @@ impl Store {
             meta.insert("superseded_by".into(), Some(slug_text.clone()));
             let text = render(&meta, &old.body);
             fs::write(&old.path, &text)?;
+            let text = read_written_text(&old.path)?;
             ledger
                 .record(
                     &self.root,
@@ -151,6 +152,7 @@ impl Store {
         })?;
         let text = render(&meta, body);
         fs::write(&path, &text)?;
+        let text = read_written_text(&path)?;
         ledger
             .record(
                 &self.root,
@@ -166,5 +168,39 @@ impl Store {
             path,
             cls: class.into(),
         })
+    }
+}
+
+/// Path.read_text() reopens the written file, decodes strictly, and applies
+/// universal newlines. Keep this fallible read after the write and before SQL;
+/// hashing the pre-write rendering loses both the bytes read and this boundary.
+fn read_written_text(path: &Path) -> Result<String, DunkError> {
+    Ok(fs::read_to_string(path)?
+        .replace("\r\n", "\n")
+        .replace('\r', "\n"))
+}
+
+#[cfg(test)]
+mod postwrite_tests {
+    use super::*;
+
+    #[test]
+    fn postwrite_read_is_fallible_strict_and_only_normalizes_cr_newlines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("written.md");
+        fs::write(
+            &path,
+            "first\r\nsecond\rthird\nfourth\u{85}\u{2028}\u{2029} café",
+        )
+        .unwrap();
+        assert_eq!(
+            read_written_text(&path).unwrap(),
+            "first\nsecond\nthird\nfourth\u{85}\u{2028}\u{2029} café"
+        );
+        fs::write(&path, [0xff, b'\r', b'\n']).unwrap();
+        assert!(read_written_text(&path).is_err());
+        assert_eq!(fs::read(&path).unwrap(), [0xff, b'\r', b'\n']);
+        fs::remove_file(&path).unwrap();
+        assert!(read_written_text(&path).is_err());
     }
 }
