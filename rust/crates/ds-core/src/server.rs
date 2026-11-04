@@ -287,7 +287,7 @@ pub fn handle_line(
     line: &str,
     peer_pid: Option<i64>,
 ) -> (Response, bool) {
-    let request: Value = match serde_json::from_str(line) {
+    let request: Value = match crate::wire_json::from_str(line) {
         Ok(value) => value,
         Err(_) => return (Response::invalid_json(), false),
     };

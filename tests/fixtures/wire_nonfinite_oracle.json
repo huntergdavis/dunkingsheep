@@ -1,0 +1,26 @@
+[
+  {
+    "input": "[NaN, Infinity, -Infinity, 1e309, -1e309]",
+    "output": "[NaN,Infinity,-Infinity,Infinity,-Infinity]"
+  },
+  {
+    "input": "[\"NaN\", \"Infinity\", \"-Infinity\", \"\\\"NaN\", \"\\u004eaN\"]",
+    "output": "[\"NaN\",\"Infinity\",\"-Infinity\",\"\\\"NaN\",\"NaN\"]"
+  },
+  {
+    "input": "{\"$serde_json::private::Number\":\"NaN\",\"__ds_mint_number__0\":\"Infinity\"}",
+    "output": "{\"$serde_json::private::Number\":\"NaN\",\"__ds_mint_number__0\":\"Infinity\"}"
+  },
+  {
+    "input": "{\"a\":NaN,\"b\":0,\"a\":Infinity}",
+    "output": "{\"a\":Infinity,\"b\":0}"
+  },
+  {
+    "input": "[null,false,0,\"\",[],{},[NaN],{\"NaN\":Infinity}]",
+    "output": "[null,false,0,\"\",[],{},[NaN],{\"NaN\":Infinity}]"
+  },
+  {
+    "input": "[123456789012345678901234567890,-0,-0.0,1e-999,1e20,1e-7]",
+    "output": "[123456789012345678901234567890,0,-0.0,0.0,1e+20,1e-07]"
+  }
+]
