@@ -406,6 +406,7 @@ mod tests {
             crate::registry::command("metrics").unwrap().name,
             "the production API registry must expose this command"
         );
+        assert!(dispatch(&flock, None, "anonymous", 2000.0).is_ok());
     }
 
     #[test]
@@ -468,7 +469,7 @@ mod tests {
     }
 
     #[test]
-    fn h_metrics_refuses_missing_stores_and_disallowed_roles() {
+    fn h_metrics_refuses_missing_stores_and_preserves_read_only_role_access() {
         let (dir, flock) = flock("api-metrics-missing");
         let missing_inbox = dispatch(&flock, None, "worker", 2000.0)
             .unwrap_err()
@@ -485,9 +486,11 @@ mod tests {
             .to_string();
         assert_eq!("metrics store is not wired", missing_metrics);
 
-        let denied = dispatch(&bare, None, "not-a-role", 2000.0)
+        // Unknown roles receive READ_ONLY commands in the Python/Rust dispatcher; metrics is
+        // read-only, so role authorization succeeds and the missing-store refusal is next.
+        let unknown_role = dispatch(&bare, None, "not-a-role", 2000.0)
             .unwrap_err()
             .to_string();
-        assert!(denied.contains("metrics is not permitted for role not-a-role"));
+        assert_eq!("metrics store is not wired", unknown_role);
     }
 }
