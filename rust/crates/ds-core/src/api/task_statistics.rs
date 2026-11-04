@@ -31,6 +31,19 @@ pub fn h_task_metrics(context: &HandlerContext<'_>, args: Args) -> Result<Value,
         .map(python_float)
         .transpose()?
         .unwrap_or(3600.0);
+    // Python's Flock.task_metrics resolves and authorizes scope before Tasks.metrics
+    // converts until/since. Preserve that order for requests with multiple bad fields.
+    let scope = scope_arg(&args);
+    if let Some(scope) = scope
+        .as_deref()
+        .filter(|scope| !scope.trim().is_empty() && scope.trim() != "all")
+    {
+        Flock::task_scope(
+            Some(scope),
+            context.self_pane_id(),
+            crate::tasks::TASK_GLOBAL,
+        )?;
+    }
     // Python converts until before since in Tasks.metrics.
     let until = args
         .get("until")
@@ -42,7 +55,6 @@ pub fn h_task_metrics(context: &HandlerContext<'_>, args: Args) -> Result<Value,
         .filter(|v| !v.is_null())
         .map(python_float)
         .transpose()?;
-    let scope = scope_arg(&args);
     let bucket = args
         .get("bucket")
         .filter(|v| truthy(v))

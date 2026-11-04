@@ -8109,6 +8109,22 @@ fn task_metrics_defaults_coercions_and_scope_match_python_dispatch() {
     assert_eq!(converted["scope"], "global");
     assert_eq!(converted["window"]["seconds"], 10);
     assert_eq!(converted["window"]["bucket"], "day");
+    let precedence = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_metrics",
+        json!({"scope":"w1:p3", "since":{"bad":"type"}}),
+        Some("w1:p1"),
+        None,
+    )
+    .unwrap_err();
+    assert!(
+        precedence
+            .to_string()
+            .contains("per-pane tasks are private"),
+        "{precedence}"
+    );
 }
 
 #[test]
