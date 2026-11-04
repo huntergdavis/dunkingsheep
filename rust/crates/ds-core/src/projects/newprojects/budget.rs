@@ -190,46 +190,43 @@ fn strict_codex_reading(home: &std::path::Path, max_age_seconds: f64, now: f64) 
             continue;
         };
         let text = String::from_utf8_lossy(&contents);
-        let mut event = None;
-        for line in text
+        let Some(line) = text
             .lines()
             .rev()
             .filter(|line| line.contains("rate_limits"))
-        {
-            let Ok(parsed) = serde_json::from_str::<Value>(line) else {
-                return serde_json::json!({
-                    "provider": "codex", "status": "error", "meaning": "unknown",
-                    "reason": "latest Codex rate_limits event is malformed"
-                });
-            };
-            let Some(limits) = crate::usage_providers::find_rate_limits(&parsed) else {
-                return serde_json::json!({
-                    "provider": "codex", "status": "error", "meaning": "unknown",
-                    "reason": "latest Codex rate_limits event has no rate_limits object"
-                });
-            };
-            let measured = crate::usage_providers::epoch(&parsed["timestamp"])
-                .filter(|time| *time != 0.0)
-                .or_else(|| {
-                    std::fs::metadata(&path)
-                        .and_then(|metadata| metadata.modified())
-                        .ok()
-                        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
-                        .map(|age| age.as_secs_f64())
-                });
-            let Some(measured) = measured.filter(|time| time.is_finite()) else {
-                return serde_json::json!({
-                    "provider": "codex", "status": "unknown", "meaning": "unknown",
-                    "reason": "Codex measurement time is unavailable"
-                });
-            };
-            event = Some((measured, limits));
-            break;
-        }
-        if let Some((measured, limits)) = event {
-            if best.as_ref().is_none_or(|current| measured > current.0) {
-                best = Some((measured, path, limits));
-            }
+            .next()
+        else {
+            continue;
+        };
+        let Ok(parsed) = serde_json::from_str::<Value>(line) else {
+            return serde_json::json!({
+                "provider": "codex", "status": "error", "meaning": "unknown",
+                "reason": "latest Codex rate_limits event is malformed"
+            });
+        };
+        let Some(limits) = crate::usage_providers::find_rate_limits(&parsed) else {
+            return serde_json::json!({
+                "provider": "codex", "status": "error", "meaning": "unknown",
+                "reason": "latest Codex rate_limits event has no rate_limits object"
+            });
+        };
+        let measured = crate::usage_providers::epoch(&parsed["timestamp"])
+            .filter(|time| *time != 0.0)
+            .or_else(|| {
+                std::fs::metadata(&path)
+                    .and_then(|metadata| metadata.modified())
+                    .ok()
+                    .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+                    .map(|age| age.as_secs_f64())
+            });
+        let Some(measured) = measured.filter(|time| time.is_finite()) else {
+            return serde_json::json!({
+                "provider": "codex", "status": "unknown", "meaning": "unknown",
+                "reason": "Codex measurement time is unavailable"
+            });
+        };
+        if best.as_ref().is_none_or(|current| measured > current.0) {
+            best = Some((measured, path, limits));
         }
     }
     let Some((measured, path, limits)) = best else {

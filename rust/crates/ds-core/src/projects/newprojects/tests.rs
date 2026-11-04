@@ -457,7 +457,7 @@ async fn restart_with_an_unresolved_external_intent_refuses_without_replay() {
     let provider_home = tempfile::tempdir().unwrap();
     let _ = codex_fixture(provider_home.path(), 1000.0, json!(15.0));
     let config = configured(Value::Null);
-    let mut projects = Projects::open_durable(&db).await.unwrap();
+    let projects = Projects::open_durable(&db).await.unwrap();
     let pending = crate::projects::Project {
         name: "budget-app".into(),
         dir: root.path().join("budget-app"),
@@ -579,7 +579,7 @@ async fn a_recovered_project_path_outside_the_approved_root_is_refused() {
     let provider_home = tempfile::tempdir().unwrap();
     let _ = codex_fixture(provider_home.path(), 1000.0, json!(15.0));
     let config = configured(Value::Null);
-    let mut projects = Projects::open_durable(&db).await.unwrap();
+    let projects = Projects::open_durable(&db).await.unwrap();
     projects
         .store
         .as_ref()
