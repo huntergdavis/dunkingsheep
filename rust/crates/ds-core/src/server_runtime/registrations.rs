@@ -47,6 +47,7 @@ pub(crate) fn production_handlers() -> Dispatcher {
     handlers.register_clear_box_delivery_capability();
     handlers.register_respawn_pane();
     handlers.register_layout_create();
+    handlers.register_layout_agent();
     handlers
 }
 
@@ -539,6 +540,9 @@ mod tests {
             "create_workspace",
             "create_tab",
             "split_pane",
+            "start_agent",
+            "rename",
+            "focus",
             "report_run",
             "report_list",
             "owner_conversation",

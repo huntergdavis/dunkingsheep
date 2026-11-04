@@ -28,7 +28,9 @@ mod dunk_get;
 pub use dunk_get::h_get_dunk;
 mod project_summary;
 pub use project_summary::h_project_summary;
+mod layout_agent;
 mod layout_create;
+pub use layout_agent::{h_focus, h_rename, h_start_agent};
 pub use layout_create::{h_create_tab, h_create_workspace, h_split_pane};
 mod respawn;
 pub use respawn::h_respawn_pane;
@@ -95,6 +97,15 @@ pub trait CommandEnv: PaneInfoEnv {
     fn health_state_env(&self) -> Result<&dyn health_state::HealthStateEnv, DunkError> {
         Err(DunkError::Refused(
             "health/state adapter is not wired".into(),
+        ))
+    }
+
+    fn with_layout_agent(
+        &self,
+        _operation: &mut crate::flock::commands_layout::AgentOperation<'_>,
+    ) -> Result<Value, DunkError> {
+        Err(DunkError::Refused(
+            "layout agent adapter is not wired".into(),
         ))
     }
 
@@ -904,6 +915,12 @@ impl Dispatcher {
     }
 
     /// Register only the three create-layout commands.
+    pub fn register_layout_agent(&mut self) {
+        self.register("start_agent", h_start_agent);
+        self.register("rename", h_rename);
+        self.register("focus", h_focus);
+    }
+
     pub fn register_layout_create(&mut self) {
         self.register("create_workspace", h_create_workspace);
         self.register("create_tab", h_create_tab);

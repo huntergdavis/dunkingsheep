@@ -15,6 +15,7 @@ mod inbox_metrics;
 mod inbox_stores;
 mod keypress;
 mod layout;
+mod layout_agent;
 mod layout_create;
 mod outbox_messages;
 mod outbox_runtime;
@@ -406,6 +407,35 @@ impl crate::flock::commands_layout::LayoutBackend for RequestRuntimeAdapter<'_> 
         self.helper_layoutbackend_start_agent(name, argv, workspace_id, tab_id, split, cwd, focus)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn start_agent_raw(
+        &mut self,
+        name: &str,
+        argv: &[String],
+        workspace: Option<&str>,
+        tab: Option<&str>,
+        split: Option<&str>,
+        cwd: Option<&str>,
+        focus: bool,
+    ) -> crate::flock::commands_layout::RawCreateResult {
+        self.helper_layoutbackend_start_agent_raw(name, argv, workspace, tab, split, cwd, focus)
+    }
+    fn rename_raw(
+        &mut self,
+        kind: &str,
+        target: &str,
+        label: &str,
+    ) -> crate::flock::commands_layout::RawCreateResult {
+        self.helper_layoutbackend_rename_raw(kind, target, label)
+    }
+    fn focus_raw(&mut self, kind: &str, target: &str) -> Result<Value, String> {
+        self.terminal.with_terminal_mut(|terminal| {
+            terminal
+                .focus_raw(kind, target)
+                .map(|()| serde_json::json!({}))
+                .map_err(|error| error.message)
+        })
+    }
     fn rename(&mut self, kind: &str, target_id: &str, label: &str) -> Result<Value, String> {
         self.helper_layoutbackend_rename(kind, target_id, label)
     }
@@ -454,6 +484,13 @@ impl PaneInfoEnv for RequestRuntimeAdapter<'_> {
 }
 
 impl crate::api::CommandEnv for RequestRuntimeAdapter<'_> {
+    fn with_layout_agent(
+        &self,
+        operation: &mut crate::flock::commands_layout::AgentOperation<'_>,
+    ) -> Result<Value, DunkError> {
+        self.with_request_layout_agent(operation)
+    }
+
     fn poolrad_sync_args(&self, args: &crate::api::Args) -> Result<Value, DunkError> {
         self.runtime_poolrad_sync_args(args)
     }
