@@ -25,6 +25,7 @@ impl RequestRuntimeAdapter<'_> {
             outbox: None,
             owner_push: self.owner_push,
             next_jobs: self.next_jobs,
+            dunk_runtime: self.dunk_runtime,
         }
         .with_outbox(outbox)?;
         let view =

@@ -130,6 +130,32 @@ impl OutboxRuntime {
         Ok(crate::flock::dunks::DunkList::handle_row(&handle))
     }
 
+    #[cfg(test)]
+    pub(crate) fn dunk_timer_generation(&self, id: &str) -> Result<Option<u64>, DunkError> {
+        let handle = self.flock.dunks.handle(id)?;
+        let workers = self
+            .dunk_timers
+            .workers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Ok(workers.get(&DunkTimerOwner::key(&handle)).map(|worker| {
+            *worker
+                .signal
+                .generation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        }))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn dunk_timer_worker_count(&self) -> usize {
+        self.dunk_timers
+            .workers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
+    }
+
     pub(crate) fn interval_changed(&self, id: &str) -> Result<(), DunkError> {
         let handle = self.flock.dunks.handle(id)?;
         self.dunk_timers.wake(&handle);
@@ -163,9 +189,11 @@ impl OutboxRuntime {
         pane: Option<&serde_json::Map<String, serde_json::Value>>,
         args: &crate::flock::dunks::UpdateArgs,
     ) -> Result<serde_json::Map<String, serde_json::Value>, DunkError> {
-        let row = self.flock.dunks.update(id, pane, args)?;
-        self.interval_changed(id)?;
-        self.flock.save()?;
+        let (row, changed) = self.flock.dunks.update_with_change(id, pane, args)?;
+        if changed {
+            self.interval_changed(id)?;
+            self.flock.save()?;
+        }
         Ok(row)
     }
 

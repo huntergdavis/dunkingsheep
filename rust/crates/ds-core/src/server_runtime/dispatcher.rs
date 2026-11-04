@@ -68,6 +68,7 @@ impl Dispatcher for RuntimeDispatcher {
         )
         .with_outbox(&self.services.outbox)?
         .with_next_jobs(&self.services.next_jobs)?
+        .with_dunk_runtime(&self.services)?
         .with_owner_push(&self.services)?;
         let context = adapter.handler_context();
         let gate = api::FlockGate(&context);

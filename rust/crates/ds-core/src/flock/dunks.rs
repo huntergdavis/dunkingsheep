@@ -1070,6 +1070,17 @@ impl DunkList {
         pane: Option<&Map<String, Value>>,
         args: &UpdateArgs,
     ) -> Result<Map<String, Value>, DunkError> {
+        self.update_with_change(dunk_id, pane, args)
+            .map(|(row, _)| row)
+    }
+
+    /// Update a dunk and report whether the Python-compatible changed list was nonempty.
+    pub(crate) fn update_with_change(
+        &self,
+        dunk_id: &str,
+        pane: Option<&Map<String, Value>>,
+        args: &UpdateArgs,
+    ) -> Result<(Map<String, Value>, bool), DunkError> {
         let interval = args.interval.as_deref().map(parse_interval).transpose()?;
         let only_when = match &args.only_when {
             Some(v) => Some(check_only_when(v.as_deref())?),
@@ -1133,6 +1144,7 @@ impl DunkList {
             dunker.hold_while_typing = flag;
             changed.push("hold_while_typing");
         }
+        let did_change = !changed.is_empty();
         if let Some(last) = changed.last() {
             let words = last.replace('_', " ");
             let mut chars = words.chars();
@@ -1143,7 +1155,7 @@ impl DunkList {
                 chars.as_str().to_lowercase()
             );
         }
-        Ok(dunker.to_dict())
+        Ok((dunker.to_dict(), did_change))
     }
 
     /// `Flock.remove`.

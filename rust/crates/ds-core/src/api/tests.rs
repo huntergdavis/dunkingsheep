@@ -80,6 +80,76 @@ impl CommandEnv for TestEnv {
     }
 }
 
+struct DunkHandlerEnv {
+    terminal: Mutex<Box<dyn Terminal>>,
+    panes: Vec<Value>,
+    dunks: DunkList,
+}
+
+impl DunkHandlerEnv {
+    fn new() -> Self {
+        Self {
+            terminal: Mutex::new(Box::new(FakeTerminal::default())),
+            panes: vec![json!({
+                "pane_id": "w1:p1",
+                "tab_id": "w1:t1",
+                "workspace_id": "w1",
+                "cwd": "/repo",
+                "agent": "codex",
+                "terminal_id": "term-1",
+                "terminal_title_stripped": "editor",
+                "tab_label": "Writer",
+                "workspace_label": "project"
+            })],
+            dunks: DunkList::new(),
+        }
+    }
+}
+
+impl PaneInfoEnv for DunkHandlerEnv {
+    fn list_panes_grouped(&self) -> Vec<Value> {
+        self.panes.clone()
+    }
+
+    fn get_pane(&self, pane_id: &str) -> Option<Value> {
+        self.panes
+            .iter()
+            .find(|pane| pane.get("pane_id").and_then(Value::as_str) == Some(pane_id))
+            .cloned()
+    }
+}
+
+impl CommandEnv for DunkHandlerEnv {
+    fn terminal(&self) -> &Mutex<Box<dyn Terminal>> {
+        &self.terminal
+    }
+
+    fn add_dunk(
+        &self,
+        pane: Option<&serde_json::Map<String, Value>>,
+        args: &crate::flock::dunks::AddArgs,
+    ) -> Result<serde_json::Map<String, Value>, DunkError> {
+        self.dunks.add(pane, args)
+    }
+
+    fn update_dunk(
+        &self,
+        id: &str,
+        pane: Option<&serde_json::Map<String, Value>>,
+        args: &crate::flock::dunks::UpdateArgs,
+    ) -> Result<serde_json::Map<String, Value>, DunkError> {
+        self.dunks.update(id, pane, args)
+    }
+
+    fn remove_dunk(&self, id: &str) -> Result<serde_json::Map<String, Value>, DunkError> {
+        self.dunks.remove(id)
+    }
+
+    fn now_s(&self) -> f64 {
+        1_800_000_000.0
+    }
+}
+
 struct OwnerApiEnv {
     terminal: Mutex<Box<dyn Terminal>>,
     owner_push: crate::owner::OwnerPush,
@@ -1959,6 +2029,216 @@ fn refusal(result: Result<Value, DunkError>) -> String {
 }
 
 #[test]
+fn h_add_dunk_assigns_ids_and_resolves_target_labels() {
+    let (_dir, flock) = flock();
+    let env = DunkHandlerEnv::new();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_dunk_mutations();
+    let request = RequestCtx {
+        self_pane_id: Some("w1:p1".into()),
+        ..RequestCtx::default()
+    };
+    let result = dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("owner", true),
+        "add_dunk",
+        args(json!({
+            "target": "Writer",
+            "text": "nudge {id}",
+            "interval_minutes": 2,
+            "start": true
+        })),
+        &request,
+        &env,
+    )
+    .unwrap();
+
+    assert_eq!(result["id"], "d1");
+    assert_eq!(result["target_pane_id"], "w1:p1");
+    assert_eq!(result["target_agent"], "codex");
+    assert_eq!(result["text"], "nudge {id}");
+    assert_eq!(result["interval_minutes"], 2.0);
+    assert_eq!(result["only_when"], "idle");
+    assert_eq!(result["running"], true);
+}
+
+#[test]
+fn h_add_dunk_uses_python_defaults() {
+    let (_dir, flock) = flock();
+    let env = DunkHandlerEnv::new();
+    let request = RequestCtx::default();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_dunk_mutations();
+    assert_eq!(
+        crate::registry::input_schema("add_dunk").unwrap()["required"],
+        json!(["target", "text", "interval_minutes"])
+    );
+    let result = dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("owner", true),
+        "add_dunk",
+        args(json!({})),
+        &request,
+        &env,
+    )
+    .unwrap();
+    assert_eq!(result["id"], "d1");
+    assert_eq!(result["text"], crate::flock::dunks::DEFAULT_TEXT);
+    assert_eq!(result["interval_minutes"], 10.0);
+    assert_eq!(result["status"], "No target - press c");
+    assert_eq!(result["running"], false);
+}
+
+#[test]
+fn h_update_dunk_changes_fields_and_clears_optionals() {
+    let (_dir, flock) = flock();
+    let env = DunkHandlerEnv::new();
+    let seed = crate::flock::dunks::AddArgs {
+        only_when: Some("idle".into()),
+        max_sends: Some("3".into()),
+        ..Default::default()
+    };
+    env.dunks.add(None, &seed).unwrap();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_dunk_mutations();
+    let request = RequestCtx {
+        self_pane_id: Some("w1:p1".into()),
+        ..RequestCtx::default()
+    };
+    let result = dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("owner", true),
+        "update_dunk",
+        args(json!({
+            "id": "d1",
+            "target": "Writer",
+            "text": "updated",
+            "only_when": null,
+            "max_sends": null
+        })),
+        &request,
+        &env,
+    )
+    .unwrap();
+    assert_eq!(result["target_pane_id"], "w1:p1");
+    assert_eq!(result["text"], "updated");
+    assert_eq!(result["only_when"], Value::Null);
+    assert_eq!(result["max_sends"], Value::Null);
+
+    // A target-only update is a valid Python call and resolves the pane through the same path.
+    let target_only = dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("owner", true),
+        "update_dunk",
+        args(json!({"id": "d1", "target": "Writer"})),
+        &request,
+        &env,
+    )
+    .unwrap();
+    assert_eq!(target_only["target_pane_id"], "w1:p1");
+
+    let invalid_interval = refusal(dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("owner", true),
+        "update_dunk",
+        args(json!({"id": "d1", "target": "Writer", "interval_minutes": true})),
+        &request,
+        &env,
+    ));
+    assert_eq!(invalid_interval, "interval must be a number of minutes");
+}
+
+#[test]
+fn h_remove_dunk_stops_and_deletes() {
+    let (_dir, flock) = flock();
+    let env = DunkHandlerEnv::new();
+    let pane = env.panes[0].as_object().unwrap().clone();
+    env.dunks
+        .add(
+            Some(&pane),
+            &crate::flock::dunks::AddArgs {
+                start: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(env.dunks.list()[0]["running"], true);
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_dunk_mutations();
+    let request = RequestCtx::default();
+    let result = dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("owner", true),
+        "remove_dunk",
+        args(json!({"id": "d1"})),
+        &request,
+        &env,
+    )
+    .unwrap();
+    assert_eq!(result["running"], false);
+    assert!(env.dunks.list().is_empty());
+}
+
+#[test]
+fn dunk_mutation_dispatcher_registers_only_this_group_and_enforces_role_gate() {
+    let (_dir, flock) = flock();
+    let env = DunkHandlerEnv::new();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_dunk_mutations();
+    assert_eq!(
+        dispatcher.registration_attempts(),
+        &["add_dunk", "update_dunk", "remove_dunk"]
+    );
+    let request = RequestCtx::default();
+    let error = refusal(dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("worker", false),
+        "add_dunk",
+        args(json!({})),
+        &request,
+        &env,
+    ));
+    assert_eq!(error, "add_dunk needs a superuser");
+
+    let invalid_add = refusal(dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("owner", true),
+        "add_dunk",
+        args(json!({
+            "target": "missing target",
+            "text": "x",
+            "interval_minutes": 0
+        })),
+        &request,
+        &env,
+    ));
+    assert_eq!(invalid_add, "interval must be positive");
+
+    let invalid_update = refusal(dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("owner", true),
+        "update_dunk",
+        args(json!({
+            "id": "d1",
+            "target": "missing target",
+            "interval_minutes": 0
+        })),
+        &request,
+        &env,
+    ));
+    assert!(invalid_update.contains("no pane matches"));
+}
+
+#[test]
 fn h_respawn_pane_matches_python() {
     let (_dir, flock) = flock();
     let env = TestEnv::default();
@@ -2178,7 +2458,7 @@ fn test_every_command_runs_or_refuses_but_never_crashes() {
             "{}: refused with no message",
             command.name
         );
-        if command.required.is_empty() {
+        if command.dispatch_required.is_empty() {
             assert_eq!(text, format!("command {} is not ported yet", command.name));
         }
     }
@@ -2267,7 +2547,7 @@ fn test_owner_only_commands_go_through_the_superuser_gate() {
     );
     let open = registry::COMMANDS
         .iter()
-        .find(|c| c.owner_only && c.required.is_empty() && roles::allowed("web", c.name))
+        .find(|c| c.owner_only && c.dispatch_required.is_empty() && roles::allowed("web", c.name))
         .expect("an owner-only command web may call");
     let text = refusal(dispatch(
         &d,

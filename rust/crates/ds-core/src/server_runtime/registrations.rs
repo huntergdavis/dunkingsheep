@@ -36,6 +36,7 @@ pub(crate) fn production_handlers() -> Dispatcher {
     handlers.register_task_mutation_leases();
     handlers.register_task_statistics();
     handlers.register_metrics();
+    handlers.register_dunk_mutations();
     handlers.register_send_text_keys_flush_box();
     handlers.register_clear_box_delivery_capability();
     handlers.register_respawn_pane();
@@ -54,20 +55,25 @@ mod tests {
     use super::*;
     use std::collections::BTreeSet;
 
+    use crate::api::CommandEnv;
     use crate::config::Env;
+    use crate::error::DunkError;
     use crate::flock::loop_env::LoopTerminalFactory;
     use crate::flock::panes::Stores;
+    use crate::flock::status::StatusEnv;
     use crate::metrics::MetricsStore;
     use crate::roles::Roles;
     use crate::server::RequestCtx;
-    use crate::server_runtime::{RuntimeObservability, RuntimeServiceInputs};
+    use crate::server_runtime::{
+        RequestRuntimeAdapter, RuntimeObservability, RuntimeServiceInputs,
+    };
     use crate::tasks::Tasks;
     use crate::terminal::{
         fakes::FakeTerminal, AgentSpec, Pane, Resize, Tab, Terminal, TerminalError, Workspace,
     };
-    use serde_json::json;
+    use serde_json::{json, Map, Value};
     use std::collections::{BTreeMap, VecDeque};
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Condvar, Mutex};
     use std::thread::ThreadId;
     use std::time::{Duration, Instant};
@@ -271,6 +277,15 @@ mod tests {
         terminal_factory: LoopTerminalFactory,
         metrics: Option<Arc<MetricsStore>>,
     ) -> (tempfile::TempDir, Arc<RuntimeServices>) {
+        make_services_with_persistence(tag, terminal_factory, metrics, false)
+    }
+
+    fn make_services_with_persistence(
+        tag: &str,
+        terminal_factory: LoopTerminalFactory,
+        metrics: Option<Arc<MetricsStore>>,
+        persist_enabled: bool,
+    ) -> (tempfile::TempDir, Arc<RuntimeServices>) {
         let dir = tempfile::tempdir().unwrap();
         let runtime = Builder::new_multi_thread().enable_all().build().unwrap();
         let tasks = Arc::new(
@@ -327,7 +342,7 @@ mod tests {
         let services = RuntimeServices::new(RuntimeServiceInputs {
             launches_file: dir.path().join(format!("{tag}-launches.json")),
             lane_registry_file: dir.path().join(format!("{tag}-lanes.json")),
-            persist_enabled: false,
+            persist_enabled,
             stores,
             roles,
             legacy_superusers: None,
@@ -356,6 +371,89 @@ mod tests {
             socket_peer: Some(true),
             ..RequestCtx::default()
         }
+    }
+
+    struct CountingStatusEnv<'a> {
+        inner: &'a dyn StatusEnv,
+        version_calls: &'a AtomicUsize,
+    }
+
+    impl StatusEnv for CountingStatusEnv<'_> {
+        fn version(&self) -> String {
+            self.version_calls.fetch_add(1, Ordering::SeqCst);
+            self.inner.version()
+        }
+        fn federated_input(&self) -> Value {
+            self.inner.federated_input()
+        }
+        fn code_status(&self) -> Map<String, Value> {
+            self.inner.code_status()
+        }
+        fn dunks(&self) -> &crate::flock::dunks::DunkList {
+            self.inner.dunks()
+        }
+        fn started_at(&self) -> f64 {
+            self.inner.started_at()
+        }
+        fn pid(&self) -> u32 {
+            self.inner.pid()
+        }
+        fn now(&self) -> f64 {
+            self.inner.now()
+        }
+        fn queued_messages(&self) -> usize {
+            self.inner.queued_messages()
+        }
+        fn inbox_unread(&self) -> Result<i64, DunkError> {
+            self.inner.inbox_unread()
+        }
+        fn task_totals(&self) -> Result<Value, DunkError> {
+            self.inner.task_totals()
+        }
+        fn task_followers(&self) -> usize {
+            self.inner.task_followers()
+        }
+        fn quarantined_mailboxes(&self) -> Option<Value> {
+            self.inner.quarantined_mailboxes()
+        }
+        fn last_message(&self) -> String {
+            self.inner.last_message()
+        }
+        fn herdr_available(&self) -> bool {
+            self.inner.herdr_available()
+        }
+        fn herdr_hint(&self) -> String {
+            self.inner.herdr_hint()
+        }
+        fn state_file(&self) -> Option<String> {
+            self.inner.state_file()
+        }
+        fn inbox_count(&self, pane: &str) -> Result<Value, String> {
+            self.inner.inbox_count(pane)
+        }
+    }
+
+    fn cached_dunks(
+        services: &RuntimeServices,
+        request: &RequestCtx,
+        version_calls: &AtomicUsize,
+    ) -> Value {
+        let terminal = Mutex::new((services.terminal_factory)());
+        let adapter = RequestRuntimeAdapter::new(
+            services.flock.as_ref(),
+            request,
+            services.runtime.handle(),
+            &terminal,
+        );
+        let status = adapter.status_env().unwrap();
+        let status = CountingStatusEnv {
+            inner: status,
+            version_calls,
+        };
+        services
+            .flock
+            .view_cache()
+            .view(&status, request.self_pane_id.as_deref(), false, 3_600.0)
     }
 
     #[test]
@@ -408,6 +506,9 @@ mod tests {
             "task_metrics",
             "task_reap",
             "metrics",
+            "add_dunk",
+            "update_dunk",
+            "remove_dunk",
             "owner_push",
             "owner_poll",
             "owner_take",
@@ -478,6 +579,227 @@ mod tests {
                 .contains("respawn-pane requires --confirm-idle"),
             "production route did not reach the accepted guard: {error}"
         );
+        dispatcher.close();
+        services.shutdown();
+    }
+
+    #[test]
+    fn production_dispatcher_routes_dunk_mutations_through_runtime_services() {
+        let (dir, services) = make_services_with_persistence(
+            "dunk-mutations-route",
+            Arc::new(|| Box::new(FakeTerminal::new())),
+            None,
+            true,
+        );
+        let dispatcher = services.production_dispatcher();
+        let owner = request("w2:p2");
+        let status_reads = AtomicUsize::new(0);
+        assert!(cached_dunks(&services, &owner, &status_reads)["dunks"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert_eq!(status_reads.load(Ordering::SeqCst), 1);
+        let added = dispatcher
+            .dispatch(
+                "add_dunk",
+                &json!({
+                    "target": "w3:p3",
+                    "text": "integration",
+                    "interval_minutes": 1,
+                    "start": true
+                }),
+                &owner,
+            )
+            .unwrap();
+        assert_eq!(added["id"], "d1");
+        assert_eq!(services.flock.dunks.list().len(), 1);
+        assert_eq!(services.outbox.dunk_timer_worker_count(), 1);
+        assert_eq!(
+            services.outbox.dunk_timer_generation("d1").unwrap(),
+            Some(0)
+        );
+        let after_add = cached_dunks(&services, &owner, &status_reads);
+        assert_eq!(after_add["dunks"][0]["target_pane_id"], "w3:p3");
+        assert_eq!(status_reads.load(Ordering::SeqCst), 2);
+
+        let updated = dispatcher
+            .dispatch(
+                "update_dunk",
+                &json!({"id": "d1", "text": "updated", "interval_minutes": 2}),
+                &owner,
+            )
+            .unwrap();
+        assert_eq!(updated["text"], "updated");
+        assert_eq!(updated["interval_minutes"], 2.0);
+        assert!(updated["next_send_at"].as_f64().is_some());
+        assert_eq!(
+            services.outbox.dunk_timer_generation("d1").unwrap(),
+            Some(1)
+        );
+        assert_eq!(
+            cached_dunks(&services, &owner, &status_reads)["dunks"][0]["text"],
+            "updated"
+        );
+        assert_eq!(status_reads.load(Ordering::SeqCst), 3);
+
+        // Equal intervals and falsey targets produce an empty Python-compatible changed list.
+        // Block persistence to prove a successful no-op neither saves nor wakes the running
+        // timer, and leave the already-primed shared view valid.
+        let state_path = dir.path().join("dunk-mutations-route-whole-state.json");
+        std::fs::remove_file(&state_path).unwrap();
+        std::fs::create_dir(&state_path).unwrap();
+        let same_interval = dispatcher
+            .dispatch(
+                "update_dunk",
+                &json!({"id": "d1", "interval_minutes": 2}),
+                &owner,
+            )
+            .unwrap();
+        assert_eq!(same_interval["interval_minutes"], 2.0);
+        let falsey_target = dispatcher
+            .dispatch("update_dunk", &json!({"id": "d1", "target": ""}), &owner)
+            .unwrap();
+        assert_eq!(falsey_target["target_pane_id"], "w3:p3");
+        assert_eq!(
+            services.outbox.dunk_timer_generation("d1").unwrap(),
+            Some(1),
+            "successful no-op updates do not wake the timer"
+        );
+        assert_eq!(services.outbox.dunk_timer_worker_count(), 1);
+        assert_eq!(
+            cached_dunks(&services, &owner, &status_reads)["dunks"][0]["interval_minutes"],
+            2.0,
+            "successful no-op updates preserve the primed view"
+        );
+        assert_eq!(
+            status_reads.load(Ordering::SeqCst),
+            3,
+            "successful no-op updates do not invalidate the shared cache"
+        );
+        std::fs::remove_dir(&state_path).unwrap();
+
+        let removed = dispatcher
+            .dispatch("remove_dunk", &json!({"id": "d1"}), &owner)
+            .unwrap();
+        assert_eq!(removed["running"], false);
+        assert!(services.flock.dunks.list().is_empty());
+        assert_eq!(services.outbox.dunk_timer_worker_count(), 0);
+        assert!(cached_dunks(&services, &owner, &status_reads)["dunks"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert_eq!(status_reads.load(Ordering::SeqCst), 4);
+
+        let before_refusals = status_reads.load(Ordering::SeqCst);
+        let invalid_interval = dispatcher
+            .dispatch(
+                "add_dunk",
+                &json!({
+                    "target": "w3:p3",
+                    "text": "invalid interval",
+                    "interval_minutes": 0
+                }),
+                &owner,
+            )
+            .unwrap_err();
+        assert!(invalid_interval
+            .to_string()
+            .contains("interval must be positive"));
+        let invalid_target = dispatcher
+            .dispatch(
+                "add_dunk",
+                &json!({
+                    "target": "missing target",
+                    "text": "invalid target",
+                    "interval_minutes": 1
+                }),
+                &owner,
+            )
+            .unwrap_err();
+        assert!(invalid_target.to_string().contains("no pane matches"));
+        let invalid_update = dispatcher
+            .dispatch(
+                "update_dunk",
+                &json!({"id": "d404", "text": "missing dunk"}),
+                &owner,
+            )
+            .unwrap_err();
+        assert!(invalid_update.to_string().contains("no dunk with id"));
+        let invalid_remove = dispatcher
+            .dispatch("remove_dunk", &json!({"id": "d404"}), &owner)
+            .unwrap_err();
+        assert!(invalid_remove.to_string().contains("no dunk with id"));
+        assert!(services.flock.dunks.list().is_empty());
+        assert!(cached_dunks(&services, &owner, &status_reads)["dunks"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert_eq!(status_reads.load(Ordering::SeqCst), before_refusals);
+
+        let other_flock = crate::flock::Flock::new(
+            dir.path().join("other-launches.json"),
+            dir.path().join("other-lanes.json"),
+            false,
+        );
+        let other_terminal = Mutex::new(Box::new(FakeTerminal::new()) as Box<dyn Terminal>);
+        let mismatch = RequestRuntimeAdapter::new(
+            &other_flock,
+            &owner,
+            services.runtime.handle(),
+            &other_terminal,
+        )
+        .with_dunk_runtime(&services)
+        .err()
+        .expect("foreign Flock must refuse the dunk runtime");
+        assert!(mismatch.to_string().contains("dunk runtime flock mismatch"));
+        assert_eq!(services.flock.dunks.list().len(), 0);
+        assert!(cached_dunks(&services, &owner, &status_reads)["dunks"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert_eq!(status_reads.load(Ordering::SeqCst), before_refusals);
+
+        // Flock.save invalidates before the fallible write. The mutation remains in memory,
+        // matching Python's append-then-_save order rather than inventing rollback behavior.
+        let state_path = dir.path().join("dunk-mutations-route-whole-state.json");
+        std::fs::remove_file(&state_path).unwrap();
+        std::fs::create_dir(&state_path).unwrap();
+        let save_error = dispatcher
+            .dispatch(
+                "add_dunk",
+                &json!({
+                    "target": "w3:p3",
+                    "text": "kept after save failure",
+                    "interval_minutes": 1,
+                    "start": false
+                }),
+                &owner,
+            )
+            .unwrap_err();
+        assert!(save_error.to_string().contains("rename"));
+        assert_eq!(services.flock.dunks.list().len(), 1);
+        let after_save_error = cached_dunks(&services, &owner, &status_reads);
+        assert_eq!(after_save_error["dunks"][0]["id"], "d2");
+        assert_eq!(
+            status_reads.load(Ordering::SeqCst),
+            before_refusals + 1,
+            "save invalidates before its fallible persistence write"
+        );
+
+        let worker = request("w1:p1");
+        let denied = dispatcher
+            .dispatch(
+                "add_dunk",
+                &json!({
+                    "target": "w3:p3",
+                    "text": "denied",
+                    "interval_minutes": 1
+                }),
+                &worker,
+            )
+            .unwrap_err();
+        assert!(denied.to_string().contains("requires a superuser"));
+
         dispatcher.close();
         services.shutdown();
     }

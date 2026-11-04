@@ -15,6 +15,8 @@ mod owner_push;
 pub use owner_push::{h_owner_poll, h_owner_push, h_owner_take};
 mod metrics;
 pub use metrics::h_metrics;
+mod dunks;
+pub use dunks::{h_add_dunk, h_remove_dunk, h_update_dunk};
 mod respawn;
 pub use respawn::h_respawn_pane;
 
@@ -121,6 +123,36 @@ pub trait CommandEnv: PaneInfoEnv {
     ) -> Result<Value, DunkError> {
         Err(DunkError::Refused(
             "respawn pane adapter is not wired".into(),
+        ))
+    }
+
+    /// Execute one already-implemented dunk mutation through the request's canonical runtime.
+    /// Target lookup stays in the API wrapper; timer, persistence and cache behavior stay in
+    /// RuntimeServices.
+    fn add_dunk(
+        &self,
+        _pane: Option<&serde_json::Map<String, Value>>,
+        _args: &crate::flock::dunks::AddArgs,
+    ) -> Result<serde_json::Map<String, Value>, DunkError> {
+        Err(DunkError::Refused(
+            "dunk mutation adapter is not wired".into(),
+        ))
+    }
+
+    fn update_dunk(
+        &self,
+        _id: &str,
+        _pane: Option<&serde_json::Map<String, Value>>,
+        _args: &crate::flock::dunks::UpdateArgs,
+    ) -> Result<serde_json::Map<String, Value>, DunkError> {
+        Err(DunkError::Refused(
+            "dunk mutation adapter is not wired".into(),
+        ))
+    }
+
+    fn remove_dunk(&self, _id: &str) -> Result<serde_json::Map<String, Value>, DunkError> {
+        Err(DunkError::Refused(
+            "dunk mutation adapter is not wired".into(),
         ))
     }
 
@@ -743,6 +775,13 @@ impl Dispatcher {
         self.register("respawn_pane", h_respawn_pane);
     }
 
+    /// Register only the T39 add, update and remove dunk handler group.
+    pub fn register_dunk_mutations(&mut self) {
+        self.register("add_dunk", h_add_dunk);
+        self.register("update_dunk", h_update_dunk);
+        self.register("remove_dunk", h_remove_dunk);
+    }
+
     /// `dunk_api.dispatch(flock, name, args, self_pane_id)`, with the acting pane read only from
     /// this request's [`RequestCtx`] and caller state scoped to this synchronous request thread.
     pub fn dispatch<G: CallerGate + ?Sized>(
@@ -774,7 +813,7 @@ impl Dispatcher {
             args = clamp_desk_args(name, &args);
         }
         let missing: Vec<&str> = command
-            .required
+            .dispatch_required
             .iter()
             .copied()
             .filter(|key| match args.get(*key) {

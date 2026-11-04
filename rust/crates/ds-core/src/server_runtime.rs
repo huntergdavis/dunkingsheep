@@ -73,6 +73,7 @@ pub(crate) struct RequestRuntimeAdapter<'a> {
     outbox: Option<&'a outbox_runtime::OutboxRuntime>,
     next_jobs: Option<&'a crate::tasks::next_job_runtime::NextJobs>,
     owner_push: Option<&'a owner_push::OwnerPushService>,
+    dunk_runtime: Option<&'a RuntimeServices>,
 }
 
 /// Terminal access shared by the request and loop adapters. A lock is held only while a
@@ -113,6 +114,7 @@ impl<'a> RequestRuntimeAdapter<'a> {
             outbox: None,
             next_jobs: None,
             owner_push: None,
+            dunk_runtime: None,
         }
     }
 
@@ -125,6 +127,18 @@ impl<'a> RequestRuntimeAdapter<'a> {
             return Err(refusal("request owner push flock mismatch"));
         }
         self.owner_push = Some(&services.owner_push);
+        Ok(self)
+    }
+
+    /// Bind dunk mutations to the same process-owned services as this request's Flock.
+    pub(crate) fn with_dunk_runtime(
+        mut self,
+        services: &'a RuntimeServices,
+    ) -> Result<Self, DunkError> {
+        if !std::ptr::eq(self.terminal.flock, services.flock.as_ref()) {
+            return Err(refusal("request dunk runtime flock mismatch"));
+        }
+        self.dunk_runtime = Some(services);
         Ok(self)
     }
 
@@ -415,6 +429,33 @@ impl crate::api::CommandEnv for RequestRuntimeAdapter<'_> {
         ) -> Result<Value, DunkError>,
     ) -> Result<Value, DunkError> {
         self.with_request_inbox(operation)
+    }
+
+    fn add_dunk(
+        &self,
+        pane: Option<&serde_json::Map<String, Value>>,
+        args: &crate::flock::dunks::AddArgs,
+    ) -> Result<serde_json::Map<String, Value>, DunkError> {
+        self.dunk_runtime
+            .ok_or_else(|| refusal("request dunk runtime is not attached"))?
+            .add_dunk(pane, args)
+    }
+
+    fn update_dunk(
+        &self,
+        id: &str,
+        pane: Option<&serde_json::Map<String, Value>>,
+        args: &crate::flock::dunks::UpdateArgs,
+    ) -> Result<serde_json::Map<String, Value>, DunkError> {
+        self.dunk_runtime
+            .ok_or_else(|| refusal("request dunk runtime is not attached"))?
+            .update_dunk(id, pane, args)
+    }
+
+    fn remove_dunk(&self, id: &str) -> Result<serde_json::Map<String, Value>, DunkError> {
+        self.dunk_runtime
+            .ok_or_else(|| refusal("request dunk runtime is not attached"))?
+            .remove_dunk(id)
     }
 
     fn owner_push(&self) -> Result<&crate::owner::OwnerPush, DunkError> {
