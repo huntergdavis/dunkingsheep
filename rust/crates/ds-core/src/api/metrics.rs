@@ -410,6 +410,28 @@ mod tests {
     }
 
     #[test]
+    fn h_metrics_empty_window_reports_missing_coverage() {
+        let (dir, flock) = flock("api-metrics-empty");
+        attach_inbox(&flock, dir.path());
+
+        let report = dispatch(&flock, None, "worker", 2000.0).unwrap();
+        assert_eq!(0, report["counts"]["events"]);
+        assert_eq!(Value::Null, report["coverage"]["events_since"]);
+        assert!(!report["coverage"]["window_has_events"].as_bool().unwrap());
+        assert_eq!(
+            json!(["queue_wait", "delivery", "handling", "blocked"]),
+            report["coverage"]["missing"]
+        );
+        for duration in ["queue_wait", "delivery", "handling", "blocked"] {
+            assert_eq!(Value::Null, report["durations"][duration]);
+        }
+        assert_eq!(
+            "no events recorded yet; durable telemetry began with this daemon and records as traffic happens",
+            report["coverage"]["notes"]
+        );
+    }
+
+    #[test]
     fn h_metrics_preserves_truthiness_and_conversion_order() {
         let (dir, flock) = flock("api-metrics-args");
         attach_inbox(&flock, dir.path());
