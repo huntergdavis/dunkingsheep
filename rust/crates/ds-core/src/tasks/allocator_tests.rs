@@ -1147,7 +1147,7 @@ async fn guarded_allocation_rechecks_turn_and_queue_before_real_commit() {
         GuardedAllocation::Committed(rows) => assert!(rows.is_empty()),
         _ => panic!("uncontended test must commit"),
     }
-    flock.outbox.lock().unwrap().remove("%1");
+    flock.outbox.lock().unwrap().shift_remove("%1");
     match tasks
         .allocation_try_guarded(Arc::clone(&flock), candidates.clone())
         .await

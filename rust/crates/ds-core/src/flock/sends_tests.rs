@@ -1220,7 +1220,7 @@ fn enqueue_appends_starts_worker_then_saves_the_queued_message() {
     #[derive(Default)]
     struct Events {
         order: Mutex<Vec<&'static str>>,
-        saved: Mutex<Vec<BTreeMap<String, Vec<Message>>>>,
+        saved: Mutex<Vec<Outbox>>,
     }
 
     impl OutboxWake for Events {
@@ -1434,7 +1434,7 @@ fn outbox_worker_pool_reaps_completed_handles_between_idle_bursts() {
     impl OutboxWorkerRunner for DrainingRunner {
         fn run(&self, flock: Arc<Flock>, pane_id: &str, _: &std::sync::atomic::AtomicBool) {
             self.0.fetch_add(1, Ordering::SeqCst);
-            outbox_lock(&flock.outbox).remove(pane_id);
+            outbox_lock(&flock.outbox).shift_remove(pane_id);
         }
     }
     struct Store;
@@ -3393,7 +3393,7 @@ fn deliver_message_does_not_use_permission_or_dead_session_detail_as_block_reaso
         }
         if !dead {
             assert_eq!(12, flock.outbox_snapshot()[P][0].holds);
-            flock.outbox.lock().unwrap().remove(P);
+            flock.outbox.lock().unwrap().shift_remove(P);
         }
     }
 
@@ -3503,6 +3503,20 @@ fn deliver_message_exhaustion_removes_once_remembers_and_releases_waiter() {
         );
     }
 
+    // Python removes the row now, and removes the empty pane only on the next worker step.
+    assert!(flock.outbox_snapshot()[P].is_empty());
+    assert_eq!(
+        outbox_step(
+            &flock,
+            &mut pane,
+            P,
+            201.0,
+            &std::sync::atomic::AtomicBool::new(false),
+            &|_| false,
+            &mut || None
+        ),
+        OutboxStep::Empty
+    );
     assert!(flock.outbox_snapshot().is_empty());
     assert!(waiter.is_set());
     assert_eq!(
@@ -3561,6 +3575,20 @@ fn deliver_message_terminal_action_failure_is_not_retried() {
         "submit_text must not reread the generation after delivery captured it"
     );
     assert!(waiter.is_set());
+    // Python removes the row now, and removes the empty pane only on the next worker step.
+    assert!(flock.outbox_snapshot()[P].is_empty());
+    assert_eq!(
+        outbox_step(
+            &flock,
+            &mut pane,
+            P,
+            201.0,
+            &std::sync::atomic::AtomicBool::new(false),
+            &|_| false,
+            &mut || None
+        ),
+        OutboxStep::Empty
+    );
     assert!(flock.outbox_snapshot().is_empty());
     assert_eq!(
         DeliveryOutcome::AlreadyDecided,
@@ -4700,4 +4728,159 @@ fn partial_receipt_failure_stays_pending_and_retry_completes_without_new_recover
         true,
         payload["stuck_candidates"]["%1"]["receipts_reconciled"]
     );
+}
+
+#[test]
+fn cancelled_inflight_non_io_save_failure_is_not_a_successful_hold() {
+    use std::sync::Arc;
+    struct CancelSave;
+    impl SnapshotStore for CancelSave {
+        fn save(&self, _: &Flock) -> Result<(), DunkError> {
+            Ok(())
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    // Missing startup state is a non-I/O persistence failure, not a filesystem OSError.
+    let flock = Arc::new(Flock::new(
+        dir.path().join("launches"),
+        dir.path().join("lanes"),
+        true,
+    ));
+    let mut message = Message::new("cancel-save", P, "worker", "body", "test");
+    message.hold_while_typing = false;
+    message.press_enter = false;
+    flock
+        .outbox
+        .lock()
+        .unwrap()
+        .insert(P.into(), vec![message.clone()]);
+    let callback_flock = Arc::clone(&flock);
+    let mut pane = Pane {
+        send_refusal: Some(format!("{BOX_HOLD} (controlled-refusal)")),
+        ..Default::default()
+    };
+    pane.on_send_text.replace(Some(Box::new(move || {
+        callback_flock
+            .cancel_message(&serde_json::json!("cancel-save"), &CancelSave)
+            .unwrap();
+    })));
+    let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        flock.deliver_message("cancel-save", 100.0, &mut pane, || None)
+    }))
+    .expect_err("non-I/O save failure must terminate the worker operation");
+    let error = failure
+        .downcast_ref::<DunkError>()
+        .expect("preserve the typed persistence error");
+    assert!(error.to_string().contains("status startup state"));
+    assert!(message.done.is_set());
+    assert!(flock.outbox_snapshot()[P].is_empty());
+    let history = flock.message_history.lock().unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].status, "cancelled");
+    assert_eq!(history[0].holds, 1);
+    assert_eq!(
+        history[0].detail.as_deref(),
+        Some(format!("{BOX_HOLD} (controlled-refusal)").as_str())
+    );
+}
+
+#[test]
+fn completed_delivery_preserves_pane_slot_until_empty_step_or_reenqueue() {
+    use std::sync::Arc;
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Arc::new(Flock::new(
+        dir.path().join("launches"),
+        dir.path().join("lanes"),
+        false,
+    ));
+    let mut first = Message::new("first", P, "first", "body", "test");
+    first.hold_while_typing = false;
+    first.press_enter = false;
+    flock.outbox.lock().unwrap().insert(P.into(), vec![first]);
+    flock.outbox.lock().unwrap().insert(
+        "a-later".into(),
+        vec![Message::new("later", "a-later", "later", "body", "test")],
+    );
+    let mut pane = Pane {
+        receipt_ok: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        flock.deliver_message("first", 1.0, &mut pane, || None),
+        DeliveryOutcome::Sent
+    );
+    assert!(flock.outbox_snapshot()[P].is_empty());
+    assert_eq!(
+        flock
+            .outbox_snapshot()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        [P, "a-later"]
+    );
+    flock
+        .enqueue(
+            Message::new("next", P, "next", "body", "test"),
+            &NoopOutboxWake,
+            &NoopSnapshotStore,
+        )
+        .unwrap();
+    assert_eq!(
+        flock
+            .outbox_snapshot()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        [P, "a-later"]
+    );
+    assert_eq!(flock.outbox_snapshot()[P][0].id, "next");
+}
+
+#[test]
+fn cancelled_captured_message_survives_history_eviction_without_reinsertion() {
+    use std::sync::Arc;
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Arc::new(Flock::new(
+        dir.path().join("launches"),
+        dir.path().join("lanes"),
+        false,
+    ));
+    let mut original = Message::new("evicted", P, "original", "body", "test");
+    original.hold_while_typing = false;
+    original.press_enter = false;
+    flock
+        .outbox
+        .lock()
+        .unwrap()
+        .insert(P.into(), vec![original.clone()]);
+    let callback_flock = Arc::clone(&flock);
+    let mut pane = Pane {
+        send_refusal: Some(format!("{BOX_HOLD} (controlled-refusal)")),
+        ..Default::default()
+    };
+    pane.on_send_text.replace(Some(Box::new(move || {
+        callback_flock
+            .cancel_message(&serde_json::json!("evicted"), &NoopSnapshotStore)
+            .unwrap();
+        for index in 0..50 {
+            let mut newer = Message::new(
+                &format!("new-{index}"),
+                "other",
+                "other",
+                "new body",
+                "other",
+            );
+            newer.status = "sent".into();
+            callback_flock.remember(&newer);
+        }
+    })));
+    assert_eq!(
+        flock.deliver_message("evicted", 100.0, &mut pane, || None),
+        DeliveryOutcome::Held
+    );
+    assert!(original.done.is_set());
+    assert!(flock.outbox_snapshot()[P].is_empty());
+    let history = flock.message_history.lock().unwrap();
+    assert_eq!(history.len(), 50);
+    assert!(history.iter().all(|message| message.id != "evicted"));
 }
