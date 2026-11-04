@@ -190,7 +190,6 @@ fn message_input(body: &Value) -> Result<MessageIn, WebResponseError> {
         attachment_ids,
         external_id,
     })
-    .map_err(WebResponseError::from)
 }
 
 fn brief_input(body: &Value) -> Result<BriefIn, WebResponseError> {
@@ -214,7 +213,6 @@ fn brief_input(body: &Value) -> Result<BriefIn, WebResponseError> {
         body: text.trim().to_owned(),
         attachment_ids,
     })
-    .map_err(WebResponseError::from)
 }
 
 fn model_attributes_error(body: &Value) -> Response {

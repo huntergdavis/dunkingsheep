@@ -70,7 +70,7 @@ async fn panes_activity(
     request: Request,
 ) -> Response {
     if let Err(response) = authenticate(auth.as_ref(), request.headers(), scheme).await {
-        return with_no_store(response);
+        return with_no_store(response.into_response());
     }
     let data = match backend.panes_activity() {
         Ok(Some(mut data)) => {
