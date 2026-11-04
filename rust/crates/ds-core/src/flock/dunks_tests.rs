@@ -56,6 +56,30 @@ fn map(value: Value) -> Map<String, Value> {
     value.as_object().cloned().expect("object")
 }
 
+#[test]
+fn scheduled_consumption_uses_visible_box_not_busy_or_transcript() {
+    use super::dunks::input_pending;
+    assert_eq!(None, input_pending(None, "continue"));
+    assert_eq!(None, input_pending(Some("working on a task"), "continue"));
+    assert_eq!(Some(true), input_pending(Some("❯ continue"), "continue"));
+    assert_eq!(
+        Some(false),
+        input_pending(Some("continue\nworking\n❯ "), "continue")
+    );
+    assert_eq!(
+        Some(true),
+        input_pending(Some("❯ prefix continue suffix"), "continue")
+    );
+    assert_eq!(
+        Some(false),
+        input_pending(Some("❯ unrelated hint"), "continue")
+    );
+    assert_eq!(
+        Some(true),
+        input_pending(Some("──────────\ncontinue\n──────────\nmodel"), "continue")
+    );
+}
+
 struct FireEnv {
     panes: Vec<Value>,
     screen: String,

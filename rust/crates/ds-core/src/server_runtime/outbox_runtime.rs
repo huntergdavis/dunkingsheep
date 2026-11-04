@@ -505,9 +505,10 @@ fn run_dunk_timer(
                 _ => {}
             }
         }
-        if fields.skip_if_unconsumed && fields.awaiting_consumption && fields.send_count > 0 {
+        if fields.skip_if_unconsumed && fields.send_count > 0 {
             if let Some(text) = fields.last_sent_text.as_deref() {
-                match crate::flock::sends::box_holds(&env, pane, text) {
+                let screen = crate::flock::sends::SendEnv::read_pane(&env, pane, 40, false);
+                match crate::flock::dunks::input_pending(screen.as_deref(), text) {
                     Some(false) => crate::flock::dunks::DunkList::timer_consumed(&handle),
                     Some(true) => {
                         if signal.cancelled.load(Ordering::Acquire) {

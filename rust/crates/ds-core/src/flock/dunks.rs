@@ -21,6 +21,52 @@ pub const DEFAULT_TEXT: &str = "continue";
 /// `DEFAULT_INTERVAL_MINUTES`.
 pub const DEFAULT_INTERVAL_MINUTES: f64 = 10.0;
 
+/// Python `_input_pending`: visible composer evidence, independent of agent busy state.
+pub(crate) fn input_pending(screen: Option<&str>, sent: &str) -> Option<bool> {
+    use crate::terminal::screen::{
+        collapse, strip_ansi, COLLAPSED_INPUT_MARKERS, CONSUMPTION_PREFIX_CHARS,
+    };
+    let screen = screen.filter(|screen| !screen.is_empty())?;
+    let lines: Vec<_> = screen.lines().collect();
+    let region = if let Some(start) = lines
+        .iter()
+        .rposition(|line| line.trim().starts_with(['❯', '›']))
+    {
+        lines[start..].join("\n")
+    } else {
+        let borders: Vec<_> = lines
+            .iter()
+            .enumerate()
+            .filter_map(|(index, line)| {
+                let plain = strip_ansi(line);
+                let plain = plain.trim();
+                (plain.starts_with('─') && plain.matches('─').count() >= 10).then_some(index)
+            })
+            .collect();
+        if borders.len() < 2 {
+            return None;
+        }
+        let bottom = borders[borders.len() - 1];
+        if bottom + 5 < lines.len() {
+            return None;
+        }
+        lines[borders[borders.len() - 2] + 1..bottom].join("\n")
+    };
+    let low = region.to_lowercase();
+    if COLLAPSED_INPUT_MARKERS
+        .iter()
+        .any(|marker| low.contains(marker))
+    {
+        return Some(true);
+    }
+    let needle: String = collapse(sent)
+        .chars()
+        .take(CONSUMPTION_PREFIX_CHARS)
+        .collect::<String>()
+        .to_lowercase();
+    Some(!needle.is_empty() && collapse(&region).to_lowercase().contains(&needle))
+}
+
 /// `Dunker.FIELDS`, in the Python's order: this is the persisted key order of `dunks.json`.
 pub const FIELDS: [&str; 28] = [
     "id",
@@ -507,7 +553,6 @@ pub(crate) struct DunkTimerFields {
     pub running: bool,
     pub only_when_idle: bool,
     pub skip_if_unconsumed: bool,
-    pub awaiting_consumption: bool,
     pub last_sent_text: Option<String>,
     pub send_count: i64,
 }
@@ -573,7 +618,6 @@ impl DunkList {
             running: dunker.running,
             only_when_idle: dunker.only_when.as_deref() == Some("idle"),
             skip_if_unconsumed: dunker.skip_if_unconsumed,
-            awaiting_consumption: dunker.awaiting_consumption,
             last_sent_text: dunker.last_sent_text.clone(),
             send_count: dunker.send_count,
         }
