@@ -14,6 +14,7 @@ mod inbox_metrics;
 mod inbox_stores;
 mod keypress;
 mod layout;
+mod layout_create;
 mod outbox_messages;
 mod outbox_runtime;
 mod owner_push;
@@ -315,6 +316,32 @@ impl SendEnv for TerminalCallAdapter<'_> {
 }
 
 impl crate::flock::commands_layout::LayoutBackend for RequestRuntimeAdapter<'_> {
+    fn create_workspace_raw(
+        &mut self,
+        label: &Value,
+        cwd: &Value,
+        focus: bool,
+    ) -> crate::flock::commands_layout::RawCreateResult {
+        self.helper_layoutbackend_create_workspace_raw(label, cwd, focus)
+    }
+    fn create_tab_raw(
+        &mut self,
+        workspace: Option<&str>,
+        label: &Value,
+        cwd: &Value,
+        focus: bool,
+    ) -> crate::flock::commands_layout::RawCreateResult {
+        self.helper_layoutbackend_create_tab_raw(workspace, label, cwd, focus)
+    }
+    fn split_pane_raw(
+        &mut self,
+        pane: &str,
+        direction: &str,
+        cwd: &Value,
+        focus: bool,
+    ) -> crate::flock::commands_layout::RawCreateResult {
+        self.helper_layoutbackend_split_pane_raw(pane, direction, cwd, focus)
+    }
     fn list_panes(&self) -> Vec<Value> {
         self.helper_layoutbackend_list_panes()
     }
@@ -436,6 +463,13 @@ impl crate::api::CommandEnv for RequestRuntimeAdapter<'_> {
 
     fn poolrad_progress(&self) -> Result<Value, DunkError> {
         self.runtime_poolrad_progress()
+    }
+
+    fn with_layout_create(
+        &self,
+        operation: &mut crate::flock::commands_layout::CreateOperation<'_>,
+    ) -> Result<Value, DunkError> {
+        self.with_request_layout_create(operation)
     }
 
     fn with_inbox_env(
@@ -574,6 +608,13 @@ impl crate::api::CommandEnv for RequestRuntimeAdapter<'_> {
 
     fn now_s(&self) -> f64 {
         crate::clock::now_s()
+    }
+
+    fn project_summary_env(
+        &self,
+    ) -> Result<&dyn crate::flock::project_summary::SummaryEnv, DunkError> {
+        self.terminal.flock.status_state()?;
+        Ok(self)
     }
 
     fn status_env(&self) -> Result<&dyn crate::flock::status::StatusEnv, DunkError> {

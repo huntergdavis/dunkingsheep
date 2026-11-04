@@ -241,7 +241,7 @@ mod tests {
         assert_eq!(
             flock.sent_text_by_pane.lock().unwrap()["w1:p1"]
                 .last()
-                .map(String::as_str),
+                .and_then(serde_json::Value::as_str),
             Some("updated"),
             "the in-flight delivery must type the latest folded notice text"
         );

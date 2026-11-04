@@ -267,6 +267,80 @@ impl RequestRuntimeAdapter<'_> {
         })
     }
 
+    pub(crate) fn helper_layoutbackend_create_workspace_raw(
+        &mut self,
+        label: &Value,
+        cwd: &Value,
+        focus: bool,
+    ) -> crate::flock::commands_layout::RawCreateResult {
+        self.terminal.with_terminal_mut(|terminal| {
+            let workspace = match terminal.create_workspace_raw(label, cwd, focus)? {
+                Ok(value) => value,
+                Err(error) => return Ok(Err(error.message)),
+            };
+            let tabs = terminal.list_tabs();
+            let tab = tabs
+                .iter()
+                .find(|tab| tab.workspace_id == workspace.workspace_id)
+                .cloned()
+                .map(tab_value);
+            let pane = terminal
+                .list_panes()
+                .into_iter()
+                .find(|pane| pane.session_id == workspace.workspace_id)
+                .map(|pane| pane_value(terminal, &pane));
+            Ok(Ok(json!({
+                "workspace": workspace_value(workspace, &tabs),
+                "tab": tab,
+                "root_pane": pane,
+            })))
+        })
+    }
+
+    pub(crate) fn helper_layoutbackend_create_tab_raw(
+        &mut self,
+        workspace_id: Option<&str>,
+        label: &Value,
+        cwd: &Value,
+        focus: bool,
+    ) -> crate::flock::commands_layout::RawCreateResult {
+        self.terminal.with_terminal_mut(|terminal| {
+            let tab = match terminal.create_tab_raw(workspace_id, label, cwd, focus)? {
+                Ok(value) => value,
+                Err(error) => return Ok(Err(error.message)),
+            };
+            let pane = terminal
+                .list_panes()
+                .into_iter()
+                .find(|pane| pane.window_id == tab.tab_id)
+                .map(|pane| pane_value(terminal, &pane));
+            let Some(pane) = pane else {
+                return Ok(Err("tmux created the window but it is not visible".into()));
+            };
+            Ok(Ok(json!({
+                "tab": tab_value(tab),
+                "root_pane": pane,
+            })))
+        })
+    }
+
+    pub(crate) fn helper_layoutbackend_split_pane_raw(
+        &mut self,
+        pane_id: &str,
+        direction: &str,
+        cwd: &Value,
+        focus: bool,
+    ) -> crate::flock::commands_layout::RawCreateResult {
+        self.terminal.with_terminal_mut(|terminal| {
+            let pane = match terminal.split_pane_raw(pane_id, direction, cwd, focus)? {
+                Ok(value) => value,
+                Err(error) => return Ok(Err(error.message)),
+            };
+            let pane = pane_value(terminal, &pane);
+            Ok(Ok(json!({ "root_pane": pane })))
+        })
+    }
+
     pub(crate) fn helper_closebackend_close(
         &mut self,
         kind: &str,

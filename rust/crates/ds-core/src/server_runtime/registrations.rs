@@ -36,6 +36,7 @@ pub(crate) fn production_handlers() -> Dispatcher {
     handlers.register_task_mutation_leases();
     handlers.register_task_statistics();
     handlers.register_metrics();
+    handlers.register_project_summary();
     handlers.register_dunk_mutations();
     handlers.register_dunk_lifecycle();
     handlers.register_get_dunk();
@@ -44,6 +45,7 @@ pub(crate) fn production_handlers() -> Dispatcher {
     handlers.register_outbox_messages();
     handlers.register_clear_box_delivery_capability();
     handlers.register_respawn_pane();
+    handlers.register_layout_create();
     handlers
 }
 
@@ -530,6 +532,9 @@ mod tests {
             "delivery",
             "delivery_capability",
             "respawn_pane",
+            "create_workspace",
+            "create_tab",
+            "split_pane",
             "report_run",
             "report_list",
             "owner_conversation",
@@ -557,6 +562,7 @@ mod tests {
             "task_metrics",
             "task_reap",
             "metrics",
+            "project_summary",
             "add_dunk",
             "get_dunk",
             "update_dunk",

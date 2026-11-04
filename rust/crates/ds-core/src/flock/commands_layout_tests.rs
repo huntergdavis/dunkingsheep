@@ -1229,3 +1229,65 @@ fn save_runs_only_when_a_dunk_was_stopped() {
     .unwrap();
     assert_eq!(1, saves);
 }
+
+#[test]
+fn workspace_last_message_precedes_failed_role_writeback() {
+    let flock = lane_flock("last-message-before-role", Some("owner"));
+    let mut backend = FakeLayout::new();
+    flock.set_last_message("before");
+    let error = make_lane(
+        &flock,
+        &mut backend,
+        "new",
+        Some("lane"),
+        Some("worker"),
+        Some("other"),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("owner role"), "{error}");
+    assert_eq!(flock.last_message(), "Created workspace new");
+    assert!(flock
+        .lane_registry(false)
+        .unwrap()
+        .values()
+        .any(|row| Flock::row_identity(Some(row)).0.as_deref() == Some("lane")));
+}
+
+#[test]
+fn workspace_last_message_follows_submit_and_survives_refusal() {
+    let flock = lane_flock("last-message-submit", None);
+    let mut backend = FakeLayout::new();
+    flock.set_last_message("before");
+    let mut submit = |_: &str, _: &str| {
+        assert_eq!(flock.last_message(), "before");
+        (false, "submit refused".into())
+    };
+    let out = flock
+        .create_workspace_with_lane(
+            &mut backend,
+            Some("new"),
+            None,
+            Some("command"),
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &mut submit,
+            &NoPanes,
+        )
+        .unwrap();
+    assert_eq!(
+        out["error"],
+        "created, but running the command failed: submit refused"
+    );
+    assert_eq!(flock.last_message(), "Created workspace new");
+    backend.fail_layout = Some("backend refused".into());
+    let error = make_lane(&flock, &mut backend, "failed", None, None, None).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "the terminal backend could not create the workspace failed: backend refused"
+    );
+    assert_eq!(flock.last_message(), "Created workspace new");
+}
