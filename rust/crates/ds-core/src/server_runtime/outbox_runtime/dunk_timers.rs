@@ -93,27 +93,49 @@ impl DunkTimerOwner {
         Arc::as_ptr(handle) as usize
     }
 
+    pub(super) fn has_live_worker(&self, handle: &crate::flock::dunks::DunkerHandle) -> bool {
+        self.workers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&Self::key(handle))
+            .is_some_and(|worker| !worker.join.is_finished())
+    }
+
     pub(super) fn start(&self, handle: crate::flock::dunks::DunkerHandle) -> Result<(), DunkError> {
         let key = Self::key(&handle);
-        let mut workers = self.workers.lock().unwrap_or_else(|e| e.into_inner());
-        if self.stopped.load(Ordering::Acquire) {
-            return Err(DunkError::Refused("dunk timer runtime is stopped".into()));
-        }
-        // A timer can exit after removal or an error before a later start observes it.
-        // Reap completed registrations so they cannot suppress a replacement worker.
-        let finished: Vec<_> = workers
-            .iter()
-            .filter_map(|(key, worker)| worker.join.is_finished().then_some(*key))
-            .collect();
-        for key in finished {
-            if let Some(worker) = workers.remove(&key) {
+        let thread_name = format!(
+            "dunk-timer-{}",
+            crate::flock::dunks::DunkList::timer_fields(&handle).id
+        );
+        let mut workers = loop {
+            let mut workers = self.workers.lock().unwrap_or_else(|e| e.into_inner());
+            if self.stopped.load(Ordering::Acquire) {
+                return Err(DunkError::Refused("dunk timer runtime is stopped".into()));
+            }
+            if let Some(worker) = workers.get(&key) {
+                if !worker.join.is_finished() {
+                    worker.signal.wake();
+                    return Ok(());
+                }
+            }
+            // Remove finished registrations under the map lock, then join them after
+            // releasing it so a worker exit can never participate in lock inversion.
+            let finished_keys: Vec<_> = workers
+                .iter()
+                .filter_map(|(key, worker)| worker.join.is_finished().then_some(*key))
+                .collect();
+            let finished: Vec<_> = finished_keys
+                .into_iter()
+                .filter_map(|key| workers.remove(&key))
+                .collect();
+            if finished.is_empty() {
+                break workers;
+            }
+            drop(workers);
+            for worker in finished {
                 let _ = worker.join.join();
             }
-        }
-        if let Some(worker) = workers.get(&key) {
-            worker.signal.wake();
-            return Ok(());
-        }
+        };
         let signal = Arc::new(TimerSignal {
             #[cfg(test)]
             precommit: Arc::clone(&self.precommit),
@@ -131,35 +153,30 @@ impl DunkTimerOwner {
         let factory = Arc::clone(&self.factory);
         let pool = self.pool.clone();
         let reporter = self.reporter.clone();
-        let join = thread::Builder::new()
-            .name(format!(
-                "dunk-timer-{}",
-                crate::flock::dunks::DunkList::timer_fields(&handle).id
-            ))
-            .spawn(move || {
-                let failed_handle = Arc::clone(&handle);
-                let failed_flock = flock.clone();
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    run_dunk_timer(
-                        flock,
-                        runtime,
-                        factory,
-                        handle,
-                        thread_signal,
-                        pool,
-                        reporter,
-                    )
-                }));
-                if result.is_err() {
-                    crate::flock::dunks::DunkList::set_timer_error(
-                        &failed_handle,
-                        "scheduled dunk worker panicked",
-                    );
-                    if let Some(flock) = failed_flock.upgrade() {
-                        save_timer_state(&flock, &failed_handle, &FlockSnapshot);
-                    }
+        let join = thread::Builder::new().name(thread_name).spawn(move || {
+            let failed_handle = Arc::clone(&handle);
+            let failed_flock = flock.clone();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                run_dunk_timer(
+                    flock,
+                    runtime,
+                    factory,
+                    handle,
+                    thread_signal,
+                    pool,
+                    reporter,
+                )
+            }));
+            if result.is_err() {
+                crate::flock::dunks::DunkList::set_timer_error(
+                    &failed_handle,
+                    "scheduled dunk worker panicked",
+                );
+                if let Some(flock) = failed_flock.upgrade() {
+                    save_timer_state(&flock, &failed_handle, &FlockSnapshot);
                 }
-            });
+            }
+        });
         let join = join
             .map_err(|error| DunkError::Refused(format!("could not start dunk timer: {error}")))?;
         workers.insert(key, TimerWorker { signal, join });

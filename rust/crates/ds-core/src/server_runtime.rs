@@ -458,6 +458,24 @@ impl crate::api::CommandEnv for RequestRuntimeAdapter<'_> {
             .remove_dunk(id)
     }
 
+    fn start_dunk(&self, id: &str) -> Result<serde_json::Map<String, Value>, DunkError> {
+        self.dunk_runtime
+            .ok_or_else(|| refusal("request dunk runtime is not attached"))?
+            .start_dunk(id)
+    }
+
+    fn stop_dunk(&self, id: &str) -> Result<serde_json::Map<String, Value>, DunkError> {
+        self.dunk_runtime
+            .ok_or_else(|| refusal("request dunk runtime is not attached"))?
+            .stop_dunk(id)
+    }
+
+    fn toggle_dunk(&self, id: &str) -> Result<serde_json::Map<String, Value>, DunkError> {
+        self.dunk_runtime
+            .ok_or_else(|| refusal("request dunk runtime is not attached"))?
+            .toggle_dunk(id)
+    }
+
     fn owner_push(&self) -> Result<&crate::owner::OwnerPush, DunkError> {
         self.owner_push
             .ok_or_else(|| refusal("owner push adapter is not wired"))?

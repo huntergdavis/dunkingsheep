@@ -37,6 +37,7 @@ pub(crate) fn production_handlers() -> Dispatcher {
     handlers.register_task_statistics();
     handlers.register_metrics();
     handlers.register_dunk_mutations();
+    handlers.register_dunk_lifecycle();
     handlers.register_send_text_keys_flush_box();
     handlers.register_clear_box_delivery_capability();
     handlers.register_respawn_pane();
@@ -509,6 +510,9 @@ mod tests {
             "add_dunk",
             "update_dunk",
             "remove_dunk",
+            "start_dunk",
+            "stop_dunk",
+            "toggle_dunk",
             "owner_push",
             "owner_poll",
             "owner_take",
@@ -801,6 +805,443 @@ mod tests {
         assert!(denied.to_string().contains("requires a superuser"));
 
         dispatcher.close();
+        services.shutdown();
+    }
+
+    #[test]
+    fn h_start_dunk_matches_python() {
+        let (dir, services) = make_services_with_persistence(
+            "start-dunk-parity",
+            Arc::new(|| Box::new(FakeTerminal::new())),
+            None,
+            true,
+        );
+        let dispatcher = services.production_dispatcher();
+        let owner = request("w2:p2");
+        let worker = request("w1:p1");
+        dispatcher
+            .dispatch(
+                "add_dunk",
+                &json!({"target": "w3:p3", "text": "start", "interval_minutes": 1, "start": false}),
+                &owner,
+            )
+            .unwrap();
+        dispatcher
+            .dispatch(
+                "add_dunk",
+                &json!({"text": "no target", "start": false}),
+                &owner,
+            )
+            .unwrap();
+
+        let status_reads = AtomicUsize::new(0);
+        let cached = cached_dunks(&services, &owner, &status_reads);
+        assert_eq!(cached["dunks"].as_array().unwrap().len(), 2);
+        assert_eq!(status_reads.load(Ordering::SeqCst), 1);
+
+        let denied = dispatcher
+            .dispatch("start_dunk", &json!({}), &worker)
+            .unwrap_err();
+        assert_eq!(
+            denied.to_string(),
+            "start_dunk requires a superuser (the owner role); w1:p1 is worker. Non-owners use the inbox and task queue."
+        );
+        let missing = dispatcher
+            .dispatch("start_dunk", &json!({}), &owner)
+            .unwrap_err();
+        assert_eq!(
+            missing.to_string(),
+            "start_dunk: missing required argument(s): id"
+        );
+
+        let no_target = dispatcher
+            .dispatch("start_dunk", &json!({"id": "d2"}), &owner)
+            .unwrap_err();
+        assert_eq!(no_target.to_string(), "d2 has no target");
+        assert_eq!(
+            services.flock.dunks.get("d2").unwrap()["running"],
+            false,
+            "Python changes status but does not mark an untargeted dunk running"
+        );
+        assert_eq!(
+            services.flock.dunks.get("d2").unwrap()["status"],
+            "No target - press c"
+        );
+        assert_eq!(services.outbox.dunk_timer_worker_count(), 0);
+        assert_eq!(
+            status_reads.load(Ordering::SeqCst),
+            1,
+            "the pre-save no-target refusal does not invalidate the cached view"
+        );
+
+        // Python Flock._find stringifies its raw id, then accepts a bare numeric id.
+        let started = dispatcher
+            .dispatch("start_dunk", &json!({"id": 1}), &owner)
+            .unwrap();
+        assert_eq!(started["id"], "d1");
+        assert_eq!(started["running"], true);
+        assert_eq!(services.outbox.dunk_timer_worker_count(), 1);
+        assert_eq!(
+            services.outbox.dunk_timer_generation("d1").unwrap(),
+            Some(0)
+        );
+        assert_eq!(
+            cached_dunks(&services, &owner, &status_reads)["dunks"][0]["running"],
+            true
+        );
+        assert_eq!(status_reads.load(Ordering::SeqCst), 2);
+
+        // An already-running start saves like Python, without creating a second worker.
+        let started_again = dispatcher
+            .dispatch("start_dunk", &json!({"id": "d1"}), &owner)
+            .unwrap();
+        assert_eq!(started_again["running"], true);
+        assert_eq!(started_again["started_at"], started["started_at"]);
+        assert_eq!(started_again["last_error"], started["last_error"]);
+        assert_eq!(services.outbox.dunk_timer_worker_count(), 1);
+        assert_eq!(
+            started_again["next_send_at"], started["next_send_at"],
+            "an already-running Python start preserves its existing deadline"
+        );
+        assert_eq!(
+            services.outbox.dunk_timer_generation("d1").unwrap(),
+            Some(0)
+        );
+        assert_eq!(
+            cached_dunks(&services, &owner, &status_reads)["dunks"][0]["running"],
+            true
+        );
+        assert_eq!(status_reads.load(Ordering::SeqCst), 3);
+
+        // Accepted idempotent starts still save/invalidate, even if persistence then fails.
+        let state_path = dir.path().join("start-dunk-parity-whole-state.json");
+        std::fs::remove_file(&state_path).unwrap();
+        std::fs::create_dir(&state_path).unwrap();
+        let save_error = dispatcher
+            .dispatch("start_dunk", &json!({"id": "d1"}), &owner)
+            .unwrap_err();
+        assert!(save_error.to_string().contains("rename"));
+        assert_eq!(services.outbox.dunk_timer_worker_count(), 1);
+        assert_eq!(
+            services.outbox.dunk_timer_generation("d1").unwrap(),
+            Some(0)
+        );
+        assert_eq!(services.flock.dunks.get("d1").unwrap()["running"], true);
+        assert_eq!(
+            cached_dunks(&services, &owner, &status_reads)["dunks"][0]["next_send_at"],
+            started["next_send_at"]
+        );
+        assert_eq!(status_reads.load(Ordering::SeqCst), 4);
+        std::fs::remove_dir(&state_path).unwrap();
+        services.stop_dunk("d1").unwrap();
+        services.shutdown();
+    }
+
+    #[test]
+    fn h_start_dunk_resumes_running_row_without_live_worker() {
+        let (_dir, services) = make_services(
+            "start-dunk-missing-worker",
+            Arc::new(|| Box::new(FakeTerminal::new())),
+            None,
+        );
+        let dispatcher = services.production_dispatcher();
+        let owner = request("w2:p2");
+        dispatcher
+            .dispatch(
+                "add_dunk",
+                &json!({"target": "w3:p3", "text": "resume", "interval_minutes": 1, "start": false}),
+                &owner,
+            )
+            .unwrap();
+        let first = dispatcher
+            .dispatch("start_dunk", &json!({"id": "d1"}), &owner)
+            .unwrap();
+        assert_eq!(services.outbox.dunk_timer_worker_count(), 1);
+
+        services.outbox.stop_dunk_timer_worker_only("d1").unwrap();
+        assert_eq!(services.flock.dunks.get("d1").unwrap()["running"], true);
+        assert_eq!(services.outbox.dunk_timer_worker_count(), 0);
+
+        let resumed = dispatcher
+            .dispatch("start_dunk", &json!({"id": "d1"}), &owner)
+            .unwrap();
+        assert_eq!(resumed["running"], true);
+        assert_ne!(resumed["started_at"], first["started_at"]);
+        assert_ne!(resumed["next_send_at"], first["next_send_at"]);
+        assert_eq!(services.outbox.dunk_timer_worker_count(), 1);
+        assert_eq!(
+            services.outbox.dunk_timer_generation("d1").unwrap(),
+            Some(0)
+        );
+
+        services.stop_dunk("d1").unwrap();
+        services.shutdown();
+    }
+
+    #[test]
+    fn h_start_dunk_reaps_finished_worker_and_resumes_running_row() {
+        let (_dir, services) = make_services(
+            "start-dunk-finished-worker",
+            Arc::new(|| Box::new(FakeTerminal::new())),
+            None,
+        );
+        let dispatcher = services.production_dispatcher();
+        let owner = request("w2:p2");
+        dispatcher
+            .dispatch(
+                "add_dunk",
+                &json!({"target": "w3:p3", "text": "resume", "interval_minutes": 1, "start": false}),
+                &owner,
+            )
+            .unwrap();
+        let first = dispatcher
+            .dispatch("start_dunk", &json!({"id": "d1"}), &owner)
+            .unwrap();
+        assert_eq!(services.outbox.dunk_timer_worker_count(), 1);
+
+        services
+            .outbox
+            .install_finished_dunk_timer_worker("d1")
+            .unwrap();
+        assert_eq!(services.flock.dunks.get("d1").unwrap()["running"], true);
+        assert_eq!(services.outbox.dunk_timer_worker_count(), 1);
+        assert_eq!(
+            services.outbox.dunk_timer_generation("d1").unwrap(),
+            Some(0)
+        );
+
+        let resumed = dispatcher
+            .dispatch("start_dunk", &json!({"id": "d1"}), &owner)
+            .unwrap();
+        assert_eq!(resumed["running"], true);
+        assert_ne!(resumed["started_at"], first["started_at"]);
+        assert_ne!(resumed["next_send_at"], first["next_send_at"]);
+        assert_eq!(services.outbox.dunk_timer_worker_count(), 1);
+        assert_eq!(
+            services.outbox.dunk_timer_generation("d1").unwrap(),
+            Some(0)
+        );
+
+        services.stop_dunk("d1").unwrap();
+        services.shutdown();
+    }
+
+    #[test]
+    fn h_start_and_stop_dunk_serialize_row_and_worker_lifetimes() {
+        let (_dir, services) = make_services(
+            "start-stop-dunk-race",
+            Arc::new(|| Box::new(FakeTerminal::new())),
+            None,
+        );
+        let dispatcher = services.production_dispatcher();
+        let owner = request("w2:p2");
+        dispatcher
+            .dispatch(
+                "add_dunk",
+                &json!({"target": "w3:p3", "text": "race", "interval_minutes": 1, "start": true}),
+                &owner,
+            )
+            .unwrap();
+        assert_eq!(services.outbox.dunk_timer_worker_count(), 1);
+
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let start_dispatcher = Arc::clone(&dispatcher);
+        let start_barrier = Arc::clone(&barrier);
+        let start = std::thread::spawn(move || {
+            let owner = request("w2:p2");
+            start_barrier.wait();
+            start_dispatcher.dispatch("start_dunk", &json!({"id": "d1"}), &owner)
+        });
+        let stop_dispatcher = Arc::clone(&dispatcher);
+        let stop_barrier = Arc::clone(&barrier);
+        let stop = std::thread::spawn(move || {
+            let owner = request("w2:p2");
+            stop_barrier.wait();
+            stop_dispatcher.dispatch("stop_dunk", &json!({"id": "d1"}), &owner)
+        });
+        barrier.wait();
+        start.join().unwrap().unwrap();
+        stop.join().unwrap().unwrap();
+
+        let row = services.flock.dunks.get("d1").unwrap();
+        if row["running"] == true {
+            assert!(row["next_send_at"].is_number());
+            assert_eq!(services.outbox.dunk_timer_worker_count(), 1);
+            services.stop_dunk("d1").unwrap();
+        } else {
+            assert_eq!(row["next_send_at"], Value::Null);
+            assert_eq!(row["status"], "Stopped");
+            assert_eq!(services.outbox.dunk_timer_worker_count(), 0);
+            std::thread::sleep(Duration::from_millis(50));
+            let after_join = services.flock.dunks.get("d1").unwrap();
+            assert_eq!(after_join["next_send_at"], Value::Null);
+            assert_eq!(after_join["status"], "Stopped");
+        }
+        services.shutdown();
+    }
+
+    #[test]
+    fn h_start_dunk_invalidates_view() {
+        let (_dir, services) = make_services_with_persistence(
+            "start-dunk-cache",
+            Arc::new(|| Box::new(FakeTerminal::new())),
+            None,
+            true,
+        );
+        let dispatcher = services.production_dispatcher();
+        let owner = request("w2:p2");
+        dispatcher
+            .dispatch(
+                "add_dunk",
+                &json!({"target": "w3:p3", "text": "cache", "interval_minutes": 1, "start": false}),
+                &owner,
+            )
+            .unwrap();
+        let status_reads = AtomicUsize::new(0);
+        cached_dunks(&services, &owner, &status_reads);
+        assert_eq!(status_reads.load(Ordering::SeqCst), 1);
+
+        dispatcher
+            .dispatch("start_dunk", &json!({"id": "d1"}), &owner)
+            .unwrap();
+        assert_eq!(
+            cached_dunks(&services, &owner, &status_reads)["dunks"][0]["running"],
+            true
+        );
+        assert_eq!(status_reads.load(Ordering::SeqCst), 2);
+        services.stop_dunk("d1").unwrap();
+        services.shutdown();
+    }
+
+    #[test]
+    fn h_stop_dunk_matches_python() {
+        let (dir, services) = make_services_with_persistence(
+            "stop-dunk-parity",
+            Arc::new(|| Box::new(FakeTerminal::new())),
+            None,
+            true,
+        );
+        let dispatcher = services.production_dispatcher();
+        let owner = request("w2:p2");
+        for text in ["normal stop", "save failure stop"] {
+            dispatcher
+                .dispatch(
+                    "add_dunk",
+                    &json!({"target": "w3:p3", "text": text, "interval_minutes": 1, "start": true}),
+                    &owner,
+                )
+                .unwrap();
+        }
+        let status_reads = AtomicUsize::new(0);
+        cached_dunks(&services, &owner, &status_reads);
+        assert_eq!(services.outbox.dunk_timer_worker_count(), 2);
+
+        let stopped = dispatcher
+            .dispatch("stop_dunk", &json!({"id": "d1"}), &owner)
+            .unwrap();
+        assert_eq!(stopped["running"], false);
+        assert_eq!(stopped["next_send_at"], Value::Null);
+        assert_eq!(stopped["status"], "Stopped");
+        assert_eq!(services.outbox.dunk_timer_worker_count(), 1);
+        assert_eq!(
+            cached_dunks(&services, &owner, &status_reads)["dunks"][0]["running"],
+            false
+        );
+        assert_eq!(status_reads.load(Ordering::SeqCst), 2);
+        let sent_after_join = services.flock.dunks.get("d1").unwrap()["send_count"].clone();
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(
+            services.flock.dunks.get("d1").unwrap()["send_count"],
+            sent_after_join
+        );
+
+        // Python _save runs even when stop is repeated; successful repeat invalidates views.
+        dispatcher
+            .dispatch("stop_dunk", &json!({"id": "d1"}), &owner)
+            .unwrap();
+        assert_eq!(
+            status_reads.load(Ordering::SeqCst),
+            2,
+            "repeat stop invalidates lazily when the view is next requested"
+        );
+        cached_dunks(&services, &owner, &status_reads);
+        assert_eq!(status_reads.load(Ordering::SeqCst), 3);
+
+        // A persistence failure happens after stop mutation, worker join, and cache invalidation.
+        let state_path = dir.path().join("stop-dunk-parity-whole-state.json");
+        std::fs::remove_file(&state_path).unwrap();
+        std::fs::create_dir(&state_path).unwrap();
+        let save_error = dispatcher
+            .dispatch("stop_dunk", &json!({"id": "d2"}), &owner)
+            .unwrap_err();
+        assert!(save_error.to_string().contains("rename"));
+        assert_eq!(services.flock.dunks.get("d2").unwrap()["running"], false);
+        assert_eq!(
+            services.flock.dunks.get("d2").unwrap()["next_send_at"],
+            Value::Null
+        );
+        assert_eq!(services.outbox.dunk_timer_worker_count(), 0);
+        assert_eq!(
+            cached_dunks(&services, &owner, &status_reads)["dunks"][1]["status"],
+            "Stopped"
+        );
+        assert_eq!(status_reads.load(Ordering::SeqCst), 4);
+        std::fs::remove_dir(&state_path).unwrap();
+        services.shutdown();
+    }
+
+    #[test]
+    fn h_toggle_dunk_matches_python() {
+        let (_dir, services) = make_services_with_persistence(
+            "toggle-dunk-parity",
+            Arc::new(|| Box::new(FakeTerminal::new())),
+            None,
+            true,
+        );
+        let dispatcher = services.production_dispatcher();
+        let owner = request("w2:p2");
+        dispatcher
+            .dispatch(
+                "add_dunk",
+                &json!({"target": "w3:p3", "text": "toggle", "interval_minutes": 1, "start": false}),
+                &owner,
+            )
+            .unwrap();
+        let lifetime = services.flock.dunks.handle("d1").unwrap();
+        let status_reads = AtomicUsize::new(0);
+        cached_dunks(&services, &owner, &status_reads);
+
+        let started = dispatcher
+            .dispatch("toggle_dunk", &json!({"id": 1}), &owner)
+            .unwrap();
+        assert_eq!(started["running"], true);
+        assert!(Arc::ptr_eq(
+            &lifetime,
+            &services.flock.dunks.handle("d1").unwrap()
+        ));
+        assert_eq!(services.outbox.dunk_timer_worker_count(), 1);
+        assert_eq!(
+            cached_dunks(&services, &owner, &status_reads)["dunks"][0]["running"],
+            true
+        );
+        assert_eq!(status_reads.load(Ordering::SeqCst), 2);
+
+        let stopped = dispatcher
+            .dispatch("toggle_dunk", &json!({"id": "d1"}), &owner)
+            .unwrap();
+        assert_eq!(stopped["running"], false);
+        assert_eq!(stopped["next_send_at"], Value::Null);
+        assert_eq!(stopped["status"], "Stopped");
+        assert_eq!(services.outbox.dunk_timer_worker_count(), 0);
+        assert!(Arc::ptr_eq(
+            &lifetime,
+            &services.flock.dunks.handle("d1").unwrap()
+        ));
+        assert_eq!(
+            cached_dunks(&services, &owner, &status_reads)["dunks"][0]["running"],
+            false
+        );
+        assert_eq!(status_reads.load(Ordering::SeqCst), 3);
         services.shutdown();
     }
 
