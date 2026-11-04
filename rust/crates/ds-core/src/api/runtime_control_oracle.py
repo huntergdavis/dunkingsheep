@@ -95,7 +95,7 @@ for config in json.load(sys.stdin):
     def tick(queue,panes,derived,delivery,unread,send,dry_run,lanes):
         assert isinstance(queue,Queue)
         # The leaf must pass its exact caller and sorted allowlist to this producer.
-        result=call('tick',[panes,derived,sorted(lanes),dry_run,'%7'],{'dispatched':[],'marker':'real tick boundary'})
+        result=call('tick',[panes,derived,sorted(lanes),dry_run,'%7'],{'dispatched':[],'marker':'fixture tick'})
         # Record the expired-only collection produced by the real unread callback contract.
         # Capture by name, not compiler-dependent closure ordering.
         cells=dict(zip(unread.__code__.co_freevars,[c.cell_contents for c in unread.__closure__]))

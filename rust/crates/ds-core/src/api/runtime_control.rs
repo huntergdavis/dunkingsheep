@@ -61,11 +61,119 @@ fn get<'a>(value: &'a Value, key: &str) -> ControlResult<&'a Value> {
     Ok(value.get(key).unwrap_or(&Value::Null))
 }
 fn key<'a>(value: &'a Value, name: &str) -> ControlResult<&'a Value> {
-    get(value, name)?;
-    value
-        .get(name)
-        .ok_or_else(|| python("KeyError", format!("'{name}'")))
+    match value {
+        Value::Object(map) => map
+            .get(name)
+            .ok_or_else(|| python("KeyError", format!("'{name}'"))),
+        Value::Array(_) => Err(python(
+            "TypeError",
+            "list indices must be integers or slices, not str",
+        )),
+        Value::String(_) => Err(python(
+            "TypeError",
+            "string indices must be integers, not 'str'",
+        )),
+        _ => Err(python(
+            "TypeError",
+            format!(
+                "'{}' object is not subscriptable",
+                super::python_type_name(value)
+            ),
+        )),
+    }
 }
+fn length(value: &Value) -> ControlResult<usize> {
+    match value {
+        Value::Array(v) => Ok(v.len()),
+        Value::Object(v) => Ok(v.len()),
+        Value::String(v) => Ok(v.chars().count()),
+        _ => Err(python(
+            "TypeError",
+            format!(
+                "object of type '{}' has no len()",
+                super::python_type_name(value)
+            ),
+        )),
+    }
+}
+fn iterable(value: &Value) -> ControlResult<Vec<Value>> {
+    match value {
+        Value::Array(v) => Ok(v.clone()),
+        Value::Object(v) => Ok(v.keys().map(|k| json!(k)).collect()),
+        Value::String(v) => Ok(v.chars().map(|c| json!(c.to_string())).collect()),
+        _ => Err(python(
+            "TypeError",
+            format!(
+                "'{}' object is not iterable",
+                super::python_type_name(value)
+            ),
+        )),
+    }
+}
+// The accepted pure summary helper tolerates malformed fields. The API must retain
+// Python's indexed-field errors instead of silently replacing them with defaults.
+fn dispatch_summary(state: &Value) -> ControlResult<String> {
+    let empty = json!([]);
+    let idle = get(state, "idle_unfilled")?;
+    let idle = if truthy(idle) { idle } else { &empty };
+    let blocked = get(state, "blocked")?;
+    let blocked = if truthy(blocked) { blocked } else { &empty };
+    let dead = get(state, "dead")?;
+    let dead = if truthy(dead) { dead } else { &empty };
+    let mut reasons = BTreeSet::new();
+    for item in iterable(blocked)? {
+        reasons.insert(format!(
+            "{}: {}",
+            python_value_string(key(&item, "name")?),
+            python_value_string(key(&item, "reason")?)
+        ));
+    }
+    let suffix = if reasons.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", reasons.into_iter().collect::<Vec<_>>().join("; "))
+    };
+    let mut lines = vec![
+        format!("idle lanes: {}", length(idle)?),
+        format!(
+            "dispatched this hour: {}",
+            python_value_string(get(state, "dispatched_1h")?)
+        ),
+        format!("blocked lanes: {}{}", length(blocked)?, suffix),
+    ];
+    if truthy(dead) {
+        let mut names = vec![];
+        for (index, item) in iterable(dead)?.iter().enumerate() {
+            let name = key(item, "name")?;
+            names.push(
+                name.as_str()
+                    .ok_or_else(|| {
+                        python(
+                            "TypeError",
+                            format!(
+                                "sequence item {index}: expected str instance, {} found",
+                                super::python_type_name(name)
+                            ),
+                        )
+                    })?
+                    .to_owned(),
+            );
+        }
+        lines.push(format!(
+            "dead lanes: {} ({})",
+            length(dead)?,
+            names.join(", ")
+        ));
+    }
+    if truthy(get(state, "queue_empty")?) {
+        lines.push(format!(
+            "the standby queue is empty and {} lane(s) are idle",
+            length(idle)?
+        ));
+    }
+    Ok(lines.join("\n"))
+}
+
 fn rows(value: &Value) -> ControlResult<&[Value]> {
     value.as_array().map(Vec::as_slice).ok_or_else(|| {
         python(
@@ -214,7 +322,7 @@ fn dispatch(
         "status" => {
             let state = env.dispatch_state()?;
             let summary = if truthy(&state) {
-                crate::dispatch::tick::summary(&state)
+                dispatch_summary(&state)?
             } else {
                 "no tick yet".into()
             };
@@ -251,6 +359,19 @@ fn tick(
         let leases = key(&task, "id")
             .and_then(|id| env.task_leases(id))
             .unwrap_or_default();
+        if !task.is_object() {
+            return Err(python(
+                "TypeError",
+                if task.is_array() {
+                    "list indices must be integers or slices, not str".into()
+                } else {
+                    format!(
+                        "'{}' object does not support item assignment",
+                        super::python_type_name(&task)
+                    )
+                },
+            ));
+        }
         for lease in leases {
             leased.insert(python_value_string(get(&lease, "pane_id")?));
         }
@@ -299,6 +420,10 @@ fn tick(
                 0.0
             } else {
                 at.as_f64()
+                    .or_else(|| {
+                        at.as_number()
+                            .and_then(|n| n.to_string().parse::<f64>().ok())
+                    })
                     .or_else(|| at.as_bool().map(|b| if b { 1.0 } else { 0.0 }))
                     .ok_or_else(|| {
                         python(

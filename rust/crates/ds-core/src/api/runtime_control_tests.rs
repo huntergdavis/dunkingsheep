@@ -187,7 +187,7 @@ impl RuntimeControlEnv for Env {
         let state = self.call(
             "tick",
             json!([i.panes, i.derived, i.allow, i.dry_run, i.caller]),
-            json!({"dispatched":[],"marker":"real tick boundary"}),
+            json!({"dispatched":[],"marker":"fixture tick"}),
         )?;
         Ok(DispatchTickResult {
             state,
@@ -539,4 +539,40 @@ fn runtime_control_missing_provider_refuses_without_mutation() {
         run_rust(&c)["outcome"]["result"],
         json!({"shutting_down":true,"stopped_all":false})
     );
+}
+
+#[test]
+fn runtime_control_raw_state_and_numeric_edges_match_python() {
+    let mut cases = vec![];
+    for state in [
+        json!({"dispatched_1h":3,"idle_unfilled":["%7"],"blocked":[{"name":"w","reason":"busy"}],"dead":[{"name":"gone"}],"queue_empty":true}),
+        json!({"x":1}),
+        json!([1]),
+        json!({"blocked":[{}]}),
+        json!({"dead":[{"name":7}]}),
+        json!({"idle_unfilled":3}),
+        json!({"blocked":"x"}),
+        json!({"idle_unfilled":"abc"}),
+    ] {
+        let mut c = case("dispatch", json!({"action":"status"}));
+        c["responses"]["state"] = state;
+        cases.push(c);
+    }
+    for token in [
+        "1e999",
+        "-1e999",
+        "9999999999999999999999999999999999999999999999999",
+    ] {
+        let v: Value = serde_json::from_str(token).unwrap();
+        cases.push(case("dispatch", json!({"action":v})));
+        cases.push(case("allocation", json!({"action":v})));
+        cases.push(case("shutdown", json!({"stop_all":v})));
+    }
+    cases.push(case("shutdown", json!({"stop_all":"\u{1c}YES\u{1f}"})));
+    for task in [json!(7), json!([]), json!("oops")] {
+        let mut c = case("dispatch", json!({"action":"tick"}));
+        c["responses"]["tasks"] = json!({"tasks":[task]});
+        cases.push(c);
+    }
+    check(cases);
 }
