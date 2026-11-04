@@ -278,6 +278,16 @@ pub trait Terminal: std::fmt::Debug {
         Ok(Ok(()))
     }
     fn start_agent(&mut self, spec: &AgentSpec) -> Result<Pane, TerminalError>;
+    fn start_agent_raw(&mut self, spec: &AgentSpec, _focus: bool) -> RawCreateResult<Pane> {
+        Ok(self.start_agent(spec))
+    }
+    fn rename_raw(&mut self, kind: &str, target: &str, label: &str) -> RawCreateResult<()> {
+        Ok(self.rename(kind, target, label))
+    }
+    fn focus_raw(&mut self, kind: &str, target: &str) -> Result<(), TerminalError> {
+        self.focus(kind, target)
+    }
+
     /// Guarded same-pane replacement. Unsupported backends must refuse explicitly.
     fn guarded_respawn(
         &mut self,

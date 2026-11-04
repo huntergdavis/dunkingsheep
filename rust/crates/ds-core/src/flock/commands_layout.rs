@@ -104,9 +104,38 @@ pub trait LayoutBackend {
         cwd: Option<&str>,
         focus: bool,
     ) -> Result<Value, String>;
+    #[allow(clippy::too_many_arguments)]
+    fn start_agent_raw(
+        &mut self,
+        name: &str,
+        argv: &[String],
+        workspace: Option<&str>,
+        tab: Option<&str>,
+        split: Option<&str>,
+        cwd: Option<&str>,
+        focus: bool,
+    ) -> RawCreateResult {
+        Ok(self.start_agent(name, argv, workspace, tab, split, cwd, focus))
+    }
+    fn rename_raw(&mut self, kind: &str, target: &str, label: &str) -> RawCreateResult {
+        Ok(self.rename(kind, target, label))
+    }
     fn rename(&mut self, kind: &str, target_id: &str, label: &str) -> Result<Value, String>;
+    fn focus_raw(&mut self, kind: &str, target: &str) -> Result<Value, String> {
+        self.focus(kind, target)
+    }
     fn focus(&mut self, kind: &str, target_id: &str) -> Result<Value, String>;
 }
+
+/// Request-scoped layout, canonical verification, and lane-registration services.
+pub type AgentOperation<'a> = dyn FnMut(
+        &mut dyn LayoutBackend,
+        &dyn super::panes::PaneInfoEnv,
+        &mut dyn super::agent_verify::VerifyBackend,
+        &crate::config::Env,
+        f64,
+    ) -> Result<Value, DunkError>
+    + 'a;
 
 /// `submit_text(pane_id, command) -> (ran, message)`.
 pub type CreateOperation<'a> = dyn FnMut(

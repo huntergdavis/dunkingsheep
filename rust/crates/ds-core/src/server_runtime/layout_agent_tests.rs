@@ -1,0 +1,275 @@
+use super::*;
+use crate::api;
+use crate::config::Env;
+use crate::flock::loop_env::LoopTerminalFactory;
+use crate::flock::panes::Stores;
+use crate::roles::Roles;
+use crate::server::{Dispatcher, RequestCtx};
+use crate::server_runtime::{RuntimeObservability, RuntimeServiceInputs, RuntimeServices};
+use crate::tasks::Tasks;
+use crate::terminal::fakes::FakeTerminal;
+use serde_json::json;
+use std::sync::{Arc, Mutex};
+use tokio::runtime::Builder;
+
+type LayoutFixture = (
+    tempfile::TempDir,
+    Arc<RuntimeServices>,
+    Arc<Mutex<Vec<Value>>>,
+);
+fn make_services(fail_layout: Option<&str>, available: bool) -> LayoutFixture {
+    make_services_with_factory(fail_layout, available, None)
+}
+fn make_services_with_factory(
+    fail_layout: Option<&str>,
+    available: bool,
+    factory: Option<LoopTerminalFactory>,
+) -> LayoutFixture {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = Builder::new_multi_thread().enable_all().build().unwrap();
+    let tasks = Arc::new(
+        runtime
+            .block_on(Tasks::open(dir.path().join("tasks.db")))
+            .unwrap(),
+    );
+    runtime.block_on(tasks.allocation_init()).unwrap();
+    let inbox = Arc::new(
+        crate::inbox_store::Store::open(dir.path().join("inbox.db"), dir.path().join("blobs"))
+            .unwrap(),
+    );
+    let env = Env::from_pairs(&[("DUNKINGSHEEP_AGENT_VERIFY_S", "0.01")]);
+    let mut roles = Roles::new(
+        &env,
+        Some(dir.path().join("roles.json")),
+        Some(dir.path().join("tokens.json")),
+        None,
+    )
+    .unwrap();
+    roles
+        .register(
+            "w1:p1",
+            "worker",
+            None,
+            None,
+            Some("codex"),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    roles
+        .register("w2:p2", "owner", None, None, None, None, None, None)
+        .unwrap();
+    let executable = dir.path().join("daemon");
+    std::fs::write(&executable, b"test daemon identity").unwrap();
+    let stores = Stores {
+        tasks: Some(tasks),
+        inbox: Some(inbox),
+        ..Stores::default()
+    };
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let observed = Arc::clone(&events);
+    let fail_layout = fail_layout.map(str::to_owned);
+    let terminal_factory: LoopTerminalFactory = Arc::new(move || {
+        let mut terminal = FakeTerminal::new();
+        terminal.raw_events = Arc::clone(&observed);
+        terminal.show_created_tab_pane = true;
+        terminal.start_agent_pid = Some(None);
+        // This fixture uses coherent session IDs across the canned pane/tab/workspace rows.
+        for pane in &mut terminal.panes {
+            pane.session_id = terminal
+                .tabs
+                .iter()
+                .find(|tab| tab.tab_id == pane.window_id)
+                .unwrap()
+                .workspace_id
+                .clone();
+        }
+        terminal.fail_layout = fail_layout.clone();
+        terminal.available = available;
+        Box::new(terminal)
+    });
+    let terminal_factory = factory.unwrap_or(terminal_factory);
+    let services = RuntimeServices::new(RuntimeServiceInputs {
+        launches_file: dir.path().join("launches.json"),
+        lane_registry_file: dir.path().join("lanes.json"),
+        persist_enabled: false,
+        stores,
+        roles,
+        legacy_superusers: None,
+        release_version: "test".into(),
+        state_file: dir.path().join("state.json"),
+        executable,
+        env,
+        observability: Some(RuntimeObservability {
+            state_dir: dir.path().join("observability"),
+            memory_db: None,
+        }),
+        runtime,
+        terminal_factory,
+    })
+    .unwrap();
+    (dir, services, events)
+}
+
+fn request(pane: &str) -> RequestCtx {
+    RequestCtx {
+        caller: Some(crate::proc::Caller::new(
+            Some(123),
+            Some("start".into()),
+            Some("codex".into()),
+            Some(pane.into()),
+            "agent",
+        )),
+        self_pane_id: Some(pane.into()),
+        socket_peer: Some(true),
+        ..RequestCtx::default()
+    }
+}
+fn dispatcher(services: &Arc<RuntimeServices>) -> super::super::dispatcher::RuntimeDispatcher {
+    let mut handlers = api::Dispatcher::new();
+    handlers.register_layout_agent();
+    super::super::dispatcher::RuntimeDispatcher::new(Arc::clone(services), handlers)
+}
+
+#[test]
+fn h_start_agent_matches_python() {
+    let (_dir, services, events) = make_services(None, true);
+    let out=dispatcher(&services).dispatch("start_agent",&json!({"name":" probe ","command":"codex --model 'test model'","workspace":"self","cwd":["raw",false],"focus":"false"}),&request("w2:p2")).unwrap();
+    assert_eq!(out["name"], "probe");
+    assert_eq!(out["argv"], json!(["codex", "--model", "test model"]));
+    assert_eq!(out["pane_id"], "w1:p-probe");
+    assert_eq!(out["child_pid"], Value::Null);
+    assert_eq!(out["role"], Value::Null);
+    assert_eq!(services.flock.last_message(), "Started agent probe");
+    let launch = services.flock.launch("w1:p-probe").unwrap();
+    assert_eq!(launch["cwd"], json!(["raw", false]));
+    assert_eq!(launch["command"], "codex --model 'test model'");
+    assert!(events.lock().unwrap().contains(&json!([
+        "start_agent",
+        "probe",
+        ["codex", "--model", "test model"],
+        "w2",
+        null,
+        null,
+        "['raw', False]",
+        false
+    ])));
+}
+#[test]
+fn h_rename_matches_python() {
+    let (_dir, services, events) = make_services(None, true);
+    services.flock.set_last_message("before");
+    let out = dispatcher(&services)
+        .dispatch(
+            "rename",
+            &json!({"kind":" PANE ","target":{"pane_id":"w1:p1"},"label":["raw",false]}),
+            &request("w2:p2"),
+        )
+        .unwrap();
+    assert_eq!(out["kind"], "pane");
+    assert_eq!(out["id"], "w1:p1");
+    assert_eq!(out["label"], "['raw', False]");
+    assert_eq!(out["pane"]["label"], "['raw', False]");
+    assert_eq!(services.flock.last_message(), "before");
+    assert!(events
+        .lock()
+        .unwrap()
+        .contains(&json!(["rename", "pane", "w1:p1", "['raw', False]"])));
+}
+#[test]
+fn h_focus_matches_python() {
+    let (_dir, services, _) = make_services(None, true);
+    services.flock.set_last_message("before");
+    let out = dispatcher(&services)
+        .dispatch(
+            "focus",
+            &json!({"kind":"workspace","target":"self"}),
+            &request("w2:p2"),
+        )
+        .unwrap();
+    assert_eq!(out, json!({"kind":"workspace","id":"w2","focused":true}));
+    assert_eq!(services.flock.last_message(), "before");
+}
+#[test]
+fn layout_agent_conversion_and_error_order() {
+    let (_dir, services, events) = make_services(None, true);
+    let d = dispatcher(&services);
+    for value in [
+        Value::Null,
+        json!(false),
+        json!(0),
+        json!(""),
+        json!([]),
+        json!({}),
+    ] {
+        let error = d
+            .dispatch(
+                "start_agent",
+                &json!({"name":value,"command":"'","split":"bad"}),
+                &request("w2:p2"),
+            )
+            .unwrap_err();
+        assert_eq!(error.to_string(), "agent name is required");
+        let error = d
+            .dispatch(
+                "rename",
+                &json!({"kind":"bad","target":"missing","label":value}),
+                &request("w2:p2"),
+            )
+            .unwrap_err();
+        assert_eq!(error.to_string(), "label is required");
+    }
+    assert_eq!(
+        d.dispatch(
+            "start_agent",
+            &json!({"name":"probe","command":"'","tab":"missing"}),
+            &request("w2:p2")
+        )
+        .unwrap_err()
+        .to_string(),
+        "No closing quotation"
+    );
+    assert!(events.lock().unwrap().is_empty());
+    let error = d
+        .dispatch(
+            "start_agent",
+            &json!({"name":"probe","command":"codex","split":["right"]}),
+            &request("w2:p2"),
+        )
+        .unwrap_err();
+    assert_eq!(error.to_string(), "split must be 'right' or 'down'");
+    assert!(events.lock().unwrap().iter().any(|e| e[0] == "workspace"));
+    assert!(services.flock.launch("w1:p-probe").is_none());
+}
+#[test]
+fn layout_agent_role_failure_keeps_launch_before_last_message() {
+    let (_dir, services, _) = make_services(None, true);
+    services.flock.set_last_message("before");
+    let error = dispatcher(&services)
+        .dispatch(
+            "start_agent",
+            &json!({"name":"probe","command":"codex","workspace":"self","role":"invalid"}),
+            &request("w2:p2"),
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("role"), "{error}");
+    assert!(services.flock.launch("w1:p-probe").is_some());
+    assert_eq!(services.flock.last_message(), "before");
+}
+#[test]
+fn layout_agent_dispatch_permission_precedes_required_arguments() {
+    let (_dir, services, events) = make_services(None, true);
+    for command in ["start_agent", "rename", "focus"] {
+        let error = dispatcher(&services)
+            .dispatch(command, &json!({}), &request("w1:p1"))
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("permission")
+                || error.to_string().contains("role")
+                || error.to_string().contains("operator"),
+            "{error}"
+        );
+    }
+    assert!(events.lock().unwrap().is_empty());
+}
