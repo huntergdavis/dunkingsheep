@@ -17,9 +17,6 @@ struct WriterState {
     closed: bool,
 }
 impl MemoryWriter {
-    pub(crate) fn path(&self) -> &Path {
-        &self.path
-    }
     pub(crate) fn new(path: &Path) -> Self {
         Self {
             path: path.to_owned(),
