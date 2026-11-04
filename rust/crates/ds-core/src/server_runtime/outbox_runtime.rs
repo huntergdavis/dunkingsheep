@@ -1025,8 +1025,27 @@ mod tests {
             .next_send_at
             .unwrap();
         assert!(after < before);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while flock.dunks.get("d1").unwrap()["send_count"]
+            .as_i64()
+            .unwrap()
+            == 0
+        {
+            assert!(
+                Instant::now() < deadline,
+                "interval wake did not cause actual delivery"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
         owner.stop_dunk("d1").unwrap();
         assert!(owner.dunk_timers.workers.lock().unwrap().is_empty());
+        let stopped_count = flock.dunks.get("d1").unwrap()["send_count"].clone();
+        thread::sleep(Duration::from_millis(1100));
+        assert_eq!(stopped_count, flock.dunks.get("d1").unwrap()["send_count"]);
+        assert_eq!(
+            serde_json::json!(false),
+            flock.dunks.get("d1").unwrap()["running"]
+        );
         owner.stop_and_join();
         let error = owner.start_dunk("d1").unwrap_err();
         assert!(error.to_string().contains("dunk timer runtime is stopped"));
