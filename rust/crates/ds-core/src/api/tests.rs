@@ -8122,9 +8122,9 @@ fn task_reap_live_tmux_listing_failure_reopens_expired_claim() {
         .unwrap();
     runtime.block_on(tasks.insert_lease(&task.id, "w9:p9", 1.0, 1.0, 2.0));
     let missing_tmux = dir.path().join("missing-tmux-command");
-    let env = TestEnv(Mutex::new(Box::new(crate::terminal::TmuxBackend::new(
-        missing_tmux,
-    ))));
+    let env = TestEnv(Mutex::new(Box::new(
+        crate::terminal::tmux::TmuxBackend::new(missing_tmux),
+    )));
     let request = RequestCtx {
         self_pane_id: Some("w1:p2".into()),
         ..RequestCtx::default()
