@@ -530,6 +530,16 @@ fn inbox_send_raw_values_preserve_body_subject_and_notification_error_order() {
     let before = crate::inbox::count(store.read_pool(), "w1:p1", &[], crate::clock::now_s())
         .unwrap()
         .total;
+    let mut pending = crate::flock::sends::Message::new(
+        "numeric-subject-notice",
+        "w1:p1",
+        "worker",
+        "old notice",
+        "test",
+    );
+    pending.is_notice = true;
+    crate::flock::sends::outbox_lock(&services.flock().outbox)
+        .insert("w1:p1".into(), vec![pending]);
     let result = dispatcher
         .dispatch(
             "inbox_send",
@@ -549,19 +559,14 @@ fn inbox_send_raw_values_preserve_body_subject_and_notification_error_order() {
     assert_eq!(falsey["subject"], "0");
     assert_eq!(falsey["notified"], true);
     let outbox = crate::flock::sends::outbox_lock(&services.flock().outbox);
-    let notices = outbox
-        .get("w1:p1")
-        .into_iter()
-        .flatten()
-        .filter(|m| m.is_notice)
-        .collect::<Vec<_>>();
+    let notice = &outbox["w1:p1"][0];
     assert!(
-        notices.iter().any(|notice| notice.text.contains(": 9.")),
-        "truthy numeric subject appears in queued Python-style notice"
+        notice.text.contains(": 9."),
+        "truthy numeric subject appears in folded Python-style notice"
     );
     assert!(
-        !notices.iter().any(|notice| notice.text.contains(": 0.")),
-        "falsey numeric subject is omitted"
+        !notice.text.contains(": 0."),
+        "falsey numeric subject is omitted after the next fold"
     );
     assert_eq!(
         crate::inbox::count(store.read_pool(), "w1:p1", &[], crate::clock::now_s())
