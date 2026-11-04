@@ -2659,11 +2659,7 @@ fn h_memory_ingest_matches_python() {
         &flock,
         &FixedRole("owner", true),
         "memory_ingest",
-        args(json!({
-            "path": source.to_string_lossy(),
-            "harness": "codex",
-            "project": "demo"
-        })),
+        args(json!({"path": source.to_string_lossy()})),
         &request,
         &env,
     )
@@ -2674,14 +2670,13 @@ fn h_memory_ingest_matches_python() {
             "source_id": 1,
             "queue_id": 1,
             "path": source.to_string_lossy(),
-            "harness": "codex",
-            "project": "demo"
+            "harness": "generic",
+            "project": null
         })
     );
-    assert_eq!(
-        flock.memory_service().unwrap().status().unwrap()["ingestor"]["running"],
-        false
-    );
+    let status = flock.memory_service().unwrap().status().unwrap();
+    assert_eq!(status["queue"]["queued"], 1);
+    assert_eq!(status["ingestor"]["running"], false);
 }
 
 #[test]

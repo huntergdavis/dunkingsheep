@@ -2405,28 +2405,13 @@ pub fn h_memory_ingest(context: &HandlerContext<'_>, args: Args) -> Result<Value
     let harness = args.get("harness").and_then(Value::as_str);
     let project = args.get("project").and_then(Value::as_str);
     let service = memory_service(context)?;
-    let (source_id, queue_id) = service.enqueue(path, harness, project)?;
-    let (path, harness, project) = service.read_pool().with(|connection| {
-        connection
-            .query_row(
-                "SELECT path, harness, project FROM sources WHERE id=?1",
-                [source_id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, Option<String>>(2)?,
-                    ))
-                },
-            )
-            .map_err(crate::db::map_sqlite)
-    })?;
+    let receipt = service.enqueue_receipt(path, harness, project)?;
     Ok(json!({
-        "source_id": source_id,
-        "queue_id": queue_id,
-        "path": path,
-        "harness": harness,
-        "project": project,
+        "source_id": receipt.source_id,
+        "queue_id": receipt.queue_id,
+        "path": receipt.path,
+        "harness": receipt.harness,
+        "project": receipt.project,
     }))
 }
 
