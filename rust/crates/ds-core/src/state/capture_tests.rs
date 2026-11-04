@@ -366,3 +366,32 @@ fn capture_raw_source_roundtrip_and_single_deterministic_snapshot() {
     assert_eq!(result["source"], json!([1])); // no binding occurs when there are no lanes
     assert_eq!(result["rows"], 0);
 }
+
+#[test]
+fn capture_exponent_overflow_source_preserves_signed_sqlite_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = StateStore::open(dir.path().join("state.db")).unwrap();
+    let reader = DeterministicProc::default();
+    let env = Lanes {
+        lanes: vec![lane("p1", None)],
+    };
+    for (index, (token, expected)) in [("1e999", "Inf"), ("-1e999", "-Inf")]
+        .into_iter()
+        .enumerate()
+    {
+        let source: Value = serde_json::from_str(token).unwrap();
+        let result = super::capture::capture_raw(
+            &env,
+            &reader,
+            &store,
+            dir.path(),
+            &source,
+            Some((index + 1) as f64),
+        )
+        .unwrap();
+        assert_eq!(result["source"], source);
+        assert_eq!(result["rows"], 1);
+        assert_eq!(store.latest(None, None, 1).unwrap()[0]["source"], expected);
+    }
+    assert_eq!(reader.snapshots.get(), 2);
+}

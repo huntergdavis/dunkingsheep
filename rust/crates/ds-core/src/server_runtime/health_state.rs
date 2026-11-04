@@ -413,6 +413,20 @@ mod tests {
             error.to_string(),
             "internal error: invalid literal for int() with base 10: 'bad'"
         );
+        for token in ["1e999", "-1e999"] {
+            let limit: Value = serde_json::from_str(token).unwrap();
+            let error = dispatcher
+                .dispatch(
+                    "state_latest",
+                    &json!({"limit":limit,"pane_id":[1]}),
+                    &worker(),
+                )
+                .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "internal error: cannot convert float infinity to integer"
+            );
+        }
         dispatcher.close();
     }
 

@@ -166,3 +166,61 @@ fn raw_state_bindings_keep_scalars_and_reject_containers_in_parameter_order() {
     );
     assert_eq!(store.latest(None, None, -1).unwrap().len(), 1);
 }
+
+#[test]
+fn raw_state_exponent_overflow_preserves_sign_in_both_filters() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = StateStore::open(dir.path().join("state.db")).unwrap();
+    store
+        .add(
+            &[
+                json!({"pane_id":"Inf", "project":"Inf"}),
+                json!({"pane_id":"-Inf", "project":"-Inf"}),
+            ],
+            1.0,
+        )
+        .unwrap();
+    for (token, expected) in [
+        ("1e999", "Inf"),
+        ("-1e999", "-Inf"),
+        ("1.0e999", "Inf"),
+        ("-1.0e999", "-Inf"),
+    ] {
+        let value: Value = serde_json::from_str(token).unwrap();
+        for (pane, project) in [
+            (Some(&value), None),
+            (None, Some(&value)),
+            (Some(&value), Some(&value)),
+        ] {
+            let rows = store.latest_raw(pane, project, Some(50)).unwrap();
+            assert_eq!(rows.len(), 1, "{token}: {rows:?}");
+            assert_eq!(rows[0]["pane_id"], expected);
+            assert_eq!(rows[0]["project"], expected);
+        }
+    }
+    // Integer tokens outside SQLite's range must not be silently converted to floats.
+    for token in [
+        "9223372036854775808",
+        "-9223372036854775809",
+        "999999999999999999999999999999999999",
+    ] {
+        let value: Value = serde_json::from_str(token).unwrap();
+        for (pane, project) in [(Some(&value), None), (None, Some(&value))] {
+            assert_eq!(
+                store
+                    .latest_raw(pane, project, Some(50))
+                    .unwrap_err()
+                    .to_string(),
+                "Python int too large to convert to SQLite INTEGER"
+            );
+        }
+        assert_eq!(
+            store
+                .add(&[json!({"pane_id":"integer", "source":value})], 2.0)
+                .unwrap_err()
+                .to_string(),
+            "Python int too large to convert to SQLite INTEGER"
+        );
+    }
+    assert_eq!(store.latest(None, None, 50).unwrap().len(), 2);
+}

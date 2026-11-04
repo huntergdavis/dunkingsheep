@@ -334,7 +334,15 @@ fn sqlite_value(value: &Value, index: usize) -> Result<rusqlite::types::Value, D
                     "Python int too large to convert to SQLite INTEGER".into(),
                 ));
             } else {
-                Sql::Real(v.as_f64().unwrap_or(f64::INFINITY))
+                // arbitrary_precision Number::as_f64 excludes nonfinite results. JSON float
+                // tokens can still overflow in Python; preserve their sign when binding.
+                Sql::Real(v.as_f64().unwrap_or_else(|| {
+                    if v.to_string().starts_with('-') {
+                        f64::NEG_INFINITY
+                    } else {
+                        f64::INFINITY
+                    }
+                }))
             }
         }
         Value::Array(_) | Value::Object(_) => {
