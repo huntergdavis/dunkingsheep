@@ -60,7 +60,8 @@ cargo bench -p ds-core --bench service -- bench_task_next
 Each uses an isolated temporary Unix socket, `FlockServer`, the canonical
 `RuntimeServices::production_dispatcher`, real task/inbox SQLite stores and
 registered worker role. Only terminal discovery uses a controlled one-pane
-fixture. Its pane root is the live process returned by the production caller
+fixture with an explicit mailbox label matching the seeded key. Its pane root
+is the live process returned by the production caller
 resolver. Every connection checks `whoami` for the worker role and successful
 kernel-peer identity binding before warmup. No live daemon or terminal is used.
 Temporary fixture data lives under the working directory (override with
@@ -153,3 +154,13 @@ canonical request provider. The exact registration inventory and
 cover the assembly: a real bound socket caller reads a seeded message, verifies
 its body and read transition, then sees an empty unread batch. Post-repair
 measurements remain pending; the earlier CEILING failures remain valid evidence.
+
+
+Post-registration run [41902731459](https://github.com/huntergdavis/dunkingsheep/actions/runs/41902731459)
+at `d4de10d74fccf0c122d32232539e391c0a8feabe` reached the real Inbox handler,
+but the fixture still carried FakeTerminal's canned `π - work` mailbox label
+while seeding `w1:p1`. The canonical resolver correctly preferred the label;
+the inbox benchmark and its new socket regression failed their mailbox check.
+No valid inbox samples are claimed. The fixture now explicitly labels its pane
+`w1:p1`, matching its seeded mailbox through the actual unique-label resolver.
+No mailbox resolver, provider, timing threshold or sample count was changed.

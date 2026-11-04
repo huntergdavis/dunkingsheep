@@ -643,6 +643,8 @@ mod tests {
             let mut terminal = FakeTerminal::new();
             terminal.panes.truncate(1);
             terminal.panes[0].pane_pid = Some(pane_pid);
+            // Match the seeded key through the real unique-label mailbox resolver.
+            terminal.panes[0].label = "w1:p1".into();
             Box::new(terminal)
         });
         let (dir, services) = make_services("socket-inbox", terminal_factory, None);

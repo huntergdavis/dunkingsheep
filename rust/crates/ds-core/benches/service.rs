@@ -219,6 +219,8 @@ impl RpcFixture {
                 let mut terminal = ds_core::terminal::fakes::FakeTerminal::new();
                 terminal.panes.truncate(1);
                 terminal.panes[0].pane_pid = Some(root_pid);
+                // The canonical mailbox resolver prefers a unique pane label.
+                terminal.panes[0].label = WORKER.into();
                 Box::new(terminal)
             }),
         })
