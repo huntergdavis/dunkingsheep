@@ -924,6 +924,16 @@ mod tests {
         let second = created_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         assert_ne!(first, second);
         assert_ne!(first, thread::current().id());
+        let stopped = owner.halt_dunks_aimed_at(&["w1:p1".to_owned()]).unwrap();
+        assert_eq!(vec!["d1", "d2"], stopped);
+        assert!(owner.dunk_timers.workers.lock().unwrap().is_empty());
+        for id in ["d1", "d2"] {
+            let row = flock.dunks.get(id).unwrap();
+            assert_eq!(serde_json::json!("Target closed"), row["status"]);
+            assert!(row["next_send_at"].is_null());
+            owner.start_dunk(id).unwrap();
+            created_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        }
         let rows = owner.stop_all_dunks().unwrap();
         assert_eq!(2, rows.len());
         assert!(rows
