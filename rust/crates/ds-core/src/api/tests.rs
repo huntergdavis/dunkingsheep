@@ -2043,6 +2043,182 @@ fn refusal(result: Result<Value, DunkError>) -> String {
 }
 
 #[test]
+fn h_get_dunk_matches_python() {
+    let (_dir, flock) = flock();
+    let env = ParityEnv::new(None);
+    let created = flock
+        .dunks
+        .add(None, &crate::flock::dunks::AddArgs::default())
+        .expect("seed dunk");
+    let before_snapshot = flock.dunks.snapshot();
+
+    let cache_before = flock.view_cache().view(&env, Some("w1:p1"), true, 3_600.0);
+    assert_eq!(cache_before["inbox_count"]["unread"], 1);
+    env.inbox_value.set(99);
+
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_get_dunk();
+    assert_eq!(dispatcher.registration_attempts(), &["get_dunk"]);
+    let request = RequestCtx {
+        self_pane_id: Some("w1:p1".into()),
+        ..RequestCtx::default()
+    };
+
+    let missing_id = refusal(dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("worker", false),
+        "get_dunk",
+        args(json!({})),
+        &request,
+        &env,
+    ));
+    assert_eq!(missing_id, "get_dunk: missing required argument(s): id");
+
+    let missing_dunk = refusal(dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("worker", false),
+        "get_dunk",
+        args(json!({"id": "d404"})),
+        &request,
+        &env,
+    ));
+    assert_eq!(missing_dunk, "no dunk with id 'd404'");
+
+    let prefixed = dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("worker", false),
+        "get_dunk",
+        args(json!({"id": "d1"})),
+        &request,
+        &env,
+    )
+    .expect("worker can read a dunk by its prefixed id");
+    assert_eq!(prefixed, Value::Object(created.clone()));
+
+    // All 29 Python Unicode-16 whitespace scalars, including U+001C..U+001F.
+    // Actual Python _find probes cover prefixed/bare success and missing/empty IDs.
+    for codepoint in [
+        0x9, 0xa, 0xb, 0xc, 0xd, 0x1c, 0x1d, 0x1e, 0x1f, 0x20, 0x85, 0xa0, 0x1680, 0x2000, 0x2001,
+        0x2002, 0x2003, 0x2004, 0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200a, 0x2028, 0x2029,
+        0x202f, 0x205f, 0x3000,
+    ] {
+        let separator = char::from_u32(codepoint).unwrap();
+        for id in ["d1", "1", "d404", ""] {
+            let result = dispatch_with_env(
+                &dispatcher,
+                &flock,
+                &FixedRole("worker", false),
+                "get_dunk",
+                args(json!({"id": format!("{separator}{id}{separator}")})),
+                &request,
+                &env,
+            );
+            match id {
+                "d1" | "1" => assert_eq!(result.unwrap(), Value::Object(created.clone())),
+                "d404" => assert_eq!(refusal(result), "no dunk with id 'd404'"),
+                _ => assert_eq!(refusal(result), "no dunk with id ''"),
+            }
+        }
+    }
+
+    let bare_number = dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("worker", false),
+        "get_dunk",
+        args(json!({"id": 1})),
+        &request,
+        &env,
+    )
+    .expect("Python accepts a bare numeric dunk id");
+    assert_eq!(bare_number, Value::Object(created));
+
+    let raw_id_error = refusal(dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("worker", false),
+        "get_dunk",
+        args(json!({"id": []})),
+        &request,
+        &env,
+    ));
+    assert_eq!(raw_id_error, "no dunk with id '[]'");
+
+    // Byte-exact Python 3.14 repr oracles: Cc/Cf/Cn/Co/Zs/Zl/Zp, printable
+    // Unicode, quotes and backslash. Surrogates cannot occur in Rust strings.
+    for (codepoint, expected) in [
+        (0x0, r###"no dunk with id 'a\x00b'"###),
+        (0x9, r###"no dunk with id 'a\tb'"###),
+        (0xa, r###"no dunk with id 'a\nb'"###),
+        (0xd, r###"no dunk with id 'a\rb'"###),
+        (0x1f, r###"no dunk with id 'a\x1fb'"###),
+        (0x7f, r###"no dunk with id 'a\x7fb'"###),
+        (0x85, r###"no dunk with id 'a\x85b'"###),
+        (0xa0, r###"no dunk with id 'a\xa0b'"###),
+        (0xad, r###"no dunk with id 'a\xadb'"###),
+        (0x378, r###"no dunk with id 'a\u0378b'"###),
+        (0x2003, r###"no dunk with id 'a\u2003b'"###),
+        (0x200b, r###"no dunk with id 'a\u200bb'"###),
+        (0x2028, r###"no dunk with id 'a\u2028b'"###),
+        (0x2029, r###"no dunk with id 'a\u2029b'"###),
+        (0xe000, r###"no dunk with id 'a\ue000b'"###),
+        (0xfffe, r###"no dunk with id 'a\ufffeb'"###),
+        (0x10000, r###"no dunk with id 'a𐀀b'"###),
+        (0x1f600, r###"no dunk with id 'a😀b'"###),
+        (0xe0001, r###"no dunk with id 'a\U000e0001b'"###),
+        (0xf0000, r###"no dunk with id 'a\U000f0000b'"###),
+        (0x10ffff, r###"no dunk with id 'a\U0010ffffb'"###),
+        (0x301, r###"no dunk with id 'áb'"###),
+        (0x20, r###"no dunk with id 'a b'"###),
+        (0xe9, r###"no dunk with id 'aéb'"###),
+        (0x4e2d, r###"no dunk with id 'a中b'"###),
+        (0x27, r###"no dunk with id "a'b""###),
+        (0x22, r###"no dunk with id 'a"b'"###),
+        (0x5c, r###"no dunk with id 'a\\b'"###),
+    ] {
+        let id = format!("a{}b", char::from_u32(codepoint).unwrap());
+        assert_eq!(
+            refusal(dispatch_with_env(
+                &dispatcher,
+                &flock,
+                &FixedRole("worker", false),
+                "get_dunk",
+                args(json!({"id": id})),
+                &request,
+                &env,
+            )),
+            expected,
+            "codepoint U+{codepoint:04X}"
+        );
+    }
+
+    let unconfigured_role = dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("unknown-role", false),
+        "get_dunk",
+        args(json!({"id": "d1"})),
+        &request,
+        &env,
+    )
+    .expect("unknown roles retain the read-only fallback for get_dunk");
+    assert_eq!(
+        unconfigured_role,
+        Value::Object(flock.dunks.get("d1").unwrap())
+    );
+
+    assert_eq!(flock.dunks.snapshot(), before_snapshot);
+    let cache_after = flock.view_cache().view(&env, Some("w1:p1"), false, 3_600.0);
+    assert_eq!(
+        cache_after, cache_before,
+        "get_dunk must not invalidate the view cache"
+    );
+}
+
+#[test]
 fn h_add_dunk_assigns_ids_and_resolves_target_labels() {
     let (_dir, flock) = flock();
     let env = DunkHandlerEnv::new();
@@ -9477,4 +9653,9 @@ fn task_reap_live_tmux_listing_failure_reopens_expired_claim() {
         .dispatch(&context, &gate, "task_reap", args(json!({})))
         .unwrap();
     assert_eq!(again["requeued"], json!([]));
+}
+
+#[test]
+fn api_python_repr_preserves_mixed_quotes_and_controls() {
+    assert_eq!(py_repr("a'\"\\\n\r\tb"), r###"'a\'"\\\n\r\tb'"###);
 }

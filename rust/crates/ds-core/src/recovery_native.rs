@@ -340,7 +340,7 @@ fn prompt_python_repr(value: &Value) -> String {
     }
 }
 
-fn prompt_python_string_repr(value: &str) -> String {
+pub(crate) fn prompt_python_string_repr(value: &str) -> String {
     let quote = if value.contains('\'') && !value.contains('"') {
         '"'
     } else {
