@@ -573,8 +573,8 @@ mod window_integer_tests {
 
     #[tokio::test]
     async fn metrics_seconds_match_python_int_float_conversion() {
-        let scratch = store("window-integer").await;
-        let tasks = &scratch.value;
+        let dir = crate::testsupport::dir("metrics-window-integer");
+        let tasks = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
         for (until, since, expected) in [
             (100.0, 99.75, "0"),
             (100.0, 100.0, "0"),
