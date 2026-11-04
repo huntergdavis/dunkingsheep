@@ -452,7 +452,11 @@ mod tests {
 
     #[test]
     fn production_dispatcher_routes_respawn_to_the_guarded_handler() {
-        let (_dir, services) = make_services("respawn-route", factory(None), None);
+        let (_dir, services) = make_services(
+            "respawn-route",
+            Arc::new(|| Box::new(FakeTerminal::new())),
+            None,
+        );
         let dispatcher = services.production_dispatcher();
         let error = dispatcher
             .dispatch(
