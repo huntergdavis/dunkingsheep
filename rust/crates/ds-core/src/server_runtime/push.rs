@@ -815,7 +815,6 @@ mod tests {
                 &crate::flock::dunks::AddArgs {
                     start: true,
                     interval: Some("60".into()),
-                    max_sends: Some("1".into()),
                     text: Some("one scheduled attempt".into()),
                     hold_while_typing: Some("false".into()),
                     ..Default::default()
@@ -843,14 +842,16 @@ mod tests {
             )
             .unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while services.flock.dunks.get("d1").is_ok() {
+        while crate::flock::dunks::DunkList::handle_row(&dunk)["send_count"] == serde_json::json!(0)
+        {
             assert!(
                 std::time::Instant::now() < deadline,
-                "original owner did not deliver/remove timer"
+                "original owner did not deliver scheduled attempt"
             );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         services.shutdown();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
         assert_eq!(
             1,
             timer_starts.load(std::sync::atomic::Ordering::SeqCst),
