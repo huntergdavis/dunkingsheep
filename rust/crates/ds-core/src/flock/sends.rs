@@ -1329,7 +1329,7 @@ fn raw_metric_error(value: &serde_json::Value) -> Option<DunkError> {
         serde_json::Value::Array(_) => "list",
         serde_json::Value::Object(_) => "dict",
         serde_json::Value::Bool(_) => "bool",
-        serde_json::Value::Number(n) if n.is_f64() => "float",
+        serde_json::Value::Number(n) if n.to_string().contains(['.', 'e', 'E']) => "float",
         _ => "int",
     };
     Some(DunkError::Refused(format!(

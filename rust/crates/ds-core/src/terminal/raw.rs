@@ -23,24 +23,30 @@ pub(crate) fn optional(value: &Value) -> Option<String> {
 }
 /// Python equality, including bool == number, recursively in containers.
 pub(crate) fn equal(a: &Value, b: &Value) -> bool {
-    fn integer(v: &Value) -> Option<i128> {
-        match v {
-            Value::Bool(v) => Some(i128::from(*v)),
-            Value::Number(v) => v
-                .as_i64()
-                .map(i128::from)
-                .or_else(|| v.as_u64().map(i128::from)),
-            _ => None,
-        }
+    #[derive(PartialEq)]
+    enum Numeric {
+        Integer(String),
+        Float(f64),
     }
-    fn int_float(integer: i128, value: &Value) -> bool {
-        value.as_f64().is_some_and(|v| {
-            v.is_finite()
-                && v.fract() == 0.0
-                && (v as i128) == integer
-                && v >= i128::MIN as f64
-                && v < i128::MAX as f64
-        })
+    fn numeric(value: &Value) -> Option<Numeric> {
+        let raw = match value {
+            Value::Bool(value) => return Some(Numeric::Integer(u8::from(*value).to_string())),
+            Value::Number(value) => value.to_string(),
+            _ => return None,
+        };
+        if raw.chars().all(|c| c.is_ascii_digit() || c == '-') {
+            return Some(Numeric::Integer(if raw == "-0" { "0".into() } else { raw }));
+        }
+        let number = crate::github::parse_python_float(&raw)?;
+        if number.is_finite() && number.fract() == 0.0 {
+            Some(Numeric::Integer(if number == 0.0 {
+                "0".into()
+            } else {
+                format!("{number:.0}")
+            }))
+        } else {
+            Some(Numeric::Float(number))
+        }
     }
     match (a, b) {
         (Value::Array(a), Value::Array(b)) => {
@@ -49,11 +55,10 @@ pub(crate) fn equal(a: &Value, b: &Value) -> bool {
         (Value::Object(a), Value::Object(b)) => {
             a.len() == b.len() && a.iter().all(|(k, v)| b.get(k).is_some_and(|b| equal(v, b)))
         }
-        _ => match (integer(a), integer(b)) {
+        _ => match (numeric(a), numeric(b)) {
             (Some(a), Some(b)) => a == b,
-            (Some(a), None) => int_float(a, b),
-            (None, Some(b)) => int_float(b, a),
-            _ => a == b,
+            (None, None) => a == b,
+            _ => false,
         },
     }
 }
@@ -87,7 +92,7 @@ pub(crate) fn text_chunks(value: &Value) -> Result<Vec<String>, DunkError> {
             let name = match other {
                 Value::Null => "NoneType",
                 Value::Bool(_) => "bool",
-                Value::Number(n) if n.is_f64() => "float",
+                Value::Number(n) if n.to_string().contains(['.', 'e', 'E']) => "float",
                 _ => "int",
             };
             Err(DunkError::Refused(format!(
@@ -207,5 +212,21 @@ esac
             &json!(9007199254740992.0)
         ));
         assert!(equal(&json!(1), &json!(1.0)));
+    }
+    #[test]
+    fn raw_large_numbers_keep_integer_precision_and_float_equality() {
+        let huge:Value=serde_json::from_str("10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000").unwrap();
+        assert_eq!(string(&huge), huge.to_string());
+        assert_eq!(
+            text_chunks(&huge).unwrap_err().to_string(),
+            "object of type 'int' has no len()"
+        );
+        let exact: Value = serde_json::from_str("100000000000000000000").unwrap();
+        assert!(equal(&exact, &json!(1e20)));
+        let next: Value = serde_json::from_str("100000000000000000001").unwrap();
+        assert!(!equal(&next, &json!(1e20)));
+        assert!(truthy(&serde_json::from_str("1e999").unwrap()));
+        assert_eq!(string(&serde_json::from_str("1e999").unwrap()), "inf");
+        assert!(!truthy(&serde_json::from_str("1e-999").unwrap()));
     }
 }
