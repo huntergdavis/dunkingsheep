@@ -4010,6 +4010,12 @@ impl Flock {
             .message_history
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Python history retains references to the original Message. A cancellation can
+        // remember it before an already-running callback completes; refresh those aliases
+        // from that exact lifetime, never a replacement which merely reused its ID.
+        for previous in history.iter_mut().filter(|row| row.same_lifetime(message)) {
+            *previous = message.clone();
+        }
         history.push_back(message.clone());
         while history.len() > MESSAGE_HISTORY {
             history.pop_front();

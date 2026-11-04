@@ -548,6 +548,11 @@ fn outbox_cancel_inflight_worker_preserves_replacement_lifetime() {
         .iter()
         .any(|row| row.id == "same" && row.status == "sent"));
     assert!(history.iter().all(|row| row.text != "new body"));
+    assert_eq!(history.iter().filter(|row| row.id == "same").count(), 2);
+    assert!(history
+        .iter()
+        .filter(|row| row.id == "same")
+        .all(|row| row.status == "sent"));
     assert_eq!(
         crate::inbox::status(&pool, &original_receipt, crate::clock::now_s())
             .unwrap()
