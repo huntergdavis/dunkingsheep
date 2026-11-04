@@ -425,6 +425,10 @@ impl PaneInfoEnv for RequestRuntimeAdapter<'_> {
 }
 
 impl crate::api::CommandEnv for RequestRuntimeAdapter<'_> {
+    fn poolrad_sync_args(&self, args: &crate::api::Args) -> Result<Value, DunkError> {
+        self.runtime_poolrad_sync_args(args)
+    }
+
     fn poolrad_sync(&self, limit: usize, dry_run: bool) -> Result<Value, DunkError> {
         self.runtime_poolrad_sync(limit, dry_run)
     }

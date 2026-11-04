@@ -42,6 +42,20 @@ impl RequestRuntimeAdapter<'_> {
             .map_err(refusal)
     }
 
+    pub(super) fn runtime_poolrad_sync_args(
+        &self,
+        args: &crate::api::Args,
+    ) -> Result<Value, DunkError> {
+        self.require_poolrad_thread()?;
+        // dunk_core imports dunk_poolrad (and evaluates Path.home()) before int(limit).
+        let config = self.poolrad_config()?;
+        let limit = crate::api::poolrad_limit(args)?;
+        let dry_run = crate::api::poolrad_dry_run(args.get("dry_run"));
+        PoolradSync::from_config(&RuntimePoolradTasks(self), &config)
+            .run_with(limit, dry_run, "medium")
+            .map_err(refusal)
+    }
+
     pub(super) fn runtime_poolrad_progress(&self) -> Result<Value, DunkError> {
         self.require_poolrad_thread()?;
         let config = self.poolrad_config()?;

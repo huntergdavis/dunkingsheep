@@ -238,6 +238,12 @@ pub trait CommandEnv: PaneInfoEnv {
         ))
     }
 
+    /// Preserve the runtime's lazy module/config error boundary before converting
+    /// the limit. Other adapters retain the accepted argument conversion here.
+    fn poolrad_sync_args(&self, args: &Args) -> Result<Value, DunkError> {
+        self.poolrad_sync(poolrad_limit(args)?, poolrad_dry_run(args.get("dry_run")))
+    }
+
     /// The accepted T52 Poolrad sync service used by the T39 command adapter.
     fn poolrad_sync(&self, _limit: usize, _dry_run: bool) -> Result<Value, DunkError> {
         Err(DunkError::Refused(
@@ -1966,7 +1972,7 @@ fn parse_python_decimal_integer_checked(value: &str) -> Result<i64, DecimalIntEr
     })
 }
 
-fn poolrad_limit(args: &Args) -> Result<usize, DunkError> {
+pub(crate) fn poolrad_limit(args: &Args) -> Result<usize, DunkError> {
     let Some(value) = args.get("limit").filter(|value| truthy(value)) else {
         return Ok(6);
     };
@@ -2144,7 +2150,7 @@ fn python_decimal_digit(character: char) -> Option<u8> {
     })
 }
 
-fn poolrad_dry_run(value: Option<&Value>) -> bool {
+pub(crate) fn poolrad_dry_run(value: Option<&Value>) -> bool {
     match value {
         None | Some(Value::Null) => false,
         Some(Value::Bool(value)) => *value,
@@ -2250,9 +2256,7 @@ pub fn h_gh_token(context: &HandlerContext<'_>, args: Args) -> Result<Value, Dun
 
 /// `dunk_api.h_poolrad_sync` through the accepted T52 Poolrad service.
 pub fn h_poolrad_sync(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
-    let limit = poolrad_limit(&args)?;
-    let dry_run = poolrad_dry_run(args.get("dry_run"));
-    context.env.poolrad_sync(limit, dry_run)
+    context.env.poolrad_sync_args(&args)
 }
 
 /// `dunk_api.h_poolrad_progress` through the accepted T52 Poolrad service.

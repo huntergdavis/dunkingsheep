@@ -14,6 +14,7 @@ use crate::terminal::{fakes::FakeTerminal, Terminal};
 use serde_json::json;
 
 struct Fixture {
+    system_token: String,
     services: Arc<RuntimeServices>,
     tasks: Arc<Tasks>,
     repo: PathBuf,
@@ -115,6 +116,9 @@ impl Fixture {
         roles
             .register("w2:p2", "owner", None, None, None, None, None, None)
             .unwrap();
+        let system_token = roles
+            .issue_token("system", Some("isolated-fixture"), None)
+            .unwrap();
         let executable = dir.path().join("daemon");
         fs::write(&executable, "isolated executable identity").unwrap();
         let services = RuntimeServices::new(RuntimeServiceInputs {
@@ -141,6 +145,7 @@ impl Fixture {
         })
         .unwrap();
         Self {
+            system_token,
             services,
             tasks,
             repo,
@@ -243,6 +248,7 @@ fn h_poolrad_progress_matches_python_real_runtime() {
     .unwrap();
     let progress = f.call("poolrad_progress", json!({}), "w1:p1").unwrap();
     assert_eq!(progress["credited"], 1);
+    assert_eq!(progress["credit_pending"], 1);
     assert_eq!(progress["composable_bodies"], 8);
     assert_eq!(progress["queue_candidates"], 8);
     assert_eq!(progress["ceiling"], 815);
@@ -284,6 +290,21 @@ fn poolrad_runtime_role_limit_bool_and_dry_run() {
             .list(None, true, 2000, "work")
             .unwrap())
         .is_empty());
+    let mut handlers = Dispatcher::new();
+    handlers.register_poolrad_sync_progress();
+    let system = f
+        .services
+        .dispatcher(handlers)
+        .dispatch(
+            "poolrad_sync",
+            &json!({"limit": 1, "dry_run": true}),
+            &RequestCtx {
+                service_token: Some(f.system_token.clone()),
+                ..RequestCtx::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(system["filed"][0]["dry"], true);
 }
 
 #[test]
@@ -469,6 +490,26 @@ fn poolrad_rejects_nested_and_current_thread_runtime_without_export() {
         .to_string()
         .contains("independently driven multithread"));
     assert!(!f.config.join("poolrad/strict-queue.json").exists());
+    let services = Arc::clone(&f.services);
+    let error = f
+        .services
+        .runtime
+        .block_on(f.services.runtime.spawn_blocking(move || {
+            let request = RequestCtx::default();
+            let terminal: Mutex<Box<dyn Terminal>> = Mutex::new(Box::new(FakeTerminal::new()));
+            let adapter = RequestRuntimeAdapter::new(
+                &services.flock,
+                &request,
+                services.runtime.handle(),
+                &terminal,
+            );
+            adapter
+                .runtime_poolrad_sync(1, true)
+                .unwrap_err()
+                .to_string()
+        }))
+        .unwrap();
+    assert!(error.contains("dedicated blocking request thread"));
 }
 
 #[test]
@@ -536,7 +577,18 @@ fn poolrad_home_error_is_deferred_and_precedes_export_and_task_lookup() {
     );
     state.python_home = CapturedPythonHome::capture_with(&Env::default(), || Ok(None));
     flock.attach_status_state(state).unwrap();
-    let request = RequestCtx::default();
+    let roles = Roles::new(
+        &Env::default(),
+        Some(f.dir.path().join("roles.json")),
+        Some(f.dir.path().join("tokens.json")),
+        None,
+    )
+    .unwrap();
+    flock.attach_roles(roles, None);
+    let request = RequestCtx {
+        service_token: Some(f.system_token.clone()),
+        ..RequestCtx::default()
+    };
     let terminal: Mutex<Box<dyn Terminal>> = Mutex::new(Box::new(FakeTerminal::new()));
     let a = RequestRuntimeAdapter::new(&flock, &request, f.services.runtime.handle(), &terminal);
     assert_eq!(
@@ -548,6 +600,18 @@ fn poolrad_home_error_is_deferred_and_precedes_export_and_task_lookup() {
         "Could not determine home directory."
     );
     assert!(!f.config.join("poolrad/strict-queue.json").exists());
+    let mut handlers = Dispatcher::new();
+    handlers.register_poolrad_sync_progress();
+    let context = a.handler_context();
+    let error = handlers
+        .dispatch(
+            &context,
+            &crate::api::FlockGate(&context),
+            "poolrad_sync",
+            Some(json!({"limit": "bad"}).as_object().unwrap().clone()),
+        )
+        .unwrap_err();
+    assert_eq!(error.to_string(), "Could not determine home directory.");
 }
 
 #[test]
