@@ -19,6 +19,7 @@ async def main():
   cases.append((name,json.dumps({'task_id':value}).encode(),'application/json'))
  for name,value in [('invalid_nan',float('nan')),('invalid_inf',float('inf')),('invalid_nested',[float('nan')])]:
   cases.append((name,json.dumps(value).encode(),'application/json'))
+ cases.extend([('raw_invalid',b'\xff','text/plain'),('raw_invalid_no_type',b'\xff',None),('json_invalid_encoding',b'\xff','application/json')])
  for name,body,ct in cases:
   for fail in [False,True]:
    calls.clear();headers=[] if ct is None else [(b'content-type',ct.encode())]
@@ -34,6 +35,6 @@ async def main():
    raw=b''.join(m.get('body',b'') for m in out if m['type']=='http.response.body')
    try:payload=json.loads(raw)
    except ValueError:payload=raw.decode()
-   rows.append(dict(name=name,body=body.decode(),content_type=ct,fail_auth=fail,status=status,json=payload,calls=list(calls)))
+   rows.append(dict(name=name,body=body.decode(errors='backslashreplace'),body_hex=body.hex(),content_type=ct,fail_auth=fail,status=status,json=payload,calls=list(calls)))
  print(json.dumps({'versions':{'fastapi':__import__('fastapi').__version__,'starlette':__import__('starlette').__version__},'cases':rows},indent=2,ensure_ascii=False))
 asyncio.run(main())

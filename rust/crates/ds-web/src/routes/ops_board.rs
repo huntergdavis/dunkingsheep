@@ -15,7 +15,8 @@ use axum::{
 };
 use serde_json::{json, Value};
 
-use super::auth::{AuthBackend, AuthError, Identity, RequestScheme};
+use super::auth::{AuthBackend, RequestScheme};
+use super::messages_write::authenticate;
 use super::response_error::WebResponseError;
 
 pub type OpsBoardFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -64,8 +65,22 @@ async fn not_now_owner_question(
     if let Err(response) = authenticate(auth_backend.as_ref(), &headers, request_scheme).await {
         return response.into_response();
     }
-    let Some(payload) = payload else {
-        return body_validation("missing", "Field required", Value::Null);
+    let payload = match payload {
+        None => return body_validation("missing", "Field required", Value::Null),
+        Some(RequestPayload::Json(value)) => value,
+        Some(RequestPayload::Raw(bytes)) => {
+            // FastAPI validates raw bytes after dependencies; its error encoder is strict UTF-8.
+            return match String::from_utf8(bytes) {
+                Ok(text) => body_validation(
+                    "dict_type",
+                    "Input should be a valid dictionary",
+                    Value::String(text),
+                ),
+                Err(_) => {
+                    (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error").into_response()
+                }
+            };
+        }
     };
     let Some(payload) = payload.as_object() else {
         return body_validation("dict_type", "Input should be a valid dictionary", payload);
@@ -110,74 +125,16 @@ async fn refresh_operations_board(
     }
 }
 
-async fn authenticate(
-    backend: &dyn AuthBackend,
-    headers: &HeaderMap,
-    scheme: RequestScheme,
-) -> Result<Identity, WebResponseError> {
-    if let Some(response) = same_origin_refusal(headers, scheme) {
-        return Err(response.into());
-    }
-    let bearer = bearer_value(headers);
-    let cookie = cookie_value(headers, "vp_session");
-    backend
-        .identity(bearer.as_deref(), cookie.as_deref())
-        .await
-        .map_err(auth_error_response)
-        .map_err(WebResponseError::from)
-}
-
-fn same_origin_refusal(headers: &HeaderMap, scheme: RequestScheme) -> Option<Response> {
-    let origin = headers.get(header::ORIGIN)?.to_str().ok()?;
-    let host = headers
-        .get(header::HOST)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("");
-    let scheme = match scheme {
-        RequestScheme::Http => "http",
-        RequestScheme::Https => "https",
-    };
-    (origin != format!("{scheme}://{host}"))
-        .then(|| detail_response(StatusCode::FORBIDDEN, "Cross-origin request refused"))
-}
-
-fn bearer_value(headers: &HeaderMap) -> Option<String> {
-    let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
-    value.strip_prefix("Bearer ").map(str::to_owned)
-}
-
-fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
-    headers
-        .get_all(header::COOKIE)
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .flat_map(|value| value.split(';'))
-        .find_map(|part| {
-            let (key, value) = part.trim().split_once('=')?;
-            (key == name).then(|| value.to_owned())
-        })
-}
-
-fn auth_error_response(error: AuthError) -> Response {
-    match error {
-        AuthError::TooManyAttempts => detail_response(
-            StatusCode::TOO_MANY_REQUESTS,
-            "Too many attempts; retry in five minutes",
-        ),
-        AuthError::IncorrectPassword | AuthError::SignInRequired => {
-            detail_response(StatusCode::UNAUTHORIZED, "Sign in required")
-        }
-        AuthError::Internal(_) => {
-            (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error").into_response()
-        }
-    }
-}
-
 fn detail_response(status: StatusCode, detail: impl Into<String>) -> Response {
     (status, Json(json!({"detail": detail.into()}))).into_response()
 }
 
-async fn request_payload(request: Request) -> Result<Option<Value>, WebResponseError> {
+enum RequestPayload {
+    Json(Value),
+    Raw(Vec<u8>),
+}
+
+async fn request_payload(request: Request) -> Result<Option<RequestPayload>, WebResponseError> {
     use super::game_state::{
         decode_python_json_bytes, python_json_decode_error,
         python_json_integer_exceeds_digit_limit, request_json_content_type,
@@ -195,9 +152,7 @@ async fn request_payload(request: Request) -> Result<Option<Value>, WebResponseE
         return Ok(None);
     }
     if !is_json {
-        return Ok(Some(Value::String(
-            String::from_utf8_lossy(&bytes).into_owned(),
-        )));
+        return Ok(Some(RequestPayload::Raw(bytes.to_vec())));
     }
     let bytes = decode_python_json_bytes(&bytes).map_err(|_| {
         detail_response(
@@ -214,7 +169,7 @@ async fn request_payload(request: Request) -> Result<Option<Value>, WebResponseE
     }
     let text = std::str::from_utf8(&bytes).expect("decoded JSON is UTF-8");
     ds_core::wire_json::from_str(text)
-        .map(Some)
+        .map(|value| Some(RequestPayload::Json(value)))
         .map_err(|error| python_json_decode_error(&bytes, &error).into())
 }
 
@@ -271,6 +226,7 @@ impl OpsBoardError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::routes::auth::{AuthError, Identity};
     use std::{
         future::Future,
         pin::pin,
@@ -287,9 +243,16 @@ mod tests {
     };
     use tower::ServiceExt;
 
+    #[derive(Default)]
+    struct SeenAuth {
+        bearer: Mutex<Option<String>>,
+        cookie: Mutex<Option<String>>,
+    }
+
     struct FakeAuth {
         fail_identity: bool,
         identity_calls: Arc<AtomicUsize>,
+        seen: Arc<SeenAuth>,
     }
 
     impl AuthBackend for FakeAuth {
@@ -302,10 +265,12 @@ mod tests {
         }
         fn identity<'a>(
             &'a self,
-            _: Option<&'a str>,
-            _: Option<&'a str>,
+            bearer: Option<&'a str>,
+            cookie: Option<&'a str>,
         ) -> super::super::auth::AuthFuture<'a, Result<Identity, AuthError>> {
             self.identity_calls.fetch_add(1, Ordering::SeqCst);
+            *self.seen.bearer.lock().unwrap() = bearer.map(str::to_owned);
+            *self.seen.cookie.lock().unwrap() = cookie.map(str::to_owned);
             let result = if self.fail_identity {
                 Err(AuthError::SignInRequired)
             } else {
@@ -378,6 +343,7 @@ mod tests {
         let auth: Arc<dyn AuthBackend> = Arc::new(FakeAuth {
             fail_identity: false,
             identity_calls: Arc::new(AtomicUsize::new(0)),
+            seen: Arc::default(),
         });
         router(board, auth, RequestScheme::Http)
     }
@@ -406,6 +372,7 @@ mod tests {
         let auth_backend: Arc<dyn AuthBackend> = Arc::new(FakeAuth {
             fail_identity: true,
             identity_calls: Arc::new(AtomicUsize::new(0)),
+            seen: Arc::default(),
         });
         let request = Request::builder()
             .method("POST")
@@ -425,6 +392,58 @@ mod tests {
     }
 
     #[test]
+    fn ops_board_reuses_latin1_and_last_cookie_auth_semantics() {
+        let board = Arc::new(FakeBoard::default());
+        let identity_calls = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::new(SeenAuth::default());
+        let auth: Arc<dyn AuthBackend> = Arc::new(FakeAuth {
+            fail_identity: false,
+            identity_calls: identity_calls.clone(),
+            seen: seen.clone(),
+        });
+        let backend: Arc<dyn OpsBoardBackend> = board.clone();
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/ops-board/not-now")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::AUTHORIZATION, "Bearer owner-token")
+            .header(header::COOKIE, "vp_session=first")
+            .header(header::COOKIE, r#"vp_session="\101""#)
+            .body(Body::from(r#"{"task_id":"t9"}"#))
+            .unwrap();
+        let response =
+            block_on(router(backend, auth, RequestScheme::Http).oneshot(request)).unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(*seen.bearer.lock().unwrap(), Some("owner-token".to_owned()));
+        assert_eq!(*seen.cookie.lock().unwrap(), Some("A".to_owned()));
+
+        let board = Arc::new(FakeBoard::default());
+        let identity_calls = Arc::new(AtomicUsize::new(0));
+        let auth: Arc<dyn AuthBackend> = Arc::new(FakeAuth {
+            fail_identity: false,
+            identity_calls: identity_calls.clone(),
+            seen: Arc::default(),
+        });
+        let backend: Arc<dyn OpsBoardBackend> = board.clone();
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/ops-board/not-now")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::HOST, "desk.test")
+            .header(
+                header::ORIGIN,
+                axum::http::HeaderValue::from_bytes(b"http://d\xe9sk.test").unwrap(),
+            )
+            .body(Body::from(r#"{"task_id":"t9"}"#))
+            .unwrap();
+        let response =
+            block_on(router(backend, auth, RequestScheme::Http).oneshot(request)).unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(identity_calls.load(Ordering::SeqCst), 0);
+        assert!(board.deferred.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn not_now_matches_actual_fastapi_raw_payload_and_validation_order() {
         let fixture: Value = serde_json::from_str(include_str!(
             "../../tests/fixtures/ops_board_request_matrix.json"
@@ -436,6 +455,7 @@ mod tests {
             let auth: Arc<dyn AuthBackend> = Arc::new(FakeAuth {
                 fail_identity: case["fail_auth"].as_bool().unwrap(),
                 identity_calls: identity_calls.clone(),
+                seen: Arc::default(),
             });
             let backend: Arc<dyn OpsBoardBackend> = board.clone();
             let mut request = Request::builder()
@@ -445,7 +465,17 @@ mod tests {
                 request = request.header(header::CONTENT_TYPE, content_type);
             }
             let request = request
-                .body(Body::from(case["body"].as_str().unwrap().to_owned()))
+                .body(Body::from(
+                    case["body_hex"]
+                        .as_str()
+                        .unwrap()
+                        .as_bytes()
+                        .chunks_exact(2)
+                        .map(|pair| {
+                            u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap()
+                        })
+                        .collect::<Vec<_>>(),
+                ))
                 .unwrap();
             let response =
                 block_on(router(backend, auth, RequestScheme::Http).oneshot(request)).unwrap();

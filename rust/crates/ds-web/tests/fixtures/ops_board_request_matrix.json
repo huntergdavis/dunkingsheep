@@ -7,6 +7,7 @@
     {
       "name": "missing",
       "body": "",
+      "body_hex": "",
       "content_type": null,
       "fail_auth": false,
       "status": 422,
@@ -29,6 +30,7 @@
     {
       "name": "missing",
       "body": "",
+      "body_hex": "",
       "content_type": null,
       "fail_auth": true,
       "status": 401,
@@ -42,6 +44,7 @@
     {
       "name": "null",
       "body": "null",
+      "body_hex": "6e756c6c",
       "content_type": "application/json",
       "fail_auth": false,
       "status": 422,
@@ -64,6 +67,7 @@
     {
       "name": "null",
       "body": "null",
+      "body_hex": "6e756c6c",
       "content_type": "application/json",
       "fail_auth": true,
       "status": 401,
@@ -77,6 +81,7 @@
     {
       "name": "array",
       "body": "[]",
+      "body_hex": "5b5d",
       "content_type": "application/json",
       "fail_auth": false,
       "status": 422,
@@ -99,6 +104,7 @@
     {
       "name": "array",
       "body": "[]",
+      "body_hex": "5b5d",
       "content_type": "application/json",
       "fail_auth": true,
       "status": 401,
@@ -112,6 +118,7 @@
     {
       "name": "string",
       "body": "\"x\"",
+      "body_hex": "227822",
       "content_type": "application/json",
       "fail_auth": false,
       "status": 422,
@@ -134,6 +141,7 @@
     {
       "name": "string",
       "body": "\"x\"",
+      "body_hex": "227822",
       "content_type": "application/json",
       "fail_auth": true,
       "status": 401,
@@ -147,6 +155,7 @@
     {
       "name": "invalid",
       "body": "{",
+      "body_hex": "7b",
       "content_type": "application/json",
       "fail_auth": false,
       "status": 422,
@@ -171,6 +180,7 @@
     {
       "name": "invalid",
       "body": "{",
+      "body_hex": "7b",
       "content_type": "application/json",
       "fail_auth": true,
       "status": 422,
@@ -195,6 +205,7 @@
     {
       "name": "trailing",
       "body": "{\"task_id\":1}x",
+      "body_hex": "7b227461736b5f6964223a317d78",
       "content_type": "application/json",
       "fail_auth": false,
       "status": 422,
@@ -219,6 +230,7 @@
     {
       "name": "trailing",
       "body": "{\"task_id\":1}x",
+      "body_hex": "7b227461736b5f6964223a317d78",
       "content_type": "application/json",
       "fail_auth": true,
       "status": 422,
@@ -243,6 +255,7 @@
     {
       "name": "text",
       "body": "{\"task_id\":\"t9\"}",
+      "body_hex": "7b227461736b5f6964223a227439227d",
       "content_type": "text/plain",
       "fail_auth": false,
       "status": 422,
@@ -265,6 +278,7 @@
     {
       "name": "text",
       "body": "{\"task_id\":\"t9\"}",
+      "body_hex": "7b227461736b5f6964223a227439227d",
       "content_type": "text/plain",
       "fail_auth": true,
       "status": 401,
@@ -278,6 +292,7 @@
     {
       "name": "no_type",
       "body": "{\"task_id\":\"t9\"}",
+      "body_hex": "7b227461736b5f6964223a227439227d",
       "content_type": null,
       "fail_auth": false,
       "status": 422,
@@ -300,6 +315,7 @@
     {
       "name": "no_type",
       "body": "{\"task_id\":\"t9\"}",
+      "body_hex": "7b227461736b5f6964223a227439227d",
       "content_type": null,
       "fail_auth": true,
       "status": 401,
@@ -313,6 +329,7 @@
     {
       "name": "suffix",
       "body": "{\"task_id\":\"t9\"}",
+      "body_hex": "7b227461736b5f6964223a227439227d",
       "content_type": "application/problem+json",
       "fail_auth": false,
       "status": 200,
@@ -335,6 +352,7 @@
     {
       "name": "suffix",
       "body": "{\"task_id\":\"t9\"}",
+      "body_hex": "7b227461736b5f6964223a227439227d",
       "content_type": "application/problem+json",
       "fail_auth": true,
       "status": 401,
@@ -348,6 +366,7 @@
     {
       "name": "list",
       "body": "{\"task_id\":[\"t9\",true]}",
+      "body_hex": "7b227461736b5f6964223a5b227439222c747275655d7d",
       "content_type": "application/json",
       "fail_auth": false,
       "status": 200,
@@ -370,6 +389,7 @@
     {
       "name": "list",
       "body": "{\"task_id\":[\"t9\",true]}",
+      "body_hex": "7b227461736b5f6964223a5b227439222c747275655d7d",
       "content_type": "application/json",
       "fail_auth": true,
       "status": 401,
@@ -383,6 +403,7 @@
     {
       "name": "map",
       "body": "{\"task_id\":{\"z\":1,\"a\":false}}",
+      "body_hex": "7b227461736b5f6964223a7b227a223a312c2261223a66616c73657d7d",
       "content_type": "application/json",
       "fail_auth": false,
       "status": 200,
@@ -405,6 +426,7 @@
     {
       "name": "map",
       "body": "{\"task_id\":{\"z\":1,\"a\":false}}",
+      "body_hex": "7b227461736b5f6964223a7b227a223a312c2261223a66616c73657d7d",
       "content_type": "application/json",
       "fail_auth": true,
       "status": 401,
@@ -418,6 +440,7 @@
     {
       "name": "unicode_strip",
       "body": "{\"task_id\": \"\\u001ct9\\u001f\"}",
+      "body_hex": "7b227461736b5f6964223a20225c753030316374395c7530303166227d",
       "content_type": "application/json",
       "fail_auth": false,
       "status": 200,
@@ -440,6 +463,7 @@
     {
       "name": "unicode_strip",
       "body": "{\"task_id\": \"\\u001ct9\\u001f\"}",
+      "body_hex": "7b227461736b5f6964223a20225c753030316374395c7530303166227d",
       "content_type": "application/json",
       "fail_auth": true,
       "status": 401,
@@ -453,6 +477,7 @@
     {
       "name": "false",
       "body": "{\"task_id\": false}",
+      "body_hex": "7b227461736b5f6964223a2066616c73657d",
       "content_type": "application/json",
       "fail_auth": false,
       "status": 400,
@@ -466,6 +491,7 @@
     {
       "name": "false",
       "body": "{\"task_id\": false}",
+      "body_hex": "7b227461736b5f6964223a2066616c73657d",
       "content_type": "application/json",
       "fail_auth": true,
       "status": 401,
@@ -479,6 +505,7 @@
     {
       "name": "zero",
       "body": "{\"task_id\": 0}",
+      "body_hex": "7b227461736b5f6964223a20307d",
       "content_type": "application/json",
       "fail_auth": false,
       "status": 400,
@@ -492,6 +519,7 @@
     {
       "name": "zero",
       "body": "{\"task_id\": 0}",
+      "body_hex": "7b227461736b5f6964223a20307d",
       "content_type": "application/json",
       "fail_auth": true,
       "status": 401,
@@ -505,6 +533,7 @@
     {
       "name": "empty_list",
       "body": "{\"task_id\": []}",
+      "body_hex": "7b227461736b5f6964223a205b5d7d",
       "content_type": "application/json",
       "fail_auth": false,
       "status": 400,
@@ -518,6 +547,7 @@
     {
       "name": "empty_list",
       "body": "{\"task_id\": []}",
+      "body_hex": "7b227461736b5f6964223a205b5d7d",
       "content_type": "application/json",
       "fail_auth": true,
       "status": 401,
@@ -531,6 +561,7 @@
     {
       "name": "empty_map",
       "body": "{\"task_id\": {}}",
+      "body_hex": "7b227461736b5f6964223a207b7d7d",
       "content_type": "application/json",
       "fail_auth": false,
       "status": 400,
@@ -544,6 +575,7 @@
     {
       "name": "empty_map",
       "body": "{\"task_id\": {}}",
+      "body_hex": "7b227461736b5f6964223a207b7d7d",
       "content_type": "application/json",
       "fail_auth": true,
       "status": 401,
@@ -557,6 +589,7 @@
     {
       "name": "float",
       "body": "{\"task_id\": 1e-07}",
+      "body_hex": "7b227461736b5f6964223a2031652d30377d",
       "content_type": "application/json",
       "fail_auth": false,
       "status": 200,
@@ -579,6 +612,7 @@
     {
       "name": "float",
       "body": "{\"task_id\": 1e-07}",
+      "body_hex": "7b227461736b5f6964223a2031652d30377d",
       "content_type": "application/json",
       "fail_auth": true,
       "status": 401,
@@ -592,6 +626,7 @@
     {
       "name": "large_integer",
       "body": "{\"task_id\": 1267650600228229401496703205376}",
+      "body_hex": "7b227461736b5f6964223a20313236373635303630303232383232393430313439363730333230353337367d",
       "content_type": "application/json",
       "fail_auth": false,
       "status": 200,
@@ -614,6 +649,7 @@
     {
       "name": "large_integer",
       "body": "{\"task_id\": 1267650600228229401496703205376}",
+      "body_hex": "7b227461736b5f6964223a20313236373635303630303232383232393430313439363730333230353337367d",
       "content_type": "application/json",
       "fail_auth": true,
       "status": 401,
@@ -627,6 +663,7 @@
     {
       "name": "nested",
       "body": "{\"task_id\": {\"quote\": [\"a'b\", null, true]}}",
+      "body_hex": "7b227461736b5f6964223a207b2271756f7465223a205b22612762222c206e756c6c2c20747275655d7d7d",
       "content_type": "application/json",
       "fail_auth": false,
       "status": 200,
@@ -649,6 +686,7 @@
     {
       "name": "nested",
       "body": "{\"task_id\": {\"quote\": [\"a'b\", null, true]}}",
+      "body_hex": "7b227461736b5f6964223a207b2271756f7465223a205b22612762222c206e756c6c2c20747275655d7d7d",
       "content_type": "application/json",
       "fail_auth": true,
       "status": 401,
@@ -662,6 +700,7 @@
     {
       "name": "nan",
       "body": "{\"task_id\": NaN}",
+      "body_hex": "7b227461736b5f6964223a204e614e7d",
       "content_type": "application/json",
       "fail_auth": false,
       "status": 200,
@@ -684,6 +723,7 @@
     {
       "name": "nan",
       "body": "{\"task_id\": NaN}",
+      "body_hex": "7b227461736b5f6964223a204e614e7d",
       "content_type": "application/json",
       "fail_auth": true,
       "status": 401,
@@ -697,6 +737,7 @@
     {
       "name": "infinity",
       "body": "{\"task_id\": Infinity}",
+      "body_hex": "7b227461736b5f6964223a20496e66696e6974797d",
       "content_type": "application/json",
       "fail_auth": false,
       "status": 200,
@@ -719,6 +760,7 @@
     {
       "name": "infinity",
       "body": "{\"task_id\": Infinity}",
+      "body_hex": "7b227461736b5f6964223a20496e66696e6974797d",
       "content_type": "application/json",
       "fail_auth": true,
       "status": 401,
@@ -732,6 +774,7 @@
     {
       "name": "negative_infinity",
       "body": "{\"task_id\": -Infinity}",
+      "body_hex": "7b227461736b5f6964223a202d496e66696e6974797d",
       "content_type": "application/json",
       "fail_auth": false,
       "status": 200,
@@ -754,6 +797,7 @@
     {
       "name": "negative_infinity",
       "body": "{\"task_id\": -Infinity}",
+      "body_hex": "7b227461736b5f6964223a202d496e66696e6974797d",
       "content_type": "application/json",
       "fail_auth": true,
       "status": 401,
@@ -767,6 +811,7 @@
     {
       "name": "invalid_nan",
       "body": "NaN",
+      "body_hex": "4e614e",
       "content_type": "application/json",
       "fail_auth": false,
       "status": 500,
@@ -778,6 +823,7 @@
     {
       "name": "invalid_nan",
       "body": "NaN",
+      "body_hex": "4e614e",
       "content_type": "application/json",
       "fail_auth": true,
       "status": 401,
@@ -791,6 +837,7 @@
     {
       "name": "invalid_inf",
       "body": "Infinity",
+      "body_hex": "496e66696e697479",
       "content_type": "application/json",
       "fail_auth": false,
       "status": 500,
@@ -802,6 +849,7 @@
     {
       "name": "invalid_inf",
       "body": "Infinity",
+      "body_hex": "496e66696e697479",
       "content_type": "application/json",
       "fail_auth": true,
       "status": 401,
@@ -815,6 +863,7 @@
     {
       "name": "invalid_nested",
       "body": "[NaN]",
+      "body_hex": "5b4e614e5d",
       "content_type": "application/json",
       "fail_auth": false,
       "status": 500,
@@ -826,6 +875,7 @@
     {
       "name": "invalid_nested",
       "body": "[NaN]",
+      "body_hex": "5b4e614e5d",
       "content_type": "application/json",
       "fail_auth": true,
       "status": 401,
@@ -835,6 +885,82 @@
       "calls": [
         "auth"
       ]
+    },
+    {
+      "name": "raw_invalid",
+      "body": "\\xff",
+      "body_hex": "ff",
+      "content_type": "text/plain",
+      "fail_auth": false,
+      "status": 500,
+      "json": "Internal Server Error",
+      "calls": [
+        "auth"
+      ]
+    },
+    {
+      "name": "raw_invalid",
+      "body": "\\xff",
+      "body_hex": "ff",
+      "content_type": "text/plain",
+      "fail_auth": true,
+      "status": 401,
+      "json": {
+        "detail": "Sign in required"
+      },
+      "calls": [
+        "auth"
+      ]
+    },
+    {
+      "name": "raw_invalid_no_type",
+      "body": "\\xff",
+      "body_hex": "ff",
+      "content_type": null,
+      "fail_auth": false,
+      "status": 500,
+      "json": "Internal Server Error",
+      "calls": [
+        "auth"
+      ]
+    },
+    {
+      "name": "raw_invalid_no_type",
+      "body": "\\xff",
+      "body_hex": "ff",
+      "content_type": null,
+      "fail_auth": true,
+      "status": 401,
+      "json": {
+        "detail": "Sign in required"
+      },
+      "calls": [
+        "auth"
+      ]
+    },
+    {
+      "name": "json_invalid_encoding",
+      "body": "\\xff",
+      "body_hex": "ff",
+      "content_type": "application/json",
+      "fail_auth": false,
+      "status": 400,
+      "json": {
+        "detail": "There was an error parsing the body"
+      },
+      "calls": []
+    },
+    {
+      "name": "json_invalid_encoding",
+      "body": "\\xff",
+      "body_hex": "ff",
+      "content_type": "application/json",
+      "fail_auth": true,
+      "status": 400,
+      "json": {
+        "detail": "There was an error parsing the body"
+      },
+      "calls": []
     }
   ]
 }
