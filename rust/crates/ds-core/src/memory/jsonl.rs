@@ -150,7 +150,7 @@ impl Throttle {
     fn after_flush(self, should_stop: &dyn Fn() -> bool) -> Result<(), SleepFailure> {
         let duration = match self {
             Self::Duration(duration) => duration,
-            Self::Python(seconds) if seconds == 0.0 => return Ok(()), // Python truthiness, including -0.0
+            Self::Python(0.0) => return Ok(()), // Python truthiness, including -0.0
             Self::Python(seconds) => python_sleep_duration(seconds)?,
         };
         sleep_unless_stopped(duration, should_stop);

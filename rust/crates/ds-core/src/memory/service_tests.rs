@@ -474,11 +474,11 @@ fn raw_since_uses_python_float_conversion_and_preserves_integer_overflow() {
 fn oversized_event_keeps_post_append_batch_and_role_flush_boundaries() {
     let (dir, service, _) = fixture();
     let path = dir.path().join("oversized.jsonl");
-    // More than 500 2000-character chunks even without counting overlap.
+    // More than 500 4000-character chunks even without counting overlap.
     // Distinct role changes before/after expose accidental cross-role grouping.
     let events = [
         json!({"role":"user", "text":"before oversized event"}),
-        json!({"role":"assistant", "text":"x".repeat(1_100_000)}),
+        json!({"role":"assistant", "text":"x".repeat(2_200_000)}),
         json!({"role":"user", "text":"after oversized event"}),
     ];
     std::fs::write(
