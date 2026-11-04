@@ -227,6 +227,7 @@ struct TimerWorker {
 }
 
 struct DunkTimerOwner {
+    stopped: AtomicBool,
     flock: Weak<Flock>,
     runtime: Handle,
     factory: Arc<Factory>,
@@ -244,6 +245,7 @@ impl DunkTimerOwner {
         reporter: StalePanelReporter,
     ) -> Self {
         Self {
+            stopped: AtomicBool::new(false),
             flock,
             runtime,
             factory,
@@ -260,6 +262,9 @@ impl DunkTimerOwner {
     fn start(&self, handle: crate::flock::dunks::DunkerHandle) -> Result<(), DunkError> {
         let key = Self::key(&handle);
         let mut workers = self.workers.lock().unwrap_or_else(|e| e.into_inner());
+        if self.stopped.load(Ordering::Acquire) {
+            return Err(DunkError::Refused("dunk timer runtime is stopped".into()));
+        }
         if let Some(worker) = workers.get(&key) {
             worker.signal.changed.notify_all();
             return Ok(());
@@ -334,8 +339,12 @@ impl DunkTimerOwner {
     }
 
     fn stop_all(&self) {
-        let workers = std::mem::take(&mut *self.workers.lock().unwrap_or_else(|e| e.into_inner()));
-        for (_, worker) in workers {
+        let workers = {
+            let mut workers = self.workers.lock().unwrap_or_else(|e| e.into_inner());
+            self.stopped.store(true, Ordering::Release);
+            std::mem::take(&mut *workers)
+        };
+        for worker in workers.values() {
             let guard = worker
                 .signal
                 .generation
@@ -344,6 +353,8 @@ impl DunkTimerOwner {
             worker.signal.cancelled.store(true, Ordering::Release);
             worker.signal.changed.notify_all();
             drop(guard);
+        }
+        for (_, worker) in workers {
             let _ = worker.join.join();
         }
     }
@@ -1005,5 +1016,8 @@ mod tests {
         owner.stop_dunk("d1").unwrap();
         assert!(owner.dunk_timers.workers.lock().unwrap().is_empty());
         owner.stop_and_join();
+        let error = owner.start_dunk("d1").unwrap_err();
+        assert!(error.to_string().contains("dunk timer runtime is stopped"));
+        assert!(owner.dunk_timers.workers.lock().unwrap().is_empty());
     }
 }
