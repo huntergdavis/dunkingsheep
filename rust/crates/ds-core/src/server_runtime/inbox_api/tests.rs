@@ -330,6 +330,7 @@ fn inbox_status_preserves_raw_sqlite_scalar_binding_and_python_repr() {
             r#"{"message_id":0.10000000000000001}"#,
             "no message with id 0.1",
         ),
+        (r#"{"message_id":1e400}"#, "no message with id inf"),
     ] {
         let args: serde_json::Value = serde_json::from_str(raw).unwrap();
         let error = dispatcher
@@ -638,10 +639,24 @@ fn inbox_send_notice_subject_rounds_raw_json_float_like_python() {
         .dispatch("inbox_send", &args, &request("w1:p1"))
         .unwrap();
     assert_eq!(sent["notified"], true);
-    let outbox = outbox_lock(&services.flock().outbox);
-    let notice = &outbox["w1:p1"][0].text;
-    assert!(notice.contains(": 0.1."), "{notice}");
-    assert!(!notice.contains("0.10000000000000001"), "{notice}");
+    {
+        let outbox = outbox_lock(&services.flock().outbox);
+        let notice = &outbox["w1:p1"][0].text;
+        assert!(notice.contains(": 0.1."), "{notice}");
+        assert!(!notice.contains("0.10000000000000001"), "{notice}");
+    }
+    let overflow_subject: serde_json::Value =
+        serde_json::from_str(r#"{"to":"w1:p1","body":"overflow subject","subject":1e400}"#)
+            .unwrap();
+    let sent = dispatcher
+        .dispatch("inbox_send", &overflow_subject, &request("w1:p1"))
+        .unwrap();
+    assert_eq!(sent["notified"], true);
+    assert_eq!(sent["subject"], "Inf");
+    {
+        let outbox = outbox_lock(&services.flock().outbox);
+        assert!(outbox["w1:p1"][0].text.contains(": inf."));
+    }
     dispatcher.close();
 }
 
@@ -933,6 +948,7 @@ fn inbox_fetch_rejects_truthy_non_path_before_any_write() {
             r#"{"attachment_id":1.0000000000000001}"#,
             "no attachment with id 1.0",
         ),
+        (r#"{"attachment_id":1e400}"#, "no attachment with id inf"),
     ] {
         let args: serde_json::Value = serde_json::from_str(raw).unwrap();
         let error = dispatcher

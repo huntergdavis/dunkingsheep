@@ -619,7 +619,10 @@ impl Flock {
                     let truthy = match value {
                         Value::Null => false,
                         Value::Bool(b) => *b,
-                        Value::Number(n) => n.as_f64().is_some_and(|n| n != 0.0),
+                        Value::Number(n) => n
+                            .as_f64()
+                            .or_else(|| n.to_string().parse::<f64>().ok())
+                            .is_some_and(|n| n != 0.0),
                         Value::Array(a) => !a.is_empty(),
                         Value::Object(o) => !o.is_empty(),
                         Value::String(s) => !s.is_empty(),

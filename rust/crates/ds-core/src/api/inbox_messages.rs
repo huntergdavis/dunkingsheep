@@ -155,11 +155,7 @@ pub fn h_inbox_status(c: &HandlerContext<'_>, args: Args) -> Result<Value, DunkE
     let raw_id = &args["message_id"];
     let bound_id = crate::sqlite_scalar::python_sqlite_scalar(Some(raw_id), 1)?;
     let id_repr = match raw_id {
-        Value::Number(number) if number.is_f64() => number
-            .as_f64()
-            .and_then(serde_json::Number::from_f64)
-            .map(|normalized| crate::owner::conversations::python_number_string(&normalized))
-            .unwrap_or_else(|| number.to_string()),
+        Value::Number(number) => crate::owner::conversations::python_number_string(number),
         _ => python_value_repr(raw_id),
     };
     c.env.with_inbox_env(&mut |env| {
@@ -175,22 +171,14 @@ pub fn h_inbox_stats(c: &HandlerContext<'_>, _args: Args) -> Result<Value, DunkE
 }
 fn inbox_fetch_id_repr(value: &Value) -> String {
     match value {
-        Value::Number(number) if number.is_f64() => number
-            .as_f64()
-            .and_then(serde_json::Number::from_f64)
-            .map(|normalized| crate::owner::conversations::python_number_string(&normalized))
-            .unwrap_or_else(|| number.to_string()),
+        Value::Number(number) => crate::owner::conversations::python_number_string(number),
         _ => python_value_repr(value),
     }
 }
 
 fn inbox_fetch_id_str(value: &Value) -> String {
     match value {
-        Value::Number(number) if number.is_f64() => number
-            .as_f64()
-            .and_then(serde_json::Number::from_f64)
-            .map(|normalized| crate::owner::conversations::python_number_string(&normalized))
-            .unwrap_or_else(|| number.to_string()),
+        Value::Number(number) => crate::owner::conversations::python_number_string(number),
         _ => python_value_string(value),
     }
 }

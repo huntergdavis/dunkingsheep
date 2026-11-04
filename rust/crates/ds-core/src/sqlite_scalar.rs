@@ -32,7 +32,11 @@ pub(crate) fn python_sqlite_scalar(
             {
                 return Err(too_large());
             }
-            value.as_f64().map(SqlValue::Real).ok_or_else(too_large)
+            value
+                .as_f64()
+                .or_else(|| raw.parse::<f64>().ok())
+                .map(SqlValue::Real)
+                .ok_or_else(too_large)
         }
         JsonValue::Array(_) => Err(DunkError::Refused(format!(
             "Error binding parameter {parameter}: type 'list' is not supported"
@@ -70,6 +74,18 @@ mod tests {
         assert_eq!(
             SqlValue::Real(1.5),
             python_sqlite_scalar(Some(&json!(1.5)), 5).unwrap()
+        );
+        let overflow_float: JsonValue = serde_json::from_str("1e400").unwrap();
+        assert_eq!(
+            SqlValue::Real(f64::INFINITY),
+            python_sqlite_scalar(Some(&overflow_float), 5).unwrap()
+        );
+        let overflow_integer: JsonValue = serde_json::from_str("18446744073709551616").unwrap();
+        assert_eq!(
+            "Python int too large to convert to SQLite INTEGER",
+            python_sqlite_scalar(Some(&overflow_integer), 5)
+                .unwrap_err()
+                .to_string()
         );
         assert_eq!(
             SqlValue::Text("x".into()),
