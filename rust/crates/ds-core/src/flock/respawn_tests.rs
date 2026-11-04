@@ -22,6 +22,54 @@ impl Drop for Children {
         }
     }
 }
+// fs::copy closes its handles before returning. CI can still report transient ETXTBSY
+// when executing the freshly copied inode. Retry only that error, within a fixed budget.
+fn spawn_fixture_child(
+    mut spawn: impl FnMut() -> std::io::Result<Child>,
+) -> std::io::Result<Child> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(250);
+    loop {
+        match spawn() {
+            Err(error)
+                if error.raw_os_error() == Some(26) && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            result => return result,
+        }
+    }
+}
+
+#[test]
+fn copied_exec_spawn_retries_only_busy_and_preserves_failure() {
+    let mut calls = 0;
+    let error = spawn_fixture_child(|| {
+        calls += 1;
+        Err(std::io::Error::from_raw_os_error(if calls < 3 {
+            26
+        } else {
+            13
+        }))
+    })
+    .unwrap_err();
+    assert_eq!(calls, 3);
+    assert_eq!(error.raw_os_error(), Some(13));
+
+    let mut calls = 0;
+    let error = spawn_fixture_child(|| {
+        calls += 1;
+        Err(std::io::Error::from_raw_os_error(2))
+    })
+    .unwrap_err();
+    assert_eq!(calls, 1);
+    assert_eq!(error.raw_os_error(), Some(2));
+
+    let started = std::time::Instant::now();
+    let error = spawn_fixture_child(|| Err(std::io::Error::from_raw_os_error(26))).unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(26));
+    assert!(started.elapsed() >= std::time::Duration::from_millis(250));
+}
+
 struct Fixture {
     flock: Flock,
     terminal: Mutex<Box<dyn Terminal>>,
@@ -41,7 +89,7 @@ impl Fixture {
         for _ in 0..3 {
             children
                 .0
-                .push(Command::new(&binary).arg("300").spawn().unwrap());
+                .push(spawn_fixture_child(|| Command::new(&binary).arg("300").spawn()).unwrap());
         }
         let pids: Vec<_> = children.0.iter().map(Child::id).collect();
         std::fs::write(dir.path().join("pid"), pids[0].to_string()).unwrap();
