@@ -676,9 +676,7 @@ impl MemoryService {
         // Direct insertion: json! re-serialization cannot carry the codec's raw NaN Number.
         ingestor.as_object_mut().expect("status object").insert(
             "throttle_s".into(),
-            crate::github::python_float_json_value(status.throttle_s).ok_or_else(|| {
-                DunkError::Refused("memory NaN status requires the numeric codec carrier".into())
-            })?,
+            crate::wire_json::float_value(status.throttle_s),
         );
         value["ingestor"] = ingestor;
         Ok(value)

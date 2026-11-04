@@ -661,3 +661,45 @@ fn memory_throttle_real_worker_accepts_raw_float_then_fails_after_committed_flus
         assert!(service.worker_id().is_none());
     }
 }
+
+#[test]
+fn memory_throttle_status_preserves_numeric_and_wire_nonfinite_values() {
+    for (seconds, token) in [
+        (f64::NAN, "NaN"),
+        (f64::INFINITY, "Infinity"),
+        (f64::NEG_INFINITY, "-Infinity"),
+        (-0.0, "-0.0"),
+        (-1.0, "-1.0"),
+        (1e300, "1e+300"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let service = MemoryService::create_at_start(
+            dir.path().join("memory.db"),
+            2,
+            Duration::from_millis(1),
+            Throttle::Python(seconds),
+        )
+        .unwrap();
+        let status = service.status().unwrap();
+        assert!(status["ingestor"]["throttle_s"].is_number());
+        assert_eq!(
+            crate::wire_json::to_string(&status["ingestor"]["throttle_s"]).unwrap(),
+            token
+        );
+        // Same direct Value move and response encoder as the memory.status handler.
+        let response = crate::protocol::Response::ok(json!(1), status);
+        let wire = crate::protocol::encode_line(&response);
+        assert!(wire.contains(&format!("\"throttle_s\":{token}")), "{wire}");
+        let parsed = crate::wire_json::from_str(&wire).unwrap();
+        assert!(parsed["result"]["ingestor"]["throttle_s"].is_number());
+        let output = std::process::Command::new("python3")
+            .args(["-c", "import json,math,sys; v=json.loads(sys.argv[1])['result']['ingestor']['throttle_s']; e=float(sys.argv[2]); assert isinstance(v,float); assert (math.isnan(v) and math.isnan(e)) or (v==e and math.copysign(1,v)==math.copysign(1,e))"])
+            .arg(&wire).arg(token).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        service.stop_and_join().unwrap();
+    }
+}
