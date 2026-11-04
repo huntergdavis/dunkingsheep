@@ -167,6 +167,7 @@ pub fn prepare_enqueue(
     let metadata = std::fs::metadata(&path)
         .map_err(|_| DunkError::Refused(format!("source does not exist: {path}")))?;
     let harness = harness
+        .filter(|value| !value.is_empty())
         .unwrap_or_else(|| harness_from_path(&path))
         .to_string();
     let project = project.map(str::trim).filter(|value| !value.is_empty());

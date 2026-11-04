@@ -2645,7 +2645,9 @@ fn h_memory_status_matches_python() {
 #[test]
 fn h_memory_ingest_matches_python() {
     let (dir, flock, env) = memory_api_fixture();
-    let source = dir.path().join("ingest.jsonl");
+    let source_dir = dir.path().join(".codex");
+    std::fs::create_dir_all(&source_dir).unwrap();
+    let source = source_dir.join("thread_history.jsonl");
     std::fs::write(
         &source,
         "{\"type\":\"session\",\"id\":\"queued-session\",\"harness\":\"codex\",\"project\":\"demo\"}\n",
@@ -2659,7 +2661,11 @@ fn h_memory_ingest_matches_python() {
         &flock,
         &FixedRole("owner", true),
         "memory_ingest",
-        args(json!({"path": source.to_string_lossy()})),
+        args(json!({
+            "path": source.to_string_lossy(),
+            "harness": "",
+            "project": ""
+        })),
         &request,
         &env,
     )
@@ -2670,13 +2676,26 @@ fn h_memory_ingest_matches_python() {
             "source_id": 1,
             "queue_id": 1,
             "path": source.to_string_lossy(),
-            "harness": "generic",
+            "harness": "codex",
             "project": null
         })
     );
     let status = flock.memory_service().unwrap().status().unwrap();
     assert_eq!(status["queue"]["queued"], 1);
     assert_eq!(status["ingestor"]["running"], false);
+    let persisted_harness = flock
+        .memory_service()
+        .unwrap()
+        .read_pool()
+        .with(|connection| {
+            Ok(connection
+                .query_row("SELECT harness FROM sources WHERE id=1", [], |row| {
+                    row.get::<_, String>(0)
+                })
+                .expect("persisted enqueue harness"))
+        })
+        .unwrap();
+    assert_eq!(persisted_harness, "codex");
 }
 
 #[test]
