@@ -846,6 +846,14 @@ fn inbox_fetch_rejects_truthy_non_path_before_any_write() {
         !accidental.exists(),
         "truthy invalid path must not create destination"
     );
+    let false_id = dispatcher
+        .dispatch(
+            "inbox_fetch",
+            &json!({"attachment_id":false}),
+            &request("w1:p1"),
+        )
+        .unwrap_err();
+    assert!(false_id.to_string().contains("no attachment with id False"));
     let unsupported = dispatcher
         .dispatch(
             "inbox_fetch",

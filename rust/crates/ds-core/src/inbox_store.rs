@@ -1281,70 +1281,69 @@ impl Store {
         Ok(ids)
     }
 
-    /// Validate fetch lookup/blob failures without touching a destination. The API uses this
-    /// before reporting Python's path type error, whose evaluation follows the attachment read.
-    pub fn validate_fetch_source(&self, attachment_id: &str) -> Result<(), DunkError> {
-        let wanted = attachment_id.to_string();
+    /// Validate fetch lookup/blob failures without touching a destination.
+    pub fn validate_fetch_source_bound(
+        &self,
+        attachment_id: &rusqlite::types::Value,
+        repr: &str,
+        display: &str,
+    ) -> Result<(), DunkError> {
+        let id = attachment_id.clone();
         let sha = self.read_pool().with(|connection| {
             connection
-                .query_row(
-                    "SELECT sha256 FROM attachments WHERE id = ?",
-                    [&wanted],
-                    |row| row.get::<_, String>(0),
-                )
+                .query_row("SELECT sha256 FROM attachments WHERE id = ?", [id], |row| {
+                    row.get::<_, String>(0)
+                })
                 .optional()
                 .map_err(map_sqlite)
         })?;
         let Some(sha) = sha else {
-            return Err(refuse(format!(
-                "no attachment with id {}",
-                py_repr(attachment_id)
-            )));
+            return Err(refuse(format!("no attachment with id {repr}")));
         };
         if !self.blob_dir.join(&sha).exists() {
             return Err(refuse(format!(
-                "attachment {attachment_id} is missing from the store"
+                "attachment {display} is missing from the store"
             )));
         }
         Ok(())
     }
 
-    /// `fetch`: copy an attachment out of the store into `dest_dir` (created if missing).
+    /// Typed compatibility wrapper for existing Rust callers.
     pub fn fetch(&self, attachment_id: &str, dest_dir: &Path) -> Result<Fetched, DunkError> {
-        let wanted = attachment_id.to_string();
+        self.fetch_bound(
+            &rusqlite::types::Value::Text(attachment_id.to_owned()),
+            &py_repr(attachment_id),
+            attachment_id,
+            dest_dir,
+        )
+    }
+
+    /// `fetch`: bind the original Python scalar, then copy the attachment after lookup/blob checks.
+    pub fn fetch_bound(
+        &self,
+        attachment_id: &rusqlite::types::Value,
+        repr: &str,
+        display: &str,
+        dest_dir: &Path,
+    ) -> Result<Fetched, DunkError> {
+        let id = attachment_id.clone();
         let row = self.writer.call(move |connection| {
-            connection
-                .query_row(
-                    "SELECT sha256, filename, size, media_type, message_id \
-                     FROM attachments WHERE id = ?",
-                    [&wanted],
-                    |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, Option<String>>(1)?,
-                            row.get::<_, i64>(2)?,
-                            row.get::<_, Option<String>>(3)?,
-                            row.get::<_, String>(4)?,
-                        ))
-                    },
-                )
-                .map(Some)
-                .or_else(|e| match e {
-                    rusqlite::Error::QueryReturnedNoRows => Ok(None),
-                    other => Err(other),
-                })
-                .map_err(map_sqlite)
+            connection.query_row(
+                "SELECT sha256, filename, size, media_type, message_id FROM attachments WHERE id = ?",
+                [id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?,
+                    row.get::<_, i64>(2)?, row.get::<_, Option<String>>(3)?, row.get::<_, String>(4)?)),
+            ).map(Some).or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None), other => Err(other),
+            }).map_err(map_sqlite)
         })?;
         let Some((sha, filename, size, media, message_id)) = row else {
-            return Err(refuse(format!(
-                "no attachment with id {}",
-                py_repr(attachment_id)
-            )));
+            return Err(refuse(format!("no attachment with id {repr}")));
         };
         let blob_path = self.blob_dir.join(&sha);
         if !blob_path.exists() {
             return Err(refuse(format!(
-                "attachment {attachment_id} is missing from the store"
+                "attachment {display} is missing from the store"
             )));
         }
         let dest = expand_user(dest_dir);
@@ -1353,7 +1352,7 @@ impl Store {
         let target = dest.join(name);
         fs::copy(&blob_path, &target).map_err(|e| refuse(format!("{}: {e}", target.display())))?;
         Ok(Fetched {
-            attachment_id: attachment_id.to_string(),
+            attachment_id: display.to_owned(),
             path: target,
             filename,
             size,
