@@ -1,7 +1,17 @@
 //! Deadman check: actual state persistence and verified inbox fallback, with a supplied sender.
 use super::*;
 use crate::client::ClientError;
-use crate::watchdog::{minutes, py_number};
+// Keep the deadman independent of watchdog initialization/configuration.
+fn minutes(seconds: f64) -> f64 {
+    format!("{:.1}", seconds / 60.0).parse().unwrap_or(0.0)
+}
+fn py_number(value: &Value) -> String {
+    match value {
+        Value::Number(n) if n.is_i64() || n.is_u64() => n.to_string(),
+        Value::Number(n) => format!("{:?}", n.as_f64().unwrap_or(0.0)),
+        other => other.to_string(),
+    }
+}
 
 pub struct CheckOptions<'a> {
     pub heartbeat: &'a Path,

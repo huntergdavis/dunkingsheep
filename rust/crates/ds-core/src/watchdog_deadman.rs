@@ -1026,3 +1026,6 @@ mod sender_tests;
 
 mod check;
 pub use check::{check, CheckOptions, CheckSendError};
+
+mod main;
+pub use main::{main, MainArgs};
