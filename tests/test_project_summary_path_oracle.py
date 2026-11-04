@@ -56,6 +56,23 @@ class ProjectSummaryPathOracleTests(unittest.TestCase):
         self.assertEqual(result["repo"], "~/a/workspace/dunkingsheep")
         self.assertEqual(result["reason"], "~/a/workspace/dunkingsheep is not a git repository")
 
+    def test_project_summary_is_read_only_for_unknown_roles(self):
+        source = Path(__file__).resolve().parents[1] / "dunk_roles.py"
+        tree = ast.parse(source.read_text())
+        names = {"ROLES", "READ_ONLY", "_WORKER", "ALLOW", "WEB_DENIED"}
+        nodes = [node for node in tree.body
+                 if (isinstance(node, ast.Assign)
+                     and any(isinstance(target, ast.Name) and target.id in names
+                             for target in node.targets))
+                 or (isinstance(node, ast.FunctionDef) and node.name == "allowed")]
+        namespace = {}
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), str(source), "exec"), namespace)
+        self.assertIn("project_summary", namespace["READ_ONLY"])
+        for role in (*namespace["ROLES"], "unrecognized", ""):
+            with self.subTest(role=role):
+                self.assertTrue(namespace["allowed"](role, "project_summary"))
+        self.assertFalse(namespace["allowed"]("unrecognized", "task_delete"))
+
 
 if __name__ == "__main__":
     unittest.main()

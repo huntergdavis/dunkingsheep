@@ -355,14 +355,9 @@ fn project_summary_dispatch_propagates_actual_source_errors() {
 }
 
 #[test]
-fn project_summary_dispatch_role_and_unknown_argument_gates_precede_handler() {
+fn project_summary_dispatch_unknown_arguments_precede_handler() {
     let scratch = crate::testsupport::dir("summary-role");
     let env = Env::new(scratch.path().join("absent"));
-    assert!(dispatch(&env, json!({}), "unrecognized")
-        .unwrap_err()
-        .to_string()
-        .contains("not permitted for role"));
-    assert!(env.calls.borrow().is_empty());
     assert_eq!(
         dispatch(&env, json!({"unexpected": true}), "worker")
             .unwrap_err()
@@ -370,7 +365,16 @@ fn project_summary_dispatch_role_and_unknown_argument_gates_precede_handler() {
         "project_summary: unknown argument(s): unexpected"
     );
     assert!(env.calls.borrow().is_empty());
+}
+
+#[test]
+fn project_summary_dispatch_preserves_python_read_only_role_fallback() {
+    let scratch = crate::testsupport::dir("summary-read-only-role");
+    let env = Env::new(scratch.path().join("absent"));
+    // dunk_roles.allowed uses ALLOW.get(role, READ_ONLY), not a closed role enum.
     for role in [
+        "unrecognized",
+        "",
         "owner",
         "system",
         "web",
@@ -380,7 +384,10 @@ fn project_summary_dispatch_role_and_unknown_argument_gates_precede_handler() {
         "reviewer",
         "anonymous",
     ] {
-        dispatch(&env, json!({}), role).unwrap();
+        env.calls.borrow_mut().clear();
+        let result = dispatch(&env, json!({}), role).unwrap();
+        assert_eq!(result["project"], "global");
+        assert!(env.calls.borrow().iter().any(|call| call == "lanes"));
     }
 }
 
