@@ -430,6 +430,7 @@ fn turn_expire_takes_an_explicit_now() {
 //    tests/test_dunk_turn_end_dispatch.py. The planning functions are T54's, so the fake plans.
 
 struct Env {
+    committed_flock: Option<std::sync::Arc<Flock>>,
     enabled: bool,
     unread: Result<Option<i64>, String>,
     tasks: Result<Vec<Value>, String>,
@@ -452,6 +453,7 @@ type PlanObservation = (Option<i64>, Option<f64>, usize);
 impl Env {
     fn ready() -> Env {
         Env {
+            committed_flock: None,
             enabled: true,
             unread: Ok(Some(0)),
             tasks: Ok(vec![json!({ "id": "t1", "title": "vitals row colour" })]),
@@ -542,13 +544,31 @@ impl TurnDispatchEnv for Env {
             .unwrap()
             .push(format!("{pane} {outcome} {reason:?} {}", bytes.is_some()));
     }
-    fn advance_next_job(&self, _: &str) -> Result<Value, crate::error::DunkError> {
+    fn advance_next_job(&self, pane: &str) -> Result<Value, crate::error::DunkError> {
+        if let Some(flock) = &self.committed_flock {
+            assert_eq!(pane, PANE);
+            assert!(ended_at(flock).is_some());
+            assert!(!flock.turn_active(pane));
+            assert!(flock
+                .turns
+                .lock()
+                .unwrap()
+                .get(pane)
+                .unwrap()
+                .ended_at
+                .is_some());
+            assert!(
+                !take_push_wake(flock),
+                "wake must follow successful advance"
+            );
+        }
         if self.fail_advance {
             return Err(crate::error::DunkError::Refused("advance failed".into()));
         }
         Ok(self.next_job.clone())
     }
     fn open_handoffs(&self, _: &str, _: bool) -> Result<bool, crate::error::DunkError> {
+        self.metrics.lock().unwrap().push("handoff_read".into());
         if self.fail_handoffs {
             return Err(crate::error::DunkError::Refused("handoff failed".into()));
         }
@@ -879,4 +899,219 @@ fn turn_dispatch_errors_preserve_wake_and_nudge_order() {
         .block_on(async { tokio::time::timeout(Duration::from_millis(100), wake.notified()).await })
         .is_ok());
     assert!(env.sent.lock().unwrap().is_empty());
+}
+
+// Poll without a wall-clock timeout: Notify retains a permit even before a waiter exists.
+fn take_push_wake(flock: &Flock) -> bool {
+    use std::future::Future;
+    use std::task::{Context, Poll, Waker};
+    let wake = flock.push_wake();
+    let mut notified = std::pin::pin!(wake.notified());
+    matches!(
+        notified
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop())),
+        Poll::Ready(())
+    )
+}
+
+#[test]
+fn turn_end_wakes_next_job_push_after_state_commit() {
+    use crate::flock::panes::Stores;
+    use crate::server::RequestCtx;
+    use crate::server_runtime::RequestRuntimeAdapter;
+    use crate::terminal::{fakes::FakeTerminal, Terminal};
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let tasks = Arc::new(
+        runtime
+            .block_on(crate::tasks::Tasks::open(dir.path().join("tasks.db")))
+            .unwrap(),
+    );
+    runtime.block_on(tasks.allocation_init()).unwrap();
+    let flock = Arc::new(Flock::new(
+        dir.path().join("launches"),
+        dir.path().join("lanes"),
+        false,
+    ));
+    flock.attach_stores(Stores {
+        tasks: Some(Arc::clone(&tasks)),
+        inbox: Some(Arc::new(
+            crate::inbox_store::Store::open(dir.path().join("inbox.db"), dir.path().join("blobs"))
+                .unwrap(),
+        )),
+        ..Stores::default()
+    });
+    let jobs = crate::tasks::next_job_runtime::NextJobs::new(Arc::clone(&flock));
+    let request = RequestCtx {
+        caller: Some(Caller {
+            pane_id: Some(PANE.into()),
+            pid: Some(41),
+            start: Some("100".into()),
+            ..Caller::default()
+        }),
+        ..RequestCtx::default()
+    };
+    let terminal: Mutex<Box<dyn Terminal>> = Mutex::new(Box::new(FakeTerminal::new()));
+    let adapter = RequestRuntimeAdapter::new(&flock, &request, runtime.handle(), &terminal)
+        .with_next_jobs(&jobs)
+        .unwrap();
+    // These are the actual request-bound TurnHooks and NextJobs, not a dispatch callback.
+    let token = started(&flock);
+    assert!(!take_push_wake(&flock));
+    let result = flock
+        .turn_end(None, "done", Some(PANE), Some(&token), true, &adapter)
+        .unwrap();
+    assert_eq!(result["ended"], true);
+    assert_eq!(result["dispatch"]["reason"], "disabled");
+    assert!(ended_at(&flock).is_some());
+    assert!(!flock.turn_active(PANE));
+    assert!(
+        take_push_wake(&flock),
+        "successful skip advance must wake push"
+    );
+    assert!(!take_push_wake(&flock), "no second pending wake");
+    let decisions = runtime.block_on(tasks.next_job_decisions()).unwrap();
+    assert!(decisions.iter().any(|(pane, plan)| pane == PANE
+        && plan["reason"] == "disabled"
+        && plan["caller"]["pid"] == 41
+        && plan["caller"]["start"] == "100"));
+
+    // Every refusal must return before the canonical adapter can advance or wake.
+    for case in [
+        "already_ended",
+        "no_active_turn",
+        "expired_turn",
+        "turn_mismatch",
+        "foreign_turn",
+        "unauthenticated",
+    ] {
+        let token = started(&flock);
+        match case {
+            "already_ended" => {
+                flock
+                    .turn_states
+                    .lock()
+                    .unwrap()
+                    .get_mut(PANE)
+                    .unwrap()
+                    .ended_at = Some(1.0);
+            }
+            "no_active_turn" => {
+                flock.turn_states.lock().unwrap().remove(PANE);
+            }
+            "expired_turn" => {
+                flock
+                    .turn_states
+                    .lock()
+                    .unwrap()
+                    .get_mut(PANE)
+                    .unwrap()
+                    .expires_at = 1.0;
+            }
+            "foreign_turn" => flock.set_caller(Some(as_caller(42, "101"))),
+            _ => {}
+        }
+        let before = runtime.block_on(tasks.next_job_decisions()).unwrap();
+        let out = flock
+            .turn_end(
+                None,
+                "done",
+                Some(PANE),
+                Some(if case == "turn_mismatch" {
+                    "wrong"
+                } else {
+                    &token
+                }),
+                case != "unauthenticated",
+                &adapter,
+            )
+            .unwrap();
+        assert_eq!(out["dispatch"]["reason"], case);
+        assert_eq!(out["ended"], case == "unauthenticated");
+        assert!(!take_push_wake(&flock), "unexpected wake for {case}");
+        assert_eq!(
+            runtime.block_on(tasks.next_job_decisions()).unwrap(),
+            before
+        );
+    }
+}
+
+#[test]
+fn turn_end_commit_metric_advance_wake_and_error_order() {
+    struct Hooks<'a> {
+        flock: &'a Flock,
+        env: &'a Env,
+        recorded: std::cell::Cell<bool>,
+    }
+    impl TurnHooks for Hooks<'_> {
+        fn record(
+            &self,
+            kind: &str,
+            pane: &str,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: &str,
+            _: f64,
+            _: Option<i64>,
+        ) {
+            assert_eq!(kind, "turn.end");
+            assert_eq!(pane, PANE);
+            assert!(ended_at(self.flock).is_some());
+            assert!(!take_push_wake(self.flock));
+            self.recorded.set(true);
+        }
+        fn observe_turn(&self, _: &str, _: &TurnState) -> Result<(), crate::error::DunkError> {
+            unreachable!()
+        }
+        fn dispatch_on_turn_end(&self, pane: &str) -> Result<Value, crate::error::DunkError> {
+            assert!(self.recorded.get());
+            let result = self.flock.dispatch_on_turn_end(pane, self.env);
+            assert_eq!(take_push_wake(self.flock), !self.env.fail_advance);
+            result
+        }
+    }
+    for case in [
+        "advance_error",
+        "handoff_error",
+        "disabled",
+        "not_allowed",
+        "unavailable_lane",
+        "readiness_unknown",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let flock = std::sync::Arc::new(Flock::new(
+            dir.path().join("launches"),
+            dir.path().join("lanes"),
+            false,
+        ));
+        let token = started(&flock);
+        let mut env = Env::ready();
+        env.committed_flock = Some(std::sync::Arc::clone(&flock));
+        env.fail_advance = case == "advance_error";
+        env.fail_handoffs = case == "handoff_error";
+        if !case.ends_with("error") {
+            env.next_job = json!({"action":"skip", "reason":case});
+        }
+        let hooks = Hooks {
+            flock: &flock,
+            env: &env,
+            recorded: std::cell::Cell::new(false),
+        };
+        let result = flock.turn_end(None, "done", Some(PANE), Some(&token), true, &hooks);
+        assert_eq!(result.is_err(), case.ends_with("error"));
+        assert!(hooks.recorded.get());
+        assert_eq!(env.metric("handoff_read"), case == "handoff_error");
+        assert!(ended_at(&flock).is_some());
+        assert!(
+            !take_push_wake(&flock),
+            "turn_end must not add another wake after dispatch"
+        );
+        assert!(env.sent.lock().unwrap().is_empty(), "no nudge on {case}");
+    }
 }
