@@ -548,9 +548,21 @@ fn inbox_send_raw_values_preserve_body_subject_and_notification_error_order() {
         .unwrap();
     assert_eq!(falsey["subject"], "0");
     assert_eq!(falsey["notified"], true);
-    let sent = services.flock().sent_text_by_pane.lock().unwrap();
-    assert!(sent["w1:p1"].iter().any(|text| text.contains(": 9.")));
-    assert!(!sent["w1:p1"].iter().any(|text| text.contains(": 0.")));
+    let outbox = crate::flock::sends::outbox_lock(&services.flock().outbox);
+    let notices = outbox
+        .get("w1:p1")
+        .into_iter()
+        .flatten()
+        .filter(|m| m.is_notice)
+        .collect::<Vec<_>>();
+    assert!(
+        notices.iter().any(|notice| notice.text.contains(": 9.")),
+        "truthy numeric subject appears in queued Python-style notice"
+    );
+    assert!(
+        !notices.iter().any(|notice| notice.text.contains(": 0.")),
+        "falsey numeric subject is omitted"
+    );
     assert_eq!(
         crate::inbox::count(store.read_pool(), "w1:p1", &[], crate::clock::now_s())
             .unwrap()
