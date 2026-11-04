@@ -16,6 +16,7 @@ pub(crate) fn production_handlers() -> Dispatcher {
     handlers.register_context_supersede_retire();
     handlers.register_memory_recall_search_context();
     handlers.register_memory_stats_status_ingest();
+    handlers.register_context_mutations();
     handlers.register_list_panes_read_pane_workspaces();
     handlers.register_retire_pane();
     handlers.register_superuser_status_add_remove();

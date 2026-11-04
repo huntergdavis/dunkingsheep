@@ -8,6 +8,8 @@
 //!
 //! NOT in this slice: the handlers themselves.
 
+mod context_mutations;
+pub use context_mutations::{h_context_add, h_context_promote, h_memory_backfill};
 pub mod inbox_messages;
 mod poll_roster_turn_end;
 pub use poll_roster_turn_end::{h_poll, h_roster, h_turn_end};
@@ -396,7 +398,7 @@ fn py_int(value: &Value) -> Option<i64> {
 }
 
 /// Python truthiness of a JSON value (`args.get(k) or default`).
-fn truthy(value: &Value) -> bool {
+pub(crate) fn truthy(value: &Value) -> bool {
     match value {
         Value::Null => false,
         Value::Bool(b) => *b,
@@ -460,7 +462,7 @@ pub(crate) fn python_value_repr(value: &Value) -> String {
     }
 }
 
-fn python_value_string(value: &Value) -> String {
+pub(crate) fn python_value_string(value: &Value) -> String {
     match value {
         Value::String(value) => value.clone(),
         Value::Array(_) | Value::Object(_) => python_value_repr(value),
@@ -653,6 +655,12 @@ impl Dispatcher {
     }
 
     /// Register only the T39 context supersede and retire handlers.
+    pub fn register_context_mutations(&mut self) {
+        self.register("context_add", h_context_add);
+        self.register("context_promote", h_context_promote);
+        self.register("memory_backfill", h_memory_backfill);
+    }
+
     pub fn register_context_supersede_retire(&mut self) {
         self.register("context_supersede", h_context_supersede);
         self.register("context_retire", h_context_retire);

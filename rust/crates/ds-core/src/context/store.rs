@@ -1378,3 +1378,6 @@ impl Store {
             .collect())
     }
 }
+
+#[path = "store_raw.rs"]
+mod raw;
