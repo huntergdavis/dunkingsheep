@@ -303,7 +303,7 @@ fn slot_holder_alive(slot: &Path) -> Option<bool> {
 /// A poolrad-heavy slot is stale only when its holder is gone.
 ///
 /// poolrad-heavy.sh records the holder pid in the slot. Age alone is not staleness: a legitimate
-/// >30min compile kept its slot and the watchdog woke the VP for a healthy job (t31). Legacy slots
+/// `>30min` compile kept its slot and the watchdog woke the VP for a healthy job (t31). Legacy slots
 /// with no pid file fall back to the age threshold for one migration.
 ///
 /// A SLOT IS `<prefix>.<digits>`, AND IT IS A FILE OR DIRECTORY, NEVER A SYMLINK: the live wrapper is

@@ -69,6 +69,7 @@ pub struct RuntimeServices {
     pub(super) runtime: Runtime,
     pub(super) stuck_reporter: StalePanelReporter,
     pub(crate) allocator: crate::flock::allocator::Allocator,
+    pub(super) owner_push: super::owner_push::OwnerPushService,
     stopped: AtomicBool,
 }
 
@@ -182,14 +183,39 @@ impl RuntimeServices {
             runtime,
             stuck_reporter,
             allocator: crate::flock::allocator::Allocator::new(),
+            owner_push: super::owner_push::OwnerPushService::default(),
             stopped: AtomicBool::new(false),
         }))
+    }
+
+    /// Capture the startup-selected owner database path exactly once, without opening it.
+    /// The startup owner must attach before serving. No environment or path defaults are
+    /// inferred here, including for empty or whitespace-containing paths.
+    pub fn attach_owner_push_path(&self, path: PathBuf) -> Result<(), DunkError> {
+        self.owner_push.attach_path(path)
     }
 
     /// Build the stuck observer adapter with the canonical Flock, outbox, and reporter.
     /// The ordinary loop-adapter constructor intentionally does not imply these services.
     #[allow(dead_code)] // The dependent startup integration consumes this staged binder.
     pub(crate) fn stuck_loop_adapter(self: &Arc<Self>) -> Result<LoopRuntimeAdapter, DunkError> {
+        LoopRuntimeAdapter::new(Arc::clone(&self.flock), Arc::clone(&self.terminal_factory))
+            .with_stuck_services(Arc::clone(self))
+    }
+
+    /// Bind every push-loop callback to this process's canonical services.
+    #[allow(dead_code)] // Consumed by the dependent loop startup integration.
+    pub(crate) fn push_loop_adapter(self: &Arc<Self>) -> Result<LoopRuntimeAdapter, DunkError> {
+        let stores = self.flock.stores();
+        if stores.tasks.is_none() {
+            return Err(refusal("push runtime task store is not attached"));
+        }
+        if stores.inbox.is_none() {
+            return Err(refusal("push runtime inbox store is not attached"));
+        }
+        if !self.next_jobs.owns_flock(self.flock.as_ref()) {
+            return Err(refusal("push runtime next jobs flock mismatch"));
+        }
         LoopRuntimeAdapter::new(Arc::clone(&self.flock), Arc::clone(&self.terminal_factory))
             .with_stuck_services(Arc::clone(self))
     }
