@@ -166,18 +166,22 @@ pub fn h_inbox_stats(c: &HandlerContext<'_>, _args: Args) -> Result<Value, DunkE
 }
 fn inbox_fetch_id_repr(value: &Value) -> String {
     match value {
-        Value::Number(number) if number.is_f64() => {
-            crate::owner::conversations::python_number_string(number)
-        }
+        Value::Number(number) if number.is_f64() => number
+            .as_f64()
+            .and_then(serde_json::Number::from_f64)
+            .map(|normalized| crate::owner::conversations::python_number_string(&normalized))
+            .unwrap_or_else(|| number.to_string())
         _ => python_value_repr(value),
     }
 }
 
 fn inbox_fetch_id_str(value: &Value) -> String {
     match value {
-        Value::Number(number) if number.is_f64() => {
-            crate::owner::conversations::python_number_string(number)
-        }
+        Value::Number(number) if number.is_f64() => number
+            .as_f64()
+            .and_then(serde_json::Number::from_f64)
+            .map(|normalized| crate::owner::conversations::python_number_string(&normalized))
+            .unwrap_or_else(|| number.to_string())
         _ => python_value_string(value),
     }
 }
@@ -187,6 +191,14 @@ pub fn h_inbox_fetch(c: &HandlerContext<'_>, args: Args) -> Result<Value, DunkEr
     let bound_id = crate::sqlite_scalar::python_sqlite_scalar(Some(raw_id), 1)?;
     let id_repr = inbox_fetch_id_repr(raw_id);
     let id_display = inbox_fetch_id_str(raw_id);
+    let result_id = match raw_id {
+        Value::Number(number) if number.is_f64() => number
+            .as_f64()
+            .and_then(serde_json::Number::from_f64)
+            .map(Value::Number)
+            .unwrap_or_else(|| raw_id.clone()),
+        _ => raw_id.clone(),
+    };
     let invalid_dest = match args.get("dest").filter(|v| truthy(v)) {
         Some(value) if !value.is_string() => Some(python_value_type_name(value).to_owned()),
         _ => None,
@@ -207,7 +219,7 @@ pub fn h_inbox_fetch(c: &HandlerContext<'_>, args: Args) -> Result<Value, DunkEr
             None => { cwd = std::env::current_dir().map_err(|e| DunkError::Refused(format!("no working directory: {e}")))?; &cwd }
         };
         let r = env.store().fetch_bound(&bound_id, &id_repr, &id_display, dest)?;
-        Ok(json!({"attachment_id":raw_id,"path":r.path,"filename":r.filename,"size":r.size,"media_type":r.media_type,"message_id":r.message_id}))
+        Ok(json!({"attachment_id":result_id,"path":r.path,"filename":r.filename,"size":r.size,"media_type":r.media_type,"message_id":r.message_id}))
     })
 }
 
