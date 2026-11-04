@@ -778,7 +778,7 @@ mod tests {
                 thread::sleep(Duration::from_millis(10));
             }
         };
-        wait_status("Busy");
+        wait_status("Busy (working)");
         {
             let mut fake = terminal.lock().unwrap();
             fake.statuses.insert("w1:p1".into(), "ready".into());
@@ -795,7 +795,7 @@ mod tests {
             fake.statuses.insert("w1:p1".into(), "working".into());
         }
         owner.interval_changed("d1").unwrap();
-        wait_status("Busy");
+        wait_status("Busy (working)");
         assert_eq!(
             serde_json::json!(1),
             flock.dunks.get("d1").unwrap()["hold_count"]
@@ -894,7 +894,7 @@ mod tests {
         loop {
             let row = flock.dunks.get("d1").unwrap();
             assert_eq!(serde_json::json!(0), row["send_count"]);
-            if row["status"] == "Busy" {
+            if row["status"] == "Busy (working)" {
                 assert_eq!(serde_json::json!(1), row["hold_count"]);
                 break;
             }
@@ -1690,7 +1690,7 @@ mod tests {
                 .get("d1")
                 .expect("busy timer must retain its row");
             assert_eq!(row["send_count"], serde_json::json!(0));
-            if row["status"] == "Busy" {
+            if row["status"] == "Busy (working)" {
                 break;
             }
             assert!(

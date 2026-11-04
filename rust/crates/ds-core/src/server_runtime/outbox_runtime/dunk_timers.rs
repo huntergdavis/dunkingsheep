@@ -245,7 +245,10 @@ fn record_timer_metric(
         at: 0.0,
         kind: kind.to_owned(),
         pane_id: fields.target_pane_id,
-        mailbox: None,
+        mailbox: crate::flock::dunks::DunkList::handle_row(handle)
+            .get("target_label")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
         sender: None,
         source: Some(fields.id),
         outcome: Some(outcome.to_owned()),
@@ -276,6 +279,7 @@ fn run_dunk_timer(
         return;
     };
     let mut panel_seen = None;
+    let mut panel_target = None;
     let mut panel_since = crate::clock::now_s();
     let mut gate_held = false;
     let mut env = TerminalCallAdapter {
@@ -313,6 +317,12 @@ fn run_dunk_timer(
         let Some(pane) = fields.target_pane_id.as_deref() else {
             break;
         };
+        if panel_target.as_deref() != Some(pane) {
+            panel_target = Some(pane.to_owned());
+            panel_seen = None;
+            panel_since = now;
+            gate_held = false;
+        }
         if fields.only_when_idle {
             match PaneInfoEnv::get_pane(&env, pane) {
                 None => {
@@ -324,7 +334,13 @@ fn run_dunk_timer(
                         .and_then(serde_json::Value::as_str)
                         .is_some_and(|status| crate::push::BUSY_STATUSES.contains(&status)) =>
                 {
-                    crate::flock::dunks::DunkList::set_timer_status(&handle, "Busy");
+                    crate::flock::dunks::DunkList::set_timer_status(
+                        &handle,
+                        &format!(
+                            "Busy ({})",
+                            info["agent_status"].as_str().unwrap_or("unknown")
+                        ),
+                    );
                     timer_wait(&signal, 1.0);
                     continue;
                 }
@@ -351,7 +367,11 @@ fn run_dunk_timer(
         }
         gate_held = false;
         if fields.skip_if_unconsumed && fields.send_count > 0 {
-            if let Some(text) = fields.last_sent_text.as_deref() {
+            if let Some(text) = fields
+                .last_sent_text
+                .as_deref()
+                .filter(|text| !text.is_empty())
+            {
                 let screen = crate::flock::sends::SendEnv::read_pane(&env, pane, 40, false);
                 match crate::flock::dunks::input_pending(screen.as_deref(), text) {
                     Some(false) => crate::flock::dunks::DunkList::timer_consumed(&handle),
@@ -403,11 +423,19 @@ fn run_dunk_timer(
         }
         let (sent, ok, detail, blocker) =
             flock.scheduled_dunk_send(&handle, &mut env, Arc::clone(&store), || {
-                (signal.cancelled.load(Ordering::Acquire) || !flock.dunks.is_running(&handle))
+                (signal.cancelled.load(Ordering::Acquire)
+                    || !flock.dunks.is_running(&handle)
+                    || crate::flock::dunks::DunkList::timer_fields(&handle).target_pane_id
+                        != fields.target_pane_id)
                     .then(|| "scheduled dunk cancelled before attempt".to_owned())
             });
         if signal.cancelled.load(Ordering::Acquire) || !flock.dunks.is_running(&handle) {
             break;
+        }
+        if crate::flock::dunks::DunkList::timer_fields(&handle).target_pane_id
+            != fields.target_pane_id
+        {
+            continue;
         }
         if sent {
             let done =
