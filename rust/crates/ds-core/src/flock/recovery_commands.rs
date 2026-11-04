@@ -86,6 +86,70 @@ fn py_string(value: &Value) -> String {
         crate::api::python_value_repr(value)
     }
 }
+// Comparison only: never normalize the raw value retained in launch memory.
+// Like memory/service.rs's private numeric cache-key primitive, integral floats
+// become their exact fixed-point integer digits; integer tokens never pass via f64.
+#[derive(PartialEq)]
+enum MetadataNumber {
+    Integer(String),
+    Float(f64),
+}
+fn metadata_number(value: &Value) -> Option<MetadataNumber> {
+    let raw = match value {
+        Value::Bool(value) => {
+            return Some(MetadataNumber::Integer(
+                if *value { "1" } else { "0" }.into(),
+            ))
+        }
+        Value::Number(value) => value.to_string(),
+        _ => return None,
+    };
+    if !raw.contains(['.', 'e', 'E']) {
+        return Some(MetadataNumber::Integer(if raw == "-0" {
+            "0".into()
+        } else {
+            raw
+        }));
+    }
+    let number = crate::github::parse_python_json_float(&raw).ok()?;
+    if number.is_finite() && number.fract() == 0.0 {
+        let digits = if number == 0.0 {
+            "0".into()
+        } else {
+            format!("{number:.0}")
+        };
+        Some(MetadataNumber::Integer(digits))
+    } else {
+        // Existing exponent carriers can represent infinity. No new NaN encoding.
+        Some(MetadataNumber::Float(number))
+    }
+}
+fn python_metadata_equal(left: &Value, right: &Value) -> bool {
+    if let (Some(left), Some(right)) = (metadata_number(left), metadata_number(right)) {
+        return left == right;
+    }
+    match (left, right) {
+        (Value::Null, Value::Null) => true,
+        (Value::String(left), Value::String(right)) => left == right,
+        (Value::Array(left), Value::Array(right)) => {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right)
+                    .all(|(left, right)| python_metadata_equal(left, right))
+        }
+        (Value::Object(left), Value::Object(right)) => {
+            left.len() == right.len()
+                && left.iter().all(|(key, left)| {
+                    right
+                        .get(key)
+                        .is_some_and(|right| python_metadata_equal(left, right))
+                })
+        }
+        _ => false,
+    }
+}
+
 fn py_space(ch: char) -> bool {
     ch.is_whitespace() || matches!(ch, '\u{1c}'..='\u{1f}')
 }
@@ -375,7 +439,11 @@ impl Flock {
                     ("terminal_title", field(pane, "terminal_title_stripped")?),
                 ];
                 for (key, value) in fields {
-                    if !value.is_null() && entry.get(key) != Some(value) {
+                    if !value.is_null()
+                        && entry
+                            .get(key)
+                            .is_none_or(|old| !python_metadata_equal(old, value))
+                    {
                         entry.insert(key.to_owned(), value.clone());
                         changed = true;
                     }

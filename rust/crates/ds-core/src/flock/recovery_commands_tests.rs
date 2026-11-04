@@ -136,7 +136,7 @@ fn run_rust(config: &Value) -> Value {
         }
         Err(error) => panic!("unexpected backend error: {error}"),
     };
-    json!({"outcome": result, "calls": env.calls.into_inner(), "launches": launches})
+    json!({"outcome": result, "calls": env.calls.into_inner(), "launches": launches, "saved": flock.launches_file.exists()})
 }
 
 // Execute only the actual oracle methods, with deterministic in-memory collaborators.
@@ -170,7 +170,11 @@ def run(c):
             return next((row[2] for row in c['memory'] if row[:2]==[harness,cwd]),None)
     flock=Oracle(); flock.herdr=Backend(); flock.memory=Memory() if isinstance(c.get('memory'),list) else None
     flock.launches=c['launches']; flock.persist_enabled=c.get('record',False); flock._lock=threading.RLock()
-    flock._save_launches=lambda: None
+    saved=False
+    def save():
+        nonlocal saved
+        if flock.persist_enabled: saved=True
+    flock._save_launches=save
     def guard(): call('guard'); return c.get('guard',{'installed':True})
     sys.modules['dunk_guard']=types.SimpleNamespace(status=guard)
     flock.dunkers=[types.SimpleNamespace(**dict({'id':'d1','running':False,'target_pane_id':None,'target_agent':None,'target_cwd':None},**d)) for d in c['dunks']]
@@ -179,7 +183,7 @@ def run(c):
         outcome={'result':result}
     except Exception as e: outcome={'kind':type(e).__name__,'error':str(e)}
     for row in flock.launches.values(): row.pop('recorded_at',None); row.pop('applied_at',None)
-    return {'outcome':outcome,'calls':calls,'launches':flock.launches}
+    return {'outcome':outcome,'calls':calls,'launches':flock.launches,'saved':saved}
 print(json.dumps([run(case) for case in payload['cases']],ensure_ascii=True))
 "#;
 fn shell(id: &str) -> Value {
@@ -432,6 +436,63 @@ fn recover_doctor_match_actual_python_commands_and_error_order() {
     c["panes"][0]["agent"] = json!("pi");
     c["panes"][0]["agent_session"] = json!({"value":"s"});
     cases.push(c);
+    // Review t3093: Python recursive numeric equality must not rewrite stored
+    // values, add source, or save. Session-kind also exercises false/0 because
+    // a falsey session value itself is skipped earlier by the Python oracle.
+    let raw_pairs = [
+        ("1", "true"),
+        ("true", "1"),
+        ("0", "false"),
+        ("false", "0"),
+        ("1", "1.0"),
+        ("1.0", "true"),
+        ("0", "-0.0"),
+        ("-0.0", "false"),
+        ("1", "1.5"),
+        ("9007199254740992", "9007199254740992.0"),
+        ("9007199254740993", "9007199254740992.0"),
+        ("9007199254740993", "9007199254740993.0"),
+        ("-9007199254740993", "-9007199254740992.0"),
+        ("18446744073709551616", "18446744073709551616.0"),
+        ("18446744073709551617", "18446744073709551616.0"),
+        ("1000000000000000000000000000000", "1e30"),
+        ("1000000000000000019884624838656", "1e30"),
+        ("1000000000000000019884624838657", "1e30"),
+        ("1e30", "1.000000000000000019884624838656e30"),
+        ("0.1", "0.10000000000000001"),
+        ("0.1", "0.10000000000000002"),
+        ("1", "\"1\""),
+        ("null", "0"),
+        ("null", "false"),
+        ("[1]", "[true]"),
+        ("[false,1.0]", "[0,true]"),
+        ("[0,1]", "[1,0]"),
+        ("{\"x\":1}", "{\"x\":true}"),
+        (
+            "{\"x\":[1,{\"y\":false}],\"z\":2}",
+            "{\"z\":2.0,\"x\":[true,{\"y\":0}]}",
+        ),
+        ("{\"x\":1}", "{\"y\":1}"),
+        ("{\"x\":9007199254740993}", "{\"x\":9007199254740992.0}"),
+    ];
+    for (left, right) in raw_pairs {
+        let left: Value = serde_json::from_str(left).unwrap();
+        let right: Value = serde_json::from_str(right).unwrap();
+        for key in ["session", "session_kind"] {
+            let mut c = json!({"panes":[{"pane_id":"%1","agent":"pi","agent_session":{"value":"s"}}],"dunks":[],"launches":{"%1":{"agent":"pi","session":"s"}},"record":true});
+            c["launches"]["%1"][key] = left.clone();
+            c["panes"][0]["agent_session"][if key == "session" { "value" } else { "kind" }] =
+                right.clone();
+            cases.push(c.clone());
+            // An unequal field updates in memory before the later raw metadata
+            // error, while the early exception still prevents persistence.
+            c["panes"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"pane_id":"%2","agent_session":7}));
+            cases.push(c);
+        }
+    }
     let input = json!({"source":include_str!("../../../../../dunk_core.py"),"cases":cases});
     let mut child = Command::new("python3")
         .args(["-c", PYTHON_ORACLE])
@@ -607,4 +668,115 @@ fn recovery_record_refuses_noncanonical_identity_without_synthesizing_keys() {
     ));
     assert!(flock.launches.lock().unwrap().is_empty());
     assert_eq!(env.calls.into_inner(), [json!(["list", null])]);
+}
+
+#[test]
+fn recovery_metadata_equality_matches_python_numeric_boundaries_without_rewriting() {
+    let mut tokens: Vec<String> = [
+        "true",
+        "false",
+        "null",
+        "0",
+        "-0",
+        "0.0",
+        "-0.0",
+        "1",
+        "1.0",
+        "-1",
+        "-1.0",
+        "0.1",
+        "0.10000000000000001",
+        "0.10000000000000002",
+        "1.5",
+        "5e-324",
+        "0e-999",
+        "9007199254740992",
+        "9007199254740993",
+        "9007199254740992.0",
+        "9007199254740993.0",
+        "-9007199254740993",
+        "-9007199254740992.0",
+        "18446744073709551616",
+        "18446744073709551617",
+        "18446744073709551616.0",
+        "1e30",
+        "1000000000000000019884624838656",
+        "1000000000000000019884624838657",
+        "1e100",
+        "1.7976931348623157e308",
+        "1e999",
+        "2e999",
+        "-1e999",
+        "\"1\"",
+        "[true]",
+        "[1.0]",
+        "{\"x\":1,\"y\":false}",
+        "{\"y\":0,\"x\":true}",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    // Exact integers and adjacent integers well beyond u128, plus an integer
+    // larger than any finite f64. Never route these integer tokens through f64.
+    tokens.push("10000000000000000159028911097599180468360808563945281389781327557747838772170381060813469985856815104".into());
+    tokens.push("10000000000000000159028911097599180468360808563945281389781327557747838772170381060813469985856815105".into());
+    tokens.push(format!("1{}", "0".repeat(400)));
+    let mut child = Command::new("python3").args(["-c", "import json,sys; v=[json.loads(s) for s in json.load(sys.stdin)]; print(json.dumps([a==b for a in v for b in v]))"])
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(serde_json::to_string(&tokens).unwrap().as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let expected: Vec<bool> = serde_json::from_slice(&output.stdout).unwrap();
+    let values: Vec<Value> = tokens
+        .iter()
+        .map(|raw| serde_json::from_str(raw).unwrap())
+        .collect();
+    for (i, left) in values.iter().enumerate() {
+        for (j, right) in values.iter().enumerate() {
+            let equal = expected[i * values.len() + j];
+            assert_eq!(
+                python_metadata_equal(left, right),
+                equal,
+                "{} == {}",
+                tokens[i],
+                tokens[j]
+            );
+            if equal {
+                let case = json!({"panes":[{"pane_id":"%1","agent":"pi","agent_session":{"value":"s","kind":right}}],"dunks":[],"launches":{"%1":{"agent":"pi","session":"s","session_kind":left}},"record":true});
+                let actual = run_rust(&case);
+                assert_eq!(actual["saved"], false, "equal metadata must not save");
+                assert_eq!(
+                    actual["launches"]["%1"], case["launches"]["%1"],
+                    "raw stored representation must remain unchanged"
+                );
+                assert!(!actual["launches"]["%1"]
+                    .as_object()
+                    .unwrap()
+                    .contains_key("source"));
+                if let Value::Object(original) = left {
+                    assert_eq!(
+                        actual["launches"]["%1"]["session_kind"]
+                            .as_object()
+                            .unwrap()
+                            .keys()
+                            .collect::<Vec<_>>(),
+                        original.keys().collect::<Vec<_>>()
+                    );
+                }
+            }
+        }
+    }
+    // The existing JSON representation has infinity carriers but no NaN value;
+    // null is not a replacement for NaN or for numeric zero.
+    assert!(crate::github::python_float_json_value(f64::NAN).is_none());
+    assert!(!python_metadata_equal(&Value::Null, &json!(0)));
 }
