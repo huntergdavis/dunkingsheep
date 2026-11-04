@@ -651,6 +651,32 @@ fn inbox_quiet_and_process_mailbox_override_are_observed_without_global_env_race
         .unwrap();
     assert_eq!(sent["notified"], false);
     assert!(crate::flock::sends::outbox_lock(&services.flock().outbox).is_empty());
+    dispatcher.close();
+    // Overrides are fallback sources only: the registered caller must be absent
+    // from the backend to expose process versus captured configuration.
+    let absent: LoopTerminalFactory = Arc::new(|| {
+        let mut terminal = FakeTerminal::new();
+        terminal.panes.clear();
+        Box::new(terminal)
+    });
+    let (_fallback_dir, fallback) = make_services_with_env(
+        "override",
+        absent,
+        None,
+        Env::from_pairs(&[("DUNKINGSHEEP_MAILBOX", "w2:p2")]),
+    );
+    fallback
+        .flock()
+        .stores()
+        .inbox
+        .unwrap()
+        .send(&crate::inbox_store::Outgoing {
+            mailbox: "w1:p1",
+            body: Some("fallback"),
+            ..Default::default()
+        })
+        .unwrap();
+    let dispatcher = fallback.dispatcher(handlers());
     let direct = dispatcher.dispatch("inbox_list", &json!({}), &ctx).unwrap();
     assert_eq!(direct["mailbox"], "w1:p1");
     assert_eq!(direct["messages"].as_array().unwrap().len(), 1);
@@ -697,4 +723,33 @@ fn inbox_archive_accepts_python_iso_forms_and_state_precedence() {
         .to_string()
         .contains("before must be an ISO date/time or a unix timestamp: 'bad'"));
     dispatcher.close();
+}
+
+#[test]
+fn inbox_default_provider_refuses_without_invoking_callback() {
+    use crate::api::{CommandEnv, PaneInfoEnv};
+    use std::sync::Mutex;
+    struct Missing(Mutex<Box<dyn crate::terminal::Terminal>>);
+    impl PaneInfoEnv for Missing {
+        fn list_panes_grouped(&self) -> Vec<serde_json::Value> {
+            Vec::new()
+        }
+        fn get_pane(&self, _: &str) -> Option<serde_json::Value> {
+            None
+        }
+    }
+    impl CommandEnv for Missing {
+        fn terminal(&self) -> &Mutex<Box<dyn crate::terminal::Terminal>> {
+            &self.0
+        }
+        fn now_s(&self) -> f64 {
+            0.0
+        }
+    }
+    let missing = Missing(Mutex::new(Box::new(FakeTerminal::new())));
+    assert!(missing
+        .with_inbox_env(&mut |_| panic!("no inbox provider"))
+        .unwrap_err()
+        .to_string()
+        .contains("inbox command adapter is not wired"));
 }
