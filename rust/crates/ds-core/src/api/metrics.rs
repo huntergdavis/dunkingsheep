@@ -518,14 +518,14 @@ mod tests {
         let positive =
             args(serde_json::from_str(r#"{"since":1e999,"until":2000,"window_s":3600}"#).unwrap());
         let positive = dispatch(&flock, Some(positive), "worker", 2000.0).unwrap();
-        assert_eq!("1e999", positive["interval"]["start"].to_string());
-        assert_eq!("-1e999", positive["interval"]["seconds"].to_string());
+        assert_eq!("1e+999", positive["interval"]["start"].to_string());
+        assert_eq!("-1e+999", positive["interval"]["seconds"].to_string());
 
         let negative =
             args(serde_json::from_str(r#"{"since":-1e999,"until":2000,"window_s":3600}"#).unwrap());
         let negative = dispatch(&flock, Some(negative), "worker", 2000.0).unwrap();
-        assert_eq!("-1e999", negative["interval"]["start"].to_string());
-        assert_eq!("1e999", negative["interval"]["seconds"].to_string());
+        assert_eq!("-1e+999", negative["interval"]["start"].to_string());
+        assert_eq!("1e+999", negative["interval"]["seconds"].to_string());
     }
 
     #[test]
