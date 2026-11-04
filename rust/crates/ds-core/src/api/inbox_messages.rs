@@ -166,18 +166,23 @@ pub fn h_inbox_stats(c: &HandlerContext<'_>, _args: Args) -> Result<Value, DunkE
 }
 pub fn h_inbox_fetch(c: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
     let id = python_value_string(&args["attachment_id"]);
-    let dest = match args.get("dest").filter(|v| truthy(v)) {
-        None => None,
-        Some(Value::String(path)) => Some(PathBuf::from(path)),
-        Some(value) => {
-            let kind = python_value_type_name(value);
+    let invalid_dest = match args.get("dest").filter(|v| truthy(v)) {
+        Some(value) if !value.is_string() => Some(python_value_type_name(value).to_owned()),
+        _ => None,
+    };
+    let dest = args
+        .get("dest")
+        .filter(|v| truthy(v))
+        .and_then(Value::as_str)
+        .map(PathBuf::from);
+    c.env.with_inbox_env(&mut |env| {
+        if let Some(kind) = invalid_dest {
+            env.store().validate_fetch_source(&id)?;
             return Err(DunkError::Refused(format!(
                 "expected str, bytes or os.PathLike object, not {kind}"
             )));
         }
-    };
-    c.env.with_inbox_env(&mut |env| {
-        let r=c.flock.inbox_fetch(env,&id,dest.as_deref())?;
+        let r = c.flock.inbox_fetch(env, &id, dest.as_deref())?;
         Ok(json!({"attachment_id":r.attachment_id,"path":r.path,"filename":r.filename,"size":r.size,"media_type":r.media_type,"message_id":r.message_id}))
     })
 }

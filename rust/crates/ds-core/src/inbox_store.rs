@@ -17,6 +17,7 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use rusqlite::OptionalExtension;
 use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
 
@@ -1278,6 +1279,33 @@ impl Store {
         })?;
         self.collect_blobs()?;
         Ok(ids)
+    }
+
+    /// Validate fetch lookup/blob failures without touching a destination. The API uses this
+    /// before reporting Python's path type error, whose evaluation follows the attachment read.
+    pub fn validate_fetch_source(&self, attachment_id: &str) -> Result<(), DunkError> {
+        let wanted = attachment_id.to_string();
+        let sha = self
+            .read_pool()
+            .query_row(
+                "SELECT sha256 FROM attachments WHERE id = ?",
+                [&wanted],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(map_sqlite)?;
+        let Some(sha) = sha else {
+            return Err(refuse(format!(
+                "no attachment with id {}",
+                py_repr(attachment_id)
+            )));
+        };
+        if !self.blob_dir.join(&sha).exists() {
+            return Err(refuse(format!(
+                "attachment {attachment_id} is missing from the store"
+            )));
+        }
+        Ok(())
     }
 
     /// `fetch`: copy an attachment out of the store into `dest_dir` (created if missing).
