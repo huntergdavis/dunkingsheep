@@ -357,7 +357,7 @@ impl McpServer {
             .required
             .iter()
             .copied()
-            .filter(|key| arguments.get(*key).map_or(true, Value::is_null))
+            .filter(|key| arguments.get(*key).is_none_or(Value::is_null))
             .collect();
         if !missing.is_empty() {
             return Ok(tool_error(&format!(

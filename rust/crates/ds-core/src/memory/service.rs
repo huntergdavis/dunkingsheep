@@ -212,7 +212,7 @@ impl QueryInput {
             )),
         }
     }
-    fn integer(&self) -> Result<String, DunkError> {
+    pub(crate) fn integer(&self) -> Result<String, DunkError> {
         match self {
             Self::Json(Value::Bool(v)) => Ok(if *v { "1" } else { "0" }.into()),
             Self::Json(Value::String(v)) => decimal_integer(v),
@@ -725,6 +725,33 @@ impl MemoryService {
         self.accepting()?;
         self.ingestor.enqueue_receipt(path, harness, project)
     }
+    /// Python backfill catches only a vanished-source ValueError. Database and
+    /// worker failures propagate, using the same owning writer as every enqueue.
+    pub fn enqueue_discovered(&self, path: &str) -> Result<bool, DunkError> {
+        self.accepting()?;
+        if !std::path::Path::new(path).exists() {
+            return Ok(false);
+        }
+        // The subsequent stat can fail independently of exists; Python propagates it.
+        let metadata = std::fs::metadata(path)?;
+        use std::os::unix::fs::MetadataExt;
+        let source = ingest::PreparedSource {
+            path: path.to_owned(),
+            harness: ingest::harness_from_path(path).to_owned(),
+            project: None,
+            mtime: metadata.mtime() as f64 + metadata.mtime_nsec() as f64 / 1e9,
+            size: metadata.len() as i64,
+            now: crate::clock::now_s(),
+        };
+        self.writer
+            .call(move |connection| ingest::enqueue_prepared(connection, source))?;
+        Ok(true)
+    }
+
+    pub fn paused(&self) -> bool {
+        self.ingestor.paused()
+    }
+
     pub fn backfill(
         &self,
         sources: &[(String, Option<String>, Option<String>)],
@@ -776,7 +803,7 @@ impl Drop for MemoryService {
 }
 
 // Unicode decimal digit table reused from the existing API conversion primitive.
-fn python_decimal_digit(character: char) -> Option<u8> {
+pub(crate) fn python_decimal_digit(character: char) -> Option<u8> {
     // Unicode 16.0 Decimal_Number ranges, matching the Python 3.14 runtime used by this port.
     // The two multi-set ranges are mathematical styled digits and segmented digits.
     const DECIMAL_RANGES: &[(u32, u32)] = &[

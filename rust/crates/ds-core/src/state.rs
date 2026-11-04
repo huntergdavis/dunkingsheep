@@ -166,7 +166,7 @@ impl StateStore {
                         text("state_source"),
                         text("state_reason"),
                         text("task_id"),
-                        text("source"),
+                        sqlite_value(row.get("source").unwrap_or(&Value::Null), 17)?,
                     ])
                     .map_err(db::map_sqlite)?;
             }
@@ -183,15 +183,28 @@ impl StateStore {
         project: Option<&str>,
         limit: i64,
     ) -> Result<Vec<Value>, DunkError> {
+        self.latest_raw(
+            pane_id.map(|v| json!(v)).as_ref(),
+            project.map(|v| json!(v)).as_ref(),
+            Some(limit),
+        )
+    }
+
+    /// Raw Python SQLite bindings. `None` limit represents an integer outside SQLite range;
+    /// defer that error until after earlier filter parameters have been bound.
+    pub fn latest_raw(
+        &self,
+        pane_id: Option<&Value>,
+        project: Option<&Value>,
+        limit: Option<i64>,
+    ) -> Result<Vec<Value>, DunkError> {
         let mut clauses = Vec::new();
-        let mut values: Vec<String> = Vec::new();
-        if let Some(pane) = pane_id.filter(|p| !p.is_empty()) {
-            clauses.push("pane_id = ?");
-            values.push(pane.to_string());
-        }
-        if let Some(project) = project.filter(|p| !p.is_empty()) {
-            clauses.push("project = ?");
-            values.push(project.to_string());
+        let mut values = Vec::new();
+        for (column, value) in [("pane_id", pane_id), ("project", project)] {
+            if let Some(value) = value.filter(|v| truthy(v)) {
+                clauses.push(format!("{column} = ?"));
+                values.push(value);
+            }
         }
         let clause = if clauses.is_empty() {
             String::new()
@@ -209,6 +222,14 @@ impl StateStore {
             .iter()
             .map(|n| (*n).to_string())
             .collect();
+        let values = values
+            .iter()
+            .enumerate()
+            .map(|(index, value)| sqlite_value(value, index + 1))
+            .collect::<Result<Vec<_>, _>>()?;
+        let limit = limit.ok_or_else(|| {
+            DunkError::Refused("Python int too large to convert to SQLite INTEGER".into())
+        })?;
         let mut bound: Vec<&dyn rusqlite::ToSql> =
             values.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
         bound.push(&limit);
@@ -297,3 +318,38 @@ mod capture_tests;
 mod session_tests;
 #[cfg(test)]
 mod tests;
+
+/// Python sqlite3 accepts JSON scalars without coercing containers to text.
+fn sqlite_value(value: &Value, index: usize) -> Result<rusqlite::types::Value, DunkError> {
+    use rusqlite::types::Value as Sql;
+    Ok(match value {
+        Value::Null => Sql::Null,
+        Value::Bool(v) => Sql::Integer(i64::from(*v)),
+        Value::String(v) => Sql::Text(v.clone()),
+        Value::Number(v) => {
+            if let Some(n) = v.as_i64() {
+                Sql::Integer(n)
+            } else if v.as_u64().is_some() || !v.to_string().contains(['.', 'e', 'E']) {
+                return Err(DunkError::Refused(
+                    "Python int too large to convert to SQLite INTEGER".into(),
+                ));
+            } else {
+                // arbitrary_precision Number::as_f64 excludes nonfinite results. JSON float
+                // tokens can still overflow in Python; preserve their sign when binding.
+                Sql::Real(v.as_f64().unwrap_or_else(|| {
+                    if v.to_string().starts_with('-') {
+                        f64::NEG_INFINITY
+                    } else {
+                        f64::INFINITY
+                    }
+                }))
+            }
+        }
+        Value::Array(_) | Value::Object(_) => {
+            return Err(DunkError::Refused(format!(
+                "Error binding parameter {index}: type '{}' is not supported",
+                if value.is_array() { "list" } else { "dict" }
+            )))
+        }
+    })
+}

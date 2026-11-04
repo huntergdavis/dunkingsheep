@@ -743,6 +743,163 @@ impl Terminal for TmuxBackend {
         pane.label = spec.name.clone();
         Ok(pane)
     }
+    fn start_agent_raw(&mut self, spec: &AgentSpec, focus: bool) -> super::RawCreateResult<Pane> {
+        raw_create_result(|| {
+            let kind = spec
+                .argv
+                .first()
+                .and_then(|p| p.rsplit('/').next())
+                .ok_or_else(|| TerminalError::refused("command is required"))?;
+            if !super::parse::AGENT_KINDS.contains(&kind) {
+                return Err(TerminalError::refused(format!(
+                    "unsupported agent kind {}",
+                    crate::api::python_value_repr(&json!(kind))
+                ))
+                .into());
+            }
+            let mut command = crate::flock::commands_layout::shlex_join(&spec.argv);
+            let mut environment = spec.env.clone();
+            let guard_dir = if !self.guard_enabled {
+                None
+            } else {
+                Some(
+                    match self
+                        .environment
+                        .get("DUNKINGSHEEP_TMUX_GUARD_DIR")
+                        .filter(|v| !v.is_empty())
+                    {
+                        Some(path) => PathBuf::from(path),
+                        None => match self
+                            .environment
+                            .get("DUNKINGSHEEP_DIR")
+                            .filter(|v| !v.is_empty())
+                        {
+                            Some(path) => PathBuf::from(path),
+                            None => super::tmux_registry::expand_home(
+                                "~/.config/dunkingsheep",
+                                &self.environment,
+                            )?,
+                        }
+                        .join("tmux-guard"),
+                    },
+                )
+            };
+            if let Some(guard_dir) = guard_dir.filter(|dir| dir.join("tmux").is_file()) {
+                let path = format!(
+                    "{}:{}",
+                    guard_dir.display(),
+                    environment
+                        .get("PATH")
+                        .filter(|v| !v.is_empty())
+                        .map(String::as_str)
+                        .unwrap_or_else(|| self.environment.get("PATH").unwrap_or(""))
+                );
+                command = format!("PATH={} {command}", shell_join(&[&path]));
+                environment.insert("PATH".into(), path);
+            }
+            let mut args: Vec<String>;
+            if let Some(tab) = spec.tab_id.as_deref().filter(|v| !v.is_empty()) {
+                let pane = self
+                    .list_panes_raw()?
+                    .into_iter()
+                    .find(|p| p.window_id == tab)
+                    .ok_or_else(|| {
+                        TerminalError::refused(format!("tab {tab} has no pane to split"))
+                    })?;
+                args = vec![
+                    "split-window".into(),
+                    "-t".into(),
+                    pane.pane_id,
+                    if spec.split.as_deref().unwrap_or("right") == "right" {
+                        "-h"
+                    } else {
+                        "-v"
+                    }
+                    .into(),
+                    "-P".into(),
+                    "-F".into(),
+                    "#{pane_id}".into(),
+                ];
+                if !focus {
+                    args.push("-d".into());
+                }
+            } else {
+                let target = spec
+                    .workspace_id
+                    .clone()
+                    .filter(|v| !v.is_empty())
+                    .or_else(|| {
+                        self.environment
+                            .get("TMUX_PANE")
+                            .and_then(|id| self.get_pane(id))
+                            .map(|p| p.session_id)
+                    })
+                    .or_else(|| {
+                        self.list_workspaces()
+                            .first()
+                            .map(|w| w.workspace_id.clone())
+                    })
+                    .ok_or_else(|| {
+                        TerminalError::refused("no tmux session to start the agent in")
+                    })?;
+                args = vec![
+                    "new-window".into(),
+                    "-d".into(),
+                    "-P".into(),
+                    "-F".into(),
+                    "#{pane_id}".into(),
+                    "-t".into(),
+                    target,
+                    "-n".into(),
+                    safe_name(&spec.name, "dunkingsheep"),
+                ];
+            }
+            if let Some(cwd) = spec.cwd.as_deref().filter(|v| !v.is_empty()) {
+                args.extend(["-c".into(), cwd.into()]);
+            }
+            for (key, value) in environment {
+                args.extend(["-e".into(), format!("{key}={value}")]);
+            }
+            args.push(agent_launch(&command));
+            let result = self.run(&args.iter().map(String::as_str).collect::<Vec<_>>())?;
+            if result.code != 0 {
+                return Err(TerminalError::refused(result.message(
+                    if spec.tab_id.as_deref().is_some_and(|v| !v.is_empty()) {
+                        "tmux split-window failed"
+                    } else {
+                        "tmux new-window failed"
+                    },
+                ))
+                .into());
+            }
+            let mut pane = self.get_pane_raw(result.stdout.trim())?.ok_or_else(|| {
+                TerminalError::refused(if spec.tab_id.as_deref().is_some_and(|v| !v.is_empty()) {
+                    "tmux created the split but it is not visible"
+                } else {
+                    "tmux started the agent but the pane is not visible"
+                })
+            })?;
+            if spec.tab_id.as_deref().is_some_and(|v| !v.is_empty()) {
+                self.registry
+                    .remember_raw("pane", &pane.pane_id, json!({"label":pane.label}))?;
+            }
+            if spec.tab_id.as_deref().is_none_or(str::is_empty) {
+                if let Some(tab) = self.list_tabs().iter().find(|t| t.tab_id == pane.window_id) {
+                    self.registry
+                        .remember_raw("tab", &tab.tab_id, json!({"label":spec.name}))?;
+                }
+            }
+            let _ = self.run(&["select-pane", "-t", &pane.pane_id, "-T", &spec.name]);
+            pane = self.get_pane_raw(&pane.pane_id)?.unwrap_or(pane);
+            self.registry.remember_raw(
+                "pane",
+                &pane.pane_id,
+                json!({"agent":spec.name,"agent_kind":kind,"name":spec.name}),
+            )?;
+            pane.command = kind.into();
+            Ok(pane)
+        })
+    }
     fn supports_guarded_respawn(&self) -> bool {
         true
     }
@@ -833,6 +990,67 @@ impl Terminal for TmuxBackend {
         Ok(())
     }
 
+    fn rename_raw(
+        &mut self,
+        kind: &str,
+        target_id: &str,
+        label: &str,
+    ) -> super::RawCreateResult<Option<super::RenamedItem>> {
+        raw_create_result(|| {
+            let result = match kind {
+                "workspace" => self.run(&["rename-session", "-t", target_id, label])?,
+                "tab" => self.run(&["rename-window", "-t", target_id, label])?,
+                "pane" => self.run(&["select-pane", "-t", target_id, "-T", label])?,
+                other => {
+                    return Err(TerminalError::refused(format!("unknown kind {other:?}")).into())
+                }
+            };
+            if result.code != 0 {
+                return Err(TerminalError::refused(
+                    result.message(&format!("tmux rename {kind} failed")),
+                )
+                .into());
+            }
+            let item = if kind == "pane" {
+                // Python _parse_panes reads one registry snapshot for both labels
+                // and managed flags, after the title mutation and before remember.
+                match self.run(&["list-panes", "-a", "-F", PANE_FORMAT]) {
+                    Ok(output) if output.code == 0 => {
+                        let mut panes = parse_panes(&output.stdout, &|_| None);
+                        let data = self.registry.load_raw()?;
+                        let labels = Registry::pane_labels_from_raw(&data, &panes)?;
+                        for pane in &mut panes {
+                            if let Some(label) = labels.get(&pane.pane_id) {
+                                pane.label = label.clone();
+                            }
+                        }
+                        panes
+                            .into_iter()
+                            .find(|pane| pane.pane_id == target_id)
+                            .map(|pane| {
+                                let managed = data["panes"]
+                                    .as_object()
+                                    .is_some_and(|rows| rows.contains_key(&pane.pane_id));
+                                super::RenamedItem::Pane {
+                                    pane: Box::new(pane),
+                                    agent_status: Some("unknown".into()),
+                                    managed: Some(managed),
+                                }
+                            })
+                    }
+                    _ => None,
+                }
+            } else {
+                self.renamed_item(kind, target_id)
+            };
+            if matches!(&item, Some(super::RenamedItem::Pane { .. })) {
+                self.registry
+                    .remember_raw("pane", target_id, json!({"label":label}))?;
+            }
+            Ok(item)
+        })
+    }
+
     fn close(&mut self, kind: &str, target_id: &str) -> Result<(), TerminalError> {
         let panes = if matches!(kind, "tab" | "workspace") {
             let result = self.run(&["list-panes", "-a", "-F", PANE_FORMAT])?;
@@ -883,6 +1101,22 @@ impl Terminal for TmuxBackend {
         let result = self.run(&args)?;
         if result.code != 0 {
             return Err(TerminalError::refused(result.message("tmux focus failed")));
+        }
+        Ok(())
+    }
+
+    fn focus_raw(&mut self, kind: &str, target_id: &str) -> Result<(), TerminalError> {
+        let args: Vec<&str> = match kind {
+            "pane" => vec!["select-pane", "-t", target_id],
+            "tab" => vec!["select-window", "-t", target_id],
+            "workspace" => vec!["switch-client", "-t", target_id],
+            other => return Err(TerminalError::refused(format!("unknown kind {other:?}"))),
+        };
+        let result = self.run(&args)?;
+        if result.code != 0 {
+            return Err(TerminalError::refused(
+                result.message(&format!("tmux focus {kind} failed")),
+            ));
         }
         Ok(())
     }

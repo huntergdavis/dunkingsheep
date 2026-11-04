@@ -5,6 +5,7 @@ on:
     paths:
       - "rust/crates/ds-core/benches/service.rs"
       - "rust/crates/ds-core/src/terminal/**"
+      - "docs/rust/BENCH.md"
       - "rust/crates/ds-core/Cargo.toml"
       - "rust/Cargo.toml"
       - "rust/Cargo.lock"
@@ -20,10 +21,12 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: 1.99.1
-      - name: Measure synthetic pane table
+      - name: Measure pane table and real socket RPCs
         shell: bash
         run: |
           set -o pipefail
@@ -31,7 +34,14 @@ jobs:
             git rev-parse HEAD
             rustc --version
             uname -a
-            cargo bench --manifest-path rust/Cargo.toml -p ds-core --bench service -- bench_list_panes_1000
+            lscpu
+            uptime
+            export DS_BENCH_DIR="$GITHUB_WORKSPACE"
+            failed=0
+            for benchmark in bench_list_panes_1000 bench_status_30_clients bench_inbox_read bench_task_next; do
+              cargo bench --manifest-path rust/Cargo.toml -p ds-core --bench service -- "$benchmark" || failed=1
+            done
+            exit "$failed"
           } 2>&1 | tee service-benchmark.txt
       - uses: actions/upload-artifact@v4
         if: always()

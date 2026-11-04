@@ -93,19 +93,42 @@ pub fn decode_request(line: &str) -> Result<Request, RequestDecodeError> {
     if trimmed.is_empty() {
         return Err(RequestDecodeError);
     }
-    serde_json::from_str(trimmed).map_err(|_| RequestDecodeError)
+    let Value::Object(mut fields) =
+        crate::wire_json::from_str(trimmed).map_err(|_| RequestDecodeError)?
+    else {
+        return Err(RequestDecodeError);
+    };
+    // Deserializing the whole Value again would reject the raw NaN Number carrier.
+    let cmd = fields
+        .remove("cmd")
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .ok_or(RequestDecodeError)?;
+    let mut optional_string = |name| match fields.remove(name) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value)),
+        _ => Err(RequestDecodeError),
+    };
+    let self_pane_id = optional_string("self_pane_id")?;
+    let service_token = optional_string("service_token")?;
+    Ok(Request {
+        id: fields.remove("id").unwrap_or(Value::Null),
+        cmd,
+        args: fields.remove("args").unwrap_or(Value::Null),
+        self_pane_id,
+        service_token,
+    })
 }
 
 /// Encode one response line (newline appended by the caller or by [`encode_line`]).
 pub fn encode_response(response: &Response) -> String {
     // The envelope has no non-string keys and no floats we do not control, so this
     // cannot fail; a panic here would be a bug in the envelope, not in a request.
-    serde_json::to_string(response).expect("a Response always serializes")
+    crate::wire_json::to_string(response).expect("a Response always serializes")
 }
 
 /// Encode any value as one newline-terminated line.
 pub fn encode_line<T: Serialize>(value: &T) -> String {
-    let mut text = serde_json::to_string(value).expect("a serializable value encodes");
+    let mut text = crate::wire_json::to_string(value).expect("a serializable value encodes");
     text.push('\n');
     text
 }
