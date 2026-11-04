@@ -40,6 +40,15 @@ fn make_services(
     terminal_factory: LoopTerminalFactory,
     metrics: Option<Arc<MetricsStore>>,
 ) -> (tempfile::TempDir, Arc<RuntimeServices>) {
+    make_services_with_env(tag, terminal_factory, metrics, Env::default())
+}
+
+fn make_services_with_env(
+    tag: &str,
+    terminal_factory: LoopTerminalFactory,
+    metrics: Option<Arc<MetricsStore>>,
+    env: Env,
+) -> (tempfile::TempDir, Arc<RuntimeServices>) {
     let dir = tempfile::tempdir().unwrap();
     let runtime = Builder::new_multi_thread().enable_all().build().unwrap();
     let tasks = Arc::new(
@@ -55,7 +64,6 @@ fn make_services(
         )
         .unwrap(),
     );
-    let env = Env::default();
     let mut roles = Roles::new(
         &env,
         Some(dir.path().join(format!("{tag}-roles.json"))),
@@ -538,5 +546,155 @@ fn inbox_send_raw_values_preserve_body_subject_and_notification_error_order() {
             .total,
         before + 1
     );
+    dispatcher.close();
+}
+
+#[test]
+fn inbox_read_task_failure_precedes_mark_and_receipt() {
+    let (_dir, services) = make_services("task-failure", factory(None), None);
+    let mut stores = services.flock().stores();
+    let store = stores.inbox.clone().unwrap();
+    let id = store
+        .send(&crate::inbox_store::Outgoing {
+            mailbox: "w1:p1",
+            body: Some("leave unread"),
+            ..Default::default()
+        })
+        .unwrap();
+    stores.tasks = None;
+    services.flock().attach_stores(stores);
+    let dispatcher = services.dispatcher(handlers());
+    assert!(dispatcher
+        .dispatch("inbox_read", &json!({}), &request("w1:p1"))
+        .unwrap_err()
+        .to_string()
+        .contains("tasks"));
+    assert!(store.get_message(&id).unwrap().read_at.is_none());
+    assert!(store.recover_delivery("w1:p1").unwrap().is_empty());
+    let read = dispatcher
+        .dispatch(
+            "inbox_read",
+            &json!({"include_tasks":false}),
+            &request("w1:p1"),
+        )
+        .unwrap();
+    assert_eq!(read["marked_read"], 1);
+    dispatcher.close();
+}
+
+#[test]
+fn inbox_send_folds_actual_queued_notice_and_returns_pre_notify_snapshot() {
+    use crate::flock::sends::outbox_lock;
+    let (_dir, services) = make_services("fold", factory(None), None);
+    let mut notice =
+        crate::flock::sends::Message::new("notice-test", "w1:p1", "worker", "old", "test");
+    notice.is_notice = true;
+    outbox_lock(&services.flock().outbox).insert("w1:p1".into(), vec![notice]);
+    let dispatcher = services.dispatcher(handlers());
+    let ctx = request("w1:p1");
+    let mut ids = Vec::new();
+    for body in ["one", "two"] {
+        let sent = dispatcher
+            .dispatch("inbox_send", &json!({"to":"w1:p1","body":body}), &ctx)
+            .unwrap();
+        assert_eq!(sent["notified"], true);
+        assert!(sent["notify_state"].is_null());
+        let id = sent["message_id"].as_str().unwrap().to_owned();
+        let status = dispatcher
+            .dispatch("inbox_status", &json!({"message_id":id}), &ctx)
+            .unwrap();
+        assert_eq!(status["notify"]["state"], "queued");
+        assert_eq!(status["notify"]["reason"], "folded into notice-test");
+        ids.push(id);
+    }
+    {
+        let outbox = outbox_lock(&services.flock().outbox);
+        assert_eq!(outbox["w1:p1"].len(), 1);
+        assert_eq!(outbox["w1:p1"][0].notify_for, ids);
+        assert!(outbox["w1:p1"][0].text.contains("2 unread"));
+    }
+    dispatcher.close();
+}
+
+#[test]
+fn inbox_quiet_and_process_mailbox_override_are_observed_without_global_env_races() {
+    const CHILD: &str = "DS_INBOX_API_ENV_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "server_runtime::inbox_api::tests::inbox_quiet_and_process_mailbox_override_are_observed_without_global_env_races", "--nocapture"])
+            .env(CHILD, "1")
+            .env("DUNKINGSHEEP_INBOX_SILENT_MAILBOXES", "w1:p1")
+            .env("DUNKINGSHEEP_MAILBOX", "w1:p1")
+            .output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let (_dir, services) = make_services_with_env(
+        "quiet",
+        factory(None),
+        None,
+        Env::from_pairs(&[("DUNKINGSHEEP_MAILBOX", "w2:p2")]),
+    );
+    let dispatcher = services.dispatcher(handlers());
+    let ctx = request("w1:p1");
+    let sent = dispatcher
+        .dispatch(
+            "inbox_send",
+            &json!({"to":"w1:p1","body":"quiet","subject":9}),
+            &ctx,
+        )
+        .unwrap();
+    assert_eq!(sent["notified"], false);
+    assert!(crate::flock::sends::outbox_lock(&services.flock().outbox).is_empty());
+    let direct = dispatcher.dispatch("inbox_list", &json!({}), &ctx).unwrap();
+    assert_eq!(direct["mailbox"], "w1:p1");
+    assert_eq!(direct["messages"].as_array().unwrap().len(), 1);
+    let cached = dispatcher
+        .dispatch("inbox_count", &json!({"fresh":true}), &ctx)
+        .unwrap();
+    assert_eq!(cached["mailbox"], "w2:p2");
+    assert_eq!(cached["unread"], 0);
+    dispatcher.close();
+}
+
+#[test]
+fn inbox_archive_accepts_python_iso_forms_and_state_precedence() {
+    let (_dir, services) = make_services("iso", factory(None), None);
+    let dispatcher = services.dispatcher(handlers());
+    let ctx = request("w1:p1");
+    // Values checked against dunk_api._archive_before / datetime.fromisoformat.
+    for (text, expected) in [
+        ("2024-01-02T03:04:05Z", 1704164645.0),
+        ("20240102X030405+00:00", 1704164645.0),
+        ("2024-W01-2🦀03:04:05+00", 1704164645.0),
+        ("2024W012T03:04:05,25+00:00", 1704164645.25),
+        ("2024-01-02T03+01", 1704160800.0),
+        ("2024-01-02T03:04:05+01:02:03.5", 1704160921.5),
+    ] {
+        let result = dispatcher
+            .dispatch(
+                "inbox_archive",
+                &json!({"mailbox":"w1:p1","before":text,"state":null,"states":["bogus"]}),
+                &ctx,
+            )
+            .unwrap();
+        assert_eq!(result["before"], expected, "{text}");
+        assert_eq!(result["states"], json!(["queued", "acked"]));
+    }
+    let error = dispatcher
+        .dispatch(
+            "inbox_archive",
+            &json!({"mailbox":"w1:p1","before":"bad"}),
+            &ctx,
+        )
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("before must be an ISO date/time or a unix timestamp: 'bad'"));
     dispatcher.close();
 }

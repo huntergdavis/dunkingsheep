@@ -246,30 +246,119 @@ fn archive_before(v: Option<&Value>) -> Result<Option<f64>, DunkError> {
     if let Some(n) = crate::github::parse_python_float(text) {
         return Ok(Some(n));
     }
-    if let Ok(date) = chrono::DateTime::parse_from_rfc3339(text) {
-        return Ok(Some(
-            date.timestamp() as f64 + f64::from(date.timestamp_subsec_nanos()) / 1e9,
-        ));
-    }
-    let local = chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%dT%H:%M:%S%.f")
-        .or_else(|_| chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M:%S%.f"))
-        .or_else(|_| {
-            chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d")
-                .map(|d| d.and_hms_opt(0, 0, 0).unwrap())
-        });
-    if let Ok(date) = local {
-        use chrono::TimeZone;
-        if let Some(date) = chrono::Local.from_local_datetime(&date).earliest() {
-            return Ok(Some(
-                date.timestamp() as f64 + f64::from(date.timestamp_subsec_nanos()) / 1e9,
-            ));
-        }
+    if let Some(timestamp) = iso_timestamp(text) {
+        return Ok(Some(timestamp));
     }
     Err(DunkError::Refused(format!(
         "before must be an ISO date/time or a unix timestamp: {}",
         python_value_repr(v)
     )))
 }
+// Python datetime.fromisoformat accepts basic/extended calendar and week dates,
+// a single arbitrary date/time separator, reduced precision, and fractional offsets.
+fn iso_timestamp(text: &str) -> Option<f64> {
+    use chrono::{Datelike, TimeZone};
+    fn clock(text: &str) -> Option<(u32, u32, u32, u32)> {
+        let (base, fraction) = text.split_once(['.', ',']).unwrap_or((text, ""));
+        if !fraction.bytes().all(|b| b.is_ascii_digit())
+            || (base.len() != text.len() && fraction.is_empty())
+        {
+            return None;
+        }
+        let parts = if base.contains(':') {
+            base.split(':').collect::<Vec<_>>()
+        } else {
+            if !base.is_ascii() || base.len() % 2 != 0 {
+                return None;
+            }
+            (0..base.len())
+                .step_by(2)
+                .map(|i| &base[i..i + 2])
+                .collect()
+        };
+        if parts.is_empty()
+            || parts.len() > 3
+            || parts
+                .iter()
+                .any(|p| p.len() != 2 || !p.bytes().all(|b| b.is_ascii_digit()))
+        {
+            return None;
+        }
+        let h = parts[0].parse().ok()?;
+        let m = parts.get(1).unwrap_or(&"00").parse().ok()?;
+        let sec = parts.get(2).unwrap_or(&"00").parse().ok()?;
+        if h > 23 || m > 59 || sec > 59 {
+            return None;
+        }
+        let micros = format!("{fraction:0<6}")[..6].parse().ok()?;
+        Some((h, m, sec, micros))
+    }
+    for (length, format) in [
+        (10, "%Y-%m-%d"),
+        (8, "%Y%m%d"),
+        (10, "%G-W%V-%u"),
+        (8, "%GW%V%u"),
+        (8, "%G-W%V"),
+        (7, "%GW%V"),
+    ] {
+        let Some(prefix) = text.get(..length) else {
+            continue;
+        };
+        let date = if format.ends_with('V') {
+            chrono::NaiveDate::parse_from_str(&format!("{prefix}-1"), &format!("{format}-%u"))
+        } else {
+            chrono::NaiveDate::parse_from_str(prefix, format)
+        };
+        let Ok(date) = date else {
+            continue;
+        };
+        if !(1..=9999).contains(&date.year()) {
+            continue;
+        }
+        let rest = &text[length..];
+        let time = if rest.is_empty() {
+            "00"
+        } else {
+            &rest[rest.chars().next()?.len_utf8()..]
+        };
+        let zone_at = time.find(['+', '-', 'Z']);
+        let (time, offset) = if let Some(i) = zone_at {
+            let (time, zone) = time.split_at(i);
+            let offset = if zone == "Z" {
+                0.0
+            } else {
+                let (h, m, s, us) = clock(&zone[1..])?;
+                let seconds = h * 3600 + m * 60 + s;
+                let seconds = if seconds == 0 {
+                    0.0
+                } else {
+                    f64::from(seconds) + f64::from(us) / 1e6
+                };
+                if zone.starts_with('-') {
+                    -seconds
+                } else {
+                    seconds
+                }
+            };
+            (time, Some(offset))
+        } else {
+            (time, None)
+        };
+        let Some((h, m, s, us)) = clock(time) else {
+            continue;
+        };
+        let date = date.and_hms_micro_opt(h, m, s, us)?;
+        return match offset {
+            Some(offset) => Some(date.and_utc().timestamp() as f64 + f64::from(us) / 1e6 - offset),
+            None => chrono::Local
+                .from_local_datetime(&date)
+                .earliest()
+                .map(|dt| dt.timestamp() as f64 + f64::from(us) / 1e6),
+        };
+    }
+    None
+}
+
 pub fn h_inbox_archive(c: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
     let mailbox = python_value_string(&args["mailbox"]);
     let before = archive_before(args.get("before"))?;

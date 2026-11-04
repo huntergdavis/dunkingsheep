@@ -614,6 +614,7 @@ impl Flock {
             )
         {
             if let Some(pane) = pane_id.as_deref() {
+                let unread = inbox::count(env.pool(), &mailbox, &[], env.now())?.unread;
                 if let Some(value) = stored_subject.filter(|v| match v {
                     Value::Null => false,
                     Value::Bool(b) => *b,
@@ -633,7 +634,6 @@ impl Flock {
                         "'{kind}' object has no attribute 'strip'"
                     )));
                 }
-                let unread = inbox::count(env.pool(), &mailbox, &[], env.now())?.unread;
                 let text = notice_text(&mailbox, unread, sender.as_deref(), subject.as_deref());
                 // A notice for this pane may already be waiting. Say the new count rather
                 // than stacking a second one: an agent that reads its inbox once has
