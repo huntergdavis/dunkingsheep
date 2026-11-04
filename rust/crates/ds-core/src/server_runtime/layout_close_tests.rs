@@ -471,3 +471,34 @@ fn layout_close_dispatch_gates_and_raw_kind_errors_do_not_mutate() {
     assert!(!err.to_string().contains("missing required"), "{err}");
     assert!(events.lock().unwrap().is_empty());
 }
+#[test]
+fn layout_passthrough_python_nonfinite_payloads_survive_without_reparsing() {
+    for (payload, ok, needle) in [
+        (
+            r#"{"result":[NaN,Infinity,-Infinity]}"#,
+            true,
+            r#""result":[NaN,Infinity,-Infinity]"#,
+        ),
+        (
+            r#"{"error":{"message":NaN},"result":7}"#,
+            false,
+            r#""error":NaN"#,
+        ),
+        ("NaN", true, r#""result":NaN"#),
+    ] {
+        let (_dir, services, events) = herdr_services(0, payload, "");
+        let args =
+            crate::wire_json::from_str(r#"{"command":["api",NaN,Infinity,-Infinity,1e999]}"#)
+                .unwrap();
+        let out = dispatcher(&services)
+            .dispatch("herdr", &args, &request("w2:p2"))
+            .unwrap();
+        assert_eq!(out["ok"], ok);
+        let wire = crate::wire_json::to_string(&out).unwrap();
+        assert!(wire.contains(needle), "{wire}");
+        assert_eq!(
+            events.lock().unwrap()[0],
+            json!(["herdr", ["api", "nan", "inf", "-inf", "inf"], 30])
+        );
+    }
+}

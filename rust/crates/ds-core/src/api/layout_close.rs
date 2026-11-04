@@ -130,7 +130,7 @@ pub fn h_herdr(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkEr
     let mut payload = Value::Null;
     for stream in [&out, &err] {
         if !stream.trim_matches(python_space).is_empty() {
-            if let Ok(value) = serde_json::from_str(stream) {
+            if let Ok(value) = crate::wire_json::from_str(stream) {
                 payload = value;
                 break;
             }
@@ -169,9 +169,15 @@ pub fn h_herdr(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkEr
         .and_then(|p| p.get("result"))
         .cloned()
         .unwrap_or(payload);
-    Ok(
-        json!({"ok":error.is_null(),"argv":argv,"result":if error.is_null(){result}else{Value::Null},"text":text,"error":error,"exit_code":code}),
-    )
+    let ok = error.is_null();
+    let mut response = serde_json::Map::new();
+    response.insert("ok".into(), json!(ok));
+    response.insert("argv".into(), json!(argv));
+    response.insert("result".into(), if ok { result } else { Value::Null });
+    response.insert("text".into(), json!(text));
+    response.insert("error".into(), error);
+    response.insert("exit_code".into(), json!(code));
+    Ok(Value::Object(response))
 }
 fn looks_like_usage(text: &str) -> bool {
     let head: String = text
