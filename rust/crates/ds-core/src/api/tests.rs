@@ -2709,6 +2709,36 @@ fn memory_handlers_share_attached_service() {
 }
 
 #[test]
+fn memory_service_attachment_rejects_replacement() {
+    let (_dir, flock, _) = memory_api_fixture();
+    let original = flock.memory_service().unwrap();
+    let replacement_dir = tempfile::tempdir().unwrap();
+    let replacement_path = replacement_dir.path().join("other-memory.db");
+    let connection = crate::db::open_writer(&replacement_path).unwrap();
+    crate::memory::recall::apply_schema(&connection).unwrap();
+    drop(connection);
+    let replacement = Arc::new(
+        crate::memory::service::MemoryService::open(
+            &replacement_path,
+            1,
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(1),
+        )
+        .unwrap(),
+    );
+
+    let error = flock.attach_memory_service(replacement).unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("a different memory service is already attached"));
+    assert!(Arc::ptr_eq(&flock.memory_service().unwrap(), &original));
+    assert!(Arc::ptr_eq(
+        flock.stores().memory.as_ref().unwrap(),
+        original.read_pool()
+    ));
+}
+
+#[test]
 fn memory_handlers_refuse_without_service() {
     let (_dir, flock) = flock();
     let env = TestEnv::default();
@@ -2800,6 +2830,39 @@ fn memory_ingest_only_enqueues_on_canonical_ingestor() {
             "codex".into(),
             "demo".into()
         )
+    );
+}
+
+#[test]
+fn memory_ingest_preserves_required_and_enqueue_errors() {
+    let (_dir, flock, env) = memory_api_fixture();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_memory_stats_status_ingest();
+    let request = RequestCtx::default();
+    let owner = FixedRole("owner", true);
+    let missing = refusal(dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &owner,
+        "memory_ingest",
+        args(json!({})),
+        &request,
+        &env,
+    ));
+    assert_eq!(missing, "memory_ingest: missing required argument(s): path");
+
+    let nonexistent = refusal(dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &owner,
+        "memory_ingest",
+        args(json!({"path":"does-not-exist.jsonl"})),
+        &request,
+        &env,
+    ));
+    assert!(
+        nonexistent.contains("source does not exist:"),
+        "{nonexistent}"
     );
 }
 
