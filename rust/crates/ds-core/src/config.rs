@@ -107,6 +107,65 @@ pub const ENV_VARS: &[&str] = &[
 #[derive(Debug, Clone, Default)]
 pub struct Env(BTreeMap<String, String>);
 
+/// Python's POSIX `Path.home()`, captured once by the startup owner. Keep lookup
+/// failures until a consumer needs the value: some Python modules import lazily.
+/// This is deliberately separate from each consumer's config override policy.
+#[derive(Debug, Clone)]
+pub struct CapturedPythonHome(Result<PathBuf, String>);
+
+impl CapturedPythonHome {
+    pub fn capture(env: &Env) -> Self {
+        Self::capture_with(env, || {
+            nix::unistd::User::from_uid(nix::unistd::Uid::current())
+                .map(|user| user.map(|user| user.dir))
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    /// Explicit account lookup seam for startup owners and isolated fixtures.
+    /// The lookup is never called when HOME is present, including an empty value.
+    pub fn capture_with(
+        env: &Env,
+        account_home: impl FnOnce() -> Result<Option<PathBuf>, String>,
+    ) -> Self {
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+        let home = match env.get("HOME") {
+            Some(value) => Ok(PathBuf::from(value)),
+            None => account_home().and_then(|home| {
+                home.ok_or_else(|| "Could not determine home directory.".to_owned())
+            }),
+        };
+        Self(home.map(|home| {
+            // posixpath.expanduser('~') strips trailing '/' and maps empty to '/'.
+            let bytes = home.as_os_str().as_bytes();
+            let end = bytes
+                .iter()
+                .rposition(|byte| *byte != b'/')
+                .map_or(0, |i| i + 1);
+            if end == 0 {
+                PathBuf::from("/")
+            } else {
+                PathBuf::from(std::ffi::OsString::from_vec(bytes[..end].to_vec()))
+            }
+        }))
+    }
+
+    pub fn path(&self) -> Result<&Path, String> {
+        self.0.as_deref().map_err(Clone::clone)
+    }
+
+    /// Python's eager `Path(environ.get("DUNKINGSHEEP_DIR", str(Path.home()
+    /// / ".config" / "dunkingsheep")))`. Blank overrides remain blank paths.
+    /// Consumers with a different override policy should use `path()` instead.
+    pub fn config_dir(&self, env: &Env) -> Result<PathBuf, String> {
+        let default = self.path()?.join(".config/dunkingsheep");
+        Ok(env
+            .get("DUNKINGSHEEP_DIR")
+            .map(PathBuf::from)
+            .unwrap_or(default))
+    }
+}
+
 impl Env {
     /// The real process environment.
     pub fn from_process() -> Self {
