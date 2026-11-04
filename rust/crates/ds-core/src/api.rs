@@ -799,7 +799,7 @@ impl Dispatcher {
             args = clamp_desk_args(name, &args);
         }
         let missing: Vec<&str> = command
-            .required
+            .dispatch_required
             .iter()
             .copied()
             .filter(|key| match args.get(*key) {

@@ -1956,17 +1956,23 @@ fn h_add_dunk_assigns_ids_and_resolves_target_labels() {
 fn h_add_dunk_uses_python_defaults() {
     let (_dir, flock) = flock();
     let env = DunkHandlerEnv::new();
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .unwrap();
     let request = RequestCtx::default();
-    let context = HandlerContext {
-        flock: &flock,
-        request: &request,
-        env: &env,
-        runtime: runtime.handle(),
-    };
-    let result = h_add_dunk(&context, Args::new()).unwrap();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_dunk_mutations();
+    assert_eq!(
+        crate::registry::input_schema("add_dunk").unwrap()["required"],
+        json!(["target", "text", "interval_minutes"])
+    );
+    let result = dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("owner", true),
+        "add_dunk",
+        args(json!({})),
+        &request,
+        &env,
+    )
+    .unwrap();
     assert_eq!(result["id"], "d1");
     assert_eq!(result["text"], crate::flock::dunks::DEFAULT_TEXT);
     assert_eq!(result["interval_minutes"], 10.0);
@@ -2023,6 +2029,17 @@ fn h_update_dunk_changes_fields_and_clears_optionals() {
     )
     .unwrap();
     assert_eq!(target_only["target_pane_id"], "w1:p1");
+
+    let invalid_interval = refusal(dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("owner", true),
+        "update_dunk",
+        args(json!({"id": "d1", "target": "Writer", "interval_minutes": true})),
+        &request,
+        &env,
+    ));
+    assert_eq!(invalid_interval, "interval must be a number of minutes");
 }
 
 #[test]
@@ -2330,7 +2347,7 @@ fn test_every_command_runs_or_refuses_but_never_crashes() {
             "{}: refused with no message",
             command.name
         );
-        if command.required.is_empty() {
+        if command.dispatch_required.is_empty() {
             assert_eq!(text, format!("command {} is not ported yet", command.name));
         }
     }
@@ -2419,7 +2436,7 @@ fn test_owner_only_commands_go_through_the_superuser_gate() {
     );
     let open = registry::COMMANDS
         .iter()
-        .find(|c| c.owner_only && c.required.is_empty() && roles::allowed("web", c.name))
+        .find(|c| c.owner_only && c.dispatch_required.is_empty() && roles::allowed("web", c.name))
         .expect("an owner-only command web may call");
     let text = refusal(dispatch(
         &d,

@@ -181,6 +181,17 @@ pub fn h_update_dunk(context: &HandlerContext<'_>, args: Args) -> Result<Value, 
         .ok_or_else(|| DunkError::Refused("'id'".into()))?;
     let target = target_pane(context, args.get("target"))?;
     let pane = pane_map(target.as_ref())?;
+    // Python parses the interval after resolving a supplied target. Keep that
+    // error order, but do not stringify JSON booleans (Python bool is rejected
+    // explicitly by parse_interval rather than parsed as the string "True").
+    if args
+        .get("interval_minutes")
+        .is_some_and(|value| matches!(value, Value::Bool(_)))
+    {
+        return Err(DunkError::Refused(
+            "interval must be a number of minutes".into(),
+        ));
+    }
     context
         .env
         .update_dunk(&python_value_string(id), pane.as_ref(), &update)
