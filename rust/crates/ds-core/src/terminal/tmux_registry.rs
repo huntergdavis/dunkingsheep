@@ -292,6 +292,40 @@ impl Registry {
             .peekable();
         Ok(children.peek().is_some() && children.all(|p| owned_panes.contains_key(&p.pane_id)))
     }
+    pub fn pane_labels_raw(
+        &self,
+        panes: &[Pane],
+    ) -> Result<std::collections::BTreeMap<String, String>, RegistryError> {
+        let data = self.load_raw()?;
+        let mut labels = std::collections::BTreeMap::new();
+        for pane in panes {
+            let collection = &data["panes"];
+            let collection = collection.as_object().ok_or_else(|| RegistryError::Shape {
+                category: "AttributeError",
+                message: format!(
+                    "'{}' object has no attribute 'get'",
+                    python_type(collection)
+                ),
+            })?;
+            if let Some(record) = collection
+                .get(&pane.pane_id)
+                .filter(|v| super::raw::truthy(v))
+            {
+                let record = record.as_object().ok_or_else(|| RegistryError::Shape {
+                    category: "AttributeError",
+                    message: format!("'{}' object has no attribute 'get'", python_type(record)),
+                })?;
+                if let Some(name) = record
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .filter(|v| !v.is_empty())
+                {
+                    labels.insert(pane.pane_id.clone(), name.to_owned());
+                }
+            }
+        }
+        Ok(labels)
+    }
     pub fn labels(&self) -> Result<std::collections::BTreeMap<String, String>, TerminalError> {
         let data = self.load()?;
         Ok(collection(&data, "pane")?

@@ -122,6 +122,7 @@ list-sessions) printf '$1\037%s\0370\n' "$(cat name)" ;;
 list-windows) printf '@1\037$1\037tab\0370\0371\n' ;;
 list-panes) printf '%%1\037$1\037@1\037/work\037bash\037shell\0371\037%s\037tab\0370\0370\0371\03780\03724\n' "$(cat name)" ;;
 new-window) printf '@1\037%%1\n' ;;
+split-window) printf '%%1\n' ;;
 esac
 "#).unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -160,6 +161,37 @@ esac
             assert_eq!(
                 persisted["tabs"]["@1"]["label"],
                 if truthy(&label) { label } else { json!("tab") }
+            );
+        }
+        for (data, expected) in [
+            (json!([]), "'list' object has no attribute 'setdefault'"),
+            (
+                json!({"panes":null}),
+                "'NoneType' object has no attribute 'get'",
+            ),
+            (
+                json!({"panes":{"%1":[1]}}),
+                "'list' object has no attribute 'get'",
+            ),
+        ] {
+            std::fs::write(&registry, data.to_string()).unwrap();
+            assert_eq!(
+                backend
+                    .create_tab_raw(Some("$1"), &json!("tab"), &Value::Null, false)
+                    .unwrap_err()
+                    .to_string(),
+                expected
+            );
+            assert_eq!(
+                backend
+                    .split_pane_raw("%1", "right", &Value::Null, false)
+                    .unwrap_err()
+                    .to_string(),
+                expected
+            );
+            assert_eq!(
+                std::fs::read_to_string(&registry).unwrap(),
+                data.to_string()
             );
         }
         for command in [

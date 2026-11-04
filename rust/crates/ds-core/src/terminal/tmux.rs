@@ -170,6 +170,29 @@ impl TmuxBackend {
         }
         Ok(panes)
     }
+    fn list_panes_raw(&self) -> Result<Vec<Pane>, super::tmux_registry::RegistryError> {
+        let result = match self.run(&["list-panes", "-a", "-F", PANE_FORMAT]) {
+            Ok(result) if result.code == 0 => result,
+            _ => return Ok(Vec::new()),
+        };
+        let mut panes = parse_panes(&result.stdout, &|_| None);
+        let labels = self.registry.pane_labels_raw(&panes)?;
+        for pane in &mut panes {
+            if let Some(label) = labels.get(&pane.pane_id) {
+                pane.label = label.clone();
+            }
+        }
+        Ok(panes)
+    }
+    fn get_pane_raw(
+        &self,
+        pane_id: &str,
+    ) -> Result<Option<Pane>, super::tmux_registry::RegistryError> {
+        Ok(self
+            .list_panes_raw()?
+            .into_iter()
+            .find(|pane| pane.pane_id == pane_id))
+    }
     fn checked_pane(&self, pane_id: &str) -> Result<Option<Pane>, TerminalError> {
         Ok(self
             .try_list_panes()?
@@ -382,7 +405,7 @@ impl Terminal for TmuxBackend {
                     .remember_raw("tab", &tab.tab_id, json!({"label":tab.label}))?;
             }
             if let Some(pane) = self
-                .list_panes()
+                .list_panes_raw()?
                 .iter()
                 .find(|p| p.session_id == created.workspace_id)
             {
@@ -499,7 +522,7 @@ impl Terminal for TmuxBackend {
             let pane = if pane_id.is_empty() {
                 None
             } else {
-                self.get_pane(pane_id)
+                self.get_pane_raw(pane_id)?
             };
             let (Some(tab), Some(pane)) = (tab, pane) else {
                 return Err(TerminalError::refused(
@@ -577,7 +600,7 @@ impl Terminal for TmuxBackend {
                 );
             }
             let new_pane = result.stdout.trim().to_string();
-            let pane = self.get_pane(&new_pane).ok_or_else(|| {
+            let pane = self.get_pane_raw(&new_pane)?.ok_or_else(|| {
                 TerminalError::refused("tmux created the split but it is not visible")
             })?;
             self.registry
