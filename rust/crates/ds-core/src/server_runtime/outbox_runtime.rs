@@ -215,9 +215,13 @@ impl Drop for OutboxRuntime {
     }
 }
 
+#[cfg(test)]
+type TimerPrecommitBarrier =
+    Arc<Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>>;
+
 struct TimerSignal {
     #[cfg(test)]
-    precommit: Arc<Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>>,
+    precommit: TimerPrecommitBarrier,
     cancelled: AtomicBool,
     generation: Mutex<u64>,
     changed: std::sync::Condvar,
@@ -230,7 +234,7 @@ struct TimerWorker {
 
 struct DunkTimerOwner {
     #[cfg(test)]
-    precommit: Arc<Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>>,
+    precommit: TimerPrecommitBarrier,
     stopped: AtomicBool,
     flock: Weak<Flock>,
     runtime: Handle,
