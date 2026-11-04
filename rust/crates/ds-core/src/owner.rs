@@ -26,6 +26,23 @@ use serde::Serialize;
 use crate::db::{map_sqlite, ReadPool, SyncWriter};
 use crate::error::DunkError;
 
+// Python's JSON float overflow remains a float infinity at sqlite3 binding. The
+// shared scalar helper covers every other value, including overflowing integers.
+fn owner_sqlite_scalar(
+    value: Option<&serde_json::Value>,
+    parameter: usize,
+) -> Result<rusqlite::types::Value, DunkError> {
+    if let Some(serde_json::Value::Number(number)) = value {
+        let raw = number.to_string();
+        if raw.contains(['.', 'e', 'E']) && number.as_f64().is_none() {
+            if let Ok(value) = crate::github::parse_python_json_float(&raw) {
+                return Ok(rusqlite::types::Value::Real(value));
+            }
+        }
+    }
+    crate::sqlite_scalar::python_sqlite_scalar(value, parameter)
+}
+
 /// Stable attribution labels for the owner web-thread projection.
 ///
 /// The Python web projection (t1983, commit 9c8f919) treats `reply_to` as a
@@ -161,6 +178,38 @@ impl OwnerPush {
         subject: Option<&str>,
         now: f64,
     ) -> Result<Pushed, DunkError> {
+        self.push_values(
+            pane_id,
+            body,
+            target.map(str::to_owned).into(),
+            subject.map(str::to_owned).into(),
+            now,
+        )
+    }
+
+    /// API values retain SQLite binding/affinity rather than Python string coercion.
+    /// The handler has validated the body after acquiring this store.
+    pub(crate) fn push_wire(
+        &self,
+        pane_id: &str,
+        body: &str,
+        target: Option<&serde_json::Value>,
+        subject: Option<&serde_json::Value>,
+        now: f64,
+    ) -> Result<Pushed, DunkError> {
+        let target = owner_sqlite_scalar(target, 2)?;
+        let subject = owner_sqlite_scalar(subject, 3)?;
+        self.push_values(pane_id, body, target, subject, now)
+    }
+
+    fn push_values(
+        &self,
+        pane_id: &str,
+        body: &str,
+        target: rusqlite::types::Value,
+        subject: rusqlite::types::Value,
+        now: f64,
+    ) -> Result<Pushed, DunkError> {
         let body = body.trim().to_string(); // owned: the closure outlives this frame
         if body.is_empty() {
             return Err(DunkError::Refused(
@@ -169,20 +218,12 @@ impl OwnerPush {
         }
         let pane_id = pane_id.to_string();
         let pane_for_answer = pane_id.clone();
-        let target = target.map(str::to_string);
-        let subject = subject.map(str::to_string);
         let id = self.writer.call(move |connection| {
             connection
                 .execute(
                     "INSERT INTO owner_push (pane_id, target, subject, body, created_at) \
                      VALUES (?1, ?2, ?3, ?4, ?5)",
-                    (
-                        pane_id.as_str(),
-                        target.as_deref(),
-                        subject.as_deref(),
-                        body.as_str(),
-                        now,
-                    ),
+                    (pane_id.as_str(), target, subject, body.as_str(), now),
                 )
                 .map_err(map_sqlite)?;
             Ok(connection.last_insert_rowid())
@@ -204,12 +245,37 @@ impl OwnerPush {
         limit: i64,
         now: f64,
     ) -> Result<Vec<Push>, DunkError> {
-        let pane = pane_id.to_string();
-        // Python `by or pane_id`: an EMPTY by is the pane id too.
-        let taken_by = by
-            .filter(|name| !name.is_empty())
-            .unwrap_or(pane_id)
-            .to_string();
+        let taken_by = by.filter(|name| !name.is_empty()).unwrap_or(pane_id);
+        // Preserve the established typed API's post-update result; the wire API uses
+        // the same transaction's selected preimage, matching dunk_owner.OwnerPush.take.
+        Ok(self
+            .take_preimage(
+                &serde_json::json!(pane_id),
+                &serde_json::json!(taken_by),
+                limit,
+                now,
+            )?
+            .into_iter()
+            .map(|row| Push {
+                taken_at: Some(now),
+                taken_by: Some(taken_by.to_owned()),
+                ..row
+            })
+            .collect())
+    }
+
+    /// Return selected rows unchanged, but commit their taken timestamps before returning.
+    /// `by` is the caller's already-defaulted raw value. SQLite validates it only when
+    /// there are rows to update, so an empty take does not bind an otherwise invalid by.
+    pub(crate) fn take_preimage(
+        &self,
+        pane_id: &serde_json::Value,
+        by: &serde_json::Value,
+        limit: i64,
+        now: f64,
+    ) -> Result<Vec<Push>, DunkError> {
+        let pane = owner_sqlite_scalar(Some(pane_id), 1)?;
+        let by = by.clone();
         let rows = self.writer.call(move |connection| {
             // ONE transaction, like the Python's single commit: a failure part-way must not leave a
             // prefix of the batch marked taken that the caller never receives (t1180 review).
@@ -222,29 +288,27 @@ impl OwnerPush {
                     )
                     .map_err(map_sqlite)?;
                 let found = statement
-                    .query_map((pane.as_str(), limit), row_to_push)
+                    .query_map((pane, limit), row_to_push)
                     .map_err(map_sqlite)?
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(map_sqlite)?;
                 found
             };
+            let taken_by = if rows.is_empty() {
+                rusqlite::types::Value::Null
+            } else {
+                owner_sqlite_scalar(Some(&by), 2)?
+            };
             for row in &rows {
                 transaction
                     .execute(
                         "UPDATE owner_push SET taken_at = ?1, taken_by = ?2 WHERE id = ?3",
-                        (now, taken_by.as_str(), row.id),
+                        (now, &taken_by, row.id),
                     )
                     .map_err(map_sqlite)?;
             }
             transaction.commit().map_err(map_sqlite)?;
-            Ok(rows
-                .into_iter()
-                .map(|row| Push {
-                    taken_at: Some(now),
-                    taken_by: Some(taken_by.clone()),
-                    ..row
-                })
-                .collect::<Vec<_>>())
+            Ok(rows)
         })?;
         Ok(rows)
     }
@@ -294,26 +358,33 @@ impl OwnerPush {
 
     /// Record a successful poll by the lane's own harness (EMPTY POLLS COUNT).
     pub fn poll(&self, pane_id: &str, by: Option<&str>, now: f64) -> Result<Poll, DunkError> {
-        let pane = pane_id.to_string();
-        let who = by
-            .map(str::to_string)
-            .unwrap_or_else(|| "harness".to_string());
-        let who_for_write = who.clone();
-        let pane_for_write = pane.clone();
+        let who = by.unwrap_or("harness");
+        self.poll_wire(pane_id, &serde_json::json!(who), now)?;
+        Ok(Poll {
+            pane_id: pane_id.to_owned(),
+            at: now,
+            by: who.to_owned(),
+        })
+    }
+
+    /// Record the actual SQLite scalar while the handler returns the original JSON by.
+    pub(crate) fn poll_wire(
+        &self,
+        pane_id: &str,
+        by: &serde_json::Value,
+        now: f64,
+    ) -> Result<(), DunkError> {
+        let pane = pane_id.to_owned();
+        let by = owner_sqlite_scalar(Some(by), 3)?;
         self.writer.call(move |connection| {
             connection
                 .execute(
                     "INSERT INTO owner_poll (pane_id, at, by) VALUES (?1, ?2, ?3) \
-                     ON CONFLICT(pane_id) DO UPDATE SET at=excluded.at, by=excluded.by",
-                    (pane_for_write.as_str(), now, who_for_write.as_str()),
+                 ON CONFLICT(pane_id) DO UPDATE SET at=excluded.at, by=excluded.by",
+                    (pane, now, by),
                 )
                 .map_err(map_sqlite)?;
             Ok(())
-        })?;
-        Ok(Poll {
-            pane_id: pane,
-            at: now,
-            by: who,
         })
     }
 
