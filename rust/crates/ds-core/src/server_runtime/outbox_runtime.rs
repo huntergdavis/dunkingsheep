@@ -727,6 +727,70 @@ mod tests {
     use crate::terminal::fakes::FakeTerminal;
 
     #[test]
+    fn scheduled_worker_snapshot_failure_never_counts_a_successful_send() {
+        let dir = tempfile::tempdir().unwrap();
+        // Enabled persistence without a status-state path makes the real snapshot fail.
+        let flock = Arc::new(Flock::new(
+            dir.path().join("launches"),
+            dir.path().join("lanes"),
+            true,
+        ));
+        flock.attach_stores(crate::flock::panes::Stores {
+            inbox: Some(Arc::new(
+                crate::inbox_store::Store::open(
+                    dir.path().join("inbox.db"),
+                    dir.path().join("blobs"),
+                )
+                .unwrap(),
+            )),
+            ..Default::default()
+        });
+        let pane = serde_json::json!({"pane_id": "w1:p1"});
+        flock
+            .dunks
+            .add(
+                pane.as_object(),
+                &AddArgs {
+                    start: true,
+                    interval: Some("0.001".into()),
+                    hold_while_typing: Some("false".into()),
+                    max_sends: Some("1".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let owner = OutboxRuntime::new(
+            Arc::clone(&flock),
+            runtime.handle().clone(),
+            Arc::new(|| Box::new(FakeTerminal::new())),
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let row = flock
+                .dunks
+                .get("d1")
+                .expect("failed attempt must not reach max_sends");
+            assert_eq!(serde_json::json!(0), row["send_count"]);
+            if row["status"] == "Error" && row["last_error"].is_string() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "snapshot failure was not surfaced"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        owner.stop_dunk("d1").unwrap();
+        assert!(owner.dunk_timers.workers.lock().unwrap().is_empty());
+        owner.stop_and_join();
+    }
+
+    #[test]
     fn held_timer_wake_rechecks_idle_before_another_attempt() {
         let dir = tempfile::tempdir().unwrap();
         let flock = Arc::new(Flock::new(
