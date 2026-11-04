@@ -686,6 +686,18 @@ mod owner_tests {
             assert!(loops.start(flock, env, intervals));
             loops.stop().await.unwrap();
         });
+        let announcements = fixture
+            .services
+            .flock()
+            .stores()
+            .inbox
+            .unwrap()
+            .read("w1:p1", 10, true, false)
+            .unwrap();
+        assert!(
+            !announcements.is_empty(),
+            "real push did not persist its task announcement"
+        );
         fixture.services.shutdown();
     }
 
