@@ -335,7 +335,7 @@ impl Store {
                     .file_stem()
                     .map(|s| s.to_string_lossy().into_owned())
                     .unwrap_or_default();
-                let parsed = fs::read_to_string(&file)
+                let parsed = super::read_text(&file)
                     .map_err(|error| ContextError(error.to_string()))
                     .and_then(|text| parse_front(&text));
                 out.push(match parsed {
@@ -572,7 +572,7 @@ impl Store {
         by: Option<&str>,
     ) {
         if let Some(ledger) = ledger.as_deref_mut() {
-            if let Ok(text) = std::fs::read_to_string(path) {
+            if let Ok(text) = super::read_text(path) {
                 let get = |key: &str| meta.get(key).and_then(|v| v.as_deref());
                 let _ = ledger.record(&self.root, slug, &text, get("class"), get("authority"), by);
             }
@@ -594,8 +594,8 @@ impl Store {
     ) -> Result<Vec<String>, ContextError> {
         let mut adopted = Vec::new();
         for entry in entries {
-            let text = std::fs::read_to_string(&entry.path)
-                .map_err(|error| io_error(&entry.path, error))?;
+            let text =
+                super::read_text(&entry.path).map_err(|error| io_error(&entry.path, error))?;
             ledger
                 .record(
                     &self.root,
@@ -920,7 +920,7 @@ impl Store {
                     "ground truth has no recheck_after (rules go stale too)",
                 ));
             }
-            let text = fs::read_to_string(&entry.path).map_err(|e| io_error(&entry.path, e))?;
+            let text = super::read_text(&entry.path).map_err(|e| io_error(&entry.path, e))?;
             match ledger
                 .status(&self.root, &entry.slug, &text)
                 .map_err(Self::ledger_err)?
@@ -1378,3 +1378,6 @@ impl Store {
             .collect())
     }
 }
+
+#[path = "store_raw.rs"]
+mod raw;

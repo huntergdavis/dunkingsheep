@@ -8,13 +8,19 @@
 //!
 //! NOT in this slice: the handlers themselves.
 
+mod context_mutations;
+pub mod health_state;
+pub use context_mutations::{h_context_add, h_context_promote, h_memory_backfill};
 pub mod inbox_messages;
+pub use health_state::{h_health, h_state_capture, h_state_latest};
 pub mod outbox_messages;
 pub use outbox_messages::{h_cancel_message, h_get_message, h_list_messages};
 mod poll_roster_turn_end;
 pub use poll_roster_turn_end::{h_poll, h_roster, h_turn_end};
 mod owner_push;
 pub use owner_push::{h_owner_poll, h_owner_push, h_owner_take};
+mod recovery;
+pub use recovery::{h_doctor, h_recover};
 mod metrics;
 pub use metrics::h_metrics;
 mod dunks;
@@ -26,7 +32,9 @@ mod dunk_get;
 pub use dunk_get::h_get_dunk;
 mod project_summary;
 pub use project_summary::h_project_summary;
+mod layout_agent;
 mod layout_create;
+pub use layout_agent::{h_focus, h_rename, h_start_agent};
 pub use layout_create::{h_create_tab, h_create_workspace, h_split_pane};
 mod respawn;
 pub use respawn::h_respawn_pane;
@@ -110,6 +118,21 @@ pub trait OwnerViewEnv {
 /// A synchronous adapter for command dependencies. All methods are object-safe so a daemon can
 /// supply one per request without putting backend types in handler signatures.
 pub trait CommandEnv: PaneInfoEnv {
+    fn health_state_env(&self) -> Result<&dyn health_state::HealthStateEnv, DunkError> {
+        Err(DunkError::Refused(
+            "health/state adapter is not wired".into(),
+        ))
+    }
+
+    fn with_layout_agent(
+        &self,
+        _operation: &mut crate::flock::commands_layout::AgentOperation<'_>,
+    ) -> Result<Value, DunkError> {
+        Err(DunkError::Refused(
+            "layout agent adapter is not wired".into(),
+        ))
+    }
+
     /// Borrow the request's layout and pane services, with confirmed command submission.
     fn with_layout_create(
         &self,
@@ -254,6 +277,11 @@ pub trait CommandEnv: PaneInfoEnv {
         static TRANSPORT: std::sync::OnceLock<crate::github::ReqwestTransport> =
             std::sync::OnceLock::new();
         Ok(TRANSPORT.get_or_init(crate::github::ReqwestTransport::default))
+    }
+
+    /// Borrow the canonical recovery providers for this request. Live composition is t1605.
+    fn recover_env(&self) -> Result<&dyn crate::flock::recovery_commands::RecoverEnv, DunkError> {
+        Err(DunkError::Refused("recovery adapter is not wired".into()))
     }
 
     /// Status sources for the `status` handler. Existing fixtures may stage this adapter, but
@@ -452,7 +480,7 @@ fn py_int(value: &Value) -> Option<i64> {
 }
 
 /// Python truthiness of a JSON value (`args.get(k) or default`).
-fn truthy(value: &Value) -> bool {
+pub(crate) fn truthy(value: &Value) -> bool {
     match value {
         Value::Null => false,
         Value::Bool(b) => *b,
@@ -660,6 +688,12 @@ pub struct Dispatcher {
 }
 
 impl Dispatcher {
+    pub fn register_health_state(&mut self) {
+        self.register("health", h_health);
+        self.register("state_capture", h_state_capture);
+        self.register("state_latest", h_state_latest);
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -714,6 +748,12 @@ impl Dispatcher {
     }
 
     /// Register only the T39 context supersede and retire handlers.
+    pub fn register_context_mutations(&mut self) {
+        self.register("context_add", h_context_add);
+        self.register("context_promote", h_context_promote);
+        self.register("memory_backfill", h_memory_backfill);
+    }
+
     pub fn register_context_supersede_retire(&mut self) {
         self.register("context_supersede", h_context_supersede);
         self.register("context_retire", h_context_retire);
@@ -768,6 +808,12 @@ impl Dispatcher {
     pub fn register_review_sync_list(&mut self) {
         self.register("review_sync", h_review_sync);
         self.register("review_list", h_review_list);
+    }
+
+    /// Register the recovery handlers; metrics keeps its existing registration.
+    pub fn register_doctor_recover(&mut self) {
+        self.register("doctor", h_doctor);
+        self.register("recover", h_recover);
     }
 
     /// Register only the T39 operations metrics summary handler.
@@ -910,6 +956,12 @@ impl Dispatcher {
     }
 
     /// Register only the three create-layout commands.
+    pub fn register_layout_agent(&mut self) {
+        self.register("start_agent", h_start_agent);
+        self.register("rename", h_rename);
+        self.register("focus", h_focus);
+    }
+
     pub fn register_layout_create(&mut self) {
         self.register("create_workspace", h_create_workspace);
         self.register("create_tab", h_create_tab);

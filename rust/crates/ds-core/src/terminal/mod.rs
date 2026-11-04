@@ -22,6 +22,21 @@ pub mod screen;
 pub mod tmux;
 pub mod tmux_registry;
 
+/// Item observed immediately after the rename mutation, before registry persistence.
+#[derive(Debug, Clone)]
+pub enum RenamedItem {
+    Pane {
+        pane: Box<Pane>,
+        agent_status: Option<String>,
+        managed: Option<bool>,
+    },
+    Tab(Tab),
+    Workspace {
+        workspace: Workspace,
+        tabs: Vec<Tab>,
+    },
+}
+
 /// Outer errors are thrown registry exceptions; inner errors are normal backend refusals.
 pub type RawCreateResult<T> = Result<Result<T, TerminalError>, tmux_registry::RegistryError>;
 
@@ -278,6 +293,50 @@ pub trait Terminal: std::fmt::Debug {
         Ok(Ok(()))
     }
     fn start_agent(&mut self, spec: &AgentSpec) -> Result<Pane, TerminalError>;
+    fn start_agent_raw(&mut self, spec: &AgentSpec, _focus: bool) -> RawCreateResult<Pane> {
+        Ok(self.start_agent(spec))
+    }
+    fn rename_raw(
+        &mut self,
+        kind: &str,
+        target: &str,
+        label: &str,
+    ) -> RawCreateResult<Option<RenamedItem>> {
+        match self.rename(kind, target, label) {
+            Ok(()) => Ok(Ok(self.renamed_item(kind, target))),
+            Err(error) => Ok(Err(error)),
+        }
+    }
+    /// Legacy backends capture their typed result here; registry-backed raw paths
+    /// override rename_raw to capture before saving their registry.
+    fn renamed_item(&self, kind: &str, target: &str) -> Option<RenamedItem> {
+        match kind {
+            "pane" => self
+                .get_pane_with_status(target)
+                .map(|(pane, agent_status)| RenamedItem::Pane {
+                    pane: Box::new(pane),
+                    agent_status,
+                    managed: None,
+                }),
+            "tab" => self
+                .list_tabs()
+                .into_iter()
+                .find(|tab| tab.tab_id == target)
+                .map(RenamedItem::Tab),
+            "workspace" => {
+                let tabs = self.list_tabs();
+                self.list_workspaces()
+                    .into_iter()
+                    .find(|workspace| workspace.workspace_id == target)
+                    .map(|workspace| RenamedItem::Workspace { workspace, tabs })
+            }
+            _ => None,
+        }
+    }
+    fn focus_raw(&mut self, kind: &str, target: &str) -> Result<(), TerminalError> {
+        self.focus(kind, target)
+    }
+
     /// Guarded same-pane replacement. Unsupported backends must refuse explicitly.
     fn guarded_respawn(
         &mut self,
@@ -559,3 +618,6 @@ mod tests {
         assert!(error.backend_unavailable);
     }
 }
+
+#[cfg(test)]
+mod layout_agent_tests;

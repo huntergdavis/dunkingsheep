@@ -21,3 +21,11 @@ impl std::fmt::Display for ContextError {
 }
 
 impl std::error::Error for ContextError {}
+
+/// Python Path.read_text(): strict UTF-8 and universal newline decoding at the
+/// file boundary. Ledger string APIs deliberately do not perform this conversion.
+pub(crate) fn read_text(path: impl AsRef<std::path::Path>) -> std::io::Result<String> {
+    Ok(std::fs::read_to_string(path)?
+        .replace("\r\n", "\n")
+        .replace('\r', "\n"))
+}

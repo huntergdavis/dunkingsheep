@@ -9824,3 +9824,6 @@ fn socket_nonfinite_leases_reach_real_task_sql_and_preserve_error_order() {
         worker.join().unwrap();
     });
 }
+
+#[path = "context_mutation_tests.rs"]
+mod context_mutation_tests;
