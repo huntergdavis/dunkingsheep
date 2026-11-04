@@ -8110,3 +8110,47 @@ fn task_metrics_defaults_coercions_and_scope_match_python_dispatch() {
     assert_eq!(converted["window"]["seconds"], 10);
     assert_eq!(converted["window"]["bucket"], "day");
 }
+
+#[test]
+fn task_reap_live_tmux_listing_failure_reopens_expired_claim() {
+    let (runtime, dir, flock, tasks, mut dispatcher) = task_mutation_api_fixture();
+    let task = runtime
+        .block_on(tasks.add("global", "expired", ""))
+        .unwrap();
+    runtime
+        .block_on(tasks.set_status(&task.id, "in_progress", None, None))
+        .unwrap();
+    runtime.block_on(tasks.insert_lease(&task.id, "w9:p9", 1.0, 1.0, 2.0));
+    let missing_tmux = dir.path().join("missing-tmux-command");
+    let env = TestEnv(Mutex::new(Box::new(crate::terminal::TmuxBackend::new(
+        missing_tmux,
+    ))));
+    let request = RequestCtx {
+        self_pane_id: Some("w1:p2".into()),
+        ..RequestCtx::default()
+    };
+    let context = HandlerContext {
+        flock: &flock,
+        request: &request,
+        env: &env,
+        runtime: runtime.handle(),
+    };
+    let gate = FlockGate(&context);
+    dispatcher.register_task_statistics();
+    let reaped = dispatcher
+        .dispatch(&context, &gate, "task_reap", args(json!({})))
+        .unwrap();
+    assert_eq!(
+        reaped["requeued"],
+        json!([{"task_id":task.id,"pane_id":"w9:p9","reason":"expired"}])
+    );
+    assert_eq!(
+        runtime.block_on(tasks.get(&task.id)).unwrap().status,
+        "open"
+    );
+    assert_eq!(runtime.block_on(tasks.leases(&task.id)), 0);
+    let again = dispatcher
+        .dispatch(&context, &gate, "task_reap", args(json!({})))
+        .unwrap();
+    assert_eq!(again["requeued"], json!([]));
+}
