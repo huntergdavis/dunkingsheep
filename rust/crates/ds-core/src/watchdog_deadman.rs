@@ -11,6 +11,59 @@ use std::time::UNIX_EPOCH;
 
 use crate::error::DunkError;
 
+/// Daemon submission through the already configured client (UnixTransport in production).
+/// The client owns the resolved socket, identity, deadline and credentials. This adapter
+/// never starts a daemon, retries a submitted write, or falls back to the inbox itself.
+pub fn daemon_sender<T: crate::client::Transport>(
+    mut client: crate::client::FlockClient<T>,
+) -> impl FnMut(&str, &str, &str) -> Result<(), crate::client::ClientError> {
+    move |target, subject, text| {
+        client.call(
+            "inbox_send",
+            json!({
+                "to": target, "subject": subject, "body": text, "system_sender": "watchdog"
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        )?;
+        Ok(())
+    }
+}
+
+/// Insert one fallback row and independently read it back without marking it read.
+/// Incident deduplication and deciding whether the daemon is down belong to `check`.
+/// Store ownership is local, so all handles close on success and every error path.
+pub fn direct_write(
+    inbox_path: &Path,
+    target: &str,
+    subject: &str,
+    text: &str,
+) -> Result<String, DunkError> {
+    let attachments = inbox_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("attachments");
+    let inbox = crate::inbox_store::Store::open(inbox_path, attachments)?;
+    let message_id = inbox.send(&crate::inbox_store::Outgoing {
+        mailbox: target,
+        body: Some(text),
+        subject: Some(subject),
+        sender: Some("watchdog"),
+        ..Default::default()
+    })?;
+    let back = inbox.get_message(&message_id)?;
+    if back.summary.sender.as_deref() != Some("watchdog")
+        || back.summary.mailbox != target
+        || back.body != text
+    {
+        return Err(DunkError::Refused(format!(
+            "direct write of {message_id} did not read back intact"
+        )));
+    }
+    Ok(message_id)
+}
+
 /// The recorded cadence may widen the unit cadence by at most six times.
 pub const CLAMP_FACTOR: f64 = 6.0;
 
@@ -850,3 +903,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "watchdog_deadman_sender_tests.rs"]
+mod sender_tests;
