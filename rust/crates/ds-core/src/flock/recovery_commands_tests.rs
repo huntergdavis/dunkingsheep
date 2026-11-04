@@ -423,13 +423,16 @@ fn recover_doctor_match_actual_python_commands_and_error_order() {
         String::from_utf8_lossy(&output.stderr)
     );
     let expected: Vec<Value> = serde_json::from_slice(&output.stdout).unwrap();
+    let mut mismatches = Vec::new();
     for (index, (case, expected)) in cases.iter().zip(expected).enumerate() {
-        assert_eq!(
-            run_rust(case),
-            expected,
-            "actual Python case {index}: {case}"
-        );
+        let actual = run_rust(case);
+        if actual != expected {
+            mismatches.push(format!(
+                "actual Python case {index}: {case}\nRust: {actual}\nPython: {expected}"
+            ));
+        }
     }
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
 }
 
 #[test]
@@ -473,4 +476,83 @@ fn recover_backend_error_category_is_not_suppressed() {
             Err(RecoveryCommandError::Backend(DunkError::Retryable(_)))
         ));
     }
+}
+
+#[test]
+fn recovery_launch_order_is_in_memory_insertion_but_persisted_json_stays_sorted() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("launches.json");
+    let flock = Flock::new(&path, dir.path().join("lanes.json"), true);
+    flock.record_launch("%9", &[("agent", json!("pi")), ("session", json!("nine"))]);
+    flock.record_launch(
+        "%2",
+        &[("agent", json!("claude")), ("session", json!("two"))],
+    );
+    flock.record_launch("%9", &[("session", json!("updated"))]);
+    assert_eq!(
+        flock
+            .launches
+            .lock()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>(),
+        ["%9", "%2"]
+    );
+    let disk: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(disk["version"], 1);
+    assert_eq!(
+        disk["panes"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>(),
+        ["%2", "%9"]
+    );
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    let loaded = Flock::new(&path, dir.path().join("lanes2.json"), true);
+    assert_eq!(
+        loaded
+            .launches
+            .lock()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>(),
+        ["%2", "%9"]
+    );
+    assert_eq!(loaded.launch("%9").unwrap()["session"], "updated");
+    // Loading an external unsorted file follows its actual object order, like json.load.
+    std::fs::write(
+        &path,
+        r#"{"version":1,"panes":{"%9":{"agent":"pi"},"%2":{"agent":"claude"}}}"#,
+    )
+    .unwrap();
+    let loaded = Flock::new(&path, dir.path().join("lanes3.json"), true);
+    assert_eq!(
+        loaded
+            .launches
+            .lock()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>(),
+        ["%9", "%2"]
+    );
+    loaded.record_launch("%1", &[("agent", json!("codex"))]);
+    assert_eq!(
+        loaded
+            .launches
+            .lock()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>(),
+        ["%9", "%2", "%1"]
+    );
 }

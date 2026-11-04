@@ -82,6 +82,10 @@ pub struct CallerState {
     pub socket_peer_ok: Option<bool>,
 }
 
+// Canonical launch insertion order matches Python dict; persistence remains sorted JSON.
+type LaunchMap =
+    indexmap::IndexMap<String, Map<String, Value>, std::collections::hash_map::RandomState>;
+
 /// The flock. Slice 1 holds launch memory, the lane registry path and caller state.
 #[derive(Debug)]
 pub struct Flock {
@@ -89,7 +93,7 @@ pub struct Flock {
     pub lane_registry_path: PathBuf,
     pub persist_enabled: bool,
     /// pane_id -> {agent, session, session_kind, cwd, argv, command, source, recorded_at}
-    launches: Mutex<BTreeMap<String, Map<String, Value>>>,
+    launches: Mutex<LaunchMap>,
     /// The in-memory dunk list and next_id slot. Whole-state persistence is owned by the
     /// later snapshot leaf; this leaf only loads/extracts dunk fields and invokes its seam.
     #[allow(dead_code)]
@@ -164,7 +168,7 @@ impl Flock {
             launches_file: launches_file.into(),
             lane_registry_path: lane_registry_path.into(),
             persist_enabled: persist,
-            launches: Mutex::new(BTreeMap::new()),
+            launches: Mutex::new(LaunchMap::default()),
             dunks: dunks::DunkList::new(),
             outbox: Mutex::new(BTreeMap::new()),
             stuck_candidates: Mutex::new(BTreeMap::new()),
@@ -524,7 +528,13 @@ impl Flock {
         if !self.persist_enabled {
             return;
         }
-        let panes = self.launches.lock().expect("launches lock").clone();
+        let panes: BTreeMap<_, _> = self
+            .launches
+            .lock()
+            .expect("launches lock")
+            .clone()
+            .into_iter()
+            .collect();
         let payload = json!({"version": 1, "panes": panes});
         if let Err(error) = atomic_json::write(&self.launches_file, &payload) {
             eprintln!("could not write {}: {error}", self.launches_file.display());
