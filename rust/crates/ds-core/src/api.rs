@@ -8,6 +8,37 @@
 //!
 //! NOT in this slice: the handlers themselves.
 
+mod context_mutations;
+pub mod health_state;
+pub use context_mutations::{h_context_add, h_context_promote, h_memory_backfill};
+pub mod inbox_messages;
+pub use health_state::{h_health, h_state_capture, h_state_latest};
+pub mod outbox_messages;
+pub use outbox_messages::{h_cancel_message, h_get_message, h_list_messages};
+mod poll_roster_turn_end;
+pub use poll_roster_turn_end::{h_poll, h_roster, h_turn_end};
+mod owner_push;
+pub use owner_push::{h_owner_poll, h_owner_push, h_owner_take};
+mod recovery;
+pub use recovery::{h_doctor, h_recover};
+mod metrics;
+pub use metrics::h_metrics;
+mod dunks;
+pub use dunks::{
+    h_add_dunk, h_fire_dunk, h_list_dunks, h_remove_dunk, h_start_dunk, h_stop_all, h_stop_dunk,
+    h_toggle_dunk, h_update_dunk,
+};
+mod dunk_get;
+pub use dunk_get::h_get_dunk;
+mod project_summary;
+pub use project_summary::h_project_summary;
+mod layout_agent;
+mod layout_create;
+pub use layout_agent::{h_focus, h_rename, h_start_agent};
+pub use layout_create::{h_create_tab, h_create_workspace, h_split_pane};
+mod respawn;
+pub use respawn::h_respawn_pane;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -27,12 +58,208 @@ use crate::{registry, roles};
 /// A request's arguments (the Python `args` dict; insertion-ordered).
 pub type Args = Map<String, Value>;
 
+/// The three send operations exposed to T39 handlers. The API layer owns command parsing and
+/// role/target gates; the daemon composition supplies the real terminal and queue behavior.
+/// `target` is the resolved pane row, and `self_pane_id` is copied from the request context.
+pub trait SendCommandEnv {
+    fn send_text(
+        &self,
+        target: &Value,
+        text: &str,
+        self_pane_id: Option<&str>,
+        hold_while_typing: bool,
+        wait_s: f64,
+        press_enter: bool,
+    ) -> Result<Value, DunkError>;
+
+    fn send_keys(
+        &self,
+        target: &Value,
+        keys: &str,
+        self_pane_id: Option<&str>,
+        hold_while_typing: bool,
+        wait_s: f64,
+    ) -> Result<Value, DunkError>;
+
+    /// Raw JSON keys are normalized only by the concrete Flock path, after target resolution.
+    /// Existing string-only adapters remain compatible; non-string input fails closed unless wired.
+    fn send_keys_raw(
+        &self,
+        target: &Value,
+        keys: &Value,
+        self_pane_id: Option<&str>,
+        hold_while_typing: bool,
+        wait_s: f64,
+    ) -> Result<Value, DunkError> {
+        match keys {
+            Value::String(keys) => {
+                self.send_keys(target, keys, self_pane_id, hold_while_typing, wait_s)
+            }
+            _ => Err(DunkError::Refused(
+                "raw key command adapter is not wired".into(),
+            )),
+        }
+    }
+
+    fn flush_box(&self, target: &Value, self_pane_id: Option<&str>) -> Result<Value, DunkError>;
+}
+
+/// Read-only data sources composed by T39 owner views. Inbox/app lookup errors stay fallible;
+/// production composition belongs to t1605, while the pure response transformations remain in
+/// `flock::views`.
+pub trait OwnerViewEnv {
+    fn app_db_path(&self) -> Result<PathBuf, DunkError>;
+    fn inbox_status(&self, message_id: &str, now: f64) -> Result<Option<Value>, DunkError>;
+    fn inbox_stats(&self, now: f64) -> Result<Vec<Value>, DunkError>;
+    fn seen_latencies(&self, mailbox: &str, limit: usize) -> Result<Vec<f64>, DunkError>;
+    fn now(&self) -> f64;
+}
+
 /// A synchronous adapter for command dependencies. All methods are object-safe so a daemon can
 /// supply one per request without putting backend types in handler signatures.
 pub trait CommandEnv: PaneInfoEnv {
+    fn health_state_env(&self) -> Result<&dyn health_state::HealthStateEnv, DunkError> {
+        Err(DunkError::Refused(
+            "health/state adapter is not wired".into(),
+        ))
+    }
+
+    fn with_layout_agent(
+        &self,
+        _operation: &mut crate::flock::commands_layout::AgentOperation<'_>,
+    ) -> Result<Value, DunkError> {
+        Err(DunkError::Refused(
+            "layout agent adapter is not wired".into(),
+        ))
+    }
+
+    /// Borrow the request's layout and pane services, with confirmed command submission.
+    fn with_layout_create(
+        &self,
+        _operation: &mut crate::flock::commands_layout::CreateOperation<'_>,
+    ) -> Result<Value, DunkError> {
+        Err(DunkError::Refused(
+            "layout create adapter is not wired".into(),
+        ))
+    }
+
+    fn with_outbox_commands(
+        &self,
+        _operation: &mut dyn FnMut(
+            &dyn outbox_messages::OutboxCommandEnv,
+        ) -> Result<Value, DunkError>,
+    ) -> Result<Value, DunkError> {
+        Err(DunkError::Refused(
+            "outbox command adapter is not wired".into(),
+        ))
+    }
+
+    /// Borrow the validated inbox services for this request on its owning thread.
+    fn with_inbox_env(
+        &self,
+        _operation: &mut dyn FnMut(
+            &dyn crate::flock::commands_inbox::InboxEnv,
+        ) -> Result<Value, DunkError>,
+    ) -> Result<Value, DunkError> {
+        Err(DunkError::Refused(
+            "inbox command adapter is not wired".into(),
+        ))
+    }
+
     /// The daemon's terminal adapter. The mutex permits the existing mutable terminal API while
     /// keeping the request context shared with role and read-only adapters.
     fn terminal(&self) -> &Mutex<Box<dyn Terminal>>;
+
+    /// Delivery-target evidence composed by the request runtime. The existing Flock
+    /// delivery-capability method owns target resolution and response shaping.
+    fn delivery_env(&self) -> Result<&dyn crate::flock::delivery::DeliveryEnv, DunkError> {
+        Err(DunkError::Refused("delivery adapter is not wired".into()))
+    }
+
+    /// Run one existing `Flock::clear_box` operation with the request-local mutable
+    /// composer adapter. Keeping adapter construction behind this callback lets the runtime
+    /// borrow its non-Send terminal only for this operation.
+    fn with_clear_box_env(
+        &self,
+        _operation: &mut dyn FnMut(
+            &mut dyn crate::flock::clear_box::ClearBoxEnv,
+        ) -> Result<Value, DunkError>,
+    ) -> Result<Value, DunkError> {
+        Err(DunkError::Refused("clear box adapter is not wired".into()))
+    }
+
+    /// Run the guarded respawn operation with the request's canonical runtime providers.
+    /// The runtime owns the temporary inbox view and terminal adapter for this callback.
+    fn with_respawn_pane_env(
+        &self,
+        _operation: &mut dyn FnMut(
+            &crate::flock::respawn::RespawnServices<'_>,
+        ) -> Result<Value, DunkError>,
+    ) -> Result<Value, DunkError> {
+        Err(DunkError::Refused(
+            "respawn pane adapter is not wired".into(),
+        ))
+    }
+
+    /// Execute one already-implemented dunk mutation through the request's canonical runtime.
+    /// Target lookup stays in the API wrapper; timer, persistence and cache behavior stay in
+    /// RuntimeServices.
+    fn add_dunk(
+        &self,
+        _pane: Option<&serde_json::Map<String, Value>>,
+        _args: &crate::flock::dunks::AddArgs,
+    ) -> Result<serde_json::Map<String, Value>, DunkError> {
+        Err(DunkError::Refused(
+            "dunk mutation adapter is not wired".into(),
+        ))
+    }
+
+    fn update_dunk(
+        &self,
+        _id: &str,
+        _pane: Option<&serde_json::Map<String, Value>>,
+        _args: &crate::flock::dunks::UpdateArgs,
+    ) -> Result<serde_json::Map<String, Value>, DunkError> {
+        Err(DunkError::Refused(
+            "dunk mutation adapter is not wired".into(),
+        ))
+    }
+
+    fn remove_dunk(&self, _id: &str) -> Result<serde_json::Map<String, Value>, DunkError> {
+        Err(DunkError::Refused(
+            "dunk mutation adapter is not wired".into(),
+        ))
+    }
+
+    fn start_dunk(&self, _id: &str) -> Result<serde_json::Map<String, Value>, DunkError> {
+        Err(DunkError::Refused(
+            "dunk lifecycle adapter is not wired".into(),
+        ))
+    }
+
+    fn stop_dunk(&self, _id: &str) -> Result<serde_json::Map<String, Value>, DunkError> {
+        Err(DunkError::Refused(
+            "dunk lifecycle adapter is not wired".into(),
+        ))
+    }
+
+    fn toggle_dunk(&self, _id: &str) -> Result<serde_json::Map<String, Value>, DunkError> {
+        Err(DunkError::Refused(
+            "dunk lifecycle adapter is not wired".into(),
+        ))
+    }
+
+    fn stop_all_dunks(&self) -> Result<Vec<serde_json::Map<String, Value>>, DunkError> {
+        Err(DunkError::Refused(
+            "dunk lifecycle adapter is not wired".into(),
+        ))
+    }
+
+    fn fire_dunk(&self, _id: &str, _countdown_s: i64, _wait: bool) -> Result<Value, DunkError> {
+        Err(DunkError::Refused(
+            "manual dunk fire adapter is not wired".into(),
+        ))
+    }
 
     /// Wall-clock time, in epoch seconds, for request-scoped caches and command timestamps.
     fn now_s(&self) -> f64;
@@ -44,11 +271,33 @@ pub trait CommandEnv: PaneInfoEnv {
         ))
     }
 
+    /// HTTP transport for the canonical review synchronization service. The default is the
+    /// shared real reqwest client; tests can inject a deterministic fake.
+    fn review_transport(&self) -> Result<&dyn crate::github::GitHubTransport, DunkError> {
+        static TRANSPORT: std::sync::OnceLock<crate::github::ReqwestTransport> =
+            std::sync::OnceLock::new();
+        Ok(TRANSPORT.get_or_init(crate::github::ReqwestTransport::default))
+    }
+
+    /// Borrow the canonical recovery providers for this request. Live composition is t1605.
+    fn recover_env(&self) -> Result<&dyn crate::flock::recovery_commands::RecoverEnv, DunkError> {
+        Err(DunkError::Refused("recovery adapter is not wired".into()))
+    }
+
     /// Status sources for the `status` handler. Existing fixtures may stage this adapter, but
     /// production dispatch must supply the real daemon snapshot.
     fn status_env(&self) -> Result<&dyn crate::flock::status::StatusEnv, DunkError> {
         Err(DunkError::Refused(
             "status command adapter is not wired".into(),
+        ))
+    }
+
+    /// Existing fallible project summary sources, including captured startup paths.
+    fn project_summary_env(
+        &self,
+    ) -> Result<&dyn crate::flock::project_summary::SummaryEnv, DunkError> {
+        Err(DunkError::Refused(
+            "project summary adapter is not wired".into(),
         ))
     }
 
@@ -60,6 +309,25 @@ pub trait CommandEnv: PaneInfoEnv {
     /// Real turn side effects (metrics and next-job observation).
     fn turn_hooks(&self) -> Result<&dyn crate::flock::commands_turns::TurnHooks, DunkError> {
         Err(DunkError::Refused("turn hooks are not wired".into()))
+    }
+
+    /// The concrete data sources used by the `roster` view.
+    fn roster_env(&self) -> Result<&dyn crate::flock::roster::RosterEnv, DunkError> {
+        Err(DunkError::Refused("roster adapter is not wired".into()))
+    }
+
+    /// The request's shared next-job manager. Completion must use the same manager that
+    /// services turn-end decisions so its per-pane lock and handoff state remain canonical.
+    fn next_jobs(&self) -> Result<&crate::tasks::next_job_runtime::NextJobs, DunkError> {
+        Err(DunkError::Refused(
+            "request next-job service is not attached".into(),
+        ))
+    }
+
+    /// Preserve the runtime's lazy module/config error boundary before converting
+    /// the limit. Other adapters retain the accepted argument conversion here.
+    fn poolrad_sync_args(&self, args: &Args) -> Result<Value, DunkError> {
+        self.poolrad_sync(poolrad_limit(args)?, poolrad_dry_run(args.get("dry_run")))
     }
 
     /// The accepted T52 Poolrad sync service used by the T39 command adapter.
@@ -83,9 +351,31 @@ pub trait CommandEnv: PaneInfoEnv {
         ))
     }
 
+    /// The daemon-owned owner-push store used by the T39 owner stats and receipt views.
+    fn owner_push(&self) -> Result<&crate::owner::OwnerPush, DunkError> {
+        Err(DunkError::Refused("owner push adapter is not wired".into()))
+    }
+
     /// The retired-pane archive used by `retire_pane`.
     fn retired_panes_path(&self) -> Result<PathBuf, DunkError> {
         crate::panes::default_path(&crate::config::Env::from_process())
+    }
+
+    /// The terminal send/queue service. Production wiring is owned by t1605.
+    fn send_commands(&self) -> Result<&dyn SendCommandEnv, DunkError> {
+        Err(DunkError::Refused(
+            "send command adapter is not wired".into(),
+        ))
+    }
+
+    /// Read-only data sources for the owner message-state and reply-stat views.
+    fn owner_views(&self) -> Result<&dyn OwnerViewEnv, DunkError> {
+        Err(DunkError::Refused("owner view adapter is not wired".into()))
+    }
+
+    /// Fallible PM routing and digest services. Runtime composition is assigned to t1605.
+    fn pm_env(&self) -> Result<&dyn crate::pm::PmEnv, DunkError> {
+        Err(DunkError::Refused("PM adapter is not wired".into()))
     }
 }
 
@@ -190,7 +480,7 @@ fn py_int(value: &Value) -> Option<i64> {
 }
 
 /// Python truthiness of a JSON value (`args.get(k) or default`).
-fn truthy(value: &Value) -> bool {
+pub(crate) fn truthy(value: &Value) -> bool {
     match value {
         Value::Null => false,
         Value::Bool(b) => *b,
@@ -228,7 +518,7 @@ fn python_scope_arg(value: Option<&Value>) -> Option<String> {
     })
 }
 
-fn python_value_repr(value: &Value) -> String {
+pub(crate) fn python_value_repr(value: &Value) -> String {
     match value {
         Value::String(value) => py_repr(value),
         Value::Array(values) => format!(
@@ -250,19 +540,25 @@ fn python_value_repr(value: &Value) -> String {
         Value::Null => "None".into(),
         Value::Bool(true) => "True".into(),
         Value::Bool(false) => "False".into(),
-        Value::Number(value) => value.to_string(),
+        Value::Number(value) => crate::github::python_number_string(value),
     }
 }
 
-fn python_value_string(value: &Value) -> String {
+pub(crate) fn python_value_string(value: &Value) -> String {
     match value {
         Value::String(value) => value.clone(),
         Value::Array(_) | Value::Object(_) => python_value_repr(value),
         Value::Null => "None".into(),
         Value::Bool(true) => "True".into(),
         Value::Bool(false) => "False".into(),
-        Value::Number(value) => value.to_string(),
+        Value::Number(value) => crate::github::python_number_string(value),
     }
+}
+
+fn python_optional_string_arg(args: &Args, key: &str) -> Option<String> {
+    args.get(key)
+        .filter(|value| !value.is_null())
+        .map(python_value_string)
 }
 
 fn task_values(value: Option<&Value>) -> Option<Vec<String>> {
@@ -301,9 +597,9 @@ fn task_string_arg<'a>(
     }
 }
 
-fn task_list_limit(args: &Args) -> Result<i64, DunkError> {
-    let Some(value) = args.get("limit").filter(|value| !value.is_null()) else {
-        return Ok(200);
+fn python_int_arg(args: &Args, key: &str, default: i64) -> Result<i64, DunkError> {
+    let Some(value) = args.get(key).filter(|value| !value.is_null()) else {
+        return Ok(default);
     };
     match value {
         Value::Bool(value) => Ok(i64::from(*value)),
@@ -344,54 +640,12 @@ fn task_list_limit(args: &Args) -> Result<i64, DunkError> {
 }
 
 fn parse_python_decimal_integer(value: &str) -> Option<i64> {
-    let literal = value.trim();
-    let sign_len = usize::from(matches!(literal.as_bytes().first(), Some(b'+' | b'-')));
-    let negative = literal.as_bytes().first() == Some(&b'-');
-    let (_, digits) = literal.split_at(sign_len);
-    if digits.is_empty() {
-        return None;
+    match parse_python_decimal_integer_checked(value) {
+        Ok(value) => Some(value),
+        Err(DecimalIntError::Invalid) => None,
+        Err(DecimalIntError::Overflow) if value.trim_start().starts_with('-') => Some(i64::MIN),
+        Err(DecimalIntError::Overflow) => Some(i64::MAX),
     }
-
-    let maximum = if negative {
-        (i64::MAX as u64) + 1
-    } else {
-        i64::MAX as u64
-    };
-    let mut magnitude = 0_u64;
-    let mut previous_was_digit = false;
-    let mut chars = digits.chars().peekable();
-    while let Some(character) = chars.next() {
-        if let Some(digit) = python_decimal_digit(character) {
-            magnitude = magnitude
-                .saturating_mul(10)
-                .saturating_add(u64::from(digit))
-                .min(maximum);
-            previous_was_digit = true;
-        } else if character == '_'
-            && previous_was_digit
-            && chars
-                .peek()
-                .and_then(|next| python_decimal_digit(*next))
-                .is_some()
-        {
-            previous_was_digit = false;
-        } else {
-            return None;
-        }
-    }
-    if !previous_was_digit {
-        return None;
-    }
-
-    Some(if negative {
-        if magnitude > i64::MAX as u64 {
-            i64::MIN
-        } else {
-            -(magnitude as i64)
-        }
-    } else {
-        magnitude as i64
-    })
 }
 
 /// `dunk_roles.clamp_desk_args`: daemon-side result caps for the desk role.
@@ -429,16 +683,31 @@ pub fn clamp_desk_args(command: &str, args: &Args) -> Args {
 #[derive(Default)]
 pub struct Dispatcher {
     handlers: HashMap<&'static str, Handler>,
+    #[cfg(test)]
+    registration_attempts: Vec<&'static str>,
 }
 
 impl Dispatcher {
+    pub fn register_health_state(&mut self) {
+        self.register("health", h_health);
+        self.register("state_capture", h_state_capture);
+        self.register("state_latest", h_state_latest);
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Register the handler for a registry command (later slices call this).
     pub fn register(&mut self, name: &'static str, handler: Handler) {
+        #[cfg(test)]
+        self.registration_attempts.push(name);
         self.handlers.insert(name, handler);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn registration_attempts(&self) -> &[&'static str] {
+        &self.registration_attempts
     }
 
     /// Register only the T39 status, identity and turn-start handler leaf.
@@ -446,6 +715,18 @@ impl Dispatcher {
         self.register("status", h_status);
         self.register("whoami", h_whoami);
         self.register("turn_start", h_turn_start);
+    }
+
+    /// Register only the T39 turn-end, sidebar poll, and roster handlers.
+    pub fn register_turn_end_poll_roster(&mut self) {
+        self.register("turn_end", h_turn_end);
+        self.register("poll", h_poll);
+        self.register("roster", h_roster);
+    }
+
+    /// Register only the T39 project summary handler.
+    pub fn register_project_summary(&mut self) {
+        self.register("project_summary", h_project_summary);
     }
 
     /// Register only the T39 help handler leaf.
@@ -467,6 +748,12 @@ impl Dispatcher {
     }
 
     /// Register only the T39 context supersede and retire handlers.
+    pub fn register_context_mutations(&mut self) {
+        self.register("context_add", h_context_add);
+        self.register("context_promote", h_context_promote);
+        self.register("memory_backfill", h_memory_backfill);
+    }
+
     pub fn register_context_supersede_retire(&mut self) {
         self.register("context_supersede", h_context_supersede);
         self.register("context_retire", h_context_retire);
@@ -477,6 +764,13 @@ impl Dispatcher {
         self.register("memory_recall", h_memory_recall);
         self.register("memory_search", h_memory_search);
         self.register("memory_context", h_memory_context);
+    }
+
+    /// Register the memory management handlers owned by the T39 memory API leaf.
+    pub fn register_memory_stats_status_ingest(&mut self) {
+        self.register("memory_stats", h_memory_stats);
+        self.register("memory_status", h_memory_status);
+        self.register("memory_ingest", h_memory_ingest);
     }
 
     /// Register only the T39 pane and workspace listing handlers.
@@ -510,6 +804,23 @@ impl Dispatcher {
         self.register("gh_token", h_gh_token);
     }
 
+    /// Register only the T39 review synchronization and list handlers.
+    pub fn register_review_sync_list(&mut self) {
+        self.register("review_sync", h_review_sync);
+        self.register("review_list", h_review_list);
+    }
+
+    /// Register the recovery handlers; metrics keeps its existing registration.
+    pub fn register_doctor_recover(&mut self) {
+        self.register("doctor", h_doctor);
+        self.register("recover", h_recover);
+    }
+
+    /// Register only the T39 operations metrics summary handler.
+    pub fn register_metrics(&mut self) {
+        self.register("metrics", h_metrics);
+    }
+
     /// Register only the T39 Poolrad sync and progress handlers.
     pub fn register_poolrad_sync_progress(&mut self) {
         self.register("poolrad_sync", h_poolrad_sync);
@@ -519,7 +830,46 @@ impl Dispatcher {
     /// Register the T39 report run/list handlers over an explicit source adapter.
     pub fn register_report_run_list(&mut self) {
         self.register("report_run", crate::report::report_run_handler);
-        self.register("report_list", crate::report::report_list_handler);
+        self.register("report_list", h_report_list);
+    }
+
+    /// Register only the T39 report-list handler.
+    pub fn register_report_list(&mut self) {
+        self.register("report_list", h_report_list);
+    }
+
+    /// Direct owner queue commands; production assembly is owned separately.
+    pub fn register_owner_push_poll_take(&mut self) {
+        self.register("owner_push", h_owner_push);
+        self.register("owner_poll", h_owner_poll);
+        self.register("owner_take", h_owner_take);
+    }
+
+    /// Register the T39 owner statistics, receipts and conversation views.
+    pub fn register_owner_stats_receipts_conversation(&mut self) {
+        self.register("owner_stats", h_owner_stats);
+        self.register("owner_receipts", h_owner_receipts);
+        self.register("owner_conversation", h_owner_conversation);
+    }
+
+    /// Register the T39 owner delivery and mailbox view handlers.
+    pub fn register_owner_delivered_message_state_reply_stats(&mut self) {
+        self.register("owner_delivered", h_owner_delivered);
+        self.register("message_state", h_message_state);
+        self.register("reply_stats", h_reply_stats);
+    }
+
+    /// Register only the T39 owner reply, ingest and outbox handlers.
+    pub fn register_owner_reply_ingest_outbox(&mut self) {
+        self.register("owner_reply", h_owner_reply);
+        self.register("owner_ingest", h_owner_ingest);
+        self.register("owner_outbox", h_owner_outbox);
+    }
+
+    /// Register only the T39 PM digest and routing handlers.
+    pub fn register_pm_digest_routing(&mut self) {
+        self.register("pm_digest", h_pm_digest);
+        self.register("pm_routing", h_pm_routing);
     }
 
     /// Register only the T39 task-following API leaf.
@@ -539,6 +889,83 @@ impl Dispatcher {
     /// Register only the T39 task-delete handler leaf.
     pub fn register_task_delete(&mut self) {
         self.register("task_delete", h_task_delete);
+    }
+
+    /// Register only the T39 task mutation and lease handlers assigned to t2966.
+    pub fn register_task_mutation_leases(&mut self) {
+        self.register("task_update", h_task_update);
+        self.register("task_assign", h_task_assign);
+        self.register("task_note", h_task_note);
+        self.register("task_block", h_task_block);
+        self.register("task_unblock", h_task_unblock);
+        self.register("task_cancel", h_task_cancel);
+        self.register("task_next", h_task_next);
+        self.register("task_heartbeat", h_task_heartbeat);
+        self.register("task_release", h_task_release);
+    }
+
+    /// Register only the T39 direct-send handlers.
+    pub fn register_outbox_messages(&mut self) {
+        self.register("list_messages", h_list_messages);
+        self.register("get_message", h_get_message);
+        self.register("cancel_message", h_cancel_message);
+    }
+
+    pub fn register_send_text_keys_flush_box(&mut self) {
+        self.register("send_text", h_send_text);
+        self.register("send_keys", h_send_keys);
+        self.register("flush_box", h_flush_box);
+    }
+
+    /// Register only the T39 clear-box and delivery handlers.
+    pub fn register_clear_box_delivery_capability(&mut self) {
+        self.register("clear_box", h_clear_box);
+        self.register("delivery", h_delivery);
+        self.register("delivery_capability", h_delivery_capability);
+    }
+
+    /// Register only the T37c guarded respawn-pane handler.
+    pub fn register_respawn_pane(&mut self) {
+        self.register("respawn_pane", h_respawn_pane);
+    }
+
+    /// Register only the T39 add, update and remove dunk handler group.
+    pub fn register_dunk_mutations(&mut self) {
+        self.register("add_dunk", h_add_dunk);
+        self.register("update_dunk", h_update_dunk);
+        self.register("remove_dunk", h_remove_dunk);
+    }
+
+    /// Register only the T39 start, stop and toggle dunk lifecycle handlers.
+    pub fn register_dunk_lifecycle(&mut self) {
+        self.register("start_dunk", h_start_dunk);
+        self.register("stop_dunk", h_stop_dunk);
+        self.register("toggle_dunk", h_toggle_dunk);
+    }
+
+    /// Register only the T39 get-dunk handler.
+    pub fn register_get_dunk(&mut self) {
+        self.register("get_dunk", h_get_dunk);
+    }
+
+    /// Register only the T39 stop-all, manual-fire and list-dunks handlers.
+    pub fn register_stop_all_fire_list_dunks(&mut self) {
+        self.register("stop_all", h_stop_all);
+        self.register("fire_dunk", h_fire_dunk);
+        self.register("list_dunks", h_list_dunks);
+    }
+
+    /// Register only the three create-layout commands.
+    pub fn register_layout_agent(&mut self) {
+        self.register("start_agent", h_start_agent);
+        self.register("rename", h_rename);
+        self.register("focus", h_focus);
+    }
+
+    pub fn register_layout_create(&mut self) {
+        self.register("create_workspace", h_create_workspace);
+        self.register("create_tab", h_create_tab);
+        self.register("split_pane", h_split_pane);
     }
 
     /// `dunk_api.dispatch(flock, name, args, self_pane_id)`, with the acting pane read only from
@@ -572,11 +999,12 @@ impl Dispatcher {
             args = clamp_desk_args(name, &args);
         }
         let missing: Vec<&str> = command
-            .required
+            .dispatch_required
             .iter()
             .copied()
             .filter(|key| match args.get(*key) {
-                None | Some(Value::Null) => true,
+                None => true,
+                Some(Value::Null) => true,
                 Some(Value::String(s)) => s.is_empty(),
                 _ => false,
             })
@@ -795,9 +1223,268 @@ pub fn h_read_pane(context: &HandlerContext<'_>, args: Args) -> Result<Value, Du
     }))
 }
 
+const DEFAULT_SEND_WAIT_S: f64 = 3.0;
+
+fn send_target(
+    context: &HandlerContext<'_>,
+    args: &Args,
+    command: &str,
+) -> Result<Value, DunkError> {
+    let target = args
+        .get("target")
+        .and_then(Value::as_str)
+        .ok_or_else(|| DunkError::Refused(format!("{command}: target must be a string")))?;
+    let self_pane_id = context.self_pane_id().filter(|pane| !pane.is_empty());
+    let role = context
+        .flock
+        .caller_role(context.self_pane_id(), context.env)?;
+
+    // Python's Flock.require_send_self lets owner/web/system act on any pane. Worker and
+    // reviewer service tokens are constrained to their bound pane before adapter invocation.
+    if matches!(role.as_str(), "worker" | "reviewer") {
+        let self_pane_id = self_pane_id.ok_or_else(|| {
+            DunkError::Refused(format!(
+                "{command} requires the owner role or a service token; anonymous callers use the inbox and task queue"
+            ))
+        })?;
+        let panes = context.env.list_panes_grouped();
+        let hint = context
+            .env
+            .terminal()
+            .lock()
+            .map_err(|_| DunkError::Refused("terminal adapter lock poisoned".into()))?
+            .server_error_hint();
+        let resolved =
+            crate::flock::resolve::resolve_target(&panes, target, Some(self_pane_id), &hint)?;
+        if resolved.get("pane_id").and_then(Value::as_str) != Some(self_pane_id) {
+            return Err(DunkError::Refused(format!(
+                "{command} to another pane requires a superuser; use `dunkingsheep inbox send` instead"
+            )));
+        }
+        return Ok(resolved.clone());
+    }
+
+    let panes = context.env.list_panes_grouped();
+    let hint = context
+        .env
+        .terminal()
+        .lock()
+        .map_err(|_| DunkError::Refused("terminal adapter lock poisoned".into()))?
+        .server_error_hint();
+    Ok(
+        crate::flock::resolve::resolve_target(&panes, target, context.self_pane_id(), &hint)?
+            .clone(),
+    )
+}
+
+fn send_wait_s(args: &Args, command: &str) -> Result<f64, DunkError> {
+    let wait_s = match args.get("wait_s").filter(|value| !value.is_null()) {
+        Some(value) => python_float(value)?,
+        None => DEFAULT_SEND_WAIT_S,
+    };
+    if !wait_s.is_finite() || !(0.0..=3600.0).contains(&wait_s) {
+        return Err(DunkError::Refused(format!(
+            "{command}: wait_s must be between 0 and 3600"
+        )));
+    }
+    Ok(wait_s)
+}
+
+fn reject_retired_desk_token(args: &Args) -> Result<(), DunkError> {
+    let Some(value) = args.get("desk_token") else {
+        return Ok(());
+    };
+    if value.is_null() || value.as_str().is_some_and(|token| token.trim().is_empty()) {
+        return Ok(());
+    }
+    if value.as_str().is_none() {
+        return Err(DunkError::Refused("desk_token must be a string".into()));
+    }
+    Err(DunkError::Refused(
+        "desk_token is retired; present a web service token instead (dunkingsheep token issue --role web)".into(),
+    ))
+}
+
+/// `dunk_api.h_send_text`: validate API inputs and gates, then delegate the actual send.
+pub fn h_send_text(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    reject_retired_desk_token(&args)?;
+    let target = send_target(context, &args, "send_text")?;
+    let text = args
+        .get("text")
+        .and_then(Value::as_str)
+        .ok_or_else(|| DunkError::Refused("send_text: text must be a string".into()))?;
+    let hold_while_typing = python_bool_arg(&args, "hold_while_typing", true);
+    let wait_s = send_wait_s(&args, "send_text")?;
+    let press_enter = python_bool_arg(&args, "press_enter", true);
+    context.env.send_commands()?.send_text(
+        &target,
+        text,
+        context.self_pane_id(),
+        hold_while_typing,
+        wait_s,
+        press_enter,
+    )
+}
+
+/// `dunk_api.h_send_keys`: validate API inputs and gates, then delegate the key send.
+pub fn h_send_keys(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    reject_retired_desk_token(&args)?;
+    let target = send_target(context, &args, "send_keys")?;
+    let keys = args
+        .get("keys")
+        .ok_or_else(|| DunkError::Refused("'keys'".into()))?;
+    let hold_while_typing = python_bool_arg(&args, "hold_while_typing", true);
+    let wait_s = send_wait_s(&args, "send_keys")?;
+    context.env.send_commands()?.send_keys_raw(
+        &target,
+        keys,
+        context.self_pane_id(),
+        hold_while_typing,
+        wait_s,
+    )
+}
+
+/// `dunk_api.h_flush_box`: enforce the pane gate and delegate the flush operation.
+pub fn h_flush_box(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let target = send_target(context, &args, "flush_box")?;
+    context
+        .env
+        .send_commands()?
+        .flush_box(&target, context.self_pane_id())
+}
+
+/// `dunk_api.h_clear_box`: preserve the raw target/reason and call the existing guarded Flock
+/// operation exactly once. Its superuser-before-resolution ordering remains in Flock.
+pub fn h_clear_box(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let target = args
+        .get("target")
+        .ok_or_else(|| DunkError::Refused("'target'".into()))?;
+    let reason = args.get("reason");
+    let mut operation = |env: &mut dyn crate::flock::clear_box::ClearBoxEnv| {
+        context
+            .flock
+            .clear_box(env, target, context.self_pane_id(), reason)
+    };
+    context.env.with_clear_box_env(&mut operation)
+}
+
+/// Resolve the raw `dunk_core.Flock.resolve_target` input used by `h_delivery`.
+fn delivery_target(context: &HandlerContext<'_>, target: &Value) -> Result<Value, DunkError> {
+    if let Value::Object(_) = target {
+        let pane_id = target
+            .get("pane_id")
+            .filter(|value| truthy(value))
+            .ok_or_else(|| DunkError::Refused("target dict has no pane_id".into()))?;
+        let panes = context.env.list_panes_grouped();
+        return Ok(panes
+            .iter()
+            .find(|pane| pane.get("pane_id") == Some(pane_id))
+            .cloned()
+            .unwrap_or_else(|| target.clone()));
+    }
+    let spec = Some(target)
+        .filter(|value| truthy(value))
+        .map(python_value_string)
+        .unwrap_or_default();
+    if spec.is_empty() {
+        return Err(DunkError::Refused("target is required".into()));
+    }
+    if matches!(spec.to_lowercase().as_str(), "self" | "me" | "here")
+        && context
+            .self_pane_id()
+            .filter(|pane| !pane.is_empty())
+            .is_none()
+    {
+        return Err(DunkError::Refused(
+            "target 'self' needs TMUX_PANE (or HERDR_PANE_ID on the herdr rollback; run from inside a pane)".into(),
+        ));
+    }
+    let panes = context.env.list_panes_grouped();
+    if panes.is_empty() {
+        let error = context
+            .env
+            .terminal()
+            .lock()
+            .map_err(|_| DunkError::Refused("terminal adapter lock poisoned".into()))?
+            .server_error_hint();
+        return Err(DunkError::Refused(error));
+    }
+    crate::flock::resolve::resolve_target(&panes, &spec, context.self_pane_id(), "").cloned()
+}
+
+/// `dunk_api.h_delivery`: resolve the raw target first; only absent or null status requests
+/// fallback to terminal status. Explicit falsey values still suppress that fallback.
+pub fn h_delivery(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let target = args
+        .get("target")
+        .ok_or_else(|| DunkError::Refused("'target'".into()))?;
+    let pane = delivery_target(context, target)?;
+    let pane_id = pane
+        .get("pane_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| DunkError::Refused("resolved target has no pane_id".into()))?;
+    let status = args
+        .get("status")
+        .filter(|value| !value.is_null())
+        .map(|value| {
+            if truthy(value) {
+                python_value_string(value)
+            } else {
+                String::new()
+            }
+        });
+    let mut operation = |env: &mut dyn crate::flock::clear_box::ClearBoxEnv| {
+        Ok(context
+            .flock
+            .delivery_state(env, pane_id, status.as_deref(), Some(&pane), None))
+    };
+    context.env.with_clear_box_env(&mut operation)
+}
+
+fn python_value_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "NoneType",
+        Value::Bool(_) => "bool",
+        Value::Number(number) if number.is_i64() || number.is_u64() => "int",
+        Value::Number(_) => "float",
+        Value::String(_) => "str",
+        Value::Array(_) => "list",
+        Value::Object(_) => "dict",
+    }
+}
+
+/// `dunk_api.h_delivery_capability`: preserve Python's falsey default and `.strip()` type error
+/// before consulting the Flock delivery service.
+pub fn h_delivery_capability(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let raw = args.get("target").unwrap_or(&Value::Null);
+    let target = if truthy(raw) {
+        let Some(target) = raw.as_str() else {
+            return Err(DunkError::Refused(format!(
+                "'{}' object has no attribute 'strip'",
+                python_value_type_name(raw)
+            )));
+        };
+        target.trim()
+    } else {
+        ""
+    };
+    if target.is_empty() {
+        return Err(DunkError::Refused(
+            "delivery_capability must be given a target (a pane id like %9 or a pinned lane name)"
+                .into(),
+        ));
+    }
+    context.flock.delivery_capability_with_owner(
+        context.env.delivery_env()?,
+        || context.env.owner_push(),
+        target,
+        context.self_pane_id(),
+        context.env.now_s(),
+    )
+}
+
 struct ApiRetireEnv<'ctx, 'request> {
     context: &'ctx HandlerContext<'request>,
-    retired_path: PathBuf,
 }
 
 impl crate::flock::retire::RetireEnv for ApiRetireEnv<'_, '_> {
@@ -836,18 +1523,15 @@ impl crate::flock::retire::RetireEnv for ApiRetireEnv<'_, '_> {
         }
     }
 
-    fn retired_path(&self) -> PathBuf {
-        self.retired_path.clone()
+    fn retired_path(&self) -> Result<PathBuf, DunkError> {
+        self.context.env.retired_panes_path()
     }
 }
 
 /// `dunk_api.h_retire_pane`: the flock handler owns the state transition; this adapter supplies
 /// request-scoped pane, role, inbox and config dependencies.
 pub fn h_retire_pane(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
-    let env = ApiRetireEnv {
-        context,
-        retired_path: context.env.retired_panes_path()?,
-    };
+    let env = ApiRetireEnv { context };
     crate::flock::retire::h_retire_pane(
         &env,
         &Value::Object(args),
@@ -993,7 +1677,434 @@ pub fn h_token_revoke(context: &HandlerContext<'_>, args: Args) -> Result<Value,
         .token_revoke(label, context.self_pane_id(), context.env)
 }
 
-fn poolrad_limit(args: &Args) -> Result<usize, DunkError> {
+/// `dunk_api.h_owner_stats`.
+pub fn h_owner_stats(context: &HandlerContext<'_>, _: Args) -> Result<Value, DunkError> {
+    crate::flock::commands_owner_views::h_owner_stats(
+        context.env.owner_push()?,
+        context.env.now_s(),
+    )
+}
+
+/// `dunk_api.h_pm_routing`.
+pub fn h_pm_routing(context: &HandlerContext<'_>, _: Args) -> Result<Value, DunkError> {
+    let env = context.env.pm_env()?;
+    let config = env.config()?;
+    let path = crate::pm::default_routing_path(config);
+    let routing = crate::pm::load_routing(Some(&path), None, config)
+        .map_err(|error| DunkError::Refused(error.to_string()))?;
+    let routing = routing
+        .into_iter()
+        .map(|(project, entry)| {
+            (
+                project,
+                json!({
+                    "pm": entry.pm,
+                    "members": entry.members,
+                    "mode": entry.mode,
+                    "vp_pane": entry.vp_pane,
+                }),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+    Ok(json!({
+        "routing": routing,
+        "registry": path.to_string_lossy(),
+        "vp_pane": crate::pm::default_vp_pane(config),
+    }))
+}
+
+/// `dunk_api.h_pm_digest`.
+pub fn h_pm_digest(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let project = args
+        .get("project")
+        .map(python_value_string)
+        .ok_or_else(|| DunkError::Refused("'project' is required".into()))?;
+    let payload = args.get("payload").filter(|value| truthy(value));
+    let target = args
+        .get("to")
+        .filter(|value| truthy(value))
+        .map(python_value_string);
+    context.flock.pm_digest(
+        context.env.pm_env()?,
+        &project,
+        payload,
+        target.as_deref(),
+        context.self_pane_id(),
+    )
+}
+
+/// `dunk_api.h_owner_receipts`.
+pub fn h_owner_receipts(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    crate::flock::commands_owner_views::h_owner_receipts(
+        context.env.owner_push()?,
+        &Value::Object(args),
+    )
+}
+
+fn view_string_list(args: &Args, key: &str, command: &str) -> Result<Vec<String>, DunkError> {
+    let Some(value) = args.get(key).filter(|value| truthy(value)) else {
+        return Ok(Vec::new());
+    };
+    let values = match value {
+        Value::String(text) => text
+            .split(',')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .map(str::to_string)
+            .collect(),
+        Value::Array(items) => items
+            .iter()
+            .map(python_value_string)
+            .filter(|item| !item.trim().is_empty())
+            .collect(),
+        _ => {
+            return Err(DunkError::Refused(format!(
+                "{command}: {key} must be a string or array"
+            )))
+        }
+    };
+    Ok(values)
+}
+
+/// `dunk_api.h_message_state`: combine application rows with inbox receipt/read state.
+pub fn h_message_state(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let ids = view_string_list(&args, "message_ids", "message_state")?;
+    let views = context.env.owner_views()?;
+    let now = views.now();
+    let app_db = views.app_db_path()?;
+    let mut inbox_rows = std::collections::HashMap::new();
+    for id in &ids {
+        if !id.is_empty() && id.chars().all(|character| character.is_ascii_digit()) {
+            continue;
+        }
+        // Python's `message_state` treats inbox.get failures like missing rows.
+        // Keep the adapter fallible for other operations, but preserve that local boundary.
+        if let Ok(Some(row)) = views.inbox_status(id, now) {
+            inbox_rows.insert(id.clone(), row);
+        }
+    }
+    Ok(crate::flock::views::message_state(
+        &app_db,
+        &|message_id| inbox_rows.get(message_id).cloned(),
+        &ids,
+        now,
+    ))
+}
+
+/// `dunk_api.h_reply_stats`: aggregate inbox stats and bounded read-latency samples.
+pub fn h_reply_stats(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let wanted = view_string_list(&args, "mailboxes", "reply_stats")?;
+    let views = context.env.owner_views()?;
+    let now = views.now();
+    let rows = views.inbox_stats(now)?;
+    let mut latencies = std::collections::HashMap::new();
+    for row in &rows {
+        let Some(mailbox) = row.get("mailbox").and_then(Value::as_str) else {
+            continue;
+        };
+        if !wanted.is_empty() && !wanted.iter().any(|name| name == mailbox) {
+            continue;
+        }
+        latencies.insert(mailbox.to_string(), views.seen_latencies(mailbox, 200)?);
+    }
+    Ok(crate::flock::views::reply_stats(
+        &rows,
+        &|mailbox| latencies.get(mailbox).cloned().unwrap_or_default(),
+        &wanted,
+        now,
+    ))
+}
+
+/// `dunk_api.h_report_list`.
+pub fn h_report_list(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    crate::report::report_list_handler(context, args)
+}
+
+/// `dunk_api.h_owner_delivered`.
+pub fn h_owner_delivered(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let message_id = args
+        .get("message_id")
+        .map(python_value_string)
+        .ok_or_else(|| DunkError::Refused("'message_id' is required".into()))?;
+    let transport_value = args.get("transport");
+    let transport = transport_value
+        .filter(|value| !value.is_null())
+        .map(python_value_string);
+    let external_id = args
+        .get("external_id")
+        .filter(|value| truthy(value))
+        .map(python_value_string);
+    let delivered = crate::owner::OwnerConversations::new(context.flock, context.env).delivered(
+        &message_id,
+        transport.as_deref(),
+        external_id.as_deref(),
+        context.self_pane_id(),
+    )?;
+    Ok(json!({
+        "message": owner_message_value(&delivered.message),
+        "transport": transport_value.cloned().unwrap_or(Value::Null),
+        "delivered_at": delivered.delivered_at,
+    }))
+}
+
+/// `dunk_api.h_owner_conversation`.
+pub fn h_owner_conversation(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let limit = match args.get("limit").filter(|value| truthy(value)) {
+        None => 50,
+        Some(value) => {
+            let mut limit_args = Args::new();
+            limit_args.insert("limit".into(), value.clone());
+            memory_int_arg(&limit_args, "limit", 50)?
+        }
+    };
+    let before = match args.get("before") {
+        None | Some(Value::Null) => None,
+        Some(Value::Number(number)) => number.as_f64(),
+        Some(Value::Bool(value)) => Some(if *value { 1.0 } else { 0.0 }),
+        Some(Value::String(text)) => Some(text.trim().parse::<f64>().map_err(|_| {
+            DunkError::Refused(format!(
+                "could not convert string to float: {}",
+                py_repr(text)
+            ))
+        })?),
+        Some(value) => {
+            return Err(DunkError::Refused(match value {
+                Value::Array(_) => {
+                    "float() argument must be a string or a real number, not 'list'".into()
+                }
+                Value::Object(_) => {
+                    "float() argument must be a string or a real number, not 'dict'".into()
+                }
+                _ => "float() argument must be a string or a real number".into(),
+            }));
+        }
+    };
+    let conversation = crate::owner::OwnerConversations::new(context.flock, context.env)
+        .conversation(Some(limit), before, context.self_pane_id())?;
+    serde_json::to_value(conversation).map_err(DunkError::from)
+}
+
+/// `dunk_api.h_owner_reply`.
+pub fn h_owner_reply(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let message_id = args
+        .get("message_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| DunkError::Refused("message_id must be a string".into()))?;
+    let reply = crate::owner::OwnerConversations::new(context.flock, context.env).reply(
+        message_id,
+        args.get("body"),
+        context.self_pane_id(),
+    )?;
+    Ok(json!({
+        "reply": owner_message_value(&reply.reply),
+        "question": reply.question,
+        "transport": reply.transport,
+        "acked": reply.acked,
+    }))
+}
+
+fn owner_message_value(message: &crate::inbox_store::Message) -> Value {
+    let summary = &message.summary;
+    json!({
+        "message_id": summary.message_id,
+        "mailbox": summary.mailbox,
+        "destination": summary.destination,
+        "sender": summary.sender,
+        "subject": summary.subject,
+        "state": summary.state,
+        "created_at": summary.created_at,
+        "waiting_s": summary.waiting_s,
+        "body_bytes": summary.body_bytes,
+        "digest_id": summary.digest_id,
+        "transport": summary.transport,
+        "reply_to": summary.reply_to,
+        "external_id": summary.external_id,
+        "delivered_at": summary.delivered_at,
+        "delivery_transport": summary.delivery_transport,
+        "attachments": message.attachments.iter().map(|attachment| json!({
+            "id": attachment.id,
+            "filename": attachment.filename,
+            "media_type": attachment.media_type,
+            "size": attachment.size,
+        })).collect::<Vec<_>>(),
+        "body": message.body,
+        "read_at": message.read_at,
+    })
+}
+
+/// `dunk_api.h_owner_ingest`.
+pub fn h_owner_ingest(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let ingested = crate::owner::OwnerConversations::new(context.flock, context.env).ingest_wire(
+        crate::owner::conversations::OwnerIngestWire {
+            body: args.get("body"),
+            transport: args.get("transport"),
+            external_id: args.get("external_id"),
+            subject: args.get("subject"),
+            attachments: args.get("attach"),
+        },
+        context.self_pane_id(),
+    )?;
+    Ok(json!({
+        "message": owner_message_value(&ingested.message),
+        "duplicate": ingested.duplicate,
+        "transport": ingested.transport,
+    }))
+}
+
+/// `dunk_api.h_owner_outbox`.
+pub fn h_owner_outbox(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let transport = args
+        .get("transport")
+        .filter(|value| !value.is_null())
+        .map(python_value_string);
+    let limit = owner_outbox_limit_arg(&args, 20)?;
+    let conversations = crate::owner::OwnerConversations::new(context.flock, context.env);
+    let limit = match limit {
+        OwnerOutboxLimit::Sqlite(limit) => limit,
+        OwnerOutboxLimit::Overflow => {
+            // Python evaluates int() before calling owner_outbox, but SQLite
+            // binds the resulting integer only after role and transport
+            // validation. Reuse the existing read-only service operation to
+            // preserve those earlier errors before reporting bind overflow.
+            conversations.outbox(transport.as_deref(), Some(20), context.self_pane_id())?;
+            return Err(DunkError::Refused(
+                "Python int too large to convert to SQLite INTEGER".into(),
+            ));
+        }
+    };
+    let outbox = conversations.outbox(transport.as_deref(), Some(limit), context.self_pane_id())?;
+    Ok(json!({
+        "transport": outbox.transport,
+        "messages": outbox.messages.iter().map(owner_message_value).collect::<Vec<_>>(),
+        "count": outbox.count,
+    }))
+}
+
+enum OwnerOutboxLimit {
+    Sqlite(i64),
+    Overflow,
+}
+
+fn owner_outbox_limit_arg(args: &Args, default: i64) -> Result<OwnerOutboxLimit, DunkError> {
+    let Some(value) = args.get("limit").filter(|value| !value.is_null()) else {
+        return Ok(OwnerOutboxLimit::Sqlite(default));
+    };
+    match value {
+        Value::Bool(value) => Ok(OwnerOutboxLimit::Sqlite(i64::from(*value))),
+        Value::Number(value) => {
+            if let Some(value) = value.as_i64() {
+                return Ok(OwnerOutboxLimit::Sqlite(value));
+            }
+            if let Some(value) = value.as_u64() {
+                return Ok(i64::try_from(value)
+                    .map(OwnerOutboxLimit::Sqlite)
+                    .unwrap_or(OwnerOutboxLimit::Overflow));
+            }
+            let token = value.to_string();
+            if !token.bytes().any(|byte| matches!(byte, b'.' | b'e' | b'E')) {
+                return Ok(match parse_python_decimal_integer_checked(&token) {
+                    Ok(value) => OwnerOutboxLimit::Sqlite(value),
+                    Err(DecimalIntError::Overflow) => OwnerOutboxLimit::Overflow,
+                    Err(DecimalIntError::Invalid) => {
+                        return Err(DunkError::Refused("cannot convert value to int".into()))
+                    }
+                });
+            }
+            let value = value
+                .as_f64()
+                .ok_or_else(|| DunkError::Refused("cannot convert value to int".into()))?
+                .trunc();
+            if value >= 9_223_372_036_854_775_808.0 || value < -9_223_372_036_854_775_808.0 {
+                return Ok(OwnerOutboxLimit::Overflow);
+            }
+            Ok(OwnerOutboxLimit::Sqlite(value as i64))
+        }
+        Value::String(value) => match parse_python_decimal_integer_checked(value) {
+            Ok(value) => Ok(OwnerOutboxLimit::Sqlite(value)),
+            Err(DecimalIntError::Overflow) => Ok(OwnerOutboxLimit::Overflow),
+            Err(DecimalIntError::Invalid) => Err(DunkError::Refused(format!(
+                "invalid literal for int() with base 10: {}",
+                py_repr(value)
+            ))),
+        },
+        Value::Array(_) => Err(DunkError::Refused(
+            "int() argument must be a string, a bytes-like object or a real number, not 'list'"
+                .into(),
+        )),
+        Value::Object(_) => Err(DunkError::Refused(
+            "int() argument must be a string, a bytes-like object or a real number, not 'dict'"
+                .into(),
+        )),
+        Value::Null => unreachable!("null limit uses the default"),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DecimalIntError {
+    Invalid,
+    Overflow,
+}
+
+fn parse_python_decimal_integer_checked(value: &str) -> Result<i64, DecimalIntError> {
+    let literal = value.trim();
+    let sign_len = usize::from(matches!(literal.as_bytes().first(), Some(b'+' | b'-')));
+    let negative = literal.as_bytes().first() == Some(&b'-');
+    let (_, digits) = literal.split_at(sign_len);
+    if digits.is_empty() {
+        return Err(DecimalIntError::Invalid);
+    }
+    let maximum = if negative {
+        (i64::MAX as u64) + 1
+    } else {
+        i64::MAX as u64
+    };
+    let mut magnitude = 0_u64;
+    let mut overflow = false;
+    let mut previous_was_digit = false;
+    let mut chars = digits.chars().peekable();
+    while let Some(character) = chars.next() {
+        if let Some(digit) = python_decimal_digit(character) {
+            match magnitude
+                .checked_mul(10)
+                .and_then(|number| number.checked_add(u64::from(digit)))
+            {
+                Some(number) if number <= maximum => magnitude = number,
+                _ => {
+                    overflow = true;
+                    magnitude = maximum;
+                }
+            }
+            previous_was_digit = true;
+        } else if character == '_'
+            && previous_was_digit
+            && chars
+                .peek()
+                .and_then(|next| python_decimal_digit(*next))
+                .is_some()
+        {
+            previous_was_digit = false;
+        } else {
+            return Err(DecimalIntError::Invalid);
+        }
+    }
+    if !previous_was_digit {
+        return Err(DecimalIntError::Invalid);
+    }
+    if overflow {
+        return Err(DecimalIntError::Overflow);
+    }
+    Ok(if negative {
+        if magnitude > i64::MAX as u64 {
+            i64::MIN
+        } else {
+            -(magnitude as i64)
+        }
+    } else {
+        magnitude as i64
+    })
+}
+
+pub(crate) fn poolrad_limit(args: &Args) -> Result<usize, DunkError> {
     let Some(value) = args.get("limit").filter(|value| truthy(value)) else {
         return Ok(6);
     };
@@ -1171,7 +2282,7 @@ fn python_decimal_digit(character: char) -> Option<u8> {
     })
 }
 
-fn poolrad_dry_run(value: Option<&Value>) -> bool {
+pub(crate) fn poolrad_dry_run(value: Option<&Value>) -> bool {
     match value {
         None | Some(Value::Null) => false,
         Some(Value::Bool(value)) => *value,
@@ -1179,6 +2290,28 @@ fn poolrad_dry_run(value: Option<&Value>) -> bool {
         Some(Value::Number(value)) => python_bool_string(&value.to_string()),
         Some(Value::Array(_) | Value::Object(_)) => false,
     }
+}
+
+/// `dunk_api.h_review` sync action through the canonical ReviewSync engine.
+pub fn h_review_sync(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let tokens = context.env.github_tokens()?;
+    let transport = context.env.review_transport()?;
+    let policy = crate::review::ConfiguredReviewPolicy {
+        config_dir: tokens.config_dir().to_path_buf(),
+    };
+    let result = context.block_on(context.flock.review_sync(
+        tokens,
+        policy,
+        tokens.api_root(),
+        crate::flock::commands_review::BorrowedGitHubTransport(transport),
+        python_bool_arg(&args, "dry_run", false),
+    ))?;
+    result.map_err(DunkError::Refused)
+}
+
+/// `dunk_api.h_review` list action through the attached Tasks actor.
+pub fn h_review_list(context: &HandlerContext<'_>, _: Args) -> Result<Value, DunkError> {
+    context.block_on(context.flock.review_list(context.env.now_s()))?
 }
 
 fn python_bool_string(value: &str) -> bool {
@@ -1255,9 +2388,7 @@ pub fn h_gh_token(context: &HandlerContext<'_>, args: Args) -> Result<Value, Dun
 
 /// `dunk_api.h_poolrad_sync` through the accepted T52 Poolrad service.
 pub fn h_poolrad_sync(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
-    let limit = poolrad_limit(&args)?;
-    let dry_run = poolrad_dry_run(args.get("dry_run"));
-    context.env.poolrad_sync(limit, dry_run)
+    context.env.poolrad_sync_args(&args)
 }
 
 /// `dunk_api.h_poolrad_progress` through the accepted T52 Poolrad service.
@@ -1361,10 +2492,10 @@ fn context_arg_string<'a>(args: &'a Args, key: &str) -> Result<&'a str, DunkErro
         .ok_or_else(|| DunkError::Refused(format!("'{key}' is required")))
 }
 
-fn memory_pool(
+fn memory_service(
     context: &HandlerContext<'_>,
-) -> Result<std::sync::Arc<crate::db::ReadPool>, DunkError> {
-    context.flock.stores().memory.ok_or_else(|| {
+) -> Result<std::sync::Arc<crate::memory::service::MemoryService>, DunkError> {
+    context.flock.memory_service().ok_or_else(|| {
         DunkError::Refused(
             "memory service is not enabled; start the daemon with persistence".into(),
         )
@@ -1508,15 +2639,10 @@ fn memory_filters(args: &Args) -> Result<crate::memory::recall::Filters, DunkErr
 fn memory_recall(context: &HandlerContext<'_>, args: &Args) -> Result<Value, DunkError> {
     let query = memory_arg_string(args, "query")?;
     let limit = memory_int_arg_at_most(args, "limit", 10, MEMORY_RECALL_MAX_LIMIT)?.max(0) as usize;
-    let pool = memory_pool(context)?;
-    let rows = crate::memory::recall::recall(
-        pool.as_ref(),
-        query,
-        limit,
-        &memory_filters(args)?,
-        context.env.now_s(),
-        1200,
-    )?;
+    let service = memory_service(context)?;
+    let filters = memory_filters(args)?;
+    let input = crate::memory::service::RecallInput::typed(query, limit, &filters, 1200);
+    let rows = service.recall(&input)?;
     serde_json::to_value(rows).map_err(|error| DunkError::Refused(error.to_string()))
 }
 
@@ -1536,8 +2662,33 @@ pub fn h_memory_context(context: &HandlerContext<'_>, args: Args) -> Result<Valu
     // Negative values retain Python's slice-from-the-end behavior; positive requests follow
     // the published API maximum, bounding the recall multiplier below.
     let sessions = memory_int_arg_at_most(&args, "sessions", 5, MEMORY_CONTEXT_MAX_SESSIONS)?;
-    let pool = memory_pool(context)?;
-    crate::memory::queries::context(pool.as_ref(), query, sessions, 2, context.env.now_s())
+    memory_service(context)?.context(query, sessions, 2)
+}
+
+/// `dunk_api.h_memory_stats`.
+pub fn h_memory_stats(context: &HandlerContext<'_>, _args: Args) -> Result<Value, DunkError> {
+    memory_service(context)?.stats()
+}
+
+/// `dunk_api.h_memory_status`.
+pub fn h_memory_status(context: &HandlerContext<'_>, _args: Args) -> Result<Value, DunkError> {
+    memory_service(context)?.status()
+}
+
+/// `dunk_api.h_memory_ingest`: enqueue only; lifecycle owns starting the worker.
+pub fn h_memory_ingest(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let path = memory_arg_string(&args, "path")?;
+    let harness = args.get("harness").and_then(Value::as_str);
+    let project = args.get("project").and_then(Value::as_str);
+    let service = memory_service(context)?;
+    let receipt = service.enqueue_receipt(path, harness, project)?;
+    Ok(json!({
+        "source_id": receipt.source_id,
+        "queue_id": receipt.queue_id,
+        "path": receipt.path,
+        "harness": receipt.harness,
+        "project": receipt.project,
+    }))
 }
 
 fn python_bool_arg(args: &Args, key: &str, default: bool) -> bool {
@@ -1557,11 +2708,10 @@ fn python_bool_arg(args: &Args, key: &str, default: bool) -> bool {
 
 fn python_float(value: &Value) -> Result<f64, DunkError> {
     match value {
-        Value::Number(number) => number
-            .as_f64()
-            .ok_or_else(|| DunkError::Refused("number is outside float range".into())),
+        Value::Number(number) => crate::github::parse_python_json_float(&number.to_string())
+            .map_err(|message| DunkError::Refused(message.into())),
         Value::Bool(value) => Ok(if *value { 1.0 } else { 0.0 }),
-        Value::String(value) => value.parse::<f64>().map_err(|_| {
+        Value::String(value) => crate::github::parse_python_float(value).ok_or_else(|| {
             DunkError::Refused(format!("could not convert string to float: '{value}'"))
         }),
         Value::Null => Ok(0.0),
@@ -1712,6 +2862,238 @@ pub fn h_task_read(context: &HandlerContext<'_>, args: Args) -> Result<Value, Du
     Ok(task.wire)
 }
 
+/// `dunk_api.h_task_update`.
+pub fn h_task_update(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let pane = context.self_pane_id();
+    let role = context.flock.caller_role(pane, context.env)?;
+    if !matches!(role.as_str(), "owner" | "system" | "web") {
+        let touched = ["status", "assignees", "multi_assignee", "block_reason"]
+            .into_iter()
+            .filter(|key| args.contains_key(*key))
+            .collect::<Vec<_>>();
+        if !touched.is_empty() {
+            return Err(DunkError::Refused(format!(
+                "task update cannot change {} for role {role}: status moves through next/complete/block, and assignment is the owner's",
+                touched.join(", ")
+            )));
+        }
+    }
+    let assignee_values = task_values(args.get("assignees"));
+    let assignees = assignee_values
+        .as_ref()
+        .map(|values| values.iter().map(String::as_str).collect::<Vec<_>>());
+    let depends_values = task_values(args.get("depends_on"));
+    let depends_on = depends_values
+        .as_ref()
+        .map(|values| values.iter().map(String::as_str).collect::<Vec<_>>());
+    let parent_id_value = args.get("parent_id").map(|value| {
+        if truthy(value) {
+            Some(python_value_string(value))
+        } else {
+            None
+        }
+    });
+    let parent_id = parent_id_value.as_ref().map(|value| value.as_deref());
+    let raw_block_reason = args.get("block_reason").map(|value| {
+        if value.is_null() {
+            None
+        } else {
+            Some(value.clone())
+        }
+    });
+    let title = python_optional_string_arg(&args, "title");
+    let body = python_optional_string_arg(&args, "body");
+    let status = python_optional_string_arg(&args, "status");
+    let priority = python_optional_string_arg(&args, "priority");
+    let update = crate::flock::commands_tasks::TaskUpdateArgs {
+        title: title.as_deref(),
+        body: body.as_deref(),
+        status: status.as_deref(),
+        priority: priority.as_deref(),
+        parent_id,
+        assignees: assignees.as_deref(),
+        depends_on: depends_on.as_deref(),
+        block_reason: None,
+        multi_assignee: args
+            .contains_key("multi_assignee")
+            .then(|| python_bool_arg(&args, "multi_assignee", false)),
+    };
+    let id = args.get("id").map(python_value_string).unwrap_or_default();
+    let task = context.block_on(context.flock.task_update_wire_with_raw_block_reason(
+        &id,
+        update,
+        raw_block_reason,
+        pane,
+    ))??;
+    Ok(task.wire)
+}
+
+/// `dunk_api.h_task_assign`.
+pub fn h_task_assign(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let pane = context.self_pane_id();
+    let role = context.flock.caller_role(pane, context.env)?;
+    if !matches!(role.as_str(), "owner" | "system" | "web") {
+        return Err(DunkError::Refused(format!(
+            "task assign requires the owner role (caller is {role}); lanes pull work with task next, they are not handed it"
+        )));
+    }
+    let values = task_values(args.get("assignees"));
+    let assignees = values
+        .as_ref()
+        .map(|values| values.iter().map(String::as_str).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let mode_value = args.get("mode").filter(|value| truthy(value));
+    let id = args.get("id").map(python_value_string).unwrap_or_default();
+    let task = context.block_on(context.flock.task_assign_wire_with_mode_parser(
+        &id,
+        &assignees,
+        || match mode_value {
+            None => Ok("add".to_string()),
+            Some(Value::String(value)) => Ok(value.clone()),
+            Some(value) => Err(DunkError::Refused(format!(
+                "'{}' object has no attribute 'strip'",
+                python_type_name(value)
+            ))),
+        },
+        pane,
+    ))??;
+    Ok(task.wire)
+}
+
+/// `dunk_api.h_task_note`.
+pub fn h_task_note(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let id = args.get("id").map(python_value_string).unwrap_or_default();
+    let event = args
+        .get("event")
+        .filter(|value| truthy(value))
+        .cloned()
+        .unwrap_or_else(|| json!("note"));
+    let meta = match args.get("reason").filter(|value| truthy(value)) {
+        Some(reason) => json!({"reason": reason}),
+        None => json!({}),
+    };
+    context.block_on(
+        context
+            .flock
+            .task_note_wire(&id, &event, context.self_pane_id(), &meta),
+    )?
+}
+
+/// `dunk_api.h_task_block`.
+pub fn h_task_block(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let id = args.get("id").map(python_value_string).unwrap_or_default();
+    let task = context.block_on(context.flock.task_block_wire(
+        &id,
+        args.get("reason"),
+        context.self_pane_id(),
+    ))??;
+    Ok(task.wire)
+}
+
+/// `dunk_api.h_task_unblock`.
+pub fn h_task_unblock(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let id = args.get("id").map(python_value_string).unwrap_or_default();
+    let task = context.block_on(context.flock.task_unblock_wire(&id, context.self_pane_id()))??;
+    Ok(task.wire)
+}
+
+/// `dunk_api.h_task_cancel`.
+pub fn h_task_cancel(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let id = args.get("id").map(python_value_string).unwrap_or_default();
+    context.block_on(context.flock.task_cancel_wire(
+        &id,
+        args.get("reason"),
+        context.self_pane_id(),
+    ))?
+}
+
+/// `dunk_api.h_task_next`.
+pub fn h_task_next(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let pane = context.self_pane_id();
+    let scope = python_scope_arg(args.get("scope"));
+    // `current_caller` is request-thread state; capture it before this future may hop workers.
+    let caller = context.flock.caller_identity();
+    context.block_on(context.flock.task_next_wire_with_lease_parser(
+        context.env,
+        scope.as_deref(),
+        || python_lease_seconds(&args),
+        python_bool_arg(&args, "allow_busy", false),
+        caller,
+        pane,
+    ))?
+}
+
+/// `dunk_api.h_task_heartbeat`.
+pub fn h_task_heartbeat(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let pane = context.self_pane_id();
+    let id = args.get("id").map(python_value_string).unwrap_or_default();
+    let caller = context.flock.caller_identity();
+    let (expires_at, lease_seconds) =
+        context.block_on(context.flock.task_heartbeat_with_lease_parser(
+            &id,
+            || python_lease_seconds(&args),
+            caller,
+            pane,
+        ))??;
+    Ok(json!({
+        "task_id": id,
+        "pane_id": pane,
+        "expires_at": crate::github::python_float_json_value(expires_at)
+            .expect("successful heartbeat expiry cannot be NaN"),
+        "lease_seconds": crate::github::python_float_json_value(lease_seconds)
+            .expect("successful heartbeat lease cannot be NaN"),
+    }))
+}
+
+fn python_lease_seconds(args: &Args) -> Result<Option<f64>, DunkError> {
+    let lease_seconds = args
+        .get("lease_seconds")
+        .filter(|value| truthy(value))
+        .map(python_float)
+        .transpose()?;
+    if lease_seconds.is_some_and(|lease| lease <= 0.0) {
+        return Err(DunkError::Refused("lease_seconds must be positive".into()));
+    }
+    Ok(lease_seconds)
+}
+
+/// `dunk_api.h_task_release`.
+pub fn h_task_release(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let id = args.get("id").map(python_value_string).unwrap_or_default();
+    let task = context.block_on(context.flock.task_release_wire(&id, context.self_pane_id()))??;
+    Ok(task.wire)
+}
+
+fn python_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "NoneType",
+        Value::Bool(_) => "bool",
+        Value::Number(number) if number.is_i64() || number.is_u64() => "int",
+        Value::Number(_) => "float",
+        Value::String(_) => "str",
+        Value::Array(_) => "list",
+        Value::Object(_) => "dict",
+    }
+}
+
+impl Dispatcher {
+    /// Register only the T39 task-completion handler.
+    pub fn register_task_complete(&mut self) {
+        self.register("task_complete", h_task_complete);
+    }
+}
+
+/// `dunk_api.h_task_complete`.
+pub fn h_task_complete(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let id = args.get("id").map(python_value_string).unwrap_or_default();
+    let by = task_string_arg(&args, "by", "task_complete")?;
+    let verdict = task_string_arg(&args, "verdict", "task_complete")?;
+    let landed = python_bool_arg(&args, "landed", true);
+    context
+        .flock
+        .task_complete(context, &id, by, verdict, landed)
+}
+
 /// `dunk_api.h_task_delete`.
 pub fn h_task_delete(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
     let id = args.get("id").map(python_value_string).unwrap_or_default();
@@ -1725,7 +3107,7 @@ pub fn h_task_list(context: &HandlerContext<'_>, args: Args) -> Result<Value, Du
     let status = task_string_arg(&args, "status", "task_list")?;
     let assignee = task_string_arg(&args, "assignee", "task_list")?;
     let kind = task_string_arg(&args, "kind", "task_list")?;
-    let limit = task_list_limit(&args)?;
+    let limit = python_int_arg(&args, "limit", 200)?;
     let (scope, tasks) = context.block_on(context.flock.task_list_wire(
         scope,
         status,
@@ -1771,34 +3153,12 @@ pub fn not_ported(name: &str) -> DunkError {
     DunkError::Refused(format!("command {name} is not ported yet"))
 }
 
-/// Python `repr(str)` for the names a client can send (single quotes unless the text has a
-/// single quote and no double quote; backslash and control characters escaped).
+/// Python `repr(str)` shared with native recovery's Unicode-aware formatter.
 fn py_repr(text: &str) -> String {
-    let quote = if text.contains('\'') && !text.contains('"') {
-        '"'
-    } else {
-        '\''
-    };
-    let mut out = String::from(quote);
-    for ch in text.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if c == quote => {
-                out.push('\\');
-                out.push(c);
-            }
-            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
-                out.push_str(&format!("\\x{:02x}", c as u32))
-            }
-            c => out.push(c),
-        }
-    }
-    out.push(quote);
-    out
+    crate::recovery_native::prompt_python_string_repr(text)
 }
 
 #[cfg(test)]
 mod tests;
+
+mod task_statistics;

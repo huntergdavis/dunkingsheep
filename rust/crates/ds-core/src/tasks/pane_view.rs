@@ -75,7 +75,8 @@ pub(super) fn row_wire(row: &Row<'_>) -> rusqlite::Result<Map<String, Value>> {
         let value = match row.get::<_, SqlValue>(index)? {
             SqlValue::Null => Value::Null,
             SqlValue::Integer(value) => json!(value),
-            SqlValue::Real(value) => json!(value),
+            SqlValue::Real(value) => crate::github::python_float_json_value(value)
+                .expect("SQLite REAL cannot contain NaN"),
             SqlValue::Text(value) => Value::String(value),
             SqlValue::Blob(_) => {
                 return Err(rusqlite::Error::InvalidColumnType(
@@ -114,7 +115,15 @@ pub(super) fn decorated_wire(
         ("is_global", json!(d.is_global)),
         ("leases", json!(leases)),
         ("claimed_by", json!(d.claimed_by)),
-        ("lease_expires_at", json!(d.lease_expires_at)),
+        (
+            "lease_expires_at",
+            d.lease_expires_at
+                .map(|value| {
+                    crate::github::python_float_json_value(value)
+                        .expect("task lease expiry cannot be NaN")
+                })
+                .unwrap_or(Value::Null),
+        ),
         ("blocked_by", json!(d.deps.blocked_by)),
         ("unlanded_dependencies", json!(d.deps.unlanded_dependencies)),
         ("dead_dependencies", json!(d.deps.dead_dependencies)),

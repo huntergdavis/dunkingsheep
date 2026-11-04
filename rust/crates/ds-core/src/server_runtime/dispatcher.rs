@@ -7,32 +7,21 @@
 use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
-use tokio::runtime::Handle;
 
-use super::RequestRuntimeAdapter;
+use super::{services::RuntimeServices, RequestRuntimeAdapter};
 use crate::api;
 use crate::error::DunkError;
 use crate::flock::mailbox::MailboxEnv;
 use crate::flock::panes::PaneInfoEnv;
-use crate::flock::Flock;
 use crate::metrics::Event;
 use crate::server::{Dispatcher, PaneInfo, RequestCtx};
 use crate::server_runtime::TerminalCallAdapter;
-use crate::terminal::Terminal;
-
-#[allow(dead_code)] // The server startup assembly is outside this dispatcher leaf.
-pub(crate) type TerminalFactory = Arc<dyn Fn() -> Box<dyn Terminal> + Send + Sync + 'static>;
-
 /// Shared server dispatcher; terminal instances stay local to each method call.
-#[allow(dead_code)] // Constructed by the dependent production server startup assembly.
 pub(crate) struct RuntimeDispatcher {
-    flock: Arc<Flock>,
-    runtime: Handle,
-    terminal_factory: TerminalFactory,
+    services: Arc<RuntimeServices>,
     handlers: api::Dispatcher,
 }
 
-#[allow(dead_code)] // Used when the staged dispatcher is wired by server startup.
 struct RolePaneQuery<'a> {
     list_panes_grouped: &'a dyn Fn() -> Result<Vec<Value>, DunkError>,
     get_pane: &'a dyn Fn(&str) -> Option<Value>,
@@ -59,19 +48,8 @@ impl PaneInfoEnv for RolePaneQuery<'_> {
 }
 
 impl RuntimeDispatcher {
-    #[allow(dead_code)] // Constructed by the dependent production server startup assembly.
-    pub(crate) fn new(
-        flock: Arc<Flock>,
-        runtime: Handle,
-        terminal_factory: TerminalFactory,
-        handlers: api::Dispatcher,
-    ) -> Self {
-        Self {
-            flock,
-            runtime,
-            terminal_factory,
-            handlers,
-        }
+    pub(super) fn new(services: Arc<RuntimeServices>, handlers: api::Dispatcher) -> Self {
+        Self { services, handlers }
     }
 }
 
@@ -81,8 +59,17 @@ impl Dispatcher for RuntimeDispatcher {
             .as_object()
             .cloned()
             .ok_or_else(|| DunkError::Refused("args must be an object".into()))?;
-        let terminal = Mutex::new((self.terminal_factory)());
-        let adapter = RequestRuntimeAdapter::new(&self.flock, ctx, &self.runtime, &terminal);
+        let terminal = Mutex::new((self.services.terminal_factory)());
+        let adapter = RequestRuntimeAdapter::new(
+            &self.services.flock,
+            ctx,
+            self.services.runtime.handle(),
+            &terminal,
+        )
+        .with_outbox(&self.services.outbox)?
+        .with_next_jobs(&self.services.next_jobs)?
+        .with_dunk_runtime(&self.services)?
+        .with_owner_push(&self.services)?;
         let context = adapter.handler_context();
         let gate = api::FlockGate(&context);
         // api::Dispatcher::dispatch installs and drops RequestCallerGuard around the real
@@ -94,11 +81,11 @@ impl Dispatcher for RuntimeDispatcher {
         if pane_id.is_empty() {
             return Ok(None);
         }
-        let terminal = Mutex::new((self.terminal_factory)());
+        let terminal = Mutex::new((self.services.terminal_factory)());
         let terminal = TerminalCallAdapter {
-            flock: &self.flock,
+            flock: &self.services.flock,
             terminal: &terminal,
-            runtime: &self.runtime,
+            runtime: self.services.runtime.handle(),
         };
         let list_panes_grouped = || terminal.try_list_panes_grouped();
         let get_pane = |id: &str| PaneInfoEnv::get_pane(&terminal, id);
@@ -108,6 +95,7 @@ impl Dispatcher for RuntimeDispatcher {
             list_error: Mutex::new(None),
         };
         let pane = self
+            .services
             .flock
             .role_pane_info(&query, pane_id, crate::clock::now_s());
         if pane.is_none() {
@@ -116,7 +104,7 @@ impl Dispatcher for RuntimeDispatcher {
                 .into_inner()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
             {
-                self.flock.forget_role_pane(pane_id);
+                self.services.flock.forget_role_pane(pane_id);
                 return Err(error);
             }
         }
@@ -129,7 +117,7 @@ impl Dispatcher for RuntimeDispatcher {
     }
 
     fn record_identity_mismatch(&self, pane_id: &str, reason: &str) {
-        if let Some(metrics) = self.flock.stores().metrics {
+        if let Some(metrics) = self.services.flock.stores().metrics {
             metrics.record(&Event {
                 at: crate::clock::now_s(),
                 kind: "identity.mismatch".into(),

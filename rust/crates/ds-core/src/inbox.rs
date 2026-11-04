@@ -388,6 +388,17 @@ pub fn list(
     limit: usize,
     now: f64,
 ) -> Result<Vec<Summary>, DunkError> {
+    list_signed(pool, mailbox, unread_only, limit as i64, now)
+}
+
+/// Preserve SQLite's negative LIMIT (unlimited) for the raw command boundary.
+pub fn list_signed(
+    pool: &ReadPool,
+    mailbox: &str,
+    unread_only: bool,
+    limit: i64,
+    now: f64,
+) -> Result<Vec<Summary>, DunkError> {
     let (condition, params) = mailbox_where(mailbox, "mailbox");
     let mut where_clause = format!("{condition} AND state != 'cancelled'");
     if unread_only {
@@ -409,7 +420,7 @@ pub fn list(
             .collect();
         // Bound as an INTEGER: the reviewer showed SQLite coerces the text form, but a
         // coercion is not a type and `LIMIT` is where a wrong type would be silent.
-        bound.push(rusqlite::types::Value::Integer(limit as i64));
+        bound.push(rusqlite::types::Value::Integer(limit));
         let rows = statement
             .query_map(rusqlite::params_from_iter(bound.iter()), |row| {
                 let state: String = row.get("state")?;
@@ -531,6 +542,18 @@ pub struct Status {
 }
 
 pub fn status(pool: &ReadPool, message_id: &str, now: f64) -> Result<Status, DunkError> {
+    let id = rusqlite::types::Value::Text(message_id.to_string());
+    status_bound(pool, &id, &format!("{message_id:?}"), now)
+}
+
+/// Status using Python sqlite3's raw scalar binding and caller-provided Python repr
+/// for the missing-row error text.
+pub fn status_bound(
+    pool: &ReadPool,
+    message_id: &rusqlite::types::Value,
+    message_id_repr: &str,
+    now: f64,
+) -> Result<Status, DunkError> {
     let sql = "SELECT id, state, mailbox, mailbox_label, pane_id, sender, created_at, read_at, \
                acked_at, archived_at, cancelled_at, length(CAST(body AS BLOB)) AS body_bytes, \
                reason, notify_state, notify_reason, notify_at, notify_transport_id, \
@@ -581,7 +604,7 @@ pub fn status(pool: &ReadPool, message_id: &str, now: f64) -> Result<Status, Dun
         match rows.next() {
             Some(row) => row.map_err(map_sqlite),
             None => Err(DunkError::Refused(format!(
-                "no message with id {message_id:?}"
+                "no message with id {message_id_repr}"
             ))),
         }
     })
@@ -628,6 +651,38 @@ pub fn stats(pool: &ReadPool, now: f64) -> Result<Vec<MailboxStats>, DunkError> 
             })
             .map_err(map_sqlite)?;
         rows.map(|row| row.map_err(map_sqlite)).collect()
+    })
+}
+
+/// `_seen_latencies`: recent read delays for one mailbox, ascending for median/last views.
+/// The SQL selects the newest `limit` non-null reads first, matching Python's query before
+/// sorting the resulting durations. A zero limit returns no samples.
+pub fn seen_latencies(pool: &ReadPool, mailbox: &str, limit: usize) -> Result<Vec<f64>, DunkError> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let (where_sql, mailbox_params) = mailbox_where(mailbox, "mailbox");
+    let sql = format!(
+        "SELECT created_at, read_at FROM messages WHERE {where_sql} AND read_at IS NOT NULL \
+         ORDER BY read_at DESC LIMIT ?"
+    );
+    let mut params: Vec<rusqlite::types::Value> = mailbox_params
+        .into_iter()
+        .map(rusqlite::types::Value::Text)
+        .collect();
+    params.push((limit.min(i64::MAX as usize) as i64).into());
+    pool.with(|connection: &Connection| {
+        let mut statement = connection.prepare(&sql).map_err(map_sqlite)?;
+        let rows = statement
+            .query_map(rusqlite::params_from_iter(params.iter()), |row| {
+                let created_at: f64 = row.get("created_at")?;
+                let read_at: f64 = row.get("read_at")?;
+                Ok((read_at - created_at).max(0.0))
+            })
+            .map_err(map_sqlite)?;
+        let mut latencies = rows.collect::<Result<Vec<_>, _>>().map_err(map_sqlite)?;
+        latencies.sort_by(f64::total_cmp);
+        Ok(latencies)
     })
 }
 

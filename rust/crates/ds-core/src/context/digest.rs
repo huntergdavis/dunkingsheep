@@ -92,7 +92,7 @@ pub fn stale_mark(entry: &Entry, now: NaiveDateTime) -> &'static str {
 impl Store {
     /// `verified`: does the file on disk match what the daemon wrote? (bootstrap counts.)
     pub fn verified(&self, entry: &Entry, ledger: &mut Ledger) -> bool {
-        let Ok(text) = std::fs::read_to_string(&entry.path) else {
+        let Ok(text) = super::read_text(&entry.path) else {
             return false;
         };
         matches!(

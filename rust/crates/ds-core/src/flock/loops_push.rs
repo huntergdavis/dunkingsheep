@@ -26,6 +26,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 
+use super::loop_env::LoopFuture;
 use super::Flock;
 use crate::error::DunkError;
 use crate::push::{push_targets, Via, BUSY_STATUSES};
@@ -44,7 +45,7 @@ pub fn push_interval() -> Duration {
 /// What one push sweep reaches outside the task store.
 pub trait PushEnv: Send + Sync {
     /// `self.herdr.list_panes()`.
-    fn list_panes(&self) -> Result<Vec<Value>, DunkError>;
+    fn list_panes(&self) -> LoopFuture<'_, Result<Vec<Value>, DunkError>>;
     /// `caller_role(pane)`: the RESOLVED role (t975), not the registry string.
     fn caller_role(&self, pane_id: &str, pane_info: Option<&Value>) -> String;
     /// `roles.describe()["lanes"]` keys; `None` when the registry is unavailable (followers only).
@@ -56,15 +57,26 @@ pub trait PushEnv: Send + Sync {
     /// `_lane_agent_alive`: `Some(false)` is evidence of a dead lane, `None` is "cannot say".
     fn lane_agent_alive(&self, pane_id: &str) -> Option<bool>;
     /// `_unread_mail`: mail the lane must act on holds it back.
-    fn unread_mail(&self, pane_id: &str) -> bool;
+    fn unread_mail<'a>(&'a self, pane_id: &'a str) -> LoopFuture<'a, bool>;
     /// `_announce_task`: the inbox message and `last_message`.
-    fn announce_task(&self, pane_id: &str, task: &Task, lease_seconds: f64);
+    fn announce_task<'a>(
+        &'a self,
+        pane_id: &'a str,
+        task: &'a Task,
+        lease_seconds: f64,
+    ) -> LoopFuture<'a, ()>;
     /// `self.next_jobs.recover()` at loop start.
-    fn recover_next_jobs(&self) {}
+    fn recover_next_jobs(&self) -> LoopFuture<'_, ()> {
+        Box::pin(async {})
+    }
     /// `self.allocator.tick()`.
-    fn allocator_tick(&self) {}
+    fn allocator_tick(&self) -> LoopFuture<'_, ()> {
+        Box::pin(async {})
+    }
     /// `self.next_jobs.tick()`.
-    fn next_jobs_tick(&self) {}
+    fn next_jobs_tick(&self) -> LoopFuture<'_, ()> {
+        Box::pin(async {})
+    }
 }
 
 /// One decision of a sweep, the same words the Python logs.
@@ -99,12 +111,13 @@ impl Flock {
     }
 
     /// `_push_targets`: pane id -> (scope, why): explicit followers plus registered lanes.
-    pub fn push_target_map(
+    pub async fn push_target_map(
         &self,
         env: &dyn PushEnv,
     ) -> std::collections::BTreeMap<String, (String, Via)> {
         let panes = env
             .list_panes()
+            .await
             .unwrap_or_default()
             .into_iter()
             .filter_map(|pane| {
@@ -153,7 +166,7 @@ impl Flock {
     /// The gates are the ones the task names and nothing else: role, busy-ness, unread mail.
     pub async fn push_tasks(&self, env: &dyn PushEnv) -> Vec<PushDecision> {
         let mut decisions = Vec::new();
-        let panes: std::collections::BTreeMap<String, Value> = match env.list_panes() {
+        let panes: std::collections::BTreeMap<String, Value> = match env.list_panes().await {
             Ok(list) => list
                 .into_iter()
                 .filter_map(|p| {
@@ -225,7 +238,7 @@ impl Flock {
                 );
                 continue;
             }
-            if env.unread_mail(pane_id) {
+            if env.unread_mail(pane_id).await {
                 note(pane_id, "skip", "unread_mail".into());
                 continue;
             }
@@ -259,7 +272,7 @@ impl Flock {
                     ..
                 }) => {
                     note(pane_id, "claim", format!("{} via={why}", task.id));
-                    env.announce_task(pane_id, &task, lease_seconds);
+                    env.announce_task(pane_id, &task, lease_seconds).await;
                 }
             }
         }
@@ -274,7 +287,7 @@ pub async fn run_push(
     interval: Duration,
     mut stop: tokio::sync::watch::Receiver<bool>,
 ) {
-    env.recover_next_jobs();
+    env.recover_next_jobs().await;
     let wake = flock.push_wake();
     loop {
         tokio::select! {
@@ -290,8 +303,8 @@ pub async fn run_push(
         if *stop.borrow() {
             return;
         }
-        env.allocator_tick();
-        env.next_jobs_tick();
+        env.allocator_tick().await;
+        env.next_jobs_tick().await;
         flock.push_tasks(env.as_ref()).await;
     }
 }

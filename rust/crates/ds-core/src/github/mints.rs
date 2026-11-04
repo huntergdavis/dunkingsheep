@@ -149,7 +149,7 @@ pub fn author_from_mints(
 }
 
 #[derive(Debug)]
-enum FloatError {
+pub(super) enum FloatError {
     Invalid,
     Overflow,
 }
@@ -275,11 +275,7 @@ impl Json {
     }
     fn float(&self, value: &Value) -> Result<f64, FloatError> {
         if let Some(raw) = self.raw(value) {
-            let result = parse_float(raw)?;
-            if integer(raw) && !result.is_finite() {
-                return Err(FloatError::Overflow);
-            }
-            return Ok(result);
+            return parse_json_float(raw);
         }
         match value {
             Value::Bool(value) => Ok(if *value { 1.0 } else { 0.0 }),
@@ -400,7 +396,24 @@ fn string_end(bytes: &[u8], start: usize) -> Option<usize> {
 fn integer(raw: &str) -> bool {
     !raw.contains(['.', 'e', 'E']) && !matches!(raw, "NaN" | "Infinity" | "-Infinity")
 }
-fn parse_float(raw: &str) -> Result<f64, FloatError> {
+fn parse_json_float(raw: &str) -> Result<f64, FloatError> {
+    let result = parse_float(raw)?;
+    if integer(raw) && !result.is_finite() {
+        return Err(FloatError::Overflow);
+    }
+    Ok(result)
+}
+pub(super) fn parse_json_number_float(raw: &str) -> Result<f64, &'static str> {
+    parse_json_float(raw).map_err(|error| error.message())
+}
+
+pub(super) fn float_json_value(value: f64) -> Option<Value> {
+    // Keep the existing adapter signature and infinity carrier. The common codec
+    // also carries NaN numerically, before callers can substitute JSON null.
+    Some(crate::wire_json::float_value(value))
+}
+
+pub(super) fn parse_float(raw: &str) -> Result<f64, FloatError> {
     let converted: String = raw
         .trim()
         .chars()
@@ -441,6 +454,11 @@ fn parse_float(raw: &str) -> Result<f64, FloatError> {
         _ => raw.parse().map_err(|_| FloatError::Invalid),
     }
 }
+/// Render an already validated serde JSON number using Python string semantics.
+pub(crate) fn python_number_string(number: &serde_json::Number) -> String {
+    number_text(&number.to_string(), false)
+}
+
 fn number_text(raw: &str, json: bool) -> String {
     if integer(raw) {
         return if raw == "-0" { "0".into() } else { raw.into() };

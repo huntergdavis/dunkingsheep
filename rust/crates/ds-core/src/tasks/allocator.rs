@@ -13,7 +13,7 @@
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Map, Value};
 
-use super::next_job::{handoffs_in, record_in};
+use super::next_job::{handoffs_in, record_in, RecordIn};
 use super::{decorate_conn, default_lease_s, order_key, Tasks};
 use crate::db;
 use crate::error::DunkError;
@@ -127,12 +127,12 @@ fn offer_in(
     conn: &Connection,
     task_id: &str,
     pool: &str,
-    role: &str,
-    requires: &Value,
+    role_requirements: (&str, &Value),
     excluded: &[String],
     actor: &str,
     now: f64,
 ) -> Result<(), DunkError> {
+    let (role, requires) = role_requirements;
     let task = decorate_conn(conn, task_id, None, now)?;
     if task.task.scope != "global" || !matches!(task.task.status.as_str(), "open" | "blocked") {
         return refuse("only open/blocked global backlog can be offered");
@@ -293,7 +293,17 @@ fn review_in(
                 let pane = handoff.get("pane_id").and_then(Value::as_str).unwrap_or("");
                 let from_task = handoff.get("from_task").and_then(Value::as_str);
                 record_in(
-                    conn, &task_id, pane, from_task, None, 0, None, now, &details,
+                    conn,
+                    RecordIn {
+                        task_id: &task_id,
+                        pane_id: pane,
+                        from_task,
+                        message_id: None,
+                        attempt: 0,
+                        reason: None,
+                        now,
+                        details: &details,
+                    },
                 )?;
             }
         }
@@ -319,7 +329,13 @@ fn review_in(
     excluded.sort();
     excluded.dedup();
     offer_in(
-        conn, &task_id, pool, "reviewer", requires, &excluded, author, now,
+        conn,
+        &task_id,
+        pool,
+        ("reviewer", requires),
+        &excluded,
+        author,
+        now,
     )?;
     conn.execute(
         "INSERT INTO allocation_reviews VALUES (?,?,?,?) ON CONFLICT(source_id) DO UPDATE SET revision=excluded.revision",
@@ -540,7 +556,19 @@ fn allocate_in(
             ] {
                 handoff.insert(key.into(), value);
             }
-            record_in(conn, &id, pane, None, None, 0, None, now, &handoff)?;
+            record_in(
+                conn,
+                RecordIn {
+                    task_id: &id,
+                    pane_id: pane,
+                    from_task: None,
+                    message_id: None,
+                    attempt: 0,
+                    reason: None,
+                    now,
+                    details: &handoff,
+                },
+            )?;
             conn.execute(
                 "UPDATE allocation_offers SET state='assigned' WHERE task_id=?",
                 params![id],
@@ -714,7 +742,7 @@ impl Tasks {
                 if reviewed.is_some() {
                     return refuse("canonical review cannot be reoffered as worker work");
                 }
-                offer_in(&tx, &id, &pool, "worker", &requires, &[], &actor, now)?;
+                offer_in(&tx, &id, &pool, ("worker", &requires), &[], &actor, now)?;
                 tx.commit().map_err(db::map_sqlite)
             })
             .await?;
@@ -776,6 +804,160 @@ impl Tasks {
                 Ok(results)
             })
             .await
+    }
+}
+
+/// Captured idleness proof; revalidated while the real turn and outbox locks are held.
+#[derive(Clone)]
+pub(crate) struct AllocationCandidate {
+    pub turn_id: String,
+    pub ended_at: Option<f64>,
+    pub caller: Value,
+}
+
+pub(crate) enum GuardedAllocation {
+    RetryLock,
+    RetryBusy,
+    Committed(Vec<Value>),
+}
+
+/// Restores the actor's SQLite timeout even if the transaction panics.
+struct TimeoutRestore<'a> {
+    conn: &'a Connection,
+    previous_ms: u64,
+    quarantine: &'a std::sync::atomic::AtomicBool,
+    restored: bool,
+    #[cfg(test)]
+    fail_restore: bool,
+}
+impl TimeoutRestore<'_> {
+    fn restore(&mut self) -> Result<(), DunkError> {
+        #[cfg(test)]
+        if self.fail_restore {
+            self.quarantine
+                .store(true, std::sync::atomic::Ordering::Release);
+            return Err(DunkError::Unavailable(
+                "injected timeout restore failure".into(),
+            ));
+        }
+        match self
+            .conn
+            .busy_timeout(std::time::Duration::from_millis(self.previous_ms))
+        {
+            Ok(()) => {
+                self.restored = true;
+                Ok(())
+            }
+            Err(error) => {
+                self.quarantine
+                    .store(true, std::sync::atomic::Ordering::Release);
+                Err(db::map_sqlite(error))
+            }
+        }
+    }
+}
+impl Drop for TimeoutRestore<'_> {
+    fn drop(&mut self) {
+        if !self.restored {
+            let _ = self.restore();
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct AllocationCommitBarrier {
+    pub(crate) entered: std::sync::mpsc::Sender<()>,
+    pub(crate) release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl Tasks {
+    /// Fixed actor job: acquire neither Flock lock nor SQLite write lock by waiting.
+    pub(crate) async fn allocation_try_guarded(
+        &self,
+        flock: std::sync::Arc<crate::flock::Flock>,
+        candidates: BTreeMap<String, AllocationCandidate>,
+    ) -> Result<GuardedAllocation, DunkError> {
+        #[cfg(test)]
+        let result = self
+            .allocation_try_guarded_inner(flock, candidates, None)
+            .await;
+        #[cfg(not(test))]
+        let result = self.allocation_try_guarded_inner(flock, candidates).await;
+        result
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn allocation_try_guarded_with_barrier(
+        &self,
+        flock: std::sync::Arc<crate::flock::Flock>,
+        candidates: BTreeMap<String, AllocationCandidate>,
+        barrier: std::sync::Arc<AllocationCommitBarrier>,
+    ) -> Result<GuardedAllocation, DunkError> {
+        self.allocation_try_guarded_inner(flock, candidates, Some(barrier))
+            .await
+    }
+
+    async fn allocation_try_guarded_inner(
+        &self,
+        flock: std::sync::Arc<crate::flock::Flock>,
+        candidates: BTreeMap<String, AllocationCandidate>,
+        #[cfg(test)] barrier: Option<std::sync::Arc<AllocationCommitBarrier>>,
+    ) -> Result<GuardedAllocation, DunkError> {
+        let attached = flock
+            .stores()
+            .tasks
+            .ok_or_else(|| DunkError::Refused("task store unavailable".into()))?;
+        if !std::ptr::eq(attached.as_ref(), self) {
+            return Err(DunkError::Refused("allocator task store mismatch".into()));
+        }
+        self.writer.call_quarantinable(move |conn, quarantine| {
+            let turns = match flock.turn_states.try_lock() {
+                Ok(guard) => guard,
+                Err(std::sync::TryLockError::WouldBlock) => return Ok(GuardedAllocation::RetryLock),
+                Err(std::sync::TryLockError::Poisoned(_)) => return Err(DunkError::Refused("turn state lock poisoned".into())),
+            };
+            let outbox = match flock.outbox.try_lock() {
+                Ok(guard) => guard,
+                Err(std::sync::TryLockError::WouldBlock) => return Ok(GuardedAllocation::RetryLock),
+                Err(std::sync::TryLockError::Poisoned(_)) => return Err(DunkError::Refused("outbox lock poisoned".into())),
+            };
+            let idle = candidates.into_iter().filter_map(|(pane, candidate)| {
+                let state = turns.get(&pane)?;
+                let pending = outbox.get(&pane).is_some_and(|q| q.iter().any(|m| m.status == "queued"));
+                (state.turn_id == candidate.turn_id && state.ended_at == candidate.ended_at && !pending)
+                    .then_some((pane, candidate.caller))
+            }).collect::<BTreeMap<_, _>>();
+            let previous_ms: u64 = conn.pragma_query_value(None, "busy_timeout", |r| r.get(0)).map_err(db::map_sqlite)?;
+            let mut restore = TimeoutRestore { conn, previous_ms, quarantine, restored: false, #[cfg(test)] fail_restore: false };
+            conn.busy_timeout(std::time::Duration::ZERO).map_err(db::map_sqlite)?;
+            let outcome = (|| {
+                let tx = match rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate) {
+                    Ok(tx) => tx,
+                    Err(error) => return match db::map_sqlite(error) {
+                        DunkError::Busy => Ok(GuardedAllocation::RetryBusy),
+                        other => Err(other),
+                    },
+                };
+                let result = allocate_in(&tx, &idle, crate::clock::now_s())?;
+                #[cfg(test)]
+                if let Some(barrier) = barrier {
+                    barrier.entered.send(()).map_err(|_| DunkError::Unavailable("allocation barrier closed".into()))?;
+                    barrier.release.lock().unwrap().recv_timeout(std::time::Duration::from_secs(15))
+                        .map_err(|_| DunkError::Unavailable("allocation barrier timed out".into()))?;
+                }
+                tx.commit().map_err(db::map_sqlite)?;
+                Ok(GuardedAllocation::Committed(result))
+            })();
+            let restored = restore.restore();
+            match (outcome, restored) {
+                (Ok(GuardedAllocation::Committed(result)), Err(error)) => {
+                    eprintln!("allocation committed; writer quarantined after timeout restoration: {error}");
+                    Ok(GuardedAllocation::Committed(result))
+                }
+                (_, Err(error)) => Err(error),
+                (outcome, Ok(())) => outcome,
+            }
+        }).await
     }
 }
 

@@ -14,6 +14,22 @@ struct Fixture {
     store: Store,
 }
 
+#[test]
+fn raw_json_float_attachment_path_uses_python_decoded_float_text() {
+    let attachments: serde_json::Value =
+        serde_json::from_str(r#"[0.10000000000000001]"#).expect("JSON number");
+    assert_eq!(
+        vec![PathBuf::from("0.1")],
+        owner_wire_attachment_paths(Some(&attachments)).expect("attachment paths")
+    );
+
+    let overflow: serde_json::Value = serde_json::from_str(r#"[1e400]"#).expect("JSON float");
+    assert_eq!(
+        vec![PathBuf::from("inf")],
+        owner_wire_attachment_paths(Some(&overflow)).expect("infinite float path")
+    );
+}
+
 impl Fixture {
     fn new() -> Self {
         let dir = tempfile::tempdir().expect("tempdir");

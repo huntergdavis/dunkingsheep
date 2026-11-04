@@ -10,37 +10,37 @@ use crate::flock::loop_env::{with_sync_store, LoopFuture};
 use crate::server_runtime::LoopRuntimeAdapter;
 
 impl LoopRuntimeAdapter {
-    #[allow(dead_code)] // The complete ReaperEnv implementation is assembled by t1924.
-    pub(crate) fn helper_reaperenv_list_panes(
+    pub(crate) fn helper_reaperenv_pane_snapshot(
         &self,
-    ) -> LoopFuture<'_, Result<Vec<Value>, DunkError>> {
+    ) -> LoopFuture<'_, (bool, Result<Vec<Value>, DunkError>)> {
         Box::pin(async move {
-            self.with_loop_terminal(|_, terminal| {
-                terminal.with_terminal(|backend| {
-                    backend
-                        .try_list_panes_with_status()
-                        .map(|panes| {
-                            panes
-                                .iter()
-                                .map(|(pane, status)| pane_to_json(pane, status.as_deref()))
-                                .collect()
-                        })
-                        .map_err(|error| DunkError::Refused(error.to_string()))
+            match self
+                .with_loop_terminal(|_, terminal| {
+                    terminal.with_terminal(|backend| {
+                        let live = backend.is_live_backend();
+                        let panes = backend
+                            .try_list_panes_with_status()
+                            .map(|panes| {
+                                panes
+                                    .iter()
+                                    .map(|(pane, status)| pane_to_json(pane, status.as_deref()))
+                                    .collect()
+                            })
+                            .map_err(|error| DunkError::Refused(error.to_string()));
+                        (live, panes)
+                    })
                 })
-            })
-            .await
-            .map_err(|error| {
-                DunkError::Refused(format!("reaper terminal worker failed: {error}"))
-            })?
+                .await
+            {
+                Ok(snapshot) => snapshot,
+                Err(error) => (
+                    false,
+                    Err(DunkError::Refused(format!(
+                        "reaper terminal worker failed: {error}"
+                    ))),
+                ),
+            }
         })
-    }
-
-    #[allow(dead_code)] // The complete ReaperEnv implementation is assembled by t1924.
-    pub(crate) fn helper_reaperenv_is_live(&self) -> bool {
-        // LoopRuntimeAdapter is constructed from configured_loop_terminal_factory, which
-        // refuses fixture and retired backends. Runtime ReaperEnv instances therefore always
-        // represent a live backend; fixture behavior is exercised through the loop test seam.
-        true
     }
 
     #[allow(dead_code)] // The complete ReaperEnv implementation is assembled by t1924.
@@ -143,20 +143,26 @@ impl LoopRuntimeAdapter {
 
     #[allow(dead_code)] // The complete ReaperEnv implementation is assembled by t1924.
     pub(crate) fn helper_reaperenv_memory_maintenance(&self) -> LoopFuture<'_, ()> {
-        let path = self
-            .flock
-            .stores()
-            .memory
-            .map(|pool| pool.path().to_path_buf());
+        let service = self.flock.memory_service();
         Box::pin(async move {
-            let Some(path) = path else {
+            let Some(service) = service else {
                 return;
             };
             let result = with_sync_store(move || {
-                let mut connection = crate::db::open_writer(&path)?;
-                let recovered = crate::memory::ingest::recover_leases(&mut connection)?;
-                let partial = crate::memory::ingest::requeue_partial(&mut connection)?;
-                Ok::<_, DunkError>((recovered, partial))
+                // spawn_blocking retains a Tokio handle. SyncWriter owns a runtime, so
+                // execute on an ordinary thread while only the blocking pool waits.
+                std::thread::Builder::new()
+                    .name("memory-reaper".into())
+                    .spawn(move || {
+                        let recovered = service.recover_leases()?;
+                        let partial = service.requeue_partial()?;
+                        Ok::<_, DunkError>((recovered, partial))
+                    })
+                    .map_err(|error| {
+                        DunkError::Refused(format!("memory maintenance thread: {error}"))
+                    })?
+                    .join()
+                    .map_err(|_| DunkError::Refused("memory maintenance thread panicked".into()))?
             })
             .await;
             match result {
@@ -186,12 +192,14 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::db::{open_writer, ReadPool};
+    use crate::db::open_writer;
     use crate::flock::panes::Stores;
     use crate::flock::Flock;
     use crate::memory::ingest::{apply_full_schema, claim_next, enqueue, finish, Outcome};
+    use crate::memory::service::MemoryService;
     use crate::terminal::fakes::FakeTerminal;
     use crate::terminal::Terminal;
+    use std::time::Duration;
 
     fn flock(dir: &std::path::Path) -> Arc<Flock> {
         Arc::new(Flock::new(
@@ -220,24 +228,29 @@ mod tests {
         drop(memory_writer);
         flock.attach_stores(Stores {
             inbox: Some(inbox),
-            memory: Some(Arc::new(ReadPool::open(&memory_path, 1).unwrap())),
             ..Stores::default()
         });
+        flock
+            .attach_memory_service(Arc::new(
+                MemoryService::open(&memory_path, 1, Duration::from_millis(500), Duration::ZERO)
+                    .unwrap(),
+            ))
+            .unwrap();
         let adapter = LoopRuntimeAdapter::new(flock, fake_terminal_factory());
 
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
-        let panes = runtime
-            .block_on(adapter.helper_reaperenv_list_panes())
-            .unwrap();
+        let panes = runtime.block_on(adapter.helper_reaperenv_pane_snapshot());
+        let (live, panes) = panes;
+        let panes = panes.unwrap();
 
         assert!(!panes.is_empty());
         assert!(panes
             .iter()
             .all(|pane| pane.get("pane_id").and_then(Value::as_str).is_some()));
-        assert!(adapter.helper_reaperenv_is_live());
+        assert!(!live);
         runtime.block_on(async {
             adapter
                 .helper_reaperenv_clear_historical_errors(&BTreeSet::new())
@@ -249,6 +262,68 @@ mod tests {
         });
         adapter.helper_reaperenv_set_last_message("reaper status");
         assert_eq!("reaper status", for_assert.last_message());
+    }
+
+    #[tokio::test]
+    async fn reaper_runtime_clears_only_historical_errors_for_exact_live_panes() {
+        let dir = tempfile::tempdir().unwrap();
+        let flock = flock(dir.path());
+        let payload = json!({"next_id": 3, "dunkers": [
+            {"id":"d1", "running":true, "target_pane_id":"%1", "last_error":"target pane not found"},
+            {"id":"d2", "running":true, "target_pane_id":"%2", "last_error":"target pane not found"}
+        ]});
+        flock._load_dunks(payload.as_object().unwrap());
+        let adapter = LoopRuntimeAdapter::new(Arc::clone(&flock), fake_terminal_factory());
+        adapter
+            .helper_reaperenv_clear_historical_errors(&BTreeSet::from(["%1".to_string()]))
+            .await;
+        let rows = flock.dunks.list();
+        let error =
+            |id: &str| rows.iter().find(|row| row["id"] == id).unwrap()["last_error"].clone();
+        assert_eq!(error("d1"), Value::Null);
+        assert_eq!(error("d2"), json!("target pane not found"));
+    }
+
+    #[tokio::test]
+    async fn reaper_runtime_uses_backend_provenance_from_the_listing_worker() {
+        use crate::tasks::{ClaimOptions, Tasks};
+        use crate::terminal::tmux::TmuxBackend;
+
+        let dir = tempfile::tempdir().unwrap();
+        let flock = flock(dir.path());
+        let tasks = Arc::new(Tasks::open(dir.path().join("tasks.db")).await.unwrap());
+        flock.attach_stores(Stores {
+            tasks: Some(Arc::clone(&tasks)),
+            ..Stores::default()
+        });
+        let task = tasks.add("global", "held", "").await.unwrap();
+        tasks
+            .claim_next(
+                "global",
+                "%1",
+                ClaimOptions {
+                    caller: Some((i32::MAX as i64, Some("1".into()), Some("pi".into()))),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let fixture = LoopRuntimeAdapter::new(Arc::clone(&flock), fake_terminal_factory());
+        let tick = flock.reaper_tick(&fixture).await;
+        assert!(tick.skipped_not_live);
+        assert_eq!(tasks.get(&task.id).await.unwrap().status, "in_progress");
+
+        // A real tmux backend remains live even when its command cannot list panes.
+        let unavailable = dir.path().join("no-such-tmux");
+        let live = LoopRuntimeAdapter::new(
+            Arc::clone(&flock),
+            Arc::new(move || Box::new(TmuxBackend::new(unavailable.clone()))),
+        );
+        let tick = flock.reaper_tick(&live).await;
+        assert!(!tick.skipped_not_live);
+        assert_eq!(tick.panes, None);
+        assert_eq!(tick.requeued.len(), 1);
+        assert_eq!(tasks.get(&task.id).await.unwrap().status, "open");
     }
 
     #[test]
@@ -287,10 +362,10 @@ mod tests {
         drop(writer);
 
         let flock = flock(dir.path());
-        flock.attach_stores(Stores {
-            memory: Some(Arc::new(ReadPool::open(&db_path, 1).unwrap())),
-            ..Stores::default()
-        });
+        let service = Arc::new(
+            MemoryService::open(&db_path, 1, Duration::from_millis(500), Duration::ZERO).unwrap(),
+        );
+        flock.attach_memory_service(Arc::clone(&service)).unwrap();
         let adapter = LoopRuntimeAdapter::new(flock, fake_terminal_factory());
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()

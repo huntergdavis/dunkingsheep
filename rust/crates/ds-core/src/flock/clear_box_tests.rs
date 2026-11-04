@@ -225,7 +225,7 @@ fn clear_box_authorizes_before_resolution_and_sends_only_the_ordered_pair() {
             &mut backend,
             &json!({"pane_id": WORKER}),
             Some(OWNER),
-            Some("cleanup"),
+            Some(&json!("cleanup")),
         )
         .unwrap();
     assert_eq!(backend.keys, ["C-u", "Escape"]);

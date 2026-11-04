@@ -124,6 +124,8 @@ pub struct FakeTerminal {
     pub fail_grouped_panes: Option<TerminalError>,
     /// When enabled, include the pane for a newly created tab in list-panes.
     pub show_created_tab_pane: bool,
+    /// Explicit root-pid observation for created agent panes in deterministic fixtures.
+    pub start_agent_pid: Option<Option<i64>>,
     /// One entry per layout mutation: `("create_tab", tab_id)` etc., for assertions.
     pub layout_calls: Vec<(String, String)>,
     /// `(pane_id, command)` per `run_command`.
@@ -147,6 +149,7 @@ pub struct FakeTerminal {
     pub keys_sent: Vec<(String, Vec<String>)>,
     /// Every `(pane_id, lines, ansi)` read.
     pub reads: Arc<Mutex<Vec<(String, i64, bool)>>>,
+    pub raw_events: Arc<Mutex<Vec<serde_json::Value>>>,
     counter: i64,
 }
 
@@ -159,6 +162,7 @@ impl Default for FakeTerminal {
             available: true,
             fail_grouped_panes: None,
             show_created_tab_pane: false,
+            start_agent_pid: None,
             layout_calls: Vec::new(),
             runs: Vec::new(),
             fail_layout: None,
@@ -170,6 +174,7 @@ impl Default for FakeTerminal {
             submits: Vec::new(),
             keys_sent: Vec::new(),
             reads: Arc::new(Mutex::new(Vec::new())),
+            raw_events: Arc::new(Mutex::new(Vec::new())),
             counter: 100,
         }
     }
@@ -256,6 +261,78 @@ impl Terminal for FakeTerminal {
         Ok(self.children.get(&pane_pid).cloned().unwrap_or_default())
     }
 
+    fn create_workspace_raw(
+        &mut self,
+        label: &serde_json::Value,
+        cwd: &serde_json::Value,
+        focus: bool,
+    ) -> super::RawCreateResult<Workspace> {
+        self.raw_events
+            .lock()
+            .unwrap()
+            .push(serde_json::json!(["workspace", label, cwd, focus]));
+        let workspace = match self.create_workspace(
+            super::raw::optional(label).as_deref(),
+            super::raw::optional(cwd).as_deref(),
+            focus,
+        ) {
+            Ok(value) => value,
+            Err(error) => return Ok(Err(error)),
+        };
+        let tab = Tab {
+            tab_id: format!("{}:t1", workspace.workspace_id),
+            workspace_id: workspace.workspace_id.clone(),
+            label: "1".into(),
+            index: 1,
+            active: true,
+        };
+        self.panes.push(Pane {
+            pane_id: format!("{}:p1", workspace.workspace_id),
+            session_id: workspace.workspace_id.clone(),
+            window_id: tab.tab_id.clone(),
+            command: "bash".into(),
+            cwd: super::raw::optional(cwd).unwrap_or_default(),
+            workspace: workspace.label.clone(),
+            tab: "1".into(),
+            ..Pane::default()
+        });
+        self.tabs.push(tab);
+        Ok(Ok(workspace))
+    }
+    fn create_tab_raw(
+        &mut self,
+        workspace: Option<&str>,
+        label: &serde_json::Value,
+        cwd: &serde_json::Value,
+        focus: bool,
+    ) -> super::RawCreateResult<Tab> {
+        self.raw_events
+            .lock()
+            .unwrap()
+            .push(serde_json::json!(["tab", workspace, label, cwd, focus]));
+        Ok(self.create_tab(
+            workspace,
+            super::raw::optional(label).as_deref(),
+            super::raw::optional(cwd).as_deref(),
+            focus,
+        ))
+    }
+    fn send_text_raw(
+        &mut self,
+        pane: &str,
+        text: &serde_json::Value,
+    ) -> Result<Result<(), TerminalError>, crate::error::DunkError> {
+        self.raw_events
+            .lock()
+            .unwrap()
+            .push(serde_json::json!(["send_raw", pane, text]));
+        for chunk in super::raw::text_chunks(text)? {
+            if let Err(error) = self.send_text(pane, &chunk) {
+                return Ok(Err(error));
+            }
+        }
+        Ok(Ok(()))
+    }
     fn create_workspace(
         &mut self,
         label: Option<&str>,
@@ -363,6 +440,19 @@ impl Terminal for FakeTerminal {
         Ok(pane)
     }
 
+    fn start_agent_raw(&mut self, spec: &AgentSpec, focus: bool) -> super::RawCreateResult<Pane> {
+        self.raw_events.lock().unwrap().push(serde_json::json!([
+            "start_agent",
+            spec.name,
+            spec.argv,
+            spec.workspace_id,
+            spec.tab_id,
+            spec.split,
+            spec.cwd,
+            focus
+        ]));
+        Ok(self.start_agent(spec))
+    }
     fn start_agent(&mut self, spec: &AgentSpec) -> Result<Pane, TerminalError> {
         if let Some(error) = self.take_failure() {
             return Err(error);
@@ -384,7 +474,7 @@ impl Terminal for FakeTerminal {
             tab: "1".into(),
             window_index: 1,
             workspace_index: 1,
-            pane_pid: Some(9000 + self.counter),
+            pane_pid: self.start_agent_pid.unwrap_or(Some(9000 + self.counter)),
             width: 120,
             height: 40,
         };
@@ -393,7 +483,41 @@ impl Terminal for FakeTerminal {
         Ok(pane)
     }
 
+    fn rename_raw(
+        &mut self,
+        kind: &str,
+        target_id: &str,
+        label: &str,
+    ) -> super::RawCreateResult<Option<super::RenamedItem>> {
+        if kind != "pane" {
+            return match self.rename(kind, target_id, label) {
+                Ok(()) => Ok(Ok(self.renamed_item(kind, target_id))),
+                Err(error) => Ok(Err(error)),
+            };
+        }
+        self.raw_events
+            .lock()
+            .unwrap()
+            .push(serde_json::json!(["rename", kind, target_id, label]));
+        if let Some(error) = self.take_failure() {
+            return Ok(Err(error));
+        }
+        if let Some(pane) = self.panes.iter_mut().find(|p| p.pane_id == target_id) {
+            pane.title = label.into();
+            pane.label = label.into();
+            self.record("rename", target_id);
+            Ok(Ok(self.renamed_item(kind, target_id)))
+        } else {
+            Ok(Err(TerminalError::refused(format!(
+                "no such pane {target_id}"
+            ))))
+        }
+    }
     fn rename(&mut self, kind: &str, target_id: &str, label: &str) -> Result<(), TerminalError> {
+        self.raw_events
+            .lock()
+            .unwrap()
+            .push(serde_json::json!(["rename", kind, target_id, label]));
         if let Some(error) = self.take_failure() {
             return Err(error);
         }
@@ -512,6 +636,10 @@ impl Terminal for FakeTerminal {
         if !self.available {
             return Err(TerminalError::unavailable(self.server_error_hint()));
         }
+        self.raw_events
+            .lock()
+            .unwrap()
+            .push(serde_json::json!(["typed", pane_id, text]));
         self.sends.push((pane_id.to_string(), text.to_string()));
         Ok(())
     }
@@ -526,6 +654,10 @@ impl Terminal for FakeTerminal {
         if !self.available {
             return Err(TerminalError::unavailable(self.server_error_hint()));
         }
+        self.raw_events
+            .lock()
+            .unwrap()
+            .push(serde_json::json!(["keys", pane_id, keys]));
         self.keys_sent.push((
             pane_id.to_string(),
             keys.iter().map(|key| key.to_string()).collect(),

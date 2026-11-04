@@ -15,6 +15,7 @@ use axum::{
 use serde_json::{json, Value};
 
 use super::auth::{AuthBackend, AuthError, Identity, RequestScheme};
+use super::response_error::WebResponseError;
 
 pub type OpsBoardFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -55,7 +56,7 @@ async fn not_now_owner_question(
     body: axum::body::Bytes,
 ) -> Response {
     if let Err(response) = authenticate(auth_backend.as_ref(), &headers, request_scheme).await {
-        return response;
+        return response.into_response();
     }
     let payload: Value = match serde_json::from_slice(&body) {
         Ok(payload) => payload,
@@ -91,7 +92,7 @@ async fn refresh_operations_board(
     headers: HeaderMap,
 ) -> Response {
     if let Err(response) = authenticate(auth_backend.as_ref(), &headers, request_scheme).await {
-        return response;
+        return response.into_response();
     }
     match backend.refresh().await {
         Ok(board) => Json(board).into_response(),
@@ -106,9 +107,9 @@ async fn authenticate(
     backend: &dyn AuthBackend,
     headers: &HeaderMap,
     scheme: RequestScheme,
-) -> Result<Identity, Response> {
+) -> Result<Identity, WebResponseError> {
     if let Some(response) = same_origin_refusal(headers, scheme) {
-        return Err(response);
+        return Err(response.into());
     }
     let bearer = bearer_value(headers);
     let cookie = cookie_value(headers, "vp_session");
@@ -116,6 +117,7 @@ async fn authenticate(
         .identity(bearer.as_deref(), cookie.as_deref())
         .await
         .map_err(auth_error_response)
+        .map_err(WebResponseError::from)
 }
 
 fn same_origin_refusal(headers: &HeaderMap, scheme: RequestScheme) -> Option<Response> {

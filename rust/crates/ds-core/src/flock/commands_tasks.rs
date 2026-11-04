@@ -16,7 +16,7 @@ use super::Flock;
 use crate::error::DunkError;
 use crate::flock::panes::PaneInfoEnv;
 use crate::tasks::metrics::MetricsOptions;
-use crate::tasks::{AddOptions, Decorated, FieldEdit, RecentNote, Task, Tasks};
+use crate::tasks::{AddOptions, Decorated, FieldEdit, ListVisibleOptions, RecentNote, Task, Tasks};
 use crate::tasks::{ClaimOptions, ClaimOutcome};
 
 /// `TASK_GLOBAL`.
@@ -294,16 +294,16 @@ impl Flock {
         };
         let limit = if limit == 0 { 200 } else { limit };
         let rows = tasks
-            .list_visible(
-                explicit.as_deref(),
+            .list_visible(ListVisibleOptions {
+                scope: explicit.as_deref(),
                 status,
                 assignee,
                 include_done,
                 limit,
-                self_pane_id,
+                pane_id: self_pane_id,
                 kind,
                 needs_owner,
-            )
+            })
             .await?;
         Ok((explicit, rows))
     }
@@ -332,11 +332,26 @@ impl Flock {
         caller: Option<(i64, Option<String>, Option<String>)>,
         self_pane_id: Option<&str>,
     ) -> Result<(f64, f64), DunkError> {
+        self.task_heartbeat_with_lease_parser(task_id, || Ok(lease_seconds), caller, self_pane_id)
+            .await
+    }
+
+    pub(crate) async fn task_heartbeat_with_lease_parser<F>(
+        &self,
+        task_id: &str,
+        parse_lease: F,
+        caller: Option<(i64, Option<String>, Option<String>)>,
+        self_pane_id: Option<&str>,
+    ) -> Result<(f64, f64), DunkError>
+    where
+        F: FnOnce() -> Result<Option<f64>, DunkError>,
+    {
         let pane = self_pane_id.filter(|p| !p.is_empty()).ok_or_else(|| {
             DunkError::Refused("task heartbeat requires a known caller pane".into())
         })?;
         let tasks = self.task_store()?;
         self.visible_task(&tasks, task_id, self_pane_id).await?;
+        let lease_seconds = parse_lease()?;
         tasks.heartbeat(task_id, pane, lease_seconds, caller).await
     }
 
@@ -420,6 +435,30 @@ impl Flock {
         caller: Option<(i64, Option<String>, Option<String>)>,
         self_pane_id: Option<&str>,
     ) -> Result<(ClaimOutcome, bool), DunkError> {
+        self.task_next_with_lease_parser(
+            env,
+            scope,
+            || Ok(lease_seconds),
+            allow_busy,
+            caller,
+            self_pane_id,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn task_next_with_lease_parser<F>(
+        &self,
+        env: &dyn PaneInfoEnv,
+        scope: Option<&str>,
+        parse_lease: F,
+        allow_busy: bool,
+        caller: Option<(i64, Option<String>, Option<String>)>,
+        self_pane_id: Option<&str>,
+    ) -> Result<(ClaimOutcome, bool), DunkError>
+    where
+        F: FnOnce() -> Result<Option<f64>, DunkError>,
+    {
         let tasks = self.task_store()?;
         let pane = self_pane_id.filter(|p| !p.is_empty());
         let role = match pane {
@@ -446,6 +485,7 @@ impl Flock {
         }
         let value = scope.map(str::trim).unwrap_or("");
         let mut follow_scope = TASK_GLOBAL.to_string();
+        let mut auto_pane = None;
         let target = match value {
             "" | "global" => TASK_GLOBAL.to_string(),
             "self" => {
@@ -457,22 +497,7 @@ impl Flock {
             }
             "auto" => {
                 if let Some(pane) = pane {
-                    let local = tasks
-                        .claim_next(
-                            pane,
-                            pane,
-                            ClaimOptions {
-                                lease_seconds,
-                                caller: caller.clone(),
-                                allow_busy,
-                                kinds: kinds.clone(),
-                                exclude_author: exclude_author.clone(),
-                            },
-                        )
-                        .await?;
-                    if matches!(local, ClaimOutcome::Claimed { .. }) {
-                        return Ok((local, false));
-                    }
+                    auto_pane = Some(pane);
                 }
                 TASK_GLOBAL.to_string()
             }
@@ -491,6 +516,25 @@ impl Flock {
                 resolved
             }
         };
+        let lease_seconds = parse_lease()?;
+        if let Some(pane) = auto_pane {
+            let local = tasks
+                .claim_next(
+                    pane,
+                    pane,
+                    ClaimOptions {
+                        lease_seconds,
+                        caller: caller.clone(),
+                        allow_busy,
+                        kinds: kinds.clone(),
+                        exclude_author: exclude_author.clone(),
+                    },
+                )
+                .await?;
+            if matches!(local, ClaimOutcome::Claimed { .. }) {
+                return Ok((local, false));
+            }
+        }
         let outcome = tasks
             .claim_next(
                 &target,
@@ -660,6 +704,17 @@ impl Flock {
         args: TaskUpdateArgs<'_>,
         self_pane_id: Option<&str>,
     ) -> Result<Task, DunkError> {
+        self.task_update_with_raw_block_reason(task_id, args, None, self_pane_id)
+            .await
+    }
+
+    pub(crate) async fn task_update_with_raw_block_reason(
+        &self,
+        task_id: &str,
+        args: TaskUpdateArgs<'_>,
+        raw_block_reason: Option<Option<serde_json::Value>>,
+        self_pane_id: Option<&str>,
+    ) -> Result<Task, DunkError> {
         let tasks = self.task_store()?;
         self.visible_task(&tasks, task_id, self_pane_id).await?;
         let resolved = match args.assignees {
@@ -678,7 +733,13 @@ impl Flock {
             block_reason: args.block_reason.map(|r| r.map(own)),
         };
         tasks
-            .update_with_status(task_id, edit, args.status, self_pane_id)
+            .update_with_status_and_raw_block_reason(
+                task_id,
+                edit,
+                args.status,
+                self_pane_id,
+                raw_block_reason,
+            )
             .await
     }
 
@@ -746,11 +807,30 @@ impl Flock {
         mode: &str,
         self_pane_id: Option<&str>,
     ) -> Result<Task, DunkError> {
+        self.task_assign_with_mode_parser(task_id, assignees, || Ok(mode.to_string()), self_pane_id)
+            .await
+    }
+
+    pub(crate) async fn task_assign_with_mode_parser<F>(
+        &self,
+        task_id: &str,
+        assignees: &[&str],
+        parse_mode: F,
+        self_pane_id: Option<&str>,
+    ) -> Result<Task, DunkError>
+    where
+        F: FnOnce() -> Result<String, DunkError>,
+    {
         let tasks = self.task_store()?;
         self.visible_task(&tasks, task_id, self_pane_id).await?;
         let resolved = Self::task_assignees(assignees, self_pane_id)?;
         let refs: Vec<&str> = resolved.iter().map(String::as_str).collect();
-        tasks.assign(task_id, &refs, mode).await
+        // Tasks.assign rejects an empty normalized list before it examines `mode.strip()`.
+        if refs.is_empty() {
+            return tasks.assign(task_id, &refs, "add").await;
+        }
+        let mode = parse_mode()?;
+        tasks.assign(task_id, &refs, &mode).await
     }
 
     /// `task_note`: append an explanatory event. Unlike the others it does NOT require the
@@ -1032,9 +1112,13 @@ mod list_tests {
         // ANOTHER request's context. A thread hop cannot be forced deterministically, so this pins
         // the contract at the source: nothing after the first `.await` may read that context.
         let source = include_str!("commands_tasks.rs");
-        let start = source.find("pub async fn task_next(").expect("task_next");
+        let start = source
+            .find("pub(crate) async fn task_next_with_lease_parser")
+            .expect("task_next lease parser");
         let body = &source[start..];
-        let body = &body[..body.find("/// `task_follow`").expect("end of task_next")];
+        let body = &body[..body
+            .find("/// `task_follow`")
+            .expect("end of task_next lease parser")];
         let first_await = body.find(".await").expect("task_next awaits");
         let (before, after) = body.split_at(first_await);
         for forbidden in [

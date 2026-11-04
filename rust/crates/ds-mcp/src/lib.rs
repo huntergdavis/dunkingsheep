@@ -13,9 +13,10 @@
 
 pub mod pyjson;
 
-use std::io::{BufRead, Write};
+use std::io::{stdin, stdout, BufRead, Write};
+use std::time::Duration;
 
-use ds_core::client::{ClientError, FlockClient, Transport};
+use ds_core::client::{connect_or_start_system, ClientError, FlockClient, Transport};
 use ds_core::registry::{self, Group};
 use ds_core::roles;
 use serde_json::{json, Map, Value};
@@ -31,6 +32,57 @@ pub const SERVER_VERSION: &str = "2.71.4";
 
 /// The `instructions` text, byte-for-byte `dunk_mcp.INSTRUCTIONS` (a test pins its SHA-256).
 pub const INSTRUCTIONS: &str = include_str!("instructions.txt");
+
+/// `dunk_client.START_TIMEOUT_S`.
+const START_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// Run the MCP stdio server using this process's inherited identity and environment.
+///
+/// Startup and transport failures are written to stderr, keeping stdout reserved for MCP.
+pub fn run_stdio() -> i32 {
+    eprintln!(
+        "dunkingsheep MCP server {SERVER_VERSION} starting (self pane {})",
+        std::env::var("HERDR_PANE_ID").unwrap_or_else(|_| "None".to_string())
+    );
+    // The daemon is started by the launcher, never by this server: it would spawn another MCP
+    // server. No launcher found means no auto-start.
+    let launcher = find_launcher();
+    let factory = Box::new(move || -> Result<Box<dyn Caller>, ClientError> {
+        let (exe, start) = match &launcher {
+            Some(path) => (path.clone(), true),
+            None => (std::path::PathBuf::from("dunkingsheep"), false),
+        };
+        let client = connect_or_start_system(None, None, start, START_TIMEOUT, &exe)
+            .map_err(ClientError::Dunk)?;
+        Ok(Box::new(client))
+    });
+    let mut server = McpServer::new(factory);
+    match server.serve_forever(&mut stdin().lock(), &mut stdout().lock()) {
+        Ok(()) => 0,
+        Err(error) => {
+            eprintln!("dunkingsheep MCP server: {error}");
+            1
+        }
+    }
+}
+
+/// `DUNKINGSHEEP_BIN`, else `dunkingsheep` beside this binary, else on `PATH`.
+fn find_launcher() -> Option<std::path::PathBuf> {
+    if let Some(explicit) = std::env::var_os("DUNKINGSHEEP_BIN").filter(|v| !v.is_empty()) {
+        return Some(explicit.into());
+    }
+    let beside = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("dunkingsheep")))
+        .filter(|path| path.is_file());
+    beside.or_else(|| {
+        std::env::var_os("PATH").and_then(|paths| {
+            std::env::split_paths(&paths)
+                .map(|dir| dir.join("dunkingsheep"))
+                .find(|path| path.is_file())
+        })
+    })
+}
 
 /// Whatever can run a daemon command: a [`FlockClient`] in production, a fake in tests.
 pub trait Caller {
@@ -305,7 +357,7 @@ impl McpServer {
             .required
             .iter()
             .copied()
-            .filter(|key| arguments.get(*key).map_or(true, Value::is_null))
+            .filter(|key| arguments.get(*key).is_none_or(Value::is_null))
             .collect();
         if !missing.is_empty() {
             return Ok(tool_error(&format!(

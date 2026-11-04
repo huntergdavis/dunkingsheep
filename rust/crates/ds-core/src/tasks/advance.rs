@@ -20,7 +20,7 @@ use std::sync::Arc;
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde_json::{json, Map, Value};
 
-use super::next_job::{handoffs_in, record_in, NON_BLOCKING_HANDOFF_STATES};
+use super::next_job::{handoffs_in, record_in, RecordIn, NON_BLOCKING_HANDOFF_STATES};
 use super::{decode_list, decorate_conn, default_lease_s, leases_for_conn, Decorated, Task, Tasks};
 use crate::db;
 use crate::error::DunkError;
@@ -42,13 +42,16 @@ pub type Plan = Map<String, Value>;
 /// `dunk_dispatch.next_job_plan`, injected.
 pub type Planner = dyn Fn(&PlanInput<'_>) -> Plan + Send + Sync;
 
+/// The locked allowlist's pane authorization predicate, borrowed for each callback call.
+pub type AllowlistPredicate<'a> = dyn Fn(&str, Option<&Value>) -> bool + 'a;
+
 /// The superusers allowlist. `with_locked` holds the lock while `body` runs and hands it a
 /// matcher `(pane_id, pane_info) -> allowed`. An `Err` (corrupt or unreadable allowlist)
 /// grants nothing.
 pub trait Allowlist: Send + Sync {
     fn with_locked(
         &self,
-        body: &mut dyn FnMut(&dyn Fn(&str, Option<&Value>) -> bool) -> Result<(), DunkError>,
+        body: &mut dyn for<'a> FnMut(&'a AllowlistPredicate<'a>) -> Result<(), DunkError>,
     ) -> Result<(), DunkError>;
 }
 
@@ -355,14 +358,16 @@ fn advance_in(
             handoff.insert("caller".into(), Value::Object(opts.caller.clone()));
             record_in(
                 &tx,
-                &chosen.task.id,
-                pane,
-                from_task.as_deref(),
-                Some(&message_id),
-                0,
-                None,
-                crate::clock::now_s(),
-                &handoff,
+                RecordIn {
+                    task_id: &chosen.task.id,
+                    pane_id: pane,
+                    from_task: from_task.as_deref(),
+                    message_id: Some(&message_id),
+                    attempt: 0,
+                    reason: None,
+                    now: crate::clock::now_s(),
+                    details: &handoff,
+                },
             )?;
             handoff.insert("task_id".into(), json!(chosen.task.id));
             handoff.insert("pane_id".into(), json!(pane));

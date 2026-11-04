@@ -241,7 +241,7 @@ pub fn run_health(
                 "ok (shallow)".to_string()
             };
             checks.insert("integrity".into(), json!(integrity));
-            let stale = stale_leases(path, started)?;
+            let stale = stale_leases(path, started).map_err(crate::error::internal_error)?;
             let expired = stale["expired_leases"].as_i64().unwrap_or(0);
             let partial = stale["partial_skipped"].as_i64().unwrap_or(0);
             if expired != 0 || partial != 0 {
@@ -273,7 +273,7 @@ pub fn run_health(
 
     let usage = statvfs(config_dir).map_err(|e| {
         DunkError::Refused(format!(
-            "[Errno {}] {}: '{}'",
+            "internal error: [Errno {}] {}: '{}'",
             e as i32,
             e.desc(),
             config_dir.display()

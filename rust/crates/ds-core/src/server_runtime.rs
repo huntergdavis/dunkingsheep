@@ -6,18 +6,41 @@
 
 mod delivery;
 mod dispatcher;
+mod health_state;
 mod inbox;
+mod inbox_api;
+mod inbox_data;
+mod inbox_delivery;
 mod inbox_metrics;
 mod inbox_stores;
 mod keypress;
 mod layout;
+mod layout_agent;
+mod layout_create;
+mod outbox_messages;
+mod outbox_runtime;
+mod owner_push;
+mod poolrad;
 mod push;
 mod push_eligibility;
+mod registrations;
+mod retire_inbox;
+mod retire_roles;
+mod roster;
+mod send_commands;
+mod services;
 mod status;
 mod stuck;
 mod submit;
 mod summary;
+mod turn_next;
+mod turn_plan;
+mod turn_send;
 mod verify;
+
+#[cfg(test)]
+pub(crate) use outbox_runtime::{CountdownGate, SubmitGate};
+pub use services::{RuntimeObservability, RuntimeServiceInputs, RuntimeServices};
 
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
@@ -41,6 +64,7 @@ use crate::terminal::tmux::TmuxBackend;
 use crate::terminal::Terminal;
 
 mod reaper;
+mod respawn_api;
 
 /// A request-scoped adapter borrowed on the server's existing connection thread.
 ///
@@ -53,6 +77,10 @@ pub(crate) struct RequestRuntimeAdapter<'a> {
     request: &'a RequestCtx,
     runtime: &'a Handle,
     inbox: Option<Arc<crate::inbox_store::Store>>,
+    outbox: Option<&'a outbox_runtime::OutboxRuntime>,
+    next_jobs: Option<&'a crate::tasks::next_job_runtime::NextJobs>,
+    owner_push: Option<&'a owner_push::OwnerPushService>,
+    dunk_runtime: Option<&'a RuntimeServices>,
 }
 
 /// Terminal access shared by the request and loop adapters. A lock is held only while a
@@ -69,6 +97,7 @@ pub(crate) struct TerminalCallAdapter<'a> {
 pub(crate) struct LoopRuntimeAdapter {
     flock: Arc<Flock>,
     terminal_factory: Arc<dyn Fn() -> Box<dyn Terminal> + Send + Sync + 'static>,
+    runtime_services: Option<Arc<RuntimeServices>>,
 }
 
 impl<'a> RequestRuntimeAdapter<'a> {
@@ -89,7 +118,60 @@ impl<'a> RequestRuntimeAdapter<'a> {
             request,
             runtime,
             inbox,
+            outbox: None,
+            next_jobs: None,
+            owner_push: None,
+            dunk_runtime: None,
         }
+    }
+
+    /// Borrow the process-owned store only from the services owning this request's Flock.
+    pub(crate) fn with_owner_push(
+        mut self,
+        services: &'a RuntimeServices,
+    ) -> Result<Self, DunkError> {
+        if !std::ptr::eq(self.terminal.flock, services.flock.as_ref()) {
+            return Err(refusal("request owner push flock mismatch"));
+        }
+        self.owner_push = Some(&services.owner_push);
+        Ok(self)
+    }
+
+    /// Bind dunk mutations to the same process-owned services as this request's Flock.
+    pub(crate) fn with_dunk_runtime(
+        mut self,
+        services: &'a RuntimeServices,
+    ) -> Result<Self, DunkError> {
+        if !std::ptr::eq(self.terminal.flock, services.flock.as_ref()) {
+            return Err(refusal("request dunk runtime flock mismatch"));
+        }
+        self.dunk_runtime = Some(services);
+        Ok(self)
+    }
+
+    /// Bind the existing outbox owner for this request; never substitute another flock.
+    #[allow(dead_code)]
+    pub(crate) fn with_outbox(
+        mut self,
+        outbox: &'a outbox_runtime::OutboxRuntime,
+    ) -> Result<Self, DunkError> {
+        if !std::ptr::eq(self.terminal.flock, outbox.flock.as_ref()) {
+            return Err(DunkError::Refused("request outbox flock mismatch".into()));
+        }
+        self.outbox = Some(outbox);
+        Ok(self)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn with_next_jobs(
+        mut self,
+        next_jobs: &'a crate::tasks::next_job_runtime::NextJobs,
+    ) -> Result<Self, DunkError> {
+        if !next_jobs.owns_flock(self.terminal.flock) {
+            return Err(DunkError::Refused("request next-job flock mismatch".into()));
+        }
+        self.next_jobs = Some(next_jobs);
+        Ok(self)
     }
 
     #[allow(dead_code)] // Wired by the production server dispatcher in the runtime integration.
@@ -235,6 +317,134 @@ impl SendEnv for TerminalCallAdapter<'_> {
     }
 }
 
+impl crate::flock::commands_layout::LayoutBackend for RequestRuntimeAdapter<'_> {
+    fn create_workspace_raw(
+        &mut self,
+        label: &Value,
+        cwd: &Value,
+        focus: bool,
+    ) -> crate::flock::commands_layout::RawCreateResult {
+        self.helper_layoutbackend_create_workspace_raw(label, cwd, focus)
+    }
+    fn create_tab_raw(
+        &mut self,
+        workspace: Option<&str>,
+        label: &Value,
+        cwd: &Value,
+        focus: bool,
+    ) -> crate::flock::commands_layout::RawCreateResult {
+        self.helper_layoutbackend_create_tab_raw(workspace, label, cwd, focus)
+    }
+    fn split_pane_raw(
+        &mut self,
+        pane: &str,
+        direction: &str,
+        cwd: &Value,
+        focus: bool,
+    ) -> crate::flock::commands_layout::RawCreateResult {
+        self.helper_layoutbackend_split_pane_raw(pane, direction, cwd, focus)
+    }
+    fn list_panes(&self) -> Vec<Value> {
+        self.helper_layoutbackend_list_panes()
+    }
+
+    fn list_tabs(&self) -> Vec<Value> {
+        self.helper_layoutbackend_list_tabs()
+    }
+
+    fn list_workspaces(&self) -> Vec<Value> {
+        self.helper_layoutbackend_list_workspaces()
+    }
+
+    fn get_pane(&self, pane_id: &str) -> Option<Value> {
+        self.helper_layoutbackend_get_pane(pane_id)
+    }
+
+    fn server_error_hint(&self) -> String {
+        self.helper_layoutbackend_server_error_hint()
+    }
+
+    fn create_workspace(
+        &mut self,
+        label: Option<&str>,
+        cwd: Option<&str>,
+        focus: bool,
+    ) -> Result<Value, String> {
+        self.helper_layoutbackend_create_workspace(label, cwd, focus)
+    }
+
+    fn create_tab(
+        &mut self,
+        workspace_id: Option<&str>,
+        label: Option<&str>,
+        cwd: Option<&str>,
+        focus: bool,
+    ) -> Result<Value, String> {
+        self.helper_layoutbackend_create_tab(workspace_id, label, cwd, focus)
+    }
+
+    fn split_pane(
+        &mut self,
+        pane_id: &str,
+        direction: &str,
+        cwd: Option<&str>,
+        focus: bool,
+    ) -> Result<Value, String> {
+        self.helper_layoutbackend_split_pane(pane_id, direction, cwd, focus)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start_agent(
+        &mut self,
+        name: &str,
+        argv: &[String],
+        workspace_id: Option<&str>,
+        tab_id: Option<&str>,
+        split: Option<&str>,
+        cwd: Option<&str>,
+        focus: bool,
+    ) -> Result<Value, String> {
+        self.helper_layoutbackend_start_agent(name, argv, workspace_id, tab_id, split, cwd, focus)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start_agent_raw(
+        &mut self,
+        name: &str,
+        argv: &[String],
+        workspace: Option<&str>,
+        tab: Option<&str>,
+        split: Option<&str>,
+        cwd: Option<&str>,
+        focus: bool,
+    ) -> crate::flock::commands_layout::RawCreateResult {
+        self.helper_layoutbackend_start_agent_raw(name, argv, workspace, tab, split, cwd, focus)
+    }
+    fn rename_raw(
+        &mut self,
+        kind: &str,
+        target: &str,
+        label: &str,
+    ) -> crate::flock::commands_layout::RawCreateResult {
+        self.helper_layoutbackend_rename_raw(kind, target, label)
+    }
+    fn focus_raw(&mut self, kind: &str, target: &str) -> Result<Value, String> {
+        self.terminal.with_terminal_mut(|terminal| {
+            terminal
+                .focus_raw(kind, target)
+                .map(|()| serde_json::json!({}))
+                .map_err(|error| error.message)
+        })
+    }
+    fn rename(&mut self, kind: &str, target_id: &str, label: &str) -> Result<Value, String> {
+        self.helper_layoutbackend_rename(kind, target_id, label)
+    }
+
+    fn focus(&mut self, kind: &str, target_id: &str) -> Result<Value, String> {
+        self.helper_layoutbackend_focus(kind, target_id)
+    }
+}
+
 impl PaneInfoEnv for TerminalCallAdapter<'_> {
     fn list_panes_grouped(&self) -> Vec<Value> {
         self.with_env(|env| PaneInfoEnv::list_panes_grouped(env))
@@ -274,12 +484,180 @@ impl PaneInfoEnv for RequestRuntimeAdapter<'_> {
 }
 
 impl crate::api::CommandEnv for RequestRuntimeAdapter<'_> {
+    fn with_layout_agent(
+        &self,
+        operation: &mut crate::flock::commands_layout::AgentOperation<'_>,
+    ) -> Result<Value, DunkError> {
+        self.with_request_layout_agent(operation)
+    }
+
+    fn poolrad_sync_args(&self, args: &crate::api::Args) -> Result<Value, DunkError> {
+        self.runtime_poolrad_sync_args(args)
+    }
+
+    fn poolrad_sync(&self, limit: usize, dry_run: bool) -> Result<Value, DunkError> {
+        self.runtime_poolrad_sync(limit, dry_run)
+    }
+
+    fn poolrad_progress(&self) -> Result<Value, DunkError> {
+        self.runtime_poolrad_progress()
+    }
+
+    fn health_state_env(&self) -> Result<&dyn crate::api::health_state::HealthStateEnv, DunkError> {
+        self.terminal.flock.status_state()?;
+        Ok(self)
+    }
+
+    fn with_layout_create(
+        &self,
+        operation: &mut crate::flock::commands_layout::CreateOperation<'_>,
+    ) -> Result<Value, DunkError> {
+        self.with_request_layout_create(operation)
+    }
+
+    fn with_inbox_env(
+        &self,
+        operation: &mut dyn FnMut(
+            &dyn crate::flock::commands_inbox::InboxEnv,
+        ) -> Result<Value, DunkError>,
+    ) -> Result<Value, DunkError> {
+        self.with_request_inbox(operation)
+    }
+
+    fn add_dunk(
+        &self,
+        pane: Option<&serde_json::Map<String, Value>>,
+        args: &crate::flock::dunks::AddArgs,
+    ) -> Result<serde_json::Map<String, Value>, DunkError> {
+        self.dunk_runtime
+            .ok_or_else(|| refusal("request dunk runtime is not attached"))?
+            .add_dunk(pane, args)
+    }
+
+    fn update_dunk(
+        &self,
+        id: &str,
+        pane: Option<&serde_json::Map<String, Value>>,
+        args: &crate::flock::dunks::UpdateArgs,
+    ) -> Result<serde_json::Map<String, Value>, DunkError> {
+        self.dunk_runtime
+            .ok_or_else(|| refusal("request dunk runtime is not attached"))?
+            .update_dunk(id, pane, args)
+    }
+
+    fn remove_dunk(&self, id: &str) -> Result<serde_json::Map<String, Value>, DunkError> {
+        self.dunk_runtime
+            .ok_or_else(|| refusal("request dunk runtime is not attached"))?
+            .remove_dunk(id)
+    }
+
+    fn start_dunk(&self, id: &str) -> Result<serde_json::Map<String, Value>, DunkError> {
+        self.dunk_runtime
+            .ok_or_else(|| refusal("request dunk runtime is not attached"))?
+            .start_dunk(id)
+    }
+
+    fn stop_dunk(&self, id: &str) -> Result<serde_json::Map<String, Value>, DunkError> {
+        self.dunk_runtime
+            .ok_or_else(|| refusal("request dunk runtime is not attached"))?
+            .stop_dunk(id)
+    }
+
+    fn toggle_dunk(&self, id: &str) -> Result<serde_json::Map<String, Value>, DunkError> {
+        self.dunk_runtime
+            .ok_or_else(|| refusal("request dunk runtime is not attached"))?
+            .toggle_dunk(id)
+    }
+
+    fn stop_all_dunks(&self) -> Result<Vec<serde_json::Map<String, Value>>, DunkError> {
+        self.dunk_runtime
+            .ok_or_else(|| refusal("request dunk runtime is not attached"))?
+            .stop_all_dunks()
+    }
+
+    fn fire_dunk(&self, id: &str, countdown_s: i64, wait: bool) -> Result<Value, DunkError> {
+        self.dunk_runtime
+            .ok_or_else(|| refusal("request dunk runtime is not attached"))?
+            .fire_dunk(id, countdown_s, wait)
+    }
+
+    fn owner_push(&self) -> Result<&crate::owner::OwnerPush, DunkError> {
+        self.owner_push
+            .ok_or_else(|| refusal("owner push adapter is not wired"))?
+            .get()
+    }
+
+    fn with_outbox_commands(
+        &self,
+        operation: &mut dyn FnMut(
+            &dyn crate::api::outbox_messages::OutboxCommandEnv,
+        ) -> Result<Value, DunkError>,
+    ) -> Result<Value, DunkError> {
+        self.require_send_outbox()?;
+        operation(self)
+    }
+
+    fn send_commands(&self) -> Result<&dyn crate::api::SendCommandEnv, DunkError> {
+        self.require_send_outbox()?;
+        Ok(self)
+    }
+
+    fn delivery_env(&self) -> Result<&dyn crate::flock::delivery::DeliveryEnv, DunkError> {
+        Ok(self)
+    }
+
+    fn with_clear_box_env(
+        &self,
+        operation: &mut dyn FnMut(
+            &mut dyn crate::flock::clear_box::ClearBoxEnv,
+        ) -> Result<Value, DunkError>,
+    ) -> Result<Value, DunkError> {
+        let mut adapter = TerminalCallAdapter {
+            flock: self.terminal.flock,
+            terminal: self.terminal.terminal,
+            runtime: self.runtime,
+        };
+        operation(&mut adapter)
+    }
+
+    fn with_respawn_pane_env(
+        &self,
+        operation: &mut dyn FnMut(
+            &crate::flock::respawn::RespawnServices<'_>,
+        ) -> Result<Value, DunkError>,
+    ) -> Result<Value, DunkError> {
+        RequestRuntimeAdapter::with_respawn_pane_env(self, operation)
+    }
+
+    fn next_jobs(&self) -> Result<&crate::tasks::next_job_runtime::NextJobs, DunkError> {
+        self.next_jobs
+            .ok_or_else(|| refusal("request next-job service is not attached"))
+    }
+
+    fn turn_hooks(&self) -> Result<&dyn crate::flock::commands_turns::TurnHooks, DunkError> {
+        if self.next_jobs.is_none() || self.outbox.is_none() {
+            return Err(DunkError::Refused("turn services are not attached".into()));
+        }
+        Ok(self)
+    }
+
+    fn roster_env(&self) -> Result<&dyn crate::flock::roster::RosterEnv, DunkError> {
+        Ok(self)
+    }
+
     fn terminal(&self) -> &Mutex<Box<dyn Terminal>> {
         self.terminal.terminal
     }
 
     fn now_s(&self) -> f64 {
         crate::clock::now_s()
+    }
+
+    fn project_summary_env(
+        &self,
+    ) -> Result<&dyn crate::flock::project_summary::SummaryEnv, DunkError> {
+        self.terminal.flock.status_state()?;
+        Ok(self)
     }
 
     fn status_env(&self) -> Result<&dyn crate::flock::status::StatusEnv, DunkError> {
@@ -301,37 +679,93 @@ impl LoopRuntimeAdapter {
         Self {
             flock,
             terminal_factory,
+            runtime_services: None,
         }
+    }
+
+    /// Bind the canonical process services required by the production stuck observer.
+    /// A bare adapter remains useful to loops that do not send stale-panel alerts.
+    pub(crate) fn with_stuck_services(
+        mut self,
+        services: Arc<RuntimeServices>,
+    ) -> Result<Self, DunkError> {
+        if !Arc::ptr_eq(&self.flock, &services.flock)
+            || !Arc::ptr_eq(&self.flock, &services.outbox.flock)
+        {
+            return Err(refusal("stuck runtime services flock mismatch"));
+        }
+        if self.flock.stores().inbox.is_none() {
+            return Err(refusal("stuck runtime inbox store is not attached"));
+        }
+        self.runtime_services = Some(services);
+        Ok(self)
     }
 
     #[allow(dead_code)] // Used by the dependent async runtime loop leaves.
     pub(crate) fn with_loop_terminal<T, F>(&self, call: F) -> JoinHandle<T>
     where
         T: Send + 'static,
-        F: for<'a> FnOnce(&'a Flock, &'a TerminalCallAdapter<'a>) -> T + Send + 'static,
+        F: for<'a> FnOnce(&'a Flock, &'a mut TerminalCallAdapter<'a>) -> T + Send + 'static,
     {
         let flock = Arc::clone(&self.flock);
         let factory = Arc::clone(&self.terminal_factory);
         let runtime = Handle::current();
         tokio::task::spawn_blocking(move || {
             let terminal = Mutex::new(factory());
-            let adapter = TerminalCallAdapter {
+            let mut adapter = TerminalCallAdapter {
                 flock: &flock,
                 terminal: &terminal,
                 runtime: &runtime,
             };
-            call(&flock, &adapter)
+            call(&flock, &mut adapter)
         })
     }
 }
 
-impl ReaperEnv for LoopRuntimeAdapter {
+impl crate::flock::loops_push::PushEnv for LoopRuntimeAdapter {
     fn list_panes(&self) -> LoopFuture<'_, Result<Vec<Value>, DunkError>> {
-        self.helper_reaperenv_list_panes()
+        self.helper_pushenv_list_panes()
     }
+    fn caller_role(&self, pane_id: &str, pane_info: Option<&Value>) -> String {
+        self.helper_pushenv_caller_role(pane_id, pane_info)
+    }
+    fn registered_lanes(&self) -> Option<BTreeSet<String>> {
+        self.helper_pushenv_registered_lanes()
+    }
+    fn may_review(&self, pane_id: &str) -> bool {
+        self.helper_pushenv_may_review(pane_id)
+    }
+    fn provider_of(&self, pane_id: &str) -> Option<String> {
+        self.helper_pushenv_provider_of(pane_id)
+    }
+    fn lane_agent_alive(&self, pane_id: &str) -> Option<bool> {
+        self.helper_pushenv_lane_agent_alive(pane_id)
+    }
+    fn unread_mail<'a>(&'a self, pane_id: &'a str) -> LoopFuture<'a, bool> {
+        self.helper_pushenv_unread_mail(pane_id)
+    }
+    fn announce_task<'a>(
+        &'a self,
+        pane_id: &'a str,
+        task: &'a crate::tasks::Task,
+        lease_seconds: f64,
+    ) -> LoopFuture<'a, ()> {
+        self.helper_pushenv_announce_task(pane_id, task, lease_seconds)
+    }
+    fn recover_next_jobs(&self) -> LoopFuture<'_, ()> {
+        self.helper_pushenv_recover_next_jobs()
+    }
+    fn allocator_tick(&self) -> LoopFuture<'_, ()> {
+        self.helper_pushenv_allocator_tick()
+    }
+    fn next_jobs_tick(&self) -> LoopFuture<'_, ()> {
+        self.helper_pushenv_next_jobs_tick()
+    }
+}
 
-    fn is_live(&self) -> bool {
-        self.helper_reaperenv_is_live()
+impl ReaperEnv for LoopRuntimeAdapter {
+    fn pane_snapshot(&self) -> LoopFuture<'_, (bool, Result<Vec<Value>, DunkError>)> {
+        self.helper_reaperenv_pane_snapshot()
     }
 
     fn clear_historical_errors<'a>(&'a self, panes: &'a BTreeSet<String>) -> LoopFuture<'a, ()> {
@@ -394,7 +828,14 @@ fn normalize_backend_name(configured: Option<&str>) -> String {
 fn backend_from_name(configured: Option<&str>) -> Result<TmuxBackend, DunkError> {
     let name = normalize_backend_name(configured);
     match name.as_str() {
-        "tmux" => Ok(TmuxBackend::default()),
+        "tmux" => {
+            let backend = TmuxBackend::default();
+            backend
+                .registry()
+                .path()
+                .map_err(|error| refusal(error.to_string()))?;
+            Ok(backend)
+        }
         "herdr" => Err(refusal(
             "terminal backend 'herdr' is retired; expected 'tmux'",
         )),
@@ -412,6 +853,75 @@ mod tests {
     use crate::flock::sends::SendEnv;
     use crate::tasks::{ClaimOptions, ClaimOutcome, Tasks};
     use crate::terminal::fakes::FakeTerminal;
+
+    #[test]
+    fn production_layout_backend_assembly_delegates_all_methods() {
+        use crate::flock::commands_layout::LayoutBackend;
+
+        let dir = crate::testsupport::dir("runtime-layout-backend");
+        let flock = Flock::new(
+            dir.path().join("launches.json"),
+            dir.path().join("roles.json"),
+            false,
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let mut fake = FakeTerminal::new();
+        fake.show_created_tab_pane = true;
+        let terminal: Mutex<Box<dyn Terminal>> = Mutex::new(Box::new(fake));
+        let request = RequestCtx::default();
+        let mut adapter = RequestRuntimeAdapter::new(&flock, &request, runtime.handle(), &terminal);
+        let backend: &mut dyn LayoutBackend = &mut adapter;
+
+        assert_eq!(3, backend.list_panes().len());
+        assert_eq!(3, backend.list_tabs().len());
+        assert_eq!(2, backend.list_workspaces().len());
+        assert_eq!("w1:p1", backend.get_pane("w1:p1").unwrap()["pane_id"]);
+        assert_eq!(
+            "tmux server not running - start it with `tmux new -d`",
+            backend.server_error_hint()
+        );
+        assert_eq!(
+            "demo",
+            backend.create_workspace(Some("demo"), None, false).unwrap()["workspace"]["label"]
+        );
+        assert_eq!(
+            "notes",
+            backend
+                .create_tab(Some("w1"), Some("notes"), None, true)
+                .unwrap()["tab"]["label"]
+        );
+        assert!(
+            backend.split_pane("w1:p1", "right", None, false).unwrap()["root_pane"]["pane_id"]
+                .as_str()
+                .unwrap()
+                .starts_with("w9:p")
+        );
+        assert_eq!(
+            "w1:p-worker",
+            backend
+                .start_agent(
+                    "worker",
+                    &["claude".to_owned()],
+                    Some("s1"),
+                    Some("w1"),
+                    None,
+                    None,
+                    true,
+                )
+                .unwrap()["pane_id"]
+        );
+        assert_eq!(
+            "Ops",
+            backend.rename("tab", "w1", "Ops").unwrap()["tab"]["label"]
+        );
+        assert_eq!(
+            serde_json::json!({}),
+            backend.focus("pane", "w1:p1").unwrap()
+        );
+    }
 
     #[test]
     fn production_env_send_read_uses_concrete_services() {

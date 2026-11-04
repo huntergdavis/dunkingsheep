@@ -323,7 +323,7 @@ impl Tasks {
                     }
                 }
                 if mine_only {
-                    rows.retain(|row| row.candidate.assignees.iter().any(|a| *a == pane));
+                    rows.retain(|row| row.candidate.assignees.contains(&pane));
                 }
                 for row in rows.iter_mut() {
                     let id = row.candidate.id.clone();
@@ -408,7 +408,12 @@ impl Tasks {
                     "INSERT INTO task_events (task_id, event, at, actor, scope, priority, status_from, status_to, duration_ms, meta) VALUES (?,?,?,?,?,?,?,?,?,?)",
                     params![chosen.candidate.id, "claimed", now, pane, chosen.scope, chosen.priority,
                             chosen.candidate.status, "in_progress", ((now - chosen.created_at) * 1000.0) as i64,
-                            json!({ "lease_seconds": lease_s, "caller_pid": pid, "caller_name": name }).to_string()],
+                            json!({
+                                "lease_seconds": crate::github::python_float_json_value(lease_s)
+                                    .expect("SQLite accepted task lease value"),
+                                "caller_pid": pid,
+                                "caller_name": name,
+                            }).to_string()],
                 ).map_err(db::map_sqlite)?;
                 let id = chosen.candidate.id.clone();
                 tx.commit().map_err(db::map_sqlite)?;

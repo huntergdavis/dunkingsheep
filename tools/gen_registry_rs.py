@@ -153,6 +153,7 @@ def build():
         return True if table is None else name in table
 
     expected = {}
+    required_metadata = {}
     lines = [
         "//! The command registry: one table the socket, the CLI and MCP all dispatch",
         "//! through (RUST_PORT.md 4.2).",
@@ -179,6 +180,7 @@ def build():
         "    pub name: &'static str,",
         "    pub description: &'static str,",
         "    pub params: &'static [Param],",
+        "    pub dispatch_required: &'static [&'static str],",
         "    pub required: &'static [&'static str],",
         "    pub mcp: bool,",
         "    pub owner_only: bool,",
@@ -206,12 +208,17 @@ def build():
         lines.append(f"        name: {json.dumps(c.name)},")
         lines.append(f"        description: {json.dumps(' '.join(c.description.split()))},")
         lines.append(f"        params: &[{params}],")
+        lines.append("        dispatch_required: &[%s]," % ", ".join(json.dumps(r) for r in c.required))
         lines.append("        required: &[%s]," % ", ".join(json.dumps(r) for r in c.mcp_required))
         lines.append(f"        mcp: {'true' if c.mcp else 'false'},")
         lines.append(f"        owner_only: {'true' if c.name in superuser_only else 'false'},")
         lines.append("        roles: &[%s]," % ", ".join(json.dumps(r) for r in allowed))
         lines.append("    },")
         expected[c.name] = c.input_schema()
+        required_metadata[c.name] = {
+            "dispatch_required": list(c.required),
+            "mcp_required": list(c.mcp_required),
+        }
     lines += [
         "];",
         "",
@@ -298,6 +305,7 @@ def build():
     ]
     fixture = {
         "commands": expected,
+        "required_metadata": required_metadata,
         "groups": {name: {"actions": {a: b for a, b in actions},
                           "description": " ".join(description.split())}
                    for name, description, actions in groups},

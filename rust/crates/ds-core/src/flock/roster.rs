@@ -13,7 +13,7 @@ use super::views::{cell, iso};
 /// What `roster` reads from the rest of the daemon.
 pub trait RosterEnv {
     /// `flock.resolve_lanes()`.
-    fn lanes(&self) -> Vec<Value>;
+    fn lanes(&self) -> Result<Vec<Value>, String>;
     /// `flock.tasks.leases_for_pane(pane_id, now=now)`; an error is an empty list.
     fn leases_for_pane(&self, pane_id: &str, now: f64) -> Vec<Value>;
     /// `flock.tasks.get(task_id)`: a row with `id` and `title`, or None when it is gone.
@@ -85,9 +85,9 @@ fn cpu_for(env: &dyn RosterEnv, leases: &[Value], now: f64) -> Value {
 }
 
 /// `roster`: one row per lane that has an agent (a bare shell has no harness and no mail).
-pub fn roster(env: &dyn RosterEnv, now: f64) -> Value {
+pub fn roster(env: &dyn RosterEnv, now: f64) -> Result<Value, String> {
     let mut rows = Vec::new();
-    for lane in env.lanes().iter().filter(|l| truthy(l.get("agent"))) {
+    for lane in env.lanes()?.iter().filter(|l| truthy(l.get("agent"))) {
         let pane_id = lane["pane_id"].as_str().unwrap_or("");
         // NULL, not the string "unknown" (reviewer on t227): the owner asked for a dash where
         // there is no status.
@@ -138,7 +138,7 @@ pub fn roster(env: &dyn RosterEnv, now: f64) -> Value {
             "cpu": cpu_for(env, &leases, now),
         }));
     }
-    json!({"as_of": iso(Some(now)), "lanes": rows})
+    Ok(json!({"as_of": iso(Some(now)), "lanes": rows}))
 }
 
 #[cfg(test)]
@@ -149,6 +149,7 @@ mod tests {
     #[derive(Default)]
     struct Env {
         lanes: Vec<Value>,
+        lane_error: Option<String>,
         leases: BTreeMap<String, Vec<Value>>,
         tasks: BTreeMap<String, Value>,
         inbox: BTreeMap<String, (i64, Option<f64>)>,
@@ -157,8 +158,11 @@ mod tests {
     }
 
     impl RosterEnv for Env {
-        fn lanes(&self) -> Vec<Value> {
-            self.lanes.clone()
+        fn lanes(&self) -> Result<Vec<Value>, String> {
+            match &self.lane_error {
+                Some(error) => Err(error.clone()),
+                None => Ok(self.lanes.clone()),
+            }
         }
         fn leases_for_pane(&self, pane_id: &str, _: f64) -> Vec<Value> {
             self.leases.get(pane_id).cloned().unwrap_or_default()
@@ -189,7 +193,7 @@ mod tests {
             lanes: vec![lane("%1", "", None), lane("%2", "pi", Some("worker-2"))],
             ..Env::default()
         };
-        let out = roster(&env, NOW);
+        let out = roster(&env, NOW).unwrap();
         assert_eq!(out["as_of"], "1970-01-02T00:00:00Z");
         let rows = out["lanes"].as_array().unwrap();
         assert_eq!(rows.len(), 1, "a bare shell has no harness and no mail");
@@ -232,6 +236,18 @@ mod tests {
     }
 
     #[test]
+    fn lane_resolution_errors_propagate_instead_of_becoming_an_empty_roster() {
+        let env = Env {
+            lane_error: Some("cannot list panes: socket unavailable".into()),
+            ..Env::default()
+        };
+        assert_eq!(
+            roster(&env, NOW).unwrap_err(),
+            "cannot list panes: socket unavailable"
+        );
+    }
+
+    #[test]
     fn the_lease_names_the_current_task_and_a_missing_task_row_still_names_the_id() {
         let mut env = Env {
             lanes: vec![lane("%2", "claude", None)],
@@ -241,14 +257,14 @@ mod tests {
             "%2".into(),
             vec![json!({"task_id": "t5", "claimed_at": 3600.0})],
         );
-        let gone = roster(&env, NOW);
+        let gone = roster(&env, NOW).unwrap();
         assert_eq!(
             gone["lanes"][0]["task"],
             json!({"id": "t5", "title": null, "since": null})
         );
         env.tasks
             .insert("t5".into(), json!({"id": "t5", "title": "do it"}));
-        let found = roster(&env, NOW);
+        let found = roster(&env, NOW).unwrap();
         assert_eq!(
             found["lanes"][0]["task"],
             json!({"id": "t5", "title": "do it", "since": "1970-01-01T01:00:00Z"})
@@ -266,7 +282,7 @@ mod tests {
             ..Env::default()
         };
         env.inbox.insert("w2".into(), (3, Some(42.0)));
-        let row = &roster(&env, NOW)["lanes"][0];
+        let row = &roster(&env, NOW).unwrap()["lanes"][0];
         assert_eq!(row["inbox"]["unread"], 3);
         assert_eq!(
             row["inbox"]["oldest_unread_s"],
@@ -281,7 +297,7 @@ mod tests {
             doing: Some(Err("boom".into())),
             ..Env::default()
         };
-        let row = &roster(&env, NOW)["lanes"][0];
+        let row = &roster(&env, NOW).unwrap()["lanes"][0];
         assert_eq!(
             (row["state"].as_str(), row["state_source"].as_str()),
             (Some("unknown"), Some("activity"))
@@ -298,7 +314,7 @@ mod tests {
             )),
             ..Env::default()
         };
-        let row = &roster(&env, NOW)["lanes"][0];
+        let row = &roster(&env, NOW).unwrap()["lanes"][0];
         assert_eq!(
             row["since"],
             json!({"value": 7200.0, "as_of": "1970-01-01T02:00:00Z", "reason": null})
@@ -318,13 +334,13 @@ mod tests {
         env.leases.insert("%2".into(), vec![json!({"task_id": "t1", "caller_pid": 0}), json!({"task_id": "t2", "caller_pid": 99, "caller_start": "s", "caller_name": "pi"})]);
         env.cpu = Some(Ok(None));
         assert_eq!(
-            roster(&env, NOW)["lanes"][0]["cpu"]["reason"],
+            roster(&env, NOW).unwrap()["lanes"][0]["cpu"]["reason"],
             "the caller pid is not running"
         );
         env.cpu = Some(Ok(Some(
             json!({"cpu_pct": 12.5, "rss_mb": 300, "process_count": 4, "extra": 1}),
         )));
-        let cpu = &roster(&env, NOW)["lanes"][0]["cpu"];
+        let cpu = &roster(&env, NOW).unwrap()["lanes"][0]["cpu"];
         assert_eq!(
             cpu["value"],
             json!({"cpu_pct": 12.5, "rss_mb": 300, "process_count": 4})
@@ -332,7 +348,7 @@ mod tests {
         assert_eq!(cpu["as_of"], "1970-01-02T00:00:00Z");
         env.cpu = Some(Err("no /proc".into()));
         assert_eq!(
-            roster(&env, NOW)["lanes"][0]["cpu"]["reason"],
+            roster(&env, NOW).unwrap()["lanes"][0]["cpu"]["reason"],
             "cpu sample failed: no /proc"
         );
     }

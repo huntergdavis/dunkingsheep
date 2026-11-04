@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
+use super::loop_env::LoopFuture;
 use super::loops_push::{claim_filters, run_push, PushDecision, PushEnv};
 use super::panes::Stores;
 use super::Flock;
@@ -42,6 +43,7 @@ struct Fake {
     unread: Mutex<BTreeSet<String>>,
     announced: Mutex<Vec<(String, String)>>,
     calls: Mutex<Vec<&'static str>>,
+    awaited: Mutex<Vec<&'static str>>,
 }
 
 impl Fake {
@@ -72,12 +74,15 @@ impl Fake {
 }
 
 impl PushEnv for Fake {
-    fn list_panes(&self) -> Result<Vec<Value>, DunkError> {
-        *self.pane_list_calls.lock().unwrap() += 1;
-        if *self.fail_pane_list.lock().unwrap() {
-            return Err(DunkError::Refused("pane listing unavailable".into()));
-        }
-        Ok(self
+    fn list_panes<'a>(&'a self) -> LoopFuture<'a, Result<Vec<Value>, DunkError>> {
+        Box::pin(async move {
+            tokio::task::yield_now().await;
+            self.awaited.lock().unwrap().push("list_panes");
+            *self.pane_list_calls.lock().unwrap() += 1;
+            if *self.fail_pane_list.lock().unwrap() {
+                return Err(DunkError::Refused("pane listing unavailable".into()));
+            }
+            Ok(self
             .panes
             .lock()
             .unwrap()
@@ -86,6 +91,7 @@ impl PushEnv for Fake {
                 json!({"pane_id": id, "agent_status": status, "pane_pid": self.pane_pids.lock().unwrap().get(id).copied()})
             })
             .collect())
+        })
     }
     fn caller_role(&self, pane_id: &str, pane_info: Option<&Value>) -> String {
         let Some((role, wanted_pid)) = self.roles.lock().unwrap().get(pane_id).cloned() else {
@@ -113,23 +119,43 @@ impl PushEnv for Fake {
     fn lane_agent_alive(&self, pane_id: &str) -> Option<bool> {
         self.alive.lock().unwrap().get(pane_id).copied()
     }
-    fn unread_mail(&self, pane_id: &str) -> bool {
-        self.unread.lock().unwrap().contains(pane_id)
+    fn unread_mail<'a>(&'a self, pane_id: &'a str) -> LoopFuture<'a, bool> {
+        Box::pin(async move {
+            tokio::task::yield_now().await;
+            self.awaited.lock().unwrap().push("unread_mail");
+            self.unread.lock().unwrap().contains(pane_id)
+        })
     }
-    fn announce_task(&self, pane_id: &str, task: &Task, _: f64) {
-        self.announced
-            .lock()
-            .unwrap()
-            .push((pane_id.into(), task.id.clone()));
+    fn announce_task<'a>(&'a self, pane_id: &'a str, task: &'a Task, _: f64) -> LoopFuture<'a, ()> {
+        Box::pin(async move {
+            tokio::task::yield_now().await;
+            self.awaited.lock().unwrap().push("announce_task");
+            self.announced
+                .lock()
+                .unwrap()
+                .push((pane_id.into(), task.id.clone()));
+        })
     }
-    fn recover_next_jobs(&self) {
-        self.calls.lock().unwrap().push("recover");
+    fn recover_next_jobs<'a>(&'a self) -> LoopFuture<'a, ()> {
+        Box::pin(async move {
+            tokio::task::yield_now().await;
+            self.awaited.lock().unwrap().push("recover_next_jobs");
+            self.calls.lock().unwrap().push("recover");
+        })
     }
-    fn allocator_tick(&self) {
-        self.calls.lock().unwrap().push("allocator");
+    fn allocator_tick<'a>(&'a self) -> LoopFuture<'a, ()> {
+        Box::pin(async move {
+            tokio::task::yield_now().await;
+            self.awaited.lock().unwrap().push("allocator_tick");
+            self.calls.lock().unwrap().push("allocator");
+        })
     }
-    fn next_jobs_tick(&self) {
-        self.calls.lock().unwrap().push("next_jobs");
+    fn next_jobs_tick<'a>(&'a self) -> LoopFuture<'a, ()> {
+        Box::pin(async move {
+            tokio::task::yield_now().await;
+            self.awaited.lock().unwrap().push("next_jobs_tick");
+            self.calls.lock().unwrap().push("next_jobs");
+        })
     }
 }
 
@@ -139,8 +165,8 @@ struct RuntimePushEnv<'a> {
 }
 
 impl PushEnv for RuntimePushEnv<'_> {
-    fn list_panes(&self) -> Result<Vec<Value>, DunkError> {
-        Ok(self.panes.clone())
+    fn list_panes<'a>(&'a self) -> LoopFuture<'a, Result<Vec<Value>, DunkError>> {
+        Box::pin(async move { Ok(self.panes.clone()) })
     }
     fn caller_role(&self, pane_id: &str, pane_info: Option<&Value>) -> String {
         self.adapter.helper_pushenv_caller_role(pane_id, pane_info)
@@ -157,10 +183,12 @@ impl PushEnv for RuntimePushEnv<'_> {
     fn lane_agent_alive(&self, _: &str) -> Option<bool> {
         None
     }
-    fn unread_mail(&self, _: &str) -> bool {
-        false
+    fn unread_mail<'a>(&'a self, _: &'a str) -> LoopFuture<'a, bool> {
+        Box::pin(async move { false })
     }
-    fn announce_task(&self, _: &str, _: &Task, _: f64) {}
+    fn announce_task<'a>(&'a self, _: &'a str, _: &'a Task, _: f64) -> LoopFuture<'a, ()> {
+        Box::pin(async move {})
+    }
 }
 
 async fn setup(tag: &str) -> (Arc<Flock>, Arc<Tasks>, tempfile::TempDir) {
@@ -242,7 +270,7 @@ async fn production_env_push_core_uses_pid_bound_pane_info() {
         crate::roles::DEFAULT_ROLE
     );
 
-    let targets = flock.push_target_map(&env);
+    let targets = flock.push_target_map(&env).await;
     assert!(targets.contains_key("w1:p1"));
     assert!(targets.contains_key("w2:p2"));
     assert!(!targets.contains_key("w3:p3"));
@@ -561,4 +589,57 @@ async fn test_the_loop_also_sweeps_on_the_interval() {
     );
     stop_tx.send(true).unwrap();
     handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn loop_push_env_futures_are_awaited_in_source_order() {
+    let (flock, tasks, _dir) = setup("awaited-order").await;
+    let fake = Arc::new(Fake::standard());
+    fake.register(IDLE_WORKER, "worker");
+    let task = tasks.add("global", "ordered work", "").await.unwrap();
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    flock.wake_push();
+    let handle = tokio::spawn(run_push(
+        flock.clone(),
+        fake.clone(),
+        Duration::from_secs(3600),
+        stop_rx,
+    ));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if !fake.announced.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("announcement future must complete");
+    stop_tx.send(true).unwrap();
+    tokio::time::timeout(Duration::from_secs(2), handle)
+        .await
+        .expect("loop stops")
+        .unwrap();
+    assert_eq!(
+        *fake.awaited.lock().unwrap(),
+        vec![
+            "recover_next_jobs",
+            "allocator_tick",
+            "next_jobs_tick",
+            "list_panes",
+            "unread_mail",
+            "announce_task",
+        ]
+    );
+    assert_eq!(
+        *fake.announced.lock().unwrap(),
+        vec![(IDLE_WORKER.into(), task.id.clone())]
+    );
+    assert_eq!(status(&tasks, &task.id).await, "in_progress");
+    // The public target helper must also drive its pane-list future.
+    assert!(flock
+        .push_target_map(fake.as_ref())
+        .await
+        .contains_key(IDLE_WORKER));
+    assert_eq!(fake.awaited.lock().unwrap().last(), Some(&"list_panes"));
 }

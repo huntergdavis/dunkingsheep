@@ -15,6 +15,8 @@ use serde_json::{json, Value};
 #[derive(Debug, Clone, PartialEq)]
 pub struct TaskWire {
     pub typed: Task,
+    /// The decorated row read in the same snapshot as `wire`.
+    pub decorated: Decorated,
     pub wire: Value,
 }
 
@@ -210,7 +212,11 @@ fn full_conn(
             .map(Value::Object)
             .unwrap_or(Value::Null);
     }
-    Ok(TaskWire { typed, wire })
+    Ok(TaskWire {
+        typed,
+        decorated,
+        wire,
+    })
 }
 
 fn notes_conn(conn: &Connection, id: &str) -> Result<Vec<RecentNote>, DunkError> {

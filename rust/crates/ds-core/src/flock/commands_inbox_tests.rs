@@ -10,6 +10,7 @@ use super::commands_inbox::{
 use super::mailbox::MailboxEnv;
 use super::Flock;
 use crate::db::ReadPool;
+use crate::error::DunkError;
 use crate::inbox_store::{Outgoing, Store};
 use serde_json::{json, Value};
 
@@ -23,6 +24,8 @@ struct Env {
     metrics: std::sync::Mutex<Vec<RecordedMetric>>,
     panes: Vec<Value>,
     role: &'static str,
+    role_flock: Option<Flock>,
+    backend_error: bool,
     override_name: Option<String>,
     silent_mailboxes: Option<String>,
     sent_count: std::sync::atomic::AtomicUsize,
@@ -45,9 +48,24 @@ impl MailboxEnv for Env {
     }
 }
 
+impl super::panes::PaneInfoEnv for Env {
+    fn list_panes_grouped(&self) -> Vec<Value> {
+        self.panes.clone()
+    }
+    fn get_pane(&self, id: &str) -> Option<Value> {
+        self.panes
+            .iter()
+            .find(|pane| pane["pane_id"] == id)
+            .cloned()
+    }
+}
+
 impl InboxEnv for Env {
-    fn caller_role(&self, _: &str) -> String {
-        self.role.to_string()
+    fn caller_role(&self, pane: &str) -> Result<String, DunkError> {
+        if let Some(flock) = &self.role_flock {
+            return flock.caller_role(Some(pane), self);
+        }
+        Ok(self.role.to_string())
     }
     fn mailbox_override(&self) -> Option<String> {
         self.override_name.clone()
@@ -55,8 +73,12 @@ impl InboxEnv for Env {
     fn inbox_silent_mailboxes(&self) -> Option<String> {
         self.silent_mailboxes.clone()
     }
-    fn backend_name(&self) -> String {
-        "fake".to_string()
+    fn backend_name(&self) -> Result<String, DunkError> {
+        if self.backend_error {
+            Err(DunkError::Refused("backend unavailable".into()))
+        } else {
+            Ok("fake".to_string())
+        }
     }
     fn lane_panes(&self) -> Vec<String> {
         vec![]
@@ -132,6 +154,8 @@ fn env(role: &'static str) -> Env {
         metrics: Default::default(),
         panes: vec![pane("w1:p1", "Mine"), pane("w1:p2", "Other")],
         role,
+        role_flock: None,
+        backend_error: false,
         override_name: None,
         silent_mailboxes: None,
         sent_count: std::sync::atomic::AtomicUsize::new(0),
@@ -172,6 +196,43 @@ fn another_lanes_mailbox_is_not_readable() {
         .to_string();
     assert!(err.contains("not yours"), "{err}");
     assert!(err.contains("needs the owner role"), "{err}");
+}
+
+#[test]
+fn role_store_error_refuses_own_mail_and_system_sender() {
+    let (mut e, d) = (env("worker"), tempfile::tempdir().unwrap());
+    let f = flock(&d);
+    e.role_flock = Some(flock(&d)); // No roles attached: the real role service refuses.
+    let error = f
+        .inbox_list(&e, Some("w1:p1"), true, 10, Some("w1:p1"))
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "no role registry is attached to this flock"
+    );
+    f.set_socket_peer(Some(true));
+    let mut args = send("w1:p2", Some("w1:p1"));
+    args.system_sender = Some("watchdog");
+    let error = f.inbox_send(&e, &args).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "no role registry is attached to this flock"
+    );
+}
+
+#[test]
+fn backend_error_is_lazy_until_all_mailbox_fallbacks_fail() {
+    let (mut e, d) = (env("worker"), tempfile::tempdir().unwrap());
+    let f = flock(&d);
+    e.backend_error = true;
+    assert_eq!(f.own_mailbox(&e, "w1:p1").unwrap(), "Mine");
+    e.override_name = Some("fallback".into());
+    assert_eq!(f.own_mailbox(&e, "w9:p9").unwrap(), "fallback");
+    e.override_name = None;
+    assert_eq!(
+        f.own_mailbox(&e, "w9:p9").unwrap_err().to_string(),
+        "backend unavailable"
+    );
 }
 
 #[test]

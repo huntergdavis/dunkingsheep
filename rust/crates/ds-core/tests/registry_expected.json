@@ -2677,5 +2677,799 @@
    },
    "description": "Layout and the herd. action=list/create/create_tab/split/start_agent/rename/focus/close. Creators and close are superuser-gated; an agent started without a workspace goes to the sandbox, never the caller's tab."
   }
+ },
+ "required_metadata": {
+  "add_dunk": {
+   "dispatch_required": [],
+   "mcp_required": [
+    "target",
+    "text",
+    "interval_minutes"
+   ]
+  },
+  "allocation": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "cancel_message": {
+   "dispatch_required": [
+    "message_id"
+   ],
+   "mcp_required": [
+    "message_id"
+   ]
+  },
+  "clear_box": {
+   "dispatch_required": [
+    "target"
+   ],
+   "mcp_required": [
+    "target"
+   ]
+  },
+  "close": {
+   "dispatch_required": [
+    "kind",
+    "target"
+   ],
+   "mcp_required": [
+    "kind",
+    "target"
+   ]
+  },
+  "context_add": {
+   "dispatch_required": [
+    "body",
+    "cls",
+    "subject"
+   ],
+   "mcp_required": [
+    "body",
+    "cls",
+    "subject"
+   ]
+  },
+  "context_promote": {
+   "dispatch_required": [
+    "slug"
+   ],
+   "mcp_required": [
+    "slug"
+   ]
+  },
+  "context_retire": {
+   "dispatch_required": [
+    "slug"
+   ],
+   "mcp_required": [
+    "slug"
+   ]
+  },
+  "context_supersede": {
+   "dispatch_required": [
+    "slug",
+    "body"
+   ],
+   "mcp_required": [
+    "slug",
+    "body"
+   ]
+  },
+  "create_tab": {
+   "dispatch_required": [],
+   "mcp_required": [
+    "label"
+   ]
+  },
+  "create_workspace": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "delivery": {
+   "dispatch_required": [
+    "target"
+   ],
+   "mcp_required": [
+    "target"
+   ]
+  },
+  "delivery_capability": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "dispatch": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "doctor": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "fire_dunk": {
+   "dispatch_required": [
+    "id"
+   ],
+   "mcp_required": [
+    "id"
+   ]
+  },
+  "flush_box": {
+   "dispatch_required": [
+    "target"
+   ],
+   "mcp_required": [
+    "target"
+   ]
+  },
+  "focus": {
+   "dispatch_required": [
+    "kind",
+    "target"
+   ],
+   "mcp_required": [
+    "kind",
+    "target"
+   ]
+  },
+  "get_dunk": {
+   "dispatch_required": [
+    "id"
+   ],
+   "mcp_required": [
+    "id"
+   ]
+  },
+  "get_message": {
+   "dispatch_required": [
+    "message_id"
+   ],
+   "mcp_required": [
+    "message_id"
+   ]
+  },
+  "gh_token": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "health": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "help": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "herdr": {
+   "dispatch_required": [
+    "command"
+   ],
+   "mcp_required": [
+    "command"
+   ]
+  },
+  "herdr_help": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "inbox_ack": {
+   "dispatch_required": [
+    "message_ids"
+   ],
+   "mcp_required": [
+    "message_ids"
+   ]
+  },
+  "inbox_archive": {
+   "dispatch_required": [
+    "mailbox"
+   ],
+   "mcp_required": [
+    "mailbox"
+   ]
+  },
+  "inbox_cancel": {
+   "dispatch_required": [
+    "message_ids"
+   ],
+   "mcp_required": [
+    "message_ids"
+   ]
+  },
+  "inbox_count": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "inbox_delete": {
+   "dispatch_required": [
+    "message_ids"
+   ],
+   "mcp_required": [
+    "message_ids"
+   ]
+  },
+  "inbox_fetch": {
+   "dispatch_required": [
+    "attachment_id"
+   ],
+   "mcp_required": [
+    "attachment_id"
+   ]
+  },
+  "inbox_list": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "inbox_read": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "inbox_recover": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "inbox_send": {
+   "dispatch_required": [
+    "to",
+    "body"
+   ],
+   "mcp_required": [
+    "to",
+    "body"
+   ]
+  },
+  "inbox_stats": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "inbox_status": {
+   "dispatch_required": [
+    "message_id"
+   ],
+   "mcp_required": [
+    "message_id"
+   ]
+  },
+  "lane_register": {
+   "dispatch_required": [
+    "role"
+   ],
+   "mcp_required": [
+    "role"
+   ]
+  },
+  "lane_set": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "lane_unregister": {
+   "dispatch_required": [
+    "pane"
+   ],
+   "mcp_required": [
+    "pane"
+   ]
+  },
+  "lanes": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "list_dunks": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "list_messages": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "list_panes": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "list_workspaces": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "memory_backfill": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "memory_context": {
+   "dispatch_required": [
+    "query"
+   ],
+   "mcp_required": [
+    "query"
+   ]
+  },
+  "memory_ingest": {
+   "dispatch_required": [
+    "path"
+   ],
+   "mcp_required": [
+    "path"
+   ]
+  },
+  "memory_recall": {
+   "dispatch_required": [
+    "query"
+   ],
+   "mcp_required": [
+    "query"
+   ]
+  },
+  "memory_search": {
+   "dispatch_required": [
+    "query"
+   ],
+   "mcp_required": [
+    "query"
+   ]
+  },
+  "memory_stats": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "memory_status": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "message_state": {
+   "dispatch_required": [
+    "message_ids"
+   ],
+   "mcp_required": [
+    "message_ids"
+   ]
+  },
+  "metrics": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "owner_conversation": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "owner_delivered": {
+   "dispatch_required": [
+    "message_id",
+    "transport"
+   ],
+   "mcp_required": [
+    "message_id",
+    "transport"
+   ]
+  },
+  "owner_ingest": {
+   "dispatch_required": [
+    "body",
+    "transport"
+   ],
+   "mcp_required": [
+    "body",
+    "transport"
+   ]
+  },
+  "owner_outbox": {
+   "dispatch_required": [
+    "transport"
+   ],
+   "mcp_required": [
+    "transport"
+   ]
+  },
+  "owner_poll": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "owner_push": {
+   "dispatch_required": [
+    "target",
+    "body"
+   ],
+   "mcp_required": [
+    "target",
+    "body"
+   ]
+  },
+  "owner_receipts": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "owner_reply": {
+   "dispatch_required": [
+    "message_id",
+    "body"
+   ],
+   "mcp_required": [
+    "message_id",
+    "body"
+   ]
+  },
+  "owner_stats": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "owner_take": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "pm_digest": {
+   "dispatch_required": [
+    "project",
+    "payload"
+   ],
+   "mcp_required": [
+    "project",
+    "payload"
+   ]
+  },
+  "pm_routing": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "poll": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "poolrad_progress": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "poolrad_sync": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "project_summary": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "read_pane": {
+   "dispatch_required": [
+    "target"
+   ],
+   "mcp_required": [
+    "target"
+   ]
+  },
+  "recover": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "remove_dunk": {
+   "dispatch_required": [
+    "id"
+   ],
+   "mcp_required": [
+    "id"
+   ]
+  },
+  "rename": {
+   "dispatch_required": [
+    "kind",
+    "target",
+    "label"
+   ],
+   "mcp_required": [
+    "kind",
+    "target",
+    "label"
+   ]
+  },
+  "reply_stats": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "report_list": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "report_run": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "respawn_pane": {
+   "dispatch_required": [
+    "pane",
+    "expected_pid",
+    "expected_start",
+    "argv",
+    "confirm_idle"
+   ],
+   "mcp_required": [
+    "pane",
+    "expected_pid",
+    "expected_start",
+    "argv",
+    "confirm_idle"
+   ]
+  },
+  "retire_pane": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "review_list": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "review_sync": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "roster": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "send_keys": {
+   "dispatch_required": [
+    "target",
+    "keys"
+   ],
+   "mcp_required": [
+    "target",
+    "keys"
+   ]
+  },
+  "send_text": {
+   "dispatch_required": [
+    "target",
+    "text"
+   ],
+   "mcp_required": [
+    "target",
+    "text"
+   ]
+  },
+  "shutdown": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "split_pane": {
+   "dispatch_required": [
+    "target"
+   ],
+   "mcp_required": [
+    "target"
+   ]
+  },
+  "start_agent": {
+   "dispatch_required": [
+    "name",
+    "command"
+   ],
+   "mcp_required": [
+    "name",
+    "command"
+   ]
+  },
+  "start_dunk": {
+   "dispatch_required": [
+    "id"
+   ],
+   "mcp_required": [
+    "id"
+   ]
+  },
+  "state_capture": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "state_latest": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "status": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "stop_all": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "stop_dunk": {
+   "dispatch_required": [
+    "id"
+   ],
+   "mcp_required": [
+    "id"
+   ]
+  },
+  "superuser_add": {
+   "dispatch_required": [
+    "entry"
+   ],
+   "mcp_required": [
+    "entry"
+   ]
+  },
+  "superuser_recover": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "superuser_remove": {
+   "dispatch_required": [
+    "entry"
+   ],
+   "mcp_required": [
+    "entry"
+   ]
+  },
+  "superuser_status": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "task_add": {
+   "dispatch_required": [
+    "title"
+   ],
+   "mcp_required": [
+    "title"
+   ]
+  },
+  "task_assign": {
+   "dispatch_required": [
+    "id",
+    "assignees"
+   ],
+   "mcp_required": [
+    "id",
+    "assignees"
+   ]
+  },
+  "task_block": {
+   "dispatch_required": [
+    "id"
+   ],
+   "mcp_required": [
+    "id"
+   ]
+  },
+  "task_cancel": {
+   "dispatch_required": [
+    "id"
+   ],
+   "mcp_required": [
+    "id"
+   ]
+  },
+  "task_complete": {
+   "dispatch_required": [
+    "id"
+   ],
+   "mcp_required": [
+    "id"
+   ]
+  },
+  "task_delete": {
+   "dispatch_required": [
+    "id"
+   ],
+   "mcp_required": [
+    "id"
+   ]
+  },
+  "task_follow": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "task_followers": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "task_heartbeat": {
+   "dispatch_required": [
+    "id"
+   ],
+   "mcp_required": [
+    "id"
+   ]
+  },
+  "task_list": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "task_metrics": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "task_next": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "task_note": {
+   "dispatch_required": [
+    "id"
+   ],
+   "mcp_required": [
+    "id"
+   ]
+  },
+  "task_read": {
+   "dispatch_required": [
+    "id"
+   ],
+   "mcp_required": [
+    "id"
+   ]
+  },
+  "task_reap": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "task_release": {
+   "dispatch_required": [
+    "id"
+   ],
+   "mcp_required": [
+    "id"
+   ]
+  },
+  "task_stats": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "task_unblock": {
+   "dispatch_required": [
+    "id"
+   ],
+   "mcp_required": [
+    "id"
+   ]
+  },
+  "task_unfollow": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "task_update": {
+   "dispatch_required": [
+    "id"
+   ],
+   "mcp_required": [
+    "id"
+   ]
+  },
+  "toggle_dunk": {
+   "dispatch_required": [
+    "id"
+   ],
+   "mcp_required": [
+    "id"
+   ]
+  },
+  "token_issue": {
+   "dispatch_required": [
+    "role"
+   ],
+   "mcp_required": [
+    "role"
+   ]
+  },
+  "token_revoke": {
+   "dispatch_required": [
+    "label"
+   ],
+   "mcp_required": [
+    "label"
+   ]
+  },
+  "turn_end": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "turn_start": {
+   "dispatch_required": [],
+   "mcp_required": []
+  },
+  "update_dunk": {
+   "dispatch_required": [
+    "id"
+   ],
+   "mcp_required": [
+    "id"
+   ]
+  },
+  "whoami": {
+   "dispatch_required": [],
+   "mcp_required": []
+  }
  }
 }

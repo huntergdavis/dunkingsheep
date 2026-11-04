@@ -25,6 +25,9 @@ use super::resolve::{resolve_tab, resolve_target, resolve_workspace};
 use super::Flock;
 use crate::error::DunkError;
 
+pub type RawCreateResult =
+    Result<Result<Value, String>, crate::terminal::tmux_registry::RegistryError>;
+
 /// The calls `Flock` makes on `self.herdr` for layout. Mutations return the backend's
 /// result dict, or its message as `Err` (the Python's `(False, message)`).
 pub trait LayoutBackend {
@@ -55,6 +58,41 @@ pub trait LayoutBackend {
         cwd: Option<&str>,
         focus: bool,
     ) -> Result<Value, String>;
+    fn create_workspace_raw(&mut self, label: &Value, cwd: &Value, focus: bool) -> RawCreateResult {
+        Ok(self.create_workspace(
+            crate::terminal::raw::optional(label).as_deref(),
+            crate::terminal::raw::optional(cwd).as_deref(),
+            focus,
+        ))
+    }
+    fn create_tab_raw(
+        &mut self,
+        workspace: Option<&str>,
+        label: &Value,
+        cwd: &Value,
+        focus: bool,
+    ) -> RawCreateResult {
+        Ok(self.create_tab(
+            workspace,
+            crate::terminal::raw::optional(label).as_deref(),
+            crate::terminal::raw::optional(cwd).as_deref(),
+            focus,
+        ))
+    }
+    fn split_pane_raw(
+        &mut self,
+        pane: &str,
+        direction: &str,
+        cwd: &Value,
+        focus: bool,
+    ) -> RawCreateResult {
+        Ok(self.split_pane(
+            pane,
+            direction,
+            crate::terminal::raw::optional(cwd).as_deref(),
+            focus,
+        ))
+    }
     #[allow(clippy::too_many_arguments)]
     fn start_agent(
         &mut self,
@@ -66,11 +104,49 @@ pub trait LayoutBackend {
         cwd: Option<&str>,
         focus: bool,
     ) -> Result<Value, String>;
+    #[allow(clippy::too_many_arguments)]
+    fn start_agent_raw(
+        &mut self,
+        name: &str,
+        argv: &[String],
+        workspace: Option<&str>,
+        tab: Option<&str>,
+        split: Option<&str>,
+        cwd: Option<&str>,
+        focus: bool,
+    ) -> RawCreateResult {
+        Ok(self.start_agent(name, argv, workspace, tab, split, cwd, focus))
+    }
+    fn rename_raw(&mut self, kind: &str, target: &str, label: &str) -> RawCreateResult {
+        Ok(self.rename(kind, target, label))
+    }
     fn rename(&mut self, kind: &str, target_id: &str, label: &str) -> Result<Value, String>;
+    fn focus_raw(&mut self, kind: &str, target: &str) -> Result<Value, String> {
+        self.focus(kind, target)
+    }
     fn focus(&mut self, kind: &str, target_id: &str) -> Result<Value, String>;
 }
 
+/// Request-scoped layout, canonical verification, and lane-registration services.
+pub type AgentOperation<'a> = dyn FnMut(
+        &mut dyn LayoutBackend,
+        &dyn super::panes::PaneInfoEnv,
+        &mut dyn super::agent_verify::VerifyBackend,
+        &crate::config::Env,
+        f64,
+    ) -> Result<Value, DunkError>
+    + 'a;
+
 /// `submit_text(pane_id, command) -> (ran, message)`.
+pub type CreateOperation<'a> = dyn FnMut(
+        &mut dyn LayoutBackend,
+        &dyn super::panes::PaneInfoEnv,
+        RawSubmit<'_>,
+    ) -> Result<Value, DunkError>
+    + 'a;
+
+pub type RawSubmit<'a> = &'a mut dyn FnMut(&str, &Value) -> Result<(bool, String), DunkError>;
+
 pub type Submit<'a> = &'a mut dyn FnMut(&str, &str) -> (bool, String);
 
 fn refused<T>(text: String) -> Result<T, DunkError> {
@@ -198,6 +274,7 @@ impl Flock {
         env: &dyn super::panes::PaneInfoEnv,
     ) -> Result<Value, DunkError> {
         let mut out = create_workspace(backend, label, cwd, command, focus, submit)?;
+        self.set_last_message(format!("Created workspace {}", label.unwrap_or("")).trim());
         let pane_id = out
             .get("pane_id")
             .and_then(Value::as_str)

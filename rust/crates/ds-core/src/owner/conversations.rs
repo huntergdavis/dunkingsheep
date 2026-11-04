@@ -21,6 +21,16 @@ pub struct OwnerIngest<'a> {
     pub attachments: &'a [PathBuf],
 }
 
+/// Raw wire arguments for the API-only owner-ingest compatibility boundary.
+/// Typed callers should continue using [`OwnerIngest`].
+pub struct OwnerIngestWire<'a> {
+    pub body: Option<&'a Value>,
+    pub transport: Option<&'a Value>,
+    pub external_id: Option<&'a Value>,
+    pub subject: Option<&'a Value>,
+    pub attachments: Option<&'a Value>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Conversation {
     pub mailbox: String,
@@ -74,6 +84,11 @@ impl<'a> OwnerConversations<'a> {
         &self,
         self_pane_id: Option<&str>,
     ) -> Result<std::sync::Arc<Store>, DunkError> {
+        self.authorised_role(self_pane_id)?;
+        self.inbox_store()
+    }
+
+    fn authorised_role(&self, self_pane_id: Option<&str>) -> Result<(), DunkError> {
         let role = match self_pane_id.filter(|pane| !pane.is_empty()) {
             Some(pane) => self.flock.caller_role(Some(pane), self.pane_env)?,
             None => "owner".to_string(),
@@ -84,6 +99,10 @@ impl<'a> OwnerConversations<'a> {
                 python_repr(&role)
             )));
         }
+        Ok(())
+    }
+
+    fn inbox_store(&self) -> Result<std::sync::Arc<Store>, DunkError> {
         self.flock
             .stores()
             .inbox
@@ -154,6 +173,57 @@ impl<'a> OwnerConversations<'a> {
             external_id: args.external_id,
         };
         let message_id = store.send(&outgoing)?;
+        let message = store.get_message(&message_id)?;
+        self.flock.invalidate_view();
+        Ok(Ingested {
+            message,
+            duplicate: false,
+            transport,
+        })
+    }
+
+    /// Ingest raw API values while preserving Python's role/transport/dedup and
+    /// Inbox.send attachment-before-subject binding order.
+    pub fn ingest_wire(
+        &self,
+        args: OwnerIngestWire<'_>,
+        self_pane_id: Option<&str>,
+    ) -> Result<Ingested, DunkError> {
+        self.authorised_role(self_pane_id)?;
+        let transport_value = args
+            .transport
+            .filter(|value| !value.is_null())
+            .map(python_str);
+        let transport = validate_transport(transport_value.as_deref())
+            .map_err(DunkError::Refused)?
+            .ok_or_else(|| {
+                DunkError::Refused("an ingested owner question needs a transport".to_string())
+            })?;
+        let external_id = args
+            .external_id
+            .filter(|value| value_truthy(value))
+            .map(python_str);
+        let store = self.inbox_store()?;
+        if external_id.as_deref().is_some_and(|id| !id.is_empty()) {
+            if let Some(message) =
+                store.find_by_external_id(OWNER_MAILBOX, external_id.as_deref())?
+            {
+                return Ok(Ingested {
+                    message,
+                    duplicate: true,
+                    transport,
+                });
+            }
+        }
+
+        let body = args.body.map(python_str).unwrap_or_default();
+        let message_id = store.send_owner_ingest_wire(
+            &body,
+            args.subject,
+            args.attachments,
+            &transport,
+            external_id.as_deref(),
+        )?;
         let message = store.get_message(&message_id)?;
         self.flock.invalidate_view();
         Ok(Ingested {
@@ -307,12 +377,25 @@ fn python_repr_value(value: &Value) -> String {
     }
 }
 
-fn python_number_string(value: &serde_json::Number) -> String {
-    if value.is_f64() {
-        python_float_string(&value.to_string())
-    } else {
-        value.to_string()
+pub(crate) fn python_number_string(value: &serde_json::Number) -> String {
+    let raw = value.to_string();
+    if raw
+        .chars()
+        .any(|character| matches!(character, '.' | 'e' | 'E'))
+    {
+        // serde_json's arbitrary_precision feature preserves the input token, while
+        // Python json.loads first rounds it to an IEEE-754 float. Format that decoded
+        // value so wire text follows Python even for rounded and infinite floats.
+        if let Ok(decoded) = raw.parse::<f64>() {
+            if !decoded.is_finite() {
+                return crate::usage::py_float_repr(decoded);
+            }
+            if let Some(normalized) = serde_json::Number::from_f64(decoded) {
+                return python_float_string(&normalized.to_string());
+            }
+        }
     }
+    raw
 }
 
 fn python_float_string(text: &str) -> String {

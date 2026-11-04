@@ -1,0 +1,20 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/api/ops-metrics/history?hours=169",
+    "headers": {
+      "host": "desk.test"
+    }
+  },
+  "response": {
+    "status": 422,
+    "headers": {
+      "content-type": "application/json"
+    },
+    "set_cookie": null,
+    "body": "{\"detail\":\"History window must be 1 to 168 hours\"}",
+    "json": {
+      "detail": "History window must be 1 to 168 hours"
+    }
+  }
+}

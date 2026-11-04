@@ -20,8 +20,8 @@
 
 use std::path::{Path, PathBuf};
 
-use rusqlite::{params, Connection, OptionalExtension};
-use serde_json::json;
+use rusqlite::{params, types::Value as SqlValue, Connection, OptionalExtension};
+use serde_json::{json, Value as JsonValue};
 
 pub mod metrics;
 
@@ -155,6 +155,27 @@ pub struct Task {
     pub completed_at: Option<f64>,
 }
 
+/// Filters and ordering limits for `Tasks::list_visible`.
+#[derive(Clone, Copy, Debug)]
+pub struct ListVisibleOptions<'a> {
+    /// Explicit scope, or `None` to use all scopes visible to the caller.
+    pub scope: Option<&'a str>,
+    /// Optional task status filter.
+    pub status: Option<&'a str>,
+    /// Optional pane id whose assignee list must contain the task.
+    pub assignee: Option<&'a str>,
+    /// Whether terminal tasks are included when `status` is not specified.
+    pub include_done: bool,
+    /// Maximum number of decorated rows to return.
+    pub limit: usize,
+    /// Viewer pane used for per-viewer eligibility decoration.
+    pub pane_id: Option<&'a str>,
+    /// Optional task kind filter.
+    pub kind: Option<&'a str>,
+    /// Restrict results to blocked tasks with a `needs-owner:` reason.
+    pub needs_owner: bool,
+}
+
 /// The task store: one writer actor, as `db.rs` provides.
 pub struct Tasks {
     writer: db::Writer,
@@ -165,6 +186,12 @@ pub struct Tasks {
 /// An `on_event` callback: (task id, event, completed-by, kind). Cheap, and it must not
 /// write the task store; a panicking callback is contained, never raised (`_fire`).
 pub type Observer = Box<dyn Fn(&str, &str, Option<&str>, Option<&str>) + Send + Sync>;
+
+#[derive(Clone)]
+enum StatusReason {
+    Text(Option<String>),
+    Raw(Option<JsonValue>),
+}
 
 impl Tasks {
     /// Open (or create) the store and bring its schema up to date.
@@ -226,6 +253,44 @@ impl Tasks {
         body: &str,
         opts: AddOptions,
     ) -> Result<Task, DunkError> {
+        self.add_with_verdict_guard(scope, title, body, opts, None)
+            .await?
+            .ok_or_else(|| DunkError::Refused("unconditional task insertion was refused".into()))
+    }
+
+    /// Add a global review task only if its exact terminal-verdict identity set is unchanged.
+    /// A stale snapshot returns `Ok(None)` before the task counter or event is touched.
+    pub async fn add_review_with_verdict_guard(
+        &self,
+        scope: &str,
+        title: &str,
+        body: &str,
+        opts: AddOptions,
+        expected_verdict_ids: &[String],
+    ) -> Result<Option<Task>, DunkError> {
+        if scope != "global" || opts.kind.as_deref() != Some("review") {
+            return Err(DunkError::Refused(
+                "review verdict expectations require a global review".into(),
+            ));
+        }
+        self.add_with_verdict_guard(
+            scope,
+            title,
+            body,
+            opts,
+            Some(expected_verdict_ids.to_vec()),
+        )
+        .await
+    }
+
+    async fn add_with_verdict_guard(
+        &self,
+        scope: &str,
+        title: &str,
+        body: &str,
+        opts: AddOptions,
+        expected_verdict_ids: Option<Vec<String>>,
+    ) -> Result<Option<Task>, DunkError> {
         let scope = validate_scope(scope)?;
         let title = title.trim().to_string();
         if title.is_empty() {
@@ -295,6 +360,25 @@ impl Tasks {
             let tx = conn
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                 .map_err(db::map_sqlite)?;
+            if let Some(expected_ids) = &expected_verdict_ids {
+                let actual_ids = {
+                    let mut stmt = tx.prepare(
+                        "SELECT id FROM tasks WHERE scope = 'global' AND kind = 'review' \
+                         AND repo = ? AND pr = ? AND head = ? AND status = 'done' \
+                         AND verdict IS NOT NULL AND verdict != ''",
+                    ).map_err(db::map_sqlite)?;
+                    let ids = stmt
+                        .query_map(params![repo, pr, head], |row| row.get::<_, String>(0))
+                        .map_err(db::map_sqlite)?;
+                    ids.collect::<Result<std::collections::BTreeSet<_>, _>>()
+                        .map_err(db::map_sqlite)?
+                };
+                let expected_ids = expected_ids.iter().cloned().collect::<std::collections::BTreeSet<_>>();
+                if actual_ids != expected_ids {
+                    tx.rollback().map_err(db::map_sqlite)?;
+                    return Ok(None);
+                }
+            }
             let require = |wanted: &str| -> Result<(), DunkError> {
                 let found: Option<String> = tx
                     .query_row("SELECT id FROM tasks WHERE id = ?", params![wanted], |row| row.get(0))
@@ -357,10 +441,13 @@ impl Tasks {
                 params![id, "created", now, created_by, scope, priority, status, meta],
             ).map_err(db::map_sqlite)?;
             tx.commit().map_err(db::map_sqlite)?;
-            Ok(id)
+            Ok(Some(id))
         }).await?;
+        let Some(id) = id else {
+            return Ok(None);
+        };
         self.fire(&id, "created", None, None);
-        self.get(&id).await
+        self.get(&id).await.map(Some)
     }
 
     /// One task by id.
@@ -383,7 +470,7 @@ impl Tasks {
                 "SELECT id, scope, title, body, status, priority, kind, assignees, depends_on, block_reason, created_at, updated_at, completed_by, completed_at FROM tasks WHERE scope = ? ORDER BY created_at, id").map_err(db::map_sqlite)?;
             let rows = stmt.query_map(params![scope], row_to_task).map_err(db::map_sqlite)?;
             let collected: Result<Vec<_>, _> = rows.collect();
-            Ok(collected.map_err(db::map_sqlite)?)
+            collected.map_err(db::map_sqlite)
         }).await
     }
     /// Set a status, and END THE CLAIM when the status is terminal.
@@ -400,10 +487,38 @@ impl Tasks {
         reason: Option<&str>,
         actor: Option<&str>,
     ) -> Result<Task, DunkError> {
+        self.set_status_with_reason(
+            id,
+            status,
+            StatusReason::Text(reason.map(str::to_owned)),
+            actor,
+        )
+        .await
+    }
+
+    /// The raw API block/cancel path preserves Python sqlite scalar binding and error order.
+    pub(crate) async fn set_status_with_raw_reason(
+        &self,
+        id: &str,
+        status: &str,
+        reason: Option<&JsonValue>,
+        actor: Option<&str>,
+    ) -> Result<Task, DunkError> {
+        self.set_status_with_reason(id, status, StatusReason::Raw(reason.cloned()), actor)
+            .await
+    }
+
+    async fn set_status_with_reason(
+        &self,
+        id: &str,
+        status: &str,
+        reason: StatusReason,
+        actor: Option<&str>,
+    ) -> Result<Task, DunkError> {
         let wanted = id.to_string();
         let id = wanted.clone();
         let status = status.to_string();
-        let reason = reason.map(|r| r.to_string());
+        let reason = reason.clone();
         let actor = actor.map(|a| a.to_string());
         let now = crate::clock::now_s();
         self.writer
@@ -425,6 +540,22 @@ impl Tasks {
                     return Err(DunkError::Refused(format!(
                         "task {id} is {current}; a finished task is not reopened by an edit (t854)")));
                 }
+                // SQLite's attempted binding happens only after visibility and terminal-state
+                // checks, as in Python. The rejected composite value therefore cannot hide a
+                // refusal or partially change status, leases, or events.
+                let (reason_binding, reason_meta) = match &reason {
+                    StatusReason::Text(value) => (
+                        value.clone().map(SqlValue::Text),
+                        value.clone().map(|value| json!({"reason": value}).to_string()),
+                    ),
+                    StatusReason::Raw(value) => (
+                        Some(crate::sqlite_scalar::python_sqlite_scalar(
+                            value.as_ref(),
+                            if status == "cancelled" { 3 } else { 5 },
+                        )?),
+                        None,
+                    ),
+                };
                 // FINDING 2: the transition writes the columns that give it meaning, and
                 // exactly one event row - task_metrics is computed from those rows, so a
                 // silent transition is invisible to the metrics.
@@ -432,8 +563,8 @@ impl Tasks {
                     status.as_str()
                 {
                     "done" => (actor.clone(), Some(now), None, None),
-                    "cancelled" => (None, None, Some(now), reason.clone()),
-                    "blocked" => (None, None, None, reason.clone()),
+                    "cancelled" => (None, None, Some(now), reason_binding.clone()),
+                    "blocked" => (None, None, None, reason_binding.clone()),
                     _ => (None, None, None, None),
                 };
                 let changed = conn
@@ -479,7 +610,7 @@ impl Tasks {
                     "INSERT INTO task_events (task_id, event, at, actor, scope, priority, \
                      status_from, status_to, duration_ms, meta) VALUES (?,?,?,?,?,?,?,?,?,?)",
                     params![id, event, now, actor, scope, priority, current, status, duration_ms,
-                            reason.clone().map(|r| json!({"reason": r}).to_string())],
+                            reason_meta],
                 )
                 .map_err(db::map_sqlite)?;
                 if ends_claim(status.as_str()) {
@@ -824,6 +955,32 @@ impl Tasks {
             })
             .await
     }
+
+    /// Append an API note using Python-compatible SQLite scalar binding. This path does not
+    /// require the task to exist; actor identity is trusted request state and may be SQL NULL.
+    pub(crate) async fn note_raw(
+        &self,
+        id: &str,
+        event: &JsonValue,
+        actor: Option<&str>,
+        meta: &JsonValue,
+    ) -> Result<(), DunkError> {
+        let id = id.to_string();
+        let event = crate::sqlite_scalar::python_sqlite_scalar(Some(event), 2)?;
+        let actor = actor.map(|actor| SqlValue::Text(actor.to_string()));
+        let meta = SqlValue::Text(meta.to_string());
+        let now = crate::clock::now_s();
+        self.writer
+            .call(move |conn| {
+                conn.execute(
+                    "INSERT INTO task_events (task_id, event, at, actor, meta) VALUES (?,?,?,?,?)",
+                    params![id, event, now, actor, meta],
+                )
+                .map_err(db::map_sqlite)?;
+                Ok(())
+            })
+            .await
+    }
     /// `assign` (t786 slice 4): add, remove or replace the assignees. The read-modify-write
     /// is ONE immediate transaction, the Python's F4: a concurrent assign must not be lost
     /// between the read and the update.
@@ -979,6 +1136,18 @@ impl Tasks {
         status: Option<&str>,
         actor: Option<&str>,
     ) -> Result<Task, DunkError> {
+        self.update_with_status_and_raw_block_reason(id, edit, status, actor, None)
+            .await
+    }
+
+    pub(crate) async fn update_with_status_and_raw_block_reason(
+        &self,
+        id: &str,
+        edit: FieldEdit,
+        status: Option<&str>,
+        actor: Option<&str>,
+        raw_block_reason: Option<Option<JsonValue>>,
+    ) -> Result<Task, DunkError> {
         if let Some(title) = &edit.title {
             if title.trim().is_empty() {
                 return Err(DunkError::Refused("a task needs a title".into()));
@@ -993,6 +1162,7 @@ impl Tasks {
         let requested_status = status.map(str::to_string);
         let now = crate::clock::now_s();
         let edit_for_call = edit.clone();
+        let raw_block_reason = raw_block_reason.clone();
         self.writer
             .call(move |conn| {
                 let tx = conn
@@ -1183,7 +1353,33 @@ impl Tasks {
                         ).map_err(db::map_sqlite)?;
                     }
                 }
-                if let Some(reason) = &edit_for_call.block_reason {
+                if let Some(raw_reason) = raw_block_reason {
+                    // Python builds one ordered SET mapping. Replacing block_reason after
+                    // a status edit retains its position in that mapping.
+                    let preceding_fields = [
+                        edit_for_call.title.is_some(),
+                        edit_for_call.body.is_some(),
+                        edit_for_call.priority.is_some(),
+                        edit_for_call.parent_id.is_some(),
+                        edit_for_call.assignees.is_some(),
+                        edit_for_call.multi_assignee.is_some(),
+                        edit_for_call.depends_on.is_some(),
+                    ].into_iter().filter(|present| *present).count();
+                    let status_fields = match status_after.as_deref() {
+                        None => 0,
+                        Some("cancelled") => 2,
+                        Some(_) => 4,
+                    };
+                    let reason = crate::sqlite_scalar::python_sqlite_scalar(
+                        raw_reason.as_ref(), preceding_fields + status_fields + 1,
+                    )?;
+                    tx.execute(
+                        "UPDATE tasks SET block_reason = ? WHERE id = ?",
+                        params![reason, id],
+                    )
+                    .map_err(db::map_sqlite)?;
+                    changed = true;
+                } else if let Some(reason) = &edit_for_call.block_reason {
                     tx.execute("UPDATE tasks SET block_reason = ? WHERE id = ?", params![reason, id]).map_err(db::map_sqlite)?;
                     changed = true;
                 }
@@ -1255,15 +1451,18 @@ impl Tasks {
     /// `order_key` order. `scope` is the already-resolved explicit scope (None = visible).
     pub async fn list_visible(
         &self,
-        scope: Option<&str>,
-        status: Option<&str>,
-        assignee: Option<&str>,
-        include_done: bool,
-        limit: usize,
-        pane_id: Option<&str>,
-        kind: Option<&str>,
-        needs_owner: bool,
+        options: ListVisibleOptions<'_>,
     ) -> Result<Vec<Decorated>, DunkError> {
+        let ListVisibleOptions {
+            scope,
+            status,
+            assignee,
+            include_done,
+            limit,
+            pane_id,
+            kind,
+            needs_owner,
+        } = options;
         let scopes = visible_scopes(scope, pane_id)?;
         let status = match status.filter(|s| !s.is_empty()) {
             Some(s) => Some(validate_status(s)?),
@@ -1318,57 +1517,38 @@ impl Tasks {
             .await
     }
 
-    /// Visible review rows with the review-only columns, retaining `list_visible`'s
-    /// exact `order_key` order. The metadata is fetched in one actor query for the
-    /// ordered IDs rather than reconstructed with one query per task.
+    /// Complete global review metadata used by ReviewSync for live identities and verdicts.
+    /// This deliberately bypasses the UI list's 1000-row cap and decorators, while keeping
+    /// its priority/creation/id ordering in one writer query.
     pub async fn list_review_rows_visible(&self) -> Result<Vec<ReviewTaskRow>, DunkError> {
-        let visible = self
-            .list_visible(None, None, None, true, 1000, None, Some("review"), false)
-            .await?;
-        if visible.is_empty() {
-            return Ok(Vec::new());
-        }
-        let ids: Vec<String> = visible.iter().map(|row| row.task.id.clone()).collect();
-        let metadata = self
-            .writer
-            .call(move |conn| {
-                let marks = vec!["?"; ids.len()].join(",");
-                let sql = format!(
-                    "SELECT id, completed_by, repo, pr, head, verdict FROM tasks WHERE id IN ({marks})"
-                );
-                let mut stmt = conn.prepare(&sql).map_err(db::map_sqlite)?;
+        self.writer
+            .call(|conn| {
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT id, status, completed_by, repo, pr, head, verdict \
+                         FROM tasks WHERE scope = 'global' AND kind = 'review' \
+                         ORDER BY CASE priority \
+                           WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 \
+                           WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 99 END, \
+                           created_at, id",
+                    )
+                    .map_err(db::map_sqlite)?;
                 let rows = stmt
-                    .query_map(rusqlite::params_from_iter(ids.iter()), |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, Option<String>>(1)?,
-                        row.get::<_, Option<String>>(2)?,
-                        row.get::<_, Option<i64>>(3)?,
-                        row.get::<_, Option<String>>(4)?,
-                        row.get::<_, Option<String>>(5)?,
-                    ))
-                })
+                    .query_map([], |row| {
+                        Ok(ReviewTaskRow {
+                            id: row.get(0)?,
+                            status: row.get(1)?,
+                            completed_by: row.get(2)?,
+                            repo: row.get(3)?,
+                            pr: row.get(4)?,
+                            head: row.get(5)?,
+                            verdict: row.get(6)?,
+                        })
+                    })
                     .map_err(db::map_sqlite)?;
                 rows.collect::<Result<Vec<_>, _>>().map_err(db::map_sqlite)
             })
-            .await?;
-        let mut out = Vec::with_capacity(visible.len());
-        for row in visible {
-            if let Some((_, completed_by, repo, pr, head, verdict)) =
-                metadata.iter().find(|(id, ..)| id == &row.task.id)
-            {
-                out.push(ReviewTaskRow {
-                    id: row.task.id,
-                    status: row.task.status,
-                    completed_by: completed_by.clone(),
-                    repo: repo.clone(),
-                    pr: *pr,
-                    head: head.clone(),
-                    verdict: verdict.clone(),
-                });
-            }
-        }
-        Ok(out)
+            .await
     }
 
     /// `Tasks.stats`: counts by status, per visible scope and in total.
@@ -2407,6 +2587,15 @@ pub async fn h_task_complete(
 mod tests {
     use super::*;
 
+    type StatusTaskEvent = (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    );
+    type TaskEventObservation = (String, String, Option<String>);
+
     async fn store(tag: &str) -> crate::testsupport::Scratch<Tasks> {
         let dir = crate::testsupport::dir(&format!("store-{tag}"));
         let tasks = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
@@ -2451,6 +2640,234 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(1, events);
+    }
+
+    #[tokio::test]
+    async fn review_add_verdict_guard_rejects_stale_snapshot_without_allocating_id_or_event() {
+        let store = store("review-add-guard-stale").await;
+        let first = store
+            .add_with(
+                "global",
+                "first review",
+                "",
+                AddOptions {
+                    kind: Some("review".into()),
+                    repo: Some("o/r".into()),
+                    pr: Some("7".into()),
+                    head: Some("head-a".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .writer
+            .call({
+                let id = first.id.clone();
+                move |conn| {
+                    conn.execute(
+                        "UPDATE tasks SET status='done', completed_by='%1', verdict='accept' WHERE id=?",
+                        params![id],
+                    )
+                    .map_err(db::map_sqlite)?;
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
+
+        let created_before: i64 = store
+            .writer
+            .call(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM task_events WHERE event='created'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(db::map_sqlite)
+            })
+            .await
+            .unwrap();
+        let counter_before: i64 = store
+            .writer
+            .call(|conn| {
+                conn.query_row("SELECT value FROM counters WHERE name='task'", [], |row| {
+                    row.get(0)
+                })
+                .map_err(db::map_sqlite)
+            })
+            .await
+            .unwrap();
+
+        let stale = store
+            .add_review_with_verdict_guard(
+                "global",
+                "second review",
+                "body",
+                AddOptions {
+                    priority: Some("high".into()),
+                    kind: Some("review".into()),
+                    repo: Some("o/r".into()),
+                    pr: Some("7".into()),
+                    head: Some("head-a".into()),
+                    ..Default::default()
+                },
+                &[],
+            )
+            .await
+            .unwrap();
+        assert!(stale.is_none());
+
+        let created_after: i64 = store
+            .writer
+            .call(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM task_events WHERE event='created'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(db::map_sqlite)
+            })
+            .await
+            .unwrap();
+        let counter_after: i64 = store
+            .writer
+            .call(|conn| {
+                conn.query_row("SELECT value FROM counters WHERE name='task'", [], |row| {
+                    row.get(0)
+                })
+                .map_err(db::map_sqlite)
+            })
+            .await
+            .unwrap();
+        assert_eq!(created_before, created_after);
+        assert_eq!(counter_before, counter_after);
+
+        let inserted = store
+            .add_review_with_verdict_guard(
+                "global",
+                "second review",
+                "body",
+                AddOptions {
+                    priority: Some("high".into()),
+                    kind: Some("review".into()),
+                    repo: Some("o/r".into()),
+                    pr: Some("7".into()),
+                    head: Some("head-a".into()),
+                    ..Default::default()
+                },
+                std::slice::from_ref(&first.id),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(format!("t{}", counter_before + 1), inserted.id);
+    }
+
+    #[tokio::test]
+    async fn review_add_verdict_guard_rejects_a_new_needs_fix_verdict() {
+        let store = store("review-add-guard-needs-fix").await;
+        let accept = store
+            .add_with(
+                "global",
+                "accept",
+                "",
+                AddOptions {
+                    kind: Some("review".into()),
+                    repo: Some("o/r".into()),
+                    pr: Some("7".into()),
+                    head: Some("head-a".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .set_verdict(&accept.id, "accept", Some("%1"))
+            .await
+            .unwrap();
+        store
+            .task_complete(&accept.id, Some("%1"), true)
+            .await
+            .unwrap();
+        let needs_fix = store
+            .add_with(
+                "global",
+                "needs fix",
+                "",
+                AddOptions {
+                    kind: Some("review".into()),
+                    repo: Some("o/r".into()),
+                    pr: Some("7".into()),
+                    head: Some("head-a".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .set_verdict(&needs_fix.id, "needs-fix", Some("%2"))
+            .await
+            .unwrap();
+        store
+            .task_complete(&needs_fix.id, Some("%2"), true)
+            .await
+            .unwrap();
+
+        let none = store
+            .add_review_with_verdict_guard(
+                "global",
+                "third review",
+                "body",
+                AddOptions {
+                    kind: Some("review".into()),
+                    repo: Some("o/r".into()),
+                    pr: Some("7".into()),
+                    head: Some("head-a".into()),
+                    ..Default::default()
+                },
+                std::slice::from_ref(&accept.id),
+            )
+            .await
+            .unwrap();
+        assert!(none.is_none());
+    }
+
+    #[tokio::test]
+    async fn list_review_rows_visible_reads_uncapped_global_rows_in_priority_age_order() {
+        let store = store("review-rows-uncapped").await;
+        store
+            .writer
+            .call(|conn| {
+                for index in 0..1005 {
+                    let id = format!("t{index:04}");
+                    conn.execute(
+                        "INSERT INTO tasks (id, scope, title, body, status, priority, assignees, depends_on, created_at, updated_at, kind, repo, pr, head) VALUES (?, 'global', ?, '', 'done', 'low', '[]', '[]', ?, ?, 'review', 'o/r', ?, 'head')",
+                        params![id, format!("review {index}"), index as f64, index as f64, index],
+                    )
+                    .map_err(db::map_sqlite)?;
+                }
+                conn.execute(
+                    "INSERT INTO tasks (id, scope, title, body, status, priority, assignees, depends_on, created_at, updated_at, kind, repo, pr, head) VALUES ('urgent', 'global', 'urgent', '', 'open', 'urgent', '[]', '[]', 5000, 5000, 'review', 'o/r', 2000, 'head')",
+                    [],
+                )
+                .map_err(db::map_sqlite)?;
+                conn.execute(
+                    "INSERT INTO tasks (id, scope, title, body, status, priority, assignees, depends_on, created_at, updated_at, kind, repo, pr, head) VALUES ('private', 'w1:p1', 'private', '', 'open', 'urgent', '[]', '[]', 0, 0, 'review', 'o/r', 2001, 'head')",
+                    [],
+                )
+                .map_err(db::map_sqlite)?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let rows = store.list_review_rows_visible().await.unwrap();
+        assert_eq!(1006, rows.len());
+        assert_eq!("urgent", rows[0].id);
+        assert_eq!("t0000", rows[1].id);
+        assert_eq!("t1004", rows[1005].id);
+        assert!(rows.iter().all(|row| row.id != "private"));
     }
 
     #[tokio::test]
@@ -2511,7 +2928,16 @@ mod tests {
         store.complete(&low.id).await.unwrap();
         let ids = |v: Vec<Decorated>| v.into_iter().map(|d| d.task.id).collect::<Vec<_>>();
         let all = store
-            .list_visible(None, None, None, true, 200, Some("w1:p1"), None, false)
+            .list_visible(ListVisibleOptions {
+                scope: None,
+                status: None,
+                assignee: None,
+                include_done: true,
+                limit: 200,
+                pane_id: Some("w1:p1"),
+                kind: None,
+                needs_owner: false,
+            })
             .await
             .unwrap();
         assert_eq!(
@@ -2519,48 +2945,102 @@ mod tests {
             ids(all)
         );
         let open = store
-            .list_visible(None, None, None, false, 200, Some("w1:p1"), None, false)
+            .list_visible(ListVisibleOptions {
+                scope: None,
+                status: None,
+                assignee: None,
+                include_done: false,
+                limit: 200,
+                pane_id: Some("w1:p1"),
+                kind: None,
+                needs_owner: false,
+            })
             .await
             .unwrap();
         assert_eq!(vec![hi.id.clone(), mine.id.clone()], ids(open));
         let done = store
-            .list_visible(None, Some("done"), None, false, 200, None, None, false)
+            .list_visible(ListVisibleOptions {
+                scope: None,
+                status: Some("done"),
+                assignee: None,
+                include_done: false,
+                limit: 200,
+                pane_id: None,
+                kind: None,
+                needs_owner: false,
+            })
             .await
             .unwrap();
         assert_eq!(vec![low.id.clone()], ids(done));
         let by = store
-            .list_visible(
-                None,
-                None,
-                Some("w1:p1"),
-                true,
-                200,
-                Some("w1:p1"),
-                None,
-                false,
-            )
+            .list_visible(ListVisibleOptions {
+                scope: None,
+                status: None,
+                assignee: Some("w1:p1"),
+                include_done: true,
+                limit: 200,
+                pane_id: Some("w1:p1"),
+                kind: None,
+                needs_owner: false,
+            })
             .await
             .unwrap();
         assert_eq!(vec![hi.id.clone()], ids(by));
         let named = store
-            .list_visible(Some("w2:p2"), None, None, true, 200, None, None, false)
+            .list_visible(ListVisibleOptions {
+                scope: Some("w2:p2"),
+                status: None,
+                assignee: None,
+                include_done: true,
+                limit: 200,
+                pane_id: None,
+                kind: None,
+                needs_owner: false,
+            })
             .await
             .unwrap();
         assert!(ids(named).contains(&theirs.id));
         assert_eq!(
             1,
             store
-                .list_visible(None, None, None, true, 1, None, None, false)
+                .list_visible(ListVisibleOptions {
+                    scope: None,
+                    status: None,
+                    assignee: None,
+                    include_done: true,
+                    limit: 1,
+                    pane_id: None,
+                    kind: None,
+                    needs_owner: false,
+                })
                 .await
                 .unwrap()
                 .len()
         );
         assert!(store
-            .list_visible(None, Some("bogus"), None, true, 1, None, None, false)
+            .list_visible(ListVisibleOptions {
+                scope: None,
+                status: Some("bogus"),
+                assignee: None,
+                include_done: true,
+                limit: 1,
+                pane_id: None,
+                kind: None,
+                needs_owner: false,
+            })
             .await
             .is_err());
         assert!(store
-            .list_visible(Some("self"), None, None, true, 1, None, None, false)
+            .list_visible(ListVisibleOptions {
+                scope: Some("self"),
+                status: None,
+                assignee: None,
+                include_done: true,
+                limit: 1,
+                pane_id: None,
+                kind: None,
+                needs_owner: false,
+            })
             .await
             .is_err());
     }
@@ -2679,7 +3159,7 @@ mod tests {
                     .prepare("SELECT actor || '|' || COALESCE(meta,'') FROM task_events WHERE task_id = ? AND event = 'unblocked'")
                     .map_err(db::map_sqlite)?;
                 let rows = stmt.query_map(params![id], |r| r.get::<_, String>(0)).map_err(db::map_sqlite)?;
-                Ok(rows.collect::<Result<Vec<_>, _>>().map_err(db::map_sqlite)?)
+                rows.collect::<Result<Vec<_>, _>>().map_err(db::map_sqlite)
             })
             .await
             .unwrap()
@@ -3315,13 +3795,7 @@ mod tests {
             .set_status(&task.id, "in_progress", None, Some("%4"))
             .await
             .unwrap();
-        let event: (
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-        ) = tasks
+        let event: StatusTaskEvent = tasks
             .writer
             .call({
                 let id = task.id.clone();
@@ -3705,7 +4179,7 @@ mod tests {
 
     #[test]
     fn order_key_sorts_by_priority_then_age_then_id() {
-        let mut rows = vec![
+        let mut rows = [
             ("low", 1.0, "t1"),
             ("urgent", 9.0, "t3"),
             ("urgent", 2.0, "t2"),
@@ -3818,7 +4292,7 @@ mod tests {
     async fn observers_fire_after_commit_and_a_failing_one_is_contained() {
         use std::sync::{Arc, Mutex};
         let tasks = store("fire").await;
-        let seen: Arc<Mutex<Vec<(String, String, Option<String>)>>> = Arc::default();
+        let seen: Arc<Mutex<Vec<TaskEventObservation>>> = Arc::default();
         tasks.on_event(Box::new(|_, _, _, _| panic!("a broken observer")));
         let sink = seen.clone();
         tasks.on_event(Box::new(move |id, event, _, kind| {
@@ -3939,7 +4413,16 @@ mod tests {
             .await
             .unwrap();
         let visible = store
-            .list_visible(None, None, None, true, 1000, None, Some("review"), false)
+            .list_visible(ListVisibleOptions {
+                scope: None,
+                status: None,
+                assignee: None,
+                include_done: true,
+                limit: 1000,
+                pane_id: None,
+                kind: Some("review"),
+                needs_owner: false,
+            })
             .await
             .unwrap()
             .into_iter()

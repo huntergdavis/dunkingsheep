@@ -883,11 +883,40 @@ pub trait PoolradTaskStore {
 /// read-only candidate exporter; stores and exporters can be faked in tests.
 type PoolradExporter<'a> = dyn Fn(&Path) -> Result<Value, String> + 'a;
 
+/// Complete startup-captured paths; constructing a sync from these never reads
+/// the live process environment, including inside the default exporter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PoolradConfig {
+    pub repo: PathBuf,
+    pub queue_path: PathBuf,
+    pub credit_path: PathBuf,
+}
+
+impl PoolradConfig {
+    pub fn from_env(
+        env: &crate::config::Env,
+        home: &crate::config::CapturedPythonHome,
+    ) -> Result<Self, String> {
+        // Python evaluates os.environ.get's default eagerly at module import,
+        // even with an explicit (possibly empty) DUNKINGSHEEP_DIR.
+        let root = home.config_dir(env)?;
+        Ok(Self {
+            repo: env
+                .get("DUNKINGSHEEP_POOLRAD_REPO")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("/home/hunter/workspace/poolrad-decomp")),
+            queue_path: root.join("poolrad/strict-queue.json"),
+            credit_path: root.join("poolrad/credit-pending.json"),
+        })
+    }
+}
+
 pub struct PoolradSync<'a> {
     store: &'a dyn PoolradTaskStore,
     repo: PathBuf,
     exporter: Option<&'a PoolradExporter<'a>>,
     credit_path: Option<PathBuf>,
+    queue_path: Option<PathBuf>,
 }
 
 impl<'a> PoolradSync<'a> {
@@ -900,6 +929,17 @@ impl<'a> PoolradSync<'a> {
             repo,
             exporter: None,
             credit_path: None,
+            queue_path: None,
+        }
+    }
+
+    pub fn from_config(store: &'a dyn PoolradTaskStore, config: &PoolradConfig) -> Self {
+        Self {
+            store,
+            repo: config.repo.clone(),
+            exporter: None,
+            credit_path: Some(config.credit_path.clone()),
+            queue_path: Some(config.queue_path.clone()),
         }
     }
 
@@ -1131,7 +1171,7 @@ impl<'a> PoolradSync<'a> {
         if let Some(exporter) = self.exporter {
             return exporter(&self.repo);
         }
-        let out = poolrad_queue_path();
+        let out = self.queue_path.clone().unwrap_or_else(poolrad_queue_path);
         export_queue(&self.repo, out, Duration::from_secs(300))
     }
 }
@@ -1377,7 +1417,8 @@ mod tests {
                 "body": body,
                 "priority": priority,
                 "kind": kind,
-                "status": "open"
+                "status": "open",
+                "assignees": []
             });
             tasks.push(task.clone());
             Ok(task)
@@ -1536,6 +1577,16 @@ mod tests {
         assert!(body.contains("callees: ready 2 of 3 (a=2, z=1)"));
         assert!(body.contains("filed-key: poolrad-strict:OVL_0001_0001@abc123"));
         assert!(body.contains("filed by backlog-sync at "));
+        for needle in [
+            "STRICT_CANDIDATE_QUEUE.md",
+            "two reviewer-lane verdicts",
+            "NOT verified",
+        ] {
+            assert!(
+                body.contains(needle),
+                "missing Python acceptance text: {needle}"
+            );
+        }
     }
 
     #[test]
@@ -1556,6 +1607,8 @@ mod tests {
             json!({"id":"t1","status":"done","body":"x\nfiled-key: poolrad-strict:OVL_1@abc\n"}),
             json!({"id":"t2","status":"cancelled","body":"","title":"Poolrad strict C: OVL_2 (1 B)"}),
             json!({"id":"t3","status":"open","body":"filed-key: poolrad-strict:OVL_1@new"}),
+            json!({"id":"t4","status":"blocked","body":"", "title":"Poolrad strict C: OVL_4 (1 B)"}),
+            json!({"id":"t5","status":"open","body":"POOLRAD STRICT FULL-C BODY OVL_5\nfiled-key: poolrad-strict:OVL_9@deadbeef", "title":"Poolrad strict C: OVL_5 (1 B)"}),
         ];
         let keys = filed_keys_from_tasks(&tasks);
         assert_eq!(keys.get("OVL_1"), Some(&(json!("t1"), "done".to_owned())));
@@ -1565,7 +1618,17 @@ mod tests {
         );
         assert_eq!(
             filed_ids_from_tasks(&tasks),
-            HashSet::from(["OVL_1".to_owned(), "OVL_2".to_owned()])
+            HashSet::from([
+                "OVL_1".to_owned(),
+                "OVL_2".to_owned(),
+                "OVL_4".to_owned(),
+                "OVL_9".to_owned()
+            ])
+        );
+        assert_eq!(keys.get("OVL_9").unwrap().0, json!("t5"));
+        assert!(
+            !keys.contains_key("OVL_5"),
+            "body filed-key takes precedence over title"
         );
     }
 
@@ -1830,6 +1893,8 @@ mod tests {
             None
         );
         assert_eq!(already_on_main(repo.path(), "OVL_0020_11AC", None), None);
+        assert!(!model_name_matches("overlay_u200_11ac.c", "OVL_0020_11AC"));
+        assert!(!model_name_matches("overlay_u20_11ac0.c", "OVL_0020_11AC"));
     }
 
     #[test]
@@ -1854,6 +1919,10 @@ mod tests {
             .as_str()
             .unwrap()
             .starts_with(TITLE_PREFIX));
+        assert_eq!(
+            store.tasks.lock().unwrap()[0]["assignees"],
+            serde_json::json!([])
+        );
         let second = sync.run_with(2, false, "medium").unwrap();
         assert_eq!(
             second["filed"]
@@ -1880,6 +1949,44 @@ mod tests {
                 .len(),
             4
         );
+    }
+
+    #[test]
+    fn sync_two_limited_passes_file_only_the_remainder() {
+        let repo = tempdir();
+        let store = FakePoolradStore::default();
+        let queue = serde_json::json!({"rows": [
+            poolrad_row("OVL_0001_0001", 1, Value::Null),
+            poolrad_row("OVL_0001_0002", 2, Value::Null),
+            poolrad_row("OVL_0001_0003", 3, Value::Null),
+            poolrad_row("OVL_0001_0004", 4, Value::Null),
+            poolrad_row("OVL_0001_0005", 5, Value::Null)
+        ]});
+        let exporter = |_: &Path| Ok(queue.clone());
+        let sync = PoolradSync::new(&store)
+            .with_repo(repo.path())
+            .with_exporter(&exporter);
+        let first = sync.run_with(2, false, "medium").unwrap();
+        assert_eq!(
+            first["filed"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["OVL_0001_0001", "OVL_0001_0002"]
+        );
+        let second = sync.run_with(10, false, "medium").unwrap();
+        assert_eq!(
+            second["filed"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["OVL_0001_0003", "OVL_0001_0004", "OVL_0001_0005"]
+        );
+        assert_eq!(store.tasks.lock().unwrap().len(), 5);
     }
 
     #[test]
@@ -2025,6 +2132,119 @@ mod tests {
                 .unwrap()
                 .contains("partial")
         );
+    }
+
+    #[test]
+    fn sync_end_to_end_body_on_main_needs_checker_while_checker_alone_stays_authorable() {
+        let repo = tempdir();
+        model_git_fixture(repo.path(), "overlay_u20_list_walk_11ac_cpu.c", Some(1433));
+        let queue = serde_json::json!({"rows":[poolrad_row(
+            "OVL_0020_11AC", 1,
+            serde_json::json!({"status":"main_model", "main_files":["src/recovered/overlay_u20_list_walk_11ac_cpu.c"]})
+        )]});
+        let exporter = |_: &Path| Ok(queue.clone());
+        let state = tempdir();
+        let credit_path = state.path().join("credit-pending.json");
+
+        let with_body = FakePoolradStore::default();
+        let report = PoolradSync::new(&with_body)
+            .with_repo(repo.path())
+            .with_exporter(&exporter)
+            .with_credit_path(&credit_path)
+            .run()
+            .unwrap();
+        assert!(report["filed"].as_array().unwrap().is_empty());
+        assert!(report["body_on_main"]["OVL_0020_11AC"]["why_not"]
+            .as_str()
+            .unwrap()
+            .contains("checker"));
+        assert!(with_body.tasks.lock().unwrap().is_empty());
+
+        fs::remove_file(
+            repo.path()
+                .join("src/recovered/overlay_u20_list_walk_11ac_cpu.c"),
+        )
+        .unwrap();
+        let checker = repo.path().join("tools/overlay/check_model.py");
+        fs::create_dir_all(checker.parent().unwrap()).unwrap();
+        fs::write(&checker, "CHECKER_ROWS = ['OVL_0020_11AC']\n").unwrap();
+        let checker_queue = serde_json::json!({"rows":[poolrad_row(
+            "OVL_0020_11AC", 1, serde_json::json!({"status":"source_mention"})
+        )]});
+        let checker_exporter = |_: &Path| Ok(checker_queue.clone());
+        let checker_only = FakePoolradStore::default();
+        let report = PoolradSync::new(&checker_only)
+            .with_repo(repo.path())
+            .with_exporter(&checker_exporter)
+            .with_credit_path(state.path().join("checker-only-credit.json"))
+            .run()
+            .unwrap();
+        assert_eq!(report["filed"][0]["id"], "OVL_0020_11AC");
+        assert!(report["body_on_main"].as_object().unwrap().is_empty());
+        assert_eq!(checker_only.tasks.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn sync_dry_run_reports_closed_and_body_on_main_credit_without_writes() {
+        let repo = tempdir();
+        model_git_fixture(repo.path(), "overlay_u20_list_walk_11ac_cpu.c", Some(1433));
+        fixture_git(repo.path(), &["checkout", "--quiet", "-b", "side-credit"]);
+        let credit_model = repo.path().join("src/recovered/overlay_u20_11ad_cpu.c");
+        fs::write(&credit_model, "/* fixture model */\n").unwrap();
+        fixture_git(repo.path(), &["add", "-A"]);
+        fixture_git(
+            repo.path(),
+            &["commit", "--quiet", "-m", "add credit model"],
+        );
+        fixture_git(repo.path(), &["checkout", "--quiet", "main"]);
+        fixture_git(
+            repo.path(),
+            &[
+                "merge",
+                "--quiet",
+                "--no-ff",
+                "-m",
+                "Merge pull request #1434 from fixture/model",
+                "side-credit",
+            ],
+        );
+        let checker = repo.path().join("tools/overlay/check_model.py");
+        fs::create_dir_all(checker.parent().unwrap()).unwrap();
+        fs::write(&checker, "CHECKER_ROWS = ['OVL_0020_11AD']\n").unwrap();
+        let dispositions = repo.path().join("docs/re");
+        fs::create_dir_all(&dispositions).unwrap();
+        fs::write(
+            dispositions.join("OVL_0068_0294_DISPOSITION.md"),
+            "closed\n",
+        )
+        .unwrap();
+        let queue = serde_json::json!({"rows":[
+            poolrad_row("OVL_0068_0294", 1, Value::Null),
+            poolrad_row("OVL_0020_11AC", 2, serde_json::json!({"status":"main_model", "main_files":["src/recovered/overlay_u20_list_walk_11ac_cpu.c"]})),
+            poolrad_row("OVL_0020_11AD", 3, Value::Null)
+        ]});
+        let exporter = |_: &Path| Ok(queue.clone());
+        let state = tempdir();
+        let credit_path = state.path().join("credit-pending.json");
+        let store = FakePoolradStore::default();
+        let report = PoolradSync::new(&store)
+            .with_repo(repo.path())
+            .with_exporter(&exporter)
+            .with_credit_path(&credit_path)
+            .run_with(5, true, "medium")
+            .unwrap();
+        assert!(report["filed"].as_array().unwrap().is_empty());
+        assert!(report["skipped"]["closed"]["OVL_0068_0294"]
+            .as_str()
+            .unwrap()
+            .contains("DISPOSITION"));
+        assert!(report["skipped"]["closed"]["OVL_0020_11AC"]
+            .as_str()
+            .unwrap()
+            .contains("checker"));
+        assert_eq!(report["credit_pending"]["OVL_0020_11AD"]["pr"], 1434);
+        assert!(!credit_path.exists());
+        assert!(store.tasks.lock().unwrap().is_empty());
     }
 
     #[test]

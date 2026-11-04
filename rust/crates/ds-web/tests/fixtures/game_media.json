@@ -1,0 +1,88 @@
+{
+  "cases": [
+    {
+      "name": "autocodeword_success",
+      "request": {"method": "POST", "path": "/api/game/autocodeword", "headers": {"host": "testserver"}},
+      "backend": {"templates": [{"glyph": "K"}], "result_fields": [["confident", true], ["typed", false], ["word", "KOH"]]},
+      "response": {
+        "status": 200,
+        "headers": {"content-type": "application/json"},
+        "body": "{\"confident\":true,\"typed\":false,\"word\":\"KOH\"}",
+        "json": {"confident": true, "typed": false, "word": "KOH"},
+        "set_cookie": null
+      }
+    },
+    {
+      "name": "autocodeword_template_failure_uses_empty_templates",
+      "request": {"method": "POST", "path": "/api/game/autocodeword", "headers": {"host": "testserver"}},
+      "backend": {"template_error": "unreadable template directory", "result_fields": [["confident", false], ["reason", "no match"], ["path", "rune"], ["glyph_count", 0], ["typed", false]]},
+      "response": {
+        "status": 200,
+        "headers": {"content-type": "application/json"},
+        "body": "{\"confident\":false,\"reason\":\"no match\",\"path\":\"rune\",\"glyph_count\":0,\"typed\":false}",
+        "json": {"confident": false, "typed": false, "reason": "no match", "path": "rune", "glyph_count": 0},
+        "set_cookie": null
+      }
+    },
+    {
+      "name": "autocodeword_game_error",
+      "request": {"method": "POST", "path": "/api/game/autocodeword", "headers": {"host": "testserver"}},
+      "backend": {"templates": [], "game_error": "Could not capture the game frame"},
+      "response": {
+        "status": 400,
+        "headers": {"content-type": "application/json"},
+        "body": "{\"detail\":\"Could not capture the game frame\"}",
+        "json": {"detail": "Could not capture the game frame"},
+        "set_cookie": null
+      }
+    },
+    {
+      "name": "video_stream",
+      "request": {"method": "GET", "path": "/api/game/video", "headers": {"host": "testserver"}},
+      "backend": {"status": {"running": true, "audio": true}, "stream_body": "video-frame\n"},
+      "response": {
+        "status": 200,
+        "headers": {"content-type": "multipart/x-mixed-replace;boundary=ffmpeg", "cache-control": "no-store", "x-content-type-options": "nosniff"},
+        "body": "video-frame\n",
+        "json": null,
+        "set_cookie": null
+      }
+    },
+    {
+      "name": "video_not_running",
+      "request": {"method": "GET", "path": "/api/game/video", "headers": {"host": "testserver"}},
+      "backend": {"status": {"running": false, "audio": false}},
+      "response": {
+        "status": 404,
+        "headers": {"content-type": "application/json"},
+        "body": "{\"detail\":\"Poolrad is not running\"}",
+        "json": {"detail": "Poolrad is not running"},
+        "set_cookie": null
+      }
+    },
+    {
+      "name": "audio_stream",
+      "request": {"method": "GET", "path": "/api/game/audio", "headers": {"host": "testserver"}},
+      "backend": {"status": {"running": true, "audio": true}, "stream_body": "audio-frame\n"},
+      "response": {
+        "status": 200,
+        "headers": {"content-type": "audio/ogg", "cache-control": "no-store"},
+        "body": "audio-frame\n",
+        "json": null,
+        "set_cookie": null
+      }
+    },
+    {
+      "name": "audio_unavailable",
+      "request": {"method": "GET", "path": "/api/game/audio", "headers": {"host": "testserver"}},
+      "backend": {"status": {"running": true, "audio": false}},
+      "response": {
+        "status": 404,
+        "headers": {"content-type": "application/json"},
+        "body": "{\"detail\":\"Poolrad audio is unavailable\"}",
+        "json": {"detail": "Poolrad audio is unavailable"},
+        "set_cookie": null
+      }
+    }
+  ]
+}

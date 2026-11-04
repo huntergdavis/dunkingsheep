@@ -122,7 +122,11 @@ impl RequestRuntimeAdapter<'_> {
                     .filter(|s| !s.is_empty())
                     .map(String::from)
             },
-            || super::normalize_backend_name(env.get("DUNKINGSHEEP_TERMINAL_BACKEND")),
+            || {
+                Ok(super::normalize_backend_name(
+                    env.get("DUNKINGSHEEP_TERMINAL_BACKEND"),
+                ))
+            },
         )?;
         let mut lanes: Vec<String> = crate::pm::load_routing(None, None, env)
             .unwrap_or_default()
@@ -141,6 +145,9 @@ impl RequestRuntimeAdapter<'_> {
 }
 
 impl StatusEnv for RequestRuntimeAdapter<'_> {
+    fn view_cache_ttl(&self) -> Result<f64, DunkError> {
+        Ok(self.terminal.flock.status_state()?.view_cache_s)
+    }
     fn version(&self) -> String {
         self.helper_statusenv_version()
     }

@@ -2,6 +2,7 @@
 
 use serde_json::{json, Value};
 
+use crate::flock::commands_layout::CloseBackend;
 use crate::flock::mailbox::MailboxEnv;
 use crate::flock::panes::PaneInfoEnv;
 use crate::server_runtime::RequestRuntimeAdapter;
@@ -36,13 +37,13 @@ fn pane_value(terminal: &dyn Terminal, pane: &Pane) -> Value {
 }
 
 impl RequestRuntimeAdapter<'_> {
-    #[allow(dead_code)] // The complete LayoutBackend assembly belongs to its dependent leaf.
+    #[allow(dead_code)] // Production LayoutBackend dispatch is assembled in t1605.
     pub(crate) fn helper_layoutbackend_list_panes(&self) -> Vec<Value> {
         self.terminal
             .with_env(|env| MailboxEnv::list_panes_grouped(env))
     }
 
-    #[allow(dead_code)] // The complete LayoutBackend assembly belongs to its dependent leaf.
+    #[allow(dead_code)] // Production LayoutBackend dispatch is assembled in t1605.
     pub(crate) fn helper_layoutbackend_list_tabs(&self) -> Vec<Value> {
         self.terminal.with_terminal(|terminal| {
             terminal
@@ -61,7 +62,7 @@ impl RequestRuntimeAdapter<'_> {
         })
     }
 
-    #[allow(dead_code)] // The complete LayoutBackend assembly belongs to its dependent leaf.
+    #[allow(dead_code)] // Production LayoutBackend dispatch is assembled in t1605.
     pub(crate) fn helper_layoutbackend_list_workspaces(&self) -> Vec<Value> {
         self.terminal.with_terminal(|terminal| {
             let tabs = terminal.list_tabs();
@@ -84,19 +85,19 @@ impl RequestRuntimeAdapter<'_> {
         })
     }
 
-    #[allow(dead_code)] // The complete LayoutBackend assembly belongs to its dependent leaf.
+    #[allow(dead_code)] // Production LayoutBackend dispatch is assembled in t1605.
     pub(crate) fn helper_layoutbackend_get_pane(&self, pane_id: &str) -> Option<Value> {
         self.terminal
             .with_env(|env| PaneInfoEnv::get_pane(env, pane_id))
     }
 
-    #[allow(dead_code)] // The complete LayoutBackend assembly belongs to its dependent leaf.
+    #[allow(dead_code)] // Production LayoutBackend dispatch is assembled in t1605.
     pub(crate) fn helper_layoutbackend_server_error_hint(&self) -> String {
         self.terminal
             .with_terminal(|terminal| terminal.server_error_hint())
     }
 
-    #[allow(dead_code)] // The complete LayoutBackend assembly belongs to its dependent leaf.
+    #[allow(dead_code)] // Production LayoutBackend dispatch is assembled in t1605.
     pub(crate) fn helper_layoutbackend_create_workspace(
         &mut self,
         label: Option<&str>,
@@ -126,7 +127,7 @@ impl RequestRuntimeAdapter<'_> {
         })
     }
 
-    #[allow(dead_code)] // The complete LayoutBackend assembly belongs to its dependent leaf.
+    #[allow(dead_code)] // Production LayoutBackend dispatch is assembled in t1605.
     pub(crate) fn helper_layoutbackend_create_tab(
         &mut self,
         workspace_id: Option<&str>,
@@ -153,7 +154,7 @@ impl RequestRuntimeAdapter<'_> {
         })
     }
 
-    #[allow(dead_code)] // The complete LayoutBackend assembly belongs to its dependent leaf.
+    #[allow(dead_code)] // Production LayoutBackend dispatch is assembled in t1605.
     pub(crate) fn helper_layoutbackend_split_pane(
         &mut self,
         pane_id: &str,
@@ -175,7 +176,7 @@ impl RequestRuntimeAdapter<'_> {
         })
     }
 
-    #[allow(dead_code)] // The complete LayoutBackend assembly belongs to its dependent leaf.
+    #[allow(dead_code)] // Production LayoutBackend dispatch is assembled in t1605.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn helper_layoutbackend_start_agent(
         &mut self,
@@ -214,7 +215,49 @@ impl RequestRuntimeAdapter<'_> {
         })
     }
 
-    #[allow(dead_code)] // The complete LayoutBackend assembly belongs to its dependent leaf.
+    #[allow(dead_code)] // Production LayoutBackend dispatch is assembled in t1605.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn helper_layoutbackend_start_agent_raw(
+        &mut self,
+        name: &str,
+        argv: &[String],
+        workspace_id: Option<&str>,
+        tab_id: Option<&str>,
+        split: Option<&str>,
+        cwd: Option<&str>,
+        focus: bool,
+    ) -> crate::flock::commands_layout::RawCreateResult {
+        self.terminal.with_terminal_mut(|terminal| {
+            let spec = AgentSpec {
+                name: name.to_owned(),
+                argv: argv.to_vec(),
+                workspace_id: workspace_id.map(str::to_owned),
+                tab_id: tab_id.map(str::to_owned),
+                split: split.map(str::to_owned),
+                cwd: cwd.map(str::to_owned),
+                label: Some(name.to_owned()),
+                ..AgentSpec::default()
+            };
+            let pane = match terminal.start_agent_raw(&spec, focus)? {
+                Ok(pane) => pane,
+                Err(error) => return Ok(Err(error.message)),
+            };
+            let mut agent = pane_value(terminal, &pane);
+            agent["name"] = json!(name);
+            agent["agent"] = json!(argv
+                .first()
+                .and_then(|v| v.rsplit('/').next())
+                .unwrap_or(""));
+            agent["agent_status"] = json!("unknown");
+            Ok(Ok(json!({
+                "agent": agent,
+                "argv": argv,
+                "pane_id": pane.pane_id,
+            })))
+        })
+    }
+
+    #[allow(dead_code)] // Production LayoutBackend dispatch is assembled in t1605.
     pub(crate) fn helper_layoutbackend_rename(
         &mut self,
         kind: &str,
@@ -252,7 +295,42 @@ impl RequestRuntimeAdapter<'_> {
         })
     }
 
-    #[allow(dead_code)] // The complete LayoutBackend assembly belongs to its dependent leaf.
+    pub(crate) fn helper_layoutbackend_rename_raw(
+        &mut self,
+        kind: &str,
+        target_id: &str,
+        label: &str,
+    ) -> crate::flock::commands_layout::RawCreateResult {
+        self.terminal.with_terminal_mut(|terminal| {
+            let snapshot = match terminal.rename_raw(kind, target_id, label)? {
+                Ok(item) => item,
+                Err(error) => return Ok(Err(error.message)),
+            };
+            let item = snapshot.map(|item| match item {
+                crate::terminal::RenamedItem::Pane {
+                    pane,
+                    agent_status,
+                    managed,
+                } => {
+                    let mut item =
+                        crate::flock::lanes::pane_to_json(&pane, agent_status.as_deref());
+                    if let Some(managed) = managed {
+                        item["managed"] = json!(managed);
+                    }
+                    item
+                }
+                crate::terminal::RenamedItem::Tab(tab) => tab_value(tab),
+                crate::terminal::RenamedItem::Workspace { workspace, tabs } => {
+                    workspace_value(workspace, &tabs)
+                }
+            });
+            let mut result = serde_json::Map::new();
+            result.insert(kind.to_owned(), item.unwrap_or(Value::Null));
+            Ok(Ok(Value::Object(result)))
+        })
+    }
+
+    #[allow(dead_code)] // Production LayoutBackend dispatch is assembled in t1605.
     pub(crate) fn helper_layoutbackend_focus(
         &mut self,
         kind: &str,
@@ -264,6 +342,99 @@ impl RequestRuntimeAdapter<'_> {
                 .map_err(|error| error.message)?;
             Ok(json!({}))
         })
+    }
+
+    pub(crate) fn helper_layoutbackend_create_workspace_raw(
+        &mut self,
+        label: &Value,
+        cwd: &Value,
+        focus: bool,
+    ) -> crate::flock::commands_layout::RawCreateResult {
+        self.terminal.with_terminal_mut(|terminal| {
+            let workspace = match terminal.create_workspace_raw(label, cwd, focus)? {
+                Ok(value) => value,
+                Err(error) => return Ok(Err(error.message)),
+            };
+            let tabs = terminal.list_tabs();
+            let tab = tabs
+                .iter()
+                .find(|tab| tab.workspace_id == workspace.workspace_id)
+                .cloned()
+                .map(tab_value);
+            let pane = terminal
+                .list_panes()
+                .into_iter()
+                .find(|pane| pane.session_id == workspace.workspace_id)
+                .map(|pane| pane_value(terminal, &pane));
+            Ok(Ok(json!({
+                "workspace": workspace_value(workspace, &tabs),
+                "tab": tab,
+                "root_pane": pane,
+            })))
+        })
+    }
+
+    pub(crate) fn helper_layoutbackend_create_tab_raw(
+        &mut self,
+        workspace_id: Option<&str>,
+        label: &Value,
+        cwd: &Value,
+        focus: bool,
+    ) -> crate::flock::commands_layout::RawCreateResult {
+        self.terminal.with_terminal_mut(|terminal| {
+            let tab = match terminal.create_tab_raw(workspace_id, label, cwd, focus)? {
+                Ok(value) => value,
+                Err(error) => return Ok(Err(error.message)),
+            };
+            let pane = terminal
+                .list_panes()
+                .into_iter()
+                .find(|pane| pane.window_id == tab.tab_id)
+                .map(|pane| pane_value(terminal, &pane));
+            let Some(pane) = pane else {
+                return Ok(Err("tmux created the window but it is not visible".into()));
+            };
+            Ok(Ok(json!({
+                "tab": tab_value(tab),
+                "root_pane": pane,
+            })))
+        })
+    }
+
+    pub(crate) fn helper_layoutbackend_split_pane_raw(
+        &mut self,
+        pane_id: &str,
+        direction: &str,
+        cwd: &Value,
+        focus: bool,
+    ) -> crate::flock::commands_layout::RawCreateResult {
+        self.terminal.with_terminal_mut(|terminal| {
+            let pane = match terminal.split_pane_raw(pane_id, direction, cwd, focus)? {
+                Ok(value) => value,
+                Err(error) => return Ok(Err(error.message)),
+            };
+            let pane = pane_value(terminal, &pane);
+            Ok(Ok(json!({ "root_pane": pane })))
+        })
+    }
+
+    pub(crate) fn helper_closebackend_close(
+        &mut self,
+        kind: &str,
+        target_id: &str,
+    ) -> Result<Value, String> {
+        self.terminal.with_terminal_mut(|terminal| {
+            terminal
+                .close(kind, target_id)
+                .map_err(|error| error.message)?;
+            Ok(json!({}))
+        })
+    }
+}
+
+impl CloseBackend for RequestRuntimeAdapter<'_> {
+    fn close(&mut self, kind: &str, target_id: &str) -> Result<Value, String> {
+        self.helper_closebackend_close(kind, target_id)
     }
 }
 
@@ -463,6 +634,27 @@ mod tests {
                 Err("focus refused".to_owned()),
                 adapter.helper_layoutbackend_focus("pane", "w1:p1")
             );
+        });
+    }
+
+    #[test]
+    fn production_env_close_backend_uses_concrete_services() {
+        with_adapter(FakeTerminal::new(), |adapter| {
+            let backend: &mut dyn CloseBackend = adapter;
+            assert!(backend.get_pane("w1:p1").is_some());
+            assert_eq!(Ok(json!({})), backend.close("pane", "w1:p1"));
+            assert!(backend.get_pane("w1:p1").is_none());
+        });
+
+        let mut refusing = FakeTerminal::new();
+        refusing.fail_layout = Some("terminal close refused".into());
+        with_adapter(refusing, |adapter| {
+            let backend: &mut dyn CloseBackend = adapter;
+            assert_eq!(
+                Err("terminal close refused".into()),
+                backend.close("tab", "w1")
+            );
+            assert!(backend.list_tabs().iter().any(|tab| tab["tab_id"] == "w1"));
         });
     }
 }

@@ -17,11 +17,14 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use rusqlite::OptionalExtension;
+use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
 
 use crate::clock::now_s;
-use crate::db::{map_sqlite, ReadPool, SyncWriter, DEFAULT_READ_POOL};
+use crate::db::{map_sqlite, ErrorContext, ReadPool, SyncWriter, DEFAULT_READ_POOL};
 use crate::error::DunkError;
+use crate::flock::mailbox::OWNER_MAILBOX;
 use crate::inbox::{
     check_sizes, mailbox_where, next_message_number, normalise_mailbox, receipt_of,
     retention_cutoff, validate_transport, Summary, COUNTER_UPSERT, MAX_BLOB_BYTES, PURGE_SELECTION,
@@ -103,37 +106,97 @@ fn refuse(text: impl Into<String>) -> DunkError {
     DunkError::Refused(text.into())
 }
 
+fn owner_wire_attachments_truthy(attachments: Option<&JsonValue>) -> bool {
+    match attachments {
+        None | Some(JsonValue::Null) | Some(JsonValue::Bool(false)) => false,
+        Some(JsonValue::Bool(true)) => true,
+        Some(JsonValue::Number(number)) => number.as_f64().is_some_and(|number| number != 0.0),
+        Some(JsonValue::String(paths)) => paths.split(',').any(|path| !path.trim().is_empty()),
+        Some(JsonValue::Array(paths)) => !paths.is_empty(),
+        Some(JsonValue::Object(paths)) => !paths.is_empty(),
+    }
+}
+
+fn owner_wire_attachment_paths(attachments: Option<&JsonValue>) -> Result<Vec<PathBuf>, DunkError> {
+    let Some(value) = attachments else {
+        return Ok(Vec::new());
+    };
+    let paths: Vec<String> = match value {
+        JsonValue::Null | JsonValue::Bool(false) => Vec::new(),
+        JsonValue::String(paths) => paths
+            .split(',')
+            .filter(|path| !path.trim().is_empty())
+            .map(str::to_string)
+            .collect(),
+        JsonValue::Array(paths) => paths.iter().map(owner_wire_python_string).collect(),
+        JsonValue::Object(paths) => paths.keys().cloned().collect(),
+        JsonValue::Bool(true) => return Err(refuse("'bool' object is not iterable")),
+        JsonValue::Number(number) if number.as_f64() == Some(0.0) => Vec::new(),
+        JsonValue::Number(number) => {
+            let kind = if number.is_f64() { "float" } else { "int" };
+            return Err(refuse(format!("'{kind}' object is not iterable")));
+        }
+    };
+    Ok(paths.into_iter().map(PathBuf::from).collect())
+}
+
+fn owner_wire_python_string(value: &JsonValue) -> String {
+    match value {
+        JsonValue::Null => "None".to_string(),
+        JsonValue::Bool(true) => "True".to_string(),
+        JsonValue::Bool(false) => "False".to_string(),
+        JsonValue::String(value) => value.clone(),
+        JsonValue::Number(value) => crate::owner::conversations::python_number_string(value),
+        JsonValue::Array(_) | JsonValue::Object(_) => crate::api::python_value_repr(value),
+    }
+}
+
+fn owner_sqlite_subject(subject: Option<&JsonValue>) -> Result<rusqlite::types::Value, DunkError> {
+    crate::sqlite_scalar::python_sqlite_scalar(subject, 6)
+}
+
 impl Store {
     /// Open (creating) the database and the blob directory. A new database gets the
     /// verbatim schema; an existing one is left alone.
     pub fn open(path: impl AsRef<Path>, blob_dir: impl AsRef<Path>) -> Result<Self, DunkError> {
+        Self::open_context(path, blob_dir, &ErrorContext::default())
+    }
+    pub(crate) fn open_context(
+        path: impl AsRef<Path>,
+        blob_dir: impl AsRef<Path>,
+        context: &ErrorContext,
+    ) -> Result<Self, DunkError> {
         let path = path.as_ref();
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| refuse(format!("{}: {e}", parent.display())))?;
+            fs::create_dir_all(parent).map_err(|e| context.io(e, parent, "create_parent"))?;
         }
         let blob_dir = blob_dir.as_ref().to_path_buf();
         fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
             .create(&blob_dir)
-            .map_err(|e| refuse(format!("{}: {e}", blob_dir.display())))?;
-        let writer = SyncWriter::spawn(path)?;
-        writer.call(|connection| {
+            .map_err(|e| context.io(e, &blob_dir, "create_attachments"))?;
+        let writer = SyncWriter::spawn_context(path, context)?;
+        let captured = context.clone();
+        let db_path = path.to_path_buf();
+        writer.call(move |connection| {
             let exists: i64 = connection
                 .query_row(
                     "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'messages'",
                     [],
                     |row| row.get(0),
                 )
-                .map_err(map_sqlite)?;
+                .map_err(|e| captured.sqlite(e, &db_path, "inbox_schema"))?;
             if exists == 0 {
                 for statement in SCHEMA {
-                    connection.execute_batch(statement).map_err(map_sqlite)?;
+                    connection
+                        .execute_batch(statement)
+                        .map_err(|e| captured.sqlite(e, &db_path, "inbox_schema"))?;
                 }
             }
             Ok(())
         })?;
-        let readers = ReadPool::open(path, DEFAULT_READ_POOL)?;
+        let readers = ReadPool::open_context(path, DEFAULT_READ_POOL, context)?;
         Ok(Store {
             writer,
             readers,
@@ -269,6 +332,45 @@ impl Store {
     /// attachment leaves no message behind; a blob stored for a send that then fails is an
     /// orphan the retention sweep collects.
     pub fn send(&self, outgoing: &Outgoing) -> Result<String, DunkError> {
+        self.send_snapshot(outgoing)
+            .map(|message| message.summary.message_id)
+    }
+
+    /// Capture the committed full row before notification mutates its state.
+    pub fn send_snapshot(&self, outgoing: &Outgoing) -> Result<Message, DunkError> {
+        self.send_snapshot_context(outgoing, ErrorContext::default())
+    }
+    pub(crate) fn send_snapshot_context(
+        &self,
+        outgoing: &Outgoing,
+        context: ErrorContext,
+    ) -> Result<Message, DunkError> {
+        let subject = outgoing.subject.map(|s| JsonValue::String(s.into()));
+        let attachments = JsonValue::Array(
+            outgoing
+                .attachments
+                .iter()
+                .map(|p| JsonValue::String(p.to_string_lossy().into_owned()))
+                .collect(),
+        );
+        self.send_snapshot_wire_context(outgoing, subject.as_ref(), Some(&attachments), context)
+    }
+
+    pub fn send_snapshot_wire(
+        &self,
+        outgoing: &Outgoing,
+        subject: Option<&JsonValue>,
+        attachments: Option<&JsonValue>,
+    ) -> Result<Message, DunkError> {
+        self.send_snapshot_wire_context(outgoing, subject, attachments, ErrorContext::default())
+    }
+    fn send_snapshot_wire_context(
+        &self,
+        outgoing: &Outgoing,
+        subject: Option<&JsonValue>,
+        attachments: Option<&JsonValue>,
+        context: ErrorContext,
+    ) -> Result<Message, DunkError> {
         let mailbox = outgoing.mailbox.trim().to_string();
         if mailbox.is_empty() {
             return Err(refuse("a mailbox is required"));
@@ -276,12 +378,12 @@ impl Store {
         let transport = validate_transport(outgoing.transport).map_err(refuse)?;
         let body = outgoing.body.unwrap_or("").to_string();
         check_sizes(body.len(), "", 0, 0).map_err(refuse)?;
-        if body.trim().is_empty() && outgoing.attachments.is_empty() {
+        if body.trim().is_empty() && !owner_wire_attachments_truthy(attachments) {
             return Err(refuse("a message needs a body or an attachment"));
         }
         let mut stored = Vec::new();
-        for path in outgoing.attachments {
-            stored.push(self.store_blob(path)?);
+        for path in owner_wire_attachment_paths(attachments)? {
+            stored.push(self.store_blob(&path)?);
         }
         // Python: `mailbox_label or mailbox`, so an EMPTY label falls back too.
         let label = outgoing
@@ -290,16 +392,104 @@ impl Store {
             .unwrap_or(&mailbox)
             .to_string();
         let own = |value: Option<&str>| value.map(str::to_string);
-        let (pane_id, sender, subject) = (
-            own(outgoing.pane_id),
-            own(outgoing.sender),
-            own(outgoing.subject),
-        );
+        let (pane_id, sender) = (own(outgoing.pane_id), own(outgoing.sender));
+        let subject = owner_sqlite_subject(subject)?;
         let reply_to = own(outgoing.reply_to);
         let external_id = outgoing
             .external_id
             .filter(|id| !id.is_empty())
             .map(str::to_string);
+        let db_path = self.writer.path().to_path_buf();
+        self.writer.call(move |connection| {
+            let map_sqlite = |error| context.sqlite(error, &db_path, "send_snapshot");
+            let transaction = connection.transaction().map_err(map_sqlite)?;
+            let message_id = next_message_id_context(&transaction, &map_sqlite)?;
+            let created = now_s();
+            transaction
+                .execute(
+                    "INSERT INTO messages (id, mailbox, mailbox_label, pane_id, sender, \
+                     subject, body, state, created_at, transport, reply_to, external_id) \
+                     VALUES (?,?,?,?,?,?,?,'queued',?,?,?,?)",
+                    rusqlite::params![
+                        message_id,
+                        mailbox,
+                        label,
+                        pane_id,
+                        sender,
+                        subject,
+                        body,
+                        created,
+                        transport,
+                        reply_to,
+                        external_id
+                    ],
+                )
+                .map_err(map_sqlite)?;
+            for (index, blob) in stored.iter().enumerate() {
+                // The attachment ROW id is per message; the blob stays content-addressed
+                // and shared (re-attaching one file to another message must not collide).
+                transaction
+                    .execute(
+                        "INSERT INTO attachments (id, message_id, filename, media_type, \
+                         size, sha256, created_at) VALUES (?,?,?,?,?,?,?)",
+                        rusqlite::params![
+                            format!("{message_id}-{}", index + 1),
+                            message_id,
+                            blob.filename,
+                            blob.media_type,
+                            blob.size as i64,
+                            blob.sha256,
+                            now_s()
+                        ],
+                    )
+                    .map_err(map_sqlite)?;
+            }
+            transaction.commit().map_err(map_sqlite)?;
+            let mut message = connection
+                .query_row(
+                    &format!("SELECT {FULL_COLUMNS} FROM messages WHERE id = ?"),
+                    [&message_id],
+                    |row| full_from_row(row, now_s()),
+                )
+                .map_err(map_sqlite)?;
+            message.attachments = attachments_of_context(connection, &message_id, &map_sqlite)?;
+            Ok(message)
+        })
+    }
+
+    /// The raw subject/attachment boundary used only by owner_ingest's wire adapter.
+    /// Existing callers keep using the typed [`Outgoing`] and [`Store::send`] API.
+    pub fn send_owner_ingest_wire(
+        &self,
+        body: &str,
+        subject: Option<&JsonValue>,
+        attachments: Option<&JsonValue>,
+        transport: &str,
+        external_id: Option<&str>,
+    ) -> Result<String, DunkError> {
+        let body = body.to_string();
+        check_sizes(body.len(), "", 0, 0).map_err(refuse)?;
+        let has_attachments = owner_wire_attachments_truthy(attachments);
+        if body.trim().is_empty() && !has_attachments {
+            return Err(refuse("a message needs a body or an attachment"));
+        }
+
+        // Python's API comma-splits strings before Inbox.send. Other values arrive
+        // unchanged, and their iteration/conversion errors occur here, after body check.
+        let paths = owner_wire_attachment_paths(attachments)?;
+        let mut stored = Vec::new();
+        for path in paths {
+            stored.push(self.store_blob(&path)?);
+        }
+        // The Python sqlite3 subject bind happens after all attachment staging.
+        let subject = owner_sqlite_subject(subject)?;
+        let transport = validate_transport(Some(transport)).map_err(refuse)?;
+        let mailbox = OWNER_MAILBOX.to_string();
+        let label = mailbox.clone();
+        let pane_id: Option<String> = None;
+        let sender: Option<String> = None;
+        let reply_to: Option<String> = None;
+        let external_id = external_id.filter(|id| !id.is_empty()).map(str::to_string);
         self.writer.call(move |connection| {
             let transaction = connection.transaction().map_err(map_sqlite)?;
             let message_id = next_message_id(&transaction)?;
@@ -325,8 +515,6 @@ impl Store {
                 )
                 .map_err(map_sqlite)?;
             for (index, blob) in stored.iter().enumerate() {
-                // The attachment ROW id is per message; the blob stays content-addressed
-                // and shared (re-attaching one file to another message must not collide).
                 transaction
                     .execute(
                         "INSERT INTO attachments (id, message_id, filename, media_type, \
@@ -542,6 +730,22 @@ impl Store {
         })
     }
 
+    /// Whether a stable PM digest already has a row. Python checks this before its upsert to
+    /// report `created` versus `updated`; failures are left to the caller's best-effort policy.
+    pub fn digest_exists(&self, digest_id: &str) -> Result<bool, DunkError> {
+        let digest_id = digest_id.to_string();
+        self.writer.call(move |connection| {
+            let exists: i64 = connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM messages WHERE digest_id = ?)",
+                    [&digest_id],
+                    |row| row.get(0),
+                )
+                .map_err(map_sqlite)?;
+            Ok(exists != 0)
+        })
+    }
+
     /// `read(mailbox, limit, peek, mark)`: full messages in queue order. Marks them read
     /// unless `peek` or `!mark`; the select and the update share one writer call, as the
     /// Python shares one lock. `mark = false` lets a caller render first and commit with
@@ -550,6 +754,17 @@ impl Store {
         &self,
         mailbox: &str,
         limit: usize,
+        peek: bool,
+        mark: bool,
+    ) -> Result<Vec<Message>, DunkError> {
+        self.read_signed(mailbox, limit as i64, peek, mark)
+    }
+
+    /// Raw SQLite limit adapter; existing typed callers retain their API.
+    pub fn read_signed(
+        &self,
+        mailbox: &str,
+        limit: i64,
         peek: bool,
         mark: bool,
     ) -> Result<Vec<Message>, DunkError> {
@@ -564,7 +779,7 @@ impl Store {
                     ))
                     .map_err(map_sqlite)?;
                 let rows = statement
-                    .query_map(rusqlite::params![mailbox, limit as i64], |row| {
+                    .query_map(rusqlite::params![mailbox, limit], |row| {
                         full_from_row(row, now)
                     })
                     .map_err(map_sqlite)?;
@@ -1095,42 +1310,69 @@ impl Store {
         Ok(ids)
     }
 
-    /// `fetch`: copy an attachment out of the store into `dest_dir` (created if missing).
-    pub fn fetch(&self, attachment_id: &str, dest_dir: &Path) -> Result<Fetched, DunkError> {
-        let wanted = attachment_id.to_string();
-        let row = self.writer.call(move |connection| {
+    /// Validate fetch lookup/blob failures without touching a destination.
+    pub fn validate_fetch_source_bound(
+        &self,
+        attachment_id: &rusqlite::types::Value,
+        repr: &str,
+        display: &str,
+    ) -> Result<(), DunkError> {
+        let id = attachment_id.clone();
+        let sha = self.read_pool().with(|connection| {
             connection
-                .query_row(
-                    "SELECT sha256, filename, size, media_type, message_id \
-                     FROM attachments WHERE id = ?",
-                    [&wanted],
-                    |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, Option<String>>(1)?,
-                            row.get::<_, i64>(2)?,
-                            row.get::<_, Option<String>>(3)?,
-                            row.get::<_, String>(4)?,
-                        ))
-                    },
-                )
-                .map(Some)
-                .or_else(|e| match e {
-                    rusqlite::Error::QueryReturnedNoRows => Ok(None),
-                    other => Err(other),
+                .query_row("SELECT sha256 FROM attachments WHERE id = ?", [id], |row| {
+                    row.get::<_, String>(0)
                 })
+                .optional()
                 .map_err(map_sqlite)
         })?;
-        let Some((sha, filename, size, media, message_id)) = row else {
+        let Some(sha) = sha else {
+            return Err(refuse(format!("no attachment with id {repr}")));
+        };
+        if !self.blob_dir.join(&sha).exists() {
             return Err(refuse(format!(
-                "no attachment with id {}",
-                py_repr(attachment_id)
+                "attachment {display} is missing from the store"
             )));
+        }
+        Ok(())
+    }
+
+    /// Typed compatibility wrapper for existing Rust callers.
+    pub fn fetch(&self, attachment_id: &str, dest_dir: &Path) -> Result<Fetched, DunkError> {
+        self.fetch_bound(
+            &rusqlite::types::Value::Text(attachment_id.to_owned()),
+            &py_repr(attachment_id),
+            attachment_id,
+            dest_dir,
+        )
+    }
+
+    /// `fetch`: bind the original Python scalar, then copy the attachment after lookup/blob checks.
+    pub fn fetch_bound(
+        &self,
+        attachment_id: &rusqlite::types::Value,
+        repr: &str,
+        display: &str,
+        dest_dir: &Path,
+    ) -> Result<Fetched, DunkError> {
+        let id = attachment_id.clone();
+        let row = self.writer.call(move |connection| {
+            connection.query_row(
+                "SELECT sha256, filename, size, media_type, message_id FROM attachments WHERE id = ?",
+                [id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?,
+                    row.get::<_, i64>(2)?, row.get::<_, Option<String>>(3)?, row.get::<_, String>(4)?)),
+            ).map(Some).or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None), other => Err(other),
+            }).map_err(map_sqlite)
+        })?;
+        let Some((sha, filename, size, media, message_id)) = row else {
+            return Err(refuse(format!("no attachment with id {repr}")));
         };
         let blob_path = self.blob_dir.join(&sha);
         if !blob_path.exists() {
             return Err(refuse(format!(
-                "attachment {attachment_id} is missing from the store"
+                "attachment {display} is missing from the store"
             )));
         }
         let dest = expand_user(dest_dir);
@@ -1139,7 +1381,7 @@ impl Store {
         let target = dest.join(name);
         fs::copy(&blob_path, &target).map_err(|e| refuse(format!("{}: {e}", target.display())))?;
         Ok(Fetched {
-            attachment_id: attachment_id.to_string(),
+            attachment_id: display.to_owned(),
             path: target,
             filename,
             size,
@@ -1216,6 +1458,13 @@ fn attachments_of(
     connection: &rusqlite::Connection,
     message_id: &str,
 ) -> Result<Vec<AttachmentRow>, DunkError> {
+    attachments_of_context(connection, message_id, &map_sqlite)
+}
+fn attachments_of_context(
+    connection: &rusqlite::Connection,
+    message_id: &str,
+    map_sqlite: &impl Fn(rusqlite::Error) -> DunkError,
+) -> Result<Vec<AttachmentRow>, DunkError> {
     let mut statement = connection
         .prepare(
             "SELECT id, filename, media_type, size FROM attachments \
@@ -1237,6 +1486,12 @@ fn attachments_of(
 
 /// `_next_id`: the counter lives beside the messages, so ids survive restarts.
 fn next_message_id(transaction: &rusqlite::Transaction) -> Result<String, DunkError> {
+    next_message_id_context(transaction, &map_sqlite)
+}
+fn next_message_id_context(
+    transaction: &rusqlite::Transaction,
+    map_sqlite: &impl Fn(rusqlite::Error) -> DunkError,
+) -> Result<String, DunkError> {
     let stored_number: Option<i64> = transaction
         .query_row(
             "SELECT value FROM counters WHERE name = 'message'",

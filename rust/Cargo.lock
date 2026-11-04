@@ -420,6 +420,7 @@ dependencies = [
  "chrono",
  "clap",
  "ds-core",
+ "ds-mcp",
  "ds-tui",
  "serde_json",
  "tempfile",
@@ -430,6 +431,7 @@ name = "ds-core"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "indexmap",
  "jsonwebtoken",
  "nix",
  "regex",

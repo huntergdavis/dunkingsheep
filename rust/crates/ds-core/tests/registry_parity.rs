@@ -39,6 +39,33 @@ fn every_input_schema_equals_the_pythons() {
 }
 
 #[test]
+fn dispatch_and_mcp_required_metadata_match_python_for_every_command() {
+    let fixture = expected();
+    for (name, want) in fixture["required_metadata"].as_object().expect("metadata") {
+        let command = registry::command(name).unwrap_or_else(|| panic!("{name} missing"));
+        assert_eq!(
+            serde_json::json!(command.dispatch_required),
+            want["dispatch_required"],
+            "{name}: dispatch required metadata differs from Python"
+        );
+        assert_eq!(
+            serde_json::json!(command.required),
+            want["mcp_required"],
+            "{name}: MCP required metadata differs from Python"
+        );
+    }
+
+    let add_dunk = registry::command("add_dunk").expect("add_dunk");
+    assert!(add_dunk.dispatch_required.is_empty());
+    assert_eq!(&["target", "text", "interval_minutes"], add_dunk.required);
+
+    // create_tab has MCP-required `label` but intentionally no dispatcher requirement.
+    let create_tab = registry::command("create_tab").expect("create_tab");
+    assert!(create_tab.dispatch_required.is_empty());
+    assert_eq!(&["label"], create_tab.required);
+}
+
+#[test]
 fn the_grouped_schemas_advertise_the_action_enum() {
     let fixture = expected();
     for (name, want) in fixture["groups"].as_object().expect("groups") {

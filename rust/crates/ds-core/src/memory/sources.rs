@@ -13,17 +13,16 @@
 //! Difference, stated: a non-object `item_json` makes the Python raise `AttributeError`
 //! (failing the whole source); here the row is skipped.
 
+use super::ingest::MemoryWrite;
 use std::path::Path;
+#[cfg(test)]
 use std::time::Duration;
 
 use rusqlite::{types::ValueRef, Connection, OpenFlags};
 use serde_json::Value;
 
-use super::ingest::{
-    absolute, harness_from_path, insert_chunks, project_from_cwd, text_from_content,
-    upsert_session, upsert_source_row,
-};
-use super::jsonl::{ingest_jsonl, IngestStats};
+use super::ingest::{absolute, harness_from_path, project_from_cwd, text_from_content};
+use super::jsonl::{ingest_jsonl, IngestStats, Throttle};
 use super::pure::{chunk_text, DEFAULT_CHUNK_CHARS, DEFAULT_OVERLAP_CHARS};
 use crate::db::map_sqlite;
 use crate::error::DunkError;
@@ -80,7 +79,7 @@ fn parse_json(value: ValueRef<'_>) -> Option<Value> {
 
 /// `_ingest_codex_history`.
 pub fn ingest_codex_history(
-    memory: &mut Connection,
+    memory: &mut impl MemoryWrite,
     path: &Path,
     project: Option<&str>,
     should_stop: &dyn Fn() -> bool,
@@ -108,8 +107,7 @@ pub fn ingest_codex_history(
         let created_ms = truthy_number(row.get_ref(1).map_err(map_sqlite)?);
         if current.as_deref() != Some(thread_id.as_str()) {
             if let Some(previous) = &current {
-                chunk_count += insert_chunks(
-                    memory,
+                chunk_count += memory.insert_chunks(
                     previous,
                     &pending,
                     Some("assistant"),
@@ -121,8 +119,8 @@ pub fn ingest_codex_history(
             current = Some(thread_id.clone());
             pending.clear();
             pending_at = created_ms.map(|ms| ms / 1000.0);
-            upsert_session(
-                memory, &thread_id, "codex", project, None, None, pending_at, pending_at, None,
+            memory.upsert_session(
+                &thread_id, "codex", project, None, None, pending_at, pending_at, None,
             )?;
             sessions.insert(thread_id.clone());
         }
@@ -148,8 +146,7 @@ pub fn ingest_codex_history(
             DEFAULT_OVERLAP_CHARS,
         ));
         if pending.len() >= 500 {
-            chunk_count += insert_chunks(
-                memory,
+            chunk_count += memory.insert_chunks(
                 &thread_id,
                 &pending,
                 Some(role),
@@ -161,15 +158,8 @@ pub fn ingest_codex_history(
         }
     }
     if let (Some(current), false) = (&current, pending.is_empty()) {
-        chunk_count += insert_chunks(
-            memory,
-            current,
-            &pending,
-            Some("assistant"),
-            None,
-            pending_at,
-            None,
-        )?;
+        chunk_count +=
+            memory.insert_chunks(current, &pending, Some("assistant"), None, pending_at, None)?;
     }
     Ok(IngestStats {
         sessions: sessions.len(),
@@ -181,7 +171,7 @@ pub fn ingest_codex_history(
 
 /// `_ingest_opencode`.
 pub fn ingest_opencode(
-    memory: &mut Connection,
+    memory: &mut impl MemoryWrite,
     path: &Path,
     project: Option<&str>,
     should_stop: &dyn Fn() -> bool,
@@ -212,8 +202,7 @@ pub fn ingest_opencode(
         if current.as_deref() != Some(session_id.as_str()) {
             if let Some(previous) = &current {
                 if !pending.is_empty() {
-                    chunk_count += insert_chunks(
-                        memory,
+                    chunk_count += memory.insert_chunks(
                         previous,
                         &pending,
                         Some("assistant"),
@@ -233,8 +222,7 @@ pub fn ingest_opencode(
             let project_name = project
                 .map(String::from)
                 .or_else(|| project_from_cwd(directory.as_deref()));
-            upsert_session(
-                memory,
+            memory.upsert_session(
                 &session_id,
                 "opencode",
                 project_name.as_deref(),
@@ -269,28 +257,14 @@ pub fn ingest_opencode(
             .to_string();
         pending.extend(chunk_text(text, DEFAULT_CHUNK_CHARS, DEFAULT_OVERLAP_CHARS));
         if pending.len() >= 500 {
-            chunk_count += insert_chunks(
-                memory,
-                &session_id,
-                &pending,
-                Some(&role),
-                None,
-                pending_at,
-                None,
-            )?;
+            chunk_count +=
+                memory.insert_chunks(&session_id, &pending, Some(&role), None, pending_at, None)?;
             pending.clear();
         }
     }
     if let (Some(current), false) = (&current, pending.is_empty()) {
-        chunk_count += insert_chunks(
-            memory,
-            current,
-            &pending,
-            Some("assistant"),
-            None,
-            pending_at,
-            None,
-        )?;
+        chunk_count +=
+            memory.insert_chunks(current, &pending, Some("assistant"), None, pending_at, None)?;
     }
     Ok(IngestStats {
         sessions: sessions.len(),
@@ -302,12 +276,12 @@ pub fn ingest_opencode(
 
 /// `ingest_path`: parse one source by its extension, then record it as ok.
 pub fn ingest_path(
-    memory: &mut Connection,
+    memory: &mut impl MemoryWrite,
     path: &str,
     harness: Option<&str>,
     project: Option<&str>,
     should_stop: &dyn Fn() -> bool,
-    throttle: Duration,
+    throttle: impl Into<Throttle>,
 ) -> Result<IngestStats, DunkError> {
     let path = absolute(path);
     let harness = harness
@@ -331,7 +305,7 @@ pub fn ingest_path(
             "unsupported memory source: {path}"
         )));
     };
-    upsert_source_row(memory, &path, &harness, project)?;
+    memory.upsert_source_row(&path, &harness, project)?;
     Ok(stats)
 }
 

@@ -11,6 +11,7 @@ pub mod jsonl;
 pub mod pure;
 pub mod queries;
 pub mod recall;
+pub mod service;
 pub mod sources;
 
 pub use pure::{
@@ -20,3 +21,5 @@ pub use pure::{
 
 #[cfg(test)]
 mod behaviour_tests;
+
+pub mod backfill;
