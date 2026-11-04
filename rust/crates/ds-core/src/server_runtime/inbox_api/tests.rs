@@ -786,3 +786,57 @@ fn inbox_archive_python_normalizes_skipped_local_time() {
     assert_eq!(result["before"], 1710066600.0);
     dispatcher.close();
 }
+
+#[test]
+fn inbox_fetch_rejects_truthy_non_path_before_any_write() {
+    let (dir, services) = make_services("bad-fetch-dest", factory(None), None);
+    let store = services.flock().stores().inbox.unwrap();
+    let attachment = dir.path().join("fetch.txt");
+    std::fs::write(&attachment, b"payload").unwrap();
+    let id = store
+        .send(&crate::inbox_store::Outgoing {
+            mailbox: "w1:p1",
+            body: Some("with attachment"),
+            attachments: &[attachment],
+            ..Default::default()
+        })
+        .unwrap();
+    let dispatcher = services.dispatcher(handlers());
+    let accidental = std::env::current_dir().unwrap().join("True");
+    assert!(!accidental.exists());
+    let error = dispatcher
+        .dispatch(
+            "inbox_fetch",
+            &json!({"attachment_id":format!("{id}-1"),"dest":true}),
+            &request("w1:p1"),
+        )
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("expected str, bytes or os.PathLike object, not bool"));
+    assert!(
+        !accidental.exists(),
+        "truthy invalid path must not create destination"
+    );
+    dispatcher.close();
+}
+
+#[test]
+fn inbox_archive_falsey_mailbox_uses_python_required_mailbox_error() {
+    let (_dir, services) = make_services("empty-archive-mailbox", factory(None), None);
+    let dispatcher = services.dispatcher(handlers());
+    for mailbox in [json!(false), json!(0), json!("")] {
+        let error = dispatcher
+            .dispatch(
+                "inbox_archive",
+                &json!({"mailbox":mailbox}),
+                &request("w1:p1"),
+            )
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("a mailbox is required"),
+            "{error}"
+        );
+    }
+    dispatcher.close();
+}

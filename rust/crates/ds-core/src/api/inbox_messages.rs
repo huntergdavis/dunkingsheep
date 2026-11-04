@@ -166,11 +166,16 @@ pub fn h_inbox_stats(c: &HandlerContext<'_>, _args: Args) -> Result<Value, DunkE
 }
 pub fn h_inbox_fetch(c: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
     let id = python_value_string(&args["attachment_id"]);
-    let dest = args
-        .get("dest")
-        .filter(|v| truthy(v))
-        .map(python_value_string)
-        .map(PathBuf::from);
+    let dest = match args.get("dest").filter(|v| truthy(v)) {
+        None => None,
+        Some(Value::String(path)) => Some(PathBuf::from(path)),
+        Some(value) => {
+            let kind = python_value_type_name(value);
+            return Err(DunkError::Refused(format!(
+                "expected str, bytes or os.PathLike object, not {kind}"
+            )));
+        }
+    };
     c.env.with_inbox_env(&mut |env| {
         let r=c.flock.inbox_fetch(env,&id,dest.as_deref())?;
         Ok(json!({"attachment_id":r.attachment_id,"path":r.path,"filename":r.filename,"size":r.size,"media_type":r.media_type,"message_id":r.message_id}))
@@ -390,7 +395,11 @@ fn iso_timestamp(text: &str) -> Option<f64> {
 }
 
 pub fn h_inbox_archive(c: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
-    let mailbox = python_value_string(&args["mailbox"]);
+    let mailbox = args
+        .get("mailbox")
+        .filter(|value| truthy(value))
+        .map(python_value_string)
+        .unwrap_or_default();
     let before = archive_before(args.get("before"))?;
     let states = match args.get("state").or_else(|| args.get("states")) {
         None | Some(Value::Null) => None,
