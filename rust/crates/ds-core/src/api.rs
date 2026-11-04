@@ -3024,43 +3024,9 @@ pub fn not_ported(name: &str) -> DunkError {
     DunkError::Refused(format!("command {name} is not ported yet"))
 }
 
-#[path = "recovery_native/python_printability.rs"]
-mod python_printability;
-
-/// Python `repr(str)` for the names a client can send (single quotes unless the text has a
-/// single quote and no double quote; backslash and control characters escaped).
+/// Python `repr(str)` shared with native recovery's Unicode-aware formatter.
 fn py_repr(text: &str) -> String {
-    let quote = if text.contains('\'') && !text.contains('"') {
-        '"'
-    } else {
-        '\''
-    };
-    let mut out = String::from(quote);
-    for ch in text.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if c == quote => {
-                out.push('\\');
-                out.push(c);
-            }
-            c if !python_printability::is_printable(c) => {
-                let codepoint = c as u32;
-                if codepoint <= 0xff {
-                    out.push_str(&format!("\\x{codepoint:02x}"));
-                } else if codepoint <= 0xffff {
-                    out.push_str(&format!("\\u{codepoint:04x}"));
-                } else {
-                    out.push_str(&format!("\\U{codepoint:08x}"));
-                }
-            }
-            c => out.push(c),
-        }
-    }
-    out.push(quote);
-    out
+    crate::recovery_native::prompt_python_string_repr(text)
 }
 
 #[cfg(test)]

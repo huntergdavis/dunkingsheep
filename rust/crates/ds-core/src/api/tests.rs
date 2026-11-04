@@ -9630,17 +9630,6 @@ fn task_reap_live_tmux_listing_failure_reopens_expired_claim() {
 }
 
 #[test]
-fn api_python_repr_printability_matches_existing_python_table() {
-    use sha2::{Digest, Sha256};
-    assert_eq!(python_printability::PYTHON_VERSION, "3.14.4");
-    assert_eq!(python_printability::UNICODE_VERSION, "16.0.0");
-    let mut digest = Sha256::new();
-    for character in (0..=0x10ffff).filter_map(char::from_u32) {
-        digest.update([u8::from(python_printability::is_printable(character))]);
-    }
-    assert_eq!(
-        format!("{:x}", digest.finalize()),
-        python_printability::PRINTABILITY_SHA256
-    );
+fn api_python_repr_preserves_mixed_quotes_and_controls() {
     assert_eq!(py_repr("a'\"\\\n\r\tb"), r###"'a\'"\\\n\r\tb'"###);
 }
