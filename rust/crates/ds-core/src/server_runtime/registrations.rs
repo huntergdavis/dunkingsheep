@@ -968,7 +968,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(
-            denied_worker.contains("needs a superuser"),
+            denied_worker.contains("requires a superuser"),
             "{denied_worker}"
         );
         let owner = request("w2:p2");
