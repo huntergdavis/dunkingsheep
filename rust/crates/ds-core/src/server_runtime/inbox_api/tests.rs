@@ -857,8 +857,14 @@ fn inbox_fetch_rejects_truthy_non_path_before_any_write() {
     for (raw, expected) in [
         (r#"{"attachment_id":1e-7}"#, "no attachment with id 1e-07"),
         (r#"{"attachment_id":1.00}"#, "no attachment with id 1.0"),
-        (r#"{"attachment_id":0.10000000000000001}"#, "no attachment with id 0.1"),
-        (r#"{"attachment_id":1.0000000000000001}"#, "no attachment with id 1.0"),
+        (
+            r#"{"attachment_id":0.10000000000000001}"#,
+            "no attachment with id 0.1",
+        ),
+        (
+            r#"{"attachment_id":1.0000000000000001}"#,
+            "no attachment with id 1.0",
+        ),
     ] {
         let args: serde_json::Value = serde_json::from_str(raw).unwrap();
         let error = dispatcher
