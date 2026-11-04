@@ -110,8 +110,7 @@ comparison, which remains **NOT VERIFIED**.
 
 ### RPC measurements
 
-Pending successful exact-head CI execution. No local cold build has been
-attempted. Initial run [41899705529](https://github.com/huntergdavis/dunkingsheep/actions/runs/41899705529)
+No local cold build has been attempted. Initial run [41899705529](https://github.com/huntergdavis/dunkingsheep/actions/runs/41899705529)
 compiled and passed connection identity checks, then aborted during status
 warmup because the harness incorrectly required task totals from the default
 polling view. It produced zero valid measured RPC samples; inbox/task cases
@@ -153,7 +152,7 @@ canonical request provider. The exact registration inventory and
 `production_dispatcher_socket_inbox_read_consumes_canonical_message` regression
 cover the assembly: a real bound socket caller reads a seeded message, verifies
 its body and read transition, then sees an empty unread batch. Post-repair
-measurements remain pending; the earlier CEILING failures remain valid evidence.
+measurements are recorded below; the earlier CEILING failures remain valid evidence.
 
 
 Post-registration run [41902731459](https://github.com/huntergdavis/dunkingsheep/actions/runs/41902731459)
@@ -164,3 +163,42 @@ the inbox benchmark and its new socket regression failed their mailbox check.
 No valid inbox samples are claimed. The fixture now explicitly labels its pane
 `w1:p1`, matching its seeded mailbox through the actual unique-label resolver.
 No mailbox resolver, provider, timing threshold or sample count was changed.
+
+
+### Completed real RPC measurement (2026-11-04)
+
+[Exact-head run 41903566477](https://github.com/huntergdavis/dunkingsheep/actions/runs/41903566477)
+executed all four named cases at
+`7d902f97a184054254ad0f7c0200d4f865fc280a` using Rust 1.99.1, optimized bench
+profile, on `runnervm7aw5e` (Linux 7.0.0-1017-azure x86_64, Intel Xeon Platinum
+8370C at 2.80 GHz, 4 vCPUs). Each RPC client completed 20 warmup calls followed
+by 200 measured successful calls. All semantic assertions passed.
+
+| RPC | Clients | Measured calls | p50 | p95 | p99 | Max | CEILING result |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| status | 30 | 6,000 | 2.224582 ms | 7.409879 ms | 12.375675 ms | 20.765078 ms | **FAIL**, p50 >= 2 ms |
+| inbox_read | 1 | 200 | 1.417313 ms | 1.845139 ms | 1.965668 ms | 2.368102 ms | **PASS**, p50 < 5 ms |
+| task_next | 1 | 200 | 1.118579 ms | 1.315321 ms | 1.763645 ms | 2.135533 ms | **PASS**, p50 < 10 ms |
+
+Status and inbox load before/after was `3.33 1.72 0.69`. Task load was
+`3.33 1.72 0.69` before and `3.14 1.70 0.69` after. The preserved synthetic
+1,000-pane case also ran (p50 264,418 ns/call). CI invoked each case as:
+
+```sh
+cargo bench --manifest-path rust/Cargo.toml -p ds-core --bench service -- NAME
+```
+
+with `NAME` set successively to `bench_list_panes_1000`,
+`bench_status_30_clients`, `bench_inbox_read`, and `bench_task_next`.
+The downloadable `service-benchmark` artifact contains the complete logs.
+
+[Exact-head build/test run 41903554341](https://github.com/huntergdavis/dunkingsheep/actions/runs/41903554341)
+passed formatting, build and workspace tests; core had 2,382 passed, zero failed,
+and one ignored. The real socket regression and exact registration inventory
+each executed once and passed. Clippy still failed in unchanged sends/watchdog
+code; it is not reported as green.
+
+The harness executed successfully, but **status still fails its performance
+CEILING**. Different runner CPUs and load prevent interpreting the lower status
+latency here as a proven optimization. Parent t822's final accepted Phase-1
+release comparison and production connection-thread drain remain **NOT VERIFIED**.
