@@ -8,6 +8,8 @@
 //!
 //! NOT in this slice: the handlers themselves.
 
+pub mod inbox_messages;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -67,6 +69,18 @@ pub trait OwnerViewEnv {
 /// A synchronous adapter for command dependencies. All methods are object-safe so a daemon can
 /// supply one per request without putting backend types in handler signatures.
 pub trait CommandEnv: PaneInfoEnv {
+    /// Borrow the validated inbox services for this request on its owning thread.
+    fn with_inbox_env(
+        &self,
+        _operation: &mut dyn FnMut(
+            &dyn crate::flock::commands_inbox::InboxEnv,
+        ) -> Result<Value, DunkError>,
+    ) -> Result<Value, DunkError> {
+        Err(DunkError::Refused(
+            "inbox command adapter is not wired".into(),
+        ))
+    }
+
     /// The daemon's terminal adapter. The mutex permits the existing mutable terminal API while
     /// keeping the request context shared with role and read-only adapters.
     fn terminal(&self) -> &Mutex<Box<dyn Terminal>>;

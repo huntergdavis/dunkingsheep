@@ -355,6 +355,29 @@ impl Store {
     /// attachment leaves no message behind; a blob stored for a send that then fails is an
     /// orphan the retention sweep collects.
     pub fn send(&self, outgoing: &Outgoing) -> Result<String, DunkError> {
+        self.send_snapshot(outgoing)
+            .map(|message| message.summary.message_id)
+    }
+
+    /// Capture the committed full row before notification mutates its state.
+    pub fn send_snapshot(&self, outgoing: &Outgoing) -> Result<Message, DunkError> {
+        let subject = outgoing.subject.map(|s| JsonValue::String(s.into()));
+        let attachments = JsonValue::Array(
+            outgoing
+                .attachments
+                .iter()
+                .map(|p| JsonValue::String(p.to_string_lossy().into_owned()))
+                .collect(),
+        );
+        self.send_snapshot_wire(outgoing, subject.as_ref(), Some(&attachments))
+    }
+
+    pub fn send_snapshot_wire(
+        &self,
+        outgoing: &Outgoing,
+        subject: Option<&JsonValue>,
+        attachments: Option<&JsonValue>,
+    ) -> Result<Message, DunkError> {
         let mailbox = outgoing.mailbox.trim().to_string();
         if mailbox.is_empty() {
             return Err(refuse("a mailbox is required"));
@@ -362,12 +385,12 @@ impl Store {
         let transport = validate_transport(outgoing.transport).map_err(refuse)?;
         let body = outgoing.body.unwrap_or("").to_string();
         check_sizes(body.len(), "", 0, 0).map_err(refuse)?;
-        if body.trim().is_empty() && outgoing.attachments.is_empty() {
+        if body.trim().is_empty() && !owner_wire_attachments_truthy(attachments) {
             return Err(refuse("a message needs a body or an attachment"));
         }
         let mut stored = Vec::new();
-        for path in outgoing.attachments {
-            stored.push(self.store_blob(path)?);
+        for path in owner_wire_attachment_paths(attachments)? {
+            stored.push(self.store_blob(&path)?);
         }
         // Python: `mailbox_label or mailbox`, so an EMPTY label falls back too.
         let label = outgoing
@@ -376,11 +399,8 @@ impl Store {
             .unwrap_or(&mailbox)
             .to_string();
         let own = |value: Option<&str>| value.map(str::to_string);
-        let (pane_id, sender, subject) = (
-            own(outgoing.pane_id),
-            own(outgoing.sender),
-            own(outgoing.subject),
-        );
+        let (pane_id, sender) = (own(outgoing.pane_id), own(outgoing.sender));
+        let subject = owner_sqlite_subject(subject)?;
         let reply_to = own(outgoing.reply_to);
         let external_id = outgoing
             .external_id
@@ -430,7 +450,15 @@ impl Store {
                     .map_err(map_sqlite)?;
             }
             transaction.commit().map_err(map_sqlite)?;
-            Ok(message_id)
+            let mut message = connection
+                .query_row(
+                    &format!("SELECT {FULL_COLUMNS} FROM messages WHERE id = ?"),
+                    [&message_id],
+                    |row| full_from_row(row, now_s()),
+                )
+                .map_err(map_sqlite)?;
+            message.attachments = attachments_of(connection, &message_id)?;
+            Ok(message)
         })
     }
 
@@ -734,6 +762,17 @@ impl Store {
         peek: bool,
         mark: bool,
     ) -> Result<Vec<Message>, DunkError> {
+        self.read_signed(mailbox, limit as i64, peek, mark)
+    }
+
+    /// Raw SQLite limit adapter; existing typed callers retain their API.
+    pub fn read_signed(
+        &self,
+        mailbox: &str,
+        limit: i64,
+        peek: bool,
+        mark: bool,
+    ) -> Result<Vec<Message>, DunkError> {
         let mailbox = mailbox.to_string();
         self.writer.call(move |connection| {
             let now = now_s();
@@ -745,7 +784,7 @@ impl Store {
                     ))
                     .map_err(map_sqlite)?;
                 let rows = statement
-                    .query_map(rusqlite::params![mailbox, limit as i64], |row| {
+                    .query_map(rusqlite::params![mailbox, limit], |row| {
                         full_from_row(row, now)
                     })
                     .map_err(map_sqlite)?;

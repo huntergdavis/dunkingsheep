@@ -388,6 +388,17 @@ pub fn list(
     limit: usize,
     now: f64,
 ) -> Result<Vec<Summary>, DunkError> {
+    list_signed(pool, mailbox, unread_only, limit as i64, now)
+}
+
+/// Preserve SQLite's negative LIMIT (unlimited) for the raw command boundary.
+pub fn list_signed(
+    pool: &ReadPool,
+    mailbox: &str,
+    unread_only: bool,
+    limit: i64,
+    now: f64,
+) -> Result<Vec<Summary>, DunkError> {
     let (condition, params) = mailbox_where(mailbox, "mailbox");
     let mut where_clause = format!("{condition} AND state != 'cancelled'");
     if unread_only {
@@ -409,7 +420,7 @@ pub fn list(
             .collect();
         // Bound as an INTEGER: the reviewer showed SQLite coerces the text form, but a
         // coercion is not a type and `LIMIT` is where a wrong type would be silent.
-        bound.push(rusqlite::types::Value::Integer(limit as i64));
+        bound.push(rusqlite::types::Value::Integer(limit));
         let rows = statement
             .query_map(rusqlite::params_from_iter(bound.iter()), |row| {
                 let state: String = row.get("state")?;

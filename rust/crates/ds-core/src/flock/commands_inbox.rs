@@ -157,6 +157,7 @@ pub struct SendArgs<'a> {
 /// What `inbox_send` returns: the stored message's id plus the fields the Python adds.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SendResult {
+    pub snapshot: Message,
     pub message_id: String,
     pub mailbox: String,
     pub label: String,
@@ -473,6 +474,23 @@ impl Flock {
     /// SYSTEM_SENDERS and only from a caller with no pane (a systemd unit); an agent always
     /// runs in a pane, so it cannot claim the name.
     pub fn inbox_send(&self, env: &dyn InboxEnv, args: &SendArgs) -> Result<SendResult, DunkError> {
+        let subject = args.subject.map(|s| Value::String(s.into()));
+        let attachments = Value::Array(
+            args.attach
+                .iter()
+                .map(|p| Value::String(p.to_string_lossy().into_owned()))
+                .collect(),
+        );
+        self.inbox_send_wire(env, args, subject.as_ref(), Some(&attachments))
+    }
+
+    pub fn inbox_send_wire(
+        &self,
+        env: &dyn InboxEnv,
+        args: &SendArgs,
+        raw_subject: Option<&Value>,
+        raw_attachments: Option<&Value>,
+    ) -> Result<SendResult, DunkError> {
         let self_pane = args.self_pane_id.filter(|p| !p.is_empty());
         if let Some(system) = args.system_sender {
             if !SYSTEM_SENDERS.contains(&system) {
@@ -565,16 +583,27 @@ impl Flock {
                 }
             }
         }
-        let message_id = env.store().send(&Outgoing {
-            mailbox: &mailbox,
-            body: Some(&body),
-            subject: subject.as_deref(),
-            sender: sender.as_deref(),
-            mailbox_label: Some(&label),
-            pane_id: pane_id.as_deref(),
-            attachments: args.attach,
-            ..Default::default()
-        })?;
+        let flagged_subject = subject.as_ref().map(|s| Value::String(s.clone()));
+        let stored_subject = if redirected.as_ref().is_some_and(|v| v.get("flag").is_some()) {
+            flagged_subject.as_ref()
+        } else {
+            raw_subject
+        };
+        let snapshot = env.store().send_snapshot_wire(
+            &Outgoing {
+                mailbox: &mailbox,
+                body: Some(&body),
+                subject: subject.as_deref(),
+                sender: sender.as_deref(),
+                mailbox_label: Some(&label),
+                pane_id: pane_id.as_deref(),
+                attachments: args.attach,
+                ..Default::default()
+            },
+            stored_subject,
+            raw_attachments,
+        )?;
+        let message_id = snapshot.summary.message_id.clone();
         let mut notified = false;
         if args.notify
             && !recipient_is_quiet(
@@ -629,10 +658,11 @@ impl Flock {
             &mailbox,
             sender.as_deref(),
             body.len(),
-            args.attach.len(),
+            snapshot.attachments.len(),
         );
         self.set_last_message(format!("Inbox message to {label}"));
         Ok(SendResult {
+            snapshot,
             message_id,
             mailbox,
             label,
@@ -676,8 +706,28 @@ impl Flock {
         include_tasks: bool,
         self_pane_id: Option<&str>,
     ) -> Result<ReadResult, DunkError> {
+        self.inbox_read_signed(
+            env,
+            mailbox,
+            limit as i64,
+            peek,
+            include_tasks,
+            self_pane_id,
+        )
+    }
+
+    /// Read with Python's signed SQLite LIMIT while preserving commit/receipt order.
+    pub fn inbox_read_signed(
+        &self,
+        env: &dyn InboxEnv,
+        mailbox: Option<&str>,
+        limit: i64,
+        peek: bool,
+        include_tasks: bool,
+        self_pane_id: Option<&str>,
+    ) -> Result<ReadResult, DunkError> {
         let key = self.mailbox_or_self(env, mailbox, self_pane_id, false, true)?;
-        let mut messages = env.store().read(&key, limit, true, false)?;
+        let mut messages = env.store().read_signed(&key, limit, true, false)?;
         // By default mail and the reader's task queues travel together. When tasks are
         // requested, compose them BEFORE the mark so a task lookup failure leaves mail unread.
         let tasks = if include_tasks {

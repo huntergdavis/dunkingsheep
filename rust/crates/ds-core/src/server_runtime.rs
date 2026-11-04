@@ -7,6 +7,7 @@
 mod delivery;
 mod dispatcher;
 mod inbox;
+mod inbox_api;
 mod inbox_data;
 mod inbox_delivery;
 mod inbox_metrics;
@@ -391,6 +392,15 @@ impl PaneInfoEnv for RequestRuntimeAdapter<'_> {
 }
 
 impl crate::api::CommandEnv for RequestRuntimeAdapter<'_> {
+    fn with_inbox_env(
+        &self,
+        operation: &mut dyn FnMut(
+            &dyn crate::flock::commands_inbox::InboxEnv,
+        ) -> Result<Value, DunkError>,
+    ) -> Result<Value, DunkError> {
+        self.with_request_inbox(operation)
+    }
+
     fn send_commands(&self) -> Result<&dyn crate::api::SendCommandEnv, DunkError> {
         self.require_send_outbox()?;
         Ok(self)

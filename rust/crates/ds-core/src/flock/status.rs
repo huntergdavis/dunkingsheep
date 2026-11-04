@@ -25,6 +25,9 @@ pub const VIEW_CACHE_S: f64 = 5.0;
 
 /// What `status`/`poll_status`/`view` read from outside the dunk list.
 pub trait StatusEnv {
+    fn view_cache_ttl(&self) -> Result<f64, DunkError> {
+        Ok(VIEW_CACHE_S)
+    }
     fn version(&self) -> String;
     /// `self.federated_input`.
     fn federated_input(&self) -> Value;
@@ -222,7 +225,7 @@ pub fn h_status(
     self_pane_id: Option<&str>,
 ) -> Result<Value, DunkError> {
     if !full {
-        let view = cache.view(env, self_pane_id, fresh, VIEW_CACHE_S);
+        let view = cache.view(env, self_pane_id, fresh, env.view_cache_ttl()?);
         let mut result = view["status"].as_object().cloned().unwrap_or_default();
         if check_herdr {
             result.insert("herdr_available".to_string(), json!(env.herdr_available()));

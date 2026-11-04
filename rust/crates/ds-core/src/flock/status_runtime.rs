@@ -21,6 +21,7 @@ pub struct StatusState {
     pub(crate) env: Env,
     pub(crate) idle_claim_s: f64,
     pub(crate) turn_end_wait_s: f64,
+    pub(crate) view_cache_s: f64,
 }
 
 impl StatusState {
@@ -42,6 +43,7 @@ impl StatusState {
             env,
             idle_claim_s: crate::activity::IDLE_CLAIM_S,
             turn_end_wait_s: 4.0,
+            view_cache_s: super::status::VIEW_CACHE_S,
         }
     }
 }
@@ -50,6 +52,12 @@ impl Flock {
     /// Attach the real startup snapshot exactly once. `Flock::new` intentionally leaves it
     /// unconfigured: its legacy arguments contain neither release nor whole-state path.
     pub fn attach_status_state(&self, mut state: StatusState) -> Result<(), DunkError> {
+        state.view_cache_s = match state.env.get("DUNKINGSHEEP_VIEW_CACHE_S") {
+            None => super::status::VIEW_CACHE_S,
+            Some(value) => crate::github::parse_python_float(value).ok_or_else(|| {
+                DunkError::Refused("invalid DUNKINGSHEEP_VIEW_CACHE_S float".into())
+            })?,
+        };
         state.idle_claim_s = crate::activity::idle_claim_s_from(&state.env)?;
         state.turn_end_wait_s = match state.env.get("DUNKINGSHEEP_TURN_END_WAIT_S") {
             None => 4.0,
