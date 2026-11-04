@@ -143,20 +143,26 @@ impl LoopRuntimeAdapter {
 
     #[allow(dead_code)] // The complete ReaperEnv implementation is assembled by t1924.
     pub(crate) fn helper_reaperenv_memory_maintenance(&self) -> LoopFuture<'_, ()> {
-        let path = self
-            .flock
-            .stores()
-            .memory
-            .map(|pool| pool.path().to_path_buf());
+        let service = self.flock.memory_service();
         Box::pin(async move {
-            let Some(path) = path else {
+            let Some(service) = service else {
                 return;
             };
             let result = with_sync_store(move || {
-                let mut connection = crate::db::open_writer(&path)?;
-                let recovered = crate::memory::ingest::recover_leases(&mut connection)?;
-                let partial = crate::memory::ingest::requeue_partial(&mut connection)?;
-                Ok::<_, DunkError>((recovered, partial))
+                // spawn_blocking retains a Tokio handle. SyncWriter owns a runtime, so
+                // execute on an ordinary thread while only the blocking pool waits.
+                std::thread::Builder::new()
+                    .name("memory-reaper".into())
+                    .spawn(move || {
+                        let recovered = service.recover_leases()?;
+                        let partial = service.requeue_partial()?;
+                        Ok::<_, DunkError>((recovered, partial))
+                    })
+                    .map_err(|error| {
+                        DunkError::Refused(format!("memory maintenance thread: {error}"))
+                    })?
+                    .join()
+                    .map_err(|_| DunkError::Refused("memory maintenance thread panicked".into()))?
             })
             .await;
             match result {
@@ -186,12 +192,14 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::db::{open_writer, ReadPool};
+    use crate::db::open_writer;
     use crate::flock::panes::Stores;
     use crate::flock::Flock;
     use crate::memory::ingest::{apply_full_schema, claim_next, enqueue, finish, Outcome};
+    use crate::memory::service::MemoryService;
     use crate::terminal::fakes::FakeTerminal;
     use crate::terminal::Terminal;
+    use std::time::Duration;
 
     fn flock(dir: &std::path::Path) -> Arc<Flock> {
         Arc::new(Flock::new(
@@ -220,9 +228,14 @@ mod tests {
         drop(memory_writer);
         flock.attach_stores(Stores {
             inbox: Some(inbox),
-            memory: Some(Arc::new(ReadPool::open(&memory_path, 1).unwrap())),
             ..Stores::default()
         });
+        flock
+            .attach_memory_service(Arc::new(
+                MemoryService::open(&memory_path, 1, Duration::from_millis(500), Duration::ZERO)
+                    .unwrap(),
+            ))
+            .unwrap();
         let adapter = LoopRuntimeAdapter::new(flock, fake_terminal_factory());
 
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -349,10 +362,10 @@ mod tests {
         drop(writer);
 
         let flock = flock(dir.path());
-        flock.attach_stores(Stores {
-            memory: Some(Arc::new(ReadPool::open(&db_path, 1).unwrap())),
-            ..Stores::default()
-        });
+        let service = Arc::new(
+            MemoryService::open(&db_path, 1, Duration::from_millis(500), Duration::ZERO).unwrap(),
+        );
+        flock.attach_memory_service(Arc::clone(&service)).unwrap();
         let adapter = LoopRuntimeAdapter::new(flock, fake_terminal_factory());
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()

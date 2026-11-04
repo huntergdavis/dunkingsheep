@@ -1,5 +1,6 @@
 //! Canonical memory producer. SQL mutations run on one SyncWriter; parsing never does.
 use super::ingest::{self, MemoryWrite};
+use super::jsonl::Throttle;
 use crate::db::{map_sqlite, SyncWriter};
 use crate::error::DunkError;
 use rusqlite::Connection;
@@ -16,9 +17,6 @@ struct WriterState {
     closed: bool,
 }
 impl MemoryWriter {
-    pub(crate) fn path(&self) -> &Path {
-        &self.path
-    }
     pub(crate) fn new(path: &Path) -> Self {
         Self {
             path: path.to_owned(),
@@ -431,6 +429,7 @@ pub struct MemoryService {
     writer: Arc<MemoryWriter>,
     ingestor: Ingestor,
     stopping: AtomicBool,
+    lifecycle: Mutex<()>,
 }
 impl MemoryService {
     pub fn open(
@@ -460,7 +459,57 @@ impl MemoryService {
                 "memory service is not enabled; start the daemon with persistence".into(),
             ));
         }
-        let path = std::fs::canonicalize(path)?;
+        Self::create_with_clock(path, readers, poll, throttle.into(), clock)
+    }
+
+    /// Startup-only first-run creation, using the same writer for schema and ingestion.
+    /// Unlike `open`, this creates missing parent directories and the database.
+    pub fn create_at_start(
+        path: impl AsRef<Path>,
+        readers: usize,
+        poll: Duration,
+        throttle: impl Into<Throttle>,
+    ) -> Result<Self, DunkError> {
+        Self::create_with_clock(
+            path.as_ref().to_owned(),
+            readers,
+            poll,
+            throttle.into(),
+            Arc::new(SystemClock(Instant::now())),
+        )
+    }
+
+    fn create_with_clock(
+        path: PathBuf,
+        readers: usize,
+        poll: Duration,
+        throttle: Throttle,
+        clock: Arc<dyn MemoryClock>,
+    ) -> Result<Self, DunkError> {
+        if tokio::runtime::Handle::try_current().is_ok() {
+            return Err(DunkError::Refused(
+                "memory startup requires a non-Tokio standard thread".into(),
+            ));
+        }
+        if path.as_os_str().is_empty() || path == Path::new(":memory:") {
+            return Err(DunkError::Refused(
+                "memory startup requires an explicit file path".into(),
+            ));
+        }
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(parent)?;
+        // Canonicalize the existing parent before first creation; do not open a second writer.
+        let path =
+            if path.exists() {
+                std::fs::canonicalize(path)?
+            } else {
+                std::fs::canonicalize(parent)?.join(path.file_name().ok_or_else(|| {
+                    DunkError::Refused("memory startup requires a file name".into())
+                })?)
+            };
         let writer = Arc::new(MemoryWriter::new(&path));
         writer.call(|connection| ingest::apply_full_schema(connection))?;
         let pool = Arc::new(ReadPool::open(&path, readers)?);
@@ -475,6 +524,7 @@ impl MemoryService {
             cache: Mutex::new(VecDeque::new()),
             nonce: AtomicU64::new(0),
             stopping: AtomicBool::new(false),
+            lifecycle: Mutex::new(()),
         })
     }
     pub fn path(&self) -> &Path {
@@ -622,12 +672,31 @@ impl MemoryService {
     pub fn status(&self) -> Result<Value, DunkError> {
         let mut value = queries::status(&self.pool, &self.path, &self.queries)?;
         let status = self.ingestor.status();
-        value["ingestor"] = serde_json::json!({"running":status.running,"paused":status.paused,"throttle_s":status.throttle_s,"last_error":status.last_error,"last_result":status.last_result});
+        let mut ingestor = serde_json::json!({"running":status.running,"paused":status.paused,"last_error":status.last_error,"last_result":status.last_result});
+        // Direct insertion: json! re-serialization cannot carry the codec's raw NaN Number.
+        ingestor.as_object_mut().expect("status object").insert(
+            "throttle_s".into(),
+            crate::wire_json::float_value(status.throttle_s),
+        );
+        value["ingestor"] = ingestor;
         Ok(value)
     }
     pub fn start(&self) -> Result<(), DunkError> {
+        self.while_accepting(|| self.ingestor.start())?
+    }
+    /// Linearize service attachment/start against final stop without retaining a Flock lock.
+    pub(crate) fn while_accepting<T>(&self, operation: impl FnOnce() -> T) -> Result<T, DunkError> {
+        let _lifecycle = self.lifecycle.lock().expect("memory lifecycle lock");
         self.accepting()?;
-        self.ingestor.start()
+        Ok(operation())
+    }
+    #[cfg(test)]
+    pub(crate) fn set_parse_hook(&self, hook: Arc<dyn Fn() + Send + Sync>) {
+        self.ingestor.set_parse_hook(hook);
+    }
+    #[cfg(test)]
+    pub(crate) fn worker_id(&self) -> Option<std::thread::ThreadId> {
+        self.ingestor.worker_id()
     }
     pub fn pause(&self) {
         self.ingestor.pause();
@@ -708,9 +777,18 @@ impl MemoryService {
     /// Python-style worker stop. A busy worker retains its join handle and writer;
     /// a completed stop may be followed by start. Final store close is explicit.
     pub fn stop(&self) -> Result<bool, DunkError> {
+        let _lifecycle = self.lifecycle.lock().expect("memory lifecycle lock");
         Ok(self.ingestor.stop_with_timeout(Duration::from_secs(5)))
     }
+    /// Final teardown deliberately waits beyond Python's five-second stop bound when busy:
+    /// never close/drop the writer while a parser still holds it.
     pub fn stop_and_join(&self) -> Result<(), DunkError> {
+        if tokio::runtime::Handle::try_current().is_ok() {
+            return Err(DunkError::Refused(
+                "memory shutdown requires a non-Tokio standard thread".into(),
+            ));
+        }
+        let _lifecycle = self.lifecycle.lock().expect("memory lifecycle lock");
         self.stopping.store(true, Ordering::Release);
         self.ingestor.stop();
         self.writer.close()
