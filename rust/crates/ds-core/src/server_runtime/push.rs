@@ -12,7 +12,6 @@ use crate::flock::loop_env::LoopFuture;
 use crate::roles::DEFAULT_ROLE;
 
 impl LoopRuntimeAdapter {
-    #[allow(dead_code)] // The complete PushEnv implementation belongs to its assembly leaf.
     pub(crate) fn helper_pushenv_list_panes<'a>(
         &'a self,
     ) -> LoopFuture<'a, Result<Vec<Value>, DunkError>> {
@@ -37,7 +36,6 @@ impl LoopRuntimeAdapter {
         })
     }
 
-    #[allow(dead_code)] // The complete PushEnv implementation belongs to its assembly leaf.
     pub(crate) fn helper_pushenv_caller_role(
         &self,
         pane_id: &str,
@@ -59,7 +57,6 @@ impl LoopRuntimeAdapter {
             .unwrap_or_else(|_| DEFAULT_ROLE.to_owned())
     }
 
-    #[allow(dead_code)] // The complete PushEnv implementation belongs to its assembly leaf.
     pub(crate) fn helper_pushenv_registered_lanes(&self) -> Option<BTreeSet<String>> {
         self.flock
             .with_roles(|roles, _| {
@@ -71,7 +68,6 @@ impl LoopRuntimeAdapter {
             .flatten()
     }
 
-    #[allow(dead_code)] // The async PushEnv assembly belongs to its dependent leaf.
     pub(crate) fn helper_pushenv_unread_mail<'a>(
         &'a self,
         pane_id: &'a str,
@@ -148,7 +144,6 @@ impl LoopRuntimeAdapter {
         })
     }
 
-    #[allow(dead_code)] // The async PushEnv assembly belongs to its dependent leaf.
     pub(crate) fn helper_pushenv_announce_task<'a>(
         &'a self,
         pane_id: &'a str,
@@ -227,6 +222,66 @@ impl LoopRuntimeAdapter {
             }
         })
     }
+
+    pub(crate) fn helper_pushenv_recover_next_jobs<'a>(&'a self) -> LoopFuture<'a, ()> {
+        let Some(services) = self.runtime_services.clone() else {
+            return Box::pin(async {
+                eprintln!("push: canonical runtime services are not bound");
+            });
+        };
+        if !Arc::ptr_eq(&self.flock, &services.flock)
+            || !services.next_jobs.owns_flock(self.flock.as_ref())
+        {
+            return Box::pin(async {
+                eprintln!("push: canonical runtime services flock mismatch");
+            });
+        }
+        Box::pin(async move {
+            if let Err(error) = services.next_jobs.recover().await {
+                eprintln!("push: next-job recovery failed: {error}");
+            }
+        })
+    }
+
+    pub(crate) fn helper_pushenv_allocator_tick<'a>(&'a self) -> LoopFuture<'a, ()> {
+        let Some(services) = self.runtime_services.clone() else {
+            return Box::pin(async {
+                eprintln!("push: canonical runtime services are not bound");
+            });
+        };
+        if !Arc::ptr_eq(&self.flock, &services.flock)
+            || !services.next_jobs.owns_flock(self.flock.as_ref())
+        {
+            return Box::pin(async {
+                eprintln!("push: canonical runtime services flock mismatch");
+            });
+        }
+        Box::pin(async move {
+            if let Err(error) = services.allocator_tick().await {
+                eprintln!("push: allocator tick failed: {error}");
+            }
+        })
+    }
+
+    pub(crate) fn helper_pushenv_next_jobs_tick<'a>(&'a self) -> LoopFuture<'a, ()> {
+        let Some(services) = self.runtime_services.clone() else {
+            return Box::pin(async {
+                eprintln!("push: canonical runtime services are not bound");
+            });
+        };
+        if !Arc::ptr_eq(&self.flock, &services.flock)
+            || !services.next_jobs.owns_flock(self.flock.as_ref())
+        {
+            return Box::pin(async {
+                eprintln!("push: canonical runtime services flock mismatch");
+            });
+        }
+        Box::pin(async move {
+            if let Err(error) = services.next_jobs.tick(false).await {
+                eprintln!("push: next-job tick failed: {error}");
+            }
+        })
+    }
 }
 
 #[cfg(test)]
@@ -238,6 +293,8 @@ mod tests {
     use crate::flock::{loops_push::PushEnv, panes::Stores, Flock};
     use crate::inbox_store::{Outgoing, Store};
     use crate::roles::Roles;
+    use crate::server_runtime::{RuntimeObservability, RuntimeServiceInputs, RuntimeServices};
+    use crate::superusers::Superusers;
     use crate::tasks::{Task, Tasks};
     use crate::terminal::{fakes::FakeTerminal, Terminal};
 
@@ -253,11 +310,13 @@ mod tests {
     }
 
     impl PushEnv for PushClaimEnv {
-        fn list_panes(&self) -> Result<Vec<Value>, crate::error::DunkError> {
-            Ok(vec![serde_json::json!({
-                "pane_id": self.pane_id,
-                "agent_status": "idle"
-            })])
+        fn list_panes<'a>(&'a self) -> LoopFuture<'a, Result<Vec<Value>, crate::error::DunkError>> {
+            Box::pin(async move {
+                Ok(vec![serde_json::json!({
+                    "pane_id": self.pane_id,
+                    "agent_status": "idle"
+                })])
+            })
         }
 
         fn caller_role(&self, _: &str, _: Option<&Value>) -> String {
@@ -280,11 +339,13 @@ mod tests {
             Some(true)
         }
 
-        fn unread_mail(&self, _: &str) -> bool {
-            self.unread
+        fn unread_mail<'a>(&'a self, _: &'a str) -> LoopFuture<'a, bool> {
+            Box::pin(async move { self.unread })
         }
 
-        fn announce_task(&self, _: &str, _: &Task, _: f64) {}
+        fn announce_task<'a>(&'a self, _: &'a str, _: &'a Task, _: f64) -> LoopFuture<'a, ()> {
+            Box::pin(async move {})
+        }
     }
 
     #[test]
@@ -542,5 +603,290 @@ mod tests {
         });
         assert_eq!(targets.len(), 1);
         assert!(targets.contains_key("%follow"));
+    }
+
+    fn push_services_fixture(
+        tag: &str,
+    ) -> (
+        tempfile::TempDir,
+        Arc<RuntimeServices>,
+        Arc<Tasks>,
+        Arc<Store>,
+        Task,
+        tokio::runtime::Handle,
+    ) {
+        let dir = crate::testsupport::dir(tag);
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let handle = runtime.handle().clone();
+        let tasks = Arc::new(
+            handle
+                .block_on(Tasks::open(dir.path().join("tasks.db")))
+                .expect("tasks store"),
+        );
+        handle.block_on(tasks.allocation_init()).unwrap();
+        let inbox = Arc::new(
+            Store::open(dir.path().join("inbox.db"), dir.path().join("blobs"))
+                .expect("inbox store"),
+        );
+        let task = handle
+            .block_on(tasks.add("global", "offered task", "acceptance"))
+            .unwrap();
+        handle
+            .block_on(tasks.update(
+                &task.id,
+                crate::tasks::FieldEdit {
+                    assignees: Some(vec!["w2:p2".into()]),
+                    ..Default::default()
+                },
+                None,
+            ))
+            .unwrap();
+        handle
+            .block_on(tasks.allocation_offer(&task.id, "code", &serde_json::json!([]), "w2:p2"))
+            .unwrap();
+        handle
+            .block_on(tasks.allocation_register(
+                "w1:p1",
+                &serde_json::json!(["code"]),
+                &serde_json::json!(["worker"]),
+                &serde_json::json!([]),
+                "w2:p2",
+                &serde_json::json!(true),
+            ))
+            .unwrap();
+
+        let env = Env::from_pairs(&[
+            (
+                "DUNKINGSHEEP_DIR",
+                dir.path().to_str().expect("UTF-8 test path"),
+            ),
+            ("DUNKINGSHEEP_TURN_END_DISPATCH", "1"),
+            ("DUNKINGSHEEP_DISPATCH_LANES", "w1:p1"),
+            ("DUNKINGSHEEP_MAILBOX", "w1:p1"),
+        ]);
+        let pid = i64::from(std::process::id());
+        let mut roles = Roles::new(
+            &env,
+            Some(dir.path().join("roles.json")),
+            Some(dir.path().join("tokens.json")),
+            None,
+        )
+        .expect("roles store");
+        roles
+            .register(
+                "w1:p1",
+                "worker",
+                Some(pid),
+                crate::proc::process_start(pid).as_deref(),
+                Some("codex"),
+                None,
+                None,
+                None,
+            )
+            .expect("worker role");
+        roles
+            .register("w2:p2", "owner", None, None, None, None, None, None)
+            .expect("owner role");
+        let executable = dir.path().join("daemon-executable");
+        std::fs::write(&executable, b"test daemon identity").unwrap();
+        let factory: crate::flock::loop_env::LoopTerminalFactory = Arc::new(|| {
+            let mut terminal = FakeTerminal::new();
+            terminal.panes[0].label = "w1:p1".into();
+            terminal.panes[0].command = "codex".into();
+            terminal.panes[0].pane_pid = Some(i64::from(std::process::id()));
+            terminal
+                .screens
+                .insert("w1:p1".into(), "› Ask Codex to do anything\n".into());
+            Box::new(terminal)
+        });
+        let services = RuntimeServices::new(RuntimeServiceInputs {
+            launches_file: dir.path().join("launches.json"),
+            lane_registry_file: dir.path().join("lanes.json"),
+            persist_enabled: false,
+            stores: Stores {
+                tasks: Some(Arc::clone(&tasks)),
+                inbox: Some(Arc::clone(&inbox)),
+                ..Stores::default()
+            },
+            roles,
+            legacy_superusers: Some(
+                Superusers::new(dir.path().join("superusers.json"), true).expect("superusers"),
+            ),
+            release_version: "test".into(),
+            state_file: dir.path().join("whole-state.json"),
+            executable,
+            env,
+            observability: Some(RuntimeObservability {
+                state_dir: dir.path().join("state-dir"),
+                memory_db: None,
+            }),
+            runtime,
+            terminal_factory: factory,
+        })
+        .expect("canonical runtime services");
+        let caller = serde_json::json!({
+            "pid": pid,
+            "start": crate::proc::process_start(pid),
+            "name": "codex",
+            "pane_id": "w1:p1",
+            "source": "agent"
+        });
+        services.flock.set_caller(Some(caller));
+        services
+            .flock
+            .turn_start(
+                None,
+                None,
+                None,
+                Some("w1:p1"),
+                None,
+                &crate::flock::commands_turns::NoHooks,
+            )
+            .unwrap();
+        services
+            .flock
+            .turn_end(
+                None,
+                "done",
+                Some("w1:p1"),
+                None,
+                false,
+                &crate::flock::commands_turns::NoHooks,
+            )
+            .unwrap();
+        services.flock.clear_caller();
+
+        (dir, services, tasks, inbox, task, handle)
+    }
+
+    #[test]
+    fn production_env_push_ticks_uses_concrete_services() {
+        let (_dir, services, tasks, _inbox, task, handle) =
+            push_services_fixture("runtime-push-ticks");
+        let adapter = services
+            .stuck_loop_adapter()
+            .expect("canonical loop adapter");
+        handle.block_on(adapter.helper_pushenv_recover_next_jobs());
+        handle.block_on(adapter.helper_pushenv_allocator_tick());
+        assert_eq!(
+            "in_progress",
+            handle.block_on(tasks.get(&task.id)).unwrap().status,
+            "allocator tick must claim the concrete offered task"
+        );
+        handle.block_on(adapter.helper_pushenv_next_jobs_tick());
+
+        services.allocator.stop_and_join();
+        handle.block_on(adapter.helper_pushenv_allocator_tick());
+        services.flock.attach_stores(Stores::default());
+        handle.block_on(adapter.helper_pushenv_recover_next_jobs());
+        handle.block_on(adapter.helper_pushenv_next_jobs_tick());
+        services.shutdown();
+    }
+    #[test]
+    fn production_pushenv_complete_adapter_uses_canonical_services() {
+        let (_dir, services, tasks, inbox, task, handle) =
+            push_services_fixture("runtime-push-assembly");
+        let adapter: Arc<dyn PushEnv> = Arc::new(
+            services
+                .push_loop_adapter()
+                .expect("canonical push adapter"),
+        );
+        handle.block_on(adapter.recover_next_jobs());
+        handle.block_on(adapter.allocator_tick());
+        assert_eq!(
+            "in_progress",
+            handle.block_on(tasks.get(&task.id)).unwrap().status,
+            "allocator tick must claim the concrete offered task"
+        );
+        handle.block_on(adapter.next_jobs_tick());
+
+        let panes = handle
+            .block_on(async { adapter.list_panes().await })
+            .expect("real terminal listing");
+        let pane = panes
+            .iter()
+            .find(|pane| pane["pane_id"] == "w1:p1")
+            .unwrap();
+        assert_eq!(adapter.caller_role("w1:p1", Some(pane)), "worker");
+        assert!(adapter.registered_lanes().unwrap().contains("w1:p1"));
+        assert_eq!(adapter.provider_of("w1:p1").as_deref(), Some("codex"));
+        assert!(adapter.may_review("w1:p1"));
+        assert!(adapter.lane_agent_alive("w1:p1").is_some());
+        // Real inbox writes occur through the worker-local terminal bridge.
+        handle.block_on(async { adapter.announce_task("w1:p1", &task, 30.0).await });
+        let messages = inbox.read("w1:p1", 50, true, false).unwrap();
+        let subject = format!("TASK {}: {}", task.id, task.title);
+        assert!(messages
+            .iter()
+            .any(|message| message.summary.subject.as_deref() == Some(subject.as_str())));
+        assert_eq!(
+            services.flock.last_message(),
+            format!("Pushed task {} to w1:p1", task.id)
+        );
+        assert!(
+            !handle.block_on(async { adapter.unread_mail("w1:p1").await }),
+            "own announcements do not hold the lane"
+        );
+        inbox
+            .send(&Outgoing {
+                mailbox: "w1:p1",
+                body: Some("Respond before claiming new work"),
+                subject: Some("Action needed"),
+                sender: Some("w2:p2"),
+                pane_id: Some("w1:p1"),
+                ..Outgoing::default()
+            })
+            .unwrap();
+        assert!(handle.block_on(async { adapter.unread_mail("w1:p1").await }));
+
+        services.allocator.stop_and_join();
+        handle.block_on(adapter.allocator_tick());
+        services.flock.attach_stores(Stores::default());
+        assert!(services.push_loop_adapter().is_err());
+        handle.block_on(adapter.recover_next_jobs());
+        handle.block_on(adapter.next_jobs_tick());
+        services.shutdown();
+    }
+    #[test]
+    fn production_pushenv_rejects_each_missing_store_before_callbacks() {
+        let (_dir, services, tasks, inbox, task, handle) =
+            push_services_fixture("runtime-push-required-stores");
+        services.flock.attach_stores(Stores {
+            tasks: Some(Arc::clone(&tasks)),
+            ..Stores::default()
+        });
+        let error = services
+            .push_loop_adapter()
+            .err()
+            .expect("inbox is required");
+        assert!(error
+            .to_string()
+            .contains("push runtime inbox store is not attached"));
+        assert_eq!(handle.block_on(tasks.get(&task.id)).unwrap().status, "open");
+
+        services.flock.attach_stores(Stores {
+            inbox: Some(Arc::clone(&inbox)),
+            ..Stores::default()
+        });
+        let error = services
+            .push_loop_adapter()
+            .err()
+            .expect("tasks are required");
+        assert!(error
+            .to_string()
+            .contains("push runtime task store is not attached"));
+        assert_eq!(handle.block_on(tasks.get(&task.id)).unwrap().status, "open");
+
+        services.flock.attach_stores(Stores {
+            tasks: Some(tasks),
+            inbox: Some(inbox),
+            ..Stores::default()
+        });
+        assert!(services.push_loop_adapter().is_ok());
+        services.shutdown();
     }
 }

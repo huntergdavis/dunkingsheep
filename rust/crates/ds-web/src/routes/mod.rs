@@ -17,3 +17,5 @@ pub mod search_attachments;
 pub mod system;
 #[rustfmt::skip]
 pub mod game_state;
+
+pub mod fleet;

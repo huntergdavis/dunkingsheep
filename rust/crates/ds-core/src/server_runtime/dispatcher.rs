@@ -67,7 +67,8 @@ impl Dispatcher for RuntimeDispatcher {
             &terminal,
         )
         .with_outbox(&self.services.outbox)?
-        .with_next_jobs(&self.services.next_jobs)?;
+        .with_next_jobs(&self.services.next_jobs)?
+        .with_owner_push(&self.services)?;
         let context = adapter.handler_context();
         let gate = api::FlockGate(&context);
         // api::Dispatcher::dispatch installs and drops RequestCallerGuard around the real

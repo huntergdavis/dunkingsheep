@@ -127,12 +127,12 @@ fn offer_in(
     conn: &Connection,
     task_id: &str,
     pool: &str,
-    role: &str,
-    requires: &Value,
+    role_requirements: (&str, &Value),
     excluded: &[String],
     actor: &str,
     now: f64,
 ) -> Result<(), DunkError> {
+    let (role, requires) = role_requirements;
     let task = decorate_conn(conn, task_id, None, now)?;
     if task.task.scope != "global" || !matches!(task.task.status.as_str(), "open" | "blocked") {
         return refuse("only open/blocked global backlog can be offered");
@@ -319,7 +319,13 @@ fn review_in(
     excluded.sort();
     excluded.dedup();
     offer_in(
-        conn, &task_id, pool, "reviewer", requires, &excluded, author, now,
+        conn,
+        &task_id,
+        pool,
+        ("reviewer", requires),
+        &excluded,
+        author,
+        now,
     )?;
     conn.execute(
         "INSERT INTO allocation_reviews VALUES (?,?,?,?) ON CONFLICT(source_id) DO UPDATE SET revision=excluded.revision",
@@ -714,7 +720,7 @@ impl Tasks {
                 if reviewed.is_some() {
                     return refuse("canonical review cannot be reoffered as worker work");
                 }
-                offer_in(&tx, &id, &pool, "worker", &requires, &[], &actor, now)?;
+                offer_in(&tx, &id, &pool, ("worker", &requires), &[], &actor, now)?;
                 tx.commit().map_err(db::map_sqlite)
             })
             .await?;

@@ -245,7 +245,7 @@ async fn only_handoffs_naming_an_owned_task_count() {
     let other = store.add("global", "other", "").await.unwrap();
     handoff(&store, &other.id, "pending", "m-other").await;
     assert!(store
-        .active_handoffs(PANE, &[mine.id.clone()])
+        .active_handoffs(PANE, std::slice::from_ref(&mine.id))
         .await
         .unwrap()
         .is_empty());

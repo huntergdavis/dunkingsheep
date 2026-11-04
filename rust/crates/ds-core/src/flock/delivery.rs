@@ -100,7 +100,21 @@ impl Flock {
         self_pane_id: Option<&str>,
         now: f64,
     ) -> Result<Value, DunkError> {
+        self.delivery_capability_with_owner(env, || Ok(owner), target, self_pane_id, now)
+    }
+
+    /// Resolve the target before acquiring the shared store, as Python does. The getter
+    /// runs once and only after resolution; typed callers retain the original entry point.
+    pub fn delivery_capability_with_owner<'a>(
+        &self,
+        env: &dyn DeliveryEnv,
+        owner: impl FnOnce() -> Result<&'a OwnerPush, DunkError>,
+        target: &str,
+        self_pane_id: Option<&str>,
+        now: f64,
+    ) -> Result<Value, DunkError> {
         let pane = self.delivery_target(env, target, self_pane_id)?;
+        let owner = owner()?;
         let pane_id = text(&pane, "pane_id");
         let agent = text(&pane, "agent").trim().to_lowercase();
         let registry = self.lane_registry(false).unwrap_or_default();
