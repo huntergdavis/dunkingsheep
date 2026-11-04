@@ -216,6 +216,8 @@ impl Drop for OutboxRuntime {
 }
 
 struct TimerSignal {
+    #[cfg(test)]
+    precommit: Arc<Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>>,
     cancelled: AtomicBool,
     generation: Mutex<u64>,
     changed: std::sync::Condvar,
@@ -227,6 +229,8 @@ struct TimerWorker {
 }
 
 struct DunkTimerOwner {
+    #[cfg(test)]
+    precommit: Arc<Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>>,
     stopped: AtomicBool,
     flock: Weak<Flock>,
     runtime: Handle,
@@ -245,6 +249,8 @@ impl DunkTimerOwner {
         reporter: StalePanelReporter,
     ) -> Self {
         Self {
+            #[cfg(test)]
+            precommit: Arc::new(Mutex::new(None)),
             stopped: AtomicBool::new(false),
             flock,
             runtime,
@@ -281,6 +287,8 @@ impl DunkTimerOwner {
             return Ok(());
         }
         let signal = Arc::new(TimerSignal {
+            #[cfg(test)]
+            precommit: Arc::clone(&self.precommit),
             cancelled: AtomicBool::new(false),
             generation: Mutex::new(0),
             changed: std::sync::Condvar::new(),
@@ -548,6 +556,14 @@ fn run_dunk_timer(
             break;
         }
         crate::flock::dunks::DunkList::set_timer_status(&handle, "Sending...");
+        #[cfg(test)]
+        {
+            let barrier = signal.precommit.lock().unwrap().take();
+            if let Some((entered, release)) = barrier {
+                entered.send(()).unwrap();
+                release.recv_timeout(Duration::from_secs(10)).unwrap();
+            }
+        }
         let (sent, ok, detail, blocker) =
             flock.scheduled_dunk_send(&handle, &mut env, Arc::clone(&store), || {
                 (signal.cancelled.load(Ordering::Acquire) || !flock.dunks.is_running(&handle))
@@ -691,6 +707,94 @@ mod tests {
     use super::*;
     use crate::flock::dunks::{AddArgs, UpdateArgs};
     use crate::terminal::fakes::FakeTerminal;
+
+    #[test]
+    fn real_timer_cancel_before_commit_joins_without_touching_same_id_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let flock = Arc::new(Flock::new(
+            dir.path().join("launches"),
+            dir.path().join("lanes"),
+            false,
+        ));
+        flock.attach_stores(crate::flock::panes::Stores {
+            inbox: Some(Arc::new(
+                crate::inbox_store::Store::open(
+                    dir.path().join("inbox.db"),
+                    dir.path().join("blobs"),
+                )
+                .unwrap(),
+            )),
+            ..Default::default()
+        });
+        let pane = serde_json::json!({"pane_id": "w1:p1"});
+        flock
+            .dunks
+            .add(
+                pane.as_object(),
+                &AddArgs {
+                    interval: Some("0.001".into()),
+                    text: Some("old lifetime".into()),
+                    hold_while_typing: Some("false".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let old = flock.dunks.handle("d1").unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let owner = Arc::new(
+            OutboxRuntime::new(
+                Arc::clone(&flock),
+                runtime.handle().clone(),
+                Arc::new(|| Box::new(FakeTerminal::new())),
+            )
+            .unwrap(),
+        );
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        *owner.dunk_timers.precommit.lock().unwrap() = Some((entered_tx, release_rx));
+        owner.start_dunk("d1").unwrap();
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let signal = Arc::clone(
+            &owner.dunk_timers.workers.lock().unwrap()[&DunkTimerOwner::key(&old)].signal,
+        );
+        let stopping = Arc::clone(&owner);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let stop = thread::spawn(move || {
+            stopping.stop_dunk("d1").unwrap();
+            done_tx.send(()).unwrap();
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !signal.cancelled.load(Ordering::Acquire) {
+            assert!(Instant::now() < deadline);
+            thread::yield_now();
+        }
+        assert!(
+            done_rx.try_recv().is_err(),
+            "stop must wait for the blocked worker"
+        );
+        flock.dunks.remove("d1").unwrap();
+        flock._load_dunks(
+            serde_json::json!({"dunkers": [{"id": "d1", "text": "replacement", "send_count": 7}]})
+                .as_object()
+                .unwrap(),
+        );
+        release_tx.send(()).unwrap();
+        done_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        stop.join().unwrap();
+        assert_eq!(
+            0,
+            crate::flock::dunks::DunkList::timer_fields(&old).send_count
+        );
+        let row = flock.dunks.get("d1").unwrap();
+        assert_eq!(serde_json::json!(7), row["send_count"]);
+        assert_eq!(serde_json::json!("replacement"), row["text"]);
+        assert!(owner.dunk_timers.workers.lock().unwrap().is_empty());
+        assert_eq!(1, flock.dunks.snapshot().1.len());
+        owner.stop_and_join();
+    }
 
     #[test]
     fn typed_attempt_without_frame_succeeds_but_snapshot_failure_refuses() {
