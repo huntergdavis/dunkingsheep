@@ -517,6 +517,47 @@ impl LoopRuntimeAdapter {
     }
 }
 
+impl crate::flock::loops_push::PushEnv for LoopRuntimeAdapter {
+    fn list_panes(&self) -> LoopFuture<'_, Result<Vec<Value>, DunkError>> {
+        self.helper_pushenv_list_panes()
+    }
+    fn caller_role(&self, pane_id: &str, pane_info: Option<&Value>) -> String {
+        self.helper_pushenv_caller_role(pane_id, pane_info)
+    }
+    fn registered_lanes(&self) -> Option<BTreeSet<String>> {
+        self.helper_pushenv_registered_lanes()
+    }
+    fn may_review(&self, pane_id: &str) -> bool {
+        self.helper_pushenv_may_review(pane_id)
+    }
+    fn provider_of(&self, pane_id: &str) -> Option<String> {
+        self.helper_pushenv_provider_of(pane_id)
+    }
+    fn lane_agent_alive(&self, pane_id: &str) -> Option<bool> {
+        self.helper_pushenv_lane_agent_alive(pane_id)
+    }
+    fn unread_mail<'a>(&'a self, pane_id: &'a str) -> LoopFuture<'a, bool> {
+        self.helper_pushenv_unread_mail(pane_id)
+    }
+    fn announce_task<'a>(
+        &'a self,
+        pane_id: &'a str,
+        task: &'a crate::tasks::Task,
+        lease_seconds: f64,
+    ) -> LoopFuture<'a, ()> {
+        self.helper_pushenv_announce_task(pane_id, task, lease_seconds)
+    }
+    fn recover_next_jobs(&self) -> LoopFuture<'_, ()> {
+        self.helper_pushenv_recover_next_jobs()
+    }
+    fn allocator_tick(&self) -> LoopFuture<'_, ()> {
+        self.helper_pushenv_allocator_tick()
+    }
+    fn next_jobs_tick(&self) -> LoopFuture<'_, ()> {
+        self.helper_pushenv_next_jobs_tick()
+    }
+}
+
 impl ReaperEnv for LoopRuntimeAdapter {
     fn pane_snapshot(&self) -> LoopFuture<'_, (bool, Result<Vec<Value>, DunkError>)> {
         self.helper_reaperenv_pane_snapshot()
