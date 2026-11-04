@@ -134,3 +134,22 @@ ported yet`. Source audit confirmed `production_handlers` omits the existing
 `register_inbox_messages` registration. This is a real assembly prerequisite;
 the harness does not substitute a synthetic handler. The status CEILING failure
 is retained. No production performance acceptance is inferred from this run.
+
+
+The separate-invocation [run 41901640842](https://github.com/huntergdavis/dunkingsheep/actions/runs/41901640842)
+measured revision `a785ac9c32bf7f0a0994dab6e71e6a114ef294e8`. With the same
+20 warmups/client and sample counts, status p50/p95/p99/max were
+**3.668626 / 13.330133 / 24.405846 / 61.204259 ms** across 6,000 calls
+(**CEILING 2 ms FAIL**). Task next completed **200 successful claims** with
+p50/p95/p99/max **1.318461 / 1.614316 / 3.421033 / 4.080889 ms**
+(**CEILING 10 ms PASS**). Inbox still produced zero valid samples because of the
+missing registration. The logs include CPU/host and each invocation's load;
+status and task load before/after was `3.75 1.84 0.73`.
+
+The bounded registration repair reuses `register_inbox_messages` from accepted,
+merged PR #660 (`0d90c35f3210c46502c6e0e5e0b3f8d66bd51d7f`), with its existing
+canonical request provider. The exact registration inventory and
+`production_dispatcher_socket_inbox_read_consumes_canonical_message` regression
+cover the assembly: a real bound socket caller reads a seeded message, verifies
+its body and read transition, then sees an empty unread batch. Post-repair
+measurements remain pending; the earlier CEILING failures remain valid evidence.
