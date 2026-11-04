@@ -111,7 +111,7 @@ pub struct Env(BTreeMap<String, String>);
 /// failures until a consumer needs the value: some Python modules import lazily.
 /// This is deliberately separate from each consumer's config override policy.
 #[derive(Debug, Clone)]
-pub struct CapturedPythonHome(Result<PathBuf, String>);
+pub struct CapturedPythonHome(Result<Option<PathBuf>, String>);
 
 impl CapturedPythonHome {
     pub fn capture(env: &Env) -> Self {
@@ -130,28 +130,41 @@ impl CapturedPythonHome {
     ) -> Self {
         use std::os::unix::ffi::{OsStrExt, OsStringExt};
         let home = match env.get("HOME") {
-            Some(value) => Ok(PathBuf::from(value)),
-            None => account_home().and_then(|home| {
-                home.ok_or_else(|| "Could not determine home directory.".to_owned())
-            }),
+            Some(value) => Ok(Some(PathBuf::from(value))),
+            None => account_home(),
         };
         Self(home.map(|home| {
-            // posixpath.expanduser('~') strips trailing '/' and maps empty to '/'.
-            let bytes = home.as_os_str().as_bytes();
-            let end = bytes
-                .iter()
-                .rposition(|byte| *byte != b'/')
-                .map_or(0, |i| i + 1);
-            if end == 0 {
-                PathBuf::from("/")
-            } else {
-                PathBuf::from(std::ffi::OsString::from_vec(bytes[..end].to_vec()))
-            }
+            home.map(|home| {
+                // posixpath.expanduser('~') strips trailing '/' and maps empty to '/'.
+                let bytes = home.as_os_str().as_bytes();
+                let end = bytes
+                    .iter()
+                    .rposition(|byte| *byte != b'/')
+                    .map_or(0, |i| i + 1);
+                if end == 0 {
+                    PathBuf::from("/")
+                } else {
+                    PathBuf::from(std::ffi::OsString::from_vec(bytes[..end].to_vec()))
+                }
+            })
         }))
     }
 
     pub fn path(&self) -> Result<&Path, String> {
-        self.0.as_deref().map_err(Clone::clone)
+        use std::os::unix::ffi::OsStrExt;
+        self.expanduser_home()?
+            .filter(|home| !home.as_os_str().as_bytes().starts_with(b"~"))
+            .ok_or_else(|| "Could not determine home directory.".to_owned())
+    }
+
+    /// `os.path.expanduser` keeps the original tilde on a missing passwd entry;
+    /// `Path.home` instead raises. Preserve that distinction without another lookup.
+    /// A genuine account lookup failure is still an error for either consumer.
+    pub fn expanduser_home(&self) -> Result<Option<&Path>, String> {
+        self.0
+            .as_ref()
+            .map(|home| home.as_deref())
+            .map_err(Clone::clone)
     }
 
     /// Python's eager `Path(environ.get("DUNKINGSHEEP_DIR", str(Path.home()

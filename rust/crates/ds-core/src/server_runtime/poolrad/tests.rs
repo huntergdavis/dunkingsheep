@@ -305,6 +305,56 @@ fn poolrad_runtime_role_limit_bool_and_dry_run() {
         )
         .unwrap();
     assert_eq!(system["filed"][0]["dry"], true);
+    // A credit-ready model exercises the actual configured write path; an empty
+    // credit set would not prove that dry-run suppresses credit persistence.
+    fs::create_dir_all(f.repo.join("src/recovered")).unwrap();
+    fs::write(
+        f.repo.join("src/recovered/overlay_u1_fixture_0001_cpu.c"),
+        "/* isolated model */\n",
+    )
+    .unwrap();
+    fs::write(
+        f.repo.join("tools/overlay/check_fixture.py"),
+        "CHECKER_ROWS = ['OVL_0001_0001']\n",
+    )
+    .unwrap();
+    git(&f.repo, &["add", "."]);
+    git(
+        &f.repo,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            "model fixture (#123)",
+        ],
+    );
+    let dry = f
+        .call(
+            "poolrad_sync",
+            json!({"limit": 1, "dry_run": true}),
+            "w2:p2",
+        )
+        .unwrap();
+    assert!(dry["credit_pending"].get("OVL_0001_0001").is_some());
+    assert!(!f.config.join("poolrad/credit-pending.json").exists());
+    let written = f
+        .call("poolrad_sync", json!({"limit": 1}), "w2:p2")
+        .unwrap();
+    assert_eq!(
+        written["credit_pending_file"],
+        f.config
+            .join("poolrad/credit-pending.json")
+            .to_str()
+            .unwrap()
+    );
+    assert_eq!(written["filed"][0]["id"], "OVL_0001_0002");
+    assert_eq!(
+        f.call("poolrad_progress", json!({}), "w1:p1").unwrap()["credit_pending"],
+        1
+    );
 }
 
 #[test]
@@ -548,6 +598,7 @@ fn poolrad_captured_home_and_config_present_empty_absent_failure() {
         );
     }
     let missing = CapturedPythonHome::capture_with(&absent, || Ok(None));
+    assert_eq!(missing.expanduser_home().unwrap(), None);
     let explicit = Env::from_pairs(&[("DUNKINGSHEEP_DIR", "/explicit")]);
     assert_eq!(
         PoolradConfig::from_env(&explicit, &missing).unwrap_err(),
@@ -558,6 +609,19 @@ fn poolrad_captured_home_and_config_present_empty_absent_failure() {
         PoolradConfig::from_env(&absent, &failed).unwrap_err(),
         "account lookup failed"
     );
+    assert_eq!(
+        failed.expanduser_home().unwrap_err(),
+        "account lookup failed"
+    );
+    for raw in ["~", "~unknown"] {
+        let env = Env::from_pairs(&[("HOME", raw)]);
+        let unexpanded = CapturedPythonHome::capture_with(&env, || panic!("HOME present"));
+        assert_eq!(unexpanded.expanduser_home().unwrap(), Some(Path::new(raw)));
+        assert_eq!(
+            unexpanded.path().unwrap_err(),
+            "Could not determine home directory."
+        );
+    }
 }
 
 #[test]
