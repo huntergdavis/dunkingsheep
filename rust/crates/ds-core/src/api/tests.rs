@@ -9695,3 +9695,6 @@ fn task_reap_live_tmux_listing_failure_reopens_expired_claim() {
 fn api_python_repr_preserves_mixed_quotes_and_controls() {
     assert_eq!(py_repr("a'\"\\\n\r\tb"), r###"'a\'"\\\n\r\tb'"###);
 }
+
+#[path = "context_mutation_tests.rs"]
+mod context_mutation_tests;

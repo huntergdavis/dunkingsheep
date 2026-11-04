@@ -8,6 +8,8 @@
 //!
 //! NOT in this slice: the handlers themselves.
 
+mod context_mutations;
+pub use context_mutations::{h_context_add, h_context_promote, h_memory_backfill};
 pub mod inbox_messages;
 pub mod outbox_messages;
 pub use outbox_messages::{h_cancel_message, h_get_message, h_list_messages};
@@ -452,7 +454,7 @@ fn py_int(value: &Value) -> Option<i64> {
 }
 
 /// Python truthiness of a JSON value (`args.get(k) or default`).
-fn truthy(value: &Value) -> bool {
+pub(crate) fn truthy(value: &Value) -> bool {
     match value {
         Value::Null => false,
         Value::Bool(b) => *b,
@@ -714,6 +716,12 @@ impl Dispatcher {
     }
 
     /// Register only the T39 context supersede and retire handlers.
+    pub fn register_context_mutations(&mut self) {
+        self.register("context_add", h_context_add);
+        self.register("context_promote", h_context_promote);
+        self.register("memory_backfill", h_memory_backfill);
+    }
+
     pub fn register_context_supersede_retire(&mut self) {
         self.register("context_supersede", h_context_supersede);
         self.register("context_retire", h_context_retire);
