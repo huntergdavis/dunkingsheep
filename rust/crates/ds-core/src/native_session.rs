@@ -274,6 +274,8 @@ pub struct StateRow {
 }
 
 /// `_state_row`: the exact thread row in the private state DB, and its rollout's real path.
+type ThreadStateRow = (String, Option<String>, Option<String>);
+
 pub fn state_row(
     codex_home: &str,
     session_id: &str,
@@ -284,7 +286,7 @@ pub fn state_row(
             "native session guard cannot find private state DB {db}"
         ));
     }
-    let read = || -> rusqlite::Result<Option<(String, Option<String>, Option<String>)>> {
+    let read = || -> rusqlite::Result<Option<ThreadStateRow>> {
         let conn = Connection::open_with_flags(
             &db,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,

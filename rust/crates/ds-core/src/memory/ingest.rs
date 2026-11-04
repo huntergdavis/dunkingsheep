@@ -124,15 +124,87 @@ pub fn enqueue(
     harness: Option<&str>,
     project: Option<&str>,
 ) -> Result<(i64, i64), DunkError> {
+    let receipt = enqueue_receipt(connection, path, harness, project)?;
+    Ok((receipt.source_id, receipt.queue_id))
+}
+
+/// `enqueue` receipt with the exact normalized metadata committed to the source row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EnqueueReceipt {
+    pub source_id: i64,
+    pub queue_id: i64,
+    pub path: String,
+    pub harness: String,
+    pub project: Option<String>,
+}
+
+/// Enqueue a source and return the metadata prepared for the same committed write.
+pub fn enqueue_receipt(
+    connection: &mut Connection,
+    path: &str,
+    harness: Option<&str>,
+    project: Option<&str>,
+) -> Result<EnqueueReceipt, DunkError> {
+    enqueue_prepared_receipt(connection, prepare_enqueue(path, harness, project)?)
+}
+
+#[derive(Clone)]
+pub struct PreparedSource {
+    pub path: String,
+    pub harness: String,
+    pub project: Option<String>,
+    pub mtime: f64,
+    pub size: i64,
+    pub now: f64,
+}
+
+pub fn prepare_enqueue(
+    path: &str,
+    harness: Option<&str>,
+    project: Option<&str>,
+) -> Result<PreparedSource, DunkError> {
     let path = absolute(path);
     let metadata = std::fs::metadata(&path)
         .map_err(|_| DunkError::Refused(format!("source does not exist: {path}")))?;
     let harness = harness
+        .filter(|value| !value.is_empty())
         .unwrap_or_else(|| harness_from_path(&path))
         .to_string();
     let project = project.map(str::trim).filter(|value| !value.is_empty());
     let (mtime, size) = (mtime_of(&metadata), metadata.len() as i64);
     let now = now_s();
+    Ok(PreparedSource {
+        path,
+        harness,
+        project: project.map(str::to_owned),
+        mtime,
+        size,
+        now,
+    })
+}
+
+pub fn enqueue_prepared(
+    connection: &mut Connection,
+    source: PreparedSource,
+) -> Result<(i64, i64), DunkError> {
+    let receipt = enqueue_prepared_receipt(connection, source)?;
+    Ok((receipt.source_id, receipt.queue_id))
+}
+
+/// Enqueue a prepared source, returning its committed IDs and the exact prepared metadata.
+pub fn enqueue_prepared_receipt(
+    connection: &mut Connection,
+    source: PreparedSource,
+) -> Result<EnqueueReceipt, DunkError> {
+    let PreparedSource {
+        path,
+        harness,
+        project,
+        mtime,
+        size,
+        now,
+    } = source;
+    commit_pending(connection)?;
     let tx = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(map_sqlite)?;
@@ -157,12 +229,19 @@ pub fn enqueue(
     .map_err(map_sqlite)?;
     let queue_id = tx.last_insert_rowid();
     tx.commit().map_err(map_sqlite)?;
-    Ok((source_id, queue_id))
+    Ok(EnqueueReceipt {
+        source_id,
+        queue_id,
+        path,
+        harness,
+        project,
+    })
 }
 
 /// `requeue_partial`: sources left partial by a deliberate stop go back to the queue.
 pub fn requeue_partial(connection: &mut Connection) -> Result<usize, DunkError> {
     let now = now_s();
+    commit_pending(connection)?;
     let tx = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(map_sqlite)?;
@@ -202,6 +281,7 @@ pub fn requeue_partial(connection: &mut Connection) -> Result<usize, DunkError> 
 /// `recover_leases`: requeue leases whose worker died; any 'ingesting' source is pending again.
 pub fn recover_leases(connection: &mut Connection) -> Result<usize, DunkError> {
     let now = now_s();
+    commit_pending(connection)?;
     let tx = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(map_sqlite)?;
@@ -224,6 +304,7 @@ pub fn recover_leases(connection: &mut Connection) -> Result<usize, DunkError> {
 /// `claim_next`: lease the oldest ready queue row, or None.
 pub fn claim_next(connection: &mut Connection, lease_s: f64) -> Result<Option<Lease>, DunkError> {
     let now = now_s();
+    commit_pending(connection)?;
     let tx = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(map_sqlite)?;
@@ -283,6 +364,7 @@ pub fn finish(
 ) -> Result<(), DunkError> {
     let now = now_s();
     let clip = |text: &str| text.chars().take(2000).collect::<String>();
+    commit_pending(connection)?;
     let tx = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(map_sqlite)?;
@@ -385,18 +467,65 @@ pub fn insert_chunks(
     created_at: Option<f64>,
     metadata: Option<&Value>,
 ) -> Result<usize, DunkError> {
-    if chunks.is_empty() {
+    insert_prepared(
+        connection,
+        prepare_chunks(session_id, chunks, role, kind, created_at, metadata),
+    )
+}
+
+pub struct ChunkBatch {
+    pub session_id: String,
+    pub role: Option<String>,
+    pub kind: Option<String>,
+    pub created_at: Option<f64>,
+    pub metadata: Option<Value>,
+    rows: Vec<(String, String, i64)>,
+}
+pub fn prepare_chunks(
+    session_id: &str,
+    chunks: &[String],
+    role: Option<&str>,
+    kind: Option<&str>,
+    created_at: Option<f64>,
+    metadata: Option<&Value>,
+) -> ChunkBatch {
+    ChunkBatch {
+        session_id: session_id.into(),
+        role: role.map(str::to_owned),
+        kind: kind.map(str::to_owned),
+        created_at,
+        metadata: metadata.cloned(),
+        rows: chunks
+            .iter()
+            .map(|text| {
+                let clean = redact(text);
+                let digest = format!("{:x}", Sha256::digest(clean.as_bytes()));
+                let tokens = (clean.chars().count() / 4).max(1) as i64;
+                (clean, digest, tokens)
+            })
+            .collect(),
+    }
+}
+pub fn insert_prepared(connection: &mut Connection, batch: ChunkBatch) -> Result<usize, DunkError> {
+    let ChunkBatch {
+        session_id,
+        role,
+        kind,
+        created_at,
+        metadata,
+        rows,
+    } = batch;
+    if rows.is_empty() {
         return Ok(0);
     }
+    let metadata = metadata.as_ref();
     let metadata = metadata.filter(|v| !v.is_null()).map(Value::to_string);
+    commit_pending(connection)?;
     let tx = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(map_sqlite)?;
     let mut inserted = 0;
-    for (ordinal, text) in chunks.iter().enumerate() {
-        let clean = redact(text);
-        let digest = format!("{:x}", Sha256::digest(clean.as_bytes()));
-        let tokens = (clean.chars().count() / 4).max(1) as i64;
+    for (ordinal, (clean, digest, tokens)) in rows.iter().enumerate() {
         inserted += tx
             .execute(
                 "INSERT OR IGNORE INTO chunks(session_id, ordinal, role, kind, text, token_count, sha256, created_at, metadata) \
@@ -418,8 +547,35 @@ pub fn upsert_source_row(
     harness: &str,
     project: Option<&str>,
 ) -> Result<(), DunkError> {
+    source_prepared(connection, prepare_source(path, harness, project)?)
+}
+
+pub fn prepare_source(
+    path: &str,
+    harness: &str,
+    project: Option<&str>,
+) -> Result<PreparedSource, DunkError> {
     let metadata =
         std::fs::metadata(path).map_err(|error| DunkError::Refused(format!("{path}: {error}")))?;
+    Ok(PreparedSource {
+        path: path.into(),
+        harness: harness.into(),
+        project: project.map(str::to_owned),
+        mtime: mtime_of(&metadata),
+        size: metadata.len() as i64,
+        now: now_s(),
+    })
+}
+
+pub fn source_prepared(connection: &Connection, source: PreparedSource) -> Result<(), DunkError> {
+    let PreparedSource {
+        path,
+        harness,
+        project,
+        mtime,
+        size,
+        now,
+    } = source;
     connection
         .execute(
             "INSERT INTO sources(harness, path, project, mtime, size, state, last_ingest) \
@@ -427,17 +583,10 @@ pub fn upsert_source_row(
              ON CONFLICT(path) DO UPDATE SET harness=excluded.harness, \
              project=COALESCE(excluded.project, sources.project), mtime=excluded.mtime, \
              size=excluded.size, state='ok', last_ingest=excluded.last_ingest, error=NULL",
-            params![
-                harness,
-                path,
-                project,
-                mtime_of(&metadata),
-                metadata.len() as i64,
-                now_s()
-            ],
+            params![harness, path, project, mtime, size, now],
         )
         .map_err(map_sqlite)?;
-    Ok(())
+    commit_pending(connection)
 }
 
 pub(crate) fn absolute(path: &str) -> String {
@@ -463,3 +612,88 @@ fn mtime_of(metadata: &std::fs::Metadata) -> f64 {
 #[cfg(test)]
 #[path = "ingest_tests.rs"]
 mod tests;
+
+/// Per-mutation parser boundary. Parsing, source reads and throttling stay on the caller.
+#[allow(clippy::too_many_arguments)]
+pub trait MemoryWrite {
+    fn upsert_session(
+        &mut self,
+        session_id: &str,
+        harness: &str,
+        project: Option<&str>,
+        cwd: Option<&str>,
+        title: Option<&str>,
+        started_at: Option<f64>,
+        updated_at: Option<f64>,
+        metadata: Option<&Value>,
+    ) -> Result<(), DunkError>;
+    fn insert_chunks(
+        &mut self,
+        session_id: &str,
+        chunks: &[String],
+        role: Option<&str>,
+        kind: Option<&str>,
+        created_at: Option<f64>,
+        metadata: Option<&Value>,
+    ) -> Result<usize, DunkError>;
+    fn upsert_source_row(
+        &mut self,
+        path: &str,
+        harness: &str,
+        project: Option<&str>,
+    ) -> Result<(), DunkError>;
+}
+
+impl MemoryWrite for Connection {
+    fn upsert_session(
+        &mut self,
+        session_id: &str,
+        harness: &str,
+        project: Option<&str>,
+        cwd: Option<&str>,
+        title: Option<&str>,
+        started_at: Option<f64>,
+        updated_at: Option<f64>,
+        metadata: Option<&Value>,
+    ) -> Result<(), DunkError> {
+        upsert_session(
+            self, session_id, harness, project, cwd, title, started_at, updated_at, metadata,
+        )
+    }
+    fn insert_chunks(
+        &mut self,
+        session_id: &str,
+        chunks: &[String],
+        role: Option<&str>,
+        kind: Option<&str>,
+        created_at: Option<f64>,
+        metadata: Option<&Value>,
+    ) -> Result<usize, DunkError> {
+        insert_chunks(self, session_id, chunks, role, kind, created_at, metadata)
+    }
+    fn upsert_source_row(
+        &mut self,
+        path: &str,
+        harness: &str,
+        project: Option<&str>,
+    ) -> Result<(), DunkError> {
+        upsert_source_row(self, path, harness, project)
+    }
+}
+
+/// Python _begin_write commits an outstanding implicit session transaction first.
+pub fn commit_pending(connection: &Connection) -> Result<(), DunkError> {
+    if !connection.is_autocommit() {
+        connection.execute_batch("COMMIT").map_err(map_sqlite)?;
+    }
+    Ok(())
+}
+
+pub fn checkpoint(connection: &Connection) -> Result<(i64, i64, i64), DunkError> {
+    commit_pending(connection)?;
+    connection
+        .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .map_err(map_sqlite)
+}

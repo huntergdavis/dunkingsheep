@@ -70,6 +70,22 @@ pub fn context(
         now,
         240,
     )?;
+    Ok(context_from_hits(
+        query,
+        sessions,
+        snippets_per_session,
+        now,
+        rows,
+    ))
+}
+
+pub(crate) fn context_from_hits(
+    query: &str,
+    sessions: i64,
+    snippets_per_session: usize,
+    now: f64,
+    rows: Vec<Hit>,
+) -> Value {
     let mut buckets: Vec<Bucket> = Vec::new();
     for row in rows {
         let index = match buckets
@@ -161,13 +177,13 @@ pub fn context(
         })
         .collect();
     let snippet_total: usize = buckets.iter().map(|b| b.snippets.len()).sum();
-    Ok(json!({
+    json!({
         "query": query,
         "generated_at": now,
         "sessions": rendered,
         "counts": {"sessions": buckets.len(), "snippets": snippet_total},
         "text": lines.join("\n"),
-    }))
+    })
 }
 
 /// In-memory query metrics (`_record_query` / `_percentiles`): per-query INSERTs on the writer

@@ -57,6 +57,7 @@ use crate::terminal::tmux::TmuxBackend;
 use crate::terminal::Terminal;
 
 mod reaper;
+mod respawn_api;
 
 /// A request-scoped adapter borrowed on the server's existing connection thread.
 ///
@@ -445,6 +446,15 @@ impl crate::api::CommandEnv for RequestRuntimeAdapter<'_> {
         operation(&mut adapter)
     }
 
+    fn with_respawn_pane_env(
+        &self,
+        operation: &mut dyn FnMut(
+            &crate::flock::respawn::RespawnServices<'_>,
+        ) -> Result<Value, DunkError>,
+    ) -> Result<Value, DunkError> {
+        RequestRuntimeAdapter::with_respawn_pane_env(self, operation)
+    }
+
     fn next_jobs(&self) -> Result<&crate::tasks::next_job_runtime::NextJobs, DunkError> {
         self.next_jobs
             .ok_or_else(|| refusal("request next-job service is not attached"))
@@ -633,7 +643,14 @@ fn normalize_backend_name(configured: Option<&str>) -> String {
 fn backend_from_name(configured: Option<&str>) -> Result<TmuxBackend, DunkError> {
     let name = normalize_backend_name(configured);
     match name.as_str() {
-        "tmux" => Ok(TmuxBackend::default()),
+        "tmux" => {
+            let backend = TmuxBackend::default();
+            backend
+                .registry()
+                .path()
+                .map_err(|error| refusal(error.to_string()))?;
+            Ok(backend)
+        }
         "herdr" => Err(refusal(
             "terminal backend 'herdr' is retired; expected 'tmux'",
         )),

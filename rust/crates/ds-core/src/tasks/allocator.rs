@@ -13,7 +13,7 @@
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Map, Value};
 
-use super::next_job::{handoffs_in, record_in};
+use super::next_job::{handoffs_in, record_in, RecordIn};
 use super::{decorate_conn, default_lease_s, order_key, Tasks};
 use crate::db;
 use crate::error::DunkError;
@@ -293,7 +293,17 @@ fn review_in(
                 let pane = handoff.get("pane_id").and_then(Value::as_str).unwrap_or("");
                 let from_task = handoff.get("from_task").and_then(Value::as_str);
                 record_in(
-                    conn, &task_id, pane, from_task, None, 0, None, now, &details,
+                    conn,
+                    RecordIn {
+                        task_id: &task_id,
+                        pane_id: pane,
+                        from_task,
+                        message_id: None,
+                        attempt: 0,
+                        reason: None,
+                        now,
+                        details: &details,
+                    },
                 )?;
             }
         }
@@ -546,7 +556,19 @@ fn allocate_in(
             ] {
                 handoff.insert(key.into(), value);
             }
-            record_in(conn, &id, pane, None, None, 0, None, now, &handoff)?;
+            record_in(
+                conn,
+                RecordIn {
+                    task_id: &id,
+                    pane_id: pane,
+                    from_task: None,
+                    message_id: None,
+                    attempt: 0,
+                    reason: None,
+                    now,
+                    details: &handoff,
+                },
+            )?;
             conn.execute(
                 "UPDATE allocation_offers SET state='assigned' WHERE task_id=?",
                 params![id],

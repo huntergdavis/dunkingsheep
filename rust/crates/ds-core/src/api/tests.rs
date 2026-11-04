@@ -25,6 +25,18 @@ use crate::terminal::{fakes::FakeTerminal, Terminal};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+struct FixedMemoryClock;
+
+impl crate::memory::service::MemoryClock for FixedMemoryClock {
+    fn wall(&self) -> f64 {
+        1_800_000_000.0
+    }
+
+    fn performance(&self) -> f64 {
+        1.0
+    }
+}
+
 struct FixedRole(&'static str, bool);
 
 impl CallerGate for FixedRole {
@@ -1836,6 +1848,90 @@ fn refusal(result: Result<Value, DunkError>) -> String {
 }
 
 #[test]
+fn h_respawn_pane_matches_python() {
+    let (_dir, flock) = flock();
+    let env = TestEnv::default();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_respawn_pane();
+    let request = RequestCtx {
+        self_pane_id: Some("w1:p1".into()),
+        ..RequestCtx::default()
+    };
+    let gate = FixedRole("owner", true);
+
+    let invalid_argv = json!({
+        "pane": "w1:p2",
+        "expected_pid": 42,
+        "expected_start": "start",
+        "argv": "codex",
+        "confirm_idle": true,
+        "rollback_argv": []
+    });
+    assert_eq!(
+        refusal(dispatch_with_env(
+            &dispatcher,
+            &flock,
+            &gate,
+            "respawn_pane",
+            args(invalid_argv),
+            &request,
+            &env,
+        )),
+        "respawn_pane requires argv as a list of strings"
+    );
+
+    let invalid_rollback = json!({
+        "pane": "w1:p2",
+        "expected_pid": 42,
+        "expected_start": "start",
+        "argv": ["codex"],
+        "confirm_idle": true,
+        "rollback_argv": []
+    });
+    assert_eq!(
+        refusal(dispatch_with_env(
+            &dispatcher,
+            &flock,
+            &gate,
+            "respawn_pane",
+            args(invalid_rollback),
+            &request,
+            &env,
+        )),
+        "respawn_pane rollback_argv must be a list of strings"
+    );
+}
+
+#[test]
+fn respawn_pane_registers_one_handler_and_refuses_without_runtime_provider() {
+    let (_dir, flock) = flock();
+    let env = TestEnv::default();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_respawn_pane();
+    assert_eq!(dispatcher.registration_attempts(), &["respawn_pane"]);
+    let request = RequestCtx {
+        self_pane_id: Some("w1:p1".into()),
+        ..RequestCtx::default()
+    };
+    let error = refusal(dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("owner", true),
+        "respawn_pane",
+        args(json!({
+            "pane": "w1:p2",
+            "expected_pid": 42,
+            "expected_start": "start",
+            "argv": ["codex"],
+            "confirm_idle": true
+        })),
+        &request,
+        &env,
+    ));
+    assert_eq!(error, "respawn pane adapter is not wired");
+}
+
+#[test]
 fn h_help_matches_python() {
     let dir = tempfile::tempdir().expect("tempdir");
     let flock = Flock::new(
@@ -2505,12 +2601,20 @@ fn memory_api_fixture() -> (tempfile::TempDir, Flock, TestEnv) {
         )
         .expect("chunk");
     drop(connection);
-    let pool = crate::db::ReadPool::open(&path, 1).expect("read pool");
+    let service = Arc::new(
+        crate::memory::service::MemoryService::with_clock(
+            &path,
+            1,
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(1),
+            Arc::new(FixedMemoryClock),
+        )
+        .expect("memory service"),
+    );
     let (_dir, flock) = flock();
-    flock.attach_stores(Stores {
-        memory: Some(Arc::new(pool)),
-        ..Stores::default()
-    });
+    flock
+        .attach_memory_service(service)
+        .expect("attach canonical memory service");
     (dir, flock, TestEnv::default())
 }
 
@@ -2593,6 +2697,329 @@ fn h_memory_context_matches_python() {
         context["text"],
         "[codex] demo | Rust API\n  - rust api uses a stable adapter boundary for recall"
     );
+}
+
+#[test]
+fn h_memory_stats_matches_python() {
+    let (_dir, flock, env) = memory_api_fixture();
+    let service = flock.memory_service().unwrap();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_memory_stats_status_ingest();
+    let result = dispatch_memory(&dispatcher, &flock, &env, "memory_stats", json!({})).unwrap();
+    assert_eq!(result, service.stats().unwrap());
+    assert_eq!(result["sources"], 0);
+    assert_eq!(result["sessions"], 1);
+    assert_eq!(result["chunks"], 1);
+    assert_eq!(result["queue_depth"], 0);
+    assert_eq!(result["queries"]["count"], 0);
+}
+
+#[test]
+fn h_memory_status_matches_python() {
+    let (_dir, flock, env) = memory_api_fixture();
+    let service = flock.memory_service().unwrap();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_memory_stats_status_ingest();
+    let result = dispatch_memory(&dispatcher, &flock, &env, "memory_status", json!({})).unwrap();
+    assert_eq!(result, service.status().unwrap());
+    assert_eq!(result["ok"], true);
+    assert_eq!(result["ingestor"]["running"], false);
+}
+
+#[test]
+fn h_memory_ingest_matches_python() {
+    let (dir, flock, env) = memory_api_fixture();
+    let source_dir = dir.path().join(".codex");
+    std::fs::create_dir_all(&source_dir).unwrap();
+    let source = source_dir.join("thread_history.jsonl");
+    std::fs::write(
+        &source,
+        "{\"type\":\"session\",\"id\":\"queued-session\",\"harness\":\"codex\",\"project\":\"demo\"}\n",
+    )
+    .unwrap();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_memory_stats_status_ingest();
+    let request = RequestCtx::default();
+    let result = dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("owner", true),
+        "memory_ingest",
+        args(json!({
+            "path": source.to_string_lossy(),
+            "harness": "",
+            "project": ""
+        })),
+        &request,
+        &env,
+    )
+    .unwrap();
+    assert_eq!(
+        result,
+        json!({
+            "source_id": 1,
+            "queue_id": 1,
+            "path": source.to_string_lossy(),
+            "harness": "codex",
+            "project": null
+        })
+    );
+    let status = flock.memory_service().unwrap().status().unwrap();
+    assert_eq!(status["queue"]["queued"], 1);
+    assert_eq!(status["ingestor"]["running"], false);
+    let persisted_harness = flock
+        .memory_service()
+        .unwrap()
+        .read_pool()
+        .with(|connection| {
+            Ok(connection
+                .query_row("SELECT harness FROM sources WHERE id=1", [], |row| {
+                    row.get::<_, String>(0)
+                })
+                .expect("persisted enqueue harness"))
+        })
+        .unwrap();
+    assert_eq!(persisted_harness, "codex");
+}
+
+#[test]
+fn memory_handlers_share_attached_service() {
+    let (_dir, flock, env) = memory_api_fixture();
+    let service = flock.memory_service().unwrap();
+    assert!(Arc::ptr_eq(&flock.memory_service().unwrap(), &service));
+    let stores = flock.stores();
+    assert!(Arc::ptr_eq(
+        stores.memory.as_ref().unwrap(),
+        service.read_pool()
+    ));
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_memory_recall_search_context();
+    dispatcher.register_memory_stats_status_ingest();
+    dispatch_memory(
+        &dispatcher,
+        &flock,
+        &env,
+        "memory_recall",
+        json!({"query": "adapter", "limit": 1}),
+    )
+    .unwrap();
+    dispatch_memory(
+        &dispatcher,
+        &flock,
+        &env,
+        "memory_search",
+        json!({"query": "adapter", "limit": 1}),
+    )
+    .unwrap();
+    let stats = dispatch_memory(&dispatcher, &flock, &env, "memory_stats", json!({})).unwrap();
+    assert!(stats["queries"]["cache_hits"].as_u64().unwrap_or_default() >= 1);
+}
+
+#[test]
+fn memory_service_attachment_rejects_replacement() {
+    let (_dir, flock, _) = memory_api_fixture();
+    let original = flock.memory_service().unwrap();
+    let replacement_dir = tempfile::tempdir().unwrap();
+    let replacement_path = replacement_dir.path().join("other-memory.db");
+    let connection = crate::db::open_writer(&replacement_path).unwrap();
+    crate::memory::recall::apply_schema(&connection).unwrap();
+    drop(connection);
+    let replacement = Arc::new(
+        crate::memory::service::MemoryService::open(
+            &replacement_path,
+            1,
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(1),
+        )
+        .unwrap(),
+    );
+
+    let error = flock.attach_memory_service(replacement).unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("a different memory service is already attached"));
+    assert!(Arc::ptr_eq(&flock.memory_service().unwrap(), &original));
+    assert!(Arc::ptr_eq(
+        flock.stores().memory.as_ref().unwrap(),
+        original.read_pool()
+    ));
+}
+
+#[test]
+fn memory_handlers_refuse_without_service() {
+    let (_dir, flock) = flock();
+    let env = TestEnv::default();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_memory_recall_search_context();
+    dispatcher.register_memory_stats_status_ingest();
+    for command in [
+        "memory_stats",
+        "memory_status",
+        "memory_recall",
+        "memory_search",
+        "memory_context",
+    ] {
+        let input = if matches!(command, "memory_stats" | "memory_status") {
+            json!({})
+        } else {
+            json!({"query":"adapter"})
+        };
+        let error = refusal(dispatch_memory(&dispatcher, &flock, &env, command, input));
+        assert!(
+            error.contains("memory service is not enabled"),
+            "{command}: {error}"
+        );
+    }
+    let error = refusal(dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("owner", true),
+        "memory_ingest",
+        args(json!({"path":"missing.jsonl"})),
+        &RequestCtx::default(),
+        &env,
+    ));
+    assert!(error.contains("memory service is not enabled"), "{error}");
+}
+
+#[test]
+fn memory_ingest_only_enqueues_on_canonical_ingestor() {
+    let (dir, flock, env) = memory_api_fixture();
+    let service = flock.memory_service().unwrap();
+    let source = dir.path().join("enqueue.jsonl");
+    std::fs::write(&source, "{}").unwrap();
+    let expected = service
+        .enqueue(source.to_str().unwrap(), Some("codex"), Some("demo"))
+        .unwrap();
+    let second = dir.path().join("enqueue-second.jsonl");
+    std::fs::write(&second, "{}").unwrap();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_memory_stats_status_ingest();
+    let request = RequestCtx::default();
+    let actual = dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("owner", true),
+        "memory_ingest",
+        args(json!({
+            "path": second.to_string_lossy(),
+            "harness": "codex",
+            "project": "demo"
+        })),
+        &request,
+        &env,
+    )
+    .unwrap();
+    assert_eq!(
+        actual,
+        json!({
+            "source_id": expected.0 + 1,
+            "queue_id": expected.1 + 1,
+            "path": second.to_string_lossy(),
+            "harness": "codex",
+            "project": "demo"
+        })
+    );
+    assert_eq!(service.status().unwrap()["ingestor"]["running"], false);
+    let enqueued = service
+        .read_pool()
+        .with(|connection| {
+            Ok(connection
+                .query_row(
+                    "SELECT path, harness, project FROM sources WHERE path=?1",
+                    [second.to_string_lossy().as_ref()],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    },
+                )
+                .expect("queued source"))
+        })
+        .unwrap();
+    assert_eq!(
+        enqueued,
+        (
+            second.to_string_lossy().into_owned(),
+            "codex".into(),
+            "demo".into()
+        )
+    );
+}
+
+#[test]
+fn memory_ingest_preserves_required_and_enqueue_errors() {
+    let (_dir, flock, env) = memory_api_fixture();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_memory_stats_status_ingest();
+    let request = RequestCtx::default();
+    let owner = FixedRole("owner", true);
+    let missing = refusal(dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &owner,
+        "memory_ingest",
+        args(json!({})),
+        &request,
+        &env,
+    ));
+    assert_eq!(missing, "memory_ingest: missing required argument(s): path");
+
+    let nonexistent = refusal(dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &owner,
+        "memory_ingest",
+        args(json!({"path":"does-not-exist.jsonl"})),
+        &request,
+        &env,
+    ));
+    assert!(
+        nonexistent.contains("source does not exist:"),
+        "{nonexistent}"
+    );
+}
+
+#[test]
+fn memory_handlers_preserve_registry_roles() {
+    let (_dir, flock, env) = memory_api_fixture();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_memory_stats_status_ingest();
+    for role in [
+        "owner",
+        "system",
+        "web",
+        "desk",
+        "planner",
+        "worker",
+        "reviewer",
+        "anonymous",
+    ] {
+        for command in ["memory_stats", "memory_status"] {
+            dispatch_with_env(
+                &dispatcher,
+                &flock,
+                &FixedRole(role, false),
+                command,
+                args(json!({})),
+                &RequestCtx::default(),
+                &env,
+            )
+            .unwrap_or_else(|error| panic!("{role} could not call {command}: {error}"));
+        }
+    }
+    let denied = refusal(dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("worker", false),
+        "memory_ingest",
+        args(json!({"path":"missing.jsonl"})),
+        &RequestCtx::default(),
+        &env,
+    ));
+    assert!(denied.contains("needs a superuser"), "{denied}");
 }
 
 #[test]
@@ -4392,6 +4819,7 @@ fn task_mutation_api_fixture() -> (
     });
     let mut dispatcher = Dispatcher::new();
     dispatcher.register_task_mutation_leases();
+    dispatcher.register_task_statistics();
     (runtime, dir, flock, tasks, dispatcher)
 }
 
@@ -7949,4 +8377,223 @@ fn h_owner_ingest_raw_errors_match_python_order() {
             "failed request inserted {external_id}"
         );
     }
+}
+
+#[test]
+fn task_statistics_dispatch_tests_task_stats_metrics_reap_roles_and_outputs() {
+    let (runtime, _dir, flock, tasks, dispatcher) = task_mutation_api_fixture();
+    runtime
+        .block_on(tasks.add("global", "visible", ""))
+        .unwrap();
+    runtime.block_on(tasks.add("w1:p1", "private", "")).unwrap();
+    let stats = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_stats",
+        json!({}),
+        Some("w1:p1"),
+        None,
+    )
+    .unwrap();
+    assert_eq!(stats["totals"]["open"], 2);
+    let metrics = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_metrics",
+        json!({"window_s":"3600","bucket":""}),
+        Some("w1:p1"),
+        None,
+    )
+    .unwrap();
+    assert_eq!(metrics["scope"], "visible");
+    assert_eq!(metrics["window"]["seconds"], 3600);
+    assert_eq!(metrics["window"]["bucket"], "hour");
+    let denied = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_reap",
+        json!({}),
+        Some("w1:p1"),
+        None,
+    )
+    .unwrap_err();
+    assert!(
+        denied.to_string().contains("task_reap is not permitted for role worker (pane w1:p1); see docs/FLAT_FLEET.md section 4.3"),
+        "{denied}"
+    );
+    let fixture_refusal = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_reap",
+        json!({}),
+        Some("w1:p2"),
+        None,
+    )
+    .unwrap_err();
+    assert!(
+        fixture_refusal.to_string().contains("alive_source='live'"),
+        "{fixture_refusal}"
+    );
+    // These roles are not registerable pane identities in the real Roles store, so exercise
+    // their registry policy through the same Dispatcher with the existing deterministic gate.
+    for role in ["system", "web"] {
+        let env = TestEnv::default();
+        let request = RequestCtx::default();
+        let context = HandlerContext {
+            flock: &flock,
+            request: &request,
+            env: &env,
+            runtime: runtime.handle(),
+        };
+        let gate = FixedRole(role, true);
+        let refused = dispatcher
+            .dispatch(&context, &gate, "task_reap", args(json!({})))
+            .unwrap_err();
+        assert!(
+            refused.to_string().contains("alive_source='live'"),
+            "{role}: {refused}"
+        );
+    }
+}
+
+#[test]
+fn task_stats_defaults_scope_and_privacy_match_python_dispatch() {
+    let (runtime, _dir, flock, tasks, dispatcher) = task_mutation_api_fixture();
+    runtime.block_on(tasks.add("global", "global", "")).unwrap();
+    runtime.block_on(tasks.add("w1:p1", "mine", "")).unwrap();
+    runtime.block_on(tasks.add("w1:p3", "other", "")).unwrap();
+    let visible = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_stats",
+        json!({}),
+        Some("w1:p1"),
+        None,
+    )
+    .unwrap();
+    assert_eq!(visible["totals"]["open"], 2);
+    let global = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_stats",
+        json!({"scope":"global"}),
+        Some("w1:p1"),
+        None,
+    )
+    .unwrap();
+    assert_eq!(global["totals"]["open"], 1);
+    let denied = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_stats",
+        json!({"scope":"w1:p3"}),
+        Some("w1:p1"),
+        None,
+    )
+    .unwrap_err();
+    assert!(
+        denied.to_string().contains("per-pane tasks are private"),
+        "{denied}"
+    );
+}
+
+#[test]
+fn task_metrics_defaults_coercions_and_scope_match_python_dispatch() {
+    let (runtime, _dir, flock, tasks, dispatcher) = task_mutation_api_fixture();
+    runtime.block_on(tasks.add("global", "global", "")).unwrap();
+    runtime.block_on(tasks.add("w1:p1", "mine", "")).unwrap();
+    runtime.block_on(tasks.add("w1:p3", "other", "")).unwrap();
+    let default = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_metrics",
+        json!({"window_s":null,"since":null,"until":null,"bucket":false}),
+        Some("w1:p1"),
+        None,
+    )
+    .unwrap();
+    assert_eq!(default["scope"], "visible");
+    assert_eq!(default["window"]["seconds"], 3600);
+    assert_eq!(default["window"]["bucket"], "hour");
+    let converted = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_metrics",
+        json!({"window_s":"10","since":"90","until":"100","scope":"global","bucket":"DAY"}),
+        Some("w1:p1"),
+        None,
+    )
+    .unwrap();
+    assert_eq!(converted["scope"], "global");
+    assert_eq!(converted["window"]["seconds"], 10);
+    assert_eq!(converted["window"]["bucket"], "day");
+    let precedence = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_metrics",
+        json!({"scope":"w1:p3", "since":{"bad":"type"}}),
+        Some("w1:p1"),
+        None,
+    )
+    .unwrap_err();
+    assert!(
+        precedence
+            .to_string()
+            .contains("per-pane tasks are private"),
+        "{precedence}"
+    );
+}
+
+#[test]
+fn task_reap_live_tmux_listing_failure_reopens_expired_claim() {
+    let (runtime, dir, flock, tasks, mut dispatcher) = task_mutation_api_fixture();
+    let task = runtime
+        .block_on(tasks.add("global", "expired", ""))
+        .unwrap();
+    runtime
+        .block_on(tasks.set_status(&task.id, "in_progress", None, None))
+        .unwrap();
+    runtime.block_on(tasks.insert_lease(&task.id, "w9:p9", 1.0, 1.0, 2.0));
+    let missing_tmux = dir.path().join("missing-tmux-command");
+    let env = TestEnv(Mutex::new(Box::new(
+        crate::terminal::tmux::TmuxBackend::new(missing_tmux),
+    )));
+    let request = RequestCtx {
+        self_pane_id: Some("w1:p2".into()),
+        ..RequestCtx::default()
+    };
+    let context = HandlerContext {
+        flock: &flock,
+        request: &request,
+        env: &env,
+        runtime: runtime.handle(),
+    };
+    let gate = FlockGate(&context);
+    dispatcher.register_task_statistics();
+    let reaped = dispatcher
+        .dispatch(&context, &gate, "task_reap", args(json!({})))
+        .unwrap();
+    assert_eq!(
+        reaped["requeued"],
+        json!([{"task_id":task.id,"pane_id":"w9:p9","reason":"expired"}])
+    );
+    assert_eq!(
+        runtime.block_on(tasks.get(&task.id)).unwrap().status,
+        "open"
+    );
+    assert_eq!(runtime.block_on(tasks.leases(&task.id)), 0);
+    let again = dispatcher
+        .dispatch(&context, &gate, "task_reap", args(json!({})))
+        .unwrap();
+    assert_eq!(again["requeued"], json!([]));
 }

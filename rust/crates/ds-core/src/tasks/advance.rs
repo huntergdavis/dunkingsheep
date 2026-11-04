@@ -20,7 +20,7 @@ use std::sync::Arc;
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde_json::{json, Map, Value};
 
-use super::next_job::{handoffs_in, record_in, NON_BLOCKING_HANDOFF_STATES};
+use super::next_job::{handoffs_in, record_in, RecordIn, NON_BLOCKING_HANDOFF_STATES};
 use super::{decode_list, decorate_conn, default_lease_s, leases_for_conn, Decorated, Task, Tasks};
 use crate::db;
 use crate::error::DunkError;
@@ -358,14 +358,16 @@ fn advance_in(
             handoff.insert("caller".into(), Value::Object(opts.caller.clone()));
             record_in(
                 &tx,
-                &chosen.task.id,
-                pane,
-                from_task.as_deref(),
-                Some(&message_id),
-                0,
-                None,
-                crate::clock::now_s(),
-                &handoff,
+                RecordIn {
+                    task_id: &chosen.task.id,
+                    pane_id: pane,
+                    from_task: from_task.as_deref(),
+                    message_id: Some(&message_id),
+                    attempt: 0,
+                    reason: None,
+                    now: crate::clock::now_s(),
+                    details: &handoff,
+                },
             )?;
             handoff.insert("task_id".into(), json!(chosen.task.id));
             handoff.insert("pane_id".into(), json!(pane));
