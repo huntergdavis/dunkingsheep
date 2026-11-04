@@ -43,17 +43,32 @@ pub struct HandoffRecord {
     pub at: f64,
 }
 
+/// The unchanged event fields passed to the private transaction helper.
+pub(super) struct RecordIn<'a> {
+    pub(super) task_id: &'a str,
+    pub(super) pane_id: &'a str,
+    pub(super) from_task: Option<&'a str>,
+    pub(super) message_id: Option<&'a str>,
+    pub(super) attempt: i64,
+    pub(super) reason: Option<&'a str>,
+    pub(super) now: f64,
+    pub(super) details: &'a Map<String, Value>,
+}
+
 pub(super) fn record_in(
     conn: &Connection,
-    task_id: &str,
-    pane_id: &str,
-    from_task: Option<&str>,
-    message_id: Option<&str>,
-    attempt: i64,
-    reason: Option<&str>,
-    now: f64,
-    details: &Map<String, Value>,
+    input: RecordIn<'_>,
 ) -> Result<HandoffRecord, DunkError> {
+    let RecordIn {
+        task_id,
+        pane_id,
+        from_task,
+        message_id,
+        attempt,
+        reason,
+        now,
+        details,
+    } = input;
     let (scope, priority, status): (String, String, String) = conn
         .query_row(
             "SELECT scope, priority, status FROM tasks WHERE id = ?",
@@ -172,14 +187,16 @@ impl Tasks {
             .call(move |conn| {
                 record_in(
                     conn,
-                    &task_id,
-                    &pane_id,
-                    from_task.as_deref(),
-                    message_id.as_deref(),
-                    attempt,
-                    reason.as_deref(),
-                    now,
-                    &details,
+                    RecordIn {
+                        task_id: &task_id,
+                        pane_id: &pane_id,
+                        from_task: from_task.as_deref(),
+                        message_id: message_id.as_deref(),
+                        attempt,
+                        reason: reason.as_deref(),
+                        now,
+                        details: &details,
+                    },
                 )
             })
             .await
@@ -313,14 +330,16 @@ impl Tasks {
                     .collect();
                 record_in(
                     &tx,
-                    text("task_id").as_deref().unwrap_or(""),
-                    text("pane_id").as_deref().unwrap_or(""),
-                    text("from_task").as_deref(),
-                    text("message_id").as_deref(),
-                    latest.get("attempt").and_then(Value::as_i64).unwrap_or(0),
-                    text("reason").as_deref(),
-                    crate::clock::now_s(),
-                    &details,
+                    RecordIn {
+                        task_id: text("task_id").as_deref().unwrap_or(""),
+                        pane_id: text("pane_id").as_deref().unwrap_or(""),
+                        from_task: text("from_task").as_deref(),
+                        message_id: text("message_id").as_deref(),
+                        attempt: latest.get("attempt").and_then(Value::as_i64).unwrap_or(0),
+                        reason: text("reason").as_deref(),
+                        now: crate::clock::now_s(),
+                        details: &details,
+                    },
                 )?;
                 tx.commit().map_err(db::map_sqlite)?;
                 Ok(Some(latest))
