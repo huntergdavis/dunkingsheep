@@ -36,6 +36,7 @@ pub(crate) fn production_handlers() -> Dispatcher {
     handlers.register_task_mutation_leases();
     handlers.register_task_statistics();
     handlers.register_metrics();
+    handlers.register_dunk_mutations();
     handlers.register_send_text_keys_flush_box();
     handlers.register_clear_box_delivery_capability();
     handlers.register_respawn_pane();
@@ -54,6 +55,7 @@ mod tests {
     use super::*;
     use std::collections::BTreeSet;
 
+    use crate::api::CommandEnv;
     use crate::config::Env;
     use crate::flock::loop_env::LoopTerminalFactory;
     use crate::flock::panes::Stores;
@@ -358,6 +360,21 @@ mod tests {
         }
     }
 
+    fn cached_dunks(services: &RuntimeServices, request: &RequestCtx) -> Value {
+        let terminal = Mutex::new((services.terminal_factory)());
+        let adapter = RequestRuntimeAdapter::new(
+            services.flock.as_ref(),
+            request,
+            services.runtime.handle(),
+            &terminal,
+        );
+        let status = adapter.status_env().unwrap();
+        services
+            .flock
+            .view_cache()
+            .view(status, request.self_pane_id.as_deref(), false, 3_600.0)
+    }
+
     #[test]
     fn production_registration_inventory_is_exact_and_has_no_duplicates() {
         let handlers = production_handlers();
@@ -408,6 +425,9 @@ mod tests {
             "task_metrics",
             "task_reap",
             "metrics",
+            "add_dunk",
+            "update_dunk",
+            "remove_dunk",
             "owner_push",
             "owner_poll",
             "owner_take",
@@ -478,6 +498,89 @@ mod tests {
                 .contains("respawn-pane requires --confirm-idle"),
             "production route did not reach the accepted guard: {error}"
         );
+        dispatcher.close();
+        services.shutdown();
+    }
+
+    #[test]
+    fn production_dispatcher_routes_dunk_mutations_through_runtime_services() {
+        let (_dir, services) = make_services(
+            "dunk-mutations-route",
+            Arc::new(|| Box::new(FakeTerminal::new())),
+            None,
+        );
+        let dispatcher = services.production_dispatcher();
+        let owner = request("w2:p2");
+        assert!(cached_dunks(&services, &owner)["dunks"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        let added = dispatcher
+            .dispatch(
+                "add_dunk",
+                &json!({
+                    "target": "w3:p3",
+                    "text": "integration",
+                    "interval_minutes": 1,
+                    "start": true
+                }),
+                &owner,
+            )
+            .unwrap();
+        assert_eq!(added["id"], "d1");
+        assert_eq!(services.flock.dunks.list().len(), 1);
+        let after_add = cached_dunks(&services, &owner);
+        assert_eq!(after_add["dunks"][0]["target_pane_id"], "w3:p3");
+
+        let updated = dispatcher
+            .dispatch(
+                "update_dunk",
+                &json!({"id": "d1", "text": "updated"}),
+                &owner,
+            )
+            .unwrap();
+        assert_eq!(updated["text"], "updated");
+        assert_eq!(
+            cached_dunks(&services, &owner)["dunks"][0]["text"],
+            "updated"
+        );
+
+        let removed = dispatcher
+            .dispatch("remove_dunk", &json!({"id": "d1"}), &owner)
+            .unwrap();
+        assert_eq!(removed["running"], false);
+        assert!(services.flock.dunks.list().is_empty());
+        assert!(cached_dunks(&services, &owner)["dunks"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+
+        let worker = request("w1:p1");
+        let denied = dispatcher
+            .dispatch(
+                "add_dunk",
+                &json!({
+                    "target": "w3:p3",
+                    "text": "denied",
+                    "interval_minutes": 1
+                }),
+                &worker,
+            )
+            .unwrap_err();
+        assert!(denied.to_string().contains("requires a superuser"));
+
+        let bad_target = dispatcher
+            .dispatch(
+                "add_dunk",
+                &json!({
+                    "target": "not-a-pane",
+                    "text": "bad target",
+                    "interval_minutes": 1
+                }),
+                &owner,
+            )
+            .unwrap_err();
+        assert!(bad_target.to_string().contains("no pane matches"));
         dispatcher.close();
         services.shutdown();
     }
