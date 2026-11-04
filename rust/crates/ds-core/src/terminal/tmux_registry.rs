@@ -297,6 +297,13 @@ impl Registry {
         panes: &[Pane],
     ) -> Result<std::collections::BTreeMap<String, String>, RegistryError> {
         let data = self.load_raw()?;
+        Self::pane_labels_from_raw(&data, panes)
+    }
+    /// Interpret labels from one already captured registry snapshot.
+    pub(crate) fn pane_labels_from_raw(
+        data: &Map<String, Value>,
+        panes: &[Pane],
+    ) -> Result<std::collections::BTreeMap<String, String>, RegistryError> {
         let mut labels = std::collections::BTreeMap::new();
         for pane in panes {
             let collection = &data["panes"];

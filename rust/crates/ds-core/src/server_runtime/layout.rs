@@ -302,30 +302,28 @@ impl RequestRuntimeAdapter<'_> {
         label: &str,
     ) -> crate::flock::commands_layout::RawCreateResult {
         self.terminal.with_terminal_mut(|terminal| {
-            if let Err(error) = terminal.rename_raw(kind, target_id, label)? {
-                return Ok(Err(error.message));
-            }
-            let item = match kind {
-                "pane" => terminal
-                    .get_pane_with_status(target_id)
-                    .map(|(pane, status)| {
-                        crate::flock::lanes::pane_to_json(&pane, status.as_deref())
-                    }),
-                "tab" => terminal
-                    .list_tabs()
-                    .into_iter()
-                    .find(|tab| tab.tab_id == target_id)
-                    .map(tab_value),
-                "workspace" => {
-                    let tabs = terminal.list_tabs();
-                    terminal
-                        .list_workspaces()
-                        .into_iter()
-                        .find(|workspace| workspace.workspace_id == target_id)
-                        .map(|workspace| workspace_value(workspace, &tabs))
-                }
-                _ => None,
+            let snapshot = match terminal.rename_raw(kind, target_id, label)? {
+                Ok(item) => item,
+                Err(error) => return Ok(Err(error.message)),
             };
+            let item = snapshot.map(|item| match item {
+                crate::terminal::RenamedItem::Pane {
+                    pane,
+                    agent_status,
+                    managed,
+                } => {
+                    let mut item =
+                        crate::flock::lanes::pane_to_json(&pane, agent_status.as_deref());
+                    if let Some(managed) = managed {
+                        item["managed"] = json!(managed);
+                    }
+                    item
+                }
+                crate::terminal::RenamedItem::Tab(tab) => tab_value(tab),
+                crate::terminal::RenamedItem::Workspace { workspace, tabs } => {
+                    workspace_value(workspace, &tabs)
+                }
+            });
             let mut result = serde_json::Map::new();
             result.insert(kind.to_owned(), item.unwrap_or(Value::Null));
             Ok(Ok(Value::Object(result)))

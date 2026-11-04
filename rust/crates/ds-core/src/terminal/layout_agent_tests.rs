@@ -126,3 +126,65 @@ fn raw_rename_registry_failure_and_terminal_refusals_remain_distinct() {
         "tmux new-window failed"
     );
 }
+
+#[test]
+fn raw_rename_captures_label_title_and_managed_before_registry_write() {
+    for previously_managed in [false, true] {
+        let (dir, mut backend) = fixture();
+        let path = dir.path().join("registry.json");
+        let initial = if previously_managed {
+            json!({"panes":{"%2":{"name":"old-agent"}},"tabs":{},"workspaces":{}})
+        } else {
+            json!({"panes":{},"tabs":{},"workspaces":{}})
+        };
+        std::fs::write(&path, initial.to_string()).unwrap();
+        let snapshot = backend
+            .rename_raw("pane", "%2", "new-label")
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let super::RenamedItem::Pane {
+            pane,
+            managed,
+            agent_status,
+        } = snapshot
+        else {
+            panic!("pane snapshot required")
+        };
+        assert_eq!(
+            pane.label,
+            if previously_managed {
+                "old-agent"
+            } else {
+                "new-label"
+            }
+        );
+        assert_eq!(pane.title, "new-label");
+        assert_eq!(managed, Some(previously_managed));
+        assert_eq!(agent_status.as_deref(), Some("unknown"));
+        let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["panes"]["%2"]["label"], "new-label");
+        assert!(saved["panes"]["%2"].get("name").is_none());
+        let after = backend.get_pane("%2").unwrap();
+        assert_eq!(after.label, "new-label");
+        assert_eq!(after.title, "new-label");
+        assert!(backend.managed("pane", "%2", &[]));
+    }
+}
+#[test]
+fn raw_rename_save_failure_leaves_old_registry_and_new_title() {
+    let (dir, mut backend) = fixture();
+    let path = dir.path().join("registry.json");
+    let initial = json!({"panes":{"%2":{"name":"old-agent"}},"tabs":{},"workspaces":{}});
+    std::fs::write(&path, initial.to_string()).unwrap();
+    std::fs::create_dir(dir.path().join("registry.json.tmp")).unwrap();
+    let error = backend.rename_raw("pane", "%2", "new-label").unwrap_err();
+    assert_eq!(error.category(), "IsADirectoryError");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&std::fs::read(path).unwrap()).unwrap(),
+        initial
+    );
+    let after = backend.get_pane("%2").unwrap();
+    assert_eq!(after.label, "old-agent");
+    assert_eq!(after.title, "new-label");
+}

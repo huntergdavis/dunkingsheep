@@ -488,9 +488,12 @@ impl Terminal for FakeTerminal {
         kind: &str,
         target_id: &str,
         label: &str,
-    ) -> super::RawCreateResult<()> {
+    ) -> super::RawCreateResult<Option<super::RenamedItem>> {
         if kind != "pane" {
-            return Ok(self.rename(kind, target_id, label));
+            return match self.rename(kind, target_id, label) {
+                Ok(()) => Ok(Ok(self.renamed_item(kind, target_id))),
+                Err(error) => Ok(Err(error)),
+            };
         }
         self.raw_events
             .lock()
@@ -503,7 +506,7 @@ impl Terminal for FakeTerminal {
             pane.title = label.into();
             pane.label = label.into();
             self.record("rename", target_id);
-            Ok(Ok(()))
+            Ok(Ok(self.renamed_item(kind, target_id)))
         } else {
             Ok(Err(TerminalError::refused(format!(
                 "no such pane {target_id}"

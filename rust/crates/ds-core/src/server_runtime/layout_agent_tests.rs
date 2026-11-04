@@ -406,3 +406,53 @@ fn layout_agent_raw_numbers_and_composites_preserve_python_strings() {
         .unwrap();
     assert_eq!(out["name"], "probe");
 }
+
+#[test]
+fn layout_rename_runtime_returns_pre_save_item_without_rereading() {
+    use crate::terminal::tmux::TmuxBackend;
+    use std::os::unix::fs::PermissionsExt;
+    for previously_managed in [false, true] {
+        let disk = tempfile::tempdir().unwrap();
+        let script = disk.path().join("tmux");
+        std::fs::write(&script,r#"#!/bin/sh
+cd "$(dirname "$0")" || exit 1
+case "$1" in
+select-pane) printf '%s' "$5" > title ;;
+list-panes)
+ printf 'w2:p2\037$old\037@old\037/work\037bash\037owner\0371\037owner\037owner\0370\0370\0372202\03780\03724\n'
+ printf '%%2\037$1\037@2\037/work\037codex\037%s\0371\037work\037tab\0370\0370\0371\03780\03724\n' "$(cat title 2>/dev/null)" ;;
+esac
+"#).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = disk.path().join("registry.json");
+        let initial = if previously_managed {
+            json!({"panes":{"%2":{"name":"old-agent"}},"tabs":{},"workspaces":{}})
+        } else {
+            json!({"panes":{},"tabs":{},"workspaces":{}})
+        };
+        std::fs::write(&path, initial.to_string()).unwrap();
+        let backend = TmuxBackend::with_registry(&script, &path);
+        let factory: LoopTerminalFactory = Arc::new(move || Box::new(backend.clone()));
+        let (_dir, services, _) = make_services_with_factory(None, true, Some(factory));
+        let out = dispatcher(&services)
+            .dispatch(
+                "rename",
+                &json!({"kind":"pane","target":{"pane_id":"%2"},"label":"new-label"}),
+                &request("w2:p2"),
+            )
+            .unwrap();
+        assert_eq!(
+            out["pane"]["label"],
+            if previously_managed {
+                "old-agent"
+            } else {
+                "new-label"
+            }
+        );
+        assert_eq!(out["pane"]["terminal_title"], "new-label");
+        assert_eq!(out["pane"]["managed"], previously_managed);
+        let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["panes"]["%2"]["label"], "new-label");
+        assert!(saved["panes"]["%2"].get("name").is_none());
+    }
+}

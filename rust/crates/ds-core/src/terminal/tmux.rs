@@ -995,7 +995,7 @@ impl Terminal for TmuxBackend {
         kind: &str,
         target_id: &str,
         label: &str,
-    ) -> super::RawCreateResult<()> {
+    ) -> super::RawCreateResult<Option<super::RenamedItem>> {
         raw_create_result(|| {
             let result = match kind {
                 "workspace" => self.run(&["rename-session", "-t", target_id, label])?,
@@ -1011,11 +1011,43 @@ impl Terminal for TmuxBackend {
                 )
                 .into());
             }
-            if kind == "pane" && self.get_pane_raw(target_id)?.is_some() {
+            let item = if kind == "pane" {
+                // Python _parse_panes reads one registry snapshot for both labels
+                // and managed flags, after the title mutation and before remember.
+                match self.run(&["list-panes", "-a", "-F", PANE_FORMAT]) {
+                    Ok(output) if output.code == 0 => {
+                        let mut panes = parse_panes(&output.stdout, &|_| None);
+                        let data = self.registry.load_raw()?;
+                        let labels = Registry::pane_labels_from_raw(&data, &panes)?;
+                        for pane in &mut panes {
+                            if let Some(label) = labels.get(&pane.pane_id) {
+                                pane.label = label.clone();
+                            }
+                        }
+                        panes
+                            .into_iter()
+                            .find(|pane| pane.pane_id == target_id)
+                            .map(|pane| {
+                                let managed = data["panes"]
+                                    .as_object()
+                                    .is_some_and(|rows| rows.contains_key(&pane.pane_id));
+                                super::RenamedItem::Pane {
+                                    pane: Box::new(pane),
+                                    agent_status: Some("unknown".into()),
+                                    managed: Some(managed),
+                                }
+                            })
+                    }
+                    _ => None,
+                }
+            } else {
+                self.renamed_item(kind, target_id)
+            };
+            if matches!(&item, Some(super::RenamedItem::Pane { .. })) {
                 self.registry
                     .remember_raw("pane", target_id, json!({"label":label}))?;
             }
-            Ok(())
+            Ok(item)
         })
     }
 
