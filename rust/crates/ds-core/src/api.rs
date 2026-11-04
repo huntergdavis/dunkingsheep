@@ -8,6 +8,9 @@
 //!
 //! NOT in this slice: the handlers themselves.
 
+mod owner_push;
+pub use owner_push::{h_owner_poll, h_owner_push, h_owner_take};
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -597,6 +600,13 @@ impl Dispatcher {
     /// Register only the T39 report-list handler.
     pub fn register_report_list(&mut self) {
         self.register("report_list", h_report_list);
+    }
+
+    /// Direct owner queue commands; production assembly is owned separately.
+    pub fn register_owner_push_poll_take(&mut self) {
+        self.register("owner_push", h_owner_push);
+        self.register("owner_poll", h_owner_poll);
+        self.register("owner_take", h_owner_take);
     }
 
     /// Register the T39 owner statistics, receipts and conversation views.
