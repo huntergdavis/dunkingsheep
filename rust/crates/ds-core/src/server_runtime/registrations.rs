@@ -33,6 +33,8 @@ pub(crate) fn production_handlers() -> Dispatcher {
     handlers.register_task_delete();
     handlers.register_task_complete();
     handlers.register_task_mutation_leases();
+    handlers.register_task_statistics();
+    handlers.register_metrics();
     handlers.register_send_text_keys_flush_box();
     handlers.register_clear_box_delivery_capability();
     handlers
@@ -399,6 +401,10 @@ mod tests {
             "task_next",
             "task_heartbeat",
             "task_release",
+            "task_stats",
+            "task_metrics",
+            "task_reap",
+            "metrics",
             "owner_push",
             "owner_poll",
             "owner_take",
@@ -651,6 +657,207 @@ mod tests {
             .to_string();
         assert!(denied.contains("superuser") || denied.contains("not permitted"));
         services.shutdown();
+    }
+
+    #[test]
+    fn assembled_dispatcher_executes_task_statistics_with_real_store_privacy() {
+        let observations = Arc::new(Mutex::new(SendObservations::default()));
+        let flush_script = Arc::new(AtomicBool::new(false));
+        let worker_gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let (_dir, services) = make_services(
+            "registered-task-statistics",
+            send_factory(observations, flush_script, worker_gate),
+            None,
+        );
+        let dispatcher = services.production_dispatcher();
+        let worker = request("w1:p1");
+        let tasks = services.flock().stores().tasks.unwrap();
+        let runtime = services.runtime_handle();
+
+        for (scope, title) in [
+            ("global", "visible global task"),
+            ("w1:p1", "visible private task"),
+            ("w3:p3", "hidden private task"),
+        ] {
+            runtime.block_on(tasks.add(scope, title, "")).unwrap();
+        }
+        let stats = dispatcher
+            .dispatch("task_stats", &json!({}), &worker)
+            .unwrap();
+        assert_eq!(stats["totals"]["open"], 2);
+        let metrics = dispatcher
+            .dispatch(
+                "task_metrics",
+                &json!({"window_s":"3600","bucket":""}),
+                &worker,
+            )
+            .unwrap();
+        assert_eq!(metrics["scope"], "visible");
+        assert_eq!(metrics["window"]["seconds"], 3600);
+        assert_eq!(metrics["window"]["bucket"], "hour");
+
+        let precedence = dispatcher
+            .dispatch(
+                "task_metrics",
+                &json!({"scope":"w3:p3","since":{"bad":"type"}}),
+                &worker,
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(
+            precedence.contains("per-pane tasks are private"),
+            "{precedence}"
+        );
+
+        let denied = dispatcher
+            .dispatch("task_stats", &json!({"scope":"w3:p3"}), &worker)
+            .unwrap_err()
+            .to_string();
+        assert!(denied.contains("per-pane tasks are private"), "{denied}");
+    }
+
+    #[test]
+    fn assembled_dispatcher_reports_real_metrics_and_named_missing_store_refusal() {
+        let observations = Arc::new(Mutex::new(SendObservations::default()));
+        let flush_script = Arc::new(AtomicBool::new(false));
+        let worker_gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let dir = tempfile::tempdir().unwrap();
+        let metrics = Arc::new(MetricsStore::open(dir.path().join("metrics.db")).unwrap());
+        let event_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+        metrics.record(&crate::metrics::Event {
+            at: event_at,
+            kind: "message.sent".into(),
+            pane_id: Some("private-pane-identifier".into()),
+            mailbox: Some("private-mailbox-identifier".into()),
+            sender: Some("private-sender-identifier".into()),
+            ..Default::default()
+        });
+        let (_services_dir, services) = make_services(
+            "registered-metrics",
+            send_factory(observations, flush_script, worker_gate),
+            Some(metrics),
+        );
+        let dispatcher = services.production_dispatcher();
+        let report = dispatcher
+            .dispatch("metrics", &json!({"window_s":3600}), &request("w1:p1"))
+            .unwrap();
+        assert_eq!(report["counts"]["events"], 1);
+        assert_eq!(report["counts"]["by_kind"]["message.sent"], 1);
+        assert!(report["coverage"]["window_has_events"].as_bool().unwrap());
+        let serialized = report.to_string();
+        for private_value in [
+            "private-pane-identifier",
+            "private-mailbox-identifier",
+            "private-sender-identifier",
+        ] {
+            assert!(
+                !serialized.contains(private_value),
+                "metrics leaked {private_value}"
+            );
+        }
+
+        let empty = dispatcher
+            .dispatch(
+                "metrics",
+                &json!({"since":event_at + 100.0,"until":event_at + 200.0}),
+                &request("w1:p1"),
+            )
+            .unwrap();
+        assert_eq!(empty["counts"]["events"], 0);
+        assert_eq!(empty["coverage"]["events_since"], event_at);
+        assert!(!empty["coverage"]["window_has_events"].as_bool().unwrap());
+
+        let mut stores = services.flock().stores();
+        stores.inbox = None;
+        services.flock().attach_stores(stores.clone());
+        let missing_inbox = dispatcher
+            .dispatch("metrics", &json!({}), &request("w1:p1"))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(missing_inbox, "inbox store is not wired");
+
+        stores.metrics = None;
+        services.flock().attach_stores(stores);
+        let missing = dispatcher
+            .dispatch("metrics", &json!({}), &request("w1:p1"))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(missing, "metrics store is not wired");
+    }
+
+    #[test]
+    fn assembled_task_reap_refuses_fixture_and_reaps_expired_lease_after_live_list_failure() {
+        let observations = Arc::new(Mutex::new(SendObservations::default()));
+        let flush_script = Arc::new(AtomicBool::new(false));
+        let worker_gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let (dir, fixture_services) = make_services(
+            "registered-task-reap-fixture",
+            send_factory(
+                Arc::clone(&observations),
+                Arc::clone(&flush_script),
+                Arc::clone(&worker_gate),
+            ),
+            None,
+        );
+        let dispatcher = fixture_services.production_dispatcher();
+        let fixture_refusal = dispatcher
+            .dispatch("task_reap", &json!({}), &request("w2:p2"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            fixture_refusal.contains("alive_source='fixture'"),
+            "{fixture_refusal}"
+        );
+        let worker_refusal = dispatcher
+            .dispatch("task_reap", &json!({}), &request("w1:p1"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            worker_refusal.contains("task_reap is not permitted for role worker"),
+            "{worker_refusal}"
+        );
+
+        let missing_tmux = dir.path().join("owned-missing-tmux-command");
+        let live_factory: LoopTerminalFactory = Arc::new(move || {
+            Box::new(crate::terminal::tmux::TmuxBackend::new(
+                missing_tmux.clone(),
+            ))
+        });
+        let (_live_dir, live_services) =
+            make_services("registered-task-reap-live", live_factory, None);
+        let live_tasks = live_services.flock().stores().tasks.unwrap();
+        let handle = live_services.runtime_handle();
+        let task = handle
+            .block_on(live_tasks.add("global", "expired lease", ""))
+            .unwrap();
+        handle
+            .block_on(live_tasks.set_status(&task.id, "in_progress", None, None))
+            .unwrap();
+        handle.block_on(live_tasks.insert_lease(&task.id, "w9:p9", 1.0, 1.0, 2.0));
+        let live_dispatcher = live_services.production_dispatcher();
+        let reaped = live_dispatcher
+            .dispatch("task_reap", &json!({}), &request("w2:p2"))
+            .unwrap();
+        assert_eq!(
+            reaped["requeued"],
+            json!([{"task_id":task.id,"pane_id":"w9:p9","reason":"expired"}])
+        );
+        assert_eq!(
+            handle.block_on(live_tasks.get(&task.id)).unwrap().status,
+            "open"
+        );
+        assert_eq!(handle.block_on(live_tasks.leases(&task.id)), 0);
+        assert!(handle
+            .block_on(live_tasks.events_named(&task.id))
+            .iter()
+            .any(|event| event == "requeued"));
+        let again = live_dispatcher
+            .dispatch("task_reap", &json!({}), &request("w2:p2"))
+            .unwrap();
+        assert_eq!(again["requeued"], json!([]));
     }
 
     #[test]
