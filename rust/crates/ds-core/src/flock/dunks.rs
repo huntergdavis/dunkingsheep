@@ -1241,6 +1241,23 @@ impl DunkList {
             .map(|handle| Self::lock_dunker(handle).to_dict())
             .collect()
     }
+
+    /// Start the captured row only when its matching timer worker is absent or finished.
+    /// Target validation remains first, matching Python `_start` error ordering.
+    pub(crate) fn start_handle_if_worker_missing(
+        handle: &DunkerHandle,
+        worker_is_live: impl FnOnce() -> bool,
+    ) -> Result<bool, DunkError> {
+        let mut dunker = Self::lock_dunker(handle);
+        if dunker.target_pane_id.as_deref().is_none_or(str::is_empty) {
+            return start_fields(&mut dunker).map(|()| true);
+        }
+        if dunker.running && worker_is_live() {
+            return Ok(false);
+        }
+        start_fields(&mut dunker)?;
+        Ok(true)
+    }
 }
 
 impl Flock {
@@ -1251,11 +1268,16 @@ impl Flock {
     ) -> (String, String) {
         super::sends::hold_signature(self, env, pane)
     }
-    /// Start and return the captured row lifetime for the runtime's timer owner.
-    pub(crate) fn start_dunk(&self, dunk_id: &str) -> Result<DunkerHandle, DunkError> {
+    /// Start the captured row unless its live timer worker already owns this running lifetime.
+    pub(crate) fn start_dunk(
+        &self,
+        dunk_id: &str,
+        worker_is_live: impl FnOnce(&DunkerHandle) -> bool,
+    ) -> Result<(DunkerHandle, bool), DunkError> {
         let handle = self.dunks.handle(dunk_id)?;
-        start_fields(&mut DunkList::lock_dunker(&handle))?;
-        Ok(handle)
+        let started =
+            DunkList::start_handle_if_worker_missing(&handle, || worker_is_live(&handle))?;
+        Ok((handle, started))
     }
 
     /// Stop and return the exact row lifetime so its timer can be cancelled and joined.

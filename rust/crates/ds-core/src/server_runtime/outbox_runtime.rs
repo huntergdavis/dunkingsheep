@@ -36,6 +36,8 @@ pub(crate) struct OutboxRuntime {
     pub(super) flock: Arc<Flock>,
     pub(super) pool: Arc<OutboxWorkerPool>,
     dunk_timers: DunkTimerOwner,
+    // Serializes row and worker-lifetime transitions; timer threads never acquire it.
+    dunk_lifecycle: Mutex<()>,
 }
 impl OutboxRuntime {
     #[allow(dead_code)]
@@ -80,6 +82,7 @@ impl OutboxRuntime {
             flock,
             pool,
             dunk_timers: timers,
+            dunk_lifecycle: Mutex::new(()),
         })
     }
 
@@ -87,10 +90,18 @@ impl OutboxRuntime {
         &self,
         id: &str,
     ) -> Result<serde_json::Map<String, serde_json::Value>, DunkError> {
-        let handle = self.flock.start_dunk(id)?;
-        if let Err(error) = self.dunk_timers.start(Arc::clone(&handle)) {
-            crate::flock::dunks::DunkList::stop_handle(&handle, "Stopped");
-            return Err(error);
+        let _lifecycle = self
+            .dunk_lifecycle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (handle, should_start_worker) = self
+            .flock
+            .start_dunk(id, |handle| self.dunk_timers.has_live_worker(handle))?;
+        if should_start_worker {
+            if let Err(error) = self.dunk_timers.start(Arc::clone(&handle)) {
+                crate::flock::dunks::DunkList::stop_handle(&handle, "Stopped");
+                return Err(error);
+            }
         }
         Ok(crate::flock::dunks::DunkList::handle_row(&handle))
     }
@@ -99,6 +110,10 @@ impl OutboxRuntime {
         &self,
         id: &str,
     ) -> Result<serde_json::Map<String, serde_json::Value>, DunkError> {
+        let _lifecycle = self
+            .dunk_lifecycle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let handle = self.flock.stop_dunk(id)?;
         self.dunk_timers.stop(&handle);
         Ok(crate::flock::dunks::DunkList::handle_row(&handle))
@@ -108,6 +123,10 @@ impl OutboxRuntime {
         &self,
         id: &str,
     ) -> Result<serde_json::Map<String, serde_json::Value>, DunkError> {
+        let _lifecycle = self
+            .dunk_lifecycle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (handle, started) = self.flock.toggle_dunk(id)?;
         if started {
             if let Err(error) = self.dunk_timers.start(Arc::clone(&handle)) {
@@ -124,6 +143,10 @@ impl OutboxRuntime {
         &self,
         id: &str,
     ) -> Result<serde_json::Map<String, serde_json::Value>, DunkError> {
+        let _lifecycle = self
+            .dunk_lifecycle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let handle = self.flock.dunks.handle(id)?;
         self.dunk_timers.stop(&handle);
         self.flock.dunks.remove_handle(&handle);
@@ -156,6 +179,53 @@ impl OutboxRuntime {
             .len()
     }
 
+    #[cfg(test)]
+    pub(crate) fn stop_dunk_timer_worker_only(&self, id: &str) -> Result<(), DunkError> {
+        let _lifecycle = self
+            .dunk_lifecycle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let handle = self.flock.dunks.handle(id)?;
+        self.dunk_timers.stop(&handle);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn install_finished_dunk_timer_worker(&self, id: &str) -> Result<(), DunkError> {
+        let _lifecycle = self
+            .dunk_lifecycle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let handle = self.flock.dunks.handle(id)?;
+        self.dunk_timers.stop(&handle);
+        let signal = Arc::new(dunk_timers::TimerSignal {
+            precommit: Arc::clone(&self.dunk_timers.precommit),
+            before_fields: Arc::clone(&self.dunk_timers.before_fields),
+            before_hold_wait: Arc::clone(&self.dunk_timers.before_hold_wait),
+            cancelled: AtomicBool::new(false),
+            generation: Mutex::new(0),
+            changed: std::sync::Condvar::new(),
+        });
+        let join = thread::spawn(|| {});
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !join.is_finished() {
+            assert!(
+                Instant::now() < deadline,
+                "finished worker fixture did not exit"
+            );
+            thread::yield_now();
+        }
+        self.dunk_timers
+            .workers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                DunkTimerOwner::key(&handle),
+                dunk_timers::TimerWorker { signal, join },
+            );
+        Ok(())
+    }
+
     pub(crate) fn interval_changed(&self, id: &str) -> Result<(), DunkError> {
         let handle = self.flock.dunks.handle(id)?;
         self.dunk_timers.wake(&handle);
@@ -167,18 +237,25 @@ impl OutboxRuntime {
         pane: Option<&serde_json::Map<String, serde_json::Value>>,
         args: &crate::flock::dunks::AddArgs,
     ) -> Result<serde_json::Map<String, serde_json::Value>, DunkError> {
-        let row = self.flock.dunks.add(pane, args)?;
-        if args.start && pane.is_some() {
-            let id = row
-                .get("id")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| DunkError::Refused("created dunk has no id".into()))?;
-            let handle = self.flock.dunks.handle(id)?;
-            if let Err(error) = self.dunk_timers.start(Arc::clone(&handle)) {
-                crate::flock::dunks::DunkList::set_timer_error(&handle, &error.to_string());
-                return Err(error);
+        let row = {
+            let _lifecycle = self
+                .dunk_lifecycle
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let row = self.flock.dunks.add(pane, args)?;
+            if args.start && pane.is_some() {
+                let id = row
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| DunkError::Refused("created dunk has no id".into()))?;
+                let handle = self.flock.dunks.handle(id)?;
+                if let Err(error) = self.dunk_timers.start(Arc::clone(&handle)) {
+                    crate::flock::dunks::DunkList::set_timer_error(&handle, &error.to_string());
+                    return Err(error);
+                }
             }
-        }
+            row
+        };
         self.flock.save()?;
         Ok(row)
     }
@@ -200,22 +277,35 @@ impl OutboxRuntime {
     pub(crate) fn stop_all_dunks(
         &self,
     ) -> Result<Vec<serde_json::Map<String, serde_json::Value>>, DunkError> {
-        let handles = self.flock.dunks.halt_handles(None);
-        for handle in &handles {
-            self.dunk_timers.stop(handle);
-        }
-        let result = self.flock.dunks.list();
+        let result = {
+            let _lifecycle = self
+                .dunk_lifecycle
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let handles = self.flock.dunks.halt_handles(None);
+            for handle in &handles {
+                self.dunk_timers.stop(handle);
+            }
+            self.flock.dunks.list()
+        };
         self.flock.save()?;
         Ok(result)
     }
 
     pub(crate) fn halt_dunks_aimed_at(&self, panes: &[String]) -> Result<Vec<String>, DunkError> {
-        let handles = self.flock.dunks.halt_handles(Some(panes));
-        let mut stopped = Vec::new();
-        for handle in &handles {
-            self.dunk_timers.stop(handle);
-            stopped.push(crate::flock::dunks::DunkList::timer_fields(handle).id);
-        }
+        let stopped = {
+            let _lifecycle = self
+                .dunk_lifecycle
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let handles = self.flock.dunks.halt_handles(Some(panes));
+            let mut stopped = Vec::new();
+            for handle in &handles {
+                self.dunk_timers.stop(handle);
+                stopped.push(crate::flock::dunks::DunkList::timer_fields(handle).id);
+            }
+            stopped
+        };
         if !stopped.is_empty() {
             self.flock.save()?;
         }
@@ -223,6 +313,10 @@ impl OutboxRuntime {
     }
 
     pub(crate) fn stop_timer_workers(&self) {
+        let _lifecycle = self
+            .dunk_lifecycle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.dunk_timers.stop_all();
     }
 
