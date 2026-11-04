@@ -496,7 +496,11 @@ mod tests {
 
         let invalid_until_precedes_since = dispatch(
             &missing_metrics,
-            Some(args(json!({"window_s": 3600, "until": {}, "since": []}))),
+            Some(args(json!({
+                "window_s": 3600,
+                "until": {"invalid": true},
+                "since": []
+            }))),
             "worker",
             2000.0,
         )
@@ -507,25 +511,21 @@ mod tests {
     }
 
     #[test]
-    fn h_metrics_preserves_signed_infinity_in_interval_values() {
+    fn h_metrics_preserves_signed_infinity_interval_carriers() {
         let (dir, flock) = flock("api-metrics-infinity");
         attach_inbox(&flock, dir.path());
 
         let positive =
             args(serde_json::from_str(r#"{"since":1e999,"until":2000,"window_s":3600}"#).unwrap());
         let positive = dispatch(&flock, Some(positive), "worker", 2000.0).unwrap();
-        let start = positive["interval"]["start"].as_f64().unwrap();
-        let seconds = positive["interval"]["seconds"].as_f64().unwrap();
-        assert!(start.is_infinite() && start.is_sign_positive());
-        assert!(seconds.is_infinite() && seconds.is_sign_negative());
+        assert_eq!("1e999", positive["interval"]["start"].to_string());
+        assert_eq!("-1e999", positive["interval"]["seconds"].to_string());
 
         let negative =
             args(serde_json::from_str(r#"{"since":-1e999,"until":2000,"window_s":3600}"#).unwrap());
         let negative = dispatch(&flock, Some(negative), "worker", 2000.0).unwrap();
-        let start = negative["interval"]["start"].as_f64().unwrap();
-        let seconds = negative["interval"]["seconds"].as_f64().unwrap();
-        assert!(start.is_infinite() && start.is_sign_negative());
-        assert!(seconds.is_infinite() && seconds.is_sign_positive());
+        assert_eq!("-1e999", negative["interval"]["start"].to_string());
+        assert_eq!("1e999", negative["interval"]["seconds"].to_string());
     }
 
     #[test]
