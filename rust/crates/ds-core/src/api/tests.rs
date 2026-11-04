@@ -4350,6 +4350,1014 @@ fn dispatch_task_api(
     dispatcher.dispatch(&context, &gate, name, args(input))
 }
 
+fn task_mutation_api_fixture() -> (
+    tokio::runtime::Runtime,
+    tempfile::TempDir,
+    Arc<Flock>,
+    Arc<crate::tasks::Tasks>,
+    Dispatcher,
+) {
+    let dir = tempfile::tempdir().expect("task mutation tempdir");
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("independently driven multi-thread task runtime");
+    let tasks = Arc::new(
+        runtime
+            .block_on(crate::tasks::Tasks::open(dir.path().join("tasks.db")))
+            .expect("temporary task store actor"),
+    );
+    let flock = Arc::new(Flock::new(
+        dir.path().join("launches.json"),
+        dir.path().join("lanes.json"),
+        false,
+    ));
+    let mut roles = Roles::new(
+        &Env::default(),
+        Some(dir.path().join("roles.json")),
+        Some(dir.path().join("tokens.json")),
+        None,
+    )
+    .expect("roles");
+    for (pane, role) in [("w1:p1", "worker"), ("w1:p2", "owner"), ("w1:p3", "worker")] {
+        roles
+            .register(pane, role, None, None, None, None, None, None)
+            .expect("role registration");
+    }
+    flock.attach_roles(roles, None);
+    flock.attach_stores(Stores {
+        tasks: Some(tasks.clone()),
+        ..Stores::default()
+    });
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_task_mutation_leases();
+    (runtime, dir, flock, tasks, dispatcher)
+}
+
+fn dispatch_task_mutation(
+    dispatcher: &Dispatcher,
+    flock: &Flock,
+    runtime: &tokio::runtime::Runtime,
+    name: &str,
+    input: Value,
+    pane: Option<&str>,
+    caller: Option<Caller>,
+) -> Result<Value, DunkError> {
+    let request = RequestCtx {
+        caller,
+        self_pane_id: pane.map(str::to_string),
+        ..RequestCtx::default()
+    };
+    dispatch_task_mutation_request(dispatcher, flock, runtime, name, input, &request)
+}
+
+fn dispatch_task_mutation_request(
+    dispatcher: &Dispatcher,
+    flock: &Flock,
+    runtime: &tokio::runtime::Runtime,
+    name: &str,
+    input: Value,
+    request: &RequestCtx,
+) -> Result<Value, DunkError> {
+    let env = TestEnv::default();
+    let context = HandlerContext {
+        flock,
+        request,
+        env: &env,
+        runtime: runtime.handle(),
+    };
+    let gate = FlockGate(&context);
+    dispatcher.dispatch(&context, &gate, name, args(input))
+}
+
+fn task_test_caller(pane: &str, pid: i64, start: &str, name: &str) -> Caller {
+    Caller::new(
+        Some(pid),
+        Some(start.to_string()),
+        Some(name.to_string()),
+        Some(pane.to_string()),
+        "agent",
+    )
+}
+
+#[test]
+fn api_t39_task_update_and_assign_preserve_dispatch_roles_values_and_full_wire() {
+    let (runtime, _dir, flock, tasks, dispatcher) = task_mutation_api_fixture();
+    let task = runtime
+        .block_on(tasks.add("global", "before", "body"))
+        .expect("seed task");
+    let dep_a = runtime
+        .block_on(tasks.add("global", "dependency a", ""))
+        .expect("dependency a");
+    let dep_b = runtime
+        .block_on(tasks.add("global", "dependency b", ""))
+        .expect("dependency b");
+    let updated = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_update",
+        json!({
+            "id": task.id,
+            "title": "after",
+            "assignees": [" w1:p1 ", "", 42, true, null, {"k": 1}, ["x"]],
+            "depends_on": format!(" {}, , {} ", dep_a.id, dep_b.id),
+            "multi_assignee": " yes "
+        }),
+        Some("w1:p2"),
+        None,
+    )
+    .expect("owner update");
+    assert_eq!(updated["title"], "after");
+    assert_eq!(
+        updated["assignees"],
+        json!(["w1:p1", "42", "True", "None", "{'k': 1}", "['x']"])
+    );
+    assert_eq!(updated["depends_on"], json!([dep_a.id, dep_b.id]));
+    assert_eq!(updated["multi_assignee"], true);
+    assert!(updated["children"].is_array());
+    assert!(updated["leases"].is_array());
+    assert!(updated.get("claimable").is_some());
+
+    // Python None is a no-op for _task_values; an empty list explicitly clears it.
+    let unchanged = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_update",
+        json!({"id": task.id, "assignees": null}),
+        Some("w1:p2"),
+        None,
+    )
+    .expect("None assignee update is a no-op");
+    assert_eq!(unchanged["assignees"], updated["assignees"]);
+    let cleared = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_update",
+        json!({"id": task.id, "assignees": []}),
+        Some("w1:p2"),
+        None,
+    )
+    .expect("empty assignee list clears");
+    assert_eq!(cleared["assignees"], json!([]));
+
+    let assigned = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_assign",
+        json!({"id": task.id, "assignees": "w1:p1, w1:p3"}),
+        Some("w1:p2"),
+        None,
+    )
+    .expect("owner assignment with default mode");
+    assert_eq!(assigned["assignees"], json!(["w1:p1", "w1:p3"]));
+    assert!(assigned["children"].is_array());
+    let falsey_mode_defaults = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_assign",
+        json!({"id": task.id, "assignees": ["w1:p1"], "mode": []}),
+        Some("w1:p2"),
+        None,
+    )
+    .expect("Python falsey mode defaults to add");
+    assert_eq!(falsey_mode_defaults["assignees"], json!(["w1:p1", "w1:p3"]));
+
+    let private_assignment = runtime
+        .block_on(tasks.add("w1:p3", "private assignment", ""))
+        .expect("private assignment task");
+    let private_mode_error = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_assign",
+        json!({"id": private_assignment.id, "assignees": ["w1:p1"], "mode": [1]}),
+        Some("w1:p2"),
+        None,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(private_mode_error.contains("belongs to another pane's private queue"));
+    let empty_assignees = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_assign",
+        json!({"id": task.id, "assignees": [], "mode": [1]}),
+        Some("w1:p2"),
+        None,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(empty_assignees.contains("at least one assignee is required"));
+    let falsey_mode_empty_assignees = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_assign",
+        json!({"id": task.id, "assignees": [], "mode": []}),
+        Some("w1:p2"),
+        None,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(falsey_mode_empty_assignees.contains("at least one assignee is required"));
+
+    let parent = runtime
+        .block_on(tasks.add("global", "parent for coercion", ""))
+        .expect("coercion parent");
+    let coercion_task = runtime
+        .block_on(tasks.add_with(
+            "global",
+            "before coercion",
+            "before body",
+            crate::tasks::AddOptions {
+                parent_id: Some(parent.id.clone()),
+                ..Default::default()
+            },
+        ))
+        .expect("coercion task");
+    let coerced = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_update",
+        json!({
+            "id": coercion_task.id,
+            "title": 42,
+            "body": false,
+            "parent_id": 0
+        }),
+        Some("w1:p2"),
+        None,
+    )
+    .expect("Python stringifies title/body and clears falsey parent ids");
+    assert_eq!(coerced["title"], "42");
+    assert_eq!(coerced["body"], "False");
+    assert_eq!(coerced["parent_id"], Value::Null);
+    let nonstring_status = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_update",
+        json!({"id": coercion_task.id, "status": 42}),
+        Some("w1:p2"),
+        None,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(nonstring_status.contains("status must be one of"));
+    let nonstring_priority = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_update",
+        json!({"id": coercion_task.id, "priority": true}),
+        Some("w1:p2"),
+        None,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(nonstring_priority.contains("priority must be one of"));
+
+    let raw_reason = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_update",
+        json!({"id": task.id, "block_reason": true}),
+        Some("w1:p2"),
+        None,
+    )
+    .expect("nonstring block reason keeps SQLite scalar affinity");
+    assert_eq!(raw_reason["block_reason"], "1");
+    let invalid_raw_reason = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_update",
+        json!({"id": task.id, "title": "must roll back", "block_reason": {"x": 1}}),
+        Some("w1:p2"),
+        None,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(invalid_raw_reason.contains("Error binding parameter 2: type 'dict' is not supported"));
+    let after_failed_raw_reason = runtime.block_on(tasks.get(&task.id)).unwrap();
+    assert_eq!(after_failed_raw_reason.title, "after");
+    assert_eq!(after_failed_raw_reason.block_reason.as_deref(), Some("1"));
+
+    for (fields, ordinal) in [
+        (json!({}), 1),
+        (json!({"body": "rollback", "priority": "high"}), 3),
+        (json!({"status": "cancelled"}), 3),
+        (json!({"status": "blocked"}), 5),
+        (json!({"title": "rollback", "status": "done"}), 6),
+        (
+            json!({"parent_id": null, "assignees": [], "multi_assignee": false, "depends_on": []}),
+            5,
+        ),
+    ] {
+        let before = runtime.block_on(tasks.events(&task.id));
+        let mut input = fields.as_object().unwrap().clone();
+        input.insert("id".into(), json!(task.id));
+        input.insert("block_reason".into(), json!([]));
+        let error = dispatch_task_mutation(
+            &dispatcher,
+            &flock,
+            &runtime,
+            "task_update",
+            Value::Object(input),
+            Some("w1:p2"),
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains(&format!(
+                "Error binding parameter {ordinal}: type 'list' is not supported"
+            )),
+            "{error}"
+        );
+        assert_eq!(runtime.block_on(tasks.events(&task.id)), before);
+        assert_eq!(
+            runtime.block_on(tasks.get(&task.id)).unwrap().title,
+            "after"
+        );
+    }
+
+    let role_refusal = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_update",
+        json!({"id": task.id, "status": "done", "title": 7}),
+        Some("w1:p1"),
+        None,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(role_refusal.contains("task update cannot change status for role worker"));
+    let assignment_refusal = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_assign",
+        json!({"id": task.id, "assignees": ["w1:p3"]}),
+        Some("w1:p1"),
+        None,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(assignment_refusal.contains("not permitted for role worker"));
+    assert_eq!(
+        runtime.block_on(tasks.get(&task.id)).unwrap().status,
+        "open"
+    );
+
+    let terminal = runtime
+        .block_on(tasks.add("global", "terminal update guard", "before"))
+        .expect("terminal guard task");
+    runtime
+        .block_on(tasks.complete(&terminal.id))
+        .expect("finish guard task");
+    let refused_update = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_update",
+        json!({"id": terminal.id, "title": "must roll back", "status": "open"}),
+        Some("w1:p2"),
+        None,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(refused_update.contains("finished task is not reopened"));
+    assert_eq!(
+        runtime.block_on(tasks.get(&terminal.id)).unwrap().title,
+        "terminal update guard",
+        "field edits roll back with the refused status transition"
+    );
+}
+
+#[test]
+fn api_t39_task_note_preserves_raw_event_meta_and_null_actor_without_task_lookup() {
+    let (runtime, dir, flock, tasks, dispatcher) = task_mutation_api_fixture();
+    let mut roles = Roles::new(
+        &Env::default(),
+        Some(dir.path().join("roles.json")),
+        Some(dir.path().join("tokens.json")),
+        None,
+    )
+    .expect("roles");
+    // Replace the attached role store with an owner token so the trusted caller has no pane.
+    let owner_token = roles
+        .issue_token("owner", Some("fixture-owner"), Some("api test"))
+        .expect("owner token");
+    flock.attach_roles(roles, None);
+    let request = RequestCtx {
+        service_token: Some(owner_token),
+        ..RequestCtx::default()
+    };
+
+    let noted = dispatch_task_mutation_request(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_note",
+        json!({"id": "t-missing-is-allowed", "event": true, "reason": {"source": ["x"]}}),
+        &request,
+    )
+    .expect("note may refer to a missing task");
+    assert_eq!(noted["noted"], "t-missing-is-allowed");
+    assert_eq!(noted["event"], true, "echo the original JSON event value");
+    assert_eq!(noted["actor"], Value::Null, "no pane means SQL NULL actor");
+    assert_eq!(noted["meta"]["reason"], json!({"source": ["x"]}));
+
+    let defaulted = dispatch_task_mutation_request(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_note",
+        json!({"id": "t-missing-is-allowed", "event": "", "reason": 7}),
+        &request,
+    )
+    .expect("falsey event defaults and truthy numeric reason remains JSON");
+    assert_eq!(defaulted["event"], "note");
+    assert_eq!(defaulted["meta"]["reason"], 7);
+
+    let numeric_event = dispatch_task_mutation_request(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_note",
+        json!({"id": "t-missing-is-allowed", "event": 5, "reason": []}),
+        &request,
+    )
+    .expect("truthy numeric event binds as TEXT and falsey reason is discarded");
+    assert_eq!(numeric_event["event"], 5);
+    assert_eq!(numeric_event["meta"], json!({}));
+
+    let connection = rusqlite::Connection::open(tasks.path()).expect("read task DB");
+    let rows: Vec<(String, Option<String>, String)> = connection
+        .prepare("SELECT event, actor, meta FROM task_events WHERE task_id = ? ORDER BY id")
+        .unwrap()
+        .query_map(["t-missing-is-allowed"], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(rows[0].0, "1", "SQLite TEXT affinity binds true as 1");
+    assert_eq!(rows[0].1, None);
+    assert_eq!(
+        serde_json::from_str::<Value>(&rows[0].2).unwrap()["reason"],
+        json!({"source": ["x"]})
+    );
+    assert_eq!(rows[1].0, "note");
+    assert_eq!(rows[1].1, None);
+    assert_eq!(
+        serde_json::from_str::<Value>(&rows[1].2).unwrap()["reason"],
+        7
+    );
+    assert_eq!(rows[2].0, "5");
+    assert_eq!(rows[2].1, None);
+    assert_eq!(
+        serde_json::from_str::<Value>(&rows[2].2).unwrap(),
+        json!({})
+    );
+
+    let before = rows.len();
+    for (event, kind) in [(json!(["x"]), "list"), (json!({"x": 1}), "dict")] {
+        let binding = dispatch_task_mutation_request(
+            &dispatcher,
+            &flock,
+            &runtime,
+            "task_note",
+            json!({"id": "t-missing-is-allowed", "event": event}),
+            &request,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(binding.contains(&format!(
+            "Error binding parameter 2: type '{kind}' is not supported"
+        )));
+    }
+    let after: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM task_events WHERE task_id = ?",
+            ["t-missing-is-allowed"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(after as usize, before, "failed note binding adds no event");
+}
+
+#[test]
+fn api_t39_task_block_cancel_bind_raw_reasons_after_guards_and_return_dependents() {
+    let (runtime, _dir, flock, tasks, dispatcher) = task_mutation_api_fixture();
+    let task = runtime
+        .block_on(tasks.add("global", "blocked root", ""))
+        .expect("root");
+    let dependent = runtime
+        .block_on(tasks.add_with(
+            "global",
+            "dependent",
+            "",
+            crate::tasks::AddOptions {
+                depends_on: vec![task.id.clone()],
+                ..Default::default()
+            },
+        ))
+        .expect("dependent");
+    let private = runtime
+        .block_on(tasks.add("w1:p3", "private task", ""))
+        .expect("private task");
+
+    let blocked = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_block",
+        json!({"id": task.id, "reason": false}),
+        Some("w1:p2"),
+        None,
+    )
+    .expect("raw false reason uses SQLite scalar affinity");
+    assert_eq!(blocked["status"], "blocked");
+    assert_eq!(blocked["block_reason"], "0");
+    let connection = rusqlite::Connection::open(tasks.path()).expect("read task DB");
+    let meta: Option<String> = connection
+        .query_row(
+            "SELECT meta FROM task_events WHERE task_id = ? AND event = 'blocked' ORDER BY id DESC LIMIT 1",
+            [&task.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(meta, None, "status event adds no synthetic reason meta");
+
+    let events_before = runtime.block_on(tasks.events(&task.id));
+    for (reason, kind) in [
+        (json!(["bad binding"]), "list"),
+        (json!({"bad": true}), "dict"),
+    ] {
+        let composite = dispatch_task_mutation(
+            &dispatcher,
+            &flock,
+            &runtime,
+            "task_cancel",
+            json!({"id": task.id, "reason": reason}),
+            Some("w1:p2"),
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(composite.contains(&format!(
+            "Error binding parameter 3: type '{kind}' is not supported"
+        )));
+        assert_eq!(
+            runtime.block_on(tasks.get(&task.id)).unwrap().status,
+            "blocked"
+        );
+        assert_eq!(runtime.block_on(tasks.events(&task.id)), events_before);
+    }
+
+    let visibility = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_cancel",
+        json!({"id": private.id, "reason": []}),
+        Some("w1:p2"),
+        None,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(visibility.contains("belongs to another pane's private queue"));
+
+    let cancelled = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_cancel",
+        json!({"id": task.id, "reason": 0}),
+        Some("w1:p2"),
+        None,
+    )
+    .expect("cancel response uses post-commit full wire");
+    assert_eq!(cancelled["status"], "cancelled");
+    assert_eq!(cancelled["block_reason"], "0");
+    assert_eq!(cancelled["blocked_dependents"], json!([dependent.id]));
+    assert!(cancelled.get("children").is_some());
+
+    let terminal_binding = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_block",
+        json!({"id": task.id, "reason": []}),
+        Some("w1:p2"),
+        None,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(terminal_binding.contains("finished task is not reopened"));
+}
+
+#[test]
+fn api_t39_task_next_heartbeat_release_preserve_caller_and_lease_envelopes() {
+    assert_eq!(
+        python_float(&json!(" 30 ")).expect("Python whitespace float"),
+        30.0
+    );
+    assert_eq!(
+        python_float(&json!("3_0")).expect("Python underscore float"),
+        30.0
+    );
+    assert_eq!(
+        python_float(&json!("٣٠")).expect("Python Unicode digit float"),
+        30.0
+    );
+    assert!(python_float(&json!("3__0")).is_err());
+    assert!(python_float(&json!("Infinity"))
+        .expect("Python nonfinite float")
+        .is_infinite());
+
+    let (runtime, _dir, flock, tasks, dispatcher) = task_mutation_api_fixture();
+    let first = runtime
+        .block_on(tasks.add("global", "first claim", ""))
+        .expect("first task");
+    let second = runtime
+        .block_on(tasks.add("global", "second claim", ""))
+        .expect("second task");
+    let caller = task_test_caller("w1:p1", 4321, "98765", "codex-agent");
+
+    let claimed = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_next",
+        json!({"scope": "global", "lease_seconds": 0, "allow_busy": false}),
+        Some("w1:p1"),
+        Some(caller.clone()),
+    )
+    .expect("falsey numeric zero uses the default lease");
+    assert_eq!(claimed["task"]["id"], first.id);
+    assert_eq!(claimed["scope"], "global");
+    assert_eq!(claimed["pane_id"], "w1:p1");
+    assert_eq!(claimed["lease_seconds"], 1800.0);
+    assert_eq!(claimed["caller"]["pid"], 4321);
+    assert_eq!(claimed["caller"]["start"], "98765");
+    assert_eq!(claimed["caller"]["name"], "codex-agent");
+    assert!(claimed.get("following").is_none());
+    assert!(claimed["task"]["children"].is_array());
+    assert!(claimed["task"]["leases"].is_array());
+
+    let bad_scope_precedes_lease_conversion = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_next",
+        json!({"scope": "not a scope!", "lease_seconds": "not a float"}),
+        Some("w1:p1"),
+        Some(caller.clone()),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(bad_scope_precedes_lease_conversion.contains("scope must be 'global' or a pane id"));
+
+    let lease = runtime
+        .block_on(tasks.leases_for_pane("w1:p1", None))
+        .expect("live lease")
+        .into_iter()
+        .find(|lease| lease.task_id == first.id)
+        .expect("lease for first task");
+    assert_eq!(lease.caller_pid, Some(4321));
+    assert_eq!(lease.caller_start.as_deref(), Some("98765"));
+
+    let busy = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_next",
+        json!({"scope": "global"}),
+        Some("w1:p1"),
+        Some(caller.clone()),
+    )
+    .expect("busy lease is a refusal envelope");
+    assert_eq!(busy["task"], Value::Null);
+    assert_eq!(busy["refused"]["reason"], "busy");
+    assert_eq!(busy["refused"]["task_ids"], json!([first.id]));
+    assert_eq!(busy["following"], true);
+
+    let parallel = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_next",
+        json!({"scope": "global", "allow_busy": " YES ", "lease_seconds": " 30 "}),
+        Some("w1:p1"),
+        Some(caller.clone()),
+    )
+    .expect("truthy allow_busy permits an explicit second claim");
+    assert_eq!(parallel["task"]["id"], second.id);
+    assert_eq!(parallel["lease_seconds"], 30.0);
+    assert!(parallel.get("following").is_none());
+
+    let heartbeat = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_heartbeat",
+        json!({"id": first.id, "lease_seconds": 0}),
+        Some("w1:p1"),
+        Some(caller.clone()),
+    )
+    .expect("heartbeat refreshes caller details");
+    assert_eq!(heartbeat["task_id"], first.id);
+    assert_eq!(heartbeat["pane_id"], "w1:p1");
+    assert_eq!(heartbeat["lease_seconds"], 1800.0);
+    let whitespace_heartbeat = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_heartbeat",
+        json!({"id": first.id, "lease_seconds": " 30 "}),
+        Some("w1:p1"),
+        Some(caller.clone()),
+    )
+    .expect("heartbeat accepts Python float whitespace");
+    assert_eq!(whitespace_heartbeat["lease_seconds"], 30.0);
+    let refreshed = runtime
+        .block_on(tasks.leases_for_pane("w1:p1", None))
+        .expect("refreshed leases")
+        .into_iter()
+        .find(|lease| lease.task_id == first.id)
+        .expect("refreshed first lease");
+    assert_eq!(refreshed.caller_pid, Some(4321));
+    assert_eq!(refreshed.caller_start.as_deref(), Some("98765"));
+
+    let invalid_lease = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_heartbeat",
+        json!({"id": first.id, "lease_seconds": "0"}),
+        Some("w1:p1"),
+        Some(caller.clone()),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(invalid_lease.contains("lease_seconds must be positive"));
+
+    let missing_heartbeat_precedes_lease_conversion = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_heartbeat",
+        json!({"id": "t-missing", "lease_seconds": "not a float"}),
+        Some("w1:p1"),
+        Some(caller.clone()),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(missing_heartbeat_precedes_lease_conversion.contains("no task with id"));
+
+    let released = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_release",
+        json!({"id": second.id}),
+        Some("w1:p1"),
+        Some(caller.clone()),
+    )
+    .expect("release returns full post-commit wire row");
+    assert_eq!(released["id"], second.id);
+    assert_eq!(released["status"], "open");
+    assert!(released["children"].is_array());
+    assert!(runtime
+        .block_on(tasks.leases_for_pane("w1:p1", None))
+        .unwrap()
+        .iter()
+        .all(|lease| lease.task_id != second.id));
+
+    // The Flock's empty-queue subscription remains a refusal envelope, not a fake success.
+    runtime
+        .block_on(tasks.complete(&first.id))
+        .expect("complete first");
+    runtime
+        .block_on(tasks.complete(&second.id))
+        .expect("complete second");
+    let empty = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_next",
+        json!({"scope": "global", "allow_busy": true}),
+        Some("w1:p1"),
+        Some(caller),
+    )
+    .expect("empty queue refusal");
+    assert_eq!(empty["task"], Value::Null);
+    assert_eq!(empty["refused"]["reason"], "empty");
+    assert_eq!(empty["following"], true);
+    assert!(flock
+        .task_followers()
+        .iter()
+        .any(|(pane, _)| pane == "w1:p1"));
+}
+
+#[test]
+fn api_t39_nonfinite_leases_remain_numeric_through_task_wire_and_events() {
+    fn client_roundtrip(command: &str, input: Value, result: Value) -> Value {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().expect("client socket directory");
+        let path = dir.path().join("peer.sock");
+        let listener = UnixListener::bind(&path).expect("temporary peer");
+        std::thread::scope(|scope| {
+            let peer = scope.spawn(|| {
+                let (mut socket, _) = listener.accept().expect("client connected");
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut line = String::new();
+                BufReader::new(&socket).read_line(&mut line).unwrap();
+                let request: crate::protocol::Request = serde_json::from_str(&line).unwrap();
+                assert_eq!(request.cmd, command);
+                assert_eq!(request.args, input);
+                assert_eq!(request.self_pane_id.as_deref(), Some("w1:p1"));
+                let response = crate::protocol::Response::ok(request.id, result);
+                socket
+                    .write_all(crate::protocol::encode_line(&response).as_bytes())
+                    .unwrap();
+            });
+            let mut client = crate::client::FlockClient::new(
+                crate::client::UnixTransport { path },
+                Some("w1:p1".into()),
+                "test pane".into(),
+                Duration::from_secs(5),
+                None,
+            );
+            let decoded = client.call(command, input.as_object().unwrap().clone());
+            peer.join().expect("temporary peer completed");
+            decoded.expect("actual client decodes dispatcher result")
+        })
+    }
+    let raw_float: Value = serde_json::from_str("1e309").expect("standard JSON float overflow");
+    assert!(python_float(&raw_float)
+        .expect("JSON float exponent converts to Python infinity")
+        .is_infinite());
+    let raw_larger_float: Value =
+        serde_json::from_str("1e999").expect("arbitrary-precision JSON float");
+    assert!(python_float(&raw_larger_float)
+        .expect("larger exponent remains a Python float")
+        .is_infinite());
+    let raw_large_integer: Value = serde_json::from_str(&format!("1{}", "0".repeat(400)))
+        .expect("arbitrary-precision JSON integer");
+    assert!(matches!(
+        python_float(&raw_large_integer),
+        Err(DunkError::Refused(message)) if message == "int too large to convert to float"
+    ));
+
+    let (runtime, _dir, flock, tasks, dispatcher) = task_mutation_api_fixture();
+    let task = runtime
+        .block_on(tasks.add("global", "literal Infinity", ""))
+        .expect("task");
+    let caller = task_test_caller("w1:p1", 4321, "98765", "codex-agent");
+    let next_args: Value = serde_json::from_str(r#"{"scope":"global","lease_seconds":"Infinity"}"#)
+        .expect("string Infinity is a JSON string");
+    let next = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_next",
+        next_args.clone(),
+        Some("w1:p1"),
+        Some(caller.clone()),
+    )
+    .expect("positive infinite lease is stored and returned");
+    let next = client_roundtrip("task_next", next_args, next);
+    assert_eq!(next["task"]["id"], task.id);
+    assert_eq!(next["task"]["title"], "literal Infinity");
+    for field in ["lease_seconds", "expires_at"] {
+        let token = next[field]
+            .as_number()
+            .expect("nonfinite lease remains a JSON number")
+            .to_string();
+        assert_eq!(token, "1e+999");
+        assert!(token.parse::<f64>().unwrap().is_infinite());
+    }
+
+    let full = runtime
+        .block_on(tasks.get_full_wire(&task.id, Some("w1:p1")))
+        .expect("full read after claim");
+    assert_eq!(full.wire["title"], "literal Infinity");
+    assert_eq!(
+        full.wire["lease_expires_at"]
+            .as_number()
+            .unwrap()
+            .to_string(),
+        "1e+999"
+    );
+    assert_eq!(full.wire["leases"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        full.wire["leases"][0]["expires_at"]
+            .as_number()
+            .unwrap()
+            .to_string(),
+        "1e+999"
+    );
+
+    let connection = rusqlite::Connection::open(tasks.path()).expect("read task DB");
+    let (storage_type, expiry): (String, f64) = connection
+        .query_row(
+            "SELECT typeof(expires_at), expires_at FROM task_leases WHERE task_id = ?",
+            [&task.id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("infinite lease row");
+    assert_eq!(storage_type, "real");
+    assert!(expiry.is_infinite());
+    let event_meta: String = connection
+        .query_row(
+            "SELECT meta FROM task_events WHERE task_id = ? AND event = 'claimed'",
+            [&task.id],
+            |row| row.get(0),
+        )
+        .expect("claim event");
+    let event_meta: Value = serde_json::from_str(&event_meta).expect("valid event JSON");
+    assert_eq!(
+        event_meta["lease_seconds"].as_number().unwrap().to_string(),
+        "1e+999"
+    );
+
+    let heartbeat_args: Value =
+        serde_json::from_str(&format!(r#"{{"id":"{}","lease_seconds":1e309}}"#, task.id))
+            .expect("numeric exponent lease argument");
+    let heartbeat = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_heartbeat",
+        heartbeat_args.clone(),
+        Some("w1:p1"),
+        Some(caller.clone()),
+    )
+    .expect("numeric exponent heartbeat stores infinity");
+    let heartbeat = client_roundtrip("task_heartbeat", heartbeat_args, heartbeat);
+    assert_eq!(
+        heartbeat["lease_seconds"].as_number().unwrap().to_string(),
+        "1e+999"
+    );
+    assert_eq!(
+        heartbeat["expires_at"].as_number().unwrap().to_string(),
+        "1e+999"
+    );
+
+    let negative_infinity = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_heartbeat",
+        json!({"id": task.id, "lease_seconds": "-Infinity"}),
+        Some("w1:p1"),
+        Some(caller.clone()),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(negative_infinity.contains("lease_seconds must be positive"));
+
+    let nan = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_heartbeat",
+        json!({"id": task.id, "lease_seconds": "NaN"}),
+        Some("w1:p1"),
+        Some(caller),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(nan.contains("NOT NULL constraint failed: task_leases.expires_at"));
+    let expiry_after_nan: f64 = connection
+        .query_row(
+            "SELECT expires_at FROM task_leases WHERE task_id = ?",
+            [&task.id],
+            |row| row.get(0),
+        )
+        .expect("failed NaN heartbeat leaves lease untouched");
+    assert!(expiry_after_nan.is_infinite());
+}
+
 #[test]
 fn h_task_add_matches_python_defaults_and_role_gate() {
     let (runtime, _dir, flock, _tasks, dispatcher) = task_api_fixture();
