@@ -23,25 +23,33 @@ impl SummaryEnv for RequestRuntimeAdapter<'_> {
             .python_home
             .path()
             .map_err(crate::error::DunkError::Refused)?;
-        expand_summary_path(&root, home, true, named_home)
+        expand_summary_path(&root, Some(home), true, named_home)
     }
 
     fn project_dir(&self, raw: &str) -> Result<std::path::PathBuf, crate::error::DunkError> {
         let state = self.terminal.flock.status_state()?;
-        let home = state
-            .python_home
-            .path()
-            .map_err(crate::error::DunkError::Refused)?;
+        let home = if raw == "~" || raw.starts_with("~/") {
+            state
+                .python_home
+                .expanduser_home()
+                .map_err(crate::error::DunkError::Refused)?
+        } else {
+            None
+        };
         let expanded = expand_summary_path(std::path::Path::new(raw), home, false, named_home)?;
         Ok(absolute_summary_path(&expanded, &std::env::current_dir()?))
     }
 
     fn merges(&self, repo: &str) -> Result<Value, crate::error::DunkError> {
         let state = self.terminal.flock.status_state()?;
-        let home = state
-            .python_home
-            .path()
-            .map_err(crate::error::DunkError::Refused)?;
+        let home = if repo == "~" || repo.starts_with("~/") {
+            state
+                .python_home
+                .expanduser_home()
+                .map_err(crate::error::DunkError::Refused)?
+        } else {
+            None
+        };
         let expanded = expand_summary_path(std::path::Path::new(repo), home, false, named_home)?;
         Ok(crate::flock::views::git_merges(
             &expanded.to_string_lossy(),
@@ -389,6 +397,62 @@ mod tests {
                     .to_string(),
                 "Could not determine home directory."
             );
+            assert_eq!(
+                SummaryEnv::project_dir(&adapter, "~/project").unwrap(),
+                std::env::current_dir().unwrap().join("~/project")
+            );
+            assert_eq!(
+                SummaryEnv::project_dir(&adapter, "/explicit/project").unwrap(),
+                std::path::PathBuf::from("/explicit/project")
+            );
         }
+    }
+    #[test]
+    fn production_summary_preserves_captured_lookup_errors_only_when_home_is_needed() {
+        use crate::config::{CapturedPythonHome, Env};
+        use crate::flock::status_runtime::StatusState;
+        let dir = crate::testsupport::dir("summary-home-lookup-error");
+        let env = Env::from_pairs(&[]);
+        let mut state = StatusState::at_start(
+            "fixture",
+            dir.path().join("state"),
+            dir.path().join("daemon"),
+            env.clone(),
+        );
+        state.python_home =
+            CapturedPythonHome::capture_with(&env, || Err("account lookup failed".into()));
+        let flock = Flock::new(
+            dir.path().join("launches.json"),
+            dir.path().join("lanes.json"),
+            false,
+        );
+        flock.attach_status_state(state).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let request = RequestCtx::default();
+        let terminal: Mutex<Box<dyn Terminal>> = Mutex::new(Box::new(FakeTerminal::new()));
+        let adapter = crate::server_runtime::RequestRuntimeAdapter::new(
+            &flock,
+            &request,
+            runtime.handle(),
+            &terminal,
+        );
+        assert_eq!(
+            SummaryEnv::project_dir(&adapter, "~/project")
+                .unwrap_err()
+                .to_string(),
+            "account lookup failed"
+        );
+        assert_eq!(
+            SummaryEnv::global_context_root(&adapter)
+                .unwrap_err()
+                .to_string(),
+            "account lookup failed"
+        );
+        assert_eq!(
+            SummaryEnv::project_dir(&adapter, "/explicit/project").unwrap(),
+            std::path::PathBuf::from("/explicit/project")
+        );
     }
 }

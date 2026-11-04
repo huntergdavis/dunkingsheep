@@ -84,7 +84,7 @@ fn project_dir_of(project: &str, path: Option<&str>) -> PathBuf {
 /// Path.expanduser (global store) refuses unknown users; os.path.expanduser (project) keeps them.
 pub(crate) fn expand_summary_path(
     raw: &Path,
-    home: &Path,
+    home: Option<&Path>,
     strict: bool,
     lookup: impl FnOnce(&str) -> Result<Option<PathBuf>, DunkError>,
 ) -> Result<PathBuf, DunkError> {
@@ -98,7 +98,7 @@ pub(crate) fn expand_summary_path(
         .position(|byte| *byte == b'/')
         .unwrap_or(bytes.len());
     let selected = if end == 1 {
-        Some(home.to_path_buf())
+        home.map(Path::to_path_buf)
     } else {
         let user = std::str::from_utf8(&bytes[1..end])
             .map_err(|error| DunkError::Refused(error.to_string()))?;
@@ -122,6 +122,11 @@ pub(crate) fn expand_summary_path(
     expanded.extend_from_slice(&bytes[end..]);
     if expanded.is_empty() {
         expanded.push(b'/');
+    }
+    if strict && expanded.first() == Some(&b'~') {
+        return Err(DunkError::Refused(
+            "Could not determine home directory.".into(),
+        ));
     }
     Ok(PathBuf::from(std::ffi::OsString::from_vec(expanded)))
 }
@@ -518,7 +523,7 @@ mod tests {
     }
     #[test]
     fn summary_path_expansion_distinguishes_named_users_and_global_errors() {
-        let captured = Path::new("/captured");
+        let captured = Some(Path::new("/captured"));
         let no_lookup =
             |_: &str| -> Result<Option<PathBuf>, DunkError> { panic!("unexpected named lookup") };
         assert_eq!(
@@ -526,7 +531,7 @@ mod tests {
             Path::new("/captured/a")
         );
         assert_eq!(
-            expand_summary_path(Path::new("~"), Path::new("/"), false, no_lookup).unwrap(),
+            expand_summary_path(Path::new("~"), Some(Path::new("/")), false, no_lookup).unwrap(),
             Path::new("/")
         );
         assert_eq!(
@@ -543,6 +548,16 @@ mod tests {
         );
         assert_eq!(
             expand_summary_path(Path::new("~missing/context"), captured, true, |_| Ok(None))
+                .unwrap_err()
+                .to_string(),
+            "Could not determine home directory."
+        );
+        assert_eq!(
+            expand_summary_path(Path::new("~/a"), None, false, no_lookup).unwrap(),
+            Path::new("~/a")
+        );
+        assert_eq!(
+            expand_summary_path(Path::new("~/a"), None, true, no_lookup)
                 .unwrap_err()
                 .to_string(),
             "Could not determine home directory."
