@@ -2075,6 +2075,29 @@ fn h_remove_dunk_stops_and_deletes() {
 }
 
 #[test]
+fn dunk_lifecycle_handlers_register_only_this_group_and_refuse_without_provider() {
+    let (_dir, flock) = flock();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_dunk_lifecycle();
+    assert_eq!(
+        dispatcher.registration_attempts(),
+        &["start_dunk", "stop_dunk", "toggle_dunk"]
+    );
+    let owner = FixedRole("owner", true);
+    for name in ["start_dunk", "stop_dunk", "toggle_dunk"] {
+        let error = refusal(dispatch(
+            &dispatcher,
+            &flock,
+            &owner,
+            name,
+            args(json!({"id": "d1"})),
+            None,
+        ));
+        assert_eq!(error, "dunk lifecycle adapter is not wired", "{name}");
+    }
+}
+
+#[test]
 fn dunk_mutation_dispatcher_registers_only_this_group_and_enforces_role_gate() {
     let (_dir, flock) = flock();
     let env = DunkHandlerEnv::new();

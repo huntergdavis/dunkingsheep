@@ -14,7 +14,9 @@ pub use owner_push::{h_owner_poll, h_owner_push, h_owner_take};
 mod metrics;
 pub use metrics::h_metrics;
 mod dunks;
-pub use dunks::{h_add_dunk, h_remove_dunk, h_update_dunk};
+pub use dunks::{
+    h_add_dunk, h_remove_dunk, h_start_dunk, h_stop_dunk, h_toggle_dunk, h_update_dunk,
+};
 mod respawn;
 pub use respawn::h_respawn_pane;
 
@@ -151,6 +153,24 @@ pub trait CommandEnv: PaneInfoEnv {
     fn remove_dunk(&self, _id: &str) -> Result<serde_json::Map<String, Value>, DunkError> {
         Err(DunkError::Refused(
             "dunk mutation adapter is not wired".into(),
+        ))
+    }
+
+    fn start_dunk(&self, _id: &str) -> Result<serde_json::Map<String, Value>, DunkError> {
+        Err(DunkError::Refused(
+            "dunk lifecycle adapter is not wired".into(),
+        ))
+    }
+
+    fn stop_dunk(&self, _id: &str) -> Result<serde_json::Map<String, Value>, DunkError> {
+        Err(DunkError::Refused(
+            "dunk lifecycle adapter is not wired".into(),
+        ))
+    }
+
+    fn toggle_dunk(&self, _id: &str) -> Result<serde_json::Map<String, Value>, DunkError> {
+        Err(DunkError::Refused(
+            "dunk lifecycle adapter is not wired".into(),
         ))
     }
 
@@ -766,6 +786,13 @@ impl Dispatcher {
         self.register("add_dunk", h_add_dunk);
         self.register("update_dunk", h_update_dunk);
         self.register("remove_dunk", h_remove_dunk);
+    }
+
+    /// Register only the T39 start, stop and toggle dunk lifecycle handlers.
+    pub fn register_dunk_lifecycle(&mut self) {
+        self.register("start_dunk", h_start_dunk);
+        self.register("stop_dunk", h_stop_dunk);
+        self.register("toggle_dunk", h_toggle_dunk);
     }
 
     /// `dunk_api.dispatch(flock, name, args, self_pane_id)`, with the acting pane read only from
