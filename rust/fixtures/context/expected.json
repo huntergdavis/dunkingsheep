@@ -370,7 +370,7 @@
           "history": 0,
           "provisional": 2
         },
-        "injected_7d": 2,
+        "injected_7d": 1,
         "injected_total": 2,
         "never_delivered": [
           "2026-10-31-port",
@@ -391,7 +391,7 @@
           "prov-cache2"
         ],
         "never_read_count": 7,
-        "reads_7d": 3,
+        "reads_7d": 2,
         "reads_total": 6
       },
       "op": "stats"
@@ -416,7 +416,7 @@
           "class": "ground-truth",
           "injected": 0,
           "last_injected": null,
-          "last_read": 4000000000.25,
+          "last_read": 1792843200.0,
           "reads": 1,
           "slug": "gt-worktrees",
           "stale": false,
@@ -451,8 +451,8 @@
           "authority": "measured",
           "class": "fact",
           "injected": 1,
-          "last_injected": 4000000002.75,
-          "last_read": 4000000001.5,
+          "last_injected": 1792843200.25,
+          "last_read": 1792843199.75,
           "reads": 2,
           "slug": "fact-deploy",
           "stale": false,
@@ -499,7 +499,7 @@
           "authority": "agent",
           "class": "provisional",
           "injected": 1,
-          "last_injected": 4000000003.0,
+          "last_injected": 1792843199.75,
           "last_read": null,
           "reads": 0,
           "slug": "prov-cache2",
@@ -511,6 +511,10 @@
       "op": "entry_stats"
     }
   ],
+  "clock": {
+    "local": "2026-10-31T12:00:00",
+    "unix": 1793448000.0
+  },
   "ledger": {
     "modified": [
       "fact-cafe"
@@ -519,6 +523,5 @@
       "fact-forged",
       "fact-broken"
     ]
-  },
-  "snapshot_day": "2026-10-31"
+  }
 }

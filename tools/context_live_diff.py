@@ -24,6 +24,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 
 import dunk_context  # noqa: E402
+from snapshot_context import fixed_clock  # noqa: E402
 
 
 def get_projection(entry):
@@ -35,7 +36,7 @@ def get_projection(entry):
         "body", "error")}
 
 
-def main(argv):
+def snapshot(argv, clock):
     if len(argv) != 3:
         print(__doc__, file=sys.stderr)
         return 2
@@ -96,11 +97,19 @@ def main(argv):
     cases.append({"op": "stats", "args": {}, "expected": store.stats()})
     cases.append({"op": "entry_stats", "args": {}, "expected": store.entry_stats()})
     (out / "expected.json").write_text(
-        json.dumps({"ledger": {"modified": [], "unrecorded": [], "adopt": True},
+        json.dumps({"clock": clock, "ledger": {"modified": [], "unrecorded": [], "adopt": True},
                     "cases": cases}, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
         encoding="utf-8")
     print(f"{len(entries)} entries, {len(cases)} cases -> {out}/expected.json")
     return 0
+
+
+def main(argv):
+    # Capture both clocks once; Rust replays precisely these values on its private copy.
+    clock = {"local": dunk_context.datetime.now().isoformat(timespec="seconds"),
+             "unix": dunk_context.time.time()}
+    with fixed_clock(clock):
+        return snapshot(argv, clock)
 
 
 if __name__ == "__main__":

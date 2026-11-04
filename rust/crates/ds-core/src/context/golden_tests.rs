@@ -1,7 +1,7 @@
 //! T50 acceptance (t1395): the read side against a fixture the PYTHON store built
 //! (`tools/snapshot_context.py --write`). Fails when a digest, the entries listing, a search
 //! result, check report, get projection, stats or entry_stats differs from what the Python
-//! printed. Access-log timestamps are fixed in the fixture; age_days remains calendar-relative.
+//! printed. Access-log timestamps are fixed in the fixture; both calendar and Unix clocks are fixed without adjusting expected values.
 
 use serde_json::{json, Value};
 
@@ -122,36 +122,21 @@ fn entry_value(entry: &super::store::Entry) -> Value {
     Value::Object(value)
 }
 
-/// The committed Python snapshot pins `date.today()` for reproducible output. Rust's public
-/// stats API intentionally uses the actual local date, so shift only the inherently relative
-/// age_days values by the elapsed calendar days. Counts, access windows and every other field
-/// remain byte-for-byte comparisons against Python output.
-fn stats_expected_today(expect: &Value) -> Value {
-    let mut expected = case(expect, "stats")[0]["expected"].clone();
-    let snapshot_day = chrono::NaiveDate::parse_from_str(
-        expect["snapshot_day"].as_str().expect("snapshot day"),
-        "%Y-%m-%d",
+fn fixed_clock(expect: &Value) -> super::store::ReadClockGuard {
+    let local = chrono::NaiveDateTime::parse_from_str(
+        expect["clock"]["local"]
+            .as_str()
+            .expect("fixed local clock"),
+        "%Y-%m-%dT%H:%M:%S",
     )
-    .expect("valid snapshot day");
-    let today = chrono::Local::now().date_naive();
-    let elapsed_days = (today - snapshot_day).num_days();
-    for age in expected["age_days"]
-        .as_object_mut()
-        .expect("age_days object")
-        .values_mut()
-    {
-        for percentile in ["median", "p90"] {
-            if let Some(days) = age[percentile].as_i64() {
-                age[percentile] = json!(days + elapsed_days);
-            }
-        }
-    }
-    expected
+    .unwrap();
+    super::store::fixed_read_clock(local, expect["clock"]["unix"].as_f64().unwrap())
 }
 
 #[test]
 fn digests_are_byte_identical_to_the_python() {
     let (_dir, store, _ledger, expect) = fixture();
+    let _clock = fixed_clock(&expect);
     let cases = case(&expect, "digest");
     assert_eq!(3, cases.len());
     for c in cases {
@@ -166,6 +151,7 @@ fn digests_are_byte_identical_to_the_python() {
 #[test]
 fn the_entries_listing_matches_the_python() {
     let (_dir, store, _ledger, expect) = fixture();
+    let _clock = fixed_clock(&expect);
     let got: Vec<Value> = store
         .entries()
         .iter()
@@ -186,6 +172,7 @@ fn the_entries_listing_matches_the_python() {
 #[test]
 fn search_results_match_the_python() {
     let (_dir, store, _ledger, expect) = fixture();
+    let _clock = fixed_clock(&expect);
     for c in case(&expect, "search") {
         let a = &c["args"];
         let got = store
@@ -203,6 +190,7 @@ fn search_results_match_the_python() {
 #[test]
 fn get_resolution_matches_the_python() {
     let (_dir, store, _ledger, expect) = fixture();
+    let _clock = fixed_clock(&expect);
     let cases = case(&expect, "get");
     assert_eq!(4, cases.len());
     for c in cases {
@@ -220,6 +208,7 @@ fn get_resolution_matches_the_python() {
 #[test]
 fn the_check_report_matches_the_python() {
     let (_dir, store, mut ledger, expect) = fixture();
+    let _clock = fixed_clock(&expect);
     let got = store.check(&mut ledger).unwrap();
     assert_eq!(case(&expect, "check")[0]["expected"], got);
 }
@@ -227,13 +216,18 @@ fn the_check_report_matches_the_python() {
 #[test]
 fn stats_match_the_python_with_fixed_access_times() {
     let (_dir, store, _ledger, expect) = fixture();
+    let _clock = fixed_clock(&expect);
     assert_eq!(1, case(&expect, "stats").len());
-    assert_eq!(stats_expected_today(&expect), store.stats().unwrap());
+    assert_eq!(
+        case(&expect, "stats")[0]["expected"],
+        store.stats().unwrap()
+    );
 }
 
 #[test]
 fn entry_stats_match_the_python_with_fixed_access_times() {
     let (_dir, store, mut ledger, expect) = fixture();
+    let _clock = fixed_clock(&expect);
     assert_eq!(1, case(&expect, "entry_stats").len());
     assert_eq!(
         case(&expect, "entry_stats")[0]["expected"],
@@ -344,6 +338,7 @@ fn live_tree_matches_the_python() {
     let store = Store::new(Some(&root), false);
     let mut ledger = Ledger::new(Some(&dir.path().join("ledger.db")));
     store.adopt(&mut ledger, "adopt").unwrap();
+    let _clock = fixed_clock(&expect);
     let diffs = all_differences(&store, &mut ledger, &expect);
     for line in &diffs {
         eprintln!("DIFF {line}");

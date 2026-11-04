@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """Snapshot the context tree + read-side output a Rust port must reproduce (T50 acceptance, t1395).
 
-Builds a small context directory through the PYTHON store with a pinned calendar (supersede and
-retire stamp today's date, so `_today` is patched; STALE marks compare `stated` with now(), so the
-fixture uses 2020 dates for stale entries and 2999 for fresh ones), runs the read side on it, and
+Builds a small context directory through the PYTHON store with pinned calendar and Unix clocks,
+including supersede/retire dates, STALE checks and access windows, runs the read side on it, and
 writes:
 
-    rust/fixtures/context/tree/             the entries (no index, no access log)
+    rust/fixtures/context/tree/             the entries and fixed access log (no index)
     rust/fixtures/context/expected.json     {"ledger": {...}, "cases": [{"op", "args", "expected"}]}
 
     python3 tools/snapshot_context.py --write
@@ -19,6 +18,8 @@ fixed timestamps so access counts and last-access values do not depend on when t
 
 The live tree comparison is separate (tools/context_live_diff.py).
 """
+from contextlib import contextmanager
+from types import SimpleNamespace
 import argparse
 import json
 import os
@@ -38,6 +39,36 @@ TODAY = "2026-10-31"
 FRESH = "2999-01-01"
 OLD = "2020-01-01"
 
+# Explicit local calendar and Unix clocks avoid dependence on the runner timezone.
+CLOCK = {"local": "2026-10-31T12:00:00", "unix": 1793448000.0}
+
+@contextmanager
+def fixed_clock(clock):
+    real_date, real_datetime, real_time = dunk_context.date, dunk_context.datetime, dunk_context.time
+    local = real_datetime.fromisoformat(clock["local"])
+
+    class FixedDate(real_date):
+        @classmethod
+        def today(cls):
+            return cls(local.year, local.month, local.day)
+
+    class FixedDatetime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            if tz is not None:
+                return cls.fromtimestamp(clock["unix"], tz)
+            return cls.fromisoformat(clock["local"])
+
+    dunk_context.date = FixedDate
+    dunk_context.datetime = FixedDatetime
+    # Replace only dunk_context's module binding, never the process-wide time.time.
+    dunk_context.time = SimpleNamespace(time=lambda: clock["unix"])
+    try:
+        yield
+    finally:
+        dunk_context.date, dunk_context.datetime, dunk_context.time = real_date, real_datetime, real_time
+
+
 DIGEST_ARGS = [
     {"max_bytes": dunk_context.DEFAULT_CAP, "subject": None},
     {"max_bytes": 420, "subject": None},
@@ -51,14 +82,13 @@ SEARCHES = [
 ]
 GETS = ["fact-port-old", "port", "gt-old-rule", "missing-entry"]
 ACCESS_LOG = [
-    # Far-future timestamps stay inside the seven-day comparison window for the fixture's
-    # lifetime; the zero timestamp stays outside it. Stats applies only a lower bound.
-    {"slug": "gt-worktrees", "at": 4000000000.25, "kind": "read", "by": "fixture"},
-    {"slug": "fact-deploy", "at": 4000000001.5, "kind": "read", "by": "fixture"},
-    {"slug": "fact-deploy", "at": 4000000002.75, "kind": "injected", "by": "fixture"},
+    # Exercise the inclusive seven-day boundary and both sides by fractional seconds.
+    {"slug": "gt-worktrees", "at": CLOCK["unix"] - 604800, "kind": "read", "by": "fixture"},
+    {"slug": "fact-deploy", "at": CLOCK["unix"] - 604800.25, "kind": "read", "by": "fixture"},
+    {"slug": "fact-deploy", "at": CLOCK["unix"] - 604799.75, "kind": "injected", "by": "fixture"},
     {"slug": "fact-deploy", "at": 0.0, "kind": "read", "by": "fixture"},
-    {"slug": "prov-cache2", "at": 4000000003.0, "kind": "injected", "by": "fixture"},
-    {"slug": "unknown-slug", "at": 4000000004.0, "kind": "read", "by": "fixture"},
+    {"slug": "prov-cache2", "at": CLOCK["unix"] - 604800.25, "kind": "injected", "by": "fixture"},
+    {"slug": "unknown-slug", "at": CLOCK["unix"] + 1, "kind": "read", "by": "fixture"},
 ]
 
 
@@ -139,24 +169,13 @@ def snapshot():
         access = Path(store.access_path())
         access.write_text("".join(json.dumps(row) + "\n" for row in ACCESS_LOG),
                           encoding="utf-8")
-        real_date = dunk_context.date
-
-        class SnapshotDate(real_date):
-            @classmethod
-            def today(cls):
-                return cls.fromisoformat(TODAY)
-
-        dunk_context.date = SnapshotDate
-        try:
-            cases.append({"op": "stats", "args": {}, "expected": store.stats()})
-            cases.append({"op": "entry_stats", "args": {}, "expected": store.entry_stats()})
-        finally:
-            dunk_context.date = real_date
+        cases.append({"op": "stats", "args": {}, "expected": store.stats()})
+        cases.append({"op": "entry_stats", "args": {}, "expected": store.entry_stats()})
         modified = ["fact-cafe"]
         unrecorded = ["fact-forged", "fact-broken"]
         tree = Path(tmp) / "tree"
         shutil.copytree(root, tree, ignore=shutil.ignore_patterns(".index*"))
-        return {"snapshot_day": TODAY,
+        return {"clock": CLOCK,
                 "ledger": {"modified": modified, "unrecorded": unrecorded},
                 "cases": cases}, tree
     except Exception:
@@ -170,7 +189,8 @@ def main():
     mode.add_argument("--write", action="store_true")
     mode.add_argument("--check", action="store_true")
     opts = parser.parse_args()
-    expected, tree = snapshot()
+    with fixed_clock(CLOCK):
+        expected, tree = snapshot()
     text = json.dumps(expected, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
     target = os.path.join(OUT, "expected.json")
     if opts.write:

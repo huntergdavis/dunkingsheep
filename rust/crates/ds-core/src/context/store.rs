@@ -9,6 +9,85 @@ use regex::Regex;
 
 use super::ContextError;
 
+// Read-side clock injection is thread-local and exists only in unit-test builds.
+#[cfg(test)]
+thread_local! {
+    static READ_CLOCK: std::cell::Cell<Option<(chrono::NaiveDateTime, f64)>> = const { std::cell::Cell::new(None) };
+}
+
+fn read_local_now() -> chrono::NaiveDateTime {
+    #[cfg(test)]
+    if let Some((local, _)) = READ_CLOCK.get() {
+        return local;
+    }
+    chrono::Local::now().naive_local()
+}
+
+fn read_unix_now() -> f64 {
+    #[cfg(test)]
+    if let Some((_, unix)) = READ_CLOCK.get() {
+        return unix;
+    }
+    crate::clock::now_s()
+}
+
+#[cfg(test)]
+pub(super) struct ReadClockGuard {
+    previous: Option<(chrono::NaiveDateTime, f64)>,
+    // A guard must be dropped on the same thread that installed it.
+    _thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+#[cfg(test)]
+pub(super) fn fixed_read_clock(local: chrono::NaiveDateTime, unix: f64) -> ReadClockGuard {
+    ReadClockGuard {
+        previous: READ_CLOCK.replace(Some((local, unix))),
+        _thread_bound: std::marker::PhantomData,
+    }
+}
+
+#[cfg(test)]
+impl Drop for ReadClockGuard {
+    fn drop(&mut self) {
+        READ_CLOCK.set(self.previous);
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn read_clock_restores_after_panic_and_isolates_parallel_threads() {
+    let local = chrono::NaiveDate::from_ymd_opt(2000, 1, 1)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    assert!(READ_CLOCK.get().is_none());
+    {
+        let _outer = fixed_read_clock(local, 1.0);
+        let result = std::panic::catch_unwind(|| {
+            let _inner = fixed_read_clock(local, 2.0);
+            panic!("exercise guard restoration");
+        });
+        assert!(result.is_err());
+        assert_eq!(read_unix_now(), 1.0);
+        let barrier = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            let barrier_ref = &barrier;
+            scope.spawn(move || {
+                assert!(READ_CLOCK.get().is_none());
+                let _other = fixed_read_clock(local, 3.0);
+                barrier_ref.wait();
+                assert_eq!(read_unix_now(), 3.0);
+                assert_eq!(read_local_now(), local);
+                barrier_ref.wait();
+            });
+            barrier.wait();
+            assert_eq!(read_unix_now(), 1.0);
+            barrier.wait();
+        });
+    }
+    assert!(READ_CLOCK.get().is_none());
+}
+
 pub const CLASSES: [&str; 4] = ["ground-truth", "fact", "provisional", "history"];
 pub const AUTHORITIES: [&str; 3] = ["owner", "measured", "agent"];
 /// `TYPES`.
@@ -484,7 +563,7 @@ impl Store {
             "{{\"slug\": {}, \"at\": {:?}, \"kind\": {}, \"by\": {}}}\n",
             py_json_string(slug),
             // `{:?}` keeps the ".0" Python's float repr prints for a whole number
-            crate::clock::now_s(),
+            read_unix_now(),
             py_json_string(kind),
             py_json_string(&by)
         );
@@ -885,7 +964,7 @@ impl Store {
                  context ledger adopt` runs",
             ));
         }
-        let now = chrono::Local::now().naive_local();
+        let now = read_local_now();
         for entry in self.entries() {
             if let Some(error) = &entry.error {
                 problems.push(problem(&entry.slug, error));
@@ -987,7 +1066,7 @@ impl Store {
     /// `stats`: per-class counts and ages, access totals, never-read and never-delivered.
     pub fn stats(&self) -> Result<Value, ContextError> {
         let entries = self.live_entries();
-        let today = chrono::Local::now().date_naive();
+        let today = read_local_now().date();
         let mut counts = Map::new();
         let mut ages = Map::new();
         for class in CLASSES {
@@ -1011,7 +1090,7 @@ impl Store {
             );
         }
         let reads = self.reads();
-        let now = crate::clock::now_s();
+        let now = read_unix_now();
         let window = now - 7.0 * 86400.0;
         let recent = reads
             .iter()
@@ -1145,7 +1224,7 @@ impl Store {
         parts.push("## Relevant".to_string());
         let mut used = parts.join("\n").len();
         let mut omitted = 0;
-        let now = chrono::Local::now().naive_local();
+        let now = read_local_now();
         for entry in others {
             let line = format!(
                 "- [{}/{}] {}",
