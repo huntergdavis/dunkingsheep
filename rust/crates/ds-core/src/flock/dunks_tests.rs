@@ -236,6 +236,14 @@ impl OutboxWake for NoopOutboxWake {
     }
 }
 
+struct RefusingOutboxWake;
+
+impl OutboxWake for RefusingOutboxWake {
+    fn ensure_worker(&self, _flock: &Arc<Flock>, _pane_id: &str) -> Result<(), DunkError> {
+        Err(DunkError::Refused("outbox worker refused".into()))
+    }
+}
+
 fn fire_env(fail_send: bool) -> FireEnv {
     FireEnv {
         panes: vec![json!({"pane_id": "w1:p2", "tab_label": "Agent"})],
@@ -484,6 +492,50 @@ fn queued_fire_uses_live_template_and_updates_only_captured_same_id_dunker() {
     assert_eq!("first {id}", outer.text);
     assert_eq!("d1", outer.source);
     assert_eq!("sent", outer.status);
+}
+
+#[test]
+fn queued_fire_does_not_suppress_non_io_snapshot_or_worker_errors() {
+    let (_dir, flock) = new_flock();
+    load_one_fire_dunk(&flock, "held {id}", None);
+    let flock = Arc::new(flock);
+    let mut env = fire_env(false);
+    env.screen = "Press Enter to confirm or Esc to cancel".into();
+
+    let error = flock
+        .fire(
+            "d1",
+            &mut env,
+            &NoopOutboxWake,
+            Arc::new(OfflineSnapshotStore),
+            || None,
+        )
+        .unwrap_err();
+    assert_eq!("offline", error.to_string());
+    assert_eq!(
+        json!("Queued (typing)"),
+        flock.dunks.get("d1").unwrap()["status"]
+    );
+    assert_eq!(1, super::sends::outbox_lock(&flock.outbox)["w1:p2"].len());
+
+    let (_other_dir, other) = new_flock();
+    load_one_fire_dunk(&other, "held {id}", None);
+    let other = Arc::new(other);
+    let error = other
+        .fire(
+            "d1",
+            &mut env,
+            &RefusingOutboxWake,
+            Arc::new(CapturingSnapshotStore::default()),
+            || None,
+        )
+        .unwrap_err();
+    assert_eq!("outbox worker refused", error.to_string());
+    assert_eq!(
+        json!("Queued (typing)"),
+        other.dunks.get("d1").unwrap()["status"]
+    );
+    assert_eq!(1, super::sends::outbox_lock(&other.outbox)["w1:p2"].len());
 }
 
 #[test]

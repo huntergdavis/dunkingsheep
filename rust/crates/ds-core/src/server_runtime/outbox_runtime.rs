@@ -21,6 +21,10 @@ use tokio::runtime::Handle;
 
 mod dunk_timers;
 use dunk_timers::DunkTimerOwner;
+mod manual_fire;
+use manual_fire::ManualFireOwner;
+#[cfg(test)]
+pub(crate) use manual_fire::{CountdownGate, SubmitGate};
 
 type Factory = dyn Fn() -> Box<dyn Terminal> + Send + Sync + 'static;
 
@@ -29,6 +33,13 @@ impl SnapshotStore for FlockSnapshot {
     fn save(&self, flock: &Flock) -> Result<(), DunkError> {
         flock.save()
     }
+
+    fn save_classified(
+        &self,
+        flock: &Flock,
+    ) -> Result<(), crate::flock::sends::SnapshotSaveFailure> {
+        flock.save_classified()
+    }
 }
 
 #[allow(dead_code)]
@@ -36,6 +47,7 @@ pub(crate) struct OutboxRuntime {
     pub(super) flock: Arc<Flock>,
     pub(super) pool: Arc<OutboxWorkerPool>,
     dunk_timers: DunkTimerOwner,
+    manual_fire: ManualFireOwner,
     // Serializes row and worker-lifetime transitions; timer threads never acquire it.
     dunk_lifecycle: Mutex<()>,
 }
@@ -70,10 +82,16 @@ impl OutboxRuntime {
         });
         let timers = DunkTimerOwner::new(
             Arc::downgrade(&flock),
+            runtime.clone(),
+            Arc::clone(&factory),
+            Arc::downgrade(&pool),
+            reporter,
+        );
+        let manual_fire = ManualFireOwner::new(
+            Arc::downgrade(&flock),
             runtime,
             factory,
             Arc::downgrade(&pool),
-            reporter,
         );
         for handle in flock.dunks.running_handles() {
             timers.start(handle)?;
@@ -82,6 +100,7 @@ impl OutboxRuntime {
             flock,
             pool,
             dunk_timers: timers,
+            manual_fire,
             dunk_lifecycle: Mutex::new(()),
         })
     }
@@ -288,8 +307,45 @@ impl OutboxRuntime {
             }
             self.flock.dunks.list()
         };
-        self.flock.save()?;
+        match self.flock.save_classified() {
+            Ok(()) | Err(crate::flock::sends::SnapshotSaveFailure::Io(_)) => {}
+            Err(crate::flock::sends::SnapshotSaveFailure::Other(error)) => return Err(error),
+        }
         Ok(result)
+    }
+
+    pub(crate) fn fire_dunk(
+        &self,
+        id: &str,
+        countdown_s: i64,
+        wait: bool,
+    ) -> Result<serde_json::Value, DunkError> {
+        self.manual_fire.fire(id, countdown_s, wait)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_manual_fire_test_gates(
+        &self,
+        countdown: Option<Arc<manual_fire::CountdownGate>>,
+        submit: Option<Arc<manual_fire::SubmitGate>>,
+    ) {
+        self.manual_fire.set_countdown_gate(countdown);
+        self.manual_fire.set_submit_gate(submit);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_manual_fire_spawn(&self) {
+        self.manual_fire.fail_next_spawn();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn manual_fire_is_stopped(&self) -> bool {
+        self.manual_fire.is_stopped()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn completed_manual_fires(&self) -> Vec<(String, String)> {
+        self.manual_fire.completed()
     }
 
     pub(crate) fn halt_dunks_aimed_at(&self, panes: &[String]) -> Result<Vec<String>, DunkError> {
@@ -320,12 +376,17 @@ impl OutboxRuntime {
         self.dunk_timers.stop_all();
     }
 
+    pub(crate) fn stop_manual_fire_workers(&self) {
+        self.manual_fire.stop_and_join();
+    }
+
     pub(crate) fn stop_outbox_workers(&self) {
         self.pool.stop_outbox_workers(&self.flock);
     }
 
     #[allow(dead_code)]
     pub(crate) fn stop_and_join(&self) {
+        self.stop_manual_fire_workers();
         self.stop_timer_workers();
         self.stop_outbox_workers();
     }

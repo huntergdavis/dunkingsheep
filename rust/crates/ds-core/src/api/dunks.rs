@@ -1,9 +1,9 @@
 //! T39 add/update/remove dunk API adapters.
 
-use super::{python_bool_arg, python_value_string, truthy, Args, HandlerContext};
+use super::{python_bool_arg, python_int_arg, python_value_string, truthy, Args, HandlerContext};
 use crate::error::DunkError;
 use crate::flock::dunks::{self, AddArgs, UpdateArgs};
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 
 fn target_pane(
     context: &HandlerContext<'_>,
@@ -240,4 +240,34 @@ pub fn h_toggle_dunk(context: &HandlerContext<'_>, args: Args) -> Result<Value, 
         .env
         .toggle_dunk(&python_value_string(id))
         .map(Value::Object)
+}
+
+/// `dunk_api.h_list_dunks`; the shared view keeps the same cache and `fresh` semantics as Python.
+pub fn h_list_dunks(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let status_env = context.env.status_env()?;
+    let view = context.env.view_cache()?.view(
+        status_env,
+        context.self_pane_id(),
+        python_bool_arg(&args, "fresh", false),
+        status_env.view_cache_ttl()?,
+    );
+    Ok(json!({"dunks": view["dunks"].clone()}))
+}
+
+/// `dunk_api.h_stop_all`; runtime owns timer cancellation, persistence, and view invalidation.
+pub fn h_stop_all(context: &HandlerContext<'_>, _args: Args) -> Result<Value, DunkError> {
+    let dunks = context.env.stop_all_dunks()?;
+    Ok(json!({"dunks": dunks}))
+}
+
+/// `dunk_api.h_fire_dunk`; parse Python arguments before runtime lookup or target validation.
+pub fn h_fire_dunk(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let countdown_s = python_int_arg(&args, "countdown_s", 0)?;
+    let wait = python_bool_arg(&args, "wait", true);
+    let id = args
+        .get("id")
+        .ok_or_else(|| DunkError::Refused("'id'".into()))?;
+    context
+        .env
+        .fire_dunk(&python_value_string(id), countdown_s, wait)
 }

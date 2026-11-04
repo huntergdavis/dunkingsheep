@@ -17,7 +17,8 @@ mod metrics;
 pub use metrics::h_metrics;
 mod dunks;
 pub use dunks::{
-    h_add_dunk, h_remove_dunk, h_start_dunk, h_stop_dunk, h_toggle_dunk, h_update_dunk,
+    h_add_dunk, h_fire_dunk, h_list_dunks, h_remove_dunk, h_start_dunk, h_stop_all, h_stop_dunk,
+    h_toggle_dunk, h_update_dunk,
 };
 mod respawn;
 pub use respawn::h_respawn_pane;
@@ -173,6 +174,18 @@ pub trait CommandEnv: PaneInfoEnv {
     fn toggle_dunk(&self, _id: &str) -> Result<serde_json::Map<String, Value>, DunkError> {
         Err(DunkError::Refused(
             "dunk lifecycle adapter is not wired".into(),
+        ))
+    }
+
+    fn stop_all_dunks(&self) -> Result<Vec<serde_json::Map<String, Value>>, DunkError> {
+        Err(DunkError::Refused(
+            "dunk lifecycle adapter is not wired".into(),
+        ))
+    }
+
+    fn fire_dunk(&self, _id: &str, _countdown_s: i64, _wait: bool) -> Result<Value, DunkError> {
+        Err(DunkError::Refused(
+            "manual dunk fire adapter is not wired".into(),
         ))
     }
 
@@ -807,6 +820,13 @@ impl Dispatcher {
         self.register("start_dunk", h_start_dunk);
         self.register("stop_dunk", h_stop_dunk);
         self.register("toggle_dunk", h_toggle_dunk);
+    }
+
+    /// Register only the T39 stop-all, manual-fire and list-dunks handlers.
+    pub fn register_stop_all_fire_list_dunks(&mut self) {
+        self.register("stop_all", h_stop_all);
+        self.register("fire_dunk", h_fire_dunk);
+        self.register("list_dunks", h_list_dunks);
     }
 
     /// `dunk_api.dispatch(flock, name, args, self_pane_id)`, with the acting pane read only from
