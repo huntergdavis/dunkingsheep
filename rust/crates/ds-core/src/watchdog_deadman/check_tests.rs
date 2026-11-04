@@ -105,7 +105,11 @@ fn test_5_retry_after_a_failed_direct_write_makes_exactly_one_row() {
     let first = check(&f.options(NOW), down).unwrap();
     assert_eq!(first["alerted"], false);
     let native = python_direct_error(&f.inbox);
-    let expected = format!("no daemon (ConnectionRefusedError: refused); direct write failed: {}: {}", native["name"].as_str().unwrap(), native["message"].as_str().unwrap());
+    let expected = format!(
+        "no daemon (ConnectionRefusedError: refused); direct write failed: {}: {}",
+        native["name"].as_str().unwrap(),
+        native["message"].as_str().unwrap()
+    );
     assert_eq!(first["delivery_error"], expected);
     assert_eq!(load(&f.status).unwrap()["error"], expected);
     assert!(!f.state.exists());
@@ -269,8 +273,7 @@ fn python_direct_error(path: &Path) -> Value {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let python: Value = serde_json::from_slice(&output.stdout).unwrap();
-    python
+    serde_json::from_slice(&output.stdout).unwrap()
 }
 
 #[test]
@@ -302,9 +305,7 @@ fn primitive_sqlite_and_readback_errors_match_actual_python_oracle() {
         if scenario == "readback" {
             let connection = rusqlite::Connection::open(&f.inbox).unwrap();
             connection
-                .execute_batch(
-                    "DELETE FROM messages; DELETE FROM counters WHERE name='message';",
-                )
+                .execute_batch("DELETE FROM messages; DELETE FROM counters WHERE name='message';")
                 .unwrap();
         }
         assert_eq!(rust, python_direct_error(&f.inbox), "{scenario}");

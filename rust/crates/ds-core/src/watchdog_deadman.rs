@@ -77,19 +77,26 @@ impl DirectWriteError {
         let Some(context) = context else {
             return Self::store(legacy);
         };
-        use rusqlite::ErrorCode;
+        // CPython Modules/_sqlite/util.c:get_exception_class (3.12).
+        use rusqlite::ffi::*;
         let name = match context.code {
-            ErrorCode::ConstraintViolation | ErrorCode::TypeMismatch => "IntegrityError",
-            ErrorCode::OutOfMemory => "MemoryError",
-            ErrorCode::ApiMisuse => "InterfaceError",
-            ErrorCode::InternalMalfunction => "InternalError",
-            ErrorCode::DatabaseCorrupt | ErrorCode::NotADatabase => "DatabaseError",
-            ErrorCode::TooBig => "DataError",
-            _ => "OperationalError",
+            SQLITE_CONSTRAINT | SQLITE_MISMATCH => "IntegrityError",
+            SQLITE_NOMEM => "MemoryError",
+            SQLITE_MISUSE | SQLITE_RANGE => "InterfaceError",
+            SQLITE_INTERNAL | SQLITE_NOTFOUND => "InternalError",
+            SQLITE_TOOBIG => "DataError",
+            SQLITE_ERROR | SQLITE_PERM | SQLITE_ABORT | SQLITE_BUSY | SQLITE_LOCKED
+            | SQLITE_READONLY | SQLITE_INTERRUPT | SQLITE_IOERR | SQLITE_FULL | SQLITE_CANTOPEN
+            | SQLITE_PROTOCOL | SQLITE_EMPTY | SQLITE_SCHEMA => "OperationalError",
+            _ => "DatabaseError",
         };
         Self {
             name,
-            message: context.message,
+            message: if context.code == SQLITE_NOMEM {
+                String::new()
+            } else {
+                context.message
+            },
             legacy,
         }
     }

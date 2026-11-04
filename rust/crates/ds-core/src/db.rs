@@ -50,7 +50,7 @@ pub const DEFAULT_READ_POOL: usize = 4;
 /// propagated to arbitrary async tasks: SyncWriter runs its actor on the caller's thread.
 #[derive(Clone, Debug)]
 pub(crate) struct SqliteErrorContext {
-    pub code: rusqlite::ErrorCode,
+    pub code: i32,
     pub message: String,
 }
 thread_local! {
@@ -86,7 +86,7 @@ pub fn map_sqlite(error: rusqlite::Error) -> DunkError {
         SQLITE_ERROR_CONTEXT.with(|slot| {
             if let Some(context) = slot.borrow_mut().as_mut() {
                 *context = Some(SqliteErrorContext {
-                    code: inner.code,
+                    code: inner.extended_code & 0xff,
                     message: message.clone().unwrap_or_else(|| error.to_string()),
                 });
             }
