@@ -70,6 +70,19 @@ fn refused<T>(text: String) -> Result<T, DunkError> {
     Err(DunkError::Refused(text))
 }
 
+/// Convert Python's floating observation window to an optional monotonic deadline.
+/// `None` means the requested window is too large for `Instant`/`Duration` to represent;
+/// it remains open until the verification loop observes a real result, matching Python's
+/// finite-large and positive-infinity deadlines without clamping them to a guessed limit.
+fn verification_deadline(verify_s: f64) -> Option<Instant> {
+    if verify_s.is_nan() {
+        // Python's `now + NaN` is NaN, so `now < deadline` is false immediately.
+        return Some(Instant::now());
+    }
+    let duration = Duration::try_from_secs_f64(verify_s.max(0.0)).ok()?;
+    Instant::now().checked_add(duration)
+}
+
 /// Python `repr(str)`.
 fn repr_str(s: &str) -> String {
     let quote = if s.contains('\'') && !s.contains('"') {
@@ -164,12 +177,12 @@ pub fn verify_agent_started(
     };
     let name_r = repr_str(name);
     let mut watch_procs = kind.is_some();
-    let deadline = Instant::now() + Duration::from_secs_f64(verify_s.max(0.0));
+    let deadline = verification_deadline(verify_s);
     let mut captured = String::new();
     let mut pane_pid: Option<i64> = None;
     let mut since_start: Option<i64> = None;
     let mut seen: Vec<i64> = Vec::new();
-    while Instant::now() < deadline {
+    while deadline.is_none_or(|deadline| Instant::now() < deadline) {
         let Some(pane) = backend.get_pane(pane_id) else {
             let tail = if captured.trim().is_empty() {
                 String::new()

@@ -38,6 +38,7 @@ pub(crate) fn production_handlers() -> Dispatcher {
     handlers.register_metrics();
     handlers.register_send_text_keys_flush_box();
     handlers.register_clear_box_delivery_capability();
+    handlers.register_respawn_pane();
     handlers
 }
 
@@ -379,6 +380,7 @@ mod tests {
             "clear_box",
             "delivery",
             "delivery_capability",
+            "respawn_pane",
             "report_run",
             "report_list",
             "owner_conversation",
@@ -447,6 +449,39 @@ mod tests {
             "duplicate registration attempt"
         );
     }
+
+    #[test]
+    fn production_dispatcher_routes_respawn_to_the_guarded_handler() {
+        let (_dir, services) = make_services(
+            "respawn-route",
+            Arc::new(|| Box::new(FakeTerminal::new())),
+            None,
+        );
+        let dispatcher = services.production_dispatcher();
+        let error = dispatcher
+            .dispatch(
+                "respawn_pane",
+                &json!({
+                    "pane": "w1:p1",
+                    "expected_pid": 1101,
+                    "expected_start": "unused",
+                    "argv": ["custom-agent"],
+                    "rollback_argv": ["old-custom-agent"],
+                    "confirm_idle": 0
+                }),
+                &request("w2:p2"),
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("respawn-pane requires --confirm-idle"),
+            "production route did not reach the accepted guard: {error}"
+        );
+        dispatcher.close();
+        services.shutdown();
+    }
+
     #[test]
     fn assembled_dispatcher_executes_real_identity_task_and_permission_paths() {
         let observations = Arc::new(Mutex::new(SendObservations::default()));

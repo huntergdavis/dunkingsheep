@@ -56,6 +56,7 @@ use crate::terminal::tmux::TmuxBackend;
 use crate::terminal::Terminal;
 
 mod reaper;
+mod respawn_api;
 
 /// A request-scoped adapter borrowed on the server's existing connection thread.
 ///
@@ -433,6 +434,15 @@ impl crate::api::CommandEnv for RequestRuntimeAdapter<'_> {
             runtime: self.runtime,
         };
         operation(&mut adapter)
+    }
+
+    fn with_respawn_pane_env(
+        &self,
+        operation: &mut dyn FnMut(
+            &crate::flock::respawn::RespawnServices<'_>,
+        ) -> Result<Value, DunkError>,
+    ) -> Result<Value, DunkError> {
+        RequestRuntimeAdapter::with_respawn_pane_env(self, operation)
     }
 
     fn next_jobs(&self) -> Result<&crate::tasks::next_job_runtime::NextJobs, DunkError> {

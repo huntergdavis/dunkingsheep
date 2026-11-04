@@ -1848,6 +1848,90 @@ fn refusal(result: Result<Value, DunkError>) -> String {
 }
 
 #[test]
+fn h_respawn_pane_matches_python() {
+    let (_dir, flock) = flock();
+    let env = TestEnv::default();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_respawn_pane();
+    let request = RequestCtx {
+        self_pane_id: Some("w1:p1".into()),
+        ..RequestCtx::default()
+    };
+    let gate = FixedRole("owner", true);
+
+    let invalid_argv = json!({
+        "pane": "w1:p2",
+        "expected_pid": 42,
+        "expected_start": "start",
+        "argv": "codex",
+        "confirm_idle": true,
+        "rollback_argv": []
+    });
+    assert_eq!(
+        refusal(dispatch_with_env(
+            &dispatcher,
+            &flock,
+            &gate,
+            "respawn_pane",
+            args(invalid_argv),
+            &request,
+            &env,
+        )),
+        "respawn_pane requires argv as a list of strings"
+    );
+
+    let invalid_rollback = json!({
+        "pane": "w1:p2",
+        "expected_pid": 42,
+        "expected_start": "start",
+        "argv": ["codex"],
+        "confirm_idle": true,
+        "rollback_argv": []
+    });
+    assert_eq!(
+        refusal(dispatch_with_env(
+            &dispatcher,
+            &flock,
+            &gate,
+            "respawn_pane",
+            args(invalid_rollback),
+            &request,
+            &env,
+        )),
+        "respawn_pane rollback_argv must be a list of strings"
+    );
+}
+
+#[test]
+fn respawn_pane_registers_one_handler_and_refuses_without_runtime_provider() {
+    let (_dir, flock) = flock();
+    let env = TestEnv::default();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_respawn_pane();
+    assert_eq!(dispatcher.registration_attempts(), &["respawn_pane"]);
+    let request = RequestCtx {
+        self_pane_id: Some("w1:p1".into()),
+        ..RequestCtx::default()
+    };
+    let error = refusal(dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("owner", true),
+        "respawn_pane",
+        args(json!({
+            "pane": "w1:p2",
+            "expected_pid": 42,
+            "expected_start": "start",
+            "argv": ["codex"],
+            "confirm_idle": true
+        })),
+        &request,
+        &env,
+    ));
+    assert_eq!(error, "respawn pane adapter is not wired");
+}
+
+#[test]
 fn h_help_matches_python() {
     let dir = tempfile::tempdir().expect("tempdir");
     let flock = Flock::new(
