@@ -91,17 +91,16 @@ fn recorded_context_steps_run_end_to_end_through_the_parser_and_dispatch() {
 #[test]
 fn commands_without_a_body_say_so_and_exit_1() {
     // The Rust TUI route is wired; serve remains outside the ported CLI surface.
-    for argv in [vec!["dunkingsheep", "serve"]] {
-        let ns = try_parse(&argv).unwrap();
-        let out = run(&ns);
-        assert_eq!(1, out.code, "{argv:?}");
-        assert_eq!("", out.stdout);
-        assert!(
-            out.stderr.contains("is parsed but not ported yet"),
-            "{}",
-            out.stderr
-        );
-    }
+    let argv = vec!["dunkingsheep", "serve"];
+    let ns = try_parse(&argv).unwrap();
+    let out = run(&ns);
+    assert_eq!(1, out.code, "{argv:?}");
+    assert_eq!("", out.stdout);
+    assert!(
+        out.stderr.contains("is parsed but not ported yet"),
+        "{}",
+        out.stderr
+    );
 }
 
 /// `secrets-check` through argv -> parser -> dispatch, against real temporary git repositories.
