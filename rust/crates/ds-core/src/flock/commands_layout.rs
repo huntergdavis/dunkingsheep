@@ -111,6 +111,13 @@ pub trait LayoutBackend {
 }
 
 /// `submit_text(pane_id, command) -> (ran, message)`.
+pub type CreateOperation<'a> = dyn FnMut(
+        &mut dyn LayoutBackend,
+        &dyn super::panes::PaneInfoEnv,
+        RawSubmit<'_>,
+    ) -> Result<Value, DunkError>
+    + 'a;
+
 pub type RawSubmit<'a> = &'a mut dyn FnMut(&str, &Value) -> Result<(bool, String), DunkError>;
 
 pub type Submit<'a> = &'a mut dyn FnMut(&str, &str) -> (bool, String);

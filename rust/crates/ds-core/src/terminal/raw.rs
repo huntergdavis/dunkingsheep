@@ -71,8 +71,17 @@ pub(crate) fn text_chunks(value: &Value) -> Result<Vec<String>, DunkError> {
             .collect()),
         Value::Object(v) if v.is_empty() => Ok(vec![]),
         Value::Object(v) => Err(DunkError::Refused(format!(
-            "slice(0, {}, None)",
-            v.len().min(super::tmux::SEND_TEXT_CHUNK_CHARS)
+            "slice({}, {}, None)",
+            if v.len() > super::tmux::SEND_TEXT_CHUNK_CHARS {
+                super::tmux::SEND_TEXT_CHUNK_CHARS - 1
+            } else {
+                0
+            },
+            if v.len() > super::tmux::SEND_TEXT_CHUNK_CHARS {
+                super::tmux::SEND_TEXT_CHUNK_CHARS + 1
+            } else {
+                v.len()
+            }
         ))),
         other => {
             let name = match other {

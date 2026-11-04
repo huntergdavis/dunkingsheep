@@ -269,11 +269,49 @@ impl Terminal for TmuxBackend {
         cwd: Option<&str>,
         focus: bool,
     ) -> Result<Workspace, TerminalError> {
-        let result = self.create_workspace_raw(&json!(label), &json!(cwd), focus)?;
-        if focus {
-            self.focus("workspace", &result.workspace_id)?;
+        let name = safe_name(label.unwrap_or("dunkingsheep"), "dunkingsheep");
+        let mut args = vec!["new-session", "-d", "-s", name.as_str()];
+        if let Some(cwd) = cwd {
+            args.extend(["-c", cwd]);
         }
-        Ok(result)
+        let result = self.run(&args)?;
+        if result.code != 0 {
+            return Err(TerminalError::refused(
+                result.message("tmux new-session failed"),
+            ));
+        }
+        let sessions = self.list_workspaces();
+        let created = sessions
+            .iter()
+            .find(|workspace| workspace.label == name)
+            .ok_or_else(|| {
+                TerminalError::refused("new-session succeeded but the session list did not show it")
+            })?;
+        self.registry.remember(
+            "workspace",
+            &created.workspace_id,
+            json!({"label":label.unwrap_or(&name)}),
+        )?;
+        if let Some(tab) = self
+            .list_tabs()
+            .iter()
+            .find(|t| t.workspace_id == created.workspace_id)
+        {
+            self.registry
+                .remember("tab", &tab.tab_id, json!({"label":tab.label}))?;
+        }
+        if let Some(pane) = self
+            .list_panes()
+            .iter()
+            .find(|p| p.session_id == created.workspace_id)
+        {
+            self.registry
+                .remember("pane", &pane.pane_id, json!({"label":pane.label}))?;
+        }
+        if focus {
+            self.focus("workspace", &created.workspace_id)?;
+        }
+        Ok(created.clone())
     }
 
     fn create_workspace_raw(
@@ -303,7 +341,7 @@ impl Terminal for TmuxBackend {
             .iter()
             .find(|workspace| workspace.label == name)
             .ok_or_else(|| {
-                TerminalError::refused("new-session succeeded but the session list did not show it")
+                TerminalError::refused("tmux created the session but it is not visible")
             })?;
         self.registry.remember(
             "workspace",
@@ -337,30 +375,14 @@ impl Terminal for TmuxBackend {
         cwd: Option<&str>,
         focus: bool,
     ) -> Result<Tab, TerminalError> {
-        let result = self.create_tab_raw(workspace_id, &json!(label), &json!(cwd), focus)?;
-        if focus {
-            self.focus("tab", &result.tab_id)?;
-        }
-        Ok(result)
-    }
-
-    fn create_tab_raw(
-        &mut self,
-        workspace_id: Option<&str>,
-        label: &serde_json::Value,
-        cwd: &serde_json::Value,
-        focus: bool,
-    ) -> Result<Tab, TerminalError> {
-        let label_text = super::raw::optional(label);
-        let cwd_text = super::raw::optional(cwd);
-        let name = safe_name(label_text.as_deref().unwrap_or("tab"), "tab");
+        let name = safe_name(label.unwrap_or("tab"), "tab");
         let format = format!("#{{window_id}}{PANE_SEP}#{{pane_id}}");
         let mut args = vec!["new-window", "-d", "-P", "-F", &format];
         if let Some(workspace_id) = workspace_id {
             args.extend(["-t", workspace_id]);
         }
         args.extend(["-n", name.as_str()]);
-        if let Some(cwd) = cwd_text.as_deref() {
+        if let Some(cwd) = cwd {
             args.extend(["-c", cwd]);
         }
         let result = self.run(&args)?;
@@ -386,6 +408,77 @@ impl Terminal for TmuxBackend {
                     "new-window created {tab_id} but the tab list did not show it"
                 ))
             })?;
+        self.registry
+            .remember("tab", &tab.tab_id, json!({"label":label.unwrap_or(&name)}))?;
+        self.registry
+            .remember("pane", &pane.pane_id, json!({"label":pane.label}))?;
+        if focus {
+            self.focus("tab", &tab.tab_id)?;
+        }
+        Ok(tab)
+    }
+
+    fn create_tab_raw(
+        &mut self,
+        workspace_id: Option<&str>,
+        label: &serde_json::Value,
+        cwd: &serde_json::Value,
+        focus: bool,
+    ) -> Result<Tab, TerminalError> {
+        let target = workspace_id
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+            .or_else(|| {
+                self.environment
+                    .get("HERDR_PANE_ID")
+                    .filter(|id| !id.is_empty())
+                    .or_else(|| {
+                        self.environment
+                            .get("TMUX_PANE")
+                            .filter(|id| !id.is_empty())
+                    })
+                    .and_then(|id| self.get_pane(id))
+                    .map(|pane| pane.session_id)
+            })
+            .or_else(|| {
+                self.list_workspaces()
+                    .first()
+                    .map(|workspace| workspace.workspace_id.clone())
+            })
+            .ok_or_else(|| TerminalError::refused("no tmux session to create a tab in"))?;
+        let label_text = super::raw::optional(label);
+        let cwd_text = super::raw::optional(cwd);
+        let name = safe_name(label_text.as_deref().unwrap_or("tab"), "dunkingsheep");
+        let format = format!("#{{window_id}}{PANE_SEP}#{{pane_id}}");
+        let mut args = vec!["new-window", "-d", "-P", "-F", &format];
+        args.extend(["-t", &target]);
+        args.extend(["-n", name.as_str()]);
+        if let Some(cwd) = cwd_text.as_deref() {
+            args.extend(["-c", cwd]);
+        }
+        let result = self.run(&args)?;
+        if result.code != 0 {
+            return Err(TerminalError::refused(
+                result.message("tmux new-window failed"),
+            ));
+        }
+        let mut fields = result.stdout.trim().split(PANE_SEP);
+        let tab_id = fields.next().unwrap_or_default().to_owned();
+        let pane_id = fields.next().unwrap_or_default();
+        let tab = self
+            .list_tabs()
+            .into_iter()
+            .find(|tab| tab.tab_id == tab_id);
+        let pane = if pane_id.is_empty() {
+            None
+        } else {
+            self.get_pane(pane_id)
+        };
+        let (Some(tab), Some(pane)) = (tab, pane) else {
+            return Err(TerminalError::refused(
+                "tmux created the window but it is not visible",
+            ));
+        };
         self.registry.remember(
             "tab",
             &tab.tab_id,
@@ -455,7 +548,7 @@ impl Terminal for TmuxBackend {
         }
         let new_pane = result.stdout.trim().to_string();
         let pane = self.get_pane(&new_pane).ok_or_else(|| {
-            TerminalError::refused(format!("split created {new_pane} but it is not listed"))
+            TerminalError::refused("tmux created the split but it is not visible")
         })?;
         self.registry
             .remember("pane", &pane.pane_id, json!({"label":pane.label}))?;

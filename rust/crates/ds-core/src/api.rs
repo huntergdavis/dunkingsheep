@@ -91,11 +91,7 @@ pub trait CommandEnv: PaneInfoEnv {
     /// Borrow the request's layout and pane services, with confirmed command submission.
     fn with_layout_create(
         &self,
-        _operation: &mut dyn FnMut(
-            &mut dyn crate::flock::commands_layout::LayoutBackend,
-            &dyn PaneInfoEnv,
-            crate::flock::commands_layout::RawSubmit<'_>,
-        ) -> Result<Value, DunkError>,
+        _operation: &mut crate::flock::commands_layout::CreateOperation<'_>,
     ) -> Result<Value, DunkError> {
         Err(DunkError::Refused(
             "layout create adapter is not wired".into(),

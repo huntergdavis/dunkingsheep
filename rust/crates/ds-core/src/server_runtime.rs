@@ -466,11 +466,7 @@ impl crate::api::CommandEnv for RequestRuntimeAdapter<'_> {
 
     fn with_layout_create(
         &self,
-        operation: &mut dyn FnMut(
-            &mut dyn crate::flock::commands_layout::LayoutBackend,
-            &dyn PaneInfoEnv,
-            crate::flock::commands_layout::RawSubmit<'_>,
-        ) -> Result<Value, DunkError>,
+        operation: &mut crate::flock::commands_layout::CreateOperation<'_>,
     ) -> Result<Value, DunkError> {
         self.with_request_layout_create(operation)
     }

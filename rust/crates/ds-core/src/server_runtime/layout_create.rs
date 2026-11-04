@@ -2,18 +2,16 @@
 
 use super::{RequestRuntimeAdapter, TerminalCallAdapter};
 use crate::error::DunkError;
+#[cfg(test)]
 use crate::flock::commands_layout::{LayoutBackend, RawSubmit};
+#[cfg(test)]
 use crate::flock::panes::PaneInfoEnv;
 use serde_json::Value;
 
 impl RequestRuntimeAdapter<'_> {
     pub(super) fn with_request_layout_create(
         &self,
-        operation: &mut dyn FnMut(
-            &mut dyn LayoutBackend,
-            &dyn PaneInfoEnv,
-            RawSubmit<'_>,
-        ) -> Result<Value, DunkError>,
+        operation: &mut crate::flock::commands_layout::CreateOperation<'_>,
     ) -> Result<Value, DunkError> {
         let mut layout = RequestRuntimeAdapter::new(
             self.terminal.flock,

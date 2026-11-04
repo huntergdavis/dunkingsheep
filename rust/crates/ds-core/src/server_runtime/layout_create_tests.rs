@@ -12,14 +12,12 @@ use serde_json::json;
 use std::sync::{Arc, Mutex};
 use tokio::runtime::Builder;
 
-fn make_services(
-    fail_layout: Option<&str>,
-    available: bool,
-) -> (
+type LayoutFixture = (
     tempfile::TempDir,
     Arc<RuntimeServices>,
     Arc<Mutex<Vec<Value>>>,
-) {
+);
+fn make_services(fail_layout: Option<&str>, available: bool) -> LayoutFixture {
     let dir = tempfile::tempdir().unwrap();
     let runtime = Builder::new_multi_thread().enable_all().build().unwrap();
     let tasks = Arc::new(
