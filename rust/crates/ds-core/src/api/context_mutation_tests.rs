@@ -349,6 +349,12 @@ fn context_add_and_promote_honor_captured_ledger_override() {
     let mut dispatcher = Dispatcher::new();
     dispatcher.register_context_mutations();
     let first = dispatch_context_command(&dispatcher,&flock,&env,"worker","w1:p2","context_add",json!({"body":"first\r\nsecond", "cls":"fact", "subject":"override", "stated":"2026-11-04"})).unwrap();
+    assert!(
+        std::fs::read(first["path"].as_str().unwrap())
+            .unwrap()
+            .contains(&b'\r'),
+        "initial add keeps raw bytes"
+    );
     assert!(custom.exists());
     assert!(!dir.path().join("config/context-ledger.db").exists());
     let article_hash = |article: &Value| {
@@ -376,6 +382,14 @@ fn context_add_and_promote_honor_captured_ledger_override() {
         recorded_hash(&custom, promoted["slug"].as_str().unwrap()),
         article_hash(&promoted)
     );
+    for article in [&first, &promoted] {
+        assert!(
+            !std::fs::read(article["path"].as_str().unwrap())
+                .unwrap()
+                .contains(&b'\r'),
+            "Python rewrites predecessor and promoted article with LF"
+        );
+    }
     // Actual Python oracle: the key is (store, slug), not (store, class, slug).
     // Same-day promotion therefore overwrites the fact's row with the rule hash.
     let rows: i64 = rusqlite::Connection::open(&custom)
@@ -513,9 +527,118 @@ fn context_postwrite_ledger_hashes_match_actual_python_newline_oracle() {
         assert!(raw.contains('\r'), "writing itself must not normalize");
         assert_ne!(crate::context::ledger::sha(&raw), first_sha);
         dispatch_context_command(&dispatcher,&flock,&env,"worker","w1:p2","context_add",json!({"body":"replacement","cls":"fact","subject":format!("{name}-replacement"),"stated":"2026-11-04","supersedes":first["slug"]})).unwrap();
+        assert!(
+            !std::fs::read(first["path"].as_str().unwrap())
+                .unwrap()
+                .contains(&b'\r'),
+            "resolved predecessor body uses Python universal newlines before rendering"
+        );
         assert_eq!(
             recorded_hash(&custom, first["slug"].as_str().unwrap()),
             old_sha
         );
     }
+}
+
+#[test]
+fn context_owner_rule_with_cr_newlines_stays_verified_checked_and_in_digest() {
+    use crate::context::{
+        ledger::{Ledger, Status},
+        store::Store,
+    };
+    for body in ["first\r\nsecond", "first\rsecond"] {
+        let dir = tempfile::tempdir().unwrap();
+        let flock = context_flock(dir.path());
+        let custom = dir.path().join("custom.db");
+        startup_with_ledger(&flock, dir.path(), Some(custom.to_str().unwrap()));
+        let env = TestEnv::default();
+        let mut dispatcher = Dispatcher::new();
+        dispatcher.register_context_mutations();
+        let added=dispatch_context_command(&dispatcher,&flock,&env,"owner","w1:p1","context_add",json!({"body":body,"cls":"ground-truth","subject":"new-rule","type":"rule","authority":"owner","stated":"2026-11-04","recheck_after":"90d"})).unwrap();
+        let raw = std::fs::read_to_string(added["path"].as_str().unwrap()).unwrap();
+        assert!(raw.contains('\r'), "initial writes remain raw");
+        // Literal actual Python3.14 Store/SQLite oracle, both CR forms.
+        assert_eq!(
+            recorded_hash(&custom, added["slug"].as_str().unwrap()),
+            "d090fd530d378a24c0b7a8f273f698d06544210f5a8554a9f4dc1b4db622f642"
+        );
+        let root = dir.path().join("config/context");
+        let store = Store {
+            root: root.clone(),
+            scope: "global",
+        };
+        let entry = store.find(added["slug"].as_str().unwrap()).unwrap();
+        assert_eq!(entry.body, "first\nsecond");
+        assert_eq!(
+            store.resolve(&entry.slug).unwrap().unwrap().body,
+            "first\nsecond"
+        );
+        let mut ledger = Ledger::new(Some(&custom));
+        assert!(store.verified(&entry, &mut ledger));
+        let check = store.check(&mut ledger).unwrap();
+        assert_eq!(check["problems"], json!([]));
+        assert_eq!(check["refusals"], json!([]));
+        // Passing raw text directly must NOT be normalized by Ledger.status.
+        assert_eq!(
+            ledger.status(&root, &entry.slug, &raw).unwrap(),
+            Status::Modified
+        );
+        let now = chrono::NaiveDate::from_ymd_opt(2026, 11, 4)
+            .unwrap()
+            .and_hms_opt(12, 0, 0)
+            .unwrap();
+        // Explicit project selection avoids any ambient/global store lookup.
+        let digest = crate::context::digest::digest_both(
+            Some(&root),
+            Some("project"),
+            8192,
+            None,
+            false,
+            &mut ledger,
+            now,
+        );
+        assert!(digest.contains("## Ground truths (1)"));
+        assert!(digest.contains("- [new-rule] first"));
+        assert!(!digest.contains("NOT injected"));
+        assert_eq!(
+            std::fs::read_to_string(added["path"].as_str().unwrap()).unwrap(),
+            raw,
+            "read consumers do not rewrite the raw initial article"
+        );
+    }
+}
+
+#[test]
+fn context_typed_write_and_adopt_use_same_file_provenance_read_boundary() {
+    use crate::context::{
+        ledger::Ledger,
+        store::{AddArgs, Store},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("context");
+    let store = Store::new(Some(&root), false);
+    let mut ledger = Ledger::new(Some(&dir.path().join("ledger.db")));
+    let added = store
+        .add(
+            "first\r\nsecond",
+            &AddArgs {
+                cls: "ground-truth",
+                subject: "typed",
+                type_: "rule",
+                authority: Some("owner"),
+                source: "",
+                stated: Some("2026-11-04"),
+                recheck_after: Some("90d"),
+                ..Default::default()
+            },
+            Some(&mut ledger),
+        )
+        .unwrap();
+    let entry = store.find(&added.slug).unwrap();
+    assert!(store.verified(&entry, &mut ledger));
+    assert_eq!(store.check(&mut ledger).unwrap()["refusals"], json!([]));
+    let mut adopted = Ledger::new(Some(&dir.path().join("adopted.db")));
+    store.adopt(&mut adopted, "owner").unwrap();
+    assert!(store.verified(&entry, &mut adopted));
+    assert!(std::fs::read(&added.path).unwrap().contains(&b'\r'));
 }

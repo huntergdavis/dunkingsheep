@@ -175,9 +175,7 @@ impl Store {
 /// universal newlines. Keep this fallible read after the write and before SQL;
 /// hashing the pre-write rendering loses both the bytes read and this boundary.
 fn read_written_text(path: &Path) -> Result<String, DunkError> {
-    Ok(fs::read_to_string(path)?
-        .replace("\r\n", "\n")
-        .replace('\r', "\n"))
+    Ok(crate::context::read_text(path)?)
 }
 
 #[cfg(test)]
