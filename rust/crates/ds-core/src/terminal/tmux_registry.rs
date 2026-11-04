@@ -260,6 +260,28 @@ impl Registry {
         collection_mut(&mut data, kind)?.insert(id.into(), Value::Object(record));
         self.save(&data)
     }
+    pub fn forget_raw(&self, kind: &str, id: &str) -> Result<(), RegistryError> {
+        let mut data = self.load_raw()?;
+        let key = key(kind).map_err(RegistryError::Configuration)?;
+        let value = data.get_mut(key).expect("load supplies collections");
+        let ty = python_type(value);
+        let collection = value.as_object_mut().ok_or_else(|| RegistryError::Shape {
+            category: if ty == "list" {
+                "TypeError"
+            } else {
+                "AttributeError"
+            },
+            message: if ty == "list" {
+                "pop expected at most 1 argument, got 2".into()
+            } else {
+                format!("'{ty}' object has no attribute 'pop'")
+            },
+        })?;
+        if collection.remove(id).is_some_and(|v| !v.is_null()) {
+            self.save_raw(&data)?;
+        }
+        Ok(())
+    }
     pub fn forget(&self, kind: &str, id: &str) -> Result<(), TerminalError> {
         let mut data = self.load()?;
         if collection_mut(&mut data, kind)?
@@ -269,6 +291,45 @@ impl Registry {
             self.save(&data)?;
         }
         Ok(())
+    }
+    pub fn managed_raw(&self, kind: &str, id: &str, panes: &[Pane]) -> Result<bool, RegistryError> {
+        fn contains(value: &Value, id: &str) -> Result<bool, RegistryError> {
+            // Keep the canonical ownership guard: malformed collections never confer authority.
+            let map = value.as_object().ok_or_else(|| {
+                RegistryError::Configuration(TerminalError::refused(
+                    "tmux registry collection must be an object",
+                ))
+            })?;
+            Ok(map.contains_key(id))
+        }
+        let data = self.load_raw()?;
+        let key = key(kind).map_err(RegistryError::Configuration)?;
+        if !contains(&data[key], id)? {
+            return Ok(false);
+        }
+        if kind == "pane" {
+            return Ok(true);
+        }
+        let children: Vec<_> = panes
+            .iter()
+            .filter(|p| {
+                if kind == "tab" {
+                    p.window_id == id
+                } else {
+                    p.session_id == id
+                }
+            })
+            .collect();
+        // Preserve the accepted destructive-operation guard: empty inventories fail closed.
+        if children.is_empty() {
+            return Ok(false);
+        }
+        for pane in children {
+            if !contains(&data["panes"], &pane.pane_id)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
     pub fn managed(&self, kind: &str, id: &str, panes: &[Pane]) -> Result<bool, TerminalError> {
         let data = self.load()?;

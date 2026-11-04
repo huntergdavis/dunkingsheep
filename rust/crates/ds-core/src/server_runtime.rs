@@ -16,6 +16,7 @@ mod inbox_stores;
 mod keypress;
 mod layout;
 mod layout_agent;
+mod layout_close;
 mod layout_create;
 mod outbox_messages;
 mod outbox_runtime;
@@ -484,6 +485,10 @@ impl PaneInfoEnv for RequestRuntimeAdapter<'_> {
 }
 
 impl crate::api::CommandEnv for RequestRuntimeAdapter<'_> {
+    fn layout_close_env(&self) -> Result<&dyn crate::api::layout_close::LayoutCloseEnv, DunkError> {
+        Ok(self)
+    }
+
     fn with_layout_agent(
         &self,
         operation: &mut crate::flock::commands_layout::AgentOperation<'_>,

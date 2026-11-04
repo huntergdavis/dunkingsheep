@@ -35,6 +35,8 @@ pub use dunk_get::h_get_dunk;
 mod project_summary;
 pub use project_summary::h_project_summary;
 mod layout_agent;
+pub mod layout_close;
+pub use layout_close::{h_close, h_herdr, h_herdr_help};
 mod layout_create;
 pub use layout_agent::{h_focus, h_rename, h_start_agent};
 pub use layout_create::{h_create_tab, h_create_workspace, h_split_pane};
@@ -120,6 +122,10 @@ pub trait OwnerViewEnv {
 /// A synchronous adapter for command dependencies. All methods are object-safe so a daemon can
 /// supply one per request without putting backend types in handler signatures.
 pub trait CommandEnv: PaneInfoEnv {
+    fn layout_close_env(&self) -> Result<&dyn layout_close::LayoutCloseEnv, DunkError> {
+        Err(crate::error::refusal("layout close adapter is not wired"))
+    }
+
     fn health_state_env(&self) -> Result<&dyn health_state::HealthStateEnv, DunkError> {
         Err(DunkError::Refused(
             "health/state adapter is not wired".into(),
@@ -972,6 +978,12 @@ impl Dispatcher {
     }
 
     /// Register only the three create-layout commands.
+    pub fn register_layout_close(&mut self) {
+        self.register("close", h_close);
+        self.register("herdr", h_herdr);
+        self.register("herdr_help", h_herdr_help);
+    }
+
     pub fn register_layout_agent(&mut self) {
         self.register("start_agent", h_start_agent);
         self.register("rename", h_rename);

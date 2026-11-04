@@ -50,6 +50,7 @@ pub(crate) fn production_handlers() -> Dispatcher {
     handlers.register_respawn_pane();
     handlers.register_layout_create();
     handlers.register_layout_agent();
+    handlers.register_layout_close();
     handlers
 }
 
@@ -567,6 +568,9 @@ mod tests {
             "start_agent",
             "rename",
             "focus",
+            "close",
+            "herdr",
+            "herdr_help",
             "report_run",
             "report_list",
             "owner_conversation",
