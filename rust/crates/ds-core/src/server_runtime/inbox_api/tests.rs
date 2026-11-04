@@ -754,3 +754,35 @@ fn inbox_default_provider_refuses_without_invoking_callback() {
         .to_string()
         .contains("inbox command adapter is not wired"));
 }
+
+#[test]
+fn inbox_archive_python_normalizes_skipped_local_time() {
+    const CHILD: &str = "DS_INBOX_DST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "server_runtime::inbox_api::tests::inbox_archive_python_normalizes_skipped_local_time", "--nocapture"])
+            .env(CHILD, "1")
+            .env("TZ", "America/Los_Angeles")
+            .output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let (_dir, services) = make_services("dst-gap", factory(None), None);
+    let dispatcher = services.dispatcher(handlers());
+    let result = dispatcher
+        .dispatch(
+            "inbox_archive",
+            &json!({"mailbox":"w1:p1","before":"2024-03-10T02:30:00"}),
+            &request("w1:p1"),
+        )
+        .unwrap();
+    // Python datetime.fromisoformat(...).timestamp() normalizes the gap with
+    // the pre-transition PST offset (UTC 10:30), rather than rejecting it.
+    assert_eq!(result["before"], 1710066600.0);
+    dispatcher.close();
+}

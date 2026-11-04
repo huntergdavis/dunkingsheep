@@ -256,6 +256,39 @@ fn archive_before(v: Option<&Value>) -> Result<Option<f64>, DunkError> {
 }
 // Python datetime.fromisoformat accepts basic/extended calendar and week dates,
 // a single arbitrary date/time separator, reduced precision, and fractional offsets.
+fn local_timestamp(date: chrono::NaiveDateTime) -> Option<f64> {
+    use chrono::{Offset, TimeZone};
+    let local = chrono::Local.from_local_datetime(&date);
+    match local {
+        chrono::LocalResult::Single(dt) => {
+            Some(dt.timestamp() as f64 + f64::from(dt.timestamp_subsec_nanos()) / 1e9)
+        }
+        chrono::LocalResult::Ambiguous(a, b) => {
+            // Python's naive datetime.timestamp uses fold=0, the earlier instant.
+            let dt = if a.timestamp() <= b.timestamp() { a } else { b };
+            Some(dt.timestamp() as f64 + f64::from(dt.timestamp_subsec_nanos()) / 1e9)
+        }
+        chrono::LocalResult::None => {
+            // mktime normalizes a skipped wall time with the pre-transition offset.
+            // Probe actual local offsets around the requested date instead of guessing
+            // the zone or assuming a one-hour transition.
+            let nominal = date.and_utc().timestamp();
+            let mut offsets = std::collections::BTreeSet::new();
+            for hours in [-36_i64, -24, -12, 12, 24, 36] {
+                let sample = chrono::Local
+                    .timestamp_opt(nominal + hours * 3600, 0)
+                    .single()?;
+                offsets.insert(sample.offset().fix().local_minus_utc());
+            }
+            offsets
+                .into_iter()
+                .map(|offset| nominal - i64::from(offset))
+                .max()
+                .map(|ts| ts as f64 + f64::from(date.and_utc().timestamp_subsec_nanos()) / 1e9)
+        }
+    }
+}
+
 fn iso_timestamp(text: &str) -> Option<f64> {
     use chrono::{Datelike, TimeZone};
     fn clock(text: &str) -> Option<(u32, u32, u32, u32)> {
@@ -350,10 +383,7 @@ fn iso_timestamp(text: &str) -> Option<f64> {
         let date = date.and_hms_micro_opt(h, m, s, us)?;
         return match offset {
             Some(offset) => Some(date.and_utc().timestamp() as f64 + f64::from(us) / 1e6 - offset),
-            None => chrono::Local
-                .from_local_datetime(&date)
-                .earliest()
-                .map(|dt| dt.timestamp() as f64 + f64::from(us) / 1e6),
+            None => local_timestamp(date),
         };
     }
     None
