@@ -59,6 +59,9 @@ impl PaneInfoEnv for Env {
     }
 }
 impl CommandEnv for Env {
+    fn now_s(&self) -> f64 {
+        1234.0
+    }
     fn terminal(&self) -> &Mutex<Box<dyn Terminal>> {
         &self.terminal
     }
@@ -448,6 +451,9 @@ fn recovery_handlers_refuse_missing_provider_after_role_and_argument_checks() {
         }
     }
     impl CommandEnv for Unwired {
+        fn now_s(&self) -> f64 {
+            1234.0
+        }
         fn terminal(&self) -> &Mutex<Box<dyn Terminal>> {
             &self.0
         }

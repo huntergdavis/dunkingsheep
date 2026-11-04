@@ -114,11 +114,6 @@ pub trait OwnerViewEnv {
 /// A synchronous adapter for command dependencies. All methods are object-safe so a daemon can
 /// supply one per request without putting backend types in handler signatures.
 pub trait CommandEnv: PaneInfoEnv {
-    /// Borrow the canonical recovery providers for this request. Live composition is t1605.
-    fn recover_env(&self) -> Result<&dyn crate::flock::recovery_commands::RecoverEnv, DunkError> {
-        Err(DunkError::Refused("recovery adapter is not wired".into()))
-    }
-
     /// Borrow the request's layout and pane services, with confirmed command submission.
     fn with_layout_create(
         &self,
@@ -263,6 +258,11 @@ pub trait CommandEnv: PaneInfoEnv {
         static TRANSPORT: std::sync::OnceLock<crate::github::ReqwestTransport> =
             std::sync::OnceLock::new();
         Ok(TRANSPORT.get_or_init(crate::github::ReqwestTransport::default))
+    }
+
+    /// Borrow the canonical recovery providers for this request. Live composition is t1605.
+    fn recover_env(&self) -> Result<&dyn crate::flock::recovery_commands::RecoverEnv, DunkError> {
+        Err(DunkError::Refused("recovery adapter is not wired".into()))
     }
 
     /// Status sources for the `status` handler. Existing fixtures may stage this adapter, but
