@@ -695,6 +695,21 @@ mod tests {
         assert_eq!(metrics["scope"], "visible");
         assert_eq!(metrics["window"]["seconds"], 3600);
         assert_eq!(metrics["window"]["bucket"], "hour");
+        assert!(metrics["throughput"]["created"].as_i64().unwrap() > 0);
+
+        let invalid_window = dispatcher
+            .dispatch(
+                "task_metrics",
+                &json!({"window_s":[],"scope":"w3:p3","since":{"bad":"type"}}),
+                &worker,
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(
+            invalid_window
+                .contains("float() argument must be a string or a real number, not 'list'"),
+            "{invalid_window}"
+        );
 
         let precedence = dispatcher
             .dispatch(
@@ -730,6 +745,9 @@ mod tests {
         metrics.record(&crate::metrics::Event {
             at: event_at,
             kind: "message.sent".into(),
+            pane_id: Some("worker-pane".into()),
+            mailbox: Some("team".into()),
+            sender: Some("synthetic-agent".into()),
             ..Default::default()
         });
         let (_services_dir, services) = make_services(
@@ -738,25 +756,58 @@ mod tests {
             Some(metrics),
         );
         let dispatcher = services.production_dispatcher();
+        services
+            .flock()
+            .stores()
+            .inbox
+            .unwrap()
+            .send(&crate::inbox_store::Outgoing {
+                mailbox: "private@example.test",
+                body: Some("PRIVATE INBOX BODY"),
+                subject: Some("PRIVATE INBOX SUBJECT"),
+                sender: Some("private sender prose"),
+                ..Default::default()
+            })
+            .unwrap();
         let report = dispatcher
             .dispatch("metrics", &json!({"window_s":3600}), &request("w1:p1"))
             .unwrap();
         assert_eq!(report["counts"]["events"], 1);
         assert_eq!(report["counts"]["by_kind"]["message.sent"], 1);
-        assert!(report["counts"]["by_pane"].as_object().unwrap().is_empty());
-        assert!(report["counts"]["by_recipient"]
-            .as_object()
-            .unwrap()
-            .is_empty());
-        assert!(report["counts"]["by_sender"]
-            .as_object()
-            .unwrap()
-            .is_empty());
+        assert_eq!(report["counts"]["by_pane"]["worker-pane"], 1);
+        assert_eq!(report["counts"]["by_recipient"]["team"], 1);
+        assert_eq!(report["counts"]["by_sender"]["synthetic-agent"], 1);
         assert!(
             report.get("events").is_none(),
             "raw events must not be exposed"
         );
         assert!(report["coverage"]["window_has_events"].as_bool().unwrap());
+        let serialized = report.to_string();
+        for private_value in [
+            "PRIVATE INBOX BODY",
+            "PRIVATE INBOX SUBJECT",
+            "private@example.test",
+            "private sender prose",
+        ] {
+            assert!(
+                !serialized.contains(private_value),
+                "metrics leaked {private_value:?}"
+            );
+        }
+
+        let invalid_window = dispatcher
+            .dispatch(
+                "metrics",
+                &json!({"window_s":[],"until":{},"since":[]}),
+                &request("w1:p1"),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(
+            invalid_window
+                .contains("float() argument must be a string or a real number, not 'list'"),
+            "{invalid_window}"
+        );
 
         let empty = dispatcher
             .dispatch(
