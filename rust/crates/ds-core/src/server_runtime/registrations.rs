@@ -15,6 +15,7 @@ pub(crate) fn production_handlers() -> Dispatcher {
     handlers.register_lanes();
     handlers.register_context_supersede_retire();
     handlers.register_memory_recall_search_context();
+    handlers.register_memory_stats_status_ingest();
     handlers.register_list_panes_read_pane_workspaces();
     handlers.register_retire_pane();
     handlers.register_superuser_status_add_remove();
@@ -414,6 +415,9 @@ mod tests {
             "memory_recall",
             "memory_context",
             "memory_search",
+            "memory_stats",
+            "memory_status",
+            "memory_ingest",
             "list_panes",
             "read_pane",
             "list_workspaces",
@@ -908,6 +912,210 @@ mod tests {
             .dispatch("task_reap", &json!({}), &request("w2:p2"))
             .unwrap();
         assert_eq!(again["requeued"], json!([]));
+    }
+
+    #[test]
+    fn assembled_dispatcher_executes_canonical_memory_handlers_and_enqueue_receipts() {
+        let observations = Arc::new(Mutex::new(SendObservations::default()));
+        let flush_script = Arc::new(AtomicBool::new(false));
+        let worker_gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let (dir, services) = make_services(
+            "registered-memory",
+            send_factory(observations, flush_script, worker_gate),
+            None,
+        );
+        let path = dir.path().join("memory.db");
+        drop(crate::db::open_writer(&path).unwrap());
+        let memory = Arc::new(
+            crate::memory::service::MemoryService::open(
+                &path,
+                1,
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+            )
+            .unwrap(),
+        );
+        services
+            .flock()
+            .attach_memory_service(Arc::clone(&memory))
+            .unwrap();
+        let stores = services.flock().stores();
+        assert!(Arc::ptr_eq(
+            &services.flock().memory_service().unwrap(),
+            &memory
+        ));
+        assert!(Arc::ptr_eq(
+            stores.memory.as_ref().unwrap(),
+            memory.read_pool()
+        ));
+
+        let dispatcher = services.production_dispatcher();
+        let worker = request("w1:p1");
+        let stats = dispatcher
+            .dispatch("memory_stats", &json!({}), &worker)
+            .unwrap();
+        assert_eq!(stats, memory.stats().unwrap());
+        assert_eq!(stats["sources"], 0);
+        assert_eq!(stats["queue_depth"], 0);
+        let status = dispatcher
+            .dispatch("memory_status", &json!({}), &worker)
+            .unwrap();
+        assert_eq!(status, memory.status().unwrap());
+        assert_eq!(status["ingestor"]["running"], false);
+
+        let denied_worker = dispatcher
+            .dispatch("memory_ingest", &json!({}), &worker)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            denied_worker.contains("needs a superuser"),
+            "{denied_worker}"
+        );
+        let owner = request("w2:p2");
+        let missing_path = dispatcher
+            .dispatch("memory_ingest", &json!({}), &owner)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            missing_path,
+            "memory_ingest: missing required argument(s): path"
+        );
+
+        let codex_dir = dir.path().join(".codex");
+        std::fs::create_dir_all(&codex_dir).unwrap();
+        let inferred_path = codex_dir.join("thread_history.jsonl");
+        std::fs::write(
+            &inferred_path,
+            "{\"type\":\"session\",\"id\":\"queued-codex\",\"harness\":\"codex\",\"project\":\"demo\"}\n",
+        )
+        .unwrap();
+        let inferred = dispatcher
+            .dispatch(
+                "memory_ingest",
+                &json!({"path":inferred_path,"harness":"","project":""}),
+                &owner,
+            )
+            .unwrap();
+        assert_eq!(
+            inferred,
+            json!({
+                "source_id":1,
+                "queue_id":1,
+                "path":inferred_path.to_string_lossy(),
+                "harness":"codex",
+                "project":null
+            })
+        );
+
+        let explicit_path = dir.path().join("explicit-history.jsonl");
+        std::fs::write(&explicit_path, "{}\n").unwrap();
+        let explicit = dispatcher
+            .dispatch(
+                "memory_ingest",
+                &json!({"path":explicit_path,"harness":"claude","project":"explicit-demo"}),
+                &owner,
+            )
+            .unwrap();
+        assert_eq!(
+            explicit,
+            json!({
+                "source_id":2,
+                "queue_id":2,
+                "path":explicit_path.to_string_lossy(),
+                "harness":"claude",
+                "project":"explicit-demo"
+            })
+        );
+
+        let queued_rows = memory
+            .read_pool()
+            .with(|connection| {
+                let mut statement = connection
+                    .prepare(
+                        "SELECT q.id, q.source_id, q.state, s.path, s.harness, s.project, s.state \
+                         FROM ingest_queue q JOIN sources s ON s.id=q.source_id ORDER BY q.id",
+                    )
+                    .unwrap();
+                let rows = statement
+                    .query_map([], |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, String>(4)?,
+                            row.get::<_, Option<String>>(5)?,
+                            row.get::<_, String>(6)?,
+                        ))
+                    })
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
+                Ok(rows)
+            })
+            .unwrap();
+        assert_eq!(
+            queued_rows,
+            vec![
+                (
+                    1,
+                    1,
+                    "queued".into(),
+                    inferred_path.to_string_lossy().into_owned(),
+                    "codex".into(),
+                    None,
+                    "pending".into(),
+                ),
+                (
+                    2,
+                    2,
+                    "queued".into(),
+                    explicit_path.to_string_lossy().into_owned(),
+                    "claude".into(),
+                    Some("explicit-demo".into()),
+                    "pending".into(),
+                ),
+            ]
+        );
+        let after_enqueue = dispatcher
+            .dispatch("memory_status", &json!({}), &worker)
+            .unwrap();
+        assert_eq!(after_enqueue["queue"]["queued"], 2);
+        assert_eq!(after_enqueue["ingestor"]["running"], false);
+    }
+
+    #[test]
+    fn assembled_dispatcher_refuses_memory_handlers_without_canonical_service() {
+        let observations = Arc::new(Mutex::new(SendObservations::default()));
+        let flush_script = Arc::new(AtomicBool::new(false));
+        let worker_gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let (dir, services) = make_services(
+            "registered-memory-missing",
+            send_factory(observations, flush_script, worker_gate),
+            None,
+        );
+        let dispatcher = services.production_dispatcher();
+        let worker = request("w1:p1");
+        for command in ["memory_stats", "memory_status"] {
+            let refused = dispatcher
+                .dispatch(command, &json!({}), &worker)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                refused.contains("memory service is not enabled"),
+                "{command}: {refused}"
+            );
+        }
+        let path = dir.path().join("source.jsonl");
+        std::fs::write(&path, "{}\n").unwrap();
+        let refused = dispatcher
+            .dispatch("memory_ingest", &json!({"path":path}), &request("w2:p2"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refused.contains("memory service is not enabled"),
+            "{refused}"
+        );
     }
 
     #[test]
