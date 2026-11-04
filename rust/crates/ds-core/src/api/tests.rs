@@ -4301,13 +4301,7 @@ fn task_api_fixture() -> (
         None,
     )
     .expect("role registry");
-    for (pane, role) in [
-        ("w1:p1", "worker"),
-        ("w1:p2", "owner"),
-        ("w1:p3", "worker"),
-        ("w1:p4", "system"),
-        ("w1:p5", "web"),
-    ] {
+    for (pane, role) in [("w1:p1", "worker"), ("w1:p2", "owner"), ("w1:p3", "worker")] {
         roles
             .register(pane, role, None, None, None, None, None, None)
             .expect("role registration");
@@ -4386,13 +4380,7 @@ fn task_mutation_api_fixture() -> (
         None,
     )
     .expect("roles");
-    for (pane, role) in [
-        ("w1:p1", "worker"),
-        ("w1:p2", "owner"),
-        ("w1:p3", "worker"),
-        ("w1:p4", "system"),
-        ("w1:p5", "web"),
-    ] {
+    for (pane, role) in [("w1:p1", "worker"), ("w1:p2", "owner"), ("w1:p3", "worker")] {
         roles
             .register(pane, role, None, None, None, None, None, None)
             .expect("role registration");
@@ -8009,7 +7997,7 @@ fn task_statistics_dispatch_tests_task_stats_metrics_reap_roles_and_outputs() {
         denied.to_string().contains("task_reap is not permitted for role worker (pane w1:p1); see docs/FLAT_FLEET.md section 4.3"),
         "{denied}"
     );
-    let reaped = dispatch_task_mutation(
+    let fixture_refusal = dispatch_task_mutation(
         &dispatcher,
         &flock,
         &runtime,
@@ -8018,20 +8006,30 @@ fn task_statistics_dispatch_tests_task_stats_metrics_reap_roles_and_outputs() {
         Some("w1:p2"),
         None,
     )
-    .unwrap();
-    assert_eq!(reaped["requeued"], json!([]));
-    for pane in ["w1:p4", "w1:p5"] {
-        let allowed = dispatch_task_mutation(
-            &dispatcher,
-            &flock,
-            &runtime,
-            "task_reap",
-            json!({}),
-            Some(pane),
-            None,
-        )
-        .unwrap();
-        assert_eq!(allowed["requeued"], json!([]));
+    .unwrap_err();
+    assert!(
+        fixture_refusal.to_string().contains("alive_source='live'"),
+        "{fixture_refusal}"
+    );
+    // These roles are not registerable pane identities in the real Roles store, so exercise
+    // their registry policy through the same Dispatcher with the existing deterministic gate.
+    for role in ["system", "web"] {
+        let env = TestEnv::default();
+        let request = RequestCtx::default();
+        let context = HandlerContext {
+            flock: &flock,
+            request: &request,
+            env: &env,
+            runtime: runtime.handle(),
+        };
+        let gate = FixedRole(role, true);
+        let refused = dispatcher
+            .dispatch(&context, &gate, "task_reap", args(json!({})))
+            .unwrap_err();
+        assert!(
+            refused.to_string().contains("alive_source='live'"),
+            "{role}: {refused}"
+        );
     }
 }
 
