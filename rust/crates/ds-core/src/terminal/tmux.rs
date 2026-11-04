@@ -16,7 +16,8 @@
 //!   closable when it (or the panes under it) came from here. The Python's second
 //!   layer is `dunk_tmux_guard.py`; that is a separate task and is not here.
 
-use std::collections::BTreeSet;
+use super::tmux_registry::Registry;
+use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -74,8 +75,9 @@ impl CommandResult {
 #[derive(Debug, Clone)]
 pub struct TmuxBackend {
     pub tmux_bin: PathBuf,
-    /// What this backend created - the close-protection registry.
-    created: BTreeSet<String>,
+    registry: Registry,
+    environment: crate::config::Env,
+    guard_enabled: bool,
 }
 
 impl Default for TmuxBackend {
@@ -86,32 +88,41 @@ impl Default for TmuxBackend {
 
 impl TmuxBackend {
     pub fn new(tmux_bin: impl Into<PathBuf>) -> Self {
-        TmuxBackend {
+        Self::from_env(tmux_bin, crate::config::Env::from_process())
+    }
+    pub fn from_env(tmux_bin: impl Into<PathBuf>, environment: crate::config::Env) -> Self {
+        Self {
             tmux_bin: tmux_bin.into(),
-            created: BTreeSet::new(),
+            registry: Registry::configured(None, &environment),
+            environment,
+            guard_enabled: true,
         }
     }
-
-    /// The registry of what this backend created (panes/tabs/workspaces, by id).
-    pub fn created(&self) -> &BTreeSet<String> {
-        &self.created
+    pub fn with_registry(tmux_bin: impl Into<PathBuf>, registry: impl Into<PathBuf>) -> Self {
+        Self {
+            tmux_bin: tmux_bin.into(),
+            registry: Registry::new(registry),
+            environment: crate::config::Env::default(),
+            guard_enabled: false,
+        }
     }
-
-    /// Record an id as created. Public because the registry is also loaded from a
-    /// state file at startup (the Python's `_load_registry`), and a test that starts
-    /// from a pre-existing world needs the same door.
-    pub fn mark_created(&mut self, id: &str) {
-        self.created.insert(id.to_string());
+    pub fn registry(&self) -> &Registry {
+        &self.registry
     }
 
     /// One tmux invocation, argv exactly as given.
     pub fn run(&self, args: &[&str]) -> Result<CommandResult, TerminalError> {
-        let output = Command::new(&self.tmux_bin)
-            .args(args)
-            .output()
-            .map_err(|error| {
-                TerminalError::unavailable(format!("{}: {error}", self.tmux_bin.display()))
-            })?;
+        let mut command = Command::new(&self.tmux_bin);
+        if let Some(socket) = self
+            .environment
+            .get("DUNKINGSHEEP_TMUX_SOCKET")
+            .filter(|v| !v.is_empty())
+        {
+            command.args(["-L", socket]);
+        }
+        let output = command.args(args).output().map_err(|error| {
+            TerminalError::unavailable(format!("{}: {error}", self.tmux_bin.display()))
+        })?;
         Ok(CommandResult {
             code: output.status.code().unwrap_or(-1),
             stdout: String::from_utf8_lossy(&output.stdout).to_string(),
@@ -119,26 +130,21 @@ impl TmuxBackend {
         })
     }
 
-    /// The Python's `_managed`: did we create this, or does it hold only panes we did?
+    /// Reload authority for every check; parents never imply pane ownership.
     pub fn managed(&self, kind: &str, target_id: &str, panes: &[Pane]) -> bool {
-        if !self.created.contains(target_id) {
-            return false;
-        }
-        // A tab/workspace is only ours if every pane under it is ours too, so a
-        // session an operator added a pane to cannot be killed by us.
-        let under: Vec<&Pane> = panes
-            .iter()
-            .filter(|pane| match kind {
-                "tab" => pane.window_id == target_id,
-                "workspace" => pane.session_id == target_id,
-                _ => pane.pane_id == target_id,
-            })
-            .collect();
-        under.into_iter().all(|pane| {
-            self.created.contains(&pane.pane_id)
-                || self.created.contains(&pane.window_id)
-                || self.created.contains(&pane.session_id)
-        })
+        self.registry
+            .managed(kind, target_id, panes)
+            .unwrap_or(false)
+    }
+    fn parsed_panes(&self, output: &str) -> Result<Vec<Pane>, TerminalError> {
+        let labels = self.registry.labels()?;
+        Ok(parse_panes(output, &|id| labels.get(id).cloned()))
+    }
+    fn checked_pane(&self, pane_id: &str) -> Result<Option<Pane>, TerminalError> {
+        Ok(self
+            .try_list_panes()?
+            .into_iter()
+            .find(|p| p.pane_id == pane_id))
     }
 
     fn capture_pane(&self, pane_id: &str, lines: i64, ansi: bool) -> Result<String, TerminalError> {
@@ -179,7 +185,7 @@ impl Terminal for TmuxBackend {
 
     fn list_panes(&self) -> Vec<Pane> {
         match self.run(&["list-panes", "-a", "-F", PANE_FORMAT]) {
-            Ok(result) if result.code == 0 => parse_panes(&result.stdout, &|_| None),
+            Ok(result) if result.code == 0 => self.parsed_panes(&result.stdout).unwrap_or_default(),
             // No server, no sessions, or a non-zero exit the Python also swallows:
             // an unreachable world is an empty one.
             _ => Vec::new(),
@@ -188,7 +194,7 @@ impl Terminal for TmuxBackend {
 
     fn try_list_panes(&self) -> Result<Vec<Pane>, TerminalError> {
         match self.run(&["list-panes", "-a", "-F", PANE_FORMAT]) {
-            Ok(result) if result.code == 0 => Ok(parse_panes(&result.stdout, &|_| None)),
+            Ok(result) if result.code == 0 => self.parsed_panes(&result.stdout),
             Ok(result) if result.is_no_server() => Ok(Vec::new()),
             Ok(result) => Err(TerminalError::refused(
                 result.message("tmux list-panes failed"),
@@ -272,11 +278,30 @@ impl Terminal for TmuxBackend {
         let created = sessions
             .iter()
             .find(|workspace| workspace.label == name)
-            .or_else(|| sessions.last())
             .ok_or_else(|| {
                 TerminalError::refused("new-session succeeded but the session list did not show it")
             })?;
-        self.created.insert(created.workspace_id.clone());
+        self.registry.remember(
+            "workspace",
+            &created.workspace_id,
+            json!({"label":label.unwrap_or(&name)}),
+        )?;
+        if let Some(tab) = self
+            .list_tabs()
+            .iter()
+            .find(|t| t.workspace_id == created.workspace_id)
+        {
+            self.registry
+                .remember("tab", &tab.tab_id, json!({"label":tab.label}))?;
+        }
+        if let Some(pane) = self
+            .list_panes()
+            .iter()
+            .find(|p| p.session_id == created.workspace_id)
+        {
+            self.registry
+                .remember("pane", &pane.pane_id, json!({"label":pane.label}))?;
+        }
         if focus {
             self.focus("workspace", &created.workspace_id)?;
         }
@@ -291,7 +316,8 @@ impl Terminal for TmuxBackend {
         focus: bool,
     ) -> Result<Tab, TerminalError> {
         let name = safe_name(label.unwrap_or("tab"), "tab");
-        let mut args = vec!["new-window", "-d", "-P", "-F", "#{window_id}"];
+        let format = format!("#{{window_id}}{PANE_SEP}#{{pane_id}}");
+        let mut args = vec!["new-window", "-d", "-P", "-F", &format];
         if let Some(workspace_id) = workspace_id {
             args.extend(["-t", workspace_id]);
         }
@@ -305,7 +331,14 @@ impl Terminal for TmuxBackend {
                 result.message("tmux new-window failed"),
             ));
         }
-        let tab_id = result.stdout.trim().to_string();
+        let mut fields = result.stdout.trim().split(PANE_SEP);
+        let tab_id = fields.next().unwrap_or_default().to_owned();
+        let pane = fields
+            .next()
+            .and_then(|id| self.get_pane(id))
+            .ok_or_else(|| {
+                TerminalError::refused("tmux created the window but it is not visible")
+            })?;
         let tab = self
             .list_tabs()
             .into_iter()
@@ -315,7 +348,10 @@ impl Terminal for TmuxBackend {
                     "new-window created {tab_id} but the tab list did not show it"
                 ))
             })?;
-        self.created.insert(tab.tab_id.clone());
+        self.registry
+            .remember("tab", &tab.tab_id, json!({"label":label.unwrap_or(&name)}))?;
+        self.registry
+            .remember("pane", &pane.pane_id, json!({"label":pane.label}))?;
         if focus {
             self.focus("tab", &tab.tab_id)?;
         }
@@ -347,43 +383,216 @@ impl Terminal for TmuxBackend {
         let pane = self.get_pane(&new_pane).ok_or_else(|| {
             TerminalError::refused(format!("split created {new_pane} but it is not listed"))
         })?;
-        self.created.insert(pane.pane_id.clone());
+        self.registry
+            .remember("pane", &pane.pane_id, json!({"label":pane.label}))?;
         Ok(pane)
     }
 
     fn start_agent(&mut self, spec: &AgentSpec) -> Result<Pane, TerminalError> {
-        // An agent is started in a pane that already exists: T37 owns the layout
-        // decision (workspace/tab/split) and calls create_* first.
-        let pane = spec
-            .tab_id
-            .as_deref()
-            .and_then(|tab| {
-                self.list_panes()
-                    .into_iter()
-                    .find(|pane| pane.window_id == tab)
-            })
-            .ok_or_else(|| {
-                TerminalError::refused(
-                    "start_agent needs an existing target pane (create_workspace/\
-                 create_tab/split_pane first; T37 owns the layout)"
-                        .to_string(),
-                )
-            })?;
-        let argv: Vec<&str> = spec.argv.iter().map(String::as_str).collect();
-        let command = shell_join(&argv);
-        let result = self.run(&[
-            "respawn-pane",
-            "-k",
-            "-t",
-            pane.pane_id.as_str(),
-            command.as_str(),
-        ])?;
+        let kind = spec
+            .argv
+            .first()
+            .and_then(|p| Path::new(p).file_name())
+            .and_then(|p| p.to_str())
+            .ok_or_else(|| TerminalError::refused("command is required"))?;
+        if !super::parse::AGENT_KINDS.contains(&kind) {
+            return Err(TerminalError::refused(format!(
+                "unsupported agent kind {kind:?}"
+            )));
+        }
+        let refs: Vec<_> = spec.argv.iter().map(String::as_str).collect();
+        let mut command = shell_join(&refs);
+        let mut environment = spec.env.clone();
+        let guard_dir = self
+            .environment
+            .get("DUNKINGSHEEP_TMUX_GUARD_DIR")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                self.environment
+                    .get("DUNKINGSHEEP_DIR")
+                    .filter(|v| !v.is_empty())
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| {
+                        super::tmux_registry::expand_home(
+                            "~/.config/dunkingsheep",
+                            &self.environment,
+                        )
+                    })
+                    .join("tmux-guard")
+            });
+        // Explicit test registries never consult the user's guard directory.
+        if self.guard_enabled {
+            if guard_dir.join("tmux").is_file() {
+                let path = format!(
+                    "{}:{}",
+                    guard_dir.display(),
+                    environment
+                        .get("PATH")
+                        .filter(|v| !v.is_empty())
+                        .map(String::as_str)
+                        .unwrap_or_else(|| self.environment.get("PATH").unwrap_or(""))
+                );
+                command = format!("PATH={} {command}", shell_join(&[&path]));
+                environment.insert("PATH".into(), path);
+            }
+        }
+        let mut args: Vec<String>;
+        if let Some(tab) = spec.tab_id.as_deref().filter(|v| !v.is_empty()) {
+            let pane = self
+                .list_panes()
+                .into_iter()
+                .find(|p| p.window_id == tab)
+                .ok_or_else(|| TerminalError::refused(format!("tab {tab} has no pane to split")))?;
+            args = vec![
+                "split-window".into(),
+                "-t".into(),
+                pane.pane_id,
+                if spec.split.as_deref().unwrap_or("right") == "right" {
+                    "-h"
+                } else {
+                    "-v"
+                }
+                .into(),
+                "-P".into(),
+                "-F".into(),
+                "#{pane_id}".into(),
+                "-d".into(),
+            ];
+        } else {
+            let target = spec
+                .workspace_id
+                .clone()
+                .filter(|v| !v.is_empty())
+                .or_else(|| {
+                    self.environment
+                        .get("TMUX_PANE")
+                        .and_then(|id| self.get_pane(id))
+                        .map(|p| p.session_id)
+                })
+                .or_else(|| {
+                    self.list_workspaces()
+                        .first()
+                        .map(|w| w.workspace_id.clone())
+                })
+                .ok_or_else(|| TerminalError::refused("no tmux session to start the agent in"))?;
+            args = vec![
+                "new-window".into(),
+                "-d".into(),
+                "-P".into(),
+                "-F".into(),
+                "#{pane_id}".into(),
+                "-t".into(),
+                target,
+                "-n".into(),
+                safe_name(&spec.name, "dunkingsheep"),
+            ];
+        }
+        if let Some(cwd) = spec.cwd.as_deref().filter(|v| !v.is_empty()) {
+            args.extend(["-c".into(), cwd.into()]);
+        }
+        for (key, value) in environment {
+            args.extend(["-e".into(), format!("{key}={value}")]);
+        }
+        args.push(agent_launch(&command));
+        let result = self.run(&args.iter().map(String::as_str).collect::<Vec<_>>())?;
+        if result.code != 0 {
+            return Err(TerminalError::refused(
+                result.message("tmux agent launch failed"),
+            ));
+        }
+        let mut pane = self.get_pane(result.stdout.trim()).ok_or_else(|| {
+            TerminalError::refused("tmux started the agent but the pane is not visible")
+        })?;
+        if spec.tab_id.as_deref().is_none_or(str::is_empty) {
+            if let Some(tab) = self.list_tabs().iter().find(|t| t.tab_id == pane.window_id) {
+                self.registry
+                    .remember("tab", &tab.tab_id, json!({"label":spec.name}))?;
+            }
+        }
+        let _ = self.run(&["select-pane", "-t", &pane.pane_id, "-T", &spec.name]);
+        pane = self.get_pane(&pane.pane_id).unwrap_or(pane);
+        self.registry.remember(
+            "pane",
+            &pane.pane_id,
+            json!({"agent":spec.name,"agent_kind":kind,"name":spec.name}),
+        )?;
+        pane.command = kind.into();
+        pane.label = spec.name.clone();
+        Ok(pane)
+    }
+    fn supports_guarded_respawn(&self) -> bool {
+        true
+    }
+    fn guarded_respawn(
+        &mut self,
+        pane_id: &str,
+        argv: &[String],
+        expected_pid: i64,
+        expected_start: &str,
+    ) -> Result<Pane, TerminalError> {
+        if pane_id.is_empty() {
+            return Err(TerminalError::refused("a pane id is required"));
+        }
+        if argv.is_empty() {
+            return Err(TerminalError::refused("an argv command is required"));
+        }
+        let pane = self
+            .checked_pane(pane_id)?
+            .ok_or_else(|| TerminalError::refused(format!("pane {pane_id} is not visible")))?;
+        if !self.registry.managed("pane", pane_id, &[])? {
+            return Err(TerminalError::refused(format!(
+                "refusing to respawn pane {pane_id}: Dunking Sheep did not create it"
+            )));
+        }
+        let old_pid = pane.pane_pid.ok_or_else(|| {
+            TerminalError::refused(format!("pane {pane_id} has no pane process id"))
+        })?;
+        if old_pid != expected_pid {
+            return Err(TerminalError::refused(format!(
+                "refusing: pane {pane_id} pid is {old_pid}, expected {expected_pid}"
+            )));
+        }
+        if crate::proc::process_start(old_pid).as_deref() != Some(expected_start) {
+            return Err(TerminalError::refused(format!(
+                "refusing: pane {pane_id} process start does not match expected {expected_start}"
+            )));
+        }
+        let refs: Vec<_> = argv.iter().map(String::as_str).collect();
+        let command = agent_launch(&shell_join(&refs));
+        let current = self.checked_pane(pane_id)?.ok_or_else(|| {
+            TerminalError::refused(format!("pane {pane_id} disappeared before respawn"))
+        })?;
+        let current_pid = current.pane_pid.ok_or_else(|| {
+            TerminalError::refused(format!("pane {pane_id} lost its pane pid before respawn"))
+        })?;
+        if current_pid != old_pid {
+            return Err(TerminalError::refused(format!("refusing: pane {pane_id} was replaced between check and mutation (pid {old_pid} -> {current_pid})")));
+        }
+        if crate::proc::process_start(current_pid).as_deref() != Some(expected_start) {
+            return Err(TerminalError::refused(format!(
+                "refusing: pane {pane_id} process changed between check and mutation"
+            )));
+        }
+        // tmux has no atomic compare-and-kill: replacement after this read remains possible.
+        let result = self.run(&["respawn-pane", "-k", "-t", pane_id, &command])?;
         if result.code != 0 {
             return Err(TerminalError::refused(
                 result.message("tmux respawn-pane failed"),
             ));
         }
-        Ok(self.get_pane(&pane.pane_id).unwrap_or(pane))
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while std::time::Instant::now() < deadline {
+            if let Some(current) = self.checked_pane(pane_id)? {
+                if current.pane_pid.is_some_and(|pid| pid != old_pid) {
+                    return Ok(current);
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        Err(TerminalError::refused(format!(
+            "pane {pane_id} did not show a new process after respawn"
+        )))
     }
 
     fn rename(&mut self, kind: &str, target_id: &str, label: &str) -> Result<(), TerminalError> {
@@ -396,12 +605,16 @@ impl Terminal for TmuxBackend {
         if result.code != 0 {
             return Err(TerminalError::refused(result.message("tmux rename failed")));
         }
+        if kind == "pane" && self.get_pane(target_id).is_some() {
+            self.registry
+                .remember("pane", target_id, json!({"label":label}))?;
+        }
         Ok(())
     }
 
     fn close(&mut self, kind: &str, target_id: &str) -> Result<(), TerminalError> {
         let panes = self.list_panes();
-        if !self.managed(kind, target_id, &panes) {
+        if !self.registry.managed(kind, target_id, &panes)? {
             return Err(TerminalError::refused(format!(
                 "refusing to close {kind} {target_id}: Dunking Sheep did not create it                  (or it contains panes it did not create)")));
         }
@@ -417,7 +630,7 @@ impl Terminal for TmuxBackend {
                 result.message(&format!("tmux {command} failed")),
             ));
         }
-        self.created.remove(target_id);
+        self.registry.forget(kind, target_id)?;
         Ok(())
     }
 
@@ -741,4 +954,10 @@ pub fn is_executable(path: &Path) -> bool {
     path.metadata()
         .map(|meta| meta.permissions().mode() & 0o111 != 0)
         .unwrap_or(false)
+}
+
+/// Preserve a fast-exiting agent's diagnostic and leave a visible shell.
+pub fn agent_launch(command: &str) -> String {
+    let script = format!("{command}; printf '\\n[agent exited rc=%s]\\n' \"$?\"; exec sh");
+    format!("sh -c {}", shell_join(&[&script]))
 }

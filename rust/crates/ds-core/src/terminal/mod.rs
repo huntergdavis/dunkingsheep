@@ -19,6 +19,7 @@ pub mod fakes;
 pub mod parse;
 pub mod screen;
 pub mod tmux;
+pub mod tmux_registry;
 
 /// One pane, as `tmux list-panes -F PANE_FORMAT` describes it.
 ///
@@ -215,6 +216,21 @@ pub trait Terminal: std::fmt::Debug {
         cwd: Option<&str>,
     ) -> Result<Pane, TerminalError>;
     fn start_agent(&mut self, spec: &AgentSpec) -> Result<Pane, TerminalError>;
+    /// Guarded same-pane replacement. Unsupported backends must refuse explicitly.
+    fn guarded_respawn(
+        &mut self,
+        _pane_id: &str,
+        _argv: &[String],
+        _expected_pid: i64,
+        _expected_start: &str,
+    ) -> Result<Pane, TerminalError> {
+        Err(TerminalError::refused(
+            "the active backend does not support guarded respawn",
+        ))
+    }
+    fn supports_guarded_respawn(&self) -> bool {
+        false
+    }
     fn rename(&mut self, kind: &str, target_id: &str, label: &str) -> Result<(), TerminalError>;
     fn close(&mut self, kind: &str, target_id: &str) -> Result<(), TerminalError>;
     fn focus(&mut self, kind: &str, target_id: &str) -> Result<(), TerminalError>;
