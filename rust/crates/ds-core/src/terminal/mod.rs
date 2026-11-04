@@ -17,9 +17,13 @@ pub mod composer;
 pub mod control;
 pub mod fakes;
 pub mod parse;
+pub(crate) mod raw;
 pub mod screen;
 pub mod tmux;
 pub mod tmux_registry;
+
+/// Outer errors are thrown registry exceptions; inner errors are normal backend refusals.
+pub type RawCreateResult<T> = Result<Result<T, TerminalError>, tmux_registry::RegistryError>;
 
 /// One pane, as `tmux list-panes -F PANE_FORMAT` describes it.
 ///
@@ -215,6 +219,64 @@ pub trait Terminal: std::fmt::Debug {
         direction: &str,
         cwd: Option<&str>,
     ) -> Result<Pane, TerminalError>;
+    /// Raw create inputs retain Python truthiness until the backend operation.
+    fn create_workspace_raw(
+        &mut self,
+        label: &serde_json::Value,
+        cwd: &serde_json::Value,
+        focus: bool,
+    ) -> RawCreateResult<Workspace> {
+        Ok(self.create_workspace(
+            raw::optional(label).as_deref(),
+            raw::optional(cwd).as_deref(),
+            focus,
+        ))
+    }
+    fn create_tab_raw(
+        &mut self,
+        workspace: Option<&str>,
+        label: &serde_json::Value,
+        cwd: &serde_json::Value,
+        focus: bool,
+    ) -> RawCreateResult<Tab> {
+        Ok(self.create_tab(
+            workspace,
+            raw::optional(label).as_deref(),
+            raw::optional(cwd).as_deref(),
+            focus,
+        ))
+    }
+    fn split_pane_raw(
+        &mut self,
+        pane: &str,
+        direction: &str,
+        cwd: &serde_json::Value,
+        focus: bool,
+    ) -> RawCreateResult<Pane> {
+        let created = match self.split_pane(pane, direction, raw::optional(cwd).as_deref()) {
+            Ok(value) => value,
+            Err(error) => return Ok(Err(error)),
+        };
+        if !focus {
+            if let Err(error) = self.focus("pane", pane) {
+                return Ok(Err(error));
+            }
+        }
+        Ok(Ok(created))
+    }
+    /// Outer error is a thrown input error; inner error is the backend's normal refusal.
+    fn send_text_raw(
+        &mut self,
+        pane: &str,
+        text: &serde_json::Value,
+    ) -> Result<Result<(), TerminalError>, crate::error::DunkError> {
+        for chunk in raw::text_chunks(text)? {
+            if let Err(error) = self.send_text(pane, &chunk) {
+                return Ok(Err(error));
+            }
+        }
+        Ok(Ok(()))
+    }
     fn start_agent(&mut self, spec: &AgentSpec) -> Result<Pane, TerminalError>;
     /// Guarded same-pane replacement. Unsupported backends must refuse explicitly.
     fn guarded_respawn(

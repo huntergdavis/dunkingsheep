@@ -114,7 +114,7 @@ pub struct Flock {
     pub(crate) stuck_last_check: Mutex<BTreeMap<String, f64>>,
     /// pane_id -> the bounded recent text this flock typed into its composer.
     #[allow(dead_code)] // The send integration callers are assigned to dependent T33 leaves.
-    pub(crate) sent_text_by_pane: Mutex<BTreeMap<String, Vec<String>>>,
+    pub(crate) sent_text_by_pane: Mutex<BTreeMap<String, Vec<serde_json::Value>>>,
     /// Next direct-message identity, matching `_new_message`'s monotonic `mN` allocation.
     next_message_id: AtomicU64,
     /// One whole-send lock per pane (`Flock._lock_for`). The `Arc` lets a caller keep the

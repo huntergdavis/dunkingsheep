@@ -44,6 +44,7 @@ pub(crate) fn production_handlers() -> Dispatcher {
     handlers.register_send_text_keys_flush_box();
     handlers.register_clear_box_delivery_capability();
     handlers.register_respawn_pane();
+    handlers.register_layout_create();
     handlers
 }
 
@@ -527,6 +528,9 @@ mod tests {
             "delivery",
             "delivery_capability",
             "respawn_pane",
+            "create_workspace",
+            "create_tab",
+            "split_pane",
             "report_run",
             "report_list",
             "owner_conversation",

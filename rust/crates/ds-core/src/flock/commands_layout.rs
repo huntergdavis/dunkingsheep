@@ -25,6 +25,9 @@ use super::resolve::{resolve_tab, resolve_target, resolve_workspace};
 use super::Flock;
 use crate::error::DunkError;
 
+pub type RawCreateResult =
+    Result<Result<Value, String>, crate::terminal::tmux_registry::RegistryError>;
+
 /// The calls `Flock` makes on `self.herdr` for layout. Mutations return the backend's
 /// result dict, or its message as `Err` (the Python's `(False, message)`).
 pub trait LayoutBackend {
@@ -55,6 +58,41 @@ pub trait LayoutBackend {
         cwd: Option<&str>,
         focus: bool,
     ) -> Result<Value, String>;
+    fn create_workspace_raw(&mut self, label: &Value, cwd: &Value, focus: bool) -> RawCreateResult {
+        Ok(self.create_workspace(
+            crate::terminal::raw::optional(label).as_deref(),
+            crate::terminal::raw::optional(cwd).as_deref(),
+            focus,
+        ))
+    }
+    fn create_tab_raw(
+        &mut self,
+        workspace: Option<&str>,
+        label: &Value,
+        cwd: &Value,
+        focus: bool,
+    ) -> RawCreateResult {
+        Ok(self.create_tab(
+            workspace,
+            crate::terminal::raw::optional(label).as_deref(),
+            crate::terminal::raw::optional(cwd).as_deref(),
+            focus,
+        ))
+    }
+    fn split_pane_raw(
+        &mut self,
+        pane: &str,
+        direction: &str,
+        cwd: &Value,
+        focus: bool,
+    ) -> RawCreateResult {
+        Ok(self.split_pane(
+            pane,
+            direction,
+            crate::terminal::raw::optional(cwd).as_deref(),
+            focus,
+        ))
+    }
     #[allow(clippy::too_many_arguments)]
     fn start_agent(
         &mut self,
@@ -71,6 +109,15 @@ pub trait LayoutBackend {
 }
 
 /// `submit_text(pane_id, command) -> (ran, message)`.
+pub type CreateOperation<'a> = dyn FnMut(
+        &mut dyn LayoutBackend,
+        &dyn super::panes::PaneInfoEnv,
+        RawSubmit<'_>,
+    ) -> Result<Value, DunkError>
+    + 'a;
+
+pub type RawSubmit<'a> = &'a mut dyn FnMut(&str, &Value) -> Result<(bool, String), DunkError>;
+
 pub type Submit<'a> = &'a mut dyn FnMut(&str, &str) -> (bool, String);
 
 fn refused<T>(text: String) -> Result<T, DunkError> {
@@ -198,6 +245,7 @@ impl Flock {
         env: &dyn super::panes::PaneInfoEnv,
     ) -> Result<Value, DunkError> {
         let mut out = create_workspace(backend, label, cwd, command, focus, submit)?;
+        self.set_last_message(format!("Created workspace {}", label.unwrap_or("")).trim());
         let pane_id = out
             .get("pane_id")
             .and_then(Value::as_str)

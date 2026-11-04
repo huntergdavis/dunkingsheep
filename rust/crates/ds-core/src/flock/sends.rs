@@ -316,8 +316,8 @@ impl Flock {
                 .get(pane_id)?
                 .iter()
                 .rev()
+                .map(crate::terminal::raw::string)
                 .find(|text| !text.is_empty() && crate::stuck::collapse(text) == flat)
-                .cloned()
         });
         if owned
             .as_deref()
@@ -924,6 +924,19 @@ pub(crate) enum DeliveryOutcome {
 /// the flock's recent-send history and queued outbox; a shape match alone never authorizes a key.
 pub trait SendPreparationEnv: FlushEnv + super::send_keys::KeyPressEnv {
     fn send_text(&mut self, pane_id: &str, text: &str) -> (bool, String);
+    fn send_text_raw(
+        &mut self,
+        pane_id: &str,
+        text: &serde_json::Value,
+    ) -> Result<(bool, String), DunkError> {
+        for chunk in crate::terminal::raw::text_chunks(text)? {
+            let result = self.send_text(pane_id, &chunk);
+            if !result.0 {
+                return Ok(result);
+            }
+        }
+        Ok((true, "typed".into()))
+    }
     fn attempt_generation(&self, pane_id: &str) -> Option<String>;
     /// Persist typed-attempt state for the actual message when a delivery frame exists.
     /// `None` preserves the low-level `submit_text` path, which has no message authority.
@@ -1129,10 +1142,49 @@ fn submit_text_with_options(
     env: &mut dyn SendPreparationEnv,
     pane_id: &str,
     text: &str,
-    mut options: SubmitOptions<'_>,
+    options: SubmitOptions<'_>,
     guard: Option<&TypingGuard<'_>>,
 ) -> SendAction {
+    submit_text_value_with_options(flock, env, pane_id, text, None, options, guard)
+        .unwrap_or_else(|error| SendAction::completed(false, error.to_string()))
+}
+
+/// Direct create-command submission; the raw value reaches the terminal after preflight.
+/// A thrown input error bypasses post-create writeback, unlike normal send refusal.
+pub fn submit_text_raw(
+    flock: &Flock,
+    env: &mut dyn SendPreparationEnv,
+    pane_id: &str,
+    text: &serde_json::Value,
+) -> Result<SendAction, DunkError> {
+    let display = crate::terminal::raw::string(text);
+    submit_text_value_with_options(
+        flock,
+        env,
+        pane_id,
+        &display,
+        Some(text),
+        SubmitOptions {
+            press_enter: true,
+            check_box: false,
+            attempt_generation: AttemptGeneration::Capture,
+            message: None,
+        },
+        None,
+    )
+}
+
+fn submit_text_value_with_options(
+    flock: &Flock,
+    env: &mut dyn SendPreparationEnv,
+    pane_id: &str,
+    text: &str,
+    raw: Option<&serde_json::Value>,
+    mut options: SubmitOptions<'_>,
+    guard: Option<&TypingGuard<'_>>,
+) -> Result<SendAction, DunkError> {
     let guarded = guard.is_some();
+    let mut input_error = None;
     let mut perform = Some(|guard: &TypingGuard<'_>| {
         if let Some(dead) = dead_session(env, pane_id) {
             return Err(format!(
@@ -1166,11 +1218,25 @@ fn submit_text_with_options(
                 || strip_ansi(&before)
                     .to_lowercase()
                     .contains("tab to queue message"));
-        let (ok, detail) = env.send_text(pane_id, text);
+        let (ok, detail) = if let Some(raw) = raw {
+            match env.send_text_raw(pane_id, raw) {
+                Ok(result) => result,
+                Err(error) => {
+                    input_error = Some(error);
+                    return Err(String::new());
+                }
+            }
+        } else {
+            env.send_text(pane_id, text)
+        };
         if !ok {
             return Err(detail);
         }
-        flock.remember_typed(pane_id, text);
+        if let Some(raw) = raw {
+            flock.remember_typed_raw(pane_id, raw);
+        } else {
+            flock.remember_typed(pane_id, text);
+        }
         if !env.persist_typed_attempt(
             options.message.take(),
             pane_id,
@@ -1206,14 +1272,17 @@ fn submit_text_with_options(
         Some(guard) => perform.take().expect("submit operation is available")(guard),
         None => match flock.typing_guard(pane_id) {
             Ok(guard) => perform.take().expect("submit operation is available")(&guard),
-            Err(error) => return SendAction::completed(false, error.to_string()),
+            Err(error) => return Ok(SendAction::completed(false, error.to_string())),
         },
     };
     drop(perform);
-    match prepared {
+    if let Some(error) = input_error {
+        return Err(error);
+    }
+    Ok(match prepared {
         Ok(value) => value,
         Err(detail) => SendAction::completed(false, detail),
-    }
+    })
 }
 
 /// Run confirmation after the typing guard has been released. `guarded=true` selects the bounded
@@ -1250,6 +1319,51 @@ pub fn confirm_send_action(env: &mut dyn SendPreparationEnv, action: &mut SendAc
     };
     action.ok = result.0;
     action.detail = result.1;
+}
+
+fn raw_metric_error(value: &serde_json::Value) -> Option<DunkError> {
+    if !crate::terminal::raw::truthy(value) || value.is_string() {
+        return None;
+    }
+    let kind = match value {
+        serde_json::Value::Array(_) => "list",
+        serde_json::Value::Object(_) => "dict",
+        serde_json::Value::Bool(_) => "bool",
+        serde_json::Value::Number(n) if n.to_string().contains(['.', 'e', 'E']) => "float",
+        _ => "int",
+    };
+    Some(DunkError::Refused(format!(
+        "'{kind}' object has no attribute 'encode'"
+    )))
+}
+
+/// Preserve the raw command's metrics conversion error after confirmed typing.
+/// The regular string-only callers continue to use `confirm_send_action`.
+pub fn confirm_send_action_raw(
+    env: &mut dyn SendPreparationEnv,
+    action: &mut SendAction,
+    raw: &serde_json::Value,
+) -> Result<(), DunkError> {
+    let Some(confirmation) = action.confirmation.take() else {
+        return Ok(());
+    };
+    let mut input_error = None;
+    let result = press_until_submitted_value(
+        env,
+        &confirmation.pane_id,
+        &confirmation.text,
+        true,
+        confirmation.busy_hint,
+        StatusBaseline::Captured(confirmation.baseline),
+        Some(raw),
+        &mut input_error,
+    );
+    if let Some(error) = input_error {
+        return Err(error);
+    }
+    action.ok = result.0;
+    action.detail = result.1;
+    Ok(())
 }
 
 /// Route an already-normalized key list once while the caller holds the typing guard. Pending
@@ -1546,7 +1660,12 @@ fn dim_bodies_accounted(flock: &Flock, pane_id: &str, screen: &str) -> bool {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get(pane_id)
-        .cloned()
+        .map(|values| {
+            values
+                .iter()
+                .map(crate::terminal::raw::string)
+                .collect::<Vec<_>>()
+        })
         .unwrap_or_default();
     {
         let outbox = outbox_lock(&flock.outbox);
@@ -1787,6 +1906,29 @@ pub fn press_until_submitted(
     busy_hint: bool,
     baseline: StatusBaseline,
 ) -> (bool, String) {
+    press_until_submitted_value(
+        env,
+        pane_id,
+        text,
+        first_pressed,
+        busy_hint,
+        baseline,
+        None,
+        &mut None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn press_until_submitted_value(
+    env: &mut dyn SubmitEnv,
+    pane_id: &str,
+    text: &str,
+    first_pressed: bool,
+    busy_hint: bool,
+    baseline: StatusBaseline,
+    raw: Option<&serde_json::Value>,
+    input_error: &mut Option<DunkError>,
+) -> (bool, String) {
     if let Some(dead) = dead_session(env, pane_id) {
         return (
             false,
@@ -1843,6 +1985,10 @@ pub fn press_until_submitted(
                     if attempt > 1 {
                         env.remember_submit_key(pane_id, if key == "Tab" { "Enter" } else { &key });
                     }
+                    if let Some(error) = raw.and_then(raw_metric_error) {
+                        *input_error = Some(error);
+                        return (false, String::new());
+                    }
                     env.record_submit_attempt(pane_id, "ok", attempt, text.len());
                     return (
                         true,
@@ -1861,6 +2007,10 @@ pub fn press_until_submitted(
                                 if key == "Tab" { "Enter" } else { &key },
                             );
                         }
+                        if let Some(error) = raw.and_then(raw_metric_error) {
+                            *input_error = Some(error);
+                            return (false, String::new());
+                        }
                         env.record_submit_attempt(pane_id, "ok-turn", attempt, text.len());
                         return (true, "sent (confirmed by the turn it started)".to_string());
                     }
@@ -1874,6 +2024,10 @@ pub fn press_until_submitted(
                 if attempt > 1 {
                     env.remember_submit_key(pane_id, if key == "Tab" { "Enter" } else { &key });
                 }
+                if let Some(error) = raw.and_then(raw_metric_error) {
+                    *input_error = Some(error);
+                    return (false, String::new());
+                }
                 env.record_submit_attempt(pane_id, "ok-turn", attempt, text.len());
                 return (true, "sent (confirmed by the turn it started)".to_string());
             }
@@ -1884,6 +2038,10 @@ pub fn press_until_submitted(
             if attempt > 1 {
                 // Python resets a busy Tab echo to Enter once the turn itself confirms delivery.
                 env.remember_submit_key(pane_id, "Enter");
+            }
+            if let Some(error) = raw.and_then(raw_metric_error) {
+                *input_error = Some(error);
+                return (false, String::new());
             }
             env.record_submit_attempt(pane_id, "ok-turn", attempt, text.len());
             return (true, "sent (confirmed by the turn it started)".to_string());
@@ -4422,15 +4580,22 @@ impl Flock {
     /// human draft. The state remains in memory, as in Python's `sent_text_by_pane`.
     #[allow(dead_code)] // The guarded send caller is assigned to a dependent T33 leaf.
     pub(crate) fn remember_typed(&self, pane_id: &str, text: &str) {
+        self.remember_typed_raw(pane_id, &serde_json::Value::String(text.into()));
+    }
+
+    pub(crate) fn remember_typed_raw(&self, pane_id: &str, text: &serde_json::Value) {
         let mut history = self
             .sent_text_by_pane
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let recent = history.entry(pane_id.to_string()).or_default();
-        if let Some(index) = recent.iter().position(|previous| previous == text) {
+        if let Some(index) = recent
+            .iter()
+            .position(|previous| crate::terminal::raw::equal(previous, text))
+        {
             recent.remove(index);
         }
-        recent.push(text.to_string());
+        recent.push(text.clone());
         if recent.len() > REMEMBERED_SENDS {
             let excess = recent.len() - REMEMBERED_SENDS;
             recent.drain(..excess);
@@ -4477,7 +4642,12 @@ impl Flock {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(pane_id)
-            .cloned()
+            .map(|values| {
+                values
+                    .iter()
+                    .map(crate::terminal::raw::string)
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default();
         {
             let outbox = outbox_lock(&self.outbox);
