@@ -828,6 +828,7 @@ pub mod loops_stuck;
 pub mod mailbox;
 pub mod panes;
 pub mod project_summary;
+pub mod recovery_commands;
 pub mod resolve;
 pub mod retire;
 mod retired;
