@@ -621,7 +621,25 @@ impl Terminal for TmuxBackend {
     }
 
     fn close(&mut self, kind: &str, target_id: &str) -> Result<(), TerminalError> {
-        let panes = self.list_panes();
+        let panes = if matches!(kind, "tab" | "workspace") {
+            let result = self.run(&["list-panes", "-a", "-F", PANE_FORMAT])?;
+            if result.code != 0 {
+                return Err(TerminalError::refused(
+                    result.message("tmux list-panes failed"),
+                ));
+            }
+            // The display parser deliberately skips malformed rows. Destructive
+            // parent operations must not silently omit an unowned child.
+            for row in result.stdout.lines() {
+                let fields: Vec<_> = row.split(PANE_SEP).collect();
+                if fields.len() != 14 || fields[..3].iter().any(|id| id.is_empty()) {
+                    return Err(TerminalError::refused("incomplete tmux pane inventory"));
+                }
+            }
+            self.parsed_panes(&result.stdout)?
+        } else {
+            self.try_list_panes()?
+        };
         if !self.registry.managed(kind, target_id, &panes)? {
             return Err(TerminalError::refused(format!(
                 "refusing to close {kind} {target_id}: Dunking Sheep did not create it                  (or it contains panes it did not create)")));

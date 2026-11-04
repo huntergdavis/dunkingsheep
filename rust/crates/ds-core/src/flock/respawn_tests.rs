@@ -632,7 +632,7 @@ fn native_active_and_busy_refuse_without_backend_mutation() {
 }
 #[test]
 fn shared_codex_home_in_requested_and_rollback_argv_is_refused() {
-    for rollback in [false, true] {
+    for rollback in 0..3 {
         let f = Fixture::new();
         let path = f.dir.path().join("tmux");
         let script = std::fs::read_to_string(&path)
@@ -645,8 +645,14 @@ fn shared_codex_home_in_requested_and_rollback_argv_is_refused() {
             "codex".into(),
         ];
         let normal = vec!["codex".into()];
-        let result = if rollback {
+        if rollback == 2 {
+            f.flock
+                .record_launch(P, &[("agent", json!("codex")), ("argv", json!(shared))]);
+        }
+        let result = if rollback == 1 {
             codex_request(&f, &normal, Some(&shared))
+        } else if rollback == 2 {
+            codex_request(&f, &normal, None)
         } else {
             codex_request(&f, &shared, None)
         };

@@ -143,17 +143,24 @@ impl Flock {
         }
         let pane_value = super::lanes::pane_to_json(&pane, None);
         let pane_agent = field(&pane_value, "agent").unwrap_or("").to_lowercase();
+        let old = Value::Object(self.launch(&pane_id).unwrap_or_default());
+        let rollback = request
+            .rollback_argv
+            .filter(|v| !v.is_empty())
+            .map(<[String]>::to_vec)
+            .unwrap_or_else(|| {
+                old["argv"]
+                    .as_array()
+                    .map(|a| a.iter().map(py_str).collect())
+                    .unwrap_or_default()
+            });
         if pane_agent == "codex" {
             let shared = crate::native_session::realpath(
                 &crate::terminal::tmux_registry::expand_home("~/.codex", services.env)
                     .map_err(|error| refusal(error.to_string()))?
                     .to_string_lossy(),
             );
-            for part in request
-                .argv
-                .iter()
-                .chain(request.rollback_argv.unwrap_or(&[]))
-            {
+            for part in request.argv.iter().chain(&rollback) {
                 if let Some(home) = part.strip_prefix("CODEX_HOME=") {
                     let home = crate::terminal::tmux_registry::expand_home(home, services.env)
                         .map_err(|error| refusal(error.to_string()))?;
@@ -229,17 +236,6 @@ impl Flock {
         } else {
             None
         };
-        let old = Value::Object(self.launch(&pane_id).unwrap_or_default());
-        let rollback = request
-            .rollback_argv
-            .filter(|v| !v.is_empty())
-            .map(<[String]>::to_vec)
-            .unwrap_or_else(|| {
-                old["argv"]
-                    .as_array()
-                    .map(|a| a.iter().map(py_str).collect())
-                    .unwrap_or_default()
-            });
         if rollback.is_empty() {
             return Err(refusal(format!(
                 "respawn-pane refused: no rollback argv for pane {pane_id}"

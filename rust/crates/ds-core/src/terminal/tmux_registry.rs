@@ -110,7 +110,7 @@ impl Registry {
             return Ok(true);
         }
         let owned_panes = collection(&data, "pane")?;
-        Ok(panes
+        let mut children = panes
             .iter()
             .filter(|p| {
                 if kind == "tab" {
@@ -119,7 +119,8 @@ impl Registry {
                     p.session_id == id
                 }
             })
-            .all(|p| owned_panes.contains_key(&p.pane_id)))
+            .peekable();
+        Ok(children.peek().is_some() && children.all(|p| owned_panes.contains_key(&p.pane_id)))
     }
     pub fn labels(&self) -> Result<std::collections::BTreeMap<String, String>, TerminalError> {
         let data = self.load()?;

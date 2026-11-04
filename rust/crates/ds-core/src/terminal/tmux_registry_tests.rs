@@ -202,3 +202,67 @@ fn account_lookup_failure_propagates_but_missing_account_preserves_tilde() {
     assert!(registry.load().is_err());
     assert!(registry.remember("pane", "%1", json!({})).is_err());
 }
+
+#[test]
+fn parent_close_requires_successful_complete_nonempty_inventory() {
+    use crate::terminal::{tmux::TmuxBackend, Terminal};
+    let dir = tempfile::tempdir().unwrap();
+    let binary = dir.path().join("tmux");
+    let root = crate::terminal::tmux::shell_join(&[dir.path().to_str().unwrap()]);
+    std::fs::write(
+        &binary,
+        format!(
+            r#"#!/bin/sh
+cd {root} || exit 1
+printf '%s\n' "$*" >> calls
+case "$1" in
+list-panes) cat inventory; if test -f fail; then echo 'inventory failed' >&2; exit 1; fi ;;
+esac
+"#
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = dir.path().join("registry.json");
+    let registry = Registry::new(&path);
+    let owned =
+        "%1\x1f$1\x1f@1\x1f/tmp\x1fsh\x1froot\x1f1\x1ffleet\x1ftab\x1f0\x1f0\x1f123\x1f80\x1f24\n";
+    for (kind, id, kill) in [
+        ("tab", "@1", "kill-window"),
+        ("workspace", "$1", "kill-session"),
+    ] {
+        registry.remember(kind, id, json!({})).unwrap();
+        registry.remember("pane", "%1", json!({})).unwrap();
+        let mut backend = TmuxBackend::with_registry(&binary, &path);
+        for (inventory, fail) in [
+            (owned.to_string(), true),
+            (String::new(), false),
+            (format!("{owned}%2\x1f$1\x1f@1\n"), false),
+            (owned.replace("%1", "%2"), false),
+            (owned.replace("$1", "$2").replace("@1", "@2"), false),
+        ] {
+            std::fs::write(dir.path().join("inventory"), inventory).unwrap();
+            if fail {
+                std::fs::write(dir.path().join("fail"), "").unwrap();
+            }
+            assert!(backend.close(kind, id).is_err());
+            assert!(!std::fs::read_to_string(dir.path().join("calls"))
+                .unwrap()
+                .contains(kill));
+            assert!(
+                registry.load().unwrap()[if kind == "tab" { "tabs" } else { "workspaces" }]
+                    .get(id)
+                    .is_some()
+            );
+            if fail {
+                std::fs::remove_file(dir.path().join("fail")).unwrap();
+            }
+        }
+        std::fs::write(dir.path().join("inventory"), owned).unwrap();
+        backend.close(kind, id).unwrap();
+        assert!(std::fs::read_to_string(dir.path().join("calls"))
+            .unwrap()
+            .contains(kill));
+        std::fs::write(dir.path().join("calls"), "").unwrap();
+    }
+}
