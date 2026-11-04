@@ -14,8 +14,13 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex, Weak,
 };
+#[cfg(test)]
+use std::thread;
 use std::time::{Duration, Instant};
 use tokio::runtime::Handle;
+
+mod dunk_timers;
+use dunk_timers::DunkTimerOwner;
 
 type Factory = dyn Fn() -> Box<dyn Terminal> + Send + Sync + 'static;
 
@@ -30,6 +35,7 @@ impl SnapshotStore for FlockSnapshot {
 pub(crate) struct OutboxRuntime {
     pub(super) flock: Arc<Flock>,
     pub(super) pool: Arc<OutboxWorkerPool>,
+    dunk_timers: DunkTimerOwner,
 }
 impl OutboxRuntime {
     #[allow(dead_code)]
@@ -50,19 +56,156 @@ impl OutboxRuntime {
         if flock.stores().inbox.is_none() {
             return Err(DunkError::Refused("inbox store is not attached".into()));
         }
+        let runner_runtime = runtime.clone();
+        let runner_factory = Arc::clone(&factory);
         let pool = Arc::new_cyclic(|pool| {
             OutboxWorkerPool::new(Arc::new(Runner {
-                runtime,
-                factory,
+                runtime: runner_runtime,
+                factory: runner_factory,
                 pool: pool.clone(),
                 reporter: reporter.clone(),
             }))
         });
-        Ok(Self { flock, pool })
+        let timers = DunkTimerOwner::new(
+            Arc::downgrade(&flock),
+            runtime,
+            factory,
+            Arc::downgrade(&pool),
+            reporter,
+        );
+        for handle in flock.dunks.running_handles() {
+            timers.start(handle)?;
+        }
+        Ok(Self {
+            flock,
+            pool,
+            dunk_timers: timers,
+        })
     }
+
+    pub(crate) fn start_dunk(
+        &self,
+        id: &str,
+    ) -> Result<serde_json::Map<String, serde_json::Value>, DunkError> {
+        let handle = self.flock.start_dunk(id)?;
+        if let Err(error) = self.dunk_timers.start(Arc::clone(&handle)) {
+            crate::flock::dunks::DunkList::stop_handle(&handle, "Stopped");
+            return Err(error);
+        }
+        Ok(crate::flock::dunks::DunkList::handle_row(&handle))
+    }
+
+    pub(crate) fn stop_dunk(
+        &self,
+        id: &str,
+    ) -> Result<serde_json::Map<String, serde_json::Value>, DunkError> {
+        let handle = self.flock.stop_dunk(id)?;
+        self.dunk_timers.stop(&handle);
+        Ok(crate::flock::dunks::DunkList::handle_row(&handle))
+    }
+
+    pub(crate) fn toggle_dunk(
+        &self,
+        id: &str,
+    ) -> Result<serde_json::Map<String, serde_json::Value>, DunkError> {
+        let (handle, started) = self.flock.toggle_dunk(id)?;
+        if started {
+            if let Err(error) = self.dunk_timers.start(Arc::clone(&handle)) {
+                crate::flock::dunks::DunkList::stop_handle(&handle, "Stopped");
+                return Err(error);
+            }
+        } else {
+            self.dunk_timers.stop(&handle);
+        }
+        Ok(crate::flock::dunks::DunkList::handle_row(&handle))
+    }
+
+    pub(crate) fn remove_dunk(
+        &self,
+        id: &str,
+    ) -> Result<serde_json::Map<String, serde_json::Value>, DunkError> {
+        let handle = self.flock.dunks.handle(id)?;
+        self.dunk_timers.stop(&handle);
+        self.flock.dunks.remove_handle(&handle);
+        Ok(crate::flock::dunks::DunkList::handle_row(&handle))
+    }
+
+    pub(crate) fn interval_changed(&self, id: &str) -> Result<(), DunkError> {
+        let handle = self.flock.dunks.handle(id)?;
+        self.dunk_timers.wake(&handle);
+        Ok(())
+    }
+
+    pub(crate) fn add_dunk(
+        &self,
+        pane: Option<&serde_json::Map<String, serde_json::Value>>,
+        args: &crate::flock::dunks::AddArgs,
+    ) -> Result<serde_json::Map<String, serde_json::Value>, DunkError> {
+        let row = self.flock.dunks.add(pane, args)?;
+        if args.start && pane.is_some() {
+            let id = row
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| DunkError::Refused("created dunk has no id".into()))?;
+            let handle = self.flock.dunks.handle(id)?;
+            if let Err(error) = self.dunk_timers.start(Arc::clone(&handle)) {
+                crate::flock::dunks::DunkList::set_timer_error(&handle, &error.to_string());
+                return Err(error);
+            }
+        }
+        self.flock.save()?;
+        Ok(row)
+    }
+
+    pub(crate) fn update_dunk(
+        &self,
+        id: &str,
+        pane: Option<&serde_json::Map<String, serde_json::Value>>,
+        args: &crate::flock::dunks::UpdateArgs,
+    ) -> Result<serde_json::Map<String, serde_json::Value>, DunkError> {
+        let row = self.flock.dunks.update(id, pane, args)?;
+        self.interval_changed(id)?;
+        self.flock.save()?;
+        Ok(row)
+    }
+
+    pub(crate) fn stop_all_dunks(
+        &self,
+    ) -> Result<Vec<serde_json::Map<String, serde_json::Value>>, DunkError> {
+        let handles = self.flock.dunks.halt_handles(None);
+        for handle in &handles {
+            self.dunk_timers.stop(handle);
+        }
+        let result = self.flock.dunks.list();
+        self.flock.save()?;
+        Ok(result)
+    }
+
+    pub(crate) fn halt_dunks_aimed_at(&self, panes: &[String]) -> Result<Vec<String>, DunkError> {
+        let handles = self.flock.dunks.halt_handles(Some(panes));
+        let mut stopped = Vec::new();
+        for handle in &handles {
+            self.dunk_timers.stop(handle);
+            stopped.push(crate::flock::dunks::DunkList::timer_fields(handle).id);
+        }
+        if !stopped.is_empty() {
+            self.flock.save()?;
+        }
+        Ok(stopped)
+    }
+
+    pub(crate) fn stop_timer_workers(&self) {
+        self.dunk_timers.stop_all();
+    }
+
+    pub(crate) fn stop_outbox_workers(&self) {
+        self.pool.stop_outbox_workers(&self.flock);
+    }
+
     #[allow(dead_code)]
     pub(crate) fn stop_and_join(&self) {
-        self.pool.stop_outbox_workers(&self.flock);
+        self.stop_timer_workers();
+        self.stop_outbox_workers();
     }
 }
 impl Drop for OutboxRuntime {
@@ -70,6 +213,7 @@ impl Drop for OutboxRuntime {
         self.stop_and_join();
     }
 }
+
 struct Runner {
     runtime: Handle,
     factory: Arc<Factory>,
@@ -149,7 +293,922 @@ impl SendPreparationEnv for TerminalCallAdapter<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::flock::dunks::{AddArgs, UpdateArgs};
     use crate::terminal::fakes::FakeTerminal;
+
+    // Worker-local facade with externally controlled state and recorded terminal I/O.
+    #[derive(Debug)]
+    struct SharedTerminal(Arc<Mutex<FakeTerminal>>, usize);
+    use crate::terminal::{AgentSpec, Pane, Resize, Tab, TerminalError, Workspace};
+    use std::collections::BTreeMap;
+    impl Terminal for SharedTerminal {
+        fn version(&self) -> String {
+            self.0.lock().unwrap().version()
+        }
+        fn is_available(&self) -> bool {
+            self.0.lock().unwrap().is_available()
+        }
+        fn server_error_hint(&self) -> String {
+            self.0.lock().unwrap().server_error_hint()
+        }
+        fn list_panes(&self) -> Vec<Pane> {
+            self.0.lock().unwrap().list_panes()
+        }
+        fn get_pane(&self, pane_id: &str) -> Option<Pane> {
+            self.0.lock().unwrap().get_pane(pane_id)
+        }
+        fn list_tabs(&self) -> Vec<Tab> {
+            self.0.lock().unwrap().list_tabs()
+        }
+        fn list_workspaces(&self) -> Vec<Workspace> {
+            self.0.lock().unwrap().list_workspaces()
+        }
+        fn list_panes_grouped(&self) -> BTreeMap<String, Vec<Pane>> {
+            self.0.lock().unwrap().list_panes_grouped()
+        }
+        fn agent_child_pids(&self, pane_pid: i64) -> Result<Vec<i64>, TerminalError> {
+            self.0.lock().unwrap().agent_child_pids(pane_pid)
+        }
+        fn create_workspace(
+            &mut self,
+            label: Option<&str>,
+            cwd: Option<&str>,
+            focus: bool,
+        ) -> Result<Workspace, TerminalError> {
+            self.0.lock().unwrap().create_workspace(label, cwd, focus)
+        }
+        fn create_tab(
+            &mut self,
+            workspace_id: Option<&str>,
+            label: Option<&str>,
+            cwd: Option<&str>,
+            focus: bool,
+        ) -> Result<Tab, TerminalError> {
+            self.0
+                .lock()
+                .unwrap()
+                .create_tab(workspace_id, label, cwd, focus)
+        }
+        fn split_pane(
+            &mut self,
+            pane_id: &str,
+            direction: &str,
+            cwd: Option<&str>,
+        ) -> Result<Pane, TerminalError> {
+            self.0.lock().unwrap().split_pane(pane_id, direction, cwd)
+        }
+        fn start_agent(&mut self, spec: &AgentSpec) -> Result<Pane, TerminalError> {
+            self.0.lock().unwrap().start_agent(spec)
+        }
+        fn rename(
+            &mut self,
+            kind: &str,
+            target_id: &str,
+            label: &str,
+        ) -> Result<(), TerminalError> {
+            self.0.lock().unwrap().rename(kind, target_id, label)
+        }
+        fn close(&mut self, kind: &str, target_id: &str) -> Result<(), TerminalError> {
+            self.0.lock().unwrap().close(kind, target_id)
+        }
+        fn focus(&mut self, kind: &str, target_id: &str) -> Result<(), TerminalError> {
+            self.0.lock().unwrap().focus(kind, target_id)
+        }
+        fn run_command(&mut self, pane_id: &str, command: &str) -> Result<(), TerminalError> {
+            self.0.lock().unwrap().run_command(pane_id, command)
+        }
+        fn send_text(&mut self, pane_id: &str, text: &str) -> Result<(), TerminalError> {
+            self.0.lock().unwrap().send_text(pane_id, text)
+        }
+        fn send_text_and_enter(&mut self, pane_id: &str, text: &str) -> Result<(), TerminalError> {
+            self.0.lock().unwrap().send_text_and_enter(pane_id, text)
+        }
+        fn send_keys(&mut self, pane_id: &str, keys: &[&str]) -> Result<(), TerminalError> {
+            let mut fake = self.0.lock().unwrap();
+            fake.send_keys(pane_id, keys)?;
+            if self.1 > 0 && fake.keys_sent.len() >= self.1 {
+                fake.screens.insert(
+                    pane_id.into(),
+                    recovery_frame("\x1b[2mAsk Codex to do anything\x1b[0m"),
+                );
+            }
+            Ok(())
+        }
+        fn read_pane(
+            &self,
+            pane_id: &str,
+            lines: i64,
+            ansi: bool,
+        ) -> Result<Option<String>, TerminalError> {
+            self.0.lock().unwrap().read_pane(pane_id, lines, ansi)
+        }
+        fn agent_status(&self, pane_id: &str) -> Option<String> {
+            self.0.lock().unwrap().agent_status(pane_id)
+        }
+        fn resize(&mut self, pane_id: &str, cols: i64, rows: i64) -> Result<Resize, TerminalError> {
+            self.0.lock().unwrap().resize(pane_id, cols, rows)
+        }
+    }
+
+    fn recovery_frame(body: &str) -> String {
+        format!(
+            "synthetic transcript\n{}› {body}\n  model · /tmp/synthetic-fixture · task\n",
+            "\n".repeat(17)
+        )
+    }
+
+    #[test]
+    fn real_timer_stale_modal_reports_once_without_submitting_dialog() {
+        // Isolate environment-based reporter sinks in a child test process. The owner command
+        // cannot execute, and all notification storage and terminal I/O stay in this fixture.
+        if std::env::var_os("DS_TIMER_MODAL_FIXTURE").is_none() {
+            let dir = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "server_runtime::outbox_runtime::tests::real_timer_stale_modal_reports_once_without_submitting_dialog", "--nocapture"])
+                .env("DS_TIMER_MODAL_FIXTURE", "1")
+                .env("DUNKINGSHEEP_DIR", dir.path())
+                .env("DUNKINGSHEEP_VPCTL", dir.path().join("absent-owner-command"))
+                .env("DUNKINGSHEEP_VP_PANE", "fixture-missing-vp")
+                .output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let flock = Arc::new(Flock::new(
+            dir.path().join("launches"),
+            dir.path().join("lanes"),
+            false,
+        ));
+        let metrics =
+            Arc::new(crate::metrics::MetricsStore::open(dir.path().join("metrics.db")).unwrap());
+        flock.attach_stores(crate::flock::panes::Stores {
+            inbox: Some(Arc::new(
+                crate::inbox_store::Store::open(
+                    dir.path().join("inbox.db"),
+                    dir.path().join("blobs"),
+                )
+                .unwrap(),
+            )),
+            metrics: Some(Arc::clone(&metrics)),
+            ..Default::default()
+        });
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let terminal = Arc::new(Mutex::new(FakeTerminal::new()));
+        {
+            let mut fake = terminal.lock().unwrap();
+            fake.panes[0].pane_pid = Some(std::process::id() as i64);
+            fake.screens.insert(
+                "w1:p1".into(),
+                "Press Enter to confirm or Esc to cancel".into(),
+            );
+        }
+        let worker_terminal = Arc::clone(&terminal);
+        let owner = OutboxRuntime::new(
+            Arc::clone(&flock),
+            runtime.handle().clone(),
+            Arc::new(move || Box::new(SharedTerminal(Arc::clone(&worker_terminal), 0))),
+        )
+        .unwrap();
+        let pane = serde_json::json!({"pane_id": "w1:p1"});
+        owner
+            .add_dunk(
+                pane.as_object(),
+                &AddArgs {
+                    start: true,
+                    interval: Some("0.001".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(45);
+        let mut first_hold = None;
+        loop {
+            let row = flock.dunks.get("d1").unwrap();
+            assert_eq!(serde_json::json!(0), row["send_count"]);
+            if row["hold_count"].as_i64().unwrap() > 0 {
+                let since = first_hold.get_or_insert_with(Instant::now);
+                if since.elapsed().as_secs_f64() > crate::flock::loops_stuck::MODAL_WAIT_S + 1.0 {
+                    owner.interval_changed("d1").unwrap();
+                    thread::sleep(Duration::from_secs(1));
+                }
+            }
+            let reports = metrics
+                .events_between(0.0, crate::clock::now_s() + 1.0)
+                .unwrap()
+                .into_iter()
+                .filter(|event| event.kind == "panel.blocking")
+                .count();
+            if reports > 0 {
+                assert_eq!(1, reports);
+                break;
+            }
+            assert!(Instant::now() < deadline, "stable modal was not reported");
+            thread::sleep(Duration::from_millis(20));
+        }
+        owner.interval_changed("d1").unwrap();
+        thread::sleep(Duration::from_secs(1));
+        owner.stop_and_join();
+        let reports = metrics
+            .events_between(0.0, crate::clock::now_s() + 1.0)
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.kind == "panel.blocking")
+            .count();
+        assert_eq!(1, reports);
+        let fake = terminal.lock().unwrap();
+        assert!(fake.keys_sent.is_empty());
+        assert!(fake.sends.is_empty());
+        assert!(fake.submits.is_empty());
+    }
+
+    #[test]
+    fn real_timer_recovers_owned_stranded_text_before_scheduled_delivery() {
+        let dir = tempfile::tempdir().unwrap();
+        let flock = Arc::new(Flock::new(
+            dir.path().join("launches"),
+            dir.path().join("lanes"),
+            true,
+        ));
+        flock
+            .attach_status_state(crate::flock::status_runtime::StatusState::at_start(
+                "test",
+                dir.path().join("state.json"),
+                std::env::current_exe().unwrap(),
+                crate::config::Env::default(),
+            ))
+            .unwrap();
+        flock.attach_stores(crate::flock::panes::Stores {
+            inbox: Some(Arc::new(
+                crate::inbox_store::Store::open(
+                    dir.path().join("inbox.db"),
+                    dir.path().join("blobs"),
+                )
+                .unwrap(),
+            )),
+            ..Default::default()
+        });
+        {
+            let mut config = flock.stuck_config.lock().unwrap();
+            config.threshold_s = 0.01;
+            config.observation_interval_s = 0.0;
+        }
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let terminal = Arc::new(Mutex::new(FakeTerminal::new()));
+        {
+            let mut fake = terminal.lock().unwrap();
+            fake.panes[0].pane_pid = Some(std::process::id() as i64);
+            fake.statuses.insert("w1:p1".into(), "idle".into());
+            fake.screens
+                .insert("w1:p1".into(), recovery_frame("stuck body"));
+        }
+        let worker_terminal = Arc::clone(&terminal);
+        let owner = OutboxRuntime::new(
+            Arc::clone(&flock),
+            runtime.handle().clone(),
+            Arc::new(move || Box::new(SharedTerminal(Arc::clone(&worker_terminal), 3))),
+        )
+        .unwrap();
+        let adapter_terminal: Mutex<Box<dyn Terminal>> =
+            Mutex::new(Box::new(SharedTerminal(Arc::clone(&terminal), 0)));
+        let env = TerminalCallAdapter {
+            flock: &flock,
+            terminal: &adapter_terminal,
+            runtime: runtime.handle(),
+        };
+        let mut message = Message::new("stranded", "w1:p1", "writer", "stuck body", "send_text");
+        message.created_at = 1.0;
+        message.status = "failed".into();
+        message.attempt_generation = pane_generation(&env, "w1:p1");
+        assert!(message.attempt_generation.is_some());
+        flock
+            .sent_text_by_pane
+            .lock()
+            .unwrap()
+            .insert("w1:p1".into(), vec!["stuck body".into()]);
+        flock.note_stuck_candidate(&message);
+        let pane = serde_json::json!({"pane_id": "w1:p1"});
+        owner
+            .add_dunk(
+                pane.as_object(),
+                &AddArgs {
+                    start: true,
+                    interval: Some("0.001".into()),
+                    text: Some("next scheduled".into()),
+                    max_sends: Some("1".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut observed_holds = 0;
+        loop {
+            let recovered = flock
+                .stuck_candidates
+                .lock()
+                .unwrap()
+                .get("w1:p1")
+                .is_some_and(|entry| entry.recovery_outcome.as_deref() == Some("consumed"));
+            if recovered {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timer did not recover owned composer: {:?}",
+                flock.dunks.get("d1")
+            );
+            let holds = flock.dunks.get("d1").unwrap()["hold_count"]
+                .as_i64()
+                .unwrap();
+            if holds > observed_holds {
+                observed_holds = holds;
+                owner.interval_changed("d1").unwrap();
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        owner.stop_and_join();
+        assert!(terminal.lock().unwrap().keys_sent.len() >= 3);
+        let persisted: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.path().join("state.json")).unwrap()).unwrap();
+        assert!(persisted.is_object());
+    }
+
+    #[test]
+    fn scheduled_worker_snapshot_failure_never_counts_a_successful_send() {
+        let dir = tempfile::tempdir().unwrap();
+        // Enabled persistence without a status-state path makes the real snapshot fail.
+        let flock = Arc::new(Flock::new(
+            dir.path().join("launches"),
+            dir.path().join("lanes"),
+            true,
+        ));
+        flock.attach_stores(crate::flock::panes::Stores {
+            inbox: Some(Arc::new(
+                crate::inbox_store::Store::open(
+                    dir.path().join("inbox.db"),
+                    dir.path().join("blobs"),
+                )
+                .unwrap(),
+            )),
+            ..Default::default()
+        });
+        let pane = serde_json::json!({"pane_id": "w1:p1"});
+        flock
+            .dunks
+            .add(
+                pane.as_object(),
+                &AddArgs {
+                    start: true,
+                    interval: Some("0.001".into()),
+                    hold_while_typing: Some("false".into()),
+                    max_sends: Some("1".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let terminal = Arc::new(Mutex::new(FakeTerminal::new()));
+        let worker_terminal = Arc::clone(&terminal);
+        let owner = OutboxRuntime::new(
+            Arc::clone(&flock),
+            runtime.handle().clone(),
+            Arc::new(move || Box::new(SharedTerminal(Arc::clone(&worker_terminal), 0))),
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let row = flock
+                .dunks
+                .get("d1")
+                .expect("failed attempt must not reach max_sends");
+            assert_eq!(serde_json::json!(0), row["send_count"]);
+            if row["status"] == "Error" && row["last_error"].is_string() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "snapshot failure was not surfaced"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        owner.stop_dunk("d1").unwrap();
+        assert!(owner.dunk_timers.workers.lock().unwrap().is_empty());
+        owner.stop_and_join();
+        let recorded = terminal.lock().unwrap();
+        assert!(recorded.submits.is_empty());
+        assert!(
+            recorded.keys_sent.is_empty(),
+            "snapshot failure must precede Enter"
+        );
+    }
+
+    #[test]
+    fn real_timer_idle_hold_idle_recheck_then_delivery() {
+        let dir = tempfile::tempdir().unwrap();
+        let flock = Arc::new(Flock::new(
+            dir.path().join("launches"),
+            dir.path().join("lanes"),
+            false,
+        ));
+        flock.attach_stores(crate::flock::panes::Stores {
+            inbox: Some(Arc::new(
+                crate::inbox_store::Store::open(
+                    dir.path().join("inbox.db"),
+                    dir.path().join("blobs"),
+                )
+                .unwrap(),
+            )),
+            ..Default::default()
+        });
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let terminal = Arc::new(Mutex::new(FakeTerminal::new()));
+        terminal
+            .lock()
+            .unwrap()
+            .statuses
+            .insert("w1:p1".into(), "working".into());
+        let worker_terminal = Arc::clone(&terminal);
+        let owner = OutboxRuntime::new(
+            Arc::clone(&flock),
+            runtime.handle().clone(),
+            Arc::new(move || Box::new(SharedTerminal(Arc::clone(&worker_terminal), 0))),
+        )
+        .unwrap();
+        let pane = serde_json::json!({"pane_id": "w1:p1"});
+        owner
+            .add_dunk(
+                pane.as_object(),
+                &AddArgs {
+                    start: true,
+                    interval: Some("0.001".into()),
+                    only_when: Some("idle".into()),
+                    max_sends: Some("1".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let wait_status = |status: &str| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let row = flock
+                    .dunks
+                    .get("d1")
+                    .expect("must not send before gates clear");
+                assert_eq!(serde_json::json!(0), row["send_count"]);
+                if row["status"] == status {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "did not reach {status}: {row:?}");
+                thread::sleep(Duration::from_millis(10));
+            }
+        };
+        wait_status("Busy (working)");
+        {
+            let mut fake = terminal.lock().unwrap();
+            fake.statuses.insert("w1:p1".into(), "ready".into());
+            fake.screens.insert(
+                "w1:p1".into(),
+                "Press Enter to confirm or Esc to cancel".into(),
+            );
+        }
+        owner.interval_changed("d1").unwrap();
+        wait_status("Held (typing)");
+        {
+            let mut fake = terminal.lock().unwrap();
+            fake.screens.clear();
+            fake.statuses.insert("w1:p1".into(), "working".into());
+        }
+        owner.interval_changed("d1").unwrap();
+        wait_status("Busy (working)");
+        assert_eq!(
+            serde_json::json!(1),
+            flock.dunks.get("d1").unwrap()["hold_count"]
+        );
+        assert!(terminal.lock().unwrap().keys_sent.is_empty());
+        terminal
+            .lock()
+            .unwrap()
+            .statuses
+            .insert("w1:p1".into(), "ready".into());
+        owner.interval_changed("d1").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while flock.dunks.get("d1").is_ok() {
+            assert!(
+                Instant::now() < deadline,
+                "cleared timer did not deliver/remove"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        owner.stop_and_join();
+        let fake = terminal.lock().unwrap();
+        assert!(!fake.sends.is_empty() || !fake.submits.is_empty());
+        assert!(!fake.keys_sent.is_empty() || !fake.submits.is_empty());
+    }
+
+    #[test]
+    fn held_timer_wake_rechecks_idle_before_another_attempt() {
+        let dir = tempfile::tempdir().unwrap();
+        let flock = Arc::new(Flock::new(
+            dir.path().join("launches"),
+            dir.path().join("lanes"),
+            false,
+        ));
+        flock.attach_stores(crate::flock::panes::Stores {
+            inbox: Some(Arc::new(
+                crate::inbox_store::Store::open(
+                    dir.path().join("inbox.db"),
+                    dir.path().join("blobs"),
+                )
+                .unwrap(),
+            )),
+            ..Default::default()
+        });
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let owner = OutboxRuntime::new(
+            Arc::clone(&flock),
+            runtime.handle().clone(),
+            Arc::new(|| {
+                let mut fake = FakeTerminal::new();
+                fake.statuses.insert("w1:p1".into(), "working".into());
+                fake.screens.insert(
+                    "w1:p1".into(),
+                    "Press Enter to confirm or Esc to cancel".into(),
+                );
+                Box::new(fake)
+            }),
+        )
+        .unwrap();
+        let pane = serde_json::json!({"pane_id": "w1:p1"});
+        owner
+            .add_dunk(
+                pane.as_object(),
+                &AddArgs {
+                    start: true,
+                    interval: Some("0.001".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let row = flock.dunks.get("d1").unwrap();
+            if row["hold_count"].as_i64().unwrap() > 0 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timer did not enter guarded hold"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        owner
+            .update_dunk(
+                "d1",
+                None,
+                &UpdateArgs {
+                    only_when: Some(Some("idle".into())),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let row = flock.dunks.get("d1").unwrap();
+            assert_eq!(serde_json::json!(0), row["send_count"]);
+            if row["status"] == "Busy (working)" {
+                assert_eq!(serde_json::json!(1), row["hold_count"]);
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "held timer did not recheck idle after wake"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        owner.stop_dunk("d1").unwrap();
+        assert!(owner.dunk_timers.workers.lock().unwrap().is_empty());
+        owner.stop_and_join();
+    }
+
+    #[test]
+    fn timer_factory_failure_is_observable_and_worker_remains_joinable() {
+        let dir = tempfile::tempdir().unwrap();
+        let flock = Arc::new(Flock::new(
+            dir.path().join("launches"),
+            dir.path().join("lanes"),
+            false,
+        ));
+        flock.attach_stores(crate::flock::panes::Stores {
+            inbox: Some(Arc::new(
+                crate::inbox_store::Store::open(
+                    dir.path().join("inbox.db"),
+                    dir.path().join("blobs"),
+                )
+                .unwrap(),
+            )),
+            ..Default::default()
+        });
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let owner = OutboxRuntime::new(
+            Arc::clone(&flock),
+            runtime.handle().clone(),
+            Arc::new(|| panic!("injected terminal factory failure")),
+        )
+        .unwrap();
+        let pane = serde_json::json!({"pane_id": "w1:p1"});
+        owner
+            .add_dunk(
+                pane.as_object(),
+                &AddArgs {
+                    start: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let row = flock.dunks.get("d1").unwrap();
+            if row["status"] == "Error" {
+                assert_eq!(
+                    serde_json::json!("scheduled dunk worker panicked"),
+                    row["last_error"]
+                );
+                assert_eq!(serde_json::json!(0), row["send_count"]);
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "factory failure was not surfaced"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        owner.stop_dunk("d1").unwrap();
+        assert!(owner.dunk_timers.workers.lock().unwrap().is_empty());
+        owner.stop_and_join();
+    }
+
+    #[test]
+    fn stop_all_joins_multiple_real_timer_workers_and_allows_explicit_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let flock = Arc::new(Flock::new(
+            dir.path().join("launches"),
+            dir.path().join("lanes"),
+            false,
+        ));
+        flock.attach_stores(crate::flock::panes::Stores {
+            inbox: Some(Arc::new(
+                crate::inbox_store::Store::open(
+                    dir.path().join("inbox.db"),
+                    dir.path().join("blobs"),
+                )
+                .unwrap(),
+            )),
+            ..Default::default()
+        });
+        let pane = serde_json::json!({"pane_id": "w1:p1"});
+        for _ in 0..2 {
+            flock
+                .dunks
+                .add(
+                    pane.as_object(),
+                    &AddArgs {
+                        start: true,
+                        interval: Some("10".into()),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+        }
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (created_tx, created_rx) = std::sync::mpsc::channel();
+        let owner = OutboxRuntime::new(
+            Arc::clone(&flock),
+            runtime.handle().clone(),
+            Arc::new(move || {
+                created_tx.send(thread::current().id()).unwrap();
+                Box::new(FakeTerminal::new())
+            }),
+        )
+        .unwrap();
+        let first = created_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let second = created_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_ne!(first, second);
+        assert_ne!(first, thread::current().id());
+        let stopped = owner.halt_dunks_aimed_at(&["w1:p1".to_owned()]).unwrap();
+        assert_eq!(vec!["d1", "d2"], stopped);
+        assert!(owner.dunk_timers.workers.lock().unwrap().is_empty());
+        for id in ["d1", "d2"] {
+            let row = flock.dunks.get(id).unwrap();
+            assert_eq!(serde_json::json!("Target closed"), row["status"]);
+            assert!(row["next_send_at"].is_null());
+            owner.start_dunk(id).unwrap();
+            created_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        }
+        let rows = owner.stop_all_dunks().unwrap();
+        assert_eq!(2, rows.len());
+        assert!(rows
+            .iter()
+            .all(|row| row["running"] == false && row["next_send_at"].is_null()));
+        assert!(owner.dunk_timers.workers.lock().unwrap().is_empty());
+        owner.start_dunk("d1").unwrap();
+        created_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        owner.stop_and_join();
+        assert!(owner.dunk_timers.workers.lock().unwrap().is_empty());
+        assert_eq!(
+            serde_json::json!(true),
+            flock.dunks.get("d1").unwrap()["running"],
+            "runtime shutdown preserves restart intent"
+        );
+    }
+
+    #[test]
+    fn real_timer_backpressure_holds_full_and_unreadable_boxes_even_when_busy() {
+        for unreadable in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let flock = Arc::new(Flock::new(
+                dir.path().join("launches"),
+                dir.path().join("lanes"),
+                false,
+            ));
+            flock.attach_stores(crate::flock::panes::Stores {
+                inbox: Some(Arc::new(
+                    crate::inbox_store::Store::open(
+                        dir.path().join("inbox.db"),
+                        dir.path().join("blobs"),
+                    )
+                    .unwrap(),
+                )),
+                ..Default::default()
+            });
+            flock._load_dunks(
+                serde_json::json!({"dunkers": [{
+                    "id": "d1", "running": true, "next_send_at": crate::clock::now_s() + 0.2,
+                    "interval_minutes": 10, "target_pane_id": "w1:p1", "text": "next",
+                    "send_count": 1, "last_sent_text": "previous", "awaiting_consumption": true,
+                    "skip_if_unconsumed": true, "hold_while_typing": false
+                }]})
+                .as_object()
+                .unwrap(),
+            );
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let owner = OutboxRuntime::new(
+                Arc::clone(&flock),
+                runtime.handle().clone(),
+                Arc::new(move || {
+                    let mut fake = FakeTerminal::new();
+                    fake.statuses.insert("w1:p1".into(), "working".into());
+                    fake.screens.insert("w1:p1".into(), "❯ previous".into());
+                    if unreadable {
+                        fake.unreadable.insert("w1:p1".into());
+                    }
+                    Box::new(fake)
+                }),
+            )
+            .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let row = flock.dunks.get("d1").unwrap();
+                assert_eq!(
+                    serde_json::json!(1),
+                    row["send_count"],
+                    "busy must not imply consumption"
+                );
+                if row["total_skips"].as_i64().unwrap() > 0 {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "real timer did not record backpressure"
+                );
+                thread::sleep(Duration::from_millis(10));
+            }
+            owner.stop_dunk("d1").unwrap();
+            let row = flock.dunks.get("d1").unwrap();
+            assert_eq!(serde_json::json!(1), row["total_skips"]);
+            assert_eq!(serde_json::json!(1), row["send_count"]);
+            assert_eq!(
+                serde_json::json!(if unreadable { 1 } else { 0 }),
+                row["unknown_skips"]
+            );
+            owner.stop_and_join();
+        }
+    }
+
+    #[test]
+    fn real_timer_cancel_before_commit_joins_without_touching_same_id_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let flock = Arc::new(Flock::new(
+            dir.path().join("launches"),
+            dir.path().join("lanes"),
+            false,
+        ));
+        flock.attach_stores(crate::flock::panes::Stores {
+            inbox: Some(Arc::new(
+                crate::inbox_store::Store::open(
+                    dir.path().join("inbox.db"),
+                    dir.path().join("blobs"),
+                )
+                .unwrap(),
+            )),
+            ..Default::default()
+        });
+        let pane = serde_json::json!({"pane_id": "w1:p1"});
+        flock
+            .dunks
+            .add(
+                pane.as_object(),
+                &AddArgs {
+                    interval: Some("0.001".into()),
+                    text: Some("old lifetime".into()),
+                    hold_while_typing: Some("false".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let old = flock.dunks.handle("d1").unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let owner = Arc::new(
+            OutboxRuntime::new(
+                Arc::clone(&flock),
+                runtime.handle().clone(),
+                Arc::new(|| Box::new(FakeTerminal::new())),
+            )
+            .unwrap(),
+        );
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        *owner.dunk_timers.precommit.lock().unwrap() = Some((entered_tx, release_rx));
+        owner.start_dunk("d1").unwrap();
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let signal = Arc::clone(
+            &owner.dunk_timers.workers.lock().unwrap()[&DunkTimerOwner::key(&old)].signal,
+        );
+        let stopping = Arc::clone(&owner);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let stop = thread::spawn(move || {
+            stopping.stop_dunk("d1").unwrap();
+            done_tx.send(()).unwrap();
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !signal.cancelled.load(Ordering::Acquire) {
+            assert!(Instant::now() < deadline);
+            thread::yield_now();
+        }
+        assert!(
+            done_rx.try_recv().is_err(),
+            "stop must wait for the blocked worker"
+        );
+        flock.dunks.remove("d1").unwrap();
+        flock._load_dunks(
+            serde_json::json!({"dunkers": [{"id": "d1", "text": "replacement", "send_count": 7}]})
+                .as_object()
+                .unwrap(),
+        );
+        release_tx.send(()).unwrap();
+        done_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        stop.join().unwrap();
+        assert_eq!(
+            0,
+            crate::flock::dunks::DunkList::timer_fields(&old).send_count
+        );
+        let row = flock.dunks.get("d1").unwrap();
+        assert_eq!(serde_json::json!(7), row["send_count"]);
+        assert_eq!(serde_json::json!("replacement"), row["text"]);
+        assert!(owner.dunk_timers.workers.lock().unwrap().is_empty());
+        assert_eq!(1, flock.dunks.snapshot().1.len());
+        owner.stop_and_join();
+    }
 
     #[test]
     fn typed_attempt_without_frame_succeeds_but_snapshot_failure_refuses() {
@@ -375,5 +1434,289 @@ mod tests {
             crate::flock::sends::outbox_lock(&flock.outbox)["w1:p1"][0].id,
             "m1"
         );
+    }
+
+    #[test]
+    fn scheduled_timer_sends_through_dunk_action_and_removes_at_max_sends() {
+        let dir = tempfile::tempdir().unwrap();
+        let flock = Arc::new(Flock::new(
+            dir.path().join("launches"),
+            dir.path().join("lanes"),
+            false,
+        ));
+        flock.attach_stores(crate::flock::panes::Stores {
+            inbox: Some(Arc::new(
+                crate::inbox_store::Store::open(
+                    dir.path().join("inbox.db"),
+                    dir.path().join("blobs"),
+                )
+                .unwrap(),
+            )),
+            ..Default::default()
+        });
+        let pane = serde_json::json!({
+            "pane_id": "w1:p1", "tab_label": "1", "workspace_label": "work",
+            "agent": "codex", "cwd": "/tmp"
+        });
+        let args = AddArgs {
+            text: Some("scheduled {count}".into()),
+            interval: Some("0.001".into()),
+            start: true,
+            max_sends: Some("2".into()),
+            hold_while_typing: Some("false".into()),
+            ..AddArgs::default()
+        };
+        flock.dunks.add(pane.as_object(), &args).unwrap();
+        let captured = flock.dunks.handle("d1").unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let owner = OutboxRuntime::new(
+            Arc::clone(&flock),
+            runtime.handle().clone(),
+            Arc::new(|| Box::new(FakeTerminal::new())),
+        )
+        .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && flock.dunks.get("d1").is_ok() {
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            flock.dunks.get("d1").is_err(),
+            "scheduled max_sends removes its row"
+        );
+        let finished = crate::flock::dunks::DunkList::timer_fields(&captured);
+        assert_eq!(2, finished.send_count);
+        assert_eq!(Some("scheduled 2"), finished.last_sent_text.as_deref());
+        owner.stop_and_join();
+    }
+
+    #[test]
+    fn restored_overdue_timer_waits_grace_then_delivers_and_removes() {
+        let dir = tempfile::tempdir().unwrap();
+        let flock = Arc::new(Flock::new(
+            dir.path().join("launches"),
+            dir.path().join("lanes"),
+            false,
+        ));
+        flock.attach_stores(crate::flock::panes::Stores {
+            inbox: Some(Arc::new(
+                crate::inbox_store::Store::open(
+                    dir.path().join("inbox.db"),
+                    dir.path().join("blobs"),
+                )
+                .unwrap(),
+            )),
+            ..Default::default()
+        });
+        let before = crate::clock::now_s();
+        flock._load_dunks(
+            serde_json::json!({"dunkers": [{
+                "id": "d1", "running": true, "next_send_at": before - 100.0,
+                "target_pane_id": "w1:p1", "text": "restored {count}",
+                "max_sends": 1, "hold_while_typing": false
+            }]})
+            .as_object()
+            .unwrap(),
+        );
+        let captured = flock.dunks.handle("d1").unwrap();
+        let due = crate::flock::dunks::DunkList::timer_fields(&captured)
+            .next_send_at
+            .unwrap();
+        assert!(due >= before + 5.0);
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let owner = OutboxRuntime::new(
+            Arc::clone(&flock),
+            runtime.handle().clone(),
+            Arc::new(|| Box::new(FakeTerminal::new())),
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while flock.dunks.get("d1").is_ok() {
+            assert!(Instant::now() < deadline, "restored timer did not deliver");
+            if crate::clock::now_s() < due - 0.05 {
+                assert_eq!(
+                    0,
+                    crate::flock::dunks::DunkList::timer_fields(&captured).send_count
+                );
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            1,
+            crate::flock::dunks::DunkList::timer_fields(&captured).send_count
+        );
+        owner.stop_and_join();
+    }
+
+    #[test]
+    fn interval_update_wakes_the_captured_timer_and_stop_joins_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let flock = Arc::new(Flock::new(
+            dir.path().join("launches"),
+            dir.path().join("lanes"),
+            false,
+        ));
+        flock.attach_stores(crate::flock::panes::Stores {
+            inbox: Some(Arc::new(
+                crate::inbox_store::Store::open(
+                    dir.path().join("inbox.db"),
+                    dir.path().join("blobs"),
+                )
+                .unwrap(),
+            )),
+            ..Default::default()
+        });
+        let pane = serde_json::json!({"pane_id": "w1:p1"});
+        let args = AddArgs {
+            interval: Some("10".into()),
+            start: true,
+            hold_while_typing: Some("false".into()),
+            ..AddArgs::default()
+        };
+        flock.dunks.add(pane.as_object(), &args).unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let owner = OutboxRuntime::new(
+            Arc::clone(&flock),
+            runtime.handle().clone(),
+            Arc::new(|| Box::new(FakeTerminal::new())),
+        )
+        .unwrap();
+        let before =
+            crate::flock::dunks::DunkList::timer_fields(&flock.dunks.handle("d1").unwrap())
+                .next_send_at
+                .unwrap();
+        owner
+            .update_dunk(
+                "d1",
+                None,
+                &UpdateArgs {
+                    interval: Some("0.001".into()),
+                    ..UpdateArgs::default()
+                },
+            )
+            .unwrap();
+        let after = crate::flock::dunks::DunkList::timer_fields(&flock.dunks.handle("d1").unwrap())
+            .next_send_at
+            .unwrap();
+        assert!(after < before);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while flock.dunks.get("d1").unwrap()["send_count"]
+            .as_i64()
+            .unwrap()
+            == 0
+        {
+            assert!(
+                Instant::now() < deadline,
+                "interval wake did not cause actual delivery"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        owner.stop_dunk("d1").unwrap();
+        assert!(owner.dunk_timers.workers.lock().unwrap().is_empty());
+        let stopped_count = flock.dunks.get("d1").unwrap()["send_count"].clone();
+        thread::sleep(Duration::from_millis(1100));
+        assert_eq!(stopped_count, flock.dunks.get("d1").unwrap()["send_count"]);
+        assert_eq!(
+            serde_json::json!(false),
+            flock.dunks.get("d1").unwrap()["running"]
+        );
+        owner.stop_and_join();
+        let error = owner.start_dunk("d1").unwrap_err();
+        assert!(error.to_string().contains("dunk timer runtime is stopped"));
+        assert!(owner.dunk_timers.workers.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn scheduled_idle_gate_holds_until_policy_changes_then_delivers() {
+        let dir = tempfile::tempdir().unwrap();
+        let flock = Arc::new(Flock::new(
+            dir.path().join("launches"),
+            dir.path().join("lanes"),
+            false,
+        ));
+        flock.attach_stores(crate::flock::panes::Stores {
+            inbox: Some(Arc::new(
+                crate::inbox_store::Store::open(
+                    dir.path().join("inbox.db"),
+                    dir.path().join("blobs"),
+                )
+                .unwrap(),
+            )),
+            ..Default::default()
+        });
+        let pane = serde_json::json!({"pane_id": "w1:p1"});
+        flock
+            .dunks
+            .add(
+                pane.as_object(),
+                &AddArgs {
+                    text: Some("idle gate delivery".into()),
+                    interval: Some("0.001".into()),
+                    start: true,
+                    only_when: Some("idle".into()),
+                    max_sends: Some("1".into()),
+                    hold_while_typing: Some("false".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let owner = OutboxRuntime::new(
+            Arc::clone(&flock),
+            runtime.handle().clone(),
+            Arc::new(|| {
+                let mut fake = FakeTerminal::new();
+                fake.statuses.insert("w1:p1".into(), "working".into());
+                Box::new(fake)
+            }),
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let row = flock
+                .dunks
+                .get("d1")
+                .expect("busy timer must retain its row");
+            assert_eq!(row["send_count"], serde_json::json!(0));
+            if row["status"] == "Busy (working)" {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timer never observed busy status"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        owner
+            .update_dunk(
+                "d1",
+                None,
+                &UpdateArgs {
+                    only_when: Some(None),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while flock.dunks.get("d1").is_ok() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            flock.dunks.get("d1").is_err(),
+            "released timer must actually deliver and reach max_sends"
+        );
+        owner.stop_and_join();
     }
 }

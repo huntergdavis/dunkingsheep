@@ -56,6 +56,30 @@ fn map(value: Value) -> Map<String, Value> {
     value.as_object().cloned().expect("object")
 }
 
+#[test]
+fn scheduled_consumption_uses_visible_box_not_busy_or_transcript() {
+    use super::dunks::input_pending;
+    assert_eq!(None, input_pending(None, "continue"));
+    assert_eq!(None, input_pending(Some("working on a task"), "continue"));
+    assert_eq!(Some(true), input_pending(Some("❯ continue"), "continue"));
+    assert_eq!(
+        Some(false),
+        input_pending(Some("continue\nworking\n❯ "), "continue")
+    );
+    assert_eq!(
+        Some(true),
+        input_pending(Some("❯ prefix continue suffix"), "continue")
+    );
+    assert_eq!(
+        Some(false),
+        input_pending(Some("❯ unrelated hint"), "continue")
+    );
+    assert_eq!(
+        Some(true),
+        input_pending(Some("──────────\ncontinue\n──────────\nmodel"), "continue")
+    );
+}
+
 struct FireEnv {
     panes: Vec<Value>,
     screen: String,
@@ -737,6 +761,61 @@ fn manual_fire_with_max_sends_does_not_remove_the_dunk() {
 
     assert_eq!(json!(true), result["ok"]);
     assert_eq!(json!(1), flock.dunks.get("d1").unwrap()["send_count"]);
+}
+
+#[test]
+fn scheduled_cancellation_at_guard_prevents_the_delivery_attempt() {
+    let (_dir, flock) = new_flock();
+    load_one_fire_dunk(&flock, "scheduled text", Some(1));
+    let flock = Arc::new(flock);
+    let handle = flock.dunks.handle("d1").unwrap();
+    let mut env = fire_env(false);
+    let store = Arc::new(CapturingSnapshotStore::default());
+    let result = flock.scheduled_dunk_send(&handle, &mut env, store.clone(), || {
+        Some("scheduled dunk cancelled before attempt".into())
+    });
+    assert!(!result.0);
+    assert!(env.typed.is_empty());
+    assert!(env.keys.is_empty());
+    assert!(env.attempts.is_empty());
+    assert_eq!(json!(0), flock.dunks.get("d1").unwrap()["send_count"]);
+    assert_eq!(0, store.calls.load(Ordering::SeqCst));
+}
+
+#[test]
+fn scheduled_max_removal_cannot_remove_a_same_id_replacement() {
+    let (_dir, flock) = new_flock();
+    load_one_fire_dunk(&flock, "old", Some(1));
+    let old = flock.dunks.handle("d1").unwrap();
+    flock.dunks.remove("d1").unwrap();
+    load_one_fire_dunk(&flock, "replacement", Some(1));
+    let replacement = flock.dunks.handle("d1").unwrap();
+    assert!(!Arc::ptr_eq(&old, &replacement));
+    assert!(!flock.dunks.remove_handle(&old));
+    assert_eq!(json!("replacement"), flock.dunks.get("d1").unwrap()["text"]);
+    assert_eq!(json!(0), flock.dunks.get("d1").unwrap()["send_count"]);
+}
+
+#[test]
+fn restored_running_timer_gets_five_second_grace_and_preserves_future_deadline() {
+    let (_dir, flock) = new_flock();
+    let before = crate::clock::now_s();
+    let future = before + 600.0;
+    flock._load_dunks(&map(json!({"dunkers": [
+        {"id": "d1", "running": true, "target_pane_id": "w1:p1", "next_send_at": before - 10.0},
+        {"id": "d2", "running": true, "target_pane_id": "w1:p1", "next_send_at": future},
+        {"id": "d3", "running": false, "target_pane_id": "w1:p1"}
+    ]})));
+    let after = crate::clock::now_s();
+    let restored = flock.dunks.get("d1").unwrap()["next_send_at"]
+        .as_f64()
+        .unwrap();
+    assert!(restored >= before + 5.0 && restored <= after + 5.0);
+    assert_eq!(
+        json!(future),
+        flock.dunks.get("d2").unwrap()["next_send_at"]
+    );
+    assert_eq!(2, flock.dunks.running_handles().len());
 }
 
 #[test]

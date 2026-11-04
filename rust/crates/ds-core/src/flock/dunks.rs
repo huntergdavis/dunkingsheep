@@ -21,6 +21,52 @@ pub const DEFAULT_TEXT: &str = "continue";
 /// `DEFAULT_INTERVAL_MINUTES`.
 pub const DEFAULT_INTERVAL_MINUTES: f64 = 10.0;
 
+/// Python `_input_pending`: visible composer evidence, independent of agent busy state.
+pub(crate) fn input_pending(screen: Option<&str>, sent: &str) -> Option<bool> {
+    use crate::terminal::screen::{
+        collapse, strip_ansi, COLLAPSED_INPUT_MARKERS, CONSUMPTION_PREFIX_CHARS,
+    };
+    let screen = screen.filter(|screen| !screen.is_empty())?;
+    let lines: Vec<_> = screen.lines().collect();
+    let region = if let Some(start) = lines
+        .iter()
+        .rposition(|line| line.trim().starts_with(['❯', '›']))
+    {
+        lines[start..].join("\n")
+    } else {
+        let borders: Vec<_> = lines
+            .iter()
+            .enumerate()
+            .filter_map(|(index, line)| {
+                let plain = strip_ansi(line);
+                let plain = plain.trim();
+                (plain.starts_with('─') && plain.matches('─').count() >= 10).then_some(index)
+            })
+            .collect();
+        if borders.len() < 2 {
+            return None;
+        }
+        let bottom = borders[borders.len() - 1];
+        if bottom + 5 < lines.len() {
+            return None;
+        }
+        lines[borders[borders.len() - 2] + 1..bottom].join("\n")
+    };
+    let low = region.to_lowercase();
+    if COLLAPSED_INPUT_MARKERS
+        .iter()
+        .any(|marker| low.contains(marker))
+    {
+        return Some(true);
+    }
+    let needle: String = collapse(sent)
+        .chars()
+        .take(CONSUMPTION_PREFIX_CHARS)
+        .collect::<String>()
+        .to_lowercase();
+    Some(!needle.is_empty() && collapse(&region).to_lowercase().contains(&needle))
+}
+
 /// `Dunker.FIELDS`, in the Python's order: this is the persisted key order of `dunks.json`.
 pub const FIELDS: [&str; 28] = [
     "id",
@@ -486,7 +532,7 @@ pub struct DunkList {
 
 /// Shared identity for one in-memory Dunker lifetime. Replacing a list row creates a new handle;
 /// queued fire work can therefore keep updating its original Dunker after removal.
-pub(super) type DunkerHandle = Arc<std::sync::Mutex<Dunker>>;
+pub(crate) type DunkerHandle = Arc<std::sync::Mutex<Dunker>>;
 
 pub(super) struct DunkSendSnapshot {
     pub id: String,
@@ -496,6 +542,19 @@ pub(super) struct DunkSendSnapshot {
     pub template: String,
     pub detector_fallback: bool,
     pub hold_while_typing: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct DunkTimerFields {
+    pub id: String,
+    pub target_pane_id: Option<String>,
+    pub interval_minutes: f64,
+    pub next_send_at: Option<f64>,
+    pub only_when_idle: bool,
+    pub hold_while_typing: bool,
+    pub skip_if_unconsumed: bool,
+    pub last_sent_text: Option<String>,
+    pub send_count: i64,
 }
 
 #[derive(Debug)]
@@ -530,6 +589,183 @@ impl DunkList {
         handle
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Return the current row's identity handle. A later same-id replacement gets a new handle.
+    pub(crate) fn handle(&self, dunk_id: &str) -> Result<DunkerHandle, DunkError> {
+        let state = self.state();
+        Ok(Arc::clone(&state.dunkers[Self::find(&state, dunk_id)?]))
+    }
+
+    /// Exact in-memory handles for restored running rows, for the runtime owner to resume.
+    pub(crate) fn running_handles(&self) -> Vec<DunkerHandle> {
+        let state = self.state();
+        state
+            .dunkers
+            .iter()
+            .filter(|handle| Self::lock_dunker(handle).running)
+            .cloned()
+            .collect()
+    }
+
+    /// Capture the lifetimes being stopped while updating their persisted fields.
+    pub(crate) fn halt_handles(&self, panes: Option<&[String]>) -> Vec<DunkerHandle> {
+        let state = self.state();
+        let mut stopped = Vec::new();
+        for handle in &state.dunkers {
+            let mut dunker = Self::lock_dunker(handle);
+            let selected = panes.is_none_or(|panes| {
+                dunker
+                    .target_pane_id
+                    .as_ref()
+                    .is_some_and(|pane| panes.contains(pane))
+            });
+            if dunker.running && selected {
+                stop_fields(&mut dunker);
+                if panes.is_some() {
+                    dunker.status = "Target closed".into();
+                }
+                stopped.push(Arc::clone(handle));
+            }
+        }
+        stopped
+    }
+
+    pub(crate) fn timer_fields(handle: &DunkerHandle) -> DunkTimerFields {
+        let dunker = Self::lock_dunker(handle);
+        DunkTimerFields {
+            id: dunker.id.clone(),
+            target_pane_id: dunker.target_pane_id.clone(),
+            interval_minutes: dunker.interval_minutes,
+            next_send_at: dunker.next_send_at,
+            only_when_idle: dunker.only_when.as_deref() == Some("idle"),
+            hold_while_typing: dunker.hold_while_typing,
+            skip_if_unconsumed: dunker.skip_if_unconsumed,
+            last_sent_text: dunker.last_sent_text.clone(),
+            send_count: dunker.send_count,
+        }
+    }
+
+    pub(crate) fn handle_row(handle: &DunkerHandle) -> Map<String, Value> {
+        Self::lock_dunker(handle).to_dict()
+    }
+
+    pub(crate) fn timer_set_deadline(handle: &DunkerHandle, at: f64) {
+        let mut dunker = Self::lock_dunker(handle);
+        if dunker.next_send_at.is_none_or(|next| next == 0.0) {
+            dunker.next_send_at = Some(at);
+        }
+    }
+
+    pub(crate) fn set_timer_status(handle: &DunkerHandle, status: &str) {
+        Self::lock_dunker(handle).status = status.to_owned();
+    }
+
+    pub(crate) fn set_timer_error(handle: &DunkerHandle, error: &str) {
+        let mut dunker = Self::lock_dunker(handle);
+        dunker.status = "Error".into();
+        dunker.last_error = Some(error.to_owned());
+    }
+
+    pub(crate) fn timer_skip(handle: &DunkerHandle, reason: &str) {
+        let mut dunker = Self::lock_dunker(handle);
+        let now = clock::now_s();
+        dunker.next_send_at = Some(now + (dunker.interval_minutes * 60.0).max(1.0));
+        dunker.skip_count += 1;
+        dunker.total_skips += 1;
+        dunker.last_skipped_at = Some(now);
+        if reason == "unconsumed" {
+            dunker.unknown_skips = 0;
+        }
+        if dunker
+            .last_error
+            .as_deref()
+            .is_some_and(|error| error.contains("target pane not found"))
+        {
+            dunker.last_error = None;
+        }
+        dunker.status = if reason == "unrecognised" {
+            "Skipped (unrecognised box)".into()
+        } else {
+            format!("Skipped ({reason})")
+        };
+    }
+
+    pub(crate) fn timer_consumed(handle: &DunkerHandle) {
+        let mut dunker = Self::lock_dunker(handle);
+        dunker.awaiting_consumption = false;
+        dunker.unknown_skips = 0;
+    }
+
+    pub(crate) fn timer_unknown_skip(handle: &DunkerHandle) -> bool {
+        let mut dunker = Self::lock_dunker(handle);
+        dunker.unknown_skips += 1;
+        if dunker.unknown_skips >= 3 {
+            dunker.unknown_skips = 0;
+            dunker.detector_fallback = true;
+            return false;
+        }
+        true
+    }
+
+    pub(crate) fn timer_hold(handle: &DunkerHandle, _detail: &str) {
+        let mut dunker = Self::lock_dunker(handle);
+        dunker.hold_count += 1;
+        dunker.last_held_at = Some(clock::now_s());
+        dunker.status = "Held (typing)".into();
+    }
+
+    pub(crate) fn timer_target_gone(handle: &DunkerHandle) {
+        let mut dunker = Self::lock_dunker(handle);
+        dunker.status = "Target gone".into();
+        dunker.last_error = Some("target pane not found".into());
+    }
+
+    pub(crate) fn timer_after_send(
+        handle: &DunkerHandle,
+        attempted: bool,
+        succeeded: bool,
+    ) -> bool {
+        let mut dunker = Self::lock_dunker(handle);
+        if attempted {
+            dunker.next_send_at = Some(clock::now_s() + (dunker.interval_minutes * 60.0).max(1.0));
+            dunker.status = if succeeded {
+                format!("Sent {}", chrono::Local::now().format("%H:%M:%S"))
+            } else {
+                "Send failed!".into()
+            };
+        }
+        dunker.max_sends.is_some_and(|max| dunker.send_count >= max)
+    }
+
+    pub(crate) fn stop_handle(handle: &DunkerHandle, status: &str) {
+        let mut dunker = Self::lock_dunker(handle);
+        dunker.running = false;
+        dunker.next_send_at = None;
+        dunker.status = status.to_owned();
+    }
+
+    pub(crate) fn is_current(&self, handle: &DunkerHandle) -> bool {
+        let state = self.state();
+        state.dunkers.iter().any(|row| Arc::ptr_eq(row, handle))
+    }
+
+    pub(crate) fn is_running(&self, handle: &DunkerHandle) -> bool {
+        self.is_current(handle) && Self::lock_dunker(handle).running
+    }
+
+    pub(crate) fn remove_handle(&self, handle: &DunkerHandle) -> bool {
+        let mut state = self.state();
+        let Some(index) = state
+            .dunkers
+            .iter()
+            .position(|row| Arc::ptr_eq(row, handle))
+        else {
+            return false;
+        };
+        state.dunkers.remove(index);
+        Self::stop_handle(handle, "Stopped");
+        true
     }
 
     /// Snapshot a dunk for one explicit fire transition, marking its volatile status first.
@@ -967,6 +1203,51 @@ impl DunkList {
 }
 
 impl Flock {
+    pub(crate) fn dunk_hold_signature(
+        &self,
+        env: &dyn super::sends::SendEnv,
+        pane: &str,
+    ) -> (String, String) {
+        super::sends::hold_signature(self, env, pane)
+    }
+    /// Start and return the captured row lifetime for the runtime's timer owner.
+    pub(crate) fn start_dunk(&self, dunk_id: &str) -> Result<DunkerHandle, DunkError> {
+        let handle = self.dunks.handle(dunk_id)?;
+        start_fields(&mut DunkList::lock_dunker(&handle))?;
+        Ok(handle)
+    }
+
+    /// Stop and return the exact row lifetime so its timer can be cancelled and joined.
+    pub(crate) fn stop_dunk(&self, dunk_id: &str) -> Result<DunkerHandle, DunkError> {
+        let handle = self.dunks.handle(dunk_id)?;
+        stop_fields(&mut DunkList::lock_dunker(&handle));
+        Ok(handle)
+    }
+
+    pub(crate) fn toggle_dunk(&self, dunk_id: &str) -> Result<(DunkerHandle, bool), DunkError> {
+        let handle = self.dunks.handle(dunk_id)?;
+        let mut dunker = DunkList::lock_dunker(&handle);
+        let running = !dunker.running;
+        if running {
+            start_fields(&mut dunker)?;
+        } else {
+            stop_fields(&mut dunker);
+        }
+        drop(dunker);
+        Ok((handle, running))
+    }
+
+    pub(crate) fn scheduled_dunk_send(
+        self: &Arc<Self>,
+        handle: &DunkerHandle,
+        env: &mut dyn SendPreparationEnv,
+        store: Arc<dyn SnapshotStore>,
+        permission: impl FnMut() -> Option<String>,
+    ) -> (bool, Option<bool>, String, Option<String>) {
+        let action = DunkDeliveryAction::new(Arc::clone(handle), store);
+        super::sends::send_dunk_now(self, &action, env, permission)
+    }
+
     /// Extract the dunk-owned fields from the already-decoded whole-state payload.
     /// The whole-Flock loader owns file reads and calls this after parsing succeeds.
     #[allow(dead_code)] // The whole-state restore caller is assigned to t1753.
