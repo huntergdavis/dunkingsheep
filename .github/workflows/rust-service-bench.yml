@@ -37,7 +37,11 @@ jobs:
             lscpu
             uptime
             export DS_BENCH_DIR="$GITHUB_WORKSPACE"
-            cargo bench --manifest-path rust/Cargo.toml -p ds-core --bench service -- bench_list_panes_1000 bench_status_30_clients bench_inbox_read bench_task_next
+            failed=0
+            for benchmark in bench_list_panes_1000 bench_status_30_clients bench_inbox_read bench_task_next; do
+              cargo bench --manifest-path rust/Cargo.toml -p ds-core --bench service -- "$benchmark" || failed=1
+            done
+            exit "$failed"
           } 2>&1 | tee service-benchmark.txt
       - uses: actions/upload-artifact@v4
         if: always()

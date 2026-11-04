@@ -96,7 +96,9 @@ PASS or FAIL without weakening the threshold; semantic failure aborts instead
 of producing valid samples. Timing failures remain reported measurements, not
 claims that the harness itself malfunctioned. Host, CPU, load before/after,
 revision, counts, p50/p95/p99 and max are printed. The service benchmark workflow
-runs all three names plus the existing 1,000-pane case and uploads the full log.
+runs each name in a separate invocation, including the existing 1,000-pane
+case, and uploads the full log. A failed case marks the job failed while allowing
+the remaining cases to execute.
 
 All benchmark-owned client and accept-loop threads are joined; clients finish
 responses and close sockets before service shutdown. `FlockServer` currently
@@ -113,3 +115,22 @@ compiled and passed connection identity checks, then aborted during status
 warmup because the harness incorrectly required task totals from the default
 polling view. It produced zero valid measured RPC samples; inbox/task cases
 were NOT RUN. The corrected assertions validate the actual default response.
+
+
+[Exact-head run 41900583730](https://github.com/huntergdavis/dunkingsheep/actions/runs/41900583730)
+measured revision `8177413df095ad76a6eb65a5f2da545547829342` with Rust 1.99.1
+on `runnervm7aw5e`, Linux 7.0.0-1017-azure x86_64, AMD EPYC 7763 (4 vCPUs).
+Load before execution was `4.34 1.94 0.75`; the run aborted before its final
+load snapshot. The command supplied all four names to the service target.
+
+| RPC | Warmup | Measured successful calls | p50 | p95 | p99 | Max | CEILING result |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| status, 30 clients | 20/client | 6,000 | 3.748419 ms | 12.569635 ms | 20.585465 ms | 57.764464 ms | **FAIL**, p50 exceeds 2 ms |
+| inbox_read | first call refused | 0 | NOT MEASURED | NOT MEASURED | NOT MEASURED | NOT MEASURED | NOT RUN |
+| task_next | NOT RUN | 0 | NOT MEASURED | NOT MEASURED | NOT MEASURED | NOT MEASURED | NOT RUN |
+
+The production dispatcher refused `inbox_read` with `command inbox_read is not
+ported yet`. Source audit confirmed `production_handlers` omits the existing
+`register_inbox_messages` registration. This is a real assembly prerequisite;
+the harness does not substitute a synthetic handler. The status CEILING failure
+is retained. No production performance acceptance is inferred from this run.
