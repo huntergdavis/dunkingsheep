@@ -879,8 +879,7 @@ mod tests {
         assert_eq!(services.outbox.dunk_timer_worker_count(), 1);
         assert_eq!(
             services.outbox.dunk_timer_generation("d1").unwrap(),
-            Some(1),
-            "repeated start wakes the existing worker once to reset its deadline"
+            Some(0)
         );
         assert_eq!(
             cached_dunks(&services, &owner, &status_reads)["dunks"][0]["running"],
@@ -894,6 +893,10 @@ mod tests {
             .unwrap();
         assert_eq!(started_again["running"], true);
         assert_eq!(services.outbox.dunk_timer_worker_count(), 1);
+        assert_eq!(
+            started_again["next_send_at"], started["next_send_at"],
+            "an already-running Python start preserves its existing deadline"
+        );
         assert_eq!(
             services.outbox.dunk_timer_generation("d1").unwrap(),
             Some(0)
