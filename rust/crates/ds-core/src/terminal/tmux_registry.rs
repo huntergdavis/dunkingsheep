@@ -294,15 +294,13 @@ impl Registry {
     }
     pub fn managed_raw(&self, kind: &str, id: &str, panes: &[Pane]) -> Result<bool, RegistryError> {
         fn contains(value: &Value, id: &str) -> Result<bool, RegistryError> {
-            match value {
-                Value::Object(map) => Ok(map.contains_key(id)),
-                Value::Array(items) => Ok(items.iter().any(|v| v.as_str() == Some(id))),
-                Value::String(text) => Ok(text.contains(id)),
-                other => Err(RegistryError::Shape {
-                    category: "TypeError",
-                    message: format!("argument of type '{}' is not iterable", python_type(other)),
-                }),
-            }
+            // Keep the canonical ownership guard: malformed collections never confer authority.
+            let map = value.as_object().ok_or_else(|| {
+                RegistryError::Configuration(TerminalError::refused(
+                    "tmux registry collection must be an object",
+                ))
+            })?;
+            Ok(map.contains_key(id))
         }
         let data = self.load_raw()?;
         let key = key(kind).map_err(RegistryError::Configuration)?;

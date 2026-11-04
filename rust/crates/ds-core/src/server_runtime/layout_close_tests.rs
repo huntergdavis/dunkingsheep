@@ -25,6 +25,14 @@ fn make_services_with_factory(
     available: bool,
     factory: Option<LoopTerminalFactory>,
 ) -> LayoutFixture {
+    make_services_persistent(fail_layout, available, factory, false)
+}
+fn make_services_persistent(
+    fail_layout: Option<&str>,
+    available: bool,
+    factory: Option<LoopTerminalFactory>,
+    persist: bool,
+) -> LayoutFixture {
     let dir = tempfile::tempdir().unwrap();
     let runtime = Builder::new_multi_thread().enable_all().build().unwrap();
     let tasks = Arc::new(
@@ -93,7 +101,7 @@ fn make_services_with_factory(
     let services = RuntimeServices::new(RuntimeServiceInputs {
         launches_file: dir.path().join("launches.json"),
         lane_registry_file: dir.path().join("lanes.json"),
-        persist_enabled: false,
+        persist_enabled: persist,
         stores,
         roles,
         legacy_superusers: None,
@@ -103,7 +111,7 @@ fn make_services_with_factory(
         env,
         observability: Some(RuntimeObservability {
             state_dir: dir.path().join("observability"),
-            memory_db: None,
+            memory_db: persist.then(|| dir.path().join("memory.db")),
         }),
         runtime,
         terminal_factory,
@@ -382,4 +390,84 @@ fn layout_passthrough_json_usage_and_raw_argument_order() {
         .to_string()
         .contains("herdr printed no help for '--help' (exit 0)"));
     assert_eq!(events.lock().unwrap().len(), 1);
+}
+#[test]
+fn layout_close_persists_stopped_rows_and_save_error_precedes_last_message() {
+    for fail in [false, true] {
+        let (dir, services, events) = make_services_persistent(None, true, None, true);
+        let pane = json!({"pane_id":"w1:p1"});
+        let row = services
+            .add_dunk(
+                pane.as_object(),
+                &crate::flock::dunks::AddArgs {
+                    start: true,
+                    interval: Some("10".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let id = row["id"].as_str().unwrap();
+        services.flock.set_last_message("before close");
+        if fail {
+            std::fs::remove_file(dir.path().join("state.json")).unwrap();
+            std::fs::create_dir(dir.path().join("state.json")).unwrap();
+        }
+        let out = dispatcher(&services).dispatch(
+            "close",
+            &json!({"kind":"pane","target":"w1:p1"}),
+            &request("w2:p2"),
+        );
+        assert_eq!(out.is_err(), fail);
+        assert_eq!(
+            services.flock.dunks.get(id).unwrap()["status"],
+            "Target closed"
+        );
+        assert!(services.flock.dunks.get(id).unwrap()["next_send_at"].is_null());
+        assert_eq!(
+            events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|e| e[0] == "close")
+                .count(),
+            1
+        );
+        if fail {
+            assert_eq!(services.flock.last_message(), "before close");
+        } else {
+            let saved: Value =
+                serde_json::from_slice(&std::fs::read(dir.path().join("state.json")).unwrap())
+                    .unwrap();
+            assert_eq!(saved["dunkers"][0]["running"], false);
+            assert_eq!(saved["dunkers"][0]["status"], "Target closed");
+        }
+        services.shutdown();
+    }
+}
+#[test]
+fn layout_close_dispatch_gates_and_raw_kind_errors_do_not_mutate() {
+    let (_dir, services, events) = make_services(None, true);
+    let d = dispatcher(&services);
+    for value in [
+        Value::Null,
+        json!(""),
+        json!(false),
+        json!(0),
+        json!([]),
+        json!({}),
+        json!(["pane"]),
+    ] {
+        assert!(d
+            .dispatch(
+                "close",
+                &json!({"kind":value,"target":"absent"}),
+                &request("w2:p2")
+            )
+            .is_err());
+    }
+    let err = d
+        .dispatch("close", &json!({}), &request("w1:p1"))
+        .unwrap_err();
+    assert!(!err.to_string().contains("missing required"), "{err}");
+    assert!(events.lock().unwrap().is_empty());
 }

@@ -93,3 +93,16 @@ fn raw_close_registry_shape_is_not_a_backend_refusal() {
         .unwrap()
         .contains("kill-pane"));
 }
+#[test]
+fn raw_close_malformed_ownership_never_grants_authority() {
+    let (dir, mut backend) = fixture();
+    std::fs::write(
+        dir.path().join("registry.json"),
+        json!({"panes":["%2"]}).to_string(),
+    )
+    .unwrap();
+    assert!(backend.close_raw("pane", "%2").is_err());
+    assert!(!std::fs::read_to_string(dir.path().join("calls"))
+        .unwrap()
+        .contains("kill-pane"));
+}
