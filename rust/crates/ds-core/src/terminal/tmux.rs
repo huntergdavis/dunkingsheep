@@ -1091,6 +1091,60 @@ impl Terminal for TmuxBackend {
         Ok(())
     }
 
+    fn close_raw(&mut self, kind: &str, target_id: &str) -> super::RawCreateResult<()> {
+        raw_create_result(|| {
+            let panes = if matches!(kind, "tab" | "workspace") {
+                let result = self.run(&["list-panes", "-a", "-F", PANE_FORMAT])?;
+                if result.code != 0 {
+                    return Err(
+                        TerminalError::refused(result.message("tmux list-panes failed")).into(),
+                    );
+                }
+                // The display parser deliberately skips malformed rows. Destructive
+                // parent operations must not silently omit an unowned child.
+                for row in result.stdout.lines() {
+                    let fields: Vec<_> = row.split(PANE_SEP).collect();
+                    if fields.len() != 14 || fields[..3].iter().any(|id| id.is_empty()) {
+                        return Err(TerminalError::refused("incomplete tmux pane inventory").into());
+                    }
+                }
+                {
+                    let mut panes = parse_panes(&result.stdout, &|_| None);
+                    let labels = self.registry.pane_labels_raw(&panes)?;
+                    for pane in &mut panes {
+                        if let Some(label) = labels.get(&pane.pane_id) {
+                            pane.label = label.clone();
+                        }
+                    }
+                    panes
+                }
+            } else {
+                self.list_panes_raw()?
+            };
+            if !self.registry.managed_raw(kind, target_id, &panes)? {
+                return Err(TerminalError::refused(format!(
+                "refusing to close {kind} {target_id}: Dunking Sheep did not create it (or it contains panes it did not create)")).into());
+            }
+            let command = match kind {
+                "pane" => "kill-pane",
+                "tab" => "kill-window",
+                "workspace" => "kill-session",
+                other => {
+                    return Err(TerminalError::refused(format!("cannot close a {other}")).into())
+                }
+            };
+            let result = self.run(&[command, "-t", target_id])?;
+            if result.code != 0 {
+                return Err(TerminalError::refused(
+                    result.message(&format!("tmux {command} failed")),
+                )
+                .into());
+            }
+            self.registry.forget_raw(kind, target_id)?;
+            Ok(())
+        })
+    }
+
     fn focus(&mut self, kind: &str, target_id: &str) -> Result<(), TerminalError> {
         let args: Vec<&str> = match kind {
             "pane" => vec!["select-pane", "-t", target_id],

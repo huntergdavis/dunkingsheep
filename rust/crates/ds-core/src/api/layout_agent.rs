@@ -12,7 +12,7 @@ fn required<'a>(args: &'a Args, key: &str) -> Result<&'a Value, DunkError> {
     args.get(key)
         .ok_or_else(|| DunkError::Refused(format!("'{key}'")))
 }
-fn python_space(c: char) -> bool {
+pub(super) fn python_space(c: char) -> bool {
     c.is_whitespace() || matches!(c, '\u{1c}'..='\u{1f}')
 }
 fn text(value: &Value) -> String {
@@ -42,7 +42,7 @@ fn parent(
     }
     Ok(resolve::pick(&rows, &spec, kind, &key, "label")?.clone())
 }
-fn target(
+pub(super) fn target(
     backend: &dyn LayoutBackend,
     kind: &str,
     target: &Value,
@@ -178,7 +178,7 @@ pub fn h_focus(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkEr
 }
 
 // Python shlex uses ASCII whitespace, unlike str.strip at the name boundary.
-fn split_command(text: &str) -> Result<Vec<String>, String> {
+pub(super) fn split_command(text: &str) -> Result<Vec<String>, String> {
     let mut words = Vec::new();
     let mut cur = String::new();
     let mut in_word = false;

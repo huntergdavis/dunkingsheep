@@ -181,6 +181,21 @@ pub struct AgentSpec {
 pub trait Terminal: std::fmt::Debug {
     /// e.g. "tmux 3.4" - the version string the daemon logs.
     fn version(&self) -> String;
+    /// Explicit backend identity; passthrough must never emulate typing in a pane.
+    fn backend_name(&self) -> &str {
+        "tmux"
+    }
+    fn herdr_run(
+        &self,
+        _argv: &[String],
+        _timeout_s: u64,
+    ) -> Result<(i32, String, String), crate::error::DunkError> {
+        Err(crate::error::refusal("herdr command backend is not wired"))
+    }
+    fn close_raw(&mut self, kind: &str, target_id: &str) -> RawCreateResult<()> {
+        Ok(self.close(kind, target_id))
+    }
+
     /// Whether the backend can be used at all right now.
     fn is_available(&self) -> bool;
     /// Whether this backend represents real panes rather than a fixture.
@@ -621,3 +636,6 @@ mod tests {
 
 #[cfg(test)]
 mod layout_agent_tests;
+
+#[cfg(test)]
+mod layout_close_tests;

@@ -120,6 +120,8 @@ pub struct FakeTerminal {
     pub tabs: Vec<Tab>,
     pub workspaces: Vec<Workspace>,
     pub available: bool,
+    pub backend_name: String,
+    pub herdr_output: (i32, String, String),
     /// Failure injected by the fallible grouped-pane listing, for propagation tests.
     pub fail_grouped_panes: Option<TerminalError>,
     /// When enabled, include the pane for a newly created tab in list-panes.
@@ -160,6 +162,8 @@ impl Default for FakeTerminal {
             tabs: canned_tabs(),
             workspaces: canned_workspaces(),
             available: true,
+            backend_name: "tmux".into(),
+            herdr_output: (0, String::new(), String::new()),
             fail_grouped_panes: None,
             show_created_tab_pane: false,
             start_agent_pid: None,
@@ -208,6 +212,21 @@ impl FakeTerminal {
 }
 
 impl Terminal for FakeTerminal {
+    fn backend_name(&self) -> &str {
+        &self.backend_name
+    }
+    fn herdr_run(
+        &self,
+        argv: &[String],
+        timeout_s: u64,
+    ) -> Result<(i32, String, String), crate::error::DunkError> {
+        self.raw_events
+            .lock()
+            .unwrap()
+            .push(serde_json::json!(["herdr", argv, timeout_s]));
+        Ok(self.herdr_output.clone())
+    }
+
     fn version(&self) -> String {
         "tmux 3.4 (fake)".to_string()
     }
@@ -547,6 +566,10 @@ impl Terminal for FakeTerminal {
     }
 
     fn close(&mut self, kind: &str, target_id: &str) -> Result<(), TerminalError> {
+        self.raw_events
+            .lock()
+            .unwrap()
+            .push(serde_json::json!(["close", kind, target_id]));
         if let Some(error) = self.take_failure() {
             return Err(error);
         }
