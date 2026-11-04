@@ -6676,9 +6676,13 @@ fn api_t39_nonfinite_leases_remain_numeric_through_task_wire_and_events() {
                     .unwrap();
                 let mut line = String::new();
                 BufReader::new(&socket).read_line(&mut line).unwrap();
-                let request: crate::protocol::Request = serde_json::from_str(&line).unwrap();
+                let request: crate::protocol::Request =
+                    crate::protocol::decode_request(&line).unwrap();
                 assert_eq!(request.cmd, command);
-                assert_eq!(request.args, input);
+                assert_eq!(
+                    crate::wire_json::to_string(&request.args).unwrap(),
+                    crate::wire_json::to_string(&input).unwrap()
+                );
                 assert_eq!(request.self_pane_id.as_deref(), Some("w1:p1"));
                 let response = crate::protocol::Response::ok(request.id, result);
                 socket
@@ -9694,6 +9698,131 @@ fn task_reap_live_tmux_listing_failure_reopens_expired_claim() {
 #[test]
 fn api_python_repr_preserves_mixed_quotes_and_controls() {
     assert_eq!(py_repr("a'\"\\\n\r\tb"), r###"'a\'"\\\n\r\tb'"###);
+}
+
+#[test]
+fn socket_nonfinite_leases_reach_real_task_sql_and_preserve_error_order() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::{UnixListener, UnixStream};
+    use std::time::Duration;
+
+    struct TaskPeer<'a> {
+        dispatcher: &'a Dispatcher,
+        flock: &'a Flock,
+        runtime: &'a tokio::runtime::Runtime,
+    }
+    impl crate::server::Dispatcher for TaskPeer<'_> {
+        fn dispatch(&self, cmd: &str, input: &Value, ctx: &RequestCtx) -> Result<Value, DunkError> {
+            assert_eq!(ctx.socket_peer, Some(true));
+            dispatch_task_mutation_request(
+                self.dispatcher,
+                self.flock,
+                self.runtime,
+                cmd,
+                input.clone(),
+                ctx,
+            )
+        }
+    }
+    let (runtime, dir, flock, tasks, dispatcher) = task_mutation_api_fixture();
+    let task = runtime
+        .block_on(tasks.add("global", "literal Infinity", ""))
+        .unwrap();
+    let path = dir.path().join("numeric.sock");
+    let listener = UnixListener::bind(&path).unwrap();
+    let peer = TaskPeer {
+        dispatcher: &dispatcher,
+        flock: &flock,
+        runtime: &runtime,
+    };
+    std::thread::scope(|scope| {
+        let worker = scope.spawn(|| {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let peer_pid = crate::server::peer_pid(&socket);
+            let reader = BufReader::new(socket.try_clone().unwrap());
+            for line in reader.lines() {
+                let (response, _) = crate::server::handle_line(&peer, &line.unwrap(), peer_pid);
+                socket
+                    .write_all(crate::protocol::encode_line(&response).as_bytes())
+                    .unwrap();
+            }
+        });
+        let mut socket = UnixStream::connect(&path).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut reader = BufReader::new(socket.try_clone().unwrap());
+        let mut call = |cmd: &str, raw_args: &str, pane: &str| {
+            let request =
+                format!(r#"{{"id":1,"cmd":"{cmd}","args":{raw_args},"self_pane_id":"{pane}"}}"#);
+            socket.write_all(format!("{request}\n").as_bytes()).unwrap();
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let value = crate::wire_json::from_str(&line).unwrap();
+            (line, value)
+        };
+        let (line, claimed) = call(
+            "task_next",
+            r#"{"scope":"global","lease_seconds":Infinity}"#,
+            "w1:p1",
+        );
+        assert_eq!(claimed["ok"], true, "{line}");
+        assert_eq!(claimed["result"]["task"]["id"], task.id);
+        assert!(line.contains(r#""lease_seconds":Infinity"#), "{line}");
+        assert!(line.contains(r#""expires_at":Infinity"#), "{line}");
+        assert_eq!(claimed["result"]["task"]["title"], "literal Infinity");
+        let db = rusqlite::Connection::open(tasks.path()).unwrap();
+        let before: (f64, i64) = db.query_row(
+            "SELECT expires_at, (SELECT COUNT(*) FROM task_events WHERE task_id=?1) FROM task_leases WHERE task_id=?1",
+            [&task.id], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        assert_eq!(before.0, f64::INFINITY);
+        let meta: String = db
+            .query_row(
+                "SELECT meta FROM task_events WHERE task_id=?1 AND event='claimed'",
+                [&task.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let event = crate::wire_json::from_str(&meta).unwrap();
+        assert_eq!(
+            crate::github::parse_python_json_float(&event["lease_seconds"].to_string()).unwrap(),
+            f64::INFINITY
+        );
+        let raw = format!(r#"{{"id":"{}","lease_seconds":NaN}}"#, task.id);
+        let (_, denied) = call("task_heartbeat", &raw, "w1:p3");
+        assert_eq!(denied["ok"], false);
+        assert!(!denied["error"].as_str().unwrap().contains("NOT NULL"));
+        let (_, missing) = call(
+            "task_heartbeat",
+            r#"{"id":"t-missing","lease_seconds":NaN}"#,
+            "w1:p1",
+        );
+        assert!(missing["error"]
+            .as_str()
+            .unwrap()
+            .contains("no task with id"));
+        let (_, nan) = call("task_heartbeat", &raw, "w1:p1");
+        assert!(
+            nan["error"]
+                .as_str()
+                .unwrap()
+                .contains("NOT NULL constraint failed: task_leases.expires_at"),
+            "{nan}"
+        );
+        let after: (f64, i64) = db.query_row(
+            "SELECT expires_at, (SELECT COUNT(*) FROM task_events WHERE task_id=?1) FROM task_leases WHERE task_id=?1",
+            [&task.id], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        assert_eq!(
+            before, after,
+            "failed NaN heartbeat must not change lease or events"
+        );
+        drop(reader);
+        drop(socket);
+        worker.join().unwrap();
+    });
 }
 
 #[path = "context_mutation_tests.rs"]

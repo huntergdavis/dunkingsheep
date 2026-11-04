@@ -783,8 +783,13 @@ fn recovery_metadata_equality_matches_python_numeric_boundaries_without_rewritin
             }
         }
     }
-    // The existing JSON representation has infinity carriers but no NaN value;
-    // null is not a replacement for NaN or for numeric zero.
-    assert!(crate::github::python_float_json_value(f64::NAN).is_none());
+    // The wire codec now supplies a numeric NaN carrier; null is not a replacement.
+    // This producer check does not extend the equality cross-product above to NaN.
+    let nan = crate::github::python_float_json_value(f64::NAN).expect("numeric NaN carrier");
+    assert!(nan.is_number());
+    assert_eq!(crate::wire_json::to_string(&nan).unwrap(), "NaN");
+    assert!(crate::github::parse_python_json_float(&nan.to_string())
+        .unwrap()
+        .is_nan());
     assert!(!python_metadata_equal(&Value::Null, &json!(0)));
 }
