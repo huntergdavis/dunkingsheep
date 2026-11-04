@@ -2428,7 +2428,7 @@ fn cli_route_11_context_local_write_a() {
     assert_eq!(Some(0), inline.status.code());
     assert!(inline.stderr.is_empty());
     assert_eq!(
-        "{{\n  \"slug\": \"2026-10-20-inline-entry\",\n  \"path\": \".dunkingsheep/fact/2026-10-20-inline-entry.md\",\n  \"class\": \"fact\"\n}}\n".to_string(),
+        "{\n  \"slug\": \"2026-10-20-inline-entry\",\n  \"path\": \".dunkingsheep/fact/2026-10-20-inline-entry.md\",\n  \"class\": \"fact\"\n}\n".to_string(),
         String::from_utf8(inline.stdout).unwrap()
     );
     let inline_path = root.join(".dunkingsheep/fact/2026-10-20-inline-entry.md");
