@@ -623,7 +623,14 @@ fn normalize_backend_name(configured: Option<&str>) -> String {
 fn backend_from_name(configured: Option<&str>) -> Result<TmuxBackend, DunkError> {
     let name = normalize_backend_name(configured);
     match name.as_str() {
-        "tmux" => Ok(TmuxBackend::default()),
+        "tmux" => {
+            let backend = TmuxBackend::default();
+            backend
+                .registry()
+                .path()
+                .map_err(|error| refusal(error.to_string()))?;
+            Ok(backend)
+        }
         "herdr" => Err(refusal(
             "terminal backend 'herdr' is retired; expected 'tmux'",
         )),

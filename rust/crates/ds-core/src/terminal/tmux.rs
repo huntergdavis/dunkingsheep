@@ -408,26 +408,32 @@ impl Terminal for TmuxBackend {
         }
         let mut command = crate::flock::commands_layout::shlex_join(&spec.argv);
         let mut environment = spec.env.clone();
-        let guard_dir = self
-            .environment
-            .get("DUNKINGSHEEP_TMUX_GUARD_DIR")
-            .filter(|v| !v.is_empty())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                self.environment
-                    .get("DUNKINGSHEEP_DIR")
+        let guard_dir = if !self.guard_enabled {
+            None
+        } else {
+            Some(
+                match self
+                    .environment
+                    .get("DUNKINGSHEEP_TMUX_GUARD_DIR")
                     .filter(|v| !v.is_empty())
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| {
-                        super::tmux_registry::expand_home(
+                {
+                    Some(path) => PathBuf::from(path),
+                    None => match self
+                        .environment
+                        .get("DUNKINGSHEEP_DIR")
+                        .filter(|v| !v.is_empty())
+                    {
+                        Some(path) => PathBuf::from(path),
+                        None => super::tmux_registry::expand_home(
                             "~/.config/dunkingsheep",
                             &self.environment,
-                        )
-                    })
-                    .join("tmux-guard")
-            });
-        // Explicit test registries never consult the user's guard directory.
-        if self.guard_enabled && guard_dir.join("tmux").is_file() {
+                        )?,
+                    }
+                    .join("tmux-guard"),
+                },
+            )
+        };
+        if let Some(guard_dir) = guard_dir.filter(|dir| dir.join("tmux").is_file()) {
             let path = format!(
                 "{}:{}",
                 guard_dir.display(),

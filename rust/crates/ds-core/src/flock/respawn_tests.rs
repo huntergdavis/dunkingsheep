@@ -590,7 +590,8 @@ fn native_fixture(f: &Fixture, active: bool) -> (rusqlite::Connection, Vec<Strin
             .iter()
             .map(Value::to_string)
             .collect::<Vec<_>>()
-            .join("\n"),
+            .join("\n")
+            + "\n",
     )
     .unwrap();
     let db = rusqlite::Connection::open(home.join("state_5.sqlite")).unwrap();

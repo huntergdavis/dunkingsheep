@@ -146,6 +146,7 @@ impl Flock {
         if pane_agent == "codex" {
             let shared = crate::native_session::realpath(
                 &crate::terminal::tmux_registry::expand_home("~/.codex", services.env)
+                    .map_err(|error| refusal(error.to_string()))?
                     .to_string_lossy(),
             );
             for part in request
@@ -154,7 +155,8 @@ impl Flock {
                 .chain(request.rollback_argv.unwrap_or(&[]))
             {
                 if let Some(home) = part.strip_prefix("CODEX_HOME=") {
-                    let home = crate::terminal::tmux_registry::expand_home(home, services.env);
+                    let home = crate::terminal::tmux_registry::expand_home(home, services.env)
+                        .map_err(|error| refusal(error.to_string()))?;
                     if crate::native_session::realpath(&home.to_string_lossy()) == shared {
                         return Err(refusal("respawn-pane refused: use an isolated per-lane CODEX_HOME, not the shared ~/.codex home"));
                     }

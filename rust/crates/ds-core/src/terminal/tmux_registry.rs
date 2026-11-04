@@ -7,11 +7,13 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
 pub struct Registry {
-    path: PathBuf,
+    path: Result<PathBuf, TerminalError>,
 }
 impl Registry {
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: Ok(path.into()),
+        }
     }
     pub fn configured(explicit: Option<&Path>, env: &Env) -> Self {
         if let Some(path) = explicit.filter(|p| !p.as_os_str().is_empty()) {
@@ -26,16 +28,18 @@ impl Registry {
         let directory = env
             .get("DUNKINGSHEEP_DIR")
             .filter(|p| !p.is_empty())
-            .map(PathBuf::from)
+            .map(|path| Ok(PathBuf::from(path)))
             .unwrap_or_else(|| expand_home("~/.config/dunkingsheep", env));
-        Self::new(directory.join("tmux-panes.json"))
+        Self {
+            path: directory.map(|directory| directory.join("tmux-panes.json")),
+        }
     }
-    pub fn path(&self) -> &Path {
-        &self.path
+    pub fn path(&self) -> Result<&Path, TerminalError> {
+        self.path.as_deref().map_err(Clone::clone)
     }
     pub fn load(&self) -> Result<Map<String, Value>, TerminalError> {
         // Python swallows file/JSON errors, but not a valid non-object registry.
-        let value = std::fs::read(&self.path)
+        let value = std::fs::read(self.path()?)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
             .unwrap_or_else(|| json!({}));
@@ -49,13 +53,13 @@ impl Registry {
         Ok(data)
     }
     pub fn save(&self, data: &Map<String, Value>) -> Result<(), TerminalError> {
-        let directory = self
-            .path
+        let path = self.path()?;
+        let directory = path
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."));
         std::fs::create_dir_all(directory).map_err(io_error)?;
-        let mut temp = self.path.as_os_str().to_os_string();
+        let mut temp = path.as_os_str().to_os_string();
         temp.push(".tmp");
         let temp = PathBuf::from(temp);
         let text = serde_json::to_string_pretty(&sorted(Value::Object(data.clone())))
@@ -74,7 +78,7 @@ impl Registry {
         std::fs::write(&temp, ascii).map_err(io_error)?;
         std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600))
             .map_err(io_error)?;
-        std::fs::rename(&temp, &self.path).map_err(io_error)
+        std::fs::rename(&temp, path).map_err(io_error)
     }
     pub fn remember(&self, kind: &str, id: &str, extra: Value) -> Result<(), TerminalError> {
         if id.is_empty() {
@@ -169,26 +173,35 @@ fn io_error(error: std::io::Error) -> TerminalError {
     TerminalError::refused(error.to_string())
 }
 /// Python expanduser: HOME (even empty), then real-UID passwd; unresolved stays '~'.
-pub fn expand_home(path: &str, env: &Env) -> PathBuf {
+pub fn expand_home(path: &str, env: &Env) -> Result<PathBuf, TerminalError> {
+    expand_home_with(path, env, &|name| {
+        let user = match name {
+            Some(name) => nix::unistd::User::from_name(name),
+            None => nix::unistd::User::from_uid(nix::unistd::Uid::current()),
+        };
+        user.map(|user| user.map(|user| user.dir))
+            .map_err(|error| TerminalError::refused(error.to_string()))
+    })
+}
+fn expand_home_with(
+    path: &str,
+    env: &Env,
+    lookup: &dyn Fn(Option<&str>) -> Result<Option<PathBuf>, TerminalError>,
+) -> Result<PathBuf, TerminalError> {
     if !path.starts_with('~') {
-        return PathBuf::from(path);
+        return Ok(PathBuf::from(path));
     }
     let end = path.find('/').unwrap_or(path.len());
     let name = &path[1..end];
     let home = if name.is_empty() {
-        env.get("HOME").map(PathBuf::from).or_else(|| {
-            nix::unistd::User::from_uid(nix::unistd::Uid::current())
-                .ok()
-                .flatten()
-                .map(|user| user.dir)
-        })
+        match env.get("HOME") {
+            Some(home) => Some(PathBuf::from(home)),
+            None => lookup(None)?,
+        }
     } else {
-        nix::unistd::User::from_name(name)
-            .ok()
-            .flatten()
-            .map(|user| user.dir)
+        lookup(Some(name))?
     };
-    match home {
+    Ok(match home {
         Some(home) => {
             let expanded = format!(
                 "{}{}",
@@ -202,7 +215,7 @@ pub fn expand_home(path: &str, env: &Env) -> PathBuf {
             })
         }
         None => PathBuf::from(path),
-    }
+    })
 }
 
 #[cfg(test)]

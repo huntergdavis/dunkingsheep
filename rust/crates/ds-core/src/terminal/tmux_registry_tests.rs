@@ -66,11 +66,13 @@ fn registry_path_precedence_is_lazy_and_empty_home_is_not_missing() {
         ("HOME", "/home/test"),
     ]);
     assert_eq!(
-        Registry::configured(Some(Path::new("/explicit")), &env).path(),
+        Registry::configured(Some(Path::new("/explicit")), &env)
+            .path()
+            .unwrap(),
         Path::new("/explicit")
     );
     assert_eq!(
-        Registry::configured(None, &env).path(),
+        Registry::configured(None, &env).path().unwrap(),
         Path::new("/registry")
     );
     let env = Env::from_pairs(&[
@@ -79,12 +81,12 @@ fn registry_path_precedence_is_lazy_and_empty_home_is_not_missing() {
         ("HOME", ""),
     ]);
     assert_eq!(
-        Registry::configured(None, &env).path(),
+        Registry::configured(None, &env).path().unwrap(),
         Path::new("/config/tmux-panes.json")
     );
     let env = Env::from_pairs(&[("HOME", "")]);
     assert_eq!(
-        Registry::configured(None, &env).path(),
+        Registry::configured(None, &env).path().unwrap(),
         Path::new("/.config/dunkingsheep/tmux-panes.json")
     );
 }
@@ -163,11 +165,11 @@ exit 0
 #[test]
 fn home_expansion_handles_root_and_named_real_account() {
     assert_eq!(
-        expand_home("~", &Env::from_pairs(&[("HOME", "")])),
+        expand_home("~", &Env::from_pairs(&[("HOME", "")])).unwrap(),
         Path::new("/")
     );
     assert_eq!(
-        expand_home("~/a", &Env::from_pairs(&[("HOME", "/")])),
+        expand_home("~/a", &Env::from_pairs(&[("HOME", "/")])).unwrap(),
         Path::new("/a")
     );
     if let Some(user) = nix::unistd::User::from_uid(nix::unistd::Uid::current()).unwrap() {
@@ -175,8 +177,28 @@ fn home_expansion_handles_root_and_named_real_account() {
             expand_home(
                 &format!("~{}/a", user.name),
                 &Env::from_pairs(&[("HOME", "/unrelated")])
-            ),
+            )
+            .unwrap(),
             user.dir.join("a")
         );
     }
+}
+
+#[test]
+fn account_lookup_failure_propagates_but_missing_account_preserves_tilde() {
+    let fail = |_: Option<&str>| Err(TerminalError::refused("passwd read failed"));
+    assert_eq!(
+        expand_home_with("~/x", &Env::from_pairs(&[("HOME", "/owned")]), &fail).unwrap(),
+        Path::new("/owned/x")
+    );
+    assert!(expand_home_with("~/x", &Env::default(), &fail).is_err());
+    assert_eq!(
+        expand_home_with("~/x", &Env::default(), &|_| Ok(None)).unwrap(),
+        Path::new("~/x")
+    );
+    let registry = Registry {
+        path: Err(TerminalError::refused("passwd read failed")),
+    };
+    assert!(registry.load().is_err());
+    assert!(registry.remember("pane", "%1", json!({})).is_err());
 }
