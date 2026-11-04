@@ -17,35 +17,21 @@ impl LoopRuntimeAdapter {
     }
 
     pub(crate) fn helper_pushenv_lane_agent_alive(&self, pane_id: &str) -> Option<bool> {
-        let registered_pane_pid = self
-            .flock
-            .with_roles(|roles, _| {
-                Ok(roles.entry(pane_id)?.map(|entry| {
-                    entry.get("pane_pid").and_then(|pid| {
-                        pid.as_i64()
-                            .or_else(|| pid.as_str().and_then(|text| text.parse().ok()))
-                    })
-                }))
+        // Registrations can outlive the pane process. Python always resolves the
+        // current pane before inspecting its process tree, including followers.
+        let terminal_factory = std::sync::Arc::clone(&self.terminal_factory);
+        let pane_id = pane_id.to_owned();
+        let pane_pid = std::thread::Builder::new()
+            .name("push-lane-pane-info".into())
+            .spawn(move || {
+                (terminal_factory)()
+                    .get_pane(&pane_id)
+                    .and_then(|pane| pane.pane_pid)
             })
-            .ok()?;
-        let pane_pid = match registered_pane_pid {
-            Some(Some(pid)) => pid,
-            Some(None) | None => {
-                let terminal_factory = std::sync::Arc::clone(&self.terminal_factory);
-                let pane_id = pane_id.to_owned();
-                std::thread::Builder::new()
-                    .name("push-lane-pane-info".into())
-                    .spawn(move || {
-                        (terminal_factory)()
-                            .get_pane(&pane_id)
-                            .and_then(|pane| pane.pane_pid)
-                    })
-                    .ok()?
-                    .join()
-                    .ok()
-                    .flatten()?
-            }
-        };
+            .ok()?
+            .join()
+            .ok()
+            .flatten()?;
         super::delivery::lane_agent_alive_for_pane_pid(pane_pid)
     }
 }
@@ -280,5 +266,116 @@ mod tests {
         assert_eq!(decisions[0].action, "skip");
         assert_eq!(decisions[0].detail, "no_live_agent");
         assert_eq!(tasks.get(&task.id).await.unwrap().status, "open");
+    }
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn production_pushenv_liveness_uses_current_pane_not_registered_pid() {
+        struct ChildGuard(std::process::Child);
+        impl Drop for ChildGuard {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let dir = crate::testsupport::dir("push-current-pane-pid");
+        // A test-owned process named like an agent, never a live terminal pane.
+        let executable = dir.path().join("codex");
+        std::os::unix::fs::symlink("/bin/sleep", &executable).unwrap();
+        let child = ChildGuard(
+            std::process::Command::new(executable)
+                .arg("60")
+                .spawn()
+                .unwrap(),
+        );
+        let agent_pid = i64::from(child.0.id());
+        assert_eq!(
+            super::super::delivery::lane_agent_alive_for_pane_pid(agent_pid),
+            Some(true)
+        );
+        let flock = Arc::new(Flock::new(
+            dir.path().join("launches.json"),
+            dir.path().join("lanes.json"),
+            false,
+        ));
+        let mut roles = Roles::new(
+            &Env::default(),
+            Some(dir.path().join("roles.json")),
+            Some(dir.path().join("tokens.json")),
+            None,
+        )
+        .unwrap();
+        roles
+            .register(
+                "w1:p1",
+                "worker",
+                Some(agent_pid),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        flock.attach_roles(roles, None);
+        flock.task_follow(None, Some("w1:p1")).unwrap();
+        let tasks = Arc::new(Tasks::open(dir.path().join("tasks.db")).await.unwrap());
+        flock.attach_stores(Stores {
+            tasks: Some(Arc::clone(&tasks)),
+            ..Stores::default()
+        });
+        let task = tasks
+            .add("global", "must not feed a reused shell", "")
+            .await
+            .unwrap();
+        let current_pid = Arc::new(std::sync::Mutex::new(Some(9_999_999_999_i64)));
+        let factory_pid = Arc::clone(&current_pid);
+        let adapter = LoopRuntimeAdapter::new(
+            Arc::clone(&flock),
+            Arc::new(move || {
+                let mut terminal = FakeTerminal::new();
+                terminal.panes[0].pane_pid = *factory_pid.lock().unwrap();
+                Box::new(terminal)
+            }),
+        );
+        let env: &dyn PushEnv = &adapter;
+        assert_eq!(
+            env.lane_agent_alive("w1:p1"),
+            Some(false),
+            "old live registration must not conceal a dead current pane"
+        );
+        let decisions = flock.push_tasks(env).await;
+        assert!(decisions
+            .iter()
+            .any(|d| d.pane_id == "w1:p1" && d.detail == "no_live_agent"));
+        assert_eq!(tasks.get(&task.id).await.unwrap().status, "open");
+
+        flock
+            .with_roles(|roles, _| {
+                roles.register(
+                    "w1:p1",
+                    "worker",
+                    Some(9_999_999_999),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            })
+            .unwrap()
+            .unwrap();
+        *current_pid.lock().unwrap() = Some(agent_pid);
+        assert_eq!(
+            env.lane_agent_alive("w1:p1"),
+            Some(true),
+            "old dead registration must not suppress the current live agent"
+        );
+        *current_pid.lock().unwrap() = None;
+        assert_eq!(
+            env.lane_agent_alive("w1:p1"),
+            None,
+            "missing current PID remains unknown"
+        );
+        assert_eq!(env.lane_agent_alive("missing-pane"), None);
     }
 }
