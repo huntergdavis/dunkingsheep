@@ -3004,6 +3004,9 @@ pub fn not_ported(name: &str) -> DunkError {
     DunkError::Refused(format!("command {name} is not ported yet"))
 }
 
+#[path = "recovery_native/python_printability.rs"]
+mod python_printability;
+
 /// Python `repr(str)` for the names a client can send (single quotes unless the text has a
 /// single quote and no double quote; backslash and control characters escaped).
 fn py_repr(text: &str) -> String {
@@ -3023,8 +3026,15 @@ fn py_repr(text: &str) -> String {
                 out.push('\\');
                 out.push(c);
             }
-            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
-                out.push_str(&format!("\\x{:02x}", c as u32))
+            c if !python_printability::is_printable(c) => {
+                let codepoint = c as u32;
+                if codepoint <= 0xff {
+                    out.push_str(&format!("\\x{codepoint:02x}"));
+                } else if codepoint <= 0xffff {
+                    out.push_str(&format!("\\u{codepoint:04x}"));
+                } else {
+                    out.push_str(&format!("\\U{codepoint:08x}"));
+                }
             }
             c => out.push(c),
         }

@@ -2107,6 +2107,54 @@ fn h_get_dunk_matches_python() {
     ));
     assert_eq!(raw_id_error, "no dunk with id '[]'");
 
+    // Byte-exact Python 3.14 repr oracles: Cc/Cf/Cn/Co/Zs/Zl/Zp, printable
+    // Unicode, quotes and backslash. Surrogates cannot occur in Rust strings.
+    for (codepoint, expected) in [
+        (0x0, r###"no dunk with id 'a\x00b'"###),
+        (0x9, r###"no dunk with id 'a\tb'"###),
+        (0xa, r###"no dunk with id 'a\nb'"###),
+        (0xd, r###"no dunk with id 'a\rb'"###),
+        (0x1f, r###"no dunk with id 'a\x1fb'"###),
+        (0x7f, r###"no dunk with id 'a\x7fb'"###),
+        (0x85, r###"no dunk with id 'a\x85b'"###),
+        (0xa0, r###"no dunk with id 'a\xa0b'"###),
+        (0xad, r###"no dunk with id 'a\xadb'"###),
+        (0x378, r###"no dunk with id 'a\u0378b'"###),
+        (0x2003, r###"no dunk with id 'a\u2003b'"###),
+        (0x200b, r###"no dunk with id 'a\u200bb'"###),
+        (0x2028, r###"no dunk with id 'a\u2028b'"###),
+        (0x2029, r###"no dunk with id 'a\u2029b'"###),
+        (0xe000, r###"no dunk with id 'a\ue000b'"###),
+        (0xfffe, r###"no dunk with id 'a\ufffeb'"###),
+        (0x10000, r###"no dunk with id 'a𐀀b'"###),
+        (0x1f600, r###"no dunk with id 'a😀b'"###),
+        (0xe0001, r###"no dunk with id 'a\U000e0001b'"###),
+        (0xf0000, r###"no dunk with id 'a\U000f0000b'"###),
+        (0x10ffff, r###"no dunk with id 'a\U0010ffffb'"###),
+        (0x301, r###"no dunk with id 'áb'"###),
+        (0x20, r###"no dunk with id 'a b'"###),
+        (0xe9, r###"no dunk with id 'aéb'"###),
+        (0x4e2d, r###"no dunk with id 'a中b'"###),
+        (0x27, r###"no dunk with id "a'b""###),
+        (0x22, r###"no dunk with id 'a"b'"###),
+        (0x5c, r###"no dunk with id 'a\\b'"###),
+    ] {
+        let id = format!("a{}b", char::from_u32(codepoint).unwrap());
+        assert_eq!(
+            refusal(dispatch_with_env(
+                &dispatcher,
+                &flock,
+                &FixedRole("worker", false),
+                "get_dunk",
+                args(json!({"id": id})),
+                &request,
+                &env,
+            )),
+            expected,
+            "codepoint U+{codepoint:04X}"
+        );
+    }
+
     let unconfigured_role = dispatch_with_env(
         &dispatcher,
         &flock,
@@ -9408,4 +9456,20 @@ fn task_reap_live_tmux_listing_failure_reopens_expired_claim() {
         .dispatch(&context, &gate, "task_reap", args(json!({})))
         .unwrap();
     assert_eq!(again["requeued"], json!([]));
+}
+
+#[test]
+fn api_python_repr_printability_matches_existing_python_table() {
+    use sha2::{Digest, Sha256};
+    assert_eq!(python_printability::PYTHON_VERSION, "3.14.4");
+    assert_eq!(python_printability::UNICODE_VERSION, "16.0.0");
+    let mut digest = Sha256::new();
+    for character in (0..=0x10ffff).filter_map(char::from_u32) {
+        digest.update([u8::from(python_printability::is_printable(character))]);
+    }
+    assert_eq!(
+        format!("{:x}", digest.finalize()),
+        python_printability::PRINTABILITY_SHA256
+    );
+    assert_eq!(py_repr("a'\"\\\n\r\tb"), r###"'a\'"\\\n\r\tb'"###);
 }
