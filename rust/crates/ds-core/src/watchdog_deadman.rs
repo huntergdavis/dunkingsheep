@@ -73,13 +73,41 @@ impl DirectWriteError {
             legacy: error,
         }
     }
-    fn sqlite((legacy, context): (DunkError, Option<crate::db::SqliteErrorContext>)) -> Self {
-        let Some(context) = context else {
+    fn native(legacy: DunkError, context: &crate::db::ErrorContext) -> Self {
+        let Some(native) = context.take() else {
             return Self::store(legacy);
+        };
+        let (code, message) = match native {
+            crate::db::NativeError::Io {
+                error,
+                path,
+                operation: _operation,
+            } => {
+                let mut typed = Self::filesystem(&path, error);
+                typed.legacy = legacy;
+                return typed;
+            }
+            crate::db::NativeError::Sqlite {
+                code,
+                message,
+                path: _path,
+                operation,
+            } => {
+                let code = code & 0xff;
+                // rusqlite decorates open failures with the filename; CPython surfaces
+                // SQLite's CANTOPEN sentence without that adapter-added path.
+                let message =
+                    if operation == "sqlite_open" && code == rusqlite::ffi::SQLITE_CANTOPEN {
+                        "unable to open database file".into()
+                    } else {
+                        message
+                    };
+                (code, message)
+            }
         };
         // CPython Modules/_sqlite/util.c:get_exception_class (3.12).
         use rusqlite::ffi::*;
-        let name = match context.code {
+        let name = match code {
             SQLITE_CONSTRAINT | SQLITE_MISMATCH => "IntegrityError",
             SQLITE_NOMEM => "MemoryError",
             SQLITE_MISUSE | SQLITE_RANGE => "InterfaceError",
@@ -92,10 +120,10 @@ impl DirectWriteError {
         };
         Self {
             name,
-            message: if context.code == SQLITE_NOMEM {
+            message: if code == SQLITE_NOMEM {
                 String::new()
             } else {
-                context.message
+                message
             },
             legacy,
         }
@@ -111,32 +139,28 @@ fn direct_write_context(
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join("attachments");
-    // Preserve the actual filesystem exception before Store::open converts it to DunkError.
-    if let Some(parent) = inbox_path.parent() {
-        fs::create_dir_all(parent).map_err(|error| DirectWriteError::filesystem(parent, error))?;
-    }
-    use std::os::unix::fs::DirBuilderExt;
-    fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(&attachments)
-        .map_err(|error| DirectWriteError::filesystem(&attachments, error))?;
-    let inbox = crate::db::with_sqlite_error_context(|| {
-        crate::inbox_store::Store::open(inbox_path, attachments)
-    })
-    .map_err(DirectWriteError::sqlite)?;
-    let message_id = crate::db::with_sqlite_error_context(|| {
-        inbox.send(&crate::inbox_store::Outgoing {
-            mailbox: target,
-            body: Some(text),
-            subject: Some(subject),
-            sender: Some("watchdog"),
-            ..Default::default()
-        })
-    })
-    .map_err(DirectWriteError::sqlite)?;
-    let back = crate::db::with_sqlite_error_context(|| inbox.get_message(&message_id))
-        .map_err(DirectWriteError::sqlite)?;
+    let context = crate::db::ErrorContext::capture();
+    let inbox = crate::inbox_store::Store::open_context(inbox_path, attachments, &context)
+        .map_err(|error| DirectWriteError::native(error, &context))?;
+    let _ = context.take();
+    let message_id = inbox
+        .send_snapshot_context(
+            &crate::inbox_store::Outgoing {
+                mailbox: target,
+                body: Some(text),
+                subject: Some(subject),
+                sender: Some("watchdog"),
+                ..Default::default()
+            },
+            context.clone(),
+        )
+        .map_err(|error| DirectWriteError::native(error, &context))?
+        .summary
+        .message_id;
+    let _ = context.take();
+    let back = inbox
+        .get_message_context(&message_id, &context)
+        .map_err(|error| DirectWriteError::native(error, &context))?;
     if back.summary.sender.as_deref() != Some("watchdog")
         || back.summary.mailbox != target
         || back.body != text

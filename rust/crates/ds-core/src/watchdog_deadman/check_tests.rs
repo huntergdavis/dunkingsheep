@@ -313,35 +313,74 @@ fn primitive_sqlite_and_readback_errors_match_actual_python_oracle() {
 }
 
 #[test]
-fn sqlite_context_is_scoped_and_restored_after_success_or_panic() {
-    use crate::db::{map_sqlite, with_sqlite_error_context};
-    fn failure() -> DunkError {
-        let connection = rusqlite::Connection::open_in_memory().unwrap();
-        map_sqlite(
-            connection
-                .execute_batch("SELECT * FROM missing_table")
-                .unwrap_err(),
+fn primitive_context_is_local_to_one_operation() {
+    use crate::db::{ErrorContext, NativeError};
+    let f = Fixture::new();
+    fs::write(&f.inbox, "not a database").unwrap();
+    let failed = ErrorContext::capture();
+    assert!(crate::inbox_store::Store::open_context(
+        &f.inbox,
+        f.dir.path().join("attachments"),
+        &failed
+    )
+    .is_err());
+    // A separate call cannot inherit another operation's error, even on the same thread.
+    let clean = ErrorContext::capture();
+    let other = Fixture::new();
+    drop(
+        crate::inbox_store::Store::open_context(
+            &other.inbox,
+            other.dir.path().join("attachments"),
+            &clean,
         )
+        .unwrap(),
+    );
+    assert!(clean.take().is_none());
+    match failed.take().unwrap() {
+        NativeError::Sqlite {
+            code,
+            path,
+            operation,
+            ..
+        } => {
+            assert_eq!(code & 0xff, rusqlite::ffi::SQLITE_NOTADB);
+            assert_eq!(path, f.inbox);
+            assert_eq!(operation, "writer_wal");
+        }
+        other => panic!("expected actual SQLite context, got {other:?}"),
     }
-    let (_, captured) = with_sqlite_error_context::<()>(|| Err(failure())).unwrap_err();
-    assert!(captured.is_some());
-    with_sqlite_error_context(|| {
-        let _ = failure();
-        Ok(())
-    })
-    .unwrap();
-    let (_, captured) =
-        with_sqlite_error_context::<()>(|| Err(DunkError::Refused("plain".into()))).unwrap_err();
-    assert!(captured.is_none());
-    let (_, outer) = with_sqlite_error_context::<()>(|| {
-        let error = failure();
-        let (_, inner) =
-            with_sqlite_error_context::<()>(|| Err(DunkError::Refused("inner".into())))
-                .unwrap_err();
-        assert!(inner.is_none());
-        let _ = std::panic::catch_unwind(|| with_sqlite_error_context::<()>(|| panic!("fixture")));
-        Err(error)
-    })
-    .unwrap_err();
-    assert_eq!(outer.unwrap().message, "no such table: missing_table");
+    assert!(failed.take().is_none());
+}
+
+#[test]
+fn read_pool_and_get_message_keep_actual_sqlite_context() {
+    use crate::db::{ErrorContext, NativeError, ReadPool};
+    let f = Fixture::new();
+    let context = ErrorContext::capture();
+    assert!(ReadPool::open_context(&f.inbox, 1, &context).is_err());
+    match context.take().unwrap() {
+        NativeError::Sqlite {
+            code,
+            path,
+            operation,
+            ..
+        } => {
+            assert_eq!(code & 0xff, rusqlite::ffi::SQLITE_CANTOPEN);
+            assert_eq!(path, f.inbox);
+            assert_eq!(operation, "sqlite_open");
+        }
+        other => panic!("expected failed reader open: {other:?}"),
+    }
+    let store =
+        crate::inbox_store::Store::open(&f.inbox, f.dir.path().join("attachments")).unwrap();
+    rusqlite::Connection::open(&f.inbox)
+        .unwrap()
+        .execute_batch("DROP TABLE messages")
+        .unwrap();
+    let legacy = store.get_message("i1").unwrap_err().to_string();
+    let captured = store.get_message_context("i1", &context).unwrap_err();
+    assert_eq!(captured.to_string(), legacy);
+    let typed = DirectWriteError::native(captured, &context);
+    assert_eq!(typed.name, "OperationalError");
+    assert_eq!(typed.message, "no such table: messages");
 }
