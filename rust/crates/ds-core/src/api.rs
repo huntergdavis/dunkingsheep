@@ -21,6 +21,8 @@ mod owner_push;
 pub use owner_push::{h_owner_poll, h_owner_push, h_owner_take};
 mod recovery;
 pub use recovery::{h_doctor, h_recover};
+pub mod runtime_control;
+pub use runtime_control::{h_allocation, h_dispatch, h_shutdown};
 mod metrics;
 pub use metrics::h_metrics;
 mod dunks;
@@ -293,6 +295,12 @@ pub trait CommandEnv: PaneInfoEnv {
     }
 
     /// Existing fallible project summary sources, including captured startup paths.
+    fn runtime_control_env(&self) -> Result<&dyn runtime_control::RuntimeControlEnv, DunkError> {
+        Err(DunkError::Refused(
+            "runtime control adapter is not wired".into(),
+        ))
+    }
+
     fn project_summary_env(
         &self,
     ) -> Result<&dyn crate::flock::project_summary::SummaryEnv, DunkError> {
@@ -817,6 +825,12 @@ impl Dispatcher {
     }
 
     /// Register only the T39 operations metrics summary handler.
+    pub fn register_runtime_control(&mut self) {
+        self.register("dispatch", h_dispatch);
+        self.register("allocation", h_allocation);
+        self.register("shutdown", h_shutdown);
+    }
+
     pub fn register_metrics(&mut self) {
         self.register("metrics", h_metrics);
     }
