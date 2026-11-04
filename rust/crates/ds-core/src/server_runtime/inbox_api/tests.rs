@@ -298,6 +298,49 @@ fn h_inbox_status_matches_python() {
 }
 
 #[test]
+fn inbox_status_preserves_raw_sqlite_scalar_binding_and_python_repr() {
+    let (_dir, services) = make_services("status-raw-id", factory(None), None);
+    let store = services.flock().stores().inbox.unwrap();
+    let id = store
+        .send(&crate::inbox_store::Outgoing {
+            mailbox: "w1:p1",
+            body: Some("status body"),
+            ..Default::default()
+        })
+        .unwrap();
+    let dispatcher = services.dispatcher(handlers());
+    let ctx = request("w1:p1");
+    let found = dispatcher
+        .dispatch("inbox_status", &json!({"message_id": id}), &ctx)
+        .unwrap();
+    assert_eq!(found["message_id"], id);
+
+    for (raw, expected) in [
+        (
+            r#"{"message_id":[]}"#,
+            "Error binding parameter 1: type 'list' is not supported",
+        ),
+        (
+            r#"{"message_id":{}}"#,
+            "Error binding parameter 1: type 'dict' is not supported",
+        ),
+        (r#"{"message_id":7}"#, "no message with id 7"),
+        (r#"{"message_id":"7"}"#, "no message with id '7'"),
+        (
+            r#"{"message_id":0.10000000000000001}"#,
+            "no message with id 0.1",
+        ),
+    ] {
+        let args: serde_json::Value = serde_json::from_str(raw).unwrap();
+        let error = dispatcher
+            .dispatch("inbox_status", &args, &ctx)
+            .unwrap_err();
+        assert!(error.to_string().contains(expected), "{raw}: {error}");
+    }
+    dispatcher.close();
+}
+
+#[test]
 fn h_inbox_ack_matches_python() {
     exercise("inbox_ack");
 }
@@ -574,6 +617,31 @@ fn inbox_send_raw_values_preserve_body_subject_and_notification_error_order() {
             .total,
         before + 2
     );
+    dispatcher.close();
+}
+
+#[test]
+fn inbox_send_notice_subject_rounds_raw_json_float_like_python() {
+    use crate::flock::sends::{outbox_lock, Message};
+
+    let (_dir, services) = make_services("float-notice-subject", factory(None), None);
+    let mut pending = Message::new("old-float-notice", "w1:p1", "worker", "old", "test");
+    pending.is_notice = true;
+    outbox_lock(&services.flock().outbox).insert("w1:p1".into(), vec![pending]);
+
+    let dispatcher = services.dispatcher(handlers());
+    let args: serde_json::Value = serde_json::from_str(
+        r#"{"to":"w1:p1","body":"float subject","subject":0.10000000000000001}"#,
+    )
+    .unwrap();
+    let sent = dispatcher
+        .dispatch("inbox_send", &args, &request("w1:p1"))
+        .unwrap();
+    assert_eq!(sent["notified"], true);
+    let outbox = outbox_lock(&services.flock().outbox);
+    let notice = &outbox["w1:p1"][0].text;
+    assert!(notice.contains(": 0.1."), "{notice}");
+    assert!(!notice.contains("0.10000000000000001"), "{notice}");
     dispatcher.close();
 }
 

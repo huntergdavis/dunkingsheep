@@ -152,9 +152,18 @@ pub fn h_inbox_delete(c: &HandlerContext<'_>, args: Args) -> Result<Value, DunkE
         .with_inbox_env(&mut |env| Ok(json!({"deleted":c.flock.inbox_delete(env,&ids)?})))
 }
 pub fn h_inbox_status(c: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
-    let id = python_value_string(&args["message_id"]);
+    let raw_id = &args["message_id"];
+    let bound_id = crate::sqlite_scalar::python_sqlite_scalar(Some(raw_id), 1)?;
+    let id_repr = match raw_id {
+        Value::Number(number) if number.is_f64() => number
+            .as_f64()
+            .and_then(serde_json::Number::from_f64)
+            .map(|normalized| crate::owner::conversations::python_number_string(&normalized))
+            .unwrap_or_else(|| number.to_string()),
+        _ => python_value_repr(raw_id),
+    };
     c.env.with_inbox_env(&mut |env| {
-        let s=c.flock.inbox_status(env,&id)?;
+        let s=crate::inbox::status_bound(env.pool(), &bound_id, &id_repr, env.now())?;
         Ok(json!({"message_id":s.message_id,"state":s.state,"mailbox":s.mailbox,"destination":s.destination,"pane_id":s.pane_id,"sender":s.sender,"created_at":s.created_at,"read_at":s.read_at,"acked_at":s.acked_at,"archived_at":s.archived_at,"cancelled_at":s.cancelled_at,"waiting_s":s.waiting_s,"body_bytes":s.body_bytes,"attachments":s.attachments,"attachment_bytes":s.attachment_bytes,"reason":s.reason,"notify":{"state":s.notify_state,"reason":s.notify_reason,"at":s.notify_at,"transport_id":s.notify_transport_id,"attempt":s.notify_attempt}}))
     })
 }

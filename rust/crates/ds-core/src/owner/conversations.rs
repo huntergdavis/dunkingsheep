@@ -379,7 +379,14 @@ fn python_repr_value(value: &Value) -> String {
 
 pub(crate) fn python_number_string(value: &serde_json::Number) -> String {
     if value.is_f64() {
-        python_float_string(&value.to_string())
+        // serde_json's arbitrary_precision feature preserves the input token, while
+        // Python json.loads first rounds it to an IEEE-754 float. Format that decoded
+        // value so wire text follows Python even for over-precise JSON decimals.
+        let normalized = value
+            .as_f64()
+            .and_then(serde_json::Number::from_f64)
+            .unwrap_or_else(|| value.clone());
+        python_float_string(&normalized.to_string())
     } else {
         value.to_string()
     }

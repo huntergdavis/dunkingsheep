@@ -630,7 +630,7 @@ impl Flock {
                     Some(match value {
                         Value::String(s) => s.clone(),
                         Value::Bool(true) => "True".into(),
-                        Value::Number(n) => n.to_string(),
+                        Value::Number(n) => crate::owner::conversations::python_number_string(n),
                         other => other.to_string(),
                     })
                 });

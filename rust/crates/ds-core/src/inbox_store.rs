@@ -146,7 +146,7 @@ fn owner_wire_python_string(value: &JsonValue) -> String {
         JsonValue::Bool(true) => "True".to_string(),
         JsonValue::Bool(false) => "False".to_string(),
         JsonValue::String(value) => value.clone(),
-        JsonValue::Number(value) => value.to_string(),
+        JsonValue::Number(value) => crate::owner::conversations::python_number_string(value),
         JsonValue::Array(_) | JsonValue::Object(_) => crate::api::python_value_repr(value),
     }
 }
