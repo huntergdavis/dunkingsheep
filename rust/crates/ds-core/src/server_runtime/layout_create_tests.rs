@@ -119,11 +119,11 @@ fn h_create_workspace_matches_python() {
     let result = dispatch
         .dispatch(
             "create_workspace",
-            &json!({"label":["raw",false],"cwd":42,"command":["echo",false],"mailbox":" lane "}),
+            &json!({"label":["raw",false],"cwd":42,"command":"echo safe","mailbox":" lane "}),
             &request("w2:p2"),
         )
         .unwrap();
-    assert_eq!(result["ran"], json!(["echo", false]));
+    assert_eq!(result["ran"], json!("echo safe"));
     let pane = result["pane_id"].as_str().unwrap();
     assert_eq!(
         services.flock.last_message(),
@@ -131,7 +131,7 @@ fn h_create_workspace_matches_python() {
     );
     assert_eq!(
         services.flock.sent_text_by_pane.lock().unwrap()[pane],
-        vec![json!(["echo", false])]
+        vec![json!("echo safe")]
     );
     assert_eq!(
         crate::flock::Flock::row_identity(services.flock.lane_registry(false).unwrap().get(pane)),
@@ -139,7 +139,7 @@ fn h_create_workspace_matches_python() {
     );
     let events = events.lock().unwrap();
     assert!(events.contains(&json!(["workspace", ["raw", false], 42, false])));
-    assert!(events.contains(&json!(["typed", pane, "['echo', False]"])));
+    assert!(events.contains(&json!(["typed", pane, "echo safe"])));
     assert!(events
         .iter()
         .any(|event| event[0] == "keys" && event[1] == pane && event[2] == json!(["Enter"])));
@@ -303,4 +303,27 @@ fn layout_create_dispatch_permission_precedes_required_and_direction_checks() {
         .dispatch("split_pane", &json!({"direction":123}), &request("w2:p2"))
         .unwrap_err();
     assert!(error.to_string().contains("target"), "{error}");
+}
+
+#[test]
+fn layout_create_raw_list_confirmation_error_keeps_typed_history_only() {
+    let (_dir, services, events) = make_services(None, true);
+    services.flock.set_last_message("before");
+    let error = dispatcher(&services)
+        .dispatch(
+            "create_workspace",
+            &json!({"command":["echo",false],"mailbox":"must not write"}),
+            &request("w2:p2"),
+        )
+        .unwrap_err();
+    assert_eq!(error.to_string(), "'list' object has no attribute 'encode'");
+    assert_eq!(services.flock.last_message(), "before");
+    assert!(services.flock.lane_registry(false).unwrap().is_empty());
+    assert_eq!(
+        services.flock.sent_text_by_pane.lock().unwrap()["w101:p1"],
+        vec![json!(["echo", false])]
+    );
+    let events = events.lock().unwrap();
+    assert!(events.contains(&json!(["typed", "w101:p1", "['echo', False]"])));
+    assert!(events.contains(&json!(["keys", "w101:p1", ["Enter"]])));
 }

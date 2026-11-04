@@ -189,3 +189,33 @@ pub fn h_split_pane(context: &HandlerContext<'_>, args: Args) -> Result<Value, D
             after_create(context.flock, result, arg(&args, "command"), "pane", submit)
         })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn after_create_preserves_raw_ran_only_when_submit_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let flock = Flock::new(
+            dir.path().join("launches.json"),
+            dir.path().join("lanes.json"),
+            false,
+        );
+        let command = json!(["accepted", false]);
+        let mut submit = |pane: &str, raw: &Value| {
+            assert_eq!(pane, "%1");
+            assert_eq!(raw, &command);
+            Ok((true, "sent".into()))
+        };
+        let out = after_create(
+            &flock,
+            Ok(json!({"root_pane":{"pane_id":"%1"}})),
+            &command,
+            "pane",
+            &mut submit,
+        )
+        .unwrap();
+        assert_eq!(out["ran"], command);
+        assert_eq!(flock.last_message(), "Created pane");
+    }
+}

@@ -31,7 +31,7 @@ impl RequestRuntimeAdapter<'_> {
                 pane,
                 text,
             )?;
-            crate::flock::sends::confirm_send_action(&mut terminal, &mut result);
+            crate::flock::sends::confirm_send_action_raw(&mut terminal, &mut result, text)?;
             Ok((result.ok, result.detail))
         };
         // The original request remains the pane/role adapter; no service binding is lost.

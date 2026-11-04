@@ -1321,6 +1321,51 @@ pub fn confirm_send_action(env: &mut dyn SendPreparationEnv, action: &mut SendAc
     action.detail = result.1;
 }
 
+fn raw_metric_error(value: &serde_json::Value) -> Option<DunkError> {
+    if !crate::terminal::raw::truthy(value) || value.is_string() {
+        return None;
+    }
+    let kind = match value {
+        serde_json::Value::Array(_) => "list",
+        serde_json::Value::Object(_) => "dict",
+        serde_json::Value::Bool(_) => "bool",
+        serde_json::Value::Number(n) if n.is_f64() => "float",
+        _ => "int",
+    };
+    Some(DunkError::Refused(format!(
+        "'{kind}' object has no attribute 'encode'"
+    )))
+}
+
+/// Preserve the raw command's metrics conversion error after confirmed typing.
+/// The regular string-only callers continue to use `confirm_send_action`.
+pub fn confirm_send_action_raw(
+    env: &mut dyn SendPreparationEnv,
+    action: &mut SendAction,
+    raw: &serde_json::Value,
+) -> Result<(), DunkError> {
+    let Some(confirmation) = action.confirmation.take() else {
+        return Ok(());
+    };
+    let mut input_error = None;
+    let result = press_until_submitted_value(
+        env,
+        &confirmation.pane_id,
+        &confirmation.text,
+        true,
+        confirmation.busy_hint,
+        StatusBaseline::Captured(confirmation.baseline),
+        Some(raw),
+        &mut input_error,
+    );
+    if let Some(error) = input_error {
+        return Err(error);
+    }
+    action.ok = result.0;
+    action.detail = result.1;
+    Ok(())
+}
+
 /// Route an already-normalized key list once while the caller holds the typing guard. Pending
 /// text confirmation is deferred into the returned action so its waits occur after lock release.
 pub fn press_keys(
@@ -1861,6 +1906,29 @@ pub fn press_until_submitted(
     busy_hint: bool,
     baseline: StatusBaseline,
 ) -> (bool, String) {
+    press_until_submitted_value(
+        env,
+        pane_id,
+        text,
+        first_pressed,
+        busy_hint,
+        baseline,
+        None,
+        &mut None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn press_until_submitted_value(
+    env: &mut dyn SubmitEnv,
+    pane_id: &str,
+    text: &str,
+    first_pressed: bool,
+    busy_hint: bool,
+    baseline: StatusBaseline,
+    raw: Option<&serde_json::Value>,
+    input_error: &mut Option<DunkError>,
+) -> (bool, String) {
     if let Some(dead) = dead_session(env, pane_id) {
         return (
             false,
@@ -1917,6 +1985,10 @@ pub fn press_until_submitted(
                     if attempt > 1 {
                         env.remember_submit_key(pane_id, if key == "Tab" { "Enter" } else { &key });
                     }
+                    if let Some(error) = raw.and_then(raw_metric_error) {
+                        *input_error = Some(error);
+                        return (false, String::new());
+                    }
                     env.record_submit_attempt(pane_id, "ok", attempt, text.len());
                     return (
                         true,
@@ -1935,6 +2007,10 @@ pub fn press_until_submitted(
                                 if key == "Tab" { "Enter" } else { &key },
                             );
                         }
+                        if let Some(error) = raw.and_then(raw_metric_error) {
+                            *input_error = Some(error);
+                            return (false, String::new());
+                        }
                         env.record_submit_attempt(pane_id, "ok-turn", attempt, text.len());
                         return (true, "sent (confirmed by the turn it started)".to_string());
                     }
@@ -1948,6 +2024,10 @@ pub fn press_until_submitted(
                 if attempt > 1 {
                     env.remember_submit_key(pane_id, if key == "Tab" { "Enter" } else { &key });
                 }
+                if let Some(error) = raw.and_then(raw_metric_error) {
+                    *input_error = Some(error);
+                    return (false, String::new());
+                }
                 env.record_submit_attempt(pane_id, "ok-turn", attempt, text.len());
                 return (true, "sent (confirmed by the turn it started)".to_string());
             }
@@ -1958,6 +2038,10 @@ pub fn press_until_submitted(
             if attempt > 1 {
                 // Python resets a busy Tab echo to Enter once the turn itself confirms delivery.
                 env.remember_submit_key(pane_id, "Enter");
+            }
+            if let Some(error) = raw.and_then(raw_metric_error) {
+                *input_error = Some(error);
+                return (false, String::new());
             }
             env.record_submit_attempt(pane_id, "ok-turn", attempt, text.len());
             return (true, "sent (confirmed by the turn it started)".to_string());
