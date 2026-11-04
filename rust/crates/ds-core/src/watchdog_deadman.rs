@@ -907,3 +907,6 @@ mod tests {
 #[cfg(test)]
 #[path = "watchdog_deadman_sender_tests.rs"]
 mod sender_tests;
+
+mod check;
+pub use check::{check, CheckOptions, CheckSendError};
