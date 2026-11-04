@@ -52,7 +52,19 @@ fn py_str(value: &Value) -> String {
         Value::Null => "None".into(),
         Value::Bool(true) => "True".into(),
         Value::Bool(false) => "False".into(),
-        other => other.to_string(),
+        Value::Number(number) => crate::github::python_number_string(number),
+        Value::Array(values) => format!(
+            "[{}]",
+            values.iter().map(repr).collect::<Vec<_>>().join(", ")
+        ),
+        Value::Object(values) => format!(
+            "{{{}}}",
+            values
+                .iter()
+                .map(|(key, value)| format!("{}: {}", agent_verify::repr_name(key), repr(value)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
     }
 }
 fn field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {

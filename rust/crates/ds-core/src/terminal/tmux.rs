@@ -422,20 +422,18 @@ impl Terminal for TmuxBackend {
                     .join("tmux-guard")
             });
         // Explicit test registries never consult the user's guard directory.
-        if self.guard_enabled {
-            if guard_dir.join("tmux").is_file() {
-                let path = format!(
-                    "{}:{}",
-                    guard_dir.display(),
-                    environment
-                        .get("PATH")
-                        .filter(|v| !v.is_empty())
-                        .map(String::as_str)
-                        .unwrap_or_else(|| self.environment.get("PATH").unwrap_or(""))
-                );
-                command = format!("PATH={} {command}", shell_join(&[&path]));
-                environment.insert("PATH".into(), path);
-            }
+        if self.guard_enabled && guard_dir.join("tmux").is_file() {
+            let path = format!(
+                "{}:{}",
+                guard_dir.display(),
+                environment
+                    .get("PATH")
+                    .filter(|v| !v.is_empty())
+                    .map(String::as_str)
+                    .unwrap_or_else(|| self.environment.get("PATH").unwrap_or(""))
+            );
+            command = format!("PATH={} {command}", shell_join(&[&path]));
+            environment.insert("PATH".into(), path);
         }
         let mut args: Vec<String>;
         if let Some(tab) = spec.tab_id.as_deref().filter(|v| !v.is_empty()) {

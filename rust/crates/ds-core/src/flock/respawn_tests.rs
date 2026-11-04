@@ -143,7 +143,7 @@ esac
             inbox: self,
             runtime: self.runtime.handle(),
             env: &self.env,
-            verify_seconds: 0.0,
+            verify_seconds: 0.01,
             before_native_recheck: None,
         };
         self.flock.respawn_pane(
@@ -404,7 +404,7 @@ fn queued_outbox_and_live_task_lease_refuse_without_mutation() {
         .contains("queued outbox"));
     assert!(!f.calls().contains("respawn-pane"));
     f.flock.outbox.lock().unwrap().clear();
-    let db = crate::db::open_writer(f.dir.path().join("tasks.db")).unwrap();
+    let db = crate::db::open_writer(&f.dir.path().join("tasks.db")).unwrap();
     db.execute("INSERT INTO task_leases(task_id,pane_id,claimed_at,heartbeat_at,expires_at) VALUES('t1',?,0,0,?)",rusqlite::params![P,crate::clock::now_s()+300.0]).unwrap();
     drop(db);
     let (p, s) = f.original();
@@ -443,7 +443,7 @@ fn unread_mail_and_count_errors_refuse_without_mutation() {
         .to_string()
         .contains("unread message"));
     assert!(!f.calls().contains("respawn-pane"));
-    let db = crate::db::open_writer(f.dir.path().join("inbox.db")).unwrap();
+    let db = crate::db::open_writer(&f.dir.path().join("inbox.db")).unwrap();
     db.execute_batch("DROP TABLE messages").unwrap();
     drop(db);
     let (p, s) = f.original();
@@ -548,7 +548,7 @@ fn codex_request(
             inbox: f,
             runtime: f.runtime.handle(),
             env: &f.env,
-            verify_seconds: 0.0,
+            verify_seconds: 0.01,
             before_native_recheck: None,
         },
         RespawnRequest {
@@ -668,7 +668,7 @@ fn native_rollout_changed_at_final_recheck_refuses_mutation() {
         inbox: &f,
         runtime: f.runtime.handle(),
         env: &f.env,
-        verify_seconds: 0.0,
+        verify_seconds: 0.01,
         before_native_recheck: Some(&change),
     };
     let error = f
