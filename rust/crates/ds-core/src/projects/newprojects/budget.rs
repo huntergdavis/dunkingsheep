@@ -139,18 +139,23 @@ impl ProjectBudgetConfig {
         let policy = self.providers.get(provider).ok_or_else(|| {
             DunkError::Refused(format!("no budget policy for provider {provider}"))
         })?;
+        // Read broadly enough for either explicitly configured source. Admission applies each
+        // source's own freshness limit, so a stale subscription cannot mask a still-fresh credit
+        // fallback measurement.
         let max_age = policy
             .subscription
             .0
             .as_ref()
             .map(|policy| policy.max_age_seconds)
-            .or_else(|| {
+            .into_iter()
+            .chain(
                 policy
                     .credit_fallback
                     .0
                     .as_ref()
-                    .map(|policy| policy.max_age_seconds)
-            })
+                    .map(|policy| policy.max_age_seconds),
+            )
+            .reduce(f64::max)
             .unwrap_or(0.0);
         let provider = provider.to_owned();
         let home = home.to_path_buf();

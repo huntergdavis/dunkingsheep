@@ -300,7 +300,9 @@ impl Projects {
             if existing.state == State::Live {
                 return Ok(existing.clone());
             }
-            if !existing.done("scaffolded") && existing.dir.exists() {
+            let approved_root = canonical_project_root(root)?;
+            validate_owned_project_dir(&approved_root, &name, existing)?;
+            if !existing.done("scaffolded") && project_path_present(&existing.dir)? {
                 return Err(DunkError::Refused(format!(
                     "{} already exists without a durable scaffold completion; inspect it before retry",
                     existing.dir.display()
@@ -317,8 +319,9 @@ impl Projects {
                     "{MAX_AWAITING_APPROVAL} projects already wait for the owner (MAX_AWAITING_APPROVAL); wait for an answer first"
                 )));
             }
-            let dir = root.join(&name);
-            if dir.exists() {
+            let approved_root = canonical_project_root(root)?;
+            let dir = approved_root.join(&name);
+            if project_path_present(&dir)? {
                 return Err(DunkError::Refused(format!(
                     "{} already exists and is not a project this daemon started; pick another name",
                     dir.display()
@@ -761,17 +764,83 @@ async fn finish_external_step(
     result: Result<String, String>,
     store: &newprojects::ProjectStore,
 ) -> Result<(), DunkError> {
+    let pending = project.pending_step.clone();
     project.pending_step = None;
     match result {
-        Ok(detail) => durable_log(project, step, true, detail, store).await,
+        Ok(detail) => {
+            if let Err(error) = durable_log(project, step, true, detail, store).await {
+                project.pending_step = pending;
+                return Err(error);
+            }
+            Ok(())
+        }
         Err(message) => {
-            durable_log(project, step, false, message.clone(), store).await?;
+            if let Err(error) = durable_log(project, step, false, message.clone(), store).await {
+                project.pending_step = pending;
+                return Err(error);
+            }
             Err(DunkError::Refused(format!(
                 "project {}: step {step} failed: {message}",
                 project.name
             )))
         }
     }
+}
+
+fn canonical_project_root(root: &Path) -> Result<PathBuf, DunkError> {
+    let canonical = std::fs::canonicalize(root).map_err(|error| {
+        DunkError::Refused(format!(
+            "project root {} is unavailable: {error}",
+            root.display()
+        ))
+    })?;
+    if !canonical.is_dir() {
+        return Err(DunkError::Refused(format!(
+            "project root {} is not a directory",
+            canonical.display()
+        )));
+    }
+    Ok(canonical)
+}
+
+fn project_path_present(path: &Path) -> Result<bool, DunkError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(DunkError::Refused(format!(
+            "cannot inspect project path {}: {error}",
+            path.display()
+        ))),
+    }
+}
+
+fn validate_owned_project_dir(root: &Path, name: &str, project: &Project) -> Result<(), DunkError> {
+    let expected = root.join(name);
+    if project.dir != expected {
+        return Err(DunkError::Refused(format!(
+            "project {name}: persisted directory {} does not match approved root {}",
+            project.dir.display(),
+            expected.display()
+        )));
+    }
+    if project_path_present(&project.dir)? {
+        let actual = std::fs::canonicalize(&project.dir).map_err(|error| {
+            DunkError::Refused(format!(
+                "project {name}: cannot verify persisted directory {}: {error}",
+                project.dir.display()
+            ))
+        })?;
+        if actual != expected {
+            return Err(DunkError::Refused(format!(
+                "project {name}: persisted directory resolves outside its approved root"
+            )));
+        }
+    } else if project.done("scaffolded") {
+        return Err(DunkError::Refused(format!(
+            "project {name}: durably scaffolded directory is missing"
+        )));
+    }
+    Ok(())
 }
 
 async fn run_steps_durable<T: Terminal + Send>(

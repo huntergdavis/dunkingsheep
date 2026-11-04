@@ -390,6 +390,67 @@ async fn failed_external_step_is_durable_and_retry_does_not_repeat_completed_ste
 }
 
 #[tokio::test]
+async fn failed_result_write_keeps_intent_uncertain_in_memory_and_prevents_replay() {
+    let root = tempfile::tempdir().unwrap();
+    let db = root.path().join("owned-projects.sqlite3");
+    let provider_home = tempfile::tempdir().unwrap();
+    let _ = codex_fixture(provider_home.path(), 1000.0, json!(15.0));
+    let config = configured(Value::Null);
+    let mut projects = Projects::open_durable(&db).await.unwrap();
+    let connection = rusqlite::Connection::open(&db).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER reject_workspace_result BEFORE INSERT ON project_events
+             WHEN NEW.step='workspace'
+             BEGIN SELECT RAISE(ABORT, 'injected event failure'); END;",
+        )
+        .unwrap();
+    drop(connection);
+    let mut terminal = FakeTerminal::new();
+
+    let first = projects
+        .spawn_from_sources(
+            &mut terminal,
+            root.path(),
+            &request(),
+            &authority(),
+            &Usage::Percent(10.0),
+            &config,
+            "codex",
+            provider_home.path(),
+            1001.0,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(first.contains("injected event failure"), "{first}");
+    assert_eq!(
+        projects.get("budget-app").unwrap().pending_step.as_deref(),
+        Some("workspace")
+    );
+    let calls_after_first = terminal.layout_calls.len();
+
+    let second = projects
+        .spawn_from_sources(
+            &mut terminal,
+            root.path(),
+            &request(),
+            &authority(),
+            &Usage::Percent(10.0),
+            &config,
+            "codex",
+            provider_home.path(),
+            1001.0,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(second.contains("outcome is uncertain"), "{second}");
+    assert_eq!(terminal.layout_calls.len(), calls_after_first);
+    projects.shutdown().await;
+}
+
+#[tokio::test]
 async fn restart_with_an_unresolved_external_intent_refuses_without_replay() {
     let root = tempfile::tempdir().unwrap();
     let db = root.path().join("owned-projects.sqlite3");
@@ -505,4 +566,64 @@ async fn a_foreign_project_directory_is_never_overwritten() {
     );
     assert!(projects.get("budget-app").is_none());
     projects.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_recovered_project_path_outside_the_approved_root_is_refused() {
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let db = root.path().join("owned-projects.sqlite3");
+    let foreign = outside.path().join("foreign-project");
+    fs::create_dir(&foreign).unwrap();
+    fs::write(foreign.join("BRIEF.md"), "owner data").unwrap();
+    let provider_home = tempfile::tempdir().unwrap();
+    let _ = codex_fixture(provider_home.path(), 1000.0, json!(15.0));
+    let config = configured(Value::Null);
+    let mut projects = Projects::open_durable(&db).await.unwrap();
+    projects
+        .store
+        .as_ref()
+        .unwrap()
+        .save(
+            crate::projects::Project {
+                name: "budget-app".into(),
+                dir: foreign.clone(),
+                brief: "test project".into(),
+                soft_cap: None,
+                state: State::Partial,
+                workspace_id: None,
+                agents: Vec::new(),
+                events: Vec::new(),
+                pending_step: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    projects.shutdown().await;
+
+    let mut recovered = Projects::open_durable(&db).await.unwrap();
+    let mut terminal = FakeTerminal::new();
+    let error = recovered
+        .spawn_from_sources(
+            &mut terminal,
+            root.path(),
+            &request(),
+            &authority(),
+            &Usage::Percent(10.0),
+            &config,
+            "codex",
+            provider_home.path(),
+            1001.0,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("does not match approved root"), "{error}");
+    assert!(terminal.layout_calls.is_empty());
+    assert_eq!(
+        fs::read_to_string(foreign.join("BRIEF.md")).unwrap(),
+        "owner data"
+    );
+    recovered.shutdown().await;
 }
