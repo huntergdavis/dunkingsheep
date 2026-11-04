@@ -608,6 +608,29 @@ impl DunkList {
             .collect()
     }
 
+    /// Capture the lifetimes being stopped while updating their persisted fields.
+    pub(crate) fn halt_handles(&self, panes: Option<&[String]>) -> Vec<DunkerHandle> {
+        let state = self.state();
+        let mut stopped = Vec::new();
+        for handle in &state.dunkers {
+            let mut dunker = Self::lock_dunker(handle);
+            let selected = panes.is_none_or(|panes| {
+                dunker
+                    .target_pane_id
+                    .as_ref()
+                    .is_some_and(|pane| panes.contains(pane))
+            });
+            if dunker.running && selected {
+                stop_fields(&mut dunker);
+                if panes.is_some() {
+                    dunker.status = "Target closed".into();
+                }
+                stopped.push(Arc::clone(handle));
+            }
+        }
+        stopped
+    }
+
     pub(crate) fn timer_fields(handle: &DunkerHandle) -> DunkTimerFields {
         let dunker = Self::lock_dunker(handle);
         DunkTimerFields {
