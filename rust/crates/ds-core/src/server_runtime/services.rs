@@ -82,7 +82,7 @@ impl Drop for StartingMemory {
 /// The concrete resources captured once at daemon startup.
 ///
 /// `stores` must contain the already opened task and inbox stores. When `observability` is
-/// present, its explicit paths open metrics and the optional memory read pool; otherwise a
+/// present, its explicit paths open metrics and the canonical memory service; otherwise a
 /// caller must supply an already opened metrics store in `stores`. Roles and the legacy
 /// superuser policy are also the actual opened instances, never defaults synthesized here.
 pub struct RuntimeServiceInputs {
@@ -2007,11 +2007,38 @@ mod tests {
             done_tx.send(()).unwrap();
         });
         assert!(done_rx.recv_timeout(Duration::from_millis(100)).is_err());
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while service.checkpoint().is_ok() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "final stop did not begin"
+            );
+            std::thread::yield_now();
+        }
+        let flock = Arc::clone(&services.flock);
+        let owner = Arc::clone(&service);
+        let (attached_tx, attached_rx) = mpsc::channel();
+        let attacher = std::thread::spawn(move || {
+            attached_tx
+                .send(flock.attach_memory_service(owner))
+                .unwrap();
+        });
+        assert!(
+            attached_rx
+                .recv_timeout(Duration::from_millis(100))
+                .is_err(),
+            "attachment must serialize behind final join"
+        );
         release_tx.send(()).unwrap();
         done_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         done_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         join1.join().unwrap();
         join2.join().unwrap();
+        assert!(attached_rx
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .is_err());
+        attacher.join().unwrap();
         assert!(service.worker_id().is_none());
         assert!(service.start().is_err());
         assert!(service
