@@ -44,6 +44,7 @@ pub(crate) fn production_handlers() -> Dispatcher {
     handlers.register_stop_all_fire_list_dunks();
     handlers.register_send_text_keys_flush_box();
     handlers.register_outbox_messages();
+    handlers.register_inbox_messages();
     handlers.register_clear_box_delivery_capability();
     handlers.register_respawn_pane();
     handlers.register_layout_create();
@@ -529,6 +530,18 @@ mod tests {
             "list_messages",
             "get_message",
             "cancel_message",
+            "inbox_send",
+            "inbox_count",
+            "inbox_list",
+            "inbox_read",
+            "inbox_status",
+            "inbox_ack",
+            "inbox_cancel",
+            "inbox_delete",
+            "inbox_recover",
+            "inbox_archive",
+            "inbox_stats",
+            "inbox_fetch",
             "clear_box",
             "delivery",
             "delivery_capability",
@@ -617,6 +630,85 @@ mod tests {
             actual.len(),
             "duplicate registration attempt"
         );
+    }
+
+    #[test]
+    fn production_dispatcher_socket_inbox_read_consumes_canonical_message() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixStream;
+
+        let caller = crate::proc::caller_from_peer(
+            Some(i64::from(std::process::id())),
+            Some("w1:p1".into()),
+        );
+        assert!(crate::proc::caller_alive(Some(&caller)));
+        let pane_pid = caller.pid.unwrap();
+        let terminal_factory: LoopTerminalFactory = Arc::new(move || {
+            let mut terminal = FakeTerminal::new();
+            terminal.panes.truncate(1);
+            terminal.panes[0].pane_pid = Some(pane_pid);
+            // Match the seeded key through the real unique-label mailbox resolver.
+            terminal.panes[0].label = "w1:p1".into();
+            Box::new(terminal)
+        });
+        let (dir, services) = make_services("socket-inbox", terminal_factory, None);
+        let store = services.flock().stores().inbox.unwrap();
+        let id = store
+            .send(&crate::inbox_store::Outgoing {
+                mailbox: "w1:p1",
+                body: Some("canonical socket message"),
+                ..Default::default()
+            })
+            .unwrap();
+        let path = dir.path().join("rpc.sock");
+        let mut server = crate::server::FlockServer::new(services.production_dispatcher(), &path);
+        server.bind().unwrap();
+        let stop = server.stop_handle();
+        let thread = std::thread::spawn(move || server.serve_forever().unwrap());
+        // Even an assertion failure closes the client and stops/joins the accept loop.
+        // This does not assert production connection-thread drain (separate t1605).
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let stream = UnixStream::connect(&path).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let mut client = BufReader::new(stream);
+            let mut call = |sequence: u64, command: &str| {
+                let request = json!({"id":sequence,"cmd":command,"args":{},"self_pane_id":"w1:p1"});
+                serde_json::to_writer(client.get_mut(), &request).unwrap();
+                client.get_mut().write_all(b"\n").unwrap();
+                let mut line = String::new();
+                assert!(client.read_line(&mut line).unwrap() > 0);
+                let mut response: Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(response["id"], sequence);
+                assert_eq!(response["ok"], true, "{command}: {response}");
+                response["result"].take()
+            };
+            let identity = call(1, "whoami");
+            assert_eq!(identity["pane_id"], "w1:p1");
+            assert_eq!(identity["role"], "worker");
+            assert_eq!(identity["bound"], true);
+            assert_eq!(identity["caller"]["pid"], pane_pid);
+            let read = call(2, "inbox_read");
+            assert_eq!(read["mailbox"], "w1:p1");
+            assert_eq!(read["messages"].as_array().unwrap().len(), 1);
+            assert_eq!(read["messages"][0]["message_id"], id);
+            assert_eq!(read["messages"][0]["body"], "canonical socket message");
+            assert_eq!(read["messages"][0]["state"], "read");
+            assert_eq!(read["marked_read"], 1);
+            assert_eq!(store.unread_for_pane("w1:p1").unwrap(), 0);
+            let empty = call(3, "inbox_read");
+            assert!(empty["messages"].as_array().unwrap().is_empty());
+        }));
+        stop.store(true, Ordering::SeqCst);
+        thread.join().unwrap();
+        services.shutdown();
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
+        }
     }
 
     #[test]
