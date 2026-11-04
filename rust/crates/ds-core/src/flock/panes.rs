@@ -67,18 +67,20 @@ impl Flock {
         service: Arc<crate::memory::service::MemoryService>,
     ) -> Result<(), crate::error::DunkError> {
         let mut slot = self.memory_service.0.lock().expect("memory service lock");
-        if let Some(current) = slot.as_ref() {
-            if !Arc::ptr_eq(current, &service) {
-                return Err(crate::error::DunkError::Refused(
-                    "a different memory service is already attached".into(),
-                ));
+        service.while_accepting(|| {
+            if let Some(current) = slot.as_ref() {
+                if !Arc::ptr_eq(current, &service) {
+                    return Err(crate::error::DunkError::Refused(
+                        "a different memory service is already attached".into(),
+                    ));
+                }
+            } else {
+                *slot = Some(Arc::clone(&service));
             }
-        } else {
-            *slot = Some(Arc::clone(&service));
-        }
-        let mut stores = self.stores.lock().expect("stores lock");
-        stores.memory = Some(Arc::clone(service.read_pool()));
-        Ok(())
+            let mut stores = self.stores.lock().expect("stores lock");
+            stores.memory = Some(Arc::clone(service.read_pool()));
+            Ok(())
+        })?
     }
 
     /// Clone the canonical service Arc, releasing the slot lock before callers do work.
@@ -160,7 +162,8 @@ impl Flock {
     /// Attach the opened stores (`Flock.__init__`'s `self.tasks` / `self.inbox`).
     pub fn attach_stores(&self, stores: Stores) {
         let mut stores = stores;
-        if let Some(service) = self.memory_service() {
+        let slot = self.memory_service.0.lock().expect("memory service lock");
+        if let Some(service) = slot.as_ref() {
             stores.memory = Some(Arc::clone(service.read_pool()));
         }
         *self.stores.lock().expect("stores lock") = stores;
@@ -182,11 +185,16 @@ impl Flock {
             crate::metrics::MetricsStore::open(":memory:")?
         };
         metrics.prune(None, crate::metrics::MAX_EVENTS)?;
-        let memory = match memory_db {
-            Some(path) if self.persist_enabled && path.exists() => {
-                crate::db::ReadPool::open(path, 2).ok().map(Arc::new)
+        let slot = self.memory_service.0.lock().expect("memory service lock");
+        let memory = if let Some(service) = slot.as_ref() {
+            Some(Arc::clone(service.read_pool()))
+        } else {
+            match memory_db {
+                Some(path) if self.persist_enabled && path.exists() => {
+                    crate::db::ReadPool::open(path, 2).ok().map(Arc::new)
+                }
+                _ => None,
             }
-            _ => None,
         };
         let mut guard = self.stores.lock().expect("stores lock");
         guard.metrics = Some(Arc::new(metrics));

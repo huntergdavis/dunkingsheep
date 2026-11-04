@@ -519,3 +519,71 @@ fn oversized_event_keeps_post_append_batch_and_role_flush_boundaries() {
         ]
     );
 }
+
+#[test]
+fn runtime_memory_reaper_uses_shared_writer_during_real_ingest_and_reports_closed_owner() {
+    use crate::server_runtime::LoopRuntimeAdapter;
+    use crate::terminal::fakes::FakeTerminal;
+    let (dir, service, _) = fixture();
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let release_rx = Mutex::new(release_rx);
+    service.set_parse_hook(Arc::new(move || {
+        entered_tx.send(()).unwrap();
+        release_rx
+            .lock()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(30))
+            .unwrap();
+    }));
+    let source = source(&dir);
+    service.enqueue(&source, Some("generic"), None).unwrap();
+    service.start().unwrap();
+    entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    // The actual parser is gated outside SQL while maintenance uses its same writer.
+    let expired = dir.path().join("expired.jsonl");
+    let partial = dir.path().join("partial.jsonl");
+    std::fs::write(&expired, "{}\n").unwrap();
+    std::fs::write(&partial, "{}\n").unwrap();
+    service
+        .writer
+        .call(move |db| {
+            ingest::enqueue(db, expired.to_str().unwrap(), Some("generic"), None)?;
+            ingest::claim_next(db, -1.0)?.unwrap();
+            ingest::enqueue(db, partial.to_str().unwrap(), Some("generic"), None)?;
+            let lease = ingest::claim_next(db, 60.0)?.unwrap();
+            ingest::finish(
+                db,
+                &lease,
+                ingest::Outcome::Skipped("stopped by operator"),
+                &json!({}),
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let flock = Arc::new(crate::flock::Flock::new(
+        dir.path().join("launches"),
+        dir.path().join("lanes"),
+        false,
+    ));
+    flock.attach_memory_service(service.clone()).unwrap();
+    let adapter = LoopRuntimeAdapter::new(flock, Arc::new(|| Box::new(FakeTerminal::new())));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(adapter.helper_reaperenv_memory_maintenance());
+    assert_eq!(service.stats().unwrap()["queue"]["queued"], 2);
+    assert_eq!(service.stats().unwrap()["queue"]["leased"], 1);
+    // Stop before releasing the gate so the recovered sources cannot enter it again.
+    assert!(!service.ingestor.stop_with_timeout(Duration::ZERO));
+    release_tx.send(()).unwrap();
+    service.stop_and_join().unwrap();
+    assert!(service.worker_id().is_none());
+    assert!(service.recover_leases().is_err());
+    assert!(service.requeue_partial().is_err());
+    // A closed service is not replaced with a fresh path-based writer by the reaper.
+    let before = service.stats().unwrap()["queue"].clone();
+    runtime.block_on(adapter.helper_reaperenv_memory_maintenance());
+    assert_eq!(before, service.stats().unwrap()["queue"]);
+}
