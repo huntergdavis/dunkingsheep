@@ -7993,7 +7993,10 @@ fn task_statistics_dispatch_tests_task_stats_metrics_reap_roles_and_outputs() {
         None,
     )
     .unwrap_err();
-    assert!(denied.to_string().contains("needs a superuser"));
+    assert!(
+        denied.to_string().contains("owner, system, or web"),
+        "{denied}"
+    );
     let reaped = dispatch_task_mutation(
         &dispatcher,
         &flock,
@@ -8045,7 +8048,10 @@ fn task_stats_defaults_scope_and_privacy_match_python_dispatch() {
         None,
     )
     .unwrap_err();
-    assert!(denied.to_string().contains("cannot access"));
+    assert!(
+        denied.to_string().contains("per-pane tasks are private"),
+        "{denied}"
+    );
 }
 
 #[test]
