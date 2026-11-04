@@ -582,4 +582,81 @@ with open(traffic,'w') as out:
         assert!(String::from_utf8_lossy(&result.stdout)
             .contains("replayed 3 request(s): 0 diff(s), 0 error(s)"));
     }
+    #[test]
+    fn health_state_core_capture_uses_real_tasks_and_one_fake_process_snapshot() {
+        use crate::state::proc::{Kids, ProcReader, Starts};
+        use std::{cell::Cell, collections::BTreeMap, sync::Mutex};
+        #[derive(Default)]
+        struct NoProc(Cell<usize>);
+        impl ProcReader for NoProc {
+            fn proc_children(&self) -> Kids {
+                panic!("extra process walk")
+            }
+            fn proc_snapshot(&self) -> (Kids, Starts) {
+                self.0.set(self.0.get() + 1);
+                (Kids::new(), Starts::new())
+            }
+            fn proc_start_ticks(&self, _: i64) -> Option<i64> {
+                None
+            }
+            fn cmdline(&self, _: i64) -> Vec<String> {
+                panic!("no process")
+            }
+            fn open_session_file(&self, _: i64) -> Option<String> {
+                panic!("no process")
+            }
+            fn env_of(&self, _: i64) -> BTreeMap<String, String> {
+                panic!("no process")
+            }
+            fn proc_start(&self, _: i64) -> Option<f64> {
+                None
+            }
+            fn active_session_file(
+                &self,
+                _: Option<&str>,
+                _: Option<f64>,
+            ) -> (Option<String>, usize) {
+                (None, 0)
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let services = services(dir.path(), dir.path().to_str().unwrap());
+        let tasks = services.flock().stores().tasks.unwrap();
+        let handle = services.runtime_handle();
+        let task = handle
+            .block_on(tasks.add("global", "capture lease", "body"))
+            .unwrap();
+        handle.block_on(tasks.insert_lease(&task.id, "w1:p1", 1.0, 1.0, 100.0));
+        let mut terminal = FakeTerminal::new();
+        terminal.panes.truncate(1);
+        terminal.panes[0].command = "codex".into();
+        terminal.panes[0].pane_pid = None;
+        let terminal: Mutex<Box<dyn crate::terminal::Terminal>> = Mutex::new(Box::new(terminal));
+        let request = worker();
+        let adapter = RequestRuntimeAdapter::new(services.flock(), &request, handle, &terminal);
+        let env = CoreCaptureEnv {
+            adapter: &adapter,
+            now: 2.0,
+        };
+        let proc = NoProc::default();
+        let store = StateStore::open(dir.path().join("agent-state.db")).unwrap();
+        let result = crate::state::capture::capture_raw(
+            &env,
+            &proc,
+            &store,
+            dir.path(),
+            &json!(123),
+            Some(2.0),
+        )
+        .unwrap();
+        assert_eq!(result, json!({"at":2.0,"rows":1,"source":123}));
+        assert_eq!(proc.0.get(), 1);
+        let rows = store.latest(None, None, 10).unwrap();
+        assert_eq!(rows[0]["task_id"], task.id);
+        assert_eq!(rows[0]["source"], "123");
+        assert_eq!(rows[0]["harness"], "codex");
+        assert_eq!(rows[0]["session_id"], Value::Null);
+        assert!(rows[0]["session_reason"].is_string());
+        services.shutdown();
+    }
 }
