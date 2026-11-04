@@ -197,8 +197,12 @@ impl RuntimeServices {
     /// Bind every push-loop callback to this process's canonical services.
     #[allow(dead_code)] // Consumed by the dependent loop startup integration.
     pub(crate) fn push_loop_adapter(self: &Arc<Self>) -> Result<LoopRuntimeAdapter, DunkError> {
-        if self.flock.stores().tasks.is_none() {
+        let stores = self.flock.stores();
+        if stores.tasks.is_none() {
             return Err(refusal("push runtime task store is not attached"));
+        }
+        if stores.inbox.is_none() {
+            return Err(refusal("push runtime inbox store is not attached"));
         }
         if !self.next_jobs.owns_flock(self.flock.as_ref()) {
             return Err(refusal("push runtime next jobs flock mismatch"));

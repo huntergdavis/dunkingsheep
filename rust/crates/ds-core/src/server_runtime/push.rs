@@ -851,4 +851,42 @@ mod tests {
         handle.block_on(adapter.next_jobs_tick());
         services.shutdown();
     }
+    #[test]
+    fn production_pushenv_rejects_each_missing_store_before_callbacks() {
+        let (_dir, services, tasks, inbox, task, handle) =
+            push_services_fixture("runtime-push-required-stores");
+        services.flock.attach_stores(Stores {
+            tasks: Some(Arc::clone(&tasks)),
+            ..Stores::default()
+        });
+        let error = services
+            .push_loop_adapter()
+            .err()
+            .expect("inbox is required");
+        assert!(error
+            .to_string()
+            .contains("push runtime inbox store is not attached"));
+        assert_eq!(handle.block_on(tasks.get(&task.id)).unwrap().status, "open");
+
+        services.flock.attach_stores(Stores {
+            inbox: Some(Arc::clone(&inbox)),
+            ..Stores::default()
+        });
+        let error = services
+            .push_loop_adapter()
+            .err()
+            .expect("tasks are required");
+        assert!(error
+            .to_string()
+            .contains("push runtime task store is not attached"));
+        assert_eq!(handle.block_on(tasks.get(&task.id)).unwrap().status, "open");
+
+        services.flock.attach_stores(Stores {
+            tasks: Some(tasks),
+            inbox: Some(inbox),
+            ..Stores::default()
+        });
+        assert!(services.push_loop_adapter().is_ok());
+        services.shutdown();
+    }
 }
