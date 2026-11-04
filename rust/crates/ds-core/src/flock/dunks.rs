@@ -623,6 +623,10 @@ impl DunkList {
         }
     }
 
+    pub(crate) fn handle_row(handle: &DunkerHandle) -> Map<String, Value> {
+        Self::lock_dunker(handle).to_dict()
+    }
+
     pub(crate) fn timer_set_deadline(handle: &DunkerHandle, at: f64) {
         let mut dunker = Self::lock_dunker(handle);
         if dunker.next_send_at.is_none_or(|next| next == 0.0) {
@@ -1172,25 +1176,28 @@ impl Flock {
     }
     /// Start and return the captured row lifetime for the runtime's timer owner.
     pub(crate) fn start_dunk(&self, dunk_id: &str) -> Result<DunkerHandle, DunkError> {
-        self.dunks.start(dunk_id)?;
-        self.dunks.handle(dunk_id)
+        let handle = self.dunks.handle(dunk_id)?;
+        start_fields(&mut DunkList::lock_dunker(&handle))?;
+        Ok(handle)
     }
 
     /// Stop and return the exact row lifetime so its timer can be cancelled and joined.
     pub(crate) fn stop_dunk(&self, dunk_id: &str) -> Result<DunkerHandle, DunkError> {
         let handle = self.dunks.handle(dunk_id)?;
-        self.dunks.stop(dunk_id)?;
+        stop_fields(&mut DunkList::lock_dunker(&handle));
         Ok(handle)
     }
 
     pub(crate) fn toggle_dunk(&self, dunk_id: &str) -> Result<(DunkerHandle, bool), DunkError> {
         let handle = self.dunks.handle(dunk_id)?;
-        let running = !DunkList::timer_fields(&handle).running;
+        let mut dunker = DunkList::lock_dunker(&handle);
+        let running = !dunker.running;
         if running {
-            self.dunks.start(dunk_id)?;
+            start_fields(&mut dunker)?;
         } else {
-            self.dunks.stop(dunk_id)?;
+            stop_fields(&mut dunker);
         }
+        drop(dunker);
         Ok((handle, running))
     }
 

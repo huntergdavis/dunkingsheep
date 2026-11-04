@@ -85,11 +85,11 @@ impl OutboxRuntime {
         id: &str,
     ) -> Result<serde_json::Map<String, serde_json::Value>, DunkError> {
         let handle = self.flock.start_dunk(id)?;
-        if let Err(error) = self.dunk_timers.start(handle) {
-            let _ = self.flock.stop_dunk(id);
+        if let Err(error) = self.dunk_timers.start(Arc::clone(&handle)) {
+            crate::flock::dunks::DunkList::stop_handle(&handle, "Stopped");
             return Err(error);
         }
-        self.flock.dunks.get(id)
+        Ok(crate::flock::dunks::DunkList::handle_row(&handle))
     }
 
     pub(crate) fn stop_dunk(
@@ -98,7 +98,7 @@ impl OutboxRuntime {
     ) -> Result<serde_json::Map<String, serde_json::Value>, DunkError> {
         let handle = self.flock.stop_dunk(id)?;
         self.dunk_timers.stop(&handle);
-        self.flock.dunks.get(id)
+        Ok(crate::flock::dunks::DunkList::handle_row(&handle))
     }
 
     pub(crate) fn toggle_dunk(
@@ -108,13 +108,13 @@ impl OutboxRuntime {
         let (handle, started) = self.flock.toggle_dunk(id)?;
         if started {
             if let Err(error) = self.dunk_timers.start(Arc::clone(&handle)) {
-                let _ = self.flock.stop_dunk(id);
+                crate::flock::dunks::DunkList::stop_handle(&handle, "Stopped");
                 return Err(error);
             }
         } else {
             self.dunk_timers.stop(&handle);
         }
-        self.flock.dunks.get(id)
+        Ok(crate::flock::dunks::DunkList::handle_row(&handle))
     }
 
     pub(crate) fn remove_dunk(
@@ -123,7 +123,8 @@ impl OutboxRuntime {
     ) -> Result<serde_json::Map<String, serde_json::Value>, DunkError> {
         let handle = self.flock.dunks.handle(id)?;
         self.dunk_timers.stop(&handle);
-        self.flock.dunks.remove(id)
+        self.flock.dunks.remove_handle(&handle);
+        Ok(crate::flock::dunks::DunkList::handle_row(&handle))
     }
 
     pub(crate) fn interval_changed(&self, id: &str) -> Result<(), DunkError> {
