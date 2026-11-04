@@ -362,7 +362,6 @@ mod tests {
                     None,
                 )
             })
-            .unwrap()
             .unwrap();
         *current_pid.lock().unwrap() = Some(agent_pid);
         assert_eq!(
