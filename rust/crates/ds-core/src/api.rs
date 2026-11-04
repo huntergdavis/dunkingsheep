@@ -294,13 +294,14 @@ pub trait CommandEnv: PaneInfoEnv {
         ))
     }
 
-    /// Existing fallible project summary sources, including captured startup paths.
+    /// Borrow canonical control services; production composition is supplied by t1605.
     fn runtime_control_env(&self) -> Result<&dyn runtime_control::RuntimeControlEnv, DunkError> {
         Err(DunkError::Refused(
             "runtime control adapter is not wired".into(),
         ))
     }
 
+    /// Existing fallible project summary sources, including captured startup paths.
     fn project_summary_env(
         &self,
     ) -> Result<&dyn crate::flock::project_summary::SummaryEnv, DunkError> {
@@ -824,13 +825,14 @@ impl Dispatcher {
         self.register("recover", h_recover);
     }
 
-    /// Register only the T39 operations metrics summary handler.
+    /// Register only dispatch, allocation, and shutdown.
     pub fn register_runtime_control(&mut self) {
         self.register("dispatch", h_dispatch);
         self.register("allocation", h_allocation);
         self.register("shutdown", h_shutdown);
     }
 
+    /// Register only the T39 operations metrics summary handler.
     pub fn register_metrics(&mut self) {
         self.register("metrics", h_metrics);
     }
