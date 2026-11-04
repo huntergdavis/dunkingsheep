@@ -797,8 +797,7 @@ fn capability(ns: &Map<String, Value>) -> Outcome {
 fn lane(ns: &Map<String, Value>) -> Outcome {
     type LanePrinter = Box<dyn Fn(&Value) -> String>;
     let action = text(ns, "lane_command").unwrap_or("list");
-    let (rpc, args, printer): (&str, Map<String, Value>, LanePrinter) =
-        match action {
+    let (rpc, args, printer): (&str, Map<String, Value>, LanePrinter) = match action {
             "register" => {
                 let mut args = Map::new();
                 for key in ["pane", "role", "provider", "model", "label"] {
