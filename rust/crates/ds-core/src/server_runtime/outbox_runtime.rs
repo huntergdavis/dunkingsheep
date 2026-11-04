@@ -4,7 +4,7 @@ use crate::error::DunkError;
 use crate::flock::loops_stuck::StalePanelReporter;
 use crate::flock::panes::PaneInfoEnv;
 use crate::flock::sends::{
-    outbox_worker, pane_generation, Message, OutboxWorkerPool, OutboxWorkerRunner,
+    outbox_worker, pane_generation, Message, OutboxWorkerContext, OutboxWorkerPool, OutboxWorkerRunner,
     SendPreparationEnv, SnapshotStore,
 };
 use crate::flock::Flock;
@@ -435,12 +435,14 @@ impl OutboxWorkerRunner for Runner {
         outbox_worker(
             &flock,
             &mut send,
-            &inbox,
-            pane_id,
-            stopped,
-            &mut reporter,
-            &wait,
-            || None,
+            OutboxWorkerContext {
+                inbox: &inbox,
+                pane_id,
+                stopped,
+                reporter: &mut reporter,
+                wait: &wait,
+                permission: || None,
+            },
         );
     }
 }
