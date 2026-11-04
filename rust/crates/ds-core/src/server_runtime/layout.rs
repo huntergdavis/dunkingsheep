@@ -216,6 +216,48 @@ impl RequestRuntimeAdapter<'_> {
     }
 
     #[allow(dead_code)] // Production LayoutBackend dispatch is assembled in t1605.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn helper_layoutbackend_start_agent_raw(
+        &mut self,
+        name: &str,
+        argv: &[String],
+        workspace_id: Option<&str>,
+        tab_id: Option<&str>,
+        split: Option<&str>,
+        cwd: Option<&str>,
+        focus: bool,
+    ) -> crate::flock::commands_layout::RawCreateResult {
+        self.terminal.with_terminal_mut(|terminal| {
+            let spec = AgentSpec {
+                name: name.to_owned(),
+                argv: argv.to_vec(),
+                workspace_id: workspace_id.map(str::to_owned),
+                tab_id: tab_id.map(str::to_owned),
+                split: split.map(str::to_owned),
+                cwd: cwd.map(str::to_owned),
+                label: Some(name.to_owned()),
+                ..AgentSpec::default()
+            };
+            let pane = match terminal.start_agent_raw(&spec, focus)? {
+                Ok(pane) => pane,
+                Err(error) => return Ok(Err(error.message)),
+            };
+            let mut agent = pane_value(terminal, &pane);
+            agent["name"] = json!(name);
+            agent["agent"] = json!(argv
+                .first()
+                .and_then(|v| v.rsplit('/').next())
+                .unwrap_or(""));
+            agent["agent_status"] = json!("unknown");
+            Ok(Ok(json!({
+                "agent": agent,
+                "argv": argv,
+                "pane_id": pane.pane_id,
+            })))
+        })
+    }
+
+    #[allow(dead_code)] // Production LayoutBackend dispatch is assembled in t1605.
     pub(crate) fn helper_layoutbackend_rename(
         &mut self,
         kind: &str,
@@ -250,6 +292,41 @@ impl RequestRuntimeAdapter<'_> {
             let mut result = serde_json::Map::new();
             result.insert(kind.to_owned(), item.unwrap_or(Value::Null));
             Ok(Value::Object(result))
+        })
+    }
+
+    pub(crate) fn helper_layoutbackend_rename_raw(
+        &mut self,
+        kind: &str,
+        target_id: &str,
+        label: &str,
+    ) -> crate::flock::commands_layout::RawCreateResult {
+        self.terminal.with_terminal_mut(|terminal| {
+            let snapshot = match terminal.rename_raw(kind, target_id, label)? {
+                Ok(item) => item,
+                Err(error) => return Ok(Err(error.message)),
+            };
+            let item = snapshot.map(|item| match item {
+                crate::terminal::RenamedItem::Pane {
+                    pane,
+                    agent_status,
+                    managed,
+                } => {
+                    let mut item =
+                        crate::flock::lanes::pane_to_json(&pane, agent_status.as_deref());
+                    if let Some(managed) = managed {
+                        item["managed"] = json!(managed);
+                    }
+                    item
+                }
+                crate::terminal::RenamedItem::Tab(tab) => tab_value(tab),
+                crate::terminal::RenamedItem::Workspace { workspace, tabs } => {
+                    workspace_value(workspace, &tabs)
+                }
+            });
+            let mut result = serde_json::Map::new();
+            result.insert(kind.to_owned(), item.unwrap_or(Value::Null));
+            Ok(Ok(Value::Object(result)))
         })
     }
 

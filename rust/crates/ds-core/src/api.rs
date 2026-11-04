@@ -9,8 +9,10 @@
 //! NOT in this slice: the handlers themselves.
 
 mod context_mutations;
+pub mod health_state;
 pub use context_mutations::{h_context_add, h_context_promote, h_memory_backfill};
 pub mod inbox_messages;
+pub use health_state::{h_health, h_state_capture, h_state_latest};
 pub mod outbox_messages;
 pub use outbox_messages::{h_cancel_message, h_get_message, h_list_messages};
 mod poll_roster_turn_end;
@@ -28,7 +30,9 @@ mod dunk_get;
 pub use dunk_get::h_get_dunk;
 mod project_summary;
 pub use project_summary::h_project_summary;
+mod layout_agent;
 mod layout_create;
+pub use layout_agent::{h_focus, h_rename, h_start_agent};
 pub use layout_create::{h_create_tab, h_create_workspace, h_split_pane};
 mod respawn;
 pub use respawn::h_respawn_pane;
@@ -112,6 +116,21 @@ pub trait OwnerViewEnv {
 /// A synchronous adapter for command dependencies. All methods are object-safe so a daemon can
 /// supply one per request without putting backend types in handler signatures.
 pub trait CommandEnv: PaneInfoEnv {
+    fn health_state_env(&self) -> Result<&dyn health_state::HealthStateEnv, DunkError> {
+        Err(DunkError::Refused(
+            "health/state adapter is not wired".into(),
+        ))
+    }
+
+    fn with_layout_agent(
+        &self,
+        _operation: &mut crate::flock::commands_layout::AgentOperation<'_>,
+    ) -> Result<Value, DunkError> {
+        Err(DunkError::Refused(
+            "layout agent adapter is not wired".into(),
+        ))
+    }
+
     /// Borrow the request's layout and pane services, with confirmed command submission.
     fn with_layout_create(
         &self,
@@ -662,6 +681,12 @@ pub struct Dispatcher {
 }
 
 impl Dispatcher {
+    pub fn register_health_state(&mut self) {
+        self.register("health", h_health);
+        self.register("state_capture", h_state_capture);
+        self.register("state_latest", h_state_latest);
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -918,6 +943,12 @@ impl Dispatcher {
     }
 
     /// Register only the three create-layout commands.
+    pub fn register_layout_agent(&mut self) {
+        self.register("start_agent", h_start_agent);
+        self.register("rename", h_rename);
+        self.register("focus", h_focus);
+    }
+
     pub fn register_layout_create(&mut self) {
         self.register("create_workspace", h_create_workspace);
         self.register("create_tab", h_create_tab);

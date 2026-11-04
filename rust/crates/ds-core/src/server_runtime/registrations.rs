@@ -12,6 +12,7 @@ pub(crate) fn production_handlers() -> Dispatcher {
     let mut handlers = Dispatcher::new();
     handlers.register_status_whoami_turn_start();
     handlers.register_help();
+    handlers.register_health_state();
     handlers.register_lanes();
     handlers.register_context_supersede_retire();
     handlers.register_memory_recall_search_context();
@@ -48,6 +49,7 @@ pub(crate) fn production_handlers() -> Dispatcher {
     handlers.register_clear_box_delivery_capability();
     handlers.register_respawn_pane();
     handlers.register_layout_create();
+    handlers.register_layout_agent();
     handlers
 }
 
@@ -522,6 +524,9 @@ mod tests {
             "lane_set",
             "retire_pane",
             "help",
+            "health",
+            "state_capture",
+            "state_latest",
             "status",
             "turn_start",
             "send_text",
@@ -549,6 +554,9 @@ mod tests {
             "create_workspace",
             "create_tab",
             "split_pane",
+            "start_agent",
+            "rename",
+            "focus",
             "report_run",
             "report_list",
             "owner_conversation",

@@ -81,6 +81,16 @@ pub fn refusal<T: fmt::Display>(text: T) -> DunkError {
     DunkError::Refused(text.to_string())
 }
 
+/// Preserve Python's server boundary for a known non-domain primitive failure.
+/// Call only where the operation's type is known (conversion, filesystem or SQLite),
+/// never to guess an exception category from its message.
+pub(crate) fn internal_error(error: DunkError) -> DunkError {
+    match error {
+        DunkError::Busy | DunkError::Retryable(_) => error,
+        other => DunkError::Refused(format!("internal error: {other}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
