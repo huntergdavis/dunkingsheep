@@ -449,7 +449,7 @@ impl Tasks {
                 "SELECT id, scope, title, body, status, priority, kind, assignees, depends_on, block_reason, created_at, updated_at, completed_by, completed_at FROM tasks WHERE scope = ? ORDER BY created_at, id").map_err(db::map_sqlite)?;
             let rows = stmt.query_map(params![scope], row_to_task).map_err(db::map_sqlite)?;
             let collected: Result<Vec<_>, _> = rows.collect();
-            Ok(collected.map_err(db::map_sqlite)?)
+            collected.map_err(db::map_sqlite)
         }).await
     }
     /// Set a status, and END THE CLAIM when the status is terminal.
@@ -3063,7 +3063,7 @@ mod tests {
                     .prepare("SELECT actor || '|' || COALESCE(meta,'') FROM task_events WHERE task_id = ? AND event = 'unblocked'")
                     .map_err(db::map_sqlite)?;
                 let rows = stmt.query_map(params![id], |r| r.get::<_, String>(0)).map_err(db::map_sqlite)?;
-                Ok(rows.collect::<Result<Vec<_>, _>>().map_err(db::map_sqlite)?)
+                rows.collect::<Result<Vec<_>, _>>().map_err(db::map_sqlite)
             })
             .await
             .unwrap()
