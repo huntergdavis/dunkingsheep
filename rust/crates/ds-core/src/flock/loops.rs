@@ -686,16 +686,16 @@ mod owner_tests {
             assert!(loops.start(flock, env, intervals));
             loops.stop().await.unwrap();
         });
-        let announcements = fixture
-            .services
-            .flock()
-            .stores()
-            .inbox
-            .unwrap()
-            .read("w1:p1", 10, true, false)
+        let inbox = rusqlite::Connection::open(fixture._dir.path().join("inbox.db")).unwrap();
+        let announcements: i64 = inbox
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE subject LIKE 'TASK %'",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
         assert!(
-            !announcements.is_empty(),
+            announcements > 0,
             "real push did not persist its task announcement"
         );
         fixture.services.shutdown();
