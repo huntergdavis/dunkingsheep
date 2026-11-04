@@ -2722,13 +2722,12 @@ fn memory_handlers_refuse_without_service() {
         "memory_search",
         "memory_context",
     ] {
-        let error = refusal(dispatch_memory(
-            &dispatcher,
-            &flock,
-            &env,
-            command,
-            json!({"query":"adapter"}),
-        ));
+        let input = if matches!(command, "memory_stats" | "memory_status") {
+            json!({})
+        } else {
+            json!({"query":"adapter"})
+        };
+        let error = refusal(dispatch_memory(&dispatcher, &flock, &env, command, input));
         assert!(
             error.contains("memory service is not enabled"),
             "{command}: {error}"
