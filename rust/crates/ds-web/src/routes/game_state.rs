@@ -331,7 +331,7 @@ async fn request_json(request: Request) -> Result<Option<ParsedRequestJson>, Web
     }
 }
 
-fn decode_python_json_bytes(bytes: &[u8]) -> Result<Vec<u8>, ()> {
+pub(super) fn decode_python_json_bytes(bytes: &[u8]) -> Result<Vec<u8>, ()> {
     #[derive(Clone, Copy)]
     enum Encoding {
         Utf8,
@@ -403,7 +403,7 @@ fn decode_python_json_bytes(bytes: &[u8]) -> Result<Vec<u8>, ()> {
     }
 }
 
-fn python_json_integer_exceeds_digit_limit(bytes: &[u8]) -> bool {
+pub(super) fn python_json_integer_exceeds_digit_limit(bytes: &[u8]) -> bool {
     let mut index = 0;
     while index < bytes.len() {
         match bytes[index] {
@@ -458,7 +458,7 @@ fn python_json_integer_exceeds_digit_limit(bytes: &[u8]) -> bool {
 
 const PYTHON_MAX_JSON_INT_DIGITS: usize = 4300;
 
-fn python_json_decode_error(bytes: &[u8], error: &serde_json::Error) -> Response {
+pub(super) fn python_json_decode_error(bytes: &[u8], error: &serde_json::Error) -> Response {
     let error_text = error.to_string();
     let invalid_escape = (error_text.starts_with("invalid escape")
         || error_text.starts_with("EOF while parsing a string"))
@@ -721,7 +721,7 @@ fn skip_json_whitespace(bytes: &[u8], mut index: usize) -> usize {
     index
 }
 
-fn request_json_content_type(headers: &HeaderMap) -> bool {
+pub(super) fn request_json_content_type(headers: &HeaderMap) -> bool {
     let Some(content_type) = headers
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
@@ -831,6 +831,8 @@ fn python_json_error(
         || error.starts_with("EOF while parsing an object")
     {
         "Expecting property name enclosed in double quotes"
+    } else if error.starts_with("trailing characters") {
+        "Extra data"
     } else if error.starts_with("trailing comma") {
         match trailing_container {
             Some(JsonContainer::Object) => "Illegal trailing comma before end of object",

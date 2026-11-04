@@ -6,7 +6,8 @@
 use std::{future::Future, pin::Pin, sync::Arc};
 
 use axum::{
-    extract::Extension,
+    body::to_bytes,
+    extract::{Extension, Request},
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::post,
@@ -52,22 +53,28 @@ async fn not_now_owner_question(
     Extension(backend): Extension<Arc<dyn OpsBoardBackend>>,
     Extension(auth_backend): Extension<Arc<dyn AuthBackend>>,
     Extension(request_scheme): Extension<RequestScheme>,
-    headers: HeaderMap,
-    body: axum::body::Bytes,
+    request: Request,
 ) -> Response {
+    let headers = request.headers().clone();
+    // FastAPI decodes JSON before dependencies, then validates the dict after auth.
+    let payload = match request_payload(request).await {
+        Ok(payload) => payload,
+        Err(response) => return response.into_response(),
+    };
     if let Err(response) = authenticate(auth_backend.as_ref(), &headers, request_scheme).await {
         return response.into_response();
     }
-    let payload: Value = match serde_json::from_slice(&body) {
-        Ok(payload) => payload,
-        Err(_) => return detail_response(StatusCode::UNPROCESSABLE_ENTITY, "invalid payload"),
+    let Some(payload) = payload else {
+        return body_validation("missing", "Field required", Value::Null);
     };
     let Some(payload) = payload.as_object() else {
-        return detail_response(StatusCode::UNPROCESSABLE_ENTITY, "invalid payload");
+        return body_validation("dict_type", "Input should be a valid dictionary", payload);
     };
     let task_value = payload.get("task_id");
     let task_id = if python_truthy(task_value) {
-        python_string(task_value).trim().to_owned()
+        ds_core::api::python_value_string(task_value.expect("truthy present value"))
+            .trim_matches(|c: char| c.is_whitespace() || matches!(c, '\u{1c}'..='\u{1f}'))
+            .to_owned()
     } else {
         String::new()
     };
@@ -170,12 +177,72 @@ fn detail_response(status: StatusCode, detail: impl Into<String>) -> Response {
     (status, Json(json!({"detail": detail.into()}))).into_response()
 }
 
-fn python_string(value: Option<&Value>) -> String {
+async fn request_payload(request: Request) -> Result<Option<Value>, WebResponseError> {
+    use super::game_state::{
+        decode_python_json_bytes, python_json_decode_error,
+        python_json_integer_exceeds_digit_limit, request_json_content_type,
+    };
+    let is_json = request_json_content_type(request.headers());
+    let bytes = to_bytes(request.into_body(), usize::MAX)
+        .await
+        .map_err(|_| {
+            detail_response(
+                StatusCode::BAD_REQUEST,
+                "There was an error parsing the body",
+            )
+        })?;
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+    if !is_json {
+        return Ok(Some(Value::String(
+            String::from_utf8_lossy(&bytes).into_owned(),
+        )));
+    }
+    let bytes = decode_python_json_bytes(&bytes).map_err(|_| {
+        detail_response(
+            StatusCode::BAD_REQUEST,
+            "There was an error parsing the body",
+        )
+    })?;
+    if python_json_integer_exceeds_digit_limit(&bytes) {
+        return Err(detail_response(
+            StatusCode::BAD_REQUEST,
+            "There was an error parsing the body",
+        )
+        .into());
+    }
+    let text = std::str::from_utf8(&bytes).expect("decoded JSON is UTF-8");
+    ds_core::wire_json::from_str(text)
+        .map(Some)
+        .map_err(|error| python_json_decode_error(&bytes, &error).into())
+}
+
+fn body_validation(kind: &str, message: &str, input: Value) -> Response {
+    // Starlette's strict JSONResponse rejects nonfinite validation-error inputs.
+    if has_nonfinite_float(&input) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error").into_response();
+    }
+    (
+        StatusCode::UNPROCESSABLE_ENTITY,
+        Json(json!({"detail": [{
+            "type": kind, "loc": ["body"], "msg": message, "input": input
+        }]})),
+    )
+        .into_response()
+}
+
+fn has_nonfinite_float(value: &Value) -> bool {
     match value {
-        None | Some(Value::Null) => String::new(),
-        Some(Value::String(value)) => value.clone(),
-        Some(Value::Bool(value)) => if *value { "True" } else { "False" }.to_owned(),
-        Some(value) => value.to_string(),
+        Value::Number(number) => {
+            let raw = number.to_string();
+            (raw.contains(['.', 'e', 'E'])
+                || matches!(raw.as_str(), "NaN" | "Infinity" | "-Infinity"))
+                && raw.parse::<f64>().is_ok_and(|number| !number.is_finite())
+        }
+        Value::Array(values) => values.iter().any(has_nonfinite_float),
+        Value::Object(values) => values.values().any(has_nonfinite_float),
+        _ => false,
     }
 }
 
@@ -183,7 +250,10 @@ fn python_truthy(value: Option<&Value>) -> bool {
     match value {
         None | Some(Value::Null) | Some(Value::Bool(false)) => false,
         Some(Value::Bool(true)) => true,
-        Some(Value::Number(value)) => value.as_f64().is_some_and(|number| number != 0.0),
+        Some(Value::Number(value)) => value
+            .to_string()
+            .parse::<f64>()
+            .is_ok_and(|number| number != 0.0),
         Some(Value::String(value)) => !value.is_empty(),
         Some(Value::Array(value)) => !value.is_empty(),
         Some(Value::Object(value)) => !value.is_empty(),
@@ -219,6 +289,7 @@ mod tests {
 
     struct FakeAuth {
         fail_identity: bool,
+        identity_calls: Arc<AtomicUsize>,
     }
 
     impl AuthBackend for FakeAuth {
@@ -234,6 +305,7 @@ mod tests {
             _: Option<&'a str>,
             _: Option<&'a str>,
         ) -> super::super::auth::AuthFuture<'a, Result<Identity, AuthError>> {
+            self.identity_calls.fetch_add(1, Ordering::SeqCst);
             let result = if self.fail_identity {
                 Err(AuthError::SignInRequired)
             } else {
@@ -305,6 +377,7 @@ mod tests {
         let board: Arc<dyn OpsBoardBackend> = board;
         let auth: Arc<dyn AuthBackend> = Arc::new(FakeAuth {
             fail_identity: false,
+            identity_calls: Arc::new(AtomicUsize::new(0)),
         });
         router(board, auth, RequestScheme::Http)
     }
@@ -332,6 +405,7 @@ mod tests {
         let board_backend: Arc<dyn OpsBoardBackend> = board.clone();
         let auth_backend: Arc<dyn AuthBackend> = Arc::new(FakeAuth {
             fail_identity: true,
+            identity_calls: Arc::new(AtomicUsize::new(0)),
         });
         let request = Request::builder()
             .method("POST")
@@ -348,6 +422,58 @@ mod tests {
             json!({"detail": "Sign in required"})
         );
         assert_eq!(board.refresh_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn not_now_matches_actual_fastapi_raw_payload_and_validation_order() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/ops_board_request_matrix.json"
+        ))
+        .unwrap();
+        for case in fixture["cases"].as_array().unwrap() {
+            let board = Arc::new(FakeBoard::default());
+            let identity_calls = Arc::new(AtomicUsize::new(0));
+            let auth: Arc<dyn AuthBackend> = Arc::new(FakeAuth {
+                fail_identity: case["fail_auth"].as_bool().unwrap(),
+                identity_calls: identity_calls.clone(),
+            });
+            let backend: Arc<dyn OpsBoardBackend> = board.clone();
+            let mut request = Request::builder()
+                .method("POST")
+                .uri("/api/ops-board/not-now");
+            if let Some(content_type) = case["content_type"].as_str() {
+                request = request.header(header::CONTENT_TYPE, content_type);
+            }
+            let request = request
+                .body(Body::from(case["body"].as_str().unwrap().to_owned()))
+                .unwrap();
+            let response =
+                block_on(router(backend, auth, RequestScheme::Http).oneshot(request)).unwrap();
+            assert_eq!(
+                response.status().as_u16(),
+                case["status"].as_u64().unwrap() as u16,
+                "{case}"
+            );
+            let bytes = block_on(to_bytes(response.into_body(), usize::MAX)).unwrap();
+            assert_eq!(
+                serde_json::from_slice::<Value>(&bytes)
+                    .unwrap_or_else(|_| Value::String(String::from_utf8(bytes.to_vec()).unwrap())),
+                case["json"],
+                "{case}"
+            );
+            let calls = case["calls"].as_array().unwrap();
+            assert_eq!(
+                identity_calls.load(Ordering::SeqCst),
+                usize::from(calls.iter().any(|call| call == "auth")),
+                "{case}"
+            );
+            let deferred: Vec<String> = calls
+                .iter()
+                .filter_map(|call| call.as_array())
+                .map(|call| call[1].as_str().unwrap().to_owned())
+                .collect();
+            assert_eq!(*board.deferred.lock().unwrap(), deferred, "{case}");
+        }
     }
 
     #[test]
