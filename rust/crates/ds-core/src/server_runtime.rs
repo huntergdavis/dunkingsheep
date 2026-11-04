@@ -565,6 +565,13 @@ impl crate::api::CommandEnv for RequestRuntimeAdapter<'_> {
         crate::clock::now_s()
     }
 
+    fn project_summary_env(
+        &self,
+    ) -> Result<&dyn crate::flock::project_summary::SummaryEnv, DunkError> {
+        self.terminal.flock.status_state()?;
+        Ok(self)
+    }
+
     fn status_env(&self) -> Result<&dyn crate::flock::status::StatusEnv, DunkError> {
         self.terminal.flock.status_state()?;
         Ok(self)
