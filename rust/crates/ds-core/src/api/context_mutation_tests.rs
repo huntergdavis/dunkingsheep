@@ -305,3 +305,19 @@ fn memory_backfill_discovery_order_and_numeric_limits() {
         "cannot convert float infinity to integer"
     );
 }
+
+#[test]
+fn memory_backfill_limit_errors_match_python_digit_boundary() {
+    use crate::memory::backfill::limit_reached;
+    assert_eq!(limit_reached(&json!("9".repeat(4301)),0).unwrap_err().to_string(), "Exceeds the limit (4300 digits) for integer string conversion: value has 4301 digits; use sys.set_int_max_str_digits() to increase the limit");
+    assert_eq!(
+        limit_reached(&json!("x".repeat(300)), 0)
+            .unwrap_err()
+            .to_string(),
+        format!(
+            "invalid literal for int() with base 10: '{}",
+            "x".repeat(199)
+        )
+    );
+    assert!(limit_reached(&json!("  +０_０ "), 0).unwrap());
+}

@@ -77,22 +77,69 @@ fn absolute(path: &Path) -> Result<PathBuf, DunkError> {
 
 pub(crate) fn limit_reached(limit: &Value, count: usize) -> Result<bool, DunkError> {
     use super::service::QueryInput;
-    let integer = QueryInput::from(limit.clone())
-        .integer()
-        .map_err(|error| match limit {
-            Value::String(text) if text.chars().count() <= 4300 => DunkError::Refused(format!(
-                "invalid literal for int() with base 10: {}",
-                crate::context::store::py_repr(text)
-            )),
-            Value::Array(_) | Value::Object(_) | Value::Null => DunkError::Refused(format!(
+    let integer = match limit {
+        Value::String(text) => limit_integer(text)?,
+        Value::Array(_) | Value::Object(_) | Value::Null => {
+            return Err(DunkError::Refused(format!(
                 "int() argument must be a string, a bytes-like object or a real number, not '{}'",
                 crate::flock::context_mutations::raw_type(limit)
-            )),
-            _ => error,
-        })?;
+            )))
+        }
+        _ => QueryInput::from(limit.clone()).integer()?,
+    };
     if integer.starts_with('-') {
         return Ok(true);
     }
     let count = count.to_string();
     Ok(count.len() > integer.len() || (count.len() == integer.len() && count >= integer))
+}
+
+// Python's int(string), including Unicode decimal digits, underscore placement,
+// the configured default digit ceiling, and its 200-character repr in errors.
+fn limit_integer(text: &str) -> Result<String, DunkError> {
+    let invalid = || {
+        DunkError::Refused(format!(
+            "invalid literal for int() with base 10: {}",
+            crate::context::store::py_repr(text)
+                .chars()
+                .take(200)
+                .collect::<String>()
+        ))
+    };
+    let trimmed = text.trim();
+    let negative = trimmed.starts_with('-');
+    let body = trimmed.strip_prefix(['-', '+']).unwrap_or(trimmed);
+    let mut digits = String::new();
+    let mut previous = false;
+    let mut chars = body.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if let Some(digit) = super::service::python_decimal_digit(ch) {
+            digits.push(char::from(b'0' + digit));
+            previous = true;
+        } else if ch == '_'
+            && previous
+            && chars
+                .peek()
+                .and_then(|c| super::service::python_decimal_digit(*c))
+                .is_some()
+        {
+            previous = false;
+        } else {
+            return Err(invalid());
+        }
+    }
+    if !previous {
+        return Err(invalid());
+    }
+    if digits.len() > 4300 {
+        return Err(DunkError::Refused(format!("Exceeds the limit (4300 digits) for integer string conversion: value has {} digits; use sys.set_int_max_str_digits() to increase the limit", digits.len())));
+    }
+    let significant = digits.trim_start_matches('0');
+    Ok(if significant.is_empty() {
+        "0".into()
+    } else if negative {
+        format!("-{significant}")
+    } else {
+        significant.into()
+    })
 }

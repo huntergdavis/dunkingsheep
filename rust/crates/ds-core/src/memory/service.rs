@@ -723,7 +723,7 @@ impl Drop for MemoryService {
 }
 
 // Unicode decimal digit table reused from the existing API conversion primitive.
-fn python_decimal_digit(character: char) -> Option<u8> {
+pub(crate) fn python_decimal_digit(character: char) -> Option<u8> {
     // Unicode 16.0 Decimal_Number ranges, matching the Python 3.14 runtime used by this port.
     // The two multi-set ranges are mathematical styled digits and segmented digits.
     const DECIMAL_RANGES: &[(u32, u32)] = &[
