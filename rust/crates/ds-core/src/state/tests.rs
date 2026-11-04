@@ -115,3 +115,54 @@ fn test_flag_reads_the_next_token_or_the_equals_form() {
     assert_eq!(flag(&argv(&["pi"]), &MODEL_FLAGS), None);
     assert_eq!(flag(&[], &MODEL_FLAGS), None);
 }
+
+#[test]
+fn raw_state_bindings_keep_scalars_and_reject_containers_in_parameter_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = StateStore::open(dir.path().join("state.db")).unwrap();
+    store
+        .add(&[json!({"pane_id":"1", "project":"2", "source":true})], 1.0)
+        .unwrap();
+    let rows = store
+        .latest_raw(Some(&json!(1)), Some(&json!(2)), Some(50))
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["source"], "1"); // TEXT affinity, while capture returns the raw bool.
+    for (pane, project, expected) in [
+        (
+            json!([1]),
+            json!({"x":1}),
+            "Error binding parameter 1: type 'list' is not supported",
+        ),
+        (
+            json!(false),
+            json!({"x":1}),
+            "Error binding parameter 1: type 'dict' is not supported",
+        ),
+        (
+            json!(1),
+            json!([1]),
+            "Error binding parameter 2: type 'list' is not supported",
+        ),
+    ] {
+        assert_eq!(
+            store
+                .latest_raw(Some(&pane), Some(&project), None)
+                .unwrap_err()
+                .to_string(),
+            expected
+        );
+    }
+    assert_eq!(
+        store.latest_raw(None, None, None).unwrap_err().to_string(),
+        "Python int too large to convert to SQLite INTEGER"
+    );
+    assert_eq!(
+        store
+            .add(&[json!({"pane_id":"p", "source":[1]})], 2.0)
+            .unwrap_err()
+            .to_string(),
+        "Error binding parameter 17: type 'list' is not supported"
+    );
+    assert_eq!(store.latest(None, None, -1).unwrap().len(), 1);
+}

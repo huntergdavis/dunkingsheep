@@ -8,7 +8,9 @@
 //!
 //! NOT in this slice: the handlers themselves.
 
+pub mod health_state;
 pub mod inbox_messages;
+pub use health_state::{h_health, h_state_capture, h_state_latest};
 mod poll_roster_turn_end;
 pub use poll_roster_turn_end::{h_poll, h_roster, h_turn_end};
 mod owner_push;
@@ -82,6 +84,12 @@ pub trait OwnerViewEnv {
 /// A synchronous adapter for command dependencies. All methods are object-safe so a daemon can
 /// supply one per request without putting backend types in handler signatures.
 pub trait CommandEnv: PaneInfoEnv {
+    fn health_state_env(&self) -> Result<&dyn health_state::HealthStateEnv, DunkError> {
+        Err(DunkError::Refused(
+            "health/state adapter is not wired".into(),
+        ))
+    }
+
     /// Borrow the validated inbox services for this request on its owning thread.
     fn with_inbox_env(
         &self,
@@ -602,6 +610,12 @@ pub struct Dispatcher {
 }
 
 impl Dispatcher {
+    pub fn register_health_state(&mut self) {
+        self.register("health", h_health);
+        self.register("state_capture", h_state_capture);
+        self.register("state_latest", h_state_latest);
+    }
+
     pub fn new() -> Self {
         Self::default()
     }

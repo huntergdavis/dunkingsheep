@@ -17,8 +17,8 @@ struct Lanes {
 }
 
 impl CaptureEnv for Lanes {
-    fn resolve_lanes(&self) -> Vec<Value> {
-        self.lanes.clone()
+    fn resolve_lanes(&self) -> Result<Vec<Value>, crate::error::DunkError> {
+        Ok(self.lanes.clone())
     }
     fn activity(&self, _: &Value, _: f64) -> LaneActivity {
         LaneActivity {
@@ -268,4 +268,101 @@ fn test_argv_flags_and_the_environment_fill_model_and_thinking_with_their_reason
     );
     assert_eq!(by("%3")["session_reason"], "the pane carries no pid, so its session cannot be read from the process; using the launch row");
     assert_eq!(by("%1")["project"], "tmp");
+}
+
+#[test]
+fn capture_propagates_lane_failure_after_one_snapshot_without_rows() {
+    struct Failed;
+    impl CaptureEnv for Failed {
+        fn resolve_lanes(&self) -> Result<Vec<Value>, crate::error::DunkError> {
+            Err(crate::error::DunkError::Retryable(
+                "lane provider failed".into(),
+            ))
+        }
+        fn activity(&self, _: &Value, _: f64) -> LaneActivity {
+            panic!("not reached")
+        }
+        fn lease_task_id(&self, _: &str, _: f64) -> Option<String> {
+            panic!("not reached")
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let store = StateStore::open(dir.path().join("state.db")).unwrap();
+    let reader = DeterministicProc::default();
+    let error = capture(&Failed, &reader, &store, dir.path(), "test", Some(1.0)).unwrap_err();
+    assert!(matches!(error, crate::error::DunkError::Retryable(_)));
+    assert_eq!(reader.snapshots.get(), 1);
+    assert!(store.latest(None, None, 10).unwrap().is_empty());
+}
+
+#[derive(Default)]
+struct DeterministicProc {
+    snapshots: Cell<usize>,
+}
+impl ProcReader for DeterministicProc {
+    fn proc_children(&self) -> Kids {
+        panic!("capture must reuse one snapshot")
+    }
+    fn proc_snapshot(&self) -> (Kids, Starts) {
+        self.snapshots.set(self.snapshots.get() + 1);
+        (Kids::new(), Starts::new())
+    }
+    fn proc_start_ticks(&self, _: i64) -> Option<i64> {
+        None
+    }
+    fn cmdline(&self, _: i64) -> Vec<String> {
+        panic!("no process in fixture")
+    }
+    fn open_session_file(&self, _: i64) -> Option<String> {
+        panic!("no process in fixture")
+    }
+    fn env_of(&self, _: i64) -> BTreeMap<String, String> {
+        panic!("no process in fixture")
+    }
+    fn proc_start(&self, _: i64) -> Option<f64> {
+        None
+    }
+    fn active_session_file(&self, _: Option<&str>, _: Option<f64>) -> (Option<String>, usize) {
+        (None, 0)
+    }
+}
+
+#[test]
+fn capture_raw_source_roundtrip_and_single_deterministic_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = StateStore::open(dir.path().join("state.db")).unwrap();
+    let reader = DeterministicProc::default();
+    let env = Lanes {
+        lanes: vec![lane("p1", None), lane("p2", None)],
+    };
+    let result =
+        super::capture::capture_raw(&env, &reader, &store, dir.path(), &json!(true), Some(1.0))
+            .unwrap();
+    assert_eq!(result, json!({"at":1.0,"rows":2,"source":true}));
+    assert_eq!(reader.snapshots.get(), 1);
+    assert!(store
+        .latest(None, None, 50)
+        .unwrap()
+        .iter()
+        .all(|r| r["source"] == "1"));
+    let error = super::capture::capture_raw(
+        &env,
+        &reader,
+        &store,
+        dir.path(),
+        &json!({"x":1}),
+        Some(2.0),
+    )
+    .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "Error binding parameter 17: type 'dict' is not supported"
+    );
+    assert_eq!(store.latest(None, None, 50).unwrap().len(), 2);
+    let empty = Lanes { lanes: vec![] };
+    let result =
+        super::capture::capture_raw(&empty, &reader, &store, dir.path(), &json!([1]), Some(3.0))
+            .unwrap();
+    assert_eq!(result["source"], json!([1])); // no binding occurs when there are no lanes
+    assert_eq!(result["rows"], 0);
 }

@@ -6,6 +6,7 @@
 
 mod delivery;
 mod dispatcher;
+mod health_state;
 mod inbox;
 mod inbox_api;
 mod inbox_data;
@@ -435,6 +436,11 @@ impl crate::api::CommandEnv for RequestRuntimeAdapter<'_> {
 
     fn poolrad_progress(&self) -> Result<Value, DunkError> {
         self.runtime_poolrad_progress()
+    }
+
+    fn health_state_env(&self) -> Result<&dyn crate::api::health_state::HealthStateEnv, DunkError> {
+        self.terminal.flock.status_state()?;
+        Ok(self)
     }
 
     fn with_inbox_env(

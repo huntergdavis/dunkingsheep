@@ -34,7 +34,7 @@ pub struct LaneActivity {
 /// What `capture` reads from the flock.
 pub trait CaptureEnv {
     /// `flock.resolve_lanes()`: lane rows (`pane_id`, `agent`, `pane_pid`, `cwd`, ...).
-    fn resolve_lanes(&self) -> Vec<Value>;
+    fn resolve_lanes(&self) -> Result<Vec<Value>, DunkError>;
     /// `dunk_activity.activity(lane, claude_status, turns, now)`.
     fn activity(&self, lane: &Value, now: f64) -> LaneActivity;
     /// `flock.tasks.leases_for_pane(pane_id, now)[0]["task_id"]`; `None` for no lease or any
@@ -103,13 +103,25 @@ pub fn capture(
     source: &str,
     now: Option<f64>,
 ) -> Result<Value, DunkError> {
+    capture_raw(env, reader, store, config_dir, &json!(source), now)
+}
+
+/// Preserve the API source value until SQLite binds it (Python does not stringify it).
+pub fn capture_raw(
+    env: &dyn CaptureEnv,
+    reader: &dyn ProcReader,
+    store: &StateStore,
+    config_dir: &Path,
+    source: &Value,
+    now: Option<f64>,
+) -> Result<Value, DunkError> {
     let now = now
         .filter(|n| *n != 0.0)
         .unwrap_or_else(crate::clock::now_s);
     let launches = read_launches(config_dir);
     let (kids, starts) = reader.proc_snapshot(); // ONE /proc walk per capture
     let mut rows: Vec<Value> = Vec::new();
-    for lane in env.resolve_lanes() {
+    for lane in env.resolve_lanes()? {
         if !lane.get("agent").is_some_and(truthy) {
             continue;
         }
