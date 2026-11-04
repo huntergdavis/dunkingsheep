@@ -155,6 +155,27 @@ pub struct Task {
     pub completed_at: Option<f64>,
 }
 
+/// Filters and ordering limits for `Tasks::list_visible`.
+#[derive(Clone, Copy, Debug)]
+pub struct ListVisibleOptions<'a> {
+    /// Explicit scope, or `None` to use all scopes visible to the caller.
+    pub scope: Option<&'a str>,
+    /// Optional task status filter.
+    pub status: Option<&'a str>,
+    /// Optional pane id whose assignee list must contain the task.
+    pub assignee: Option<&'a str>,
+    /// Whether terminal tasks are included when `status` is not specified.
+    pub include_done: bool,
+    /// Maximum number of decorated rows to return.
+    pub limit: usize,
+    /// Viewer pane used for per-viewer eligibility decoration.
+    pub pane_id: Option<&'a str>,
+    /// Optional task kind filter.
+    pub kind: Option<&'a str>,
+    /// Restrict results to blocked tasks with a `needs-owner:` reason.
+    pub needs_owner: bool,
+}
+
 /// The task store: one writer actor, as `db.rs` provides.
 pub struct Tasks {
     writer: db::Writer,
@@ -1430,15 +1451,18 @@ impl Tasks {
     /// `order_key` order. `scope` is the already-resolved explicit scope (None = visible).
     pub async fn list_visible(
         &self,
-        scope: Option<&str>,
-        status: Option<&str>,
-        assignee: Option<&str>,
-        include_done: bool,
-        limit: usize,
-        pane_id: Option<&str>,
-        kind: Option<&str>,
-        needs_owner: bool,
+        options: ListVisibleOptions<'_>,
     ) -> Result<Vec<Decorated>, DunkError> {
+        let ListVisibleOptions {
+            scope,
+            status,
+            assignee,
+            include_done,
+            limit,
+            pane_id,
+            kind,
+            needs_owner,
+        } = options;
         let scopes = visible_scopes(scope, pane_id)?;
         let status = match status.filter(|s| !s.is_empty()) {
             Some(s) => Some(validate_status(s)?),
@@ -2904,7 +2928,16 @@ mod tests {
         store.complete(&low.id).await.unwrap();
         let ids = |v: Vec<Decorated>| v.into_iter().map(|d| d.task.id).collect::<Vec<_>>();
         let all = store
-            .list_visible(None, None, None, true, 200, Some("w1:p1"), None, false)
+            .list_visible(ListVisibleOptions {
+                scope: None,
+                status: None,
+                assignee: None,
+                include_done: true,
+                limit: 200,
+                pane_id: Some("w1:p1"),
+                kind: None,
+                needs_owner: false,
+            })
             .await
             .unwrap();
         assert_eq!(
@@ -2912,48 +2945,102 @@ mod tests {
             ids(all)
         );
         let open = store
-            .list_visible(None, None, None, false, 200, Some("w1:p1"), None, false)
+            .list_visible(ListVisibleOptions {
+                scope: None,
+                status: None,
+                assignee: None,
+                include_done: false,
+                limit: 200,
+                pane_id: Some("w1:p1"),
+                kind: None,
+                needs_owner: false,
+            })
             .await
             .unwrap();
         assert_eq!(vec![hi.id.clone(), mine.id.clone()], ids(open));
         let done = store
-            .list_visible(None, Some("done"), None, false, 200, None, None, false)
+            .list_visible(ListVisibleOptions {
+                scope: None,
+                status: Some("done"),
+                assignee: None,
+                include_done: false,
+                limit: 200,
+                pane_id: None,
+                kind: None,
+                needs_owner: false,
+            })
             .await
             .unwrap();
         assert_eq!(vec![low.id.clone()], ids(done));
         let by = store
-            .list_visible(
-                None,
-                None,
-                Some("w1:p1"),
-                true,
-                200,
-                Some("w1:p1"),
-                None,
-                false,
-            )
+            .list_visible(ListVisibleOptions {
+                scope: None,
+                status: None,
+                assignee: Some("w1:p1"),
+                include_done: true,
+                limit: 200,
+                pane_id: Some("w1:p1"),
+                kind: None,
+                needs_owner: false,
+            })
             .await
             .unwrap();
         assert_eq!(vec![hi.id.clone()], ids(by));
         let named = store
-            .list_visible(Some("w2:p2"), None, None, true, 200, None, None, false)
+            .list_visible(ListVisibleOptions {
+                scope: Some("w2:p2"),
+                status: None,
+                assignee: None,
+                include_done: true,
+                limit: 200,
+                pane_id: None,
+                kind: None,
+                needs_owner: false,
+            })
             .await
             .unwrap();
         assert!(ids(named).contains(&theirs.id));
         assert_eq!(
             1,
             store
-                .list_visible(None, None, None, true, 1, None, None, false)
+                .list_visible(ListVisibleOptions {
+                    scope: None,
+                    status: None,
+                    assignee: None,
+                    include_done: true,
+                    limit: 1,
+                    pane_id: None,
+                    kind: None,
+                    needs_owner: false,
+                })
                 .await
                 .unwrap()
                 .len()
         );
         assert!(store
-            .list_visible(None, Some("bogus"), None, true, 1, None, None, false)
+            .list_visible(ListVisibleOptions {
+                scope: None,
+                status: Some("bogus"),
+                assignee: None,
+                include_done: true,
+                limit: 1,
+                pane_id: None,
+                kind: None,
+                needs_owner: false,
+            })
             .await
             .is_err());
         assert!(store
-            .list_visible(Some("self"), None, None, true, 1, None, None, false)
+            .list_visible(ListVisibleOptions {
+                scope: Some("self"),
+                status: None,
+                assignee: None,
+                include_done: true,
+                limit: 1,
+                pane_id: None,
+                kind: None,
+                needs_owner: false,
+            })
             .await
             .is_err());
     }
@@ -4326,7 +4413,16 @@ mod tests {
             .await
             .unwrap();
         let visible = store
-            .list_visible(None, None, None, true, 1000, None, Some("review"), false)
+            .list_visible(ListVisibleOptions {
+                scope: None,
+                status: None,
+                assignee: None,
+                include_done: true,
+                limit: 1000,
+                pane_id: None,
+                kind: Some("review"),
+                needs_owner: false,
+            })
             .await
             .unwrap()
             .into_iter()
