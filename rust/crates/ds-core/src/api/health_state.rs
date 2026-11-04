@@ -37,11 +37,25 @@ pub fn h_state_latest(context: &HandlerContext<'_>, mut args: Args) -> Result<Va
             if !args.get("limit").is_some_and(super::truthy) {
                 args.insert("limit".into(), json!(50));
             }
-            let limit = match super::owner_outbox_limit_arg(&args, 50)? {
+            if let Some(Value::Number(number)) = args.get("limit") {
+                let token = number.to_string();
+                if token.contains(['.', 'e', 'E'])
+                    && number.as_f64().is_none_or(|value| !value.is_finite())
+                {
+                    return Err(DunkError::Refused(
+                        "internal error: cannot convert float infinity to integer".into(),
+                    ));
+                }
+            }
+            let limit = match super::owner_outbox_limit_arg(&args, 50)
+                .map_err(crate::error::internal_error)?
+            {
                 OwnerOutboxLimit::Sqlite(value) => Some(value),
                 OwnerOutboxLimit::Overflow => None,
             };
-            let rows = store.latest_raw(args.get("pane_id"), args.get("project"), limit)?;
+            let rows = store
+                .latest_raw(args.get("pane_id"), args.get("project"), limit)
+                .map_err(crate::error::internal_error)?;
             Ok(json!({"count": rows.len(), "rows": rows}))
         })
 }

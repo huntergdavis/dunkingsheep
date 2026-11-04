@@ -356,7 +356,7 @@ fn capture_raw_source_roundtrip_and_single_deterministic_snapshot() {
     .unwrap_err();
     assert_eq!(
         error.to_string(),
-        "Error binding parameter 17: type 'dict' is not supported"
+        "internal error: Error binding parameter 17: type 'dict' is not supported"
     );
     assert_eq!(store.latest(None, None, 50).unwrap().len(), 2);
     let empty = Lanes { lanes: vec![] };

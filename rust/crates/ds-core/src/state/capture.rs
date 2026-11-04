@@ -228,6 +228,8 @@ pub fn capture_raw(
             "source": source,
         }));
     }
-    store.add(&rows, now)?;
+    store
+        .add(&rows, now)
+        .map_err(crate::error::internal_error)?;
     Ok(json!({"at": now, "rows": rows.len(), "source": source}))
 }

@@ -203,12 +203,9 @@ impl StateStore {
         for (column, value) in [("pane_id", pane_id), ("project", project)] {
             if let Some(value) = value.filter(|v| truthy(v)) {
                 clauses.push(format!("{column} = ?"));
-                values.push(sqlite_value(value, values.len() + 1)?);
+                values.push(value);
             }
         }
-        let limit = limit.ok_or_else(|| {
-            DunkError::Refused("Python int too large to convert to SQLite INTEGER".into())
-        })?;
         let clause = if clauses.is_empty() {
             String::new()
         } else {
@@ -225,6 +222,14 @@ impl StateStore {
             .iter()
             .map(|n| (*n).to_string())
             .collect();
+        let values = values
+            .iter()
+            .enumerate()
+            .map(|(index, value)| sqlite_value(value, index + 1))
+            .collect::<Result<Vec<_>, _>>()?;
+        let limit = limit.ok_or_else(|| {
+            DunkError::Refused("Python int too large to convert to SQLite INTEGER".into())
+        })?;
         let mut bound: Vec<&dyn rusqlite::ToSql> =
             values.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
         bound.push(&limit);

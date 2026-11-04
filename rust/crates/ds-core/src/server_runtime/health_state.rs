@@ -20,10 +20,10 @@ impl LazyStateStore {
         // Python os.makedirs(dirname('agent-state.db')) rejects an empty dirname.
         if self.0.parent().is_some_and(|p| p.as_os_str().is_empty()) {
             return Err(DunkError::Refused(
-                "[Errno 2] No such file or directory: ''".into(),
+                "internal error: [Errno 2] No such file or directory: ''".into(),
             ));
         }
-        StateStore::open(&self.0)
+        StateStore::open(&self.0).map_err(crate::error::internal_error)
     }
 }
 
@@ -127,7 +127,7 @@ impl RequestRuntimeAdapter<'_> {
             .map(|p| p.pane_id)
             .collect();
         drop(terminal);
-        let Ok(registry) = self.terminal.flock.lane_registry(false) else {
+        let Ok(registry) = self.terminal.flock.with_roles(|roles, _| roles.describe()) else {
             return vec![];
         };
         let Some(lanes) = registry.get("lanes").and_then(Value::as_object) else {
@@ -148,7 +148,7 @@ impl RequestRuntimeAdapter<'_> {
         let home = state
             .python_home
             .expanduser_home()
-            .map_err(DunkError::Refused)?
+            .map_err(|e| crate::error::internal_error(DunkError::Refused(e)))?
             .unwrap_or_else(|| std::path::Path::new("~"))
             .to_path_buf();
         let configured = state
@@ -361,7 +361,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             error.to_string(),
-            "invalid literal for int() with base 10: 'bad'"
+            "internal error: invalid literal for int() with base 10: 'bad'"
         );
         assert!(
             path.is_file(),
@@ -400,7 +400,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             error.to_string(),
-            "Error binding parameter 1: type 'list' is not supported"
+            "internal error: Error binding parameter 1: type 'list' is not supported"
         );
         let error = dispatcher
             .dispatch(
@@ -411,7 +411,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             error.to_string(),
-            "invalid literal for int() with base 10: 'bad'"
+            "internal error: invalid literal for int() with base 10: 'bad'"
         );
         dispatcher.close();
     }
@@ -424,7 +424,10 @@ mod tests {
         let error = dispatcher
             .dispatch("state_latest", &json!({"limit":[1]}), &worker())
             .unwrap_err();
-        assert_eq!(error.to_string(), "[Errno 2] No such file or directory: ''");
+        assert_eq!(
+            error.to_string(),
+            "internal error: [Errno 2] No such file or directory: ''"
+        );
         dispatcher.close();
     }
     #[test]
@@ -483,5 +486,100 @@ mod tests {
             &services.flock().memory_service().unwrap()
         ));
         dispatcher.close();
+    }
+    #[test]
+    fn health_state_python_differential_replay_executes_all_three_commands() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+        use std::process::Command;
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("not-created-yet");
+        let services = services(dir.path(), config.to_str().unwrap());
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let traffic = dir.path().join("health-state.jsonl");
+        // Real Python entry points create the expectations in an isolated configuration.
+        let oracle = Command::new("python3").arg("-c").arg(r#"
+import ast,json,pathlib,sys,types
+root,traffic=sys.argv[1:]
+sys.path.insert(0,root)
+import dunk_health,dunk_state
+ns={}
+module=ast.parse(pathlib.Path(root,'dunk_api.py').read_text())
+for node in module.body:
+    if isinstance(node,ast.FunctionDef) and node.name in ('h_state_capture','h_state_latest','h_health','_opt'):
+        exec(compile(ast.Module(body=[node],type_ignores=[]),'dunk_api.py','exec'),ns)
+flock=types.SimpleNamespace(memory=None,resolve_lanes=lambda:[])
+flock.health=lambda **kw:dunk_health.run_health(flock,**kw)
+dunk_state._proc_snapshot=lambda:({}, {})
+with open(traffic,'w') as out:
+    for cmd,args in [('health',{}),('state_capture',{'source':[1]}),('state_latest',{'limit':0})]:
+        try: response={'ok':True,'result':ns['h_'+cmd](flock,args,None)}
+        except Exception as e: response={'ok':False,'error':'internal error: '+str(e)}
+        out.write(json.dumps({'cmd':cmd,'args':args,'response':response})+'\n')
+"#).arg(&root).arg(&traffic)
+            .env("HOME", dir.path()).env("DUNKINGSHEEP_DIR", &config).output().unwrap();
+        assert!(
+            oracle.status.success(),
+            "{}",
+            String::from_utf8_lossy(&oracle.stderr)
+        );
+        // Remove only this fixture's generated DB/directory, restoring identical initial state.
+        std::fs::remove_dir_all(&config).unwrap();
+        let socket = dir.path().join("replay.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let dispatcher = services.production_dispatcher();
+        let thread = std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            for _ in 0..3 {
+                let deadline = std::time::Instant::now() + Duration::from_secs(30);
+                let (mut stream, _) = loop {
+                    match listener.accept() {
+                        Ok(stream) => break stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(
+                                std::time::Instant::now() < deadline,
+                                "replay client did not connect"
+                            );
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(error) => panic!("replay accept: {error}"),
+                    }
+                };
+                let mut line = String::new();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut line)
+                    .unwrap();
+                let request: Value = serde_json::from_str(&line).unwrap();
+                let command = request["cmd"].as_str().unwrap();
+                seen.push(command.to_owned());
+                let response = match dispatcher.dispatch(command, &request["args"], &worker()) {
+                    Ok(result) => json!({"ok":true,"result":result}),
+                    Err(error) => json!({"ok":false,"error":error.to_string()}),
+                };
+                writeln!(stream, "{response}").unwrap();
+            }
+            dispatcher.close();
+            seen
+        });
+        let result = Command::new("python3")
+            .arg(root.join("tools/diff_harness.py"))
+            .args(["replay", "--traffic"])
+            .arg(&traffic)
+            .arg("--against")
+            .arg(&socket)
+            .args(["--commands", "health,state_capture,state_latest"])
+            .output()
+            .unwrap();
+        let seen = thread.join().unwrap();
+        assert_eq!(seen, ["health", "state_capture", "state_latest"]);
+        assert!(
+            result.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(String::from_utf8_lossy(&result.stdout)
+            .contains("replayed 3 request(s): 0 diff(s), 0 error(s)"));
     }
 }
