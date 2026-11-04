@@ -351,6 +351,17 @@ fn context_add_and_promote_honor_captured_ledger_override() {
     let first = dispatch_context_command(&dispatcher,&flock,&env,"worker","w1:p2","context_add",json!({"body":"first\r\nsecond", "cls":"fact", "subject":"override", "stated":"2026-11-04"})).unwrap();
     assert!(custom.exists());
     assert!(!dir.path().join("config/context-ledger.db").exists());
+    let article_hash = |article: &Value| {
+        let text = std::fs::read_to_string(article["path"].as_str().unwrap())
+            .unwrap()
+            .replace("\r\n", "\n")
+            .replace('\r', "\n");
+        crate::context::ledger::sha(&text)
+    };
+    assert_eq!(
+        recorded_hash(&custom, first["slug"].as_str().unwrap()),
+        article_hash(&first)
+    );
     let promoted = dispatch_context_command(
         &dispatcher,
         &flock,
@@ -361,14 +372,27 @@ fn context_add_and_promote_honor_captured_ledger_override() {
         json!({"slug":first["slug"]}),
     )
     .unwrap();
-    for article in [&first, &promoted] {
-        let text = std::fs::read_to_string(article["path"].as_str().unwrap())
-            .unwrap()
-            .replace("\r\n", "\n")
-            .replace('\r', "\n");
+    assert_eq!(
+        recorded_hash(&custom, promoted["slug"].as_str().unwrap()),
+        article_hash(&promoted)
+    );
+    // Actual Python oracle: the key is (store, slug), not (store, class, slug).
+    // Same-day promotion therefore overwrites the fact's row with the rule hash.
+    let rows: i64 = rusqlite::Connection::open(&custom)
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM entries", [], |row| row.get(0))
+        .unwrap();
+    if first["slug"] == promoted["slug"] {
+        assert_eq!(rows, 1);
+        assert_ne!(
+            article_hash(&first),
+            recorded_hash(&custom, first["slug"].as_str().unwrap())
+        );
+    } else {
+        assert_eq!(rows, 2);
         assert_eq!(
-            recorded_hash(&custom, article["slug"].as_str().unwrap()),
-            crate::context::ledger::sha(&text)
+            recorded_hash(&custom, first["slug"].as_str().unwrap()),
+            article_hash(&first)
         );
     }
     assert!(!dir.path().join("config/context-ledger.db").exists());
