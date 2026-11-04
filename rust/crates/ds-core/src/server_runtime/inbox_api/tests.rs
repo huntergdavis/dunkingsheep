@@ -825,7 +825,7 @@ fn inbox_fetch_rejects_truthy_non_path_before_any_write() {
 fn inbox_archive_falsey_mailbox_uses_python_required_mailbox_error() {
     let (_dir, services) = make_services("empty-archive-mailbox", factory(None), None);
     let dispatcher = services.dispatcher(handlers());
-    for mailbox in [json!(false), json!(0), json!("")] {
+    for mailbox in [json!(false), json!(0)] {
         let error = dispatcher
             .dispatch(
                 "inbox_archive",
@@ -838,5 +838,14 @@ fn inbox_archive_falsey_mailbox_uses_python_required_mailbox_error() {
             "{error}"
         );
     }
+    let error = dispatcher
+        .dispatch("inbox_archive", &json!({"mailbox":""}), &request("w1:p1"))
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("missing required argument(s): mailbox"),
+        "{error}"
+    );
     dispatcher.close();
 }
