@@ -62,7 +62,7 @@ fn optional_int(value: &str) -> Option<i64> {
 /// in the title, longest kind first so `mastracode` beats `code`. Returns `""` when
 /// nothing matches, which is the Python's "not an agent" value.
 pub fn agent_kind(command: &str, title: &str) -> String {
-    let first = command.trim().split_whitespace().next().unwrap_or("");
+    let first = command.split_whitespace().next().unwrap_or("");
     let base = first.rsplit('/').next().unwrap_or("").to_lowercase();
     for kind in AGENT_KINDS {
         if base == kind || base.starts_with(kind) {

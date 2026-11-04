@@ -264,9 +264,7 @@ fn test_styled_boundary_needs_exactly_one_bold_composer_before_one_footer() {
 
 #[test]
 fn test_federated_composer_is_off_unless_the_flag_is_set_and_reads_a_bold_native_composer() {
-    let frame = format!(
-        "  >_ OpenAI Codex (v0.165.0)\n\n\x1b[1m\u{203a} pending text\x1b[0m\n\n  GPT-6-Astra high \u{b7} ~/workspace/x\n  ? for shortcuts\n"
-    );
+    let frame = "  >_ OpenAI Codex (v0.165.0)\n\n\x1b[1m\u{203a} pending text\x1b[0m\n\n  GPT-6-Astra high \u{b7} ~/workspace/x\n  ? for shortcuts\n".to_string();
     assert_eq!(None, federated_composer(false, &frame));
     assert_eq!(
         Some("pending text".to_string()),

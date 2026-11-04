@@ -23,6 +23,8 @@ pub type Panes = BTreeMap<String, String>;
 /// A queued message: `(id, mailbox, created_at, pane_id)`.
 pub type Queued = (String, String, f64, Option<String>);
 
+type UndeliverableRow = (String, String, f64, Option<String>);
+
 /// `inbox.db`, opened read-only per query. An unreadable store is an error the evaluator turns into
 /// a self error for the rules that needed it, never a silent pass.
 pub struct InboxDb<'a> {
@@ -36,10 +38,7 @@ impl InboxDb<'_> {
     }
 
     /// `(id, mailbox, created_at, reason)` of undeliverable mail created at or before `now`.
-    fn undeliverable(
-        &self,
-        now: f64,
-    ) -> Result<Vec<(String, String, f64, Option<String>)>, DunkError> {
+    fn undeliverable(&self, now: f64) -> Result<Vec<UndeliverableRow>, DunkError> {
         let conn = self.connect()?;
         let mut stmt = conn
             .prepare(
