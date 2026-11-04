@@ -286,7 +286,7 @@ fn raw_send_keys_dispatcher_and_canonical_provider_match_python_oracle() {
             fixture.assert_pristine();
             continue;
         }
-        let result = fixture
+        let mut result = fixture
             .dispatch(
                 json!({"target":"self", "keys":keys,"hold_while_typing":false,"wait_s":0}),
                 "w1:p1",
@@ -297,6 +297,16 @@ fn raw_send_keys_dispatcher_and_canonical_provider_match_python_oracle() {
         assert_eq!(result["source"], "send_keys");
         assert_eq!(result["message_id"], "m1");
         assert_eq!(result["pane_id"], "w1:p1");
+        assert!(result["created_at"].is_number());
+        assert!(result["finished_at"].is_number());
+        let response = result.as_object_mut().unwrap();
+        response.remove("created_at");
+        response.remove("finished_at");
+        response.insert("pane_id".into(), json!("self"));
+        response.insert("target_label".into(), json!("fixture"));
+        assert_eq!(result, case["response"]);
+        assert_eq!(fixture.flock.snapshot()["next_message_id"], 2);
+        assert_eq!(fixture.flock.message_history.lock().unwrap().len(), 1);
         let batches = fixture.batches.lock().unwrap();
         let delivered: Vec<String> = batches.iter().flat_map(|(_, keys)| keys.clone()).collect();
         assert_eq!(json!(delivered), case["keys"]);

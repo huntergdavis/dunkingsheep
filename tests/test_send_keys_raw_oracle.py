@@ -73,7 +73,11 @@ def row(raw):
     try:
         result = NS["h_send_keys"](flock, {"target": "self", "keys": json.loads(raw),
                                          "hold_while_typing": False, "wait_s": 0}, "self")
-        return {"json": raw, "keys": flock.keys[0], "text": result["text"]}
+        # Clock samples are checked separately by the consumer; compare every other field.
+        response = {key: value for key, value in result.items()
+                    if key not in {"created_at", "finished_at"}}
+        return {"json": raw, "keys": flock.keys[0], "text": result["text"],
+                "response": response}
     except (TypeError, DunkError) as error:
         assert flock.next_message_id == 1 and not flock.messages
         return {"json": raw, "error": str(error), "error_type": type(error).__name__}

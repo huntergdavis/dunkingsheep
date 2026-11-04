@@ -4,14 +4,42 @@
     "keys": [
       "ctrl+c Enter"
     ],
-    "text": "ctrl+c Enter"
+    "text": "ctrl+c Enter",
+    "response": {
+      "message_id": "m1",
+      "pane_id": "self",
+      "target_label": "fixture",
+      "text": "ctrl+c Enter",
+      "source": "send_keys",
+      "status": "sent",
+      "queued": false,
+      "ok": true,
+      "outcome": "ok",
+      "message": "sent",
+      "holds": 0,
+      "waiting_s": null
+    }
   },
   {
     "json": "\"  Escape  \"",
     "keys": [
       "  Escape  "
     ],
-    "text": "  Escape  "
+    "text": "  Escape  ",
+    "response": {
+      "message_id": "m1",
+      "pane_id": "self",
+      "target_label": "fixture",
+      "text": "  Escape  ",
+      "source": "send_keys",
+      "status": "sent",
+      "queued": false,
+      "ok": true,
+      "outcome": "ok",
+      "message": "sent",
+      "holds": 0,
+      "waiting_s": null
+    }
   },
   {
     "json": "[\"ctrl+c Enter\", \" \", \"\\u001c\", \" Escape \"]",
@@ -19,7 +47,21 @@
       "ctrl+c Enter",
       " Escape "
     ],
-    "text": "ctrl+c Enter  Escape "
+    "text": "ctrl+c Enter  Escape ",
+    "response": {
+      "message_id": "m1",
+      "pane_id": "self",
+      "target_label": "fixture",
+      "text": "ctrl+c Enter  Escape ",
+      "source": "send_keys",
+      "status": "sent",
+      "queued": false,
+      "ok": true,
+      "outcome": "ok",
+      "message": "sent",
+      "holds": 0,
+      "waiting_s": null
+    }
   },
   {
     "json": "[null, false, true, 0, 1.0, -0.0, [\"a\\nb\"], {\"z\": 1, \"a\": false}]",
@@ -33,7 +75,21 @@
       "['a\\nb']",
       "{'z': 1, 'a': False}"
     ],
-    "text": "None False True 0 1.0 -0.0 ['a\\nb'] {'z': 1, 'a': False}"
+    "text": "None False True 0 1.0 -0.0 ['a\\nb'] {'z': 1, 'a': False}",
+    "response": {
+      "message_id": "m1",
+      "pane_id": "self",
+      "target_label": "fixture",
+      "text": "None False True 0 1.0 -0.0 ['a\\nb'] {'z': 1, 'a': False}",
+      "source": "send_keys",
+      "status": "sent",
+      "queued": false,
+      "ok": true,
+      "outcome": "ok",
+      "message": "sent",
+      "holds": 0,
+      "waiting_s": null
+    }
   },
   {
     "json": "{\"z key\": 1, \"a key\": 2, \" \": 3, \"\\u001f\": 4}",
@@ -41,7 +97,21 @@
       "z key",
       "a key"
     ],
-    "text": "z key a key"
+    "text": "z key a key",
+    "response": {
+      "message_id": "m1",
+      "pane_id": "self",
+      "target_label": "fixture",
+      "text": "z key a key",
+      "source": "send_keys",
+      "status": "sent",
+      "queued": false,
+      "ok": true,
+      "outcome": "ok",
+      "message": "sent",
+      "holds": 0,
+      "waiting_s": null
+    }
   },
   {
     "json": "[184467440737095516160000000, 1e999, -1e999, 1e-999]",
@@ -51,7 +121,21 @@
       "-inf",
       "0.0"
     ],
-    "text": "184467440737095516160000000 inf -inf 0.0"
+    "text": "184467440737095516160000000 inf -inf 0.0",
+    "response": {
+      "message_id": "m1",
+      "pane_id": "self",
+      "target_label": "fixture",
+      "text": "184467440737095516160000000 inf -inf 0.0",
+      "source": "send_keys",
+      "status": "sent",
+      "queued": false,
+      "ok": true,
+      "outcome": "ok",
+      "message": "sent",
+      "holds": 0,
+      "waiting_s": null
+    }
   },
   {
     "json": "[\"\\u200b\", \"\\u001cEscape\\u001f\", \"\\u0085\"]",
@@ -59,7 +143,21 @@
       "\u200b",
       "\u001cEscape\u001f"
     ],
-    "text": "\u200b \u001cEscape\u001f"
+    "text": "\u200b \u001cEscape\u001f",
+    "response": {
+      "message_id": "m1",
+      "pane_id": "self",
+      "target_label": "fixture",
+      "text": "\u200b \u001cEscape\u001f",
+      "source": "send_keys",
+      "status": "sent",
+      "queued": false,
+      "ok": true,
+      "outcome": "ok",
+      "message": "sent",
+      "holds": 0,
+      "waiting_s": null
+    }
   },
   {
     "json": "[]",
