@@ -1,7 +1,7 @@
 //! T12 slice 1 tests: the claimability rules, the refusal reasons, leases and heartbeat.
 
 use super::*;
-use crate::tasks::FieldEdit;
+use crate::tasks::{FieldEdit, ListVisibleOptions};
 
 async fn store(tag: &str) -> crate::testsupport::Scratch<Tasks> {
     let dir = crate::testsupport::dir(&format!("claim-{tag}"));
