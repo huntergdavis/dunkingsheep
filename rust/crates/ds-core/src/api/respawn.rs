@@ -110,11 +110,21 @@ mod tests {
         let truthy_string = json!({
             "pane": "w1:p1",
             "argv": ["agent"],
-            "confirm_idle": "false"
+            "confirm_idle": " YES "
         })
         .as_object()
         .unwrap()
         .clone();
         assert!(parse_args(&truthy_string).unwrap().confirm_idle);
+
+        let false_string = json!({
+            "pane": "w1:p1",
+            "argv": ["agent"],
+            "confirm_idle": "false"
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        assert!(!parse_args(&false_string).unwrap().confirm_idle);
     }
 }
