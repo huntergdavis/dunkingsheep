@@ -142,7 +142,7 @@ fn run_rust(config: &Value) -> Value {
 // Execute only the actual oracle methods, with deterministic in-memory collaborators.
 // No live Flock construction/import, terminal, memory store, or host state is accessed.
 const PYTHON_ORACLE: &str = r#"
-import ast,json,os,re,shlex,sys,threading,time,types
+import ast,copy,json,os,re,shlex,sys,threading,time,types
 payload=json.load(sys.stdin)
 tree=ast.parse(payload['source'])
 names={'_is_empty_shell','_resume_command','_launch_for','_with_cwd','_doctor_warnings','recover','doctor','_record_launch','_snapshot_launches','_guard_status'}
@@ -184,7 +184,12 @@ def run(c):
     except Exception as e: outcome={'kind':type(e).__name__,'error':str(e)}
     for row in flock.launches.values(): row.pop('recorded_at',None); row.pop('applied_at',None)
     return {'outcome':outcome,'calls':calls,'launches':flock.launches,'saved':saved}
-print(json.dumps([run(case) for case in payload['cases']],ensure_ascii=True))
+# Both implementations must start from the same decoded metadata. Python floats
+# are binary64, while arbitrary-precision serde JSON can retain decimal tokens.
+# Preserve an independent copy before run mutates canonical launch state.
+inputs=copy.deepcopy(payload['cases'])
+outputs=[run(case) for case in payload['cases']]
+print(json.dumps({'inputs':inputs,'outputs':outputs},ensure_ascii=True))
 "#;
 fn shell(id: &str) -> Value {
     json!({"pane_id":id,"cwd":"/work","agent_status":"unknown","terminal_title_stripped":"u@host: /work"})
@@ -513,11 +518,14 @@ fn recover_doctor_match_actual_python_commands_and_error_order() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let expected: Vec<Value> = serde_json::from_slice(&output.stdout).unwrap();
+    let oracle: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let inputs = oracle["inputs"].as_array().unwrap();
+    let expected = oracle["outputs"].as_array().unwrap();
+    assert_eq!(inputs.len(), cases.len());
     let mut mismatches = Vec::new();
-    for (index, (case, expected)) in cases.iter().zip(expected).enumerate() {
+    for (index, (case, expected)) in inputs.iter().zip(expected).enumerate() {
         let actual = run_rust(case);
-        if actual != expected {
+        if &actual != expected {
             mismatches.push(format!(
                 "actual Python case {index}: {case}\nRust: {actual}\nPython: {expected}"
             ));
