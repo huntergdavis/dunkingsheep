@@ -25,6 +25,10 @@ pub(super) type TimerPrecommitBarrier =
 pub(super) struct TimerSignal {
     #[cfg(test)]
     pub(super) precommit: TimerPrecommitBarrier,
+    #[cfg(test)]
+    pub(super) before_fields: TimerPrecommitBarrier,
+    #[cfg(test)]
+    pub(super) before_hold_wait: TimerPrecommitBarrier,
     pub(super) cancelled: AtomicBool,
     pub(super) generation: Mutex<u64>,
     pub(super) changed: std::sync::Condvar,
@@ -38,6 +42,10 @@ pub(super) struct TimerWorker {
 pub(super) struct DunkTimerOwner {
     #[cfg(test)]
     pub(super) precommit: TimerPrecommitBarrier,
+    #[cfg(test)]
+    pub(super) before_fields: TimerPrecommitBarrier,
+    #[cfg(test)]
+    pub(super) before_hold_wait: TimerPrecommitBarrier,
     pub(super) stopped: AtomicBool,
     pub(super) flock: Weak<Flock>,
     pub(super) runtime: Handle,
@@ -58,6 +66,10 @@ impl DunkTimerOwner {
         Self {
             #[cfg(test)]
             precommit: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            before_fields: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            before_hold_wait: Arc::new(Mutex::new(None)),
             stopped: AtomicBool::new(false),
             flock,
             runtime,
@@ -96,6 +108,10 @@ impl DunkTimerOwner {
         let signal = Arc::new(TimerSignal {
             #[cfg(test)]
             precommit: Arc::clone(&self.precommit),
+            #[cfg(test)]
+            before_fields: Arc::clone(&self.before_fields),
+            #[cfg(test)]
+            before_hold_wait: Arc::clone(&self.before_hold_wait),
             cancelled: AtomicBool::new(false),
             generation: Mutex::new(0),
             changed: std::sync::Condvar::new(),
@@ -205,7 +221,20 @@ impl Drop for DunkTimerOwner {
     }
 }
 
+#[cfg(test)]
+fn cross_timer_barrier(barrier: &TimerPrecommitBarrier) {
+    let barrier = barrier.lock().unwrap().take();
+    if let Some((entered, release)) = barrier {
+        entered.send(()).unwrap();
+        release.recv_timeout(Duration::from_secs(10)).unwrap();
+    }
+}
+
 fn timer_wait(signal: &TimerSignal, seconds: f64) -> bool {
+    #[cfg(test)]
+    if seconds == 60.0 {
+        cross_timer_barrier(&signal.before_hold_wait);
+    }
     let generation = signal.generation.lock().unwrap_or_else(|e| e.into_inner());
     if signal.cancelled.load(Ordering::Acquire) {
         return true;
@@ -292,6 +321,8 @@ fn run_dunk_timer(
         if signal.cancelled.load(Ordering::Acquire) || !flock.dunks.is_running(&handle) {
             break;
         }
+        #[cfg(test)]
+        cross_timer_barrier(&signal.before_fields);
         let fields = crate::flock::dunks::DunkList::timer_fields(&handle);
         let now = crate::clock::now_s();
         let due = fields.next_send_at.unwrap_or_else(|| {

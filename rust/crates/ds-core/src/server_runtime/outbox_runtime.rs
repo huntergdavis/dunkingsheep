@@ -597,6 +597,9 @@ mod tests {
             .unwrap()
             .insert("w1:p1".into(), vec!["stuck body".into()]);
         flock.note_stuck_candidate(&message);
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        *owner.dunk_timers.before_hold_wait.lock().unwrap() = Some((held_tx, release_rx));
         let pane = serde_json::json!({"pane_id": "w1:p1"});
         owner
             .add_dunk(
@@ -610,8 +613,12 @@ mod tests {
                 },
             )
             .unwrap();
+        held_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        // Force the wake to happen after hold accounting but BEFORE the condvar wait.
+        owner.interval_changed("d1").unwrap();
+        release_tx.send(()).unwrap();
         let deadline = Instant::now() + Duration::from_secs(15);
-        let mut observed_holds = 0;
+        let mut observed_holds = 1;
         loop {
             let recovered = flock
                 .stuck_candidates
@@ -966,6 +973,83 @@ mod tests {
         }
         owner.stop_dunk("d1").unwrap();
         assert!(owner.dunk_timers.workers.lock().unwrap().is_empty());
+        owner.stop_and_join();
+    }
+
+    #[test]
+    fn stop_all_after_live_check_cannot_restore_stopped_deadline_or_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let flock = Arc::new(Flock::new(
+            dir.path().join("launches"),
+            dir.path().join("lanes"),
+            false,
+        ));
+        flock.attach_stores(crate::flock::panes::Stores {
+            inbox: Some(Arc::new(
+                crate::inbox_store::Store::open(
+                    dir.path().join("inbox.db"),
+                    dir.path().join("blobs"),
+                )
+                .unwrap(),
+            )),
+            ..Default::default()
+        });
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let owner = Arc::new(
+            OutboxRuntime::new(
+                Arc::clone(&flock),
+                runtime.handle().clone(),
+                Arc::new(|| Box::new(FakeTerminal::new())),
+            )
+            .unwrap(),
+        );
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        *owner.dunk_timers.before_fields.lock().unwrap() = Some((entered_tx, release_rx));
+        let pane = serde_json::json!({"pane_id": "w1:p1"});
+        owner
+            .add_dunk(
+                pane.as_object(),
+                &AddArgs {
+                    start: true,
+                    interval: Some("10".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let handle = flock.dunks.handle("d1").unwrap();
+        let signal = Arc::clone(
+            &owner.dunk_timers.workers.lock().unwrap()[&DunkTimerOwner::key(&handle)].signal,
+        );
+        let stopping = Arc::clone(&owner);
+        let join = thread::spawn(move || stopping.stop_all_dunks().unwrap());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !signal.cancelled.load(Ordering::Acquire) {
+            assert!(Instant::now() < deadline);
+            thread::yield_now();
+        }
+        assert!(
+            !join.is_finished(),
+            "stop returned before captured worker joined"
+        );
+        release_tx.send(()).unwrap();
+        let rows = join.join().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["running"], false);
+        assert!(
+            rows[0]["next_send_at"].is_null(),
+            "late worker restored deadline: {:?}",
+            rows[0]
+        );
+        assert_eq!(rows[0]["status"], "Stopped");
+        assert!(owner.dunk_timers.workers.lock().unwrap().is_empty());
+        owner.start_dunk("d1").unwrap();
+        owner.stop_dunk("d1").unwrap();
+        assert!(flock.dunks.get("d1").unwrap()["next_send_at"].is_null());
         owner.stop_and_join();
     }
 
