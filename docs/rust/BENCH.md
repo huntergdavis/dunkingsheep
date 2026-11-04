@@ -77,7 +77,9 @@ measured calls. Percentiles use sorted observations at index `(n - 1) * p / 100`
 - `bench_status_30_clients`: 30 established clients start together on separate
   threads, each running requests serially. Reports pooled per-request latency
   across 6,000 successful measured calls, not batch throughput. Every response
-  must contain the fixture version, process PID and actual task totals.
+  must contain the fixture version, process PID, bound pane and empty fixture
+  dunk/outbox counts. This measures default `status` options: its polling view,
+  not `full=true` global inbox/task scans.
 - `bench_inbox_read`: one client consumes one newly seeded unread message per
   call with default options (including task queues). Seeding is outside timing;
   every response must return the exact message ID/body and mark one message read.
@@ -105,5 +107,9 @@ comparison, which remains **NOT VERIFIED**.
 
 ### RPC measurements
 
-Pending exact-head CI execution. No local cold build has been attempted and no
-latency or CEILING result is claimed yet.
+Pending successful exact-head CI execution. No local cold build has been
+attempted. Initial run [41899705529](https://github.com/huntergdavis/dunkingsheep/actions/runs/41899705529)
+compiled and passed connection identity checks, then aborted during status
+warmup because the harness incorrectly required task totals from the default
+polling view. It produced zero valid measured RPC samples; inbox/task cases
+were NOT RUN. The corrected assertions validate the actual default response.

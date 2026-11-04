@@ -308,7 +308,9 @@ fn bench_status_30_clients() {
                 let elapsed = started.elapsed().as_nanos();
                 assert_eq!(result["version"], "rpc-benchmark");
                 assert_eq!(result["pid"], std::process::id());
-                assert!(result["tasks"].is_object(), "real task totals: {result}");
+                assert_eq!(result["self_pane_id"], WORKER);
+                assert_eq!(result["queued_messages"], 0);
+                assert_eq!(result["dunkers"], 0);
                 if iteration >= RPC_WARMUP {
                     samples.push(elapsed);
                 }
