@@ -22,6 +22,8 @@ pub use dunks::{
 };
 mod dunk_get;
 pub use dunk_get::h_get_dunk;
+mod project_summary;
+pub use project_summary::h_project_summary;
 mod respawn;
 pub use respawn::h_respawn_pane;
 
@@ -214,6 +216,15 @@ pub trait CommandEnv: PaneInfoEnv {
     fn status_env(&self) -> Result<&dyn crate::flock::status::StatusEnv, DunkError> {
         Err(DunkError::Refused(
             "status command adapter is not wired".into(),
+        ))
+    }
+
+    /// Existing fallible project summary sources, including captured startup paths.
+    fn project_summary_env(
+        &self,
+    ) -> Result<&dyn crate::flock::project_summary::SummaryEnv, DunkError> {
+        Err(DunkError::Refused(
+            "project summary adapter is not wired".into(),
         ))
     }
 
@@ -632,6 +643,11 @@ impl Dispatcher {
         self.register("turn_end", h_turn_end);
         self.register("poll", h_poll);
         self.register("roster", h_roster);
+    }
+
+    /// Register only the T39 project summary handler.
+    pub fn register_project_summary(&mut self) {
+        self.register("project_summary", h_project_summary);
     }
 
     /// Register only the T39 help handler leaf.

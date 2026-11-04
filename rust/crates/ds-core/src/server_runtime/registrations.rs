@@ -36,6 +36,7 @@ pub(crate) fn production_handlers() -> Dispatcher {
     handlers.register_task_mutation_leases();
     handlers.register_task_statistics();
     handlers.register_metrics();
+    handlers.register_project_summary();
     handlers.register_dunk_mutations();
     handlers.register_dunk_lifecycle();
     handlers.register_get_dunk();

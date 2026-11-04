@@ -13,16 +13,29 @@ use serde_json::{json, Value};
 use super::views::{git_merges, iso, PROJECT_REPOS};
 use crate::context::digest::first_line;
 use crate::context::store::{Store, CLASSES};
+use crate::error::DunkError;
 
 /// What `project_summary` reads besides the context stores.
 pub trait SummaryEnv {
+    /// Fully expanded global context root from the daemon's captured startup configuration.
+    fn global_context_root(&self) -> Result<PathBuf, DunkError> {
+        Err(DunkError::Refused(
+            "project summary context root is not wired".into(),
+        ))
+    }
+    /// Expand and absolutize a raw path using the captured HOME, never request-time HOME.
+    fn project_dir(&self, _raw: &str) -> Result<PathBuf, DunkError> {
+        Err(DunkError::Refused(
+            "project summary path adapter is not wired".into(),
+        ))
+    }
     /// `flock.resolve_lanes()`.
-    fn lanes(&self) -> Vec<Value>;
+    fn lanes(&self) -> Result<Vec<Value>, DunkError>;
     /// `flock.task_list(include_done=..., limit=500)["tasks"]`.
-    fn task_list(&self, include_done: bool) -> Vec<Value>;
+    fn task_list(&self, include_done: bool) -> Result<Vec<Value>, DunkError>;
     /// `git_merges(repo)`: the repository's own record. Defaults to the real `git log`.
-    fn merges(&self, repo: &str) -> Value {
-        git_merges(repo, 10)
+    fn merges(&self, repo: &str) -> Result<Value, DunkError> {
+        Ok(git_merges(repo, 10))
     }
 }
 
@@ -67,6 +80,86 @@ fn project_dir_of(project: &str, path: Option<&str>) -> PathBuf {
     out
 }
 
+/// POSIX expanduser using captured HOME and an explicit named-account lookup.
+/// Path.expanduser (global store) refuses unknown users; os.path.expanduser (project) keeps them.
+pub(crate) fn expand_summary_path(
+    raw: &Path,
+    home: &Path,
+    strict: bool,
+    lookup: impl FnOnce(&str) -> Result<Option<PathBuf>, DunkError>,
+) -> Result<PathBuf, DunkError> {
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    let bytes = raw.as_os_str().as_bytes();
+    if bytes.first() != Some(&b'~') {
+        return Ok(raw.to_path_buf());
+    }
+    let end = bytes
+        .iter()
+        .position(|byte| *byte == b'/')
+        .unwrap_or(bytes.len());
+    let selected = if end == 1 {
+        Some(home.to_path_buf())
+    } else {
+        let user = std::str::from_utf8(&bytes[1..end])
+            .map_err(|error| DunkError::Refused(error.to_string()))?;
+        lookup(user)?
+    };
+    let Some(selected) = selected else {
+        return if strict {
+            Err(DunkError::Refused(
+                "Could not determine home directory.".into(),
+            ))
+        } else {
+            Ok(raw.to_path_buf())
+        };
+    };
+    let prefix = selected.as_os_str().as_bytes();
+    let trimmed = prefix
+        .iter()
+        .rposition(|byte| *byte != b'/')
+        .map_or(0, |i| i + 1);
+    let mut expanded = prefix[..trimmed].to_vec();
+    expanded.extend_from_slice(&bytes[end..]);
+    if expanded.is_empty() {
+        expanded.push(b'/');
+    }
+    Ok(PathBuf::from(std::ffi::OsString::from_vec(expanded)))
+}
+
+/// POSIX abspath/normpath, including the special exactly-two-leading-slashes case.
+pub(crate) fn absolute_summary_path(path: &Path, cwd: &Path) -> PathBuf {
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    let joined = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    };
+    let bytes = joined.as_os_str().as_bytes();
+    let double_root = bytes.starts_with(b"//") && !bytes.starts_with(b"///");
+    let mut parts: Vec<&[u8]> = Vec::new();
+    for part in bytes.split(|byte| *byte == b'/') {
+        match part {
+            b"" | b"." => {}
+            b".." => {
+                parts.pop();
+            }
+            _ => parts.push(part),
+        }
+    }
+    let mut out = if double_root {
+        b"//".to_vec()
+    } else {
+        b"/".to_vec()
+    };
+    for (i, part) in parts.iter().enumerate() {
+        if i != 0 {
+            out.push(b'/');
+        }
+        out.extend_from_slice(part);
+    }
+    PathBuf::from(std::ffi::OsString::from_vec(out))
+}
+
 /// The label, the project dir and the stores a summary reads. `global` is the global store
 /// (`Store(global_store=True)`); a project reads `select_stores(<dir>/.dunkingsheep)`, which
 /// is global plus the project store when its directory exists.
@@ -89,6 +182,34 @@ pub fn stores_for(
     }
 }
 
+/// Store selection after the API has validated and resolved the raw project path.
+/// These roots are already expanded; constructing them directly avoids ambient HOME reads.
+pub fn stores_for_resolved(
+    project_dir: Option<&Path>,
+    global_root: PathBuf,
+) -> Vec<(String, Store)> {
+    let mut stores = vec![(
+        "global".into(),
+        Store {
+            root: global_root,
+            scope: "global",
+        },
+    )];
+    if let Some(dir) = project_dir {
+        let root = dir.join(".dunkingsheep");
+        if root.is_dir() {
+            stores.push((
+                "project".into(),
+                Store {
+                    root,
+                    scope: "project",
+                },
+            ));
+        }
+    }
+    stores
+}
+
 fn str_of<'a>(v: &'a Value, key: &str) -> &'a str {
     v.get(key).and_then(Value::as_str).unwrap_or("")
 }
@@ -100,7 +221,7 @@ pub fn project_summary(
     project_dir: Option<&Path>,
     stores: &[(String, Store)],
     now: f64,
-) -> Value {
+) -> Result<Value, DunkError> {
     let mut counts: serde_json::Map<String, Value> = serde_json::Map::new();
     let (mut truths, mut articles): (Vec<Value>, Vec<Value>) = (Vec::new(), Vec::new());
     for (name, target) in stores {
@@ -133,7 +254,7 @@ pub fn project_summary(
     }
     let prefix = project_dir.map(|d| d.display().to_string());
     let lanes: Vec<Value> = env
-        .lanes()
+        .lanes()?
         .into_iter()
         .filter(|lane| {
             truthy(lane.get("agent"))
@@ -143,14 +264,14 @@ pub fn project_summary(
         })
         .collect();
     let in_flight: Vec<Value> = env
-        .task_list(false)
+        .task_list(false)?
         .iter()
         .filter(|t| str_of(t, "status") == "in_progress")
         .map(|t| json!({"id": t["id"], "title": t["title"], "status": t["status"], "priority": t["priority"],
                         "assignees": if truthy(t.get("assignees")) { t["assignees"].clone() } else { json!([]) }}))
         .collect();
     let mut history: Vec<Value> = env
-        .task_list(true)
+        .task_list(true)?
         .iter()
         .filter(|t| str_of(t, "status") == "done" && truthy(t.get("completed_at")))
         .map(|t| json!({"at": iso(t["completed_at"].as_f64()), "kind": "task.done", "id": t["id"], "title": t["title"], "by": t.get("completed_by").cloned().unwrap_or(Value::Null)}))
@@ -164,9 +285,9 @@ pub fn project_summary(
     let merges: serde_json::Map<String, Value> = PROJECT_REPOS
         .iter()
         .filter(|(name, _)| label == "global" || label == *name)
-        .map(|(name, repo)| (name.to_string(), env.merges(repo)))
-        .collect();
-    json!({
+        .map(|(name, repo)| env.merges(repo).map(|merges| (name.to_string(), merges)))
+        .collect::<Result<_, _>>()?;
+    Ok(json!({
         "project": label,
         "as_of": iso(Some(now)),
         "path": prefix,
@@ -178,7 +299,7 @@ pub fn project_summary(
         "merges": merges,
         "history": history,
         "history_note": if has_history { "merges and decisions are the repository's record; this timeline is tasks completed here" } else { "no completed task has a timestamp yet" },
-    })
+    }))
 }
 
 #[cfg(test)]
@@ -191,18 +312,19 @@ mod tests {
     }
 
     impl SummaryEnv for Env {
-        fn lanes(&self) -> Vec<Value> {
-            self.lanes.clone()
+        fn lanes(&self) -> Result<Vec<Value>, DunkError> {
+            Ok(self.lanes.clone())
         }
-        fn task_list(&self, include_done: bool) -> Vec<Value> {
-            self.tasks
+        fn task_list(&self, include_done: bool) -> Result<Vec<Value>, DunkError> {
+            Ok(self
+                .tasks
                 .iter()
                 .filter(|t| include_done || t["status"] != "done")
                 .cloned()
-                .collect()
+                .collect())
         }
-        fn merges(&self, repo: &str) -> Value {
-            json!({"repo": repo, "merges": [], "as_of": null, "reason": "stub"})
+        fn merges(&self, repo: &str) -> Result<Value, DunkError> {
+            Ok(json!({"repo": repo, "merges": [], "as_of": null, "reason": "stub"}))
         }
     }
 
@@ -250,7 +372,7 @@ mod tests {
                 json!({"id": "t4", "title": "no stamp", "status": "done"}),
             ],
         };
-        let out = project_summary(&env, "demo", Some(&dir), &stores, 86_400.0);
+        let out = project_summary(&env, "demo", Some(&dir), &stores, 86_400.0).unwrap();
         assert_eq!(out["project"], "demo");
         assert_eq!(out["as_of"], "1970-01-02T00:00:00Z");
         assert_eq!(out["path"], dir.display().to_string());
@@ -320,7 +442,7 @@ mod tests {
             lanes: vec![json!({"pane_id": "%1", "agent": "pi", "cwd": "/anything"})],
             tasks: vec![],
         };
-        let out = project_summary(&env, &label, dir.as_deref(), &stores, 0.0);
+        let out = project_summary(&env, &label, dir.as_deref(), &stores, 0.0).unwrap();
         assert!(out["path"].is_null());
         assert_eq!(
             out["now"]["agents"],
@@ -351,7 +473,8 @@ mod tests {
             Some(Path::new("/nonexistent/dunkingsheep")),
             &[],
             0.0,
-        );
+        )
+        .unwrap();
         assert_eq!(
             out["merges"]
                 .as_object()
@@ -392,5 +515,48 @@ mod tests {
         );
         let (g, _, only) = stores_for(Some("global"), None, Store::new(Some(&g4_dir), false));
         assert_eq!((g.as_str(), only.len()), ("global", 1));
+    }
+    #[test]
+    fn summary_path_expansion_distinguishes_named_users_and_global_errors() {
+        let captured = Path::new("/captured");
+        let no_lookup =
+            |_: &str| -> Result<Option<PathBuf>, DunkError> { panic!("unexpected named lookup") };
+        assert_eq!(
+            expand_summary_path(Path::new("~/a"), captured, false, no_lookup).unwrap(),
+            Path::new("/captured/a")
+        );
+        assert_eq!(
+            expand_summary_path(Path::new("~"), Path::new("/"), false, no_lookup).unwrap(),
+            Path::new("/")
+        );
+        assert_eq!(
+            expand_summary_path(Path::new("~alice/a"), captured, false, |name| {
+                assert_eq!(name, "alice");
+                Ok(Some(PathBuf::from("/accounts/alice/")))
+            })
+            .unwrap(),
+            Path::new("/accounts/alice/a")
+        );
+        assert_eq!(
+            expand_summary_path(Path::new("~missing/a"), captured, false, |_| Ok(None)).unwrap(),
+            Path::new("~missing/a")
+        );
+        assert_eq!(
+            expand_summary_path(Path::new("~missing/context"), captured, true, |_| Ok(None))
+                .unwrap_err()
+                .to_string(),
+            "Could not determine home directory."
+        );
+        for (raw, expected) in [
+            ("a/../b", "/cwd/b"),
+            ("/../../a", "/a"),
+            ("//host/a/../b", "//host/b"),
+            ("///host/./b", "/host/b"),
+        ] {
+            assert_eq!(
+                absolute_summary_path(Path::new(raw), Path::new("/cwd")).as_os_str(),
+                expected
+            );
+        }
     }
 }
