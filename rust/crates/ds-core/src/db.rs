@@ -45,12 +45,53 @@ pub const BUSY_TIMEOUT_MS: u64 = 5000;
 /// How many read-only connections a pool keeps by default (RUST_PORT.md 5.2: N).
 pub const DEFAULT_READ_POOL: usize = 4;
 
+/// Optional diagnostic capture for synchronous callers which need the original SQLite
+/// category. Public errors and store behavior remain unchanged. This is deliberately not
+/// propagated to arbitrary async tasks: SyncWriter runs its actor on the caller's thread.
+#[derive(Clone, Debug)]
+pub(crate) struct SqliteErrorContext {
+    pub code: rusqlite::ErrorCode,
+    pub message: String,
+}
+thread_local! {
+    static SQLITE_ERROR_CONTEXT: std::cell::RefCell<Option<Option<SqliteErrorContext>>> = const { std::cell::RefCell::new(None) };
+}
+
+pub(crate) fn with_sqlite_error_context<T>(
+    operation: impl FnOnce() -> Result<T, DunkError>,
+) -> Result<T, (DunkError, Option<SqliteErrorContext>)> {
+    struct Restore(Option<Option<SqliteErrorContext>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            SQLITE_ERROR_CONTEXT.with(|slot| {
+                slot.replace(self.0.take());
+            });
+        }
+    }
+    let restore = Restore(SQLITE_ERROR_CONTEXT.with(|slot| slot.replace(Some(None))));
+    let result = operation();
+    let context = SQLITE_ERROR_CONTEXT.with(|slot| slot.borrow().clone().flatten());
+    drop(restore);
+    // Successful operations discard transient failures (e.g. a recovered busy retry).
+    result.map_err(|error| (error, context))
+}
+
 /// The one place SQLite errors become [`DunkError`].
 ///
 /// Busy/locked is its own variant because the caller may retry and the wire
 /// protocol says `retryable: true`; everything else is a refusal carrying SQLite's
 /// own sentence, which the Python also surfaces verbatim.
 pub fn map_sqlite(error: rusqlite::Error) -> DunkError {
+    if let rusqlite::Error::SqliteFailure(inner, message) = &error {
+        SQLITE_ERROR_CONTEXT.with(|slot| {
+            if let Some(context) = slot.borrow_mut().as_mut() {
+                *context = Some(SqliteErrorContext {
+                    code: inner.code,
+                    message: message.clone().unwrap_or_else(|| error.to_string()),
+                });
+            }
+        });
+    }
     if let rusqlite::Error::SqliteFailure(inner, _) = &error {
         if inner.code == rusqlite::ErrorCode::DatabaseBusy
             || inner.code == rusqlite::ErrorCode::DatabaseLocked

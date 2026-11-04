@@ -52,11 +52,23 @@ impl From<io::Error> for CheckSendError {
             io::ErrorKind::NotFound => "FileNotFoundError",
             io::ErrorKind::NotADirectory => "NotADirectoryError",
             io::ErrorKind::TimedOut => "TimeoutError",
+            io::ErrorKind::PermissionDenied => "PermissionError",
+            io::ErrorKind::IsADirectory => "IsADirectoryError",
             _ => "OSError",
         };
         Self {
             name: name.into(),
-            message: error.to_string(),
+            message: match error.raw_os_error() {
+                Some(code) => {
+                    let text = error.to_string();
+                    let suffix = format!(" (os error {code})");
+                    format!(
+                        "[Errno {code}] {}",
+                        text.strip_suffix(&suffix).unwrap_or(&text)
+                    )
+                }
+                None => error.to_string(),
+            },
             io_error: Some(error),
             filename: None,
         }
@@ -228,15 +240,18 @@ pub fn check(
             if state.get("direct_incident") != Some(&json!(incident)) {
                 let direct = options
                     .inbox_path
-                    .ok_or_else(|| refuse("inbox path is missing"))
-                    .and_then(|path| direct_write(path, options.target, subject, &body));
+                    .ok_or_else(|| DirectWriteError::store(refuse("inbox path is missing")))
+                    .and_then(|path| direct_write_context(path, options.target, subject, &body));
                 match direct {
                     Ok(id) => report["direct_message_id"] = json!(id),
                     Err(error) => {
                         return fail(
                             options,
                             report,
-                            format!("no daemon ({text}); direct write failed: DunkError: {error}"),
+                            format!(
+                                "no daemon ({text}); direct write failed: {}: {}",
+                                error.name, error.message
+                            ),
                             "direct",
                             "daemon_down",
                         )

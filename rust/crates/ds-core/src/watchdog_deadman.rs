@@ -40,26 +40,107 @@ pub fn direct_write(
     subject: &str,
     text: &str,
 ) -> Result<String, DunkError> {
+    direct_write_context(inbox_path, target, subject, text).map_err(|error| error.legacy)
+}
+
+struct DirectWriteError {
+    name: &'static str,
+    message: String,
+    legacy: DunkError,
+}
+impl DirectWriteError {
+    fn filesystem(path: &Path, error: io::Error) -> Self {
+        let name = match error.kind() {
+            io::ErrorKind::AlreadyExists => "FileExistsError",
+            io::ErrorKind::NotFound => "FileNotFoundError",
+            io::ErrorKind::NotADirectory => "NotADirectoryError",
+            io::ErrorKind::IsADirectory => "IsADirectoryError",
+            io::ErrorKind::PermissionDenied => "PermissionError",
+            _ => "OSError",
+        };
+        let message = python_io_error(path, &error);
+        let legacy = DunkError::Refused(format!("{}: {error}", path.display()));
+        Self {
+            name,
+            message,
+            legacy,
+        }
+    }
+    fn store(error: DunkError) -> Self {
+        Self {
+            name: "InboxError",
+            message: error.to_string(),
+            legacy: error,
+        }
+    }
+    fn sqlite((legacy, context): (DunkError, Option<crate::db::SqliteErrorContext>)) -> Self {
+        let Some(context) = context else {
+            return Self::store(legacy);
+        };
+        use rusqlite::ErrorCode;
+        let name = match context.code {
+            ErrorCode::ConstraintViolation | ErrorCode::TypeMismatch => "IntegrityError",
+            ErrorCode::OutOfMemory => "MemoryError",
+            ErrorCode::ApiMisuse => "InterfaceError",
+            ErrorCode::InternalMalfunction => "InternalError",
+            ErrorCode::DatabaseCorrupt | ErrorCode::NotADatabase => "DatabaseError",
+            ErrorCode::TooBig => "DataError",
+            _ => "OperationalError",
+        };
+        Self {
+            name,
+            message: context.message,
+            legacy,
+        }
+    }
+}
+fn direct_write_context(
+    inbox_path: &Path,
+    target: &str,
+    subject: &str,
+    text: &str,
+) -> Result<String, DirectWriteError> {
     let attachments = inbox_path
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join("attachments");
-    let inbox = crate::inbox_store::Store::open(inbox_path, attachments)?;
-    let message_id = inbox.send(&crate::inbox_store::Outgoing {
-        mailbox: target,
-        body: Some(text),
-        subject: Some(subject),
-        sender: Some("watchdog"),
-        ..Default::default()
-    })?;
-    let back = inbox.get_message(&message_id)?;
+    // Preserve the actual filesystem exception before Store::open converts it to DunkError.
+    if let Some(parent) = inbox_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| DirectWriteError::filesystem(parent, error))?;
+    }
+    use std::os::unix::fs::DirBuilderExt;
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&attachments)
+        .map_err(|error| DirectWriteError::filesystem(&attachments, error))?;
+    let inbox = crate::db::with_sqlite_error_context(|| {
+        crate::inbox_store::Store::open(inbox_path, attachments)
+    })
+    .map_err(DirectWriteError::sqlite)?;
+    let message_id = crate::db::with_sqlite_error_context(|| {
+        inbox.send(&crate::inbox_store::Outgoing {
+            mailbox: target,
+            body: Some(text),
+            subject: Some(subject),
+            sender: Some("watchdog"),
+            ..Default::default()
+        })
+    })
+    .map_err(DirectWriteError::sqlite)?;
+    let back = crate::db::with_sqlite_error_context(|| inbox.get_message(&message_id))
+        .map_err(DirectWriteError::sqlite)?;
     if back.summary.sender.as_deref() != Some("watchdog")
         || back.summary.mailbox != target
         || back.body != text
     {
-        return Err(DunkError::Refused(format!(
-            "direct write of {message_id} did not read back intact"
-        )));
+        return Err(DirectWriteError {
+            name: "RuntimeError",
+            message: format!("direct write of {message_id} did not read back intact"),
+            legacy: DunkError::Refused(format!(
+                "direct write of {message_id} did not read back intact"
+            )),
+        });
     }
     Ok(message_id)
 }
@@ -412,13 +493,17 @@ fn io_error_type(error: &io::Error) -> &'static str {
 fn python_io_error(path: &Path, error: &io::Error) -> String {
     let code = error.raw_os_error().unwrap_or(5);
     let description = match error.kind() {
+        io::ErrorKind::AlreadyExists => "File exists",
         io::ErrorKind::NotFound => "No such file or directory",
         io::ErrorKind::NotADirectory => "Not a directory",
         io::ErrorKind::PermissionDenied => "Permission denied",
         io::ErrorKind::IsADirectory => "Is a directory",
         _ => return error.to_string(),
     };
-    format!("[Errno {code}] {description}: '{}'", path.display())
+    format!(
+        "[Errno {code}] {description}: {}",
+        crate::api::python_value_repr(&json!(path.to_string_lossy()))
+    )
 }
 
 fn unicode_decode_error(bytes: &[u8], error: Utf8Error) -> String {
