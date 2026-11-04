@@ -24,6 +24,7 @@ pub(crate) fn production_handlers() -> Dispatcher {
     handlers.register_poolrad_sync_progress();
     handlers.register_report_run_list();
     handlers.register_owner_stats_receipts_conversation();
+    handlers.register_owner_push_poll_take();
     handlers.register_owner_delivered_message_state_reply_stats();
     handlers.register_owner_reply_ingest_outbox();
     handlers.register_pm_digest_routing();
@@ -31,6 +32,7 @@ pub(crate) fn production_handlers() -> Dispatcher {
     handlers.register_task_add_list_read();
     handlers.register_task_delete();
     handlers.register_task_complete();
+    handlers.register_task_mutation_leases();
     handlers.register_send_text_keys_flush_box();
     handlers.register_clear_box_delivery_capability();
     handlers
@@ -388,6 +390,18 @@ mod tests {
             "task_read",
             "task_delete",
             "task_complete",
+            "task_update",
+            "task_assign",
+            "task_note",
+            "task_block",
+            "task_unblock",
+            "task_cancel",
+            "task_next",
+            "task_heartbeat",
+            "task_release",
+            "owner_push",
+            "owner_poll",
+            "owner_take",
             "task_follow",
             "task_unfollow",
             "task_followers",
@@ -636,6 +650,173 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(denied.contains("superuser") || denied.contains("not permitted"));
+        services.shutdown();
+    }
+
+    #[test]
+    fn production_dispatcher_owner_queue_uses_shared_lazy_service() {
+        let observations = Arc::new(Mutex::new(SendObservations::default()));
+        let gate = Arc::new((Mutex::new(true), Condvar::new()));
+        let (_dir, services) = make_services(
+            "owner-queue-runtime",
+            send_factory(
+                Arc::clone(&observations),
+                Arc::new(AtomicBool::new(false)),
+                gate,
+            ),
+            None,
+        );
+        let dispatcher = services.production_dispatcher();
+        let owner = request("w2:p2");
+        assert!(dispatcher
+            .dispatch(
+                "owner_push",
+                &json!({"target":"w3:p3","body":"missing path"}),
+                &owner,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("runtime owner push path is not wired"));
+        let path = tempfile::tempdir().unwrap();
+        services
+            .attach_owner_push_path(path.path().join("owner.db"))
+            .unwrap();
+        let pushed = dispatcher
+            .dispatch(
+                "owner_push",
+                &json!({"target":"w3:p3","body":"queue one"}),
+                &owner,
+            )
+            .unwrap();
+        assert_eq!(pushed["outcome"], "stored");
+        dispatcher
+            .dispatch(
+                "owner_push",
+                &json!({"target":"w3:p3","body":"queue two"}),
+                &owner,
+            )
+            .unwrap();
+        let desk = request("w3:p3");
+        let wrong = dispatcher
+            .dispatch("owner_poll", &json!({"pane_id":"w3:p3"}), &owner)
+            .unwrap_err();
+        assert!(wrong
+            .to_string()
+            .contains("Only a lane may report its own polling"));
+        let poll = dispatcher
+            .dispatch("owner_poll", &json!({}), &desk)
+            .unwrap();
+        assert_eq!(poll["pane_id"], "w3:p3");
+        let taken = dispatcher
+            .dispatch("owner_take", &json!({}), &desk)
+            .unwrap();
+        assert_eq!(taken["messages"][0]["body"], "queue one");
+        assert_eq!(taken["messages"][1]["body"], "queue two");
+        let drained = dispatcher
+            .dispatch("owner_take", &json!({}), &desk)
+            .unwrap();
+        assert_eq!(
+            drained["messages"].as_array().unwrap().len(),
+            0,
+            "committed receipt is not redelivered"
+        );
+        services.shutdown();
+    }
+
+    #[test]
+    fn production_dispatcher_task_mutation_handlers_use_real_tasks_and_identity() {
+        let observations = Arc::new(Mutex::new(SendObservations::default()));
+        let (_dir, services) = make_services(
+            "task-mutations-runtime",
+            send_factory(
+                Arc::clone(&observations),
+                Arc::new(AtomicBool::new(false)),
+                Arc::new((Mutex::new(true), Condvar::new())),
+            ),
+            None,
+        );
+        let dispatcher = services.production_dispatcher();
+        let owner = request("w2:p2");
+        let pid = std::process::id() as i64;
+        let process = crate::proc::stat(pid).unwrap();
+        let mut worker = request("w1:p1");
+        worker.caller = Some(crate::proc::Caller::new(
+            Some(pid),
+            Some(process.start),
+            Some("codex".into()),
+            Some("w1:p1".into()),
+            "agent",
+        ));
+        let task = dispatcher
+            .dispatch(
+                "task_add",
+                &json!({"title":"registered mutation","body":"before"}),
+                &worker,
+            )
+            .unwrap();
+        let id = task["id"].as_str().unwrap();
+        let updated = dispatcher
+            .dispatch(
+                "task_update",
+                &json!({"id":id,"title":"updated","body":"after"}),
+                &owner,
+            )
+            .unwrap();
+        assert_eq!(updated["title"], "updated");
+        dispatcher
+            .dispatch(
+                "task_assign",
+                &json!({"id":id,"assignees":["w1:p1"]}),
+                &owner,
+            )
+            .unwrap();
+        let claimed = dispatcher
+            .dispatch("task_next", &json!({"scope":"global"}), &worker)
+            .unwrap();
+        assert_eq!(claimed["task"]["id"], id);
+        let heartbeat = dispatcher
+            .dispatch("task_heartbeat", &json!({"id":id}), &worker)
+            .unwrap();
+        assert_eq!(heartbeat["task_id"], id);
+        dispatcher
+            .dispatch(
+                "task_note",
+                &json!({"id":id,"reason":"real runtime note"}),
+                &worker,
+            )
+            .unwrap();
+        let released = dispatcher
+            .dispatch("task_release", &json!({"id":id}), &worker)
+            .unwrap();
+        assert_eq!(released["status"], "open");
+        let blocked = dispatcher
+            .dispatch("task_block", &json!({"id":id,"reason":"wait"}), &worker)
+            .unwrap();
+        assert_eq!(blocked["status"], "blocked");
+        let unblocked = dispatcher
+            .dispatch("task_unblock", &json!({"id":id}), &owner)
+            .unwrap();
+        assert_eq!(unblocked["status"], "open");
+        let denied = dispatcher
+            .dispatch(
+                "task_assign",
+                &json!({"id":id,"assignees":["w1:p1"]}),
+                &worker,
+            )
+            .unwrap_err();
+        assert!(denied.to_string().contains("not permitted for role worker"));
+        let unchanged = dispatcher
+            .dispatch("task_read", &json!({"id":id}), &owner)
+            .unwrap();
+        assert_eq!(
+            unchanged["assignees"],
+            json!(["w1:p1"]),
+            "refused assignment must leave state unchanged"
+        );
+        let cancelled = dispatcher
+            .dispatch("task_cancel", &json!({"id":id,"reason":"done"}), &owner)
+            .unwrap();
+        assert_eq!(cancelled["status"], "cancelled");
         services.shutdown();
     }
 }
