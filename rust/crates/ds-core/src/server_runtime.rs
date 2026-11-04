@@ -442,7 +442,7 @@ impl crate::api::CommandEnv for RequestRuntimeAdapter<'_> {
             &crate::flock::respawn::RespawnServices<'_>,
         ) -> Result<Value, DunkError>,
     ) -> Result<Value, DunkError> {
-        respawn_api::RequestRuntimeAdapter::with_respawn_pane_env(self, operation)
+        RequestRuntimeAdapter::with_respawn_pane_env(self, operation)
     }
 
     fn next_jobs(&self) -> Result<&crate::tasks::next_job_runtime::NextJobs, DunkError> {
