@@ -551,6 +551,7 @@ pub(crate) struct DunkTimerFields {
     pub interval_minutes: f64,
     pub next_send_at: Option<f64>,
     pub only_when_idle: bool,
+    pub hold_while_typing: bool,
     pub skip_if_unconsumed: bool,
     pub last_sent_text: Option<String>,
     pub send_count: i64,
@@ -615,6 +616,7 @@ impl DunkList {
             interval_minutes: dunker.interval_minutes,
             next_send_at: dunker.next_send_at,
             only_when_idle: dunker.only_when.as_deref() == Some("idle"),
+            hold_while_typing: dunker.hold_while_typing,
             skip_if_unconsumed: dunker.skip_if_unconsumed,
             last_sent_text: dunker.last_sent_text.clone(),
             send_count: dunker.send_count,
@@ -649,7 +651,21 @@ impl DunkList {
         dunker.skip_count += 1;
         dunker.total_skips += 1;
         dunker.last_skipped_at = Some(now);
-        dunker.status = format!("Skipped ({reason})");
+        if reason == "unconsumed" {
+            dunker.unknown_skips = 0;
+        }
+        if dunker
+            .last_error
+            .as_deref()
+            .is_some_and(|error| error.contains("target pane not found"))
+        {
+            dunker.last_error = None;
+        }
+        dunker.status = if reason == "unrecognised" {
+            "Skipped (unrecognised box)".into()
+        } else {
+            format!("Skipped ({reason})")
+        };
     }
 
     pub(crate) fn timer_consumed(handle: &DunkerHandle) {
@@ -669,12 +685,11 @@ impl DunkList {
         true
     }
 
-    pub(crate) fn timer_hold(handle: &DunkerHandle, detail: &str) {
+    pub(crate) fn timer_hold(handle: &DunkerHandle, _detail: &str) {
         let mut dunker = Self::lock_dunker(handle);
         dunker.hold_count += 1;
         dunker.last_held_at = Some(clock::now_s());
-        dunker.status = "Held".into();
-        dunker.last_error = Some(detail.to_owned());
+        dunker.status = "Held (typing)".into();
     }
 
     pub(crate) fn timer_target_gone(handle: &DunkerHandle) {

@@ -475,6 +475,7 @@ fn run_dunk_timer(
     };
     let mut panel_seen = None;
     let mut panel_since = crate::clock::now_s();
+    let mut gate_held = false;
     let mut env = TerminalCallAdapter {
         flock: &flock,
         terminal: &terminal,
@@ -514,9 +515,6 @@ fn run_dunk_timer(
             match PaneInfoEnv::get_pane(&env, pane) {
                 None => {
                     crate::flock::dunks::DunkList::timer_target_gone(&handle);
-                    save_timer_state(&flock, &handle, store.as_ref());
-                    timer_wait(&signal, 1.0);
-                    continue;
                 }
                 Some(info)
                     if info
@@ -531,6 +529,25 @@ fn run_dunk_timer(
                 _ => {}
             }
         }
+        if fields.hold_while_typing
+            && !crate::flock::sends::clear_to_send(&env, pane, &|seconds| {
+                timer_wait(&signal, seconds)
+            })
+        {
+            if signal.cancelled.load(Ordering::Acquire) {
+                break;
+            }
+            if !gate_held {
+                gate_held = true;
+                crate::flock::dunks::DunkList::timer_hold(&handle, "the box would not clear");
+                save_timer_state(&flock, &handle, store.as_ref());
+            }
+            crate::flock::dunks::DunkList::set_timer_status(&handle, "Held (typing)");
+            timer_wait(&signal, 60.0);
+            // Returning through the idle gate is essential: clearing the box may submit a turn.
+            continue;
+        }
+        gate_held = false;
         if fields.skip_if_unconsumed && fields.send_count > 0 {
             if let Some(text) = fields.last_sent_text.as_deref() {
                 let screen = crate::flock::sends::SendEnv::read_pane(&env, pane, 40, false);
@@ -726,6 +743,111 @@ mod tests {
     use crate::flock::dunks::{AddArgs, UpdateArgs};
     use crate::terminal::fakes::FakeTerminal;
 
+    // Worker-local facade with externally controlled state and recorded terminal I/O.
+    struct SharedTerminal(Arc<Mutex<FakeTerminal>>);
+    use crate::terminal::{AgentSpec, Pane, Resize, Tab, TerminalError, Workspace};
+    use std::collections::BTreeMap;
+    impl Terminal for SharedTerminal {
+        fn version(&self) -> String {
+            self.0.lock().unwrap().version()
+        }
+        fn is_available(&self) -> bool {
+            self.0.lock().unwrap().is_available()
+        }
+        fn server_error_hint(&self) -> String {
+            self.0.lock().unwrap().server_error_hint()
+        }
+        fn list_panes(&self) -> Vec<Pane> {
+            self.0.lock().unwrap().list_panes()
+        }
+        fn get_pane(&self, pane_id: &str) -> Option<Pane> {
+            self.0.lock().unwrap().get_pane(pane_id)
+        }
+        fn list_tabs(&self) -> Vec<Tab> {
+            self.0.lock().unwrap().list_tabs()
+        }
+        fn list_workspaces(&self) -> Vec<Workspace> {
+            self.0.lock().unwrap().list_workspaces()
+        }
+        fn list_panes_grouped(&self) -> BTreeMap<String, Vec<Pane>> {
+            self.0.lock().unwrap().list_panes_grouped()
+        }
+        fn agent_child_pids(&self, pane_pid: i64) -> Result<Vec<i64>, TerminalError> {
+            self.0.lock().unwrap().agent_child_pids(pane_pid)
+        }
+        fn create_workspace(
+            &mut self,
+            label: Option<&str>,
+            cwd: Option<&str>,
+            focus: bool,
+        ) -> Result<Workspace, TerminalError> {
+            self.0.lock().unwrap().create_workspace(label, cwd, focus)
+        }
+        fn create_tab(
+            &mut self,
+            workspace_id: Option<&str>,
+            label: Option<&str>,
+            cwd: Option<&str>,
+            focus: bool,
+        ) -> Result<Tab, TerminalError> {
+            self.0
+                .lock()
+                .unwrap()
+                .create_tab(workspace_id, label, cwd, focus)
+        }
+        fn split_pane(
+            &mut self,
+            pane_id: &str,
+            direction: &str,
+            cwd: Option<&str>,
+        ) -> Result<Pane, TerminalError> {
+            self.0.lock().unwrap().split_pane(pane_id, direction, cwd)
+        }
+        fn start_agent(&mut self, spec: &AgentSpec) -> Result<Pane, TerminalError> {
+            self.0.lock().unwrap().start_agent(spec)
+        }
+        fn rename(
+            &mut self,
+            kind: &str,
+            target_id: &str,
+            label: &str,
+        ) -> Result<(), TerminalError> {
+            self.0.lock().unwrap().rename(kind, target_id, label)
+        }
+        fn close(&mut self, kind: &str, target_id: &str) -> Result<(), TerminalError> {
+            self.0.lock().unwrap().close(kind, target_id)
+        }
+        fn focus(&mut self, kind: &str, target_id: &str) -> Result<(), TerminalError> {
+            self.0.lock().unwrap().focus(kind, target_id)
+        }
+        fn run_command(&mut self, pane_id: &str, command: &str) -> Result<(), TerminalError> {
+            self.0.lock().unwrap().run_command(pane_id, command)
+        }
+        fn send_text(&mut self, pane_id: &str, text: &str) -> Result<(), TerminalError> {
+            self.0.lock().unwrap().send_text(pane_id, text)
+        }
+        fn send_text_and_enter(&mut self, pane_id: &str, text: &str) -> Result<(), TerminalError> {
+            self.0.lock().unwrap().send_text_and_enter(pane_id, text)
+        }
+        fn send_keys(&mut self, pane_id: &str, keys: &[&str]) -> Result<(), TerminalError> {
+            self.0.lock().unwrap().send_keys(pane_id, keys)
+        }
+        fn read_pane(
+            &self,
+            pane_id: &str,
+            lines: i64,
+            ansi: bool,
+        ) -> Result<Option<String>, TerminalError> {
+            self.0.lock().unwrap().read_pane(pane_id, lines, ansi)
+        }
+        fn agent_status(&self, pane_id: &str) -> Option<String> {
+            self.0.lock().unwrap().agent_status(pane_id)
+        }
+        fn resize(&mut self, pane_id: &str, cols: i64, rows: i64) -> Result<Resize, TerminalError> {
+            self.0.lock().unwrap().resize(pane_id, cols, rows)
+        }
+    }
+
     #[test]
     fn scheduled_worker_snapshot_failure_never_counts_a_successful_send() {
         let dir = tempfile::tempdir().unwrap();
@@ -763,10 +885,12 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
+        let terminal = Arc::new(Mutex::new(FakeTerminal::new()));
+        let worker_terminal = Arc::clone(&terminal);
         let owner = OutboxRuntime::new(
             Arc::clone(&flock),
             runtime.handle().clone(),
-            Arc::new(|| Box::new(FakeTerminal::new())),
+            Arc::new(move || Box::new(SharedTerminal(Arc::clone(&worker_terminal)))),
         )
         .unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -788,6 +912,118 @@ mod tests {
         owner.stop_dunk("d1").unwrap();
         assert!(owner.dunk_timers.workers.lock().unwrap().is_empty());
         owner.stop_and_join();
+        let recorded = terminal.lock().unwrap();
+        assert!(recorded.submits.is_empty());
+        assert!(
+            recorded.keys_sent.is_empty(),
+            "snapshot failure must precede Enter"
+        );
+    }
+
+    #[test]
+    fn real_timer_idle_hold_idle_recheck_then_delivery() {
+        let dir = tempfile::tempdir().unwrap();
+        let flock = Arc::new(Flock::new(
+            dir.path().join("launches"),
+            dir.path().join("lanes"),
+            false,
+        ));
+        flock.attach_stores(crate::flock::panes::Stores {
+            inbox: Some(Arc::new(
+                crate::inbox_store::Store::open(
+                    dir.path().join("inbox.db"),
+                    dir.path().join("blobs"),
+                )
+                .unwrap(),
+            )),
+            ..Default::default()
+        });
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let terminal = Arc::new(Mutex::new(FakeTerminal::new()));
+        terminal
+            .lock()
+            .unwrap()
+            .statuses
+            .insert("w1:p1".into(), "working".into());
+        let worker_terminal = Arc::clone(&terminal);
+        let owner = OutboxRuntime::new(
+            Arc::clone(&flock),
+            runtime.handle().clone(),
+            Arc::new(move || Box::new(SharedTerminal(Arc::clone(&worker_terminal)))),
+        )
+        .unwrap();
+        let pane = serde_json::json!({"pane_id": "w1:p1"});
+        owner
+            .add_dunk(
+                pane.as_object(),
+                &AddArgs {
+                    start: true,
+                    interval: Some("0.001".into()),
+                    only_when: Some("idle".into()),
+                    max_sends: Some("1".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let wait_status = |status: &str| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let row = flock
+                    .dunks
+                    .get("d1")
+                    .expect("must not send before gates clear");
+                assert_eq!(serde_json::json!(0), row["send_count"]);
+                if row["status"] == status {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "did not reach {status}: {row:?}");
+                thread::sleep(Duration::from_millis(10));
+            }
+        };
+        wait_status("Busy");
+        {
+            let mut fake = terminal.lock().unwrap();
+            fake.statuses.insert("w1:p1".into(), "ready".into());
+            fake.screens.insert(
+                "w1:p1".into(),
+                "Press Enter to confirm or Esc to cancel".into(),
+            );
+        }
+        owner.interval_changed("d1").unwrap();
+        wait_status("Held (typing)");
+        {
+            let mut fake = terminal.lock().unwrap();
+            fake.screens.clear();
+            fake.statuses.insert("w1:p1".into(), "working".into());
+        }
+        owner.interval_changed("d1").unwrap();
+        wait_status("Busy");
+        assert_eq!(
+            serde_json::json!(1),
+            flock.dunks.get("d1").unwrap()["hold_count"]
+        );
+        assert!(terminal.lock().unwrap().keys_sent.is_empty());
+        terminal
+            .lock()
+            .unwrap()
+            .statuses
+            .insert("w1:p1".into(), "ready".into());
+        owner.interval_changed("d1").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while flock.dunks.get("d1").is_some() {
+            assert!(
+                Instant::now() < deadline,
+                "cleared timer did not deliver/remove"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        owner.stop_and_join();
+        let fake = terminal.lock().unwrap();
+        assert!(!fake.sends.is_empty() || !fake.submits.is_empty());
+        assert!(!fake.keys_sent.is_empty() || !fake.submits.is_empty());
     }
 
     #[test]
