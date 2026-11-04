@@ -4392,6 +4392,7 @@ fn task_mutation_api_fixture() -> (
     });
     let mut dispatcher = Dispatcher::new();
     dispatcher.register_task_mutation_leases();
+    dispatcher.register_task_statistics();
     (runtime, dir, flock, tasks, dispatcher)
 }
 
@@ -7949,4 +7950,134 @@ fn h_owner_ingest_raw_errors_match_python_order() {
             "failed request inserted {external_id}"
         );
     }
+}
+
+#[test]
+fn task_statistics_dispatch_tests_task_stats_metrics_reap_roles_and_outputs() {
+    let (runtime, _dir, flock, tasks, dispatcher) = task_mutation_api_fixture();
+    runtime
+        .block_on(tasks.add("global", "visible", ""))
+        .unwrap();
+    runtime.block_on(tasks.add("w1:p1", "private", "")).unwrap();
+    let stats = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_stats",
+        json!({}),
+        Some("w1:p1"),
+        None,
+    )
+    .unwrap();
+    assert_eq!(stats["totals"]["open"], 2);
+    let metrics = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_metrics",
+        json!({"window_s":"3600","bucket":""}),
+        Some("w1:p1"),
+        None,
+    )
+    .unwrap();
+    assert_eq!(metrics["scope"], "visible");
+    assert_eq!(metrics["window"]["seconds"], 3600);
+    assert_eq!(metrics["window"]["bucket"], "hour");
+    let denied = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_reap",
+        json!({}),
+        Some("w1:p1"),
+        None,
+    )
+    .unwrap_err();
+    assert!(denied.to_string().contains("needs a superuser"));
+    let reaped = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_reap",
+        json!({}),
+        Some("w1:p2"),
+        None,
+    )
+    .unwrap();
+    assert_eq!(reaped["requeued"], json!([]));
+}
+
+#[test]
+fn task_stats_defaults_scope_and_privacy_match_python_dispatch() {
+    let (runtime, _dir, flock, tasks, dispatcher) = task_mutation_api_fixture();
+    runtime.block_on(tasks.add("global", "global", "")).unwrap();
+    runtime.block_on(tasks.add("w1:p1", "mine", "")).unwrap();
+    runtime.block_on(tasks.add("w1:p3", "other", "")).unwrap();
+    let visible = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_stats",
+        json!({}),
+        Some("w1:p1"),
+        None,
+    )
+    .unwrap();
+    assert_eq!(visible["totals"]["open"], 2);
+    let global = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_stats",
+        json!({"scope":"global"}),
+        Some("w1:p1"),
+        None,
+    )
+    .unwrap();
+    assert_eq!(global["totals"]["open"], 1);
+    let denied = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_stats",
+        json!({"scope":"w1:p3"}),
+        Some("w1:p1"),
+        None,
+    )
+    .unwrap_err();
+    assert!(denied.to_string().contains("cannot access"));
+}
+
+#[test]
+fn task_metrics_defaults_coercions_and_scope_match_python_dispatch() {
+    let (runtime, _dir, flock, tasks, dispatcher) = task_mutation_api_fixture();
+    runtime.block_on(tasks.add("global", "global", "")).unwrap();
+    runtime.block_on(tasks.add("w1:p1", "mine", "")).unwrap();
+    runtime.block_on(tasks.add("w1:p3", "other", "")).unwrap();
+    let default = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_metrics",
+        json!({"window_s":null,"since":null,"until":null,"bucket":false}),
+        Some("w1:p1"),
+        None,
+    )
+    .unwrap();
+    assert_eq!(default["scope"], "visible");
+    assert_eq!(default["window"]["seconds"], 3600);
+    assert_eq!(default["window"]["bucket"], "hour");
+    let converted = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_metrics",
+        json!({"window_s":"10","since":"90","until":"100","scope":"global","bucket":"DAY"}),
+        Some("w1:p1"),
+        None,
+    )
+    .unwrap();
+    assert_eq!(converted["scope"], "global");
+    assert_eq!(converted["window"]["seconds"], 10);
+    assert_eq!(converted["window"]["bucket"], "day");
 }
