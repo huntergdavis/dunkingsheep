@@ -176,7 +176,7 @@ pub fn h_inbox_fetch(c: &HandlerContext<'_>, args: Args) -> Result<Value, DunkEr
         .and_then(Value::as_str)
         .map(PathBuf::from);
     c.env.with_inbox_env(&mut |env| {
-        if let Some(kind) = invalid_dest {
+        if let Some(kind) = invalid_dest.as_deref() {
             env.store().validate_fetch_source(&id)?;
             return Err(DunkError::Refused(format!(
                 "expected str, bytes or os.PathLike object, not {kind}"

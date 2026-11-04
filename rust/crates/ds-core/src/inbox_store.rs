@@ -1285,15 +1285,16 @@ impl Store {
     /// before reporting Python's path type error, whose evaluation follows the attachment read.
     pub fn validate_fetch_source(&self, attachment_id: &str) -> Result<(), DunkError> {
         let wanted = attachment_id.to_string();
-        let sha = self
-            .read_pool()
-            .query_row(
-                "SELECT sha256 FROM attachments WHERE id = ?",
-                [&wanted],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
-            .map_err(map_sqlite)?;
+        let sha = self.read_pool().with(|connection| {
+            connection
+                .query_row(
+                    "SELECT sha256 FROM attachments WHERE id = ?",
+                    [&wanted],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(map_sqlite)
+        })?;
         let Some(sha) = sha else {
             return Err(refuse(format!(
                 "no attachment with id {}",

@@ -856,6 +856,24 @@ fn inbox_fetch_rejects_truthy_non_path_before_any_write() {
     assert!(missing
         .to_string()
         .contains("no attachment with id 'missing'"));
+    let blob_dir = dir.path().join("bad-fetch-dest-blobs");
+    let blob = std::fs::read_dir(&blob_dir)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    std::fs::remove_file(blob).unwrap();
+    let missing_blob = dispatcher
+        .dispatch(
+            "inbox_fetch",
+            &json!({"attachment_id":format!("{id}-1"),"dest":true}),
+            &request("w1:p1"),
+        )
+        .unwrap_err();
+    assert!(missing_blob
+        .to_string()
+        .contains(&format!("attachment {id}-1 is missing from the store")));
     dispatcher.close();
 }
 
