@@ -483,6 +483,33 @@ impl Terminal for FakeTerminal {
         Ok(pane)
     }
 
+    fn rename_raw(
+        &mut self,
+        kind: &str,
+        target_id: &str,
+        label: &str,
+    ) -> super::RawCreateResult<()> {
+        if kind != "pane" {
+            return Ok(self.rename(kind, target_id, label));
+        }
+        self.raw_events
+            .lock()
+            .unwrap()
+            .push(serde_json::json!(["rename", kind, target_id, label]));
+        if let Some(error) = self.take_failure() {
+            return Ok(Err(error));
+        }
+        if let Some(pane) = self.panes.iter_mut().find(|p| p.pane_id == target_id) {
+            pane.title = label.into();
+            pane.label = label.into();
+            self.record("rename", target_id);
+            Ok(Ok(()))
+        } else {
+            Ok(Err(TerminalError::refused(format!(
+                "no such pane {target_id}"
+            ))))
+        }
+    }
     fn rename(&mut self, kind: &str, target_id: &str, label: &str) -> Result<(), TerminalError> {
         self.raw_events
             .lock()

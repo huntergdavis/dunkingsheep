@@ -210,7 +210,14 @@ fn layout_agent_conversion_and_error_order() {
                 &request("w2:p2"),
             )
             .unwrap_err();
-        assert_eq!(error.to_string(), "agent name is required");
+        assert_eq!(
+            error.to_string(),
+            if value.is_null() || value == "" {
+                "start_agent: missing required argument(s): name"
+            } else {
+                "agent name is required"
+            }
+        );
         let error = d
             .dispatch(
                 "rename",
@@ -218,7 +225,14 @@ fn layout_agent_conversion_and_error_order() {
                 &request("w2:p2"),
             )
             .unwrap_err();
-        assert_eq!(error.to_string(), "label is required");
+        assert_eq!(
+            error.to_string(),
+            if value.is_null() || value == "" {
+                "rename: missing required argument(s): label"
+            } else {
+                "label is required"
+            }
+        );
     }
     assert_eq!(
         d.dispatch(
@@ -272,4 +286,123 @@ fn layout_agent_dispatch_permission_precedes_required_arguments() {
         );
     }
     assert!(events.lock().unwrap().is_empty());
+}
+
+#[test]
+fn layout_agent_role_success_preserves_raw_fields_and_final_message() {
+    let (dir, services, _) = make_services(None, true);
+    let out=dispatcher(&services).dispatch("start_agent",&json!({"name":"probe","command":"codex","workspace":"self","role":"worker","provider":false,"model":[]}),&request("w2:p2")).unwrap();
+    assert_eq!(out["role"]["provider"], "False");
+    assert_eq!(out["role"]["model"], "[]");
+    assert_eq!(out["role"]["label"], "probe");
+    assert_eq!(services.flock.last_message(), "Started agent probe");
+    let saved: Value =
+        serde_json::from_slice(&std::fs::read(dir.path().join("roles.json")).unwrap()).unwrap();
+    assert_eq!(saved["lanes"]["w1:p-probe"]["role"], "worker");
+}
+#[test]
+fn layout_agent_verification_failure_precedes_launch_and_role_writeback() {
+    let factory: LoopTerminalFactory = Arc::new(|| {
+        let mut terminal = FakeTerminal::new();
+        terminal.start_agent_pid = Some(None);
+        terminal
+            .screens
+            .insert("w1:p-probe".into(), "[agent exited rc=127]".into());
+        Box::new(terminal)
+    });
+    let (dir, services, _) = make_services_with_factory(None, true, Some(factory));
+    services.flock.set_last_message("before");
+    let error = dispatcher(&services)
+        .dispatch(
+            "start_agent",
+            &json!({"name":"probe","command":"codex","workspace":"w2","role":"worker"}),
+            &request("w2:p2"),
+        )
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "agent 'probe' exited immediately in pane w1:p-probe: '[agent exited rc=127]'"
+    );
+    assert!(services.flock.launch("w1:p-probe").is_none());
+    assert_eq!(services.flock.last_message(), "before");
+    let saved: Value =
+        serde_json::from_slice(&std::fs::read(dir.path().join("roles.json")).unwrap()).unwrap();
+    assert!(saved["lanes"].get("w1:p-probe").is_none());
+}
+
+#[test]
+fn layout_agent_bridge_uses_same_terminal_and_releases_each_lock() {
+    use crate::api::CommandEnv;
+    use crate::flock::{status_runtime::StatusState, Flock};
+    use crate::terminal::Terminal;
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Flock::new(dir.path().join("launches"), dir.path().join("lanes"), false);
+    let executable = dir.path().join("daemon");
+    std::fs::write(&executable, b"fixture").unwrap();
+    flock
+        .attach_status_state(StatusState::at_start(
+            "test",
+            dir.path().join("state"),
+            executable,
+            Env::from_pairs(&[("DUNKINGSHEEP_AGENT_VERIFY_S", "0.01")]),
+        ))
+        .unwrap();
+    let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+    let terminal: Mutex<Box<dyn Terminal>> = Mutex::new(Box::new(FakeTerminal::new()));
+    let request = RequestCtx::default();
+    let adapter = RequestRuntimeAdapter::new(&flock, &request, runtime.handle(), &terminal);
+    adapter
+        .with_layout_agent(&mut |layout, panes, verifier, _, window| {
+            assert_eq!(window, 0.01);
+            assert!(terminal.try_lock().is_ok());
+            let started = layout
+                .start_agent_raw(
+                    "probe",
+                    &["codex".into()],
+                    Some("w2"),
+                    None,
+                    None,
+                    None,
+                    false,
+                )
+                .unwrap()
+                .unwrap();
+            let pane = started["pane_id"].as_str().unwrap();
+            assert!(terminal.try_lock().is_ok());
+            assert_eq!(panes.get_pane(pane).unwrap()["pane_id"], pane);
+            assert_eq!(verifier.get_pane(pane).unwrap()["pane_id"], pane);
+            verifier.read_pane(pane, 20);
+            assert!(terminal.try_lock().is_ok());
+            Ok(json!({}))
+        })
+        .unwrap();
+}
+#[test]
+fn layout_agent_raw_numbers_and_composites_preserve_python_strings() {
+    let (_dir, services, _) = make_services(None, true);
+    for (raw, expected) in [
+        ("true", "True"),
+        ("1e999", "inf"),
+        ("-1e999", "-inf"),
+        ("9007199254740993", "9007199254740993"),
+        ("[1,false]", "[1, False]"),
+    ] {
+        let value: Value = serde_json::from_str(raw).unwrap();
+        let out = dispatcher(&services)
+            .dispatch(
+                "rename",
+                &json!({"kind":"pane","target":"w1:p1","label":value}),
+                &request("w2:p2"),
+            )
+            .unwrap();
+        assert_eq!(out["label"], expected);
+    }
+    let out = dispatcher(&services)
+        .dispatch(
+            "start_agent",
+            &json!({"name":"\u{1c}probe\u{1f}","command":"codex","workspace":"self"}),
+            &request("w2:p2"),
+        )
+        .unwrap();
+    assert_eq!(out["name"], "probe");
 }

@@ -244,6 +244,11 @@ impl RequestRuntimeAdapter<'_> {
             };
             let mut agent = pane_value(terminal, &pane);
             agent["name"] = json!(name);
+            agent["agent"] = json!(argv
+                .first()
+                .and_then(|v| v.rsplit('/').next())
+                .unwrap_or(""));
+            agent["agent_status"] = json!("unknown");
             Ok(Ok(json!({
                 "agent": agent,
                 "argv": argv,

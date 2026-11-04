@@ -569,3 +569,6 @@ mod tests {
         assert!(error.backend_unavailable);
     }
 }
+
+#[cfg(test)]
+mod layout_agent_tests;

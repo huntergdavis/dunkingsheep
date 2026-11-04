@@ -12,6 +12,9 @@ fn required<'a>(args: &'a Args, key: &str) -> Result<&'a Value, DunkError> {
     args.get(key)
         .ok_or_else(|| DunkError::Refused(format!("'{key}'")))
 }
+fn python_space(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '\u{1c}'..='\u{1f}')
+}
 fn text(value: &Value) -> String {
     optional(value).unwrap_or_default()
 }
@@ -21,7 +24,7 @@ fn parent(
     target: &Value,
     own: Option<&str>,
 ) -> Result<Value, DunkError> {
-    let spec = text(target).trim().to_owned();
+    let spec = text(target).trim_matches(python_space).to_owned();
     let key = format!("{kind}_id");
     let spec = if matches!(spec.to_lowercase().as_str(), "self" | "me" | "here") {
         let pane = resolve::self_pane(own, |id| backend.get_pane(id))?;
@@ -59,10 +62,12 @@ fn target(
                     .find(|p| p.get("pane_id").is_some_and(|v| equal(v, id)))
                     .unwrap_or_else(|| target.clone()));
             }
-            let spec = text(target);
-            let rows = if spec.trim().is_empty()
-                || (matches!(spec.trim().to_lowercase().as_str(), "self" | "me" | "here")
-                    && own.is_none())
+            let spec = text(target).trim_matches(python_space).to_owned();
+            let rows = if spec.trim_matches(python_space).is_empty()
+                || (matches!(
+                    spec.trim_matches(python_space).to_lowercase().as_str(),
+                    "self" | "me" | "here"
+                ) && own.is_none())
             {
                 vec![]
             } else {
@@ -86,7 +91,7 @@ fn result(
 pub fn h_start_agent(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
     let name = required(&args, "name")?;
     let command = required(&args, "command")?;
-    let name = text(name).trim().to_owned();
+    let name = text(name).trim_matches(python_space).to_owned();
     if name.is_empty() {
         return Err(DunkError::Refused("agent name is required".into()));
     }
@@ -101,9 +106,9 @@ pub fn h_start_agent(context: &HandlerContext<'_>, args: Args) -> Result<Value, 
         let tab_id = if truthy(tab) { Some(string(&parent(backend,"tab",tab,context.self_pane_id())?["tab_id"])) } else {None};
         let mut workspace_id = if truthy(workspace) { Some(string(&parent(backend,"workspace",workspace,context.self_pane_id())?["workspace_id"])) } else {None};
         if !truthy(tab) && !truthy(workspace) {
-            let label = env.get("DUNKINGSHEEP_SANDBOX_WORKSPACE").unwrap_or("sandbox").trim();
+            let label = env.get("DUNKINGSHEEP_SANDBOX_WORKSPACE").unwrap_or("sandbox").trim_matches(python_space);
             let label = if label.is_empty() {"sandbox"} else {label};
-            if let Some(row) = backend.list_workspaces().into_iter().find(|row| text(&row["label"]).trim().to_lowercase()==label.to_lowercase()) {
+            if let Some(row) = backend.list_workspaces().into_iter().find(|row| text(&row["label"]).trim_matches(python_space).to_lowercase()==label.to_lowercase()) {
                 workspace_id=optional(&row["workspace_id"]);
             } else {
                 let created=result(backend.create_workspace_raw(&json!(label),&Value::Null,false),&format!("could not create sandbox workspace {}",super::python_value_repr(&json!(label))))?;
@@ -139,11 +144,11 @@ pub fn h_rename(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkE
     let kind = required(&args, "kind")?;
     let target_value = required(&args, "target")?;
     let label = required(&args, "label")?;
-    let label = text(label).trim().to_owned();
+    let label = text(label).trim_matches(python_space).to_owned();
     if label.is_empty() {
         return Err(DunkError::Refused("label is required".into()));
     }
-    let kind = text(kind).trim().to_lowercase();
+    let kind = text(kind).trim_matches(python_space).to_lowercase();
     context.env.with_layout_agent(&mut |backend, _, _, _, _| {
         let row = target(backend, &kind, target_value, context.self_pane_id())?;
         let id = string(&row[format!("{kind}_id")]);
@@ -159,7 +164,7 @@ pub fn h_rename(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkE
 pub fn h_focus(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
     let kind = required(&args, "kind")?;
     let target_value = required(&args, "target")?;
-    let kind = text(kind).trim().to_lowercase();
+    let kind = text(kind).trim_matches(python_space).to_lowercase();
     context.env.with_layout_agent(&mut |backend, _, _, _, _| {
         let row = target(backend, &kind, target_value, context.self_pane_id())?;
         let id = string(&row[format!("{kind}_id")]);
@@ -180,7 +185,7 @@ fn split_command(text: &str) -> Result<Vec<String>, String> {
     let mut chars = text.chars();
     while let Some(c) = chars.next() {
         match c {
-            c if matches!(c, ' ' | '\t' | '\r' | '\n') => {
+            ' ' | '\t' | '\r' | '\n' => {
                 if in_word {
                     words.push(std::mem::take(&mut cur));
                     in_word = false;
@@ -235,4 +240,32 @@ fn split_command(text: &str) -> Result<Vec<String>, String> {
         words.push(cur);
     }
     Ok(words)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn agent_command_shlex_preserves_python_whitespace_and_errors() {
+        assert_eq!(
+            split_command("codex\u{a0}--flag").unwrap(),
+            vec!["codex\u{a0}--flag"]
+        );
+        assert_eq!(
+            split_command("codex\t--flag").unwrap(),
+            vec!["codex", "--flag"]
+        );
+        assert_eq!(
+            split_command("codex \"x\\").unwrap_err(),
+            "No escaped character"
+        );
+        assert_eq!(
+            split_command("codex '").unwrap_err(),
+            "No closing quotation"
+        );
+        assert_eq!(
+            split_command("codex \"\\$x\"").unwrap(),
+            vec!["codex", "\\$x"]
+        );
+    }
 }
