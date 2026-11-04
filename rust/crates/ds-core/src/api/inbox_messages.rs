@@ -170,7 +170,7 @@ fn inbox_fetch_id_repr(value: &Value) -> String {
             .as_f64()
             .and_then(serde_json::Number::from_f64)
             .map(|normalized| crate::owner::conversations::python_number_string(&normalized))
-            .unwrap_or_else(|| number.to_string())
+            .unwrap_or_else(|| number.to_string()),
         _ => python_value_repr(value),
     }
 }
@@ -181,7 +181,7 @@ fn inbox_fetch_id_str(value: &Value) -> String {
             .as_f64()
             .and_then(serde_json::Number::from_f64)
             .map(|normalized| crate::owner::conversations::python_number_string(&normalized))
-            .unwrap_or_else(|| number.to_string())
+            .unwrap_or_else(|| number.to_string()),
         _ => python_value_string(value),
     }
 }
