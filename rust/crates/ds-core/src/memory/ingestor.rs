@@ -163,7 +163,13 @@ impl Ingestor {
                 }
                 let _completed = Completed(done);
                 run_loop(
-                    writer, poll, throttle, &stop, &paused, &wake, &shared, parse_hook,
+                    writer,
+                    (poll, throttle),
+                    &stop,
+                    &paused,
+                    &wake,
+                    &shared,
+                    parse_hook,
                 );
             })
             .map_err(|error| DunkError::Refused(format!("memory ingest thread: {error}")))?;
@@ -186,8 +192,11 @@ impl Ingestor {
 
     /// `stop`: signal, wake the loop, join (the Python waits up to 5 s).
     pub fn stop(&self) {
-        self.stop.store(true, Ordering::SeqCst);
-        self.wake.1.notify_all();
+        {
+            let _wake = self.wake.0.lock().expect("wake lock");
+            self.stop.store(true, Ordering::SeqCst);
+            self.wake.1.notify_all();
+        }
         if let Some(handle) = self.thread.lock().expect("thread lock").take() {
             let _ = handle.join();
         }
@@ -196,8 +205,11 @@ impl Ingestor {
     /// A bounded Python-style stop retains the handle and writer when still busy.
     pub fn stop_with_timeout(&self, timeout: Duration) -> bool {
         let mut slot = self.thread.lock().expect("thread lock");
-        self.stop.store(true, Ordering::SeqCst);
-        self.wake.1.notify_all();
+        {
+            let _wake = self.wake.0.lock().expect("wake lock");
+            self.stop.store(true, Ordering::SeqCst);
+            self.wake.1.notify_all();
+        }
         if slot.is_none() {
             return true;
         }
@@ -250,14 +262,14 @@ impl Drop for Ingestor {
 
 fn run_loop(
     writer: Arc<MemoryWriter>,
-    poll: Duration,
-    throttle: Duration,
+    timing: (Duration, Duration),
     stop: &AtomicBool,
     paused: &AtomicBool,
     wake: &(Mutex<()>, Condvar),
     shared: &Mutex<Shared>,
     parse_hook: Option<Arc<dyn Fn() + Send + Sync>>,
 ) {
+    let (poll, throttle) = timing;
     let mut sink = WriterSink(Arc::clone(&writer));
     let record = |error: Option<String>, result: Option<Value>| {
         let mut state = shared.lock().expect("shared lock");
@@ -272,7 +284,9 @@ fn run_loop(
         // `while not self._stop.wait(poll_s)`: sleep one poll, or until stop/enqueue wakes us.
         {
             let guard = wake.0.lock().expect("wake lock");
-            let _ = wake.1.wait_timeout(guard, poll).expect("wake wait");
+            if !stop.load(Ordering::SeqCst) {
+                let _ = wake.1.wait_timeout(guard, poll).expect("wake wait");
+            }
         }
         if stop.load(Ordering::SeqCst) {
             return;

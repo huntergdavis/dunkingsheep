@@ -97,9 +97,20 @@ pub fn recall(
     max_chars: usize,
 ) -> Result<Vec<Hit>, DunkError> {
     let sql_filters = SqlFilters {
-        harness: filters.harness.clone().map(rusqlite::types::Value::Text),
-        project: filters.project.clone().map(rusqlite::types::Value::Text),
-        since: filters.since.map(rusqlite::types::Value::Real),
+        harness: filters
+            .harness
+            .clone()
+            .map(rusqlite::types::Value::Text)
+            .map(SqlScalar::Value),
+        project: filters
+            .project
+            .clone()
+            .map(rusqlite::types::Value::Text)
+            .map(SqlScalar::Value),
+        since: filters
+            .since
+            .map(rusqlite::types::Value::Real)
+            .map(SqlScalar::Value),
     };
     recall_sql(
         pool,
@@ -108,14 +119,34 @@ pub fn recall(
         &sql_filters,
         now,
         max_chars,
-        &fetch_limit(limit).to_string(),
+        &i64::try_from(fetch_limit(limit))
+            .unwrap_or(i64::MAX)
+            .to_string(),
     )
 }
 
+pub(crate) enum SqlScalar {
+    Value(rusqlite::types::Value),
+    Integer(String),
+}
+impl SqlScalar {
+    fn bind(&self) -> Result<rusqlite::types::Value, DunkError> {
+        match self {
+            Self::Value(value) => Ok(value.clone()),
+            Self::Integer(digits) => digits
+                .parse::<i64>()
+                .map(rusqlite::types::Value::Integer)
+                .map_err(|_| {
+                    DunkError::Refused("Python int too large to convert to SQLite INTEGER".into())
+                }),
+        }
+    }
+}
+
 pub(crate) struct SqlFilters {
-    pub harness: Option<rusqlite::types::Value>,
-    pub project: Option<rusqlite::types::Value>,
-    pub since: Option<rusqlite::types::Value>,
+    pub harness: Option<SqlScalar>,
+    pub project: Option<SqlScalar>,
+    pub since: Option<SqlScalar>,
 }
 
 pub(crate) fn recall_sql(
@@ -226,15 +257,15 @@ fn fetch(
             vec![rusqlite::types::Value::Text(match_expression.to_string())];
         if let Some(harness) = &filters.harness {
             sql.push_str(" AND s.harness = ?");
-            params.push(harness.clone());
+            params.push(harness.bind()?);
         }
         if let Some(project) = &filters.project {
             sql.push_str(" AND s.project = ?");
-            params.push(project.clone());
+            params.push(project.bind()?);
         }
         if let Some(since) = &filters.since {
             sql.push_str(" AND COALESCE(s.updated_at, c.created_at) >= ?");
-            params.push(since.clone());
+            params.push(since.bind()?);
         }
         sql.push_str(" ORDER BY bm25(chunks_fts) LIMIT ?");
         let fetch_limit = sql_limit.parse::<i64>().map_err(|_| {

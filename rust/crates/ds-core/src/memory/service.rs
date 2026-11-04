@@ -257,18 +257,18 @@ impl QueryInput {
             }
         }
     }
-    fn sql_scalar(&self) -> Result<Option<rusqlite::types::Value>, DunkError> {
+    fn sql_scalar(&self) -> Result<Option<recall::SqlScalar>, DunkError> {
         use rusqlite::types::Value as Sql;
         if !self.truthy() {
             return Ok(None);
         }
         Ok(Some(match self {
-            Self::Json(Value::String(v)) => Sql::Text(v.clone()),
-            Self::Json(Value::Bool(v)) => Sql::Integer(i64::from(*v)),
+            Self::Json(Value::String(v)) => recall::SqlScalar::Value(Sql::Text(v.clone())),
+            Self::Json(Value::Bool(v)) => recall::SqlScalar::Value(Sql::Integer(i64::from(*v))),
             Self::Json(Value::Number(v)) if !v.to_string().contains(['.', 'e', 'E']) => {
-                Sql::Integer(self.integer()?.parse().map_err(|_| sqlite_overflow())?)
+                recall::SqlScalar::Integer(self.integer()?)
             }
-            _ => Sql::Real(self.float()?),
+            _ => recall::SqlScalar::Value(Sql::Real(self.float()?)),
         }))
     }
 }
@@ -530,7 +530,9 @@ impl MemoryService {
                 harness: input.harness.sql_scalar()?,
                 project: input.project.sql_scalar()?,
                 since: if input.since.truthy() {
-                    Some(rusqlite::types::Value::Real(input.since.float()?))
+                    Some(recall::SqlScalar::Value(rusqlite::types::Value::Real(
+                        input.since.float()?,
+                    )))
                 } else {
                     None
                 },

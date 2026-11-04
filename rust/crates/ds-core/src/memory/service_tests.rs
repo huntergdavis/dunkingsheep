@@ -355,3 +355,98 @@ fn context_and_status_use_shared_queries_and_actual_database_counts() {
     assert_eq!(status["ok"], true);
     assert_eq!(status["ingestor"]["running"], false);
 }
+
+#[test]
+fn expired_refresh_preserves_lru_position() {
+    let (_dir, service, clock) = fixture();
+    service.recall(&input("oldest")).unwrap();
+    service.recall(&input("newer")).unwrap();
+    *clock.wall.lock().unwrap() = 1016.0;
+    service.recall(&input("oldest")).unwrap();
+    let cache = service.cache.lock().unwrap();
+    assert_eq!(cache.front().unwrap().key.query, "oldest");
+    assert_eq!(cache.back().unwrap().key.query, "newer");
+}
+
+#[test]
+fn source_finalize_and_queue_mutations_use_same_connection_and_commit_pending() {
+    let (dir, service, _) = fixture();
+    service.writer.call(|db| {
+        // A TEMP table and its trigger can only be seen on this exact connection.
+        db.execute_batch("CREATE TEMP TABLE actor_trace(event TEXT); CREATE TEMP TRIGGER trace_queue AFTER INSERT ON main.ingest_queue BEGIN INSERT INTO actor_trace VALUES('enqueue'); END;").map_err(map_sqlite)
+    }).unwrap();
+    let mut sink = WriterSink(service.writer.clone());
+    sink.upsert_session(
+        "pending-source",
+        "generic",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    let path = source(&dir);
+    sink.upsert_source_row(&path, "generic", None).unwrap();
+    assert!(service.writer.call(|db| Ok(db.is_autocommit())).unwrap());
+    service.enqueue(&path, None, None).unwrap();
+    let lease = service
+        .writer
+        .call(|db| ingest::claim_next(db, 120.0))
+        .unwrap()
+        .unwrap();
+    service
+        .writer
+        .call(move |db| ingest::finish(db, &lease, ingest::Outcome::Ok, &json!({})))
+        .unwrap();
+    service.requeue_partial().unwrap();
+    service.recover_leases().unwrap();
+    service.checkpoint().unwrap();
+    assert_eq!(
+        service
+            .writer
+            .call(|db| db
+                .query_row("SELECT COUNT(*) FROM actor_trace", [], |row| row
+                    .get::<_, i64>(0))
+                .map_err(map_sqlite))
+            .unwrap(),
+        1
+    );
+    assert_eq!(service.stats().unwrap()["queue"]["done"], 1);
+    service.stop_and_join().unwrap();
+    assert!(service.checkpoint().is_err());
+}
+
+#[test]
+fn paused_start_resume_restart_and_source_failure_keep_honest_status() {
+    let (dir, service, _) = fixture();
+    assert!(service.stop().unwrap());
+    service.pause();
+    let path = source(&dir);
+    service.enqueue(&path, None, None).unwrap();
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let (a, b) = (entered.clone(), release.clone());
+    service.ingestor.set_parse_hook(Arc::new(move || {
+        a.wait();
+        b.wait();
+    }));
+    service.start().unwrap();
+    assert_eq!(service.stats().unwrap()["queue"]["queued"], 1);
+    service.resume();
+    entered.wait();
+    // Fail the source after claim, without touching any live source file.
+    std::fs::remove_file(path).unwrap();
+    assert!(!service.ingestor.stop_with_timeout(Duration::ZERO));
+    release.wait();
+    service.ingestor.stop();
+    assert!(service.ingestor.status().last_error.is_some());
+    assert_eq!(service.stats().unwrap()["queue"]["failed"], 1);
+    service.pause();
+    service.start().unwrap();
+    assert!(service.ingestor.status().running);
+    assert!(service.stop().unwrap());
+    assert!(service.stop().unwrap());
+    service.stop_and_join().unwrap();
+}
