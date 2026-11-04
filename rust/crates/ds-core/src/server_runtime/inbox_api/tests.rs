@@ -494,3 +494,49 @@ fn inbox_status_cache_ttl_validates_captured_startup_config() {
         }
     }
 }
+
+#[test]
+fn inbox_send_raw_values_preserve_body_subject_and_notification_error_order() {
+    let (_dir, services) = make_services("raw-send", factory(None), None);
+    let dispatcher = services.dispatcher(handlers());
+    let ctx = request("w1:p1");
+    let result = dispatcher
+        .dispatch(
+            "inbox_send",
+            &json!({"to":"w1:p1","body":0,"subject":7,"notify":false}),
+            &ctx,
+        )
+        .unwrap();
+    assert_eq!(result["body"], "0");
+    assert_eq!(result["subject"], "7");
+    assert!(dispatcher
+        .dispatch(
+            "inbox_send",
+            &json!({"to":"w1:p1","body":"x","system_sender":true}),
+            &ctx
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("unknown system sender True"));
+    let store = services.flock().stores().inbox.unwrap();
+    let before = crate::inbox::count(store.read_pool(), "w1:p1", &[], crate::clock::now_s())
+        .unwrap()
+        .total;
+    let error = dispatcher
+        .dispatch(
+            "inbox_send",
+            &json!({"to":"w1:p1","body":"committed before notice","subject":9,"notify":true}),
+            &ctx,
+        )
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("'int' object has no attribute 'strip'"));
+    assert_eq!(
+        crate::inbox::count(store.read_pool(), "w1:p1", &[], crate::clock::now_s())
+            .unwrap()
+            .total,
+        before + 1
+    );
+    dispatcher.close();
+}

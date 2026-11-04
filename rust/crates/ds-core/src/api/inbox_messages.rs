@@ -178,7 +178,11 @@ pub fn h_inbox_fetch(c: &HandlerContext<'_>, args: Args) -> Result<Value, DunkEr
 }
 
 pub fn h_inbox_send(c: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
-    let to = python_value_string(&args["to"]);
+    let to = args
+        .get("to")
+        .filter(|v| truthy(v))
+        .map(python_value_string)
+        .unwrap_or_default();
     let body = args
         .get("body")
         .filter(|v| !v.is_null())
@@ -188,6 +192,15 @@ pub fn h_inbox_send(c: &HandlerContext<'_>, args: Args) -> Result<Value, DunkErr
         .get("subject")
         .filter(|v| !v.is_null())
         .map(python_value_string);
+    if let Some(system) = args
+        .get("system_sender")
+        .filter(|v| truthy(v) && !v.is_string())
+    {
+        return Err(DunkError::Refused(format!(
+            "unknown system sender {}",
+            python_value_repr(system)
+        )));
+    }
     let system = args
         .get("system_sender")
         .filter(|v| truthy(v))

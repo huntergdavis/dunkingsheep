@@ -614,6 +614,25 @@ impl Flock {
             )
         {
             if let Some(pane) = pane_id.as_deref() {
+                if let Some(value) = stored_subject.filter(|v| match v {
+                    Value::Null => false,
+                    Value::Bool(b) => *b,
+                    Value::Number(n) => n.as_f64().is_some_and(|n| n != 0.0),
+                    Value::Array(a) => !a.is_empty(),
+                    Value::Object(o) => !o.is_empty(),
+                    Value::String(_) => false,
+                }) {
+                    let kind = match value {
+                        Value::Bool(_) => "bool",
+                        Value::Number(n) if n.is_i64() || n.is_u64() => "int",
+                        Value::Number(_) => "float",
+                        Value::Array(_) => "list",
+                        _ => "dict",
+                    };
+                    return Err(DunkError::Refused(format!(
+                        "'{kind}' object has no attribute 'strip'"
+                    )));
+                }
                 let unread = inbox::count(env.pool(), &mailbox, &[], env.now())?.unread;
                 let text = notice_text(&mailbox, unread, sender.as_deref(), subject.as_deref());
                 // A notice for this pane may already be waiting. Say the new count rather
