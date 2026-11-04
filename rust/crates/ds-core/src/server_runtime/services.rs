@@ -238,6 +238,8 @@ impl RuntimeServices {
         if let Some(observability) = inputs.observability {
             flock.wire_observability(&observability.state_dir, None)?;
         }
+        // Declare the runtime first so rollback joins memory before runtime destruction.
+        let runtime = inputs.runtime;
         let mut starting_memory = StartingMemory(match memory {
             Some(config) => Some(Arc::new(MemoryService::create_at_start(
                 &config.path,
@@ -260,7 +262,6 @@ impl RuntimeServices {
             inputs.env.clone(),
         ))?;
 
-        let runtime = inputs.runtime;
         let terminal_factory = inputs.terminal_factory;
         let stuck_reporter = StalePanelReporter::new();
         let outbox = OutboxRuntime::new_with_reporter(

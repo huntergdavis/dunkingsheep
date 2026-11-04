@@ -67,21 +67,29 @@ fn make_services(
         state_dir: dir.path().join(format!("{tag}-state")),
         memory_db: None,
     });
-    let services = RuntimeServices::new(RuntimeServiceInputs {
-        launches_file: dir.path().join(format!("{tag}-launches.json")),
-        lane_registry_file: dir.path().join(format!("{tag}-lanes.json")),
-        persist_enabled: true,
-        stores,
-        roles,
-        legacy_superusers: None,
-        release_version: "test-release".into(),
-        state_file: dir.path().join(format!("{tag}-whole-state.json")),
-        executable,
-        env,
-        observability,
-        runtime,
-        terminal_factory,
-    })
+    let memory = super::super::services::RuntimeMemoryConfig::captured(
+        dir.path().join(format!("{tag}-memory.db")),
+        &env,
+    )
+    .unwrap();
+    let services = RuntimeServices::new_with_memory(
+        RuntimeServiceInputs {
+            launches_file: dir.path().join(format!("{tag}-launches.json")),
+            lane_registry_file: dir.path().join(format!("{tag}-lanes.json")),
+            persist_enabled: true,
+            stores,
+            roles,
+            legacy_superusers: None,
+            release_version: "test-release".into(),
+            state_file: dir.path().join(format!("{tag}-whole-state.json")),
+            executable,
+            env,
+            observability,
+            runtime,
+            terminal_factory,
+        },
+        Some(memory),
+    )
     .unwrap();
     (dir, services)
 }

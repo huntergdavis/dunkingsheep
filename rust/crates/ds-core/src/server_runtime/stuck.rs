@@ -271,7 +271,7 @@ mod tests {
             env,
             observability: Some(RuntimeObservability {
                 state_dir,
-                memory_db: None,
+                memory_db: Some(dir.join("memory.db")),
             }),
             runtime,
             terminal_factory: factory,
