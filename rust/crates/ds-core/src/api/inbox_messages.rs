@@ -290,7 +290,7 @@ fn local_timestamp(date: chrono::NaiveDateTime) -> Option<f64> {
 }
 
 fn iso_timestamp(text: &str) -> Option<f64> {
-    use chrono::{Datelike, TimeZone};
+    use chrono::Datelike;
     fn clock(text: &str) -> Option<(u32, u32, u32, u32)> {
         let (base, fraction) = text.split_once(['.', ',']).unwrap_or((text, ""));
         if !fraction.bytes().all(|b| b.is_ascii_digit())
