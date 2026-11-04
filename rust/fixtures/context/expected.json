@@ -214,6 +214,66 @@
       "op": "search"
     },
     {
+      "args": {
+        "key": "fact-port-old"
+      },
+      "expected": {
+        "authority": "measured",
+        "body": "The port is 9090.",
+        "class": "fact",
+        "error": null,
+        "recheck_after": "7d",
+        "retired_at": null,
+        "retired_reason": null,
+        "scope": "project",
+        "slug": "2026-10-31-port",
+        "source": null,
+        "stated": "2026-10-31",
+        "subject": "port",
+        "superseded_by": null,
+        "supersedes": "fact-port-old",
+        "type": "measurement"
+      },
+      "op": "get"
+    },
+    {
+      "args": {
+        "key": "port"
+      },
+      "expected": {
+        "authority": "measured",
+        "body": "The port is 9090.",
+        "class": "fact",
+        "error": null,
+        "recheck_after": "7d",
+        "retired_at": null,
+        "retired_reason": null,
+        "scope": "project",
+        "slug": "2026-10-31-port",
+        "source": null,
+        "stated": "2026-10-31",
+        "subject": "port",
+        "superseded_by": null,
+        "supersedes": "fact-port-old",
+        "type": "measurement"
+      },
+      "op": "get"
+    },
+    {
+      "args": {
+        "key": "gt-old-rule"
+      },
+      "expected": null,
+      "op": "get"
+    },
+    {
+      "args": {
+        "key": "missing-entry"
+      },
+      "expected": null,
+      "op": "get"
+    },
+    {
       "args": {},
       "expected": {
         "counts": {
@@ -282,6 +342,173 @@
         ]
       },
       "op": "check"
+    },
+    {
+      "args": {},
+      "expected": {
+        "age_days": {
+          "fact": {
+            "median": -355078,
+            "p90": 0
+          },
+          "ground-truth": {
+            "median": 2495,
+            "p90": 2495
+          },
+          "history": {
+            "median": null,
+            "p90": null
+          },
+          "provisional": {
+            "median": -355078,
+            "p90": 2495
+          }
+        },
+        "counts": {
+          "fact": 5,
+          "ground-truth": 2,
+          "history": 0,
+          "provisional": 2
+        },
+        "injected_7d": 2,
+        "injected_total": 2,
+        "never_delivered": [
+          "2026-10-31-port",
+          "fact-cafe",
+          "fact-forged",
+          "fact-norecheck",
+          "gt-prod",
+          "prov-cache"
+        ],
+        "never_delivered_count": 6,
+        "never_read": [
+          "2026-10-31-port",
+          "fact-cafe",
+          "fact-forged",
+          "fact-norecheck",
+          "gt-prod",
+          "prov-cache",
+          "prov-cache2"
+        ],
+        "never_read_count": 7,
+        "reads_7d": 3,
+        "reads_total": 6
+      },
+      "op": "stats"
+    },
+    {
+      "args": {},
+      "expected": [
+        {
+          "authority": "owner",
+          "class": "ground-truth",
+          "injected": 0,
+          "last_injected": null,
+          "last_read": null,
+          "reads": 0,
+          "slug": "gt-prod",
+          "stale": false,
+          "stated": "2020-01-01",
+          "subject": "prod"
+        },
+        {
+          "authority": "owner",
+          "class": "ground-truth",
+          "injected": 0,
+          "last_injected": null,
+          "last_read": 4000000000.25,
+          "reads": 1,
+          "slug": "gt-worktrees",
+          "stale": false,
+          "stated": "2020-01-01",
+          "subject": "worktrees"
+        },
+        {
+          "authority": "measured",
+          "class": "fact",
+          "injected": 0,
+          "last_injected": null,
+          "last_read": null,
+          "reads": 0,
+          "slug": "2026-10-31-port",
+          "stale": false,
+          "stated": "2026-10-31",
+          "subject": "port"
+        },
+        {
+          "authority": "measured",
+          "class": "fact",
+          "injected": 0,
+          "last_injected": null,
+          "last_read": null,
+          "reads": 0,
+          "slug": "fact-cafe",
+          "stale": false,
+          "stated": "2999-01-01",
+          "subject": "menu"
+        },
+        {
+          "authority": "measured",
+          "class": "fact",
+          "injected": 1,
+          "last_injected": 4000000002.75,
+          "last_read": 4000000001.5,
+          "reads": 2,
+          "slug": "fact-deploy",
+          "stale": false,
+          "stated": "2999-01-01",
+          "subject": "deploy"
+        },
+        {
+          "authority": "agent",
+          "class": "fact",
+          "injected": 0,
+          "last_injected": null,
+          "last_read": null,
+          "reads": 0,
+          "slug": "fact-forged",
+          "stale": false,
+          "stated": "2999-01-01",
+          "subject": "forged"
+        },
+        {
+          "authority": "measured",
+          "class": "fact",
+          "injected": 0,
+          "last_injected": null,
+          "last_read": null,
+          "reads": 0,
+          "slug": "fact-norecheck",
+          "stale": false,
+          "stated": "2999-01-01",
+          "subject": "norecheck"
+        },
+        {
+          "authority": "agent",
+          "class": "provisional",
+          "injected": 0,
+          "last_injected": null,
+          "last_read": null,
+          "reads": 0,
+          "slug": "prov-cache",
+          "stale": true,
+          "stated": "2020-01-01",
+          "subject": "cache"
+        },
+        {
+          "authority": "agent",
+          "class": "provisional",
+          "injected": 1,
+          "last_injected": 4000000003.0,
+          "last_read": null,
+          "reads": 0,
+          "slug": "prov-cache2",
+          "stale": false,
+          "stated": "2999-01-01",
+          "subject": "cache2"
+        }
+      ],
+      "op": "entry_stats"
     }
   ],
   "ledger": {
@@ -292,5 +519,6 @@
       "fact-forged",
       "fact-broken"
     ]
-  }
+  },
+  "snapshot_day": "2026-10-31"
 }

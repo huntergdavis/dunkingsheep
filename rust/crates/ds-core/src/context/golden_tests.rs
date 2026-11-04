@@ -1,6 +1,7 @@
 //! T50 acceptance (t1395): the read side against a fixture the PYTHON store built
 //! (`tools/snapshot_context.py --write`). Fails when a digest, the entries listing, a search
-//! result or the check report differs from what the Python printed. `stats` is not covered.
+//! result, check report, get projection, stats or entry_stats differs from what the Python
+//! printed. Access-log timestamps are fixed in the fixture; age_days remains calendar-relative.
 
 use serde_json::{json, Value};
 
@@ -80,6 +81,74 @@ fn case<'a>(expect: &'a Value, op: &str) -> Vec<&'a Value> {
         .collect()
 }
 
+fn entry_value(entry: &super::store::Entry) -> Value {
+    let mut value = serde_json::Map::new();
+    for key in [
+        "slug",
+        "class",
+        "subject",
+        "type",
+        "scope",
+        "authority",
+        "stated",
+        "source",
+        "recheck_after",
+        "supersedes",
+        "superseded_by",
+        "retired_at",
+        "retired_reason",
+    ] {
+        value.insert(
+            key.to_string(),
+            if key == "slug" {
+                json!(entry.slug)
+            } else {
+                entry.get(key).map_or(Value::Null, |field| json!(field))
+            },
+        );
+    }
+    value.insert(
+        "body".into(),
+        if entry.error.is_some() {
+            Value::Null
+        } else {
+            json!(entry.body.trim())
+        },
+    );
+    value.insert(
+        "error".into(),
+        entry.error.as_ref().map_or(Value::Null, |e| json!(e)),
+    );
+    Value::Object(value)
+}
+
+/// The committed Python snapshot pins `date.today()` for reproducible output. Rust's public
+/// stats API intentionally uses the actual local date, so shift only the inherently relative
+/// age_days values by the elapsed calendar days. Counts, access windows and every other field
+/// remain byte-for-byte comparisons against Python output.
+fn stats_expected_today(expect: &Value) -> Value {
+    let mut expected = case(expect, "stats")[0]["expected"].clone();
+    let snapshot_day = chrono::NaiveDate::parse_from_str(
+        expect["snapshot_day"].as_str().expect("snapshot day"),
+        "%Y-%m-%d",
+    )
+    .expect("valid snapshot day");
+    let today = chrono::Local::now().date_naive();
+    let elapsed_days = (today - snapshot_day).num_days();
+    for age in expected["age_days"]
+        .as_object_mut()
+        .expect("age_days object")
+        .values_mut()
+    {
+        for percentile in ["median", "p90"] {
+            if let Some(days) = age[percentile].as_i64() {
+                age[percentile] = json!(days + elapsed_days);
+            }
+        }
+    }
+    expected
+}
+
 #[test]
 fn digests_are_byte_identical_to_the_python() {
     let (_dir, store, _ledger, expect) = fixture();
@@ -132,21 +201,72 @@ fn search_results_match_the_python() {
 }
 
 #[test]
+fn get_resolution_matches_the_python() {
+    let (_dir, store, _ledger, expect) = fixture();
+    let cases = case(&expect, "get");
+    assert_eq!(4, cases.len());
+    for c in cases {
+        let key = c["args"]["key"].as_str().unwrap();
+        let got = store
+            .resolve(key)
+            .unwrap()
+            .as_ref()
+            .map(entry_value)
+            .unwrap_or(Value::Null);
+        assert_eq!(c["expected"], got, "get {key}");
+    }
+}
+
+#[test]
 fn the_check_report_matches_the_python() {
     let (_dir, store, mut ledger, expect) = fixture();
     let got = store.check(&mut ledger).unwrap();
     assert_eq!(case(&expect, "check")[0]["expected"], got);
 }
 
+#[test]
+fn stats_match_the_python_with_fixed_access_times() {
+    let (_dir, store, _ledger, expect) = fixture();
+    assert_eq!(1, case(&expect, "stats").len());
+    assert_eq!(stats_expected_today(&expect), store.stats().unwrap());
+}
+
+#[test]
+fn entry_stats_match_the_python_with_fixed_access_times() {
+    let (_dir, store, mut ledger, expect) = fixture();
+    assert_eq!(1, case(&expect, "entry_stats").len());
+    assert_eq!(
+        case(&expect, "entry_stats")[0]["expected"],
+        json!(store.entry_stats(&mut ledger).unwrap())
+    );
+}
+
 /// Every difference between the Rust read side and the Python's recorded answers, one line
 /// each (the live-tree run wants all of them, not the first).
 fn all_differences(store: &Store, ledger: &mut Ledger, expect: &Value) -> Vec<String> {
     let mut out = Vec::new();
+    let access_path = store.access_path();
+    let original_access = std::fs::read(&access_path).ok();
     for c in case(expect, "digest") {
         let cap = c["args"]["max_bytes"].as_u64().unwrap() as usize;
         let got = store.digest(cap, c["args"]["subject"].as_str());
         if c["expected"].as_str() != Some(got.as_str()) {
             out.push(format!("digest {} differs", c["args"]));
+        }
+    }
+    for c in case(expect, "get") {
+        let key = c["args"]["key"].as_str().unwrap();
+        match store.resolve(key) {
+            Ok(entry) => {
+                let got = entry.as_ref().map(entry_value).unwrap_or(Value::Null);
+                if c["expected"] != got {
+                    out.push(format!(
+                        "get {key} differs: python {} rust {got}",
+                        c["expected"]
+                    ));
+                }
+            }
+            Err(error) => out.push(format!("get {key} failed: {error}")),
         }
     }
     let entries: Vec<Value> = store
@@ -181,6 +301,28 @@ fn all_differences(store: &Store, ledger: &mut Ledger, expect: &Value) -> Vec<St
         Ok(got) if case(expect, "check")[0]["expected"] == got => {}
         Ok(got) => out.push(format!("check differs: rust {got}")),
         Err(error) => out.push(format!("check failed: {error}")),
+    }
+    // The Python helper restores the copied access log after its search probes for the same
+    // reason: acceptance queries must not become input to the stats comparison.
+    match original_access {
+        Some(bytes) => {
+            if let Err(error) = std::fs::write(&access_path, bytes) {
+                out.push(format!("could not restore copied access log: {error}"));
+            }
+        }
+        None => {
+            let _ = std::fs::remove_file(&access_path);
+        }
+    }
+    match store.stats() {
+        Ok(got) if case(expect, "stats")[0]["expected"] == got => {}
+        Ok(got) => out.push(format!("stats differs: rust {got}")),
+        Err(error) => out.push(format!("stats failed: {error}")),
+    }
+    match store.entry_stats(ledger) {
+        Ok(got) if case(expect, "entry_stats")[0]["expected"] == json!(got) => {}
+        Ok(got) => out.push(format!("entry_stats differs: rust {}", json!(got))),
+        Err(error) => out.push(format!("entry_stats failed: {error}")),
     }
     out
 }
