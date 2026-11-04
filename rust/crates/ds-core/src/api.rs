@@ -21,6 +21,8 @@ mod owner_push;
 pub use owner_push::{h_owner_poll, h_owner_push, h_owner_take};
 mod recovery;
 pub use recovery::{h_doctor, h_recover};
+pub mod runtime_control;
+pub use runtime_control::{h_allocation, h_dispatch, h_shutdown};
 mod metrics;
 pub use metrics::h_metrics;
 mod dunks;
@@ -289,6 +291,13 @@ pub trait CommandEnv: PaneInfoEnv {
     fn status_env(&self) -> Result<&dyn crate::flock::status::StatusEnv, DunkError> {
         Err(DunkError::Refused(
             "status command adapter is not wired".into(),
+        ))
+    }
+
+    /// Borrow canonical control services; production composition is supplied by t1605.
+    fn runtime_control_env(&self) -> Result<&dyn runtime_control::RuntimeControlEnv, DunkError> {
+        Err(DunkError::Refused(
+            "runtime control adapter is not wired".into(),
         ))
     }
 
@@ -814,6 +823,13 @@ impl Dispatcher {
     pub fn register_doctor_recover(&mut self) {
         self.register("doctor", h_doctor);
         self.register("recover", h_recover);
+    }
+
+    /// Register only dispatch, allocation, and shutdown.
+    pub fn register_runtime_control(&mut self) {
+        self.register("dispatch", h_dispatch);
+        self.register("allocation", h_allocation);
+        self.register("shutdown", h_shutdown);
     }
 
     /// Register only the T39 operations metrics summary handler.
