@@ -61,6 +61,13 @@ fn round_seconds(value: f64) -> f64 {
 
 /// `dunk_api.h_metrics` / `Flock.metrics_summary`.
 pub fn h_metrics(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    // The Python API handler converts this argument before entering
+    // Flock.metrics_summary, even when `since` is truthy and the window is
+    // not used to calculate the start.
+    let window = match args.get("window_s") {
+        None | Some(Value::Null) => 3600.0,
+        Some(value) => super::python_float(value)?,
+    };
     let now = context.env.now_s();
     let end = match args.get("until").filter(|value| super::truthy(value)) {
         Some(value) => super::python_float(value)?,
@@ -68,15 +75,7 @@ pub fn h_metrics(context: &HandlerContext<'_>, args: Args) -> Result<Value, Dunk
     };
     let start = match args.get("since").filter(|value| super::truthy(value)) {
         Some(value) => super::python_float(value)?,
-        None => {
-            // Python does not evaluate window_s when `since` is truthy. Keep that conversion
-            // order, and `_opt`'s missing/null default, observable here.
-            let window = match args.get("window_s") {
-                None | Some(Value::Null) => 3600.0,
-                Some(value) => super::python_float(value)?,
-            };
-            end - window.max(1.0)
-        }
+        None => end - window.max(1.0),
     };
 
     let stores = context.flock.stores();
@@ -123,14 +122,20 @@ pub fn h_metrics(context: &HandlerContext<'_>, args: Args) -> Result<Value, Dunk
         json!(crate::metrics::SCHEMA_VERSION),
     );
     output.insert("generated_at".into(), json!(now));
-    output.insert(
-        "interval".into(),
-        json!({
-            "start": start,
-            "end": end,
-            "seconds": round_seconds(end - start),
-        }),
+    let mut interval = Map::new();
+    interval.insert(
+        "start".into(),
+        crate::github::python_float_json_value(start).unwrap_or(Value::Null),
     );
+    interval.insert(
+        "end".into(),
+        crate::github::python_float_json_value(end).unwrap_or(Value::Null),
+    );
+    interval.insert(
+        "seconds".into(),
+        crate::github::python_float_json_value(round_seconds(end - start)).unwrap_or(Value::Null),
+    );
+    output.insert("interval".into(), Value::Object(interval));
     output.insert(
         "units".into(),
         json!({
@@ -448,18 +453,18 @@ mod tests {
             report["interval"]
         );
 
-        // A truthy `since` bypasses window_s conversion in Python's conditional expression.
-        let explicit = dispatch(
+        // The public handler converts window_s before entering Flock, even when
+        // a truthy `since` means the resulting duration is not used.
+        let explicit_invalid_window = dispatch(
             &flock,
             Some(args(json!({"since": 1000, "until": 1200, "window_s": []}))),
             "worker",
             2000.0,
         )
-        .unwrap();
-        assert_eq!(
-            json!({"start": 1000.0, "end": 1200.0, "seconds": 200.0}),
-            explicit["interval"]
-        );
+        .unwrap_err()
+        .to_string();
+        assert!(explicit_invalid_window
+            .contains("float() argument must be a string or a real number, not 'list'"));
 
         let minimum = dispatch(
             &flock,
@@ -478,16 +483,49 @@ mod tests {
             dir.path().join("bare-lanes"),
             false,
         );
-        let invalid_first = dispatch(
+        let invalid_window_precedes_endpoint_args = dispatch(
             &missing_metrics,
-            Some(args(json!({"window_s": []}))),
+            Some(args(json!({"window_s": [], "until": {}, "since": []}))),
             "worker",
             2000.0,
         )
         .unwrap_err()
         .to_string();
-        assert!(invalid_first
+        assert!(invalid_window_precedes_endpoint_args
             .contains("float() argument must be a string or a real number, not 'list'"));
+
+        let invalid_until_precedes_since = dispatch(
+            &missing_metrics,
+            Some(args(json!({"window_s": 3600, "until": {}, "since": []}))),
+            "worker",
+            2000.0,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(invalid_until_precedes_since
+            .contains("float() argument must be a string or a real number, not 'dict'"));
+    }
+
+    #[test]
+    fn h_metrics_preserves_signed_infinity_in_interval_values() {
+        let (dir, flock) = flock("api-metrics-infinity");
+        attach_inbox(&flock, dir.path());
+
+        let positive =
+            args(serde_json::from_str(r#"{"since":1e999,"until":2000,"window_s":3600}"#).unwrap());
+        let positive = dispatch(&flock, Some(positive), "worker", 2000.0).unwrap();
+        let start = positive["interval"]["start"].as_f64().unwrap();
+        let seconds = positive["interval"]["seconds"].as_f64().unwrap();
+        assert!(start.is_infinite() && start.is_sign_positive());
+        assert!(seconds.is_infinite() && seconds.is_sign_negative());
+
+        let negative =
+            args(serde_json::from_str(r#"{"since":-1e999,"until":2000,"window_s":3600}"#).unwrap());
+        let negative = dispatch(&flock, Some(negative), "worker", 2000.0).unwrap();
+        let start = negative["interval"]["start"].as_f64().unwrap();
+        let seconds = negative["interval"]["seconds"].as_f64().unwrap();
+        assert!(start.is_infinite() && start.is_sign_negative());
+        assert!(seconds.is_infinite() && seconds.is_sign_positive());
     }
 
     #[test]
