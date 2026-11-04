@@ -202,6 +202,47 @@ pub fn load(path: impl AsRef<Path>) -> Result<Value, DunkError> {
     Ok(serde_json::from_str(&text).unwrap_or_else(|_| json!({})))
 }
 
+/// `_save`: write sorted Python JSON to the PID-specific sibling, then replace the state.
+/// Failures leave the old destination (and any written temporary file) as Python does.
+pub fn save(path: impl AsRef<Path>, data: &Value) -> io::Result<()> {
+    let path = path.as_ref();
+    let directory = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(directory)?;
+    let mut temporary = path.as_os_str().to_os_string();
+    temporary.push(format!(".tmp.{}", std::process::id()));
+    // dumps_sorted supplies Python separators, float spelling, recursive sorting and
+    // Unicode escaping; Python also escapes DEL, which that shared helper leaves raw.
+    let text = crate::usage::dumps_sorted(data).replace('\u{7f}', "\\u007f");
+    fs::write(Path::new(&temporary), text)?;
+    fs::rename(Path::new(&temporary), path)
+}
+
+/// `_read_error`: decode the whole file, strip Python whitespace, then take 2000 characters.
+/// Only a missing file or a directory is absence; other read/decode errors propagate.
+pub fn read_error(path: impl AsRef<Path>) -> io::Result<Option<String>> {
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::IsADirectory
+            ) =>
+        {
+            return Ok(None)
+        }
+        Err(error) => return Err(error),
+    };
+    // Python text files use universal newlines, and str.strip additionally includes
+    // the four ASCII information separators that Rust's is_whitespace excludes.
+    let text = text.replace("\r\n", "\n").replace('\r', "\n");
+    let stripped =
+        text.trim_matches(|c: char| c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c));
+    Ok((!stripped.is_empty()).then(|| stripped.chars().take(2000).collect()))
+}
+
 fn scale_unit(unit: &Value) -> Value {
     match unit {
         Value::Number(number) if number.is_i64() => {
@@ -344,7 +385,7 @@ fn unicode_decode_error(bytes: &[u8], error: Utf8Error) -> String {
 mod tests {
     use super::{
         classify_daemon_error, daemon_path_problem, effective_cadence, heartbeat_age, load,
-        read_text_prefix_from, recorded_cadence,
+        read_error, read_text_prefix_from, recorded_cadence, save,
     };
     use serde_json::{json, Value};
     use std::fs;
@@ -649,5 +690,163 @@ mod tests {
         fs::write(&path, "true").unwrap();
         let loaded: Value = load(path).unwrap();
         assert_eq!(json!(true), loaded);
+    }
+
+    fn python_oracle(script: &str, path: &std::path::Path) -> String {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let output = std::process::Command::new("python3")
+            .args(["-c", script])
+            .arg(path)
+            .current_dir(root)
+            .output()
+            .expect("Python oracle must execute");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    }
+
+    fn state_temporary(path: &std::path::Path) -> std::path::PathBuf {
+        let mut name = path.as_os_str().to_os_string();
+        name.push(format!(".tmp.{}", std::process::id()));
+        name.into()
+    }
+
+    #[test]
+    fn watchdog_deadman_save_matches_python_sorted_json_and_replaces_inode() {
+        use std::io::Read as _;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("nested/state.json");
+        let data = json!({"z": ["é🧵\u{7f}", 1.0, 1e-7, 1e20, -0.0], "a": {"z": true, "a": null}});
+        save(&path, &data).unwrap();
+        let expected = python_oracle(
+            "import json, sys, dunk_watchdog_deadman as d; p=sys.argv[1]; data=json.load(open(p)); d._save(p+'.oracle', data); print(open(p+'.oracle').read(), end='')",
+            &path,
+        );
+        assert_eq!(expected, fs::read_to_string(&path).unwrap());
+        assert!(expected.starts_with("{\"a\": {\"a\": null, \"z\": true}, \"z\": ["));
+        assert!(expected.contains(r"\u00e9\ud83e\uddf5\u007f"));
+        assert!(!state_temporary(&path).exists());
+        let mut old_reader = fs::File::open(&path).unwrap();
+        save(&path, &json!({"new": 3})).unwrap();
+        let mut old_text = String::new();
+        old_reader.read_to_string(&mut old_text).unwrap();
+        assert_eq!(
+            expected, old_text,
+            "replacement must not truncate old inode"
+        );
+        assert_eq!("{\"new\": 3}", fs::read_to_string(&path).unwrap());
+    }
+
+    #[test]
+    fn watchdog_deadman_save_propagates_parent_write_and_replace_failures() {
+        let directory = tempfile::tempdir().unwrap();
+        let parent_file = directory.path().join("file");
+        fs::write(&parent_file, "old").unwrap();
+        assert!(save(parent_file.join("state"), &json!({})).is_err());
+        let state = directory.path().join("state");
+        fs::write(&state, "old").unwrap();
+        let temporary = state_temporary(&state);
+        fs::create_dir(&temporary).unwrap();
+        assert_eq!(
+            io::ErrorKind::IsADirectory,
+            save(&state, &json!({})).unwrap_err().kind()
+        );
+        assert_eq!("old", fs::read_to_string(&state).unwrap());
+        fs::remove_dir(&temporary).unwrap();
+        fs::remove_file(&state).unwrap();
+        fs::create_dir(&state).unwrap();
+        assert!(save(&state, &json!({"new": true})).is_err());
+        assert!(state.is_dir());
+        assert_eq!("{\"new\": true}", fs::read_to_string(&temporary).unwrap());
+        let oracle = python_oracle(
+            "import os, sys, dunk_watchdog_deadman as d; p=sys.argv[1];\ntry: d._save(p, {'new': True})\nexcept IsADirectoryError: print(open(f'{p}.tmp.{os.getpid()}').read(), end='')",
+            &state,
+        );
+        assert_eq!(oracle, fs::read_to_string(temporary).unwrap());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let locked = directory.path().join("locked");
+            fs::create_dir(&locked).unwrap();
+            fs::set_permissions(&locked, fs::Permissions::from_mode(0o500)).unwrap();
+            let denied = fs::write(locked.join("probe"), "probe").is_err();
+            let result = save(locked.join("state"), &json!({}));
+            fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+            // A privileged test runner may bypass mode bits; ordinary CI must deny this.
+            if denied {
+                assert_eq!(io::ErrorKind::PermissionDenied, result.unwrap_err().kind());
+                assert!(!locked.join("state").exists());
+            }
+        }
+    }
+
+    #[test]
+    fn watchdog_deadman_read_error_matches_python_raw_unicode_whitespace_and_limit() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("error");
+        for raw in [
+            "CONFIG: pagethreshold: unknown key\n".to_string(),
+            "\u{1c}\u{1f}\u{a0}\t\r\n".to_string(),
+            " \rfirst\r\nsecond\rthird\r ".to_string(),
+            format!("{}{} trailing  ", " \n".repeat(2100), "🧵é".repeat(1100)),
+            "\u{200b}content\u{200b}".to_string(),
+            String::new(),
+        ] {
+            fs::write(&path, raw).unwrap();
+            let expected: Option<String> = serde_json::from_str(&python_oracle(
+                "import json, sys, dunk_watchdog_deadman as d; print(json.dumps(d._read_error(sys.argv[1])))",
+                &path,
+            )).unwrap();
+            assert_eq!(expected, read_error(&path).unwrap());
+        }
+        fs::write(&path, "🧵".repeat(2001)).unwrap();
+        assert_eq!(2000, read_error(&path).unwrap().unwrap().chars().count());
+    }
+
+    #[test]
+    fn watchdog_deadman_read_error_only_swallows_missing_or_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("error");
+        assert_eq!(None, read_error(&path).unwrap());
+        assert_eq!(None, read_error(directory.path()).unwrap());
+        fs::write(&path, "file").unwrap();
+        assert_eq!(
+            io::ErrorKind::NotADirectory,
+            read_error(path.join("child")).unwrap_err().kind()
+        );
+        let mut invalid = vec![b'a'; 3000];
+        invalid.push(0xff);
+        fs::write(&path, invalid).unwrap();
+        assert_eq!(
+            io::ErrorKind::InvalidData,
+            read_error(&path).unwrap_err().kind()
+        );
+        assert_eq!("UnicodeDecodeError\n", python_oracle(
+            "import sys, dunk_watchdog_deadman as d;\ntry: d._read_error(sys.argv[1])\nexcept UnicodeDecodeError: print('UnicodeDecodeError')",
+            &path,
+        ));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{symlink, PermissionsExt};
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+            // Root can still read mode-000 files; exercise the kernel denial when available.
+            if let Err(error) = fs::read(&path) {
+                assert_eq!(io::ErrorKind::PermissionDenied, error.kind());
+                assert_eq!(
+                    io::ErrorKind::PermissionDenied,
+                    read_error(&path).unwrap_err().kind()
+                );
+            }
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+            let loop_path = directory.path().join("loop");
+            symlink(&loop_path, &loop_path).unwrap();
+            assert_eq!(
+                fs::read(&loop_path).unwrap_err().raw_os_error(),
+                read_error(&loop_path).unwrap_err().raw_os_error()
+            );
+        }
     }
 }
