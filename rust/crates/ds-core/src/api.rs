@@ -19,6 +19,8 @@ mod poll_roster_turn_end;
 pub use poll_roster_turn_end::{h_poll, h_roster, h_turn_end};
 mod owner_push;
 pub use owner_push::{h_owner_poll, h_owner_push, h_owner_take};
+mod recovery;
+pub use recovery::{h_doctor, h_recover};
 mod metrics;
 pub use metrics::h_metrics;
 mod dunks;
@@ -275,6 +277,11 @@ pub trait CommandEnv: PaneInfoEnv {
         static TRANSPORT: std::sync::OnceLock<crate::github::ReqwestTransport> =
             std::sync::OnceLock::new();
         Ok(TRANSPORT.get_or_init(crate::github::ReqwestTransport::default))
+    }
+
+    /// Borrow the canonical recovery providers for this request. Live composition is t1605.
+    fn recover_env(&self) -> Result<&dyn crate::flock::recovery_commands::RecoverEnv, DunkError> {
+        Err(DunkError::Refused("recovery adapter is not wired".into()))
     }
 
     /// Status sources for the `status` handler. Existing fixtures may stage this adapter, but
@@ -801,6 +808,12 @@ impl Dispatcher {
     pub fn register_review_sync_list(&mut self) {
         self.register("review_sync", h_review_sync);
         self.register("review_list", h_review_list);
+    }
+
+    /// Register the recovery handlers; metrics keeps its existing registration.
+    pub fn register_doctor_recover(&mut self) {
+        self.register("doctor", h_doctor);
+        self.register("recover", h_recover);
     }
 
     /// Register only the T39 operations metrics summary handler.
