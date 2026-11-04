@@ -2029,6 +2029,94 @@ fn refusal(result: Result<Value, DunkError>) -> String {
 }
 
 #[test]
+fn h_get_dunk_matches_python() {
+    let (_dir, flock) = flock();
+    let env = ParityEnv::new(None);
+    let created = flock
+        .dunks
+        .add(None, &crate::flock::dunks::AddArgs::default())
+        .expect("seed dunk");
+    let before_snapshot = flock.dunks.snapshot();
+
+    let cache_before = flock.view_cache().view(&env, Some("w1:p1"), true, 3_600.0);
+    assert_eq!(cache_before["inbox_count"]["unread"], 1);
+    env.inbox_value.set(99);
+
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_get_dunk();
+    assert_eq!(dispatcher.registration_attempts(), &["get_dunk"]);
+    let request = RequestCtx {
+        self_pane_id: Some("w1:p1".into()),
+        ..RequestCtx::default()
+    };
+
+    let missing_id = refusal(dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("worker", false),
+        "get_dunk",
+        args(json!({})),
+        &request,
+        &env,
+    ));
+    assert_eq!(missing_id, "get_dunk: missing required argument(s): id");
+
+    let prefixed = dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("worker", false),
+        "get_dunk",
+        args(json!({"id": "d1"})),
+        &request,
+        &env,
+    )
+    .expect("worker can read a dunk by its prefixed id");
+    assert_eq!(prefixed, Value::Object(created.clone()));
+
+    let bare_number = dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("worker", false),
+        "get_dunk",
+        args(json!({"id": 1})),
+        &request,
+        &env,
+    )
+    .expect("Python accepts a bare numeric dunk id");
+    assert_eq!(bare_number, Value::Object(created));
+
+    let raw_id_error = refusal(dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("worker", false),
+        "get_dunk",
+        args(json!({"id": []})),
+        &request,
+        &env,
+    ));
+    assert!(raw_id_error.contains("no dunk with id"));
+    assert!(raw_id_error.contains("[]"), "raw JSON id stringification");
+
+    let denied_role = refusal(dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("unknown-role", false),
+        "get_dunk",
+        args(json!({"id": "d1"})),
+        &request,
+        &env,
+    ));
+    assert!(denied_role.contains("not permitted for role unknown-role"));
+
+    assert_eq!(flock.dunks.snapshot(), before_snapshot);
+    let cache_after = flock.view_cache().view(&env, Some("w1:p1"), false, 3_600.0);
+    assert_eq!(
+        cache_after, cache_before,
+        "get_dunk must not invalidate the view cache"
+    );
+}
+
+#[test]
 fn h_add_dunk_assigns_ids_and_resolves_target_labels() {
     let (_dir, flock) = flock();
     let env = DunkHandlerEnv::new();

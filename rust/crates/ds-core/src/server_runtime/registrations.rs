@@ -38,6 +38,7 @@ pub(crate) fn production_handlers() -> Dispatcher {
     handlers.register_metrics();
     handlers.register_dunk_mutations();
     handlers.register_dunk_lifecycle();
+    handlers.register_get_dunk();
     handlers.register_send_text_keys_flush_box();
     handlers.register_clear_box_delivery_capability();
     handlers.register_respawn_pane();
@@ -508,6 +509,7 @@ mod tests {
             "task_reap",
             "metrics",
             "add_dunk",
+            "get_dunk",
             "update_dunk",
             "remove_dunk",
             "start_dunk",

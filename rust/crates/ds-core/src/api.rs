@@ -19,6 +19,8 @@ mod dunks;
 pub use dunks::{
     h_add_dunk, h_remove_dunk, h_start_dunk, h_stop_dunk, h_toggle_dunk, h_update_dunk,
 };
+mod dunk_get;
+pub use dunk_get::h_get_dunk;
 mod respawn;
 pub use respawn::h_respawn_pane;
 
@@ -807,6 +809,11 @@ impl Dispatcher {
         self.register("start_dunk", h_start_dunk);
         self.register("stop_dunk", h_stop_dunk);
         self.register("toggle_dunk", h_toggle_dunk);
+    }
+
+    /// Register only the T39 get-dunk handler.
+    pub fn register_get_dunk(&mut self) {
+        self.register("get_dunk", h_get_dunk);
     }
 
     /// `dunk_api.dispatch(flock, name, args, self_pane_id)`, with the acting pane read only from
