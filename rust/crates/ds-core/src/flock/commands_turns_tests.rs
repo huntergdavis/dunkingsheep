@@ -947,15 +947,20 @@ fn turn_end_wakes_next_job_push_after_state_commit() {
         )),
         ..Stores::default()
     });
+    let gate_env = crate::config::Env::from_pairs(&[("DUNKINGSHEEP_TURN_END_DISPATCH", "0")]);
     flock
         .attach_status_state(crate::flock::status_runtime::StatusState::at_start(
             "test",
             dir.path().join("state.json"),
             std::env::current_exe().unwrap(),
-            crate::config::Env::from_pairs(&[("DUNKINGSHEEP_TURN_END_DISPATCH", "0")]),
+            gate_env.clone(),
         ))
         .unwrap();
-    let jobs = crate::tasks::next_job_runtime::NextJobs::new(Arc::clone(&flock));
+    let jobs = crate::tasks::next_job_runtime::NextJobs::with_providers(
+        Arc::clone(&flock),
+        Arc::new(move || Ok(gate_env.clone())),
+        Some(Arc::new(|| Box::new(FakeTerminal::new()))),
+    );
     let request = RequestCtx {
         caller: Some(Caller {
             pane_id: Some(PANE.into()),
