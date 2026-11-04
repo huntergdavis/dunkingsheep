@@ -62,12 +62,14 @@ mod tests {
     use crate::metrics::MetricsStore;
     use crate::roles::Roles;
     use crate::server::RequestCtx;
-    use crate::server_runtime::{RuntimeObservability, RuntimeServiceInputs};
+    use crate::server_runtime::{
+        RequestRuntimeAdapter, RuntimeObservability, RuntimeServiceInputs,
+    };
     use crate::tasks::Tasks;
     use crate::terminal::{
         fakes::FakeTerminal, AgentSpec, Pane, Resize, Tab, Terminal, TerminalError, Workspace,
     };
-    use serde_json::json;
+    use serde_json::{json, Value};
     use std::collections::{BTreeMap, VecDeque};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Condvar, Mutex};
