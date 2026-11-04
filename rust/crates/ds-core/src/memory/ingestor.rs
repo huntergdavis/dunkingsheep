@@ -241,6 +241,18 @@ impl Ingestor {
         Ok(queued)
     }
 
+    /// Enqueue and expose the exact normalized metadata committed by the writer.
+    pub fn enqueue_receipt(
+        &self,
+        path: &str,
+        harness: Option<&str>,
+        project: Option<&str>,
+    ) -> Result<super::ingest::EnqueueReceipt, DunkError> {
+        let receipt = self.writer.enqueue_receipt(path, harness, project)?;
+        self.wake.1.notify_all();
+        Ok(receipt)
+    }
+
     pub fn status(&self) -> Status {
         let running = self.running();
         let shared = self.shared.lock().expect("shared lock");

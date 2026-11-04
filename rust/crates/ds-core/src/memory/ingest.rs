@@ -124,7 +124,28 @@ pub fn enqueue(
     harness: Option<&str>,
     project: Option<&str>,
 ) -> Result<(i64, i64), DunkError> {
-    enqueue_prepared(connection, prepare_enqueue(path, harness, project)?)
+    let receipt = enqueue_receipt(connection, path, harness, project)?;
+    Ok((receipt.source_id, receipt.queue_id))
+}
+
+/// `enqueue` receipt with the exact normalized metadata committed to the source row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EnqueueReceipt {
+    pub source_id: i64,
+    pub queue_id: i64,
+    pub path: String,
+    pub harness: String,
+    pub project: Option<String>,
+}
+
+/// Enqueue a source and return the metadata prepared for the same committed write.
+pub fn enqueue_receipt(
+    connection: &mut Connection,
+    path: &str,
+    harness: Option<&str>,
+    project: Option<&str>,
+) -> Result<EnqueueReceipt, DunkError> {
+    enqueue_prepared_receipt(connection, prepare_enqueue(path, harness, project)?)
 }
 
 #[derive(Clone)]
@@ -146,6 +167,7 @@ pub fn prepare_enqueue(
     let metadata = std::fs::metadata(&path)
         .map_err(|_| DunkError::Refused(format!("source does not exist: {path}")))?;
     let harness = harness
+        .filter(|value| !value.is_empty())
         .unwrap_or_else(|| harness_from_path(&path))
         .to_string();
     let project = project.map(str::trim).filter(|value| !value.is_empty());
@@ -165,6 +187,15 @@ pub fn enqueue_prepared(
     connection: &mut Connection,
     source: PreparedSource,
 ) -> Result<(i64, i64), DunkError> {
+    let receipt = enqueue_prepared_receipt(connection, source)?;
+    Ok((receipt.source_id, receipt.queue_id))
+}
+
+/// Enqueue a prepared source, returning its committed IDs and the exact prepared metadata.
+pub fn enqueue_prepared_receipt(
+    connection: &mut Connection,
+    source: PreparedSource,
+) -> Result<EnqueueReceipt, DunkError> {
     let PreparedSource {
         path,
         harness,
@@ -198,7 +229,13 @@ pub fn enqueue_prepared(
     .map_err(map_sqlite)?;
     let queue_id = tx.last_insert_rowid();
     tx.commit().map_err(map_sqlite)?;
-    Ok((source_id, queue_id))
+    Ok(EnqueueReceipt {
+        source_id,
+        queue_id,
+        path,
+        harness,
+        project,
+    })
 }
 
 /// `requeue_partial`: sources left partial by a deliberate stop go back to the queue.

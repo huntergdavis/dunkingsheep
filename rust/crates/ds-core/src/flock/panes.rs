@@ -61,6 +61,35 @@ impl std::fmt::Debug for Stores {
 }
 
 impl Flock {
+    /// Attach the canonical memory service and retain its own pool as the legacy read alias.
+    pub fn attach_memory_service(
+        &self,
+        service: Arc<crate::memory::service::MemoryService>,
+    ) -> Result<(), crate::error::DunkError> {
+        let mut slot = self.memory_service.0.lock().expect("memory service lock");
+        if let Some(current) = slot.as_ref() {
+            if !Arc::ptr_eq(current, &service) {
+                return Err(crate::error::DunkError::Refused(
+                    "a different memory service is already attached".into(),
+                ));
+            }
+        } else {
+            *slot = Some(Arc::clone(&service));
+        }
+        let mut stores = self.stores.lock().expect("stores lock");
+        stores.memory = Some(Arc::clone(service.read_pool()));
+        Ok(())
+    }
+
+    /// Clone the canonical service Arc, releasing the slot lock before callers do work.
+    pub fn memory_service(&self) -> Option<Arc<crate::memory::service::MemoryService>> {
+        self.memory_service
+            .0
+            .lock()
+            .expect("memory service lock")
+            .clone()
+    }
+
     /// `_pane_info`: the pane with that id, preferring the grouped listing (it carries the
     /// tab/workspace labels the name-based checks need), else `get_pane`. Never raises.
     pub fn pane_info(env: &dyn PaneInfoEnv, pane_id: &str) -> Option<Value> {
@@ -130,6 +159,10 @@ impl Flock {
 
     /// Attach the opened stores (`Flock.__init__`'s `self.tasks` / `self.inbox`).
     pub fn attach_stores(&self, stores: Stores) {
+        let mut stores = stores;
+        if let Some(service) = self.memory_service() {
+            stores.memory = Some(Arc::clone(service.read_pool()));
+        }
         *self.stores.lock().expect("stores lock") = stores;
     }
 

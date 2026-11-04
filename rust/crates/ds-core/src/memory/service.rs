@@ -70,8 +70,18 @@ impl MemoryWriter {
         harness: Option<&str>,
         project: Option<&str>,
     ) -> Result<(i64, i64), DunkError> {
+        let receipt = self.enqueue_receipt(path, harness, project)?;
+        Ok((receipt.source_id, receipt.queue_id))
+    }
+
+    pub(crate) fn enqueue_receipt(
+        &self,
+        path: &str,
+        harness: Option<&str>,
+        project: Option<&str>,
+    ) -> Result<ingest::EnqueueReceipt, DunkError> {
         let source = ingest::prepare_enqueue(path, harness, project)?;
-        self.call(move |connection| ingest::enqueue_prepared(connection, source))
+        self.call(move |connection| ingest::enqueue_prepared_receipt(connection, source))
     }
 }
 impl Drop for MemoryWriter {
@@ -633,6 +643,16 @@ impl MemoryService {
     ) -> Result<(i64, i64), DunkError> {
         self.accepting()?;
         self.ingestor.enqueue(path, harness, project)
+    }
+    /// Enqueue and return the exact normalized source metadata committed with the receipt.
+    pub fn enqueue_receipt(
+        &self,
+        path: &str,
+        harness: Option<&str>,
+        project: Option<&str>,
+    ) -> Result<ingest::EnqueueReceipt, DunkError> {
+        self.accepting()?;
+        self.ingestor.enqueue_receipt(path, harness, project)
     }
     pub fn backfill(
         &self,

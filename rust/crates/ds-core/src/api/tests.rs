@@ -25,6 +25,18 @@ use crate::terminal::{fakes::FakeTerminal, Terminal};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+struct FixedMemoryClock;
+
+impl crate::memory::service::MemoryClock for FixedMemoryClock {
+    fn wall(&self) -> f64 {
+        1_800_000_000.0
+    }
+
+    fn performance(&self) -> f64 {
+        1.0
+    }
+}
+
 struct FixedRole(&'static str, bool);
 
 impl CallerGate for FixedRole {
@@ -2505,12 +2517,20 @@ fn memory_api_fixture() -> (tempfile::TempDir, Flock, TestEnv) {
         )
         .expect("chunk");
     drop(connection);
-    let pool = crate::db::ReadPool::open(&path, 1).expect("read pool");
+    let service = Arc::new(
+        crate::memory::service::MemoryService::with_clock(
+            &path,
+            1,
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(1),
+            Arc::new(FixedMemoryClock),
+        )
+        .expect("memory service"),
+    );
     let (_dir, flock) = flock();
-    flock.attach_stores(Stores {
-        memory: Some(Arc::new(pool)),
-        ..Stores::default()
-    });
+    flock
+        .attach_memory_service(service)
+        .expect("attach canonical memory service");
     (dir, flock, TestEnv::default())
 }
 
@@ -2593,6 +2613,329 @@ fn h_memory_context_matches_python() {
         context["text"],
         "[codex] demo | Rust API\n  - rust api uses a stable adapter boundary for recall"
     );
+}
+
+#[test]
+fn h_memory_stats_matches_python() {
+    let (_dir, flock, env) = memory_api_fixture();
+    let service = flock.memory_service().unwrap();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_memory_stats_status_ingest();
+    let result = dispatch_memory(&dispatcher, &flock, &env, "memory_stats", json!({})).unwrap();
+    assert_eq!(result, service.stats().unwrap());
+    assert_eq!(result["sources"], 0);
+    assert_eq!(result["sessions"], 1);
+    assert_eq!(result["chunks"], 1);
+    assert_eq!(result["queue_depth"], 0);
+    assert_eq!(result["queries"]["count"], 0);
+}
+
+#[test]
+fn h_memory_status_matches_python() {
+    let (_dir, flock, env) = memory_api_fixture();
+    let service = flock.memory_service().unwrap();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_memory_stats_status_ingest();
+    let result = dispatch_memory(&dispatcher, &flock, &env, "memory_status", json!({})).unwrap();
+    assert_eq!(result, service.status().unwrap());
+    assert_eq!(result["ok"], true);
+    assert_eq!(result["ingestor"]["running"], false);
+}
+
+#[test]
+fn h_memory_ingest_matches_python() {
+    let (dir, flock, env) = memory_api_fixture();
+    let source_dir = dir.path().join(".codex");
+    std::fs::create_dir_all(&source_dir).unwrap();
+    let source = source_dir.join("thread_history.jsonl");
+    std::fs::write(
+        &source,
+        "{\"type\":\"session\",\"id\":\"queued-session\",\"harness\":\"codex\",\"project\":\"demo\"}\n",
+    )
+    .unwrap();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_memory_stats_status_ingest();
+    let request = RequestCtx::default();
+    let result = dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("owner", true),
+        "memory_ingest",
+        args(json!({
+            "path": source.to_string_lossy(),
+            "harness": "",
+            "project": ""
+        })),
+        &request,
+        &env,
+    )
+    .unwrap();
+    assert_eq!(
+        result,
+        json!({
+            "source_id": 1,
+            "queue_id": 1,
+            "path": source.to_string_lossy(),
+            "harness": "codex",
+            "project": null
+        })
+    );
+    let status = flock.memory_service().unwrap().status().unwrap();
+    assert_eq!(status["queue"]["queued"], 1);
+    assert_eq!(status["ingestor"]["running"], false);
+    let persisted_harness = flock
+        .memory_service()
+        .unwrap()
+        .read_pool()
+        .with(|connection| {
+            Ok(connection
+                .query_row("SELECT harness FROM sources WHERE id=1", [], |row| {
+                    row.get::<_, String>(0)
+                })
+                .expect("persisted enqueue harness"))
+        })
+        .unwrap();
+    assert_eq!(persisted_harness, "codex");
+}
+
+#[test]
+fn memory_handlers_share_attached_service() {
+    let (_dir, flock, env) = memory_api_fixture();
+    let service = flock.memory_service().unwrap();
+    assert!(Arc::ptr_eq(&flock.memory_service().unwrap(), &service));
+    let stores = flock.stores();
+    assert!(Arc::ptr_eq(
+        stores.memory.as_ref().unwrap(),
+        service.read_pool()
+    ));
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_memory_recall_search_context();
+    dispatcher.register_memory_stats_status_ingest();
+    dispatch_memory(
+        &dispatcher,
+        &flock,
+        &env,
+        "memory_recall",
+        json!({"query": "adapter", "limit": 1}),
+    )
+    .unwrap();
+    dispatch_memory(
+        &dispatcher,
+        &flock,
+        &env,
+        "memory_search",
+        json!({"query": "adapter", "limit": 1}),
+    )
+    .unwrap();
+    let stats = dispatch_memory(&dispatcher, &flock, &env, "memory_stats", json!({})).unwrap();
+    assert!(stats["queries"]["cache_hits"].as_u64().unwrap_or_default() >= 1);
+}
+
+#[test]
+fn memory_service_attachment_rejects_replacement() {
+    let (_dir, flock, _) = memory_api_fixture();
+    let original = flock.memory_service().unwrap();
+    let replacement_dir = tempfile::tempdir().unwrap();
+    let replacement_path = replacement_dir.path().join("other-memory.db");
+    let connection = crate::db::open_writer(&replacement_path).unwrap();
+    crate::memory::recall::apply_schema(&connection).unwrap();
+    drop(connection);
+    let replacement = Arc::new(
+        crate::memory::service::MemoryService::open(
+            &replacement_path,
+            1,
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(1),
+        )
+        .unwrap(),
+    );
+
+    let error = flock.attach_memory_service(replacement).unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("a different memory service is already attached"));
+    assert!(Arc::ptr_eq(&flock.memory_service().unwrap(), &original));
+    assert!(Arc::ptr_eq(
+        flock.stores().memory.as_ref().unwrap(),
+        original.read_pool()
+    ));
+}
+
+#[test]
+fn memory_handlers_refuse_without_service() {
+    let (_dir, flock) = flock();
+    let env = TestEnv::default();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_memory_recall_search_context();
+    dispatcher.register_memory_stats_status_ingest();
+    for command in [
+        "memory_stats",
+        "memory_status",
+        "memory_recall",
+        "memory_search",
+        "memory_context",
+    ] {
+        let input = if matches!(command, "memory_stats" | "memory_status") {
+            json!({})
+        } else {
+            json!({"query":"adapter"})
+        };
+        let error = refusal(dispatch_memory(&dispatcher, &flock, &env, command, input));
+        assert!(
+            error.contains("memory service is not enabled"),
+            "{command}: {error}"
+        );
+    }
+    let error = refusal(dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("owner", true),
+        "memory_ingest",
+        args(json!({"path":"missing.jsonl"})),
+        &RequestCtx::default(),
+        &env,
+    ));
+    assert!(error.contains("memory service is not enabled"), "{error}");
+}
+
+#[test]
+fn memory_ingest_only_enqueues_on_canonical_ingestor() {
+    let (dir, flock, env) = memory_api_fixture();
+    let service = flock.memory_service().unwrap();
+    let source = dir.path().join("enqueue.jsonl");
+    std::fs::write(&source, "{}").unwrap();
+    let expected = service
+        .enqueue(source.to_str().unwrap(), Some("codex"), Some("demo"))
+        .unwrap();
+    let second = dir.path().join("enqueue-second.jsonl");
+    std::fs::write(&second, "{}").unwrap();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_memory_stats_status_ingest();
+    let request = RequestCtx::default();
+    let actual = dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("owner", true),
+        "memory_ingest",
+        args(json!({
+            "path": second.to_string_lossy(),
+            "harness": "codex",
+            "project": "demo"
+        })),
+        &request,
+        &env,
+    )
+    .unwrap();
+    assert_eq!(
+        actual,
+        json!({
+            "source_id": expected.0 + 1,
+            "queue_id": expected.1 + 1,
+            "path": second.to_string_lossy(),
+            "harness": "codex",
+            "project": "demo"
+        })
+    );
+    assert_eq!(service.status().unwrap()["ingestor"]["running"], false);
+    let enqueued = service
+        .read_pool()
+        .with(|connection| {
+            Ok(connection
+                .query_row(
+                    "SELECT path, harness, project FROM sources WHERE path=?1",
+                    [second.to_string_lossy().as_ref()],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    },
+                )
+                .expect("queued source"))
+        })
+        .unwrap();
+    assert_eq!(
+        enqueued,
+        (
+            second.to_string_lossy().into_owned(),
+            "codex".into(),
+            "demo".into()
+        )
+    );
+}
+
+#[test]
+fn memory_ingest_preserves_required_and_enqueue_errors() {
+    let (_dir, flock, env) = memory_api_fixture();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_memory_stats_status_ingest();
+    let request = RequestCtx::default();
+    let owner = FixedRole("owner", true);
+    let missing = refusal(dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &owner,
+        "memory_ingest",
+        args(json!({})),
+        &request,
+        &env,
+    ));
+    assert_eq!(missing, "memory_ingest: missing required argument(s): path");
+
+    let nonexistent = refusal(dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &owner,
+        "memory_ingest",
+        args(json!({"path":"does-not-exist.jsonl"})),
+        &request,
+        &env,
+    ));
+    assert!(
+        nonexistent.contains("source does not exist:"),
+        "{nonexistent}"
+    );
+}
+
+#[test]
+fn memory_handlers_preserve_registry_roles() {
+    let (_dir, flock, env) = memory_api_fixture();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_memory_stats_status_ingest();
+    for role in [
+        "owner",
+        "system",
+        "web",
+        "desk",
+        "planner",
+        "worker",
+        "reviewer",
+        "anonymous",
+    ] {
+        for command in ["memory_stats", "memory_status"] {
+            dispatch_with_env(
+                &dispatcher,
+                &flock,
+                &FixedRole(role, false),
+                command,
+                args(json!({})),
+                &RequestCtx::default(),
+                &env,
+            )
+            .unwrap_or_else(|error| panic!("{role} could not call {command}: {error}"));
+        }
+    }
+    let denied = refusal(dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("worker", false),
+        "memory_ingest",
+        args(json!({"path":"missing.jsonl"})),
+        &RequestCtx::default(),
+        &env,
+    ));
+    assert!(denied.contains("needs a superuser"), "{denied}");
 }
 
 #[test]
