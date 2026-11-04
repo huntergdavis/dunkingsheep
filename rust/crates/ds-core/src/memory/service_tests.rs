@@ -469,3 +469,53 @@ fn raw_since_uses_python_float_conversion_and_preserves_integer_overflow() {
     request.since = json!("inf").into();
     assert!(service.recall(&request).unwrap().is_empty());
 }
+
+#[test]
+fn oversized_event_keeps_post_append_batch_and_role_flush_boundaries() {
+    let (dir, service, _) = fixture();
+    let path = dir.path().join("oversized.jsonl");
+    // More than 500 2000-character chunks even without counting overlap.
+    // Distinct role changes before/after expose accidental cross-role grouping.
+    let events = [
+        json!({"role":"user", "text":"before oversized event"}),
+        json!({"role":"assistant", "text":"x".repeat(1_100_000)}),
+        json!({"role":"user", "text":"after oversized event"}),
+    ];
+    std::fs::write(
+        &path,
+        events
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+    .unwrap();
+    let mut sink = WriterSink(service.writer.clone());
+    super::super::jsonl::ingest_jsonl(&mut sink, &path, "generic", None, &|| false, Duration::ZERO)
+        .unwrap();
+    let (count, maximum, minimum) = service.pool.with(|db| {
+        db.query_row("SELECT COUNT(*), MAX(ordinal), MIN(ordinal) FROM chunks WHERE session_id='oversized' AND role='assistant'", [], |row| Ok((row.get::<_,i64>(0)?, row.get::<_,i64>(1)?, row.get::<_,i64>(2)?))).map_err(map_sqlite)
+    }).unwrap();
+    assert!(
+        count > 500,
+        "whole event must cross the threshold before flushing"
+    );
+    assert_eq!(minimum, 0);
+    assert_eq!(
+        maximum,
+        count - 1,
+        "no artificial split/reset at ordinal 500"
+    );
+    let user_rows = service.pool.with(|db| {
+        let mut statement = db.prepare("SELECT text, ordinal FROM chunks WHERE session_id='oversized' AND role='user' ORDER BY id").map_err(map_sqlite)?;
+        let rows = statement.query_map([], |row| Ok((row.get::<_,String>(0)?, row.get::<_,i64>(1)?))).map_err(map_sqlite)?;
+        rows.collect::<Result<Vec<_>,_>>().map_err(map_sqlite)
+    }).unwrap();
+    assert_eq!(
+        user_rows,
+        vec![
+            ("before oversized event".into(), 0),
+            ("after oversized event".into(), 0)
+        ]
+    );
+}
