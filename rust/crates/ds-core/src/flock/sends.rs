@@ -3770,11 +3770,7 @@ pub(crate) struct OutboxWorkerContext<'a, P> {
 }
 
 #[allow(dead_code)] // Production worker startup is gated to a separate runtime task.
-pub(crate) fn outbox_worker<E, P>(
-    flock: &Flock,
-    env: &mut E,
-    context: OutboxWorkerContext<'_, P>,
-)
+pub(crate) fn outbox_worker<E, P>(flock: &Flock, env: &mut E, context: OutboxWorkerContext<'_, P>)
 where
     E: SendPreparationEnv + PaneInfoEnv,
     P: FnMut() -> Option<String>,

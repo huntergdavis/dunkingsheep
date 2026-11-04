@@ -17,8 +17,6 @@ use crate::terminal::screen::{box_text, AMBIGUOUS_COMPOSER};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 
-type ReceiptForward = Box<dyn FnMut(Option<&mut Message>, &str, &str, bool, Option<&str>) -> bool>;
-
 #[derive(Default)]
 struct Pane {
     screens: BTreeMap<String, String>,
@@ -47,7 +45,7 @@ struct Pane {
     events: Vec<&'static str>,
     pending_override: Option<String>,
     receipt_frames: Vec<Option<String>>,
-    receipt_forward: Option<ReceiptForward>,
+    receipt_forward: Option<Box<ReceiptForward>>,
     send_refusal: Option<String>,
 }
 
@@ -894,7 +892,7 @@ fn outbox_worker_accepts_distinct_send_and_inbox_environment_types() {
     outbox_worker(
         &flock,
         &mut pane,
-        super::OutboxWorkerContext {
+        OutboxWorkerContext {
             inbox: &inbox,
             pane_id: P,
             stopped: &stopped,
