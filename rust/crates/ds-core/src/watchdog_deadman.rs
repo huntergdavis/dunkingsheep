@@ -831,7 +831,7 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::{symlink, PermissionsExt};
-            fs::set_permissions(&path, fs::Permissions::from_mode(0)).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
             // Root can still read mode-000 files; exercise the kernel denial when available.
             if let Err(error) = fs::read(&path) {
                 assert_eq!(io::ErrorKind::PermissionDenied, error.kind());
