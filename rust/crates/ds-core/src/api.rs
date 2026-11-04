@@ -10,6 +10,8 @@
 
 mod owner_push;
 pub use owner_push::{h_owner_poll, h_owner_push, h_owner_take};
+mod metrics;
+pub use metrics::h_metrics;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -583,6 +585,11 @@ impl Dispatcher {
     pub fn register_review_sync_list(&mut self) {
         self.register("review_sync", h_review_sync);
         self.register("review_list", h_review_list);
+    }
+
+    /// Register only the T39 operations metrics summary handler.
+    pub fn register_metrics(&mut self) {
+        self.register("metrics", h_metrics);
     }
 
     /// Register only the T39 Poolrad sync and progress handlers.
