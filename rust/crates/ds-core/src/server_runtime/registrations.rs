@@ -842,7 +842,10 @@ mod tests {
         let denied = dispatcher
             .dispatch("start_dunk", &json!({}), &worker)
             .unwrap_err();
-        assert_eq!(denied.to_string(), "start_dunk needs a superuser");
+        assert_eq!(
+            denied.to_string(),
+            "start_dunk requires a superuser (the owner role); w1:p1 is worker. Non-owners use the inbox and task queue."
+        );
         let missing = dispatcher
             .dispatch("start_dunk", &json!({}), &owner)
             .unwrap_err();
