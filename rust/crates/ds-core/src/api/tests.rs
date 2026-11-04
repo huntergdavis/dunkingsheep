@@ -7542,6 +7542,20 @@ impl SendCommandEnv for FakeSendCommands {
         )
     }
 
+    fn send_keys_raw(
+        &self,
+        target: &Value,
+        keys: &Value,
+        self_pane_id: Option<&str>,
+        hold_while_typing: bool,
+        wait_s: f64,
+    ) -> Result<Value, DunkError> {
+        self.record(
+            json!({"operation":"send_keys", "target":target, "keys":keys,
+            "self_pane_id":self_pane_id, "hold_while_typing":hold_while_typing, "wait_s":wait_s}),
+        )
+    }
+
     fn flush_box(&self, target: &Value, self_pane_id: Option<&str>) -> Result<Value, DunkError> {
         self.record(json!({"operation":"flush_box", "target":target,
             "self_pane_id":self_pane_id}))
@@ -8110,6 +8124,28 @@ fn send_text_and_keys_forward_explicit_options() {
     assert_eq!(calls[1]["operation"], "send_keys");
     assert_eq!(calls[1]["hold_while_typing"], false);
     assert_eq!(calls[1]["wait_s"], 0.0);
+}
+
+#[test]
+fn send_keys_dispatch_forwards_raw_values_without_schema_coercion() {
+    let (_dir, flock, env, dispatcher) = send_api_fixture("send-raw-keys");
+    for keys in [
+        json!(["ctrl+c Enter", false, null]),
+        json!({"z":1,"a":2}),
+        json!(false),
+        json!(0),
+    ] {
+        dispatch_as_flock_role(
+            &dispatcher,
+            &flock,
+            &env,
+            Some("w2:p2"),
+            "send_keys",
+            args(json!({"target":"self", "keys":keys,"wait_s":0})),
+        )
+        .unwrap();
+        assert_eq!(env.send.calls.lock().unwrap().last().unwrap()["keys"], keys);
+    }
 }
 
 #[test]

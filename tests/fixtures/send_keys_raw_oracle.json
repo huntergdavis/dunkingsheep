@@ -1,0 +1,109 @@
+[
+  {
+    "json": "\"ctrl+c Enter\"",
+    "keys": [
+      "ctrl+c Enter"
+    ],
+    "text": "ctrl+c Enter"
+  },
+  {
+    "json": "\"  Escape  \"",
+    "keys": [
+      "  Escape  "
+    ],
+    "text": "  Escape  "
+  },
+  {
+    "json": "[\"ctrl+c Enter\", \" \", \"\\u001c\", \" Escape \"]",
+    "keys": [
+      "ctrl+c Enter",
+      " Escape "
+    ],
+    "text": "ctrl+c Enter  Escape "
+  },
+  {
+    "json": "[null, false, true, 0, 1.0, -0.0, [\"a\\nb\"], {\"z\": 1, \"a\": false}]",
+    "keys": [
+      "None",
+      "False",
+      "True",
+      "0",
+      "1.0",
+      "-0.0",
+      "['a\\nb']",
+      "{'z': 1, 'a': False}"
+    ],
+    "text": "None False True 0 1.0 -0.0 ['a\\nb'] {'z': 1, 'a': False}"
+  },
+  {
+    "json": "{\"z key\": 1, \"a key\": 2, \" \": 3, \"\\u001f\": 4}",
+    "keys": [
+      "z key",
+      "a key"
+    ],
+    "text": "z key a key"
+  },
+  {
+    "json": "[184467440737095516160000000, 1e999, -1e999, 1e-999]",
+    "keys": [
+      "184467440737095516160000000",
+      "inf",
+      "-inf",
+      "0.0"
+    ],
+    "text": "184467440737095516160000000 inf -inf 0.0"
+  },
+  {
+    "json": "[\"\\u200b\", \"\\u001cEscape\\u001f\", \"\\u0085\"]",
+    "keys": [
+      "\u200b",
+      "\u001cEscape\u001f"
+    ],
+    "text": "\u200b \u001cEscape\u001f"
+  },
+  {
+    "json": "[]",
+    "error": "keys are required, e.g. 'Enter' or 'ctrl+c'",
+    "error_type": "DunkError"
+  },
+  {
+    "json": "{}",
+    "error": "keys are required, e.g. 'Enter' or 'ctrl+c'",
+    "error_type": "DunkError"
+  },
+  {
+    "json": "\"\"",
+    "error": "keys are required, e.g. 'Enter' or 'ctrl+c'",
+    "error_type": "DunkError"
+  },
+  {
+    "json": "null",
+    "error": "'NoneType' object is not iterable",
+    "error_type": "TypeError"
+  },
+  {
+    "json": "false",
+    "error": "'bool' object is not iterable",
+    "error_type": "TypeError"
+  },
+  {
+    "json": "0",
+    "error": "'int' object is not iterable",
+    "error_type": "TypeError"
+  },
+  {
+    "json": "7",
+    "error": "'int' object is not iterable",
+    "error_type": "TypeError"
+  },
+  {
+    "json": "1.0",
+    "error": "'float' object is not iterable",
+    "error_type": "TypeError"
+  },
+  {
+    "json": "1e999",
+    "error": "'float' object is not iterable",
+    "error_type": "TypeError"
+  }
+]

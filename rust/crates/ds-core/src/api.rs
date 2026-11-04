@@ -69,6 +69,26 @@ pub trait SendCommandEnv {
         wait_s: f64,
     ) -> Result<Value, DunkError>;
 
+    /// Raw JSON keys are normalized only by the concrete Flock path, after target resolution.
+    /// Existing string-only adapters remain compatible; non-string input fails closed unless wired.
+    fn send_keys_raw(
+        &self,
+        target: &Value,
+        keys: &Value,
+        self_pane_id: Option<&str>,
+        hold_while_typing: bool,
+        wait_s: f64,
+    ) -> Result<Value, DunkError> {
+        match keys {
+            Value::String(keys) => {
+                self.send_keys(target, keys, self_pane_id, hold_while_typing, wait_s)
+            }
+            _ => Err(DunkError::Refused(
+                "raw key command adapter is not wired".into(),
+            )),
+        }
+    }
+
     fn flush_box(&self, target: &Value, self_pane_id: Option<&str>) -> Result<Value, DunkError>;
 }
 
@@ -471,7 +491,7 @@ pub(crate) fn python_value_repr(value: &Value) -> String {
     }
 }
 
-fn python_value_string(value: &Value) -> String {
+pub(crate) fn python_value_string(value: &Value) -> String {
     match value {
         Value::String(value) => value.clone(),
         Value::Array(_) | Value::Object(_) => python_value_repr(value),
@@ -1222,11 +1242,10 @@ pub fn h_send_keys(context: &HandlerContext<'_>, args: Args) -> Result<Value, Du
     let target = send_target(context, &args, "send_keys")?;
     let keys = args
         .get("keys")
-        .and_then(Value::as_str)
-        .ok_or_else(|| DunkError::Refused("send_keys: keys must be a string".into()))?;
+        .ok_or_else(|| DunkError::Refused("'keys'".into()))?;
     let hold_while_typing = python_bool_arg(&args, "hold_while_typing", true);
     let wait_s = send_wait_s(&args, "send_keys")?;
-    context.env.send_commands()?.send_keys(
+    context.env.send_commands()?.send_keys_raw(
         &target,
         keys,
         context.self_pane_id(),
