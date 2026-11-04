@@ -16,6 +16,7 @@ mod inbox_stores;
 mod keypress;
 mod layout;
 mod layout_create;
+mod outbox_messages;
 mod outbox_runtime;
 mod owner_push;
 mod poolrad;
@@ -547,6 +548,16 @@ impl crate::api::CommandEnv for RequestRuntimeAdapter<'_> {
         self.owner_push
             .ok_or_else(|| refusal("owner push adapter is not wired"))?
             .get()
+    }
+
+    fn with_outbox_commands(
+        &self,
+        operation: &mut dyn FnMut(
+            &dyn crate::api::outbox_messages::OutboxCommandEnv,
+        ) -> Result<Value, DunkError>,
+    ) -> Result<Value, DunkError> {
+        self.require_send_outbox()?;
+        operation(self)
     }
 
     fn send_commands(&self) -> Result<&dyn crate::api::SendCommandEnv, DunkError> {

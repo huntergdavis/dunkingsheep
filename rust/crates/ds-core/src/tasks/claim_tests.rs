@@ -1,7 +1,7 @@
 //! T12 slice 1 tests: the claimability rules, the refusal reasons, leases and heartbeat.
 
 use super::*;
-use crate::tasks::FieldEdit;
+use crate::tasks::{FieldEdit, ListVisibleOptions};
 
 async fn store(tag: &str) -> crate::testsupport::Scratch<Tasks> {
     let dir = crate::testsupport::dir(&format!("claim-{tag}"));
@@ -595,7 +595,16 @@ async fn test_priority_order_then_age() {
     let high = add_with(&tasks, "high", Some("high"), &[], &[], false).await;
     let medium = add_with(&tasks, "medium", Some("medium"), &[], &[], false).await;
     let order: Vec<_> = tasks
-        .list_visible(Some("global"), None, None, false, 100, None, None, false)
+        .list_visible(ListVisibleOptions {
+            scope: Some("global"),
+            status: None,
+            assignee: None,
+            include_done: false,
+            limit: 100,
+            pane_id: None,
+            kind: None,
+            needs_owner: false,
+        })
         .await
         .unwrap()
         .into_iter()
@@ -617,7 +626,16 @@ async fn test_default_low_oldest_first_and_explicit_priority_preserved() {
     assert_eq!("low", newer.priority);
     assert_eq!("medium", explicit.priority);
     let order: Vec<_> = tasks
-        .list_visible(Some("global"), None, None, false, 100, None, None, false)
+        .list_visible(ListVisibleOptions {
+            scope: Some("global"),
+            status: None,
+            assignee: None,
+            include_done: false,
+            limit: 100,
+            pane_id: None,
+            kind: None,
+            needs_owner: false,
+        })
         .await
         .unwrap()
         .into_iter()
@@ -1087,29 +1105,29 @@ async fn test_assigned_agent_can_claim_its_task() {
     let tasks = store("py-assigned-agent").await;
     let task = add_with(&tasks, "assigned", None, &["w1:p1"], &[], false).await;
     let other = tasks
-        .list_visible(
-            Some("global"),
-            None,
-            None,
-            false,
-            100,
-            Some("w2:p2"),
-            None,
-            false,
-        )
+        .list_visible(ListVisibleOptions {
+            scope: Some("global"),
+            status: None,
+            assignee: None,
+            include_done: false,
+            limit: 100,
+            pane_id: Some("w2:p2"),
+            kind: None,
+            needs_owner: false,
+        })
         .await
         .unwrap();
     let mine = tasks
-        .list_visible(
-            Some("global"),
-            None,
-            None,
-            false,
-            100,
-            Some("w1:p1"),
-            None,
-            false,
-        )
+        .list_visible(ListVisibleOptions {
+            scope: Some("global"),
+            status: None,
+            assignee: None,
+            include_done: false,
+            limit: 100,
+            pane_id: Some("w1:p1"),
+            kind: None,
+            needs_owner: false,
+        })
         .await
         .unwrap();
     assert!(!other[0].eligible);

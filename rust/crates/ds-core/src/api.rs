@@ -11,6 +11,8 @@
 pub mod health_state;
 pub mod inbox_messages;
 pub use health_state::{h_health, h_state_capture, h_state_latest};
+pub mod outbox_messages;
+pub use outbox_messages::{h_cancel_message, h_get_message, h_list_messages};
 mod poll_roster_turn_end;
 pub use poll_roster_turn_end::{h_poll, h_roster, h_turn_end};
 mod owner_push;
@@ -103,6 +105,17 @@ pub trait CommandEnv: PaneInfoEnv {
     ) -> Result<Value, DunkError> {
         Err(DunkError::Refused(
             "layout create adapter is not wired".into(),
+        ))
+    }
+
+    fn with_outbox_commands(
+        &self,
+        _operation: &mut dyn FnMut(
+            &dyn outbox_messages::OutboxCommandEnv,
+        ) -> Result<Value, DunkError>,
+    ) -> Result<Value, DunkError> {
+        Err(DunkError::Refused(
+            "outbox command adapter is not wired".into(),
         ))
     }
 
@@ -840,6 +853,12 @@ impl Dispatcher {
     }
 
     /// Register only the T39 direct-send handlers.
+    pub fn register_outbox_messages(&mut self) {
+        self.register("list_messages", h_list_messages);
+        self.register("get_message", h_get_message);
+        self.register("cancel_message", h_cancel_message);
+    }
+
     pub fn register_send_text_keys_flush_box(&mut self) {
         self.register("send_text", h_send_text);
         self.register("send_keys", h_send_keys);

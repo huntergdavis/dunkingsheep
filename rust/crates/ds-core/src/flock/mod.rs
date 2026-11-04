@@ -9,6 +9,8 @@
 //! `_pane_info`, and the construction of the stores that have no Rust owner yet
 //! (Superusers, MemoryStore, NextJobs, Allocator, outbox/stuck state).
 
+mod outbox_api;
+
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -96,7 +98,7 @@ pub struct Flock {
     // Snapshot and runtime dunk CRUD callers are assigned to dependent leaves.
     pub(crate) dunks: dunks::DunkList,
     /// pane_id -> FIFO messages waiting for the pane's outbox worker.
-    pub(crate) outbox: Mutex<BTreeMap<String, Vec<sends::Message>>>,
+    pub(crate) outbox: Mutex<sends::Outbox>,
     /// pane_id -> the latest delivery intent used by the stuck observer.
     #[allow(dead_code)] // The stuck-recovery integration caller is owned by a later leaf.
     pub(crate) stuck_candidates: Mutex<BTreeMap<String, sends::StuckCandidate>>,
@@ -166,7 +168,7 @@ impl Flock {
             persist_enabled: persist,
             launches: Mutex::new(BTreeMap::new()),
             dunks: dunks::DunkList::new(),
-            outbox: Mutex::new(BTreeMap::new()),
+            outbox: Mutex::new(sends::Outbox::default()),
             stuck_candidates: Mutex::new(BTreeMap::new()),
             message_history: Mutex::new(VecDeque::new()),
             decided: Mutex::new(sends::DecidedMessages::default()),
@@ -337,7 +339,7 @@ impl Flock {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .by_id
             .clone();
-        let mut restored = BTreeMap::<String, Vec<sends::Message>>::new();
+        let mut restored = sends::Outbox::default();
         for row in rows {
             let Some(message) = sends::message_from_snapshot(row) else {
                 continue;
