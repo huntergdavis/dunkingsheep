@@ -183,10 +183,11 @@ pub fn expand_home(path: &str, env: &Env) -> Result<PathBuf, TerminalError> {
             .map_err(|error| TerminalError::refused(error.to_string()))
     })
 }
+type AccountLookup<'a> = dyn Fn(Option<&str>) -> Result<Option<PathBuf>, TerminalError> + 'a;
 fn expand_home_with(
     path: &str,
     env: &Env,
-    lookup: &dyn Fn(Option<&str>) -> Result<Option<PathBuf>, TerminalError>,
+    lookup: &AccountLookup<'_>,
 ) -> Result<PathBuf, TerminalError> {
     if !path.starts_with('~') {
         return Ok(PathBuf::from(path));
