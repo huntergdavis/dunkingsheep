@@ -879,7 +879,8 @@ mod tests {
         assert_eq!(services.outbox.dunk_timer_worker_count(), 1);
         assert_eq!(
             services.outbox.dunk_timer_generation("d1").unwrap(),
-            Some(0)
+            Some(1),
+            "repeated start wakes the existing worker once to reset its deadline"
         );
         assert_eq!(
             cached_dunks(&services, &owner, &status_reads)["dunks"][0]["running"],
