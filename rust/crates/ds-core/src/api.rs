@@ -346,7 +346,7 @@ pub(crate) fn python_value_repr(value: &Value) -> String {
         Value::Null => "None".into(),
         Value::Bool(true) => "True".into(),
         Value::Bool(false) => "False".into(),
-        Value::Number(value) => value.to_string(),
+        Value::Number(value) => crate::github::python_number_string(value),
     }
 }
 
@@ -357,7 +357,7 @@ fn python_value_string(value: &Value) -> String {
         Value::Null => "None".into(),
         Value::Bool(true) => "True".into(),
         Value::Bool(false) => "False".into(),
-        Value::Number(value) => value.to_string(),
+        Value::Number(value) => crate::github::python_number_string(value),
     }
 }
 
@@ -2881,3 +2881,5 @@ fn py_repr(text: &str) -> String {
 
 #[cfg(test)]
 mod tests;
+
+mod task_statistics;

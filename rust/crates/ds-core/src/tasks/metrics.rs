@@ -199,6 +199,24 @@ impl Tasks {
             })
             .await?;
 
+        // Python's `int(until - since)` runs after the SQL reads, truncates toward zero,
+        // accepts arbitrarily large finite results, and raises for NaN/infinity.
+        let seconds = until - since;
+        let window_seconds = if seconds.is_nan() {
+            return Err(DunkError::Refused(
+                "cannot convert float NaN to integer".into(),
+            ));
+        } else if seconds.is_infinite() {
+            return Err(DunkError::Refused(
+                "cannot convert float infinity to integer".into(),
+            ));
+        } else {
+            let integer = format!("{:.0}", seconds.trunc());
+            serde_json::from_str::<Value>(&integer).map_err(|_| {
+                DunkError::Refused("task metrics window integer is not representable".into())
+            })?
+        };
+
         let mut by_status: BTreeMap<String, i64> =
             STATUSES.iter().map(|s| (s.to_string(), 0)).collect();
         let mut by_priority: BTreeMap<String, i64> =
@@ -277,7 +295,7 @@ impl Tasks {
             "window": {
                 "since": since,
                 "until": until,
-                "seconds": (until - since) as i64,
+                "seconds": window_seconds,
                 "bucket_seconds": bucket_s,
                 "bucket": if bucket_s == 86400 { "day" } else { "hour" },
             },
@@ -545,6 +563,51 @@ mod tests {
                 serde_json::to_string_pretty(&case["expected"]).unwrap(),
                 serde_json::to_string_pretty(&actual).unwrap()
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod window_integer_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn metrics_seconds_match_python_int_float_conversion() {
+        let dir = crate::testsupport::dir("metrics-window-integer");
+        let tasks = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+        for (until, since, expected) in [
+            (100.0, 99.75, "0"),
+            (100.0, 100.0, "0"),
+            (1e30, 0.0, "1000000000000000019884624838656"),
+            (0.0, 1e30, "-1000000000000000019884624838656"),
+        ] {
+            let value = tasks
+                .metrics(MetricsOptions {
+                    window_s: 3600.0,
+                    since: Some(since),
+                    until: Some(until),
+                    scopes: None,
+                    bucket: "hour".into(),
+                    scope_label: "all".into(),
+                })
+                .await
+                .unwrap();
+            assert_eq!(value["window"]["seconds"].to_string(), expected);
+        }
+        for (until, message) in [(f64::NAN, "NaN"), (f64::INFINITY, "infinity")] {
+            let error = tasks
+                .metrics(MetricsOptions {
+                    window_s: 3600.0,
+                    since: Some(0.0),
+                    until: Some(until),
+                    scopes: None,
+                    bucket: "hour".into(),
+                    scope_label: "all".into(),
+                })
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(message), "{error}");
         }
     }
 }

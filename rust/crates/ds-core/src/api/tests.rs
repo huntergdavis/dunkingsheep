@@ -4392,6 +4392,7 @@ fn task_mutation_api_fixture() -> (
     });
     let mut dispatcher = Dispatcher::new();
     dispatcher.register_task_mutation_leases();
+    dispatcher.register_task_statistics();
     (runtime, dir, flock, tasks, dispatcher)
 }
 
@@ -7949,4 +7950,223 @@ fn h_owner_ingest_raw_errors_match_python_order() {
             "failed request inserted {external_id}"
         );
     }
+}
+
+#[test]
+fn task_statistics_dispatch_tests_task_stats_metrics_reap_roles_and_outputs() {
+    let (runtime, _dir, flock, tasks, dispatcher) = task_mutation_api_fixture();
+    runtime
+        .block_on(tasks.add("global", "visible", ""))
+        .unwrap();
+    runtime.block_on(tasks.add("w1:p1", "private", "")).unwrap();
+    let stats = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_stats",
+        json!({}),
+        Some("w1:p1"),
+        None,
+    )
+    .unwrap();
+    assert_eq!(stats["totals"]["open"], 2);
+    let metrics = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_metrics",
+        json!({"window_s":"3600","bucket":""}),
+        Some("w1:p1"),
+        None,
+    )
+    .unwrap();
+    assert_eq!(metrics["scope"], "visible");
+    assert_eq!(metrics["window"]["seconds"], 3600);
+    assert_eq!(metrics["window"]["bucket"], "hour");
+    let denied = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_reap",
+        json!({}),
+        Some("w1:p1"),
+        None,
+    )
+    .unwrap_err();
+    assert!(
+        denied.to_string().contains("task_reap is not permitted for role worker (pane w1:p1); see docs/FLAT_FLEET.md section 4.3"),
+        "{denied}"
+    );
+    let fixture_refusal = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_reap",
+        json!({}),
+        Some("w1:p2"),
+        None,
+    )
+    .unwrap_err();
+    assert!(
+        fixture_refusal.to_string().contains("alive_source='live'"),
+        "{fixture_refusal}"
+    );
+    // These roles are not registerable pane identities in the real Roles store, so exercise
+    // their registry policy through the same Dispatcher with the existing deterministic gate.
+    for role in ["system", "web"] {
+        let env = TestEnv::default();
+        let request = RequestCtx::default();
+        let context = HandlerContext {
+            flock: &flock,
+            request: &request,
+            env: &env,
+            runtime: runtime.handle(),
+        };
+        let gate = FixedRole(role, true);
+        let refused = dispatcher
+            .dispatch(&context, &gate, "task_reap", args(json!({})))
+            .unwrap_err();
+        assert!(
+            refused.to_string().contains("alive_source='live'"),
+            "{role}: {refused}"
+        );
+    }
+}
+
+#[test]
+fn task_stats_defaults_scope_and_privacy_match_python_dispatch() {
+    let (runtime, _dir, flock, tasks, dispatcher) = task_mutation_api_fixture();
+    runtime.block_on(tasks.add("global", "global", "")).unwrap();
+    runtime.block_on(tasks.add("w1:p1", "mine", "")).unwrap();
+    runtime.block_on(tasks.add("w1:p3", "other", "")).unwrap();
+    let visible = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_stats",
+        json!({}),
+        Some("w1:p1"),
+        None,
+    )
+    .unwrap();
+    assert_eq!(visible["totals"]["open"], 2);
+    let global = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_stats",
+        json!({"scope":"global"}),
+        Some("w1:p1"),
+        None,
+    )
+    .unwrap();
+    assert_eq!(global["totals"]["open"], 1);
+    let denied = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_stats",
+        json!({"scope":"w1:p3"}),
+        Some("w1:p1"),
+        None,
+    )
+    .unwrap_err();
+    assert!(
+        denied.to_string().contains("per-pane tasks are private"),
+        "{denied}"
+    );
+}
+
+#[test]
+fn task_metrics_defaults_coercions_and_scope_match_python_dispatch() {
+    let (runtime, _dir, flock, tasks, dispatcher) = task_mutation_api_fixture();
+    runtime.block_on(tasks.add("global", "global", "")).unwrap();
+    runtime.block_on(tasks.add("w1:p1", "mine", "")).unwrap();
+    runtime.block_on(tasks.add("w1:p3", "other", "")).unwrap();
+    let default = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_metrics",
+        json!({"window_s":null,"since":null,"until":null,"bucket":false}),
+        Some("w1:p1"),
+        None,
+    )
+    .unwrap();
+    assert_eq!(default["scope"], "visible");
+    assert_eq!(default["window"]["seconds"], 3600);
+    assert_eq!(default["window"]["bucket"], "hour");
+    let converted = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_metrics",
+        json!({"window_s":"10","since":"90","until":"100","scope":"global","bucket":"DAY"}),
+        Some("w1:p1"),
+        None,
+    )
+    .unwrap();
+    assert_eq!(converted["scope"], "global");
+    assert_eq!(converted["window"]["seconds"], 10);
+    assert_eq!(converted["window"]["bucket"], "day");
+    let precedence = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_metrics",
+        json!({"scope":"w1:p3", "since":{"bad":"type"}}),
+        Some("w1:p1"),
+        None,
+    )
+    .unwrap_err();
+    assert!(
+        precedence
+            .to_string()
+            .contains("per-pane tasks are private"),
+        "{precedence}"
+    );
+}
+
+#[test]
+fn task_reap_live_tmux_listing_failure_reopens_expired_claim() {
+    let (runtime, dir, flock, tasks, mut dispatcher) = task_mutation_api_fixture();
+    let task = runtime
+        .block_on(tasks.add("global", "expired", ""))
+        .unwrap();
+    runtime
+        .block_on(tasks.set_status(&task.id, "in_progress", None, None))
+        .unwrap();
+    runtime.block_on(tasks.insert_lease(&task.id, "w9:p9", 1.0, 1.0, 2.0));
+    let missing_tmux = dir.path().join("missing-tmux-command");
+    let env = TestEnv(Mutex::new(Box::new(
+        crate::terminal::tmux::TmuxBackend::new(missing_tmux),
+    )));
+    let request = RequestCtx {
+        self_pane_id: Some("w1:p2".into()),
+        ..RequestCtx::default()
+    };
+    let context = HandlerContext {
+        flock: &flock,
+        request: &request,
+        env: &env,
+        runtime: runtime.handle(),
+    };
+    let gate = FlockGate(&context);
+    dispatcher.register_task_statistics();
+    let reaped = dispatcher
+        .dispatch(&context, &gate, "task_reap", args(json!({})))
+        .unwrap();
+    assert_eq!(
+        reaped["requeued"],
+        json!([{"task_id":task.id,"pane_id":"w9:p9","reason":"expired"}])
+    );
+    assert_eq!(
+        runtime.block_on(tasks.get(&task.id)).unwrap().status,
+        "open"
+    );
+    assert_eq!(runtime.block_on(tasks.leases(&task.id)), 0);
+    let again = dispatcher
+        .dispatch(&context, &gate, "task_reap", args(json!({})))
+        .unwrap();
+    assert_eq!(again["requeued"], json!([]));
 }

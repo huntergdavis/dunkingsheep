@@ -5,6 +5,7 @@
 //! exercised without touching a user's config or making a live request.
 
 mod mints;
+pub(crate) use mints::python_number_string;
 pub use mints::{author_from_mints, author_mint_path, record_author_mint, repos_config};
 
 /// Parse a Python-compatible float string using the existing mint decoder.

@@ -463,6 +463,11 @@ pub(super) fn parse_float(raw: &str) -> Result<f64, FloatError> {
         _ => raw.parse().map_err(|_| FloatError::Invalid),
     }
 }
+/// Render an already validated serde JSON number using Python string semantics.
+pub(crate) fn python_number_string(number: &serde_json::Number) -> String {
+    number_text(&number.to_string(), false)
+}
+
 fn number_text(raw: &str, json: bool) -> String {
     if integer(raw) {
         return if raw == "-0" { "0".into() } else { raw.into() };
