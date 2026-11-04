@@ -726,6 +726,94 @@ mod tests {
     use crate::terminal::fakes::FakeTerminal;
 
     #[test]
+    fn held_timer_wake_rechecks_idle_before_another_attempt() {
+        let dir = tempfile::tempdir().unwrap();
+        let flock = Arc::new(Flock::new(
+            dir.path().join("launches"),
+            dir.path().join("lanes"),
+            false,
+        ));
+        flock.attach_stores(crate::flock::panes::Stores {
+            inbox: Some(Arc::new(
+                crate::inbox_store::Store::open(
+                    dir.path().join("inbox.db"),
+                    dir.path().join("blobs"),
+                )
+                .unwrap(),
+            )),
+            ..Default::default()
+        });
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let owner = OutboxRuntime::new(
+            Arc::clone(&flock),
+            runtime.handle().clone(),
+            Arc::new(|| {
+                let mut fake = FakeTerminal::new();
+                fake.statuses.insert("w1:p1".into(), "working".into());
+                fake.screens.insert(
+                    "w1:p1".into(),
+                    "Press Enter to confirm or Esc to cancel".into(),
+                );
+                Box::new(fake)
+            }),
+        )
+        .unwrap();
+        let pane = serde_json::json!({"pane_id": "w1:p1"});
+        owner
+            .add_dunk(
+                pane.as_object(),
+                &AddArgs {
+                    start: true,
+                    interval: Some("0.001".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let row = flock.dunks.get("d1").unwrap();
+            if row["hold_count"].as_i64().unwrap() > 0 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timer did not enter guarded hold"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        owner
+            .update_dunk(
+                "d1",
+                None,
+                &UpdateArgs {
+                    only_when: Some(Some("idle".into())),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let row = flock.dunks.get("d1").unwrap();
+            assert_eq!(serde_json::json!(0), row["send_count"]);
+            if row["status"] == "Busy" {
+                assert_eq!(serde_json::json!(1), row["hold_count"]);
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "held timer did not recheck idle after wake"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        owner.stop_dunk("d1").unwrap();
+        assert!(owner.dunk_timers.workers.lock().unwrap().is_empty());
+        owner.stop_and_join();
+    }
+
+    #[test]
     fn timer_factory_failure_is_observable_and_worker_remains_joinable() {
         let dir = tempfile::tempdir().unwrap();
         let flock = Arc::new(Flock::new(
