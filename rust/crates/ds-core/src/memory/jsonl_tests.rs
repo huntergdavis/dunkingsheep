@@ -458,10 +458,22 @@ fn throttle_oracle_case(
         .collect::<Result<_, _>>()
         .unwrap();
     let actual = json!({"error":error,"flushes":flushes,"rows":rows,"result":result,"throttle":crate::usage::py_float_repr(seconds)});
+    for field in ["error", "flushes", "result", "throttle"] {
+        assert_eq!(
+            actual[field], expected[field],
+            "field={field}, raw={raw}, stop={stop_at:?}, duplicate={duplicate}"
+        );
+    }
+    let actual_rows = actual["rows"].as_array().unwrap();
+    let expected_rows = expected["rows"].as_array().unwrap();
     assert_eq!(
-        actual, expected,
-        "raw={raw}, stop={stop_at:?}, duplicate={duplicate}"
+        actual_rows.len(),
+        expected_rows.len(),
+        "committed row count, raw={raw}"
     );
+    for (index, (actual, expected)) in actual_rows.iter().zip(expected_rows).enumerate() {
+        assert_eq!(actual, expected, "committed row {index}, raw={raw}");
+    }
     actual
 }
 
@@ -515,7 +527,7 @@ fn memory_throttle_python_role_flush_overshoot_zero_and_duplicate_boundaries() {
         }
     }
     let huge = [
-        json!({"role":"assistant","text":"abcdefghij".repeat(110_000)}),
+        json!({"role":"assistant","text":"abcdefghij".repeat(220_000)}),
         json!({"role":"user","text":"not reached after failure"}),
     ];
     for raw in ["-1", "NaN", "Infinity", "0"] {

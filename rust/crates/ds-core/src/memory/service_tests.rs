@@ -647,12 +647,13 @@ fn memory_throttle_real_worker_accepts_raw_float_then_fails_after_committed_flus
             );
             std::thread::sleep(Duration::from_millis(1));
         }
-        let (state, source_error, queue_error, stored) = service.pool.with(|db| {
-            db.query_row("SELECT s.state,s.error,q.error,(SELECT text FROM chunks WHERE session_id='text') FROM sources s JOIN ingest_queue q ON q.source_id=s.id WHERE s.path=?", [text.to_str().unwrap()], |row| {
-                Ok((row.get::<_,String>(0)?, row.get::<_,String>(1)?, row.get::<_,String>(2)?, row.get::<_,String>(3)?))
+        let (state, queue_state, source_error, queue_error, stored) = service.pool.with(|db| {
+            db.query_row("SELECT s.state,q.state,s.error,q.error,(SELECT text FROM chunks WHERE session_id='text') FROM sources s JOIN ingest_queue q ON q.source_id=s.id WHERE s.path=?", [text.to_str().unwrap()], |row| {
+                Ok((row.get::<_,String>(0)?, row.get::<_,String>(1)?, row.get::<_,String>(2)?, row.get::<_,String>(3)?, row.get::<_,String>(4)?))
             }).map_err(map_sqlite)
         }).unwrap();
-        assert_eq!(state, "failed");
+        assert_eq!(state, "error");
+        assert_eq!(queue_state, "failed");
         assert_eq!(source_error, message);
         assert_eq!(queue_error, message);
         assert_eq!(stored, "committed before native sleep failure");
