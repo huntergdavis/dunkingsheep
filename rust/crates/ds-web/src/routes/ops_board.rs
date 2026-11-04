@@ -215,7 +215,9 @@ mod tests {
     };
     use tower::ServiceExt;
 
-    struct FakeAuth;
+    struct FakeAuth {
+        fail_identity: bool,
+    }
 
     impl AuthBackend for FakeAuth {
         fn login<'a>(
@@ -230,7 +232,12 @@ mod tests {
             _: Option<&'a str>,
             _: Option<&'a str>,
         ) -> super::super::auth::AuthFuture<'a, Result<Identity, AuthError>> {
-            Box::pin(async { Ok(Identity::Owner) })
+            let result = if self.fail_identity {
+                Err(AuthError::SignInRequired)
+            } else {
+                Ok(Identity::Owner)
+            };
+            Box::pin(async move { result })
         }
         fn logout<'a>(
             &'a self,
@@ -294,8 +301,51 @@ mod tests {
 
     fn app(board: Arc<FakeBoard>) -> Router {
         let board: Arc<dyn OpsBoardBackend> = board;
-        let auth: Arc<dyn AuthBackend> = Arc::new(FakeAuth);
+        let auth: Arc<dyn AuthBackend> = Arc::new(FakeAuth {
+            fail_identity: false,
+        });
         router(board, auth, RequestScheme::Http)
+    }
+
+    #[test]
+    fn routes_reject_cross_origin_and_unauthenticated_requests_before_backend_calls() {
+        let board = Arc::new(FakeBoard::default());
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/ops-board/refresh")
+            .header(header::HOST, "desk.test")
+            .header(header::ORIGIN, "https://other.test")
+            .body(Body::empty())
+            .unwrap();
+        let response = block_on(app(board.clone()).oneshot(request)).unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let bytes = block_on(to_bytes(response.into_body(), usize::MAX)).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&bytes).unwrap(),
+            json!({"detail": "Cross-origin request refused"})
+        );
+        assert_eq!(board.refresh_calls.load(Ordering::SeqCst), 0);
+
+        let board = Arc::new(FakeBoard::default());
+        let board_backend: Arc<dyn OpsBoardBackend> = board.clone();
+        let auth_backend: Arc<dyn AuthBackend> = Arc::new(FakeAuth {
+            fail_identity: true,
+        });
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/ops-board/refresh")
+            .body(Body::empty())
+            .unwrap();
+        let response =
+            block_on(router(board_backend, auth_backend, RequestScheme::Http).oneshot(request))
+                .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let bytes = block_on(to_bytes(response.into_body(), usize::MAX)).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&bytes).unwrap(),
+            json!({"detail": "Sign in required"})
+        );
+        assert_eq!(board.refresh_calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]
