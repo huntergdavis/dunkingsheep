@@ -147,6 +147,7 @@ pub struct FakeTerminal {
     pub keys_sent: Vec<(String, Vec<String>)>,
     /// Every `(pane_id, lines, ansi)` read.
     pub reads: Arc<Mutex<Vec<(String, i64, bool)>>>,
+    pub raw_events: Arc<Mutex<Vec<serde_json::Value>>>,
     counter: i64,
 }
 
@@ -170,6 +171,7 @@ impl Default for FakeTerminal {
             submits: Vec::new(),
             keys_sent: Vec::new(),
             reads: Arc::new(Mutex::new(Vec::new())),
+            raw_events: Arc::new(Mutex::new(Vec::new())),
             counter: 100,
         }
     }
@@ -256,6 +258,75 @@ impl Terminal for FakeTerminal {
         Ok(self.children.get(&pane_pid).cloned().unwrap_or_default())
     }
 
+    fn create_workspace_raw(
+        &mut self,
+        label: &serde_json::Value,
+        cwd: &serde_json::Value,
+        focus: bool,
+    ) -> Result<Workspace, TerminalError> {
+        self.raw_events
+            .lock()
+            .unwrap()
+            .push(serde_json::json!(["workspace", label, cwd, focus]));
+        let workspace = self.create_workspace(
+            super::raw::optional(label).as_deref(),
+            super::raw::optional(cwd).as_deref(),
+            focus,
+        )?;
+        let tab = Tab {
+            tab_id: format!("{}:t1", workspace.workspace_id),
+            workspace_id: workspace.workspace_id.clone(),
+            label: "1".into(),
+            index: 1,
+            active: true,
+        };
+        self.panes.push(Pane {
+            pane_id: format!("{}:p1", workspace.workspace_id),
+            session_id: workspace.workspace_id.clone(),
+            window_id: tab.tab_id.clone(),
+            command: "bash".into(),
+            cwd: super::raw::optional(cwd).unwrap_or_default(),
+            workspace: workspace.label.clone(),
+            tab: "1".into(),
+            ..Pane::default()
+        });
+        self.tabs.push(tab);
+        Ok(workspace)
+    }
+    fn create_tab_raw(
+        &mut self,
+        workspace: Option<&str>,
+        label: &serde_json::Value,
+        cwd: &serde_json::Value,
+        focus: bool,
+    ) -> Result<Tab, TerminalError> {
+        self.raw_events
+            .lock()
+            .unwrap()
+            .push(serde_json::json!(["tab", workspace, label, cwd, focus]));
+        self.create_tab(
+            workspace,
+            super::raw::optional(label).as_deref(),
+            super::raw::optional(cwd).as_deref(),
+            focus,
+        )
+    }
+    fn send_text_raw(
+        &mut self,
+        pane: &str,
+        text: &serde_json::Value,
+    ) -> Result<Result<(), TerminalError>, crate::error::DunkError> {
+        self.raw_events
+            .lock()
+            .unwrap()
+            .push(serde_json::json!(["send_raw", pane, text]));
+        for chunk in super::raw::text_chunks(text)? {
+            if let Err(error) = self.send_text(pane, &chunk) {
+                return Ok(Err(error));
+            }
+        }
+        Ok(Ok(()))
+    }
     fn create_workspace(
         &mut self,
         label: Option<&str>,
@@ -512,6 +583,10 @@ impl Terminal for FakeTerminal {
         if !self.available {
             return Err(TerminalError::unavailable(self.server_error_hint()));
         }
+        self.raw_events
+            .lock()
+            .unwrap()
+            .push(serde_json::json!(["typed", pane_id, text]));
         self.sends.push((pane_id.to_string(), text.to_string()));
         Ok(())
     }
@@ -526,6 +601,10 @@ impl Terminal for FakeTerminal {
         if !self.available {
             return Err(TerminalError::unavailable(self.server_error_hint()));
         }
+        self.raw_events
+            .lock()
+            .unwrap()
+            .push(serde_json::json!(["keys", pane_id, keys]));
         self.keys_sent.push((
             pane_id.to_string(),
             keys.iter().map(|key| key.to_string()).collect(),

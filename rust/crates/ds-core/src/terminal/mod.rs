@@ -17,6 +17,7 @@ pub mod composer;
 pub mod control;
 pub mod fakes;
 pub mod parse;
+pub(crate) mod raw;
 pub mod screen;
 pub mod tmux;
 pub mod tmux_registry;
@@ -215,6 +216,59 @@ pub trait Terminal: std::fmt::Debug {
         direction: &str,
         cwd: Option<&str>,
     ) -> Result<Pane, TerminalError>;
+    /// Raw create inputs retain Python truthiness until the backend operation.
+    fn create_workspace_raw(
+        &mut self,
+        label: &serde_json::Value,
+        cwd: &serde_json::Value,
+        focus: bool,
+    ) -> Result<Workspace, TerminalError> {
+        self.create_workspace(
+            raw::optional(label).as_deref(),
+            raw::optional(cwd).as_deref(),
+            focus,
+        )
+    }
+    fn create_tab_raw(
+        &mut self,
+        workspace: Option<&str>,
+        label: &serde_json::Value,
+        cwd: &serde_json::Value,
+        focus: bool,
+    ) -> Result<Tab, TerminalError> {
+        self.create_tab(
+            workspace,
+            raw::optional(label).as_deref(),
+            raw::optional(cwd).as_deref(),
+            focus,
+        )
+    }
+    fn split_pane_raw(
+        &mut self,
+        pane: &str,
+        direction: &str,
+        cwd: &serde_json::Value,
+        focus: bool,
+    ) -> Result<Pane, TerminalError> {
+        let created = self.split_pane(pane, direction, raw::optional(cwd).as_deref())?;
+        if !focus {
+            self.focus("pane", pane)?;
+        }
+        Ok(created)
+    }
+    /// Outer error is a thrown input error; inner error is the backend's normal refusal.
+    fn send_text_raw(
+        &mut self,
+        pane: &str,
+        text: &serde_json::Value,
+    ) -> Result<Result<(), TerminalError>, crate::error::DunkError> {
+        for chunk in raw::text_chunks(text)? {
+            if let Err(error) = self.send_text(pane, &chunk) {
+                return Ok(Err(error));
+            }
+        }
+        Ok(Ok(()))
+    }
     fn start_agent(&mut self, spec: &AgentSpec) -> Result<Pane, TerminalError>;
     /// Guarded same-pane replacement. Unsupported backends must refuse explicitly.
     fn guarded_respawn(

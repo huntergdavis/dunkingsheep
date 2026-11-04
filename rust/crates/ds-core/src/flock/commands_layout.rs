@@ -55,6 +55,46 @@ pub trait LayoutBackend {
         cwd: Option<&str>,
         focus: bool,
     ) -> Result<Value, String>;
+    fn create_workspace_raw(
+        &mut self,
+        label: &Value,
+        cwd: &Value,
+        focus: bool,
+    ) -> Result<Value, String> {
+        self.create_workspace(
+            crate::terminal::raw::optional(label).as_deref(),
+            crate::terminal::raw::optional(cwd).as_deref(),
+            focus,
+        )
+    }
+    fn create_tab_raw(
+        &mut self,
+        workspace: Option<&str>,
+        label: &Value,
+        cwd: &Value,
+        focus: bool,
+    ) -> Result<Value, String> {
+        self.create_tab(
+            workspace,
+            crate::terminal::raw::optional(label).as_deref(),
+            crate::terminal::raw::optional(cwd).as_deref(),
+            focus,
+        )
+    }
+    fn split_pane_raw(
+        &mut self,
+        pane: &str,
+        direction: &str,
+        cwd: &Value,
+        focus: bool,
+    ) -> Result<Value, String> {
+        self.split_pane(
+            pane,
+            direction,
+            crate::terminal::raw::optional(cwd).as_deref(),
+            focus,
+        )
+    }
     #[allow(clippy::too_many_arguments)]
     fn start_agent(
         &mut self,
@@ -71,6 +111,8 @@ pub trait LayoutBackend {
 }
 
 /// `submit_text(pane_id, command) -> (ran, message)`.
+pub type RawSubmit<'a> = &'a mut dyn FnMut(&str, &Value) -> Result<(bool, String), DunkError>;
+
 pub type Submit<'a> = &'a mut dyn FnMut(&str, &str) -> (bool, String);
 
 fn refused<T>(text: String) -> Result<T, DunkError> {
@@ -198,6 +240,7 @@ impl Flock {
         env: &dyn super::panes::PaneInfoEnv,
     ) -> Result<Value, DunkError> {
         let mut out = create_workspace(backend, label, cwd, command, focus, submit)?;
+        self.set_last_message(format!("Created workspace {}", label.unwrap_or("")).trim());
         let pane_id = out
             .get("pane_id")
             .and_then(Value::as_str)

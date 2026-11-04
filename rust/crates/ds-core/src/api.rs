@@ -24,6 +24,8 @@ mod dunk_get;
 pub use dunk_get::h_get_dunk;
 mod project_summary;
 pub use project_summary::h_project_summary;
+mod layout_create;
+pub use layout_create::{h_create_tab, h_create_workspace, h_split_pane};
 mod respawn;
 pub use respawn::h_respawn_pane;
 
@@ -86,6 +88,20 @@ pub trait OwnerViewEnv {
 /// A synchronous adapter for command dependencies. All methods are object-safe so a daemon can
 /// supply one per request without putting backend types in handler signatures.
 pub trait CommandEnv: PaneInfoEnv {
+    /// Borrow the request's layout and pane services, with confirmed command submission.
+    fn with_layout_create(
+        &self,
+        _operation: &mut dyn FnMut(
+            &mut dyn crate::flock::commands_layout::LayoutBackend,
+            &dyn PaneInfoEnv,
+            crate::flock::commands_layout::RawSubmit<'_>,
+        ) -> Result<Value, DunkError>,
+    ) -> Result<Value, DunkError> {
+        Err(DunkError::Refused(
+            "layout create adapter is not wired".into(),
+        ))
+    }
+
     /// Borrow the validated inbox services for this request on its owning thread.
     fn with_inbox_env(
         &self,
@@ -856,6 +872,13 @@ impl Dispatcher {
         self.register("stop_all", h_stop_all);
         self.register("fire_dunk", h_fire_dunk);
         self.register("list_dunks", h_list_dunks);
+    }
+
+    /// Register only the three create-layout commands.
+    pub fn register_layout_create(&mut self) {
+        self.register("create_workspace", h_create_workspace);
+        self.register("create_tab", h_create_tab);
+        self.register("split_pane", h_split_pane);
     }
 
     /// `dunk_api.dispatch(flock, name, args, self_pane_id)`, with the acting pane read only from
