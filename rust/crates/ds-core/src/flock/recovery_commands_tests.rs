@@ -212,6 +212,11 @@ fn recover_doctor_match_actual_python_commands_and_error_order() {
         }
     }
     for recheck in [
+        json!(false),
+        json!(0),
+        json!(""),
+        json!([]),
+        json!(1),
         Value::Null,
         json!({}),
         json!({"agent":"codex"}),
@@ -402,6 +407,31 @@ fn recover_doctor_match_actual_python_commands_and_error_order() {
     let mut c = base();
     c["dunks"] = json!([{"id":"d1","running":false,"target_pane_id":"%1"}]);
     cases.push(c);
+    for session in [
+        Value::Null,
+        json!(false),
+        json!([]),
+        json!(""),
+        json!(3),
+        json!(["bad"]),
+        json!({"agent":"pi","value":0}),
+        json!({"agent":false,"value":"s"}),
+    ] {
+        let mut c = base();
+        c["record"] = json!(true);
+        c["panes"][0]["agent_session"] = session;
+        cases.push(c);
+    }
+    let mut c = base();
+    c["record"] = json!(true);
+    c["panes"] = json!([{"pane_id":"%1","agent":"pi","agent_session":{"value":"s"}}, {"pane_id":"%2","agent_session":7}]);
+    cases.push(c);
+    let mut c = base();
+    c["record"] = json!(true);
+    c["launches"]["%1"]["source"] = Value::Null;
+    c["panes"][0]["agent"] = json!("pi");
+    c["panes"][0]["agent_session"] = json!({"value":"s"});
+    cases.push(c);
     let input = json!({"source":include_str!("../../../../../dunk_core.py"),"cases":cases});
     let mut child = Command::new("python3")
         .args(["-c", PYTHON_ORACLE])
@@ -555,4 +585,26 @@ fn recovery_launch_order_is_in_memory_insertion_but_persisted_json_stays_sorted(
             .collect::<Vec<_>>(),
         ["%9", "%2", "%1"]
     );
+}
+
+#[test]
+fn recovery_record_refuses_noncanonical_identity_without_synthesizing_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Flock::new(
+        dir.path().join("launches.json"),
+        dir.path().join("lanes.json"),
+        true,
+    );
+    let config = json!({"panes":[{"pane_id":null,"agent":"pi","agent_session":{"value":"s"}}],"dunks":[],"launches":{}});
+    let env = Env {
+        flock: &flock,
+        config,
+        calls: RefCell::new(Vec::new()),
+    };
+    assert!(matches!(
+        flock.recover(&env, true, true),
+        Err(RecoveryCommandError::Backend(DunkError::Identity(_)))
+    ));
+    assert!(flock.launches.lock().unwrap().is_empty());
+    assert_eq!(env.calls.into_inner(), [json!(["list", null])]);
 }

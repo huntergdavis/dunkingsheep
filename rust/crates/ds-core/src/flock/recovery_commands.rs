@@ -18,6 +18,8 @@ pub type RecoveryResult<T> = Result<T, RecoveryCommandError>;
 /// Required request-scoped services. No method has an empty/success default.
 /// The production adapter must use canonical backend/memory/guard services and
 /// guarded submission; tests may provide deterministic isolated implementations.
+/// Recordable pane identities must be canonical string IDs; raw metadata values
+/// remain uncoerced. A malformed identity is refused before inserting a launch.
 pub trait RecoverEnv {
     fn list_panes(&self) -> RecoveryResult<Vec<Value>>;
     fn get_pane(&self, pane_id: &Value) -> RecoveryResult<Option<Value>>;
@@ -334,6 +336,61 @@ impl Flock {
         Ok(warnings)
     }
 
+    // The recovery seam carries raw Python metadata. Keep its truthiness/error
+    // ordering while updating the same canonical launch map (not a second store).
+    fn snapshot_recovery_launches(&self, panes: &[Value]) -> RecoveryResult<()> {
+        if !self.persist_enabled {
+            return Ok(());
+        }
+        let mut changed = false;
+        {
+            let mut launches = self.launches.lock().expect("launches lock");
+            for pane in panes {
+                let empty = json!({});
+                let session = either(field(pane, "agent_session")?, &empty);
+                let pane_agent = field(pane, "agent")?;
+                let agent = if truthy(pane_agent) {
+                    pane_agent
+                } else {
+                    field(session, "agent")?
+                };
+                let value = field(session, "value")?;
+                if !truthy(agent) || !truthy(value) {
+                    continue;
+                }
+                // Canonical launch identities are backend pane IDs, not JSON keys
+                // synthesized from arbitrary metadata.
+                let id = field(pane, "pane_id")?.as_str().ok_or_else(|| {
+                    DunkError::Identity("recovery recording requires a string pane_id".into())
+                })?;
+                let entry = launches.entry(id.to_owned()).or_default();
+                let fields = [
+                    ("agent", agent),
+                    ("session", value),
+                    ("session_kind", field(session, "kind")?),
+                    (
+                        "cwd",
+                        either(field(pane, "cwd")?, field(pane, "foreground_cwd")?),
+                    ),
+                    ("terminal_title", field(pane, "terminal_title_stripped")?),
+                ];
+                for (key, value) in fields {
+                    if !value.is_null() && entry.get(key) != Some(value) {
+                        entry.insert(key.to_owned(), value.clone());
+                        changed = true;
+                    }
+                }
+                if changed && entry.get("source").is_none_or(Value::is_null) {
+                    entry.insert("source".into(), json!("herdr"));
+                }
+            }
+        }
+        if changed {
+            self.save_launches();
+        }
+        Ok(())
+    }
+
     /// Python Flock.recover. Caller authorization belongs to the consuming API leaf.
     pub fn recover(
         &self,
@@ -344,7 +401,7 @@ impl Flock {
         let panes = env.list_panes()?;
         let by_id = pane_index(&panes)?;
         if record {
-            self.snapshot_launches(&panes);
+            self.snapshot_recovery_launches(&panes)?;
         }
         let mut plan = Vec::new();
         let mut seen = Vec::new();
@@ -430,7 +487,13 @@ impl Flock {
                     continue;
                 }
                 let pane = env.get_pane(&item["pane_id"])?;
-                if pane.as_ref().map(empty_shell).transpose()?.unwrap_or(false) {
+                // Python evaluates pane.get("agent") before _is_empty_shell, even
+                // for falsey non-object backend responses (which must raise).
+                let still_empty = match pane.as_ref() {
+                    None => false,
+                    Some(pane) => !truthy(field(pane, "agent")?) && empty_shell(pane)?,
+                };
+                if still_empty {
                     let (ok, detail) = env.submit_command(
                         &item["pane_id"],
                         item["command"].as_str().expect("constructed command"),
