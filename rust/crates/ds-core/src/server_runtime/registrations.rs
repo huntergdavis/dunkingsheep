@@ -972,7 +972,7 @@ mod tests {
         );
         assert_eq!(status_reads.load(Ordering::SeqCst), 2);
         let sent_after_join = services.flock.dunks.get("d1").unwrap()["send_count"].clone();
-        thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(50));
         assert_eq!(
             services.flock.dunks.get("d1").unwrap()["send_count"],
             sent_after_join
