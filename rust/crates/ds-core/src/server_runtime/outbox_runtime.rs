@@ -709,6 +709,82 @@ mod tests {
     use crate::terminal::fakes::FakeTerminal;
 
     #[test]
+    fn real_timer_backpressure_holds_full_and_unreadable_boxes_even_when_busy() {
+        for unreadable in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let flock = Arc::new(Flock::new(
+                dir.path().join("launches"),
+                dir.path().join("lanes"),
+                false,
+            ));
+            flock.attach_stores(crate::flock::panes::Stores {
+                inbox: Some(Arc::new(
+                    crate::inbox_store::Store::open(
+                        dir.path().join("inbox.db"),
+                        dir.path().join("blobs"),
+                    )
+                    .unwrap(),
+                )),
+                ..Default::default()
+            });
+            flock._load_dunks(
+                serde_json::json!({"dunkers": [{
+                    "id": "d1", "running": true, "next_send_at": crate::clock::now_s() + 0.2,
+                    "interval_minutes": 10, "target_pane_id": "w1:p1", "text": "next",
+                    "send_count": 1, "last_sent_text": "previous", "awaiting_consumption": true,
+                    "skip_if_unconsumed": true, "hold_while_typing": false
+                }]})
+                .as_object()
+                .unwrap(),
+            );
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let owner = OutboxRuntime::new(
+                Arc::clone(&flock),
+                runtime.handle().clone(),
+                Arc::new(move || {
+                    let mut fake = FakeTerminal::new();
+                    fake.statuses.insert("w1:p1".into(), "working".into());
+                    fake.screens.insert("w1:p1".into(), "❯ previous".into());
+                    if unreadable {
+                        fake.unreadable.insert("w1:p1".into());
+                    }
+                    Box::new(fake)
+                }),
+            )
+            .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let row = flock.dunks.get("d1").unwrap();
+                assert_eq!(
+                    serde_json::json!(1),
+                    row["send_count"],
+                    "busy must not imply consumption"
+                );
+                if row["total_skips"].as_i64().unwrap() > 0 {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "real timer did not record backpressure"
+                );
+                thread::sleep(Duration::from_millis(10));
+            }
+            owner.stop_dunk("d1").unwrap();
+            let row = flock.dunks.get("d1").unwrap();
+            assert_eq!(serde_json::json!(1), row["total_skips"]);
+            assert_eq!(serde_json::json!(1), row["send_count"]);
+            assert_eq!(
+                serde_json::json!(if unreadable { 1 } else { 0 }),
+                row["unknown_skips"]
+            );
+            owner.stop_and_join();
+        }
+    }
+
+    #[test]
     fn real_timer_cancel_before_commit_joins_without_touching_same_id_replacement() {
         let dir = tempfile::tempdir().unwrap();
         let flock = Arc::new(Flock::new(
