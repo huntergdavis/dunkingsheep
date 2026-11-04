@@ -8,7 +8,9 @@
 //!
 //! NOT in this slice: the handlers themselves.
 
+mod context_mutations;
 pub mod health_state;
+pub use context_mutations::{h_context_add, h_context_promote, h_memory_backfill};
 pub mod inbox_messages;
 pub use health_state::{h_health, h_state_capture, h_state_latest};
 pub mod outbox_messages;
@@ -76,6 +78,26 @@ pub trait SendCommandEnv {
         hold_while_typing: bool,
         wait_s: f64,
     ) -> Result<Value, DunkError>;
+
+    /// Raw JSON keys are normalized only by the concrete Flock path, after target resolution.
+    /// Existing string-only adapters remain compatible; non-string input fails closed unless wired.
+    fn send_keys_raw(
+        &self,
+        target: &Value,
+        keys: &Value,
+        self_pane_id: Option<&str>,
+        hold_while_typing: bool,
+        wait_s: f64,
+    ) -> Result<Value, DunkError> {
+        match keys {
+            Value::String(keys) => {
+                self.send_keys(target, keys, self_pane_id, hold_while_typing, wait_s)
+            }
+            _ => Err(DunkError::Refused(
+                "raw key command adapter is not wired".into(),
+            )),
+        }
+    }
 
     fn flush_box(&self, target: &Value, self_pane_id: Option<&str>) -> Result<Value, DunkError>;
 }
@@ -451,7 +473,7 @@ fn py_int(value: &Value) -> Option<i64> {
 }
 
 /// Python truthiness of a JSON value (`args.get(k) or default`).
-fn truthy(value: &Value) -> bool {
+pub(crate) fn truthy(value: &Value) -> bool {
     match value {
         Value::Null => false,
         Value::Bool(b) => *b,
@@ -515,7 +537,7 @@ pub(crate) fn python_value_repr(value: &Value) -> String {
     }
 }
 
-fn python_value_string(value: &Value) -> String {
+pub(crate) fn python_value_string(value: &Value) -> String {
     match value {
         Value::String(value) => value.clone(),
         Value::Array(_) | Value::Object(_) => python_value_repr(value),
@@ -719,6 +741,12 @@ impl Dispatcher {
     }
 
     /// Register only the T39 context supersede and retire handlers.
+    pub fn register_context_mutations(&mut self) {
+        self.register("context_add", h_context_add);
+        self.register("context_promote", h_context_promote);
+        self.register("memory_backfill", h_memory_backfill);
+    }
+
     pub fn register_context_supersede_retire(&mut self) {
         self.register("context_supersede", h_context_supersede);
         self.register("context_retire", h_context_retire);
@@ -1291,11 +1319,10 @@ pub fn h_send_keys(context: &HandlerContext<'_>, args: Args) -> Result<Value, Du
     let target = send_target(context, &args, "send_keys")?;
     let keys = args
         .get("keys")
-        .and_then(Value::as_str)
-        .ok_or_else(|| DunkError::Refused("send_keys: keys must be a string".into()))?;
+        .ok_or_else(|| DunkError::Refused("'keys'".into()))?;
     let hold_while_typing = python_bool_arg(&args, "hold_while_typing", true);
     let wait_s = send_wait_s(&args, "send_keys")?;
-    context.env.send_commands()?.send_keys(
+    context.env.send_commands()?.send_keys_raw(
         &target,
         keys,
         context.self_pane_id(),

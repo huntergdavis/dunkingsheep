@@ -3328,6 +3328,49 @@ pub trait OutboxWake: Send + Sync {
     fn ensure_worker(&self, flock: &Arc<Flock>, pane_id: &str) -> Result<(), DunkError>;
 }
 
+/// Input only: no wire/snapshot representation and no policy callbacks.
+enum KeyInput<'a> {
+    Typed(&'a [String]),
+    Raw(&'a Value),
+}
+
+impl KeyInput<'_> {
+    fn normalized(self) -> Result<Vec<String>, DunkError> {
+        let keys = match self {
+            Self::Typed(keys) => keys.to_vec(),
+            Self::Raw(Value::String(key)) => vec![key.clone()],
+            Self::Raw(Value::Array(keys)) => {
+                keys.iter().map(crate::api::python_value_string).collect()
+            }
+            Self::Raw(Value::Object(keys)) => keys.keys().cloned().collect(),
+            Self::Raw(value) => {
+                let kind = match value {
+                    Value::Null => "NoneType",
+                    Value::Bool(_) => "bool",
+                    Value::Number(number) if number.to_string().contains(['.', 'e', 'E']) => {
+                        "float"
+                    }
+                    Value::Number(_) => "int",
+                    _ => unreachable!("iterable JSON values handled above"),
+                };
+                return Err(DunkError::Refused(format!(
+                    "'{kind}' object is not iterable"
+                )));
+            }
+        };
+        // Match Python str.strip's 29 characters, including the four information separators.
+        Ok(keys
+            .into_iter()
+            .filter(|key| {
+                !key.trim_matches(|ch: char| {
+                    ch.is_whitespace() || matches!(ch, '\u{1c}'..='\u{1f}')
+                })
+                .is_empty()
+            })
+            .collect())
+    }
+}
+
 /// Arguments shared by the public direct-send entry points.
 #[derive(Debug, Clone)]
 pub struct DirectSendOptions<'a> {
@@ -3717,17 +3760,29 @@ pub(crate) fn outbox_step<E: SendPreparationEnv + PaneInfoEnv>(
 /// `_outbox_worker`: run deterministic queue steps, report stale modals, and make one real
 /// owned-text recovery transition when the same box remains visible. Runtime adapters provide
 /// terminal I/O and a stop-aware wait; tests can advance a fake clock without spawning threads.
+pub(crate) struct OutboxWorkerContext<'a, P> {
+    pub(crate) inbox: &'a dyn InboxEnv,
+    pub(crate) pane_id: &'a str,
+    pub(crate) stopped: &'a AtomicBool,
+    pub(crate) reporter: &'a mut super::loops_stuck::StalePanelReporter,
+    pub(crate) wait: &'a dyn Fn(f64) -> bool,
+    pub(crate) permission: P,
+}
+
 #[allow(dead_code)] // Production worker startup is gated to a separate runtime task.
-pub(crate) fn outbox_worker<E: SendPreparationEnv + PaneInfoEnv>(
-    flock: &Flock,
-    env: &mut E,
-    inbox: &dyn InboxEnv,
-    pane_id: &str,
-    stopped: &AtomicBool,
-    reporter: &mut super::loops_stuck::StalePanelReporter,
-    wait: &dyn Fn(f64) -> bool,
-    mut permission: impl FnMut() -> Option<String>,
-) {
+pub(crate) fn outbox_worker<E, P>(flock: &Flock, env: &mut E, context: OutboxWorkerContext<'_, P>)
+where
+    E: SendPreparationEnv + PaneInfoEnv,
+    P: FnMut() -> Option<String>,
+{
+    let OutboxWorkerContext {
+        inbox,
+        pane_id,
+        stopped,
+        reporter,
+        wait,
+        mut permission,
+    } = context;
     let mut seen: Option<HoldSignature> = None;
     let mut seen_since = env.now_s();
     loop {
@@ -4947,6 +5002,51 @@ impl Flock {
         env: &mut dyn SendPreparationEnv,
         wake: &dyn OutboxWake,
         store: &dyn SnapshotStore,
+        permission: impl FnMut() -> Option<String>,
+    ) -> Result<Value, DunkError> {
+        self.send_keys_input(
+            target,
+            KeyInput::Typed(keys),
+            options,
+            env,
+            wake,
+            store,
+            permission,
+        )
+    }
+
+    /// Python's raw key input boundary; normalization follows the same target resolution.
+    #[allow(clippy::too_many_arguments)]
+    pub fn send_keys_raw_now(
+        self: &Arc<Self>,
+        target: &Value,
+        keys: &Value,
+        options: DirectSendOptions<'_>,
+        env: &mut dyn SendPreparationEnv,
+        wake: &dyn OutboxWake,
+        store: &dyn SnapshotStore,
+        permission: impl FnMut() -> Option<String>,
+    ) -> Result<Value, DunkError> {
+        self.send_keys_input(
+            target,
+            KeyInput::Raw(keys),
+            options,
+            env,
+            wake,
+            store,
+            permission,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn send_keys_input(
+        self: &Arc<Self>,
+        target: &Value,
+        keys: KeyInput<'_>,
+        options: DirectSendOptions<'_>,
+        env: &mut dyn SendPreparationEnv,
+        wake: &dyn OutboxWake,
+        store: &dyn SnapshotStore,
         mut permission: impl FnMut() -> Option<String>,
     ) -> Result<Value, DunkError> {
         let panes = env.list_panes_grouped();
@@ -4967,11 +5067,7 @@ impl Flock {
             )?
             .clone()
         };
-        let normalized: Vec<String> = keys
-            .iter()
-            .filter(|key| !key.trim().is_empty())
-            .cloned()
-            .collect();
+        let normalized = keys.normalized()?;
         if normalized.is_empty() {
             return Err(DunkError::Refused(
                 "keys are required, e.g. 'Enter' or 'ctrl+c'".into(),

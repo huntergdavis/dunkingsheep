@@ -45,8 +45,7 @@ struct Pane {
     events: Vec<&'static str>,
     pending_override: Option<String>,
     receipt_frames: Vec<Option<String>>,
-    receipt_forward:
-        Option<Box<dyn FnMut(Option<&mut Message>, &str, &str, bool, Option<&str>) -> bool>>,
+    receipt_forward: Option<Box<ReceiptForward>>,
     send_refusal: Option<String>,
 }
 
@@ -640,12 +639,14 @@ impl SnapshotStore for NoopSnapshotStore {
 fn immediate_send_receipt_uses_the_exact_nonqueued_message() {
     let dir = tempfile::tempdir().unwrap();
     let flock = std::sync::Arc::new(persistent_receipt_flock(dir.path()));
-    let mut pane = Pane::default();
-    pane.panes = vec![serde_json::json!({"pane_id": P, "tab_label": "worker"})];
-    pane.receipt_forward = Some(real_receipt_forward(
-        flock.clone(),
-        serde_json::json!({"pane_id": P}),
-    ));
+    let mut pane = Pane {
+        panes: vec![serde_json::json!({"pane_id": P, "tab_label": "worker"})],
+        receipt_forward: Some(real_receipt_forward(
+            flock.clone(),
+            serde_json::json!({"pane_id": P}),
+        )),
+        ..Pane::default()
+    };
 
     let result = flock
         .send_now(
@@ -695,11 +696,13 @@ fn queued_identical_text_receipts_keep_each_actual_message_id() {
         .unwrap()
         .insert(P.into(), vec![first, second]);
 
-    let mut pane = Pane::default();
-    pane.receipt_forward = Some(real_receipt_forward(
-        flock.clone(),
-        serde_json::json!({"pane_id": P}),
-    ));
+    let mut pane = Pane {
+        receipt_forward: Some(real_receipt_forward(
+            flock.clone(),
+            serde_json::json!({"pane_id": P}),
+        )),
+        ..Pane::default()
+    };
     assert_eq!(
         DeliveryOutcome::Sent,
         flock.deliver_message("m-first", 10.0, &mut pane, || None)
@@ -748,11 +751,13 @@ fn captured_none_generation_is_forwarded_without_a_second_read() {
         .lock()
         .unwrap()
         .insert(P.into(), vec![captured, message]);
-    let mut pane = Pane::default();
-    pane.receipt_forward = Some(real_receipt_forward(
-        flock.clone(),
-        serde_json::json!({"pane_id": P}),
-    ));
+    let mut pane = Pane {
+        receipt_forward: Some(real_receipt_forward(
+            flock.clone(),
+            serde_json::json!({"pane_id": P}),
+        )),
+        ..Pane::default()
+    };
 
     assert_eq!(
         DeliveryOutcome::Sent,
@@ -788,11 +793,13 @@ fn captured_none_generation_is_forwarded_without_a_second_read() {
 fn low_level_text_submission_has_no_message_frame_or_recovery_authority() {
     let dir = tempfile::tempdir().unwrap();
     let flock = std::sync::Arc::new(persistent_receipt_flock(dir.path()));
-    let mut pane = Pane::default();
-    pane.receipt_forward = Some(real_receipt_forward(
-        flock.clone(),
-        serde_json::json!({"pane_id": P}),
-    ));
+    let mut pane = Pane {
+        receipt_forward: Some(real_receipt_forward(
+            flock.clone(),
+            serde_json::json!({"pane_id": P}),
+        )),
+        ..Pane::default()
+    };
     let guard = flock.typing_guard(P).unwrap();
     let action = submit_text(&flock, &mut pane, P, "unframed", false, false, Some(&guard));
     drop(guard);
@@ -844,12 +851,14 @@ fn failed_real_receipt_snapshot_prevents_the_first_enter() {
             crate::config::Env::default(),
         ))
         .unwrap();
-    let mut pane = Pane::default();
-    pane.panes = vec![serde_json::json!({"pane_id": P, "tab_label": "worker"})];
-    pane.receipt_forward = Some(real_receipt_forward(
-        flock.clone(),
-        serde_json::json!({"pane_id": P}),
-    ));
+    let mut pane = Pane {
+        panes: vec![serde_json::json!({"pane_id": P, "tab_label": "worker"})],
+        receipt_forward: Some(real_receipt_forward(
+            flock.clone(),
+            serde_json::json!({"pane_id": P}),
+        )),
+        ..Pane::default()
+    };
 
     let result = flock
         .send_now(
@@ -883,12 +892,14 @@ fn outbox_worker_accepts_distinct_send_and_inbox_environment_types() {
     outbox_worker(
         &flock,
         &mut pane,
-        &inbox,
-        P,
-        &stopped,
-        &mut reporter,
-        &|_| true,
-        || None,
+        OutboxWorkerContext {
+            inbox: &inbox,
+            pane_id: P,
+            stopped: &stopped,
+            reporter: &mut reporter,
+            wait: &|_| true,
+            permission: || None,
+        },
     );
     assert!(flock.outbox_snapshot().is_empty());
 }
@@ -1119,8 +1130,10 @@ fn direct_text_send_preserves_metadata_and_queues_by_default() {
         dir.path(),
         false,
     ));
-    let mut pane = Pane::default();
-    pane.panes = vec![serde_json::json!({"pane_id": P, "tab_label": "Agent A"})];
+    let mut pane = Pane {
+        panes: vec![serde_json::json!({"pane_id": P, "tab_label": "Agent A"})],
+        ..Pane::default()
+    };
     let result = flock
         .send_now(
             &serde_json::json!(P),
@@ -1181,8 +1194,10 @@ fn direct_send_methods_reject_blank_text_and_key_sequences() {
         dir.path(),
         false,
     ));
-    let mut pane = Pane::default();
-    pane.panes = vec![serde_json::json!({"pane_id": P, "tab_label": "Agent A"})];
+    let mut pane = Pane {
+        panes: vec![serde_json::json!({"pane_id": P, "tab_label": "Agent A"})],
+        ..Pane::default()
+    };
     let text_error = flock
         .send_now(
             &serde_json::json!(P),
@@ -3486,8 +3501,10 @@ fn deliver_message_exhaustion_removes_once_remembers_and_releases_waiter() {
     let message = Message::new("m-exhausted", P, "pane", "hello", "test");
     let waiter = message.done.clone();
     flock.outbox.lock().unwrap().insert(P.into(), vec![message]);
-    let mut pane = Pane::default();
-    pane.gone = true;
+    let mut pane = Pane {
+        gone: true,
+        ..Pane::default()
+    };
 
     const HOLD_LIMIT: i64 = 10;
     for attempt in 0..HOLD_LIMIT {

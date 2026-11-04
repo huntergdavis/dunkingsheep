@@ -87,6 +87,31 @@ impl SendCommandEnv for RequestRuntimeAdapter<'_> {
         )
     }
 
+    fn send_keys_raw(
+        &self,
+        target: &Value,
+        keys: &Value,
+        self_pane_id: Option<&str>,
+        hold_while_typing: bool,
+        wait_s: f64,
+    ) -> Result<Value, DunkError> {
+        let outbox = self.require_send_outbox()?;
+        let mut terminal = self.send_terminal();
+        outbox.flock.send_keys_raw_now(
+            target,
+            keys,
+            DirectSendOptions {
+                self_pane_id,
+                hold_while_typing,
+                wait_s,
+            },
+            &mut terminal,
+            outbox.pool.as_ref(),
+            &FlockSnapshot,
+            || None,
+        )
+    }
+
     fn flush_box(&self, target: &Value, self_pane_id: Option<&str>) -> Result<Value, DunkError> {
         self.require_send_outbox()?;
         let mut terminal = self.send_terminal();
@@ -157,3 +182,6 @@ mod tests {
         outbox.stop_and_join();
     }
 }
+
+#[cfg(test)]
+mod raw_keys_tests;

@@ -141,6 +141,9 @@ fn py_text(value: &Value) -> String {
     }
 }
 
+/// Event id and timestamp that delimit a consecutive skipped-dunk run.
+type SkipEventBoundary = (i64, f64);
+
 /// A dunk that is still skipping. Not one that skipped for a while and stopped.
 ///
 /// d52 paged with 33 consecutive skips and a cumulative 52 - but its last skip was 76 hours old and
@@ -163,8 +166,9 @@ pub fn rule_dunk_skip_loop(
         let id = dunk_id(dunk);
         let rows = events.dunk_events(&id, since, now)?;
         let (mut run, mut best) = (0i64, 0i64);
-        let mut run_start: Option<(i64, f64)> = None;
-        let (mut best_start, mut best_end): (Option<(i64, f64)>, Option<(i64, f64)>) = (None, None);
+        let mut run_start: Option<SkipEventBoundary> = None;
+        let (mut best_start, mut best_end): (Option<SkipEventBoundary>, Option<SkipEventBoundary>) =
+            (None, None);
         for event in &rows {
             if event.kind == "dunk.skipped" {
                 run += 1;
