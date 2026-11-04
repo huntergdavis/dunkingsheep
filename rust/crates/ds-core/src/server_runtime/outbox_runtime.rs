@@ -713,6 +713,73 @@ mod tests {
     use crate::terminal::fakes::FakeTerminal;
 
     #[test]
+    fn stop_all_joins_multiple_real_timer_workers_and_allows_explicit_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let flock = Arc::new(Flock::new(
+            dir.path().join("launches"),
+            dir.path().join("lanes"),
+            false,
+        ));
+        flock.attach_stores(crate::flock::panes::Stores {
+            inbox: Some(Arc::new(
+                crate::inbox_store::Store::open(
+                    dir.path().join("inbox.db"),
+                    dir.path().join("blobs"),
+                )
+                .unwrap(),
+            )),
+            ..Default::default()
+        });
+        let pane = serde_json::json!({"pane_id": "w1:p1"});
+        for _ in 0..2 {
+            flock
+                .dunks
+                .add(
+                    pane.as_object(),
+                    &AddArgs {
+                        start: true,
+                        interval: Some("10".into()),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+        }
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (created_tx, created_rx) = std::sync::mpsc::channel();
+        let owner = OutboxRuntime::new(
+            Arc::clone(&flock),
+            runtime.handle().clone(),
+            Arc::new(move || {
+                created_tx.send(thread::current().id()).unwrap();
+                Box::new(FakeTerminal::new())
+            }),
+        )
+        .unwrap();
+        let first = created_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let second = created_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_ne!(first, second);
+        assert_ne!(first, thread::current().id());
+        let rows = owner.stop_all_dunks().unwrap();
+        assert_eq!(2, rows.len());
+        assert!(rows
+            .iter()
+            .all(|row| row["running"] == false && row["next_send_at"].is_null()));
+        assert!(owner.dunk_timers.workers.lock().unwrap().is_empty());
+        owner.start_dunk("d1").unwrap();
+        created_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        owner.stop_and_join();
+        assert!(owner.dunk_timers.workers.lock().unwrap().is_empty());
+        assert_eq!(
+            serde_json::json!(true),
+            flock.dunks.get("d1").unwrap()["running"],
+            "runtime shutdown preserves restart intent"
+        );
+    }
+
+    #[test]
     fn real_timer_backpressure_holds_full_and_unreadable_boxes_even_when_busy() {
         for unreadable in [false, true] {
             let dir = tempfile::tempdir().unwrap();
