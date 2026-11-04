@@ -2404,8 +2404,30 @@ pub fn h_memory_ingest(context: &HandlerContext<'_>, args: Args) -> Result<Value
     let path = memory_arg_string(&args, "path")?;
     let harness = args.get("harness").and_then(Value::as_str);
     let project = args.get("project").and_then(Value::as_str);
-    let receipt = memory_service(context)?.enqueue(path, harness, project)?;
-    serde_json::to_value(receipt).map_err(|error| DunkError::Refused(error.to_string()))
+    let service = memory_service(context)?;
+    let (source_id, queue_id) = service.enqueue(path, harness, project)?;
+    let (path, harness, project) = service.read_pool().with(|connection| {
+        connection
+            .query_row(
+                "SELECT path, harness, project FROM sources WHERE id=?1",
+                [source_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .map_err(crate::db::map_sqlite)
+    })?;
+    Ok(json!({
+        "source_id": source_id,
+        "queue_id": queue_id,
+        "path": path,
+        "harness": harness,
+        "project": project,
+    }))
 }
 
 fn python_bool_arg(args: &Args, key: &str, default: bool) -> bool {

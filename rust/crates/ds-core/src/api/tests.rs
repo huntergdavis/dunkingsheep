@@ -2668,7 +2668,16 @@ fn h_memory_ingest_matches_python() {
         &env,
     )
     .unwrap();
-    assert_eq!(result.as_array().unwrap().len(), 2);
+    assert_eq!(
+        result,
+        json!({
+            "source_id": 1,
+            "queue_id": 1,
+            "path": source.to_string_lossy(),
+            "harness": "codex",
+            "project": "demo"
+        })
+    );
     assert_eq!(
         flock.memory_service().unwrap().status().unwrap()["ingestor"]["running"],
         false
@@ -2803,7 +2812,16 @@ fn memory_ingest_only_enqueues_on_canonical_ingestor() {
         &env,
     )
     .unwrap();
-    assert_eq!(actual, json!([expected.0 + 1, expected.1 + 1]));
+    assert_eq!(
+        actual,
+        json!({
+            "source_id": expected.0 + 1,
+            "queue_id": expected.1 + 1,
+            "path": second.to_string_lossy(),
+            "harness": "codex",
+            "project": "demo"
+        })
+    );
     assert_eq!(service.status().unwrap()["ingestor"]["running"], false);
     let enqueued = service
         .read_pool()
