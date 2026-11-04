@@ -854,6 +854,16 @@ fn inbox_fetch_rejects_truthy_non_path_before_any_write() {
         )
         .unwrap_err();
     assert!(false_id.to_string().contains("no attachment with id False"));
+    for (raw, expected) in [
+        (r#"{"attachment_id":1e-7}"#, "no attachment with id 1e-07"),
+        (r#"{"attachment_id":1.00}"#, "no attachment with id 1.0"),
+    ] {
+        let args: serde_json::Value = serde_json::from_str(raw).unwrap();
+        let error = dispatcher
+            .dispatch("inbox_fetch", &args, &request("w1:p1"))
+            .unwrap_err();
+        assert!(error.to_string().contains(expected), "{raw}: {error}");
+    }
     let unsupported = dispatcher
         .dispatch(
             "inbox_fetch",
