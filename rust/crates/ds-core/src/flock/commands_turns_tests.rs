@@ -950,7 +950,7 @@ fn turn_end_wakes_next_job_push_after_state_commit() {
     flock
         .attach_status_state(crate::flock::status_runtime::StatusState::at_start(
             "test",
-            &dir.path().join("state.json"),
+            dir.path().join("state.json"),
             std::env::current_exe().unwrap(),
             crate::config::Env::from_pairs(&[("DUNKINGSHEEP_TURN_END_DISPATCH", "0")]),
         ))
