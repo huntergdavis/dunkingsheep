@@ -5,6 +5,122 @@ use serde_json::{json, Map, Value};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
+/// The filesystem operation that failed, retained without parsing an error message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegistryOperation {
+    CreateDirectory,
+    Write,
+    Chmod,
+    Rename,
+}
+
+/// Exceptions from the raw Python registry boundary. Ordinary terminal refusals are
+/// represented separately by the inner result of `RawCreateResult`.
+#[derive(Debug)]
+pub enum RegistryError {
+    Io {
+        operation: RegistryOperation,
+        path: PathBuf,
+        destination: Option<PathBuf>,
+        error: std::io::Error,
+    },
+    Shape {
+        category: &'static str,
+        message: String,
+    },
+    Configuration(TerminalError),
+}
+impl RegistryError {
+    pub fn category(&self) -> &'static str {
+        match self {
+            Self::Io { error, .. } => match error.kind() {
+                std::io::ErrorKind::AlreadyExists => "FileExistsError",
+                std::io::ErrorKind::NotFound => "FileNotFoundError",
+                std::io::ErrorKind::NotADirectory => "NotADirectoryError",
+                std::io::ErrorKind::IsADirectory => "IsADirectoryError",
+                std::io::ErrorKind::PermissionDenied => "PermissionError",
+                std::io::ErrorKind::Interrupted => "InterruptedError",
+                _ => "OSError",
+            },
+            Self::Shape { category, .. } => category,
+            Self::Configuration(_) => "DunkError",
+        }
+    }
+    fn io(
+        operation: RegistryOperation,
+        path: &Path,
+        destination: Option<&Path>,
+        error: std::io::Error,
+    ) -> Self {
+        Self::Io {
+            operation,
+            path: path.to_owned(),
+            destination: destination.map(Path::to_owned),
+            error,
+        }
+    }
+    fn legacy(self) -> TerminalError {
+        match self {
+            Self::Io { error, .. } => io_error(error),
+            Self::Configuration(error) => error,
+            Self::Shape { message, .. } => TerminalError::refused(message),
+        }
+    }
+}
+impl std::fmt::Display for RegistryError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io {
+                path,
+                destination,
+                error,
+                ..
+            } => {
+                let quoted = crate::api::python_value_repr(&json!(path.to_string_lossy()));
+                if let Some(errno) = error.raw_os_error() {
+                    write!(
+                        formatter,
+                        "[Errno {errno}] {}: {quoted}",
+                        nix::errno::Errno::from_raw(errno).desc()
+                    )?;
+                } else {
+                    write!(formatter, "{error}: {quoted}")?;
+                }
+                if let Some(destination) = destination {
+                    write!(
+                        formatter,
+                        " -> {}",
+                        crate::api::python_value_repr(&json!(destination.to_string_lossy()))
+                    )?;
+                }
+                Ok(())
+            }
+            Self::Shape { message, .. } => formatter.write_str(message),
+            Self::Configuration(error) => write!(formatter, "{error}"),
+        }
+    }
+}
+impl std::error::Error for RegistryError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io { error, .. } => Some(error),
+            _ => None,
+        }
+    }
+}
+
+fn python_type(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "NoneType",
+        Value::Bool(_) => "bool",
+        Value::Array(_) => "list",
+        Value::Object(_) => "dict",
+        Value::String(_) => "str",
+        Value::Number(n) if n.to_string().contains(['.', 'e', 'E']) => "float",
+        _ => "int",
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Registry {
     path: Result<PathBuf, TerminalError>,
@@ -52,18 +168,70 @@ impl Registry {
         }
         Ok(data)
     }
+    pub fn load_raw(&self) -> Result<Map<String, Value>, RegistryError> {
+        let path = self.path().map_err(RegistryError::Configuration)?;
+        // Python catches OSError and JSON/Unicode decoding errors, not a valid wrong type.
+        let value = std::fs::read(path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .unwrap_or_else(|| json!({}));
+        let kind = python_type(&value);
+        let mut data = value
+            .as_object()
+            .cloned()
+            .ok_or_else(|| RegistryError::Shape {
+                category: "AttributeError",
+                message: format!("'{kind}' object has no attribute 'setdefault'"),
+            })?;
+        for key in ["panes", "tabs", "workspaces"] {
+            data.entry(key).or_insert_with(|| json!({}));
+        }
+        Ok(data)
+    }
+    pub fn remember_raw(&self, kind: &str, id: &str, extra: Value) -> Result<(), RegistryError> {
+        if id.is_empty() {
+            return Ok(());
+        }
+        let mut data = self.load_raw()?;
+        let key = key(kind).map_err(RegistryError::Configuration)?;
+        let value = data
+            .get_mut(key)
+            .expect("load supplies all three collections");
+        let kind = python_type(value);
+        let collection = value.as_object_mut().ok_or_else(|| RegistryError::Shape {
+            category: "TypeError",
+            message: if kind == "list" {
+                "list indices must be integers or slices, not str".into()
+            } else {
+                format!("'{kind}' object does not support item assignment")
+            },
+        })?;
+        let mut record = extra.as_object().cloned().unwrap_or_default();
+        record.insert("at".into(), json!(crate::clock::now_s() as i64));
+        collection.insert(id.into(), Value::Object(record));
+        self.save_raw(&data)
+    }
     pub fn save(&self, data: &Map<String, Value>) -> Result<(), TerminalError> {
-        let path = self.path()?;
+        self.save_raw(data).map_err(RegistryError::legacy)
+    }
+    pub fn save_raw(&self, data: &Map<String, Value>) -> Result<(), RegistryError> {
+        let path = self.path().map_err(RegistryError::Configuration)?;
         let directory = path
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."));
-        std::fs::create_dir_all(directory).map_err(io_error)?;
+        std::fs::create_dir_all(directory).map_err(|error| {
+            RegistryError::io(RegistryOperation::CreateDirectory, directory, None, error)
+        })?;
         let mut temp = path.as_os_str().to_os_string();
         temp.push(".tmp");
         let temp = PathBuf::from(temp);
-        let text = serde_json::to_string_pretty(&sorted(Value::Object(data.clone())))
-            .map_err(|e| TerminalError::refused(e.to_string()))?;
+        let text = serde_json::to_string_pretty(&sorted(Value::Object(data.clone()))).map_err(
+            |error| RegistryError::Shape {
+                category: "ValueError",
+                message: error.to_string(),
+            },
+        )?;
         // json.dump defaults ensure_ascii=True, including surrogate pairs.
         let mut ascii = String::new();
         for c in text.chars() {
@@ -75,10 +243,12 @@ impl Registry {
                 }
             }
         }
-        std::fs::write(&temp, ascii).map_err(io_error)?;
+        std::fs::write(&temp, ascii)
+            .map_err(|error| RegistryError::io(RegistryOperation::Write, &temp, None, error))?;
         std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600))
-            .map_err(io_error)?;
-        std::fs::rename(&temp, path).map_err(io_error)
+            .map_err(|error| RegistryError::io(RegistryOperation::Chmod, &temp, None, error))?;
+        std::fs::rename(&temp, path)
+            .map_err(|error| RegistryError::io(RegistryOperation::Rename, &temp, Some(path), error))
     }
     pub fn remember(&self, kind: &str, id: &str, extra: Value) -> Result<(), TerminalError> {
         if id.is_empty() {

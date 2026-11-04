@@ -22,6 +22,9 @@ pub mod screen;
 pub mod tmux;
 pub mod tmux_registry;
 
+/// Outer errors are thrown registry exceptions; inner errors are normal backend refusals.
+pub type RawCreateResult<T> = Result<Result<T, TerminalError>, tmux_registry::RegistryError>;
+
 /// One pane, as `tmux list-panes -F PANE_FORMAT` describes it.
 ///
 /// The fields are the Python's, in the same order, because the parser (T21) fills
@@ -222,12 +225,12 @@ pub trait Terminal: std::fmt::Debug {
         label: &serde_json::Value,
         cwd: &serde_json::Value,
         focus: bool,
-    ) -> Result<Workspace, TerminalError> {
-        self.create_workspace(
+    ) -> RawCreateResult<Workspace> {
+        Ok(self.create_workspace(
             raw::optional(label).as_deref(),
             raw::optional(cwd).as_deref(),
             focus,
-        )
+        ))
     }
     fn create_tab_raw(
         &mut self,
@@ -235,13 +238,13 @@ pub trait Terminal: std::fmt::Debug {
         label: &serde_json::Value,
         cwd: &serde_json::Value,
         focus: bool,
-    ) -> Result<Tab, TerminalError> {
-        self.create_tab(
+    ) -> RawCreateResult<Tab> {
+        Ok(self.create_tab(
             workspace,
             raw::optional(label).as_deref(),
             raw::optional(cwd).as_deref(),
             focus,
-        )
+        ))
     }
     fn split_pane_raw(
         &mut self,
@@ -249,12 +252,17 @@ pub trait Terminal: std::fmt::Debug {
         direction: &str,
         cwd: &serde_json::Value,
         focus: bool,
-    ) -> Result<Pane, TerminalError> {
-        let created = self.split_pane(pane, direction, raw::optional(cwd).as_deref())?;
+    ) -> RawCreateResult<Pane> {
+        let created = match self.split_pane(pane, direction, raw::optional(cwd).as_deref()) {
+            Ok(value) => value,
+            Err(error) => return Ok(Err(error)),
+        };
         if !focus {
-            self.focus("pane", pane)?;
+            if let Err(error) = self.focus("pane", pane) {
+                return Ok(Err(error));
+            }
         }
-        Ok(created)
+        Ok(Ok(created))
     }
     /// Outer error is a thrown input error; inner error is the backend's normal refusal.
     fn send_text_raw(

@@ -320,7 +320,7 @@ impl crate::flock::commands_layout::LayoutBackend for RequestRuntimeAdapter<'_> 
         label: &Value,
         cwd: &Value,
         focus: bool,
-    ) -> Result<Value, String> {
+    ) -> crate::flock::commands_layout::RawCreateResult {
         self.helper_layoutbackend_create_workspace_raw(label, cwd, focus)
     }
     fn create_tab_raw(
@@ -329,7 +329,7 @@ impl crate::flock::commands_layout::LayoutBackend for RequestRuntimeAdapter<'_> 
         label: &Value,
         cwd: &Value,
         focus: bool,
-    ) -> Result<Value, String> {
+    ) -> crate::flock::commands_layout::RawCreateResult {
         self.helper_layoutbackend_create_tab_raw(workspace, label, cwd, focus)
     }
     fn split_pane_raw(
@@ -338,7 +338,7 @@ impl crate::flock::commands_layout::LayoutBackend for RequestRuntimeAdapter<'_> 
         direction: &str,
         cwd: &Value,
         focus: bool,
-    ) -> Result<Value, String> {
+    ) -> crate::flock::commands_layout::RawCreateResult {
         self.helper_layoutbackend_split_pane_raw(pane, direction, cwd, focus)
     }
     fn list_panes(&self) -> Vec<Value> {

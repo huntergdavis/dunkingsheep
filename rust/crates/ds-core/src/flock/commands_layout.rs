@@ -25,6 +25,9 @@ use super::resolve::{resolve_tab, resolve_target, resolve_workspace};
 use super::Flock;
 use crate::error::DunkError;
 
+pub type RawCreateResult =
+    Result<Result<Value, String>, crate::terminal::tmux_registry::RegistryError>;
+
 /// The calls `Flock` makes on `self.herdr` for layout. Mutations return the backend's
 /// result dict, or its message as `Err` (the Python's `(False, message)`).
 pub trait LayoutBackend {
@@ -55,17 +58,12 @@ pub trait LayoutBackend {
         cwd: Option<&str>,
         focus: bool,
     ) -> Result<Value, String>;
-    fn create_workspace_raw(
-        &mut self,
-        label: &Value,
-        cwd: &Value,
-        focus: bool,
-    ) -> Result<Value, String> {
-        self.create_workspace(
+    fn create_workspace_raw(&mut self, label: &Value, cwd: &Value, focus: bool) -> RawCreateResult {
+        Ok(self.create_workspace(
             crate::terminal::raw::optional(label).as_deref(),
             crate::terminal::raw::optional(cwd).as_deref(),
             focus,
-        )
+        ))
     }
     fn create_tab_raw(
         &mut self,
@@ -73,13 +71,13 @@ pub trait LayoutBackend {
         label: &Value,
         cwd: &Value,
         focus: bool,
-    ) -> Result<Value, String> {
-        self.create_tab(
+    ) -> RawCreateResult {
+        Ok(self.create_tab(
             workspace,
             crate::terminal::raw::optional(label).as_deref(),
             crate::terminal::raw::optional(cwd).as_deref(),
             focus,
-        )
+        ))
     }
     fn split_pane_raw(
         &mut self,
@@ -87,13 +85,13 @@ pub trait LayoutBackend {
         direction: &str,
         cwd: &Value,
         focus: bool,
-    ) -> Result<Value, String> {
-        self.split_pane(
+    ) -> RawCreateResult {
+        Ok(self.split_pane(
             pane,
             direction,
             crate::terminal::raw::optional(cwd).as_deref(),
             focus,
-        )
+        ))
     }
     #[allow(clippy::too_many_arguments)]
     fn start_agent(

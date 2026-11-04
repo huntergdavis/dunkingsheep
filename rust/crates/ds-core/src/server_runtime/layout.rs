@@ -272,11 +272,12 @@ impl RequestRuntimeAdapter<'_> {
         label: &Value,
         cwd: &Value,
         focus: bool,
-    ) -> Result<Value, String> {
+    ) -> crate::flock::commands_layout::RawCreateResult {
         self.terminal.with_terminal_mut(|terminal| {
-            let workspace = terminal
-                .create_workspace_raw(label, cwd, focus)
-                .map_err(|error| error.message)?;
+            let workspace = match terminal.create_workspace_raw(label, cwd, focus)? {
+                Ok(value) => value,
+                Err(error) => return Ok(Err(error.message)),
+            };
             let tabs = terminal.list_tabs();
             let tab = tabs
                 .iter()
@@ -288,11 +289,11 @@ impl RequestRuntimeAdapter<'_> {
                 .into_iter()
                 .find(|pane| pane.session_id == workspace.workspace_id)
                 .map(|pane| pane_value(terminal, &pane));
-            Ok(json!({
+            Ok(Ok(json!({
                 "workspace": workspace_value(workspace, &tabs),
                 "tab": tab,
                 "root_pane": pane,
-            }))
+            })))
         })
     }
 
@@ -302,23 +303,24 @@ impl RequestRuntimeAdapter<'_> {
         label: &Value,
         cwd: &Value,
         focus: bool,
-    ) -> Result<Value, String> {
+    ) -> crate::flock::commands_layout::RawCreateResult {
         self.terminal.with_terminal_mut(|terminal| {
-            let tab = terminal
-                .create_tab_raw(workspace_id, label, cwd, focus)
-                .map_err(|error| error.message)?;
+            let tab = match terminal.create_tab_raw(workspace_id, label, cwd, focus)? {
+                Ok(value) => value,
+                Err(error) => return Ok(Err(error.message)),
+            };
             let pane = terminal
                 .list_panes()
                 .into_iter()
                 .find(|pane| pane.window_id == tab.tab_id)
                 .map(|pane| pane_value(terminal, &pane));
             let Some(pane) = pane else {
-                return Err("tmux created the window but it is not visible".into());
+                return Ok(Err("tmux created the window but it is not visible".into()));
             };
-            Ok(json!({
+            Ok(Ok(json!({
                 "tab": tab_value(tab),
                 "root_pane": pane,
-            }))
+            })))
         })
     }
 
@@ -328,13 +330,14 @@ impl RequestRuntimeAdapter<'_> {
         direction: &str,
         cwd: &Value,
         focus: bool,
-    ) -> Result<Value, String> {
+    ) -> crate::flock::commands_layout::RawCreateResult {
         self.terminal.with_terminal_mut(|terminal| {
-            let pane = terminal
-                .split_pane_raw(pane_id, direction, cwd, focus)
-                .map_err(|error| error.message)?;
+            let pane = match terminal.split_pane_raw(pane_id, direction, cwd, focus)? {
+                Ok(value) => value,
+                Err(error) => return Ok(Err(error.message)),
+            };
             let pane = pane_value(terminal, &pane);
-            Ok(json!({ "root_pane": pane }))
+            Ok(Ok(json!({ "root_pane": pane })))
         })
     }
 

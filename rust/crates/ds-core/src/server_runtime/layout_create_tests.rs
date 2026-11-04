@@ -18,6 +18,13 @@ type LayoutFixture = (
     Arc<Mutex<Vec<Value>>>,
 );
 fn make_services(fail_layout: Option<&str>, available: bool) -> LayoutFixture {
+    make_services_with_factory(fail_layout, available, None)
+}
+fn make_services_with_factory(
+    fail_layout: Option<&str>,
+    available: bool,
+    factory: Option<LoopTerminalFactory>,
+) -> LayoutFixture {
     let dir = tempfile::tempdir().unwrap();
     let runtime = Builder::new_multi_thread().enable_all().build().unwrap();
     let tasks = Arc::new(
@@ -81,6 +88,7 @@ fn make_services(fail_layout: Option<&str>, available: bool) -> LayoutFixture {
         terminal.available = available;
         Box::new(terminal)
     });
+    let terminal_factory = factory.unwrap_or(terminal_factory);
     let services = RuntimeServices::new(RuntimeServiceInputs {
         launches_file: dir.path().join("launches.json"),
         lane_registry_file: dir.path().join("lanes.json"),
@@ -371,4 +379,91 @@ fn layout_create_role_success_persists_python_raw_string_fields() {
         .unwrap()
         .iter()
         .any(|event| event[0] == "workspace"));
+}
+
+#[test]
+fn layout_create_registry_parent_file_is_thrown_after_creation_before_writeback() {
+    use crate::terminal::{
+        tmux::TmuxBackend,
+        tmux_registry::{RegistryError, RegistryOperation},
+        Terminal,
+    };
+    use std::os::unix::fs::PermissionsExt;
+    let disk = tempfile::tempdir().unwrap();
+    let script = disk.path().join("tmux");
+    std::fs::write(&script,r#"#!/bin/sh
+cd "$(dirname "$0")" || exit 1
+printf '%s\n' "$@" >> calls
+case "$1" in
+new-session) printf '%s' "$4" > created ;;
+list-sessions) printf '$1\037%s\0370\n' "$(cat created 2>/dev/null)" ;;
+list-windows) printf '@1\037$1\037tab\0370\0371\n' ;;
+list-panes)
+  printf 'w2:p2\037$old\037@old\037/work\037bash\037owner\0371\037owner\037owner\0370\0370\0372202\03780\03724\n'
+  printf '%%1\037$1\037@1\037/work\037bash\037new\0371\037new\037tab\0370\0370\0371\03780\03724\n'
+  ;;
+esac
+"#).unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let parent = disk.path().join("parent");
+    std::fs::write(&parent, b"file").unwrap();
+    let registry = parent.join("registry.json");
+    let mut terminal = TmuxBackend::with_registry(&script, &registry);
+    let error = terminal
+        .create_workspace_raw(&json!("created"), &Value::Null, false)
+        .unwrap_err();
+    assert_eq!(error.category(), "FileExistsError");
+    match &error {
+        RegistryError::Io {
+            operation,
+            path,
+            destination,
+            error,
+        } => {
+            assert_eq!(*operation, RegistryOperation::CreateDirectory);
+            assert_eq!(path, &parent);
+            assert!(destination.is_none());
+            assert_eq!(error.raw_os_error(), Some(nix::libc::EEXIST));
+        }
+        other => panic!("expected real filesystem error: {other:?}"),
+    }
+    let expected = error.to_string();
+    assert_eq!(
+        expected,
+        format!(
+            "[Errno {}] File exists: {}",
+            nix::libc::EEXIST,
+            api::python_value_repr(&json!(parent.to_string_lossy()))
+        )
+    );
+    let factory: LoopTerminalFactory =
+        Arc::new(move || Box::new(TmuxBackend::with_registry(&script, &registry)));
+    let (dir, services, _) = make_services_with_factory(None, true, Some(factory));
+    services.flock.set_last_message("before");
+    let error = dispatcher(&services)
+        .dispatch(
+            "create_workspace",
+            &json!({
+                "label": "created",
+                "command": "echo must-not-type",
+                "mailbox": "must not write",
+                "role": "worker"
+            }),
+            &request("w2:p2"),
+        )
+        .unwrap_err();
+    assert_eq!(error.to_string(), expected);
+    assert_eq!(
+        std::fs::read_to_string(disk.path().join("created")).unwrap(),
+        "created"
+    );
+    assert!(!std::fs::read_to_string(disk.path().join("calls"))
+        .unwrap()
+        .contains("send-keys"));
+    assert_eq!(services.flock.last_message(), "before");
+    assert!(services.flock.sent_text_by_pane.lock().unwrap().is_empty());
+    assert!(services.flock.lane_registry(false).unwrap().is_empty());
+    let roles: Value =
+        serde_json::from_slice(&std::fs::read(dir.path().join("roles.json")).unwrap()).unwrap();
+    assert!(roles["lanes"].get("%1").is_none());
 }

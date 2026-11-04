@@ -16,11 +16,12 @@ fn what(kind: &str, label: &Value) -> String {
 }
 fn after_create(
     flock: &Flock,
-    result: Result<Value, String>,
+    result: crate::flock::commands_layout::RawCreateResult,
     command: &Value,
     what: &str,
     submit: RawSubmit<'_>,
 ) -> Result<Value, DunkError> {
+    let result = result.map_err(|error| DunkError::Refused(error.to_string()))?;
     let result = result.map_err(|error| {
         DunkError::Refused(format!(
             "the terminal backend could not create the {what}: {error}"
@@ -209,7 +210,7 @@ mod tests {
         };
         let out = after_create(
             &flock,
-            Ok(json!({"root_pane":{"pane_id":"%1"}})),
+            Ok(Ok(json!({"root_pane":{"pane_id":"%1"}}))),
             &command,
             "pane",
             &mut submit,

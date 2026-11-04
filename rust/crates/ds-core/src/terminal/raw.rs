@@ -141,6 +141,7 @@ esac
         ] {
             backend
                 .create_workspace_raw(&label, &json!(["cwd"]), true)
+                .unwrap()
                 .unwrap();
             let persisted: Value =
                 serde_json::from_slice(&std::fs::read(&registry).unwrap()).unwrap();
@@ -152,6 +153,7 @@ esac
             assert_eq!(persisted["workspaces"]["$1"]["label"], expected);
             backend
                 .create_tab_raw(Some("$1"), &label, &json!(false), true)
+                .unwrap()
                 .unwrap();
             let persisted: Value =
                 serde_json::from_slice(&std::fs::read(&registry).unwrap()).unwrap();

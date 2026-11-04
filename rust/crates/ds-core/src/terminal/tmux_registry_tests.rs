@@ -266,3 +266,110 @@ esac
         std::fs::write(dir.path().join("calls"), "").unwrap();
     }
 }
+
+#[test]
+fn raw_registry_load_swallows_only_io_and_decoding_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("registry.json");
+    let registry = Registry::new(&path);
+    assert_eq!(registry.load_raw().unwrap().len(), 3);
+    for bytes in [b"broken".as_slice(), b"\xff".as_slice()] {
+        std::fs::write(&path, bytes).unwrap();
+        assert_eq!(registry.load_raw().unwrap().len(), 3);
+    }
+    for (text, kind) in [
+        ("[]", "list"),
+        ("null", "NoneType"),
+        ("false", "bool"),
+        ("1", "int"),
+        ("\"x\"", "str"),
+    ] {
+        std::fs::write(&path, text).unwrap();
+        let error = registry.load_raw().unwrap_err();
+        assert_eq!(error.category(), "AttributeError");
+        assert_eq!(
+            error.to_string(),
+            format!("'{kind}' object has no attribute 'setdefault'")
+        );
+    }
+    std::fs::write(&path, r#"{"panes":null}"#).unwrap();
+    let error = registry.remember_raw("pane", "%1", json!({})).unwrap_err();
+    assert_eq!(error.category(), "TypeError");
+    assert_eq!(
+        error.to_string(),
+        "'NoneType' object does not support item assignment"
+    );
+}
+
+#[test]
+fn raw_registry_actual_write_and_rename_failures_retain_operation_errno_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("registry.json");
+    let temp = dir.path().join("registry.json.tmp");
+    let registry = Registry::new(&path);
+    std::fs::create_dir(&temp).unwrap();
+    let error = registry
+        .remember_raw("pane", "%1", json!({"label":"x"}))
+        .unwrap_err();
+    assert_eq!(error.category(), "IsADirectoryError");
+    match &error {
+        RegistryError::Io {
+            operation,
+            path,
+            destination,
+            error,
+        } => {
+            assert_eq!(*operation, RegistryOperation::Write);
+            assert_eq!(path, &temp);
+            assert!(destination.is_none());
+            assert_eq!(error.raw_os_error(), Some(nix::libc::EISDIR));
+        }
+        other => panic!("expected real filesystem error: {other:?}"),
+    }
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "[Errno {}] Is a directory: {}",
+            nix::libc::EISDIR,
+            crate::api::python_value_repr(&json!(temp.to_string_lossy()))
+        )
+    );
+    std::fs::remove_dir(&temp).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    // The read error is swallowed; the later rename error is propagated with both paths.
+    assert_eq!(registry.load_raw().unwrap().len(), 3);
+    let error = registry
+        .remember_raw("pane", "%1", json!({"label":"x"}))
+        .unwrap_err();
+    match &error {
+        RegistryError::Io {
+            operation,
+            path: failed,
+            destination,
+            error,
+        } => {
+            assert_eq!(*operation, RegistryOperation::Rename);
+            assert_eq!(failed, &temp);
+            assert_eq!(destination.as_deref(), Some(path.as_path()));
+            assert_eq!(error.raw_os_error(), Some(nix::libc::EISDIR));
+        }
+        other => panic!("expected real filesystem error: {other:?}"),
+    }
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "[Errno {}] Is a directory: {} -> {}",
+            nix::libc::EISDIR,
+            crate::api::python_value_repr(&json!(temp.to_string_lossy())),
+            crate::api::python_value_repr(&json!(path.to_string_lossy()))
+        )
+    );
+    assert!(
+        temp.is_file(),
+        "Python leaves the temp file after os.replace fails"
+    );
+    assert_eq!(
+        std::fs::metadata(&temp).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+}

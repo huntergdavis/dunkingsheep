@@ -263,16 +263,19 @@ impl Terminal for FakeTerminal {
         label: &serde_json::Value,
         cwd: &serde_json::Value,
         focus: bool,
-    ) -> Result<Workspace, TerminalError> {
+    ) -> super::RawCreateResult<Workspace> {
         self.raw_events
             .lock()
             .unwrap()
             .push(serde_json::json!(["workspace", label, cwd, focus]));
-        let workspace = self.create_workspace(
+        let workspace = match self.create_workspace(
             super::raw::optional(label).as_deref(),
             super::raw::optional(cwd).as_deref(),
             focus,
-        )?;
+        ) {
+            Ok(value) => value,
+            Err(error) => return Ok(Err(error)),
+        };
         let tab = Tab {
             tab_id: format!("{}:t1", workspace.workspace_id),
             workspace_id: workspace.workspace_id.clone(),
@@ -291,7 +294,7 @@ impl Terminal for FakeTerminal {
             ..Pane::default()
         });
         self.tabs.push(tab);
-        Ok(workspace)
+        Ok(Ok(workspace))
     }
     fn create_tab_raw(
         &mut self,
@@ -299,17 +302,17 @@ impl Terminal for FakeTerminal {
         label: &serde_json::Value,
         cwd: &serde_json::Value,
         focus: bool,
-    ) -> Result<Tab, TerminalError> {
+    ) -> super::RawCreateResult<Tab> {
         self.raw_events
             .lock()
             .unwrap()
             .push(serde_json::json!(["tab", workspace, label, cwd, focus]));
-        self.create_tab(
+        Ok(self.create_tab(
             workspace,
             super::raw::optional(label).as_deref(),
             super::raw::optional(cwd).as_deref(),
             focus,
-        )
+        ))
     }
     fn send_text_raw(
         &mut self,
