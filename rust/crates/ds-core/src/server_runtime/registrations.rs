@@ -40,6 +40,7 @@ pub(crate) fn production_handlers() -> Dispatcher {
     handlers.register_dunk_lifecycle();
     handlers.register_stop_all_fire_list_dunks();
     handlers.register_send_text_keys_flush_box();
+    handlers.register_outbox_messages();
     handlers.register_clear_box_delivery_capability();
     handlers.register_respawn_pane();
     handlers
@@ -521,6 +522,9 @@ mod tests {
             "send_text",
             "send_keys",
             "flush_box",
+            "list_messages",
+            "get_message",
+            "cancel_message",
             "clear_box",
             "delivery",
             "delivery_capability",

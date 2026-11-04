@@ -9,6 +9,8 @@
 //! `_pane_info`, and the construction of the stores that have no Rust owner yet
 //! (Superusers, MemoryStore, NextJobs, Allocator, outbox/stuck state).
 
+mod outbox_api;
+
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};

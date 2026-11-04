@@ -2307,7 +2307,7 @@ impl CompletionWaiter {
     }
 
     #[allow(dead_code)] // Used by the separate terminal outcome interface in this leaf.
-    fn settle(&self) {
+    pub(super) fn settle(&self) {
         let mut state = lock_unpoison(&self.state);
         if !state.settled {
             state.settled = true;
