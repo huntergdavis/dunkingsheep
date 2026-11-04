@@ -465,6 +465,10 @@ impl Terminal for FakeTerminal {
     }
 
     fn rename(&mut self, kind: &str, target_id: &str, label: &str) -> Result<(), TerminalError> {
+        self.raw_events
+            .lock()
+            .unwrap()
+            .push(serde_json::json!(["rename", kind, target_id, label]));
         if let Some(error) = self.take_failure() {
             return Err(error);
         }

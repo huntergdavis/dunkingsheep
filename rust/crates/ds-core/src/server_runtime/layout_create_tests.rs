@@ -67,6 +67,16 @@ fn make_services(fail_layout: Option<&str>, available: bool) -> LayoutFixture {
         let mut terminal = FakeTerminal::new();
         terminal.raw_events = Arc::clone(&observed);
         terminal.show_created_tab_pane = true;
+        // This fixture uses coherent session IDs across the canned pane/tab/workspace rows.
+        for pane in &mut terminal.panes {
+            pane.session_id = terminal
+                .tabs
+                .iter()
+                .find(|tab| tab.tab_id == pane.window_id)
+                .unwrap()
+                .workspace_id
+                .clone();
+        }
         terminal.fail_layout = fail_layout.clone();
         terminal.available = available;
         Box::new(terminal)
@@ -163,7 +173,7 @@ fn h_create_tab_matches_python() {
                 &request("w2:p2"),
             )
             .unwrap();
-        assert_eq!(out["tab"]["workspace_id"], "s2");
+        assert_eq!(out["tab"]["workspace_id"], "w1");
         assert_eq!(out["ran"], Value::Null);
         assert_eq!(services.flock.last_message(), "Created tab");
     }
@@ -172,6 +182,15 @@ fn h_create_tab_matches_python() {
         .unwrap()
         .iter()
         .any(|event| event[0] == "send_raw"));
+    let own = dispatch
+        .dispatch(
+            "create_tab",
+            &json!({"workspace":"self"}),
+            &request("w2:p2"),
+        )
+        .unwrap();
+    assert_eq!(own["tab"]["workspace_id"], "w1");
+
     let error = dispatch
         .dispatch(
             "create_tab",
@@ -326,4 +345,30 @@ fn layout_create_raw_list_confirmation_error_keeps_typed_history_only() {
     let events = events.lock().unwrap();
     assert!(events.contains(&json!(["typed", "w101:p1", "['echo', False]"])));
     assert!(events.contains(&json!(["keys", "w101:p1", ["Enter"]])));
+}
+
+#[test]
+fn layout_create_role_success_persists_python_raw_string_fields() {
+    let (dir, services, events) = make_services(None, true);
+    let out=dispatcher(&services).dispatch("create_workspace",&json!({"label":"created","mailbox":["lane",false],"role":"worker","provider":false,"model":[]}),&request("w2:p2")).unwrap();
+    assert_eq!(out["role"]["provider"], "False");
+    assert_eq!(out["role"]["model"], "[]");
+    assert_eq!(out["role"]["label"], "['lane', False]");
+    let pane = out["pane_id"].as_str().unwrap();
+    assert_eq!(
+        services.flock.last_message(),
+        format!("Registered {pane} as worker")
+    );
+    let roles: Value =
+        serde_json::from_slice(&std::fs::read(dir.path().join("roles.json")).unwrap()).unwrap();
+    assert_eq!(roles["lanes"][pane]["role"], "worker");
+    assert!(events
+        .lock()
+        .unwrap()
+        .contains(&json!(["rename", "pane", pane, "['lane', False]"])));
+    assert!(events
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|event| event[0] == "workspace"));
 }
