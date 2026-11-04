@@ -7,6 +7,7 @@
 mod delivery;
 mod dispatcher;
 mod inbox;
+mod inbox_api;
 mod inbox_data;
 mod inbox_delivery;
 mod inbox_metrics;
@@ -407,6 +408,15 @@ impl PaneInfoEnv for RequestRuntimeAdapter<'_> {
 }
 
 impl crate::api::CommandEnv for RequestRuntimeAdapter<'_> {
+    fn with_inbox_env(
+        &self,
+        operation: &mut dyn FnMut(
+            &dyn crate::flock::commands_inbox::InboxEnv,
+        ) -> Result<Value, DunkError>,
+    ) -> Result<Value, DunkError> {
+        self.with_request_inbox(operation)
+    }
+
     fn owner_push(&self) -> Result<&crate::owner::OwnerPush, DunkError> {
         self.owner_push
             .ok_or_else(|| refusal("owner push adapter is not wired"))?

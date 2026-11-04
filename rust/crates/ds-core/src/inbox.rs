@@ -388,6 +388,17 @@ pub fn list(
     limit: usize,
     now: f64,
 ) -> Result<Vec<Summary>, DunkError> {
+    list_signed(pool, mailbox, unread_only, limit as i64, now)
+}
+
+/// Preserve SQLite's negative LIMIT (unlimited) for the raw command boundary.
+pub fn list_signed(
+    pool: &ReadPool,
+    mailbox: &str,
+    unread_only: bool,
+    limit: i64,
+    now: f64,
+) -> Result<Vec<Summary>, DunkError> {
     let (condition, params) = mailbox_where(mailbox, "mailbox");
     let mut where_clause = format!("{condition} AND state != 'cancelled'");
     if unread_only {
@@ -409,7 +420,7 @@ pub fn list(
             .collect();
         // Bound as an INTEGER: the reviewer showed SQLite coerces the text form, but a
         // coercion is not a type and `LIMIT` is where a wrong type would be silent.
-        bound.push(rusqlite::types::Value::Integer(limit as i64));
+        bound.push(rusqlite::types::Value::Integer(limit));
         let rows = statement
             .query_map(rusqlite::params_from_iter(bound.iter()), |row| {
                 let state: String = row.get("state")?;
@@ -531,6 +542,18 @@ pub struct Status {
 }
 
 pub fn status(pool: &ReadPool, message_id: &str, now: f64) -> Result<Status, DunkError> {
+    let id = rusqlite::types::Value::Text(message_id.to_string());
+    status_bound(pool, &id, &format!("{message_id:?}"), now)
+}
+
+/// Status using Python sqlite3's raw scalar binding and caller-provided Python repr
+/// for the missing-row error text.
+pub fn status_bound(
+    pool: &ReadPool,
+    message_id: &rusqlite::types::Value,
+    message_id_repr: &str,
+    now: f64,
+) -> Result<Status, DunkError> {
     let sql = "SELECT id, state, mailbox, mailbox_label, pane_id, sender, created_at, read_at, \
                acked_at, archived_at, cancelled_at, length(CAST(body AS BLOB)) AS body_bytes, \
                reason, notify_state, notify_reason, notify_at, notify_transport_id, \
@@ -581,7 +604,7 @@ pub fn status(pool: &ReadPool, message_id: &str, now: f64) -> Result<Status, Dun
         match rows.next() {
             Some(row) => row.map_err(map_sqlite),
             None => Err(DunkError::Refused(format!(
-                "no message with id {message_id:?}"
+                "no message with id {message_id_repr}"
             ))),
         }
     })
