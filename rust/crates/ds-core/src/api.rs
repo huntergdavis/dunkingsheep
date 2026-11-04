@@ -9,6 +9,8 @@
 //! NOT in this slice: the handlers themselves.
 
 pub mod inbox_messages;
+mod poll_roster_turn_end;
+pub use poll_roster_turn_end::{h_poll, h_roster, h_turn_end};
 mod owner_push;
 pub use owner_push::{h_owner_poll, h_owner_push, h_owner_take};
 mod metrics;
@@ -208,6 +210,11 @@ pub trait CommandEnv: PaneInfoEnv {
     /// Real turn side effects (metrics and next-job observation).
     fn turn_hooks(&self) -> Result<&dyn crate::flock::commands_turns::TurnHooks, DunkError> {
         Err(DunkError::Refused("turn hooks are not wired".into()))
+    }
+
+    /// The concrete data sources used by the `roster` view.
+    fn roster_env(&self) -> Result<&dyn crate::flock::roster::RosterEnv, DunkError> {
+        Err(DunkError::Refused("roster adapter is not wired".into()))
     }
 
     /// The request's shared next-job manager. Completion must use the same manager that
@@ -597,6 +604,13 @@ impl Dispatcher {
         self.register("status", h_status);
         self.register("whoami", h_whoami);
         self.register("turn_start", h_turn_start);
+    }
+
+    /// Register only the T39 turn-end, sidebar poll, and roster handlers.
+    pub fn register_turn_end_poll_roster(&mut self) {
+        self.register("turn_end", h_turn_end);
+        self.register("poll", h_poll);
+        self.register("roster", h_roster);
     }
 
     /// Register only the T39 help handler leaf.

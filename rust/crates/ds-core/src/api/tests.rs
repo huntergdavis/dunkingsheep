@@ -15,12 +15,14 @@ use crate::flock::commands_turns::{TurnHooks, TurnState};
 use crate::flock::dunks::DunkList;
 use crate::flock::mailbox::MailboxEnv;
 use crate::flock::panes::{PaneInfoEnv, Stores};
+use crate::flock::roster::RosterEnv;
 use crate::flock::status::{StatusEnv, ViewCache};
 use crate::inbox_store::Store;
 use crate::proc::Caller;
 use crate::report::{ReportPaths, ReportSources};
 use crate::roles::Roles;
 use crate::server::RequestCtx;
+use crate::tasks::Tasks;
 use crate::terminal::{fakes::FakeTerminal, Terminal};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -746,10 +748,18 @@ struct ParityEnv {
     inbox_value: Cell<i64>,
     probes: Cell<u32>,
     turn_calls: Mutex<Vec<String>>,
+    inbox_store: Store,
+    inbox_pool: crate::db::ReadPool,
+    _inbox_tmp: tempfile::TempDir,
 }
 
 impl ParityEnv {
     fn new(pane_pid: Option<i64>) -> Self {
+        let inbox_tmp = tempfile::tempdir().expect("inbox tempdir");
+        let inbox_path = inbox_tmp.path().join("inbox.db");
+        let inbox_store =
+            Store::open(&inbox_path, inbox_tmp.path().join("blobs")).expect("inbox store");
+        let inbox_pool = crate::db::ReadPool::open(&inbox_path, 2).expect("inbox pool");
         Self {
             terminal: Mutex::new(Box::new(FakeTerminal::default())),
             dunks: DunkList::new(),
@@ -759,13 +769,19 @@ impl ParityEnv {
             inbox_value: Cell::new(1),
             probes: Cell::new(0),
             turn_calls: Mutex::new(Vec::new()),
+            inbox_store,
+            inbox_pool,
+            _inbox_tmp: inbox_tmp,
         }
     }
 }
 
 impl PaneInfoEnv for ParityEnv {
     fn list_panes_grouped(&self) -> Vec<Value> {
-        Vec::new()
+        vec![json!({
+            "pane_id": "w1:p1", "agent_name": "worker", "agent": "pi",
+            "label": "worker", "workspace_label": "w1", "tab_label": "t1"
+        })]
     }
     fn get_pane(&self, pane_id: &str) -> Option<Value> {
         self.pane_pid
@@ -874,6 +890,101 @@ impl CommandEnv for ParityEnv {
     }
     fn turn_hooks(&self) -> Result<&dyn TurnHooks, DunkError> {
         Ok(self)
+    }
+    fn with_inbox_env(
+        &self,
+        operation: &mut dyn FnMut(&dyn InboxEnv) -> Result<Value, DunkError>,
+    ) -> Result<Value, DunkError> {
+        operation(self)
+    }
+    fn roster_env(&self) -> Result<&dyn RosterEnv, DunkError> {
+        Ok(self)
+    }
+}
+
+impl MailboxEnv for ParityEnv {
+    fn list_panes(&self) -> Vec<Value> {
+        <Self as PaneInfoEnv>::list_panes_grouped(self)
+    }
+    fn list_panes_grouped(&self) -> Vec<Value> {
+        <Self as PaneInfoEnv>::list_panes_grouped(self)
+    }
+    fn registered_pane(&self, pane_id: &str) -> (bool, bool, Option<String>) {
+        (
+            pane_id == "w1:p1",
+            pane_id == "w1:p1",
+            self.pane_pid.map(|pid| pid.to_string()),
+        )
+    }
+}
+
+impl InboxEnv for ParityEnv {
+    fn caller_role(&self, _pane_id: &str) -> Result<String, DunkError> {
+        Ok("worker".into())
+    }
+    fn mailbox_override(&self) -> Option<String> {
+        None
+    }
+    fn backend_name(&self) -> Result<String, DunkError> {
+        Ok("test".into())
+    }
+    fn lane_panes(&self) -> Vec<String> {
+        Vec::new()
+    }
+    fn pool(&self) -> &crate::db::ReadPool {
+        &self.inbox_pool
+    }
+    fn store(&self) -> &Store {
+        &self.inbox_store
+    }
+    fn now(&self) -> f64 {
+        self.now_s
+    }
+    fn record_metric(
+        &self,
+        _: &str,
+        _: Option<&str>,
+        _: &str,
+        _: Option<&str>,
+        _: Option<i64>,
+        _: Option<i64>,
+    ) {
+    }
+    fn pm_routing(&self) -> Vec<RouteEntry> {
+        Vec::new()
+    }
+    fn fold_into_queued_notice(&self, _: &str, _: &str, _: &str) -> Option<String> {
+        None
+    }
+    fn send_now(&self, _: &str, _: &str, _: &str) -> Result<Nudge, DunkError> {
+        Err(DunkError::Refused("unused test nudge".into()))
+    }
+    fn record_sent(&self, _: Option<&str>, _: &str, _: Option<&str>, _: usize, _: usize) {}
+    fn tasks_for_pane(&self, _: &str) -> Result<Value, DunkError> {
+        Ok(Value::Null)
+    }
+}
+
+impl RosterEnv for ParityEnv {
+    fn lanes(&self) -> Result<Vec<Value>, String> {
+        Ok(vec![json!({
+            "pane_id": "w1:p1", "agent": "pi", "agent_name": "worker"
+        })])
+    }
+    fn leases_for_pane(&self, _: &str, _: f64) -> Vec<Value> {
+        Vec::new()
+    }
+    fn task(&self, _: &str) -> Option<Value> {
+        None
+    }
+    fn inbox_count(&self, _: &str) -> Option<(i64, Option<f64>)> {
+        Some((0, None))
+    }
+    fn activity(&self, _: &Value, _: f64) -> Result<Value, String> {
+        Ok(json!({"state": "idle", "since": null, "source": "test", "reason": null}))
+    }
+    fn cpu_sample(&self, _: &Value, _: f64) -> Result<Option<Value>, String> {
+        Ok(None)
     }
 }
 
@@ -2812,6 +2923,302 @@ fn h_turn_start_matches_python() {
         string_zero_ttl,
         Err(DunkError::Refused(message)) if message == "ttl_s must be positive"
     ));
+}
+
+#[test]
+fn h_turn_end_matches_python() {
+    let (_dir, flock) = flock();
+    let pane_id = "w1:p1";
+    let pid = std::process::id() as i64;
+    let caller = Caller::new(
+        Some(pid),
+        crate::proc::process_start(pid),
+        None,
+        Some(pane_id.into()),
+        "peer",
+    );
+    let request = RequestCtx {
+        self_pane_id: Some(pane_id.into()),
+        caller: Some(caller.clone()),
+        ..RequestCtx::default()
+    };
+    let env = ParityEnv::new(Some(pid));
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_status_whoami_turn_start();
+    dispatcher.register_turn_end_poll_roster();
+
+    let started = dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("worker", false),
+        "turn_start",
+        args(json!({"source": "test"})),
+        &request,
+        &env,
+    )
+    .expect("start turn");
+    let refused = dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("worker", false),
+        "turn_end",
+        args(json!({"pane": "w2:p2", "turn_id": started["turn_id"]})),
+        &request,
+        &env,
+    )
+    .unwrap_err();
+    assert!(refused.to_string().contains("turn event must target"));
+    assert!(!env
+        .turn_calls
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|call| call.starts_with("record turn.end")));
+
+    let ended = dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("worker", false),
+        "turn_end",
+        args(json!({"turn_id": started["turn_id"]})),
+        &request,
+        &env,
+    )
+    .expect("end authenticated turn");
+    assert_eq!(ended["pane_id"], pane_id);
+    assert_eq!(ended["ended"], true);
+    assert_eq!(ended["reason"], "turn_end");
+    assert_eq!(ended["dispatch"]["action"], "skip");
+    assert!(env
+        .turn_calls
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|call| call.starts_with("record turn.end")));
+}
+
+#[test]
+fn h_poll_matches_python() {
+    use crate::inbox_store::Outgoing;
+
+    let (_dir, flock) = flock();
+    let env = ParityEnv::new(None);
+    let mut ids = Vec::new();
+    for index in 0..6 {
+        ids.push(
+            env.inbox_store
+                .send(&Outgoing {
+                    mailbox: "worker",
+                    body: Some("poll unread message"),
+                    subject: Some(&format!("message {index}")),
+                    ..Outgoing::default()
+                })
+                .expect("seed unread message"),
+        );
+    }
+    let request = RequestCtx {
+        self_pane_id: Some("w1:p1".into()),
+        ..RequestCtx::default()
+    };
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_turn_end_poll_roster();
+    assert_eq!(
+        dispatcher.registration_attempts(),
+        &["turn_end", "poll", "roster"]
+    );
+
+    let result = dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("worker", false),
+        "poll",
+        args(json!({"mailbox": "w1:p1"})),
+        &request,
+        &env,
+    )
+    .expect("poll sidebar data");
+    assert_eq!(result["status"]["self_pane_id"], "w1:p1");
+    assert_eq!(result["status"]["herdr_available"], Value::Null);
+    assert_eq!(
+        env.probes.get(),
+        0,
+        "poll must not probe backend availability"
+    );
+    assert_eq!(result["inbox_count"]["unread"], 6);
+    assert_eq!(result["dunks"]["messages"].as_array().unwrap().len(), 5);
+    assert!(ids.iter().any(|id| result["dunks"]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|message| message["message_id"] == *id)));
+    let after = flock
+        .inbox_count(&env, Some("w1:p1"), Some("w1:p1"))
+        .expect("count after poll");
+    assert_eq!(after.unread, 6, "poll must not mark unread messages read");
+
+    let missing_self = dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("worker", false),
+        "poll",
+        args(json!({"limit": []})),
+        &RequestCtx::default(),
+        &env,
+    )
+    .expect("inbox count errors precede limit conversion and are partial results");
+    assert!(missing_self["error"]
+        .as_str()
+        .unwrap()
+        .contains("no mailbox given"));
+    assert!(!missing_self["error"]
+        .as_str()
+        .unwrap()
+        .contains("int() argument"));
+    assert!(missing_self.get("inbox_count").is_none());
+    assert_eq!(missing_self["dunks"]["messages"], json!([]));
+
+    let list_error = dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("worker", false),
+        "poll",
+        args(json!({"mailbox": "w2:p2"})),
+        &request,
+        &env,
+    )
+    .expect("inbox list domain errors remain partial poll results");
+    assert!(list_error.get("inbox_count").is_some());
+    assert!(list_error["error"].as_str().unwrap().contains("not yours"));
+    assert_eq!(list_error["dunks"]["messages"], json!([]));
+
+    let bad_limit_type = dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("worker", false),
+        "poll",
+        args(json!({"mailbox": "w1:p1", "limit": []})),
+        &request,
+        &env,
+    )
+    .unwrap_err();
+    assert!(bad_limit_type.to_string().contains("int() argument"));
+
+    let bad_limit_value = dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("worker", false),
+        "poll",
+        args(json!({"mailbox": "w1:p1", "limit": "not-a-number"})),
+        &request,
+        &env,
+    )
+    .unwrap_err();
+    assert!(bad_limit_value
+        .to_string()
+        .contains("invalid literal for int()"));
+
+    let overflow_limit = dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("worker", false),
+        "poll",
+        args(json!({"mailbox": "w1:p1", "limit": "9223372036854775808"})),
+        &request,
+        &env,
+    )
+    .unwrap_err();
+    assert!(overflow_limit
+        .to_string()
+        .contains("too large to convert to SQLite INTEGER"));
+
+    let panes = dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("worker", false),
+        "poll",
+        args(json!({"mailbox": "w1:p1", "panes": "yes"})),
+        &request,
+        &env,
+    )
+    .expect("opt-in pane data");
+    assert_eq!(panes["panes"]["panes"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn h_poll_tasks_matches_python_wire_defaults_and_visibility() {
+    let (dir, flock) = flock();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .expect("task runtime");
+    let tasks = Arc::new(
+        runtime
+            .block_on(Tasks::open(dir.path().join("tasks.db")))
+            .expect("task store"),
+    );
+    runtime
+        .block_on(tasks.allocation_init())
+        .expect("task init");
+    let global = runtime
+        .block_on(tasks.add("global", "global poll task", "full wire body"))
+        .expect("global task");
+    let private = runtime
+        .block_on(tasks.add("w2:p2", "other private task", "private body"))
+        .expect("private task");
+    flock.attach_stores(Stores {
+        tasks: Some(tasks),
+        ..Stores::default()
+    });
+    let env = ParityEnv::new(None);
+    let request = RequestCtx {
+        self_pane_id: Some("w1:p1".into()),
+        ..RequestCtx::default()
+    };
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_turn_end_poll_roster();
+    let result = dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("worker", false),
+        "poll",
+        args(json!({"tasks": true, "task_scope": "all"})),
+        &request,
+        &env,
+    )
+    .expect("opt-in full task wire");
+    let listed = result["tasks"]["tasks"].as_array().expect("task list");
+    assert!(listed.iter().any(|task| task["id"] == global.id));
+    assert!(!listed.iter().any(|task| task["id"] == private.id));
+    assert!(
+        listed.iter().find(|task| task["id"] == global.id).unwrap()["body"]
+            .as_str()
+            .is_some()
+    );
+    assert_eq!(result["tasks"]["pane_id"], "w1:p1");
+}
+
+#[test]
+fn h_roster_matches_python() {
+    let (_dir, flock) = flock();
+    let env = ParityEnv::new(None);
+    let request = RequestCtx::default();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_turn_end_poll_roster();
+    let result = dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("worker", false),
+        "roster",
+        args(json!({})),
+        &request,
+        &env,
+    )
+    .expect("roster reads actual roster adapter");
+    assert_eq!(result["lanes"].as_array().unwrap().len(), 1);
+    assert_eq!(result["lanes"][0]["pane_id"], "w1:p1");
+    assert_eq!(result["lanes"][0]["state"], "idle");
+    assert_eq!(result["lanes"][0]["name"], "worker");
 }
 
 #[test]

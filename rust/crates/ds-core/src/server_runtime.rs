@@ -526,6 +526,10 @@ impl crate::api::CommandEnv for RequestRuntimeAdapter<'_> {
         Ok(self)
     }
 
+    fn roster_env(&self) -> Result<&dyn crate::flock::roster::RosterEnv, DunkError> {
+        Ok(self)
+    }
+
     fn terminal(&self) -> &Mutex<Box<dyn Terminal>> {
         self.terminal.terminal
     }
