@@ -439,7 +439,9 @@ fn layout_close_persists_stopped_rows_and_save_error_precedes_last_message() {
                 serde_json::from_slice(&std::fs::read(dir.path().join("state.json")).unwrap())
                     .unwrap();
             assert_eq!(saved["dunkers"][0]["running"], false);
-            assert_eq!(saved["dunkers"][0]["status"], "Target closed");
+            // Python Dunker.FIELDS / _save omit the derived live status.
+            assert!(saved["dunkers"][0].get("status").is_none());
+            assert!(saved["dunkers"][0]["next_send_at"].is_null());
         }
         services.shutdown();
     }
