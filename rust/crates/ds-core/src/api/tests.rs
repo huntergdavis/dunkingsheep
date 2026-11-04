@@ -4301,7 +4301,13 @@ fn task_api_fixture() -> (
         None,
     )
     .expect("role registry");
-    for (pane, role) in [("w1:p1", "worker"), ("w1:p2", "owner"), ("w1:p3", "worker")] {
+    for (pane, role) in [
+        ("w1:p1", "worker"),
+        ("w1:p2", "owner"),
+        ("w1:p3", "worker"),
+        ("w1:p4", "system"),
+        ("w1:p5", "web"),
+    ] {
         roles
             .register(pane, role, None, None, None, None, None, None)
             .expect("role registration");
@@ -4380,7 +4386,13 @@ fn task_mutation_api_fixture() -> (
         None,
     )
     .expect("roles");
-    for (pane, role) in [("w1:p1", "worker"), ("w1:p2", "owner"), ("w1:p3", "worker")] {
+    for (pane, role) in [
+        ("w1:p1", "worker"),
+        ("w1:p2", "owner"),
+        ("w1:p3", "worker"),
+        ("w1:p4", "system"),
+        ("w1:p5", "web"),
+    ] {
         roles
             .register(pane, role, None, None, None, None, None, None)
             .expect("role registration");
@@ -7994,7 +8006,7 @@ fn task_statistics_dispatch_tests_task_stats_metrics_reap_roles_and_outputs() {
     )
     .unwrap_err();
     assert!(
-        denied.to_string().contains("owner, system, or web"),
+        denied.to_string().contains("task_reap is not permitted for role worker (pane w1:p1); see docs/FLAT_FLEET.md section 4.3"),
         "{denied}"
     );
     let reaped = dispatch_task_mutation(
@@ -8008,6 +8020,19 @@ fn task_statistics_dispatch_tests_task_stats_metrics_reap_roles_and_outputs() {
     )
     .unwrap();
     assert_eq!(reaped["requeued"], json!([]));
+    for pane in ["w1:p4", "w1:p5"] {
+        let allowed = dispatch_task_mutation(
+            &dispatcher,
+            &flock,
+            &runtime,
+            "task_reap",
+            json!({}),
+            Some(pane),
+            None,
+        )
+        .unwrap();
+        assert_eq!(allowed["requeued"], json!([]));
+    }
 }
 
 #[test]
