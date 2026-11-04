@@ -549,6 +549,10 @@ fn inbox_send_raw_values_preserve_body_subject_and_notification_error_order() {
         .unwrap();
     assert_eq!(result["subject"], "9");
     assert_eq!(result["notified"], true);
+    {
+        let outbox = crate::flock::sends::outbox_lock(&services.flock().outbox);
+        assert!(outbox["w1:p1"][0].text.contains(": 9."));
+    }
     let falsey = dispatcher
         .dispatch(
             "inbox_send",
@@ -560,10 +564,6 @@ fn inbox_send_raw_values_preserve_body_subject_and_notification_error_order() {
     assert_eq!(falsey["notified"], true);
     let outbox = crate::flock::sends::outbox_lock(&services.flock().outbox);
     let notice = &outbox["w1:p1"][0];
-    assert!(
-        notice.text.contains(": 9."),
-        "truthy numeric subject appears in folded Python-style notice"
-    );
     assert!(
         !notice.text.contains(": 0."),
         "falsey numeric subject is omitted after the next fold"
