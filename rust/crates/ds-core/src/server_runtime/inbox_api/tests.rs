@@ -846,6 +846,16 @@ fn inbox_fetch_rejects_truthy_non_path_before_any_write() {
         !accidental.exists(),
         "truthy invalid path must not create destination"
     );
+    let unsupported = dispatcher
+        .dispatch(
+            "inbox_fetch",
+            &json!({"attachment_id":[],"dest":true}),
+            &request("w1:p1"),
+        )
+        .unwrap_err();
+    assert!(unsupported
+        .to_string()
+        .contains("Error binding parameter 1: type 'list' is not supported"));
     let missing = dispatcher
         .dispatch(
             "inbox_fetch",

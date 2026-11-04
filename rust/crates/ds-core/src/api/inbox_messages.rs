@@ -165,7 +165,18 @@ pub fn h_inbox_stats(c: &HandlerContext<'_>, _args: Args) -> Result<Value, DunkE
     })
 }
 pub fn h_inbox_fetch(c: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
-    let id = python_value_string(&args["attachment_id"]);
+    let raw_id = &args["attachment_id"];
+    crate::sqlite_scalar::python_sqlite_scalar(Some(raw_id), 1)?;
+    let id = match raw_id {
+        Value::Bool(value) => {
+            if *value {
+                "1".to_owned()
+            } else {
+                "0".to_owned()
+            }
+        }
+        value => python_value_string(value),
+    };
     let invalid_dest = match args.get("dest").filter(|v| truthy(v)) {
         Some(value) if !value.is_string() => Some(python_value_type_name(value).to_owned()),
         _ => None,
