@@ -20,6 +20,8 @@ pub use dunks::{
     h_add_dunk, h_fire_dunk, h_list_dunks, h_remove_dunk, h_start_dunk, h_stop_all, h_stop_dunk,
     h_toggle_dunk, h_update_dunk,
 };
+mod dunk_get;
+pub use dunk_get::h_get_dunk;
 mod respawn;
 pub use respawn::h_respawn_pane;
 
@@ -820,6 +822,11 @@ impl Dispatcher {
         self.register("start_dunk", h_start_dunk);
         self.register("stop_dunk", h_stop_dunk);
         self.register("toggle_dunk", h_toggle_dunk);
+    }
+
+    /// Register only the T39 get-dunk handler.
+    pub fn register_get_dunk(&mut self) {
+        self.register("get_dunk", h_get_dunk);
     }
 
     /// Register only the T39 stop-all, manual-fire and list-dunks handlers.
@@ -3017,33 +3024,9 @@ pub fn not_ported(name: &str) -> DunkError {
     DunkError::Refused(format!("command {name} is not ported yet"))
 }
 
-/// Python `repr(str)` for the names a client can send (single quotes unless the text has a
-/// single quote and no double quote; backslash and control characters escaped).
+/// Python `repr(str)` shared with native recovery's Unicode-aware formatter.
 fn py_repr(text: &str) -> String {
-    let quote = if text.contains('\'') && !text.contains('"') {
-        '"'
-    } else {
-        '\''
-    };
-    let mut out = String::from(quote);
-    for ch in text.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if c == quote => {
-                out.push('\\');
-                out.push(c);
-            }
-            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
-                out.push_str(&format!("\\x{:02x}", c as u32))
-            }
-            c => out.push(c),
-        }
-    }
-    out.push(quote);
-    out
+    crate::recovery_native::prompt_python_string_repr(text)
 }
 
 #[cfg(test)]
