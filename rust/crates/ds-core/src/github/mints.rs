@@ -408,18 +408,9 @@ pub(super) fn parse_json_number_float(raw: &str) -> Result<f64, &'static str> {
 }
 
 pub(super) fn float_json_value(value: f64) -> Option<Value> {
-    if let Some(number) = serde_json::Number::from_f64(value) {
-        return Some(Value::Number(number));
-    }
-    if value.is_nan() {
-        return None;
-    }
-    let raw = if value.is_sign_negative() {
-        "-1e999"
-    } else {
-        "1e999"
-    };
-    Some(serde_json::from_str(raw).expect("arbitrary_precision accepts the task infinity carrier"))
+    // Keep the existing adapter signature and infinity carrier. The common codec
+    // also carries NaN numerically, before callers can substitute JSON null.
+    Some(crate::wire_json::float_value(value))
 }
 
 pub(super) fn parse_float(raw: &str) -> Result<f64, FloatError> {

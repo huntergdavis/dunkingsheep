@@ -529,6 +529,28 @@ mod tests {
     }
 
     #[test]
+    fn h_metrics_derived_nan_survives_common_wire_codec_without_mutation() {
+        let (dir, flock) = flock("api-metrics-derived-nan");
+        attach_inbox(&flock, dir.path());
+        let before = flock.snapshot();
+        let input = crate::wire_json::from_str(r#"{"until":Infinity}"#).unwrap();
+        let report = dispatch(&flock, Some(args(input)), "anonymous", 2000.0).unwrap();
+        assert_eq!(flock.snapshot(), before);
+        assert!(report["interval"]["seconds"].is_number());
+        assert_eq!(
+            crate::api::python_value_string(&report["interval"]["seconds"]),
+            "nan"
+        );
+        let wire = crate::protocol::encode_line(&crate::protocol::Response::ok(json!(1), report));
+        assert!(
+            wire.contains(r#""interval":{"start":Infinity,"end":Infinity,"seconds":NaN}"#),
+            "{wire}"
+        );
+        let decoded = crate::wire_json::from_str(&wire).unwrap();
+        assert!(decoded["result"]["interval"]["seconds"].is_number());
+    }
+
+    #[test]
     fn h_metrics_refuses_missing_stores_and_preserves_read_only_role_access() {
         let (dir, flock) = flock("api-metrics-missing");
         let missing_inbox = dispatch(&flock, None, "worker", 2000.0)

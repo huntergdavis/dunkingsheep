@@ -224,6 +224,33 @@ mod tests {
     }
 
     #[test]
+    fn shared_float_adapter_preserves_nan_and_existing_infinity_carriers() {
+        for (number, raw, wire) in [
+            (f64::NAN, "NaN", "NaN"),
+            (f64::INFINITY, "1e+999", "Infinity"),
+            (f64::NEG_INFINITY, "-1e+999", "-Infinity"),
+            (1.5, "1.5", "1.5"),
+        ] {
+            let value = crate::github::python_float_json_value(number).expect("numeric carrier");
+            assert!(value.is_number());
+            assert_eq!(value.to_string(), raw);
+            assert_eq!(to_string(&value).unwrap(), wire);
+        }
+    }
+
+    #[test]
+    fn wire_parser_preserves_existing_container_depth_limit() {
+        for depth in [1, 126, 127, 128, 129] {
+            let raw = format!("{}0{}", "[".repeat(depth), "]".repeat(depth));
+            assert_eq!(
+                from_str(&raw).is_ok(),
+                serde_json::from_str::<Value>(&raw).is_ok(),
+                "depth {depth}"
+            );
+        }
+    }
+
+    #[test]
     fn wire_codec_matches_actual_python_numeric_oracle() {
         let cases: Vec<Value> = serde_json::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),

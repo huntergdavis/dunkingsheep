@@ -1,5 +1,6 @@
 """Actual Python server/client/heartbeat boundaries, isolated from daemon imports."""
 import ast
+from contextlib import closing
 import json
 import logging
 from pathlib import Path
@@ -113,8 +114,30 @@ class WireOracleTests(unittest.TestCase):
                 listener.close()
             self.assertFalse(thread.is_alive())
 
+    def test_actual_metrics_derived_nan_is_numeric_on_wire_and_read_only(self):
+        api = ast.parse((ROOT / "dunk_api.py").read_text())
+        nodes = [node for node in api.body if isinstance(node, ast.FunctionDef)
+                 and node.name in {"h_metrics", "_opt"}]
+        nodes.append(method("dunk_core.py", "Flock", "metrics_summary"))
+        ns = dict(NS, METRICS_SCHEMA_VERSION=1,
+                  dunk_metrics=types.SimpleNamespace(KINDS={}, OUTCOMES={}, REASONS={}))
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), "actual-metrics-boundary", "exec"), ns)
+        calls = []
+        def summary(start, end):
+            calls.append(("summary", start, end))
+            return {"events": 0}, {}, {}
+        flock = types.SimpleNamespace(
+            metrics=types.SimpleNamespace(summary=summary, earliest=lambda: None, retention_s=0),
+            inbox=types.SimpleNamespace(stats=lambda: []),
+            outbox={}, dunkers=[], _lock=threading.RLock())
+        flock.metrics_summary = types.MethodType(ns["metrics_summary"], flock)
+        report = ns["h_metrics"](flock, json.loads('{"until":Infinity}'), None)
+        self.assertEqual(json.dumps(report["interval"]), '{"start": Infinity, "end": Infinity, "seconds": NaN}')
+        self.assertEqual(len(calls), 1)
+        self.assertEqual((flock.outbox, flock.dunkers), ({}, []))
+
     def test_actual_heartbeat_nan_reaches_sql_not_null_after_row_match(self):
-        with sqlite3.connect(":memory:") as db:
+        with closing(sqlite3.connect(":memory:")) as db:
             db.execute("CREATE TABLE task_leases(task_id TEXT,pane_id TEXT,heartbeat_at REAL,expires_at REAL NOT NULL)")
             db.execute("INSERT INTO task_leases VALUES('t1','p1',0,1)")
             db.commit()
