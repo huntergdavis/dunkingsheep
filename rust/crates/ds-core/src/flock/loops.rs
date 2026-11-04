@@ -733,6 +733,11 @@ mod owner_tests {
             .unwrap();
             tokio::time::sleep(Duration::from_millis(100)).await;
             assert_eq!(fixture.tasks.get(&task.id).await.unwrap().status, "open");
+            let inbox = rusqlite::Connection::open(fixture._dir.path().join("inbox.db")).unwrap();
+            let busy_messages: i64 = inbox
+                .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(0, busy_messages, "busy lane received an announcement");
             fixture.busy.store(false, Ordering::SeqCst);
             flock.wake_push();
             tokio::time::timeout(Duration::from_secs(5), async {
