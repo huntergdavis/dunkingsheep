@@ -650,25 +650,44 @@ impl DunkList {
         Self::lock_dunker(handle).to_dict()
     }
 
+    /// Stop and worker mutations serialize on the captured row lock. A worker that passed
+    /// its outer live check before stop must not restore a deadline/status afterwards.
+    fn lock_running_dunker(handle: &DunkerHandle) -> Option<std::sync::MutexGuard<'_, Dunker>> {
+        let dunker = Self::lock_dunker(handle);
+        if dunker.running {
+            Some(dunker)
+        } else {
+            None
+        }
+    }
+
     pub(crate) fn timer_set_deadline(handle: &DunkerHandle, at: f64) {
-        let mut dunker = Self::lock_dunker(handle);
+        let Some(mut dunker) = Self::lock_running_dunker(handle) else {
+            return;
+        };
         if dunker.next_send_at.is_none_or(|next| next == 0.0) {
             dunker.next_send_at = Some(at);
         }
     }
 
     pub(crate) fn set_timer_status(handle: &DunkerHandle, status: &str) {
-        Self::lock_dunker(handle).status = status.to_owned();
+        if let Some(mut dunker) = Self::lock_running_dunker(handle) {
+            dunker.status = status.to_owned();
+        }
     }
 
     pub(crate) fn set_timer_error(handle: &DunkerHandle, error: &str) {
-        let mut dunker = Self::lock_dunker(handle);
+        let Some(mut dunker) = Self::lock_running_dunker(handle) else {
+            return;
+        };
         dunker.status = "Error".into();
         dunker.last_error = Some(error.to_owned());
     }
 
     pub(crate) fn timer_skip(handle: &DunkerHandle, reason: &str) {
-        let mut dunker = Self::lock_dunker(handle);
+        let Some(mut dunker) = Self::lock_running_dunker(handle) else {
+            return;
+        };
         let now = clock::now_s();
         dunker.next_send_at = Some(now + (dunker.interval_minutes * 60.0).max(1.0));
         dunker.skip_count += 1;
@@ -692,13 +711,17 @@ impl DunkList {
     }
 
     pub(crate) fn timer_consumed(handle: &DunkerHandle) {
-        let mut dunker = Self::lock_dunker(handle);
+        let Some(mut dunker) = Self::lock_running_dunker(handle) else {
+            return;
+        };
         dunker.awaiting_consumption = false;
         dunker.unknown_skips = 0;
     }
 
     pub(crate) fn timer_unknown_skip(handle: &DunkerHandle) -> bool {
-        let mut dunker = Self::lock_dunker(handle);
+        let Some(mut dunker) = Self::lock_running_dunker(handle) else {
+            return false;
+        };
         dunker.unknown_skips += 1;
         if dunker.unknown_skips >= 3 {
             dunker.unknown_skips = 0;
@@ -709,14 +732,18 @@ impl DunkList {
     }
 
     pub(crate) fn timer_hold(handle: &DunkerHandle, _detail: &str) {
-        let mut dunker = Self::lock_dunker(handle);
+        let Some(mut dunker) = Self::lock_running_dunker(handle) else {
+            return;
+        };
         dunker.hold_count += 1;
         dunker.last_held_at = Some(clock::now_s());
         dunker.status = "Held (typing)".into();
     }
 
     pub(crate) fn timer_target_gone(handle: &DunkerHandle) {
-        let mut dunker = Self::lock_dunker(handle);
+        let Some(mut dunker) = Self::lock_running_dunker(handle) else {
+            return;
+        };
         dunker.status = "Target gone".into();
         dunker.last_error = Some("target pane not found".into());
     }
@@ -726,7 +753,9 @@ impl DunkList {
         attempted: bool,
         succeeded: bool,
     ) -> bool {
-        let mut dunker = Self::lock_dunker(handle);
+        let Some(mut dunker) = Self::lock_running_dunker(handle) else {
+            return false;
+        };
         if attempted {
             dunker.next_send_at = Some(clock::now_s() + (dunker.interval_minutes * 60.0).max(1.0));
             dunker.status = if succeeded {

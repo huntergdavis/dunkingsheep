@@ -982,8 +982,17 @@ mod tests {
         let flock = Arc::new(Flock::new(
             dir.path().join("launches"),
             dir.path().join("lanes"),
-            false,
+            true,
         ));
+        let state_path = dir.path().join("state.json");
+        flock
+            .attach_status_state(crate::flock::status_runtime::StatusState::at_start(
+                "test",
+                &state_path,
+                std::env::current_exe().unwrap(),
+                crate::config::Env::default(),
+            ))
+            .unwrap();
         flock.attach_stores(crate::flock::panes::Stores {
             inbox: Some(Arc::new(
                 crate::inbox_store::Store::open(
@@ -1047,6 +1056,10 @@ mod tests {
         );
         assert_eq!(rows[0]["status"], "Stopped");
         assert!(owner.dunk_timers.workers.lock().unwrap().is_empty());
+        let persisted: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+        assert_eq!(persisted["dunkers"][0]["running"], false);
+        assert!(persisted["dunkers"][0]["next_send_at"].is_null());
         owner.start_dunk("d1").unwrap();
         owner.stop_dunk("d1").unwrap();
         assert!(flock.dunks.get("d1").unwrap()["next_send_at"].is_null());
