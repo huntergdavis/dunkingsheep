@@ -1031,4 +1031,89 @@ mod tests {
         assert!(error.to_string().contains("dunk timer runtime is stopped"));
         assert!(owner.dunk_timers.workers.lock().unwrap().is_empty());
     }
+
+    #[test]
+    fn scheduled_idle_gate_holds_until_policy_changes_then_delivers() {
+        let dir = tempfile::tempdir().unwrap();
+        let flock = Arc::new(Flock::new(
+            dir.path().join("launches"),
+            dir.path().join("lanes"),
+            false,
+        ));
+        flock.attach_stores(crate::flock::panes::Stores {
+            inbox: Some(Arc::new(
+                crate::inbox_store::Store::open(
+                    dir.path().join("inbox.db"),
+                    dir.path().join("blobs"),
+                )
+                .unwrap(),
+            )),
+            ..Default::default()
+        });
+        let pane = serde_json::json!({"pane_id": "w1:p1"});
+        flock
+            .dunks
+            .add(
+                pane.as_object(),
+                &AddArgs {
+                    text: Some("idle gate delivery".into()),
+                    interval: Some("0.001".into()),
+                    start: true,
+                    only_when: Some("idle".into()),
+                    max_sends: Some("1".into()),
+                    hold_while_typing: Some("false".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let owner = OutboxRuntime::new(
+            Arc::clone(&flock),
+            runtime.handle().clone(),
+            Arc::new(|| {
+                let mut fake = FakeTerminal::new();
+                fake.statuses.insert("w1:p1".into(), "working".into());
+                Box::new(fake)
+            }),
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let row = flock
+                .dunks
+                .get("d1")
+                .expect("busy timer must retain its row");
+            assert_eq!(row["send_count"], serde_json::json!(0));
+            if row["status"] == "Busy" {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timer never observed busy status"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        owner
+            .update_dunk(
+                "d1",
+                None,
+                &UpdateArgs {
+                    only_when: Some(None),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while flock.dunks.get("d1").is_ok() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            flock.dunks.get("d1").is_err(),
+            "released timer must actually deliver and reach max_sends"
+        );
+        owner.stop_and_join();
+    }
 }
