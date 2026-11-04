@@ -2073,11 +2073,41 @@ fn dunk_mutation_dispatcher_registers_only_this_group_and_enforces_role_gate() {
         &flock,
         &FixedRole("worker", false),
         "add_dunk",
-        args(json!({"target": "Writer", "text": "x", "interval_minutes": 1})),
+        args(json!({})),
         &request,
         &env,
     ));
     assert_eq!(error, "add_dunk needs a superuser");
+
+    let invalid_add = refusal(dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("owner", true),
+        "add_dunk",
+        args(json!({
+            "target": "missing target",
+            "text": "x",
+            "interval_minutes": 0
+        })),
+        &request,
+        &env,
+    ));
+    assert_eq!(invalid_add, "interval must be positive");
+
+    let invalid_update = refusal(dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("owner", true),
+        "update_dunk",
+        args(json!({
+            "id": "d1",
+            "target": "missing target",
+            "interval_minutes": 0
+        })),
+        &request,
+        &env,
+    ));
+    assert!(invalid_update.contains("no pane matches"));
 }
 
 #[test]

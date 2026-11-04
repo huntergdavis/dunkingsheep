@@ -130,6 +130,32 @@ impl OutboxRuntime {
         Ok(crate::flock::dunks::DunkList::handle_row(&handle))
     }
 
+    #[cfg(test)]
+    pub(crate) fn dunk_timer_generation(&self, id: &str) -> Result<Option<u64>, DunkError> {
+        let handle = self.flock.dunks.handle(id)?;
+        let workers = self
+            .dunk_timers
+            .workers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Ok(workers.get(&DunkTimerOwner::key(&handle)).map(|worker| {
+            *worker
+                .signal
+                .generation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        }))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn dunk_timer_worker_count(&self) -> usize {
+        self.dunk_timers
+            .workers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
+    }
+
     pub(crate) fn interval_changed(&self, id: &str) -> Result<(), DunkError> {
         let handle = self.flock.dunks.handle(id)?;
         self.dunk_timers.wake(&handle);
