@@ -449,7 +449,7 @@ impl Tasks {
                 "SELECT id, scope, title, body, status, priority, kind, assignees, depends_on, block_reason, created_at, updated_at, completed_by, completed_at FROM tasks WHERE scope = ? ORDER BY created_at, id").map_err(db::map_sqlite)?;
             let rows = stmt.query_map(params![scope], row_to_task).map_err(db::map_sqlite)?;
             let collected: Result<Vec<_>, _> = rows.collect();
-            Ok(collected.map_err(db::map_sqlite)?)
+            collected.map_err(db::map_sqlite)
         }).await
     }
     /// Set a status, and END THE CLAIM when the status is terminal.
@@ -2563,6 +2563,15 @@ pub async fn h_task_complete(
 mod tests {
     use super::*;
 
+    type StatusTaskEvent = (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    );
+    type TaskEventObservation = (String, String, Option<String>);
+
     async fn store(tag: &str) -> crate::testsupport::Scratch<Tasks> {
         let dir = crate::testsupport::dir(&format!("store-{tag}"));
         let tasks = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
@@ -3063,7 +3072,7 @@ mod tests {
                     .prepare("SELECT actor || '|' || COALESCE(meta,'') FROM task_events WHERE task_id = ? AND event = 'unblocked'")
                     .map_err(db::map_sqlite)?;
                 let rows = stmt.query_map(params![id], |r| r.get::<_, String>(0)).map_err(db::map_sqlite)?;
-                Ok(rows.collect::<Result<Vec<_>, _>>().map_err(db::map_sqlite)?)
+                rows.collect::<Result<Vec<_>, _>>().map_err(db::map_sqlite)
             })
             .await
             .unwrap()
@@ -3699,13 +3708,7 @@ mod tests {
             .set_status(&task.id, "in_progress", None, Some("%4"))
             .await
             .unwrap();
-        let event: (
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-        ) = tasks
+        let event: StatusTaskEvent = tasks
             .writer
             .call({
                 let id = task.id.clone();
@@ -4089,7 +4092,7 @@ mod tests {
 
     #[test]
     fn order_key_sorts_by_priority_then_age_then_id() {
-        let mut rows = vec![
+        let mut rows = [
             ("low", 1.0, "t1"),
             ("urgent", 9.0, "t3"),
             ("urgent", 2.0, "t2"),
@@ -4202,7 +4205,7 @@ mod tests {
     async fn observers_fire_after_commit_and_a_failing_one_is_contained() {
         use std::sync::{Arc, Mutex};
         let tasks = store("fire").await;
-        let seen: Arc<Mutex<Vec<(String, String, Option<String>)>>> = Arc::default();
+        let seen: Arc<Mutex<Vec<TaskEventObservation>>> = Arc::default();
         tasks.on_event(Box::new(|_, _, _, _| panic!("a broken observer")));
         let sink = seen.clone();
         tasks.on_event(Box::new(move |id, event, _, kind| {
