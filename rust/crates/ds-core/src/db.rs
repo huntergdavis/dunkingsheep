@@ -45,6 +45,70 @@ pub const BUSY_TIMEOUT_MS: u64 = 5000;
 /// How many read-only connections a pool keeps by default (RUST_PORT.md 5.2: N).
 pub const DEFAULT_READ_POOL: usize = 4;
 
+/// Private diagnostic carrier passed only through the operation being observed.
+/// Legacy callers use an empty carrier; no global/thread-local observer is installed.
+#[derive(Clone, Default)]
+pub(crate) struct ErrorContext(Option<std::sync::Arc<Mutex<Option<NativeError>>>>);
+#[derive(Debug)]
+pub(crate) enum NativeError {
+    Io {
+        error: std::io::Error,
+        path: PathBuf,
+        operation: &'static str,
+    },
+    Sqlite {
+        code: i32,
+        message: String,
+        path: PathBuf,
+        operation: &'static str,
+    },
+}
+impl ErrorContext {
+    pub(crate) fn capture() -> Self {
+        Self(Some(Default::default()))
+    }
+    pub(crate) fn take(&self) -> Option<NativeError> {
+        self.0
+            .as_ref()
+            .and_then(|slot| slot.lock().expect("native error context").take())
+    }
+    fn record(&self, error: NativeError) {
+        if let Some(slot) = &self.0 {
+            *slot.lock().expect("native error context") = Some(error);
+        }
+    }
+    pub(crate) fn sqlite(
+        &self,
+        error: rusqlite::Error,
+        path: &Path,
+        operation: &'static str,
+    ) -> DunkError {
+        if let rusqlite::Error::SqliteFailure(inner, message) = &error {
+            self.record(NativeError::Sqlite {
+                code: inner.extended_code,
+                message: message.clone().unwrap_or_else(|| error.to_string()),
+                path: path.to_path_buf(),
+                operation,
+            });
+        }
+        map_sqlite(error)
+    }
+    pub(crate) fn io(
+        &self,
+        error: std::io::Error,
+        path: &Path,
+        operation: &'static str,
+    ) -> DunkError {
+        let legacy = DunkError::Refused(format!("{}: {error}", path.display()));
+        self.record(NativeError::Io {
+            error,
+            path: path.to_path_buf(),
+            operation,
+        });
+        legacy
+    }
+}
+
 /// The one place SQLite errors become [`DunkError`].
 ///
 /// Busy/locked is its own variant because the caller may retry and the wire
@@ -86,11 +150,19 @@ pub fn open_writer(path: &Path) -> Result<Connection, DunkError> {
 /// [`DunkError::Busy`] should take milliseconds, not the production five seconds,
 /// and a test that waits out the real timeout hides a hang in the busy path.
 pub fn open_writer_with_timeout(path: &Path, busy_ms: u64) -> Result<Connection, DunkError> {
+    open_writer_context(path, busy_ms, &ErrorContext::default())
+}
+fn open_writer_context(
+    path: &Path,
+    busy_ms: u64,
+    context: &ErrorContext,
+) -> Result<Connection, DunkError> {
     let path = checked_path(path)?;
-    let connection = Connection::open(&path).map_err(map_sqlite)?;
+    let connection =
+        Connection::open(&path).map_err(|e| context.sqlite(e, &path, "sqlite_open"))?;
     connection
         .busy_timeout(std::time::Duration::from_millis(busy_ms))
-        .map_err(map_sqlite)?;
+        .map_err(|e| context.sqlite(e, &path, "writer_pragma"))?;
     // An in-memory database has no journal file to switch.
     //
     // Switching to WAL needs a lock the OTHER writer may hold at this instant, so
@@ -110,7 +182,7 @@ pub fn open_writer_with_timeout(path: &Path, busy_ms: u64) -> Result<Connection,
                     break;
                 }
                 Err(error) => {
-                    let mapped = map_sqlite(error);
+                    let mapped = context.sqlite(error, &path, "writer_wal");
                     if error_is_busy(&mapped) && attempt + 1 < WAL_OPEN_ATTEMPTS {
                         std::thread::sleep(std::time::Duration::from_millis(
                             WAL_OPEN_BACKOFF_MS << attempt.min(4),
@@ -127,24 +199,28 @@ pub fn open_writer_with_timeout(path: &Path, busy_ms: u64) -> Result<Connection,
             return Err(error);
         }
     }
+    let _ = context.take(); // A successful retry must not leave a stale diagnostic.
     Ok(connection)
 }
 
 /// A read-only connection: never creates the file, never writes, never changes the
 /// journal mode of a database that belongs to someone else.
 pub fn open_reader(path: &Path) -> Result<Connection, DunkError> {
+    open_reader_context(path, &ErrorContext::default())
+}
+fn open_reader_context(path: &Path, context: &ErrorContext) -> Result<Connection, DunkError> {
     let path = checked_path(path)?;
     let connection = Connection::open_with_flags(
         &path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
     )
-    .map_err(map_sqlite)?;
+    .map_err(|e| context.sqlite(e, &path, "sqlite_open"))?;
     connection
         .busy_timeout(std::time::Duration::from_millis(BUSY_TIMEOUT_MS))
-        .map_err(map_sqlite)?;
+        .map_err(|e| context.sqlite(e, &path, "reader_pragma"))?;
     connection
         .pragma_update(None, "query_only", true)
-        .map_err(map_sqlite)?;
+        .map_err(|e| context.sqlite(e, &path, "reader_pragma"))?;
     Ok(connection)
 }
 
@@ -169,8 +245,11 @@ impl Writer {
     /// Start the actor. The connection is opened HERE, on the caller's thread, so a
     /// bad path or a busy open is reported to the caller rather than lost in a task.
     pub fn spawn(path: impl AsRef<Path>) -> Result<Self, DunkError> {
+        Self::spawn_context(path, &ErrorContext::default())
+    }
+    fn spawn_context(path: impl AsRef<Path>, context: &ErrorContext) -> Result<Self, DunkError> {
         let path = checked_path(path.as_ref())?;
-        let mut connection = open_writer(&path)?;
+        let mut connection = open_writer_context(&path, BUSY_TIMEOUT_MS, context)?;
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Job>(64);
         let quarantined = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let actor_quarantined = std::sync::Arc::clone(&quarantined);
@@ -305,13 +384,19 @@ impl std::fmt::Debug for SyncWriter {
 impl SyncWriter {
     /// Open the database and start the writer actor inside a fresh runtime.
     pub fn spawn(path: impl AsRef<Path>) -> Result<Self, DunkError> {
+        Self::spawn_context(path, &ErrorContext::default())
+    }
+    pub(crate) fn spawn_context(
+        path: impl AsRef<Path>,
+        context: &ErrorContext,
+    ) -> Result<Self, DunkError> {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|error| DunkError::Refused(format!("tokio runtime: {error}")))?;
         let writer = {
             let _entered = runtime.enter(); // the actor task lives in this runtime
-            Writer::spawn(path)?
+            Writer::spawn_context(path, context)?
         };
         Ok(SyncWriter {
             writer: std::sync::Arc::new(writer),
@@ -370,11 +455,18 @@ impl Drop for Borrowed<'_> {
 
 impl ReadPool {
     pub fn open(path: impl AsRef<Path>, size: usize) -> Result<Self, DunkError> {
+        Self::open_context(path, size, &ErrorContext::default())
+    }
+    pub(crate) fn open_context(
+        path: impl AsRef<Path>,
+        size: usize,
+        context: &ErrorContext,
+    ) -> Result<Self, DunkError> {
         let path = checked_path(path.as_ref())?;
         let size = size.max(1);
         let mut connections = Vec::with_capacity(size);
         for _ in 0..size {
-            connections.push(open_reader(&path)?);
+            connections.push(open_reader_context(&path, context)?);
         }
         Ok(ReadPool {
             path,
