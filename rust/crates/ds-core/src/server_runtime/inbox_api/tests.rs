@@ -727,7 +727,8 @@ fn inbox_archive_accepts_python_iso_forms_and_state_precedence() {
 
 #[test]
 fn inbox_default_provider_refuses_without_invoking_callback() {
-    use crate::api::{CommandEnv, PaneInfoEnv};
+    use crate::api::CommandEnv;
+    use crate::flock::panes::PaneInfoEnv;
     use std::sync::Mutex;
     struct Missing(Mutex<Box<dyn crate::terminal::Terminal>>);
     impl PaneInfoEnv for Missing {
