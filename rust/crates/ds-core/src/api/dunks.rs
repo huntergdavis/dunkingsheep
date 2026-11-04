@@ -208,3 +208,36 @@ pub fn h_remove_dunk(context: &HandlerContext<'_>, args: Args) -> Result<Value, 
         .remove_dunk(&python_value_string(id))
         .map(Value::Object)
 }
+
+/// `dunk_api.h_start_dunk`; stringify the raw id as Python Flock._find does.
+pub fn h_start_dunk(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let id = args
+        .get("id")
+        .ok_or_else(|| DunkError::Refused("'id'".into()))?;
+    context
+        .env
+        .start_dunk(&python_value_string(id))
+        .map(Value::Object)
+}
+
+/// `dunk_api.h_stop_dunk`; stringify the raw id as Python Flock._find does.
+pub fn h_stop_dunk(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let id = args
+        .get("id")
+        .ok_or_else(|| DunkError::Refused("'id'".into()))?;
+    context
+        .env
+        .stop_dunk(&python_value_string(id))
+        .map(Value::Object)
+}
+
+/// `dunk_api.h_toggle_dunk`; stringify the raw id as Python Flock._find does.
+pub fn h_toggle_dunk(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let id = args
+        .get("id")
+        .ok_or_else(|| DunkError::Refused("'id'".into()))?;
+    context
+        .env
+        .toggle_dunk(&python_value_string(id))
+        .map(Value::Object)
+}
