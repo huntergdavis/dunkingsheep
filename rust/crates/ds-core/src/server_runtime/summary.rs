@@ -51,7 +51,7 @@ impl SummaryEnv for RequestRuntimeAdapter<'_> {
             None
         };
         let expanded = expand_summary_path(std::path::Path::new(repo), home, false, named_home)?;
-        Ok(crate::flock::views::git_merges(
+        Ok(crate::flock::views::git_merges_expanded(
             &expanded.to_string_lossy(),
             10,
         ))
@@ -295,6 +295,10 @@ mod tests {
                 vec![("HOME", "")],
                 PathBuf::from("/.config/dunkingsheep/context"),
             ),
+            (
+                vec![("HOME", "~/a"), ("DUNKINGSHEEP_DIR", "/explicit")],
+                PathBuf::from("/explicit/context"),
+            ),
         ] {
             let flock = Flock::new(
                 dir.path().join("launches.json"),
@@ -324,15 +328,21 @@ mod tests {
             let home = if pairs[0].1.is_empty() {
                 "/"
             } else {
-                "/captured"
+                pairs[0].1
             };
             assert_eq!(
                 SummaryEnv::project_dir(&adapter, "~/workspace/a/../b").unwrap(),
-                PathBuf::from(home).join("workspace/b")
+                crate::flock::project_summary::absolute_summary_path(
+                    &PathBuf::from(home).join("workspace/b"),
+                    &std::env::current_dir().unwrap()
+                )
             );
             assert_eq!(
                 SummaryEnv::project_dir(&adapter, "~").unwrap(),
-                PathBuf::from(home)
+                crate::flock::project_summary::absolute_summary_path(
+                    std::path::Path::new(home),
+                    &std::env::current_dir().unwrap()
+                )
             );
             assert_eq!(
                 SummaryEnv::project_dir(&adapter, "//host/a/../b")

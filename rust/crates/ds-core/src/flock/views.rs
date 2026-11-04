@@ -270,6 +270,15 @@ pub fn git_merges(repo: &str, limit: i64) -> Value {
 /// `git_merges` with the program and deadline as parameters (the test uses a fake git).
 pub fn git_merges_with(repo: &str, limit: i64, program: &str, timeout_s: f64) -> Value {
     let path = expand_home(repo);
+    git_merges_expanded_with(path, limit, program, timeout_s)
+}
+
+/// A path already expanded by a captured configuration owner. Do not expand it twice.
+pub(crate) fn git_merges_expanded(path: &str, limit: i64) -> Value {
+    git_merges_expanded_with(path.to_string(), limit, "git", 10.0)
+}
+
+fn git_merges_expanded_with(path: String, limit: i64, program: &str, timeout_s: f64) -> Value {
     if !Path::new(&path).join(".git").is_dir() {
         return json!({"repo": path, "merges": [], "as_of": null, "reason": format!("{path} is not a git repository")});
     }
@@ -430,6 +439,14 @@ pub fn reply_stats(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn git_merges_expanded_preserves_a_retained_tilde_path() {
+        let path = "~/a/workspace/summary-no-such-repository";
+        let output = super::git_merges_expanded_with(path.into(), 10, "/nonexistent/git", 0.1);
+        assert_eq!(output["repo"], path);
+        assert_eq!(output["reason"], format!("{path} is not a git repository"));
+    }
+
     #[test]
     fn git_merge_ordinary_paths_do_not_read_missing_or_bad_home() {
         use std::cell::Cell;

@@ -43,6 +43,19 @@ class ProjectSummaryPathOracleTests(unittest.TestCase):
                             "reason": f"{path} is not a git repository",
                         })
 
+    def test_git_merges_expands_tilde_home_exactly_once(self):
+        source = Path(__file__).resolve().parents[1] / "dunk_views.py"
+        tree = ast.parse(source.read_text())
+        function = next(node for node in tree.body
+                        if isinstance(node, ast.FunctionDef) and node.name == "git_merges")
+        namespace = {"os": os}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), "exec"), namespace)
+        with patch.object(os, "environ", {"HOME": "~/a"}), \
+             patch.object(os.path, "isdir", return_value=False):
+            result = namespace["git_merges"]("~/workspace/dunkingsheep")
+        self.assertEqual(result["repo"], "~/a/workspace/dunkingsheep")
+        self.assertEqual(result["reason"], "~/a/workspace/dunkingsheep is not a git repository")
+
 
 if __name__ == "__main__":
     unittest.main()
