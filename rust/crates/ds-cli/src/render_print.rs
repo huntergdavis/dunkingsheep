@@ -1705,7 +1705,7 @@ pub fn render_dispatch_tick(result: &Value) -> String {
     let dead = arr(result, "dead");
     let mut reasons: Vec<String> = blocked
         .iter()
-        .map(|item| format!("{}: {}", field(&item, "name"), field(&item, "reason")))
+        .map(|item| format!("{}: {}", field(item, "name"), field(item, "reason")))
         .collect();
     reasons.sort();
     reasons.dedup();
@@ -1723,7 +1723,7 @@ pub fn render_dispatch_tick(result: &Value) -> String {
     if !dead.is_empty() {
         let names = dead
             .iter()
-            .map(|item| field(&item, "name"))
+            .map(|item| field(item, "name"))
             .collect::<Vec<_>>()
             .join(", ");
         out.push_str(&format!("dead lanes: {} ({names})\n", dead.len()));

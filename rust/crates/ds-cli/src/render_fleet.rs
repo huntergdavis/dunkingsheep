@@ -37,7 +37,7 @@ fn py_repr_string(s: &str) -> String {
     for c in s.chars() {
         match c {
             '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\n"),
+            '\n' => out.push('\n'),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
             c if c == quote => {

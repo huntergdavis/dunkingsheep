@@ -795,8 +795,9 @@ fn capability(ns: &Map<String, Value>) -> Outcome {
 }
 
 fn lane(ns: &Map<String, Value>) -> Outcome {
+    type LanePrinter = Box<dyn Fn(&Value) -> String>;
     let action = text(ns, "lane_command").unwrap_or("list");
-    let (rpc, args, printer): (&str, Map<String, Value>, Box<dyn Fn(&Value) -> String>) =
+    let (rpc, args, printer): (&str, Map<String, Value>, LanePrinter) =
         match action {
             "register" => {
                 let mut args = Map::new();
@@ -2080,41 +2081,6 @@ fn command_output_timeout(
         stdout,
         stderr,
     })
-}
-
-#[cfg(test)]
-mod guard_timeout_tests {
-    use super::command_output_timeout;
-    use std::process::Command;
-    use std::time::Duration;
-
-    #[test]
-    fn guard_check_child_obeys_timeout() {
-        let mut command = Command::new("sleep");
-        command
-            .arg("5")
-            .stdout(super::Stdio::piped())
-            .stderr(super::Stdio::piped());
-        let error = command_output_timeout(&mut command, Duration::from_millis(30)).unwrap_err();
-        assert!(error.contains("timed out"), "{error}");
-    }
-
-    #[test]
-    fn guard_check_drains_large_child_output() {
-        let mut command = Command::new("python3");
-        command
-            .args([
-                "-c",
-                "import sys; sys.stdout.write('o' * 1048576); sys.stderr.write('e' * 1048576)",
-            ])
-            .stdout(super::Stdio::piped())
-            .stderr(super::Stdio::piped());
-        let output = command_output_timeout(&mut command, Duration::from_secs(10)).unwrap();
-        assert_eq!(output.stdout.len(), 1_048_576);
-        assert_eq!(output.stderr.len(), 1_048_576);
-        assert!(output.stdout.iter().all(|byte| *byte == b'o'));
-        assert!(output.stderr.iter().all(|byte| *byte == b'e'));
-    }
 }
 
 fn owner_command(ns: &Map<String, Value>) -> Outcome {
@@ -4374,5 +4340,40 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
             crate::daemon_cmd::git_credential(ns, &mut stdin.lock())
         }
         other => not_ported(other),
+    }
+}
+
+#[cfg(test)]
+mod guard_timeout_tests {
+    use super::command_output_timeout;
+    use std::process::Command;
+    use std::time::Duration;
+
+    #[test]
+    fn guard_check_child_obeys_timeout() {
+        let mut command = Command::new("sleep");
+        command
+            .arg("5")
+            .stdout(super::Stdio::piped())
+            .stderr(super::Stdio::piped());
+        let error = command_output_timeout(&mut command, Duration::from_millis(30)).unwrap_err();
+        assert!(error.contains("timed out"), "{error}");
+    }
+
+    #[test]
+    fn guard_check_drains_large_child_output() {
+        let mut command = Command::new("python3");
+        command
+            .args([
+                "-c",
+                "import sys; sys.stdout.write('o' * 1048576); sys.stderr.write('e' * 1048576)",
+            ])
+            .stdout(super::Stdio::piped())
+            .stderr(super::Stdio::piped());
+        let output = command_output_timeout(&mut command, Duration::from_secs(10)).unwrap();
+        assert_eq!(output.stdout.len(), 1_048_576);
+        assert_eq!(output.stderr.len(), 1_048_576);
+        assert!(output.stdout.iter().all(|byte| *byte == b'o'));
+        assert!(output.stderr.iter().all(|byte| *byte == b'e'));
     }
 }
