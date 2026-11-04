@@ -19,3 +19,5 @@ pub mod system;
 pub mod game_state;
 
 pub mod fleet;
+
+mod response_error;

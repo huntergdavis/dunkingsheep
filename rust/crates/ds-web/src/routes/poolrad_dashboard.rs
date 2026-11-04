@@ -3,6 +3,8 @@
 //! The renderer and dashboard filesystem stay behind an injected backend. The
 //! route layer enforces authentication, the report allowlist, and response headers.
 
+use super::response_error::WebResponseError;
+
 use std::sync::Arc;
 
 use axum::{
@@ -62,7 +64,7 @@ async fn refresh_poolrad_dashboard(
     request: Request,
 ) -> Response {
     if let Err(response) = authenticate(auth.as_ref(), request.headers(), scheme).await {
-        return response;
+        return response.into_response();
     }
     if !backend.dashboard_available() {
         return detail_response(StatusCode::NOT_FOUND, "Poolrad dashboard unavailable");
@@ -87,7 +89,7 @@ async fn poolrad_dashboard_page(
     request: Request,
 ) -> Response {
     if let Err(response) = authenticate(auth.as_ref(), request.headers(), scheme).await {
-        return response;
+        return response.into_response();
     }
     let Some(html) = backend.dashboard_html() else {
         return detail_response(StatusCode::NOT_FOUND, "Poolrad dashboard unavailable");
@@ -126,7 +128,7 @@ async fn poolrad_dashboard_report(
     request: Request,
 ) -> Response {
     if let Err(response) = authenticate(auth.as_ref(), request.headers(), scheme).await {
-        return response;
+        return response.into_response();
     }
     if !DASHBOARD_REPORTS.contains(&filename.as_str()) {
         return detail_response(StatusCode::NOT_FOUND, "Report unavailable");
@@ -160,7 +162,7 @@ async fn authenticate(
     auth: &dyn AuthBackend,
     headers: &HeaderMap,
     scheme: RequestScheme,
-) -> Result<(), Response> {
+) -> Result<(), WebResponseError> {
     if let Some(value) = headers.get(header::ORIGIN) {
         let origin = value.to_str().map_err(|_| cross_origin())?;
         let host = headers
@@ -172,7 +174,7 @@ async fn authenticate(
             RequestScheme::Https => "https",
         };
         if !origin.is_empty() && origin != format!("{expected}://{host}") {
-            return Err(cross_origin());
+            return Err(cross_origin().into());
         }
     }
     let bearer = headers
@@ -184,6 +186,7 @@ async fn authenticate(
         .await
         .map(|_| ())
         .map_err(auth_error_response)
+        .map_err(WebResponseError::from)
 }
 
 fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {

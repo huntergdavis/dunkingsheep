@@ -3,6 +3,8 @@
 //! Pane reads, dashboard loading, accounting, and cache state are injected so the
 //! HTTP handlers can be exercised without contacting a terminal or dashboard checkout.
 
+use super::response_error::WebResponseError;
+
 use std::sync::Arc;
 
 use axum::{
@@ -68,7 +70,7 @@ async fn panes_activity(
     request: Request,
 ) -> Response {
     if let Err(response) = authenticate(auth.as_ref(), request.headers(), scheme).await {
-        return with_no_store(response);
+        return with_no_store(response.into_response());
     }
     let data = match backend.panes_activity() {
         Ok(Some(mut data)) => {
@@ -94,7 +96,7 @@ async fn activity(
     request: Request,
 ) -> Response {
     if let Err(response) = authenticate(auth.as_ref(), request.headers(), scheme).await {
-        return response;
+        return response.into_response();
     }
     let query = match parse_query(request.uri().query()) {
         Ok(query) => query,
@@ -125,7 +127,7 @@ async fn poolrad_dashboard_progress(
     request: Request,
 ) -> Response {
     if let Err(response) = authenticate(auth.as_ref(), request.headers(), scheme).await {
-        return response;
+        return response.into_response();
     }
     let mut view = match backend.poolrad_progress() {
         Ok(Some(view)) => view,
@@ -161,7 +163,7 @@ async fn authenticate(
     auth: &dyn AuthBackend,
     headers: &HeaderMap,
     scheme: RequestScheme,
-) -> Result<(), Response> {
+) -> Result<(), WebResponseError> {
     if let Some(value) = headers.get(header::ORIGIN) {
         let origin = value.to_str().map_err(|_| cross_origin())?;
         let host = headers
@@ -173,7 +175,7 @@ async fn authenticate(
             RequestScheme::Https => "https",
         };
         if !origin.is_empty() && origin != format!("{expected}://{host}") {
-            return Err(cross_origin());
+            return Err(cross_origin().into());
         }
     }
     let bearer = headers
@@ -193,6 +195,7 @@ async fn authenticate(
         .await
         .map(|_| ())
         .map_err(auth_error_response)
+        .map_err(WebResponseError::from)
 }
 
 fn parse_query(raw: Option<&str>) -> Result<std::collections::BTreeMap<String, String>, ()> {

@@ -4,6 +4,8 @@
 //! and the short pane-text cache. The injected backend owns session storage,
 //! daemon RPC, roster construction, and wall-clock formatting.
 
+use super::response_error::WebResponseError;
+
 use std::{
     collections::HashMap,
     future::Future,
@@ -128,7 +130,7 @@ async fn report_viewport(
 ) -> Response {
     let headers = request.headers().clone();
     if let Err(response) = authenticate(auth.as_ref(), &headers, scheme).await {
-        return response;
+        return response.into_response();
     }
 
     let body = match to_bytes(request.into_body(), usize::MAX).await {
@@ -158,7 +160,7 @@ async fn channels(
     headers: HeaderMap,
 ) -> Response {
     if let Err(response) = authenticate(auth.as_ref(), &headers, scheme).await {
-        return response;
+        return response.into_response();
     }
 
     let (panes, daemon) = match state.backend.rpc("list_panes", json!({})).await {
@@ -404,9 +406,9 @@ async fn authenticate(
     backend: &dyn AuthBackend,
     headers: &HeaderMap,
     scheme: RequestScheme,
-) -> Result<Identity, Response> {
+) -> Result<Identity, WebResponseError> {
     if let Some(response) = same_origin_refusal(headers, scheme) {
-        return Err(response);
+        return Err(response.into());
     }
     let bearer = headers
         .get(header::AUTHORIZATION)
@@ -417,6 +419,7 @@ async fn authenticate(
         .identity(bearer, cookie.as_deref())
         .await
         .map_err(auth_error_response)
+        .map_err(WebResponseError::from)
 }
 
 fn same_origin_refusal(headers: &HeaderMap, scheme: RequestScheme) -> Option<Response> {

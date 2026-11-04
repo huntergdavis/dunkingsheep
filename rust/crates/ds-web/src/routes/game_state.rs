@@ -3,6 +3,8 @@
 //! The runtime owns DOSBox state and file operations behind `GameStateBackend`;
 //! this module owns request validation, auth, and Python-compatible responses.
 
+use super::response_error::WebResponseError;
+
 use std::{future::Future, pin::Pin, sync::Arc};
 
 use axum::{
@@ -113,7 +115,7 @@ async fn game_states(
     request: Request,
 ) -> Response {
     if let Err(response) = authenticate(auth.as_ref(), request.headers(), scheme).await {
-        return response;
+        return response.into_response();
     }
     match game.list_states().await {
         Ok(states) => Json(states).into_response(),
@@ -130,10 +132,10 @@ async fn game_savestate(
     let headers = request.headers().clone();
     let parsed_body = match request_json(request).await {
         Ok(body) => body,
-        Err(response) => return response,
+        Err(response) => return response.into_response(),
     };
     if let Err(response) = authenticate(auth.as_ref(), &headers, scheme).await {
-        return response;
+        return response.into_response();
     }
     let parsed_body = match parsed_body {
         Some(parsed_body) => parsed_body,
@@ -186,10 +188,10 @@ async fn game_loadstate(
     let headers = request.headers().clone();
     let parsed_body = match request_json(request).await {
         Ok(body) => body,
-        Err(response) => return response,
+        Err(response) => return response.into_response(),
     };
     if let Err(response) = authenticate(auth.as_ref(), &headers, scheme).await {
-        return response;
+        return response.into_response();
     }
     let body = match parsed_body {
         Some(ParsedRequestJson {
@@ -266,7 +268,7 @@ async fn game_loadstate(
     }
 }
 
-async fn request_json(request: Request) -> Result<Option<ParsedRequestJson>, Response> {
+async fn request_json(request: Request) -> Result<Option<ParsedRequestJson>, WebResponseError> {
     let parse_as_json = request_json_content_type(request.headers());
     let bytes = to_bytes(request.into_body(), usize::MAX)
         .await
@@ -291,7 +293,7 @@ async fn request_json(request: Request) -> Result<Option<ParsedRequestJson>, Res
             return Err(detail_response(
                 StatusCode::BAD_REQUEST,
                 "There was an error parsing the body",
-            ));
+            ).into());
         }
     };
     match serde_json::from_slice(&json_bytes) {
@@ -300,7 +302,7 @@ async fn request_json(request: Request) -> Result<Option<ParsedRequestJson>, Res
                 return Err(detail_response(
                     StatusCode::BAD_REQUEST,
                     "There was an error parsing the body",
-                ));
+                ).into());
             }
             Ok(Some(ParsedRequestJson {
                 value,
@@ -314,7 +316,7 @@ async fn request_json(request: Request) -> Result<Option<ParsedRequestJson>, Res
                         return Err(detail_response(
                             StatusCode::BAD_REQUEST,
                             "There was an error parsing the body",
-                        ));
+                        ).into());
                     }
                     let surrogate_tag = top_level_tag_python_string(&json_bytes)
                         .filter(PythonString::has_surrogate);
@@ -324,7 +326,7 @@ async fn request_json(request: Request) -> Result<Option<ParsedRequestJson>, Res
                     }));
                 }
             }
-            Err(python_json_decode_error(&json_bytes, &error))
+            Err(python_json_decode_error(&json_bytes, &error).into())
         }
     }
 }
@@ -366,11 +368,12 @@ fn decode_python_json_bytes(bytes: &[u8]) -> Result<Vec<u8>, ()> {
             .map(|text| text.as_bytes().to_vec())
             .map_err(|_| ()),
         Encoding::Utf16Le | Encoding::Utf16Be => {
-            if payload.len() % 2 != 0 {
+            let (pairs, remainder) = payload.as_chunks::<2>();
+            if !remainder.is_empty() {
                 return Err(());
             }
-            let units: Vec<u16> = payload
-                .chunks_exact(2)
+            let units: Vec<u16> = pairs
+                .iter()
                 .map(|pair| match encoding {
                     Encoding::Utf16Le => u16::from_le_bytes([pair[0], pair[1]]),
                     Encoding::Utf16Be => u16::from_be_bytes([pair[0], pair[1]]),
@@ -382,11 +385,12 @@ fn decode_python_json_bytes(bytes: &[u8]) -> Result<Vec<u8>, ()> {
                 .map_err(|_| ())
         }
         Encoding::Utf32Le | Encoding::Utf32Be => {
-            if payload.len() % 4 != 0 {
+            let (quads, remainder) = payload.as_chunks::<4>();
+            if !remainder.is_empty() {
                 return Err(());
             }
             let mut text = String::new();
-            for quad in payload.chunks_exact(4) {
+            for quad in quads {
                 let code_point = match encoding {
                     Encoding::Utf32Le => u32::from_le_bytes([quad[0], quad[1], quad[2], quad[3]]),
                     Encoding::Utf32Be => u32::from_be_bytes([quad[0], quad[1], quad[2], quad[3]]),
@@ -897,7 +901,7 @@ fn python_trailing_comma(bytes: &[u8]) -> Option<(usize, JsonContainer)> {
         } else if character == ',' {
             let after_comma = &text[byte_offset + character.len_utf8()..];
             let closing = after_comma
-                .trim_start_matches(|character| matches!(character, ' ' | '\n' | '\r' | '\t'))
+                .trim_start_matches([' ', '\n', '\r', '\t'])
                 .chars()
                 .next();
             let container = match (closing, containers.last()) {
@@ -1082,16 +1086,16 @@ async fn authenticate(
     backend: &dyn AuthBackend,
     headers: &HeaderMap,
     scheme: RequestScheme,
-) -> Result<Identity, Response> {
+) -> Result<Identity, WebResponseError> {
     if let Some(response) = same_origin_refusal(headers, scheme) {
-        return Err(response);
+        return Err(response.into());
     }
     let bearer = bearer_value(headers);
     let cookie = cookie_value(headers, "vp_session");
     backend
         .identity(bearer.as_deref(), cookie.as_deref())
         .await
-        .map_err(auth_error_response)
+        .map_err(auth_error_response).map_err(WebResponseError::from)
 }
 
 fn same_origin_refusal(headers: &HeaderMap, scheme: RequestScheme) -> Option<Response> {
