@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 
@@ -18,9 +19,17 @@ pub struct ProviderBudget {
 #[derive(Debug, Clone)]
 pub struct ExplicitOption<T>(pub Option<T>);
 
-impl<'de, T: Deserialize<'de>> Deserialize<'de> for ExplicitOption<T> {
+impl<'de, T: DeserializeOwned> Deserialize<'de> for ExplicitOption<T> {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        Option::<T>::deserialize(deserializer).map(Self)
+        let value = Value::deserialize(deserializer)?;
+        if value.is_null() {
+            Ok(Self(None))
+        } else {
+            serde_json::from_value(value)
+                .map(Some)
+                .map(Self)
+                .map_err(serde::de::Error::custom)
+        }
     }
 }
 
