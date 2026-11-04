@@ -189,9 +189,11 @@ impl OutboxRuntime {
         pane: Option<&serde_json::Map<String, serde_json::Value>>,
         args: &crate::flock::dunks::UpdateArgs,
     ) -> Result<serde_json::Map<String, serde_json::Value>, DunkError> {
-        let row = self.flock.dunks.update(id, pane, args)?;
-        self.interval_changed(id)?;
-        self.flock.save()?;
+        let (row, changed) = self.flock.dunks.update_with_change(id, pane, args)?;
+        if changed {
+            self.interval_changed(id)?;
+            self.flock.save()?;
+        }
         Ok(row)
     }
 

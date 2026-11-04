@@ -642,6 +642,42 @@ mod tests {
         );
         assert_eq!(status_reads.load(Ordering::SeqCst), 3);
 
+        // Equal intervals and falsey targets produce an empty Python-compatible changed list.
+        // Block persistence to prove a successful no-op neither saves nor wakes the running
+        // timer, and leave the already-primed shared view valid.
+        let state_path = dir.path().join("dunk-mutations-route-whole-state.json");
+        std::fs::remove_file(&state_path).unwrap();
+        std::fs::create_dir(&state_path).unwrap();
+        let same_interval = dispatcher
+            .dispatch(
+                "update_dunk",
+                &json!({"id": "d1", "interval_minutes": 2}),
+                &owner,
+            )
+            .unwrap();
+        assert_eq!(same_interval["interval_minutes"], 2.0);
+        let falsey_target = dispatcher
+            .dispatch("update_dunk", &json!({"id": "d1", "target": ""}), &owner)
+            .unwrap();
+        assert_eq!(falsey_target["target_pane_id"], "w3:p3");
+        assert_eq!(
+            services.outbox.dunk_timer_generation("d1").unwrap(),
+            Some(1),
+            "successful no-op updates do not wake the timer"
+        );
+        assert_eq!(services.outbox.dunk_timer_worker_count(), 1);
+        assert_eq!(
+            cached_dunks(&services, &owner, &status_reads)["dunks"][0]["interval_minutes"],
+            2.0,
+            "successful no-op updates preserve the primed view"
+        );
+        assert_eq!(
+            status_reads.load(Ordering::SeqCst),
+            3,
+            "successful no-op updates do not invalidate the shared cache"
+        );
+        std::fs::remove_dir(&state_path).unwrap();
+
         let removed = dispatcher
             .dispatch("remove_dunk", &json!({"id": "d1"}), &owner)
             .unwrap();
