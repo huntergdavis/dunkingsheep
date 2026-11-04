@@ -23,6 +23,7 @@ impl RequestRuntimeAdapter<'_> {
             runtime: self.runtime,
             inbox: self.inbox.clone(),
             outbox: None,
+            owner_push: self.owner_push,
             next_jobs: self.next_jobs,
         }
         .with_outbox(outbox)?;
