@@ -204,7 +204,7 @@ mod tests {
     use crate::api::{CallerGate, CommandEnv, Dispatcher};
     use crate::error::DunkError;
     use crate::flock::dunks::Dunker;
-    use crate::flock::panes::{PaneInfoEnv, Stores};
+    use crate::flock::panes::PaneInfoEnv;
     use crate::flock::Flock;
     use crate::inbox_store::{Outgoing, Store as InboxStore};
     use crate::server::RequestCtx;
