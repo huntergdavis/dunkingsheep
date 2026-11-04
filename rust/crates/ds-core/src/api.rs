@@ -548,6 +548,13 @@ impl Dispatcher {
         self.register("memory_context", h_memory_context);
     }
 
+    /// Register the memory management handlers owned by the T39 memory API leaf.
+    pub fn register_memory_stats_status_ingest(&mut self) {
+        self.register("memory_stats", h_memory_stats);
+        self.register("memory_status", h_memory_status);
+        self.register("memory_ingest", h_memory_ingest);
+    }
+
     /// Register only the T39 pane and workspace listing handlers.
     pub fn register_list_panes_read_pane_workspaces(&mut self) {
         self.register("list_panes", h_list_panes);
@@ -2209,10 +2216,10 @@ fn context_arg_string<'a>(args: &'a Args, key: &str) -> Result<&'a str, DunkErro
         .ok_or_else(|| DunkError::Refused(format!("'{key}' is required")))
 }
 
-fn memory_pool(
+fn memory_service(
     context: &HandlerContext<'_>,
-) -> Result<std::sync::Arc<crate::db::ReadPool>, DunkError> {
-    context.flock.stores().memory.ok_or_else(|| {
+) -> Result<std::sync::Arc<crate::memory::service::MemoryService>, DunkError> {
+    context.flock.memory_service().ok_or_else(|| {
         DunkError::Refused(
             "memory service is not enabled; start the daemon with persistence".into(),
         )
@@ -2356,15 +2363,10 @@ fn memory_filters(args: &Args) -> Result<crate::memory::recall::Filters, DunkErr
 fn memory_recall(context: &HandlerContext<'_>, args: &Args) -> Result<Value, DunkError> {
     let query = memory_arg_string(args, "query")?;
     let limit = memory_int_arg_at_most(args, "limit", 10, MEMORY_RECALL_MAX_LIMIT)?.max(0) as usize;
-    let pool = memory_pool(context)?;
-    let rows = crate::memory::recall::recall(
-        pool.as_ref(),
-        query,
-        limit,
-        &memory_filters(args)?,
-        context.env.now_s(),
-        1200,
-    )?;
+    let service = memory_service(context)?;
+    let filters = memory_filters(args)?;
+    let input = crate::memory::service::RecallInput::typed(query, limit, &filters, 1200);
+    let rows = service.recall(&input)?;
     serde_json::to_value(rows).map_err(|error| DunkError::Refused(error.to_string()))
 }
 
@@ -2384,8 +2386,26 @@ pub fn h_memory_context(context: &HandlerContext<'_>, args: Args) -> Result<Valu
     // Negative values retain Python's slice-from-the-end behavior; positive requests follow
     // the published API maximum, bounding the recall multiplier below.
     let sessions = memory_int_arg_at_most(&args, "sessions", 5, MEMORY_CONTEXT_MAX_SESSIONS)?;
-    let pool = memory_pool(context)?;
-    crate::memory::queries::context(pool.as_ref(), query, sessions, 2, context.env.now_s())
+    memory_service(context)?.context(query, sessions, 2)
+}
+
+/// `dunk_api.h_memory_stats`.
+pub fn h_memory_stats(context: &HandlerContext<'_>, _args: Args) -> Result<Value, DunkError> {
+    memory_service(context)?.stats()
+}
+
+/// `dunk_api.h_memory_status`.
+pub fn h_memory_status(context: &HandlerContext<'_>, _args: Args) -> Result<Value, DunkError> {
+    memory_service(context)?.status()
+}
+
+/// `dunk_api.h_memory_ingest`: enqueue only; lifecycle owns starting the worker.
+pub fn h_memory_ingest(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let path = memory_arg_string(&args, "path")?;
+    let harness = args.get("harness").and_then(Value::as_str);
+    let project = args.get("project").and_then(Value::as_str);
+    let receipt = memory_service(context)?.enqueue(path, harness, project)?;
+    serde_json::to_value(receipt).map_err(|error| DunkError::Refused(error.to_string()))
 }
 
 fn python_bool_arg(args: &Args, key: &str, default: bool) -> bool {
