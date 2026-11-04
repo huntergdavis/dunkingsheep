@@ -869,6 +869,10 @@ fn hold_backoff_s(attempts: i64) -> f64 {
 
 pub type HoldSignature = (String, String);
 
+/// Python dict ordering is part of queue lookup, list ties, and persisted restore order.
+/// The accepted dependency disables defaults; use the existing standard-library hasher.
+pub type Outbox = indexmap::IndexMap<String, Vec<Message>, std::collections::hash_map::RandomState>;
+
 struct OutboxHold<'a> {
     message: &'a Message,
     now: f64,
@@ -2459,6 +2463,12 @@ impl PartialEq for DunkDeliveryAction {
 }
 
 impl Message {
+    pub(super) fn cancel_at(&mut self, now: f64) {
+        self.status = "cancelled".into();
+        self.finished_at = Some(now);
+        *lock_unpoison(&self.attempt_state.cancelled_at) = Some(now);
+    }
+
     pub(super) fn set_dunk_delivery(&mut self, action: Arc<DunkDeliveryAction>) {
         self.dunk_delivery = Some(action);
     }
@@ -2466,6 +2476,8 @@ impl Message {
 
 #[derive(Debug, Default)]
 struct MessageAttemptState {
+    // Shared by the captured callback and queue row, independent of bounded history retention.
+    cancelled_at: Mutex<Option<f64>>,
     receipt_ids: Mutex<Vec<String>>,
     folded_text: Mutex<Option<String>>,
 }
@@ -3443,7 +3455,7 @@ pub(crate) fn outbox_step<E: SendPreparationEnv + PaneInfoEnv>(
         };
         queue.retain(|message| message.status == "queued");
         let Some(stored_head) = queue.first_mut() else {
-            outbox.remove(pane_id);
+            outbox.shift_remove(pane_id);
             return OutboxStep::Empty;
         };
         stored_head.prepare_receipt_frame();
@@ -3530,7 +3542,7 @@ pub(crate) fn outbox_step<E: SendPreparationEnv + PaneInfoEnv>(
             Some(current) if current.same_lifetime(&head) => {}
             Some(_) => return OutboxStep::Delivered,
             None => {
-                outbox.remove(pane_id);
+                outbox.shift_remove(pane_id);
                 return OutboxStep::Empty;
             }
         }
@@ -3619,9 +3631,7 @@ pub(crate) fn outbox_worker<E: SendPreparationEnv + PaneInfoEnv>(
     }
 }
 
-pub(crate) fn outbox_lock(
-    outbox: &Mutex<BTreeMap<String, Vec<Message>>>,
-) -> MutexGuard<'_, BTreeMap<String, Vec<Message>>> {
+pub(crate) fn outbox_lock(outbox: &Mutex<Outbox>) -> MutexGuard<'_, Outbox> {
     outbox
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -3640,11 +3650,19 @@ impl Flock {
         let (message, attempts, terminal) = {
             let mut outbox = outbox_lock(&self.outbox);
             let pane_id = &message.pane_id;
-            let Some(queue) = outbox.get_mut(pane_id) else {
-                return DeliveryOutcome::Missing;
-            };
-            let Some(stored) = queue.iter_mut().find(|row| row.same_lifetime(message)) else {
-                return DeliveryOutcome::Missing;
+            let Some(stored) = outbox
+                .get_mut(pane_id)
+                .and_then(|queue| queue.iter_mut().find(|row| row.same_lifetime(message)))
+            else {
+                drop(outbox);
+                return self.record_cancelled_outbox_hold(OutboxHold {
+                    message,
+                    now,
+                    permanent,
+                    reason,
+                    refused_detail,
+                    signature,
+                });
             };
             if stored.status != "queued" {
                 return DeliveryOutcome::AlreadyDecided;
@@ -3674,10 +3692,11 @@ impl Flock {
             let mut message = stored.clone();
             message.refresh_notify_for_from_frame();
             if terminal {
+                let queue = outbox
+                    .get_mut(pane_id)
+                    .expect("selected queue remains locked");
                 queue.retain(|row| !row.same_lifetime(&message));
-                if queue.is_empty() {
-                    outbox.remove(pane_id);
-                }
+                // Python keeps the pane slot until the next empty worker step.
             }
             (message, attempts, terminal)
         };
@@ -3725,6 +3744,129 @@ impl Flock {
             DeliveryOutcome::Undeliverable
         } else {
             let _ = self.save();
+            DeliveryOutcome::Held
+        }
+    }
+
+    /// Python `_deliver` keeps its original Message object when cancellation removes the
+    /// queue row. A later guard refusal mutates that object's history alias, not a replacement.
+    fn record_cancelled_outbox_hold(&self, hold: OutboxHold<'_>) -> DeliveryOutcome {
+        let (message, attempts, terminal) = {
+            let mut history = lock_unpoison(&self.message_history);
+            let cancelled_at = *lock_unpoison(&hold.message.attempt_state.cancelled_at);
+            let Some(cancelled_at) = cancelled_at else {
+                return DeliveryOutcome::Missing;
+            };
+            let mut stored = history
+                .iter()
+                .find(|row| row.same_lifetime(hold.message))
+                .cloned()
+                .unwrap_or_else(|| {
+                    // Python's captured Message survives eviction from message_history.
+                    let mut original = hold.message.clone();
+                    original.status = "cancelled".into();
+                    original.finished_at = Some(cancelled_at);
+                    original
+                });
+            if stored.status != "cancelled" {
+                return DeliveryOutcome::AlreadyDecided;
+            }
+            stored.holds = stored.holds.saturating_add(1);
+            let attempts = stored.holds.min(HOLD_ATTEMPT_LIMIT);
+            // This is the reached Python _deliver refusal branch, whose budget applies to
+            // every refusal (including a transient one), even after cancellation.
+            let delivered_refusal = hold.refused_detail.is_some();
+            let terminal =
+                (delivered_refusal || hold.permanent) && stored.holds >= HOLD_ATTEMPT_LIMIT;
+            let reason = hold
+                .reason
+                .filter(|reason| !reason.is_empty())
+                .unwrap_or("unknown");
+            if terminal {
+                stored.status = "undeliverable".into();
+                stored.detail = Some(if delivered_refusal {
+                    format!("undeliverable after {attempts} refused attempts (last reason: {reason}); not retried again")
+                } else {
+                    format!("undeliverable after {attempts} deferred attempts ({reason}); the target cannot accept")
+                });
+                stored.finished_at = Some(if delivered_refusal {
+                    clock::now_s()
+                } else {
+                    hold.now
+                });
+            } else {
+                stored.next_attempt_at = Some(hold.now + hold_backoff_s(attempts));
+                stored.hold_signature_kind = Some(hold.signature.0);
+                stored.hold_signature = Some(hold.signature.1);
+                stored.detail = Some(if delivered_refusal {
+                    hold.refused_detail
+                        .filter(|detail| !detail.is_empty())
+                        .or(hold.reason.filter(|reason| !reason.is_empty()))
+                        .unwrap_or("held")
+                        .to_owned()
+                } else {
+                    let delay = hold_backoff_s(attempts);
+                    format!("deferred ({reason}); attempt {attempts} of {HOLD_ATTEMPT_LIMIT}, next attempt in {delay:.0}s")
+                });
+            }
+            let mut message = stored.clone();
+            message.refresh_notify_for_from_frame();
+            for alias in history.iter_mut().filter(|row| row.same_lifetime(&message)) {
+                *alias = message.clone();
+            }
+            (message, attempts, terminal)
+        };
+        if let Some(metrics) = self.stores().metrics {
+            for kind in [
+                Some("message.held"),
+                terminal.then_some("message.undeliverable"),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                metrics.record(&crate::metrics::Event {
+                    at: 0.0,
+                    kind: kind.into(),
+                    pane_id: Some(message.pane_id.clone()),
+                    mailbox: Some(message.target_label.clone()),
+                    sender: None,
+                    source: Some(message.source.clone()),
+                    outcome: Some(
+                        if kind == "message.held" {
+                            "held"
+                        } else {
+                            "undeliverable"
+                        }
+                        .into(),
+                    ),
+                    reason: hold.reason.map(str::to_owned),
+                    duration_ms: None,
+                    attempts: Some(attempts),
+                    bytes: Some(message.text.len() as i64),
+                });
+            }
+        }
+        if terminal {
+            // Python remembers again only at the terminal budget; an ordinary refusal
+            // merely updates the already-present cancellation alias and emits no receipt.
+            self.remember(&message);
+        }
+        match self.save_classified() {
+            Ok(()) | Err(SnapshotSaveFailure::Io(_)) => {}
+            // The existing worker interface has no error return. Python lets non-OSError
+            // persistence failures terminate this worker; do not turn them into success.
+            Err(SnapshotSaveFailure::Other(error)) => std::panic::panic_any(error),
+        }
+        if terminal {
+            self.record_delivery_outcome(
+                &message,
+                false,
+                message.detail.as_deref(),
+                "undeliverable",
+                None,
+            );
+            DeliveryOutcome::Undeliverable
+        } else {
             DeliveryOutcome::Held
         }
     }
@@ -3912,9 +4054,7 @@ impl Flock {
                 message.refresh_notify_for_from_frame();
                 if let Some(queue) = outbox.get_mut(&pane_id) {
                     queue.retain(|row| !row.same_lifetime(&message));
-                    if queue.is_empty() {
-                        outbox.remove(&pane_id);
-                    }
+                    // Preserve the pane's insertion slot until the worker observes it empty.
                 }
             }
             self.remember(&message);
@@ -4778,7 +4918,7 @@ impl Flock {
     }
 
     /// Current pane queues for the snapshot-store seam and deterministic tests.
-    pub fn outbox_snapshot(&self) -> BTreeMap<String, Vec<Message>> {
+    pub fn outbox_snapshot(&self) -> Outbox {
         outbox_lock(&self.outbox).clone()
     }
 }

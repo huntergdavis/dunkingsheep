@@ -93,8 +93,7 @@ impl Flock {
                         message.id, message.status
                     )));
                 }
-                message.status = "cancelled".into();
-                message.finished_at = Some(crate::clock::now_s());
+                message.cancel_at(crate::clock::now_s());
                 let message = queue.remove(index);
                 self.remember(&message);
                 // Python cancellation releases the Event, but does not record delivery receipts.

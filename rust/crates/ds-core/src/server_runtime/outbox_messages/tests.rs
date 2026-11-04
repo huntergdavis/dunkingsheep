@@ -322,6 +322,7 @@ use std::time::Duration;
 #[derive(Debug)]
 struct BarrierTerminal {
     inner: FakeTerminal,
+    refusal: Option<String>,
     entered: mpsc::Sender<()>,
     release: Arc<(Mutex<bool>, Condvar)>,
 }
@@ -425,6 +426,9 @@ impl Terminal for BarrierTerminal {
             *released && !timeout.timed_out(),
             "worker barrier not released"
         );
+        if let Some(detail) = &self.refusal {
+            return Err(TerminalError::refused(detail.clone()));
+        }
         self.inner.send_text(pane_id, text)
     }
 
@@ -464,6 +468,7 @@ fn outbox_cancel_inflight_worker_preserves_replacement_lifetime() {
         Arc::new(move || {
             Box::new(BarrierTerminal {
                 inner: FakeTerminal::new(),
+                refusal: None,
                 entered: entered_tx.clone(),
                 release: Arc::clone(&release),
             })
@@ -635,6 +640,357 @@ fn outbox_message_provider_requires_canonical_flock() {
             .unwrap()
             .to_string(),
         "request outbox flock mismatch"
+    );
+    services.shutdown();
+}
+
+#[test]
+fn outbox_ordered_api_ties_duplicate_ids_replacement_and_restore() {
+    let (_dir, services) =
+        make_services("ordered", Arc::new(|| Box::new(FakeTerminal::new())), None);
+    put(&services, "duplicate", "z-pane", 100.0);
+    put(&services, "duplicate", "a-pane", 100.0);
+    put(&services, "z-second", "z-pane", 100.0);
+    put(&services, "middle", "m-pane", 100.0);
+    let dispatcher = services.production_dispatcher();
+    let owner = request("w2:p2");
+    let queued = || {
+        dispatcher
+            .dispatch("list_messages", &json!({}), &owner)
+            .unwrap()["queued"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| {
+                (
+                    row["pane_id"].as_str().unwrap().to_owned(),
+                    row["message_id"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        queued(),
+        [
+            ("z-pane", "duplicate"),
+            ("z-pane", "z-second"),
+            ("a-pane", "duplicate"),
+            ("m-pane", "middle")
+        ]
+        .map(|(p, m)| (p.into(), m.into()))
+    );
+    assert_eq!(
+        dispatcher
+            .dispatch("get_message", &json!({"message_id":"duplicate"}), &owner)
+            .unwrap()["pane_id"],
+        "z-pane"
+    );
+    assert_eq!(
+        dispatcher
+            .dispatch("cancel_message", &json!({"message_id":"duplicate"}), &owner)
+            .unwrap()["pane_id"],
+        "z-pane"
+    );
+    assert_eq!(
+        dispatcher
+            .dispatch("get_message", &json!({"message_id":"duplicate"}), &owner)
+            .unwrap()["pane_id"],
+        "a-pane"
+    );
+    assert_eq!(
+        dispatcher
+            .dispatch("cancel_message", &json!({"message_id":"duplicate"}), &owner)
+            .unwrap()["pane_id"],
+        "a-pane"
+    );
+    let replacement = Message::new("a-new", "a-pane", "target", "body", "send_text");
+    {
+        let mut outbox = services.flock().outbox.lock().unwrap();
+        outbox.insert("a-pane".into(), vec![replacement]);
+        assert_eq!(
+            outbox.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["z-pane", "a-pane", "m-pane"]
+        );
+        let z = outbox.shift_remove("z-pane").unwrap();
+        assert_eq!(
+            outbox.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["a-pane", "m-pane"]
+        );
+        outbox.insert("z-pane".into(), z);
+        assert_eq!(
+            outbox.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["a-pane", "m-pane", "z-pane"]
+        );
+    }
+    let snapshot = services.flock().snapshot();
+    assert_eq!(
+        snapshot["outbox"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["pane_id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["a-pane", "m-pane", "z-pane"]
+    );
+    services
+        .flock()
+        .restore_outbox(snapshot["outbox"].as_array().unwrap());
+    assert_eq!(
+        services
+            .flock()
+            .outbox_snapshot()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["a-pane", "m-pane", "z-pane"]
+    );
+    // Python restore enqueues in row order; later rows for an existing pane retain its slot.
+    let row = |id: &str, pane: &str| {
+        crate::flock::sends::message_snapshot(&Message::new(
+            id,
+            pane,
+            "target",
+            "body",
+            "send_text",
+        ))
+    };
+    services.flock().restore_outbox(&[
+        row("z1", "z"),
+        row("a1", "a"),
+        row("z2", "z"),
+        row("m1", "m"),
+    ]);
+    assert_eq!(
+        services
+            .flock()
+            .outbox_snapshot()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["z", "a", "m"]
+    );
+    assert_eq!(
+        services.flock().outbox_snapshot()["z"]
+            .iter()
+            .map(|m| m.id.as_str())
+            .collect::<Vec<_>>(),
+        ["z1", "z2"]
+    );
+    services.shutdown();
+}
+
+#[test]
+fn outbox_cancelled_inflight_refusal_updates_only_original_history_and_snapshot() {
+    use crate::flock::sends::{OutboxWake, BOX_HOLD};
+    for initial_holds in [0, 9] {
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let detail = format!("{BOX_HOLD} (controlled-refusal)");
+        let factory: LoopTerminalFactory = {
+            let release = Arc::clone(&release);
+            let detail = detail.clone();
+            Arc::new(move || {
+                let mut inner = FakeTerminal::new();
+                inner
+                    .screens
+                    .insert("w1:p1".into(), "❯ foreign draft".into());
+                Box::new(BarrierTerminal {
+                    inner,
+                    refusal: Some(detail.clone()),
+                    entered: entered_tx.clone(),
+                    release: Arc::clone(&release),
+                })
+            })
+        };
+        let (dir, services) = make_services("cancel-refusal", factory, None);
+        let store = services.flock().stores().inbox.unwrap();
+        let receipt = |body: &str| {
+            let id = store
+                .send(&crate::inbox_store::Outgoing {
+                    mailbox: "worker",
+                    body: Some(body),
+                    ..Default::default()
+                })
+                .unwrap();
+            store
+                .record_notify(&id, "queued", Some("awaiting notice"), None, None)
+                .unwrap();
+            id
+        };
+        let original_receipt = receipt("old");
+        let replacement_receipt = receipt("new");
+        let mut old = Message::new("same-id", "w1:p1", "original", "original body", "original");
+        old.created_at = 100.0;
+        old.holds = initial_holds;
+        old.is_notice = true;
+        old.notify_for = vec![original_receipt.clone()];
+        old.hold_while_typing = false;
+        old.press_enter = false;
+        old.attempt_generation = Some("original-generation".into());
+        services
+            .flock()
+            .outbox
+            .lock()
+            .unwrap()
+            .insert("w1:p1".into(), vec![old.clone()]);
+        services
+            .outbox
+            .pool
+            .ensure_worker(services.flock(), "w1:p1")
+            .unwrap();
+        let reached = entered_rx.recv_timeout(Duration::from_secs(10));
+        if reached.is_err() {
+            *release.0.lock().unwrap() = true;
+            release.1.notify_all();
+            services.shutdown();
+            panic!("worker did not reach refusal barrier: {reached:?}");
+        }
+        let dispatcher = services.production_dispatcher();
+        let cancelled = dispatcher
+            .dispatch(
+                "cancel_message",
+                &json!({"message_id":"same-id"}),
+                &request("w2:p2"),
+            )
+            .unwrap();
+        assert_eq!(cancelled["status"], "cancelled");
+        assert_eq!(cancelled["holds"], initial_holds);
+        assert!(old.done.is_set());
+        let mut replacement = Message::new(
+            "same-id",
+            "w1:p1",
+            "replacement",
+            "replacement body",
+            "replacement",
+        );
+        replacement.created_at = old.created_at;
+        replacement.attempt_generation = Some("replacement-generation".into());
+        replacement.is_notice = true;
+        replacement.notify_for = vec![replacement_receipt.clone()];
+        // The replacement remains a future-due row even if the worker reaches another step.
+        // This avoids a timing-dependent race with shutdown while testing the same pane/ID.
+        replacement.next_attempt_at = Some(f64::MAX);
+        replacement.hold_signature_kind = Some("box".into());
+        replacement.hold_signature = Some("foreign draft".into());
+        services
+            .flock()
+            .outbox
+            .lock()
+            .unwrap()
+            .insert("w1:p1".into(), vec![replacement.clone()]);
+        let shutdown_services = Arc::clone(&services);
+        let shutdown = std::thread::spawn(move || shutdown_services.shutdown());
+        *release.0.lock().unwrap() = true;
+        release.1.notify_all();
+        shutdown.join().unwrap();
+        assert_eq!(
+            services.flock().outbox_snapshot()["w1:p1"],
+            vec![replacement.clone()]
+        );
+        assert!(!replacement.done.is_set());
+        let history = services.flock().message_history.lock().unwrap();
+        let terminal = initial_holds == 9;
+        assert_eq!(history.len(), if terminal { 2 } else { 1 });
+        for row in history.iter() {
+            assert_eq!(row.text, "original body");
+            assert_eq!(
+                row.attempt_generation.as_deref(),
+                Some("original-generation")
+            );
+            assert_eq!(row.holds, initial_holds + 1);
+            assert_eq!(
+                row.status,
+                if terminal {
+                    "undeliverable"
+                } else {
+                    "cancelled"
+                }
+            );
+            assert_eq!(
+                row.detail.as_deref(),
+                Some(if terminal {
+                    "undeliverable after 10 refused attempts (last reason: controlled-refusal); not retried again"
+                } else {
+                    &detail
+                })
+            );
+            if !terminal {
+                assert!(row.next_attempt_at.is_some());
+            }
+        }
+        drop(history);
+        let state = |id: &str| {
+            crate::inbox::status(store.read_pool(), id, crate::clock::now_s())
+                .unwrap()
+                .notify_state
+        };
+        assert_eq!(
+            state(&original_receipt).as_deref(),
+            Some(if terminal { "failed" } else { "queued" })
+        );
+        assert_eq!(state(&replacement_receipt).as_deref(), Some("queued"));
+        let persisted: Value = serde_json::from_slice(
+            &std::fs::read(dir.path().join("cancel-refusal-whole-state.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(persisted["outbox"].as_array().unwrap().len(), 1);
+        assert_eq!(persisted["outbox"][0]["text"], "replacement body");
+        assert_eq!(
+            persisted["decided"]["same-id"]["status"],
+            if terminal {
+                "undeliverable"
+            } else {
+                "cancelled"
+            }
+        );
+    }
+}
+
+#[test]
+fn outbox_worker_removal_keeps_remaining_panes_in_insertion_order() {
+    use crate::flock::sends::OutboxWake;
+    let (_dir, services) = make_services(
+        "remove-order",
+        Arc::new(|| Box::new(FakeTerminal::new())),
+        None,
+    );
+    services
+        .flock()
+        .outbox
+        .lock()
+        .unwrap()
+        .insert("z-empty".into(), Vec::new());
+    put(&services, "a", "a-pane", 100.0);
+    put(&services, "m", "m-pane", 100.0);
+    services
+        .outbox
+        .pool
+        .ensure_worker(services.flock(), "z-empty")
+        .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while services.flock().outbox_snapshot().contains_key("z-empty")
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(
+        services
+            .flock()
+            .outbox_snapshot()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["a-pane", "m-pane"]
+    );
+    put(&services, "z-new", "z-empty", 100.0);
+    assert_eq!(
+        services
+            .flock()
+            .outbox_snapshot()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["a-pane", "m-pane", "z-empty"]
     );
     services.shutdown();
 }
