@@ -190,12 +190,7 @@ fn strict_codex_reading(home: &std::path::Path, max_age_seconds: f64, now: f64) 
             continue;
         };
         let text = String::from_utf8_lossy(&contents);
-        let Some(line) = text
-            .lines()
-            .rev()
-            .filter(|line| line.contains("rate_limits"))
-            .next()
-        else {
+        let Some(line) = text.lines().rev().find(|line| line.contains("rate_limits")) else {
             continue;
         };
         let Ok(parsed) = serde_json::from_str::<Value>(line) else {
