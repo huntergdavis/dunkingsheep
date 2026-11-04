@@ -193,11 +193,10 @@ impl QueryInput {
         match self {
             Self::Float(v) => Ok(*v),
             Self::Json(Value::Bool(v)) => Ok(if *v { 1.0 } else { 0.0 }),
-            Self::Json(Value::Number(v)) => v
-                .to_string()
-                .parse()
-                .map_err(|_| DunkError::Refused("int too large to convert to float".into())),
-            Self::Json(Value::String(v)) => v.trim().parse().map_err(|_| {
+            // Reuse the same Python-number conversion primitives as api.rs.
+            Self::Json(Value::Number(v)) => crate::github::parse_python_json_float(&v.to_string())
+                .map_err(|message| DunkError::Refused(message.into())),
+            Self::Json(Value::String(v)) => crate::github::parse_python_float(v).ok_or_else(|| {
                 DunkError::Refused(format!("could not convert string to float: {v:?}"))
             }),
             _ => Err(DunkError::Refused(

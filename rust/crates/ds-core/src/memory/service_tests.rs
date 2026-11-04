@@ -450,3 +450,22 @@ fn paused_start_resume_restart_and_source_failure_keep_honest_status() {
     assert!(service.stop().unwrap());
     service.stop_and_join().unwrap();
 }
+
+#[test]
+fn raw_since_uses_python_float_conversion_and_preserves_integer_overflow() {
+    let (_dir, service, _) = fixture();
+    let mut request = input("alpha");
+    request.since = json!("٠_٠.٠").into();
+    assert_eq!(service.recall(&request).unwrap().len(), 2);
+    request.since = serde_json::from_str::<Value>(&"9".repeat(400))
+        .unwrap()
+        .into();
+    assert!(service
+        .recall(&request)
+        .unwrap_err()
+        .to_string()
+        .contains("too large"));
+    assert_eq!(service.query_stats().percentiles()["errors"], 1);
+    request.since = json!("inf").into();
+    assert!(service.recall(&request).unwrap().is_empty());
+}
