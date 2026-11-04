@@ -2061,6 +2061,17 @@ fn h_get_dunk_matches_python() {
     ));
     assert_eq!(missing_id, "get_dunk: missing required argument(s): id");
 
+    let missing_dunk = refusal(dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("worker", false),
+        "get_dunk",
+        args(json!({"id": "d404"})),
+        &request,
+        &env,
+    ));
+    assert_eq!(missing_dunk, "no dunk with id 'd404'");
+
     let prefixed = dispatch_with_env(
         &dispatcher,
         &flock,
@@ -2094,8 +2105,7 @@ fn h_get_dunk_matches_python() {
         &request,
         &env,
     ));
-    assert!(raw_id_error.contains("no dunk with id"));
-    assert!(raw_id_error.contains("[]"), "raw JSON id stringification");
+    assert_eq!(raw_id_error, "no dunk with id '[]'");
 
     let unconfigured_role = dispatch_with_env(
         &dispatcher,

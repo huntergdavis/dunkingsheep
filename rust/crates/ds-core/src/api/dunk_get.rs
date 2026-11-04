@@ -1,6 +1,6 @@
 //! T39 read-only dunk lookup adapter.
 
-use super::{python_value_string, Args, HandlerContext};
+use super::{python_value_repr, python_value_string, Args, HandlerContext};
 use crate::error::DunkError;
 use serde_json::Value;
 
@@ -9,9 +9,20 @@ pub fn h_get_dunk(context: &HandlerContext<'_>, args: Args) -> Result<Value, Dun
     let id = args
         .get("id")
         .ok_or_else(|| DunkError::Refused("'id'".into()))?;
-    context
-        .flock
-        .dunks
-        .get(&python_value_string(id))
-        .map(Value::Object)
+    let dunk_id = python_value_string(id);
+    let normalized_id = dunk_id.trim();
+    match context.flock.dunks.get(&dunk_id) {
+        Ok(dunk) => Ok(Value::Object(dunk)),
+        Err(error) => {
+            let core_missing_id = format!("no dunk with id {normalized_id:?}");
+            if matches!(&error, DunkError::Refused(message) if message == &core_missing_id) {
+                Err(DunkError::Refused(format!(
+                    "no dunk with id {}",
+                    python_value_repr(&Value::String(normalized_id.to_owned()))
+                )))
+            } else {
+                Err(error)
+            }
+        }
+    }
 }
