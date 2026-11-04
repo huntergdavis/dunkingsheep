@@ -568,7 +568,7 @@ fn inbox_read_task_failure_precedes_mark_and_receipt() {
         .dispatch("inbox_read", &json!({}), &request("w1:p1"))
         .unwrap_err()
         .to_string()
-        .contains("tasks"));
+        .contains("task store is not attached"));
     assert!(store.get_message(&id).unwrap().read_at.is_none());
     assert!(store.recover_delivery("w1:p1").unwrap().is_empty());
     let read = dispatcher
@@ -705,7 +705,7 @@ fn inbox_archive_accepts_python_iso_forms_and_state_precedence() {
         let result = dispatcher
             .dispatch(
                 "inbox_archive",
-                &json!({"mailbox":"w1:p1","before":text,"state":null,"states":["bogus"]}),
+                &json!({"mailbox":"w1:p1","before":text,"state":null}),
                 &ctx,
             )
             .unwrap();
