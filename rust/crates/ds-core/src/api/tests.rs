@@ -3038,19 +3038,37 @@ fn h_poll_matches_python() {
         &flock,
         &FixedRole("worker", false),
         "poll",
-        args(json!({})),
+        args(json!({"limit": []})),
         &RequestCtx::default(),
         &env,
     )
-    .expect("inbox errors are partial poll results");
+    .expect("inbox count errors precede limit conversion and are partial results");
     assert!(missing_self["error"]
         .as_str()
         .unwrap()
         .contains("no mailbox given"));
+    assert!(!missing_self["error"]
+        .as_str()
+        .unwrap()
+        .contains("int() argument"));
     assert!(missing_self.get("inbox_count").is_none());
     assert_eq!(missing_self["dunks"]["messages"], json!([]));
 
-    let bad_limit = dispatch_with_env(
+    let list_error = dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("worker", false),
+        "poll",
+        args(json!({"mailbox": "w2:p2"})),
+        &request,
+        &env,
+    )
+    .expect("inbox list domain errors remain partial poll results");
+    assert!(list_error.get("inbox_count").is_some());
+    assert!(list_error["error"].as_str().unwrap().contains("not yours"));
+    assert_eq!(list_error["dunks"]["messages"], json!([]));
+
+    let bad_limit_type = dispatch_with_env(
         &dispatcher,
         &flock,
         &FixedRole("worker", false),
@@ -3059,13 +3077,36 @@ fn h_poll_matches_python() {
         &request,
         &env,
     )
-    .expect("limit conversion refusal is a partial poll result");
-    assert_eq!(bad_limit["inbox_count"]["unread"], 6);
-    assert!(bad_limit["error"]
-        .as_str()
-        .unwrap()
-        .contains("int() argument"));
-    assert_eq!(bad_limit["dunks"]["messages"], json!([]));
+    .unwrap_err();
+    assert!(bad_limit_type.to_string().contains("int() argument"));
+
+    let bad_limit_value = dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("worker", false),
+        "poll",
+        args(json!({"mailbox": "w1:p1", "limit": "not-a-number"})),
+        &request,
+        &env,
+    )
+    .unwrap_err();
+    assert!(bad_limit_value
+        .to_string()
+        .contains("invalid literal for int()"));
+
+    let overflow_limit = dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("worker", false),
+        "poll",
+        args(json!({"mailbox": "w1:p1", "limit": "9223372036854775808"})),
+        &request,
+        &env,
+    )
+    .unwrap_err();
+    assert!(overflow_limit
+        .to_string()
+        .contains("too large to convert to SQLite INTEGER"));
 
     let panes = dispatch_with_env(
         &dispatcher,

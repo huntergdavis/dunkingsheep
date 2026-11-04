@@ -46,73 +46,97 @@ pub fn h_turn_end(context: &HandlerContext<'_>, args: Args) -> Result<Value, Dun
     Ok(result)
 }
 
+/// Poll distinguishes domain errors (partial response) from raw limit conversion errors.
+enum PollInboxError {
+    Partial(DunkError),
+    Propagate(DunkError),
+}
+
 /// One uncached count and unread-list read using the request's validated inbox services.
 fn poll_inbox(
     context: &HandlerContext<'_>,
     args: &Args,
     count_out: &mut Option<Value>,
-) -> Result<(String, Vec<Value>), DunkError> {
+) -> Result<(String, Vec<Value>), PollInboxError> {
     let mailbox = args
         .get("mailbox")
         .filter(|value| super::truthy(value))
         .map(super::python_value_string);
-    context
-        .env
-        .with_inbox_env(&mut |env| {
-            let counts =
-                context
-                    .flock
-                    .inbox_count(env, mailbox.as_deref(), context.self_pane_id())?;
-            *count_out = Some(json!({
-                "mailbox": counts.mailbox,
-                "unread": counts.unread,
-                "total": counts.total,
-                "archived": counts.archived,
-                "undeliverable": counts.undeliverable,
-                "oldest_unread_s": counts.oldest_unread_s,
-                "attachments_unread": counts.attachments_unread,
-                "from_lanes": counts.from_lanes,
-            }));
+    let mut limit_error = None;
+    let mut overflow_error = None;
+    let result = context.env.with_inbox_env(&mut |env| {
+        let counts = context
+            .flock
+            .inbox_count(env, mailbox.as_deref(), context.self_pane_id())?;
+        *count_out = Some(json!({
+            "mailbox": counts.mailbox,
+            "unread": counts.unread,
+            "total": counts.total,
+            "archived": counts.archived,
+            "undeliverable": counts.undeliverable,
+            "oldest_unread_s": counts.oldest_unread_s,
+            "attachments_unread": counts.attachments_unread,
+            "from_lanes": counts.from_lanes,
+        }));
 
-            // Python evaluates int(limit) only after inbox_count returns and before inbox_list
-            // resolves the mailbox. Keep that order so a bad mailbox wins over a bad limit.
-            let limit = match super::owner_outbox_limit_arg(args, 5)? {
-                super::OwnerOutboxLimit::Sqlite(limit) => limit,
-                super::OwnerOutboxLimit::Overflow => {
-                    return Err(DunkError::Refused(
-                        "Python int too large to convert to SQLite INTEGER".into(),
-                    ));
-                }
-            };
-            let key = context.flock.mailbox_or_self(
-                env,
-                mailbox.as_deref(),
-                context.self_pane_id(),
-                false,
-                true,
-            )?;
-            let rows = crate::inbox::list_signed(env.pool(), &key, true, limit, env.now())?;
-            let messages = rows
-                .iter()
-                .map(|row| {
-                    let full = env.store().get_message(&row.message_id)?;
-                    let mut wire = super::owner_message_value(&full);
-                    wire.as_object_mut()
-                        .expect("message wire is an object")
-                        .remove("body");
-                    wire.as_object_mut()
-                        .expect("message wire is an object")
-                        .remove("read_at");
-                    Ok(wire)
-                })
-                .collect::<Result<Vec<_>, DunkError>>()?;
-            Ok(json!({"mailbox": key, "messages": messages}))
-        })
-        .map(|result| {
-            let mailbox = result["mailbox"].as_str().unwrap_or_default().to_owned();
-            let messages = result["messages"].as_array().cloned().unwrap_or_default();
-            (mailbox, messages)
-        })
+        // Python evaluates int(limit) only after inbox_count returns and before inbox_list
+        // resolves the mailbox. Keep that order so a bad mailbox wins over a bad limit.
+        let limit = match super::owner_outbox_limit_arg(args, 5) {
+            Ok(super::OwnerOutboxLimit::Sqlite(limit)) => limit,
+            Ok(super::OwnerOutboxLimit::Overflow) => {
+                // Python's int() accepts arbitrary-size integers; SQLite binding fails only
+                // after inbox_list has resolved and authorized the mailbox.
+                context.flock.mailbox_or_self(
+                    env,
+                    mailbox.as_deref(),
+                    context.self_pane_id(),
+                    false,
+                    true,
+                )?;
+                overflow_error = Some(DunkError::Refused(
+                    "Python int too large to convert to SQLite INTEGER".into(),
+                ));
+                return Ok(Value::Null);
+            }
+            Err(error) => {
+                limit_error = Some(error);
+                return Ok(Value::Null);
+            }
+        };
+        let key = context.flock.mailbox_or_self(
+            env,
+            mailbox.as_deref(),
+            context.self_pane_id(),
+            false,
+            true,
+        )?;
+        let rows = crate::inbox::list_signed(env.pool(), &key, true, limit, env.now())?;
+        let messages = rows
+            .iter()
+            .map(|row| {
+                let full = env.store().get_message(&row.message_id)?;
+                let mut wire = super::owner_message_value(&full);
+                wire.as_object_mut()
+                    .expect("message wire is an object")
+                    .remove("body");
+                wire.as_object_mut()
+                    .expect("message wire is an object")
+                    .remove("read_at");
+                Ok(wire)
+            })
+            .collect::<Result<Vec<_>, DunkError>>()?;
+        Ok(json!({"mailbox": key, "messages": messages}))
+    });
+    if let Some(error) = limit_error {
+        return Err(PollInboxError::Propagate(error));
+    }
+    if let Some(error) = overflow_error {
+        return Err(PollInboxError::Propagate(error));
+    }
+    let result = result.map_err(PollInboxError::Partial)?;
+    let mailbox = result["mailbox"].as_str().unwrap_or_default().to_owned();
+    let messages = result["messages"].as_array().cloned().unwrap_or_default();
+    Ok((mailbox, messages))
 }
 
 /// `dunk_api.h_poll`.
@@ -148,13 +172,14 @@ pub fn h_poll(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkErr
                 "messages": messages,
             });
         }
-        Err(error) => {
+        Err(PollInboxError::Partial(error)) => {
             if let Some(count) = inbox_count {
                 result["inbox_count"] = count;
             }
             result["error"] = json!(error.to_string());
             result["dunks"] = json!({"dunks": dunks(), "messages": []});
         }
+        Err(PollInboxError::Propagate(error)) => return Err(error),
     }
 
     if super::python_bool_arg(&args, "panes", false) {
