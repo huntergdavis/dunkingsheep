@@ -2097,7 +2097,7 @@ fn h_get_dunk_matches_python() {
     assert!(raw_id_error.contains("no dunk with id"));
     assert!(raw_id_error.contains("[]"), "raw JSON id stringification");
 
-    let denied_role = refusal(dispatch_with_env(
+    let unconfigured_role = dispatch_with_env(
         &dispatcher,
         &flock,
         &FixedRole("unknown-role", false),
@@ -2105,8 +2105,12 @@ fn h_get_dunk_matches_python() {
         args(json!({"id": "d1"})),
         &request,
         &env,
-    ));
-    assert!(denied_role.contains("not permitted for role unknown-role"));
+    )
+    .expect("unknown roles retain the read-only fallback for get_dunk");
+    assert_eq!(
+        unconfigured_role,
+        Value::Object(flock.dunks.get("d1").unwrap())
+    );
 
     assert_eq!(flock.dunks.snapshot(), before_snapshot);
     let cache_after = flock.view_cache().view(&env, Some("w1:p1"), false, 3_600.0);
