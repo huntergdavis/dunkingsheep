@@ -173,7 +173,7 @@ fn h_create_tab_matches_python() {
                 &request("w2:p2"),
             )
             .unwrap();
-        assert_eq!(out["tab"]["workspace_id"], "w1");
+        assert_eq!(out["tab"]["workspace_id"], "w2");
         assert_eq!(out["ran"], Value::Null);
         assert_eq!(services.flock.last_message(), "Created tab");
     }
@@ -189,7 +189,7 @@ fn h_create_tab_matches_python() {
             &request("w2:p2"),
         )
         .unwrap();
-    assert_eq!(own["tab"]["workspace_id"], "w1");
+    assert_eq!(own["tab"]["workspace_id"], "w2");
 
     let error = dispatch
         .dispatch(
