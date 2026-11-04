@@ -96,16 +96,47 @@ pub fn recall(
     now: f64,
     max_chars: usize,
 ) -> Result<Vec<Hit>, DunkError> {
+    let sql_filters = SqlFilters {
+        harness: filters.harness.clone().map(rusqlite::types::Value::Text),
+        project: filters.project.clone().map(rusqlite::types::Value::Text),
+        since: filters.since.map(rusqlite::types::Value::Real),
+    };
+    recall_sql(
+        pool,
+        query,
+        limit,
+        &sql_filters,
+        now,
+        max_chars,
+        &fetch_limit(limit).to_string(),
+    )
+}
+
+pub(crate) struct SqlFilters {
+    pub harness: Option<rusqlite::types::Value>,
+    pub project: Option<rusqlite::types::Value>,
+    pub since: Option<rusqlite::types::Value>,
+}
+
+pub(crate) fn recall_sql(
+    pool: &ReadPool,
+    query: &str,
+    limit: usize,
+    filters: &SqlFilters,
+    now: f64,
+    max_chars: usize,
+    sql_limit: &str,
+) -> Result<Vec<Hit>, DunkError> {
     let tokens = fts_tokens(query);
     let Some(and_fts) = fts_query(query, "AND") else {
         return Ok(Vec::new());
     };
     let or_fts = fts_query(query, "OR");
-    let mut rows = fetch(pool, &and_fts, limit, filters)?;
+    let mut rows = fetch(pool, &and_fts, sql_limit, filters)?;
     if rows.is_empty() {
         if let Some(or_fts) = or_fts {
             if or_fts != and_fts {
-                rows = fetch(pool, &or_fts, limit, filters)?;
+                rows = fetch(pool, &or_fts, sql_limit, filters)?;
             }
         }
     }
@@ -179,8 +210,8 @@ struct Raw {
 fn fetch(
     pool: &ReadPool,
     match_expression: &str,
-    limit: usize,
-    filters: &Filters,
+    sql_limit: &str,
+    filters: &SqlFilters,
 ) -> Result<Vec<Raw>, DunkError> {
     pool.with(|connection| {
         let mut sql = String::from(
@@ -195,18 +226,20 @@ fn fetch(
             vec![rusqlite::types::Value::Text(match_expression.to_string())];
         if let Some(harness) = &filters.harness {
             sql.push_str(" AND s.harness = ?");
-            params.push(rusqlite::types::Value::Text(harness.clone()));
+            params.push(harness.clone());
         }
         if let Some(project) = &filters.project {
             sql.push_str(" AND s.project = ?");
-            params.push(rusqlite::types::Value::Text(project.clone()));
+            params.push(project.clone());
         }
-        if let Some(since) = filters.since {
+        if let Some(since) = &filters.since {
             sql.push_str(" AND COALESCE(s.updated_at, c.created_at) >= ?");
-            params.push(rusqlite::types::Value::Real(since));
+            params.push(since.clone());
         }
         sql.push_str(" ORDER BY bm25(chunks_fts) LIMIT ?");
-        let fetch_limit = i64::try_from(fetch_limit(limit)).unwrap_or(i64::MAX);
+        let fetch_limit = sql_limit.parse::<i64>().map_err(|_| {
+            DunkError::Refused("Python int too large to convert to SQLite INTEGER".into())
+        })?;
         params.push(rusqlite::types::Value::Integer(fetch_limit));
         let mut statement = connection.prepare(&sql).map_err(map_sqlite)?;
         let rows = statement

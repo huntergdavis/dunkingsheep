@@ -11,16 +11,19 @@
 //! same through `chrono::Local`, and anything `fromisoformat` accepts beyond RFC 3339 and
 //! `YYYY-MM-DD[T ]HH:MM:SS[.f]` is treated as unparseable (the Python's `None`).
 
+use super::ingest::MemoryWrite;
+#[cfg(test)]
+use rusqlite::Connection;
 use std::collections::BTreeSet;
 use std::io::BufRead;
 use std::path::Path;
 use std::time::Duration;
 
 use chrono::{DateTime, Local, NaiveDateTime, TimeZone};
-use rusqlite::Connection;
+
 use serde_json::{Map, Value};
 
-use super::ingest::{insert_chunks, project_from_cwd, text_from_content, upsert_session};
+use super::ingest::{project_from_cwd, text_from_content};
 use super::pure::chunk_text;
 use super::pure::{DEFAULT_CHUNK_CHARS, DEFAULT_OVERLAP_CHARS};
 use crate::clock::now_s;
@@ -145,8 +148,8 @@ fn sleep_unless_stopped(total: Duration, should_stop: &dyn Fn() -> bool) {
 
 /// `_ingest_jsonl`. `should_stop` is polled before every line; on a stop the pending batch
 /// is flushed and the stats carry `stopped: true`. `throttle` sleeps after each flush.
-pub fn ingest_jsonl(
-    connection: &mut Connection,
+pub fn ingest_jsonl<W: MemoryWrite>(
+    connection: &mut W,
     path: &Path,
     harness: &str,
     project: Option<&str>,
@@ -170,14 +173,13 @@ pub fn ingest_jsonl(
     let mut last_at: Option<f64> = None;
     let empty = Map::new();
 
-    let flush = |connection: &mut Connection,
+    let flush = |connection: &mut W,
                  pending: &mut Pending,
                  session_id: &str,
                  chunk_count: &mut usize|
      -> Result<(), DunkError> {
         if !pending.chunks.is_empty() {
-            *chunk_count += insert_chunks(
-                connection,
+            *chunk_count += connection.insert_chunks(
                 session_id,
                 &pending.chunks,
                 pending.role,
@@ -233,8 +235,7 @@ pub fn ingest_jsonl(
                         started_at =
                             started_at.or_else(|| payload.get("timestamp").and_then(iso_time));
                         title = title.or_else(|| truthy(payload.get("originator")));
-                        upsert_session(
-                            connection,
+                        connection.upsert_session(
                             &session_id,
                             harness,
                             project
@@ -294,8 +295,7 @@ pub fn ingest_jsonl(
                         cwd = truthy(event.get("cwd")).or(cwd);
                         started_at =
                             started_at.or_else(|| event.get("timestamp").and_then(iso_time));
-                        upsert_session(
-                            connection,
+                        connection.upsert_session(
                             &session_id,
                             harness,
                             project
@@ -346,8 +346,7 @@ pub fn ingest_jsonl(
                 project = Some(found);
             }
         }
-        upsert_session(
-            connection,
+        connection.upsert_session(
             &session_id,
             harness,
             project.as_deref(),
@@ -375,8 +374,7 @@ pub fn ingest_jsonl(
         }
     }
     flush(connection, &mut pending, &session_id, &mut chunk_count)?;
-    upsert_session(
-        connection,
+    connection.upsert_session(
         &session_id,
         harness,
         project.as_deref(),
