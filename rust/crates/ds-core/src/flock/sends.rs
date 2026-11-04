@@ -3760,17 +3760,29 @@ pub(crate) fn outbox_step<E: SendPreparationEnv + PaneInfoEnv>(
 /// `_outbox_worker`: run deterministic queue steps, report stale modals, and make one real
 /// owned-text recovery transition when the same box remains visible. Runtime adapters provide
 /// terminal I/O and a stop-aware wait; tests can advance a fake clock without spawning threads.
+pub(crate) struct OutboxWorkerContext<'a, P> {
+    pub(crate) inbox: &'a dyn InboxEnv,
+    pub(crate) pane_id: &'a str,
+    pub(crate) stopped: &'a AtomicBool,
+    pub(crate) reporter: &'a mut super::loops_stuck::StalePanelReporter,
+    pub(crate) wait: &'a dyn Fn(f64) -> bool,
+    pub(crate) permission: P,
+}
+
 #[allow(dead_code)] // Production worker startup is gated to a separate runtime task.
-pub(crate) fn outbox_worker<E: SendPreparationEnv + PaneInfoEnv>(
-    flock: &Flock,
-    env: &mut E,
-    inbox: &dyn InboxEnv,
-    pane_id: &str,
-    stopped: &AtomicBool,
-    reporter: &mut super::loops_stuck::StalePanelReporter,
-    wait: &dyn Fn(f64) -> bool,
-    mut permission: impl FnMut() -> Option<String>,
-) {
+pub(crate) fn outbox_worker<E, P>(flock: &Flock, env: &mut E, context: OutboxWorkerContext<'_, P>)
+where
+    E: SendPreparationEnv + PaneInfoEnv,
+    P: FnMut() -> Option<String>,
+{
+    let OutboxWorkerContext {
+        inbox,
+        pane_id,
+        stopped,
+        reporter,
+        wait,
+        mut permission,
+    } = context;
     let mut seen: Option<HoldSignature> = None;
     let mut seen_since = env.now_s();
     loop {
