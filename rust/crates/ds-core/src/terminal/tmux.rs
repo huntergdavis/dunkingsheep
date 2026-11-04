@@ -396,19 +396,17 @@ impl Terminal for TmuxBackend {
             &created.workspace_id,
             json!({"label": if super::raw::truthy(label) { label.clone() } else { json!(name) }}),
         )?;
-            if let Some(tab) = self
-                .list_tabs()
-                .iter()
-                .find(|t| t.workspace_id == created.workspace_id)
-            {
+            let tabs = self.list_tabs();
+            let tab = tabs.iter().find(|t| t.workspace_id == created.workspace_id);
+            // Python reads both children before saving either. A pane-read schema
+            // exception leaves only the workspace saved, even when a tab exists.
+            let panes = self.list_panes_raw()?;
+            let pane = panes.iter().find(|p| p.session_id == created.workspace_id);
+            if let Some(tab) = tab {
                 self.registry
                     .remember_raw("tab", &tab.tab_id, json!({"label":tab.label}))?;
             }
-            if let Some(pane) = self
-                .list_panes_raw()?
-                .iter()
-                .find(|p| p.session_id == created.workspace_id)
-            {
+            if let Some(pane) = pane {
                 self.registry
                     .remember_raw("pane", &pane.pane_id, json!({"label":pane.label}))?;
             }

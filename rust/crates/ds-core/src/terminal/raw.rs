@@ -223,6 +223,76 @@ esac
         assert!(!argv.contains("switch-client"));
     }
     #[test]
+    fn raw_workspace_reads_both_children_before_persisting_either() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("tmux");
+        std::fs::write(&script, r#"#!/bin/sh
+cd "$(dirname "$0")" || exit 1
+printf '%s\n' "$1" >> calls
+case "$1" in
+new-session) printf '%s' "$4" > created ;;
+list-sessions) printf '$1\037%s\0370\n' "$(cat created)" ;;
+list-windows) printf '@1\037$1\037tab\0370\0371\n' ;;
+list-panes) printf '%%1\037$1\037@1\037/work\037bash\037shell\0371\037created\037tab\0370\0370\0371\03780\03724\n' ;;
+esac
+"#).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let registry = dir.path().join("registry.json");
+        let mut backend = TmuxBackend::with_registry(&script, &registry);
+        for (panes, tabs, category, message) in [
+            (
+                Value::Null,
+                json!({}),
+                "AttributeError",
+                "'NoneType' object has no attribute 'get'",
+            ),
+            (
+                json!({}),
+                Value::Null,
+                "TypeError",
+                "'NoneType' object does not support item assignment",
+            ),
+            (
+                Value::Null,
+                Value::Null,
+                "AttributeError",
+                "'NoneType' object has no attribute 'get'",
+            ),
+        ] {
+            std::fs::write(
+                &registry,
+                json!({"panes":panes,"tabs":tabs,"workspaces":{}}).to_string(),
+            )
+            .unwrap();
+            std::fs::write(dir.path().join("calls"), "").unwrap();
+            let error = backend
+                .create_workspace_raw(&json!("created"), &Value::Null, false)
+                .unwrap_err();
+            assert_eq!(error.category(), category);
+            assert_eq!(error.to_string(), message);
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join("created")).unwrap(),
+                "created"
+            );
+            let saved: Value = serde_json::from_slice(&std::fs::read(&registry).unwrap()).unwrap();
+            assert_eq!(saved["workspaces"]["$1"]["label"], "created");
+            assert!(saved["workspaces"]["$1"]["at"].is_i64());
+            assert_eq!(saved["workspaces"].as_object().unwrap().len(), 1);
+            assert_eq!(
+                saved["tabs"], tabs,
+                "no tab write before pane read or after tab schema error"
+            );
+            assert_eq!(
+                saved["panes"], panes,
+                "no pane write after either schema error"
+            );
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join("calls")).unwrap(),
+                "new-session\nlist-sessions\nlist-windows\nlist-panes\n"
+            );
+        }
+    }
+    #[test]
     fn raw_history_python_equality_and_collapse() {
         let dir = tempfile::tempdir().unwrap();
         let flock = crate::flock::Flock::new(
