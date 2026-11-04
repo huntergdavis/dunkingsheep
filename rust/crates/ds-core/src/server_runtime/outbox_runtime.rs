@@ -1048,11 +1048,12 @@ mod tests {
             text: Some("scheduled {count}".into()),
             interval: Some("0.001".into()),
             start: true,
-            max_sends: Some("1".into()),
+            max_sends: Some("2".into()),
             hold_while_typing: Some("false".into()),
             ..AddArgs::default()
         };
         flock.dunks.add(pane.as_object(), &args).unwrap();
+        let captured = flock.dunks.handle("d1").unwrap();
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
@@ -1071,6 +1072,70 @@ mod tests {
         assert!(
             flock.dunks.get("d1").is_err(),
             "scheduled max_sends removes its row"
+        );
+        let finished = crate::flock::dunks::DunkList::timer_fields(&captured);
+        assert_eq!(2, finished.send_count);
+        assert_eq!(Some("scheduled 2"), finished.last_sent_text.as_deref());
+        owner.stop_and_join();
+    }
+
+    #[test]
+    fn restored_overdue_timer_waits_grace_then_delivers_and_removes() {
+        let dir = tempfile::tempdir().unwrap();
+        let flock = Arc::new(Flock::new(
+            dir.path().join("launches"),
+            dir.path().join("lanes"),
+            false,
+        ));
+        flock.attach_stores(crate::flock::panes::Stores {
+            inbox: Some(Arc::new(
+                crate::inbox_store::Store::open(
+                    dir.path().join("inbox.db"),
+                    dir.path().join("blobs"),
+                )
+                .unwrap(),
+            )),
+            ..Default::default()
+        });
+        let before = crate::clock::now_s();
+        flock._load_dunks(
+            serde_json::json!({"dunkers": [{
+                "id": "d1", "running": true, "next_send_at": before - 100.0,
+                "target_pane_id": "w1:p1", "text": "restored {count}",
+                "max_sends": 1, "hold_while_typing": false
+            }]})
+            .as_object()
+            .unwrap(),
+        );
+        let captured = flock.dunks.handle("d1").unwrap();
+        let due = crate::flock::dunks::DunkList::timer_fields(&captured)
+            .next_send_at
+            .unwrap();
+        assert!(due >= before + 5.0);
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let owner = OutboxRuntime::new(
+            Arc::clone(&flock),
+            runtime.handle().clone(),
+            Arc::new(|| Box::new(FakeTerminal::new())),
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while flock.dunks.get("d1").is_ok() {
+            assert!(Instant::now() < deadline, "restored timer did not deliver");
+            if crate::clock::now_s() < due - 0.05 {
+                assert_eq!(
+                    0,
+                    crate::flock::dunks::DunkList::timer_fields(&captured).send_count
+                );
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            1,
+            crate::flock::dunks::DunkList::timer_fields(&captured).send_count
         );
         owner.stop_and_join();
     }
