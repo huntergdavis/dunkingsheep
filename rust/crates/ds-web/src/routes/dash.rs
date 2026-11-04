@@ -3,6 +3,8 @@
 //! The private UI bundle is supplied through an injected backend. Session checks
 //! reuse the web auth seam, and handlers preserve the legacy dashboard redirects.
 
+use super::response_error::WebResponseError;
+
 use std::sync::Arc;
 
 use axum::{
@@ -68,7 +70,7 @@ async fn dash_route(
                 &format!("/?next={}", quote_component(&target)),
             );
         }
-        Err(response) => return response,
+        Err(response) => return response.into_response(),
     }
 
     if name == "poolrad" {
@@ -103,7 +105,7 @@ async fn session_valid(
     auth: &dyn AuthBackend,
     headers: &HeaderMap,
     _scheme: RequestScheme,
-) -> Result<bool, Response> {
+) -> Result<bool, WebResponseError> {
     let bearer = headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -114,7 +116,7 @@ async fn session_valid(
         Err(
             AuthError::SignInRequired | AuthError::IncorrectPassword | AuthError::TooManyAttempts,
         ) => Ok(false),
-        Err(AuthError::Internal(_)) => Err(internal_error()),
+        Err(AuthError::Internal(_)) => Err(internal_error().into()),
     }
 }
 

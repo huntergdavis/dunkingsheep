@@ -4,6 +4,8 @@
 //! The injected backend owns the application database and the transport
 //! reconciliation used by the Python handlers.
 
+use super::response_error::WebResponseError;
+
 use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
 
 use axum::{
@@ -79,7 +81,7 @@ async fn messages(
     request: Request,
 ) -> Response {
     if let Err(response) = authenticate(auth.as_ref(), request.headers(), scheme).await {
-        return response;
+        return response.into_response();
     }
     let query = match parse_query(request.uri().query()) {
         Ok(query) => query,
@@ -140,7 +142,7 @@ async fn deliveries(
     request: Request,
 ) -> Response {
     if let Err(response) = authenticate(auth.as_ref(), request.headers(), scheme).await {
-        return response;
+        return response.into_response();
     }
     let query = match parse_query(request.uri().query()) {
         Ok(query) => query,
@@ -191,7 +193,7 @@ async fn message_context(
     request: Request,
 ) -> Response {
     if let Err(response) = authenticate(auth.as_ref(), request.headers(), scheme).await {
-        return response;
+        return response.into_response();
     }
     let raw_id = request
         .uri()
@@ -215,9 +217,9 @@ async fn authenticate(
     backend: &dyn AuthBackend,
     headers: &HeaderMap,
     scheme: RequestScheme,
-) -> Result<Identity, Response> {
+) -> Result<Identity, WebResponseError> {
     if let Some(response) = same_origin_refusal(headers, scheme) {
-        return Err(response);
+        return Err(response.into());
     }
     let bearer = headers
         .get(header::AUTHORIZATION)
@@ -228,6 +230,7 @@ async fn authenticate(
         .identity(bearer, cookie.as_deref())
         .await
         .map_err(auth_error_response)
+        .map_err(WebResponseError::from)
 }
 
 fn same_origin_refusal(headers: &HeaderMap, scheme: RequestScheme) -> Option<Response> {

@@ -4,6 +4,8 @@
 //! input adapter. Keeping both explicit leaves this module isolated from the
 //! live emulator and makes route behavior testable without starting a game.
 
+use super::response_error::WebResponseError;
+
 use std::{future::Future, pin::Pin, sync::Arc};
 
 use axum::{
@@ -58,7 +60,7 @@ async fn game_stop(
     request: axum::extract::Request,
 ) -> Response {
     if let Err(response) = authenticate(auth.as_ref(), request.headers(), scheme).await {
-        return response;
+        return response.into_response();
     }
     match backend.stop().await {
         Ok(status) => Json(status).into_response(),
@@ -77,21 +79,21 @@ async fn game_key(
     let headers = request.headers().clone();
     let body = match request_json(request).await {
         Ok(body) => body,
-        Err(response) => return response,
+        Err(response) => return response.into_response(),
     };
     if let Err(response) = authenticate(auth.as_ref(), &headers, scheme).await {
-        return response;
+        return response.into_response();
     }
     let Some(body) = body else {
         return required_body_error();
     };
     let object = match model_object(&body) {
         Ok(object) => object,
-        Err(response) => return response,
+        Err(response) => return response.into_response(),
     };
     let key = match string_field(object, "key", &body, 1, 16) {
         Ok(key) => key,
-        Err(response) => return response,
+        Err(response) => return response.into_response(),
     };
     match backend.key(key).await {
         Ok(()) => Json(json!({"ok": true})).into_response(),
@@ -108,25 +110,25 @@ async fn game_type(
     let headers = request.headers().clone();
     let body = match request_json(request).await {
         Ok(body) => body,
-        Err(response) => return response,
+        Err(response) => return response.into_response(),
     };
     if let Err(response) = authenticate(auth.as_ref(), &headers, scheme).await {
-        return response;
+        return response.into_response();
     }
     let Some(body) = body else {
         return required_body_error();
     };
     let object = match model_object(&body) {
         Ok(object) => object,
-        Err(response) => return response,
+        Err(response) => return response.into_response(),
     };
     let text = match string_field(object, "text", &body, 1, 64) {
         Ok(text) => text,
-        Err(response) => return response,
+        Err(response) => return response.into_response(),
     };
     let submit = match bool_field(object, "submit") {
         Ok(submit) => submit,
-        Err(response) => return response,
+        Err(response) => return response.into_response(),
     };
     match backend.type_text(text, submit).await {
         Ok(()) => Json(json!({"ok": true})).into_response(),
@@ -134,7 +136,7 @@ async fn game_type(
     }
 }
 
-async fn request_json(request: axum::extract::Request) -> Result<Option<Value>, Response> {
+async fn request_json(request: axum::extract::Request) -> Result<Option<Value>, WebResponseError> {
     let is_json = request
         .headers()
         .get(header::CONTENT_TYPE)
@@ -171,7 +173,7 @@ async fn request_json(request: axum::extract::Request) -> Result<Option<Value>, 
             }]})),
         )
             .into_response()
-    }).map(Some)
+    }).map(Some).map_err(WebResponseError::from)
 }
 
 fn is_json_media_type(content_type: &str) -> bool {
@@ -230,7 +232,7 @@ fn python_json_error(error: &serde_json::Error) -> String {
 // Match FastAPI's request-body adapter, which validates with attribute extraction enabled.
 // For non-object JSON this is `model_attributes_type`; standalone BaseModel validation uses a
 // different `model_type` error and is not the route's Python behavior.
-fn model_object(body: &Value) -> Result<&Map<String, Value>, Response> {
+fn model_object(body: &Value) -> Result<&Map<String, Value>, WebResponseError> {
     body.as_object().ok_or_else(|| {
         validation_error(json!({
             "type": "model_attributes_type",
@@ -238,7 +240,7 @@ fn model_object(body: &Value) -> Result<&Map<String, Value>, Response> {
             "msg": "Input should be a valid dictionary or object to extract fields from",
             "input": body
         }))
-    })
+    }).map_err(WebResponseError::from)
 }
 
 fn string_field<'a>(
@@ -247,14 +249,14 @@ fn string_field<'a>(
     body: &Value,
     min_length: usize,
     max_length: usize,
-) -> Result<&'a str, Response> {
+) -> Result<&'a str, WebResponseError> {
     let Some(value) = object.get(name) else {
         return Err(validation_error(json!({
             "type": "missing",
             "loc": ["body", name],
             "msg": "Field required",
             "input": body
-        })));
+        })).into());
     };
     let Some(value_str) = value.as_str() else {
         return Err(validation_error(json!({
@@ -262,7 +264,7 @@ fn string_field<'a>(
             "loc": ["body", name],
             "msg": "Input should be a valid string",
             "input": value
-        })));
+        })).into());
     };
     let length = value_str.chars().count();
     if length < min_length {
@@ -272,7 +274,7 @@ fn string_field<'a>(
             "msg": format!("String should have at least {min_length} character"),
             "input": value,
             "ctx": {"min_length": min_length}
-        })));
+        })).into());
     }
     if length > max_length {
         return Err(validation_error(json!({
@@ -281,12 +283,12 @@ fn string_field<'a>(
             "msg": format!("String should have at most {max_length} characters"),
             "input": value,
             "ctx": {"max_length": max_length}
-        })));
+        })).into());
     }
     Ok(value_str)
 }
 
-fn bool_field(object: &Map<String, Value>, name: &str) -> Result<bool, Response> {
+fn bool_field(object: &Map<String, Value>, name: &str) -> Result<bool, WebResponseError> {
     let Some(value) = object.get(name) else {
         return Ok(true);
     };
@@ -314,7 +316,7 @@ fn bool_field(object: &Map<String, Value>, name: &str) -> Result<bool, Response>
                 "loc": ["body", name],
                 "msg": "Input should be a valid boolean, unable to interpret input",
                 "input": value
-            }))),
+            })).into()),
         };
     }
     Err(validation_error(json!({
@@ -322,7 +324,7 @@ fn bool_field(object: &Map<String, Value>, name: &str) -> Result<bool, Response>
         "loc": ["body", name],
         "msg": "Input should be a valid boolean",
         "input": value
-    })))
+    })).into())
 }
 
 fn validation_error(error: Value) -> Response {
@@ -337,16 +339,16 @@ async fn authenticate(
     auth: &dyn AuthBackend,
     headers: &HeaderMap,
     scheme: RequestScheme,
-) -> Result<(), Response> {
+) -> Result<(), WebResponseError> {
     if let Some(response) = same_origin(headers, scheme) {
-        return Err(response);
+        return Err(response.into());
     }
     let bearer = bearer_value(headers);
     let cookie = cookie_value(headers);
     auth.identity(bearer.as_deref(), cookie.as_deref())
         .await
         .map(|_| ())
-        .map_err(auth_error_response)
+        .map_err(auth_error_response).map_err(WebResponseError::from)
 }
 
 fn same_origin(headers: &HeaderMap, scheme: RequestScheme) -> Option<Response> {

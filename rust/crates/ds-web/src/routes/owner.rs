@@ -4,6 +4,8 @@
 //! separately injected backend owns daemon RPC, desk roster lookup, and time,
 //! so handler tests never contact a live daemon or terminal.
 
+use super::response_error::WebResponseError;
+
 use std::{
     collections::HashMap,
     future::Future,
@@ -162,7 +164,7 @@ async fn api_owner_send(
     request: Request,
 ) -> Response {
     if let Err(response) = authenticate(auth.as_ref(), request.headers(), scheme).await {
-        return response;
+        return response.into_response();
     };
 
     let body_bytes = match to_bytes(request.into_body(), usize::MAX).await {
@@ -246,10 +248,7 @@ async fn api_owner_send(
         "note": "Recorded in the owner mailbox. Stored is not read: the desk has not seen it until it answers."
     });
 
-    let pane = match desk_pane(state.backend.as_ref()).await {
-        Ok(pane) => pane,
-        Err(_) => None,
-    };
+    let pane = desk_pane(state.backend.as_ref()).await.unwrap_or_default();
     let Some(pane) = pane else {
         result["notify"] = json!({
             "state": "desk_offline",
@@ -331,7 +330,7 @@ async fn api_owner_thread(
     request: Request,
 ) -> Response {
     if let Err(response) = authenticate(auth.as_ref(), request.headers(), scheme).await {
-        return response;
+        return response.into_response();
     }
     let query = match parse_query(request.uri().query()) {
         Ok(query) => query,
@@ -339,7 +338,7 @@ async fn api_owner_thread(
     };
     let limit = match parse_thread_limit(query.get("limit").map(String::as_str)) {
         Ok(limit) => limit,
-        Err(response) => return response,
+        Err(response) => return response.into_response(),
     };
     match owner_thread(state.as_ref(), limit).await {
         Ok(result) => Json(result).into_response(),
@@ -351,9 +350,9 @@ async fn authenticate(
     backend: &dyn AuthBackend,
     headers: &HeaderMap,
     scheme: RequestScheme,
-) -> Result<Identity, Response> {
+) -> Result<Identity, WebResponseError> {
     if let Some(response) = same_origin_refusal(headers, scheme) {
-        return Err(response);
+        return Err(response.into());
     }
     let bearer = bearer_value(headers);
     let cookie = cookie_value(headers, "vp_session");
@@ -361,6 +360,7 @@ async fn authenticate(
         .identity(bearer.as_deref(), cookie.as_deref())
         .await
         .map_err(auth_error_response)
+        .map_err(WebResponseError::from)
 }
 
 fn same_origin_refusal(headers: &HeaderMap, scheme: RequestScheme) -> Option<Response> {
@@ -469,7 +469,7 @@ fn parse_query(raw: Option<&str>) -> Result<HashMap<String, String>, ()> {
     Ok(query)
 }
 
-fn parse_thread_limit(raw: Option<&str>) -> Result<i64, Response> {
+fn parse_thread_limit(raw: Option<&str>) -> Result<i64, WebResponseError> {
     let Some(raw) = raw else { return Ok(50) };
     let parsed = raw.trim().parse::<i128>();
     match parsed {
@@ -483,7 +483,8 @@ fn parse_thread_limit(raw: Option<&str>) -> Result<i64, Response> {
                 "input": raw
             }]})),
         )
-            .into_response()),
+            .into_response()
+            .into()),
     }
 }
 

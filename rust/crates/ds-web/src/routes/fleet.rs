@@ -1,5 +1,7 @@
 //! Isolated fleet routes. Production RPC, direct-message transport, local inventory,
 //! and metrics connection ownership must be bound and verified under t1702 before mounting.
+use super::response_error::WebResponseError;
+
 use super::{
     auth::{AuthBackend, AuthError, Identity, RequestScheme},
     messages_write::MessageIn,
@@ -170,7 +172,7 @@ async fn api_pane_send(
 ) -> Response {
     let identity = match authenticate(auth.as_ref(), request.headers(), scheme).await {
         Ok(i) => i,
-        Err(r) => return r,
+        Err(r) => return r.into_response(),
     };
     let bytes = match to_bytes(request.into_body(), usize::MAX).await {
         Ok(b) => b,
@@ -504,7 +506,7 @@ async fn operations_metrics(
     headers: HeaderMap,
 ) -> Response {
     if let Err(r) = authenticate(auth.as_ref(), &headers, scheme).await {
-        return r;
+        return r.into_response();
     }
     match state.sources.summary().await {
         Ok(v) => Json(v).into_response(),
@@ -520,9 +522,9 @@ async fn authenticate(
     backend: &dyn AuthBackend,
     headers: &HeaderMap,
     scheme: RequestScheme,
-) -> Result<Identity, Response> {
+) -> Result<Identity, WebResponseError> {
     if let Some(response) = same_origin_refusal(headers, scheme) {
-        return Err(response);
+        return Err(response.into());
     }
     let bearer = bearer_value(headers);
     let cookie = cookie_value(headers, "vp_session");
@@ -530,6 +532,7 @@ async fn authenticate(
         .identity(bearer.as_deref(), cookie.as_deref())
         .await
         .map_err(auth_error_response)
+        .map_err(WebResponseError::from)
 }
 
 fn same_origin_refusal(headers: &HeaderMap, scheme: RequestScheme) -> Option<Response> {
