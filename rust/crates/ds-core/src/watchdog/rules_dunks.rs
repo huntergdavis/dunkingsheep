@@ -151,7 +151,6 @@ type SkipEventBoundary = (i64, f64);
 /// has stopped is not an incident. And a cumulative counter that only grows fires on its own
 /// history, so the count is now the CURRENT run (it resets when the dunk sends) with the lifetime
 /// figure reporting separately.
-
 pub fn rule_dunk_skip_loop(
     dunks: &[Value],
     events: &dyn DunkEvents,
