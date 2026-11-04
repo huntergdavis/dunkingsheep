@@ -32,6 +32,7 @@ pub(crate) fn production_handlers() -> Dispatcher {
     handlers.register_task_delete();
     handlers.register_task_complete();
     handlers.register_send_text_keys_flush_box();
+    handlers.register_clear_box_delivery_capability();
     handlers
 }
 
@@ -370,6 +371,9 @@ mod tests {
             "send_text",
             "send_keys",
             "flush_box",
+            "clear_box",
+            "delivery",
+            "delivery_capability",
             "report_run",
             "report_list",
             "owner_conversation",

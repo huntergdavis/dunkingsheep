@@ -1160,9 +1160,9 @@ pub fn h_delivery_capability(context: &HandlerContext<'_>, args: Args) -> Result
                 .into(),
         ));
     }
-    context.flock.delivery_capability(
+    context.flock.delivery_capability_with_owner(
         context.env.delivery_env()?,
-        context.env.owner_push()?,
+        || context.env.owner_push(),
         target,
         context.self_pane_id(),
         context.env.now_s(),

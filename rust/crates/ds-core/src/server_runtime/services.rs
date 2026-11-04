@@ -69,6 +69,7 @@ pub struct RuntimeServices {
     pub(super) runtime: Runtime,
     pub(super) stuck_reporter: StalePanelReporter,
     pub(crate) allocator: crate::flock::allocator::Allocator,
+    pub(super) owner_push: super::owner_push::OwnerPushService,
     stopped: AtomicBool,
 }
 
@@ -182,8 +183,16 @@ impl RuntimeServices {
             runtime,
             stuck_reporter,
             allocator: crate::flock::allocator::Allocator::new(),
+            owner_push: super::owner_push::OwnerPushService::default(),
             stopped: AtomicBool::new(false),
         }))
+    }
+
+    /// Capture the startup-selected owner database path exactly once, without opening it.
+    /// The startup owner must attach before serving. No environment or path defaults are
+    /// inferred here, including for empty or whitespace-containing paths.
+    pub fn attach_owner_push_path(&self, path: PathBuf) -> Result<(), DunkError> {
+        self.owner_push.attach_path(path)
     }
 
     /// Build the stuck observer adapter with the canonical Flock, outbox, and reporter.
