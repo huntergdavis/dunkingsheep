@@ -21,6 +21,7 @@ pub struct StatusState {
     pub(crate) env: Env,
     pub(crate) idle_claim_s: f64,
     pub(crate) turn_end_wait_s: f64,
+    pub(crate) agent_verify_s: f64,
 }
 
 impl StatusState {
@@ -42,6 +43,7 @@ impl StatusState {
             env,
             idle_claim_s: crate::activity::IDLE_CLAIM_S,
             turn_end_wait_s: 4.0,
+            agent_verify_s: 2.0,
         }
     }
 }
@@ -55,6 +57,12 @@ impl Flock {
             None => 4.0,
             Some(value) => crate::github::parse_python_float(value).ok_or_else(|| {
                 DunkError::Refused("invalid DUNKINGSHEEP_TURN_END_WAIT_S float".into())
+            })?,
+        };
+        state.agent_verify_s = match state.env.get("DUNKINGSHEEP_AGENT_VERIFY_S") {
+            None => 2.0,
+            Some(value) => crate::github::parse_python_float(value).ok_or_else(|| {
+                DunkError::Refused("invalid DUNKINGSHEEP_AGENT_VERIFY_S float".into())
             })?,
         };
         self.status_runtime
@@ -125,5 +133,70 @@ impl Flock {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = moved;
         self.invalidate_view();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_verify_window_is_captured_and_python_float_parsed_at_startup() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, env, expected) in [
+            ("default", Env::default(), 2.0),
+            (
+                "configured",
+                Env::from_pairs(&[("DUNKINGSHEEP_AGENT_VERIFY_S", " 0.25 ")]),
+                0.25,
+            ),
+            (
+                "infinity",
+                Env::from_pairs(&[("DUNKINGSHEEP_AGENT_VERIFY_S", "Infinity")]),
+                f64::INFINITY,
+            ),
+            (
+                "nan",
+                Env::from_pairs(&[("DUNKINGSHEEP_AGENT_VERIFY_S", "NaN")]),
+                f64::NAN,
+            ),
+        ] {
+            let flock = Flock::new(
+                dir.path().join(format!("{name}-launches")),
+                dir.path().join(format!("{name}-lanes")),
+                false,
+            );
+            flock
+                .attach_status_state(StatusState::at_start(
+                    "test",
+                    dir.path().join(format!("{name}-state")),
+                    dir.path().join("daemon"),
+                    env,
+                ))
+                .unwrap();
+            let actual = flock.status_state().unwrap().agent_verify_s;
+            assert!(actual == expected || (actual.is_nan() && expected.is_nan()));
+        }
+    }
+
+    #[test]
+    fn invalid_agent_verify_window_fails_status_attachment() {
+        let dir = tempfile::tempdir().unwrap();
+        for (index, raw) in ["", "  ", "soon"].into_iter().enumerate() {
+            let flock = Flock::new(
+                dir.path().join(format!("launches-{index}")),
+                dir.path().join(format!("lanes-{index}")),
+                false,
+            );
+            let state = StatusState::at_start(
+                "test",
+                dir.path().join(format!("state-{index}")),
+                dir.path().join("daemon"),
+                Env::from_pairs(&[("DUNKINGSHEEP_AGENT_VERIFY_S", raw)]),
+            );
+            let error = flock.attach_status_state(state).unwrap_err();
+            assert!(error.to_string().contains("DUNKINGSHEEP_AGENT_VERIFY_S"));
+            assert!(flock.status_state().is_err());
+        }
     }
 }

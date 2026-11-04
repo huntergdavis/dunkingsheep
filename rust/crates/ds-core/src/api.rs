@@ -12,6 +12,8 @@ mod owner_push;
 pub use owner_push::{h_owner_poll, h_owner_push, h_owner_take};
 mod metrics;
 pub use metrics::h_metrics;
+mod respawn;
+pub use respawn::h_respawn_pane;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -92,6 +94,19 @@ pub trait CommandEnv: PaneInfoEnv {
         ) -> Result<Value, DunkError>,
     ) -> Result<Value, DunkError> {
         Err(DunkError::Refused("clear box adapter is not wired".into()))
+    }
+
+    /// Run the guarded respawn operation with the request's canonical runtime providers.
+    /// The runtime owns the temporary inbox view and terminal adapter for this callback.
+    fn with_respawn_pane_env(
+        &self,
+        _operation: &mut dyn FnMut(
+            &crate::flock::respawn::RespawnServices<'_>,
+        ) -> Result<Value, DunkError>,
+    ) -> Result<Value, DunkError> {
+        Err(DunkError::Refused(
+            "respawn pane adapter is not wired".into(),
+        ))
     }
 
     /// Wall-clock time, in epoch seconds, for request-scoped caches and command timestamps.
@@ -694,6 +709,11 @@ impl Dispatcher {
         self.register("clear_box", h_clear_box);
         self.register("delivery", h_delivery);
         self.register("delivery_capability", h_delivery_capability);
+    }
+
+    /// Register only the T37c guarded respawn-pane handler.
+    pub fn register_respawn_pane(&mut self) {
+        self.register("respawn_pane", h_respawn_pane);
     }
 
     /// `dunk_api.dispatch(flock, name, args, self_pane_id)`, with the acting pane read only from

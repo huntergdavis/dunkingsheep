@@ -117,6 +117,47 @@ fn test_an_immediate_exit_is_refused_with_the_status() {
 }
 
 #[test]
+fn positive_infinity_and_large_windows_keep_observing_until_real_result() {
+    for verify_s in [f64::INFINITY, f64::MAX] {
+        let mut backend = Scripted::new(
+            Screen::Frames(vec![
+                "✻ Welcome to Claude Code\n❯ \n".into(),
+                "\n[agent exited rc=127]\n".into(),
+            ]),
+            Some(vec![vec![child(
+                &["/usr/bin/claude"],
+                Some("claude"),
+                "S",
+                2000,
+            )]]),
+        );
+        let error =
+            verify_agent_started(&mut backend, "probe", Some(PANE), Some("claude"), verify_s)
+                .unwrap_err()
+                .to_string();
+        assert!(error.contains("exited immediately"), "{verify_s}: {error}");
+        assert_eq!(backend.reads, 2, "{verify_s}: exit ordering changed");
+        assert_eq!(
+            backend.proc_calls, 2,
+            "{verify_s}: process observation changed"
+        );
+    }
+}
+
+#[test]
+fn nan_and_negative_windows_preserve_python_immediate_deadline() {
+    for verify_s in [f64::NAN, -1.0, f64::NEG_INFINITY] {
+        let mut backend = Scripted::new(Screen::One("unused\n".into()), None);
+        assert_eq!(
+            verify_agent_started(&mut backend, "probe", Some(PANE), None, verify_s).unwrap(),
+            None,
+            "{verify_s}"
+        );
+        assert_eq!(backend.reads, 0, "{verify_s}");
+    }
+}
+
+#[test]
 fn test_a_running_agent_is_reported_started() {
     assert_eq!(None, start("✻ Welcome to Claude Code\n❯ \n", None).unwrap());
 }
