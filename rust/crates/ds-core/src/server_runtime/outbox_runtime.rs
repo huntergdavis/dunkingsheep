@@ -309,15 +309,28 @@ impl DunkTimerOwner {
                 crate::flock::dunks::DunkList::timer_fields(&handle).id
             ))
             .spawn(move || {
-                run_dunk_timer(
-                    flock,
-                    runtime,
-                    factory,
-                    handle,
-                    thread_signal,
-                    pool,
-                    reporter,
-                )
+                let failed_handle = Arc::clone(&handle);
+                let failed_flock = flock.clone();
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    run_dunk_timer(
+                        flock,
+                        runtime,
+                        factory,
+                        handle,
+                        thread_signal,
+                        pool,
+                        reporter,
+                    )
+                }));
+                if result.is_err() {
+                    crate::flock::dunks::DunkList::set_timer_error(
+                        &failed_handle,
+                        "scheduled dunk worker panicked",
+                    );
+                    if let Some(flock) = failed_flock.upgrade() {
+                        save_timer_state(&flock, &failed_handle, &FlockSnapshot);
+                    }
+                }
             });
         let join = join
             .map_err(|error| DunkError::Refused(format!("could not start dunk timer: {error}")))?;
@@ -711,6 +724,66 @@ mod tests {
     use super::*;
     use crate::flock::dunks::{AddArgs, UpdateArgs};
     use crate::terminal::fakes::FakeTerminal;
+
+    #[test]
+    fn timer_factory_failure_is_observable_and_worker_remains_joinable() {
+        let dir = tempfile::tempdir().unwrap();
+        let flock = Arc::new(Flock::new(
+            dir.path().join("launches"),
+            dir.path().join("lanes"),
+            false,
+        ));
+        flock.attach_stores(crate::flock::panes::Stores {
+            inbox: Some(Arc::new(
+                crate::inbox_store::Store::open(
+                    dir.path().join("inbox.db"),
+                    dir.path().join("blobs"),
+                )
+                .unwrap(),
+            )),
+            ..Default::default()
+        });
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let owner = OutboxRuntime::new(
+            Arc::clone(&flock),
+            runtime.handle().clone(),
+            Arc::new(|| panic!("injected terminal factory failure")),
+        )
+        .unwrap();
+        let pane = serde_json::json!({"pane_id": "w1:p1"});
+        owner
+            .add_dunk(
+                pane.as_object(),
+                &AddArgs {
+                    start: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let row = flock.dunks.get("d1").unwrap();
+            if row["status"] == "Error" {
+                assert_eq!(
+                    serde_json::json!("scheduled dunk worker panicked"),
+                    row["last_error"]
+                );
+                assert_eq!(serde_json::json!(0), row["send_count"]);
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "factory failure was not surfaced"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        owner.stop_dunk("d1").unwrap();
+        assert!(owner.dunk_timers.workers.lock().unwrap().is_empty());
+        owner.stop_and_join();
+    }
 
     #[test]
     fn stop_all_joins_multiple_real_timer_workers_and_allows_explicit_restart() {
