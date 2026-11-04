@@ -277,19 +277,19 @@ impl ManualFireOwner {
             .name(format!("manual-dunk-fire-{dunk_id}"))
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    run_fire(
-                        worker_flock.clone(),
+                    run_fire(WorkerFire {
+                        flock: worker_flock.clone(),
                         runtime,
                         factory,
                         pool,
-                        worker_handle.clone(),
-                        worker_signal,
+                        handle: worker_handle.clone(),
+                        signal: worker_signal,
                         countdown_s,
                         #[cfg(test)]
                         countdown_gate,
                         #[cfg(test)]
                         submit_gate,
-                    )
+                    })
                 }))
                 .unwrap_or_else(|_| {
                     Err(DunkError::Refused(
@@ -399,17 +399,34 @@ impl Drop for TrustedWorker<'_> {
     }
 }
 
-fn run_fire(
-    weak_flock: Weak<Flock>,
+struct WorkerFire {
+    flock: Weak<Flock>,
     runtime: Handle,
     factory: Arc<Factory>,
-    weak_pool: Weak<OutboxWorkerPool>,
+    pool: Weak<OutboxWorkerPool>,
     handle: DunkerHandle,
     signal: Arc<FireSignal>,
     countdown_s: i64,
-    #[cfg(test)] countdown_gate: Option<Arc<CountdownGate>>,
-    #[cfg(test)] submit_gate: Option<Arc<SubmitGate>>,
-) -> Result<serde_json::Value, DunkError> {
+    #[cfg(test)]
+    countdown_gate: Option<Arc<CountdownGate>>,
+    #[cfg(test)]
+    submit_gate: Option<Arc<SubmitGate>>,
+}
+
+fn run_fire(worker: WorkerFire) -> Result<serde_json::Value, DunkError> {
+    let WorkerFire {
+        flock: weak_flock,
+        runtime,
+        factory,
+        pool: weak_pool,
+        handle,
+        signal,
+        countdown_s,
+        #[cfg(test)]
+        countdown_gate,
+        #[cfg(test)]
+        submit_gate,
+    } = worker;
     for remaining in (1..=countdown_s.max(0)).rev() {
         if signal.cancelled.load(Ordering::Acquire) {
             return Err(DunkError::Refused(

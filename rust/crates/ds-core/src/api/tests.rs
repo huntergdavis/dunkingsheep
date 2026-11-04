@@ -2218,13 +2218,15 @@ fn h_stop_all_matches_python_and_stops_every_running_dunk() {
     }
     let mut dispatcher = Dispatcher::new();
     dispatcher.register_stop_all_fire_list_dunks();
-    let result = dispatch(
+    let request = RequestCtx::default();
+    let result = dispatch_with_env(
         &dispatcher,
         &flock,
         &FixedRole("owner", true),
         "stop_all",
         None,
-        None,
+        &request,
+        &env,
     )
     .unwrap();
     assert_eq!(result["dunks"].as_array().unwrap().len(), 2);
