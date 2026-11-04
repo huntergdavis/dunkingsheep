@@ -17,6 +17,8 @@ mod poll_roster_turn_end;
 pub use poll_roster_turn_end::{h_poll, h_roster, h_turn_end};
 mod owner_push;
 pub use owner_push::{h_owner_poll, h_owner_push, h_owner_take};
+mod recovery;
+pub use recovery::{h_doctor, h_recover};
 mod metrics;
 pub use metrics::h_metrics;
 mod dunks;
@@ -112,6 +114,11 @@ pub trait OwnerViewEnv {
 /// A synchronous adapter for command dependencies. All methods are object-safe so a daemon can
 /// supply one per request without putting backend types in handler signatures.
 pub trait CommandEnv: PaneInfoEnv {
+    /// Borrow the canonical recovery providers for this request. Live composition is t1605.
+    fn recover_env(&self) -> Result<&dyn crate::flock::recovery_commands::RecoverEnv, DunkError> {
+        Err(DunkError::Refused("recovery adapter is not wired".into()))
+    }
+
     /// Borrow the request's layout and pane services, with confirmed command submission.
     fn with_layout_create(
         &self,
@@ -776,6 +783,12 @@ impl Dispatcher {
     pub fn register_review_sync_list(&mut self) {
         self.register("review_sync", h_review_sync);
         self.register("review_list", h_review_list);
+    }
+
+    /// Register the recovery handlers; metrics keeps its existing registration.
+    pub fn register_doctor_recover(&mut self) {
+        self.register("doctor", h_doctor);
+        self.register("recover", h_recover);
     }
 
     /// Register only the T39 operations metrics summary handler.
