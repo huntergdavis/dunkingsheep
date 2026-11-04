@@ -554,6 +554,7 @@ mod tests {
             "task_metrics",
             "task_reap",
             "metrics",
+            "project_summary",
             "add_dunk",
             "get_dunk",
             "update_dunk",
