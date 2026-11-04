@@ -823,7 +823,11 @@ mod tests {
             .unwrap();
         let dunk = services.flock.dunks.handle("d1").unwrap();
         for _ in 0..3 {
-            runtime.block_on(adapter.helper_pushenv_announce_task("w1:p1", &task, 30.0));
+            runtime.block_on(async {
+                adapter
+                    .helper_pushenv_announce_task("w1:p1", &task, 30.0)
+                    .await
+            });
         }
         assert!(inbox
             .read("w1:p1", 50, true, false)
