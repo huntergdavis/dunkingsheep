@@ -170,21 +170,37 @@ fn io_error(error: std::io::Error) -> TerminalError {
 }
 /// Python expanduser: HOME (even empty), then real-UID passwd; unresolved stays '~'.
 pub fn expand_home(path: &str, env: &Env) -> PathBuf {
-    if path != "~" && !path.starts_with("~/") {
+    if !path.starts_with('~') {
         return PathBuf::from(path);
     }
-    let home = env.get("HOME").map(PathBuf::from).or_else(|| {
-        nix::unistd::User::from_uid(nix::unistd::Uid::current())
+    let end = path.find('/').unwrap_or(path.len());
+    let name = &path[1..end];
+    let home = if name.is_empty() {
+        env.get("HOME").map(PathBuf::from).or_else(|| {
+            nix::unistd::User::from_uid(nix::unistd::Uid::current())
+                .ok()
+                .flatten()
+                .map(|user| user.dir)
+        })
+    } else {
+        nix::unistd::User::from_name(name)
             .ok()
             .flatten()
             .map(|user| user.dir)
-    });
+    };
     match home {
-        Some(home) => PathBuf::from(format!(
-            "{}{}",
-            home.to_string_lossy().trim_end_matches('/'),
-            &path[1..]
-        )),
+        Some(home) => {
+            let expanded = format!(
+                "{}{}",
+                home.to_string_lossy().trim_end_matches('/'),
+                &path[end..]
+            );
+            PathBuf::from(if expanded.is_empty() {
+                "/".into()
+            } else {
+                expanded
+            })
+        }
         None => PathBuf::from(path),
     }
 }

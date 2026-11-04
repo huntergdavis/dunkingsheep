@@ -139,6 +139,11 @@ exit 0
     );
     let mut second = TmuxBackend::with_registry(&binary, &path);
     let panes = second.list_panes();
+    first
+        .registry()
+        .remember("pane", "%1", json!({"name":"  "}))
+        .unwrap();
+    assert_eq!(second.get_pane("%1").unwrap().label, "  ");
     assert!(second.managed("workspace", "$1", &panes));
     assert!(second.managed("tab", "@1", &panes));
     assert!(second.managed("pane", "%1", &panes));
@@ -153,4 +158,25 @@ exit 0
         .contains("kill-session"));
     second.close("pane", "%1").unwrap();
     assert!(!first.managed("pane", "%1", &[]));
+}
+
+#[test]
+fn home_expansion_handles_root_and_named_real_account() {
+    assert_eq!(
+        expand_home("~", &Env::from_pairs(&[("HOME", "")])),
+        Path::new("/")
+    );
+    assert_eq!(
+        expand_home("~/a", &Env::from_pairs(&[("HOME", "/")])),
+        Path::new("/a")
+    );
+    if let Some(user) = nix::unistd::User::from_uid(nix::unistd::Uid::current()).unwrap() {
+        assert_eq!(
+            expand_home(
+                &format!("~{}/a", user.name),
+                &Env::from_pairs(&[("HOME", "/unrelated")])
+            ),
+            user.dir.join("a")
+        );
+    }
 }

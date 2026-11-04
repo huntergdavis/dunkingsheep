@@ -138,7 +138,13 @@ impl TmuxBackend {
     }
     fn parsed_panes(&self, output: &str) -> Result<Vec<Pane>, TerminalError> {
         let labels = self.registry.labels()?;
-        Ok(parse_panes(output, &|id| labels.get(id).cloned()))
+        let mut panes = parse_panes(output, &|id| labels.get(id).cloned());
+        for pane in &mut panes {
+            if let Some(name) = labels.get(&pane.pane_id) {
+                pane.label = name.clone();
+            }
+        }
+        Ok(panes)
     }
     fn checked_pane(&self, pane_id: &str) -> Result<Option<Pane>, TerminalError> {
         Ok(self
@@ -400,8 +406,7 @@ impl Terminal for TmuxBackend {
                 "unsupported agent kind {kind:?}"
             )));
         }
-        let refs: Vec<_> = spec.argv.iter().map(String::as_str).collect();
-        let mut command = shell_join(&refs);
+        let mut command = crate::flock::commands_layout::shlex_join(&spec.argv);
         let mut environment = spec.env.clone();
         let guard_dir = self
             .environment
@@ -556,8 +561,7 @@ impl Terminal for TmuxBackend {
                 "refusing: pane {pane_id} process start does not match expected {expected_start}"
             )));
         }
-        let refs: Vec<_> = argv.iter().map(String::as_str).collect();
-        let command = agent_launch(&shell_join(&refs));
+        let command = agent_launch(&crate::flock::commands_layout::shlex_join(argv));
         let current = self.checked_pane(pane_id)?.ok_or_else(|| {
             TerminalError::refused(format!("pane {pane_id} disappeared before respawn"))
         })?;
@@ -957,5 +961,8 @@ pub fn is_executable(path: &Path) -> bool {
 /// Preserve a fast-exiting agent's diagnostic and leave a visible shell.
 pub fn agent_launch(command: &str) -> String {
     let script = format!("{command}; printf '\\n[agent exited rc=%s]\\n' \"$?\"; exec sh");
-    format!("sh -c {}", shell_join(&[&script]))
+    format!(
+        "sh -c {}",
+        crate::flock::commands_layout::shlex_join(&[script])
+    )
 }

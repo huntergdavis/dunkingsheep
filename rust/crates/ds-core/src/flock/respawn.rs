@@ -322,7 +322,6 @@ impl Flock {
         if let Some(message) = failure {
             return Err(self.respawn_failed(&failure_context, Some(new_pid), message));
         }
-        let refs: Vec<_> = request.argv.iter().map(String::as_str).collect();
         self.record_launch(
             &pane_id,
             &[
@@ -334,7 +333,10 @@ impl Flock {
                         .unwrap_or_else(|| pane_value["agent"].clone()),
                 ),
                 ("argv", json!(request.argv)),
-                ("command", json!(crate::terminal::tmux::shell_join(&refs))),
+                (
+                    "command",
+                    json!(super::commands_layout::shlex_join(request.argv)),
+                ),
                 (
                     "cwd",
                     old.get("cwd")

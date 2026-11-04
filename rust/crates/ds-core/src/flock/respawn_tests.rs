@@ -352,13 +352,22 @@ fn rollback_failure_is_not_reported_as_verified() {
 }
 #[test]
 fn unreadable_and_foreign_composer_refuse_without_mutation() {
-    for screen in ["ambiguous screen", "│ ❯ human work\n────────\n"] {
+    for screen in [
+        "› old transcript\n› live draft\n\n\n  gpt · ~/repo\n",
+        "│ ❯ human work\n────────\n",
+    ] {
         let f = Fixture::new();
         std::fs::write(f.dir.path().join("screen"), screen).unwrap();
         let (p, s) = f.original();
         assert!(f.run(true, p, s).is_err());
         assert!(!f.calls().contains("respawn-pane"));
     }
+    let f = Fixture::new();
+    std::fs::remove_file(f.dir.path().join("screen")).unwrap();
+    let (p, s) = f.original();
+    let error = f.run(true, p, s).unwrap_err().to_string();
+    assert!(error.contains("pane unreadable"), "{error}");
+    assert!(!f.calls().contains("respawn-pane -k"));
 }
 
 #[test]
@@ -567,7 +576,7 @@ fn native_fixture(f: &Fixture, active: bool) -> (rusqlite::Connection, Vec<Strin
     let home = f.dir.path().join("private-codex");
     std::fs::create_dir(&home).unwrap();
     let session = "01a173ee-beed-7461-a560-e5f6c1f666a7";
-    let rollout = home.join("rollout.jsonl");
+    let rollout = home.join(format!("rollout-{session}.jsonl"));
     let mut events = vec![
         json!({"timestamp":"2026-10-29T06:06:30Z","type":"session_meta","payload":{"id":session,"session_id":session,"cwd":"/tmp"}}),
         json!({"timestamp":"2026-10-29T06:06:31Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn","thread_id":session}}),
@@ -610,7 +619,8 @@ fn native_fixture(f: &Fixture, active: bool) -> (rusqlite::Connection, Vec<Strin
 fn native_active_and_busy_refuse_without_backend_mutation() {
     let f = Fixture::new();
     let (_db, argv) = native_fixture(&f, true);
-    assert!(codex_request(&f, &argv, None).is_err());
+    let error = codex_request(&f, &argv, None).unwrap_err().to_string();
+    assert!(error.contains("unfinished turn(s)"), "{error}");
     assert!(!f.calls().contains("respawn-pane -k"));
     let f = Fixture::new();
     let (db, argv) = native_fixture(&f, false);
@@ -651,7 +661,10 @@ fn shared_codex_home_in_requested_and_rollback_argv_is_refused() {
 fn native_rollout_changed_at_final_recheck_refuses_mutation() {
     let f = Fixture::new();
     let (_db, argv) = native_fixture(&f, false);
-    let rollout = f.dir.path().join("private-codex/rollout.jsonl");
+    let rollout = f
+        .dir
+        .path()
+        .join("private-codex/rollout-01a173ee-beed-7461-a560-e5f6c1f666a7.jsonl");
     let change = || {
         use std::io::Write;
         std::fs::OpenOptions::new()
