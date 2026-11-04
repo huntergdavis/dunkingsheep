@@ -530,21 +530,32 @@ fn inbox_send_raw_values_preserve_body_subject_and_notification_error_order() {
     let before = crate::inbox::count(store.read_pool(), "w1:p1", &[], crate::clock::now_s())
         .unwrap()
         .total;
-    let error = dispatcher
+    let result = dispatcher
         .dispatch(
             "inbox_send",
-            &json!({"to":"w1:p1","body":"committed before notice","subject":9,"notify":true}),
+            &json!({"to":"w1:p1","body":"numeric subject","subject":9,"notify":true}),
             &ctx,
         )
-        .unwrap_err();
-    assert!(error
-        .to_string()
-        .contains("'int' object has no attribute 'strip'"));
+        .unwrap();
+    assert_eq!(result["subject"], "9");
+    assert_eq!(result["notified"], true);
+    let falsey = dispatcher
+        .dispatch(
+            "inbox_send",
+            &json!({"to":"w1:p1","body":"falsey subject","subject":0,"notify":true}),
+            &ctx,
+        )
+        .unwrap();
+    assert_eq!(falsey["subject"], "0");
+    assert_eq!(falsey["notified"], true);
+    let sent = services.flock().sent_text_by_pane.lock().unwrap();
+    assert!(sent["w1:p1"].iter().any(|text| text.contains(": 9.")));
+    assert!(!sent["w1:p1"].iter().any(|text| text.contains(": 0.")));
     assert_eq!(
         crate::inbox::count(store.read_pool(), "w1:p1", &[], crate::clock::now_s())
             .unwrap()
             .total,
-        before + 1
+        before + 2
     );
     dispatcher.close();
 }

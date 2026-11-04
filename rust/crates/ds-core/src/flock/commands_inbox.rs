@@ -615,26 +615,31 @@ impl Flock {
         {
             if let Some(pane) = pane_id.as_deref() {
                 let unread = inbox::count(env.pool(), &mailbox, &[], env.now())?.unread;
-                if let Some(value) = stored_subject.filter(|v| match v {
-                    Value::Null => false,
-                    Value::Bool(b) => *b,
-                    Value::Number(n) => n.as_f64().is_some_and(|n| n != 0.0),
-                    Value::Array(a) => !a.is_empty(),
-                    Value::Object(o) => !o.is_empty(),
-                    Value::String(_) => false,
-                }) {
-                    let kind = match value {
-                        Value::Bool(_) => "bool",
-                        Value::Number(n) if n.is_i64() || n.is_u64() => "int",
-                        Value::Number(_) => "float",
-                        Value::Array(_) => "list",
-                        _ => "dict",
+                let notice_subject = stored_subject.and_then(|value| {
+                    let truthy = match value {
+                        Value::Null => false,
+                        Value::Bool(b) => *b,
+                        Value::Number(n) => n.as_f64().is_some_and(|n| n != 0.0),
+                        Value::Array(a) => !a.is_empty(),
+                        Value::Object(o) => !o.is_empty(),
+                        Value::String(s) => !s.is_empty(),
                     };
-                    return Err(DunkError::Refused(format!(
-                        "'{kind}' object has no attribute 'strip'"
-                    )));
-                }
-                let text = notice_text(&mailbox, unread, sender.as_deref(), subject.as_deref());
+                    if !truthy {
+                        return None;
+                    }
+                    Some(match value {
+                        Value::String(s) => s.clone(),
+                        Value::Bool(true) => "True".into(),
+                        Value::Number(n) => n.to_string(),
+                        other => other.to_string(),
+                    })
+                });
+                let text = notice_text(
+                    &mailbox,
+                    unread,
+                    sender.as_deref(),
+                    notice_subject.as_deref(),
+                );
                 // A notice for this pane may already be waiting. Say the new count rather
                 // than stacking a second one: an agent that reads its inbox once has
                 // handled both messages.
