@@ -141,8 +141,10 @@ fn h_list_messages_matches_python() {
     old.status = "sent".into();
     old.finished_at = Some(1.0);
     services.flock().remember(&old);
-    let mut newer = old.clone();
-    newer.id = "newer".into();
+    // A distinct history entry needs its own lifetime, not a clone of the first object.
+    let mut newer = Message::new("newer", "private", "private target", "secret", "send_text");
+    newer.status = "sent".into();
+    newer.finished_at = Some(1.0);
     services.flock().remember(&newer);
     let before = services.flock().outbox_snapshot();
     let dispatcher = services.production_dispatcher();
@@ -185,7 +187,7 @@ fn h_list_messages_matches_python() {
 fn h_get_message_matches_python() {
     let (_dir, services) = make_services("get", Arc::new(|| Box::new(FakeTerminal::new())), None);
     let message = put(&services, "m1", "private", 10.0);
-    let mut old = message.clone();
+    let mut old = Message::new("m1", "private", "target", "hello", "send_text");
     old.status = "sent".into();
     services.flock().remember(&old);
     let dispatcher = services.production_dispatcher();
