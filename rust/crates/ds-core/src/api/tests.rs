@@ -2866,7 +2866,7 @@ fn h_roster_matches_python() {
         &flock,
         &FixedRole("worker", false),
         "roster",
-        args(json!({"ignored": true})),
+        args(json!({})),
         &request,
         &env,
     )
