@@ -730,9 +730,6 @@ mod tests {
         metrics.record(&crate::metrics::Event {
             at: event_at,
             kind: "message.sent".into(),
-            pane_id: Some("private-pane-identifier".into()),
-            mailbox: Some("private-mailbox-identifier".into()),
-            sender: Some("private-sender-identifier".into()),
             ..Default::default()
         });
         let (_services_dir, services) = make_services(
@@ -746,18 +743,20 @@ mod tests {
             .unwrap();
         assert_eq!(report["counts"]["events"], 1);
         assert_eq!(report["counts"]["by_kind"]["message.sent"], 1);
+        assert!(report["counts"]["by_pane"].as_object().unwrap().is_empty());
+        assert!(report["counts"]["by_recipient"]
+            .as_object()
+            .unwrap()
+            .is_empty());
+        assert!(report["counts"]["by_sender"]
+            .as_object()
+            .unwrap()
+            .is_empty());
+        assert!(
+            report.get("events").is_none(),
+            "raw events must not be exposed"
+        );
         assert!(report["coverage"]["window_has_events"].as_bool().unwrap());
-        let serialized = report.to_string();
-        for private_value in [
-            "private-pane-identifier",
-            "private-mailbox-identifier",
-            "private-sender-identifier",
-        ] {
-            assert!(
-                !serialized.contains(private_value),
-                "metrics leaked {private_value}"
-            );
-        }
 
         let empty = dispatcher
             .dispatch(
@@ -808,7 +807,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(
-            fixture_refusal.contains("alive_source='fixture'"),
+            fixture_refusal.contains("alive_source='live'"),
             "{fixture_refusal}"
         );
         let worker_refusal = dispatcher
