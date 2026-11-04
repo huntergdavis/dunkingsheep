@@ -2098,6 +2098,32 @@ fn h_get_dunk_matches_python() {
     .expect("worker can read a dunk by its prefixed id");
     assert_eq!(prefixed, Value::Object(created.clone()));
 
+    // All 29 Python Unicode-16 whitespace scalars, including U+001C..U+001F.
+    // Actual Python _find probes cover prefixed/bare success and missing/empty IDs.
+    for codepoint in [
+        0x9, 0xa, 0xb, 0xc, 0xd, 0x1c, 0x1d, 0x1e, 0x1f, 0x20, 0x85, 0xa0, 0x1680, 0x2000, 0x2001,
+        0x2002, 0x2003, 0x2004, 0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200a, 0x2028, 0x2029,
+        0x202f, 0x205f, 0x3000,
+    ] {
+        let separator = char::from_u32(codepoint).unwrap();
+        for id in ["d1", "1", "d404", ""] {
+            let result = dispatch_with_env(
+                &dispatcher,
+                &flock,
+                &FixedRole("worker", false),
+                "get_dunk",
+                args(json!({"id": format!("{separator}{id}{separator}")})),
+                &request,
+                &env,
+            );
+            match id {
+                "d1" | "1" => assert_eq!(result.unwrap(), Value::Object(created.clone())),
+                "d404" => assert_eq!(refusal(result), "no dunk with id 'd404'"),
+                _ => assert_eq!(refusal(result), "no dunk with id ''"),
+            }
+        }
+    }
+
     let bare_number = dispatch_with_env(
         &dispatcher,
         &flock,
