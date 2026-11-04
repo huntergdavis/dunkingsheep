@@ -587,3 +587,76 @@ fn runtime_memory_reaper_uses_shared_writer_during_real_ingest_and_reports_close
     runtime.block_on(adapter.helper_reaperenv_memory_maintenance());
     assert_eq!(before, service.stats().unwrap()["queue"]);
 }
+
+#[test]
+fn memory_throttle_real_worker_accepts_raw_float_then_fails_after_committed_flush() {
+    for (seconds, message) in [
+        (-1.0, "sleep length must be non-negative"),
+        (f64::NAN, "Invalid value NaN (not a number)"),
+        (f64::INFINITY, "timestamp out of range for platform time_t"),
+        (
+            f64::NEG_INFINITY,
+            "timestamp out of range for platform time_t",
+        ),
+        (1e300, "timestamp out of range for platform time_t"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let service = MemoryService::create_at_start(
+            dir.path().join("memory.db"),
+            2,
+            Duration::from_millis(1),
+            Throttle::Python(seconds),
+        )
+        .unwrap();
+        let empty = dir.path().join("empty.jsonl");
+        std::fs::write(&empty, "{}\n").unwrap();
+        service
+            .enqueue(empty.to_str().unwrap(), Some("generic"), None)
+            .unwrap();
+        service.start().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while service.stats().unwrap()["queue"]["done"] != 1 {
+            assert!(
+                Instant::now() < deadline,
+                "empty input failed: {:?}",
+                service.ingestor.status()
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(service.ingestor.status().last_error.is_none());
+        let raw = service.ingestor.status().throttle_s;
+        assert!(raw.to_bits() == seconds.to_bits() || (raw.is_nan() && seconds.is_nan()));
+        let text = dir.path().join("text.jsonl");
+        std::fs::write(
+            &text,
+            "{\"role\":\"user\",\"text\":\"committed before native sleep failure\"}\n",
+        )
+        .unwrap();
+        service
+            .enqueue(text.to_str().unwrap(), Some("generic"), None)
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if service.ingestor.status().last_error.as_deref() == Some(message) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "missing delayed error: {:?}",
+                service.ingestor.status()
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let (state, source_error, queue_error, stored) = service.pool.with(|db| {
+            db.query_row("SELECT s.state,s.error,q.error,(SELECT text FROM chunks WHERE session_id='text') FROM sources s JOIN ingest_queue q ON q.source_id=s.id WHERE s.path=?", [text.to_str().unwrap()], |row| {
+                Ok((row.get::<_,String>(0)?, row.get::<_,String>(1)?, row.get::<_,String>(2)?, row.get::<_,String>(3)?))
+            }).map_err(map_sqlite)
+        }).unwrap();
+        assert_eq!(state, "failed");
+        assert_eq!(source_error, message);
+        assert_eq!(queue_error, message);
+        assert_eq!(stored, "committed before native sleep failure");
+        service.stop_and_join().unwrap();
+        assert!(service.worker_id().is_none());
+    }
+}

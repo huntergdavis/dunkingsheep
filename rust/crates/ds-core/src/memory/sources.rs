@@ -15,13 +15,14 @@
 
 use super::ingest::MemoryWrite;
 use std::path::Path;
+#[cfg(test)]
 use std::time::Duration;
 
 use rusqlite::{types::ValueRef, Connection, OpenFlags};
 use serde_json::Value;
 
 use super::ingest::{absolute, harness_from_path, project_from_cwd, text_from_content};
-use super::jsonl::{ingest_jsonl, IngestStats};
+use super::jsonl::{ingest_jsonl, IngestStats, Throttle};
 use super::pure::{chunk_text, DEFAULT_CHUNK_CHARS, DEFAULT_OVERLAP_CHARS};
 use crate::db::map_sqlite;
 use crate::error::DunkError;
@@ -280,7 +281,7 @@ pub fn ingest_path(
     harness: Option<&str>,
     project: Option<&str>,
     should_stop: &dyn Fn() -> bool,
-    throttle: Duration,
+    throttle: impl Into<Throttle>,
 ) -> Result<IngestStats, DunkError> {
     let path = absolute(path);
     let harness = harness

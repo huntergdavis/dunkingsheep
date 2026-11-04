@@ -1,5 +1,6 @@
 //! Canonical memory producer. SQL mutations run on one SyncWriter; parsing never does.
 use super::ingest::{self, MemoryWrite};
+use super::jsonl::Throttle;
 use crate::db::{map_sqlite, SyncWriter};
 use crate::error::DunkError;
 use rusqlite::Connection;
@@ -461,7 +462,7 @@ impl MemoryService {
                 "memory service is not enabled; start the daemon with persistence".into(),
             ));
         }
-        Self::create_with_clock(path, readers, poll, throttle, clock)
+        Self::create_with_clock(path, readers, poll, throttle.into(), clock)
     }
 
     /// Startup-only first-run creation, using the same writer for schema and ingestion.
@@ -470,13 +471,13 @@ impl MemoryService {
         path: impl AsRef<Path>,
         readers: usize,
         poll: Duration,
-        throttle: Duration,
+        throttle: impl Into<Throttle>,
     ) -> Result<Self, DunkError> {
         Self::create_with_clock(
             path.as_ref().to_owned(),
             readers,
             poll,
-            throttle,
+            throttle.into(),
             Arc::new(SystemClock(Instant::now())),
         )
     }
@@ -485,7 +486,7 @@ impl MemoryService {
         path: PathBuf,
         readers: usize,
         poll: Duration,
-        throttle: Duration,
+        throttle: Throttle,
         clock: Arc<dyn MemoryClock>,
     ) -> Result<Self, DunkError> {
         if tokio::runtime::Handle::try_current().is_ok() {
@@ -674,7 +675,15 @@ impl MemoryService {
     pub fn status(&self) -> Result<Value, DunkError> {
         let mut value = queries::status(&self.pool, &self.path, &self.queries)?;
         let status = self.ingestor.status();
-        value["ingestor"] = serde_json::json!({"running":status.running,"paused":status.paused,"throttle_s":status.throttle_s,"last_error":status.last_error,"last_result":status.last_result});
+        let mut ingestor = serde_json::json!({"running":status.running,"paused":status.paused,"last_error":status.last_error,"last_result":status.last_result});
+        // Direct insertion: json! re-serialization cannot carry the codec's raw NaN Number.
+        ingestor.as_object_mut().expect("status object").insert(
+            "throttle_s".into(),
+            crate::github::python_float_json_value(status.throttle_s).ok_or_else(|| {
+                DunkError::Refused("memory NaN status requires the numeric codec carrier".into())
+            })?,
+        );
+        value["ingestor"] = ingestor;
         Ok(value)
     }
     pub fn start(&self) -> Result<(), DunkError> {

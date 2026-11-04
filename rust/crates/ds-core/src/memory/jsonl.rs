@@ -129,6 +129,106 @@ struct Pending {
     at: Option<f64>,
 }
 
+/// Legacy Duration callers retain their timing; startup supplies an unvalidated Python float.
+#[derive(Clone, Copy, Debug)]
+pub enum Throttle {
+    Duration(Duration),
+    Python(f64),
+}
+impl From<Duration> for Throttle {
+    fn from(value: Duration) -> Self {
+        Self::Duration(value)
+    }
+}
+impl Throttle {
+    pub fn seconds(self) -> f64 {
+        match self {
+            Self::Duration(value) => value.as_secs_f64(),
+            Self::Python(value) => value,
+        }
+    }
+    fn after_flush(self, should_stop: &dyn Fn() -> bool) -> Result<(), SleepFailure> {
+        let duration = match self {
+            Self::Duration(duration) => duration,
+            Self::Python(seconds) if seconds == 0.0 => return Ok(()), // Python truthiness, including -0.0
+            Self::Python(seconds) => python_sleep_duration(seconds)?,
+        };
+        sleep_unless_stopped(duration, should_stop);
+        Ok(())
+    }
+}
+
+/// Native Python time.sleep failures, kept typed until the existing DunkError boundary.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum SleepFailure {
+    Negative,
+    Nan,
+    Overflow,
+}
+impl SleepFailure {
+    #[cfg(test)]
+    pub(crate) fn python_class(&self) -> &'static str {
+        match self {
+            Self::Negative | Self::Nan => "ValueError",
+            Self::Overflow => "OverflowError",
+        }
+    }
+    pub(crate) fn message(&self) -> &'static str {
+        match self {
+            Self::Negative => "sleep length must be non-negative",
+            Self::Nan => "Invalid value NaN (not a number)",
+            Self::Overflow => "timestamp out of range for platform time_t",
+        }
+    }
+}
+
+// CPython time.sleep converts to signed 64-bit nanoseconds before checking negativity.
+// Positive fractional nanoseconds round up (_PyTime_ROUND_TIMEOUT); no cast may saturate.
+fn python_sleep_duration(seconds: f64) -> Result<Duration, SleepFailure> {
+    if seconds.is_nan() {
+        return Err(SleepFailure::Nan);
+    }
+    let nanos = seconds * 1_000_000_000.0;
+    if !nanos.is_finite()
+        || !(-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(&nanos)
+    {
+        return Err(SleepFailure::Overflow);
+    }
+    if seconds < 0.0 {
+        return Err(SleepFailure::Negative);
+    }
+    Ok(Duration::from_nanos(nanos.ceil() as u64))
+}
+
+#[derive(Debug)]
+pub(crate) enum IngestFailure {
+    Store(DunkError),
+    Sleep(SleepFailure),
+}
+impl From<DunkError> for IngestFailure {
+    fn from(error: DunkError) -> Self {
+        Self::Store(error)
+    }
+}
+impl From<std::io::Error> for IngestFailure {
+    fn from(error: std::io::Error) -> Self {
+        Self::Store(error.into())
+    }
+}
+impl From<SleepFailure> for IngestFailure {
+    fn from(error: SleepFailure) -> Self {
+        Self::Sleep(error)
+    }
+}
+impl From<IngestFailure> for DunkError {
+    fn from(error: IngestFailure) -> Self {
+        match error {
+            IngestFailure::Store(error) => error,
+            IngestFailure::Sleep(error) => DunkError::Refused(error.message().into()),
+        }
+    }
+}
+
 /// The throttle pause after a flush, ENDED EARLY by a stop. A plain `sleep(throttle)` made
 /// `Ingestor::stop` block for the whole interval (its join waited on the sleeping worker) and
 /// made any test of a mid-file stop depend on wall-clock timing (t1440). The pause is taken in
@@ -154,8 +254,27 @@ pub fn ingest_jsonl<W: MemoryWrite>(
     harness: &str,
     project: Option<&str>,
     should_stop: &dyn Fn() -> bool,
-    throttle: Duration,
+    throttle: impl Into<Throttle>,
 ) -> Result<IngestStats, DunkError> {
+    ingest_jsonl_classified(
+        connection,
+        path,
+        harness,
+        project,
+        should_stop,
+        throttle.into(),
+    )
+    .map_err(Into::into)
+}
+
+pub(crate) fn ingest_jsonl_classified<W: MemoryWrite>(
+    connection: &mut W,
+    path: &Path,
+    harness: &str,
+    project: Option<&str>,
+    should_stop: &dyn Fn() -> bool,
+    throttle: Throttle,
+) -> Result<IngestStats, IngestFailure> {
     let mut session_id = path
         .file_stem()
         .map(|stem| stem.to_string_lossy().into_owned())
@@ -177,7 +296,7 @@ pub fn ingest_jsonl<W: MemoryWrite>(
                  pending: &mut Pending,
                  session_id: &str,
                  chunk_count: &mut usize|
-     -> Result<(), DunkError> {
+     -> Result<(), IngestFailure> {
         if !pending.chunks.is_empty() {
             *chunk_count += connection.insert_chunks(
                 session_id,
@@ -188,7 +307,7 @@ pub fn ingest_jsonl<W: MemoryWrite>(
                 None,
             )?;
             pending.chunks.clear();
-            sleep_unless_stopped(throttle, should_stop);
+            throttle.after_flush(should_stop)?;
         }
         Ok(())
     };

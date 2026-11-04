@@ -39,7 +39,7 @@ pub struct RuntimeObservability {
 pub struct RuntimeMemoryConfig {
     path: PathBuf,
     poll: Duration,
-    throttle: Duration,
+    throttle: f64,
 }
 impl RuntimeMemoryConfig {
     pub fn captured(path: PathBuf, env: &Env) -> Result<Self, DunkError> {
@@ -54,15 +54,10 @@ impl RuntimeMemoryConfig {
                 "could not convert memory throttle string to float: {raw:?}"
             ))
         })?;
-        // Accepted ingestor/source APIs carry Duration, unlike Python's float. Do not
-        // silently clamp/default valid Python inputs that this bounded seam cannot carry.
-        let throttle = Duration::try_from_secs_f64(seconds).map_err(|_| refusal(format!(
-            "memory throttle {raw:?} is valid Python float but unsupported by the current Duration ingest timing boundary"
-        )))?;
         Ok(Self {
             path,
             poll: Duration::from_millis(500),
-            throttle,
+            throttle: seconds,
         })
     }
 }
@@ -245,7 +240,7 @@ impl RuntimeServices {
                 &config.path,
                 2,
                 config.poll,
-                config.throttle,
+                crate::memory::jsonl::Throttle::Python(config.throttle),
             )?)),
             None => None,
         });
@@ -1890,28 +1885,27 @@ mod tests {
                 .to_string()
                 .contains("could not convert"));
         }
-        for raw in ["-1", "NaN", "-inf", "Infinity", "1e300"] {
-            let error = RuntimeMemoryConfig::captured(
-                path.clone(),
-                &Env::from_pairs(&[("DUNKINGSHEEP_MEMORY_THROTTLE_S", raw)]),
-            )
-            .err()
-            .unwrap();
-            assert!(
-                error
-                    .to_string()
-                    .contains("Duration ingest timing boundary"),
-                "{raw}: {error}"
-            );
-        }
-        for (raw, expected) in [(" ١_٢.٥e-2 ", 0.125), ("-0.0", 0.0), ("0", 0.0)] {
+        for raw in [
+            "-1",
+            "NaN",
+            "-inf",
+            "Infinity",
+            "1e300",
+            "-0.0",
+            "1e-300",
+            " ١_٢.٥e-2 ",
+        ] {
             let config = RuntimeMemoryConfig::captured(
                 path.clone(),
                 &Env::from_pairs(&[("DUNKINGSHEEP_MEMORY_THROTTLE_S", raw)]),
             )
             .unwrap();
+            let expected = crate::github::parse_python_float(raw).unwrap();
             assert_eq!(config.poll, Duration::from_millis(500));
-            assert_eq!(config.throttle.as_secs_f64(), expected);
+            assert!(
+                config.throttle.to_bits() == expected.to_bits()
+                    || (config.throttle.is_nan() && expected.is_nan())
+            );
         }
         let mut missing = memory_inputs(&dir, Env::default(), true);
         missing.observability.as_mut().unwrap().memory_db = None;
