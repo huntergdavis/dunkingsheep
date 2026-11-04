@@ -11,7 +11,10 @@ use std::sync::{Arc, OnceLock};
 use regex::Regex;
 use serde_json::{json, Map, Value};
 
-use super::sends::{DunkDeliveryAction, OutboxWake, SendPreparationEnv, SnapshotStore};
+use super::sends::{
+    DunkDeliveryAction, EnqueueFailure, OutboxWake, SendPreparationEnv, SnapshotSaveFailure,
+    SnapshotStore,
+};
 use super::Flock;
 use crate::clock;
 use crate::error::DunkError;
@@ -1375,7 +1378,13 @@ impl Flock {
             outer.set_dunk_delivery(action);
             DunkList::queue_fire(handle);
             let message_id = outer.id.clone();
-            self.enqueue(outer, wake, store.as_ref())?;
+            match self.enqueue_classified(outer, wake, store.as_ref()) {
+                Ok(()) | Err(EnqueueFailure::Snapshot(SnapshotSaveFailure::Io(_))) => {}
+                Err(EnqueueFailure::Worker(error))
+                | Err(EnqueueFailure::Snapshot(SnapshotSaveFailure::Other(error))) => {
+                    return Err(error);
+                }
+            }
             let message = format!(
                 "queued: the box in {} would not clear",
                 snapshot.target_label

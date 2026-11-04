@@ -12,6 +12,23 @@ use std::path::{Path, PathBuf};
 
 use crate::error::DunkError;
 
+/// Preserve whether an atomic state write failed because of an OS operation or
+/// because the payload/path could not be represented. A few Python-compatible
+/// mutation paths intentionally ignore only the former.
+#[derive(Debug)]
+pub(crate) enum ClassifiedWriteError {
+    Io(DunkError),
+    Other(DunkError),
+}
+
+impl ClassifiedWriteError {
+    pub(crate) fn into_dunk_error(self) -> DunkError {
+        match self {
+            Self::Io(error) | Self::Other(error) => error,
+        }
+    }
+}
+
 /// Read JSON, or the default when the file does not exist.
 ///
 /// A missing file is the normal first-run state (the Python's `except OSError:
@@ -37,14 +54,28 @@ pub fn read_or_default<T: serde::de::DeserializeOwned + Default>(
 /// The temp file must be in the same directory as the target: `rename` is only
 /// atomic within a filesystem, and `/tmp` is not the config directory.
 pub fn write<T: serde::Serialize>(path: &Path, value: &T) -> Result<(), DunkError> {
-    let directory = path
-        .parent()
-        .ok_or_else(|| DunkError::Refused(format!("{} has no parent directory", path.display())))?;
-    fs::create_dir_all(directory)?;
+    write_classified(path, value).map_err(ClassifiedWriteError::into_dunk_error)
+}
+
+pub(crate) fn write_classified<T: serde::Serialize>(
+    path: &Path,
+    value: &T,
+) -> Result<(), ClassifiedWriteError> {
+    let directory = path.parent().ok_or_else(|| {
+        ClassifiedWriteError::Other(DunkError::Refused(format!(
+            "{} has no parent directory",
+            path.display()
+        )))
+    })?;
+    fs::create_dir_all(directory).map_err(|error| ClassifiedWriteError::Io(error.into()))?;
     // State files are written with sorted keys (the Python's `sort_keys=True`). serde_json now
     // keeps insertion order (`preserve_order`), so sort explicitly instead of leaning on a
     // BTreeMap: the file bytes and the order a reader sees stay what they were.
-    let text = serde_json::to_string_pretty(&sorted_keys(serde_json::to_value(value)?))? + "\n";
+    let json =
+        serde_json::to_value(value).map_err(|error| ClassifiedWriteError::Other(error.into()))?;
+    let text = serde_json::to_string_pretty(&sorted_keys(json))
+        .map_err(|error| ClassifiedWriteError::Other(error.into()))?
+        + "\n";
     let temporary = temporary_path(path);
     {
         let mut file = OpenOptions::new()
@@ -53,15 +84,24 @@ pub fn write<T: serde::Serialize>(path: &Path, value: &T) -> Result<(), DunkErro
             .mode(0o600) // created 0600, before any content
             .open(&temporary)
             .map_err(|error| {
-                DunkError::Refused(format!("create {}: {error}", temporary.display()))
+                ClassifiedWriteError::Io(DunkError::Refused(format!(
+                    "create {}: {error}",
+                    temporary.display()
+                )))
             })?;
-        file.write_all(text.as_bytes())?;
-        file.sync_all()?; // the data is on disk before the rename
+        file.write_all(text.as_bytes())
+            .map_err(|error| ClassifiedWriteError::Io(error.into()))?;
+        file.sync_all()
+            .map_err(|error| ClassifiedWriteError::Io(error.into()))?; // data before rename
     }
-    fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))?;
+    fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))
+        .map_err(|error| ClassifiedWriteError::Io(error.into()))?;
     fs::rename(&temporary, path).map_err(|error| {
         let _ = fs::remove_file(&temporary);
-        DunkError::Refused(format!("rename {}: {error}", path.display()))
+        ClassifiedWriteError::Io(DunkError::Refused(format!(
+            "rename {}: {error}",
+            path.display()
+        )))
     })?;
     Ok(())
 }

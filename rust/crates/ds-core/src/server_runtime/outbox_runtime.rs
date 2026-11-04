@@ -33,6 +33,13 @@ impl SnapshotStore for FlockSnapshot {
     fn save(&self, flock: &Flock) -> Result<(), DunkError> {
         flock.save()
     }
+
+    fn save_classified(
+        &self,
+        flock: &Flock,
+    ) -> Result<(), crate::flock::sends::SnapshotSaveFailure> {
+        flock.save_classified()
+    }
 }
 
 #[allow(dead_code)]
@@ -300,7 +307,10 @@ impl OutboxRuntime {
             }
             self.flock.dunks.list()
         };
-        self.flock.save()?;
+        match self.flock.save_classified() {
+            Ok(()) | Err(crate::flock::sends::SnapshotSaveFailure::Io(_)) => {}
+            Err(crate::flock::sends::SnapshotSaveFailure::Other(error)) => return Err(error),
+        }
         Ok(result)
     }
 

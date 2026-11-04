@@ -298,6 +298,13 @@ impl Flock {
     /// selection and replacement, so an older snapshot cannot become the final file.
     #[allow(dead_code)] // Send/outbox callers share this persistence edge.
     pub(crate) fn save(&self) -> Result<(), DunkError> {
+        self.save_classified()
+            .map_err(sends::SnapshotSaveFailure::into_dunk_error)
+    }
+
+    /// Preserve the OS-vs-serialization boundary for the small set of legacy dunk
+    /// operations whose Python callers intentionally ignore only OSError.
+    pub(crate) fn save_classified(&self) -> Result<(), sends::SnapshotSaveFailure> {
         self.invalidate_view();
         if !self.persist_enabled {
             return Ok(());
@@ -306,9 +313,18 @@ impl Flock {
             .snapshot_lock
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let path = self.status_state()?.state_file.clone();
+        let path = self
+            .status_state()
+            .map_err(sends::SnapshotSaveFailure::Other)?
+            .state_file
+            .clone();
         let payload = self.snapshot();
-        crate::atomic_json::write(&path, &payload)
+        crate::atomic_json::write_classified(&path, &payload).map_err(|error| match error {
+            atomic_json::ClassifiedWriteError::Io(error) => sends::SnapshotSaveFailure::Io(error),
+            atomic_json::ClassifiedWriteError::Other(error) => {
+                sends::SnapshotSaveFailure::Other(error)
+            }
+        })
     }
 
     /// Rebuild queued messages from snapshot rows. Inbox read errors keep the original row.
