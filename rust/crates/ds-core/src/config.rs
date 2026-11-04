@@ -152,8 +152,10 @@ impl CapturedPythonHome {
 
     pub fn path(&self) -> Result<&Path, String> {
         use std::os::unix::ffi::OsStrExt;
+        // Deployed Python 3.14.4 Path.home() rejects only exactly "~".
+        // Path.expanduser() has a different, prefix-based check.
         self.expanduser_home()?
-            .filter(|home| !home.as_os_str().as_bytes().starts_with(b"~"))
+            .filter(|home| home.as_os_str().as_bytes() != b"~")
             .ok_or_else(|| "Could not determine home directory.".to_owned())
     }
 

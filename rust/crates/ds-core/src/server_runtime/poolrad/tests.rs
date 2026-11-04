@@ -613,15 +613,6 @@ fn poolrad_captured_home_and_config_present_empty_absent_failure() {
         failed.expanduser_home().unwrap_err(),
         "account lookup failed"
     );
-    for raw in ["~", "~unknown"] {
-        let env = Env::from_pairs(&[("HOME", raw)]);
-        let unexpanded = CapturedPythonHome::capture_with(&env, || panic!("HOME present"));
-        assert_eq!(unexpanded.expanduser_home().unwrap(), Some(Path::new(raw)));
-        assert_eq!(
-            unexpanded.path().unwrap_err(),
-            "Could not determine home directory."
-        );
-    }
 }
 
 #[test]
@@ -725,4 +716,84 @@ fn poolrad_config_snapshot_and_invalid_output_path_are_not_live_fallbacks() {
         f.call("poolrad_progress", json!({}), "w1:p1").unwrap()["queue_exported_at"],
         Value::Null
     );
+}
+
+/// Captured by python_home_oracle.py on the deployed Python 3.14.4. CI's
+/// system Python can differ; it must not silently select the production policy.
+#[test]
+fn poolrad_home_matches_recorded_python_3_14_4_oracle() {
+    let oracle: Value = serde_json::from_str(include_str!("python_home_3_14_4.json")).unwrap();
+    assert_eq!(oracle["python_version"], json!([3, 14, 4]));
+    let cases = oracle["cases"].as_array().unwrap();
+    assert_eq!(cases.len(), 7);
+    let check = |actual: Result<String, String>, expected: &Value, name: &str| match actual {
+        Ok(value) => assert_eq!(json!({"ok": value}), *expected, "{name}"),
+        Err(error) => {
+            assert_eq!(expected["exception"], "RuntimeError", "{name}");
+            assert_eq!(expected["error"], error, "{name}");
+        }
+    };
+    for case in cases {
+        let name = case["name"].as_str().unwrap();
+        let pairs: Vec<_> = case["home"]
+            .as_str()
+            .map(|home| ("HOME", home))
+            .into_iter()
+            .collect();
+        let env = Env::from_pairs(&pairs);
+        let home = CapturedPythonHome::capture_with(&env, || {
+            assert!(
+                case["home"].is_null(),
+                "present HOME must not query passwd: {name}"
+            );
+            Ok(case["account_home"].as_str().map(PathBuf::from))
+        });
+        let expanded = home
+            .expanduser_home()
+            .unwrap()
+            .unwrap_or_else(|| Path::new("~"));
+        assert_eq!(
+            expanded.to_string_lossy(),
+            case["expanduser"].as_str().unwrap(),
+            "{name}"
+        );
+        check(
+            home.path().map(|path| path.to_string_lossy().into_owned()),
+            &case["path"],
+            name,
+        );
+        for (explicit, field) in [(false, "config_default"), (true, "config_explicit")] {
+            let mut config_pairs = pairs.clone();
+            if explicit {
+                config_pairs.push(("DUNKINGSHEEP_DIR", "/explicit"));
+            }
+            let config_env = Env::from_pairs(&config_pairs);
+            check(
+                home.config_dir(&config_env)
+                    .map(|path| path.to_string_lossy().into_owned()),
+                &case[field],
+                name,
+            );
+            let config = PoolradConfig::from_env(&config_env, &home);
+            if let Some(root) = case[field]["ok"].as_str() {
+                let config = config.unwrap();
+                assert_eq!(
+                    config.queue_path,
+                    Path::new(root).join("poolrad/strict-queue.json"),
+                    "{name}"
+                );
+                assert_eq!(
+                    config.credit_path,
+                    Path::new(root).join("poolrad/credit-pending.json"),
+                    "{name}"
+                );
+            } else {
+                assert_eq!(
+                    config.unwrap_err(),
+                    case[field]["error"].as_str().unwrap(),
+                    "{name}"
+                );
+            }
+        }
+    }
 }
