@@ -41,7 +41,7 @@ pub fn h_task_metrics(context: &HandlerContext<'_>, args: Args) -> Result<Value,
         Flock::task_scope(
             Some(scope),
             context.self_pane_id(),
-            crate::tasks::TASK_GLOBAL,
+            crate::flock::commands_tasks::TASK_GLOBAL,
         )?;
     }
     // Python converts until before since in Tasks.metrics.
