@@ -33,6 +33,8 @@ mod turn_plan;
 mod turn_send;
 mod verify;
 
+#[cfg(test)]
+pub(crate) use outbox_runtime::{CountdownGate, SubmitGate};
 pub use services::{RuntimeObservability, RuntimeServiceInputs, RuntimeServices};
 
 use std::collections::BTreeSet;
@@ -474,6 +476,18 @@ impl crate::api::CommandEnv for RequestRuntimeAdapter<'_> {
         self.dunk_runtime
             .ok_or_else(|| refusal("request dunk runtime is not attached"))?
             .toggle_dunk(id)
+    }
+
+    fn stop_all_dunks(&self) -> Result<Vec<serde_json::Map<String, Value>>, DunkError> {
+        self.dunk_runtime
+            .ok_or_else(|| refusal("request dunk runtime is not attached"))?
+            .stop_all_dunks()
+    }
+
+    fn fire_dunk(&self, id: &str, countdown_s: i64, wait: bool) -> Result<Value, DunkError> {
+        self.dunk_runtime
+            .ok_or_else(|| refusal("request dunk runtime is not attached"))?
+            .fire_dunk(id, countdown_s, wait)
     }
 
     fn owner_push(&self) -> Result<&crate::owner::OwnerPush, DunkError> {

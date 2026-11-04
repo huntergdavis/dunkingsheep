@@ -38,6 +38,7 @@ pub(crate) fn production_handlers() -> Dispatcher {
     handlers.register_metrics();
     handlers.register_dunk_mutations();
     handlers.register_dunk_lifecycle();
+    handlers.register_stop_all_fire_list_dunks();
     handlers.register_send_text_keys_flush_box();
     handlers.register_clear_box_delivery_capability();
     handlers.register_respawn_pane();
@@ -98,6 +99,7 @@ mod tests {
         inner: FakeTerminal,
         observations: Arc<Mutex<SendObservations>>,
         read_script: Mutex<VecDeque<Option<String>>>,
+        shared_screen: Option<Arc<Mutex<String>>>,
     }
 
     fn tail_lines(screen: &str, lines: i64) -> String {
@@ -214,6 +216,9 @@ mod tests {
             lines: i64,
             ansi: bool,
         ) -> Result<Option<String>, TerminalError> {
+            if let Some(screen) = &self.shared_screen {
+                return Ok(Some(tail_lines(&screen.lock().unwrap(), lines)));
+            }
             if let Some(screen) = self.read_script.lock().unwrap().pop_front() {
                 return Ok(screen.map(|screen| tail_lines(&screen, lines)));
             }
@@ -269,6 +274,44 @@ mod tests {
                 inner,
                 observations: Arc::clone(&observations),
                 read_script: Mutex::new(read_script),
+                shared_screen: None,
+            })
+        })
+    }
+
+    fn manual_fire_factory(
+        observations: Arc<Mutex<SendObservations>>,
+        screen: Arc<Mutex<String>>,
+        outbox_started: std::sync::mpsc::Sender<()>,
+        release_outbox: Arc<(Mutex<bool>, Condvar)>,
+    ) -> LoopTerminalFactory {
+        let request_thread = std::thread::current().id();
+        let factory_calls = Arc::new(AtomicUsize::new(0));
+        Arc::new(move || {
+            let current_thread = std::thread::current().id();
+            observations
+                .lock()
+                .unwrap()
+                .factory_threads
+                .push(current_thread);
+            let invocation = factory_calls.fetch_add(1, Ordering::SeqCst);
+            if invocation >= 2 && current_thread != request_thread {
+                let _ = outbox_started.send(());
+                let (released, wake) = &*release_outbox;
+                let mut released = released.lock().unwrap();
+                while !*released {
+                    released = wake.wait(released).unwrap();
+                }
+            }
+            let mut inner = FakeTerminal::new();
+            for pane in &mut inner.panes {
+                pane.pane_pid = Some(std::process::id() as i64);
+            }
+            Box::new(DispatcherTerminal {
+                inner,
+                observations: Arc::clone(&observations),
+                read_script: Mutex::new(VecDeque::new()),
+                shared_screen: Some(Arc::clone(&screen)),
             })
         })
     }
@@ -513,6 +556,9 @@ mod tests {
             "start_dunk",
             "stop_dunk",
             "toggle_dunk",
+            "stop_all",
+            "fire_dunk",
+            "list_dunks",
             "owner_push",
             "owner_poll",
             "owner_take",
@@ -2080,6 +2126,79 @@ mod tests {
             .dispatch("task_cancel", &json!({"id":id,"reason":"done"}), &owner)
             .unwrap();
         assert_eq!(cancelled["status"], "cancelled");
+        services.shutdown();
+    }
+
+    #[test]
+    fn dispatcher_manual_fire_holds_then_delivers_through_real_outbox_callback() {
+        let observations = Arc::new(Mutex::new(SendObservations::default()));
+        let screen = Arc::new(Mutex::new("❯ human draft".to_owned()));
+        let (outbox_started_tx, outbox_started_rx) = std::sync::mpsc::channel();
+        let release_outbox = Arc::new((Mutex::new(false), Condvar::new()));
+        let terminal_factory = manual_fire_factory(
+            Arc::clone(&observations),
+            Arc::clone(&screen),
+            outbox_started_tx,
+            Arc::clone(&release_outbox),
+        );
+        let (_dir, services) = make_services("manual-fire-held", terminal_factory, None);
+        let pane = json!({"pane_id":"w1:p1","tab_label":"1"});
+        services
+            .add_dunk(
+                pane.as_object(),
+                &crate::flock::dunks::AddArgs {
+                    text: Some("held {id}".into()),
+                    start: false,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let mut handlers = crate::api::Dispatcher::new();
+        handlers.register_stop_all_fire_list_dunks();
+        let dispatcher = services.dispatcher(handlers);
+        let result = dispatcher
+            .dispatch(
+                "fire_dunk",
+                &json!({"id":"d1","wait":true}),
+                &request("w2:p2"),
+            )
+            .unwrap();
+        assert_eq!(result["queued"], true);
+        let message_id = result["message_id"].as_str().expect("queued message id");
+        assert!(services
+            .flock()
+            .outbox
+            .lock()
+            .unwrap()
+            .get("w1:p1")
+            .unwrap()
+            .iter()
+            .any(|message| message.id == message_id));
+
+        outbox_started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("canonical outbox worker created its own terminal");
+        *screen.lock().unwrap() = "❯ ".into();
+        let (released, wake) = &*release_outbox;
+        *released.lock().unwrap() = true;
+        wake.notify_all();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(8);
+        loop {
+            if services.flock().dunks.get("d1").unwrap()["send_count"] == 1 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "queued fire action was not delivered by the outbox callback"
+            );
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            services.flock().dunks.get("d1").unwrap()["last_sent_text"],
+            "held d1"
+        );
+        assert_eq!(observations.lock().unwrap().text.len(), 1);
         services.shutdown();
     }
 }
