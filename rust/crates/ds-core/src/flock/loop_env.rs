@@ -29,8 +29,12 @@ pub fn configured_loop_terminal_factory() -> Result<LoopTerminalFactory, DunkErr
     match name.as_str() {
         DEFAULT_TERMINAL_BACKEND => {
             let tmux_bin = tmux_binary_from_override(std::env::var_os("DUNKINGSHEEP_TMUX_BIN"));
+            let environment = crate::config::Env::from_process();
+            crate::terminal::tmux_registry::Registry::configured(None, &environment)
+                .path()
+                .map_err(|error| crate::error::refusal(error.to_string()))?;
             Ok(Arc::new(move || {
-                Box::new(TmuxBackend::new(tmux_bin.clone()))
+                Box::new(TmuxBackend::from_env(tmux_bin.clone(), environment.clone()))
             }))
         }
         "herdr" => Err(crate::error::refusal(
