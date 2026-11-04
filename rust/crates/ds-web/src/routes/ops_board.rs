@@ -8,7 +8,7 @@ use std::{future::Future, pin::Pin, sync::Arc};
 use axum::{
     body::to_bytes,
     extract::{Extension, Request},
-    http::{header, HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::post,
     Json, Router,
@@ -239,7 +239,7 @@ mod tests {
 
     use axum::{
         body::{to_bytes, Body},
-        http::Request,
+        http::{header, Request},
     };
     use tower::ServiceExt;
 
