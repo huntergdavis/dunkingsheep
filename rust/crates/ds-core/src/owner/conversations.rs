@@ -377,7 +377,7 @@ fn python_repr_value(value: &Value) -> String {
     }
 }
 
-fn python_number_string(value: &serde_json::Number) -> String {
+pub(crate) fn python_number_string(value: &serde_json::Number) -> String {
     if value.is_f64() {
         python_float_string(&value.to_string())
     } else {

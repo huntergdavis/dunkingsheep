@@ -164,31 +164,20 @@ pub fn h_inbox_stats(c: &HandlerContext<'_>, _args: Args) -> Result<Value, DunkE
         Ok(json!({"mailboxes":rows.iter().map(|s|json!({"mailbox":s.mailbox,"destination":s.destination,"unread":s.unread,"total":s.total,"archived":s.archived,"undeliverable":s.undeliverable,"oldest_unread_s":s.oldest_unread_s})).collect::<Vec<_>>()}))
     })
 }
-fn python_float_repr(value: &serde_json::Number) -> String {
-    let Some(float) = value.as_f64() else {
-        return value.to_string();
-    };
-    let rendered = format!("{float:?}");
-    let Some((mantissa, exponent)) = rendered.split_once('e') else {
-        return rendered;
-    };
-    let Ok(exponent) = exponent.parse::<i32>() else {
-        return rendered;
-    };
-    let sign = if exponent < 0 { '-' } else { '+' };
-    format!("{mantissa}e{sign}{:02}", exponent.unsigned_abs())
-}
-
 fn inbox_fetch_id_repr(value: &Value) -> String {
     match value {
-        Value::Number(number) if number.is_f64() => python_float_repr(number),
+        Value::Number(number) if number.is_f64() => {
+            crate::owner::conversations::python_number_string(number)
+        }
         _ => python_value_repr(value),
     }
 }
 
 fn inbox_fetch_id_str(value: &Value) -> String {
     match value {
-        Value::Number(number) if number.is_f64() => python_float_repr(number),
+        Value::Number(number) if number.is_f64() => {
+            crate::owner::conversations::python_number_string(number)
+        }
         _ => python_value_string(value),
     }
 }
