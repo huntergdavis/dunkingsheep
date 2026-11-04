@@ -22,6 +22,8 @@ pub use dunks::{
     h_add_dunk, h_fire_dunk, h_list_dunks, h_remove_dunk, h_start_dunk, h_stop_all, h_stop_dunk,
     h_toggle_dunk, h_update_dunk,
 };
+mod dunk_get;
+pub use dunk_get::h_get_dunk;
 mod respawn;
 pub use respawn::h_respawn_pane;
 
@@ -249,6 +251,12 @@ pub trait CommandEnv: PaneInfoEnv {
         Err(DunkError::Refused(
             "request next-job service is not attached".into(),
         ))
+    }
+
+    /// Preserve the runtime's lazy module/config error boundary before converting
+    /// the limit. Other adapters retain the accepted argument conversion here.
+    fn poolrad_sync_args(&self, args: &Args) -> Result<Value, DunkError> {
+        self.poolrad_sync(poolrad_limit(args)?, poolrad_dry_run(args.get("dry_run")))
     }
 
     /// The accepted T52 Poolrad sync service used by the T39 command adapter.
@@ -839,6 +847,11 @@ impl Dispatcher {
         self.register("start_dunk", h_start_dunk);
         self.register("stop_dunk", h_stop_dunk);
         self.register("toggle_dunk", h_toggle_dunk);
+    }
+
+    /// Register only the T39 get-dunk handler.
+    pub fn register_get_dunk(&mut self) {
+        self.register("get_dunk", h_get_dunk);
     }
 
     /// Register only the T39 stop-all, manual-fire and list-dunks handlers.
@@ -1985,7 +1998,7 @@ fn parse_python_decimal_integer_checked(value: &str) -> Result<i64, DecimalIntEr
     })
 }
 
-fn poolrad_limit(args: &Args) -> Result<usize, DunkError> {
+pub(crate) fn poolrad_limit(args: &Args) -> Result<usize, DunkError> {
     let Some(value) = args.get("limit").filter(|value| truthy(value)) else {
         return Ok(6);
     };
@@ -2163,7 +2176,7 @@ fn python_decimal_digit(character: char) -> Option<u8> {
     })
 }
 
-fn poolrad_dry_run(value: Option<&Value>) -> bool {
+pub(crate) fn poolrad_dry_run(value: Option<&Value>) -> bool {
     match value {
         None | Some(Value::Null) => false,
         Some(Value::Bool(value)) => *value,
@@ -2269,9 +2282,7 @@ pub fn h_gh_token(context: &HandlerContext<'_>, args: Args) -> Result<Value, Dun
 
 /// `dunk_api.h_poolrad_sync` through the accepted T52 Poolrad service.
 pub fn h_poolrad_sync(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
-    let limit = poolrad_limit(&args)?;
-    let dry_run = poolrad_dry_run(args.get("dry_run"));
-    context.env.poolrad_sync(limit, dry_run)
+    context.env.poolrad_sync_args(&args)
 }
 
 /// `dunk_api.h_poolrad_progress` through the accepted T52 Poolrad service.
@@ -3036,33 +3047,9 @@ pub fn not_ported(name: &str) -> DunkError {
     DunkError::Refused(format!("command {name} is not ported yet"))
 }
 
-/// Python `repr(str)` for the names a client can send (single quotes unless the text has a
-/// single quote and no double quote; backslash and control characters escaped).
+/// Python `repr(str)` shared with native recovery's Unicode-aware formatter.
 fn py_repr(text: &str) -> String {
-    let quote = if text.contains('\'') && !text.contains('"') {
-        '"'
-    } else {
-        '\''
-    };
-    let mut out = String::from(quote);
-    for ch in text.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if c == quote => {
-                out.push('\\');
-                out.push(c);
-            }
-            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
-                out.push_str(&format!("\\x{:02x}", c as u32))
-            }
-            c => out.push(c),
-        }
-    }
-    out.push(quote);
-    out
+    crate::recovery_native::prompt_python_string_repr(text)
 }
 
 #[cfg(test)]
