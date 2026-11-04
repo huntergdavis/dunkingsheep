@@ -451,6 +451,18 @@ impl SendPreparationEnv for TerminalCallAdapter<'_> {
             Err(error) => (false, error.to_string()),
         }
     }
+    fn send_text_raw(
+        &mut self,
+        pane: &str,
+        text: &serde_json::Value,
+    ) -> Result<(bool, String), DunkError> {
+        Ok(
+            match self.with_terminal_mut(|terminal| terminal.send_text_raw(pane, text))? {
+                Ok(()) => (true, "typed".into()),
+                Err(error) => (false, error.to_string()),
+            },
+        )
+    }
     fn attempt_generation(&self, pane: &str) -> Option<String> {
         pane_generation(self, pane)
     }

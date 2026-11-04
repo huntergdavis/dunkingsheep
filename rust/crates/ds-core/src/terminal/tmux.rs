@@ -27,6 +27,30 @@ use super::{
     RESIZE_MIN,
 };
 
+enum RawCreateFailure {
+    Backend(TerminalError),
+    Registry(super::tmux_registry::RegistryError),
+}
+impl From<TerminalError> for RawCreateFailure {
+    fn from(error: TerminalError) -> Self {
+        Self::Backend(error)
+    }
+}
+impl From<super::tmux_registry::RegistryError> for RawCreateFailure {
+    fn from(error: super::tmux_registry::RegistryError) -> Self {
+        Self::Registry(error)
+    }
+}
+fn raw_create_result<T>(
+    operation: impl FnOnce() -> Result<T, RawCreateFailure>,
+) -> super::RawCreateResult<T> {
+    match operation() {
+        Ok(value) => Ok(Ok(value)),
+        Err(RawCreateFailure::Backend(error)) => Ok(Err(error)),
+        Err(RawCreateFailure::Registry(error)) => Err(error),
+    }
+}
+
 /// `SEND_TEXT_CHUNK_CHARS` (herdr_client.py:21): a long message is typed in chunks,
 /// because a TUI's input buffer does not take an arbitrary length in one keystroke run.
 pub const SEND_TEXT_CHUNK_CHARS: usize = 900;
@@ -145,6 +169,29 @@ impl TmuxBackend {
             }
         }
         Ok(panes)
+    }
+    fn list_panes_raw(&self) -> Result<Vec<Pane>, super::tmux_registry::RegistryError> {
+        let result = match self.run(&["list-panes", "-a", "-F", PANE_FORMAT]) {
+            Ok(result) if result.code == 0 => result,
+            _ => return Ok(Vec::new()),
+        };
+        let mut panes = parse_panes(&result.stdout, &|_| None);
+        let labels = self.registry.pane_labels_raw(&panes)?;
+        for pane in &mut panes {
+            if let Some(label) = labels.get(&pane.pane_id) {
+                pane.label = label.clone();
+            }
+        }
+        Ok(panes)
+    }
+    fn get_pane_raw(
+        &self,
+        pane_id: &str,
+    ) -> Result<Option<Pane>, super::tmux_registry::RegistryError> {
+        Ok(self
+            .list_panes_raw()?
+            .into_iter()
+            .find(|pane| pane.pane_id == pane_id))
     }
     fn checked_pane(&self, pane_id: &str) -> Result<Option<Pane>, TerminalError> {
         Ok(self
@@ -314,6 +361,60 @@ impl Terminal for TmuxBackend {
         Ok(created.clone())
     }
 
+    fn create_workspace_raw(
+        &mut self,
+        label: &serde_json::Value,
+        cwd: &serde_json::Value,
+        focus: bool,
+    ) -> super::RawCreateResult<Workspace> {
+        raw_create_result(|| {
+            let label_text = super::raw::optional(label);
+            let cwd_text = super::raw::optional(cwd);
+            let name = safe_name(
+                label_text.as_deref().unwrap_or("dunkingsheep"),
+                "dunkingsheep",
+            );
+            let mut args = vec!["new-session", "-d", "-s", name.as_str()];
+            if let Some(cwd) = cwd_text.as_deref() {
+                args.extend(["-c", cwd]);
+            }
+            let result = self.run(&args)?;
+            if result.code != 0 {
+                return Err(
+                    TerminalError::refused(result.message("tmux new-session failed")).into(),
+                );
+            }
+            let sessions = self.list_workspaces();
+            let created = sessions
+                .iter()
+                .find(|workspace| workspace.label == name)
+                .ok_or_else(|| {
+                    TerminalError::refused("tmux created the session but it is not visible")
+                })?;
+            self.registry.remember_raw(
+            "workspace",
+            &created.workspace_id,
+            json!({"label": if super::raw::truthy(label) { label.clone() } else { json!(name) }}),
+        )?;
+            let tabs = self.list_tabs();
+            let tab = tabs.iter().find(|t| t.workspace_id == created.workspace_id);
+            // Python reads both children before saving either. A pane-read schema
+            // exception leaves only the workspace saved, even when a tab exists.
+            let panes = self.list_panes_raw()?;
+            let pane = panes.iter().find(|p| p.session_id == created.workspace_id);
+            if let Some(tab) = tab {
+                self.registry
+                    .remember_raw("tab", &tab.tab_id, json!({"label":tab.label}))?;
+            }
+            if let Some(pane) = pane {
+                self.registry
+                    .remember_raw("pane", &pane.pane_id, json!({"label":pane.label}))?;
+            }
+            let _ = focus;
+            Ok(created.clone())
+        })
+    }
+
     fn create_tab(
         &mut self,
         workspace_id: Option<&str>,
@@ -364,6 +465,81 @@ impl Terminal for TmuxBackend {
         Ok(tab)
     }
 
+    fn create_tab_raw(
+        &mut self,
+        workspace_id: Option<&str>,
+        label: &serde_json::Value,
+        cwd: &serde_json::Value,
+        focus: bool,
+    ) -> super::RawCreateResult<Tab> {
+        raw_create_result(|| {
+            let target = workspace_id
+                .filter(|id| !id.is_empty())
+                .map(str::to_owned)
+                .or_else(|| {
+                    self.environment
+                        .get("HERDR_PANE_ID")
+                        .filter(|id| !id.is_empty())
+                        .or_else(|| {
+                            self.environment
+                                .get("TMUX_PANE")
+                                .filter(|id| !id.is_empty())
+                        })
+                        .and_then(|id| self.get_pane(id))
+                        .map(|pane| pane.session_id)
+                })
+                .or_else(|| {
+                    self.list_workspaces()
+                        .first()
+                        .map(|workspace| workspace.workspace_id.clone())
+                })
+                .ok_or_else(|| TerminalError::refused("no tmux session to create a tab in"))?;
+            let label_text = super::raw::optional(label);
+            let cwd_text = super::raw::optional(cwd);
+            let name = safe_name(label_text.as_deref().unwrap_or("tab"), "dunkingsheep");
+            let format = format!("#{{window_id}}{PANE_SEP}#{{pane_id}}");
+            let mut args = vec!["new-window", "-d", "-P", "-F", &format];
+            args.extend(["-t", &target]);
+            args.extend(["-n", name.as_str()]);
+            if let Some(cwd) = cwd_text.as_deref() {
+                args.extend(["-c", cwd]);
+            }
+            let result = self.run(&args)?;
+            if result.code != 0 {
+                return Err(
+                    TerminalError::refused(result.message("tmux new-window failed")).into(),
+                );
+            }
+            let mut fields = result.stdout.trim().split(PANE_SEP);
+            let tab_id = fields.next().unwrap_or_default().to_owned();
+            let pane_id = fields.next().unwrap_or_default();
+            let tab = self
+                .list_tabs()
+                .into_iter()
+                .find(|tab| tab.tab_id == tab_id);
+            let pane = if pane_id.is_empty() {
+                None
+            } else {
+                self.get_pane_raw(pane_id)?
+            };
+            let (Some(tab), Some(pane)) = (tab, pane) else {
+                return Err(TerminalError::refused(
+                    "tmux created the window but it is not visible",
+                )
+                .into());
+            };
+            self.registry.remember_raw(
+            "tab",
+            &tab.tab_id,
+            json!({"label": if super::raw::truthy(label) { label.clone() } else { json!(name) }}),
+        )?;
+            self.registry
+                .remember_raw("pane", &pane.pane_id, json!({"label":pane.label}))?;
+            let _ = focus;
+            Ok(tab)
+        })
+    }
+
     fn split_pane(
         &mut self,
         pane_id: &str,
@@ -392,6 +568,43 @@ impl Terminal for TmuxBackend {
         self.registry
             .remember("pane", &pane.pane_id, json!({"label":pane.label}))?;
         Ok(pane)
+    }
+
+    fn split_pane_raw(
+        &mut self,
+        pane_id: &str,
+        direction: &str,
+        cwd: &serde_json::Value,
+        focus: bool,
+    ) -> super::RawCreateResult<Pane> {
+        raw_create_result(|| {
+            let cwd_text = super::raw::optional(cwd);
+            let mut args = vec!["split-window", "-t", pane_id];
+            match direction {
+                "down" => args.push("-v"),
+                _ => args.push("-h"),
+            }
+            args.extend(["-P", "-F", "#{pane_id}"]);
+            if !focus {
+                args.push("-d");
+            }
+            if let Some(cwd) = cwd_text.as_deref() {
+                args.extend(["-c", cwd]);
+            }
+            let result = self.run(&args)?;
+            if result.code != 0 {
+                return Err(
+                    TerminalError::refused(result.message("tmux split-window failed")).into(),
+                );
+            }
+            let new_pane = result.stdout.trim().to_string();
+            let pane = self.get_pane_raw(&new_pane)?.ok_or_else(|| {
+                TerminalError::refused("tmux created the split but it is not visible")
+            })?;
+            self.registry
+                .remember_raw("pane", &pane.pane_id, json!({"label":pane.label}))?;
+            Ok(pane)
+        })
     }
 
     fn start_agent(&mut self, spec: &AgentSpec) -> Result<Pane, TerminalError> {
@@ -735,6 +948,31 @@ impl Terminal for TmuxBackend {
         })
     }
 
+    fn send_text_raw(
+        &mut self,
+        pane: &str,
+        text: &serde_json::Value,
+    ) -> Result<Result<(), TerminalError>, crate::error::DunkError> {
+        if pane.is_empty() {
+            return Ok(Err(TerminalError::refused("No target")));
+        }
+        let chunks = super::raw::text_chunks(text)?;
+        for (index, chunk) in chunks.iter().enumerate() {
+            let result = match self.run(&["send-keys", "-t", pane, "-l", "--", chunk]) {
+                Ok(result) => result,
+                Err(error) => return Ok(Err(error)),
+            };
+            if result.code != 0 {
+                return Ok(Err(TerminalError::refused(
+                    result.message("tmux send-keys failed"),
+                )));
+            }
+            if index + 1 < chunks.len() {
+                std::thread::sleep(std::time::Duration::from_secs_f64(SEND_TEXT_CHUNK_DELAY_S));
+            }
+        }
+        Ok(Ok(()))
+    }
     fn send_text(&mut self, pane_id: &str, text: &str) -> Result<(), TerminalError> {
         // FINDING 4: the Python refuses an empty target with "No target".
         if pane_id.is_empty() {
