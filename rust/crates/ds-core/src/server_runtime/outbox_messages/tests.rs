@@ -200,10 +200,8 @@ fn h_get_message_matches_python() {
         message.to_dict().as_object().unwrap().len()
     );
     for (id, repr) in [
-        (json!(null), "None"),
         (json!(false), "False"),
         (json!(0), "0"),
-        (json!(""), "''"),
         (json!(["m1", 1]), "['m1', 1]"),
         (json!({"x":true}), "{'x': True}"),
     ] {
@@ -215,6 +213,36 @@ fn h_get_message_matches_python() {
             format!("no message with id {repr}")
         );
     }
+    // dunk_api.dispatch:2997 rejects null/empty before the raw-ID producer.
+    for id in [Value::Null, json!("")] {
+        assert_eq!(
+            dispatcher
+                .dispatch(
+                    "get_message",
+                    &json!({"message_id": id, "extra": true}),
+                    &ctx
+                )
+                .unwrap_err()
+                .to_string(),
+            "get_message: missing required argument(s): message_id"
+        );
+    }
+    assert_eq!(
+        services
+            .flock()
+            .get_message(&Value::Null)
+            .unwrap_err()
+            .to_string(),
+        "no message with id None"
+    );
+    assert_eq!(
+        services
+            .flock()
+            .get_message(&json!(""))
+            .unwrap_err()
+            .to_string(),
+        "no message with id ''"
+    );
     assert_eq!(
         dispatcher
             .dispatch("get_message", &json!({}), &ctx)
@@ -440,7 +468,26 @@ fn outbox_cancel_inflight_worker_preserves_replacement_lifetime() {
         })
     };
     let (_dir, services) = make_services("inflight", factory, None);
+    let store = services.flock().stores().inbox.unwrap();
+    let pool = crate::db::ReadPool::open(store.path(), 1).unwrap();
+    let receipt = |body: &str| {
+        let id = store
+            .send(&crate::inbox_store::Outgoing {
+                mailbox: "worker",
+                body: Some(body),
+                ..Default::default()
+            })
+            .unwrap();
+        store
+            .record_notify(&id, "queued", Some("awaiting notice"), None, None)
+            .unwrap();
+        id
+    };
+    let original_receipt = receipt("original");
+    let replacement_receipt = receipt("replacement");
     let mut message = put(&services, "same", "w1:p1", 10.0);
+    message.is_notice = true;
+    message.notify_for = vec![original_receipt.clone()];
     message.hold_while_typing = false;
     message.press_enter = false;
     services
@@ -472,6 +519,8 @@ fn outbox_cancel_inflight_worker_preserves_replacement_lifetime() {
     assert_eq!(cancelled["status"], "cancelled");
     assert!(message.done.is_set());
     let mut replacement = Message::new("same", "w3:p3", "replacement", "new body", "new source");
+    replacement.is_notice = true;
+    replacement.notify_for = vec![replacement_receipt.clone()];
     replacement.created_at = message.created_at;
     replacement.attempt_generation = Some("replacement-generation".into());
     services
@@ -499,4 +548,86 @@ fn outbox_cancel_inflight_worker_preserves_replacement_lifetime() {
         .iter()
         .any(|row| row.id == "same" && row.status == "sent"));
     assert!(history.iter().all(|row| row.text != "new body"));
+    assert_eq!(
+        crate::inbox::status(&pool, &original_receipt, crate::clock::now_s())
+            .unwrap()
+            .notify_state
+            .as_deref(),
+        Some("sent")
+    );
+    assert_eq!(
+        crate::inbox::status(&pool, &replacement_receipt, crate::clock::now_s())
+            .unwrap()
+            .notify_state
+            .as_deref(),
+        Some("queued")
+    );
+}
+
+#[test]
+fn outbox_cancel_real_filesystem_error_keeps_committed_memory() {
+    let (dir, services) =
+        make_services("io-error", Arc::new(|| Box::new(FakeTerminal::new())), None);
+    let message = put(&services, "m", "w1:p1", 1.0);
+    // Atomic replacement of an existing directory fails with a real filesystem error.
+    let path = dir.path().join("io-error-whole-state.json");
+    if path.is_file() {
+        std::fs::remove_file(&path).unwrap();
+    }
+    std::fs::create_dir(&path).unwrap();
+    let dispatcher = services.production_dispatcher();
+    let got = dispatcher
+        .dispatch(
+            "cancel_message",
+            &json!({"message_id":"m"}),
+            &request("w2:p2"),
+        )
+        .unwrap();
+    assert_eq!(got["status"], "cancelled");
+    assert!(message.done.is_set());
+    assert!(path.is_dir());
+    assert_eq!(
+        services.flock().decided.lock().unwrap().by_id["m"].status,
+        "cancelled"
+    );
+    services.shutdown();
+}
+
+#[test]
+fn outbox_message_provider_requires_canonical_flock() {
+    use crate::api::CommandEnv;
+    use crate::server_runtime::RequestRuntimeAdapter;
+    let (dir, services) =
+        make_services("provider", Arc::new(|| Box::new(FakeTerminal::new())), None);
+    let request = request("w2:p2");
+    let terminal: Mutex<Box<dyn Terminal>> = Mutex::new(Box::new(FakeTerminal::new()));
+    let adapter = RequestRuntimeAdapter::new(
+        services.flock(),
+        &request,
+        services.runtime.handle(),
+        &terminal,
+    );
+    assert_eq!(
+        adapter
+            .with_outbox_commands(&mut |env| env.list_messages())
+            .unwrap_err()
+            .to_string(),
+        "request outbox service is not attached"
+    );
+    let other = crate::flock::Flock::new(
+        dir.path().join("other-launches"),
+        dir.path().join("other-lanes"),
+        false,
+    );
+    let adapter =
+        RequestRuntimeAdapter::new(&other, &request, services.runtime.handle(), &terminal);
+    assert_eq!(
+        adapter
+            .with_outbox(&services.outbox)
+            .err()
+            .unwrap()
+            .to_string(),
+        "request outbox flock mismatch"
+    );
+    services.shutdown();
 }
