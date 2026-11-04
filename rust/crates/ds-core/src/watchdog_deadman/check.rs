@@ -49,6 +49,9 @@ impl From<io::Error> for CheckSendError {
     fn from(error: io::Error) -> Self {
         let name = match error.kind() {
             io::ErrorKind::ConnectionRefused => "ConnectionRefusedError",
+            io::ErrorKind::ConnectionReset => "ConnectionResetError",
+            io::ErrorKind::BrokenPipe => "BrokenPipeError",
+            io::ErrorKind::WouldBlock => "BlockingIOError",
             io::ErrorKind::NotFound => "FileNotFoundError",
             io::ErrorKind::NotADirectory => "NotADirectoryError",
             io::ErrorKind::TimedOut => "TimeoutError",

@@ -384,3 +384,74 @@ fn read_pool_and_get_message_keep_actual_sqlite_context() {
     assert_eq!(typed.name, "OperationalError");
     assert_eq!(typed.message, "no such table: messages");
 }
+
+#[test]
+fn native_io_subclasses_match_python_report_and_persisted_status_without_fallback() {
+    for (errno, name) in [
+        (104, "ConnectionResetError"),
+        (32, "BrokenPipeError"),
+        (11, "BlockingIOError"),
+    ] {
+        let f = Fixture::new();
+        let mut attempts = 0;
+        let report = check(&f.options(NOW), |_, _, _| {
+            attempts += 1;
+            Err(io::Error::from_raw_os_error(errno).into())
+        })
+        .unwrap();
+        assert_eq!(attempts, 1);
+        assert_eq!(report["alerted"], false);
+        assert_eq!(report["cause"], "other");
+        assert!(report["daemon_error"]
+            .as_str()
+            .unwrap()
+            .starts_with(&format!("{name}: ")));
+        let status = load(&f.status).unwrap();
+        assert_eq!(status["attempted"], "daemon");
+        assert!(!f.state.exists(), "failed sends must not start cooldown");
+        assert!(
+            !f.inbox.exists(),
+            "no direct fallback for these native failures"
+        );
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let output = std::process::Command::new("python3")
+            .args([
+                "-c",
+                r#"
+import json, os, sys
+sys.path.insert(0, sys.argv[1])
+import dunk_watchdog_deadman as d
+root, code, now = sys.argv[2], int(sys.argv[3]), float(sys.argv[4])
+attempts = 0
+def send(*args):
+    global attempts
+    attempts += 1
+    raise OSError(code, os.strerror(code))
+report = d.check(os.path.join(root, 'heartbeat'), 10, 3, 'fake-vp',
+    os.path.join(root, 'state.json'), 60, now, send=send,
+    status_path=os.path.join(root, 'status.json'), inbox_path=os.path.join(root, 'inbox.db'),
+    daemon_path=os.path.join(root, 'daemon.sock'), expected_dir=root)
+with open(os.path.join(root, 'status.json')) as file:
+    status = json.load(file)
+print(json.dumps({'report': report, 'status': status, 'attempts': attempts}))
+"#,
+            ])
+            .arg(root)
+            .arg(f.dir.path())
+            .arg(errno.to_string())
+            .arg(NOW.to_string())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let python: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report, python["report"], "errno {errno} report");
+        assert_eq!(status, python["status"], "errno {errno} persisted status");
+        assert_eq!(python["attempts"], 1);
+        assert!(!f.state.exists());
+        assert!(!f.inbox.exists());
+    }
+}
