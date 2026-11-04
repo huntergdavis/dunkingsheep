@@ -798,66 +798,66 @@ fn lane(ns: &Map<String, Value>) -> Outcome {
     type LanePrinter = Box<dyn Fn(&Value) -> String>;
     let action = text(ns, "lane_command").unwrap_or("list");
     let (rpc, args, printer): (&str, Map<String, Value>, LanePrinter) = match action {
-            "register" => {
-                let mut args = Map::new();
-                for key in ["pane", "role", "provider", "model", "label"] {
-                    args.insert(key.into(), ns.get(key).cloned().unwrap_or(Value::Null));
-                }
-                (
-                    "lane_register",
-                    args,
-                    Box::new(|result| {
-                        format!(
-                            "registered {} as {} (pid {})\n",
-                            crate::render_fleet::py_str(&result["pane_id"]),
-                            crate::render_fleet::py_str(&result["role"]),
-                            result
-                                .get("pane_pid")
-                                .filter(|value| !value.is_null())
-                                .map(crate::render_fleet::py_str)
-                                .unwrap_or_else(|| "None".into())
-                        )
-                    }),
-                )
+        "register" => {
+            let mut args = Map::new();
+            for key in ["pane", "role", "provider", "model", "label"] {
+                args.insert(key.into(), ns.get(key).cloned().unwrap_or(Value::Null));
             }
-            "unregister" => {
-                let mut args = Map::new();
-                args.insert(
-                    "pane".into(),
-                    ns.get("pane").cloned().unwrap_or(Value::Null),
-                );
-                (
-                    "lane_unregister",
-                    args,
-                    Box::new(|result| {
-                        format!(
-                            "unregistered {}: {}\n",
-                            crate::render_fleet::py_str(&result["pane_id"]),
-                            crate::render_fleet::py_str(&Value::Bool(crate::render_print::truthy(
-                                &result["removed"]
-                            )))
-                        )
-                    }),
-                )
-            }
-            "set" => {
-                let mut args = Map::new();
-                args.insert(
-                    "pane".into(),
-                    ns.get("pane").cloned().unwrap_or(Value::Null),
-                );
-                args.insert(
-                    "mailbox".into(),
-                    ns.get("mailbox").cloned().unwrap_or(Value::Null),
-                );
-                ("lane_set", args, Box::new(crate::render_fleet::render_lane))
-            }
-            _ => (
-                "lanes",
-                Map::new(),
-                Box::new(crate::render_fleet::render_lanes),
-            ),
-        };
+            (
+                "lane_register",
+                args,
+                Box::new(|result| {
+                    format!(
+                        "registered {} as {} (pid {})\n",
+                        crate::render_fleet::py_str(&result["pane_id"]),
+                        crate::render_fleet::py_str(&result["role"]),
+                        result
+                            .get("pane_pid")
+                            .filter(|value| !value.is_null())
+                            .map(crate::render_fleet::py_str)
+                            .unwrap_or_else(|| "None".into())
+                    )
+                }),
+            )
+        }
+        "unregister" => {
+            let mut args = Map::new();
+            args.insert(
+                "pane".into(),
+                ns.get("pane").cloned().unwrap_or(Value::Null),
+            );
+            (
+                "lane_unregister",
+                args,
+                Box::new(|result| {
+                    format!(
+                        "unregistered {}: {}\n",
+                        crate::render_fleet::py_str(&result["pane_id"]),
+                        crate::render_fleet::py_str(&Value::Bool(crate::render_print::truthy(
+                            &result["removed"]
+                        )))
+                    )
+                }),
+            )
+        }
+        "set" => {
+            let mut args = Map::new();
+            args.insert(
+                "pane".into(),
+                ns.get("pane").cloned().unwrap_or(Value::Null),
+            );
+            args.insert(
+                "mailbox".into(),
+                ns.get("mailbox").cloned().unwrap_or(Value::Null),
+            );
+            ("lane_set", args, Box::new(crate::render_fleet::render_lane))
+        }
+        _ => (
+            "lanes",
+            Map::new(),
+            Box::new(crate::render_fleet::render_lanes),
+        ),
+    };
     crate::daemon_cmd::run_command(ns, rpc, args, printer)
 }
 
