@@ -265,6 +265,17 @@ impl DunkTimerOwner {
         if self.stopped.load(Ordering::Acquire) {
             return Err(DunkError::Refused("dunk timer runtime is stopped".into()));
         }
+        // A timer can exit after removal or an error before a later start observes it.
+        // Reap completed registrations so they cannot suppress a replacement worker.
+        let finished: Vec<_> = workers
+            .iter()
+            .filter_map(|(key, worker)| worker.join.is_finished().then_some(*key))
+            .collect();
+        for key in finished {
+            if let Some(worker) = workers.remove(&key) {
+                let _ = worker.join.join();
+            }
+        }
         if let Some(worker) = workers.get(&key) {
             worker.signal.changed.notify_all();
             return Ok(());
