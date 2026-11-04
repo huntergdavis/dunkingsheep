@@ -18,12 +18,11 @@ impl LoopRuntimeAdapter {
         let worker = self.with_loop_terminal(|_, terminal| {
             terminal.with_terminal(|backend| {
                 backend
-                    .try_list_panes_grouped()
-                    .map(|grouped| {
-                        grouped
-                            .into_values()
-                            .flatten()
-                            .map(|pane| pane_to_json(&pane, None))
+                    .try_list_panes_with_status()
+                    .map(|panes| {
+                        panes
+                            .into_iter()
+                            .map(|(pane, status)| pane_to_json(&pane, status.as_deref()))
                             .collect()
                     })
                     .map_err(|error| DunkError::Refused(error.to_string()))
@@ -144,12 +143,35 @@ impl LoopRuntimeAdapter {
         })
     }
 
+    fn push_announcement_services(&self) -> Result<Arc<super::RuntimeServices>, DunkError> {
+        let services = self
+            .runtime_services
+            .clone()
+            .ok_or_else(|| refusal("push announcement canonical runtime services are not bound"))?;
+        if !Arc::ptr_eq(&self.flock, &services.flock)
+            || !Arc::ptr_eq(&self.flock, &services.outbox.flock)
+        {
+            return Err(refusal(
+                "push announcement canonical runtime services flock mismatch",
+            ));
+        }
+        Ok(services)
+    }
+
     pub(crate) fn helper_pushenv_announce_task<'a>(
         &'a self,
         pane_id: &'a str,
         task: &'a crate::tasks::Task,
         lease_seconds: f64,
     ) -> LoopFuture<'a, ()> {
+        let services = match self.push_announcement_services() {
+            Ok(services) => services,
+            Err(error) => {
+                return Box::pin(async move {
+                    eprintln!("could not announce task: {error}");
+                })
+            }
+        };
         let pane_id = pane_id.to_owned();
         let task = task.clone();
         let task_id = task.id.clone();
@@ -181,7 +203,6 @@ impl LoopRuntimeAdapter {
         ]);
         let body = lines.join("\n");
         let flock = Arc::clone(&self.flock);
-        let terminal_factory = Arc::clone(&self.terminal_factory);
         let worker = self.with_loop_terminal(move |flock_ref, terminal| {
             let result = (|| {
                 let runtime = terminal.runtime.clone();
@@ -192,15 +213,10 @@ impl LoopRuntimeAdapter {
                     &runtime,
                     terminal.terminal,
                 );
-                let outbox = super::outbox_runtime::OutboxRuntime::new(
-                    Arc::clone(&flock),
-                    runtime.clone(),
-                    terminal_factory,
-                )?;
                 let inbox = super::inbox_data::InboxRuntimeView::new(
                     request_adapter,
                     Arc::clone(&flock),
-                    Arc::clone(&outbox.pool),
+                    Arc::clone(&services.outbox.pool),
                 )?;
                 let args = crate::flock::commands_inbox::SendArgs {
                     to: &pane_id,
@@ -350,25 +366,10 @@ mod tests {
 
     #[test]
     fn production_env_push_delivery_uses_concrete_services() {
-        let dir = crate::testsupport::dir("runtime-push-delivery");
-        let store = Arc::new(
-            Store::open(dir.path().join("inbox.db"), dir.path().join("blobs"))
-                .expect("inbox store"),
-        );
-        let flock = Arc::new(Flock::new(
-            dir.path().join("launches.json"),
-            dir.path().join("lanes.json"),
-            false,
-        ));
-        flock.attach_stores(Stores {
-            inbox: Some(Arc::clone(&store)),
-            ..Stores::default()
-        });
-        let adapter = LoopRuntimeAdapter::new(Arc::clone(&flock), Arc::new(fake_push_terminal));
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("runtime");
+        let (_dir, services, _tasks, store, _offered, runtime) =
+            push_services_fixture("runtime-push-delivery");
+        let flock = Arc::clone(&services.flock);
+        let adapter = services.push_loop_adapter().unwrap();
         let task = Task {
             id: "t42".into(),
             scope: "global".into(),
@@ -520,7 +521,11 @@ mod tests {
 
         let adapter = LoopRuntimeAdapter::new(
             Arc::clone(&flock),
-            Arc::new(|| Box::new(FakeTerminal::new())),
+            Arc::new(|| {
+                let mut terminal = FakeTerminal::new();
+                terminal.statuses.insert("w1:p1".into(), "working".into());
+                Box::new(terminal)
+            }),
         );
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -534,6 +539,13 @@ mod tests {
             assert!(!panes.is_empty());
             panes
         });
+        assert_eq!(
+            panes
+                .iter()
+                .find(|pane| pane["pane_id"] == "w1:p1")
+                .unwrap()["agent_status"],
+            "working"
+        );
         assert_eq!(
             adapter.helper_pushenv_caller_role(
                 "w2:p2",
@@ -607,6 +619,20 @@ mod tests {
 
     fn push_services_fixture(
         tag: &str,
+    ) -> (
+        tempfile::TempDir,
+        Arc<RuntimeServices>,
+        Arc<Tasks>,
+        Arc<Store>,
+        Task,
+        tokio::runtime::Handle,
+    ) {
+        push_services_fixture_with_factory(tag, None)
+    }
+
+    fn push_services_fixture_with_factory(
+        tag: &str,
+        supplied_factory: Option<crate::flock::loop_env::LoopTerminalFactory>,
     ) -> (
         tempfile::TempDir,
         Arc<RuntimeServices>,
@@ -703,6 +729,7 @@ mod tests {
                 .insert("w1:p1".into(), "› Ask Codex to do anything\n".into());
             Box::new(terminal)
         });
+        let factory = supplied_factory.unwrap_or(factory);
         let services = RuntimeServices::new(RuntimeServiceInputs {
             launches_file: dir.path().join("launches.json"),
             lane_registry_file: dir.path().join("lanes.json"),
@@ -761,6 +788,138 @@ mod tests {
         services.flock.clear_caller();
 
         (dir, services, tasks, inbox, task, handle)
+    }
+
+    #[test]
+    fn repeated_announcements_reuse_canonical_pool_and_one_running_timer() {
+        let timer_starts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let recorded = Arc::clone(&timer_starts);
+        let factory: crate::flock::loop_env::LoopTerminalFactory = Arc::new(move || {
+            if std::thread::current()
+                .name()
+                .is_some_and(|name| name.starts_with("dunk-timer-"))
+            {
+                recorded.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            fake_push_terminal()
+        });
+        let (_dir, services, _tasks, inbox, task, runtime) =
+            push_services_fixture_with_factory("push-canonical-timer", Some(factory));
+        let adapter = services.push_loop_adapter().unwrap();
+        let bound = adapter.push_announcement_services().unwrap();
+        assert!(Arc::ptr_eq(&bound.outbox.pool, &services.outbox.pool));
+        let pane = serde_json::json!({"pane_id": "w1:p1"});
+        services
+            .add_dunk(
+                pane.as_object(),
+                &crate::flock::dunks::AddArgs {
+                    start: true,
+                    interval: Some("60".into()),
+                    text: Some("one scheduled attempt".into()),
+                    hold_while_typing: Some("false".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let dunk = services.flock.dunks.handle("d1").unwrap();
+        for _ in 0..3 {
+            runtime.block_on(async {
+                adapter
+                    .helper_pushenv_announce_task("w1:p1", &task, 30.0)
+                    .await
+            });
+        }
+        assert!(inbox
+            .read("w1:p1", 50, true, false)
+            .unwrap()
+            .iter()
+            .any(|message| message.summary.subject.as_deref()
+                == Some(format!("TASK {}: {}", task.id, task.title).as_str())));
+        services
+            .update_dunk(
+                "d1",
+                None,
+                &crate::flock::dunks::UpdateArgs {
+                    interval: Some("0.001".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while crate::flock::dunks::DunkList::handle_row(&dunk)["send_count"] == serde_json::json!(0)
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "original owner did not deliver scheduled attempt"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        services.shutdown();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        assert_eq!(
+            1,
+            timer_starts.load(std::sync::atomic::Ordering::SeqCst),
+            "announcement constructed another timer owner"
+        );
+        assert_eq!(
+            serde_json::json!(1),
+            crate::flock::dunks::DunkList::handle_row(&dunk)["send_count"]
+        );
+        let attempts = services
+            .flock
+            .stores()
+            .metrics
+            .unwrap()
+            .events_between(0.0, crate::clock::now_s() + 1.0)
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.kind == "dunk.sent" && event.source.as_deref() == Some("d1"))
+            .count();
+        assert_eq!(1, attempts);
+        let constructors = timer_starts.load(std::sync::atomic::Ordering::SeqCst);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert_eq!(
+            constructors,
+            timer_starts.load(std::sync::atomic::Ordering::SeqCst)
+        );
+    }
+
+    #[test]
+    fn announcement_refuses_missing_and_mismatched_services_without_delivery() {
+        let (dir, services, _tasks, inbox, task, runtime) =
+            push_services_fixture("push-refuse-unbound");
+        let missing = LoopRuntimeAdapter::new(
+            Arc::clone(&services.flock),
+            Arc::new(|| panic!("refusal must precede terminal construction")),
+        );
+        assert!(missing
+            .push_announcement_services()
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("not bound"));
+        let other = Arc::new(Flock::new(
+            dir.path().join("other-launches"),
+            dir.path().join("other-lanes"),
+            false,
+        ));
+        let mut mismatched = LoopRuntimeAdapter::new(
+            other,
+            Arc::new(|| panic!("refusal must precede terminal construction")),
+        );
+        mismatched.runtime_services = Some(Arc::clone(&services));
+        assert!(mismatched
+            .push_announcement_services()
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("mismatch"));
+        let before = services.flock.last_message();
+        runtime.block_on(missing.helper_pushenv_announce_task("w1:p1", &task, 30.0));
+        runtime.block_on(mismatched.helper_pushenv_announce_task("w1:p1", &task, 30.0));
+        assert!(inbox.read("w1:p1", 50, true, false).unwrap().is_empty());
+        assert_eq!(before, services.flock.last_message());
+        services.shutdown();
     }
 
     #[test]

@@ -9,6 +9,7 @@ use crate::server::RequestCtx;
 use crate::server_runtime::{
     inbox_data::InboxRuntimeView, RequestRuntimeAdapter, TerminalCallAdapter,
 };
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -25,9 +26,21 @@ pub(super) type TimerPrecommitBarrier =
 pub(super) struct TimerSignal {
     #[cfg(test)]
     pub(super) precommit: TimerPrecommitBarrier,
+    #[cfg(test)]
+    pub(super) before_fields: TimerPrecommitBarrier,
+    #[cfg(test)]
+    pub(super) before_hold_wait: TimerPrecommitBarrier,
     pub(super) cancelled: AtomicBool,
     pub(super) generation: Mutex<u64>,
     pub(super) changed: std::sync::Condvar,
+}
+
+impl TimerSignal {
+    fn wake(&self) {
+        let mut generation = self.generation.lock().unwrap_or_else(|e| e.into_inner());
+        *generation = generation.wrapping_add(1);
+        self.changed.notify_all();
+    }
 }
 
 pub(super) struct TimerWorker {
@@ -38,6 +51,10 @@ pub(super) struct TimerWorker {
 pub(super) struct DunkTimerOwner {
     #[cfg(test)]
     pub(super) precommit: TimerPrecommitBarrier,
+    #[cfg(test)]
+    pub(super) before_fields: TimerPrecommitBarrier,
+    #[cfg(test)]
+    pub(super) before_hold_wait: TimerPrecommitBarrier,
     pub(super) stopped: AtomicBool,
     pub(super) flock: Weak<Flock>,
     pub(super) runtime: Handle,
@@ -58,6 +75,10 @@ impl DunkTimerOwner {
         Self {
             #[cfg(test)]
             precommit: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            before_fields: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            before_hold_wait: Arc::new(Mutex::new(None)),
             stopped: AtomicBool::new(false),
             flock,
             runtime,
@@ -90,12 +111,16 @@ impl DunkTimerOwner {
             }
         }
         if let Some(worker) = workers.get(&key) {
-            worker.signal.changed.notify_all();
+            worker.signal.wake();
             return Ok(());
         }
         let signal = Arc::new(TimerSignal {
             #[cfg(test)]
             precommit: Arc::clone(&self.precommit),
+            #[cfg(test)]
+            before_fields: Arc::clone(&self.before_fields),
+            #[cfg(test)]
+            before_hold_wait: Arc::clone(&self.before_hold_wait),
             cancelled: AtomicBool::new(false),
             generation: Mutex::new(0),
             changed: std::sync::Condvar::new(),
@@ -148,13 +173,7 @@ impl DunkTimerOwner {
             .unwrap_or_else(|e| e.into_inner())
             .get(&Self::key(handle))
         {
-            let mut generation = worker
-                .signal
-                .generation
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            *generation = generation.wrapping_add(1);
-            worker.signal.changed.notify_all();
+            worker.signal.wake();
         }
     }
 
@@ -205,17 +224,38 @@ impl Drop for DunkTimerOwner {
     }
 }
 
-fn timer_wait(signal: &TimerSignal, seconds: f64) -> bool {
+#[cfg(test)]
+fn cross_timer_barrier(barrier: &TimerPrecommitBarrier) {
+    let barrier = barrier.lock().unwrap().take();
+    if let Some((entered, release)) = barrier {
+        entered.send(()).unwrap();
+        release.recv_timeout(Duration::from_secs(10)).unwrap();
+    }
+}
+
+fn timer_wait(signal: &TimerSignal, observed: &Cell<u64>, seconds: f64) -> bool {
+    #[cfg(test)]
+    if seconds == 60.0 {
+        cross_timer_barrier(&signal.before_hold_wait);
+    }
     let generation = signal.generation.lock().unwrap_or_else(|e| e.into_inner());
     if signal.cancelled.load(Ordering::Acquire) {
         return true;
     }
-    let before = *generation;
+    // Retain wakes delivered while the worker was doing I/O or accounting, before this wait.
+    if *generation != observed.get() {
+        observed.set(*generation);
+        return true;
+    }
+    let before = observed.get();
     let duration = Duration::from_secs_f64(seconds.max(0.0));
     let (generation, _) = signal
         .changed
-        .wait_timeout(generation, duration)
+        .wait_timeout_while(generation, duration, |current| {
+            !signal.cancelled.load(Ordering::Acquire) && *current == before
+        })
         .unwrap_or_else(|e| e.into_inner());
+    observed.set(*generation);
     signal.cancelled.load(Ordering::Acquire) || *generation != before
 }
 
@@ -278,6 +318,7 @@ fn run_dunk_timer(
     let Ok(inbox) = InboxRuntimeView::new(adapter, Arc::clone(&flock), pool) else {
         return;
     };
+    let observed_wake = Cell::new(0);
     let mut panel_seen = None;
     let mut panel_target = None;
     let mut panel_since = crate::clock::now_s();
@@ -292,6 +333,8 @@ fn run_dunk_timer(
         if signal.cancelled.load(Ordering::Acquire) || !flock.dunks.is_running(&handle) {
             break;
         }
+        #[cfg(test)]
+        cross_timer_barrier(&signal.before_fields);
         let fields = crate::flock::dunks::DunkList::timer_fields(&handle);
         let now = crate::clock::now_s();
         let due = fields.next_send_at.unwrap_or_else(|| {
@@ -311,7 +354,7 @@ fn run_dunk_timer(
                 &handle,
                 &format!("Next: {mins:02}:{secs:02}"),
             );
-            timer_wait(&signal, remaining.min(1.0));
+            timer_wait(&signal, &observed_wake, remaining.min(1.0));
             continue;
         }
         let Some(pane) = fields.target_pane_id.as_deref() else {
@@ -341,19 +384,25 @@ fn run_dunk_timer(
                             info["agent_status"].as_str().unwrap_or("unknown")
                         ),
                     );
-                    timer_wait(&signal, 1.0);
+                    timer_wait(&signal, &observed_wake, 1.0);
                     continue;
                 }
                 _ => {}
             }
         }
+        let settle_interrupted = Cell::new(false);
         if fields.hold_while_typing
             && !crate::flock::sends::clear_to_send(&env, pane, &|seconds| {
-                timer_wait(&signal, seconds)
+                let interrupted = timer_wait(&signal, &observed_wake, seconds);
+                settle_interrupted.set(interrupted);
+                interrupted
             })
         {
             if signal.cancelled.load(Ordering::Acquire) {
                 break;
+            }
+            if settle_interrupted.get() {
+                continue; // An edit/wake restarts the gates; it is not a typing hold.
             }
             if !gate_held {
                 gate_held = true;
@@ -361,7 +410,7 @@ fn run_dunk_timer(
                 save_timer_state(&flock, &handle, store.as_ref());
             }
             crate::flock::dunks::DunkList::set_timer_status(&handle, "Held (typing)");
-            timer_wait(&signal, 60.0);
+            timer_wait(&signal, &observed_wake, 60.0);
             // Returning through the idle gate is essential: clearing the box may submit a turn.
             continue;
         }
@@ -388,7 +437,7 @@ fn run_dunk_timer(
                             Some("unconsumed".into()),
                         );
                         save_timer_state(&flock, &handle, store.as_ref());
-                        timer_wait(&signal, 1.0);
+                        timer_wait(&signal, &observed_wake, 1.0);
                         continue;
                     }
                     None => {
@@ -402,7 +451,7 @@ fn run_dunk_timer(
                                 Some("unrecognised".into()),
                             );
                             save_timer_state(&flock, &handle, store.as_ref());
-                            timer_wait(&signal, 1.0);
+                            timer_wait(&signal, &observed_wake, 1.0);
                             continue;
                         }
                     }
@@ -446,7 +495,7 @@ fn run_dunk_timer(
                 save_timer_state(&flock, &handle, store.as_ref());
                 break;
             }
-            timer_wait(&signal, 1.0);
+            timer_wait(&signal, &observed_wake, 1.0);
         } else {
             let now = crate::clock::now_s();
             let signature = flock.dunk_hold_signature(&env, pane);
@@ -486,7 +535,7 @@ fn run_dunk_timer(
             );
             record_timer_metric(&flock, &handle, "dunk.held", "held", Some(detail));
             save_timer_state(&flock, &handle, store.as_ref());
-            timer_wait(&signal, 60.0);
+            timer_wait(&signal, &observed_wake, 60.0);
         }
     }
 }
