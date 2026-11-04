@@ -25,6 +25,9 @@ serde = { version = "1", features = ["derive"] }
 # arbitrary_precision preserves Python-size JSON integers for API validation instead of rounding
 # overflowing integer tokens to f64. preserve_order pulls in `indexmap`; sort_keys=True sites sort.
 serde_json = { version = "1", features = ["preserve_order", "arbitrary_precision"] }
+# t3078 prerequisite: reuse the locked map for Python outbox insertion-order parity.
+# Keep installed Python until this declaration and the later implementation are accepted.
+indexmap = { version = "=2.14.2", default-features = false }
 # T52 (ds-core/github.rs): GitHub App JWT signing and REST calls. jsonwebtoken
 # replaces PyJWT; reqwest uses rustls and async APIs. The boring fallback is the
 # existing Python GitHub client until this Rust path is integrated and accepted.
