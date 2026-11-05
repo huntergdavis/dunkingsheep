@@ -459,7 +459,14 @@ fn field(row: &Row<'_>, name: &str) -> rusqlite::Result<Value> {
             })?;
             Ok(json!(text))
         }
-        rusqlite::types::ValueRef::Blob(value) => Ok(json!(value)),
+        rusqlite::types::ValueRef::Blob(_) => Err(rusqlite::Error::FromSqlConversionFailure(
+            index,
+            rusqlite::types::Type::Blob,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "SQLite BLOB cannot be serialized as JSON",
+            )),
+        )),
     }
 }
 

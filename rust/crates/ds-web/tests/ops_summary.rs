@@ -14,7 +14,8 @@ from zoneinfo import ZoneInfo
 from pathlib import Path
 
 repo, db_path, host_path, opencode_path = map(Path, sys.argv[1:5])
-blob_payload = len(sys.argv) > 5 and sys.argv[5] == 'blob'
+fixture_mode = sys.argv[5]
+blob_payload = fixture_mode == 'payload_blob'
 source = (repo / 'bridges/ops_metrics.py').read_text()
 tree = ast.parse(source)
 names = {'iso','parse_time','_unique_authored_trial','experiment_summary','host_health','opencode_usage','summary'}
@@ -39,6 +40,8 @@ conn.executemany("INSERT INTO quota_observations(project,provider,cohort,pane_id
     ('poolrad','codex','weekly','%1','2025-04-15T11:00:00Z','reported',80,'2025-04-20T00:00:00Z','q2')])
 conn.execute("INSERT INTO subscription_costs(project,provider,monthly_usd_cents,observed_at,evidence_ref) VALUES('poolrad','codex',9999,'2025-04-01T00:00:00Z','sub')")
 conn.execute("INSERT INTO goal_observations(project,scope,goal_key,observed_at,status,value,target,unit,evidence_ref,note) VALUES('poolrad','local','coverage','2025-04-15T11:00:00Z','in_progress',1.25,2.5,'bodies','goal','fixture')")
+if fixture_mode == 'row_blob':
+    conn.execute("UPDATE goal_observations SET note=? WHERE goal_key='coverage'", (sqlite3.Binary(b'hi'),))
 conn.executemany("INSERT INTO accounting_snapshots(project,observed_at,commit_oid,strict_full_c,verified_game_identities,ceiling,bound_kind,source_signature,evidence_ref) VALUES('poolrad',?,?,?,?,815,'upper_bound','sig','docs/re/test')", [
     ('2025-04-15T10:30:00Z','a'*40,50,60),('2025-04-15T11:30:00Z','b'*40,60,70)])
 conn.execute("INSERT INTO pr_latest(project,number,state,head_oid,merged_at,first_seen_at,last_seen_at) VALUES('poolrad',42,'OPEN',NULL,NULL,'2025-04-01T00:00:00Z','2025-04-15T11:00:00Z')")
@@ -65,7 +68,14 @@ oc.execute('CREATE TABLE session(time_created INTEGER,cost REAL,time_updated INT
 oc.executemany('INSERT INTO session VALUES(?,?,?)', [(1744710000000,0.1255,1744713600000),(1742000000000,2.0,1742000000000)])
 oc.commit(); oc.close()
 now=datetime.fromisoformat('2025-04-15T12:00:00+00:00')
-print(json.dumps(namespace['summary'](conn, now=now),separators=(',',':')))
+try:
+    result = json.dumps(namespace['summary'](conn, now=now),separators=(',',':'))
+except TypeError as error:
+    if fixture_mode != 'row_blob':
+        raise
+    print(json.dumps({'python_error':str(error)}))
+else:
+    print(result)
 "#;
 
 const PY_OPTIONAL_ORACLE: &str = r#"
@@ -81,11 +91,12 @@ namespace={'datetime':datetime,'timezone':timezone,'Path':Path,'ZoneInfo':ZoneIn
            'json':json,'sqlite3':sqlite3}
 exec(compile(ast.fix_missing_locations(ast.Module(body=nodes,type_ignores=[])),'<ops_optional_fixture>','exec'),namespace)
 now=datetime.fromisoformat('2025-04-15T12:00:00+00:00')
+fractional_now=datetime.fromisoformat('2023-11-14T22:13:21+00:00')
 print(json.dumps({
  'missing_host':namespace['host_health'](now,path=host_missing),
  'missing_opencode':namespace['opencode_usage'](now,path=opencode_missing),
  'invalid_host':namespace['host_health'](now,path=invalid_host),
- 'fractional_host':namespace['host_health'](now,path=fractional_host),
+ 'fractional_host':namespace['host_health'](fractional_now,path=fractional_host),
  'stale_host':namespace['host_health'](now,path=stale_host),
  'invalid_db':namespace['opencode_usage'](now,path=invalid_db)
 },separators=(',',':')))
@@ -120,7 +131,7 @@ fn canonical_json(value: Value) -> Value {
     }
 }
 
-fn setup_oracle(repo: &Path, db: &Path, host: &Path, opencode: &Path, blob_payload: bool) -> Value {
+fn setup_oracle(repo: &Path, db: &Path, host: &Path, opencode: &Path, fixture_mode: &str) -> Value {
     let output = Command::new("python3")
         .arg("-c")
         .arg(PY_ORACLE)
@@ -128,7 +139,7 @@ fn setup_oracle(repo: &Path, db: &Path, host: &Path, opencode: &Path, blob_paylo
         .arg(db)
         .arg(host)
         .arg(opencode)
-        .arg(if blob_payload { "blob" } else { "text" })
+        .arg(fixture_mode)
         .output()
         .expect("run AST-isolated Python fixture");
     assert!(
@@ -143,7 +154,7 @@ fn setup_oracle(repo: &Path, db: &Path, host: &Path, opencode: &Path, blob_paylo
 fn summary_matches_ast_isolated_python_fixture_with_real_sources_and_rounding() {
     let (_dir, db, host, opencode) = fixture_paths();
     let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let expected = setup_oracle(&repo, &db, &host, &opencode, false);
+    let expected = setup_oracle(&repo, &db, &host, &opencode, "text");
     let conn = Connection::open(&db).expect("fixture operations database");
     let now = DateTime::parse_from_rfc3339("2025-04-15T12:00:00Z")
         .unwrap()
@@ -190,10 +201,16 @@ fn optional_readers_preserve_missing_invalid_and_stale_semantics() {
     assert_eq!(health["stale"], true);
     assert_eq!(health["tmp_free_gib"], 1.23);
     let fractional = directory.path().join("fractional.json");
-    std::fs::write(&fractional, br#"{"last_sample":{"at":1744718339.9995,"tmp_used_fraction":0.4,"tmp_free_bytes":1324997412,"tmp_inode_used_fraction":0.2,"load1":0.2,"load5":0.3,"cpus":4,"cpu_psi_some_avg60":0.0}}"#).unwrap();
+    std::fs::write(&fractional, br#"{"last_sample":{"at":1700000000.9996,"tmp_used_fraction":0.4,"tmp_free_bytes":1324997412,"tmp_inode_used_fraction":0.2,"load1":0.2,"load5":0.3,"cpus":4,"cpu_psi_some_avg60":0.0}}"#).unwrap();
     assert_eq!(
-        ops_summary::host_health(now, &fractional).unwrap()["observed_at"],
-        "2025-04-15T11:58:59Z"
+        ops_summary::host_health(
+            DateTime::parse_from_rfc3339("2023-11-14T22:13:21Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            &fractional
+        )
+        .unwrap()["observed_at"],
+        "2023-11-14T22:13:20Z"
     );
     let invalid_db = directory.path().join("invalid.sqlite");
     std::fs::write(&invalid_db, b"not a sqlite database").unwrap();
@@ -225,7 +242,12 @@ fn optional_readers_preserve_missing_invalid_and_stale_semantics() {
     assert_eq!(expected["stale_host"]["stale"], true);
     assert_eq!(expected["stale_host"]["tmp_free_gib"], 1.23);
     assert_eq!(
-        ops_summary::host_health(now, &fractional).unwrap(),
+        ops_summary::host_health(
+            DateTime::parse_from_rfc3339("2023-11-14T22:13:21Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            &fractional
+        ),
         expected["fractional_host"]
     );
     assert_eq!(
@@ -258,7 +280,7 @@ fn python_rounding_and_database_errors_are_explicit() {
 fn summary_parses_json_stored_as_sqlite_blob_like_python_bytes() {
     let (_dir, db, host, opencode) = fixture_paths();
     let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let expected = setup_oracle(&repo, &db, &host, &opencode, true);
+    let expected = setup_oracle(&repo, &db, &host, &opencode, "payload_blob");
     let conn = Connection::open(&db).expect("fixture operations database");
     let now = DateTime::parse_from_rfc3339("2025-04-15T12:00:00Z")
         .unwrap()
@@ -266,4 +288,29 @@ fn summary_parses_json_stored_as_sqlite_blob_like_python_bytes() {
     let actual =
         ops_summary::summary(&conn, now, &host, &opencode).expect("summary with BLOB payload");
     assert_eq!(canonical_json(actual), canonical_json(expected));
+}
+
+#[test]
+fn summary_rejects_blob_in_a_returned_text_column_like_python_json_serialization() {
+    let (_dir, db, host, opencode) = fixture_paths();
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let expected = setup_oracle(&repo, &db, &host, &opencode, "row_blob");
+    assert_eq!(
+        expected["python_error"],
+        "Object of type bytes is not JSON serializable"
+    );
+    let conn = Connection::open(&db).expect("fixture operations database");
+    let now = DateTime::parse_from_rfc3339("2025-04-15T12:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let error = ops_summary::summary(&conn, now, &host, &opencode)
+        .expect_err("a returned SQLite BLOB is not JSON serializable");
+    assert!(matches!(
+        error,
+        ops_summary::SummaryError::Sql(rusqlite::Error::FromSqlConversionFailure(
+            _,
+            rusqlite::types::Type::Blob,
+            _
+        ))
+    ));
 }
