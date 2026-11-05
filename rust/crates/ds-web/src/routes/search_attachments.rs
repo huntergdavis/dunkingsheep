@@ -1045,7 +1045,7 @@ fn session_cookie(headers: &HeaderMap) -> Option<String> {
     session
 }
 
-fn unquote_cookie_value(value: &str) -> String {
+pub(super) fn unquote_cookie_value(value: &str) -> String {
     if value.len() < 2 || !value.starts_with('"') || !value.ends_with('"') {
         return value.to_owned();
     }

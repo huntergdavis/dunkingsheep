@@ -559,7 +559,8 @@ pub(crate) fn python_value_repr(value: &Value) -> String {
     }
 }
 
-pub(crate) fn python_value_string(value: &Value) -> String {
+/// Python string coercion for JSON values at shared protocol boundaries.
+pub fn python_value_string(value: &Value) -> String {
     match value {
         Value::String(value) => value.clone(),
         Value::Array(_) | Value::Object(_) => python_value_repr(value),

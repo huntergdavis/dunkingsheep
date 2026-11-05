@@ -1,0 +1,18 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/api/ops-board/not-now",
+    "headers": {
+      "host": "testserver",
+      "content-type": "application/json"
+    },
+    "json": {"task_id": "t9"}
+  },
+  "response": {
+    "status": 200,
+    "headers": {"content-type": "application/json"},
+    "set_cookie": null,
+    "body": "{\"task_id\":\"t9\",\"priority\":\"low\",\"task\":{\"id\":\"t9\",\"priority\":\"low\"}}",
+    "json": {"task_id": "t9", "priority": "low", "task": {"id": "t9", "priority": "low"}}
+  }
+}

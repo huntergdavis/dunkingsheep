@@ -550,7 +550,7 @@ fn python_json_error(error: &serde_json::Error) -> String {
     }
 }
 
-async fn authenticate(
+pub(super) async fn authenticate(
     auth: &dyn AuthBackend,
     headers: &HeaderMap,
     scheme: RequestScheme,
@@ -617,25 +617,7 @@ fn session_cookie(headers: &HeaderMap) -> Option<String> {
 }
 
 fn python_cookie_unquote(value: &str) -> String {
-    let characters: Vec<char> = value.chars().collect();
-    if characters.len() < 2 || characters[0] != '"' || characters[characters.len() - 1] != '"' {
-        return value.to_owned();
-    }
-    let mut result = String::new();
-    let mut index = 1;
-    let end = characters.len() - 1;
-    while index < end {
-        if characters[index] == '\\' {
-            index += 1;
-            if index < end {
-                result.push(characters[index]);
-            }
-        } else {
-            result.push(characters[index]);
-        }
-        index += 1;
-    }
-    result
+    super::search_attachments::unquote_cookie_value(value)
 }
 
 fn auth_error_response(error: AuthError) -> Response {
