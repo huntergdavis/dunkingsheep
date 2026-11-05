@@ -362,6 +362,12 @@ impl ManualFireOwner {
     /// real send or durable enqueue; shutdown joins it before pool/store/runtime teardown. Normal
     /// stop/remove never calls this method and therefore never cancels a fire.
     pub(super) fn stop_and_join(&self) {
+        if let Err(error) = self.stop_and_join_checked() {
+            eprintln!("manual-fire shutdown failed: {error}");
+        }
+    }
+
+    pub(super) fn stop_and_join_checked(&self) -> Result<(), DunkError> {
         let workers = {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             state.stopped = true;
@@ -370,8 +376,16 @@ impl ManualFireOwner {
         for worker in workers.values() {
             worker.signal.cancel();
         }
-        for (_, worker) in workers {
-            let _ = worker.join.join();
+        let mut failures = Vec::new();
+        for (id, worker) in workers {
+            if worker.join.join().is_err() {
+                failures.push(format!("manual-fire worker {id} panicked"));
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(crate::error::refusal(failures.join("; ")))
         }
     }
 }

@@ -285,6 +285,30 @@ fn not_ported(command: &str) -> Outcome {
     }
 }
 
+fn serve(ns: &Map<String, Value>) -> Outcome {
+    let options = ds_core::server_runtime::DaemonOptions {
+        socket_path: text(ns, "socket")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from),
+        state_file: text(ns, "state_file")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from),
+        no_log_file: matches!(ns.get("no_log_file"), Some(Value::Bool(true))),
+    };
+    match ds_core::server_runtime::run_daemon(options) {
+        Ok(code) => Outcome {
+            stdout: String::new(),
+            stderr: String::new(),
+            code,
+        },
+        Err(error) => Outcome {
+            stdout: String::new(),
+            stderr: format!("error: {error}\n"),
+            code: error.exit_code(),
+        },
+    }
+}
+
 fn guide(ns: &Map<String, Value>) -> Outcome {
     let markdown = matches!(ns.get("markdown"), Some(Value::Bool(true)));
     let version = crate::cli_table::ROOT
@@ -3188,6 +3212,7 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
         | "metrics" => delivery_queue_route(ns),
         "gh-token" => crate::daemon_cmd::gh_token(ns),
         "tui" => tui(ns),
+        "serve" => serve(ns),
         // `client.call("list_panes"), print_panes`
         "fire" | "test" => {
             let mut args = Map::new();

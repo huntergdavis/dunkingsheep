@@ -1,6 +1,7 @@
 //! Concrete terminal-backed sources for the dialog observer.
 
 use serde_json::Value;
+use std::sync::Arc;
 
 use crate::error::DunkError;
 use crate::flock::lanes::pane_to_json;
@@ -8,6 +9,67 @@ use crate::flock::loop_env::LoopFuture;
 use crate::flock::sends::CONSUMPTION_READ_LINES;
 use crate::server::RequestCtx;
 use crate::server_runtime::{LoopRuntimeAdapter, RequestRuntimeAdapter};
+
+impl crate::flock::loops_stuck::StuckEnv for LoopRuntimeAdapter {
+    fn list_panes(&self) -> LoopFuture<'_, Result<Vec<Value>, DunkError>> {
+        self.helper_stuckenv_list_panes()
+    }
+
+    fn read_screen<'a>(&'a self, pane_id: &'a str) -> LoopFuture<'a, Option<String>> {
+        self.helper_stuckenv_read_screen(pane_id)
+    }
+
+    fn pane_generation<'a>(&'a self, pane_id: &'a str) -> LoopFuture<'a, Option<String>> {
+        self.helper_stuckenv_pane_generation(pane_id)
+    }
+
+    fn note_stale_panel<'a>(
+        &'a self,
+        pane_id: &'a str,
+        signature_text: &'a str,
+        since: f64,
+    ) -> LoopFuture<'a, ()> {
+        self.helper_stuckenv_note_stale_panel(pane_id, signature_text, since)
+    }
+
+    fn closed(&self) -> bool {
+        self.helper_stuckenv_closed()
+    }
+
+    fn stuck_recovery_enabled(&self) -> bool {
+        self.helper_stuckenv_stuck_recovery_enabled()
+    }
+
+    fn stuck_observer_step(&self) -> LoopFuture<'_, usize> {
+        let Some(services) = self.runtime_services.clone() else {
+            return Box::pin(async { 0 });
+        };
+        let services_for_worker = Arc::clone(&services);
+        let worker = self.with_loop_terminal(move |flock, terminal| {
+            if !std::ptr::eq(flock, services_for_worker.flock.as_ref()) {
+                return Err(crate::error::refusal("stuck observer flock mismatch"));
+            }
+            crate::flock::loops_stuck::strict_stuck_observer_scan(
+                flock,
+                terminal,
+                crate::clock::now_s(),
+            )
+        });
+        Box::pin(async move {
+            match worker.await {
+                Ok(Ok(count)) => count,
+                Ok(Err(error)) => {
+                    eprintln!("stuck observer scan failed: {error}");
+                    0
+                }
+                Err(error) => {
+                    eprintln!("stuck observer worker failed: {error}");
+                    0
+                }
+            }
+        })
+    }
+}
 
 impl LoopRuntimeAdapter {
     #[allow(dead_code)] // The complete StuckEnv assembly is owned by the dependent runtime leaf.

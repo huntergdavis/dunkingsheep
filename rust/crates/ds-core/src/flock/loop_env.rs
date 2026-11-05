@@ -11,7 +11,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use crate::error::DunkError;
-use crate::server_runtime::{configured_backend_name, DEFAULT_TERMINAL_BACKEND};
+use crate::server_runtime::DEFAULT_TERMINAL_BACKEND;
 use crate::terminal::tmux::TmuxBackend;
 use crate::terminal::Terminal;
 
@@ -25,14 +25,25 @@ pub type LoopTerminalFactory = Arc<dyn Fn() -> Box<dyn Terminal> + Send + Sync +
 /// loop starts. The backend object itself is constructed later by [`with_loop_terminal`]'s
 /// blocking-worker closure.
 pub fn configured_loop_terminal_factory() -> Result<LoopTerminalFactory, DunkError> {
-    let name = configured_backend_name()?;
+    let environment = crate::config::Env::from_process();
+    configured_loop_terminal_factory_from(&environment)
+}
+
+/// Build the backend factory from the environment captured by daemon startup. This
+/// keeps backend, registry, and tmux selection stable for the life of the process.
+pub fn configured_loop_terminal_factory_from(
+    environment: &crate::config::Env,
+) -> Result<LoopTerminalFactory, DunkError> {
+    let name = crate::server_runtime::configured_backend_name_from_env(environment)?;
     match name.as_str() {
         DEFAULT_TERMINAL_BACKEND => {
-            let tmux_bin = tmux_binary_from_override(std::env::var_os("DUNKINGSHEEP_TMUX_BIN"));
-            let environment = crate::config::Env::from_process();
-            crate::terminal::tmux_registry::Registry::configured(None, &environment)
+            let tmux_bin = tmux_binary_from_override(
+                environment.get("DUNKINGSHEEP_TMUX_BIN").map(OsString::from),
+            );
+            crate::terminal::tmux_registry::Registry::configured(None, environment)
                 .path()
                 .map_err(|error| crate::error::refusal(error.to_string()))?;
+            let environment = environment.clone();
             Ok(Arc::new(move || {
                 Box::new(TmuxBackend::from_env(tmux_bin.clone(), environment.clone()))
             }))
