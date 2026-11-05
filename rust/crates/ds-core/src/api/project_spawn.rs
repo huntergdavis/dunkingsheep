@@ -3,9 +3,7 @@ use serde_json::{Map, Value};
 use crate::error::DunkError;
 use crate::flock::commands_inbox::OwnerMailboxReporter;
 use crate::projects::newprojects::ProjectBudgetConfig;
-use crate::projects::{
-    Authority, ProjectAgentRegistrar, ProjectTerminal, Projects, Request, Usage,
-};
+use crate::projects::{Authority, ProjectAgentRegistrar, ProjectTerminal, Projects, Request};
 use crate::terminal::Pane;
 
 use super::{Args, HandlerContext};
