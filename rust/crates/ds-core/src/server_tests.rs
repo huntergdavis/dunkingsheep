@@ -6,7 +6,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 use serde_json::{json, Value};
 
@@ -186,6 +186,241 @@ fn shutdown_command_stops_the_server() {
     assert!(UnixStream::connect(&running.path).is_err());
 }
 
+struct BlockingDispatcher {
+    entered: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+    release: Arc<(Mutex<bool>, Condvar)>,
+    completed: std::sync::atomic::AtomicBool,
+    closed_after_completion: std::sync::atomic::AtomicBool,
+}
+
+impl Dispatcher for BlockingDispatcher {
+    fn dispatch(&self, _: &str, _: &Value, _: &RequestCtx) -> Result<Value, DunkError> {
+        if let Some(entered) = self.entered.lock().unwrap().take() {
+            entered.send(()).unwrap();
+        }
+        let (released, changed) = &*self.release;
+        let mut released = released.lock().unwrap();
+        while !*released {
+            released = changed.wait(released).unwrap();
+        }
+        self.completed.store(true, Ordering::SeqCst);
+        Ok(json!({"finished": true}))
+    }
+
+    fn close(&self) {
+        self.closed_after_completion
+            .store(self.completed.load(Ordering::SeqCst), Ordering::SeqCst);
+    }
+}
+
+#[test]
+fn close_waits_for_an_active_handler_before_closing_the_dispatcher() {
+    let dir = sock_dir("drain-active");
+    let path = dir.path().join("s.sock");
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let release = Arc::new((Mutex::new(false), Condvar::new()));
+    let dispatcher = Arc::new(BlockingDispatcher {
+        entered: Mutex::new(Some(entered_tx)),
+        release: Arc::clone(&release),
+        completed: std::sync::atomic::AtomicBool::new(false),
+        closed_after_completion: std::sync::atomic::AtomicBool::new(false),
+    });
+    let dispatcher_trait: Arc<dyn Dispatcher> = dispatcher.clone();
+    let mut server = FlockServer::new(dispatcher_trait, path.clone());
+    server.bind().unwrap();
+    let stop = server.stop_handle();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let thread = std::thread::spawn(move || done_tx.send(server.serve_forever()).unwrap());
+
+    let mut client = connect(&path);
+    client.send("{\"id\":1,\"cmd\":\"hold\"}\n");
+    entered_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    stop.store(true, Ordering::SeqCst);
+    assert!(done_rx
+        .recv_timeout(std::time::Duration::from_millis(100))
+        .is_err());
+
+    let (released, changed) = &*release;
+    *released.lock().unwrap() = true;
+    changed.notify_all();
+    done_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap()
+        .unwrap();
+    thread.join().unwrap();
+    let response = client.line();
+    assert_eq!(response["result"]["finished"], true);
+    let mut eof = String::new();
+    assert_eq!(client.reader.read_line(&mut eof).unwrap(), 0);
+    assert!(dispatcher.closed_after_completion.load(Ordering::SeqCst));
+    assert!(!path.exists());
+}
+
+#[test]
+fn completed_socket_churn_is_reaped_before_shutdown() {
+    let dir = sock_dir("drain-churn");
+    let path = dir.path().join("s.sock");
+    let mut server = FlockServer::new(Arc::new(Fake::default()), path.clone());
+    server.bind().unwrap();
+    let stop = server.stop_handle();
+    let registry = Arc::clone(&server.connections);
+    let changed = Arc::clone(&server.connections_changed);
+    let thread = std::thread::spawn(move || server.serve_forever());
+
+    for id in 0..32 {
+        let mut client = connect(&path);
+        let reply = client.call(json!({"id": id, "cmd": "whoami"}));
+        assert_eq!(reply["ok"], true);
+    }
+    let registry_state = registry.lock().unwrap();
+    let (registry_state, _) = changed
+        .wait_timeout_while(registry_state, std::time::Duration::from_secs(5), |state| {
+            !state.workers.is_empty()
+        })
+        .unwrap();
+    assert!(
+        registry_state.workers.is_empty(),
+        "finished workers were retained"
+    );
+    drop(registry_state);
+
+    stop.store(true, Ordering::SeqCst);
+    thread.join().unwrap().unwrap();
+    assert!(!path.exists());
+}
+
+#[test]
+fn draining_wakes_and_joins_a_registered_idle_reader() {
+    let (server_stream, mut peer) = UnixStream::pair().unwrap();
+    let registry = Arc::new(Mutex::new(ConnectionRegistry::new()));
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    admit_connection(
+        Arc::new(Fake::default()),
+        server_stream,
+        1,
+        Arc::clone(&stop),
+        Arc::clone(&registry),
+    )
+    .unwrap();
+    assert_eq!(registry.lock().unwrap().workers.len(), 1);
+
+    let changed = Condvar::new();
+    let (panicked, wake_errors, poisoned) = drain_connections(&registry, &changed);
+    assert!(panicked.is_empty());
+    assert!(wake_errors.is_empty());
+    assert!(!poisoned);
+    assert!(registry.lock().unwrap().workers.is_empty());
+    assert!(!registry.lock().unwrap().admitting);
+    let mut reader = BufReader::new(&mut peer);
+    let mut line = String::new();
+    assert_eq!(reader.read_line(&mut line).unwrap(), 0);
+}
+
+#[test]
+fn admission_and_close_share_one_registry_gate() {
+    let registry = Arc::new(Mutex::new(ConnectionRegistry::new()));
+    let gate = registry.lock().unwrap();
+    let (server_stream, peer) = UnixStream::pair().unwrap();
+    let thread_registry = Arc::clone(&registry);
+    let (admitted_tx, admitted_rx) = std::sync::mpsc::channel();
+    let admission = std::thread::spawn(move || {
+        let result = admit_connection(
+            Arc::new(Fake::default()),
+            server_stream,
+            7,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            thread_registry,
+        );
+        admitted_tx.send(result).unwrap();
+    });
+    drop(gate);
+    admitted_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap()
+        .unwrap();
+    admission.join().unwrap();
+    assert_eq!(registry.lock().unwrap().workers.len(), 1);
+    let changed = Condvar::new();
+    let (_, wake_errors, poisoned) = drain_connections(&registry, &changed);
+    assert!(wake_errors.is_empty());
+    assert!(!poisoned);
+    drop(peer);
+
+    let closed_registry = Arc::new(Mutex::new(ConnectionRegistry::new()));
+    let changed = Condvar::new();
+    let (_, wake_errors, poisoned) = drain_connections(&closed_registry, &changed);
+    assert!(wake_errors.is_empty());
+    assert!(!poisoned);
+    let (server_stream, mut peer) = UnixStream::pair().unwrap();
+    admit_connection(
+        Arc::new(Fake::default()),
+        server_stream,
+        8,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        Arc::clone(&closed_registry),
+    )
+    .unwrap();
+    assert!(closed_registry.lock().unwrap().workers.is_empty());
+    let mut reader = BufReader::new(&mut peer);
+    let mut line = String::new();
+    assert_eq!(reader.read_line(&mut line).unwrap(), 0);
+}
+
+#[test]
+fn finished_worker_panics_are_joined_and_reported() {
+    let registry = Mutex::new(ConnectionRegistry::new());
+    let (wake, peer) = UnixStream::pair().unwrap();
+    let join = std::thread::spawn(|| panic!("worker failed"));
+    registry
+        .lock()
+        .unwrap()
+        .workers
+        .insert(9, ConnectionWorker { wake, join });
+
+    let changed = Condvar::new();
+    let (panicked, wake_errors, poisoned) = drain_connections(&registry, &changed);
+    assert_eq!(panicked, vec![9]);
+    assert!(wake_errors.is_empty());
+    assert!(!poisoned);
+    assert!(registry.lock().unwrap().workers.is_empty());
+    drop(peer);
+}
+
+struct PanickingClose;
+
+impl Dispatcher for PanickingClose {
+    fn dispatch(&self, _: &str, _: &Value, _: &RequestCtx) -> Result<Value, DunkError> {
+        Ok(Value::Null)
+    }
+
+    fn close(&self) {
+        panic!("dispatcher close failed");
+    }
+}
+
+#[test]
+fn dispatcher_close_panics_are_reported_after_socket_cleanup() {
+    let dir = sock_dir("close-panic");
+    let path = dir.path().join("s.sock");
+    let mut server = FlockServer::new(Arc::new(PanickingClose), path.clone());
+    server.bind().unwrap();
+
+    assert!(matches!(
+        server.close(),
+        Err(BindError::Shutdown {
+            dispatcher_panicked: true,
+            worker_panics,
+            worker_wake_errors,
+            registry_poisoned: false,
+            socket_error: None,
+        }) if worker_panics.is_empty() && worker_wake_errors.is_empty()
+    ));
+    assert!(!path.exists());
+    server.close().unwrap();
+}
+
 #[test]
 fn second_server_on_same_socket_refuses() {
     let running = start("second");
@@ -202,7 +437,7 @@ fn stale_socket_file_is_reclaimed() {
     let mut server = FlockServer::new(Arc::new(Fake::default()), path.clone());
     server.bind().unwrap();
     assert!(server.is_bound());
-    server.close();
+    server.close().unwrap();
     assert!(!path.exists());
 }
 

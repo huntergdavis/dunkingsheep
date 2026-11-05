@@ -17,7 +17,8 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 use serde_json::{json, Value};
@@ -84,7 +85,28 @@ pub struct FlockServer {
     pub socket_path: PathBuf,
     listener: Option<UnixListener>,
     stop: Arc<AtomicBool>,
-    connections: Arc<Mutex<BTreeMap<u64, UnixStream>>>,
+    connections: Arc<Mutex<ConnectionRegistry>>,
+    connections_changed: Arc<std::sync::Condvar>,
+    dispatcher_closed: bool,
+}
+
+struct ConnectionWorker {
+    wake: UnixStream,
+    join: JoinHandle<()>,
+}
+
+struct ConnectionRegistry {
+    admitting: bool,
+    workers: BTreeMap<u64, ConnectionWorker>,
+}
+
+impl ConnectionRegistry {
+    fn new() -> Self {
+        Self {
+            admitting: true,
+            workers: BTreeMap::new(),
+        }
+    }
 }
 
 impl FlockServer {
@@ -94,7 +116,9 @@ impl FlockServer {
             socket_path: socket_path.into(),
             listener: None,
             stop: Arc::new(AtomicBool::new(false)),
-            connections: Arc::new(Mutex::new(BTreeMap::new())),
+            connections: Arc::new(Mutex::new(ConnectionRegistry::new())),
+            connections_changed: Arc::new(std::sync::Condvar::new()),
+            dispatcher_closed: false,
         }
     }
 
@@ -152,6 +176,11 @@ impl FlockServer {
         let mut next_id = 0u64;
         let mut failure = None;
         while !self.stop.load(Ordering::SeqCst) {
+            if let Err(error) = reap_finished_workers(&self.connections, &self.connections_changed)
+            {
+                failure = Some(error);
+                break;
+            }
             let accepted = match self.listener.as_ref() {
                 Some(listener) => listener.accept(),
                 None => break,
@@ -163,9 +192,10 @@ impl FlockServer {
                     let dispatcher = Arc::clone(&self.dispatcher);
                     let stop = Arc::clone(&self.stop);
                     let connections = Arc::clone(&self.connections);
-                    std::thread::spawn(move || {
-                        serve_connection(dispatcher, conn, id, stop, connections)
-                    });
+                    if let Err(error) = admit_connection(dispatcher, conn, id, stop, connections) {
+                        failure = Some(error);
+                        break;
+                    }
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     std::thread::sleep(Duration::from_millis(20));
@@ -178,22 +208,50 @@ impl FlockServer {
                 }
             }
         }
-        self.close();
-        failure.map_or(Ok(()), Err)
+        let close_result = self.close();
+        match (failure, close_result) {
+            (Some(error), Ok(())) => Err(error),
+            (Some(serve), Err(shutdown)) => Err(BindError::ServeAndShutdown {
+                serve: Box::new(serve),
+                shutdown: Box::new(shutdown),
+            }),
+            (None, result) => result,
+        }
     }
 
-    pub fn close(&mut self) {
-        self.dispatcher.close();
+    pub fn close(&mut self) -> Result<(), BindError> {
+        self.stop.store(true, Ordering::SeqCst);
         self.listener = None;
-        if let Ok(connections) = self.connections.lock() {
-            for conn in connections.values() {
-                let _ = conn.shutdown(std::net::Shutdown::Both);
-            }
-        }
-        if self.socket_path.exists() {
-            let _ = std::fs::remove_file(&self.socket_path);
-        }
+        let (panicked_workers, wake_errors, registry_poisoned) =
+            drain_connections(&self.connections, &self.connections_changed);
+        let dispatcher_panicked = if !self.dispatcher_closed {
+            let result = catch_unwind(AssertUnwindSafe(|| self.dispatcher.close())).is_err();
+            self.dispatcher_closed = true;
+            result
+        } else {
+            false
+        };
+        let socket_error = match std::fs::remove_file(&self.socket_path) {
+            Ok(()) => None,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => Some(error),
+        };
         tracing::info!("daemon stopped");
+        if registry_poisoned
+            || !panicked_workers.is_empty()
+            || !wake_errors.is_empty()
+            || dispatcher_panicked
+            || socket_error.is_some()
+        {
+            return Err(BindError::Shutdown {
+                worker_panics: panicked_workers,
+                worker_wake_errors: wake_errors,
+                dispatcher_panicked,
+                registry_poisoned,
+                socket_error,
+            });
+        }
+        Ok(())
     }
 
     /// Return (response, stop_after). The socket peer is the short-lived CLI; the caller
@@ -208,6 +266,19 @@ impl FlockServer {
 pub enum BindError {
     AlreadyRunning(AlreadyRunning),
     Io(std::io::Error),
+    RegistryPoisoned,
+    WorkerPanicked(Vec<u64>),
+    Shutdown {
+        worker_panics: Vec<u64>,
+        worker_wake_errors: Vec<(u64, std::io::Error)>,
+        dispatcher_panicked: bool,
+        registry_poisoned: bool,
+        socket_error: Option<std::io::Error>,
+    },
+    ServeAndShutdown {
+        serve: Box<BindError>,
+        shutdown: Box<BindError>,
+    },
 }
 
 impl std::fmt::Display for BindError {
@@ -215,21 +286,117 @@ impl std::fmt::Display for BindError {
         match self {
             BindError::AlreadyRunning(error) => error.fmt(f),
             BindError::Io(error) => error.fmt(f),
+            BindError::RegistryPoisoned => f.write_str("connection registry lock was poisoned"),
+            BindError::WorkerPanicked(ids) => write!(f, "connection workers panicked: {ids:?}"),
+            BindError::Shutdown { worker_panics, worker_wake_errors, dispatcher_panicked, registry_poisoned, socket_error } => write!(
+                f,
+                "shutdown incomplete: worker panics={worker_panics:?}, worker wake errors={worker_wake_errors:?}, dispatcher panicked={dispatcher_panicked}, registry poisoned={registry_poisoned}, socket cleanup error={socket_error:?}"
+            ),
+            BindError::ServeAndShutdown { serve, shutdown } => {
+                write!(f, "serve failed ({serve}); shutdown also failed ({shutdown})")
+            }
         }
     }
 }
 
-fn serve_connection(
+impl std::error::Error for BindError {}
+
+fn lock_registry(
+    registry: &Mutex<ConnectionRegistry>,
+) -> Result<MutexGuard<'_, ConnectionRegistry>, BindError> {
+    registry.lock().map_err(|_| BindError::RegistryPoisoned)
+}
+
+fn take_workers(registry: &mut ConnectionRegistry) -> BTreeMap<u64, ConnectionWorker> {
+    std::mem::take(&mut registry.workers)
+}
+
+fn reap_finished_workers(
+    registry: &Mutex<ConnectionRegistry>,
+    changed: &std::sync::Condvar,
+) -> Result<(), BindError> {
+    let finished = {
+        let mut registry = lock_registry(registry)?;
+        let ids: Vec<_> = registry
+            .workers
+            .iter()
+            .filter_map(|(id, worker)| worker.join.is_finished().then_some(*id))
+            .collect();
+        let finished = ids
+            .into_iter()
+            .filter_map(|id| registry.workers.remove(&id).map(|worker| (id, worker)))
+            .collect::<Vec<_>>();
+        if !finished.is_empty() {
+            changed.notify_all();
+        }
+        finished
+    };
+    let panicked: Vec<_> = finished
+        .into_iter()
+        .filter_map(|(id, worker)| worker.join.join().is_err().then_some(id))
+        .collect();
+    if panicked.is_empty() {
+        Ok(())
+    } else {
+        Err(BindError::WorkerPanicked(panicked))
+    }
+}
+
+fn drain_connections(
+    registry: &Mutex<ConnectionRegistry>,
+    changed: &std::sync::Condvar,
+) -> (Vec<u64>, Vec<(u64, std::io::Error)>, bool) {
+    let (workers, poisoned) = match registry.lock() {
+        Ok(mut registry) => {
+            registry.admitting = false;
+            (take_workers(&mut registry), false)
+        }
+        Err(poisoned) => {
+            let mut registry = poisoned.into_inner();
+            registry.admitting = false;
+            (take_workers(&mut registry), true)
+        }
+    };
+    changed.notify_all();
+    let mut wake_errors = Vec::new();
+    for (id, worker) in &workers {
+        // Wake only blocked reads. Active handlers may still need this connection's write
+        // half to deliver their response before their worker can be joined.
+        if let Err(error) = worker.wake.shutdown(std::net::Shutdown::Read) {
+            wake_errors.push((*id, error));
+        }
+    }
+    let mut panicked_workers = Vec::new();
+    for (id, worker) in workers {
+        if worker.join.join().is_err() {
+            panicked_workers.push(id);
+        }
+    }
+    (panicked_workers, wake_errors, poisoned)
+}
+
+fn admit_connection(
     dispatcher: Arc<dyn Dispatcher>,
     conn: UnixStream,
     id: u64,
     stop: Arc<AtomicBool>,
-    connections: Arc<Mutex<BTreeMap<u64, UnixStream>>>,
-) {
-    if let (Ok(mut map), Ok(clone)) = (connections.lock(), conn.try_clone()) {
-        map.insert(id, clone);
+    connections: Arc<Mutex<ConnectionRegistry>>,
+) -> Result<(), BindError> {
+    let mut registry = lock_registry(&connections)?;
+    if !registry.admitting || stop.load(Ordering::SeqCst) {
+        return Ok(());
     }
+    let wake = conn.try_clone().map_err(BindError::Io)?;
     let _ = conn.set_nonblocking(false);
+    let join = std::thread::Builder::new()
+        .name(format!("dunk-connection-{id}"))
+        .spawn(move || serve_connection(dispatcher, conn, stop))
+        .map_err(BindError::Io)?;
+    registry.workers.insert(id, ConnectionWorker { wake, join });
+    Ok(())
+}
+
+fn serve_connection(dispatcher: Arc<dyn Dispatcher>, conn: UnixStream, stop: Arc<AtomicBool>) {
     let peer_pid = peer_pid(&conn);
     if let Ok(reader) = conn.try_clone() {
         let mut writer = conn;
@@ -249,9 +416,6 @@ fn serve_connection(
                 break;
             }
         }
-    }
-    if let Ok(mut map) = connections.lock() {
-        map.remove(&id);
     }
 }
 
