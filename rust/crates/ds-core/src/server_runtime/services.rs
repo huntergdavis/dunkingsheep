@@ -608,7 +608,7 @@ impl RuntimeServices {
                 .map_err(|_| refusal("runtime shutdown thread panicked"))
         })
         .await
-        .map_err(|error| refusal(format!("runtime shutdown worker: {error}")))?
+        .map_err(|error| refusal(format!("runtime shutdown worker: {error}")))??
     }
 
     pub(super) fn is_stopped(&self) -> bool {

@@ -17,7 +17,6 @@ use crate::server_runtime::{
 };
 use crate::superusers::Superusers;
 use crate::tasks::Tasks;
-use crate::terminal::Terminal;
 
 /// Explicit per-invocation overrides. `None` follows the Python daemon defaults.
 #[derive(Debug, Clone, Default)]

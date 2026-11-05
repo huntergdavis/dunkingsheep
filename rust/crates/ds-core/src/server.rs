@@ -24,7 +24,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use crate::config::Env;
-use crate::error::DunkError;
+use crate::error::{refusal, DunkError};
 use crate::proc::{caller_from_peer, caller_pane_auth_failure, Caller};
 use crate::protocol::{encode_line, Response};
 use crate::terminal::Terminal;
