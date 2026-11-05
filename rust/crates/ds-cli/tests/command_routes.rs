@@ -5567,6 +5567,156 @@ fn api_no_start_daemon_fails_before_listener_when_socket_is_absent() {
     assert!(!socket.exists(), "no daemon process should be started");
 }
 
+#[cfg(unix)]
+#[test]
+fn cli_route_51_watchdog() {
+    let temp = tempfile::tempdir().unwrap();
+    let socket = temp.path().join("watchdog-must-not-connect.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+
+    let config_dir = temp.path().join("config-data");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let config_path = temp.path().join("watchdog.json");
+    let error_path = temp.path().join("watchdog.config-error");
+    let state_path = temp.path().join("watchdog-state.json");
+    let heartbeat_path = temp.path().join("watchdog.heartbeat");
+    let mut config: Value = serde_json::from_str(
+        &std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../packaging/watchdog.example.json"
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    config["stores"]["config_dir"] = json!(config_dir);
+    config["state_path"] = json!(state_path);
+    config["heartbeat_path"] = json!(heartbeat_path);
+    config["enabled"] = json!(false);
+    config["dry_run"] = json!(true);
+    std::fs::write(&config_path, serde_json::to_vec_pretty(&config).unwrap()).unwrap();
+
+    let config_arg = config_path.to_str().unwrap();
+    let error_arg = error_path.to_str().unwrap();
+    let dry = run_cli(
+        socket.to_str().unwrap(),
+        &[
+            "watchdog",
+            "--config",
+            config_arg,
+            "--error-file",
+            error_arg,
+            "--dry-run",
+            "--now",
+            "1700000000",
+        ],
+    );
+    assert_eq!(Some(0), dry.status.code());
+    assert!(
+        dry.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&dry.stderr)
+    );
+    let dry_text = String::from_utf8(dry.stdout).unwrap();
+    assert!(
+        dry_text.starts_with("watchdog dry-run (--dry-run flag)  findings "),
+        "{dry_text}"
+    );
+    assert!(!error_path.exists());
+    assert!(!state_path.exists());
+    assert!(!heartbeat_path.exists());
+
+    let replay = run_cli(
+        socket.to_str().unwrap(),
+        &[
+            "watchdog",
+            "--config",
+            config_arg,
+            "--error-file",
+            error_arg,
+            "--replay",
+            "--from",
+            "1700000000",
+            "--to",
+            "1700000060",
+            "--step",
+            "1",
+        ],
+    );
+    assert_eq!(Some(0), replay.status.code());
+    assert!(
+        replay.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&replay.stderr)
+    );
+    let replay_text = String::from_utf8(replay.stdout).unwrap();
+    assert!(
+        replay_text.contains("REPLAY rule=dunk.skip_loop would_notify_vp="),
+        "{replay_text}"
+    );
+    assert!(
+        replay_text.contains("REPLAY rule=inbox.ambiguous_sender would_notify_vp="),
+        "{replay_text}"
+    );
+
+    let invalid_path = temp.path().join("missing.json");
+    let invalid = run_cli(
+        socket.to_str().unwrap(),
+        &[
+            "watchdog",
+            "--config",
+            invalid_path.to_str().unwrap(),
+            "--error-file",
+            error_arg,
+            "--dry-run",
+        ],
+    );
+    assert_eq!(Some(2), invalid.status.code());
+    assert_eq!(
+        "watchdog: refusing to start: CONFIG: <file>: config file not found: ".to_string()
+            + invalid_path.to_str().unwrap()
+            + "\n",
+        String::from_utf8(invalid.stderr).unwrap()
+    );
+    assert!(
+        !error_path.exists(),
+        "dry-run config refusal must not write the marker"
+    );
+
+    config["enabled"] = json!(true);
+    config["dry_run"] = json!(false);
+    std::fs::write(&config_path, serde_json::to_vec_pretty(&config).unwrap()).unwrap();
+    std::fs::write(&error_path, "old config failure\n").unwrap();
+    let refused_now = run_cli(
+        socket.to_str().unwrap(),
+        &[
+            "watchdog",
+            "--config",
+            config_arg,
+            "--error-file",
+            error_arg,
+            "--now",
+            "1700000000",
+        ],
+    );
+    assert_eq!(Some(2), refused_now.status.code());
+    assert_eq!(
+        "watchdog: refusing --now on a live run (use --dry-run or --replay)\n",
+        String::from_utf8(refused_now.stderr).unwrap()
+    );
+    assert!(refused_now.stdout.is_empty());
+    assert!(
+        !error_path.exists(),
+        "normal config load removes the previous marker before the --now refusal"
+    );
+    assert!(!state_path.exists());
+    assert!(!heartbeat_path.exists());
+    assert!(
+        matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+        "watchdog local routes unexpectedly connected to the daemon socket"
+    );
+}
+
 #[test]
 fn ds_http_help_defaults_follow_environment() {
     fn help(host: Option<&str>, port: Option<&str>) -> Output {
