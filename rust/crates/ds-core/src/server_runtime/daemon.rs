@@ -870,6 +870,25 @@ mod tests {
             None,
         );
         assert_eq!(true, response["ok"]);
+        shutdown_reader
+            .get_mut()
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .expect("set bounded pre-drain EOF probe timeout");
+        let mut pre_drain_byte = [0_u8; 1];
+        match shutdown_reader.read(&mut pre_drain_byte) {
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                ) => {}
+            Ok(0) => panic!("shutdown connection reached EOF before accepted work drained"),
+            Ok(count) => panic!("unexpected {count} byte(s) after shutdown response"),
+            Err(error) => panic!("pre-drain read failed unexpectedly: {error}"),
+        }
+        shutdown_reader
+            .get_mut()
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("restore post-drain EOF timeout");
         assert_eq!(
             Err(mpsc::RecvTimeoutError::Timeout),
             daemon.finished.recv_timeout(Duration::from_millis(100)),
