@@ -419,7 +419,7 @@ pub fn run(
         return Ok(report);
     }
 
-    let current: BTreeSet<String> = findings.iter().map(|item| dedupe_key(item)).collect();
+    let current: BTreeSet<String> = findings.iter().map(dedupe_key).collect();
     if let Some(deliveries) = state["superuser_deliveries"].as_object_mut() {
         deliveries.retain(|key, _| current.contains(key));
     }
@@ -547,7 +547,7 @@ pub fn run(
             }
         );
         match send(
-            &config["escalation"]["vp"]["mailbox"].as_str().unwrap_or(""),
+            config["escalation"]["vp"]["mailbox"].as_str().unwrap_or(""),
             &subject,
             &digest("VP digest", &vp_lines),
         ) {
