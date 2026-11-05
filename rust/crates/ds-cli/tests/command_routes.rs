@@ -5144,7 +5144,7 @@ fn cli_route_53_api() {
     request.read_to_end(&mut response).unwrap();
     let response = String::from_utf8(response).unwrap();
     let (headers, body) = response.split_once("\r\n\r\n").unwrap();
-    assert!(headers.starts_with("HTTP/1.1 200 OK\r\n"), "{headers}");
+    assert!(headers.starts_with("HTTP/1.0 200 OK\r\n"), "{headers}");
     assert!(headers
         .to_ascii_lowercase()
         .contains("content-type: application/json"));

@@ -3186,13 +3186,13 @@ fn api(ns: &Map<String, Value>) -> Outcome {
         Duration::from_secs(10),
         &daemon_executable,
     ) {
-        let code = match &error {
-            ds_core::error::DunkError::Unavailable(_) => 3,
-            _ => error.exit_code().max(2),
+        let (message, code) = match error {
+            ds_core::error::DunkError::Unavailable(message) => (message, 3),
+            error => (error.to_string(), error.exit_code().max(2)),
         };
         return Outcome {
             stdout: String::new(),
-            stderr: format!("error: {error}\n"),
+            stderr: format!("error: {message}\n"),
             code,
         };
     }
