@@ -718,6 +718,12 @@ server.serve_forever()
     }
 
     fn assert_response_equivalent(python: &[u8], rust: &[u8], case: usize, compare_body: bool) {
+        for (label, response) in [("Python", python), ("Rust", rust)] {
+            assert!(
+                response.windows(4).any(|part| part == b"\r\n\r\n"),
+                "case {case}: {label} returned no complete HTTP response: {response:?}"
+            );
+        }
         fn split(response: &[u8]) -> (u16, Vec<(String, String)>, &[u8]) {
             let boundary = response
                 .windows(4)

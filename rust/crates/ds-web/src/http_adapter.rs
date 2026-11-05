@@ -770,6 +770,37 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn in_process_post_deep_selected_value_error_echo_is_stack_safe() {
+        let depth = 2038;
+        let mut body = br#"{"cols":"#.to_vec();
+        body.extend(std::iter::repeat_n(b'[', depth));
+        body.push(b'0');
+        body.extend(std::iter::repeat_n(b']', depth));
+        body.extend_from_slice(br#","#);
+        body.extend_from_slice(br#""rows":24}"#);
+        assert_eq!(body.len(), ds_core::http::MAX_POST_BYTES);
+
+        let response = block_on(test_router().oneshot(request(
+            Method::POST,
+            "/api/terminals/test/resize",
+            Body::from(body),
+        )))
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let declared_length = response.headers()[header::CONTENT_LENGTH]
+            .to_str()
+            .unwrap()
+            .parse::<usize>()
+            .unwrap();
+        let bytes = block_on(to_bytes(response.into_body(), usize::MAX)).unwrap();
+        assert_eq!(declared_length, bytes.len());
+        assert!(bytes.starts_with(b"{\n  \"error\": \"cols and rows must be integers\",\n"));
+        assert!(bytes
+            .windows(b"\"requested\"".len())
+            .any(|w| w == b"\"requested\""));
+    }
+
+    #[test]
     fn bind_defaults_and_environment_overrides_match_python_settings() {
         assert_eq!(
             api_bind_config_from(|_| None).unwrap(),

@@ -11,7 +11,7 @@ use std::fmt::Write as _;
 // one-byte nested containers. A 2048-frame guard also bounds standalone JSON callers.
 const MAX_JSON_DEPTH: usize = 2048;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub enum Value {
     Null,
     Bool(bool),
@@ -20,6 +20,63 @@ pub enum Value {
     String(PythonString),
     Array(Vec<Value>),
     Object(Vec<(PythonString, Value)>),
+}
+
+impl Clone for Value {
+    fn clone(&self) -> Self {
+        enum Task<'a> {
+            Visit(&'a Value),
+            Array(usize),
+            Object(Vec<PythonString>, usize),
+        }
+
+        let mut tasks = vec![Task::Visit(self)];
+        let mut values = Vec::new();
+        while let Some(task) = tasks.pop() {
+            match task {
+                Task::Visit(value) => match value {
+                    Value::Null => values.push(Value::Null),
+                    Value::Bool(value) => values.push(Value::Bool(*value)),
+                    Value::Integer(value) => values.push(Value::Integer(value.clone())),
+                    Value::Float(value) => values.push(Value::Float(*value)),
+                    Value::String(value) => values.push(Value::String(value.clone())),
+                    Value::Array(items) => {
+                        tasks.push(Task::Array(items.len()));
+                        tasks.extend(items.iter().rev().map(Task::Visit));
+                    }
+                    Value::Object(items) => {
+                        tasks.push(Task::Object(
+                            items.iter().map(|(key, _)| key.clone()).collect(),
+                            items.len(),
+                        ));
+                        tasks.extend(items.iter().rev().map(|(_, value)| Task::Visit(value)));
+                    }
+                },
+                Task::Array(count) => {
+                    let children = values.split_off(values.len() - count);
+                    values.push(Value::Array(children));
+                }
+                Task::Object(keys, count) => {
+                    let children = values.split_off(values.len() - count);
+                    values.push(Value::Object(keys.into_iter().zip(children).collect()));
+                }
+            }
+        }
+        values.pop().expect("clone task produces one root value")
+    }
+}
+
+impl Drop for Value {
+    fn drop(&mut self) {
+        let mut pending = vec![std::mem::replace(self, Value::Null)];
+        while let Some(mut value) = pending.pop() {
+            match &mut value {
+                Value::Array(items) => pending.append(items),
+                Value::Object(items) => pending.extend(items.drain(..).map(|(_, child)| child)),
+                _ => {}
+            }
+        }
+    }
 }
 
 /// Python string code units. UTF-16 permits isolated surrogates and keeps
@@ -94,7 +151,11 @@ pub fn decimal_digit(character: char) -> Option<u8> {
     ];
     let codepoint = character as u32;
     ZEROES.iter().find_map(|zero| {
-        (codepoint >= *zero && codepoint < *zero + 10).then_some((codepoint - *zero) as u8)
+        if codepoint >= *zero && codepoint < *zero + 10 {
+            Some((codepoint - *zero) as u8)
+        } else {
+            None
+        }
     })
 }
 
@@ -804,7 +865,7 @@ mod tests {
         assert_eq!(dumps(&parsed, Some(2)), PYTHON_INDENTED);
         let compact = dumps(&parsed, None);
         assert_eq!(dumps(&loads(compact.as_bytes()).unwrap(), None), compact);
-        let Value::Object(fields) = parsed else {
+        let Value::Object(fields) = &parsed else {
             panic!("expected object")
         };
         assert_eq!(
