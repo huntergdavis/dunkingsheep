@@ -2527,6 +2527,63 @@ mod tests {
     }
 
     #[test]
+    fn production_dispatcher_owner_decision_uses_real_task_actor_and_roles() {
+        let observations = Arc::new(Mutex::new(SendObservations::default()));
+        let (_dir, services) = make_services(
+            "owner-decision-runtime",
+            send_factory(
+                Arc::clone(&observations),
+                Arc::new(AtomicBool::new(false)),
+                Arc::new((Mutex::new(true), Condvar::new())),
+            ),
+            None,
+        );
+        let dispatcher = services.production_dispatcher();
+        let owner = request("w2:p2");
+        let worker = request("w1:p1");
+        let task = dispatcher
+            .dispatch("task_add", &json!({"title":"owner decision"}), &owner)
+            .unwrap();
+        let id = task["id"].as_str().unwrap();
+        dispatcher
+            .dispatch(
+                "task_block",
+                &json!({"id":id,"reason":"needs-owner: choose | options: 1=yes; 2=no"}),
+                &owner,
+            )
+            .unwrap();
+        assert!(dispatcher
+            .dispatch("task_owner_question", &json!({"id":id}), &worker)
+            .is_err());
+        let question = dispatcher
+            .dispatch("task_owner_question", &json!({"id":id}), &owner)
+            .unwrap();
+        let answer = json!({"id":id,"version":question["version"],"option_number":1});
+        assert!(dispatcher
+            .dispatch("task_owner_answer", &answer, &worker)
+            .is_err());
+        assert_eq!(
+            dispatcher
+                .dispatch("task_owner_answer", &answer, &owner)
+                .unwrap()["changed"],
+            true
+        );
+        assert_eq!(
+            dispatcher
+                .dispatch("task_owner_answer", &answer, &owner)
+                .unwrap()["changed"],
+            false
+        );
+        assert_eq!(
+            dispatcher
+                .dispatch("task_read", &json!({"id":id}), &owner)
+                .unwrap()["status"],
+            "open"
+        );
+        services.shutdown();
+    }
+
+    #[test]
     fn dispatcher_manual_fire_holds_then_delivers_through_real_outbox_callback() {
         let observations = Arc::new(Mutex::new(SendObservations::default()));
         let screen = Arc::new(Mutex::new("❯ human draft".to_owned()));

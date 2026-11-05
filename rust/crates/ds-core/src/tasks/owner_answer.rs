@@ -179,4 +179,40 @@ mod tests {
             .unwrap();
         assert!(tasks.owner_question(&task.id, Some("%1")).await.is_err());
     }
+    #[tokio::test]
+    async fn owner_answer_rolls_back_all_writes_on_event_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let tasks = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+        let task = tasks.add("global", "decision", "").await.unwrap();
+        tasks
+            .block(&task.id, "needs-owner: pick | options: 1=yes")
+            .await
+            .unwrap();
+        let version = tasks.owner_question(&task.id, None).await.unwrap()["version"]
+            .as_i64()
+            .unwrap();
+        tasks.writer.call(|conn| {
+            conn.execute_batch("CREATE TRIGGER fail_owner_unblock BEFORE INSERT ON task_events WHEN NEW.event='unblocked' BEGIN SELECT RAISE(ABORT, 'injected'); END;").map_err(db::map_sqlite)?;
+            Ok(())
+        }).await.unwrap();
+        assert!(tasks
+            .owner_answer(&task.id, version, Some(1), None, Some("owner"), None)
+            .await
+            .is_err());
+        assert_eq!(tasks.get(&task.id).await.unwrap().status, "blocked");
+        let id = task.id.clone();
+        let count: i64 = tasks
+            .writer
+            .call(move |conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM task_events WHERE task_id=? AND event='owner_answer'",
+                    [&id],
+                    |row| row.get(0),
+                )
+                .map_err(db::map_sqlite)
+            })
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+    }
 }
