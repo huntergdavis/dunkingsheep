@@ -95,8 +95,11 @@ async fn serve_connection(
     let request_line = trim_crlf(&line);
     log.request_line.clone_from(&request_line);
     // BaseHTTPRequestHandler decodes request lines as Latin-1 and calls
-    // Python str.split(), whose Unicode whitespace set includes NBSP.
-    let words: Vec<_> = request_line.split_whitespace().collect();
+    // Python str.split(), which also treats U+001C..U+001F as whitespace.
+    let words: Vec<_> = request_line
+        .split(python_is_whitespace)
+        .filter(|word| !word.is_empty())
+        .collect();
     if words.is_empty() {
         return Ok(());
     }
@@ -329,6 +332,10 @@ fn parse_http_version(value: &str) -> Option<(u64, u64)> {
         return None;
     }
     Some((major.parse().ok()?, minor.parse().ok()?))
+}
+
+fn python_is_whitespace(character: char) -> bool {
+    character.is_whitespace() || matches!(character, '\u{001c}'..='\u{001f}')
 }
 
 fn python_repr(value: &str) -> String {
@@ -794,6 +801,7 @@ server.serve_forever()
                 b"GET\xa0/healthz\xa0HTTP/1.0\r\nX-EOF: yes\r\n".as_slice(),
                 37,
             ),
+            (b"GET\x1c/healthz\x1cHTTP/1.0\r\n\r\n".as_slice(), 38),
         ] {
             compare_oracle_request(
                 port,
