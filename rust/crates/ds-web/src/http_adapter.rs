@@ -471,13 +471,13 @@ async fn post(state: HttpState, uri: Uri, request: Request<Body>) -> Response<Bo
 
 fn resize_error_response(error: ApiError, requested: &Value) -> Response<Body> {
     let mut fields = vec![(
-        python_json::PythonString::from_str("error"),
-        Value::String(python_json::PythonString::from_str(&error.message)),
+        python_json::PythonString::from_text("error"),
+        Value::String(python_json::PythonString::from_text(&error.message)),
     )];
     for key in ["name", "pane_id"] {
         if let Some(value) = error.context.get(key) {
             fields.push((
-                python_json::PythonString::from_str(key),
+                python_json::PythonString::from_text(key),
                 Value::from(value.clone()),
             ));
         }
@@ -488,11 +488,11 @@ fn resize_error_response(error: ApiError, requested: &Value) -> Response<Body> {
             requested
                 .resize_value(name)
                 .cloned()
-                .map(|value| (python_json::PythonString::from_str(name), value))
+                .map(|value| (python_json::PythonString::from_text(name), value))
         })
         .collect();
     fields.push((
-        python_json::PythonString::from_str("requested"),
+        python_json::PythonString::from_text("requested"),
         Value::Object(requested_fields),
     ));
     json_response(error.status, Value::Object(fields), true)

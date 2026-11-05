@@ -29,7 +29,7 @@ pub enum Value {
 pub struct PythonString(Vec<u16>);
 
 impl PythonString {
-    pub fn from_str(value: &str) -> Self {
+    pub fn from_text(value: &str) -> Self {
         Self(value.encode_utf16().collect())
     }
 
@@ -180,12 +180,12 @@ impl From<serde_json::Value> for Value {
                     _ => Self::Integer(token),
                 }
             }
-            J::String(value) => Self::String(PythonString::from_str(&value)),
+            J::String(value) => Self::String(PythonString::from_text(&value)),
             J::Array(values) => Self::Array(values.into_iter().map(Self::from).collect()),
             J::Object(values) => Self::Object(
                 values
                     .into_iter()
-                    .map(|(key, value)| (PythonString::from_str(&key), Self::from(value)))
+                    .map(|(key, value)| (PythonString::from_text(&key), Self::from(value)))
                     .collect(),
             ),
         }
@@ -230,12 +230,13 @@ fn decode_json_bytes(bytes: &[u8]) -> Result<String, JsonError> {
 }
 
 fn decode_utf16(bytes: &[u8], big_endian: bool) -> Result<String, JsonError> {
-    if bytes.len() % 2 != 0 {
+    if !bytes.len().is_multiple_of(2) {
         return Err(JsonError {
             offset: bytes.len() - 1,
         });
     }
-    let units = bytes.chunks_exact(2).map(|p| {
+    let (pairs, _) = bytes.as_chunks::<2>();
+    let units = pairs.iter().map(|p| {
         if big_endian {
             u16::from_be_bytes([p[0], p[1]])
         } else {
@@ -250,13 +251,15 @@ fn decode_utf16(bytes: &[u8], big_endian: bool) -> Result<String, JsonError> {
 }
 
 fn decode_utf32(bytes: &[u8], big_endian: bool) -> Result<String, JsonError> {
-    if bytes.len() % 4 != 0 {
+    if !bytes.len().is_multiple_of(4) {
+        let remainder = bytes.len() & 3;
         return Err(JsonError {
-            offset: bytes.len() - bytes.len() % 4,
+            offset: bytes.len() - remainder,
         });
     }
     let mut out = String::new();
-    for (index, part) in bytes.chunks_exact(4).enumerate() {
+    let (parts, _) = bytes.as_chunks::<4>();
+    for (index, part) in parts.iter().enumerate() {
         let n = if big_endian {
             u32::from_be_bytes(part.try_into().unwrap())
         } else {
@@ -517,13 +520,7 @@ impl Parser<'_> {
             let normalized = token
                 .parse::<i128>()
                 .map(|n| n.to_string())
-                .unwrap_or_else(|_| {
-                    if token.starts_with('-') {
-                        token.to_owned()
-                    } else {
-                        token.to_owned()
-                    }
-                });
+                .unwrap_or_else(|_| token.to_owned());
             Ok(Value::Integer(normalized))
         }
     }
@@ -554,11 +551,7 @@ fn write_value(out: &mut String, value: &Value, indent: Option<usize>, depth: us
                     write_item_prefix(out, indent, depth + 1, i == 0);
                     write_string(out, key);
                     out.push(':');
-                    if indent.is_some() {
-                        out.push(' ');
-                    } else {
-                        out.push(' ');
-                    }
+                    out.push(' ');
                     write_value(out, val, indent, depth + 1);
                 }
                 write_close(out, indent, depth);
@@ -566,6 +559,71 @@ fn write_value(out: &mut String, value: &Value, indent: Option<usize>, depth: us
             out.push('}');
         }
     }
+}
+
+fn write_sequence<'a>(
+    out: &mut String,
+    values: impl Iterator<Item = &'a Value>,
+    indent: Option<usize>,
+    depth: usize,
+    open: char,
+    close: char,
+) {
+    let values: Vec<_> = values.collect();
+    out.push(open);
+    for (i, value) in values.iter().enumerate() {
+        write_item_prefix(out, indent, depth + 1, i == 0);
+        write_value(out, value, indent, depth + 1);
+    }
+    if !values.is_empty() {
+        write_close(out, indent, depth);
+    }
+    out.push(close);
+}
+fn write_item_prefix(out: &mut String, indent: Option<usize>, depth: usize, first: bool) {
+    if !first {
+        out.push(',');
+        if indent.is_none() {
+            out.push(' ');
+        }
+    }
+    if let Some(width) = indent {
+        out.push('\n');
+        for _ in 0..width.saturating_mul(depth) {
+            out.push(' ');
+        }
+    }
+}
+fn write_close(out: &mut String, indent: Option<usize>, depth: usize) {
+    if let Some(width) = indent {
+        out.push('\n');
+        for _ in 0..width.saturating_mul(depth) {
+            out.push(' ');
+        }
+    }
+}
+fn write_string(out: &mut String, value: &PythonString) {
+    out.push('"');
+    for &unit in &value.0 {
+        match unit {
+            8 => out.push_str("\\b"),
+            9 => out.push_str("\\t"),
+            10 => out.push_str("\\n"),
+            12 => out.push_str("\\f"),
+            13 => out.push_str("\\r"),
+            0x20..=0x7e if unit != b'"' as u16 && unit != b'\\' as u16 => {
+                out.push(unit as u8 as char)
+            }
+            0x20..=0x7e => {
+                out.push('\\');
+                out.push(unit as u8 as char);
+            }
+            _ => {
+                let _ = write!(out, "\\u{unit:04x}");
+            }
+        }
+    }
+    out.push('"');
 }
 
 #[cfg(test)]
@@ -636,7 +694,7 @@ mod tests {
         assert_eq!(
             dumps(
                 &Value::Object(vec![(
-                    PythonString::from_str("cols"),
+                    PythonString::from_text("cols"),
                     surrogate_selected.resize_value("cols").unwrap().clone(),
                 )]),
                 None,
@@ -669,75 +727,11 @@ mod tests {
         body.push(b' ');
         assert!(loads(&body).is_ok());
         assert_eq!(
-            response_bytes(&Value::String(PythonString::from_str("☃")), None),
+            response_bytes(&Value::String(PythonString::from_text("☃")), None),
             br#""\u2603""#
         );
         let nested = format!("{}0{}", "[".repeat(2047), "]".repeat(2047));
         assert_eq!(nested.len(), 4095);
         assert!(loads(nested.as_bytes()).is_ok());
     }
-}
-fn write_sequence<'a>(
-    out: &mut String,
-    values: impl Iterator<Item = &'a Value>,
-    indent: Option<usize>,
-    depth: usize,
-    open: char,
-    close: char,
-) {
-    let values: Vec<_> = values.collect();
-    out.push(open);
-    for (i, value) in values.iter().enumerate() {
-        write_item_prefix(out, indent, depth + 1, i == 0);
-        write_value(out, value, indent, depth + 1);
-    }
-    if !values.is_empty() {
-        write_close(out, indent, depth);
-    }
-    out.push(close);
-}
-fn write_item_prefix(out: &mut String, indent: Option<usize>, depth: usize, first: bool) {
-    if !first {
-        out.push(',');
-        if indent.is_none() {
-            out.push(' ');
-        }
-    }
-    if let Some(width) = indent {
-        out.push('\n');
-        for _ in 0..width.saturating_mul(depth) {
-            out.push(' ');
-        }
-    }
-}
-fn write_close(out: &mut String, indent: Option<usize>, depth: usize) {
-    if let Some(width) = indent {
-        out.push('\n');
-        for _ in 0..width.saturating_mul(depth) {
-            out.push(' ');
-        }
-    }
-}
-fn write_string(out: &mut String, value: &PythonString) {
-    out.push('"');
-    for &unit in &value.0 {
-        match unit {
-            8 => out.push_str("\\b"),
-            9 => out.push_str("\\t"),
-            10 => out.push_str("\\n"),
-            12 => out.push_str("\\f"),
-            13 => out.push_str("\\r"),
-            0x20..=0x7e if unit != b'"' as u16 && unit != b'\\' as u16 => {
-                out.push(unit as u8 as char)
-            }
-            0x20..=0x7e => {
-                out.push('\\');
-                out.push(unit as u8 as char);
-            }
-            _ => {
-                let _ = write!(out, "\\u{unit:04x}");
-            }
-        }
-    }
-    out.push('"');
 }

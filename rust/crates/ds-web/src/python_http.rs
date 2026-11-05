@@ -358,8 +358,8 @@ async fn write_json_error(
     log: &RequestLog,
 ) -> io::Result<()> {
     let payload = crate::python_json::Value::Object(vec![(
-        crate::python_json::PythonString::from_str("error"),
-        crate::python_json::Value::String(crate::python_json::PythonString::from_str(message)),
+        crate::python_json::PythonString::from_text("error"),
+        crate::python_json::Value::String(crate::python_json::PythonString::from_text(message)),
     )]);
     let response = crate::http_adapter::EncodedResponse::json(status, &payload, false)
         .into_axum()

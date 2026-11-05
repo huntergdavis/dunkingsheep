@@ -14,26 +14,31 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let port_default = defaults.port.to_string();
     let matches = Command::new("ds-http")
         .about("Dunking Sheep HTTP facade (GET only, plus POST resize)")
         .arg(
             Arg::new("host")
                 .long("host")
                 .value_name("HOST")
-                .default_value(defaults.host.as_str()),
+                .help(format!("Host to bind (default: {})", defaults.host)),
         )
         .arg(
             Arg::new("port")
                 .long("port")
                 .value_name("PORT")
                 .value_parser(value_parser!(u16))
-                .default_value(port_default.as_str()),
+                .help(format!("Port to bind (default: {})", defaults.port)),
         )
         .get_matches();
 
-    let host = matches.get_one::<String>("host").expect("host default");
-    let port = *matches.get_one::<u16>("port").expect("port default");
+    let host = matches
+        .get_one::<String>("host")
+        .map(String::as_str)
+        .unwrap_or(&defaults.host);
+    let port = matches
+        .get_one::<u16>("port")
+        .copied()
+        .unwrap_or(defaults.port);
     let app = match system_router(daemon_executable()) {
         Ok(app) => app,
         Err(error) => {
