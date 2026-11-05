@@ -5049,3 +5049,199 @@ fn cli_route_58_commands_map() {
     assert_matches_python(&["--json", "mcp-map"]);
     assert_matches_python(&["mcp-map", "--markdown"]);
 }
+
+fn replace_route_option<'a>(args: &mut Vec<&'a str>, flag: &str, value: &'a str) {
+    let index = args.iter().position(|arg| *arg == flag).unwrap();
+    args[index + 1] = value;
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_route_52_watchdog_deadman() {
+    let temp = tempfile::tempdir().unwrap();
+    let socket = temp.path().join("daemon.sock");
+    let socket_text = socket.display().to_string();
+    let unused_root_socket = temp.path().join("root-socket-must-not-be-used.sock");
+    let unused_root_socket_text = unused_root_socket.display().to_string();
+    let dir_text = temp.path().display().to_string();
+    let heartbeat = temp.path().join("heartbeat.json");
+    let state = temp.path().join("state.json");
+    let error_file = temp.path().join("watchdog.config-error");
+    let status_file = temp.path().join("status.json");
+    let inbox_file = temp.path().join("inbox.db");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let daemon = std::thread::spawn(move || {
+        let (send_stream, _) = listener.accept().unwrap();
+        let mut send_line = String::new();
+        BufReader::new(&send_stream)
+            .read_line(&mut send_line)
+            .unwrap();
+        let send: Value = serde_json::from_str(&send_line).unwrap();
+        assert_eq!("inbox_send", send["cmd"]);
+        assert_eq!(Value::Null, send["self_pane_id"]);
+        let args = send["args"].clone();
+        let mut writer = &send_stream;
+        writer.write_all(b"{\"ok\":true,\"result\":{}}\n").unwrap();
+        args
+    });
+
+    let heartbeat_text = heartbeat.display().to_string();
+    let state_text = state.display().to_string();
+    let error_text = error_file.display().to_string();
+    let status_text = status_file.display().to_string();
+    let inbox_text = inbox_file.display().to_string();
+    let command = [
+        "watchdog-deadman",
+        "--heartbeat",
+        &heartbeat_text,
+        "--cadence-minutes",
+        "1",
+        "--to",
+        "vp-test",
+        "--state",
+        &state_text,
+        "--error-file",
+        &error_text,
+        "--status",
+        &status_text,
+        "--inbox",
+        &inbox_text,
+        "--cooldown-minutes",
+        "30",
+        "--now",
+        "2000000000",
+        "--json",
+    ];
+    let output = run_cli_with_env(
+        &unused_root_socket_text,
+        &command,
+        &[
+            ("DUNKINGSHEEP_DIR", dir_text.as_str()),
+            ("DUNKINGSHEEP_SOCKET", socket_text.as_str()),
+        ],
+    );
+    let args = daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    assert!(
+        output.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!("watchdog.deadman", report["rule"]);
+    assert_eq!(heartbeat.display().to_string(), report["heartbeat"]);
+    assert!(report["stale"].as_bool().unwrap());
+    assert!(report["alerted"].as_bool().unwrap());
+    assert_eq!("daemon", report["delivered_via"]);
+    assert!(state.exists());
+    assert_eq!("vp-test", args["to"]);
+    assert_eq!("watchdog", args["system_sender"]);
+    assert_eq!(
+        "watchdog.deadman: watchdog heartbeat stale",
+        args["subject"]
+    );
+    assert_eq!(
+        format!(
+            "[critical] watchdog.deadman: the watchdog heartbeat {} is missing (the watchdog has never completed a live run). Fleet exceptions are NOT being watched until it runs again. Check `systemctl --user status dunkingsheep-watchdog.timer` and `dunkingsheep watchdog --dry-run`.",
+            heartbeat.display()
+        ),
+        args["body"]
+    );
+
+    let other_dir = temp.path().join("other");
+    std::fs::create_dir(&other_dir).unwrap();
+    let other_socket = other_dir.join("daemon.sock");
+    let other_socket_text = other_socket.display().to_string();
+    let wrong_dir_state = temp.path().join("wrong-dir-state.json");
+    let wrong_dir_state_text = wrong_dir_state.display().to_string();
+    let other_listener = UnixListener::bind(&other_socket).unwrap();
+    other_listener.set_nonblocking(true).unwrap();
+    let mut wrong_dir_command = command.to_vec();
+    replace_route_option(
+        &mut wrong_dir_command,
+        "--state",
+        wrong_dir_state_text.as_str(),
+    );
+    wrong_dir_command.extend([
+        "--socket",
+        other_socket_text.as_str(),
+        "--expected-socket-dir",
+        "",
+    ]);
+    let refused = run_cli_with_env(
+        &unused_root_socket_text,
+        &wrong_dir_command,
+        &[("DUNKINGSHEEP_DIR", dir_text.as_str())],
+    );
+    assert!(matches!(
+        other_listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    ));
+    assert_eq!(Some(2), refused.status.code());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("VP alert NOT delivered [config_bad]"),
+        "stderr: {}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    let refused_report: Value = serde_json::from_slice(&refused.stdout).unwrap();
+    assert_eq!("config_bad", refused_report["cause"]);
+    assert!(refused_report["delivery_error"]
+        .as_str()
+        .unwrap()
+        .contains("is not the expected directory"));
+
+    let dry_socket = temp.path().join("dry-run.sock");
+    let dry_socket_text = dry_socket.display().to_string();
+    let dry_state = temp.path().join("dry-run-state.json");
+    let dry_state_text = dry_state.display().to_string();
+    let mut dry_run_command = command.to_vec();
+    replace_route_option(&mut dry_run_command, "--state", dry_state_text.as_str());
+    dry_run_command.extend(["--socket", dry_socket_text.as_str(), "--dry-run"]);
+    let dry_run = run_cli_with_env(
+        &unused_root_socket_text,
+        &dry_run_command,
+        &[("DUNKINGSHEEP_DIR", dir_text.as_str())],
+    );
+    assert_eq!(Some(0), dry_run.status.code());
+    assert!(dry_run.stderr.is_empty());
+    let dry_report: Value = serde_json::from_slice(&dry_run.stdout).unwrap();
+    assert_eq!("dry-run", dry_report["mode"]);
+    assert!(!dry_state.exists());
+
+    let missing_socket = temp.path().join("missing-daemon.sock");
+    let missing_socket_text = missing_socket.display().to_string();
+    let failed_state = temp.path().join("failed-send-state.json");
+    let failed_state_text = failed_state.display().to_string();
+    let failed_status = temp.path().join("failed-send-status.json");
+    let failed_status_text = failed_status.display().to_string();
+    let failed_inbox = temp.path().join("inbox-is-directory");
+    std::fs::create_dir(&failed_inbox).unwrap();
+    let failed_inbox_text = failed_inbox.display().to_string();
+    let mut fallback_command = command.to_vec();
+    replace_route_option(&mut fallback_command, "--state", failed_state_text.as_str());
+    replace_route_option(
+        &mut fallback_command,
+        "--status",
+        failed_status_text.as_str(),
+    );
+    replace_route_option(&mut fallback_command, "--inbox", failed_inbox_text.as_str());
+    fallback_command.extend(["--socket", missing_socket_text.as_str()]);
+    let fallback = run_cli_with_env(
+        &unused_root_socket_text,
+        &fallback_command,
+        &[("DUNKINGSHEEP_DIR", dir_text.as_str())],
+    );
+    assert_eq!(Some(1), fallback.status.code());
+    assert!(
+        String::from_utf8_lossy(&fallback.stderr).contains("VP alert NOT delivered [daemon_down]")
+    );
+    let fallback_report: Value = serde_json::from_slice(&fallback.stdout).unwrap();
+    assert_eq!("daemon_down", fallback_report["cause"]);
+    assert!(fallback_report["delivery_error"]
+        .as_str()
+        .is_some_and(|error| !error.is_empty()));
+    let status_record: Value =
+        serde_json::from_slice(&std::fs::read(failed_status).unwrap()).unwrap();
+    assert_eq!("daemon_down", status_record["cause"]);
+    assert_eq!("direct", status_record["attempted"]);
+}
