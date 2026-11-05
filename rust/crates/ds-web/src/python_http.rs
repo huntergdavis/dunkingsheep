@@ -149,7 +149,9 @@ async fn serve_connection(
         loop {
             line.clear();
             match read_line_bounded(&mut reader, &mut line, MAX_LINE).await {
-                Ok(false) => return Ok(()),
+                // CPython's http.client.parse_headers treats EOF as the end
+                // of the header block, even without the terminating blank line.
+                Ok(false) => break,
                 Ok(true) => {}
                 Err(error) if error.kind() == io::ErrorKind::InvalidData => {
                     return write_error(
@@ -788,6 +790,10 @@ server.serve_forever()
                 35,
             ),
             (b"GET\xa0/healthz\xa0HTTP/1.0\r\n\r\n".as_slice(), 36),
+            (
+                b"GET\xa0/healthz\xa0HTTP/1.0\r\nX-EOF: yes\r\n".as_slice(),
+                37,
+            ),
         ] {
             compare_oracle_request(
                 port,
