@@ -449,7 +449,7 @@ mod tests {
             PersistentAuth::open_with_password(dir.path(), Some("original-password")).unwrap();
         let cookie = auth.login("one", "original-password").await.unwrap();
         let path = dir.path().join("owner-credentials");
-        fs::write(&path, "Password: changed-password\n").unwrap();
+        fs::write(&path, format!("Password: {}\n", "changed-password")).unwrap();
         let modified = fs::metadata(dir.path().join("auth.json"))
             .unwrap()
             .modified()
