@@ -2118,7 +2118,7 @@ mod tests {
         )
         .unwrap();
         let mut observed = None;
-        let error = RuntimeServices::build(inputs, Some(config), |owner| {
+        let error = RuntimeServices::build(inputs, Some(config), None, |_flock, owner| {
             let service = owner.as_ref().unwrap();
             assert!(service.worker_id().is_some());
             observed = Some(Arc::clone(service));

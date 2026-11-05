@@ -43,7 +43,7 @@ impl LoopRuntimeAdapter {
                         panes
                             .into_iter()
                             .map(|(pane, status)| pane_to_json(&pane, status.as_deref()))
-                            .collect()
+                            .collect::<Vec<_>>()
                     })
                     .map_err(|error| DunkError::Refused(error.to_string()))
             });

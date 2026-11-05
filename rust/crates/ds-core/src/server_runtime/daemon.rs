@@ -168,7 +168,7 @@ pub fn run_daemon_captured(
                 None
             }
         })
-        .unwrap_or_else(|| Arc::new(std::sync::atomic::AtomicBool::new(false)));
+        .unwrap_or(Arc::new(std::sync::atomic::AtomicBool::new(false)));
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -219,9 +219,10 @@ pub fn run_daemon_captured(
         let _entered = services.runtime_handle().enter();
         let loop_env = services.push_loop_adapter()?;
         #[cfg(test)]
-        if let Some(gate) = startup.loop_test_gate.clone() {
-            loop_env = loop_env.with_test_gate(gate);
-        }
+        let loop_env = match startup.loop_test_gate.clone() {
+            Some(gate) => loop_env.with_test_gate(gate),
+            None => loop_env,
+        };
         let loop_env = Arc::new(loop_env);
         if !loops.start(Arc::clone(services.flock()), loop_env, loop_intervals) {
             let mut failures = vec!["daemon loops could not be started exactly once".to_owned()];
@@ -454,7 +455,8 @@ fn captured_loop_intervals(env: &Env) -> Result<LoopIntervals, DunkError> {
 #[cfg(test)]
 mod tests {
     use std::io::{BufRead, BufReader, Read, Write};
-    use std::os::unix::net::{Shutdown, UnixListener, UnixStream};
+    use std::net::Shutdown;
+    use std::os::unix::net::{UnixListener, UnixStream};
     use std::sync::mpsc;
 
     use super::*;
