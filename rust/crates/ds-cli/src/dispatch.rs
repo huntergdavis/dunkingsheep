@@ -3138,6 +3138,73 @@ fn token(ns: &Map<String, Value>) -> Outcome {
     }
 }
 
+/// Run the local HTTP facade. The HTTP adapter owns the listener and makes its
+/// daemon connection lazily when a request reaches a daemon-backed route.
+fn api(ns: &Map<String, Value>) -> Outcome {
+    let host = text(ns, "host").unwrap_or("127.0.0.1").to_owned();
+    let port = match text(ns, "port").unwrap_or("8792").parse::<u16>() {
+        Ok(port) => port,
+        Err(_) => {
+            return Outcome {
+                stdout: String::new(),
+                stderr: format!("invalid --port: {:?}\n", text(ns, "port").unwrap_or("8792")),
+                code: 2,
+            }
+        }
+    };
+
+    // The HTTP adapter resolves its daemon client from the process environment,
+    // just as dunk_http._client() does. Carry the CLI's selected socket into it.
+    if let Some(socket) = text(ns, "socket").filter(|value| !value.is_empty()) {
+        std::env::set_var("DUNKINGSHEEP_SOCKET", socket);
+    }
+    if let Some(self_pane) = text(ns, "self_pane").filter(|value| !value.is_empty()) {
+        std::env::set_var("HERDR_PANE_ID", self_pane);
+    }
+
+    let daemon_executable =
+        std::env::current_exe().unwrap_or_else(|_| PathBuf::from("dunkingsheep"));
+    let app = match ds_web::http_adapter::system_router(daemon_executable) {
+        Ok(app) => app,
+        Err(error) => {
+            return Outcome {
+                stdout: String::new(),
+                stderr: format!("error: {error}\n"),
+                code: 1,
+            }
+        }
+    };
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            return Outcome {
+                stdout: String::new(),
+                stderr: format!("error: could not create HTTP runtime: {error}\n"),
+                code: 1,
+            }
+        }
+    };
+    let result = runtime.block_on(async {
+        let listener = ds_web::http_adapter::bind_listener(&host, port).await?;
+        ds_web::http_adapter::serve_configured(listener, app, &host, port).await
+    });
+    match result {
+        Ok(()) => Outcome {
+            stdout: String::new(),
+            stderr: String::new(),
+            code: 0,
+        },
+        Err(error) => Outcome {
+            stdout: String::new(),
+            stderr: format!("error: {error}\n"),
+            code: 1,
+        },
+    }
+}
+
 /// Run one parsed command (`ns` is the argparse namespace as a dictionary).
 pub fn run(ns: &Map<String, Value>) -> Outcome {
     let command = text(ns, "command").unwrap_or("");
@@ -3164,6 +3231,7 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
             }
         }
         "install" => install_launcher(ns, json),
+        "api" => api(ns),
         "mcp-setup" => mcp_setup(ns),
         "context" => context(ns, json),
         // `secrets-check [--base REF] [--cwd DIR] [--quiet]`: exit 1 + the refusal on stderr.
