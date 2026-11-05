@@ -96,23 +96,28 @@ async fn serve_connection(
     log.request_line.clone_from(&request_line);
     let mut words = request_line.split_ascii_whitespace();
     let Some(method) = words.next() else {
-        return write_error_legacy(&mut write, 400, "Bad Request", "bad request syntax", &log)
-            .await;
+        return Ok(());
     };
     let Some(target) = words.next() else {
-        return write_error_legacy(&mut write, 400, "Bad Request", "bad request syntax", &log)
-            .await;
+        let message = format!("Bad request syntax ({})", python_repr(&request_line));
+        return write_error_legacy(&mut write, 400, "Bad Request", &message, &log).await;
     };
-    let Some(version) = words.next() else {
-        return write_error(&mut write, 400, "Bad Request", "bad request syntax", &log).await;
-    };
-    if words.next().is_some() || !(version == "HTTP/1.0" || version == "HTTP/1.1") {
+    let version = words.next();
+    let short_legacy_request = version.is_none();
+    if short_legacy_request && method != "GET" {
+        let message = format!("Bad HTTP/0.9 request type ({})", python_repr(method));
+        return write_error_legacy(&mut write, 400, "Bad Request", &message, &log).await;
+    }
+    let version = version.unwrap_or("HTTP/0.9");
+    let legacy_response = short_legacy_request || version == "HTTP/0.9";
+    if words.next().is_some()
+        || !(version == "HTTP/0.9" || version == "HTTP/1.0" || version == "HTTP/1.1")
+    {
         return write_error(&mut write, 400, "Bad Request", "bad request syntax", &log).await;
     }
-
     let mut headers = Vec::<(String, String)>::new();
     let mut header_count = 0;
-    loop {
+    while !short_legacy_request {
         line.clear();
         match read_line_bounded(&mut reader, &mut line, MAX_LINE).await {
             Ok(false) => return Ok(()),
@@ -154,14 +159,12 @@ async fn serve_connection(
     // `HTTPMessage.get` returns the first occurrence. The Python handler ignores
     // Transfer-Encoding entirely and reads zero bytes when Content-Length is absent.
     if method != "GET" && method != "POST" {
-        return write_error(
-            &mut write,
-            501,
-            "Not Implemented",
-            &format!("Unsupported method ({})", python_repr(method)),
-            &log,
-        )
-        .await;
+        let message = format!("Unsupported method ({})", python_repr(method));
+        return if legacy_response {
+            write_error_legacy(&mut write, 501, "Not Implemented", &message, &log).await
+        } else {
+            write_error(&mut write, 501, "Not Implemented", &message, &log).await
+        };
     }
     let content_length = if method == "POST" {
         headers.iter().find(|(name, _)| name == "content-length")
@@ -197,7 +200,7 @@ async fn serve_connection(
         }
     }
 
-    let http_version = if version == "HTTP/1.0" {
+    let http_version = if version == "HTTP/1.0" || legacy_response {
         axum::http::Version::HTTP_10
     } else {
         axum::http::Version::HTTP_11
@@ -233,7 +236,11 @@ async fn serve_connection(
                 .await
         }
     };
-    write_response(&mut write, response, &log).await
+    if legacy_response {
+        write_response_legacy(&mut write, response, &log).await
+    } else {
+        write_response(&mut write, response, &log).await
+    }
 }
 
 fn python_content_length(value: &str) -> Option<(bool, bool, bool)> {
@@ -342,6 +349,19 @@ async fn write_response(
         .write_all(format!("Content-Length: {}\r\n", body.len()).as_bytes())
         .await?;
     write.write_all(b"Cache-Control: no-store\r\n\r\n").await?;
+    write.write_all(&body).await?;
+    write.shutdown().await
+}
+
+async fn write_response_legacy(
+    write: &mut tokio::net::tcp::OwnedWriteHalf,
+    response: Response<Body>,
+    log: &RequestLog,
+) -> io::Result<()> {
+    log_response(log, response.status().as_u16());
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .map_err(io::Error::other)?;
     write.write_all(&body).await?;
     write.shutdown().await
 }
@@ -667,6 +687,26 @@ server.serve_forever()
             b"POST /no-route HTTP/1.0\r\nContent-Length: \xd9\xa1\r\n\r\n",
             24,
         );
+        for (request, case) in [(b"\r\n".as_slice(), 25), (b"   \r\n", 26)] {
+            compare_oracle_request(
+                port,
+                router(FakeDaemon::default(), OracleBackend),
+                request,
+                case,
+            );
+        }
+        compare_oracle_request(
+            port,
+            router(FakeDaemon::default(), OracleBackend),
+            b"POST /\r\n",
+            27,
+        );
+        compare_oracle_request(
+            port,
+            router(FakeDaemon::default(), OracleBackend),
+            b"GET /healthz\r\n",
+            28,
+        );
         compare_expect_continue(port, router(FakeDaemon::default(), OracleBackend));
         child.kill().unwrap();
         child.wait().unwrap();
@@ -737,8 +777,19 @@ server.serve_forever()
     }
 
     fn assert_response_equivalent(python: &[u8], rust: &[u8], case: usize, compare_body: bool) {
-        if case == 23 {
+        if matches!(case, 23 | 27 | 28) {
             assert_eq!(python, rust, "legacy HTTP/0.9 case {case}");
+            return;
+        }
+        if matches!(case, 25 | 26) {
+            assert!(
+                python.is_empty(),
+                "Python empty-line response case {case}: {python:?}"
+            );
+            assert!(
+                rust.is_empty(),
+                "Rust empty-line response case {case}: {rust:?}"
+            );
             return;
         }
         for (label, response) in [("Python", python), ("Rust", rust)] {
