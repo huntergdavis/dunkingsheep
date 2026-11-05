@@ -143,42 +143,44 @@ async fn serve_connection(
     let version = version.unwrap_or("HTTP/0.9");
     let mut headers = Vec::<(String, String)>::new();
     let mut header_count = 0;
-    while !short_legacy_request {
-        line.clear();
-        match read_line_bounded(&mut reader, &mut line, MAX_LINE).await {
-            Ok(false) => return Ok(()),
-            Ok(true) => {}
-            Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+    if !short_legacy_request {
+        loop {
+            line.clear();
+            match read_line_bounded(&mut reader, &mut line, MAX_LINE).await {
+                Ok(false) => return Ok(()),
+                Ok(true) => {}
+                Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+                    return write_error(
+                        &mut write,
+                        431,
+                        "Request Header Fields Too Large",
+                        "Line too long",
+                        &log,
+                    )
+                    .await;
+                }
+                Err(error) => return Err(error),
+            }
+            if line == b"\r\n" || line == b"\n" {
+                break;
+            }
+            header_count += 1;
+            if header_count > MAX_HEADERS {
                 return write_error(
                     &mut write,
                     431,
                     "Request Header Fields Too Large",
-                    "Line too long",
+                    "Too many headers",
                     &log,
                 )
                 .await;
             }
-            Err(error) => return Err(error),
-        }
-        if line == b"\r\n" || line == b"\n" {
-            break;
-        }
-        header_count += 1;
-        if header_count > MAX_HEADERS {
-            return write_error(
-                &mut write,
-                431,
-                "Request Header Fields Too Large",
-                "Too many headers",
-                &log,
-            )
-            .await;
-        }
-        let raw = trim_crlf(&line);
-        if let Some((name, value)) = raw.split_once(':') {
-            let name = name.trim().to_ascii_lowercase();
-            let value = value.trim_matches([' ', '\t']).to_owned();
-            headers.push((name, value));
+            let raw = trim_crlf(&line);
+            if let Some((name, value)) = raw.split_once(':') {
+                let name = name.trim().to_ascii_lowercase();
+                let value = value.trim_matches([' ', '\t']).to_owned();
+                headers.push((name, value));
+            }
         }
     }
 
@@ -476,7 +478,7 @@ fn error_page(status: u16, reason: &str, message: &str) -> String {
         _ => reason,
     };
     format!(
-        "<!DOCTYPE HTML>\n<html lang=\"en\">\n    <head>\n        <meta charset=\"utf-8\">\n        <style type=\"text/css\">\n            :root {{\n                color-scheme: light dark;\n            }}\n        </style>\n        <title>Error response</title>\n    </head>\n    <body>\n        <h1>Error response</h1>\n        <p>Error code: {status}</p>\n        <p>Message: {}.</p>\n        <p>Error code explanation: {status} - {explanation}.</p>\n    </body>\n</html>\n",
+        "<!DOCTYPE HTML>\n<html lang=\"en\">\n    <head>\n        <meta charset=\"utf-8\">\n        <title>Error response</title>\n    </head>\n    <body>\n        <h1>Error response</h1>\n        <p>Error code: {status}</p>\n        <p>Message: {}.</p>\n        <p>Error code explanation: {status} - {explanation}.</p>\n    </body>\n</html>\n",
         html_escape(message),
     )
 }
@@ -486,8 +488,6 @@ fn html_escape(value: &str) -> String {
         .replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#x27;")
 }
 
 #[cfg(test)]
@@ -774,7 +774,7 @@ server.serve_forever()
         python.shutdown(std::net::Shutdown::Write).unwrap();
         let mut python_response = Vec::new();
         python.read_to_end(&mut python_response).unwrap();
-        let compare_error_page = !matches!(case, 12 | 20 | 21 | 22 | 23 | 29);
+        let compare_error_page = !matches!(case, 12 | 20 | 21 | 22 | 23);
         assert_response_equivalent(&python_response, &rust, case, compare_error_page);
     }
 
