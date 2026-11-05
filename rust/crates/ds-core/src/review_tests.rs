@@ -1485,10 +1485,11 @@ async fn account_without_a_row_id_records_refusal_without_opening_a_pr() {
 
     assert!(out["reason"].as_str().unwrap().contains("no row id"));
     assert!(out["accounting_pr"].is_null());
-    let requests = sync.transport.requests.lock().unwrap();
-    assert_eq!(4, requests.len());
-    assert!(requests.iter().all(|request| request.method == "GET"));
-    drop(requests);
+    {
+        let requests = sync.transport.requests.lock().unwrap();
+        assert_eq!(4, requests.len());
+        assert!(requests.iter().all(|request| request.method == "GET"));
+    }
     let rows = sync.flock.list_review_rows_visible().await.unwrap();
     let accepted = rows.iter().find(|row| row.id == stored.id).unwrap();
     assert_eq!("done", accepted.status);
@@ -1620,15 +1621,16 @@ async fn account_branch_commit_failure_preserves_the_accepted_verdict() {
         .unwrap()
         .iter()
         .any(|error| error.as_str().unwrap().contains("422")));
-    let requests = sync.transport.requests.lock().unwrap();
-    assert_eq!(11, requests.len());
-    assert!(!requests
-        .iter()
-        .any(|request| { request.method == "POST" && request.url.ends_with("/pulls") }));
-    assert!(!requests
-        .iter()
-        .any(|request| request.url.ends_with("/git/refs")));
-    drop(requests);
+    {
+        let requests = sync.transport.requests.lock().unwrap();
+        assert_eq!(11, requests.len());
+        assert!(!requests
+            .iter()
+            .any(|request| { request.method == "POST" && request.url.ends_with("/pulls") }));
+        assert!(!requests
+            .iter()
+            .any(|request| request.url.ends_with("/git/refs")));
+    }
     let rows = sync.flock.list_review_rows_visible().await.unwrap();
     let accepted = rows.iter().find(|row| row.id == stored.id).unwrap();
     assert_eq!("done", accepted.status);
