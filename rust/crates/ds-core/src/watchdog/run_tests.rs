@@ -274,6 +274,7 @@ fn run_fixture() -> (tempfile::TempDir, Value) {
     config["stores"]["config_dir"] = json!(dir.path());
     config["state_path"] = json!(dir.path().join("state.json"));
     config["heartbeat_path"] = json!(dir.path().join("heartbeat.json"));
+    config["panes"]["source"] = json!("none");
     for rule in config["rules"].as_object_mut().unwrap().values_mut() {
         rule["enabled"] = json!(false);
     }
@@ -305,7 +306,10 @@ fn run_dry_run_matches_fixture_shape_and_never_writes_or_sends() {
         report["counts"],
         json!({"findings":0,"vp":0,"owner":0,"needs_attention":0})
     );
-    assert_eq!(report["lines"], json!([]));
+    assert_eq!(
+        report["lines"],
+        json!(["SKIPPED rule=money.spend_projection error=no metering source"])
+    );
     assert!(sends.is_empty());
     assert!(owner.posts.borrow().is_empty());
     assert_eq!(
@@ -335,7 +339,7 @@ fn run_confirms_matching_route_and_reports_channel_mismatch_once() {
     let mut sender = |_: &str, _: &str, _: &str| Ok(());
     let report = run(&config, 100.0, false, &mut sender, &owner, None, None).unwrap();
     let persisted = read_json(&dir.path().join("state.json")).unwrap();
-    assert_eq!(persisted["owner_pages"]["cos-page"]["confirmed_at"], 100.0);
+    assert!(persisted["owner_pages"].get("cos-page").is_none());
     assert_eq!(
         persisted["owner_pages"]["legacy-page"]["status"],
         "undelivered"
@@ -350,11 +354,14 @@ fn run_confirms_matching_route_and_reports_channel_mismatch_once() {
         .contains("UNDELIVERED"));
     assert_eq!(report["sent"], json!(["vp"]));
     assert!(dir.path().join("heartbeat.json").exists());
+    assert_eq!(owner.posts.borrow().len(), 1);
+    assert!(owner.posts.borrow()[0].contains("Watchdog OWNER resolved"));
+    let resolved_count = owner.posts.borrow().len();
 
     let retry = run(&config, 101.0, false, &mut sender, &owner, None, None).unwrap();
     assert_eq!(retry["problems"], json!([]));
     assert_eq!(retry["sent"], json!([]));
-    assert!(owner.posts.borrow().is_empty());
+    assert_eq!(owner.posts.borrow().len(), resolved_count);
 }
 
 #[test]
