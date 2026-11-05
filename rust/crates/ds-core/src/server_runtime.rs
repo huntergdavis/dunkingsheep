@@ -4,6 +4,7 @@
 //! defaulting to tmux. Herdr is retired in the Rust runtime, so it is refused
 //! explicitly instead of being silently replaced with tmux.
 
+mod daemon;
 mod delivery;
 mod dispatcher;
 mod health_state;
@@ -40,10 +41,13 @@ mod turn_plan;
 mod turn_send;
 mod verify;
 
+pub use daemon::{run_daemon, run_daemon_captured, DaemonOptions, DaemonStartup};
 #[cfg(test)]
 pub(crate) use outbox_runtime::{CountdownGate, SubmitGate};
 pub use project_runtime::{ProjectRuntimeEntry, ProjectRuntimePolicy};
-pub use services::{RuntimeObservability, RuntimeServiceInputs, RuntimeServices};
+pub use services::{
+    RuntimeMemoryConfig, RuntimeObservability, RuntimeServiceInputs, RuntimeServices,
+};
 
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
@@ -101,7 +105,23 @@ pub(crate) struct LoopRuntimeAdapter {
     flock: Arc<Flock>,
     terminal_factory: Arc<dyn Fn() -> Box<dyn Terminal> + Send + Sync + 'static>,
     runtime_services: Option<Arc<RuntimeServices>>,
+    #[cfg(test)]
+    test_gate: Option<LoopTestGate>,
+    #[cfg(test)]
+    test_pane_list_result: Option<std::sync::mpsc::Sender<Result<usize, String>>>,
 }
+
+#[cfg(test)]
+pub(crate) type LoopTestGate = Arc<
+    Mutex<
+        Option<(
+            std::sync::mpsc::Sender<()>,
+            std::sync::mpsc::Receiver<()>,
+            std::sync::mpsc::Sender<()>,
+            std::sync::mpsc::Sender<Result<usize, String>>,
+        )>,
+    >,
+>;
 
 impl<'a> RequestRuntimeAdapter<'a> {
     #[allow(dead_code)] // Wired by the production server dispatcher in the runtime integration.
@@ -744,7 +764,22 @@ impl LoopRuntimeAdapter {
             flock,
             terminal_factory,
             runtime_services: None,
+            #[cfg(test)]
+            test_gate: None,
+            #[cfg(test)]
+            test_pane_list_result: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_gate(mut self, gate: LoopTestGate) -> Self {
+        self.test_pane_list_result = gate
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .map(|(_, _, _, result)| result.clone());
+        self.test_gate = Some(gate);
+        self
     }
 
     /// Bind the canonical process services required by the production stuck observer.
@@ -860,6 +895,13 @@ pub const DEFAULT_TERMINAL_BACKEND: &str = "tmux";
 /// A configured value that cannot be represented as UTF-8 is a refusal, never a default.
 pub fn configured_backend_name() -> Result<String, DunkError> {
     configured_backend_name_from(std::env::var_os(TERMINAL_BACKEND_ENV).as_deref())
+}
+
+/// Resolve the backend from one startup-captured environment snapshot.
+pub(crate) fn configured_backend_name_from_env(
+    env: &crate::config::Env,
+) -> Result<String, DunkError> {
+    Ok(normalize_backend_name(env.get(TERMINAL_BACKEND_ENV)))
 }
 
 /// Construct the configured backend, refusing retired and unknown names explicitly.

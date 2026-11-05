@@ -3,9 +3,11 @@
 
     python3 tools/context_live_diff.py SRC_TREE OUT_DIR
 
-Copies SRC_TREE (never written, never opened for writing) to OUT_DIR/tree, adopts every live
-entry into a fresh throwaway ledger (the live ledger is keyed by the live path, which a copy
-cannot reuse), and writes OUT_DIR/expected.json in the shape of the golden fixture. Then:
+Copies SRC_TREE (never written, never opened for writing) to OUT_DIR/tree, including its access
+log if present, adopts every live entry into a fresh throwaway ledger (the live ledger is keyed
+by the live path, which a copy cannot reuse), and writes OUT_DIR/expected.json in the shape of
+the golden fixture. Search calls log reads, so the copied access log is restored before stats
+are captured. Then:
 
     DS_CONTEXT_LIVE_DIR=OUT_DIR cargo test -p ds-core --lib -- --ignored context::golden_tests::live
 
@@ -22,9 +24,19 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 
 import dunk_context  # noqa: E402
+from snapshot_context import fixed_clock  # noqa: E402
 
 
-def main(argv):
+def get_projection(entry):
+    if entry is None:
+        return None
+    return {key: entry.get(key) for key in (
+        "slug", "class", "subject", "type", "scope", "authority", "stated", "source",
+        "recheck_after", "supersedes", "superseded_by", "retired_at", "retired_reason",
+        "body", "error")}
+
+
+def snapshot(argv, clock):
     if len(argv) != 3:
         print(__doc__, file=sys.stderr)
         return 2
@@ -35,10 +47,12 @@ def main(argv):
     shutil.rmtree(out, ignore_errors=True)
     out.mkdir(parents=True)
     tree = out / "tree"
-    shutil.copytree(src, tree, ignore=shutil.ignore_patterns(".index*", "access.jsonl"))
+    shutil.copytree(src, tree, ignore=shutil.ignore_patterns(".index*"))
     ledger = dunk_context.Ledger(out / "ledger.db")
     store = dunk_context.Store(tree, ledger=ledger)
     store.adopt(ledger)
+    access_path = store.access_path()
+    original_access = access_path.read_bytes() if access_path.exists() else None
     cases = []
     for max_bytes, subject in ((dunk_context.DEFAULT_CAP, None), (600, None)):
         cases.append({"op": "digest", "args": {"max_bytes": max_bytes, "subject": subject},
@@ -60,13 +74,42 @@ def main(argv):
         except dunk_context.ContextError as exc:
             found = {"error": str(exc)}
         cases.append({"op": "search", "args": args, "expected": found})
+    historical = next((entry for entry in entries if entry.get("superseded_by")), None)
+    retired = next((entry for entry in entries if store.is_retired(entry)), None)
+    first_entry = next((entry for entry in entries if not entry.get("error")), None)
+    get_keys = [
+        (historical or first_entry or {}).get("slug", "missing-entry"),
+        (historical or first_entry or {}).get("subject", "missing-entry"),
+        (retired or {}).get("slug", "missing-entry"),
+        "__t50_missing_context_entry__",
+    ]
+    for key in get_keys:
+        try:
+            found = get_projection(store.resolve(key))
+        except dunk_context.ContextError as exc:
+            found = {"error": str(exc)}
+        cases.append({"op": "get", "args": {"key": key}, "expected": found})
     cases.append({"op": "check", "args": {}, "expected": store.check()})
+    if original_access is None:
+        access_path.unlink(missing_ok=True)
+    else:
+        access_path.write_bytes(original_access)
+    cases.append({"op": "stats", "args": {}, "expected": store.stats()})
+    cases.append({"op": "entry_stats", "args": {}, "expected": store.entry_stats()})
     (out / "expected.json").write_text(
-        json.dumps({"ledger": {"modified": [], "unrecorded": [], "adopt": True},
+        json.dumps({"clock": clock, "ledger": {"modified": [], "unrecorded": [], "adopt": True},
                     "cases": cases}, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
         encoding="utf-8")
     print(f"{len(entries)} entries, {len(cases)} cases -> {out}/expected.json")
     return 0
+
+
+def main(argv):
+    # Capture both clocks once; Rust replays precisely these values on its private copy.
+    clock = {"local": dunk_context.datetime.now().isoformat(timespec="seconds"),
+             "unix": dunk_context.time.time()}
+    with fixed_clock(clock):
+        return snapshot(argv, clock)
 
 
 if __name__ == "__main__":

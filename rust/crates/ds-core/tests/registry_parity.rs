@@ -14,13 +14,18 @@ fn every_python_command_is_present_and_no_extra_ones_are() {
     let commands = fixture["commands"].as_object().expect("commands");
     let rust: Vec<&str> = registry::COMMANDS.iter().map(|c| c.name).collect();
     let python: Vec<&str> = commands.keys().map(String::as_str).collect();
-    assert_eq!(
-        python.len(),
-        rust.len(),
-        "the registry has {} commands, Python has {}",
-        rust.len(),
-        python.len()
-    );
+    // These owner-decision commands are Rust-only additions; Python remains frozen.
+    let rust_only = ["task_owner_answer", "task_owner_question"];
+    let extra: Vec<_> = rust
+        .iter()
+        .copied()
+        .filter(|name| !python.contains(name))
+        .collect();
+    assert_eq!(extra.len(), rust_only.len());
+    for name in rust_only {
+        assert!(extra.contains(&name), "missing Rust-only command {name}");
+    }
+    assert_eq!(rust.len(), python.len() + rust_only.len());
     for name in &python {
         assert!(
             registry::command(name).is_some(),

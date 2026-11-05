@@ -1,6 +1,7 @@
 //! T50 acceptance (t1395): the read side against a fixture the PYTHON store built
 //! (`tools/snapshot_context.py --write`). Fails when a digest, the entries listing, a search
-//! result or the check report differs from what the Python printed. `stats` is not covered.
+//! result, check report, get projection, stats or entry_stats differs from what the Python
+//! printed. Access-log timestamps are fixed in the fixture; both calendar and Unix clocks are fixed without adjusting expected values.
 
 use serde_json::{json, Value};
 
@@ -80,9 +81,62 @@ fn case<'a>(expect: &'a Value, op: &str) -> Vec<&'a Value> {
         .collect()
 }
 
+fn entry_value(entry: &super::store::Entry) -> Value {
+    let mut value = serde_json::Map::new();
+    for key in [
+        "slug",
+        "class",
+        "subject",
+        "type",
+        "scope",
+        "authority",
+        "stated",
+        "source",
+        "recheck_after",
+        "supersedes",
+        "superseded_by",
+        "retired_at",
+        "retired_reason",
+    ] {
+        value.insert(
+            key.to_string(),
+            if key == "slug" {
+                json!(entry.slug)
+            } else {
+                entry.get(key).map_or(Value::Null, |field| json!(field))
+            },
+        );
+    }
+    value.insert(
+        "body".into(),
+        if entry.error.is_some() {
+            Value::Null
+        } else {
+            json!(entry.body.trim())
+        },
+    );
+    value.insert(
+        "error".into(),
+        entry.error.as_ref().map_or(Value::Null, |e| json!(e)),
+    );
+    Value::Object(value)
+}
+
+fn fixed_clock(expect: &Value) -> super::store::ReadClockGuard {
+    let local = chrono::NaiveDateTime::parse_from_str(
+        expect["clock"]["local"]
+            .as_str()
+            .expect("fixed local clock"),
+        "%Y-%m-%dT%H:%M:%S",
+    )
+    .unwrap();
+    super::store::fixed_read_clock(local, expect["clock"]["unix"].as_f64().unwrap())
+}
+
 #[test]
 fn digests_are_byte_identical_to_the_python() {
     let (_dir, store, _ledger, expect) = fixture();
+    let _clock = fixed_clock(&expect);
     let cases = case(&expect, "digest");
     assert_eq!(3, cases.len());
     for c in cases {
@@ -97,6 +151,7 @@ fn digests_are_byte_identical_to_the_python() {
 #[test]
 fn the_entries_listing_matches_the_python() {
     let (_dir, store, _ledger, expect) = fixture();
+    let _clock = fixed_clock(&expect);
     let got: Vec<Value> = store
         .entries()
         .iter()
@@ -117,6 +172,7 @@ fn the_entries_listing_matches_the_python() {
 #[test]
 fn search_results_match_the_python() {
     let (_dir, store, _ledger, expect) = fixture();
+    let _clock = fixed_clock(&expect);
     for c in case(&expect, "search") {
         let a = &c["args"];
         let got = store
@@ -132,21 +188,79 @@ fn search_results_match_the_python() {
 }
 
 #[test]
+fn get_resolution_matches_the_python() {
+    let (_dir, store, _ledger, expect) = fixture();
+    let _clock = fixed_clock(&expect);
+    let cases = case(&expect, "get");
+    assert_eq!(4, cases.len());
+    for c in cases {
+        let key = c["args"]["key"].as_str().unwrap();
+        let got = store
+            .resolve(key)
+            .unwrap()
+            .as_ref()
+            .map(entry_value)
+            .unwrap_or(Value::Null);
+        assert_eq!(c["expected"], got, "get {key}");
+    }
+}
+
+#[test]
 fn the_check_report_matches_the_python() {
     let (_dir, store, mut ledger, expect) = fixture();
+    let _clock = fixed_clock(&expect);
     let got = store.check(&mut ledger).unwrap();
     assert_eq!(case(&expect, "check")[0]["expected"], got);
+}
+
+#[test]
+fn stats_match_the_python_with_fixed_access_times() {
+    let (_dir, store, _ledger, expect) = fixture();
+    let _clock = fixed_clock(&expect);
+    assert_eq!(1, case(&expect, "stats").len());
+    assert_eq!(
+        case(&expect, "stats")[0]["expected"],
+        store.stats().unwrap()
+    );
+}
+
+#[test]
+fn entry_stats_match_the_python_with_fixed_access_times() {
+    let (_dir, store, mut ledger, expect) = fixture();
+    let _clock = fixed_clock(&expect);
+    assert_eq!(1, case(&expect, "entry_stats").len());
+    assert_eq!(
+        case(&expect, "entry_stats")[0]["expected"],
+        json!(store.entry_stats(&mut ledger).unwrap())
+    );
 }
 
 /// Every difference between the Rust read side and the Python's recorded answers, one line
 /// each (the live-tree run wants all of them, not the first).
 fn all_differences(store: &Store, ledger: &mut Ledger, expect: &Value) -> Vec<String> {
     let mut out = Vec::new();
+    let access_path = store.access_path();
+    let original_access = std::fs::read(&access_path).ok();
     for c in case(expect, "digest") {
         let cap = c["args"]["max_bytes"].as_u64().unwrap() as usize;
         let got = store.digest(cap, c["args"]["subject"].as_str());
         if c["expected"].as_str() != Some(got.as_str()) {
             out.push(format!("digest {} differs", c["args"]));
+        }
+    }
+    for c in case(expect, "get") {
+        let key = c["args"]["key"].as_str().unwrap();
+        match store.resolve(key) {
+            Ok(entry) => {
+                let got = entry.as_ref().map(entry_value).unwrap_or(Value::Null);
+                if c["expected"] != got {
+                    out.push(format!(
+                        "get {key} differs: python {} rust {got}",
+                        c["expected"]
+                    ));
+                }
+            }
+            Err(error) => out.push(format!("get {key} failed: {error}")),
         }
     }
     let entries: Vec<Value> = store
@@ -182,6 +296,28 @@ fn all_differences(store: &Store, ledger: &mut Ledger, expect: &Value) -> Vec<St
         Ok(got) => out.push(format!("check differs: rust {got}")),
         Err(error) => out.push(format!("check failed: {error}")),
     }
+    // The Python helper restores the copied access log after its search probes for the same
+    // reason: acceptance queries must not become input to the stats comparison.
+    match original_access {
+        Some(bytes) => {
+            if let Err(error) = std::fs::write(&access_path, bytes) {
+                out.push(format!("could not restore copied access log: {error}"));
+            }
+        }
+        None => {
+            let _ = std::fs::remove_file(&access_path);
+        }
+    }
+    match store.stats() {
+        Ok(got) if case(expect, "stats")[0]["expected"] == got => {}
+        Ok(got) => out.push(format!("stats differs: rust {got}")),
+        Err(error) => out.push(format!("stats failed: {error}")),
+    }
+    match store.entry_stats(ledger) {
+        Ok(got) if case(expect, "entry_stats")[0]["expected"] == json!(got) => {}
+        Ok(got) => out.push(format!("entry_stats differs: rust {}", json!(got))),
+        Err(error) => out.push(format!("entry_stats failed: {error}")),
+    }
     out
 }
 
@@ -202,6 +338,7 @@ fn live_tree_matches_the_python() {
     let store = Store::new(Some(&root), false);
     let mut ledger = Ledger::new(Some(&dir.path().join("ledger.db")));
     store.adopt(&mut ledger, "adopt").unwrap();
+    let _clock = fixed_clock(&expect);
     let diffs = all_differences(&store, &mut ledger, &expect);
     for line in &diffs {
         eprintln!("DIFF {line}");

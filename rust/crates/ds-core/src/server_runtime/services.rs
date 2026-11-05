@@ -115,6 +115,7 @@ pub struct RuntimeServices {
     pub(super) owner_push: super::owner_push::OwnerPushService,
     stopped: AtomicBool,
     shutdown_lock: Mutex<()>,
+    shutdown_failure: Mutex<Option<String>>,
     memory: Option<Arc<MemoryService>>,
 }
 
@@ -142,13 +143,25 @@ impl RuntimeServices {
         inputs: RuntimeServiceInputs,
         memory: Option<RuntimeMemoryConfig>,
     ) -> Result<Arc<Self>, DunkError> {
-        Self::build(inputs, memory, |_| {})
+        Self::build(inputs, memory, None, |_, _| {}, |_, _| Ok(()))
+    }
+
+    /// Build services with the already decoded whole-Flock state. Restoration happens
+    /// after stores are attached and before OutboxRuntime starts restored dunk timers.
+    pub(crate) fn new_with_memory_and_snapshot(
+        inputs: RuntimeServiceInputs,
+        memory: Option<RuntimeMemoryConfig>,
+        snapshot: Option<serde_json::Value>,
+    ) -> Result<Arc<Self>, DunkError> {
+        Self::build(inputs, memory, snapshot, |_, _| {}, |_, _| Ok(()))
     }
 
     fn build(
         inputs: RuntimeServiceInputs,
         memory: Option<RuntimeMemoryConfig>,
-        after_memory_start: impl FnOnce(&Option<Arc<MemoryService>>),
+        snapshot: Option<serde_json::Value>,
+        before_memory_start: impl FnOnce(&Flock, &Option<Arc<MemoryService>>),
+        after_memory_start: impl FnOnce(&Flock, &Option<Arc<MemoryService>>) -> Result<(), DunkError>,
     ) -> Result<Arc<Self>, DunkError> {
         if inputs.persist_enabled != memory.is_some() {
             return Err(refusal(
@@ -246,9 +259,7 @@ impl RuntimeServices {
         });
         if let Some(service) = &starting_memory.0 {
             flock.attach_memory_service(Arc::clone(service))?;
-            service.start()?;
         }
-        after_memory_start(&starting_memory.0);
         flock.attach_roles(inputs.roles, inputs.legacy_superusers);
         flock.attach_status_state(StatusState::at_start(
             inputs.release_version,
@@ -256,6 +267,19 @@ impl RuntimeServices {
             &inputs.executable,
             inputs.env.clone(),
         ))?;
+
+        if let Some(snapshot) = snapshot.as_ref() {
+            flock.restore_snapshot(snapshot);
+        }
+
+        // Keep the restored Flock state visible before any runtime worker, including the
+        // first-run memory ingestor, can observe or act on this service set.
+        before_memory_start(&flock, &starting_memory.0);
+        if let Some(service) = &starting_memory.0 {
+            service.start()?;
+        }
+        // A narrow construction seam lets rollback tests fail after the first worker starts.
+        after_memory_start(&flock, &starting_memory.0)?;
 
         let terminal_factory = inputs.terminal_factory;
         let stuck_reporter = StalePanelReporter::new();
@@ -284,6 +308,7 @@ impl RuntimeServices {
             owner_push: super::owner_push::OwnerPushService::default(),
             stopped: AtomicBool::new(false),
             shutdown_lock: Mutex::new(()),
+            shutdown_failure: Mutex::new(None),
             memory: starting_memory.0.take(),
         }))
     }
@@ -516,23 +541,61 @@ impl RuntimeServices {
     /// its request threads (the remaining t1605 shutdown gate). Call on a standard thread;
     /// async owners must await `shutdown_async` so no Tokio worker waits on SyncWriter.
     pub fn shutdown(&self) {
+        if let Err(error) = self.shutdown_checked() {
+            eprintln!("runtime shutdown failed: {error}");
+        }
+    }
+
+    /// Stop all service owners and return the first failure to the daemon lifecycle.
+    pub fn shutdown_checked(&self) -> Result<(), DunkError> {
         assert!(
             self.memory.is_none() || tokio::runtime::Handle::try_current().is_err(),
             "persistent runtime shutdown requires a standard thread; use shutdown_async"
         );
         // Every caller waits for the same completed teardown, not merely a stop flag.
         let _shutdown = self.shutdown_lock.lock().expect("runtime shutdown lock");
-        if !self.stopped.swap(true, Ordering::AcqRel) {
-            self.outbox.stop_manual_fire_workers();
-            self.outbox.stop_timer_workers();
+        if self.stopped.swap(true, Ordering::AcqRel) {
+            if let Some(error) = self
+                .shutdown_failure
+                .lock()
+                .expect("runtime shutdown failure lock")
+                .as_ref()
+            {
+                return Err(refusal(error.clone()));
+            }
+        } else {
+            let mut failures = Vec::new();
+            if let Err(error) = self.outbox.stop_timer_workers_checked() {
+                failures.push(error.to_string());
+            }
+            if let Err(error) = self.outbox.stop_manual_fire_workers_checked() {
+                failures.push(error.to_string());
+            }
             self.allocator.stop_and_join();
-            self.outbox.stop_outbox_workers();
+            if let Err(error) = self.outbox.stop_outbox_workers_checked() {
+                failures.push(error.to_string());
+            }
             if let Some(memory) = &self.memory {
                 if let Err(error) = memory.stop_and_join() {
-                    eprintln!("runtime memory shutdown failed: {error}");
+                    failures.push(error.to_string());
                 }
             }
+            if !failures.is_empty() {
+                *self
+                    .shutdown_failure
+                    .lock()
+                    .expect("runtime shutdown failure lock") = Some(failures.join("; "));
+            }
         }
+        if let Some(error) = self
+            .shutdown_failure
+            .lock()
+            .expect("runtime shutdown failure lock")
+            .as_ref()
+        {
+            return Err(refusal(error.clone()));
+        }
+        Ok(())
     }
 
     /// Await the same complete teardown without running synchronous owners on Tokio workers.
@@ -542,13 +605,13 @@ impl RuntimeServices {
         crate::flock::loop_env::with_sync_store(move || {
             std::thread::Builder::new()
                 .name("runtime-shutdown".into())
-                .spawn(move || services.shutdown())
+                .spawn(move || services.shutdown_checked())
                 .map_err(|error| refusal(format!("runtime shutdown thread: {error}")))?
                 .join()
                 .map_err(|_| refusal("runtime shutdown thread panicked"))
         })
         .await
-        .map_err(|error| refusal(format!("runtime shutdown worker: {error}")))?
+        .map_err(|error| refusal(format!("runtime shutdown worker: {error}")))??
     }
 
     pub(super) fn is_stopped(&self) -> bool {
@@ -658,6 +721,127 @@ mod tests {
                 .unwrap(),
         );
         (tasks, inbox)
+    }
+
+    #[test]
+    fn snapshot_restores_before_one_timer_starts_and_owner_push_stays_lazy() {
+        let dir = crate::testsupport::dir("runtime-snapshot-before-workers");
+        let runtime = Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("daemon runtime");
+        let (tasks, inbox) = tasks_and_inbox(&runtime, &dir);
+        let stores = Stores {
+            tasks: Some(tasks),
+            inbox: Some(inbox),
+            ..Stores::default()
+        };
+        let env = configured_env(&dir, "0");
+        let inputs = startup_inputs(
+            &dir,
+            runtime,
+            env,
+            Arc::new(|| Box::new(FakeTerminal::new())),
+            stores,
+        );
+        let owner_path = dir.path().join("owner-push.db");
+        let before = crate::clock::now_s();
+        let snapshot = json!({
+            "version": 1,
+            "dunkers": [{
+                "id": "d1",
+                "running": true,
+                "next_send_at": before - 60.0,
+                "target_pane_id": "w1:p1",
+                "text": "restored {count}",
+                "max_sends": 1,
+                "hold_while_typing": false
+            }]
+        });
+
+        let services = RuntimeServices::new_with_memory_and_snapshot(inputs, None, Some(snapshot))
+            .expect("canonical services restore before timer startup");
+        let row = services.flock.dunks.get("d1").expect("restored dunk");
+        assert!(row["next_send_at"].as_f64().unwrap() >= before + 4.0);
+        assert_eq!(1, services.outbox.dunk_timer_worker_count());
+        services
+            .attach_owner_push_path(owner_path.clone())
+            .expect("attach lazy owner path");
+        assert!(
+            !owner_path.exists(),
+            "attaching the path does not open its DB"
+        );
+        services
+            .shutdown_checked()
+            .expect("restored timer joins before resource close");
+        assert_eq!(0, services.outbox.dunk_timer_worker_count());
+    }
+
+    #[test]
+    fn memory_worker_start_boundary_observes_restored_flock_state() {
+        let dir = crate::testsupport::dir("runtime-memory-after-restore");
+        let runtime = Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("daemon runtime");
+        let (tasks, inbox) = tasks_and_inbox(&runtime, &dir);
+        let stores = Stores {
+            tasks: Some(tasks),
+            inbox: Some(inbox),
+            ..Stores::default()
+        };
+        let env = configured_env(&dir, "0");
+        let memory_path = dir.path().join("memory.db");
+        let mut inputs = startup_inputs(
+            &dir,
+            runtime,
+            env.clone(),
+            Arc::new(|| Box::new(FakeTerminal::new())),
+            stores,
+        );
+        inputs.persist_enabled = true;
+        inputs
+            .observability
+            .as_mut()
+            .expect("runtime opens its metrics store")
+            .memory_db = Some(memory_path.clone());
+        let memory = Some(RuntimeMemoryConfig::captured(memory_path, &env).unwrap());
+        let snapshot = json!({
+            "version": 1,
+            "dunkers": [{
+                "id": "d-restored",
+                "running": false,
+                "target_pane_id": "w1:p1",
+                "text": "restored state",
+                "max_sends": 1,
+                "hold_while_typing": false
+            }]
+        });
+
+        let services = RuntimeServices::build(
+            inputs,
+            memory,
+            Some(snapshot),
+            |flock, memory| {
+                let memory = memory
+                    .as_ref()
+                    .expect("memory service exists before its worker starts");
+                let status = memory.status().expect("memory service status");
+                assert_eq!(
+                    false, status["ingestor"]["running"],
+                    "memory ingestor remains stopped at the restore boundary"
+                );
+                assert!(
+                    flock.dunks.get("d-restored").is_ok(),
+                    "snapshot state is restored at the memory-start boundary"
+                );
+            },
+            |_, _| Ok(()),
+        )
+        .expect("build and start memory after snapshot restoration");
+        services
+            .shutdown_checked()
+            .expect("memory and runtime workers are joined");
     }
 
     fn fake_factory_with_current_pane() -> LoopTerminalFactory {
@@ -1926,11 +2110,7 @@ mod tests {
     #[test]
     fn runtime_memory_partial_startup_failure_joins_worker_and_closes_writer() {
         let dir = tempfile::tempdir().unwrap();
-        let inputs = memory_inputs(
-            &dir,
-            Env::from_pairs(&[("DUNKINGSHEEP_VIEW_CACHE_S", "bad")]),
-            true,
-        );
+        let inputs = memory_inputs(&dir, Env::default(), true);
         let config = RuntimeMemoryConfig::captured(
             inputs
                 .observability
@@ -1943,14 +2123,23 @@ mod tests {
         )
         .unwrap();
         let mut observed = None;
-        let error = RuntimeServices::build(inputs, Some(config), |owner| {
-            let service = owner.as_ref().unwrap();
-            assert!(service.worker_id().is_some());
-            observed = Some(Arc::clone(service));
-        })
+        let error = RuntimeServices::build(
+            inputs,
+            Some(config),
+            None,
+            |_, _| {},
+            |_flock, owner| {
+                let service = owner.as_ref().unwrap();
+                assert!(service.worker_id().is_some());
+                observed = Some(Arc::clone(service));
+                Err(refusal("injected failure after memory worker startup"))
+            },
+        )
         .err()
         .unwrap();
-        assert!(error.to_string().contains("DUNKINGSHEEP_VIEW_CACHE_S"));
+        assert!(error
+            .to_string()
+            .contains("injected failure after memory worker startup"));
         let service = observed.unwrap();
         assert!(service.worker_id().is_none());
         assert!(service.start().is_err());

@@ -1324,9 +1324,11 @@ mod tests {
         }
     }
 
+    type SearchInvocation = (String, Option<String>, i64, usize);
+
     #[derive(Default)]
     struct FakeBackend {
-        search: Mutex<Vec<(String, Option<String>, i64, usize)>>,
+        search: Mutex<Vec<SearchInvocation>>,
         uploads: Mutex<Vec<UploadPart>>,
         rows: Mutex<Vec<Value>>,
         file: Option<DownloadFile>,

@@ -3463,6 +3463,12 @@ impl OutboxWorkerPool {
     /// Stop and join every worker for this flock. Call this before closing terminal/store
     /// services; after this call, enqueue refuses to start another worker for the same flock.
     pub fn stop_outbox_workers(&self, flock: &Flock) {
+        if let Err(error) = self.stop_outbox_workers_checked(flock) {
+            eprintln!("outbox worker shutdown failed: {error}");
+        }
+    }
+
+    pub(crate) fn stop_outbox_workers_checked(&self, flock: &Flock) -> Result<(), DunkError> {
         let flock_id = flock.id;
         let (workers, mut retired) = {
             let mut workers = self
@@ -3487,14 +3493,24 @@ impl OutboxWorkerPool {
                 .collect::<Vec<_>>();
             (active, retired)
         };
+        let mut failures = Vec::new();
         for mut worker in workers {
             worker.stopped.store(true, Ordering::Release);
             if let Some(handle) = worker.handle.take() {
-                let _ = handle.join();
+                if handle.join().is_err() {
+                    failures.push(format!("outbox worker {} panicked", worker.token));
+                }
             }
         }
         for handle in retired.drain(..) {
-            let _ = handle.join();
+            if handle.join().is_err() {
+                failures.push("retired outbox worker panicked".to_owned());
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(crate::error::refusal(failures.join("; ")))
         }
     }
 

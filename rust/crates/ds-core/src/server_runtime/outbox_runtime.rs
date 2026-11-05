@@ -376,12 +376,28 @@ impl OutboxRuntime {
         self.dunk_timers.stop_all();
     }
 
+    pub(crate) fn stop_timer_workers_checked(&self) -> Result<(), DunkError> {
+        let _lifecycle = self
+            .dunk_lifecycle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.dunk_timers.stop_all_checked()
+    }
+
     pub(crate) fn stop_manual_fire_workers(&self) {
         self.manual_fire.stop_and_join();
     }
 
+    pub(crate) fn stop_manual_fire_workers_checked(&self) -> Result<(), DunkError> {
+        self.manual_fire.stop_and_join_checked()
+    }
+
     pub(crate) fn stop_outbox_workers(&self) {
         self.pool.stop_outbox_workers(&self.flock);
+    }
+
+    pub(crate) fn stop_outbox_workers_checked(&self) -> Result<(), DunkError> {
+        self.pool.stop_outbox_workers_checked(&self.flock)
     }
 
     #[allow(dead_code)]
