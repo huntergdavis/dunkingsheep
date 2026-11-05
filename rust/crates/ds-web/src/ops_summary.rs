@@ -889,8 +889,15 @@ pub fn summary(
         &[&PROJECT],&["provider","monthly_usd_cents","observed_at","evidence_ref"])?;
     for item in &mut subscriptions {
         let cents = item["monthly_usd_cents"].as_i64().unwrap_or_default();
-        item.as_object_mut().unwrap().remove("monthly_usd_cents");
-        item["monthly_usd"] = number(cents as f64 / 100.0);
+        let provider = item["provider"].clone();
+        let observed_at = item["observed_at"].clone();
+        let evidence_ref = item["evidence_ref"].clone();
+        *item = json!({
+            "provider": provider,
+            "observed_at": observed_at,
+            "evidence_ref": evidence_ref,
+            "monthly_usd": number(cents as f64 / 100.0)
+        });
     }
     let monthly = if subscriptions.is_empty() {
         Value::Null

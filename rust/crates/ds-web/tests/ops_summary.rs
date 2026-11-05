@@ -101,6 +101,22 @@ fn fixture_paths() -> (
     (directory, db, host, opencode)
 }
 
+fn canonical_json(value: Value) -> Value {
+    match value {
+        Value::Object(object) => {
+            let mut entries = object.into_iter().collect::<Vec<_>>();
+            entries.sort_by(|left, right| left.0.cmp(&right.0));
+            let mut canonical = serde_json::Map::new();
+            for (key, value) in entries {
+                canonical.insert(key, canonical_json(value));
+            }
+            Value::Object(canonical)
+        }
+        Value::Array(values) => Value::Array(values.into_iter().map(canonical_json).collect()),
+        other => other,
+    }
+}
+
 fn setup_oracle(repo: &Path, db: &Path, host: &Path, opencode: &Path) -> Value {
     let output = Command::new("python3")
         .arg("-c")
@@ -129,7 +145,7 @@ fn summary_matches_ast_isolated_python_fixture_with_real_sources_and_rounding() 
         .unwrap()
         .with_timezone(&Utc);
     let actual = ops_summary::summary(&conn, now, &host, &opencode).expect("summary");
-    assert_eq!(actual, expected);
+    assert_eq!(canonical_json(actual.clone()), canonical_json(expected));
     assert_eq!(
         actual["quotas"]["codex"]["burn_percentage_points_per_hour"],
         10.0
