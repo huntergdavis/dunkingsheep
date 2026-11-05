@@ -828,7 +828,7 @@ server.serve_forever()
         python.shutdown(std::net::Shutdown::Write).unwrap();
         let mut python_response = Vec::new();
         python.read_to_end(&mut python_response).unwrap();
-        assert_response_equivalent(&python_response, &rust_response, 25, true);
+        assert_response_equivalent(&python_response, &rust_response, 33, true);
     }
 
     fn assert_response_equivalent(python: &[u8], rust: &[u8], case: usize, compare_body: bool) {
