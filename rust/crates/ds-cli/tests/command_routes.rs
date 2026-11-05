@@ -5282,14 +5282,19 @@ fn cli_route_52_watchdog_deadman() {
     );
     replace_route_option(&mut fallback_command, "--inbox", failed_inbox_text.as_str());
     fallback_command.extend(["--socket", missing_socket_text.as_str()]);
-    let fallback = run_cli_with_env(
+    let fallback = run_cli_with_env_bounded(
         &unused_root_socket_text,
         &fallback_command,
-        &[("DUNKINGSHEEP_DIR", dir_text.as_str())],
+        &[
+            ("DUNKINGSHEEP_DIR", dir_text.as_str()),
+            ("DUNKINGSHEEP_SERVICE_TOKEN", "watchdog-fixture-token"),
+        ],
     );
     assert_eq!(Some(1), fallback.status.code());
+    let fallback_stderr = String::from_utf8_lossy(&fallback.stderr);
     assert!(
-        String::from_utf8_lossy(&fallback.stderr).contains("VP alert NOT delivered [daemon_down]")
+        fallback_stderr.contains("VP alert NOT delivered [daemon_down]"),
+        "unexpected fallback stderr: {fallback_stderr}"
     );
     let fallback_report: Value = serde_json::from_slice(&fallback.stdout).unwrap();
     assert_eq!("daemon_down", fallback_report["cause"]);
