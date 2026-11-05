@@ -265,10 +265,10 @@ fn test_every_flat_command_has_a_grouped_home() {
     // The Python walks `mcp_tool_map()`; ds-core has no such map, so check the same facts
     // against the registry: every mcp command is some group's action, and every action names
     // a registered command.
-    // `owner_receipts` is mcp=true with no group: the Python test of the same name FAILS on main
-    // for it today (flat name still callable). Listed here, by name, so a NEW ungrouped command
-    // fails this test and this one does not hide behind a wildcard.
-    const KNOWN_UNGROUPED: [&str; 1] = ["owner_receipts"];
+    // `owner_receipts` is already mcp=true with no group. `project_spawn` is a Rust-only flat
+    // extension: putting it in a group would change the frozen Python mcp-map shape. Both remain
+    // callable by flat name, and this list makes each ungrouped exception explicit.
+    const KNOWN_UNGROUPED: [&str; 2] = ["owner_receipts", "project_spawn"];
     for command in registry::COMMANDS.iter().filter(|c| c.mcp) {
         if KNOWN_UNGROUPED.contains(&command.name) {
             continue;

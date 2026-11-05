@@ -128,7 +128,7 @@ pub const SYSTEM_EXTRA: [&str; 30] = [
 ];
 
 /// `ALLOW["desk"]` minus `READ_ONLY`.
-pub const DESK_EXTRA: [&str; 15] = [
+pub const DESK_EXTRA: [&str; 16] = [
     "inbox_ack",
     "inbox_fetch",
     "inbox_read",
@@ -137,6 +137,7 @@ pub const DESK_EXTRA: [&str; 15] = [
     "owner_poll",
     "owner_reply",
     "owner_take",
+    "project_spawn",
     "read_pane",
     "report_run",
     "task_add",
@@ -185,13 +186,14 @@ pub const WEB_DENIED: [&str; 30] = [
 
 /// `allowed(role, command)`: may `role` call `command`?
 ///
-/// `owner` may call everything; `web` may call everything but `WEB_DENIED`; the lane roles
+/// `owner` may call everything; `web` may call everything but `WEB_DENIED` and Rust-only
+/// `project_spawn`; the lane roles
 /// get `READ_ONLY` plus their own extras; an UNKNOWN role gets `READ_ONLY` only (the
 /// Python's `ALLOW.get(role, READ_ONLY)`).
 pub fn allowed(role: &str, command: &str) -> bool {
     let extra: &[&str] = match role {
         "owner" => return true,
-        "web" => return !WEB_DENIED.contains(&command),
+        "web" => return !WEB_DENIED.contains(&command) && command != "project_spawn",
         "system" => &SYSTEM_EXTRA,
         "desk" => &DESK_EXTRA,
         "planner" => &PLANNER_EXTRA,

@@ -34,6 +34,8 @@ mod dunk_get;
 pub use dunk_get::h_get_dunk;
 mod project_summary;
 pub use project_summary::h_project_summary;
+mod project_spawn;
+pub use project_spawn::h_project_spawn;
 mod layout_agent;
 pub mod layout_close;
 pub use layout_close::{h_close, h_herdr, h_herdr_help};
@@ -119,11 +121,34 @@ pub trait OwnerViewEnv {
     fn now(&self) -> f64;
 }
 
+/// Explicit daemon-owned configuration for `project_spawn`. Production construction is gated
+/// with the project runtime/config slice; this API layer supplies no path, amount, provider, or
+/// usage default of its own.
+#[derive(Debug, Clone)]
+pub struct ProjectSpawnConfig {
+    pub project_root: PathBuf,
+    pub store_path: PathBuf,
+    pub budget_json: String,
+    pub provider: String,
+    pub provider_home: PathBuf,
+    pub five_hour_usage: crate::projects::Usage,
+    pub approved: bool,
+    pub now: f64,
+}
+
 /// A synchronous adapter for command dependencies. All methods are object-safe so a daemon can
 /// supply one per request without putting backend types in handler signatures.
 pub trait CommandEnv: PaneInfoEnv {
     fn layout_close_env(&self) -> Result<&dyn layout_close::LayoutCloseEnv, DunkError> {
         Err(crate::error::refusal("layout close adapter is not wired"))
+    }
+
+    /// Project root, durable store, provider measurements and owner approval. The runtime
+    /// adapter is intentionally not supplied by the source-only command registration slice.
+    fn project_spawn_config(&self) -> Result<ProjectSpawnConfig, DunkError> {
+        Err(DunkError::Refused(
+            "project spawn config adapter is not wired".into(),
+        ))
     }
 
     fn health_state_env(&self) -> Result<&dyn health_state::HealthStateEnv, DunkError> {
@@ -743,6 +768,12 @@ impl Dispatcher {
     /// Register only the T39 project summary handler.
     pub fn register_project_summary(&mut self) {
         self.register("project_summary", h_project_summary);
+    }
+
+    /// Register only the T39 Rust project-spawn handler. Runtime config remains independently
+    /// gated; an unwired adapter refuses before opening the store or touching the terminal.
+    pub fn register_project_spawn(&mut self) {
+        self.register("project_spawn", h_project_spawn);
     }
 
     /// Register only the T39 help handler leaf.

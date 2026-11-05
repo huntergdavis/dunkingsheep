@@ -5,7 +5,7 @@
 //! the Python harness classes: those drive a whole Flock and belong to the later slices.
 
 use super::commands_inbox::{
-    notice_text, recipient_is_quiet, InboxEnv, Nudge, RouteEntry, SendArgs,
+    notice_text, recipient_is_quiet, InboxEnv, Nudge, OwnerMailboxReporter, RouteEntry, SendArgs,
 };
 use super::mailbox::MailboxEnv;
 use super::Flock;
@@ -184,6 +184,23 @@ fn put(e: &Env, mailbox: &str, body: &str) -> String {
             ..Default::default()
         })
         .expect("send")
+}
+
+#[test]
+fn project_reporter_commits_to_the_reserved_owner_mailbox() {
+    let e = env("desk");
+    let f = flock(&e._dir);
+    let reporter = OwnerMailboxReporter {
+        flock: &f,
+        env: &e,
+        self_pane_id: Some("w1:p1"),
+    };
+    let message_id =
+        crate::projects::Reporter::report(&reporter, "project-a", "project project-a is live")
+            .unwrap();
+    let status = crate::inbox::status(e.pool(), &message_id, e.now()).unwrap();
+    assert_eq!(status.mailbox, "owner");
+    assert_eq!(status.state, "queued");
 }
 
 #[test]

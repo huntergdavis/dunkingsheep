@@ -1,12 +1,6 @@
-//! `project_spawn` (t1171, contract in docs/PROJECTS.md): the front desk asks, the DAEMON
-//! starts a project with its own authority. Slice 1: the guards, the idempotent and
-//! resumable step runner, and the events - driven through the `Terminal` trait so a test
-//! uses `FakeTerminal` and never a real agent.
-//!
-//! NOT in this slice (named so nobody reads it as done): wiring into the command table and
-//! `ALLOW['desk']`, persistence of the registry, the owner-mailbox report, model choice by
-//! usage headroom, and the "one word" approval transport (docs/PROJECTS.md "Not decided").
-//! The live registry is in memory, so a daemon restart forgets a half-spawned project.
+//! `project_spawn` (t1171): the front desk asks, the DAEMON starts a project with its own
+//! authority. Project state, durable step events, agent starts, and owner reporting are
+//! kept behind this module so a restart can resume without replaying an uncertain action.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -14,6 +8,9 @@ use std::process::Command;
 use crate::error::DunkError;
 use crate::fallback::{tier_headroom, tier_state, Credit, RESERVE_PERCENT};
 use crate::terminal::{AgentSpec, Terminal};
+use serde::{Deserialize, Serialize};
+
+pub mod newprojects;
 
 /// Max agents one project may own (named in the refusal text). docs/PROJECTS.md leaves the
 /// exact maxima undecided; these are the starting values, not a measured limit.
@@ -34,16 +31,17 @@ pub enum Usage {
 }
 
 /// The steps of a spawn, in order; each is an event, so a half-spawned project is visible.
-pub const STEPS: [&str; 5] = [
+pub const STEPS: [&str; 6] = [
     "validated",
     "scaffolded",
     "workspace",
-    "research_agent",
+    "writer_agent",
+    "reviewer_agent",
     "reported",
 ];
 
 /// One logged step.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Event {
     pub step: String,
     pub ok: bool,
@@ -51,7 +49,7 @@ pub struct Event {
 }
 
 /// Where a project is.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum State {
     /// Waiting for the owner's one word.
     AwaitingApproval,
@@ -64,7 +62,7 @@ pub enum State {
 }
 
 /// One project in the registry.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Project {
     pub name: String,
     pub dir: PathBuf,
@@ -75,6 +73,10 @@ pub struct Project {
     /// (role, pane id).
     pub agents: Vec<(String, String)>,
     pub events: Vec<Event>,
+    /// A durable intent written before an external action. On restart, an outstanding intent
+    /// is reported as uncertain and is never replayed automatically.
+    #[serde(default)]
+    pub pending_step: Option<String>,
 }
 
 impl Project {
@@ -84,7 +86,7 @@ impl Project {
 }
 
 /// What the desk sends: the contract's `project_spawn(name, brief, template, soft_cap)` and
-/// nothing else. Whether the owner approved, and which command starts the research agent,
+/// nothing else. Whether the owner approved, and the commands used for project agents,
 /// are NOT the caller's to say - see [`Authority`].
 #[derive(Debug, Clone)]
 pub struct Request {
@@ -94,20 +96,44 @@ pub struct Request {
     pub soft_cap: Option<f64>,
 }
 
-/// What the DAEMON knows and the desk must never supply: the owner's one word, and the
-/// command that starts the research agent (the daemon picks the model). A desk-controlled
-/// `research_argv` would be an arbitrary command run with daemon authority.
+/// What the DAEMON knows and the desk must never supply: the owner's one word. Project agent
+/// commands are built from the approved template below; a desk-controlled argv would be an
+/// arbitrary command run with daemon authority.
 #[derive(Debug, Clone)]
 pub struct Authority {
     /// The owner's one word has been given (read from the owner's mailbox, daemon-side).
     pub approved: bool,
-    pub research_argv: Vec<String>,
+    /// Writer and reviewer argv are explicit daemon authority, never request fields.
+    pub writer_argv: Vec<String>,
+    pub reviewer_argv: Vec<String>,
+}
+
+impl Authority {
+    /// The approved project template: one Luna low writer and one Luna medium reviewer.
+    /// Budget admission is performed against the configured Codex subscription before this
+    /// template can cause any project write or agent start.
+    pub fn project_template(approved: bool) -> Self {
+        let argv = |effort: &str| {
+            vec![
+                "codex".into(),
+                "--model".into(),
+                "gpt-6-luna".into(),
+                "--config".into(),
+                format!("model_reasoning_effort={effort}"),
+            ]
+        };
+        Self {
+            approved,
+            writer_argv: argv("low"),
+            reviewer_argv: argv("medium"),
+        }
+    }
 }
 
 /// Posts the "project is live" report to the owner's mailbox (docs/PROJECTS.md step 7). A trait
 /// so the registry is tested without a mailbox; the daemon's implementation sends through the
 /// inbox store. `Ok` carries the message id the report was filed under.
-pub trait Reporter: std::fmt::Debug + Send {
+pub trait Reporter: std::fmt::Debug {
     fn report(&self, project: &str, body: &str) -> Result<String, String>;
 }
 
@@ -117,6 +143,7 @@ pub struct Projects {
     projects: Vec<Project>,
     /// None until the owner mailbox is wired: the `reported` step then says it was NOT sent.
     reporter: Option<Box<dyn Reporter>>,
+    store: Option<newprojects::ProjectStore>,
 }
 
 /// `[a-z0-9][a-z0-9-]{1,38}`: a slug, because the name becomes a directory under the root.
@@ -211,6 +238,266 @@ impl Projects {
         Self::default()
     }
 
+    /// Open the project-owned durable store and recover its registry before accepting requests.
+    /// The path must come from approved configuration; no amount or store path is invented.
+    pub async fn open_durable(path: &Path) -> Result<Self, DunkError> {
+        let store = newprojects::ProjectStore::open(path).await?;
+        let projects = store.load().await?;
+        Ok(Self {
+            projects,
+            reporter: None,
+            store: Some(store),
+        })
+    }
+
+    pub async fn open_durable_with_reporter(
+        path: &Path,
+        reporter: Box<dyn Reporter>,
+    ) -> Result<Self, DunkError> {
+        let store = newprojects::ProjectStore::open(path).await?;
+        let projects = store.load().await?;
+        Ok(Self {
+            projects,
+            reporter: Some(reporter),
+            store: Some(store),
+        })
+    }
+
+    pub async fn shutdown(&self) {
+        if let Some(store) = &self.store {
+            store.shutdown().await;
+        }
+    }
+
+    /// Budgeted async entry point. The legacy synchronous entry point has no budget configuration
+    /// and is therefore refused before it can write a project.
+    #[allow(clippy::too_many_arguments)]
+    async fn spawn_budgeted<T: Terminal + ?Sized>(
+        &mut self,
+        terminal: &mut T,
+        root: &Path,
+        request: &Request,
+        authority: &Authority,
+        five_hour_usage: &Usage,
+        budget: &newprojects::ProjectBudgetConfig,
+        provider: &str,
+        provider_reading: &serde_json::Value,
+        now: f64,
+        reporter_override: Option<&dyn Reporter>,
+    ) -> Result<Project, DunkError> {
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| DunkError::Refused("project budget not configured".into()))?;
+        let name = validate_name(&request.name)?;
+        if self
+            .get(&name)
+            .is_some_and(|project| project.pending_step.is_some())
+        {
+            return Err(DunkError::Refused(format!(
+                "project {name}: previous step outcome is uncertain; inspect before retry"
+            )));
+        }
+        if let Some(cap) = request.soft_cap {
+            if !cap.is_finite() || cap <= 0.0 {
+                return Err(DunkError::Refused(format!(
+                    "soft_cap must be a positive number; got {cap}"
+                )));
+            }
+        }
+        if request.template != "standard" {
+            return Err(DunkError::Refused(format!(
+                "unknown project template {:?}; only 'standard' exists",
+                request.template
+            )));
+        }
+        if let Some(existing) = self.get(&name) {
+            if existing.state == State::Stopped {
+                return Err(DunkError::Refused(format!(
+                    "project {name:?} was stopped by the owner (its directory is kept); start a new project under another name"
+                )));
+            }
+            if existing.state == State::Live {
+                return Ok(existing.clone());
+            }
+            if authority.approved && reporter_override.is_none() && self.reporter.is_none() {
+                return Err(DunkError::Refused(
+                    "owner mailbox reporter is not wired".into(),
+                ));
+            }
+            let approved_root = canonical_project_root(root)?;
+            validate_owned_project_dir(&approved_root, &name, existing)?;
+            if !existing.done("scaffolded") && project_path_present(&existing.dir)? {
+                return Err(DunkError::Refused(format!(
+                    "{} already exists without a durable scaffold completion; inspect it before retry",
+                    existing.dir.display()
+                )));
+            }
+        } else {
+            if self.live_count() >= MAX_LIVE_PROJECTS {
+                return Err(DunkError::Refused(format!(
+                    "{MAX_LIVE_PROJECTS} projects are already live (MAX_LIVE_PROJECTS); stop one first"
+                )));
+            }
+            if self.awaiting_count() >= MAX_AWAITING_APPROVAL {
+                return Err(DunkError::Refused(format!(
+                    "{MAX_AWAITING_APPROVAL} projects already wait for the owner (MAX_AWAITING_APPROVAL); wait for an answer first"
+                )));
+            }
+            let approved_root = canonical_project_root(root)?;
+            let dir = approved_root.join(&name);
+            if project_path_present(&dir)? {
+                return Err(DunkError::Refused(format!(
+                    "{} already exists and is not a project this daemon started; pick another name",
+                    dir.display()
+                )));
+            }
+            if authority.approved && reporter_override.is_none() && self.reporter.is_none() {
+                return Err(DunkError::Refused(
+                    "owner mailbox reporter is not wired".into(),
+                ));
+            }
+            // A new name is budget-admitted before any durable project state is written.
+            budget.admit(&name, provider, five_hour_usage, provider_reading, now)?;
+            let project = Project {
+                name: name.clone(),
+                dir,
+                brief: request.brief.clone(),
+                soft_cap: request.soft_cap,
+                state: State::AwaitingApproval,
+                workspace_id: None,
+                agents: Vec::new(),
+                events: Vec::new(),
+                pending_step: None,
+            };
+            store.save(project.clone(), None).await?;
+            self.projects.push(project);
+        }
+
+        let index = self
+            .projects
+            .iter()
+            .position(|project| project.name == name)
+            .ok_or_else(|| {
+                DunkError::Refused(format!("project {name}: durable registry lost its state"))
+            })?;
+        if !authority.approved {
+            self.projects[index].state = State::AwaitingApproval;
+            store.save(self.projects[index].clone(), None).await?;
+            return Ok(self.projects[index].clone());
+        }
+        // Revalidate current provider evidence before any side effect on a resumed project.
+        budget.admit(&name, provider, five_hour_usage, provider_reading, now)?;
+        self.projects[index].state = State::Partial;
+        store.save(self.projects[index].clone(), None).await?;
+        let reporter = reporter_override.or(self.reporter.as_deref());
+        run_steps_durable(
+            &mut self.projects[index],
+            terminal,
+            request,
+            authority,
+            reporter,
+            store,
+        )
+        .await?;
+        self.projects[index].state = State::Live;
+        store.save(self.projects[index].clone(), None).await?;
+        Ok(self.projects[index].clone())
+    }
+
+    /// Production-facing provider path: run the configured real usage reader, then validate that
+    /// measurement and persist only after admission succeeds.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn spawn_from_sources<T: Terminal + ?Sized>(
+        &mut self,
+        terminal: &mut T,
+        root: &Path,
+        request: &Request,
+        authority: &Authority,
+        five_hour_usage: &Usage,
+        budget_json: &str,
+        provider: &str,
+        provider_home: &Path,
+        now: f64,
+    ) -> Result<Project, DunkError> {
+        self.spawn_from_sources_reporter(
+            terminal,
+            root,
+            request,
+            authority,
+            five_hour_usage,
+            budget_json,
+            provider,
+            provider_home,
+            now,
+            None,
+        )
+        .await
+    }
+
+    /// Production-facing variant with a request-scoped owner mailbox reporter. The reporter is
+    /// borrowed only for this call, so a daemon can use its existing inbox adapter without
+    /// storing borrowed runtime state inside `Projects`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn spawn_from_sources_with_reporter<T: Terminal + ?Sized>(
+        &mut self,
+        terminal: &mut T,
+        root: &Path,
+        request: &Request,
+        authority: &Authority,
+        five_hour_usage: &Usage,
+        budget_json: &str,
+        provider: &str,
+        provider_home: &Path,
+        now: f64,
+        reporter: &dyn Reporter,
+    ) -> Result<Project, DunkError> {
+        self.spawn_from_sources_reporter(
+            terminal,
+            root,
+            request,
+            authority,
+            five_hour_usage,
+            budget_json,
+            provider,
+            provider_home,
+            now,
+            Some(reporter),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn spawn_from_sources_reporter<T: Terminal + ?Sized>(
+        &mut self,
+        terminal: &mut T,
+        root: &Path,
+        request: &Request,
+        authority: &Authority,
+        five_hour_usage: &Usage,
+        budget_json: &str,
+        provider: &str,
+        provider_home: &Path,
+        now: f64,
+        reporter: Option<&dyn Reporter>,
+    ) -> Result<Project, DunkError> {
+        let budget = newprojects::ProjectBudgetConfig::from_json(budget_json)?;
+        let reading = budget.read_provider(provider, provider_home, now).await?;
+        self.spawn_budgeted(
+            terminal,
+            root,
+            request,
+            authority,
+            five_hour_usage,
+            &budget,
+            provider,
+            &reading,
+            now,
+            reporter,
+        )
+        .await
+    }
+
     /// A registry that posts its report through `reporter`.
     pub fn with_reporter(reporter: Box<dyn Reporter>) -> Self {
         Projects {
@@ -252,6 +539,11 @@ impl Projects {
         if !is_owner {
             return Err(DunkError::Refused(
                 "project_stop is owner-only: closing and stopping the fleet stays with a human in a terminal".into(),
+            ));
+        }
+        if self.store.is_some() {
+            return Err(DunkError::Refused(
+                "durable projects require stop_durable so state and events are awaited".into(),
             ));
         }
         let Some(index) = self.projects.iter().position(|p| p.name == name) else {
@@ -325,9 +617,107 @@ impl Projects {
         Ok(project.clone())
     }
 
-    /// `project_spawn`: validate, guard, approve, then run the steps that are not done.
-    /// Idempotent by name: a live project is returned untouched; a partial one resumes.
+    /// Durable counterpart to `stop`: persist each close intent before the terminal call and its
+    /// result before proceeding. A recovered unresolved intent is never replayed automatically.
+    pub async fn stop_durable<T: Terminal + Send>(
+        &mut self,
+        terminal: &mut T,
+        name: &str,
+        is_owner: bool,
+    ) -> Result<Project, DunkError> {
+        if !is_owner {
+            return Err(DunkError::Refused(
+                "project_stop is owner-only: closing and stopping the fleet stays with a human in a terminal".into(),
+            ));
+        }
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| DunkError::Refused("durable project store not configured".into()))?;
+        let index = self
+            .projects
+            .iter()
+            .position(|project| project.name == name)
+            .ok_or_else(|| DunkError::Refused(format!("no project named {name:?}")))?;
+        if self.projects[index].pending_step.is_some() {
+            return Err(DunkError::Refused(format!(
+                "project {name}: previous step outcome is uncertain; inspect before retry"
+            )));
+        }
+        if self.projects[index].state == State::Stopped {
+            return Ok(self.projects[index].clone());
+        }
+        let mut failures = Vec::new();
+        for (role, pane_id) in self.projects[index].agents.clone() {
+            let step = format!("stop_agent_{pane_id}");
+            begin_external_step(&mut self.projects[index], &step, store).await?;
+            let result = terminal
+                .close("pane", &pane_id)
+                .map(|()| {
+                    self.projects[index]
+                        .agents
+                        .retain(|(_, pane)| *pane != pane_id);
+                    format!("closed {role}={pane_id}")
+                })
+                .map_err(|error| format!("{role}={pane_id}: {error}"));
+            if let Err(error) =
+                finish_external_step(&mut self.projects[index], &step, result, store).await
+            {
+                failures.push(error.to_string());
+            }
+        }
+        if failures.is_empty() {
+            if let Some(workspace) = self.projects[index].workspace_id.clone() {
+                begin_external_step(&mut self.projects[index], "stop_workspace", store).await?;
+                let result = terminal
+                    .close("workspace", &workspace)
+                    .map(|()| {
+                        self.projects[index].workspace_id = None;
+                        format!("closed {workspace}")
+                    })
+                    .map_err(|error| format!("{workspace}: {error}"));
+                if let Err(error) =
+                    finish_external_step(&mut self.projects[index], "stop_workspace", result, store)
+                        .await
+                {
+                    failures.push(error.to_string());
+                }
+            }
+        }
+        if !failures.is_empty() {
+            return Err(DunkError::Refused(format!(
+                "project {name}: stop incomplete ({}); calling project_stop again retries what is left",
+                failures.join("; ")
+            )));
+        }
+        self.projects[index].state = State::Stopped;
+        let kept = self.projects[index].dir.display().to_string();
+        durable_log(
+            &mut self.projects[index],
+            "stopped",
+            true,
+            format!("agents and workspace closed; directory kept at {kept}"),
+            store,
+        )
+        .await?;
+        Ok(self.projects[index].clone())
+    }
+
+    /// Compatibility entry point for callers without approved budget input. It fails closed;
+    /// durable project creation must use `spawn_from_sources`.
     pub fn spawn(
+        &mut self,
+        _terminal: &mut dyn Terminal,
+        _root: &Path,
+        _request: &Request,
+        _authority: &Authority,
+        _usage: &Usage,
+    ) -> Result<Project, DunkError> {
+        Err(DunkError::Refused("project budget not configured".into()))
+    }
+
+    #[cfg(test)]
+    fn spawn_unbudgeted_for_test(
         &mut self,
         terminal: &mut dyn Terminal,
         root: &Path,
@@ -391,6 +781,7 @@ impl Projects {
                 workspace_id: None,
                 agents: Vec::new(),
                 events: Vec::new(),
+                pending_step: None,
             });
         }
         let index = self
@@ -428,6 +819,275 @@ fn log(project: &mut Project, step: &str, ok: bool, detail: impl Into<String>) {
     });
 }
 
+async fn durable_log(
+    project: &mut Project,
+    step: &str,
+    ok: bool,
+    detail: impl Into<String>,
+    store: &newprojects::ProjectStore,
+) -> Result<(), DunkError> {
+    log(project, step, ok, detail);
+    let sequence = project.events.len().saturating_sub(1) as i64;
+    let event = project.events.last().cloned();
+    store
+        .save(project.clone(), event.map(|event| (sequence, event)))
+        .await
+}
+
+async fn begin_external_step(
+    project: &mut Project,
+    step: &str,
+    store: &newprojects::ProjectStore,
+) -> Result<(), DunkError> {
+    project.pending_step = Some(step.to_owned());
+    durable_log(
+        project,
+        &format!("{step}_started"),
+        true,
+        "outcome pending",
+        store,
+    )
+    .await
+}
+
+async fn finish_external_step(
+    project: &mut Project,
+    step: &str,
+    result: Result<String, String>,
+    store: &newprojects::ProjectStore,
+) -> Result<(), DunkError> {
+    let pending = project.pending_step.clone();
+    project.pending_step = None;
+    match result {
+        Ok(detail) => {
+            if let Err(error) = durable_log(project, step, true, detail, store).await {
+                project.pending_step = pending;
+                return Err(error);
+            }
+            Ok(())
+        }
+        Err(message) => {
+            if let Err(error) = durable_log(project, step, false, message.clone(), store).await {
+                project.pending_step = pending;
+                return Err(error);
+            }
+            Err(DunkError::Refused(format!(
+                "project {}: step {step} failed: {message}",
+                project.name
+            )))
+        }
+    }
+}
+
+fn canonical_project_root(root: &Path) -> Result<PathBuf, DunkError> {
+    let canonical = std::fs::canonicalize(root).map_err(|error| {
+        DunkError::Refused(format!(
+            "project root {} is unavailable: {error}",
+            root.display()
+        ))
+    })?;
+    if !canonical.is_dir() {
+        return Err(DunkError::Refused(format!(
+            "project root {} is not a directory",
+            canonical.display()
+        )));
+    }
+    Ok(canonical)
+}
+
+fn project_path_present(path: &Path) -> Result<bool, DunkError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(DunkError::Refused(format!(
+            "cannot inspect project path {}: {error}",
+            path.display()
+        ))),
+    }
+}
+
+fn validate_owned_project_dir(root: &Path, name: &str, project: &Project) -> Result<(), DunkError> {
+    let expected = root.join(name);
+    if project.dir != expected {
+        return Err(DunkError::Refused(format!(
+            "project {name}: persisted directory {} does not match approved root {}",
+            project.dir.display(),
+            expected.display()
+        )));
+    }
+    if project_path_present(&project.dir)? {
+        let actual = std::fs::canonicalize(&project.dir).map_err(|error| {
+            DunkError::Refused(format!(
+                "project {name}: cannot verify persisted directory {}: {error}",
+                project.dir.display()
+            ))
+        })?;
+        if actual != expected {
+            return Err(DunkError::Refused(format!(
+                "project {name}: persisted directory resolves outside its approved root"
+            )));
+        }
+    } else if project.done("scaffolded") {
+        return Err(DunkError::Refused(format!(
+            "project {name}: durably scaffolded directory is missing"
+        )));
+    }
+    Ok(())
+}
+
+async fn run_steps_durable<T: Terminal + ?Sized>(
+    project: &mut Project,
+    terminal: &mut T,
+    request: &Request,
+    authority: &Authority,
+    reporter: Option<&dyn Reporter>,
+    store: &newprojects::ProjectStore,
+) -> Result<(), DunkError> {
+    if project.pending_step.is_some() {
+        return Err(DunkError::Refused(format!(
+            "project {}: previous step outcome is uncertain; inspect before retry",
+            project.name
+        )));
+    }
+    if !project.done("validated") {
+        durable_log(
+            project,
+            "validated",
+            true,
+            format!("template {}", request.template),
+            store,
+        )
+        .await?;
+    }
+    if !project.done("scaffolded") {
+        begin_external_step(project, "scaffolded", store).await?;
+        let result =
+            scaffold(&project.dir, &project.brief).map(|()| project.dir.display().to_string());
+        finish_external_step(project, "scaffolded", result, store).await?;
+    }
+    if !project.done("workspace") {
+        begin_external_step(project, "workspace", store).await?;
+        let cwd = project.dir.display().to_string();
+        let result = terminal
+            .create_workspace(Some(&project.name), Some(&cwd), false)
+            .map(|workspace| {
+                project.workspace_id = Some(workspace.workspace_id.clone());
+                workspace.workspace_id
+            })
+            .map_err(|error| error.to_string());
+        finish_external_step(project, "workspace", result, store).await?;
+    }
+    start_project_agent_durable(
+        project,
+        terminal,
+        store,
+        "writer_agent",
+        "writer",
+        &authority.writer_argv,
+    )
+    .await?;
+    start_project_agent_durable(
+        project,
+        terminal,
+        store,
+        "reviewer_agent",
+        "reviewer",
+        &authority.reviewer_argv,
+    )
+    .await?;
+    if !project.done("reported") {
+        let panes: Vec<String> = project
+            .agents
+            .iter()
+            .map(|(role, pane)| format!("{role}={pane}"))
+            .collect();
+        if let Some(reporter) = reporter {
+            begin_external_step(project, "reported", store).await?;
+            let brief: String = project
+                .brief
+                .lines()
+                .next()
+                .unwrap_or("")
+                .chars()
+                .take(200)
+                .collect();
+            let body = format!(
+                "project {} is live\ndirectory: {}\nagents: {}\nbrief: {}",
+                project.name,
+                project.dir.display(),
+                panes.join(", "),
+                brief
+            );
+            let report = reporter
+                .report(&project.name, &body)
+                .map(|id| format!("sent {id}; {}", panes.join(",")))
+                .map_err(|error| format!("{error}; would carry {}", panes.join(",")));
+            finish_external_step(project, "reported", report, store).await?;
+        } else {
+            durable_log(
+                project,
+                "reported",
+                false,
+                format!(
+                    "pending: not sent (owner mailbox not wired); would carry {}",
+                    panes.join(",")
+                ),
+                store,
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+async fn start_project_agent_durable<T: Terminal + ?Sized>(
+    project: &mut Project,
+    terminal: &mut T,
+    store: &newprojects::ProjectStore,
+    step: &str,
+    role: &str,
+    argv: &[String],
+) -> Result<(), DunkError> {
+    if project.done(step) {
+        return Ok(());
+    }
+    if project.agents.len() >= MAX_AGENTS_PER_PROJECT {
+        let reason = format!("{MAX_AGENTS_PER_PROJECT} agents already (MAX_AGENTS_PER_PROJECT)");
+        durable_log(project, step, false, reason.clone(), store).await?;
+        return Err(DunkError::Refused(format!(
+            "project {}: step {step} failed: {reason}",
+            project.name
+        )));
+    }
+    if argv.is_empty() {
+        let reason = format!("no launch command for the {role}");
+        durable_log(project, step, false, reason.clone(), store).await?;
+        return Err(DunkError::Refused(format!(
+            "project {}: step {step} failed: {reason}",
+            project.name
+        )));
+    }
+    begin_external_step(project, step, store).await?;
+    let name = format!("{}-{role}", project.name);
+    let spec = AgentSpec {
+        name: name.clone(),
+        argv: argv.to_vec(),
+        workspace_id: project.workspace_id.clone(),
+        cwd: Some(project.dir.display().to_string()),
+        label: Some(name),
+        ..AgentSpec::default()
+    };
+    let result = terminal
+        .start_agent(&spec)
+        .map(|pane| {
+            project.agents.push((role.into(), pane.pane_id.clone()));
+            pane.pane_id
+        })
+        .map_err(|error| error.to_string());
+    finish_external_step(project, step, result, store).await
+}
+
+#[cfg(test)]
 fn fail(project: &mut Project, step: &str, message: String) -> Result<(), DunkError> {
     log(project, step, false, message.clone());
     Err(DunkError::Refused(format!(
@@ -436,6 +1096,7 @@ fn fail(project: &mut Project, step: &str, message: String) -> Result<(), DunkEr
     )))
 }
 
+#[cfg(test)]
 fn run_steps(
     project: &mut Project,
     terminal: &mut dyn Terminal,
@@ -472,37 +1133,38 @@ fn run_steps(
             Err(error) => return fail(project, "workspace", error.to_string()),
         }
     }
-    if !project.done("research_agent") {
+    for (step, role, argv) in [
+        ("writer_agent", "writer", &authority.writer_argv),
+        ("reviewer_agent", "reviewer", &authority.reviewer_argv),
+    ] {
+        if project.done(step) {
+            continue;
+        }
         if project.agents.len() >= MAX_AGENTS_PER_PROJECT {
             return fail(
                 project,
-                "research_agent",
+                step,
                 format!("{MAX_AGENTS_PER_PROJECT} agents already (MAX_AGENTS_PER_PROJECT)"),
             );
         }
-        if authority.research_argv.is_empty() {
-            return fail(
-                project,
-                "research_agent",
-                "no launch command for the research agent".into(),
-            );
+        if argv.is_empty() {
+            return fail(project, step, format!("no launch command for the {role}"));
         }
+        let name = format!("{}-{role}", project.name);
         let spec = AgentSpec {
-            name: format!("{}-research", project.name),
-            argv: authority.research_argv.clone(),
+            name: name.clone(),
+            argv: argv.clone(),
             workspace_id: project.workspace_id.clone(),
             cwd: Some(project.dir.display().to_string()),
-            label: Some(format!("{}-research", project.name)),
+            label: Some(name),
             ..AgentSpec::default()
         };
         match terminal.start_agent(&spec) {
             Ok(pane) => {
-                project
-                    .agents
-                    .push(("research".into(), pane.pane_id.clone()));
-                log(project, "research_agent", true, pane.pane_id);
+                project.agents.push((role.into(), pane.pane_id.clone()));
+                log(project, step, true, pane.pane_id);
             }
-            Err(error) => return fail(project, "research_agent", error.to_string()),
+            Err(error) => return fail(project, step, error.to_string()),
         }
     }
     if !project.done("reported") {
@@ -565,8 +1227,10 @@ fn run_steps(
 
 /// Step 3: `~/workspace/<name>`, `git init`, `BRIEF.md`, a `dunkingsheep/` dir.
 fn scaffold(dir: &Path, brief: &str) -> Result<(), String> {
-    std::fs::create_dir_all(dir.join("dunkingsheep"))
-        .map_err(|e| format!("create {}: {e}", dir.display()))?;
+    // Reserve the name atomically. A concurrent foreign directory is never adopted or modified.
+    std::fs::create_dir(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    std::fs::create_dir(dir.join("dunkingsheep"))
+        .map_err(|e| format!("create {}/dunkingsheep: {e}", dir.display()))?;
     // Only if absent: a resumed scaffold, or a hand-edited brief, is never overwritten.
     let brief_path = dir.join("BRIEF.md");
     if !brief_path.exists() {
@@ -605,10 +1269,7 @@ mod tests {
     }
 
     fn authority(approved: bool) -> Authority {
-        Authority {
-            approved,
-            research_argv: vec!["claude".into()],
-        }
+        Authority::project_template(approved)
     }
 
     fn root(tag: &str) -> crate::testsupport::Scratch<PathBuf> {
@@ -622,6 +1283,31 @@ mod tests {
         for bad in ["", "a", "-x", "x-", "Up", "a b", "../etc", &"a".repeat(40)] {
             assert!(validate_name(bad).is_err(), "{bad:?} must be refused");
         }
+    }
+
+    #[test]
+    fn approved_template_starts_one_luna_low_writer_and_one_luna_medium_reviewer() {
+        let authority = Authority::project_template(true);
+        assert_eq!(
+            authority.writer_argv,
+            vec![
+                "codex".to_string(),
+                "--model".to_string(),
+                "gpt-6-luna".to_string(),
+                "--config".to_string(),
+                "model_reasoning_effort=low".to_string()
+            ]
+        );
+        assert_eq!(
+            authority.reviewer_argv,
+            vec![
+                "codex".to_string(),
+                "--model".to_string(),
+                "gpt-6-luna".to_string(),
+                "--config".to_string(),
+                "model_reasoning_effort=medium".to_string()
+            ]
+        );
     }
 
     #[test]
@@ -642,7 +1328,7 @@ mod tests {
         let (mut term, mut projects, root) =
             (FakeTerminal::new(), Projects::new(), root("approve"));
         let waiting = projects
-            .spawn(
+            .spawn_unbudgeted_for_test(
                 &mut term,
                 &root,
                 &request("app"),
@@ -656,7 +1342,7 @@ mod tests {
             "no side effect before approval"
         );
         let live = projects
-            .spawn(
+            .spawn_unbudgeted_for_test(
                 &mut term,
                 &root,
                 &request("app"),
@@ -670,7 +1356,7 @@ mod tests {
                 && root.join("app/dunkingsheep").is_dir()
                 && root.join("app/.git").exists()
         );
-        assert_eq!(1, live.agents.len());
+        assert_eq!(2, live.agents.len());
         let steps: Vec<&str> = live.events.iter().map(|e| e.step.as_str()).collect();
         assert_eq!(steps, STEPS.to_vec());
     }
@@ -679,7 +1365,7 @@ mod tests {
     fn spawn_is_idempotent_by_name() {
         let (mut term, mut projects, root) = (FakeTerminal::new(), Projects::new(), root("idem"));
         let first = projects
-            .spawn(
+            .spawn_unbudgeted_for_test(
                 &mut term,
                 &root,
                 &request("app"),
@@ -689,7 +1375,7 @@ mod tests {
             .unwrap();
         let calls = term.layout_calls.len();
         let again = projects
-            .spawn(
+            .spawn_unbudgeted_for_test(
                 &mut term,
                 &root,
                 &request("app"),
@@ -713,7 +1399,7 @@ mod tests {
         let (mut term, mut projects, root) = (FakeTerminal::new(), Projects::new(), root("resume"));
         term.fail_layout = Some("no server".into());
         let err = projects
-            .spawn(
+            .spawn_unbudgeted_for_test(
                 &mut term,
                 &root,
                 &request("app"),
@@ -726,7 +1412,7 @@ mod tests {
         assert_eq!(State::Partial, partial.state);
         assert!(partial.done("scaffolded") && !partial.done("workspace"));
         let live = projects
-            .spawn(
+            .spawn_unbudgeted_for_test(
                 &mut term,
                 &root,
                 &request("app"),
@@ -750,7 +1436,7 @@ mod tests {
         let (mut term, mut projects, root) = (FakeTerminal::new(), Projects::new(), root("guards"));
         for index in 0..MAX_LIVE_PROJECTS {
             projects
-                .spawn(
+                .spawn_unbudgeted_for_test(
                     &mut term,
                     &root,
                     &request(&format!("p{index}x")),
@@ -760,7 +1446,7 @@ mod tests {
                 .unwrap();
         }
         let err = projects
-            .spawn(
+            .spawn_unbudgeted_for_test(
                 &mut term,
                 &root,
                 &request("extra"),
@@ -770,7 +1456,7 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("MAX_LIVE_PROJECTS"), "{err}");
         // A separate registry, so the refusal below is the usage gate and not the live cap.
-        let hot = Projects::new().spawn(
+        let hot = Projects::new().spawn_unbudgeted_for_test(
             &mut FakeTerminal::new(),
             &root,
             &request("zz"),
@@ -786,7 +1472,7 @@ mod tests {
             ..request("tt")
         };
         assert!(projects
-            .spawn(
+            .spawn_unbudgeted_for_test(
                 &mut term,
                 &root,
                 &template,
@@ -801,12 +1487,12 @@ mod tests {
     #[test]
     fn a_name_already_on_disk_is_refused_and_its_files_are_untouched() {
         // Finding 1: BRIEF.md of an existing directory (a shared checkout, or a project from
-        // before a restart) was overwritten and a research agent started in it.
+        // before a restart) was overwritten and project agents were started in it.
         let (mut term, mut projects, root) = (FakeTerminal::new(), Projects::new(), root("exists"));
         std::fs::create_dir_all(root.join("app")).unwrap();
         std::fs::write(root.join("app/BRIEF.md"), "PRECIOUS").unwrap();
         let refused = projects
-            .spawn(
+            .spawn_unbudgeted_for_test(
                 &mut term,
                 &root,
                 &request("app"),
@@ -832,7 +1518,7 @@ mod tests {
         let (mut term, mut projects, root) =
             (FakeTerminal::new(), Projects::new(), root("keepbrief"));
         term.fail_layout = Some("no server".into());
-        let _ = projects.spawn(
+        let _ = projects.spawn_unbudgeted_for_test(
             &mut term,
             &root,
             &request("app"),
@@ -842,7 +1528,7 @@ mod tests {
         std::fs::write(root.join("app/BRIEF.md"), "edited by hand").unwrap();
         term.fail_layout = None;
         projects
-            .spawn(
+            .spawn_unbudgeted_for_test(
                 &mut term,
                 &root,
                 &request("app"),
@@ -864,10 +1550,11 @@ mod tests {
             (FakeTerminal::new(), Projects::new(), root("authority"));
         let nobody = Authority {
             approved: true,
-            research_argv: vec![],
+            writer_argv: vec![],
+            reviewer_argv: vec![],
         };
         let err = projects
-            .spawn(
+            .spawn_unbudgeted_for_test(
                 &mut term,
                 &root,
                 &request("app"),
@@ -876,19 +1563,16 @@ mod tests {
             )
             .unwrap_err()
             .to_string();
-        assert!(
-            err.contains("no launch command for the research agent"),
-            "{err}"
-        );
+        assert!(err.contains("no launch command for the writer"), "{err}");
     }
 
     #[test]
-    fn the_report_step_says_it_was_not_sent() {
-        // Finding 3: a Live project must not claim a report nothing made.
+    fn missing_owner_reporter_does_not_mark_the_report_sent() {
+        // A missing mailbox adapter is visible and never becomes a successful report event.
         let (mut term, mut projects, root) =
             (FakeTerminal::new(), Projects::new(), root("reported"));
         let live = projects
-            .spawn(
+            .spawn_unbudgeted_for_test(
                 &mut term,
                 &root,
                 &request("app"),
@@ -896,6 +1580,7 @@ mod tests {
                 &Usage::Percent(10.0),
             )
             .unwrap();
+        assert_eq!(live.state, State::Live);
         let reported = live.events.iter().find(|e| e.step == "reported").unwrap();
         assert!(!reported.ok);
         assert!(
@@ -912,7 +1597,7 @@ mod tests {
             (FakeTerminal::new(), Projects::new(), root("bounded"));
         for index in 0..MAX_AWAITING_APPROVAL {
             projects
-                .spawn(
+                .spawn_unbudgeted_for_test(
                     &mut term,
                     &root,
                     &request(&format!("w{index}x")),
@@ -922,7 +1607,7 @@ mod tests {
                 .unwrap();
         }
         let refused = projects
-            .spawn(
+            .spawn_unbudgeted_for_test(
                 &mut term,
                 &root,
                 &request("onemore"),
@@ -939,7 +1624,7 @@ mod tests {
             };
             assert!(
                 projects
-                    .spawn(
+                    .spawn_unbudgeted_for_test(
                         &mut term,
                         &root,
                         &capped,
@@ -956,7 +1641,7 @@ mod tests {
             ..request("fine")
         };
         let waiting = Projects::new()
-            .spawn(
+            .spawn_unbudgeted_for_test(
                 &mut term,
                 &root,
                 &fine,
@@ -1118,7 +1803,7 @@ mod tests {
         let mut req = request("app");
         req.brief = "build a thing\nSECOND LINE must not leak into the report".into();
         let live = projects
-            .spawn(
+            .spawn_unbudgeted_for_test(
                 &mut term,
                 &root,
                 &req,
@@ -1130,7 +1815,7 @@ mod tests {
         let event = live.events.iter().find(|e| e.step == "reported").unwrap();
         assert!(event.ok, "{}", event.detail);
         assert!(
-            event.detail.starts_with("sent i1; research="),
+            event.detail.starts_with("sent i1; writer=") && event.detail.contains("reviewer="),
             "{}",
             event.detail
         );
@@ -1138,7 +1823,9 @@ mod tests {
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].0, "app");
         assert!(
-            sent[0].1.contains("project app is live") && sent[0].1.contains("agents: research="),
+            sent[0].1.contains("project app is live")
+                && sent[0].1.contains("agents: writer=")
+                && sent[0].1.contains("reviewer="),
             "{}",
             sent[0].1
         );
@@ -1161,7 +1848,7 @@ mod tests {
             root("report-retry"),
         );
         let err = projects
-            .spawn(
+            .spawn_unbudgeted_for_test(
                 &mut term,
                 &root,
                 &request("app"),
@@ -1180,7 +1867,7 @@ mod tests {
             .fail
             .store(false, std::sync::atomic::Ordering::SeqCst);
         let live = projects
-            .spawn(
+            .spawn_unbudgeted_for_test(
                 &mut term,
                 &root,
                 &request("app"),
@@ -1197,9 +1884,9 @@ mod tests {
         assert_eq!(
             live.events
                 .iter()
-                .filter(|e| e.step == "research_agent" && e.ok)
+                .filter(|e| matches!(e.step.as_str(), "writer_agent" | "reviewer_agent") && e.ok)
                 .count(),
-            1
+            2
         );
         assert_eq!(
             reporter.sent.lock().unwrap().len(),
@@ -1208,7 +1895,7 @@ mod tests {
         );
         // and a live project is idempotent: asking again sends nothing more
         projects
-            .spawn(
+            .spawn_unbudgeted_for_test(
                 &mut term,
                 &root,
                 &request("app"),
@@ -1229,7 +1916,7 @@ mod tests {
     ) {
         let (mut term, mut projects, root) = (FakeTerminal::new(), Projects::new(), root(tag));
         let live = projects
-            .spawn(
+            .spawn_unbudgeted_for_test(
                 &mut term,
                 &root,
                 &request("app"),
@@ -1323,8 +2010,9 @@ mod tests {
             "a project whose agent could not be closed is not stopped"
         );
         assert_eq!(
-            after.agents, live.agents,
-            "the unclosed agent is still on the record"
+            after.agents,
+            vec![live.agents[0].clone()],
+            "the failed writer close remains recorded while the reviewer close completes"
         );
         assert!(after.events.iter().any(|e| e.step == "stop_agent" && !e.ok));
         let stopped = projects.stop(&mut term, "app", true).unwrap();
@@ -1336,7 +2024,7 @@ mod tests {
         let (mut term, mut projects, root, _live) = live_project("stop-revive");
         projects.stop(&mut term, "app", true).unwrap();
         let err = projects
-            .spawn(
+            .spawn_unbudgeted_for_test(
                 &mut term,
                 &root,
                 &request("app"),
@@ -1357,7 +2045,7 @@ mod tests {
         // a stopped project no longer counts against MAX_LIVE_PROJECTS
         for index in 0..MAX_LIVE_PROJECTS {
             projects
-                .spawn(
+                .spawn_unbudgeted_for_test(
                     &mut term,
                     &root,
                     &request(&format!("p{index}x")),
@@ -1373,7 +2061,7 @@ mod tests {
         let (mut term, mut projects, root) =
             (FakeTerminal::new(), Projects::new(), root("stop-waiting"));
         projects
-            .spawn(
+            .spawn_unbudgeted_for_test(
                 &mut term,
                 &root,
                 &request("app"),
