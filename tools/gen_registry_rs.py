@@ -171,14 +171,6 @@ def build():
             return project_spawn_schema
 
     commands.append(RustOnlyCommand())
-    groups = (
-        *groups,
-        (
-            "projects",
-            "Budget-admitted project lifecycle. action=spawn starts a project using daemon-owned approval, provider usage and team policy.",
-            (("spawn", "project_spawn"),),
-        ),
-    )
 
     def permitted(role, name):
         if role == "web" and name in web_denied:
@@ -258,7 +250,7 @@ def build():
     lines += [
         "];",
         "",
-        "/// The Python MCP groups followed by explicit Rust-only extension groups.",
+        "/// The MCP groups, in the order `dunk_api.MCP_GROUPS` lists them.",
         "pub static GROUPS: &[Group] = &[",
     ]
     for name, description, actions in groups:

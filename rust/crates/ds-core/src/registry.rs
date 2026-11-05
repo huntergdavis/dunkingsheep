@@ -1293,7 +1293,7 @@ pub static COMMANDS: &[Command] = &[
     },
 ];
 
-/// The Python MCP groups followed by explicit Rust-only extension groups.
+/// The MCP groups, in the order `dunk_api.MCP_GROUPS` lists them.
 pub static GROUPS: &[Group] = &[
     Group {
         name: "inbox",
@@ -1354,11 +1354,6 @@ pub static GROUPS: &[Group] = &[
         name: "system",
         description: "Discovery, recovery and the raw escape hatch. action=help (full guide + registry), herdr (rollback-backend passthrough), herdr_help (rollback), recover, doctor.",
         actions: &[("help", "help"), ("herdr", "herdr"), ("herdr_help", "herdr_help"), ("recover", "recover"), ("doctor", "doctor")],
-    },
-    Group {
-        name: "projects",
-        description: "Budget-admitted project lifecycle. action=spawn starts a project using daemon-owned approval, provider usage and team policy.",
-        actions: &[("spawn", "project_spawn")],
     },
 ];
 
