@@ -1,9 +1,9 @@
 //! Generic `--json` daemon output through the actual Rust CLI process and an isolated fake socket.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 
 use serde_json::{json, Value};
 
@@ -5244,4 +5244,233 @@ fn cli_route_52_watchdog_deadman() {
         serde_json::from_slice(&std::fs::read(failed_status).unwrap()).unwrap();
     assert_eq!("daemon_down", status_record["cause"]);
     assert_eq!("direct", status_record["attempted"]);
+}
+
+#[cfg(unix)]
+struct KillOnDrop(Child);
+
+#[cfg(unix)]
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_route_53_api() {
+    use std::net::{Shutdown, TcpListener, TcpStream};
+    use std::os::unix::process::ExitStatusExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let daemon_socket = temp.path().join("api-daemon.sock");
+    let listener = UnixListener::bind(&daemon_socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let daemon = std::thread::spawn(move || {
+        for (expected_cmd, expected_args, result) in [
+            ("status", json!({}), json!({})),
+            ("status", json!({}), json!({})),
+            ("roster", json!({}), json!({"lanes": ["%99"]})),
+        ] {
+            let stream = accept_fake_daemon(&listener);
+            let mut line = String::new();
+            BufReader::new(&stream).read_line(&mut line).unwrap();
+            let request: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(expected_cmd, request["cmd"].as_str().unwrap());
+            assert_eq!(expected_args, request["args"]);
+            assert_eq!("%99", request["self_pane_id"]);
+            let response = json!({"ok": true, "result": result});
+            (&stream)
+                .write_all(format!("{response}\n").as_bytes())
+                .unwrap();
+        }
+    });
+
+    let port_listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = port_listener.local_addr().unwrap().port();
+    drop(port_listener);
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_dunkingsheep"))
+        .args([
+            "--socket",
+            daemon_socket.to_str().unwrap(),
+            "--self-pane",
+            "%99",
+            "api",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            &port.to_string(),
+        ])
+        .env("DUNKINGSHEEP_DIR", temp.path().join("config"))
+        .env("DUNKINGSHEEP_TTY_IDENTITY", "0")
+        .env_remove("TMUX_PANE")
+        .env_remove("DUNKINGSHEEP_SERVICE_TOKEN")
+        .env_remove("DUNKINGSHEEP_SERVICE_TOKEN_FILE")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start Rust API CLI route");
+    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+    let mut child = KillOnDrop(child);
+    let stderr_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        BufReader::new(stderr).read_to_end(&mut bytes).unwrap();
+        bytes
+    });
+
+    let mut startup = String::new();
+    BufReader::new(stdout).read_line(&mut startup).unwrap();
+    assert_eq!(
+        format!("dunkingsheep api listening on http://127.0.0.1:{port}\n"),
+        startup
+    );
+
+    let mut request = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    request
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .unwrap();
+    request
+        .write_all(b"GET /api/roster HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .unwrap();
+    request.shutdown(Shutdown::Write).unwrap();
+    let mut response = Vec::new();
+    request.read_to_end(&mut response).unwrap();
+    let response = String::from_utf8(response).unwrap();
+    let (headers, body) = response.split_once("\r\n\r\n").unwrap();
+    assert!(headers.starts_with("HTTP/1.0 200 OK\r\n"), "{headers}");
+    assert!(headers
+        .to_ascii_lowercase()
+        .contains("content-type: application/json"));
+    let content_length = headers
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().unwrap())
+        })
+        .unwrap();
+    assert_eq!(body.len(), content_length);
+    assert_eq!(
+        json!({"lanes": ["%99"]}),
+        serde_json::from_str::<Value>(body).unwrap()
+    );
+    assert!(
+        child.0.try_wait().unwrap().is_none(),
+        "API command exited early"
+    );
+
+    child.0.kill().unwrap();
+    let status = child.0.wait().unwrap();
+    assert!(
+        status.signal().is_some(),
+        "API server should stop only when the test stops it"
+    );
+    assert!(stderr_reader.join().unwrap().is_empty());
+    daemon.join().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn api_no_start_daemon_fails_before_listener_when_socket_is_absent() {
+    let temp = tempfile::tempdir().unwrap();
+    let socket = temp.path().join("missing-daemon.sock");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_dunkingsheep"))
+        .args([
+            "--socket",
+            socket.to_str().unwrap(),
+            "--self-pane",
+            "%99",
+            "--no-start-daemon",
+            "api",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "0",
+        ])
+        .env("DUNKINGSHEEP_DIR", temp.path().join("config"))
+        .env("DUNKINGSHEEP_TTY_IDENTITY", "0")
+        .env_remove("TMUX_PANE")
+        .env_remove("DUNKINGSHEEP_OWNER_START")
+        .env_remove("DUNKINGSHEEP_TEST_SPAWN")
+        .env_remove("DUNKINGSHEEP_SERVICE_TOKEN")
+        .env_remove("DUNKINGSHEEP_SERVICE_TOKEN_FILE")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start no-daemon API route");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let exited = loop {
+        if child.try_wait().unwrap().is_some() {
+            break true;
+        }
+        if std::time::Instant::now() >= deadline {
+            break false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    if !exited {
+        child.kill().unwrap();
+        let output = child.wait_with_output().unwrap();
+        panic!(
+            "--no-start-daemon did not exit before serving; stdout={:?}, stderr={:?}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(Some(3), output.status.code());
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        format!("error: no dunkingsheep daemon on {}\n", socket.display()),
+        String::from_utf8(output.stderr).unwrap()
+    );
+    assert!(!socket.exists(), "no daemon process should be started");
+}
+
+#[test]
+fn ds_http_help_defaults_follow_environment() {
+    fn help(host: Option<&str>, port: Option<&str>) -> Output {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ds-http"));
+        command
+            .arg("--help")
+            .env_remove("DUNKINGSHEEP_API_HOST")
+            .env_remove("DUNKINGSHEEP_API_PORT");
+        if let Some(host) = host {
+            command.env("DUNKINGSHEEP_API_HOST", host);
+        }
+        if let Some(port) = port {
+            command.env("DUNKINGSHEEP_API_PORT", port);
+        }
+        command.output().expect("run ds-http help")
+    }
+
+    let defaults = help(None, None);
+    assert_eq!(Some(0), defaults.status.code());
+    assert!(defaults.stderr.is_empty());
+    let defaults = String::from_utf8(defaults.stdout).unwrap();
+    assert!(
+        defaults.contains("Host to bind (default: 127.0.0.1)"),
+        "{defaults}"
+    );
+    assert!(
+        defaults.contains("Port to bind (default: 8792)"),
+        "{defaults}"
+    );
+
+    let configured = help(Some("127.0.0.2"), Some("9321"));
+    assert_eq!(Some(0), configured.status.code());
+    assert!(configured.stderr.is_empty());
+    let configured = String::from_utf8(configured.stdout).unwrap();
+    assert!(
+        configured.contains("Host to bind (default: 127.0.0.2)"),
+        "{configured}"
+    );
+    assert!(
+        configured.contains("Port to bind (default: 9321)"),
+        "{configured}"
+    );
 }
