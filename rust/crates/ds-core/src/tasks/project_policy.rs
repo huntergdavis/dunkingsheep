@@ -160,10 +160,11 @@ fn parse_reply(
         return Err(refused("project policy has no explicit budget source"));
     }
 
+    let provider = reply.provider;
     let budget_json = json!({
         "credit_ceiling": Value::Null,
         "providers": {
-            reply.provider: {
+            provider.clone(): {
                 "subscription": subscription_value,
                 "credit_fallback": credit_fallback_value,
             }
@@ -175,7 +176,7 @@ fn parse_reply(
 
     Ok(ProjectPolicyAnswer {
         project,
-        provider: reply.provider,
+        provider,
         budget_json,
     })
 }
