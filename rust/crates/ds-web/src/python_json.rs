@@ -66,19 +66,6 @@ impl Clone for Value {
     }
 }
 
-impl Drop for Value {
-    fn drop(&mut self) {
-        let mut pending = vec![std::mem::replace(self, Value::Null)];
-        while let Some(mut value) = pending.pop() {
-            match &mut value {
-                Value::Array(items) => pending.append(items),
-                Value::Object(items) => pending.extend(items.drain(..).map(|(_, child)| child)),
-                _ => {}
-            }
-        }
-    }
-}
-
 /// Python string code units. UTF-16 permits isolated surrogates and keeps
 /// supplementary characters as their corresponding pair for ensure_ascii.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
