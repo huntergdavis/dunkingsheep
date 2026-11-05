@@ -248,7 +248,7 @@ fn optional_readers_preserve_missing_invalid_and_stale_semantics() {
                 .with_timezone(&Utc),
             &fractional
         ),
-        expected["fractional_host"]
+        Some(expected["fractional_host"].clone())
     );
     assert_eq!(
         ops_summary::host_health(now, &state).unwrap(),
