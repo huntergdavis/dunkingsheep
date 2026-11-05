@@ -3142,14 +3142,24 @@ fn token(ns: &Map<String, Value>) -> Outcome {
 /// daemon connection lazily when a request reaches a daemon-backed route.
 fn api(ns: &Map<String, Value>) -> Outcome {
     let host = text(ns, "host").unwrap_or("127.0.0.1").to_owned();
-    let port = match text(ns, "port").unwrap_or("8792").parse::<u16>() {
-        Ok(port) => port,
-        Err(_) => {
+    let port_value = ns.get("port").cloned().unwrap_or_else(|| Value::from(8792));
+    let port = match &port_value {
+        Value::Number(number) => number.as_u64().and_then(|port| u16::try_from(port).ok()),
+        Value::String(value) => value.parse::<u16>().ok(),
+        _ => None,
+    };
+    let port = match port {
+        Some(port) => port,
+        None => {
+            let invalid_port = match &port_value {
+                Value::String(value) => value.clone(),
+                value => value.to_string(),
+            };
             return Outcome {
                 stdout: String::new(),
-                stderr: format!("invalid --port: {:?}\n", text(ns, "port").unwrap_or("8792")),
+                stderr: format!("invalid --port: {invalid_port:?}\n"),
                 code: 2,
-            }
+            };
         }
     };
 
@@ -3164,6 +3174,28 @@ fn api(ns: &Map<String, Value>) -> Outcome {
 
     let daemon_executable =
         std::env::current_exe().unwrap_or_else(|_| PathBuf::from("dunkingsheep"));
+    let socket_path = text(ns, "socket")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    let self_pane = text(ns, "self_pane").filter(|value| !value.is_empty());
+    let start_daemon = !matches!(ns.get("no_start_daemon"), Some(Value::Bool(true)));
+    if let Err(error) = ds_core::client::connect_or_start_system(
+        socket_path.as_deref(),
+        self_pane,
+        start_daemon,
+        Duration::from_secs(10),
+        &daemon_executable,
+    ) {
+        let code = match &error {
+            ds_core::error::DunkError::Unavailable(_) => 3,
+            _ => error.exit_code().max(2),
+        };
+        return Outcome {
+            stdout: String::new(),
+            stderr: format!("error: {error}\n"),
+            code,
+        };
+    }
     let app = match ds_web::http_adapter::system_router(daemon_executable) {
         Ok(app) => app,
         Err(error) => {

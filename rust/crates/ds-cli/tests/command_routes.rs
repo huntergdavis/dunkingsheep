@@ -5074,6 +5074,7 @@ fn cli_route_53_api() {
     let daemon = std::thread::spawn(move || {
         for (expected_cmd, expected_args, result) in [
             ("status", json!({}), json!({})),
+            ("status", json!({}), json!({})),
             ("roster", json!({}), json!({"lanes": ["%99"]})),
         ] {
             let stream = accept_fake_daemon(&listener);
@@ -5173,6 +5174,65 @@ fn cli_route_53_api() {
     );
     assert!(stderr_reader.join().unwrap().is_empty());
     daemon.join().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn api_no_start_daemon_fails_before_listener_when_socket_is_absent() {
+    let temp = tempfile::tempdir().unwrap();
+    let socket = temp.path().join("missing-daemon.sock");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_dunkingsheep"))
+        .args([
+            "--socket",
+            socket.to_str().unwrap(),
+            "--self-pane",
+            "%99",
+            "--no-start-daemon",
+            "api",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "0",
+        ])
+        .env("DUNKINGSHEEP_DIR", temp.path().join("config"))
+        .env("DUNKINGSHEEP_TTY_IDENTITY", "0")
+        .env_remove("TMUX_PANE")
+        .env_remove("DUNKINGSHEEP_OWNER_START")
+        .env_remove("DUNKINGSHEEP_TEST_SPAWN")
+        .env_remove("DUNKINGSHEEP_SERVICE_TOKEN")
+        .env_remove("DUNKINGSHEEP_SERVICE_TOKEN_FILE")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start no-daemon API route");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let exited = loop {
+        if child.try_wait().unwrap().is_some() {
+            break true;
+        }
+        if std::time::Instant::now() >= deadline {
+            break false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    if !exited {
+        child.kill().unwrap();
+        let output = child.wait_with_output().unwrap();
+        panic!(
+            "--no-start-daemon did not exit before serving; stdout={:?}, stderr={:?}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(Some(3), output.status.code());
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        format!("error: no dunkingsheep daemon on {}\n", socket.display()),
+        String::from_utf8(output.stderr).unwrap()
+    );
+    assert!(!socket.exists(), "no daemon process should be started");
 }
 
 #[test]
