@@ -217,7 +217,7 @@ pub fn run_daemon_captured(
     let mut loops = LoopSet::default();
     {
         let _entered = services.runtime_handle().enter();
-        let mut loop_env = services.push_loop_adapter()?;
+        let loop_env = services.push_loop_adapter()?;
         #[cfg(test)]
         if let Some(gate) = startup.loop_test_gate.clone() {
             loop_env = loop_env.with_test_gate(gate);
