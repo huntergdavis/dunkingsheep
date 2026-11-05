@@ -380,6 +380,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn real_login_route_uses_persistent_provider() {
+        use axum::{
+            body::Body,
+            extract::{ConnectInfo, Extension},
+            http::{Request, StatusCode},
+        };
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let backend: Arc<dyn AuthBackend> = Arc::new(
+            PersistentAuth::open_with_password(dir.path(), Some("original-password")).unwrap(),
+        );
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/login")
+            .header("content-type", "application/json")
+            .extension(ConnectInfo(
+                "127.0.0.1:4000".parse::<std::net::SocketAddr>().unwrap(),
+            ))
+            .body(Body::from(r#"{"password":"original-password"}"#))
+            .unwrap();
+        let response = crate::routes::auth::router()
+            .layer(Extension(backend))
+            .oneshot(request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response
+            .headers()
+            .get("set-cookie")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("vp_session="));
+    }
+
+    #[tokio::test]
     async fn python_compatible_credentials_sessions_and_restart() {
         let dir = tempfile::tempdir().unwrap();
         let auth =
