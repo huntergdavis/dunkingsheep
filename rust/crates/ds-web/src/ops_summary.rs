@@ -483,8 +483,9 @@ fn decode_json_bytes(bytes: &[u8]) -> SummaryResult<String> {
         if bytes.len() & 1 != 0 {
             return Err(SummaryError::InvalidJsonEncoding);
         }
-        let units = bytes
-            .chunks_exact(2)
+        let (pairs, _) = bytes.as_chunks::<2>();
+        let units = pairs
+            .iter()
             .map(|pair| {
                 let pair = [pair[0], pair[1]];
                 if little_endian {
@@ -501,8 +502,8 @@ fn decode_json_bytes(bytes: &[u8]) -> SummaryResult<String> {
             return Err(SummaryError::InvalidJsonEncoding);
         }
         let mut text = String::new();
-        for chunk in bytes.chunks_exact(4) {
-            let chunk = [chunk[0], chunk[1], chunk[2], chunk[3]];
+        let (chunks, _) = bytes.as_chunks::<4>();
+        for chunk in chunks {
             let value = if little_endian {
                 u32::from_le_bytes(chunk)
             } else {
