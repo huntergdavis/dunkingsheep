@@ -190,16 +190,24 @@ pub fn h_metrics(context: &HandlerContext<'_>, args: Args) -> Result<Value, Dunk
             "dunks": selected_dunks(&flock_snapshot),
         }),
     );
-    output.insert(
-        "coverage".into(),
-        json!({
-            "events_since": earliest,
-            "window_has_events": summary["counts"]["events"] != 0,
-            "missing": missing,
-            "retention_s": metrics.retention_s,
-            "notes": notes,
-        }),
+    let mut coverage = Map::new();
+    coverage.insert(
+        "events_since".into(),
+        earliest
+            .map(|at| {
+                crate::github::python_float_json_value(at)
+                    .expect("SQLite REAL event timestamp has a numeric carrier")
+            })
+            .unwrap_or(Value::Null),
     );
+    coverage.insert(
+        "window_has_events".into(),
+        Value::Bool(summary["counts"]["events"] != 0),
+    );
+    coverage.insert("missing".into(), Value::Array(missing));
+    coverage.insert("retention_s".into(), json!(metrics.retention_s));
+    coverage.insert("notes".into(), Value::String(notes.to_string()));
+    output.insert("coverage".into(), Value::Object(coverage));
     Ok(Value::Object(output))
 }
 
@@ -548,6 +556,38 @@ mod tests {
         );
         let decoded = crate::wire_json::from_str(&wire).unwrap();
         assert!(decoded["result"]["interval"]["seconds"].is_number());
+    }
+
+    #[test]
+    fn h_metrics_coverage_infinite_timestamp_survives_common_wire_codec() {
+        let (dir, flock) = flock("api-metrics-coverage-infinity");
+        attach_inbox(&flock, dir.path());
+        let metrics = flock.stores().metrics.unwrap();
+        metrics.record(&crate::metrics::Event {
+            at: f64::INFINITY,
+            kind: "test.event".into(),
+            ..Default::default()
+        });
+        assert_eq!(Some(f64::INFINITY), metrics.earliest().unwrap());
+
+        let count = || {
+            rusqlite::Connection::open(dir.path().join("metrics.db"))
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM events", [], |row| row.get::<_, i64>(0))
+                .unwrap()
+        };
+        let before = count();
+        let report = dispatch(&flock, None, "anonymous", 2000.0).unwrap();
+        assert!(report["coverage"]["events_since"].is_number());
+        assert_eq!(
+            crate::api::python_value_string(&report["coverage"]["events_since"]),
+            "inf"
+        );
+        let wire = crate::protocol::encode_line(&crate::protocol::Response::ok(json!(1), report));
+        assert!(wire.contains(r#""events_since":Infinity"#), "{wire}");
+        let decoded = crate::wire_json::from_str(&wire).unwrap();
+        assert!(decoded["result"]["coverage"]["events_since"].is_number());
+        assert_eq!(count(), before, "metrics summary must be read-only");
     }
 
     #[test]
