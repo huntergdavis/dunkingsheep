@@ -316,6 +316,14 @@ impl Harness {
             write_script(&self.bin.join(name), &self.substitute(template));
         }
         write_script(&self.dosbox, &self.substitute(DOSBOX_SCRIPT));
+        // kill is a real host binary. It is captured through a symlink in the
+        // private bin directory, so the captured PATH can resolve it.
+        let kill = ["/usr/bin/kill", "/bin/kill"]
+            .iter()
+            .map(Path::new)
+            .find(|candidate| candidate.is_file())
+            .expect("a kill binary on this host");
+        symlink(kill, self.bin.join("kill")).expect("kill symlink in the captured bin");
         let tools = self.repo.join("tools/oracle");
         fs::create_dir_all(&tools).expect("tools directory");
         write_script(
@@ -1092,6 +1100,52 @@ fn stream_commands_match_the_python_argv() {
         .any(|pair| pair[0] == "-i" && pair[1] == "vp_poolrad_7.monitor"));
     assert!(audio.iter().any(|arg| arg == "libopus"));
     assert_eq!(audio.last().map(String::as_str), Some("pipe:1"));
+}
+
+// ---- Tool resolution: captured paths only ---------------------------------------
+
+/// A tool missing from the captured PATH must be refused, not searched for on the
+/// ambient PATH. `env` exists on this host. Under the old bare-name fallback the
+/// launch would have run it and succeeded.
+#[test]
+fn a_tool_missing_from_the_captured_path_is_refused_not_searched_on_the_ambient_path() {
+    let harness = Harness::new();
+    let mut config = harness.config(quick_timeouts());
+    let captured = harness.bin.to_string_lossy().into_owned();
+    config.tools = Tools::capture(&captured);
+    config.path_var = captured;
+    assert!(
+        config.tools.xdotool.is_absolute(),
+        "a tool on the captured PATH is captured"
+    );
+    let session = Arc::new(OwnedGameSession::new(config).expect("session"));
+    let (status, body) = start(&session, &harness.codewheel, true);
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert!(
+        detail(&body).contains("refusing to search the ambient PATH"),
+        "{body}"
+    );
+    let calls = harness.read_state_file("calls.log");
+    assert!(
+        !calls.contains("new-session"),
+        "no tmux session was created: {calls}"
+    );
+    let (_, status_body) = send(
+        lifecycle_app(&session, &harness.codewheel),
+        "GET",
+        "/api/game/status",
+        None,
+    );
+    assert_eq!(status_body["running"], json!(false));
+}
+
+#[test]
+fn a_session_is_refused_without_a_captured_kill() {
+    let harness = Harness::new();
+    let mut config = harness.config(quick_timeouts());
+    config.tools.kill = PathBuf::from("kill");
+    let refused = OwnedGameSession::new(config).err();
+    assert!(refused.is_some_and(|error| error.contains("kill")));
 }
 
 // ---- Codeword parity with web/codeword.py ------------------------------------------------

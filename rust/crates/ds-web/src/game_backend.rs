@@ -15,10 +15,12 @@
 //!   client disconnect, and termination on shutdown.
 //!
 //! Ownership: every external program runs from an absolute path captured in
-//! [`Tools`] at construction. The Xvfb child is owned by the session and is
-//! terminated by process group. DOSBox-X lives in the private tmux server and
-//! is owned by its session name. There is no shell, no Python, no live game and
-//! no network access.
+//! [`Tools`] at construction. A tool that does not resolve is refused at its
+//! launch point (`require_captured`), never looked up on the ambient PATH. `kill`
+//! is required when the session is constructed. The Xvfb child is owned by the
+//! session and is terminated by process group. DOSBox-X lives in the private tmux
+//! server and is owned by its session name. There is no shell, no Python, no live
+//! game and no network access.
 //!
 //! Blockers, reported rather than stubbed:
 //! - `GameMediaBackend::stream` (live video/audio) cannot build an axum `Body`.
@@ -184,11 +186,16 @@ pub struct Tools {
     pub bwrap: PathBuf,
     pub convert: PathBuf,
     pub kill: PathBuf,
+    /// The `env` launcher used inside the tmux command string. It is captured
+    /// like the others, so the tmux pane cannot resolve it from its own PATH.
+    pub env: PathBuf,
 }
 
 impl Tools {
-    /// Resolves each tool against `path_var`. A missing tool keeps its bare
-    /// name, so the launch fails with a precise spawn error.
+    /// Resolves each tool against `path_var` once, at construction. A tool that
+    /// does not resolve keeps its bare name. Such a name is never spawned:
+    /// `require_captured` refuses it at every launch point, so the OS cannot
+    /// substitute a binary from the ambient PATH.
     pub fn capture(path_var: &str) -> Self {
         let find = |name: &str| which(name, path_var).unwrap_or_else(|| PathBuf::from(name));
         Self {
@@ -201,6 +208,7 @@ impl Tools {
             bwrap: find("bwrap"),
             convert: find("convert"),
             kill: find("kill"),
+            env: find("env"),
         }
     }
 }
@@ -367,6 +375,20 @@ impl Ran {
     }
 }
 
+/// Refuses any program that is not an absolute captured path. A bare name would
+/// make the OS search the ambient PATH at spawn time, which is the substitution
+/// this check rules out.
+fn require_captured(program: &Path) -> Result<(), String> {
+    if program.is_absolute() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} is not an absolute captured executable; refusing to search the ambient PATH",
+            program.display()
+        ))
+    }
+}
+
 /// Runs an absolute program with a hard timeout, environment overrides and no
 /// stdin. A spawn error or a timeout is an `Err`; a non-zero exit is an `Ok`.
 fn run<I, S>(
@@ -380,6 +402,7 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
+    require_captured(program)?;
     let mut command = Command::new(program);
     command
         .args(args)
@@ -1170,7 +1193,25 @@ fn start_session(ctx: &Ctx, st: &mut Session, fresh: bool) -> Res<Value> {
 
 /// The body of the `try:` in `GameSession.start`. Any error here stops the
 /// partial launch and is wrapped by the caller.
+/// Tools a launch cannot do without. Each must be captured as an absolute path
+/// before any process starts, so a refused launch starts nothing.
+fn launch_preflight(ctx: &Ctx) -> Res<()> {
+    let tools = &ctx.cfg.tools;
+    for path in [
+        &tools.tmux,
+        &tools.xvfb,
+        &tools.xauth,
+        &tools.xdotool,
+        &tools.bwrap,
+        &tools.env,
+    ] {
+        require_captured(path).map_err(Fault::Failure)?;
+    }
+    Ok(())
+}
+
 fn launch_session(ctx: &Ctx, st: &mut Session, run_dir: &Path) -> Res<Value> {
+    launch_preflight(ctx)?;
     let play_env = play_environment(ctx, run_dir)?;
     let identity = describe_emulator(ctx, &ctx.dosbox_x);
     if identity["sha256"].is_null() {
@@ -1233,7 +1274,7 @@ fn launch_session(ctx: &Ctx, st: &mut Session, run_dir: &Path) -> Res<Value> {
     if let Some(sink_name) = &st.sink_name {
         env_args.push(format!("PULSE_SINK={sink_name}"));
     }
-    let mut parts = vec!["env".to_owned()];
+    let mut parts = vec![ctx.cfg.tools.env.to_string_lossy().into_owned()];
     parts.extend(env_args);
     parts.extend(dosbox_command(ctx, run_dir, ctx.cfg.play_build));
     let command = format!("exec {}", shell_join(&parts));
@@ -1347,6 +1388,7 @@ fn start_display(ctx: &Ctx, st: &mut Session, run_dir: &Path) -> Res<(String, Pa
                 .open(run_dir.join("vp-xvfb.log")),
         )?;
         let log_err = io_res(log.try_clone())?;
+        require_captured(&ctx.cfg.tools.xvfb).map_err(Fault::Failure)?;
         let mut xvfb = io_res(
             Command::new(&ctx.cfg.tools.xvfb)
                 .arg(&display)
@@ -2991,6 +3033,8 @@ pub struct OwnedGameSession {
 impl OwnedGameSession {
     /// Resolves the configured DOSBox-X as `GameSession.__init__` does.
     pub fn new(config: SessionConfig) -> Result<Self, String> {
+        require_captured(&config.tools.kill)
+            .map_err(|error| format!("shutdown needs kill to terminate process groups: {error}"))?;
         let dosbox_x = resolve_dosbox(&config)?;
         Ok(Self {
             shared: Arc::new(Shared {
