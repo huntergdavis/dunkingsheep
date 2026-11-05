@@ -2038,6 +2038,7 @@ fn invalid_project_budget_refuses_before_opening_the_durable_store() {
             provider: "codex".into(),
             provider_home: dir.path().to_path_buf(),
             five_hour_usage: crate::projects::Usage::Percent(10.0),
+            provider_reading: None,
             approved: true,
             now: 1_800_000_000.0,
         },
@@ -2077,6 +2078,7 @@ fn missing_provider_policy_refuses_before_opening_the_durable_store() {
             provider: "codex".into(),
             provider_home: dir.path().to_path_buf(),
             five_hour_usage: crate::projects::Usage::Percent(10.0),
+            provider_reading: None,
             approved: true,
             now: 1_800_000_000.0,
         },
@@ -2101,6 +2103,120 @@ fn missing_provider_policy_refuses_before_opening_the_durable_store() {
         !store_path.exists(),
         "missing policy must not create SQLite"
     );
+}
+
+#[test]
+fn project_spawn_rejects_caller_supplied_authority_paths_and_argv() {
+    let dir = tempfile::tempdir().unwrap();
+    let store_path = dir.path().join("project-store.sqlite3");
+    let env = ProjectSpawnTestEnv {
+        terminal: Mutex::new(Box::new(FakeTerminal::default())),
+        config: ProjectSpawnConfig {
+            project_root: dir.path().join("projects"),
+            store_path: store_path.clone(),
+            budget_json: String::new(),
+            provider: "codex".into(),
+            provider_home: dir.path().to_path_buf(),
+            five_hour_usage: crate::projects::Usage::Unknown("fixture".into()),
+            provider_reading: None,
+            approved: false,
+            now: 1_800_000_000.0,
+        },
+    };
+    let (_flock_dir, flock) = flock();
+    let request = RequestCtx::default();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_project_spawn();
+    let error = dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("desk", false),
+        "project_spawn",
+        args(json!({
+            "name":"budget-app",
+            "brief":"test",
+            "approved":true,
+            "provider":"codex",
+            "project_root":"/tmp/attacker",
+            "argv":["sh","-c","false"]
+        })),
+        &request,
+        &env,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("caller-controlled field"));
+    assert!(!store_path.exists());
+}
+
+#[test]
+fn stale_and_future_project_usage_refuse_before_opening_the_durable_store() {
+    for (label, reading) in [
+        (
+            "stale",
+            json!({
+                "provider":"codex", "status":"unknown", "meaning":"percent_used",
+                "source":"fixture", "measured_at":1.0, "reason":"stale fixture",
+                "windows":[{"name":"300min","window_minutes":300,"percent_used":10.0}]
+            }),
+        ),
+        (
+            "future",
+            json!({
+                "provider":"codex", "status":"ok", "meaning":"percent_used",
+                "source":"fixture", "measured_at":1_800_000_100.0,
+                "windows":[{"name":"300min","window_minutes":300,"percent_used":10.0}]
+            }),
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let project_root = dir.path().join("projects");
+        std::fs::create_dir_all(&project_root).unwrap();
+        let store_path = dir.path().join("project-store.sqlite3");
+        let provider_home = dir.path().join("provider-home");
+        std::fs::create_dir_all(&provider_home).unwrap();
+        let env = ProjectSpawnTestEnv {
+            terminal: Mutex::new(Box::new(FakeTerminal::default())),
+            config: ProjectSpawnConfig {
+                project_root,
+                store_path: store_path.clone(),
+                budget_json: json!({
+                    "credit_ceiling": null,
+                    "providers": {"codex": {
+                        "subscription": {
+                            "window":"300min", "max_used_percent":70.0,
+                            "max_age_seconds":60.0
+                        },
+                        "credit_fallback": {
+                            "enabled":false,"limit":25.0,"max_age_seconds":60.0
+                        }
+                    }}
+                })
+                .to_string(),
+                provider: "codex".into(),
+                provider_home,
+                five_hour_usage: crate::projects::Usage::Percent(10.0),
+                provider_reading: Some(reading),
+                approved: true,
+                now: 1_800_000_000.0,
+            },
+        };
+        let (_flock_dir, flock) = flock();
+        let request = RequestCtx::default();
+        let mut dispatcher = Dispatcher::new();
+        dispatcher.register_project_spawn();
+        let error = dispatch_with_env(
+            &dispatcher,
+            &flock,
+            &FixedRole("desk", false),
+            "project_spawn",
+            args(json!({"name":"budget-app", "brief":"test"})),
+            &request,
+            &env,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("unknown"), "{label}: {error}");
+        assert!(!store_path.exists(), "{label} usage opened SQLite");
+    }
 }
 
 static CONTEXT_LEDGER_TEST_LOCK: Mutex<()> = Mutex::new(());

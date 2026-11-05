@@ -35,6 +35,26 @@ impl std::fmt::Debug for MemoryServiceSlot {
     }
 }
 
+/// Holds the one explicitly attached project policy for this canonical Flock.
+#[derive(Default)]
+pub(crate) struct ProjectRuntimePolicySlot(
+    Mutex<Option<Arc<crate::server_runtime::ProjectRuntimePolicy>>>,
+);
+
+impl std::fmt::Debug for ProjectRuntimePolicySlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("ProjectRuntimePolicySlot")
+            .field(
+                &self
+                    .0
+                    .lock()
+                    .expect("project runtime policy lock")
+                    .is_some(),
+            )
+            .finish()
+    }
+}
+
 /// `_PANE_ID_RE`.
 fn pane_id_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
@@ -139,6 +159,8 @@ pub struct Flock {
     turns: Mutex<BTreeMap<String, crate::activity::Turn>>,
     stores: Mutex<panes::Stores>,
     memory_service: MemoryServiceSlot,
+    /// Explicit project/provider policy attached by the startup owner; absent is fail-closed.
+    project_runtime_policy: ProjectRuntimePolicySlot,
     /// The role registry and the legacy allowlist (T31), attached after construction.
     pub(crate) role_stores: roles_gate::RoleStoresCell,
     /// pane_id -> its full turn (turn_id, caller, handoff; T36). `turns` above is the
@@ -190,6 +212,7 @@ impl Flock {
             turns: Mutex::new(BTreeMap::new()),
             stores: Mutex::new(panes::Stores::default()),
             memory_service: MemoryServiceSlot::default(),
+            project_runtime_policy: ProjectRuntimePolicySlot::default(),
             role_stores: Mutex::new(roles_gate::RoleStores::default()),
             turn_states: Mutex::new(commands_turns::Turns::new()),
             turn_dispatch: Mutex::new(commands_turns::TurnDispatchState::default()),

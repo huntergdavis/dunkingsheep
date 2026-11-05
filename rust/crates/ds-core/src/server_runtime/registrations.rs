@@ -39,6 +39,7 @@ pub(crate) fn production_handlers() -> Dispatcher {
     handlers.register_task_statistics();
     handlers.register_metrics();
     handlers.register_project_summary();
+    handlers.register_project_spawn();
     handlers.register_dunk_mutations();
     handlers.register_dunk_lifecycle();
     handlers.register_get_dunk();
@@ -599,6 +600,7 @@ mod tests {
             "task_reap",
             "metrics",
             "project_summary",
+            "project_spawn",
             "add_dunk",
             "get_dunk",
             "update_dunk",
@@ -652,6 +654,265 @@ mod tests {
             actual.len(),
             "duplicate registration attempt"
         );
+    }
+
+    fn project_entry(subscription: bool, credit_fallback: bool) -> ProjectRuntimeEntry {
+        let subscription = subscription.then(|| {
+            json!({
+                "window": "300min",
+                "max_used_percent": 70.0,
+                "max_age_seconds": 3600.0
+            })
+        });
+        ProjectRuntimeEntry {
+            provider: "codex".into(),
+            budget_json: json!({
+                "credit_ceiling": null,
+                "providers": {
+                    "codex": {
+                        "subscription": subscription,
+                        "credit_fallback": {
+                            "enabled": credit_fallback,
+                            "limit": 25.0,
+                            "max_age_seconds": 3600.0
+                        }
+                    }
+                }
+            })
+            .to_string(),
+            approved: true,
+        }
+    }
+
+    fn write_project_usage(home: &std::path::Path, timestamp: f64, malformed: bool) {
+        let sessions = home.join(".codex/sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let line = if malformed {
+            "{ malformed rate_limits event".to_string()
+        } else {
+            json!({
+                "timestamp": timestamp,
+                "payload": {"rate_limits": {"primary": {
+                    "used_percent": 15.0,
+                    "window_minutes": 300
+                }}}
+            })
+            .to_string()
+        };
+        std::fs::write(sessions.join("session.jsonl"), line).unwrap();
+    }
+
+    fn attach_project_policy(
+        services: &RuntimeServices,
+        root: &std::path::Path,
+        entries: BTreeMap<String, ProjectRuntimeEntry>,
+    ) -> std::path::PathBuf {
+        let project_root = root.join("projects");
+        let provider_home = root.join("codex-home");
+        std::fs::create_dir_all(&project_root).unwrap();
+        std::fs::create_dir_all(&provider_home).unwrap();
+        let store_path = root.join("projects.sqlite3");
+        let policy = ProjectRuntimePolicy::new(
+            project_root,
+            store_path.clone(),
+            BTreeMap::from([("codex".into(), provider_home)]),
+            entries,
+        )
+        .unwrap();
+        services
+            .flock
+            .attach_project_runtime_policy(Arc::new(policy))
+            .unwrap();
+        store_path
+    }
+
+    #[test]
+    fn production_project_spawn_uses_explicit_policy_evidence_and_guarded_runtime() {
+        let pid = i64::from(std::process::id());
+        let terminal_factory: LoopTerminalFactory = Arc::new(move || {
+            let mut terminal = FakeTerminal::new();
+            terminal.start_agent_pid = Some(Some(pid));
+            Box::new(terminal)
+        });
+        let (dir, services) = make_services("project-runtime", terminal_factory, None);
+        let mut entries = BTreeMap::new();
+        entries.insert("project-one".into(), project_entry(true, false));
+        entries.insert("project-two".into(), project_entry(true, true));
+        entries.insert("credit-only".into(), project_entry(false, true));
+        let store_path = attach_project_policy(&services, dir.path(), entries);
+        let provider_home = dir.path().join("codex-home");
+        let dispatcher = services.production_dispatcher();
+        let desk = request("w3:p3");
+
+        let missing = dispatcher
+            .dispatch(
+                "project_spawn",
+                &json!({"name":"unconfigured", "brief":"x"}),
+                &desk,
+            )
+            .unwrap_err();
+        assert!(missing.to_string().contains("no explicit runtime policy"));
+        assert!(!store_path.exists());
+
+        write_project_usage(&provider_home, crate::clock::now_s() - 7200.0, false);
+        let stale = dispatcher
+            .dispatch(
+                "project_spawn",
+                &json!({"name":"project-one", "brief":"stale"}),
+                &desk,
+            )
+            .unwrap_err();
+        assert!(stale.to_string().contains("unknown"), "{stale}");
+        assert!(!store_path.exists(), "stale usage opened the project store");
+
+        write_project_usage(&provider_home, crate::clock::now_s(), true);
+        let malformed = dispatcher
+            .dispatch(
+                "project_spawn",
+                &json!({"name":"project-one", "brief":"malformed"}),
+                &desk,
+            )
+            .unwrap_err();
+        assert!(malformed.to_string().contains("unknown"), "{malformed}");
+        assert!(
+            !store_path.exists(),
+            "malformed usage opened the project store"
+        );
+
+        write_project_usage(&provider_home, crate::clock::now_s(), false);
+        let credit_only = dispatcher
+            .dispatch(
+                "project_spawn",
+                &json!({"name":"credit-only", "brief":"no attribution"}),
+                &desk,
+            )
+            .unwrap_err();
+        assert!(credit_only.to_string().contains("project credit budget"));
+        assert!(
+            !store_path.exists(),
+            "unattributed credit opened the project store"
+        );
+
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let mut calls = Vec::new();
+        for _ in 0..2 {
+            let dispatcher = Arc::clone(&dispatcher);
+            let barrier = Arc::clone(&barrier);
+            let desk = desk.clone();
+            calls.push(std::thread::spawn(move || {
+                barrier.wait();
+                dispatcher
+                    .dispatch(
+                        "project_spawn",
+                        &json!({"name":"project-one", "brief":"first"}),
+                        &desk,
+                    )
+                    .unwrap()
+            }));
+        }
+        barrier.wait();
+        let first = calls.remove(0).join().unwrap();
+        let second = calls.remove(0).join().unwrap();
+        assert_eq!(first["agents"], second["agents"]);
+        assert_eq!(first["agents"].as_array().unwrap().len(), 2);
+        assert!(store_path.exists());
+
+        let project_two = dispatcher
+            .dispatch(
+                "project_spawn",
+                &json!({"name":"project-two", "brief":"explicit credit fallback disabled unless needed"}),
+                &desk,
+            )
+            .unwrap();
+        assert_eq!(project_two["agents"].as_array().unwrap().len(), 2);
+
+        let project_ids: Vec<_> = first["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|agent| agent[1].as_str().unwrap().to_string())
+            .collect();
+        services
+            .flock
+            .with_roles(|roles, _| {
+                for (pane, expected_role, label) in [
+                    (&project_ids[0], "worker", "project-one-writer"),
+                    (&project_ids[1], "reviewer", "project-one-reviewer"),
+                ] {
+                    let entry = roles.entry(pane)?.expect("project role receipt");
+                    assert_eq!(
+                        entry.get("role").and_then(Value::as_str),
+                        Some(expected_role)
+                    );
+                    assert_eq!(entry.get("provider").and_then(Value::as_str), Some("codex"));
+                    assert_eq!(
+                        entry.get("model").and_then(Value::as_str),
+                        Some("gpt-6-luna")
+                    );
+                    assert_eq!(entry.get("label").and_then(Value::as_str), Some(label));
+                    assert_eq!(entry.get("pane_pid").and_then(Value::as_i64), Some(pid));
+                    assert!(entry.get("start").and_then(Value::as_str).is_some());
+                }
+                Ok(())
+            })
+            .unwrap();
+        let (persisted_projects, project_events) = services
+            .runtime
+            .handle()
+            .block_on(async {
+                let store = crate::projects::newprojects::ProjectStore::open(&store_path).await?;
+                let projects = store.load().await?;
+                let events = store.events("project-one".into()).await?;
+                store.shutdown().await;
+                Ok::<_, DunkError>((projects, events))
+            })
+            .unwrap();
+        let persisted = persisted_projects
+            .iter()
+            .find(|project| project.name == "project-one")
+            .expect("project state persisted");
+        let writer_receipt = project_events
+            .iter()
+            .find(|event| event.step == "writer_agent" && event.ok)
+            .expect("writer role receipt persisted");
+        assert!(writer_receipt.detail.contains(
+            "argv=codex --no-daemon --model gpt-6-luna --config model_reasoning_effort=low"
+        ));
+        let reviewer_receipt = project_events
+            .iter()
+            .find(|event| event.step == "reviewer_agent" && event.ok)
+            .expect("reviewer role receipt persisted");
+        assert!(reviewer_receipt.detail.contains(
+            "argv=codex --no-daemon --model gpt-6-luna --config model_reasoning_effort=medium"
+        ));
+        assert_eq!("Live", format!("{:?}", persisted.state));
+        let report_receipt = project_events
+            .iter()
+            .find(|event| event.step == "reported" && event.ok)
+            .expect("owner report receipt persisted");
+        let message_id = report_receipt
+            .detail
+            .split_whitespace()
+            .nth(1)
+            .expect("committed owner message id")
+            .trim_end_matches(';');
+        let inbox = services.flock.stores().inbox.unwrap();
+        let message = inbox.get_message(message_id).unwrap();
+        assert_eq!(
+            Some("Project project-one is live"),
+            message.summary.subject.as_deref()
+        );
+        assert!(inbox.unread_for_pane("w2:p2").unwrap() > 0);
+
+        let raw = dispatcher
+            .dispatch("start_agent", &json!({}), &desk)
+            .unwrap_err();
+        assert!(raw.to_string().contains("not permitted"), "{raw}");
+        let stop = dispatcher
+            .dispatch("stop_all", &json!({}), &desk)
+            .unwrap_err();
+        assert!(stop.to_string().contains("not permitted"), "{stop}");
+        services.shutdown();
     }
 
     #[test]

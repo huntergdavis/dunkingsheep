@@ -7,7 +7,7 @@ use std::process::Command;
 
 use crate::error::DunkError;
 use crate::fallback::{tier_headroom, tier_state, Credit, RESERVE_PERCENT};
-use crate::terminal::{AgentSpec, Terminal};
+use crate::terminal::{AgentSpec, Pane, Terminal, TerminalError, Workspace};
 use serde::{Deserialize, Serialize};
 
 pub mod newprojects;
@@ -28,6 +28,47 @@ pub const USAGE_REFUSE_PCT: f64 = 70.0;
 pub enum Usage {
     Percent(f64),
     Unknown(String),
+}
+
+/// The project runtime only needs these two mutations. Unlike `Terminal`, this narrow seam lets
+/// the request adapter acquire the shared terminal lock for one actual operation at a time.
+pub trait ProjectTerminal {
+    fn create_workspace(
+        &mut self,
+        label: Option<&str>,
+        cwd: Option<&str>,
+        focus: bool,
+    ) -> Result<Workspace, TerminalError>;
+
+    fn start_agent(&mut self, spec: &AgentSpec) -> Result<Pane, TerminalError>;
+}
+
+impl<T: Terminal + ?Sized> ProjectTerminal for T {
+    fn create_workspace(
+        &mut self,
+        label: Option<&str>,
+        cwd: Option<&str>,
+        focus: bool,
+    ) -> Result<Workspace, TerminalError> {
+        Terminal::create_workspace(self, label, cwd, focus)
+    }
+
+    fn start_agent(&mut self, spec: &AgentSpec) -> Result<Pane, TerminalError> {
+        Terminal::start_agent(self, spec)
+    }
+}
+
+/// Runtime role registration is a separate durable operation from starting a pane. If it fails,
+/// the caller retains the pane in project state and refuses an automatic duplicate start.
+pub trait ProjectAgentRegistrar {
+    fn register(
+        &self,
+        role: &str,
+        pane: &Pane,
+        provider: &str,
+        model: &str,
+        label: &str,
+    ) -> Result<(), String>;
 }
 
 /// The steps of a spawn, in order; each is an event, so a half-spawned project is visible.
@@ -116,6 +157,7 @@ impl Authority {
         let argv = |effort: &str| {
             vec![
                 "codex".into(),
+                "--no-daemon".into(),
                 "--model".into(),
                 "gpt-6-luna".into(),
                 "--config".into(),
@@ -272,7 +314,7 @@ impl Projects {
     /// Budgeted async entry point. The legacy synchronous entry point has no budget configuration
     /// and is therefore refused before it can write a project.
     #[allow(clippy::too_many_arguments)]
-    async fn spawn_budgeted<T: Terminal + ?Sized>(
+    async fn spawn_budgeted<T: ProjectTerminal + ?Sized>(
         &mut self,
         terminal: &mut T,
         root: &Path,
@@ -284,6 +326,7 @@ impl Projects {
         provider_reading: &serde_json::Value,
         now: f64,
         reporter_override: Option<&dyn Reporter>,
+        registrar: Option<&dyn ProjectAgentRegistrar>,
     ) -> Result<Project, DunkError> {
         let store = self
             .store
@@ -397,6 +440,7 @@ impl Projects {
             request,
             authority,
             reporter,
+            registrar,
             store,
         )
         .await?;
@@ -467,6 +511,41 @@ impl Projects {
         .await
     }
 
+    /// Production entry point when the request adapter has already captured and validated a
+    /// provider reading before opening the durable store. Role registration is awaited as part
+    /// of each agent step, after the pane identity has been persisted.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn spawn_from_reading_with_reporter_and_registrar<T: ProjectTerminal + ?Sized>(
+        &mut self,
+        terminal: &mut T,
+        root: &Path,
+        request: &Request,
+        authority: &Authority,
+        five_hour_usage: &Usage,
+        budget_json: &str,
+        provider: &str,
+        provider_reading: &serde_json::Value,
+        now: f64,
+        reporter: &dyn Reporter,
+        registrar: &dyn ProjectAgentRegistrar,
+    ) -> Result<Project, DunkError> {
+        let budget = newprojects::ProjectBudgetConfig::from_json(budget_json)?;
+        self.spawn_budgeted(
+            terminal,
+            root,
+            request,
+            authority,
+            five_hour_usage,
+            &budget,
+            provider,
+            provider_reading,
+            now,
+            Some(reporter),
+            Some(registrar),
+        )
+        .await
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn spawn_from_sources_reporter<T: Terminal + ?Sized>(
         &mut self,
@@ -494,6 +573,7 @@ impl Projects {
             &reading,
             now,
             reporter,
+            None,
         )
         .await
     }
@@ -819,6 +899,17 @@ fn log(project: &mut Project, step: &str, ok: bool, detail: impl Into<String>) {
     });
 }
 
+async fn retain_uncertain_external_step(
+    project: &mut Project,
+    step: &str,
+    detail: impl Into<String>,
+    store: &newprojects::ProjectStore,
+) -> Result<(), DunkError> {
+    // Keep `pending_step` set. A caller or restart must inspect the external effect before any
+    // replay; the event records the observed pane/report context without claiming completion.
+    durable_log(project, &format!("{step}_uncertain"), false, detail, store).await
+}
+
 async fn durable_log(
     project: &mut Project,
     step: &str,
@@ -935,12 +1026,13 @@ fn validate_owned_project_dir(root: &Path, name: &str, project: &Project) -> Res
     Ok(())
 }
 
-async fn run_steps_durable<T: Terminal + ?Sized>(
+async fn run_steps_durable<T: ProjectTerminal + ?Sized>(
     project: &mut Project,
     terminal: &mut T,
     request: &Request,
     authority: &Authority,
     reporter: Option<&dyn Reporter>,
+    registrar: Option<&dyn ProjectAgentRegistrar>,
     store: &newprojects::ProjectStore,
 ) -> Result<(), DunkError> {
     if project.pending_step.is_some() {
@@ -968,13 +1060,27 @@ async fn run_steps_durable<T: Terminal + ?Sized>(
     if !project.done("workspace") {
         begin_external_step(project, "workspace", store).await?;
         let cwd = project.dir.display().to_string();
-        let result = terminal
-            .create_workspace(Some(&project.name), Some(&cwd), false)
-            .map(|workspace| {
+        let result = match terminal.create_workspace(Some(&project.name), Some(&cwd), false) {
+            Ok(workspace) => {
                 project.workspace_id = Some(workspace.workspace_id.clone());
-                workspace.workspace_id
-            })
-            .map_err(|error| error.to_string());
+                Ok(workspace.workspace_id)
+            }
+            Err(error) if registrar.is_some() => {
+                let message = error.to_string();
+                retain_uncertain_external_step(
+                    project,
+                    "workspace",
+                    format!("workspace creation result uncertain: {message}"),
+                    store,
+                )
+                .await?;
+                return Err(DunkError::Refused(format!(
+                    "project {}: workspace creation outcome is uncertain; inspect before retry ({message})",
+                    project.name
+                )));
+            }
+            Err(error) => Err(error.to_string()),
+        };
         finish_external_step(project, "workspace", result, store).await?;
     }
     start_project_agent_durable(
@@ -984,6 +1090,7 @@ async fn run_steps_durable<T: Terminal + ?Sized>(
         "writer_agent",
         "writer",
         &authority.writer_argv,
+        registrar,
     )
     .await?;
     start_project_agent_durable(
@@ -993,6 +1100,7 @@ async fn run_steps_durable<T: Terminal + ?Sized>(
         "reviewer_agent",
         "reviewer",
         &authority.reviewer_argv,
+        registrar,
     )
     .await?;
     if !project.done("reported") {
@@ -1018,11 +1126,33 @@ async fn run_steps_durable<T: Terminal + ?Sized>(
                 panes.join(", "),
                 brief
             );
-            let report = reporter
-                .report(&project.name, &body)
-                .map(|id| format!("sent {id}; {}", panes.join(",")))
-                .map_err(|error| format!("{error}; would carry {}", panes.join(",")));
-            finish_external_step(project, "reported", report, store).await?;
+            match reporter.report(&project.name, &body) {
+                Ok(id) => {
+                    finish_external_step(
+                        project,
+                        "reported",
+                        Ok(format!("sent {id}; {}", panes.join(","))),
+                        store,
+                    )
+                    .await?;
+                }
+                Err(error) => {
+                    retain_uncertain_external_step(
+                        project,
+                        "reported",
+                        format!(
+                            "report result uncertain: {error}; would carry {}",
+                            panes.join(",")
+                        ),
+                        store,
+                    )
+                    .await?;
+                    return Err(DunkError::Refused(format!(
+                        "project {}: report outcome is uncertain; inspect before retry ({error})",
+                        project.name
+                    )));
+                }
+            }
         } else {
             durable_log(
                 project,
@@ -1040,16 +1170,23 @@ async fn run_steps_durable<T: Terminal + ?Sized>(
     Ok(())
 }
 
-async fn start_project_agent_durable<T: Terminal + ?Sized>(
+async fn start_project_agent_durable<T: ProjectTerminal + ?Sized>(
     project: &mut Project,
     terminal: &mut T,
     store: &newprojects::ProjectStore,
     step: &str,
     role: &str,
     argv: &[String],
+    registrar: Option<&dyn ProjectAgentRegistrar>,
 ) -> Result<(), DunkError> {
     if project.done(step) {
         return Ok(());
+    }
+    if let Some((_, pane_id)) = project.agents.iter().find(|(existing, _)| existing == role) {
+        return Err(DunkError::Refused(format!(
+            "project {}: {role} pane {pane_id} exists without a completed durable role step; inspect before retry",
+            project.name
+        )));
     }
     if project.agents.len() >= MAX_AGENTS_PER_PROJECT {
         let reason = format!("{MAX_AGENTS_PER_PROJECT} agents already (MAX_AGENTS_PER_PROJECT)");
@@ -1077,13 +1214,61 @@ async fn start_project_agent_durable<T: Terminal + ?Sized>(
         label: Some(name),
         ..AgentSpec::default()
     };
-    let result = terminal
-        .start_agent(&spec)
-        .map(|pane| {
+    let result = match terminal.start_agent(&spec) {
+        Err(error) if registrar.is_some() => {
+            let message = error.to_string();
+            retain_uncertain_external_step(
+                project,
+                step,
+                format!("{role} start result uncertain: {message}"),
+                store,
+            )
+            .await?;
+            return Err(DunkError::Refused(format!(
+                "project {}: {role} start outcome is uncertain; inspect before retry ({message})",
+                project.name
+            )));
+        }
+        Err(error) => Err(error.to_string()),
+        Ok(pane) => {
+            // Persist the returned pane identity before role registration. If registration or
+            // its receipt fails, a retry sees the pane and refuses to start a duplicate.
             project.agents.push((role.into(), pane.pane_id.clone()));
-            pane.pane_id
-        })
-        .map_err(|error| error.to_string());
+            store.save(project.clone(), None).await?;
+            let registered = match registrar {
+                Some(registrar) => registrar
+                    .register(role, &pane, "codex", "gpt-6-luna", &name)
+                    .map(|()| {
+                        format!(
+                            "pane={} role={role} provider=codex model=gpt-6-luna registered argv={}",
+                            pane.pane_id,
+                            spec.argv.join(" ")
+                        )
+                    }),
+                None => Ok(pane.pane_id.clone()),
+            };
+            match registered {
+                Ok(detail) => Ok(detail),
+                Err(message) if registrar.is_some() => {
+                    retain_uncertain_external_step(
+                        project,
+                        step,
+                        format!(
+                            "pane={} role registration uncertain: {message}",
+                            pane.pane_id
+                        ),
+                        store,
+                    )
+                    .await?;
+                    return Err(DunkError::Refused(format!(
+                        "project {}: {role} pane {} role registration is uncertain; inspect before retry ({message})",
+                        project.name, pane.pane_id
+                    )));
+                }
+                Err(message) => Err(message),
+            }
+        }
+    };
     finish_external_step(project, step, result, store).await
 }
 
@@ -1292,6 +1477,7 @@ mod tests {
             authority.writer_argv,
             vec![
                 "codex".to_string(),
+                "--no-daemon".to_string(),
                 "--model".to_string(),
                 "gpt-6-luna".to_string(),
                 "--config".to_string(),
@@ -1302,6 +1488,7 @@ mod tests {
             authority.reviewer_argv,
             vec![
                 "codex".to_string(),
+                "--no-daemon".to_string(),
                 "--model".to_string(),
                 "gpt-6-luna".to_string(),
                 "--config".to_string(),

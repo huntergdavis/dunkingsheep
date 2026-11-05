@@ -4,7 +4,8 @@ Owner ask (2026-10-31): "I want to tell the front desk to spin up a new project 
 project gets spun up with new agents. I don't want to write any commands or spin up agents
 myself."
 
-This is a CONTRACT for the Rust daemon (python is frozen). Nothing here is implemented yet.
+This is the Rust-only project contract (Python is frozen). The command and durable budgeted
+project engine are implemented; production policy attachment and live activation remain gated.
 
 ## Why a daemon verb
 
@@ -30,28 +31,53 @@ with its own authority; the daemon decides how. The desk role gains exactly this
   today: Claude Sonnet low.
 * Approval is one word from the owner.
 
-## Steps (each logged as a task event; the verb is idempotent by `name`)
+## Current source steps (durable and idempotent by `name`)
 
-1. Validate `name` (slug) and refuse an existing live project of that name (return it).
-2. Ask the owner at creation: confirm the template and the soft cap; wait for one word.
-3. Create `~/workspace/<name>`, `git init`, write `BRIEF.md` and a `dunkingsheep/` dir.
-4. Create the workspace and tabs through the terminal backend.
-5. Start the research agent; register roles. Workers and reviewers start when the research
-   agent files the plan as tasks.
-6. Pick each agent's model by real usage headroom (usage.rs readings; an `unknown`
-   reading is never treated as headroom).
-7. Post a report to the owner mailbox with pane ids.
+1. Validate the slug, configured project policy, provider budget, and fresh source reading before
+   opening the durable project store. Return an existing live project without starting it again.
+2. Scaffold the project directory without overwriting foreign content.
+3. Create one workspace and start one Codex Luna low writer and one Codex Luna medium reviewer
+   with `--no-daemon`; persist each pane identity before recording its runtime role.
+4. Send the project report through the canonical owner inbox and record success only after the
+   inbox returns a committed message id.
+5. Persist every state transition and step receipt. An unresolved external action remains
+   uncertain across restart and requires inspection before retry.
 
 ## Guards
 
 * Max agents per project and max live projects (constants, named in the refusal text).
-* REFUSE when five-hour Claude usage >= 70% (the Rust-gate headroom number).
+* REFUSE when the fresh five-hour provider usage is >= 70% (the existing Rust-gate headroom guard).
 * Soft cap: counted from usage readings; at the cap the project is paused, not killed.
-* Every step is an event, so a half-spawned project is visible and resumable.
+* Every step is an event, so partial state is visible. Uncertain external actions refuse replay.
 * Tests use a fake terminal; no real agents.
+
+## Current runtime boundary (t3158)
+
+* The production dispatcher registers `project_spawn` once. The desk request is limited to
+  `name`, `brief`, `template`, and `soft_cap`; provider, budget, paths, approval, and argv come
+  from an explicit typed policy attached to the canonical Flock.
+* Runtime policy is selected by exact project name. Each entry carries an explicit provider,
+  budget JSON (including required `credit_ceiling` and explicit provider keys), and approval
+  state. Missing, invalid, unknown, or unapproved policy refuses before opening SQLite or
+  writing a project directory.
+* Provider usage is read for each request. The source subscription is checked first, followed by
+  credit fallback only when policy explicitly enables it and the reading is attributed to that
+  exact project and provider. Current Rust sources do not report project-attributed credit spend;
+  account balances and deltas are not project usage. Unknown, stale, future, malformed, and
+  unattributed evidence refuses.
+* Project agent launches use the bounded Codex Luna template (`--no-daemon`, writer low,
+  reviewer medium). The existing fleet role registry calls the writer lane `worker`; its
+  `project-<name>-writer` label distinguishes it from the registered `reviewer`. Pane identity is
+  saved before role registration; role and owner-report steps remain uncertain after an ambiguous
+  failure, so retries cannot blindly start or report again.
+* This source slice does not install live project settings, choose account amounts, establish
+  owner-approval provenance, or activate a production startup attachment. Those decisions remain
+  owner-held under t1692/t1605. Tests use temporary stores and controlled local fakes; no live
+  provider/account data or agent starts are part of this source work.
 
 ## Not decided / not verified
 
 * The exact per-project agent and project maxima.
-* How "one word" approval is delivered (owner inbox vs. pane).
-* Behaviour with the real tmux backend; nothing here has been run.
+* How the owner approval transport proves provenance in a live runtime.
+* Actual operator-approved project/provider limits and real project-credit attribution.
+* Production startup attachment and live role/model behavior.

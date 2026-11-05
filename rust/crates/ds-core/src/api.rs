@@ -132,6 +132,9 @@ pub struct ProjectSpawnConfig {
     pub provider: String,
     pub provider_home: PathBuf,
     pub five_hour_usage: crate::projects::Usage,
+    /// A request-time reading from the selected provider. Production adapters supply this so
+    /// admission can happen before opening the durable project database.
+    pub provider_reading: Option<Value>,
     pub approved: bool,
     pub now: f64,
 }
@@ -143,12 +146,47 @@ pub trait CommandEnv: PaneInfoEnv {
         Err(crate::error::refusal("layout close adapter is not wired"))
     }
 
-    /// Project root, durable store, provider measurements and owner approval. The runtime
-    /// adapter is intentionally not supplied by the source-only command registration slice.
+    /// Legacy typed project config hook. The production runtime resolves request-specific policy
+    /// through `project_spawn_config_for`; this default remains fail-closed.
     fn project_spawn_config(&self) -> Result<ProjectSpawnConfig, DunkError> {
         Err(DunkError::Refused(
             "project spawn config adapter is not wired".into(),
         ))
+    }
+
+    /// Resolve trusted project/provider policy using only the desk's bounded selection fields.
+    /// Existing typed adapters remain compatible; production overrides this request-aware seam.
+    fn project_spawn_config_for(
+        &self,
+        _project_name: &str,
+        _template: &str,
+    ) -> Result<ProjectSpawnConfig, DunkError> {
+        self.project_spawn_config()
+    }
+
+    /// Serialize project creation across requests on the canonical runtime. The default is for
+    /// isolated command fixtures; production overrides it with the Flock-owned gate.
+    fn with_project_spawn_lock(
+        &self,
+        _project_name: &str,
+        operation: &mut dyn FnMut() -> Result<(), DunkError>,
+    ) -> Result<(), DunkError> {
+        operation()
+    }
+
+    /// Project execution uses only workspace creation and agent start. Runtime implementations
+    /// hold the terminal mutex for each operation, releasing it before role or inbox callbacks.
+    fn with_project_terminal(
+        &self,
+        operation: &mut dyn FnMut(
+            &mut dyn crate::projects::ProjectTerminal,
+        ) -> Result<(), DunkError>,
+    ) -> Result<(), DunkError> {
+        let mut terminal = self
+            .terminal()
+            .lock()
+            .map_err(|_| DunkError::Refused("terminal lock poisoned".into()))?;
+        operation(&mut **terminal)
     }
 
     fn health_state_env(&self) -> Result<&dyn health_state::HealthStateEnv, DunkError> {
