@@ -157,24 +157,23 @@ pub fn run_daemon_captured(
         .transpose()?;
     let stop = signal_stop
         .as_ref()
-        .map(crate::server::SignalStop::stop_handle)
-        .or_else(|| {
-            #[cfg(test)]
-            {
-                startup.stop_test_handle.clone()
-            }
-            #[cfg(not(test))]
-            {
-                None
-            }
-        })
+        .map(crate::server::SignalStop::stop_handle);
+    #[cfg(test)]
+    let fallback_stop = startup
+        .stop_test_handle
+        .clone()
         .unwrap_or(Arc::new(std::sync::atomic::AtomicBool::new(false)));
+    #[cfg(not(test))]
+    let fallback_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop = stop.unwrap_or(fallback_stop);
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(|error| refusal(format!("could not create daemon runtime: {error}")))?;
     let tasks = Arc::new(runtime.block_on(Tasks::open(config_dir.join("tasks.db")))?);
+    // AllocationStore.__init__ creates the canonical tables on this same task-store actor.
+    runtime.block_on(tasks.allocation_init())?;
     let inbox = Arc::new(crate::inbox_store::Store::open(
         config_dir.join("inbox.db"),
         config_dir.join("attachments"),
@@ -468,6 +467,17 @@ mod tests {
         args: serde_json::Value,
         service_token: Option<&str>,
     ) -> serde_json::Value {
+        daemon_call_with_identity(socket, id, command, args, service_token, None)
+    }
+
+    fn daemon_call_with_identity(
+        socket: &Path,
+        id: u64,
+        command: &str,
+        args: serde_json::Value,
+        service_token: Option<&str>,
+        self_pane_id: Option<&str>,
+    ) -> serde_json::Value {
         let mut request = serde_json::json!({
             "id": id,
             "cmd": command,
@@ -475,6 +485,9 @@ mod tests {
         });
         if let Some(token) = service_token {
             request["service_token"] = serde_json::Value::String(token.to_owned());
+        }
+        if let Some(pane_id) = self_pane_id {
+            request["self_pane_id"] = serde_json::Value::String(pane_id.to_owned());
         }
         let mut stream = UnixStream::connect(socket).expect("connect production socket");
         stream
@@ -598,6 +611,7 @@ mod tests {
         let factory_request_block = Arc::clone(&request_block);
         let factory_request_entered = request_entered_tx;
         let factory_request_release = Arc::clone(&request_release_rx);
+        let caller_pid = std::process::id() as i64;
         let terminal_factory: LoopTerminalFactory = Arc::new(move || {
             let is_connection = std::thread::current()
                 .name()
@@ -614,7 +628,11 @@ mod tests {
                     .recv()
                     .expect("active request gate release");
             }
-            Box::new(crate::terminal::fakes::FakeTerminal::new())
+            let mut terminal = crate::terminal::fakes::FakeTerminal::new();
+            for pane in &mut terminal.panes {
+                pane.pane_pid = Some(caller_pid);
+            }
+            Box::new(terminal)
         });
         let (ready_tx, ready_rx) = mpsc::sync_channel(0);
         let (loop_entered_tx, loop_entered_rx) = mpsc::channel();
@@ -728,16 +746,17 @@ mod tests {
             read["result"]["body"]
         );
 
-        let private = daemon_call(
+        let private = daemon_call_with_identity(
             &socket,
             5,
             "task_add",
             serde_json::json!({
                 "title": "private runtime task",
-                "scope": "w9:p9",
+                "scope": "w1:p1",
                 "body": "must not be visible anonymously",
             }),
             Some(shutdown_token),
+            Some("w1:p1"),
         );
         assert_eq!(true, private["ok"], "{private}");
         let private_id = private["result"]["id"].as_str().expect("private task id");
@@ -832,6 +851,19 @@ mod tests {
             !config.join("daemon.log").exists(),
             "--no-log-file leaves no daemon log"
         );
+
+        let allocation_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("allocation status runtime");
+        let allocation_tasks = allocation_runtime
+            .block_on(Tasks::open(config.join("tasks.db")))
+            .expect("reopen the daemon task store");
+        let allocation_status = allocation_runtime
+            .block_on(allocation_tasks.allocation_status())
+            .expect("first-run allocator schema supports status after loop startup");
+        assert_eq!(serde_json::json!([]), allocation_status["workers"]);
+        assert_eq!(serde_json::json!([]), allocation_status["offers"]);
     }
 
     #[test]
@@ -946,7 +978,10 @@ mod tests {
         let config = dir.path().join("config");
         let socket = dir.path().join("already-running.sock");
         let listener = UnixListener::bind(&socket).expect("existing daemon socket");
-        let env = Env::from_pairs(&[("DUNKINGSHEEP_DIR", config.to_str().unwrap())]);
+        let env = Env::from_pairs(&[
+            ("DUNKINGSHEEP_DIR", config.to_str().unwrap()),
+            ("HOME", dir.path().to_str().unwrap()),
+        ]);
         let startup = DaemonStartup {
             env: env.clone(),
             home: CapturedPythonHome::capture_with(&env, || Ok(None)),

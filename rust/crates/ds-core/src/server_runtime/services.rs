@@ -143,7 +143,7 @@ impl RuntimeServices {
         inputs: RuntimeServiceInputs,
         memory: Option<RuntimeMemoryConfig>,
     ) -> Result<Arc<Self>, DunkError> {
-        Self::build(inputs, memory, None, |_, _| {})
+        Self::build(inputs, memory, None, |_, _| {}, |_, _| Ok(()))
     }
 
     /// Build services with the already decoded whole-Flock state. Restoration happens
@@ -153,7 +153,7 @@ impl RuntimeServices {
         memory: Option<RuntimeMemoryConfig>,
         snapshot: Option<serde_json::Value>,
     ) -> Result<Arc<Self>, DunkError> {
-        Self::build(inputs, memory, snapshot, |_, _| {})
+        Self::build(inputs, memory, snapshot, |_, _| {}, |_, _| Ok(()))
     }
 
     fn build(
@@ -161,6 +161,7 @@ impl RuntimeServices {
         memory: Option<RuntimeMemoryConfig>,
         snapshot: Option<serde_json::Value>,
         before_memory_start: impl FnOnce(&Flock, &Option<Arc<MemoryService>>),
+        after_memory_start: impl FnOnce(&Flock, &Option<Arc<MemoryService>>) -> Result<(), DunkError>,
     ) -> Result<Arc<Self>, DunkError> {
         if inputs.persist_enabled != memory.is_some() {
             return Err(refusal(
@@ -277,6 +278,8 @@ impl RuntimeServices {
         if let Some(service) = &starting_memory.0 {
             service.start()?;
         }
+        // A narrow construction seam lets rollback tests fail after the first worker starts.
+        after_memory_start(&flock, &starting_memory.0)?;
 
         let terminal_factory = inputs.terminal_factory;
         let stuck_reporter = StalePanelReporter::new();
@@ -815,20 +818,26 @@ mod tests {
             }]
         });
 
-        let services = RuntimeServices::build(inputs, memory, Some(snapshot), |flock, memory| {
-            let memory = memory
-                .as_ref()
-                .expect("memory service exists before its worker starts");
-            let status = memory.status().expect("memory service status");
-            assert_eq!(
-                false, status["ingestor"]["running"],
-                "memory ingestor remains stopped at the restore boundary"
-            );
-            assert!(
-                flock.dunks.get("d-restored").is_ok(),
-                "snapshot state is restored at the memory-start boundary"
-            );
-        })
+        let services = RuntimeServices::build(
+            inputs,
+            memory,
+            Some(snapshot),
+            |flock, memory| {
+                let memory = memory
+                    .as_ref()
+                    .expect("memory service exists before its worker starts");
+                let status = memory.status().expect("memory service status");
+                assert_eq!(
+                    false, status["ingestor"]["running"],
+                    "memory ingestor remains stopped at the restore boundary"
+                );
+                assert!(
+                    flock.dunks.get("d-restored").is_ok(),
+                    "snapshot state is restored at the memory-start boundary"
+                );
+            },
+            |_, _| Ok(()),
+        )
         .expect("build and start memory after snapshot restoration");
         services
             .shutdown_checked()
@@ -2101,11 +2110,7 @@ mod tests {
     #[test]
     fn runtime_memory_partial_startup_failure_joins_worker_and_closes_writer() {
         let dir = tempfile::tempdir().unwrap();
-        let inputs = memory_inputs(
-            &dir,
-            Env::from_pairs(&[("DUNKINGSHEEP_VIEW_CACHE_S", "bad")]),
-            true,
-        );
+        let inputs = memory_inputs(&dir, Env::default(), true);
         let config = RuntimeMemoryConfig::captured(
             inputs
                 .observability
@@ -2118,14 +2123,23 @@ mod tests {
         )
         .unwrap();
         let mut observed = None;
-        let error = RuntimeServices::build(inputs, Some(config), None, |_flock, owner| {
-            let service = owner.as_ref().unwrap();
-            assert!(service.worker_id().is_some());
-            observed = Some(Arc::clone(service));
-        })
+        let error = RuntimeServices::build(
+            inputs,
+            Some(config),
+            None,
+            |_, _| {},
+            |_flock, owner| {
+                let service = owner.as_ref().unwrap();
+                assert!(service.worker_id().is_some());
+                observed = Some(Arc::clone(service));
+                Err(refusal("injected failure after memory worker startup"))
+            },
+        )
         .err()
         .unwrap();
-        assert!(error.to_string().contains("DUNKINGSHEEP_VIEW_CACHE_S"));
+        assert!(error
+            .to_string()
+            .contains("injected failure after memory worker startup"));
         let service = observed.unwrap();
         assert!(service.worker_id().is_none());
         assert!(service.start().is_err());

@@ -54,7 +54,7 @@ pub(crate) fn production_handlers() -> Dispatcher {
     handlers.register_layout_create();
     handlers.register_layout_agent();
     handlers.register_layout_close();
-    handlers.register_runtime_control();
+    handlers.register("shutdown", crate::api::h_shutdown);
     handlers
 }
 
@@ -648,8 +648,6 @@ mod tests {
             "superuser_add",
             "superuser_remove",
             "superuser_recover",
-            "dispatch",
-            "allocation",
             "shutdown",
         ]
         .into_iter()
