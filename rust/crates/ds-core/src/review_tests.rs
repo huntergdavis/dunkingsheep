@@ -1639,6 +1639,15 @@ async fn account_branch_commit_failure_preserves_the_accepted_verdict() {
         .unwrap()
         .iter()
         .any(|error| error.as_str().unwrap().contains("422")));
+    let connection = rusqlite::Connection::open(dir.path().join("tasks.db")).unwrap();
+    let accounting_pr: Option<i64> = connection
+        .query_row(
+            "SELECT accounting_pr FROM tasks WHERE id = ?",
+            rusqlite::params![stored.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(None, accounting_pr);
 }
 
 #[tokio::test]
