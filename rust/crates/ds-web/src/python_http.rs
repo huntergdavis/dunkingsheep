@@ -94,7 +94,9 @@ async fn serve_connection(
     }
     let request_line = trim_crlf(&line);
     log.request_line.clone_from(&request_line);
-    let words: Vec<_> = request_line.split_ascii_whitespace().collect();
+    // BaseHTTPRequestHandler decodes request lines as Latin-1 and calls
+    // Python str.split(), whose Unicode whitespace set includes NBSP.
+    let words: Vec<_> = request_line.split_whitespace().collect();
     if words.is_empty() {
         return Ok(());
     }
@@ -201,8 +203,9 @@ async fn serve_connection(
     };
     let mut body = Vec::new();
     let mut negative_length = false;
+    let mut canonical_content_length = None;
     if let Some((_, length)) = content_length {
-        let (negative, zero, too_large) = match python_content_length(length) {
+        let (negative, zero, too_large, normalized) = match python_content_length(length) {
             Some(parsed) => parsed,
             None => {
                 let message = format!(
@@ -212,13 +215,18 @@ async fn serve_connection(
                 return write_json_error(&mut write, 500, &message, &log).await;
             }
         };
+        // The route adapter makes its body-limit decision from the header.
+        // Python accepts int spellings that Rust's usize parser does not, so
+        // forward a canonical decimal length after framing has consumed bytes.
+        canonical_content_length = Some(if negative {
+            length.to_owned()
+        } else if too_large {
+            (ds_core::http::MAX_POST_BYTES + 1).to_string()
+        } else {
+            normalized.clone()
+        });
         if !negative && !zero && !too_large {
-            let parsed = length
-                .trim()
-                .trim_start_matches('+')
-                .replace('_', "")
-                .parse::<u64>()
-                .unwrap_or(0);
+            let parsed = normalized.parse::<u64>().unwrap_or(0);
             let mut limited = (&mut reader).take(parsed);
             limited.read_to_end(&mut body).await?;
         } else if negative {
@@ -244,6 +252,11 @@ async fn serve_connection(
         if !seen_headers.insert(name.clone()) {
             continue;
         }
+        let value = if method == "POST" && name == "content-length" {
+            canonical_content_length.as_deref().unwrap_or(&value)
+        } else {
+            &value
+        };
         builder = builder.header(name, value);
     }
     let mut request = match builder.body(Body::from(body)) {
@@ -271,7 +284,7 @@ async fn serve_connection(
     }
 }
 
-fn python_content_length(value: &str) -> Option<(bool, bool, bool)> {
+fn python_content_length(value: &str) -> Option<(bool, bool, bool, String)> {
     // HTTPMessage decodes header octets as ISO-8859-1 before Python calls int;
     // a UTF-8 Arabic digit therefore arrives as two non-decimal Latin-1 chars.
     let value = value.trim();
@@ -291,11 +304,14 @@ fn python_content_length(value: &str) -> Option<(bool, bool, bool)> {
     {
         return None;
     }
-    let normalized = digits.replace('_', "");
-    let magnitude = normalized.trim_start_matches('0');
+    let digits = digits.replace('_', "");
+    let magnitude = digits.trim_start_matches('0');
     let zero = magnitude.is_empty();
-    let too_large = magnitude.len() > 4 || (magnitude.len() == 4 && magnitude > "4096");
-    Some((negative && !zero, zero, too_large))
+    let limit = ds_core::http::MAX_POST_BYTES.to_string();
+    let too_large = magnitude.len() > limit.len()
+        || (magnitude.len() == limit.len() && magnitude > limit.as_str());
+    let normalized = if zero { "0" } else { magnitude }.to_owned();
+    Some((negative && !zero, zero, too_large, normalized))
 }
 
 fn parse_http_version(value: &str) -> Option<(u64, u64)> {
@@ -754,6 +770,24 @@ server.serve_forever()
             (b"GET /healthz HTTP/1.0 extra\r\n", 30),
             (b"GET /healthz HTTP/nope\r\n", 31),
             (b"GET /healthz HTTP/2.0\r\n", 32),
+        ] {
+            compare_oracle_request(
+                port,
+                router(FakeDaemon::default(), OracleBackend),
+                request,
+                case,
+            );
+        }
+        for (request, case) in [
+            (
+                b"POST /no-route HTTP/1.0\r\nContent-Length: 4_097\r\n\r\n".as_slice(),
+                34,
+            ),
+            (
+                b"POST /no-route HTTP/1.0\r\nContent-Length: +4_097\r\n\r\n".as_slice(),
+                35,
+            ),
+            (b"GET\xa0/healthz\xa0HTTP/1.0\r\n".as_slice(), 36),
         ] {
             compare_oracle_request(
                 port,
