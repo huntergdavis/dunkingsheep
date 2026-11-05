@@ -25,6 +25,7 @@ use serde_json::{json, Value as JsonValue};
 
 pub mod metrics;
 pub mod owner_answer;
+pub mod project_policy;
 
 use crate::db;
 use crate::error::DunkError;
