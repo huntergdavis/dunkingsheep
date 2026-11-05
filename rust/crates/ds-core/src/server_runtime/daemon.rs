@@ -782,12 +782,38 @@ mod tests {
         );
         assert_eq!(true, private["ok"], "{private}");
         let private_id = private["result"]["id"].as_str().expect("private task id");
-        let private_read = daemon_call(
+
+        // Python intentionally allows a caller with no pane to read task rows.
+        let anonymous_read = daemon_call(
             &socket,
             6,
             "task_read",
             serde_json::json!({"id": private_id}),
             None,
+        );
+        assert_eq!(true, anonymous_read["ok"], "{anonymous_read}");
+
+        let other_pane_identity = daemon_call_with_identity(
+            &socket,
+            10,
+            "whoami",
+            serde_json::json!({}),
+            Some(shutdown_token),
+            Some("w1:p2"),
+        );
+        assert_eq!(true, other_pane_identity["ok"], "{other_pane_identity}");
+        assert_eq!("w1:p2", other_pane_identity["result"]["pane_id"]);
+        assert_eq!(
+            true, other_pane_identity["result"]["bound"],
+            "{other_pane_identity}"
+        );
+        let private_read = daemon_call_with_identity(
+            &socket,
+            11,
+            "task_read",
+            serde_json::json!({"id": private_id}),
+            None,
+            Some("w1:p2"),
         );
         assert_eq!(false, private_read["ok"], "{private_read}");
         assert!(
