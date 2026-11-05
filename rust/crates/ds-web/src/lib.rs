@@ -5,6 +5,7 @@
 pub mod auth_backend;
 pub mod http_adapter;
 pub mod ops_history;
+pub mod panes_backend;
 pub mod python_http;
 pub mod python_json;
 pub mod roster;
