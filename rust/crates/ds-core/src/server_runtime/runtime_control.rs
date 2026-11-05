@@ -17,7 +17,6 @@ use crate::api::runtime_control::{
 use crate::dispatch::queue::{DispatchError, Queue};
 use crate::dispatch::tick::{Tick, TickQueue};
 use crate::error::DunkError;
-use crate::flock::mailbox::MailboxEnv;
 use crate::flock::panes::PaneInfoEnv;
 use crate::inbox_store::Outgoing;
 use crate::server_runtime::{RequestRuntimeAdapter, RuntimeServices};
@@ -361,22 +360,18 @@ impl RuntimeControlEnv for RequestRuntimeAdapter<'_> {
     fn task_list(&self, include_done: bool, limit: usize) -> ControlResult<Value> {
         let (scope, tasks) = self
             .runtime
-            .block_on(self.terminal.flock.task_list(
+            .block_on(self.terminal.flock.task_list_wire(
                 None,
                 None,
                 None,
                 include_done,
-                limit,
+                Some(i64::try_from(limit).unwrap_or(i64::MAX)),
                 None,
                 None,
                 false,
             ))
             .map_err(backend)?;
-        let tasks = tasks
-            .into_iter()
-            .map(serde_json::to_value)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| backend(DunkError::Unavailable(error.to_string())))?;
+        let tasks = tasks.into_iter().map(|task| task.wire).collect::<Vec<_>>();
         Ok(json!({"scope": scope.unwrap_or_else(|| "visible".into()), "tasks": tasks}))
     }
 
@@ -385,13 +380,15 @@ impl RuntimeControlEnv for RequestRuntimeAdapter<'_> {
             kind: "TypeError",
             message: "task id must be a string".into(),
         })?;
-        self.runtime
-            .block_on(self.tasks()?.leases_for(id, None))
+        let wire = self
+            .runtime
+            .block_on(self.tasks()?.get_full_wire(id, None))
             .map_err(backend)?
-            .into_iter()
-            .map(serde_json::to_value)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| backend(DunkError::Unavailable(error.to_string())))
+            .wire;
+        wire.get("leases")
+            .and_then(Value::as_array)
+            .cloned()
+            .ok_or_else(|| backend(DunkError::Refused("task lease wire unavailable".into())))
     }
 
     fn is_retired(&self, pane: &Value) -> ControlResult<bool> {
@@ -537,8 +534,9 @@ impl RuntimeControlEnv for RequestRuntimeAdapter<'_> {
             .runtime
             .block_on(self.tasks()?.get(id))
             .map_err(backend)?;
-        serde_json::to_value(task)
-            .map_err(|error| backend(DunkError::Unavailable(error.to_string())))
+        // h_allocation only passes this row to authorize_task_complete, which keys it by id;
+        // Tasks::get intentionally has no visibility projection, matching the Python store.
+        Ok(json!({"id": task.id}))
     }
 
     fn authorize_task_complete(
@@ -642,8 +640,7 @@ impl AllocationStore for RequestRuntimeAdapter<'_> {
             .runtime
             .block_on(self.tasks()?.allocation_offer(task, pool, requires, caller))
             .map_err(backend)?;
-        serde_json::to_value(task)
-            .map_err(|error| backend(DunkError::Unavailable(error.to_string())))
+        self.task_get(&json!(task.id))
     }
 
     fn review(
@@ -674,8 +671,7 @@ impl AllocationStore for RequestRuntimeAdapter<'_> {
                     .allocation_review(task, revision, body, pool, requires, caller),
             )
             .map_err(backend)?;
-        serde_json::to_value(task)
-            .map_err(|error| backend(DunkError::Unavailable(error.to_string())))
+        self.task_get(&json!(task.id))
     }
 }
 

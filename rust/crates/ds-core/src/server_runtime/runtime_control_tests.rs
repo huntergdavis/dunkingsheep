@@ -1,5 +1,3 @@
-use super::*;
-
 use crate::api;
 use crate::config::Env;
 use crate::flock::loop_env::LoopTerminalFactory;
