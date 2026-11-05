@@ -787,7 +787,7 @@ server.serve_forever()
                 b"POST /no-route HTTP/1.0\r\nContent-Length: +4_097\r\n\r\n".as_slice(),
                 35,
             ),
-            (b"GET\xa0/healthz\xa0HTTP/1.0\r\n".as_slice(), 36),
+            (b"GET\xa0/healthz\xa0HTTP/1.0\r\n\r\n".as_slice(), 36),
         ] {
             compare_oracle_request(
                 port,
