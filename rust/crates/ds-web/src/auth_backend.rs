@@ -32,9 +32,12 @@ pub struct PersistentAuth {
 struct Inner {
     data: PathBuf,
     gate: Mutex<()>,
-    attempts: Mutex<HashMap<String, Vec<f64>>>,
+    attempts: Mutex<HashMap<String, Arc<Mutex<Vec<f64>>>>>,
+    login_slots: Arc<tokio::sync::Semaphore>,
+    #[cfg(test)]
+    kdf_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, PartialEq, Eq)]
 struct Credentials {
     salt: String,
     digest: String,
@@ -164,6 +167,9 @@ impl PersistentAuth {
                 data,
                 gate: Mutex::new(()),
                 attempts: Mutex::new(HashMap::new()),
+                login_slots: Arc::new(tokio::sync::Semaphore::new(8)),
+                #[cfg(test)]
+                kdf_hook: Mutex::new(None),
             }),
         })
     }
@@ -176,69 +182,114 @@ impl PersistentAuth {
         read_record(&self.inner.data.join("auth.json"))
     }
     fn sync_credentials(&self) -> Result<(), AuthError> {
-        let credentials = self.inner.data.join("owner-credentials");
-        let auth = self.inner.data.join("auth.json");
-        let newer = match fs::metadata(&credentials) {
-            Ok(m) => {
-                m.modified().map_err(internal)?
-                    > fs::metadata(&auth)
+        loop {
+            let credentials = self.inner.data.join("owner-credentials");
+            let auth = self.inner.data.join("auth.json");
+            let (text, record, modified) = {
+                let _guard = self.inner.gate.lock().map_err(internal)?;
+                let metadata = match fs::metadata(&credentials) {
+                    Ok(metadata) => metadata,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                    Err(error) => return Err(internal(error)),
+                };
+                let modified = metadata.modified().map_err(internal)?;
+                if modified
+                    <= fs::metadata(&auth)
                         .map_err(internal)?
                         .modified()
                         .map_err(internal)?
+                {
+                    return Ok(());
+                }
+                (
+                    fs::read_to_string(&credentials).map_err(internal)?,
+                    self.record()?,
+                    modified,
+                )
+            };
+            let Some(password) = text
+                .lines()
+                .find_map(|line| line.strip_prefix("Password: ").filter(|p| !p.is_empty()))
+            else {
+                return Ok(());
+            };
+            let matches = password_matches(password, &record)?;
+            let replacement = if matches {
+                None
+            } else {
+                let fresh = salt()?;
+                Some((hex(&fresh), hex(&derive(password, &fresh))))
+            };
+            let _guard = self.inner.gate.lock().map_err(internal)?;
+            if self.record()? != record
+                || fs::metadata(&credentials)
+                    .map_err(internal)?
+                    .modified()
+                    .map_err(internal)?
+                    != modified
+                || fs::read_to_string(&credentials).map_err(internal)? != text
+            {
+                continue;
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-            Err(e) => return Err(internal(e)),
-        };
-        if !newer {
+            if let Some((fresh_salt, fresh_digest)) = replacement {
+                let mut updated = record;
+                updated.salt = fresh_salt;
+                updated.digest = fresh_digest;
+                private_write(&auth, &serde_json::to_vec(&updated).map_err(internal)?)?;
+                self.db()?
+                    .execute("DELETE FROM sessions", [])
+                    .map_err(internal)?;
+            }
             return Ok(());
         }
-        let text = fs::read_to_string(credentials).map_err(internal)?;
-        let Some(password) = text
-            .lines()
-            .find_map(|line| line.strip_prefix("Password: ").filter(|p| !p.is_empty()))
-        else {
-            return Ok(());
-        };
-        let mut record = self.record()?;
-        if password_matches(password, &record)? {
-            return Ok(());
-        }
-        let fresh = salt()?;
-        record.salt = hex(&fresh);
-        record.digest = hex(&derive(password, &fresh));
-        private_write(&auth, &serde_json::to_vec(&record).map_err(internal)?)?;
-        self.db()?
-            .execute("DELETE FROM sessions", [])
-            .map_err(internal)?;
-        Ok(())
     }
     fn login_sync(&self, address: &str, password: &str) -> Result<String, AuthError> {
-        let _guard = self.inner.gate.lock().map_err(internal)?;
-        self.sync_credentials()?;
-        let now = now()?;
-        let mut attempts = self.inner.attempts.lock().map_err(internal)?;
-        let attempts = attempts.entry(address.to_owned()).or_default();
-        attempts.retain(|t| now - *t < 300.0);
-        if attempts.len() >= 8 {
-            return Err(AuthError::TooManyAttempts);
-        }
-        if !password_matches(password, &self.record()?)? {
-            attempts.push(now);
-            return Err(AuthError::IncorrectPassword);
-        }
-        attempts.clear();
-        let session = secret(32)?;
-        let mut db = self.db()?;
-        let tx = db.transaction().map_err(internal)?;
-        tx.execute("DELETE FROM sessions WHERE expires_at<=?", [now])
+        let address_attempts = {
+            let mut all = self.inner.attempts.lock().map_err(internal)?;
+            Arc::clone(all.entry(address.to_owned()).or_default())
+        };
+        let mut attempts = address_attempts.lock().map_err(internal)?;
+        loop {
+            self.sync_credentials()?;
+            let timestamp = now()?;
+            attempts.retain(|t| timestamp - *t < 300.0);
+            if attempts.len() >= 8 {
+                return Err(AuthError::TooManyAttempts);
+            }
+            let record = {
+                let _guard = self.inner.gate.lock().map_err(internal)?;
+                self.record()?
+            };
+            #[cfg(test)]
+            {
+                let hook = self.inner.kdf_hook.lock().map_err(internal)?.clone();
+                if let Some(hook) = hook {
+                    hook();
+                }
+            }
+            let matches = password_matches(password, &record)?;
+            let _guard = self.inner.gate.lock().map_err(internal)?;
+            if self.record()? != record {
+                continue;
+            }
+            if !matches {
+                attempts.push(timestamp);
+                return Err(AuthError::IncorrectPassword);
+            }
+            attempts.clear();
+            let session = secret(32)?;
+            let mut db = self.db()?;
+            let tx = db.transaction().map_err(internal)?;
+            tx.execute("DELETE FROM sessions WHERE expires_at<=?", [timestamp])
+                .map_err(internal)?;
+            tx.execute(
+                "INSERT INTO sessions(token_hash,expires_at) VALUES(?,?)",
+                params![session_key(&session), timestamp + SESSION_S],
+            )
             .map_err(internal)?;
-        tx.execute(
-            "INSERT INTO sessions(token_hash,expires_at) VALUES(?,?)",
-            params![session_key(&session), now + SESSION_S],
-        )
-        .map_err(internal)?;
-        tx.commit().map_err(internal)?;
-        Ok(session)
+            tx.commit().map_err(internal)?;
+            return Ok(session);
+        }
     }
     fn identity_sync(
         &self,
@@ -286,32 +337,45 @@ impl PersistentAuth {
         Ok(())
     }
     fn change_sync(&self, current: &str, new: &str, keep: Option<&str>) -> Result<(), AuthError> {
-        let _guard = self.inner.gate.lock().map_err(internal)?;
-        let mut record = self.record()?;
-        if !password_matches(current, &record)? {
-            return Err(AuthError::IncorrectPassword);
-        }
-        let fresh = salt()?;
-        record.salt = hex(&fresh);
-        record.digest = hex(&derive(new, &fresh));
-        private_write(
-            &self.inner.data.join("auth.json"),
-            &serde_json::to_vec(&record).map_err(internal)?,
-        )?;
-        let credentials = self.inner.data.join("owner-credentials");
-        if credentials.exists() {
+        loop {
+            let record = {
+                let _guard = self.inner.gate.lock().map_err(internal)?;
+                self.record()?
+            };
+            let matches = password_matches(current, &record)?;
+            let fresh = if matches { Some(salt()?) } else { None };
+            let replacement = fresh
+                .as_ref()
+                .map(|fresh| (hex(fresh), hex(&derive(new, fresh))));
+            let _guard = self.inner.gate.lock().map_err(internal)?;
+            if self.record()? != record {
+                continue;
+            }
+            let Some((fresh_salt, fresh_digest)) = replacement else {
+                return Err(AuthError::IncorrectPassword);
+            };
+            let mut updated = record;
+            updated.salt = fresh_salt;
+            updated.digest = fresh_digest;
             private_write(
-                &credentials,
-                format!("Password: {new}\nAPI token: {}\n", record.token).as_bytes(),
+                &self.inner.data.join("auth.json"),
+                &serde_json::to_vec(&updated).map_err(internal)?,
             )?;
+            let credentials = self.inner.data.join("owner-credentials");
+            if credentials.exists() {
+                private_write(
+                    &credentials,
+                    format!("Password: {new}\nAPI token: {}\n", updated.token).as_bytes(),
+                )?;
+            }
+            self.db()?
+                .execute(
+                    "DELETE FROM sessions WHERE token_hash<>?",
+                    [session_key(keep.unwrap_or(""))],
+                )
+                .map_err(internal)?;
+            return Ok(());
         }
-        self.db()?
-            .execute(
-                "DELETE FROM sessions WHERE token_hash<>?",
-                [session_key(keep.unwrap_or(""))],
-            )
-            .map_err(internal)?;
-        Ok(())
     }
     async fn blocking<T: Send + 'static>(
         &self,
@@ -330,7 +394,17 @@ impl AuthBackend for PersistentAuth {
         password: &'a str,
     ) -> AuthFuture<'a, Result<String, AuthError>> {
         let (a, p) = (address.to_owned(), password.to_owned());
-        Box::pin(async move { self.blocking(move |s| s.login_sync(&a, &p)).await })
+        Box::pin(async move {
+            let permit = Arc::clone(&self.inner.login_slots)
+                .acquire_owned()
+                .await
+                .map_err(internal)?;
+            self.blocking(move |s| {
+                let _permit = permit;
+                s.login_sync(&a, &p)
+            })
+            .await
+        })
     }
     fn identity<'a>(
         &'a self,
@@ -369,6 +443,51 @@ impl AuthBackend for PersistentAuth {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn slow_login_does_not_block_identity_and_rechecks_changed_password() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let auth =
+            PersistentAuth::open_with_password(dir.path(), Some("original-password")).unwrap();
+        let token = auth.record().unwrap().token;
+        let first = Arc::new(AtomicBool::new(true));
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let release_rx = Mutex::new(release_rx);
+        *auth.inner.kdf_hook.lock().unwrap() = Some(Arc::new(move || {
+            if first.swap(false, Ordering::SeqCst) {
+                entered_tx.send(()).unwrap();
+                release_rx.lock().unwrap().recv().unwrap();
+            }
+        }));
+        let worker = auth.clone();
+        let login = tokio::spawn(async move { worker.login("one", "original-password").await });
+        tokio::task::spawn_blocking(move || {
+            entered_rx.recv_timeout(Duration::from_secs(5)).unwrap()
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), auth.identity(Some(&token), None))
+                .await
+                .unwrap()
+                .unwrap(),
+            Identity::Api
+        );
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            auth.change_password("original-password", "replacement-password", None),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        release_tx.send(()).unwrap();
+        assert!(matches!(
+            login.await.unwrap(),
+            Err(AuthError::IncorrectPassword)
+        ));
+    }
 
     #[test]
     fn password_digest_matches_python_pbkdf2() {
