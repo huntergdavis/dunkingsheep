@@ -652,12 +652,12 @@ impl AllocationStore for RequestRuntimeAdapter<'_> {
         requires: &Value,
         caller: Option<&str>,
     ) -> ControlResult<Value> {
-        let text = |value: &Value, field: &str| {
+        fn text<'a>(value: &'a Value, field: &str) -> ControlResult<&'a str> {
             value.as_str().ok_or_else(|| ControlError::Python {
                 kind: "TypeError",
                 message: format!("{field} must be a string"),
             })
-        };
+        }
         let task = text(task, "task id")?;
         let revision = text(revision, "revision")?;
         let body = text(body, "body")?;
