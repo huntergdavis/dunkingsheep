@@ -1,0 +1,494 @@
+//! Read-only Rust equivalent of bridges/ops_metrics.py::summary.
+//!
+//! The caller supplies an initialized database connection, explicit clock, and
+//! configured file paths. This module owns no service state, cache, or discovery.
+
+use chrono::{DateTime, Datelike, Duration, Utc};
+use rusqlite::{params, Connection, OptionalExtension, Row};
+use serde_json::{json, Map, Number, Value};
+use std::path::Path;
+
+const PROJECT: &str = "poolrad";
+
+type SummaryResult<T> = Result<T, SummaryError>;
+
+#[derive(Debug)]
+pub enum SummaryError {
+    Sql(rusqlite::Error),
+    Timestamp(String),
+    Json(serde_json::Error),
+}
+
+impl From<rusqlite::Error> for SummaryError {
+    fn from(value: rusqlite::Error) -> Self { Self::Sql(value) }
+}
+
+impl From<serde_json::Error> for SummaryError {
+    fn from(value: serde_json::Error) -> Self { Self::Json(value) }
+}
+
+fn parse_time(value: &str) -> SummaryResult<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(value)
+        .map(|value| value.with_timezone(&Utc))
+        .map_err(|_| SummaryError::Timestamp(value.to_owned()))
+}
+
+fn iso(value: DateTime<Utc>) -> String { value.format("%Y-%m-%dT%H:%M:%SZ").to_string() }
+
+fn age(now: DateTime<Utc>, value: &str) -> SummaryResult<i64> {
+    Ok((now - parse_time(value)?).num_seconds().max(0))
+}
+
+// Python round uses ties-to-even; f64::round does not.
+fn round_even(value: f64, digits: i32) -> f64 {
+    if !value.is_finite() { return value; }
+    let factor = 10_f64.powi(digits);
+    let scaled = value * factor;
+    let floor = scaled.floor();
+    let fraction = scaled - floor;
+    let rounded = if fraction < 0.5 { floor }
+        else if fraction > 0.5 { floor + 1.0 }
+        else if (floor as i128) % 2 == 0 { floor }
+        else { floor + 1.0 };
+    rounded / factor
+}
+
+fn number(value: f64) -> Value {
+    Number::from_f64(value).map(Value::Number).unwrap_or(Value::Null)
+}
+
+fn field(row: &Row<'_>, name: &str) -> rusqlite::Result<Value> {
+    let index = row.as_ref().column_index(name)?;
+    match row.get_ref(index)? {
+        rusqlite::types::ValueRef::Null => Ok(Value::Null),
+        rusqlite::types::ValueRef::Integer(value) => Ok(json!(value)),
+        rusqlite::types::ValueRef::Real(value) => Ok(number(value)),
+        rusqlite::types::ValueRef::Text(value) => {
+            let text=String::from_utf8(value.to_vec()).map_err(|error|
+                rusqlite::Error::FromSqlConversionFailure(
+                    index,rusqlite::types::Type::Text,Box::new(error),
+                ))?;
+            Ok(json!(text))
+        }
+        rusqlite::types::ValueRef::Blob(value) => Ok(json!(value)),
+    }
+}
+
+fn row_object(row: &Row<'_>, columns: &[&str]) -> rusqlite::Result<Value> {
+    let mut result = Map::new();
+    for name in columns { result.insert((*name).to_owned(), field(row, name)?); }
+    Ok(Value::Object(result))
+}
+
+fn query_objects(
+    conn: &Connection,
+    sql: &str,
+    values: &[&dyn rusqlite::ToSql],
+    columns: &[&str],
+) -> SummaryResult<Vec<Value>> {
+    let mut statement = conn.prepare(sql)?;
+    let rows = statement.query_map(values, |row| row_object(row, columns))?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+}
+
+fn latest_trial_for_accepted_body(
+    conn: &Connection, function_id: &str, head: &str,
+) -> SummaryResult<Option<String>> {
+    let mut statement=conn.prepare("SELECT DISTINCT trial_id FROM function_body_events WHERE project=?1 AND function_id=?2 AND source_head=?3 AND status='authored' AND trial_id IS NOT NULL")?;
+    let mut rows=statement.query(params![PROJECT,function_id,head])?;
+    let Some(first)=rows.next()? else{return Ok(None)};
+    let trial:String=first.get(0)?;
+    if rows.next()?.is_some(){Ok(None)}else{Ok(Some(trial))}
+}
+
+fn experiment_summary(conn: &Connection, now: DateTime<Utc>) -> SummaryResult<Value> {
+    let start = iso(now - Duration::hours(24));
+    let end = iso(now);
+    let mut messages = query_objects(conn,
+        "SELECT pane_id,SUM(kind='inbox.sent') AS inbox_deliveries,SUM(kind='message.sent') AS direct_sends FROM agent_message_events WHERE occurred_at>=?1 AND occurred_at<=?2 GROUP BY pane_id ORDER BY inbox_deliveries+direct_sends DESC,pane_id",
+        &[&start, &end], &["pane_id","inbox_deliveries","direct_sends"])?;
+    for message in &mut messages {
+        let pane = message["pane_id"].as_str().unwrap_or_default();
+        let identity = conn.query_row(
+            "SELECT agent_name,lane_name FROM pane_samples WHERE pane_id=?1 AND agent_name IS NOT NULL ORDER BY run_id DESC LIMIT 1",
+            [pane], |row| Ok((row.get::<_, String>(0)?,row.get::<_, Option<String>>(1)?)),
+        ).optional()?;
+        let (agent, lane) = if let Some((agent,lane))=identity {(Some(agent),lane)} else {
+            let alias = conn.query_row(
+                "SELECT mailbox_alias FROM agent_message_events WHERE pane_id=?1 AND kind='inbox.sent' AND mailbox_alias IS NOT NULL AND mailbox_alias NOT LIKE '%@%' GROUP BY mailbox_alias ORDER BY COUNT(*) DESC,mailbox_alias LIMIT 1",
+                [pane], |row| row.get::<_,String>(0),
+            ).optional()?;
+            (alias,None)
+        };
+        message["agent_name"]=agent.map(Value::String).unwrap_or(Value::Null);
+        message["lane_name"]=lane.map(Value::String).unwrap_or(Value::Null);
+    }
+
+    let mut bodies=query_objects(conn,
+        "SELECT e.function_id,e.status,e.pane_id,e.trial_id,e.source_head,e.evidence_ref,e.reviewed_by,e.occurred_at FROM function_body_events e WHERE e.project=?1 AND e.id=(SELECT x.id FROM function_body_events x WHERE x.project=e.project AND x.function_id=e.function_id ORDER BY x.occurred_at DESC,x.id DESC LIMIT 1) ORDER BY e.occurred_at DESC,e.function_id",
+        &[&PROJECT],&["function_id","status","pane_id","trial_id","source_head","evidence_ref","reviewed_by","occurred_at"])?;
+    let mut trials=query_objects(conn,
+        "SELECT * FROM agent_trials WHERE project=?1 AND started_at>=?2 ORDER BY started_at DESC,trial_id",
+        &[&PROJECT,&iso(now-Duration::hours(168))],
+        &["trial_id","project","pane_id","agent_type","provider","model","reasoning_effort","hypothesis","started_at","ended_at","input_tokens","output_tokens","metered_usd","correction_minutes","host_psi10","usage_source","evidence_ref"])?;
+
+    let mut in_window=std::collections::HashSet::<String>::new();
+    for trial in &trials { in_window.insert(trial["trial_id"].as_str().unwrap_or_default().to_owned()); }
+    let authored=query_objects(conn,
+        "SELECT DISTINCT trial_id,function_id FROM function_body_events WHERE project=?1 AND status='authored' AND trial_id IS NOT NULL",
+        &[&PROJECT],&["trial_id","function_id"])?;
+    let mut authored_keys=std::collections::HashSet::<(String,String)>::new();
+    let mut counts=std::collections::HashMap::<String,(i64,i64)>::new();
+    for body in authored {
+        let trial=body["trial_id"].as_str().unwrap_or_default().to_owned();
+        let function=body["function_id"].as_str().unwrap_or_default().to_owned();
+        if in_window.contains(&trial) {
+            authored_keys.insert((trial.clone(),function));
+            counts.entry(trial).or_default().0+=1;
+        }
+    }
+    for body in &mut bodies {
+        if body["status"]=="withdrawn" {continue}
+        if body["status"]=="accepted" && body["trial_id"].is_null() {
+            if let Some(trial)=latest_trial_for_accepted_body(conn,body["function_id"].as_str().unwrap_or_default(),body["source_head"].as_str().unwrap_or_default())? {
+                body["trial_id"]=json!(trial);
+                body["trial_attribution"]=json!("matching_authored_head_backfill");
+            }
+        }
+        let Some(trial)=body["trial_id"].as_str() else {continue};
+        if !in_window.contains(trial) {continue}
+        let counts_for_trial=counts.entry(trial.to_owned()).or_default();
+        if body["status"]=="accepted" {
+            let key=(trial.to_owned(),body["function_id"].as_str().unwrap_or_default().to_owned());
+            if authored_keys.insert(key) {counts_for_trial.0+=1}
+            counts_for_trial.1+=1;
+        }
+    }
+
+    for trial in &mut trials {
+        let id=trial["trial_id"].as_str().unwrap_or_default().to_owned();
+        let (authored_count,accepted_count)=counts.get(&id).copied().unwrap_or_default();
+        trial["authored_bodies"]=json!(authored_count);
+        trial["accepted_bodies"]=json!(accepted_count);
+        let started=parse_time(trial["started_at"].as_str().unwrap_or_default())?;
+        let ended=match trial["ended_at"].as_str(){Some(text)=>Some(parse_time(text)?),None=>None};
+        let hours=((ended.unwrap_or(now)-started).num_milliseconds() as f64/3_600_000.0).max(0.0);
+        trial["elapsed_hours"]=number(round_even(hours,3));
+        trial["accepted_per_hour"]=if hours>0.0&&ended.is_some(){number(round_even(accepted_count as f64/hours,3))}else{Value::Null};
+        trial["accepted_per_usd"]=match trial["metered_usd"].as_f64(){Some(cost) if cost!=0.0=>number(round_even(accepted_count as f64/cost,3)),_=>Value::Null};
+        let end_text=trial["ended_at"].as_str().map(str::to_owned).unwrap_or_else(||iso(now));
+        let (inbox,direct):(i64,i64)=conn.query_row(
+            "SELECT SUM(kind='inbox.sent'),SUM(kind='message.sent') FROM agent_message_events WHERE pane_id=?1 AND occurred_at>=?2 AND occurred_at<=?3",
+            params![trial["pane_id"].as_str().unwrap_or_default(),trial["started_at"].as_str().unwrap_or_default(),end_text],
+            |row|Ok((row.get::<_,Option<i64>>(0)?.unwrap_or(0),row.get::<_,Option<i64>>(1)?.unwrap_or(0))))?;
+        trial["inbox_deliveries"]=json!(inbox);
+        trial["direct_sends"]=json!(direct);
+    }
+
+    let mut groups=std::collections::BTreeMap::<(String,String,String),Value>::new();
+    for trial in &trials {
+        let agent=trial["agent_type"].as_str().unwrap_or_default().trim().to_lowercase();
+        let model=trial["model"].as_str().unwrap_or_default().trim();
+        let model_key=model.to_lowercase();
+        let effort=trial["reasoning_effort"].as_str().filter(|value|!value.is_empty()).unwrap_or("unspecified").trim().to_lowercase();
+        let group=groups.entry((agent.clone(),model_key.clone(),effort.clone())).or_insert_with(||json!({
+            "agent_type":agent,"model":if model_key=="gpt-6-sol"{"GPT-6-Sol"}else{model},
+            "reasoning_effort":effort,"trials":0,"completed_trials":0,"authored_bodies":0,
+            "accepted_bodies":0,"completed_accepted_bodies":0,"completed_hours":0.0,
+            "inbox_deliveries":0,"direct_sends":0,"metered_usd":0.0,"all_completed_costs_sourced":true
+        }));
+        for name in ["trials","authored_bodies","accepted_bodies","inbox_deliveries","direct_sends"] {
+            let current=group[name].as_i64().unwrap_or(0);
+            group[name]=json!(current+trial[name].as_i64().unwrap_or(0));
+        }
+        if !trial["ended_at"].is_null() {
+            group["completed_trials"]=json!(group["completed_trials"].as_i64().unwrap_or(0)+1);
+            group["completed_accepted_bodies"]=json!(group["completed_accepted_bodies"].as_i64().unwrap_or(0)+trial["accepted_bodies"].as_i64().unwrap_or(0));
+            group["completed_hours"]=number(group["completed_hours"].as_f64().unwrap_or(0.0)+trial["elapsed_hours"].as_f64().unwrap_or(0.0));
+            if let Some(cost)=trial["metered_usd"].as_f64(){group["metered_usd"]=number(group["metered_usd"].as_f64().unwrap_or(0.0)+cost)}
+            else{group["all_completed_costs_sourced"]=json!(false)}
+        }
+    }
+    let mut efficiency=Vec::new();
+    for (_,mut group) in groups {
+        let hours=group["completed_hours"].as_f64().unwrap_or(0.0);
+        let accepted=group["completed_accepted_bodies"].as_i64().unwrap_or(0);
+        group["completed_hours"]=number(round_even(hours,3));
+        group["accepted_per_hour"]=if hours>0.0{number(round_even(accepted as f64/hours,3))}else{Value::Null};
+        group["usd_per_accepted"]=if accepted>0&&group["all_completed_costs_sourced"]==true{number(round_even(group["metered_usd"].as_f64().unwrap_or(0.0)/accepted as f64,3))}else{Value::Null};
+        if group["all_completed_costs_sourced"]==false{group["metered_usd"]=Value::Null}
+        efficiency.push(group)
+    }
+    efficiency.sort_by(|a,b|(
+        a["agent_type"].as_str().unwrap_or_default(),
+        a["model"].as_str().unwrap_or_default(),
+        a["reasoning_effort"].as_str().unwrap_or_default(),
+    ).cmp(&(
+        b["agent_type"].as_str().unwrap_or_default(),
+        b["model"].as_str().unwrap_or_default(),
+        b["reasoning_effort"].as_str().unwrap_or_default(),
+    )));
+    let authored_bodies=bodies.iter().filter(|b|b["status"]=="authored"||b["status"]=="accepted").count();
+    let accepted_bodies=bodies.iter().filter(|b|b["status"]=="accepted").count();
+    Ok(json!({
+        "window_start":start,"messages_by_pane":messages,
+        "message_definition":"Dunking Sheep inbox.sent plus confirmed message.sent delivery events to each pane; these are prompts/notifications, not model turns or token usage. A direct notification and its inbox item can both appear.",
+        "bodies":bodies,"authored_bodies":authored_bodies,"accepted_bodies":accepted_bodies,
+        "trials":trials,"efficiency_by_type_model":efficiency
+    }))
+}
+
+fn host_health(now: DateTime<Utc>, path: &Path) -> Option<Value> {
+    let bytes=std::fs::read(path).ok()?;
+    let state:Value=serde_json::from_slice(&bytes).ok()?;
+    let sample=state.get("last_sample")?;
+    let at=sample.get("at")?.as_f64()?;
+    if !at.is_finite(){return None}
+    let millis=(at*1000.0).round();
+    if millis<i64::MIN as f64||millis>i64::MAX as f64{return None}
+    let observed=DateTime::<Utc>::from_timestamp_millis(millis as i64)?;
+    let now_seconds=now.timestamp() as f64+f64::from(now.timestamp_subsec_nanos())/1_000_000_000.0;
+    let sample_age=(now_seconds-at).max(0.0) as i64;
+    let free=sample.get("tmp_free_bytes")?.as_f64()?;
+    Some(json!({
+        "observed_at":iso(observed),"age_s":sample_age,"stale":sample_age>180,
+        "levels":state.get("levels").cloned().unwrap_or_else(||json!({})),
+        "tmp_used_fraction":sample.get("tmp_used_fraction")?,
+        "tmp_free_gib":round_even(free/1024_f64.powi(3),2),
+        "tmp_inode_used_fraction":sample.get("tmp_inode_used_fraction")?,
+        "load1":sample.get("load1")?,"load5":sample.get("load5")?,
+        "cpus":sample.get("cpus")?,"cpu_psi_some_avg60":sample.get("cpu_psi_some_avg60")?,
+        "process_count":sample.get("process_count").cloned().unwrap_or(Value::Null),
+        "zombie_count":sample.get("zombie_count").cloned().unwrap_or(Value::Null)
+    }))
+}
+
+fn nth_sunday(year:i32,month:u32,nth:u32)->u32{
+    let first=chrono::NaiveDate::from_ymd_opt(year,month,1).expect("valid month");
+    1+((7-first.weekday().num_days_from_sunday())%7)+7*(nth-1)
+}
+
+// America/Los_Angeles offsets at UTC instants, using the US daylight-saving rule.
+fn la_offset_at_utc(value:DateTime<Utc>)->i32{
+    let year=value.year();
+    let start_day=nth_sunday(year,3,2);
+    let end_day=nth_sunday(year,11,1);
+    let start=chrono::NaiveDate::from_ymd_opt(year,3,start_day).unwrap().and_hms_opt(10,0,0).unwrap().and_utc();
+    let end=chrono::NaiveDate::from_ymd_opt(year,11,end_day).unwrap().and_hms_opt(9,0,0).unwrap().and_utc();
+    if value>=start&&value<end{-7*3600}else{-8*3600}
+}
+
+fn local_midnight_utc(year:i32,month:u32)->Option<DateTime<Utc>>{
+    let local=chrono::NaiveDate::from_ymd_opt(year,month,1)?.and_hms_opt(0,0,0)?;
+    let mut utc=local.and_utc()-Duration::hours(8);
+    for _ in 0..2{utc=local.and_utc()-Duration::seconds(la_offset_at_utc(utc) as i64)}
+    Some(utc)
+}
+
+fn opencode_usage(now:DateTime<Utc>,path:&Path)->Option<Value>{
+    if !path.is_file(){return None}
+    let local=now+Duration::seconds(la_offset_at_utc(now) as i64);
+    let year=local.year();
+    let month=local.month();
+    let (next_year,next_month)=if month==12{(year+1,1)}else{(year,month+1)};
+    let start=local_midnight_utc(year,month)?;
+    let end=local_midnight_utc(next_year,next_month)?;
+    let conn=Connection::open_with_flags(path,rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    conn.busy_timeout(std::time::Duration::from_secs(2)).ok()?;
+    let (count,total,month_cost,updated):(i64,f64,f64,Option<i64>)=conn.query_row(
+        "SELECT COUNT(*),COALESCE(SUM(cost),0),COALESCE(SUM(CASE WHEN time_created>=?1 AND time_created<?2 THEN cost ELSE 0 END),0),MAX(time_updated) FROM session",
+        params![start.timestamp_millis(),end.timestamp_millis()],
+        |row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
+    ).ok()?;
+    let last=updated.and_then(DateTime::<Utc>::from_timestamp_millis).map(iso);
+    Some(json!({
+        "source":"OpenCode local session cost (same source as opencode stats)",
+        "scope":"All local OpenCode sessions; model cost estimate, not billed overage",
+        "observed_at":iso(now),"billing_month":format!("{year:04}-{month:02}"),
+        "month_estimated_usd":round_even(month_cost,4),
+        "all_time_estimated_usd":round_even(total,4),"session_count":count,"last_session_at":last
+    }))
+}
+
+/// Produce the full source-backed summary from one already-open operations database.
+pub fn summary(
+    conn:&Connection,
+    now:DateTime<Utc>,
+    host_watch_path:&Path,
+    opencode_db_path:&Path,
+)->SummaryResult<Value>{
+    let run=conn.query_row(
+        "SELECT * FROM collection_runs ORDER BY id DESC LIMIT 1",[],
+        |row|row_object(row,&["id","observed_at","panes_state","github_state","vp_messages_state","dunk_metrics_state","accounting_state","agent_messages_state","errors_json"]),
+    ).optional()?;
+    let mut freshness=Map::new();
+    for source in ["panes","github","vp_messages","agent_messages","dunk_metrics","accounting"]{
+        let state=format!("{source}_state");
+        let latest:Option<String>=conn.query_row(
+            &format!("SELECT observed_at FROM collection_runs WHERE {state}='ok' ORDER BY id DESC LIMIT 1"),[],
+            |row|row.get(0),
+        ).optional()?;
+        let last=latest.clone().map(Value::String).unwrap_or(Value::Null);
+        let age_value=match latest.as_deref(){Some(value)=>json!(age(now,value)?),None=>Value::Null};
+        freshness.insert(source.to_owned(),json!({"last_ok_at":last,"age_s":age_value}));
+    }
+
+    let mut staff=json!({"pm":{},"coder":{},"reviewer":{},"other":{}});
+    let mut roster=Vec::new();
+    if run.as_ref().is_some_and(|r|r["panes_state"]=="ok"){
+        let run_id=run.as_ref().unwrap()["id"].as_i64().unwrap_or_default();
+        for row in query_objects(conn,
+            "SELECT role,COALESCE(agent_status,'unknown') AS status,COUNT(*) AS n FROM pane_samples WHERE run_id=?1 GROUP BY role,status",
+            &[&run_id],&["role","status","n"])?{
+            if let (Some(role),Some(status))=(row["role"].as_str(),row["status"].as_str()){
+                staff[role][status]=row["n"].clone();
+            }
+        }
+        roster=query_objects(conn,
+            "SELECT pane_id,role,agent_kind,agent_status,agent_name,lane_name FROM pane_samples WHERE run_id=?1 AND project=?2 ORDER BY pane_id",
+            &[&run_id,&PROJECT],&["pane_id","role","agent_kind","agent_status","agent_name","lane_name"])?;
+    }
+
+    let mut quotas=json!({"codex":null,"claude":null});
+    for provider in ["codex","claude"]{
+        let latest=conn.query_row(
+            "SELECT * FROM quota_observations WHERE project=?1 AND provider=?2 ORDER BY observed_at DESC,id DESC LIMIT 1",
+            params![PROJECT,provider],|row|row_object(row,&["pane_id","cohort","observed_at","precision","weekly_percent_left","reset_at","evidence_ref"]),
+        ).optional()?;
+        let Some(latest)=latest else{continue};
+        let mut item=json!({
+            "pane":latest["pane_id"],"provider":provider,"cohort":latest["cohort"],
+            "observed_at":latest["observed_at"],"age_s":age(now,latest["observed_at"].as_str().unwrap_or_default())?,
+            "precision":latest["precision"],"weekly_percent_left":latest["weekly_percent_left"],
+            "reset_at":latest["reset_at"],"evidence_ref":latest["evidence_ref"],
+            "burn_percentage_points_per_hour":null
+        });
+        let prior=conn.query_row(
+            "SELECT weekly_percent_left,observed_at FROM quota_observations WHERE project=?1 AND provider=?2 AND cohort=?3 AND reset_at=?4 AND observed_at<?5 ORDER BY observed_at DESC,id DESC LIMIT 1",
+            params![PROJECT,provider,latest["cohort"].as_str().unwrap_or_default(),latest["reset_at"].as_str().unwrap_or_default(),latest["observed_at"].as_str().unwrap_or_default()],
+            |row|Ok((row.get::<_,f64>(0)?,row.get::<_,String>(1)?)),
+        ).optional()?;
+        if let Some((percent,at))=prior{
+            let hours=(parse_time(latest["observed_at"].as_str().unwrap_or_default())?-parse_time(&at)?).num_milliseconds() as f64/3_600_000.0;
+            if hours>=0.5{item["burn_percentage_points_per_hour"]=number(round_even((percent-latest["weekly_percent_left"].as_f64().unwrap_or(0.0))/hours,2))}
+        }
+        quotas[provider]=item;
+    }
+    let quota=quotas.as_object().and_then(|map|map.values().filter(|v|!v.is_null()).max_by_key(|v|v["observed_at"].as_str().unwrap_or_default()).cloned()).unwrap_or(Value::Null);
+
+    let mut subscriptions=query_objects(conn,
+        "SELECT provider,monthly_usd_cents,observed_at,evidence_ref FROM subscription_costs s WHERE project=?1 AND id=(SELECT MAX(id) FROM subscription_costs WHERE project=s.project AND provider=s.provider) ORDER BY provider",
+        &[&PROJECT],&["provider","monthly_usd_cents","observed_at","evidence_ref"])?;
+    for item in &mut subscriptions{
+        let cents=item["monthly_usd_cents"].as_i64().unwrap_or_default();
+        item.as_object_mut().unwrap().remove("monthly_usd_cents");
+        item["monthly_usd"]=number(cents as f64/100.0);
+    }
+    let monthly=if subscriptions.is_empty(){Value::Null}else{number(subscriptions.iter().map(|v|v["monthly_usd"].as_f64().unwrap_or(0.0)).sum())};
+    let first=chrono::NaiveDate::from_ymd_opt(now.year(),now.month(),1).unwrap();
+    let (next_year,next_month)=if now.month()==12{(now.year()+1,1)}else{(now.year(),now.month()+1)};
+    let days=(chrono::NaiveDate::from_ymd_opt(next_year,next_month,1).unwrap()-first).num_days();
+    let calendar_hours=days*24;
+    let fixed_hourly=monthly.as_f64().map(|v|number(round_even(v/calendar_hours as f64,4))).unwrap_or(Value::Null);
+
+    let goals=query_objects(conn,
+        "SELECT scope,goal_key,observed_at,status,value,target,unit,evidence_ref,note FROM goal_observations g WHERE project=?1 AND id=(SELECT MAX(id) FROM goal_observations WHERE project=g.project AND goal_key=g.goal_key) ORDER BY scope,goal_key",
+        &[&PROJECT],&["scope","goal_key","observed_at","status","value","target","unit","evidence_ref","note"])?;
+    let accounting=conn.query_row(
+        "SELECT * FROM accounting_snapshots WHERE project=?1 ORDER BY observed_at DESC,id DESC LIMIT 1",
+        [&PROJECT],|row|row_object(row,&["observed_at","commit_oid","strict_full_c","verified_game_identities","ceiling","bound_kind","source_signature","evidence_ref"]),
+    ).optional()?;
+    let mut progress=Value::Null;
+    let mut completion=Value::Null;
+    if let Some(item)=accounting{
+        let ceiling=item["ceiling"].as_i64().unwrap_or_default();
+        let strict=item["strict_full_c"].as_i64().unwrap_or_default();
+        let identities=item["verified_game_identities"].as_i64().unwrap_or_default();
+        let upper=item["bound_kind"]=="upper_bound";
+        let percent=|n:i64|if upper{((n*1000)/ceiling) as f64/10.0}else{round_even(100.0*n as f64/ceiling as f64,1)};
+        progress=json!({
+            "strict_full_c":strict,"verified_game_identities":identities,"ceiling":ceiling,
+            "bound_kind":item["bound_kind"],"strict_percent":percent(strict),"identity_percent":percent(identities),
+            "observed_at":item["observed_at"],"age_s":age(now,item["observed_at"].as_str().unwrap_or_default())?,
+            "commit_oid":item["commit_oid"],"evidence_ref":item["evidence_ref"]
+        });
+        let end=parse_time(item["observed_at"].as_str().unwrap_or_default())?;
+        let from=iso(end-Duration::hours(24));
+        let through=iso(end-Duration::hours(1));
+        let prior=conn.query_row(
+            "SELECT observed_at,strict_full_c FROM accounting_snapshots WHERE project=?1 AND observed_at<=?2 AND observed_at>=?3 AND ceiling=?4 AND bound_kind=?5 AND source_signature=?6 ORDER BY observed_at ASC,id ASC LIMIT 1",
+            params![PROJECT,through,from,ceiling,item["bound_kind"].as_str().unwrap_or_default(),item["source_signature"].as_str().unwrap_or_default()],
+            |row|Ok((row.get::<_,String>(0)?,row.get::<_,i64>(1)?)),
+        ).optional()?;
+        if let Some((prior_at,prior_count))=prior{
+            if strict>=prior_count{
+                let elapsed=(end-parse_time(&prior_at)?).num_milliseconds() as f64/3_600_000.0;
+                let delta=strict-prior_count;
+                completion=json!({
+                    "strict_functions_per_hour":round_even(delta as f64/elapsed,4),
+                    "function_coverage_points_per_hour":round_even(100.0*delta as f64/ceiling as f64/elapsed,4),
+                    "delta_strict_functions":delta,"window_hours":round_even(elapsed,2),
+                    "window_start":prior_at,"window_end":item["observed_at"],
+                    "ceiling":ceiling,"bound_kind":item["bound_kind"]
+                });
+            }
+        }
+    }
+    let prs=query_objects(conn,
+        "SELECT number,state,merged_at,last_seen_at FROM pr_latest WHERE project=?1 ORDER BY number DESC LIMIT 12",
+        &[&PROJECT],&["number","state","merged_at","last_seen_at"])?;
+    let telemetry=conn.query_row(
+        "SELECT generated_at,interval_start,interval_end,schema_version,payload_json FROM dunk_metrics_snapshots ORDER BY id DESC LIMIT 1",
+        [],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,i64>(3)?,row.get::<_,String>(4)?)),
+    ).optional()?;
+    let telemetry=match telemetry{
+        Some((generated,start,end,version,payload))=>Some(json!({
+            "generated_at":generated,"age_s":age(now,&generated)?,
+            "interval":{"start":start,"end":end},"schema_version":version,
+            "data":serde_json::from_str::<Value>(&payload)?
+        })),
+        None=>None
+    };
+    let mut vp_counts=Vec::new();
+    if run.as_ref().is_some_and(|r|r["vp_messages_state"]=="ok"){
+        let run_id=run.as_ref().unwrap()["id"].as_i64().unwrap_or_default();
+        vp_counts=query_objects(conn,
+            "SELECT channel,role,total FROM vp_message_counts WHERE run_id=?1 ORDER BY channel,role",
+            &[&run_id],&["channel","role","total"])?;
+    }
+    let sources=if let Some(run)=&run{
+        let mut map=Map::new();
+        for name in ["panes","github","vp_messages","agent_messages","dunk_metrics","accounting"]{
+            map.insert(name.to_owned(),run[format!("{name}_state")].clone());
+        }
+        Value::Object(map)
+    }else{json!({})};
+    let latest_sample=run.as_ref().map(|r|r["observed_at"].clone()).unwrap_or(Value::Null);
+    let latest_sample_age=match latest_sample.as_str(){Some(value)=>json!(age(now,value)?),None=>Value::Null};
+    let experiment=experiment_summary(conn,now)?;
+    let now_iso=iso(now);
+    Ok(json!({
+        "generated_at":now_iso,"project":PROJECT,
+        "latest_sample_at":latest_sample,"latest_sample_age_s":latest_sample_age,
+        "sources":sources,"source_freshness":freshness,"staff":staff,"pane_roster":roster,
+        "quota":quota,"quotas":quotas,"subscriptions":subscriptions,
+        "monthly_fixed_usd":monthly,"fixed_subscription_usd_per_calendar_hour":fixed_hourly,
+        "calendar_hours_in_month":calendar_hours,"billing_month":format!("{:04}-{:02}",now.year(),now.month()),
+        "usage_cost_usd":null,"opencode_usage":opencode_usage(now,opencode_db_path),
+        "host_health":host_health(now,host_watch_path),"goals":goals,
+        "function_progress":progress,"completion_rate":completion,
+        "tracked_recent_prs":prs,"vp_message_counts":vp_counts,"dunk_metrics":telemetry,
+        "experiment_lab":experiment,
+        "limitations":[
+            "Pane state is sampled presence, not verified productive work or token consumption.",
+            "PR list tracks recent visible PRs, not a whole-game completion denominator.",
+            "Quota burn is percentage points per hour only after two direct readings at least 30 minutes apart with one reset.",
+            "Usage-based money and token cost are unknown without a billing source.",
+            "Fixed subscription totals are owner-reported and exclude unknown taxes, add-ons, and usage charges.",
+            "The hourly price divides fixed monthly subscriptions by calendar hours, not coder hours or metered usage.",
+            "Completion speed is change in PM-reviewed strict C credit divided by the actual interval, using the same reviewed function bound; it is not whole-game completion speed.",
+            "Agent delivery events count prompts and inbox items delivered to a pane; they do not count model turns, and notification sends can duplicate inbox items.",
+            "Function body trial records are append-only local evidence and remain separate from the PM-reviewed published 815 denominator."
+        ]
+    }))
+}
