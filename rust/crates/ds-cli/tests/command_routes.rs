@@ -5638,9 +5638,12 @@ fn cli_route_51_watchdog() {
             "--from",
             "1700000000",
             "--to",
-            "1700000060",
+            "0",
             "--step",
             "1",
+            "--now",
+            "1700000000",
+            "--json",
         ],
     );
     assert_eq!(Some(0), replay.status.code());
@@ -5649,15 +5652,15 @@ fn cli_route_51_watchdog() {
         "{}",
         String::from_utf8_lossy(&replay.stderr)
     );
-    let replay_text = String::from_utf8(replay.stdout).unwrap();
-    assert!(
-        replay_text.contains("REPLAY rule=dunk.skip_loop would_notify_vp="),
-        "{replay_text}"
+    let replay_result: Value = serde_json::from_slice(&replay.stdout).unwrap();
+    assert_eq!(Some(1_700_000_000.0), replay_result["from"].as_f64());
+    assert_eq!(
+        Some(1_700_000_000.0),
+        replay_result["to"].as_f64(),
+        "Python CLI treats explicit --to 0 as false and falls back to --now"
     );
-    assert!(
-        replay_text.contains("REPLAY rule=inbox.ambiguous_sender would_notify_vp="),
-        "{replay_text}"
-    );
+    assert!(replay_result["counts"]["dunk.skip_loop"].is_object());
+    assert!(replay_result["counts"]["inbox.ambiguous_sender"].is_object());
 
     let invalid_path = temp.path().join("missing.json");
     let invalid = run_cli(

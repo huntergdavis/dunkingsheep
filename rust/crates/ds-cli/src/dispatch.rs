@@ -3476,10 +3476,35 @@ fn watchdog_text(report: &Value) -> String {
     format!("{}\n", lines.join("\n"))
 }
 
+/// The Rust CLI has no owner-channel route resolver. Keep this missing integration explicit and
+/// fail closed instead of injecting a closure that looks like a production route reader.
+struct WatchdogOwnerRouteUnconfigured;
+
+impl ds_core::watchdog::run::OwnerTransport for WatchdogOwnerRouteUnconfigured {
+    fn desk_channel(&self) -> Result<String, ds_core::error::DunkError> {
+        Err(ds_core::error::DunkError::Unavailable(
+            "watchdog owner route is not configured in the Rust CLI".into(),
+        ))
+    }
+
+    fn post(&self, _body: &str) -> Result<i64, ds_core::watchdog::run::SendError> {
+        Err(ds_core::watchdog::run::SendError {
+            kind: "OwnerChannelUnavailable".into(),
+            message: "watchdog owner route is not configured in the Rust CLI".into(),
+        })
+    }
+
+    fn confirmed_through(&self) -> Result<Option<Value>, ds_core::error::DunkError> {
+        Err(ds_core::error::DunkError::Unavailable(
+            "watchdog owner route is not configured in the Rust CLI".into(),
+        ))
+    }
+}
+
 fn watchdog(ns: &Map<String, Value>) -> Outcome {
     use ds_core::watchdog::{
         config::load_config,
-        run::{self, DeskBriefChannel, SendError},
+        run::{self, SendError},
     };
     use std::path::PathBuf;
 
@@ -3550,7 +3575,12 @@ fn watchdog(ns: &Map<String, Value>) -> Outcome {
         ) else {
             return watchdog_error("watchdog: --replay needs --from and --step\n");
         };
-        let end = ns.get("replay_to").and_then(Value::as_f64).unwrap_or(now);
+        // Match Python's `args.replay_to or now`: an explicit numeric zero is falsy.
+        let end = ns
+            .get("replay_to")
+            .and_then(Value::as_f64)
+            .filter(|value| *value != 0.0)
+            .unwrap_or(now);
         return match watchdog_replay(&config, start, end, step) {
             Ok(result) if matches!(ns.get("json"), Some(Value::Bool(true))) => Outcome {
                 stdout: format!("{}\n", sorted_json(&result)),
@@ -3609,14 +3639,7 @@ fn watchdog(ns: &Map<String, Value>) -> Outcome {
             message: error.to_string(),
         })
     };
-    let confirm_path = PathBuf::from(ds_core::native_session::expanduser(
-        "~/.config/dunkingsheep/watchdog-confirm.json",
-    ));
-    let channel = DeskBriefChannel::new(confirm_path, |_| {
-        Err(ds_core::error::DunkError::Unavailable(
-            "watchdog owner route is not configured in the Rust CLI".into(),
-        ))
-    });
+    let channel = WatchdogOwnerRouteUnconfigured;
     match run::run(&config, now, dry_run, &mut send, &channel, None, None) {
         Ok(report) => Outcome {
             stdout: if matches!(ns.get("json"), Some(Value::Bool(true))) {
