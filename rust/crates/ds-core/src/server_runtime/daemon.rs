@@ -482,6 +482,30 @@ mod tests {
         service_token: Option<&str>,
         self_pane_id: Option<&str>,
     ) -> serde_json::Value {
+        let (response, mut reader) = daemon_call_with_identity_response(
+            socket,
+            id,
+            command,
+            args,
+            service_token,
+            self_pane_id,
+        );
+        let mut remainder = Vec::new();
+        reader
+            .read_to_end(&mut remainder)
+            .expect("response connection reaches EOF");
+        assert!(remainder.is_empty(), "unexpected extra response bytes");
+        response
+    }
+
+    fn daemon_call_with_identity_response(
+        socket: &Path,
+        id: u64,
+        command: &str,
+        args: serde_json::Value,
+        service_token: Option<&str>,
+        self_pane_id: Option<&str>,
+    ) -> (serde_json::Value, BufReader<UnixStream>) {
         let mut request = serde_json::json!({
             "id": id,
             "cmd": command,
@@ -506,12 +530,10 @@ mod tests {
         reader
             .read_line(&mut response)
             .expect("read production response");
-        let mut remainder = Vec::new();
-        reader
-            .read_to_end(&mut remainder)
-            .expect("response connection reaches EOF");
-        assert!(remainder.is_empty(), "unexpected extra response bytes");
-        serde_json::from_str(&response).expect("decode production response")
+        (
+            serde_json::from_str(&response).expect("decode production response"),
+            reader,
+        )
     }
 
     fn request_shutdown_for_cleanup(socket: &Path, token: &str) -> bool {
@@ -839,12 +861,13 @@ mod tests {
             .recv_timeout(Duration::from_secs(10))
             .expect("accepted status request paused in its worker-local terminal factory");
 
-        let response = daemon_call(
+        let (response, mut shutdown_reader) = daemon_call_with_identity_response(
             &socket,
             8,
             "shutdown",
             serde_json::json!({}),
             Some(shutdown_token),
+            None,
         );
         assert_eq!(true, response["ok"]);
         assert_eq!(
@@ -884,6 +907,14 @@ mod tests {
             .join()
             .expect("active request thread");
         assert_eq!(true, active_response["ok"], "{active_response}");
+        let mut shutdown_remainder = Vec::new();
+        shutdown_reader
+            .read_to_end(&mut shutdown_remainder)
+            .expect("shutdown connection reaches EOF after all requests drain");
+        assert!(
+            shutdown_remainder.is_empty(),
+            "shutdown response has no extra bytes"
+        );
         assert_eq!(
             0,
             daemon
