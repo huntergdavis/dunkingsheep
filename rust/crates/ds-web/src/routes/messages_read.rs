@@ -525,7 +525,7 @@ mod tests {
     use std::{
         future::Future,
         sync::{Arc, Mutex},
-        task::{Context, Poll, Wake, Waker},
+        task::{Context, Poll, Waker},
     };
 
     use axum::{
@@ -696,12 +696,7 @@ mod tests {
     }
 
     fn block_on<F: Future>(future: F) -> F::Output {
-        struct NoopWake;
-        impl Wake for NoopWake {
-            fn wake(self: Arc<Self>) {}
-        }
-        let waker = Waker::from(Arc::new(NoopWake));
-        let mut context = Context::from_waker(&waker);
+        let mut context = Context::from_waker(Waker::noop());
         let mut future = std::pin::pin!(future);
         loop {
             match future.as_mut().poll(&mut context) {

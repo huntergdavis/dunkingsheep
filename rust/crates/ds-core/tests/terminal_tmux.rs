@@ -78,7 +78,7 @@ fn list_panes_parses_the_canned_listing() {
     let _serial = serial();
     let dir = tempdir();
     let listing = pane_line("%2", "$2", "@2", "claude", "2202");
-    let fake = fake_tmux(&dir.path().to_path_buf(), &listing, 0);
+    let fake = fake_tmux(dir.path(), &listing, 0);
     let backend = isolated_backend(fake);
     let panes = backend.list_panes();
     assert_eq!(1, panes.len());
@@ -122,7 +122,7 @@ fn listing_panes_with_their_status_is_one_tmux_process_not_one_per_pane() {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    let fake = fake_tmux(&dir.path().to_path_buf(), &listing, 0);
+    let fake = fake_tmux(dir.path(), &listing, 0);
     let backend = isolated_backend(fake);
     let panes = backend.list_panes_with_status();
     assert_eq!(6, panes.len());
@@ -146,7 +146,7 @@ fn fallible_resolve_lanes_preserves_status_with_one_tmux_listing() {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    let fake = fake_tmux(&dir.path().to_path_buf(), &listing, 0);
+    let fake = fake_tmux(dir.path(), &listing, 0);
     let backend = isolated_backend(fake);
     let registered = |_: &str| (false, false, None);
     let env = TerminalEnv {
@@ -171,7 +171,7 @@ fn one_pane_with_its_status_is_one_tmux_process_and_a_missing_pane_is_none() {
     let _serial = serial();
     let dir = tempdir();
     let listing = pane_line("%2", "$2", "@2", "claude", "2202");
-    let fake = fake_tmux(&dir.path().to_path_buf(), &listing, 0);
+    let fake = fake_tmux(dir.path(), &listing, 0);
     let backend = isolated_backend(fake);
     let (pane, status) = backend.get_pane_with_status("%2").expect("pane");
     assert_eq!("%2", pane.pane_id);
@@ -184,11 +184,7 @@ fn one_pane_with_its_status_is_one_tmux_process_and_a_missing_pane_is_none() {
 fn a_missing_server_is_an_empty_world_not_an_error() {
     let _serial = serial();
     let dir = tempdir();
-    let fake = fake_tmux(
-        &dir.path().to_path_buf(),
-        "no server running on /tmp/tmux-1000/default",
-        1,
-    );
+    let fake = fake_tmux(dir.path(), "no server running on /tmp/tmux-1000/default", 1);
     let backend = isolated_backend(fake);
     assert!(backend.list_panes().is_empty());
     assert!(backend.list_tabs().is_empty());
@@ -199,7 +195,7 @@ fn a_missing_server_is_an_empty_world_not_an_error() {
 fn fallible_listing_preserves_the_exact_tmux_failure() {
     let _serial = serial();
     let dir = tempdir();
-    let fake = fake_tmux(&dir.path().to_path_buf(), "pane listing is offline", 7);
+    let fake = fake_tmux(dir.path(), "pane listing is offline", 7);
     let backend = isolated_backend(fake);
     let expected = TerminalError::refused("pane listing is offline");
 
@@ -212,11 +208,7 @@ fn fallible_listing_preserves_the_exact_tmux_failure() {
 fn fallible_listing_keeps_a_missing_server_as_an_empty_world() {
     let _serial = serial();
     let dir = tempdir();
-    let fake = fake_tmux(
-        &dir.path().to_path_buf(),
-        "no server running on /tmp/tmux-1000/default",
-        1,
-    );
+    let fake = fake_tmux(dir.path(), "no server running on /tmp/tmux-1000/default", 1);
     let backend = isolated_backend(fake);
 
     assert_eq!(Ok(Vec::new()), backend.try_list_panes());
@@ -238,7 +230,7 @@ fn close_refuses_anything_this_backend_did_not_create() {
     let _serial = serial();
     let dir = tempdir();
     let listing = pane_line("%2", "$2", "@2", "bash", "2202");
-    let fake = fake_tmux(&dir.path().to_path_buf(), &listing, 0);
+    let fake = fake_tmux(dir.path(), &listing, 0);
     let mut backend = isolated_backend(fake);
     let error: TerminalError = backend.close("pane", "%2").unwrap_err();
     assert!(error.to_string().contains("did not create it"), "{error}");
@@ -251,7 +243,7 @@ fn a_created_pane_can_be_closed_and_the_kill_argv_is_right() {
     let _serial = serial();
     let dir = tempdir();
     let listing = pane_line("%2", "$2", "@2", "bash", "2202");
-    let fake = fake_tmux(&dir.path().to_path_buf(), &listing, 0);
+    let fake = fake_tmux(dir.path(), &listing, 0);
     let mut backend = isolated_backend(fake);
     backend
         .registry()
@@ -269,7 +261,7 @@ fn a_created_pane_can_be_closed_and_the_kill_argv_is_right() {
 fn run_command_is_literal_chunked_and_settles_before_enter() {
     let _serial = serial();
     let dir = tempdir();
-    let fake = fake_tmux(&dir.path().to_path_buf(), "", 0);
+    let fake = fake_tmux(dir.path(), "", 0);
     let mut backend = isolated_backend(fake);
     backend
         .run_command("%2", "dunkingsheep status; echo hi")
@@ -293,7 +285,7 @@ fn run_command_is_literal_chunked_and_settles_before_enter() {
 fn a_long_message_is_sent_in_chunks() {
     let _serial = serial();
     let dir = tempdir();
-    let fake = fake_tmux(&dir.path().to_path_buf(), "", 0);
+    let fake = fake_tmux(dir.path(), "", 0);
     let mut backend = isolated_backend(fake);
     let message = "x".repeat(2000); // 3 chunks of <= 900
     backend.send_text("%2", &message).expect("typed");
@@ -413,7 +405,7 @@ fn an_empty_target_is_refused_and_a_missing_pane_has_no_status() {
     let dir = tempdir();
     // A fake that serves the canned pane, so "%2" EXISTS and "%404" does not.
     let listing = pane_line("%2", "$2", "@2", "bash", "2202");
-    let fake = fake_tmux(&dir.path().to_path_buf(), &listing, 0);
+    let fake = fake_tmux(dir.path(), &listing, 0);
     let mut backend = isolated_backend(fake);
     let error = backend.send_text("", "hello").unwrap_err();
     assert_eq!("No target", error.to_string());
@@ -433,7 +425,7 @@ fn an_empty_target_is_refused_and_a_missing_pane_has_no_status() {
 fn a_failing_tmux_is_a_refusal_with_tmux_s_own_message() {
     let _serial = serial();
     let dir = tempdir();
-    let fake = fake_tmux(&dir.path().to_path_buf(), "can't find pane: %9", 1);
+    let fake = fake_tmux(dir.path(), "can't find pane: %9", 1);
     let mut backend = isolated_backend(fake);
     let error = backend.run_command("%9", "true").unwrap_err();
     assert!(error.to_string().contains("can't find pane: %9"), "{error}");
@@ -453,7 +445,7 @@ fn a_missing_tmux_binary_is_unavailable_not_a_refusal() {
 fn capture_pane_asks_for_the_ansi_and_line_flags() {
     let _serial = serial();
     let dir = tempdir();
-    let fake = fake_tmux(&dir.path().to_path_buf(), "screen text", 0);
+    let fake = fake_tmux(dir.path(), "screen text", 0);
     let backend = isolated_backend(fake);
     assert_eq!("screen text\n", backend.capture("%2", 50, true).unwrap());
     let calls = fs::read_to_string(dir.path().join("argv.txt")).unwrap();
@@ -466,7 +458,7 @@ fn agent_child_pids_says_it_needs_proc_rs_rather_than_answering_empty() {
     // The Python delegates to dunk_callers.pane_agent_pids (T03). An empty Vec here
     // would read as "no agent behind this pane", which is a different claim.
     let dir = tempdir();
-    let fake = fake_tmux(&dir.path().to_path_buf(), "", 0);
+    let fake = fake_tmux(dir.path(), "", 0);
     let backend = isolated_backend(fake);
     let error = backend.agent_child_pids(2202).unwrap_err();
     assert!(error.to_string().contains("T03"), "{error}");
@@ -517,7 +509,7 @@ fn resize_sends_the_python_argv_and_reports_the_size_read_back() {
     let before = pane_line("%2", "$2", "@2", "claude", "2202");
     let after = pane_line("%2", "$2", "@2", "claude", "2202")
         .replace(&["120", "40"].join(SEP), &["90", "30"].join(SEP));
-    let fake = fake_tmux_that_resizes(&dir.path().to_path_buf(), &before, &after);
+    let fake = fake_tmux_that_resizes(dir.path(), &before, &after);
     let mut backend = isolated_backend(fake);
 
     let resize = backend.resize("%2", 90, 30).expect("resize");
@@ -550,7 +542,7 @@ fn resize_refuses_out_of_bounds_before_touching_tmux() {
     let _serial = serial();
     let dir = tempdir();
     let listing = pane_line("%2", "$2", "@2", "claude", "2202");
-    let fake = fake_tmux_that_resizes(&dir.path().to_path_buf(), &listing, &listing);
+    let fake = fake_tmux_that_resizes(dir.path(), &listing, &listing);
     let mut backend = isolated_backend(fake);
 
     for (cols, rows) in [(0, 30), (30, 0), (1001, 30), (30, 1001)] {
@@ -577,7 +569,7 @@ fn resize_names_a_missing_pane() {
     let _serial = serial();
     let dir = tempdir();
     let listing = pane_line("%2", "$2", "@2", "claude", "2202");
-    let fake = fake_tmux_that_resizes(&dir.path().to_path_buf(), &listing, &listing);
+    let fake = fake_tmux_that_resizes(dir.path(), &listing, &listing);
     let mut backend = isolated_backend(fake);
     let error = backend.resize("%99", 80, 24).expect_err("no such pane");
     assert_eq!("no such pane %99", error.message);
