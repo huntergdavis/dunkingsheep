@@ -3115,7 +3115,8 @@ pub fn h_task_owner_answer(context: &HandlerContext<'_>, args: Args) -> Result<V
         .ok_or_else(|| DunkError::Refused("task id is required".into()))?;
     let version = args
         .get("version")
-        .and_then(Value::as_i64)
+        .and_then(Value::as_str)
+        .and_then(|v| v.parse::<i64>().ok())
         .filter(|v| *v > 0)
         .ok_or_else(|| DunkError::Refused("question version is required".into()))?;
     let option = match args.get("option_number") {

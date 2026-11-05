@@ -190,7 +190,8 @@ viewport report.
 - `grep -r "subprocess\|sqlite3" web/` returns only the session store.
 
 Owner-decision questions may use `needs-owner: question | options: 1=label; 2=label`.
-The desk fetches the current question generation before showing its choices; the
-answer sends that generation with the selected number. A stale generation is
+The desk fetches the current task-event generation before showing its choices; the
+answer sends that opaque decimal string with the selected number. Any intervening
+task event invalidates the displayed generation and requires a refresh. A stale generation is
 refused, and an identical repeated answer is a no-op. Questions without options
 retain a freeform answer field.

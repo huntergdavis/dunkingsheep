@@ -29,7 +29,7 @@ fn options(reason: &str) -> Result<Vec<(u64, String)>, DunkError> {
 }
 
 impl Tasks {
-    /// Read the current question and its immutable blocked-event generation together.
+    /// Read the current question and its task-event generation together.
     pub async fn owner_question(&self, id: &str, pane: Option<&str>) -> Result<Value, DunkError> {
         let id = id.to_owned();
         let pane = pane.map(str::to_owned);
@@ -38,13 +38,13 @@ impl Tasks {
             let (status, scope, reason): (String, String, Option<String>) = tx.query_row("SELECT status,scope,block_reason FROM tasks WHERE id=?", [&id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).optional().map_err(db::map_sqlite)?.ok_or_else(|| DunkError::Refused(format!("no task with id {id:?}")))?;
             if pane.as_deref().is_some_and(|p| !p.is_empty() && scope != "global" && scope != p) { return Err(DunkError::Refused("task is not visible to this caller".into())); }
             let reason = reason.filter(|r| status == "blocked" && r.starts_with("needs-owner:")).ok_or_else(|| DunkError::Refused("task has no owner question".into()))?;
-            let version: i64 = tx.query_row("SELECT id FROM task_events WHERE task_id=? AND event='blocked' ORDER BY id DESC LIMIT 1", [&id], |r| r.get(0)).optional().map_err(db::map_sqlite)?.ok_or_else(|| DunkError::Refused("owner question has no version".into()))?;
+            let version: i64 = tx.query_row("SELECT id FROM task_events WHERE task_id=? ORDER BY id DESC LIMIT 1", [&id], |r| r.get(0)).optional().map_err(db::map_sqlite)?.ok_or_else(|| DunkError::Refused("owner question has no version".into()))?;
             let choices = options(&reason)?.into_iter().map(|(number,label)| json!({"number":number,"label":label})).collect::<Vec<_>>();
-            Ok(json!({"task_id":id,"question":reason.trim_start_matches("needs-owner:").trim(),"version":version,"options":choices}))
+            Ok(json!({"task_id":id,"question":reason.trim_start_matches("needs-owner:").split_once("| options:").map_or_else(|| reason.trim_start_matches("needs-owner:").trim(), |(question, _)| question.trim()),"version":version.to_string(),"options":choices}))
         }).await
     }
 
-    /// Answer only the specific blocked generation identified by its blocked-event ID.
+    /// Answer only the specific blocked generation identified by its task-event ID.
     pub async fn owner_answer(
         &self,
         id: &str,
@@ -65,13 +65,13 @@ impl Tasks {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))
                 .optional().map_err(db::map_sqlite)?.ok_or_else(|| DunkError::Refused(format!("no task with id {id:?}")))?;
             if pane.as_deref().is_some_and(|p| !p.is_empty() && scope != "global" && scope != p) { return Err(DunkError::Refused("task is not visible to this caller".into())); }
-            let generation: Option<i64> = tx.query_row("SELECT id FROM task_events WHERE task_id=? AND event='blocked' ORDER BY id DESC LIMIT 1", [&id], |r| r.get(0)).optional().map_err(db::map_sqlite)?;
-            if generation != Some(version) { return Err(DunkError::Refused("owner question has changed".into())); }
             if status != "blocked" {
-                let previous: Option<String> = tx.query_row("SELECT meta FROM task_events WHERE task_id=? AND event='owner_answer' ORDER BY id DESC LIMIT 1", [&id], |r| r.get(0)).optional().map_err(db::map_sqlite)?;
+                let previous: Option<String> = tx.query_row("SELECT meta FROM task_events WHERE task_id=? AND event='owner_answer' AND id=(SELECT id FROM task_events WHERE task_id=? AND event IN ('owner_answer','blocked','unblocked') ORDER BY id DESC LIMIT 1 OFFSET 1) AND (SELECT event FROM task_events WHERE task_id=? AND event IN ('owner_answer','blocked','unblocked') ORDER BY id DESC LIMIT 1)='unblocked'", [&id,&id,&id], |r| r.get(0)).optional().map_err(db::map_sqlite)?;
                 if status == "open" && previous.as_deref().and_then(|s| serde_json::from_str::<Value>(s).ok()).is_some_and(|v| v["version"] == version && v["option_number"] == json!(option) && v["reply"] == json!(reply)) { return Ok(json!({"task_id":id,"version":version,"changed":false})); }
                 return Err(DunkError::Refused("task has no matching blocked owner question".into()));
             }
+            let generation: Option<i64> = tx.query_row("SELECT id FROM task_events WHERE task_id=? ORDER BY id DESC LIMIT 1", [&id], |r| r.get(0)).optional().map_err(db::map_sqlite)?;
+            if generation != Some(version) { return Err(DunkError::Refused("owner question has changed".into())); }
             let reason = reason.filter(|v| v.starts_with("needs-owner:")).ok_or_else(|| DunkError::Refused("task has no owner question".into()))?;
             let choices = options(&reason)?;
             let answer = if choices.is_empty() {
@@ -106,7 +106,9 @@ mod tests {
             .await
             .unwrap();
         let version = tasks.owner_question(&task.id, None).await.unwrap()["version"]
-            .as_i64()
+            .as_str()
+            .unwrap()
+            .parse::<i64>()
             .unwrap();
         let (a, b) = tokio::join!(
             tasks.owner_answer(&task.id, version, Some(1), None, Some("owner"), None),
@@ -130,7 +132,9 @@ mod tests {
             .await
             .is_err());
         let next = tasks.owner_question(&task.id, None).await.unwrap()["version"]
-            .as_i64()
+            .as_str()
+            .unwrap()
+            .parse::<i64>()
             .unwrap();
         assert_ne!(version, next);
         assert!(tasks
@@ -151,7 +155,7 @@ mod tests {
         assert!(tasks.owner_question(&task.id, Some("%2")).await.is_err());
         let q = tasks.owner_question(&task.id, Some("%1")).await.unwrap();
         assert_eq!(q["options"], json!([]));
-        let version = q["version"].as_i64().unwrap();
+        let version = q["version"].as_str().unwrap().parse::<i64>().unwrap();
         assert!(tasks
             .owner_answer(&task.id, version, None, Some(" "), Some("%1"), Some("%1"))
             .await
@@ -189,7 +193,9 @@ mod tests {
             .await
             .unwrap();
         let version = tasks.owner_question(&task.id, None).await.unwrap()["version"]
-            .as_i64()
+            .as_str()
+            .unwrap()
+            .parse::<i64>()
             .unwrap();
         tasks.writer.call(|conn| {
             conn.execute_batch("CREATE TRIGGER fail_owner_unblock BEFORE INSERT ON task_events WHEN NEW.event='unblocked' BEGIN SELECT RAISE(ABORT, 'injected'); END;").map_err(db::map_sqlite)?;
@@ -214,5 +220,29 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count, 0);
+    }
+    #[tokio::test]
+    async fn task_event_invalidates_a_previously_read_question() {
+        let dir = tempfile::tempdir().unwrap();
+        let tasks = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+        let task = tasks.add("global", "decision", "").await.unwrap();
+        tasks
+            .block(&task.id, "needs-owner: pick | options: 1=yes")
+            .await
+            .unwrap();
+        let version = tasks.owner_question(&task.id, None).await.unwrap()["version"]
+            .as_str()
+            .unwrap()
+            .parse::<i64>()
+            .unwrap();
+        tasks
+            .note(&task.id, "updated", "owner", Some("question revised"))
+            .await
+            .unwrap();
+        assert!(tasks
+            .owner_answer(&task.id, version, Some(1), None, Some("owner"), None)
+            .await
+            .is_err());
+        assert_eq!(tasks.get(&task.id).await.unwrap().status, "blocked");
     }
 }

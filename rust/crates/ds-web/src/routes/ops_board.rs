@@ -151,8 +151,8 @@ async fn owner_request(
     let result = if answer {
         let Some(version) = payload
             .get("version")
-            .and_then(Value::as_i64)
-            .filter(|v| *v > 0)
+            .and_then(Value::as_str)
+            .filter(|v| v.parse::<i64>().is_ok_and(|n| n > 0))
         else {
             return detail_response(StatusCode::BAD_REQUEST, "question version is required");
         };
@@ -461,7 +461,7 @@ mod tests {
             id: &'a str,
         ) -> OpsBoardFuture<'a, Result<Value, OpsBoardError>> {
             Box::pin(async move {
-                Ok(json!({"task_id":id,"version":42,"options":[{"number":1,"label":"yes"}]}))
+                Ok(json!({"task_id":id,"version":"42","options":[{"number":1,"label":"yes"}]}))
             })
         }
         fn owner_answer<'a>(
@@ -558,7 +558,7 @@ mod tests {
             .header(header::HOST, "desk.test")
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(
-                r#"{"task_id":"t9","version":42,"option_number":1}"#,
+                r#"{"task_id":"t9","version":"42","option_number":1}"#,
             ))
             .unwrap();
         let response = router(board, auth, RequestScheme::Http)
@@ -570,7 +570,7 @@ mod tests {
             rx.recv_timeout(Duration::from_secs(2)).unwrap(),
             (
                 json!("task_owner_answer"),
-                json!({"id":"t9","version":42,"option_number":1,"reply":null})
+                json!({"id":"t9","version":"42","option_number":1,"reply":null})
             )
         );
         server.join().unwrap();
@@ -586,14 +586,14 @@ mod tests {
             .header(header::HOST, "desk.test")
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(
-                r#"{"task_id":"t9","version":42,"option_number":1}"#,
+                r#"{"task_id":"t9","version":"42","option_number":1}"#,
             ))
             .unwrap();
         let response = block_on(app(board.clone()).oneshot(request)).unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
             *board.answers.lock().unwrap(),
-            vec![json!({"id":"t9","version":42,"option_number":1,"reply":null})]
+            vec![json!({"id":"t9","version":"42","option_number":1,"reply":null})]
         );
     }
 

@@ -1151,7 +1151,7 @@ pub static COMMANDS: &[Command] = &[
     Command {
         name: "task_owner_answer",
         description: "Atomically answer one versioned owner question.",
-        params: &[Param { name: "id", schema: "{\"type\":\"string\"}" }, Param { name: "version", schema: "{\"type\":\"integer\"}" }, Param { name: "option_number", schema: "{\"type\":\"integer\"}" }, Param { name: "reply", schema: "{\"type\":\"string\"}" }],
+        params: &[Param { name: "id", schema: "{\"type\":\"string\"}" }, Param { name: "version", schema: "{\"type\":\"string\"}" }, Param { name: "option_number", schema: "{\"type\":\"integer\"}" }, Param { name: "reply", schema: "{\"type\":\"string\"}" }],
         dispatch_required: &["id", "version"], required: &["id", "version"], mcp: false, owner_only: true,
         roles: &["owner", "web"],
     },
