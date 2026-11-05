@@ -261,9 +261,9 @@ fn decode_utf32(bytes: &[u8], big_endian: bool) -> Result<String, JsonError> {
     let (parts, _) = bytes.as_chunks::<4>();
     for (index, part) in parts.iter().enumerate() {
         let n = if big_endian {
-            u32::from_be_bytes(part.try_into().unwrap())
+            u32::from_be_bytes(*part)
         } else {
-            u32::from_le_bytes(part.try_into().unwrap())
+            u32::from_le_bytes(*part)
         };
         out.push(char::from_u32(n).ok_or(JsonError { offset: index * 4 })?);
     }
