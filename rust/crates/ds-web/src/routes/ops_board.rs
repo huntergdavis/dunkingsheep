@@ -506,6 +506,77 @@ mod tests {
         router(board, auth, RequestScheme::Http)
     }
 
+    #[tokio::test]
+    async fn owner_answer_uses_one_actual_unix_socket_command() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+        use std::time::Duration;
+        let dir = std::env::temp_dir().join(format!(
+            "ds-owner-answer-{}-{}",
+            std::process::id(),
+            ds_core::clock::now_s()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("daemon.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            let request: Value = serde_json::from_str(&line).unwrap();
+            tx.send((request["cmd"].clone(), request["args"].clone()))
+                .unwrap();
+            writeln!(
+                stream,
+                "{}",
+                json!({"id":request["id"],"ok":true,"result":{"changed":true}})
+            )
+            .unwrap();
+        });
+        let client = ds_core::client::FlockClient::new(
+            ds_core::client::UnixTransport { path },
+            None,
+            "test".into(),
+            Duration::from_secs(2),
+            Some("fixture-token".into()),
+        );
+        let board: Arc<dyn OpsBoardBackend> = Arc::new(SocketOwnerDecisions {
+            board: Arc::new(FakeBoard::default()),
+            client: Arc::new(std::sync::Mutex::new(client)),
+        });
+        let auth: Arc<dyn AuthBackend> = Arc::new(FakeAuth {
+            fail_identity: false,
+            identity_calls: Arc::new(AtomicUsize::new(0)),
+            seen: Arc::default(),
+        });
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/ops-board/answer")
+            .header(header::HOST, "desk.test")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"task_id":"t9","version":42,"option_number":1}"#,
+            ))
+            .unwrap();
+        let response = router(board, auth, RequestScheme::Http)
+            .oneshot(request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            (
+                json!("task_owner_answer"),
+                json!({"id":"t9","version":42,"option_number":1,"reply":null})
+            )
+        );
+        server.join().unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn owner_answer_routes_one_versioned_backend_call() {
         let board = Arc::new(FakeBoard::default());

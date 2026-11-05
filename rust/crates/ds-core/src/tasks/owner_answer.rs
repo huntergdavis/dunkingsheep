@@ -139,4 +139,44 @@ mod tests {
             .is_err());
         assert_eq!(tasks.get(&task.id).await.unwrap().status, "blocked");
     }
+    #[tokio::test]
+    async fn freeform_privacy_and_malformed_options_fail_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let tasks = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+        let task = tasks.add("%1", "decision", "").await.unwrap();
+        tasks
+            .block(&task.id, "needs-owner: what now?")
+            .await
+            .unwrap();
+        assert!(tasks.owner_question(&task.id, Some("%2")).await.is_err());
+        let q = tasks.owner_question(&task.id, Some("%1")).await.unwrap();
+        assert_eq!(q["options"], json!([]));
+        let version = q["version"].as_i64().unwrap();
+        assert!(tasks
+            .owner_answer(&task.id, version, None, Some(" "), Some("%1"), Some("%1"))
+            .await
+            .is_err());
+        assert_eq!(
+            tasks
+                .owner_answer(
+                    &task.id,
+                    version,
+                    None,
+                    Some("proceed"),
+                    Some("%1"),
+                    Some("%1")
+                )
+                .await
+                .unwrap()["answer"],
+            "proceed"
+        );
+        tasks
+            .block(
+                &task.id,
+                "needs-owner: choose | options: 1=one; 1=duplicate",
+            )
+            .await
+            .unwrap();
+        assert!(tasks.owner_question(&task.id, Some("%1")).await.is_err());
+    }
 }
