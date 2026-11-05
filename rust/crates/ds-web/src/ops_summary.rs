@@ -505,9 +505,9 @@ fn decode_json_bytes(bytes: &[u8]) -> SummaryResult<String> {
         let (chunks, _) = bytes.as_chunks::<4>();
         for chunk in chunks {
             let value = if little_endian {
-                u32::from_le_bytes(chunk)
+                u32::from_le_bytes(*chunk)
             } else {
-                u32::from_be_bytes(chunk)
+                u32::from_be_bytes(*chunk)
             };
             text.push(char::from_u32(value).ok_or(SummaryError::InvalidJsonEncoding)?);
         }
