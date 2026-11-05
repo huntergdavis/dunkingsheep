@@ -7,9 +7,9 @@
 
 use std::fmt::Write as _;
 
-// Keep recursive parsing below the platform's small worker-thread stack. The raw
-// HTTP body limit can otherwise contain enough nested arrays to abort the process.
-const MAX_JSON_DEPTH: usize = 512;
+// The HTTP facade accepts at most 4096 request bytes, which permits at most 2047
+// one-byte nested containers. A 2048-frame guard also bounds standalone JSON callers.
+const MAX_JSON_DEPTH: usize = 2048;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
@@ -269,6 +269,35 @@ fn decode_utf32(bytes: &[u8], big_endian: bool) -> Result<String, JsonError> {
     Ok(out)
 }
 
+#[derive(Clone, Copy)]
+enum ArrayState {
+    First,
+    Value,
+    Separator,
+}
+#[derive(Clone, Copy)]
+enum ObjectState {
+    KeyOrEnd,
+    Key,
+    Value,
+    Separator,
+}
+enum ContainerFrame {
+    Array {
+        items: Vec<Value>,
+        state: ArrayState,
+    },
+    Object {
+        items: Vec<(PythonString, Value)>,
+        key: Option<PythonString>,
+        state: ObjectState,
+    },
+}
+enum ContainerState {
+    Array(ArrayState),
+    Object(ObjectState),
+}
+
 struct Parser<'a> {
     text: &'a str,
     at: usize,
@@ -296,32 +325,27 @@ impl Parser<'_> {
         self.at += 1;
         Ok(())
     }
-    fn value(&mut self, depth: usize) -> Result<Value, JsonError> {
-        self.space();
-        match self.peek().ok_or_else(|| self.error())? {
-            b'"' => self.string().map(Value::String),
-            b'[' | b'{' => {
-                if depth >= MAX_JSON_DEPTH {
-                    return Err(self.error());
-                }
-                let object = self.peek() == Some(b'{');
-                self.at += 1;
-                let end = if object { b'}' } else { b']' };
-                self.space();
-                if self.peek() == Some(end) {
-                    self.at += 1;
-                    return Ok(if object {
-                        Value::Object(Vec::new())
-                    } else {
-                        Value::Array(Vec::new())
-                    });
-                }
-                if object {
-                    let mut items: Vec<(PythonString, Value)> = Vec::new();
-                    loop {
-                        let key = self.string()?;
-                        self.take(b':')?;
-                        let value = self.value(depth + 1)?;
+    fn value(&mut self, _depth: usize) -> Result<Value, JsonError> {
+        let mut frames = Vec::new();
+        let mut completed = self.begin_value(&mut frames)?;
+        loop {
+            if let Some(value) = completed.take() {
+                let Some(frame) = frames.last_mut() else {
+                    return Ok(value);
+                };
+                match frame {
+                    ContainerFrame::Array { items, state } => {
+                        if !matches!(state, ArrayState::First | ArrayState::Value) {
+                            return Err(self.error());
+                        }
+                        items.push(value);
+                        *state = ArrayState::Separator;
+                    }
+                    ContainerFrame::Object { items, key, state } => {
+                        if !matches!(state, ObjectState::Value) {
+                            return Err(self.error());
+                        }
+                        let key = key.take().ok_or_else(|| self.error())?;
                         if let Some((_, old)) =
                             items.iter_mut().find(|(existing, _)| *existing == key)
                         {
@@ -329,53 +353,180 @@ impl Parser<'_> {
                         } else {
                             items.push((key, value));
                         }
-                        self.space();
-                        if self.peek() == Some(end) {
-                            self.at += 1;
-                            break;
-                        }
-                        self.take(b',')?;
+                        *state = ObjectState::Separator;
                     }
-                    Ok(Value::Object(items))
-                } else {
-                    let mut items = Vec::new();
-                    loop {
-                        items.push(self.value(depth + 1)?);
-                        self.space();
-                        if self.peek() == Some(end) {
-                            self.at += 1;
-                            break;
-                        }
-                        self.take(b',')?;
-                    }
-                    Ok(Value::Array(items))
                 }
+                continue;
             }
+            let Some(frame) = frames.last() else {
+                return Err(self.error());
+            };
+            let state = match frame {
+                ContainerFrame::Array { state, .. } => ContainerState::Array(*state),
+                ContainerFrame::Object { state, .. } => ContainerState::Object(*state),
+            };
+            match state {
+                ContainerState::Array(state) => match state {
+                    ArrayState::First => {
+                        self.space();
+                        if self.peek() == Some(b']') {
+                            self.at += 1;
+                            let Some(ContainerFrame::Array { items, .. }) = frames.pop() else {
+                                unreachable!()
+                            };
+                            completed = Some(Value::Array(items));
+                        } else {
+                            completed = self.begin_value(&mut frames)?;
+                        }
+                    }
+                    ArrayState::Value => {
+                        self.space();
+                        if self.peek() == Some(b']') {
+                            return Err(self.error());
+                        }
+                        completed = self.begin_value(&mut frames)?;
+                    }
+                    ArrayState::Separator => {
+                        self.space();
+                        match self.peek() {
+                            Some(b',') => {
+                                self.at += 1;
+                                if let Some(ContainerFrame::Array { state, .. }) = frames.last_mut()
+                                {
+                                    *state = ArrayState::Value;
+                                }
+                            }
+                            Some(b']') => {
+                                self.at += 1;
+                                let Some(ContainerFrame::Array { items, .. }) = frames.pop() else {
+                                    unreachable!()
+                                };
+                                completed = Some(Value::Array(items));
+                            }
+                            _ => return Err(self.error()),
+                        }
+                    }
+                },
+                ContainerState::Object(state) => match state {
+                    ObjectState::KeyOrEnd => {
+                        self.space();
+                        if self.peek() == Some(b'}') {
+                            self.at += 1;
+                            let Some(ContainerFrame::Object { items, .. }) = frames.pop() else {
+                                unreachable!()
+                            };
+                            completed = Some(Value::Object(items));
+                        } else {
+                            self.start_object_value(&mut frames)?;
+                            completed = self.begin_value(&mut frames)?;
+                        }
+                    }
+                    ObjectState::Key => {
+                        self.start_object_value(&mut frames)?;
+                        completed = self.begin_value(&mut frames)?;
+                    }
+                    ObjectState::Value => completed = self.begin_value(&mut frames)?,
+                    ObjectState::Separator => {
+                        self.space();
+                        match self.peek() {
+                            Some(b',') => {
+                                self.at += 1;
+                                if let Some(ContainerFrame::Object { state, .. }) =
+                                    frames.last_mut()
+                                {
+                                    *state = ObjectState::Key;
+                                }
+                            }
+                            Some(b'}') => {
+                                self.at += 1;
+                                let Some(ContainerFrame::Object { items, .. }) = frames.pop()
+                                else {
+                                    unreachable!()
+                                };
+                                completed = Some(Value::Object(items));
+                            }
+                            _ => return Err(self.error()),
+                        }
+                    }
+                },
+            }
+        }
+    }
+
+    fn start_object_value(&mut self, frames: &mut [ContainerFrame]) -> Result<(), JsonError> {
+        let key = self.string()?;
+        self.take(b':')?;
+        if let Some(ContainerFrame::Object {
+            key: slot, state, ..
+        }) = frames.last_mut()
+        {
+            *slot = Some(key);
+            *state = ObjectState::Value;
+        }
+        Ok(())
+    }
+
+    fn begin_value(
+        &mut self,
+        frames: &mut Vec<ContainerFrame>,
+    ) -> Result<Option<Value>, JsonError> {
+        self.space();
+        match self.peek().ok_or_else(|| self.error())? {
+            b'[' | b'{' => {
+                if frames.len() >= MAX_JSON_DEPTH {
+                    return Err(self.error());
+                }
+                let object = self.peek() == Some(b'{');
+                self.at += 1;
+                self.space();
+                if object && self.peek() == Some(b'}') {
+                    self.at += 1;
+                    return Ok(Some(Value::Object(Vec::new())));
+                }
+                if !object && self.peek() == Some(b']') {
+                    self.at += 1;
+                    return Ok(Some(Value::Array(Vec::new())));
+                }
+                if object {
+                    frames.push(ContainerFrame::Object {
+                        items: Vec::new(),
+                        key: None,
+                        state: ObjectState::KeyOrEnd,
+                    });
+                } else {
+                    frames.push(ContainerFrame::Array {
+                        items: Vec::new(),
+                        state: ArrayState::First,
+                    });
+                }
+                Ok(None)
+            }
+            b'"' => self.string().map(Value::String).map(Some),
             b't' => {
                 self.literal(b"true")?;
-                Ok(Value::Bool(true))
+                Ok(Some(Value::Bool(true)))
             }
             b'f' => {
                 self.literal(b"false")?;
-                Ok(Value::Bool(false))
+                Ok(Some(Value::Bool(false)))
             }
             b'n' => {
                 self.literal(b"null")?;
-                Ok(Value::Null)
+                Ok(Some(Value::Null))
             }
             b'N' => {
                 self.literal(b"NaN")?;
-                Ok(Value::Float(f64::NAN))
+                Ok(Some(Value::Float(f64::NAN)))
             }
             b'I' => {
                 self.literal(b"Infinity")?;
-                Ok(Value::Float(f64::INFINITY))
+                Ok(Some(Value::Float(f64::INFINITY)))
             }
             b'-' if self.text[self.at..].starts_with("-Infinity") => {
                 self.literal(b"-Infinity")?;
-                Ok(Value::Float(f64::NEG_INFINITY))
+                Ok(Some(Value::Float(f64::NEG_INFINITY)))
             }
-            b'-' | b'0'..=b'9' => self.number(),
+            b'-' | b'0'..=b'9' => self.number().map(Some),
             _ => Err(self.error()),
         }
     }
@@ -526,59 +677,73 @@ impl Parser<'_> {
 }
 
 fn write_value(out: &mut String, value: &Value, indent: Option<usize>, depth: usize) {
-    match value {
-        Value::Null => out.push_str("null"),
-        Value::Bool(v) => out.push_str(if *v { "true" } else { "false" }),
-        Value::Integer(v) => out.push_str(v),
-        Value::Float(v) => {
-            if v.is_nan() {
-                out.push_str("NaN");
-            } else if *v == f64::INFINITY {
-                out.push_str("Infinity");
-            } else if *v == f64::NEG_INFINITY {
-                out.push_str("-Infinity");
-            } else {
-                out.push_str(&ds_core::usage::py_float_repr(*v));
-            }
-        }
-        Value::String(s) => write_string(out, s),
-        Value::Array(items) => write_sequence(out, items.iter(), indent, depth, '[', ']'),
-        Value::Object(items) => {
-            out.push('{');
-            if !items.is_empty() {
-                for (i, (key, val)) in items.iter().enumerate() {
-                    write_item_prefix(out, indent, depth + 1, i == 0);
-                    write_string(out, key);
-                    out.push(':');
-                    out.push(' ');
-                    write_value(out, val, indent, depth + 1);
+    enum Task<'a> {
+        Value(&'a Value, usize),
+        Prefix(usize, bool),
+        Key(&'a PythonString),
+        Colon,
+        Close(char, usize),
+    }
+    let mut tasks = vec![Task::Value(value, depth)];
+    while let Some(task) = tasks.pop() {
+        match task {
+            Task::Value(value, depth) => match value {
+                Value::Null => out.push_str("null"),
+                Value::Bool(v) => out.push_str(if *v { "true" } else { "false" }),
+                Value::Integer(v) => out.push_str(v),
+                Value::Float(v) => {
+                    if v.is_nan() {
+                        out.push_str("NaN");
+                    } else if *v == f64::INFINITY {
+                        out.push_str("Infinity");
+                    } else if *v == f64::NEG_INFINITY {
+                        out.push_str("-Infinity");
+                    } else {
+                        out.push_str(&ds_core::usage::py_float_repr(*v));
+                    }
                 }
-                write_close(out, indent, depth);
+                Value::String(s) => write_string(out, s),
+                Value::Array(items) => {
+                    out.push('[');
+                    if items.is_empty() {
+                        out.push(']');
+                    } else {
+                        tasks.push(Task::Close(']', depth));
+                        for (i, item) in items.iter().enumerate().rev() {
+                            tasks.push(Task::Value(item, depth + 1));
+                            tasks.push(Task::Prefix(depth + 1, i == 0));
+                        }
+                    }
+                }
+                Value::Object(items) => {
+                    out.push('{');
+                    if items.is_empty() {
+                        out.push('}');
+                    } else {
+                        tasks.push(Task::Close('}', depth));
+                        for (i, (key, value)) in items.iter().enumerate().rev() {
+                            tasks.push(Task::Value(value, depth + 1));
+                            tasks.push(Task::Colon);
+                            tasks.push(Task::Key(key));
+                            tasks.push(Task::Prefix(depth + 1, i == 0));
+                        }
+                    }
+                }
+            },
+            Task::Prefix(depth, first) => write_item_prefix(out, indent, depth, first),
+            Task::Key(key) => write_string(out, key),
+            Task::Colon => {
+                out.push(':');
+                out.push(' ');
             }
-            out.push('}');
+            Task::Close(close, depth) => {
+                write_close(out, indent, depth);
+                out.push(close);
+            }
         }
     }
 }
 
-fn write_sequence<'a>(
-    out: &mut String,
-    values: impl Iterator<Item = &'a Value>,
-    indent: Option<usize>,
-    depth: usize,
-    open: char,
-    close: char,
-) {
-    let values: Vec<_> = values.collect();
-    out.push(open);
-    for (i, value) in values.iter().enumerate() {
-        write_item_prefix(out, indent, depth + 1, i == 0);
-        write_value(out, value, indent, depth + 1);
-    }
-    if !values.is_empty() {
-        write_close(out, indent, depth);
-    }
-    out.push(close);
-}
 fn write_item_prefix(out: &mut String, indent: Option<usize>, depth: usize, first: bool) {
     if !first {
         out.push(',');
@@ -729,12 +894,10 @@ mod tests {
             response_bytes(&Value::String(PythonString::from_text("☃")), None),
             br#""\u2603""#
         );
-        let nested = format!(
-            "{}0{}",
-            "[".repeat(MAX_JSON_DEPTH),
-            "]".repeat(MAX_JSON_DEPTH)
-        );
-        assert!(loads(nested.as_bytes()).is_ok());
+        let nested = format!("{}0{}", "[".repeat(2047), "]".repeat(2047));
+        assert_eq!(nested.len(), 4095);
+        let parsed_nested = loads(nested.as_bytes()).unwrap();
+        assert_eq!(dumps(&parsed_nested, None), nested);
         let too_deep = format!(
             "{}0{}",
             "[".repeat(MAX_JSON_DEPTH + 1),
