@@ -99,7 +99,18 @@ impl OpsBoardBackend for SocketOwnerDecisions {
                                 ds_core::client::ClientError::Dunk(_) => "DunkError",
                                 ds_core::client::ClientError::Unavailable(_) => "DaemonUnavailable",
                                 ds_core::client::ClientError::Protocol(_) => "ValueError",
-                                ds_core::client::ClientError::Io(_) => "OSError",
+                                ds_core::client::ClientError::Io(error) => match error.kind() {
+                                    std::io::ErrorKind::NotFound => "FileNotFoundError",
+                                    std::io::ErrorKind::PermissionDenied => "PermissionError",
+                                    std::io::ErrorKind::ConnectionRefused => {
+                                        "ConnectionRefusedError"
+                                    }
+                                    std::io::ErrorKind::ConnectionReset => "ConnectionResetError",
+                                    std::io::ErrorKind::BrokenPipe => "BrokenPipeError",
+                                    std::io::ErrorKind::TimedOut
+                                    | std::io::ErrorKind::WouldBlock => "TimeoutError",
+                                    _ => "OSError",
+                                },
                             }
                             .into(),
                         )
