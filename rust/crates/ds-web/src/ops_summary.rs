@@ -384,7 +384,7 @@ pub(super) fn round_even(value: f64, digits: i32) -> f64 {
     if !value.is_finite() {
         return value;
     }
-    if digits < 0 || digits > 18 {
+    if !(0..=18).contains(&digits) {
         return value;
     }
     let Some(scaled) = rounded_scaled_integer(value, digits as u32) else {
