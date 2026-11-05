@@ -7,7 +7,7 @@
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use ds_core::flock::lanes::TerminalEnv;
 use ds_core::flock::Flock;
@@ -35,7 +35,7 @@ const SEP: &str = "\x1f";
 
 /// Write a fake tmux that logs its argv to `<dir>/argv.txt` and prints `stdout`,
 /// exiting with `code`.
-fn fake_tmux(dir: &PathBuf, stdout: &str, code: i32) -> PathBuf {
+fn fake_tmux(dir: &Path, stdout: &str, code: i32) -> PathBuf {
     let script = dir.join("tmux");
     let log = dir.join("argv.txt");
     let body = format!(
@@ -484,7 +484,7 @@ fn shell_join_quotes_only_what_needs_it() {
 
 /// A fake tmux whose pane listing CHANGES after `resize-window` is called, so a test
 /// can assert that the reported geometry is the one READ BACK, not the request.
-fn fake_tmux_that_resizes(dir: &PathBuf, before: &str, after: &str) -> PathBuf {
+fn fake_tmux_that_resizes(dir: &Path, before: &str, after: &str) -> PathBuf {
     let script = dir.join("tmux");
     let log = dir.join("argv.txt");
     let listing = dir.join("listing.txt");
