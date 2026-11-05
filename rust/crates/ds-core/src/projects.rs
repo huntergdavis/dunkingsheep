@@ -2010,8 +2010,9 @@ mod tests {
             "a project whose agent could not be closed is not stopped"
         );
         assert_eq!(
-            after.agents, live.agents,
-            "the unclosed agent is still on the record"
+            after.agents,
+            vec![live.agents[0].clone()],
+            "the failed writer close remains recorded while the reviewer close completes"
         );
         assert!(after.events.iter().any(|e| e.step == "stop_agent" && !e.ok));
         let stopped = projects.stop(&mut term, "app", true).unwrap();
