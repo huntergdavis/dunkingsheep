@@ -433,8 +433,15 @@ impl AuthBackend for PersistentAuth {
             keep_cookie.map(str::to_owned),
         );
         Box::pin(async move {
-            self.blocking(move |s| s.change_sync(&c, &n, k.as_deref()))
+            let permit = Arc::clone(&self.inner.login_slots)
+                .acquire_owned()
                 .await
+                .map_err(internal)?;
+            self.blocking(move |s| {
+                let _permit = permit;
+                s.change_sync(&c, &n, k.as_deref())
+            })
+            .await
         })
     }
 }
@@ -443,6 +450,29 @@ impl AuthBackend for PersistentAuth {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[tokio::test]
+    async fn password_change_waits_for_shared_kdf_capacity() {
+        let dir = tempfile::tempdir().unwrap();
+        let auth =
+            PersistentAuth::open_with_password(dir.path(), Some("original-password")).unwrap();
+        let permits = Arc::clone(&auth.inner.login_slots)
+            .acquire_many_owned(8)
+            .await
+            .unwrap();
+        assert!(tokio::time::timeout(
+            Duration::from_millis(50),
+            auth.change_password("original-password", "replacement-password", None)
+        )
+        .await
+        .is_err());
+        assert!(password_matches("original-password", &auth.record().unwrap()).unwrap());
+        drop(permits);
+        auth.change_password("original-password", "replacement-password", None)
+            .await
+            .unwrap();
+        assert!(password_matches("replacement-password", &auth.record().unwrap()).unwrap());
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn slow_login_does_not_block_identity_and_rechecks_changed_password() {
