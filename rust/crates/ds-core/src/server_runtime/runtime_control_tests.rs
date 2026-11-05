@@ -67,6 +67,12 @@ fn services() -> (tempfile::TempDir, Arc<RuntimeServices>) {
     };
     let terminal_factory: LoopTerminalFactory = Arc::new(|| {
         let mut terminal = FakeTerminal::new();
+        let pane_pid = i64::from(std::process::id());
+        for pane in &mut terminal.panes {
+            if matches!(pane.pane_id.as_str(), "w1:p1" | "w2:p2") {
+                pane.pane_pid = Some(pane_pid);
+            }
+        }
         terminal.statuses.insert("w1:p1".into(), "idle".into());
         terminal
             .screens
@@ -96,10 +102,11 @@ fn services() -> (tempfile::TempDir, Arc<RuntimeServices>) {
 }
 
 fn request(pane: &str) -> RequestCtx {
+    let pid = i64::from(std::process::id());
     RequestCtx {
         caller: Some(Caller::new(
-            Some(123),
-            Some("start".into()),
+            Some(pid),
+            crate::proc::process_start(pid),
             Some("codex".into()),
             Some(pane.into()),
             "agent",
@@ -169,6 +176,77 @@ fn production_allocation_status_reads_shared_cache_without_running_a_tick() {
         .dispatch("allocation", &json!({"action":"status"}), &request("w1:p1"))
         .unwrap();
     assert_eq!(response["last_tick"], cached);
+    assert_eq!(services.allocator.last_result(), cached);
+    services.shutdown_checked().unwrap();
+}
+
+#[test]
+fn production_allocation_mutations_use_authenticated_canonical_tasks_and_preserve_cache() {
+    let (_dir, services) = services();
+    let tasks = services.flock().stores().tasks.unwrap();
+    let owned = services
+        .runtime_handle()
+        .block_on(tasks.add_with(
+            "global",
+            "Offerable work",
+            "body",
+            crate::tasks::AddOptions {
+                assignees: vec!["w2:p2".into()],
+                created_by: Some("w2:p2".into()),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+    let review_source = services
+        .runtime_handle()
+        .block_on(tasks.add_with(
+            "global",
+            "Review source",
+            "source body",
+            crate::tasks::AddOptions {
+                assignees: vec!["w2:p2".into()],
+                created_by: Some("w2:p2".into()),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+    let cached = json!({"cached allocation":17});
+    services.allocator.seed_cache(cached.clone());
+    let dispatcher = dispatcher(&services);
+
+    let registered = dispatcher
+        .dispatch(
+            "allocation",
+            &json!({"action":"register","pane_id":"w1:p1","pools":["code"],"roles":["worker"],"skills":["rust"]}),
+            &request("w2:p2"),
+        )
+        .unwrap();
+    assert!(registered["workers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|worker| { worker["pane_id"] == "w1:p1" && worker["registered_by"] == "w2:p2" }));
+    assert_eq!(services.allocator.last_result(), cached);
+
+    let offered = dispatcher
+        .dispatch(
+            "allocation",
+            &json!({"action":"offer","task_id":owned.id,"pool":"code"}),
+            &request("w2:p2"),
+        )
+        .unwrap();
+    assert_eq!(offered["id"], owned.id);
+    assert_eq!(offered["title"], "Offerable work");
+
+    let reviewed = dispatcher
+        .dispatch(
+            "allocation",
+            &json!({"action":"review","task_id":review_source.id,"revision":"0123456789abcdef0123456789abcdef01234567","body":"accepted evidence","pool":"review"}),
+            &request("w2:p2"),
+        )
+        .unwrap();
+    assert_eq!(reviewed["kind"], "review");
+    assert_eq!(reviewed["scope"], "global");
     assert_eq!(services.allocator.last_result(), cached);
     services.shutdown_checked().unwrap();
 }
