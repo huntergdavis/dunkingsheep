@@ -511,13 +511,8 @@ mod tests {
         use std::io::{BufRead, BufReader, Write};
         use std::os::unix::net::UnixListener;
         use std::time::Duration;
-        let dir = std::env::temp_dir().join(format!(
-            "ds-owner-answer-{}-{}",
-            std::process::id(),
-            ds_core::clock::now_s()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("daemon.sock");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("daemon.sock");
         let listener = UnixListener::bind(&path).unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
         let server = std::thread::spawn(move || {
@@ -574,7 +569,6 @@ mod tests {
             )
         );
         server.join().unwrap();
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

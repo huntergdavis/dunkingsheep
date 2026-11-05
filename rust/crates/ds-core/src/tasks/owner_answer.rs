@@ -67,7 +67,10 @@ impl Tasks {
             if pane.as_deref().is_some_and(|p| !p.is_empty() && scope != "global" && scope != p) { return Err(DunkError::Refused("task is not visible to this caller".into())); }
             if status != "blocked" {
                 let previous: Option<String> = tx.query_row("SELECT meta FROM task_events WHERE task_id=? AND event='owner_answer' AND id=(SELECT id FROM task_events WHERE task_id=? AND event IN ('owner_answer','blocked','unblocked') ORDER BY id DESC LIMIT 1 OFFSET 1) AND (SELECT event FROM task_events WHERE task_id=? AND event IN ('owner_answer','blocked','unblocked') ORDER BY id DESC LIMIT 1)='unblocked'", [&id,&id,&id], |r| r.get(0)).optional().map_err(db::map_sqlite)?;
-                if status == "open" && previous.as_deref().and_then(|s| serde_json::from_str::<Value>(s).ok()).is_some_and(|v| v["version"] == version && v["option_number"] == json!(option) && v["reply"] == json!(reply)) { return Ok(json!({"task_id":id,"version":version,"changed":false})); }
+                if status == "open" && previous.as_deref().and_then(|s| serde_json::from_str::<Value>(s).ok()).is_some_and(|v| v["version"] == version && v["option_number"] == json!(option) && v["reply"] == json!(reply)) {
+                    let task = super::wire::full_conn(&tx, &id, pane.as_deref(), crate::clock::now_s())?.wire;
+                    return Ok(json!({"task_id":id,"version":version.to_string(),"changed":false,"unblocked":true,"task":task}));
+                }
                 return Err(DunkError::Refused("task has no matching blocked owner question".into()));
             }
             let generation: Option<i64> = tx.query_row("SELECT id FROM task_events WHERE task_id=? ORDER BY id DESC LIMIT 1", [&id], |r| r.get(0)).optional().map_err(db::map_sqlite)?;
@@ -87,8 +90,9 @@ impl Tasks {
             tx.execute("INSERT INTO task_events (task_id,event,at,actor,scope,priority,status_from,status_to,meta) VALUES (?,'owner_answer',?,?,?,?, 'blocked','open',?)", params![id,now,actor,scope,priority,meta]).map_err(db::map_sqlite)?;
             tx.execute("UPDATE tasks SET status='open', block_reason=NULL, updated_at=? WHERE id=? AND status='blocked'", params![now,id]).map_err(db::map_sqlite)?;
             tx.execute("INSERT INTO task_events (task_id,event,at,actor,scope,priority,status_from,status_to) VALUES (?,'unblocked',?,?,?,?, 'blocked','open')", params![id,now,actor,scope,priority]).map_err(db::map_sqlite)?;
+            let task = super::wire::full_conn(&tx, &id, pane.as_deref(), now)?.wire;
             tx.commit().map_err(db::map_sqlite)?;
-            Ok(json!({"task_id":id,"version":version,"changed":true,"answer":answer}))
+            Ok(json!({"task_id":id,"version":version.to_string(),"changed":true,"unblocked":true,"task":task,"answer":answer}))
         }).await
     }
 }
@@ -116,6 +120,9 @@ mod tests {
         );
         assert_ne!(a.is_ok(), b.is_ok());
         let winner = if a.is_ok() { 1 } else { 2 };
+        let accepted = if let Ok(value) = a { value } else { b.unwrap() };
+        assert_eq!(accepted["task"]["status"], "open");
+        assert_eq!(accepted["task"]["block_reason"], Value::Null);
         assert_eq!(
             tasks
                 .owner_answer(&task.id, version, Some(winner), None, Some("owner"), None)
