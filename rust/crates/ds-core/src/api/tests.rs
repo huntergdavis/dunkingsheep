@@ -80,6 +80,35 @@ impl CommandEnv for TestEnv {
     }
 }
 
+struct ProjectSpawnTestEnv {
+    terminal: Mutex<Box<dyn Terminal>>,
+    config: ProjectSpawnConfig,
+}
+
+impl PaneInfoEnv for ProjectSpawnTestEnv {
+    fn list_panes_grouped(&self) -> Vec<Value> {
+        Vec::new()
+    }
+
+    fn get_pane(&self, _pane_id: &str) -> Option<Value> {
+        None
+    }
+}
+
+impl CommandEnv for ProjectSpawnTestEnv {
+    fn terminal(&self) -> &Mutex<Box<dyn Terminal>> {
+        &self.terminal
+    }
+
+    fn project_spawn_config(&self) -> Result<ProjectSpawnConfig, DunkError> {
+        Ok(self.config.clone())
+    }
+
+    fn now_s(&self) -> f64 {
+        self.config.now
+    }
+}
+
 struct DunkHandlerEnv {
     terminal: Mutex<Box<dyn Terminal>>,
     panes: Vec<Value>,
@@ -1993,6 +2022,85 @@ fn rust_project_spawn_is_desk_only_and_requires_explicit_runtime_config() {
     )
     .unwrap_err();
     assert!(denied.to_string().contains("not permitted for role worker"));
+}
+
+#[test]
+fn invalid_project_budget_refuses_before_opening_the_durable_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let store_path = dir.path().join("project-store.sqlite3");
+    let env = ProjectSpawnTestEnv {
+        terminal: Mutex::new(Box::new(FakeTerminal::default())),
+        config: ProjectSpawnConfig {
+            project_root: dir.path().join("projects"),
+            store_path: store_path.clone(),
+            budget_json: r#"{"providers":{"codex":{"subscription":null,"credit_fallback":null}}}"#
+                .into(),
+            provider: "codex".into(),
+            provider_home: dir.path().to_path_buf(),
+            five_hour_usage: crate::projects::Usage::Percent(10.0),
+            approved: true,
+            now: 1_800_000_000.0,
+        },
+    };
+    let (_flock_dir, flock) = flock();
+    let request = RequestCtx::default();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_project_spawn();
+    let error = dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("desk", false),
+        "project_spawn",
+        args(json!({"name": "budget-app", "brief": "test"})),
+        &request,
+        &env,
+    )
+    .unwrap_err();
+
+    assert_eq!("project budget not configured", error.to_string());
+    assert!(
+        !store_path.exists(),
+        "invalid config must not create SQLite"
+    );
+}
+
+#[test]
+fn missing_provider_policy_refuses_before_opening_the_durable_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let store_path = dir.path().join("project-store.sqlite3");
+    let env = ProjectSpawnTestEnv {
+        terminal: Mutex::new(Box::new(FakeTerminal::default())),
+        config: ProjectSpawnConfig {
+            project_root: dir.path().join("projects"),
+            store_path: store_path.clone(),
+            budget_json: r#"{"credit_ceiling":null,"providers":{"claude":{"subscription":null,"credit_fallback":null}}}"#.into(),
+            provider: "codex".into(),
+            provider_home: dir.path().to_path_buf(),
+            five_hour_usage: crate::projects::Usage::Percent(10.0),
+            approved: true,
+            now: 1_800_000_000.0,
+        },
+    };
+    let (_flock_dir, flock) = flock();
+    let request = RequestCtx::default();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_project_spawn();
+    let error = dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("desk", false),
+        "project_spawn",
+        args(json!({"name": "budget-app", "brief": "test"})),
+        &request,
+        &env,
+    )
+    .unwrap_err();
+
+    assert_eq!("no budget policy for provider codex", error.to_string());
+    assert!(
+        !store_path.exists(),
+        "missing policy must not create SQLite"
+    );
 }
 
 static CONTEXT_LEDGER_TEST_LOCK: Mutex<()> = Mutex::new(());

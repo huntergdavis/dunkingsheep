@@ -2,6 +2,7 @@ use serde_json::{Map, Value};
 
 use crate::error::DunkError;
 use crate::flock::commands_inbox::OwnerMailboxReporter;
+use crate::projects::newprojects::ProjectBudgetConfig;
 use crate::projects::{Authority, Projects, Request};
 
 use super::{Args, HandlerContext};
@@ -49,6 +50,15 @@ pub fn h_project_spawn(context: &HandlerContext<'_>, args: Args) -> Result<Value
         template,
         soft_cap,
     };
+    // Reject missing or malformed budget configuration before opening the project store: opening
+    // its SQLite writer creates the schema and is itself a durable write.
+    let budget = ProjectBudgetConfig::from_json(&config.budget_json)?;
+    if !budget.providers.contains_key(&config.provider) {
+        return Err(DunkError::Refused(format!(
+            "no budget policy for provider {}",
+            config.provider
+        )));
+    }
     let authority = Authority::project_template(config.approved);
     let terminal_mutex = context.env.terminal();
     let mut terminal = terminal_mutex
