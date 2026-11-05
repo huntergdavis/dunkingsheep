@@ -17,6 +17,7 @@ pub enum SummaryError {
     Sql(rusqlite::Error),
     Timestamp(String),
     Json(serde_json::Error),
+    InvalidPayloadType,
 }
 
 impl From<rusqlite::Error> for SummaryError {
@@ -37,6 +38,9 @@ impl std::fmt::Display for SummaryError {
             Self::Sql(error) => write!(formatter, "SQLite error: {error}"),
             Self::Timestamp(value) => write!(formatter, "invalid timestamp: {value}"),
             Self::Json(error) => write!(formatter, "invalid JSON: {error}"),
+            Self::InvalidPayloadType => {
+                write!(formatter, "telemetry payload must be JSON text or bytes")
+            }
         }
     }
 }
@@ -380,20 +384,57 @@ pub(super) fn round_even(value: f64, digits: i32) -> f64 {
     if !value.is_finite() {
         return value;
     }
-    let factor = 10_f64.powi(digits);
-    let scaled = value * factor;
-    let floor = scaled.floor();
-    let fraction = scaled - floor;
-    let rounded = if fraction < 0.5 {
-        floor
-    } else if fraction > 0.5 {
-        floor + 1.0
-    } else if (floor as i128) % 2 == 0 {
-        floor
-    } else {
-        floor + 1.0
+    if digits < 0 || digits > 18 {
+        return value;
+    }
+    let Some(scaled) = rounded_scaled_integer(value, digits as u32) else {
+        return value;
     };
-    rounded / factor
+    scaled as f64 / 10_f64.powi(digits)
+}
+
+// Round the exact binary value after multiplying by 10^digits. Scaling in
+// f64 first loses the low bits that distinguish Python's round(2.675, 2).
+fn rounded_scaled_integer(value: f64, digits: u32) -> Option<i128> {
+    let bits = value.to_bits();
+    let negative = bits >> 63 != 0;
+    let exponent = ((bits >> 52) & 0x7ff) as i32;
+    let fraction = bits & ((1_u64 << 52) - 1);
+    let (mantissa, binary_exponent) = if exponent == 0 {
+        (fraction as u128, -1074)
+    } else {
+        (((1_u64 << 52) | fraction) as u128, exponent - 1075)
+    };
+    if mantissa == 0 {
+        return Some(0);
+    }
+    let five = 5_u128.checked_pow(digits)?;
+    let numerator = mantissa.checked_mul(five)?;
+    let shift = binary_exponent + digits as i32;
+    let magnitude = if shift >= 0 {
+        let shift = shift as u32;
+        if shift >= 128 || numerator > (u128::MAX >> shift) {
+            return None;
+        }
+        numerator << shift
+    } else {
+        let denominator_shift = (-shift) as u32;
+        if denominator_shift >= 128 {
+            0
+        } else {
+            let denominator = 1_u128 << denominator_shift;
+            let quotient = numerator / denominator;
+            let remainder = numerator % denominator;
+            match remainder.cmp(&(denominator - remainder)) {
+                std::cmp::Ordering::Less => quotient,
+                std::cmp::Ordering::Greater => quotient.checked_add(1)?,
+                std::cmp::Ordering::Equal if quotient % 2 == 1 => quotient.checked_add(1)?,
+                std::cmp::Ordering::Equal => quotient,
+            }
+        }
+    };
+    let signed = i128::try_from(magnitude).ok()?;
+    Some(if negative { -signed } else { signed })
 }
 
 fn number(value: f64) -> Value {
@@ -679,11 +720,8 @@ pub(super) fn host_health(now: DateTime<Utc>, path: &Path) -> Option<Value> {
     if !at.is_finite() {
         return None;
     }
-    let millis = (at * 1000.0).round();
-    if millis < i64::MIN as f64 || millis > i64::MAX as f64 {
-        return None;
-    }
-    let observed = DateTime::<Utc>::from_timestamp_millis(millis as i64)?;
+    let micros = rounded_scaled_integer(at, 6)?;
+    let observed = DateTime::<Utc>::from_timestamp_micros(i64::try_from(micros).ok()?)?;
     let now_seconds =
         now.timestamp() as f64 + f64::from(now.timestamp_subsec_nanos()) / 1_000_000_000.0;
     let sample_age = (now_seconds - at).max(0.0) as i64;
@@ -980,13 +1018,17 @@ pub fn summary(
         &[&PROJECT],&["number","state","merged_at","last_seen_at"])?;
     let telemetry=conn.query_row(
         "SELECT generated_at,interval_start,interval_end,schema_version,payload_json FROM dunk_metrics_snapshots ORDER BY id DESC LIMIT 1",
-        [],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,i64>(3)?,row.get::<_,String>(4)?)),
+        [],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,i64>(3)?,row.get_ref(4)?.to_owned())),
     ).optional()?;
     let telemetry = match telemetry {
         Some((generated, start, end, version, payload)) => Some(json!({
             "generated_at":generated,"age_s":age(now,&generated)?,
             "interval":{"start":start,"end":end},"schema_version":version,
-            "data":serde_json::from_str::<Value>(&payload)?
+            "data":match payload {
+                rusqlite::types::Value::Text(payload) => serde_json::from_str::<Value>(&payload)?,
+                rusqlite::types::Value::Blob(payload) => serde_json::from_slice::<Value>(&payload)?,
+                _ => return Err(SummaryError::InvalidPayloadType),
+            }
         })),
         None => None,
     };

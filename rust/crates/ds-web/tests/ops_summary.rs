@@ -13,7 +13,8 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from pathlib import Path
 
-repo, db_path, host_path, opencode_path = map(Path, sys.argv[1:])
+repo, db_path, host_path, opencode_path = map(Path, sys.argv[1:5])
+blob_payload = len(sys.argv) > 5 and sys.argv[5] == 'blob'
 source = (repo / 'bridges/ops_metrics.py').read_text()
 tree = ast.parse(source)
 names = {'iso','parse_time','_unique_authored_trial','experiment_summary','host_health','opencode_usage','summary'}
@@ -41,7 +42,8 @@ conn.execute("INSERT INTO goal_observations(project,scope,goal_key,observed_at,s
 conn.executemany("INSERT INTO accounting_snapshots(project,observed_at,commit_oid,strict_full_c,verified_game_identities,ceiling,bound_kind,source_signature,evidence_ref) VALUES('poolrad',?,?,?,?,815,'upper_bound','sig','docs/re/test')", [
     ('2025-04-15T10:30:00Z','a'*40,50,60),('2025-04-15T11:30:00Z','b'*40,60,70)])
 conn.execute("INSERT INTO pr_latest(project,number,state,head_oid,merged_at,first_seen_at,last_seen_at) VALUES('poolrad',42,'OPEN',NULL,NULL,'2025-04-01T00:00:00Z','2025-04-15T11:00:00Z')")
-conn.execute("INSERT INTO dunk_metrics_snapshots(observed_at,generated_at,interval_start,interval_end,schema_version,payload_json) VALUES('2025-04-15T11:50:00Z','2025-04-15T11:50:00Z','2025-04-15T11:00:00Z','2025-04-15T11:50:00Z',1,?)", ('{"events":3}',))
+payload = sqlite3.Binary(b'{"events":3}') if blob_payload else '{"events":3}'
+conn.execute("INSERT INTO dunk_metrics_snapshots(observed_at,generated_at,interval_start,interval_end,schema_version,payload_json) VALUES('2025-04-15T11:50:00Z','2025-04-15T11:50:00Z','2025-04-15T11:00:00Z','2025-04-15T11:50:00Z',1,?)", (payload,))
 conn.execute("INSERT INTO vp_message_counts(run_id,channel,role,total) VALUES(1,'cos','pm',4)")
 conn.executemany("INSERT INTO agent_message_events(source_event_id,occurred_at,pane_id,kind,delivery_source,source_ref,mailbox_alias) VALUES(?,?,?,?,?,?,?)", [
     (1,'2025-04-15T10:20:00Z','%1','inbox.sent','test','e1','builder'),
@@ -71,7 +73,7 @@ import ast, json, sqlite3, sys
 from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
-repo, host_missing, opencode_missing, invalid_host, stale_host, invalid_db = map(Path,sys.argv[1:])
+repo, host_missing, opencode_missing, invalid_host, stale_host, invalid_db, fractional_host = map(Path,sys.argv[1:])
 tree=ast.parse((repo/'bridges/ops_metrics.py').read_text())
 names={'iso','host_health','opencode_usage'}
 nodes=[node for node in tree.body if isinstance(node,(ast.FunctionDef,ast.AsyncFunctionDef)) and node.name in names]
@@ -83,6 +85,7 @@ print(json.dumps({
  'missing_host':namespace['host_health'](now,path=host_missing),
  'missing_opencode':namespace['opencode_usage'](now,path=opencode_missing),
  'invalid_host':namespace['host_health'](now,path=invalid_host),
+ 'fractional_host':namespace['host_health'](now,path=fractional_host),
  'stale_host':namespace['host_health'](now,path=stale_host),
  'invalid_db':namespace['opencode_usage'](now,path=invalid_db)
 },separators=(',',':')))
@@ -117,7 +120,7 @@ fn canonical_json(value: Value) -> Value {
     }
 }
 
-fn setup_oracle(repo: &Path, db: &Path, host: &Path, opencode: &Path) -> Value {
+fn setup_oracle(repo: &Path, db: &Path, host: &Path, opencode: &Path, blob_payload: bool) -> Value {
     let output = Command::new("python3")
         .arg("-c")
         .arg(PY_ORACLE)
@@ -125,6 +128,7 @@ fn setup_oracle(repo: &Path, db: &Path, host: &Path, opencode: &Path) -> Value {
         .arg(db)
         .arg(host)
         .arg(opencode)
+        .arg(if blob_payload { "blob" } else { "text" })
         .output()
         .expect("run AST-isolated Python fixture");
     assert!(
@@ -139,7 +143,7 @@ fn setup_oracle(repo: &Path, db: &Path, host: &Path, opencode: &Path) -> Value {
 fn summary_matches_ast_isolated_python_fixture_with_real_sources_and_rounding() {
     let (_dir, db, host, opencode) = fixture_paths();
     let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let expected = setup_oracle(&repo, &db, &host, &opencode);
+    let expected = setup_oracle(&repo, &db, &host, &opencode, false);
     let conn = Connection::open(&db).expect("fixture operations database");
     let now = DateTime::parse_from_rfc3339("2025-04-15T12:00:00Z")
         .unwrap()
@@ -185,6 +189,12 @@ fn optional_readers_preserve_missing_invalid_and_stale_semantics() {
     assert_eq!(health["age_s"], 181);
     assert_eq!(health["stale"], true);
     assert_eq!(health["tmp_free_gib"], 1.23);
+    let fractional = directory.path().join("fractional.json");
+    std::fs::write(&fractional, br#"{"last_sample":{"at":1744718339.9995,"tmp_used_fraction":0.4,"tmp_free_bytes":1324997412,"tmp_inode_used_fraction":0.2,"load1":0.2,"load5":0.3,"cpus":4,"cpu_psi_some_avg60":0.0}}"#).unwrap();
+    assert_eq!(
+        ops_summary::host_health(now, &fractional).unwrap()["observed_at"],
+        "2025-04-15T11:58:59Z"
+    );
     let invalid_db = directory.path().join("invalid.sqlite");
     std::fs::write(&invalid_db, b"not a sqlite database").unwrap();
     assert_eq!(ops_summary::opencode_usage(now, &invalid_db), None);
@@ -198,6 +208,7 @@ fn optional_readers_preserve_missing_invalid_and_stale_semantics() {
         .arg(&invalid)
         .arg(&state)
         .arg(&invalid_db)
+        .arg(&fractional)
         .output()
         .expect("run AST-isolated optional-reader oracle");
     assert!(
@@ -214,6 +225,10 @@ fn optional_readers_preserve_missing_invalid_and_stale_semantics() {
     assert_eq!(expected["stale_host"]["stale"], true);
     assert_eq!(expected["stale_host"]["tmp_free_gib"], 1.23);
     assert_eq!(
+        ops_summary::host_health(now, &fractional).unwrap(),
+        expected["fractional_host"]
+    );
+    assert_eq!(
         ops_summary::host_health(now, &state).unwrap(),
         expected["stale_host"]
     );
@@ -223,6 +238,8 @@ fn optional_readers_preserve_missing_invalid_and_stale_semantics() {
 fn python_rounding_and_database_errors_are_explicit() {
     assert_eq!(ops_summary::round_even(1.25, 1), 1.2);
     assert_eq!(ops_summary::round_even(1.35, 1), 1.4);
+    assert_eq!(ops_summary::round_even(2.675, 2), 2.67);
+    assert_eq!(ops_summary::round_even(1.234_567_5, 6), 1.234_568);
     let conn = Connection::open_in_memory().unwrap();
     let now = DateTime::parse_from_rfc3339("2025-04-15T12:00:00Z")
         .unwrap()
@@ -235,4 +252,18 @@ fn python_rounding_and_database_errors_are_explicit() {
     )
     .unwrap_err();
     assert!(matches!(error, ops_summary::SummaryError::Sql(_)));
+}
+
+#[test]
+fn summary_parses_json_stored_as_sqlite_blob_like_python_bytes() {
+    let (_dir, db, host, opencode) = fixture_paths();
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let expected = setup_oracle(&repo, &db, &host, &opencode, true);
+    let conn = Connection::open(&db).expect("fixture operations database");
+    let now = DateTime::parse_from_rfc3339("2025-04-15T12:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let actual =
+        ops_summary::summary(&conn, now, &host, &opencode).expect("summary with BLOB payload");
+    assert_eq!(canonical_json(actual), canonical_json(expected));
 }
