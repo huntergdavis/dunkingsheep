@@ -1,9 +1,6 @@
-# The Rust port's gates (TASKS.md rule 3: tests pass, clippy clean, fmt clean).
-#
-# There was no Rust workflow before this: the only workflow in the repo was
-# secret-scan.yml, so "clippy is a CI-only gate" (T02's note) meant "CI does not run
-# it either" - the gate existed in the task text and nowhere else. This adds the two
-# gates are blocking only after they have passed on current main.
+# Rust checks required by protected main: cargo fmt --check, cargo build + test,
+# and cargo clippy. The Clippy job became blocking after the cleanup batch and an
+# exact current-main `-D warnings` run passed.
 #
 #   fmt + build + test   blocking. Clippy was initially non-blocking until the
 #                        complete current-main workspace passed `-D warnings`.
