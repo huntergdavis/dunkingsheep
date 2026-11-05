@@ -66,7 +66,7 @@ impl Tasks {
                 .optional().map_err(db::map_sqlite)?.ok_or_else(|| DunkError::Refused(format!("no task with id {id:?}")))?;
             if pane.as_deref().is_some_and(|p| !p.is_empty() && scope != "global" && scope != p) { return Err(DunkError::Refused("task is not visible to this caller".into())); }
             if status != "blocked" {
-                let previous: Option<String> = tx.query_row("SELECT meta FROM task_events WHERE task_id=? AND event='owner_answer' AND id=(SELECT id FROM task_events WHERE task_id=? AND event IN ('owner_answer','blocked','unblocked') ORDER BY id DESC LIMIT 1 OFFSET 1) AND (SELECT event FROM task_events WHERE task_id=? AND event IN ('owner_answer','blocked','unblocked') ORDER BY id DESC LIMIT 1)='unblocked'", [&id,&id,&id], |r| r.get(0)).optional().map_err(db::map_sqlite)?;
+                let previous: Option<String> = tx.query_row("SELECT meta FROM task_events WHERE task_id=? AND event='owner_answer' AND status_from='blocked' AND status_to='open' AND id=(SELECT id FROM task_events WHERE task_id=? AND event IN ('owner_answer','blocked','unblocked') ORDER BY id DESC LIMIT 1 OFFSET 1) AND (SELECT event FROM task_events WHERE task_id=? AND event IN ('owner_answer','blocked','unblocked') ORDER BY id DESC LIMIT 1)='unblocked'", [&id,&id,&id], |r| r.get(0)).optional().map_err(db::map_sqlite)?;
                 if status == "open" && previous.as_deref().and_then(|s| serde_json::from_str::<Value>(s).ok()).is_some_and(|v| v["version"] == version && v["option_number"] == json!(option) && v["reply"] == json!(reply)) {
                     let task = super::wire::full_conn(&tx, &id, pane.as_deref(), crate::clock::now_s())?.wire;
                     return Ok(json!({"task_id":id,"version":version.to_string(),"changed":false,"unblocked":true,"task":task}));
@@ -251,5 +251,35 @@ mod tests {
             .await
             .is_err());
         assert_eq!(tasks.get(&task.id).await.unwrap().status, "blocked");
+    }
+    #[tokio::test]
+    async fn ordinary_note_cannot_spoof_an_owner_answer_receipt() {
+        let dir = tempfile::tempdir().unwrap();
+        let tasks = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+        let task = tasks.add("global", "decision", "").await.unwrap();
+        tasks
+            .block(&task.id, "needs-owner: pick | options: 1=yes")
+            .await
+            .unwrap();
+        let version = tasks.owner_question(&task.id, None).await.unwrap()["version"]
+            .as_str()
+            .unwrap()
+            .parse::<i64>()
+            .unwrap();
+        tasks
+            .note_with_meta(
+                &task.id,
+                "owner_answer",
+                "worker",
+                None,
+                &json!({"version":version,"option_number":1,"reply":null}),
+            )
+            .await
+            .unwrap();
+        tasks.unblock(&task.id).await.unwrap();
+        assert!(tasks
+            .owner_answer(&task.id, version, Some(1), None, Some("owner"), None)
+            .await
+            .is_err());
     }
 }
