@@ -424,6 +424,7 @@ dependencies = [
  "ds-tui",
  "serde_json",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]
@@ -474,6 +475,7 @@ dependencies = [
  "ds-core",
  "serde",
  "serde_json",
+ "tokio",
  "tower",
 ]
 

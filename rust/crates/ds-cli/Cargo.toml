@@ -9,12 +9,17 @@ description = "The dunkingsheep command line (T42: the generated parser; command
 name = "dunkingsheep"
 path = "src/main.rs"
 
+[[bin]]
+name = "ds-http"
+path = "src/bin/ds-http.rs"
+
 [dependencies]
 clap.workspace = true
 ds-core = { path = "../ds-core" }
 ds-mcp = { path = "../ds-mcp" }
 ds-tui = { path = "../ds-tui" }
 serde_json = { workspace = true, features = ["arbitrary_precision"] }
+tokio = { version = "=1.54.1", features = ["rt-multi-thread", "net", "time"] }
 # context digest takes `now` (NaiveDateTime); the same pinned chrono ds-core uses.
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 
