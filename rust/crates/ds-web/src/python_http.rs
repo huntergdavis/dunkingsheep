@@ -384,6 +384,7 @@ mod tests {
         net::TcpStream,
         process::{Command, Stdio},
         thread,
+        time::Duration,
     };
 
     fn raw_request(app: Router, bytes: &[u8]) -> Vec<u8> {
@@ -592,6 +593,7 @@ server.serve_forever()
             b"POST /no-route HTTP/1.0\r\nContent-Length: \xd9\xa1\r\n\r\n",
             24,
         );
+        compare_expect_continue(port, router(FakeDaemon::default(), OracleBackend));
         child.kill().unwrap();
         child.wait().unwrap();
     }
@@ -605,6 +607,59 @@ server.serve_forever()
         python.read_to_end(&mut python_response).unwrap();
         let compare_error_page = !matches!(case, 12 | 20 | 21 | 22 | 23);
         assert_response_equivalent(&python_response, &rust, case, compare_error_page);
+    }
+
+    fn compare_expect_continue(port: u16, app: Router) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let listener = runtime.block_on(TcpListener::bind("127.0.0.1:0")).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            runtime.block_on(async move {
+                let (stream, peer) = listener.accept().await.unwrap();
+                serve_connection(stream, peer, app).await.unwrap();
+            })
+        });
+        let headers = b"POST /no-route HTTP/1.1\r\nHost: localhost\r\nExpect: 100-continue\r\nContent-Length: 2\r\n\r\n";
+        let mut rust = TcpStream::connect(address).unwrap();
+        rust.write_all(headers).unwrap();
+        rust.set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+        let mut byte = [0_u8; 1];
+        assert!(
+            matches!(
+                rust.read(&mut byte),
+                Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut)
+            ),
+            "Rust listener sent an unexpected interim response"
+        );
+        rust.set_read_timeout(None).unwrap();
+        rust.write_all(b"{}").unwrap();
+        rust.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut rust_response = Vec::new();
+        rust.read_to_end(&mut rust_response).unwrap();
+        server.join().unwrap();
+
+        let mut python = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        python.write_all(headers).unwrap();
+        python
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+        assert!(
+            matches!(
+                python.read(&mut byte),
+                Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut)
+            ),
+            "Python Handler sent an unexpected interim response"
+        );
+        python.set_read_timeout(None).unwrap();
+        python.write_all(b"{}").unwrap();
+        python.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut python_response = Vec::new();
+        python.read_to_end(&mut python_response).unwrap();
+        assert_response_equivalent(&python_response, &rust_response, 25, true);
     }
 
     fn assert_response_equivalent(python: &[u8], rust: &[u8], case: usize, compare_body: bool) {
