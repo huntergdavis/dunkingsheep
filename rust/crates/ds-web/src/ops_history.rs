@@ -3,9 +3,81 @@
 //! This reader does not implement collection, summary, board refresh, or startup.
 //! The caller supplies the existing operations database path and an explicit clock.
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
-use rusqlite::{types::ValueRef, Connection, OpenFlags, ToSql};
+use rusqlite::{types::ValueRef, Connection, ToSql};
 use serde_json::{json, Map, Number, Value};
-use std::path::Path;
+use std::{
+    fs,
+    os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    path::Path,
+};
+
+fn io_error(error: std::io::Error) -> rusqlite::Error {
+    rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+}
+
+fn add_column_if_missing(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    declaration: &str,
+) -> rusqlite::Result<()> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(stmt);
+    if !columns.iter().any(|name| name == column) {
+        conn.execute_batch(&format!(
+            "ALTER TABLE {table} ADD COLUMN {column} {declaration}"
+        ))?;
+    }
+    Ok(())
+}
+
+fn connect(path: &Path) -> rusqlite::Result<Connection> {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        fs::create_dir_all(parent).map_err(io_error)?;
+    }
+    fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(path)
+        .map_err(io_error)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(io_error)?;
+    let conn = Connection::open(path)?;
+    conn.busy_timeout(std::time::Duration::from_secs(10))?;
+    conn.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL;")?;
+    conn.execute_batch(include_str!("ops_schema.sql"))?;
+    for (table, column, declaration) in [
+        (
+            "collection_runs",
+            "accounting_state",
+            "TEXT NOT NULL DEFAULT 'unavailable'",
+        ),
+        (
+            "accounting_snapshots",
+            "source_signature",
+            "TEXT NOT NULL DEFAULT ''",
+        ),
+        (
+            "collection_runs",
+            "agent_messages_state",
+            "TEXT NOT NULL DEFAULT 'unavailable'",
+        ),
+        ("pane_samples", "agent_name", "TEXT"),
+        ("pane_samples", "lane_name", "TEXT"),
+        ("agent_message_events", "sender_alias", "TEXT"),
+        ("agent_message_events", "mailbox_alias", "TEXT"),
+        ("agent_message_events", "message_bytes", "INTEGER"),
+        ("agent_message_events", "duration_ms", "INTEGER"),
+        ("agent_message_events", "attempts", "INTEGER"),
+    ] {
+        add_column_if_missing(&conn, table, column, declaration)?;
+    }
+    Ok(conn)
+}
 
 fn rows(conn: &Connection, sql: &str, args: &[&dyn ToSql]) -> rusqlite::Result<Vec<Value>> {
     let mut stmt = conn.prepare(sql)?;
@@ -55,16 +127,14 @@ fn rows(conn: &Connection, sql: &str, args: &[&dyn ToSql]) -> rusqlite::Result<V
     rows.collect()
 }
 
-/// Query the configured existing database. Values outside 1..=168 are rejected.
-/// This explicitly does not open or initialize the live database by default.
+/// Query the explicitly configured database. Values outside 1..=168 are rejected.
 pub fn history(path: &Path, now: DateTime<Utc>, hours: u16) -> rusqlite::Result<Value> {
     if !(1..=168).contains(&hours) {
         return Err(rusqlite::Error::InvalidParameterName(
             "history window must be 1 to 168 hours".into(),
         ));
     }
-    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    conn.busy_timeout(std::time::Duration::from_secs(10))?;
+    let conn = connect(path)?;
     let generated = now.to_rfc3339_opts(SecondsFormat::Secs, true);
     let start =
         (now - Duration::hours(i64::from(hours))).to_rfc3339_opts(SecondsFormat::Secs, true);
@@ -118,18 +188,40 @@ INSERT INTO accounting_snapshots VALUES(1,'poolrad','2026-01-02T09:00:00Z',1,2,N
             json!([{"number":3,"merged_at":"2026-01-02T10:00:00Z"},{"number":12,"merged_at":"2026-01-02T10:00:00Z"}])
         );
         assert_eq!(result["accounting_samples"][0]["ceiling"], Value::Null);
+        let reopened = Connection::open(&path).unwrap();
+        let mut stmt = reopened
+            .prepare("PRAGMA table_info(collection_runs)")
+            .unwrap();
+        let columns = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert!(columns.contains(&"accounting_state".to_owned()));
+        assert!(columns.contains(&"agent_messages_state".to_owned()));
+        assert_eq!(
+            reopened
+                .query_row("SELECT COUNT(*) FROM collection_runs", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
     }
 
     #[test]
-    fn missing_database_invalid_window_and_missing_schema_fail() {
+    fn missing_database_is_initialized_privately_and_invalid_window_fails() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("missing.sqlite3");
         let now = Utc::now();
         assert!(history(&path, now, 0).is_err());
         assert!(history(&path, now, 169).is_err());
-        assert!(history(&path, now, 24).is_err());
         assert!(!path.exists());
-        drop(Connection::open(&path).unwrap());
-        assert!(history(&path, now, 24).is_err());
+        let result = history(&path, now, 24).unwrap();
+        assert_eq!(result["goal_observations"], json!([]));
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(history(&path, now, 24).unwrap(), result);
     }
 }
