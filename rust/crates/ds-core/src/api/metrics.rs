@@ -573,7 +573,9 @@ mod tests {
         let count = || {
             rusqlite::Connection::open(dir.path().join("metrics.db"))
                 .unwrap()
-                .query_row("SELECT COUNT(*) FROM events", [], |row| row.get::<_, i64>(0))
+                .query_row("SELECT COUNT(*) FROM events", [], |row| {
+                    row.get::<_, i64>(0)
+                })
                 .unwrap()
         };
         let before = count();
