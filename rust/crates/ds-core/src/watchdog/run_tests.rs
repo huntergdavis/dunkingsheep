@@ -392,14 +392,8 @@ fn confirm_pending_sorts_pages_and_accepts_python_sized_ids() {
     };
     let mut problems = Vec::new();
     confirm_pending(&config, &mut state, &owner, 100.0, &mut problems);
-    assert!(problems[0]
-        .as_str()
-        .unwrap()
-        .starts_with("owner page a-page"));
-    assert!(problems[1]
-        .as_str()
-        .unwrap()
-        .starts_with("owner page z-page"));
+    assert!(problems[0].starts_with("owner page a-page"));
+    assert!(problems[1].starts_with("owner page z-page"));
     assert_eq!(state["owner_pages"]["large-page"]["confirmed_at"], 100.0);
 }
 
