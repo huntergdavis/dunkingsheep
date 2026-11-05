@@ -684,7 +684,10 @@ mod tests {
         fn viewports(&self) -> PanesWebFuture<'_, Result<Vec<Value>, PanesWebError>> {
             panic!("unexpected viewport")
         }
-        fn roster_rows(&self, _: &[Value]) -> Vec<Value> {
+        fn roster_rows<'a>(
+            &'a self,
+            _: &'a [Value],
+        ) -> PanesWebFuture<'a, Result<Vec<Value>, PanesWebError>> {
             panic!("unexpected roster callback")
         }
         fn now_seconds(&self) -> f64 {

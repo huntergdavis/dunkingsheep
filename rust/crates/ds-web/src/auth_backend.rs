@@ -101,9 +101,42 @@ fn password_matches(password: &str, record: &Credentials) -> Result<bool, AuthEr
     )
     .is_ok())
 }
-fn session_key(cookie: &str) -> String {
+pub(crate) fn session_key(cookie: &str) -> String {
     hex(digest::digest(&digest::SHA256, cookie.as_bytes()).as_ref())
 }
+
+/// The six viewport columns the Python desk adds to `sessions` (`web/app.py`), in the order its
+/// initializer checks them. The pane backend's reads and writes use these names.
+pub(crate) const SESSION_VIEWPORT_COLUMNS: [(&str, &str); 6] = [
+    ("viewport_width", "INTEGER"),
+    ("viewport_height", "INTEGER"),
+    ("viewport_dpr", "REAL"),
+    ("viewport_screen_width", "INTEGER"),
+    ("viewport_screen_height", "INTEGER"),
+    ("viewport_at", "REAL"),
+];
+
+/// Column names of `sessions` in table order (`PRAGMA table_info`).
+pub(crate) fn session_column_names(db: &Connection) -> rusqlite::Result<Vec<String>> {
+    let mut statement = db.prepare("PRAGMA table_info(sessions)")?;
+    let names = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<String>>>()?;
+    Ok(names)
+}
+
+/// Idempotent startup migration: add each missing viewport column with `ALTER TABLE`, as the
+/// Python initializer does. A database that already has the columns is left unchanged.
+pub(crate) fn migrate_session_viewport_columns(db: &Connection) -> rusqlite::Result<()> {
+    let existing = session_column_names(db)?;
+    for (name, kind) in SESSION_VIEWPORT_COLUMNS {
+        if !existing.iter().any(|column| column == name) {
+            db.execute_batch(&format!("ALTER TABLE sessions ADD COLUMN {name} {kind}"))?;
+        }
+    }
+    Ok(())
+}
+
 fn read_record(path: &Path) -> Result<Credentials, AuthError> {
     serde_json::from_slice(&fs::read(path).map_err(internal)?).map_err(internal)
 }
@@ -143,6 +176,7 @@ impl PersistentAuth {
         let db = Connection::open(data.join("messages.sqlite3")).map_err(internal)?;
         db.busy_timeout(Duration::from_secs(10)).map_err(internal)?;
         db.execute_batch("CREATE TABLE IF NOT EXISTS sessions(token_hash TEXT PRIMARY KEY, expires_at REAL NOT NULL); CREATE INDEX IF NOT EXISTS sessions_expires_at ON sessions(expires_at);").map_err(internal)?;
+        migrate_session_viewport_columns(&db).map_err(internal)?;
         let auth = data.join("auth.json");
         if !auth.exists() {
             let password = match initial_password.filter(|p| !p.is_empty()) {
@@ -727,5 +761,45 @@ mod tests {
             auth.login("other", "original-password").await,
             Err(AuthError::Internal(_))
         ));
+    }
+
+    #[test]
+    fn legacy_sessions_table_gains_the_viewport_columns_once_and_keeps_its_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let legacy = Connection::open(dir.path().join("messages.sqlite3")).unwrap();
+            legacy
+                .execute_batch(
+                    "CREATE TABLE sessions(token_hash TEXT PRIMARY KEY, expires_at REAL NOT NULL);
+                     CREATE INDEX sessions_expires_at ON sessions(expires_at);
+                     INSERT INTO sessions(token_hash, expires_at) VALUES('legacy-hash', 4102444800.0);",
+                )
+                .unwrap();
+        }
+        PersistentAuth::open_with_password(dir.path(), Some("original-password")).unwrap();
+        // A second start must not try to add the columns again.
+        PersistentAuth::open(dir.path()).unwrap();
+        let db = Connection::open(dir.path().join("messages.sqlite3")).unwrap();
+        let columns: Vec<(String, String)> = db
+            .prepare("PRAGMA table_info(sessions)")
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        for (name, kind) in SESSION_VIEWPORT_COLUMNS {
+            let matching: Vec<&(String, String)> = columns
+                .iter()
+                .filter(|(column, _)| column == name)
+                .collect();
+            assert_eq!(matching.len(), 1, "{name} exists exactly once");
+            assert_eq!(matching[0].1, kind, "{name} keeps the Python column type");
+        }
+        let kept: String = db
+            .query_row("SELECT token_hash FROM sessions", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(kept, "legacy-hash");
     }
 }

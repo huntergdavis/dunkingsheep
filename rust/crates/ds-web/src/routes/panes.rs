@@ -50,9 +50,9 @@ impl PanesWebError {
     }
 }
 
-/// Required backend operations for the pane routes. `roster_rows` is a
-/// required pure transformation seam; implementations use the shared Rust
-/// roster port and the daemon's pane authority check.
+/// Required backend operations for the pane routes. `roster_rows` is async and
+/// fallible: implementations resolve daemon pane authority off the executor and
+/// must return roster errors rather than an empty roster.
 pub trait PanesWebBackend: Send + Sync + 'static {
     fn rpc<'a>(
         &'a self,
@@ -69,7 +69,10 @@ pub trait PanesWebBackend: Send + Sync + 'static {
 
     fn viewports<'a>(&'a self) -> PanesWebFuture<'a, Result<Vec<Value>, PanesWebError>>;
 
-    fn roster_rows(&self, panes: &[Value]) -> Vec<Value>;
+    fn roster_rows<'a>(
+        &'a self,
+        panes: &'a [Value],
+    ) -> PanesWebFuture<'a, Result<Vec<Value>, PanesWebError>>;
 
     fn now_seconds(&self) -> f64;
 
@@ -171,7 +174,10 @@ async fn channels(
         Err(PanesWebError::Http { .. }) => (Vec::new(), false),
         Err(PanesWebError::Failure(_)) => return internal_error_response(),
     };
-    let channels = state.backend.roster_rows(&panes);
+    let channels = match state.backend.roster_rows(&panes).await {
+        Ok(channels) => channels,
+        Err(error) => return error.into_response(),
+    };
     let viewports = match state.backend.viewports().await {
         Ok(viewports) => viewports,
         Err(error) => return error.into_response(),
@@ -581,6 +587,7 @@ mod tests {
         viewport_result: Mutex<Result<bool, PanesWebError>>,
         viewports_result: Mutex<Result<Vec<Value>, PanesWebError>>,
         roster: Vec<Value>,
+        roster_result: Mutex<Result<Vec<Value>, PanesWebError>>,
         calls: Mutex<Vec<(String, Value)>>,
         viewport_updates: Mutex<Vec<(String, ViewportSample, f64)>>,
         roster_inputs: Mutex<Vec<Vec<Value>>>,
@@ -588,14 +595,16 @@ mod tests {
 
     impl FakeBackend {
         fn new(rpc_result: Result<Value, PanesWebError>) -> Arc<Self> {
+            let roster = vec![json!({
+                "id": "cos", "name": "Desk", "online": false,
+                "status": "offline", "can_message": false
+            })];
             Arc::new(Self {
                 rpc_result: Mutex::new(rpc_result),
                 viewport_result: Mutex::new(Ok(true)),
                 viewports_result: Mutex::new(Ok(vec![json!({"innerWidth": 1280})])),
-                roster: vec![json!({
-                    "id": "cos", "name": "Desk", "online": false,
-                    "status": "offline", "can_message": false
-                })],
+                roster_result: Mutex::new(Ok(roster.clone())),
+                roster,
                 calls: Mutex::new(Vec::new()),
                 viewport_updates: Mutex::new(Vec::new()),
                 roster_inputs: Mutex::new(Vec::new()),
@@ -633,9 +642,13 @@ mod tests {
             Box::pin(async move { result })
         }
 
-        fn roster_rows(&self, panes: &[Value]) -> Vec<Value> {
+        fn roster_rows<'a>(
+            &'a self,
+            panes: &'a [Value],
+        ) -> PanesWebFuture<'a, Result<Vec<Value>, PanesWebError>> {
             self.roster_inputs.lock().unwrap().push(panes.to_vec());
-            self.roster.clone()
+            let result = self.roster_result.lock().unwrap().clone();
+            Box::pin(async move { result })
         }
 
         fn now_seconds(&self) -> f64 {
@@ -894,6 +907,19 @@ mod tests {
             backend.roster_inputs.lock().unwrap().as_slice(),
             &[vec![json!({"pane_id": "%9", "agent_status": "idle"})]]
         );
+    }
+
+    #[test]
+    fn channels_surfaces_roster_failures_instead_of_an_empty_roster() {
+        let backend = FakeBackend::new(Ok(json!({"panes": [1]})));
+        *backend.roster_result.lock().unwrap() =
+            Err(PanesWebError::Failure("malformed pane".into()));
+        let request = request("GET", "/api/channels", None, None);
+        let response = block_on(app(Arc::clone(&backend)).oneshot(request)).unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = block_on(to_bytes(response.into_body(), usize::MAX)).unwrap();
+        assert_eq!(body.as_ref(), b"Internal Server Error");
+        assert_eq!(backend.roster_inputs.lock().unwrap().len(), 1);
     }
 
     #[test]
