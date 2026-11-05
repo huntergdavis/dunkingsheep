@@ -63,7 +63,7 @@ oc.execute('CREATE TABLE session(time_created INTEGER,cost REAL,time_updated INT
 oc.executemany('INSERT INTO session VALUES(?,?,?)', [(1744710000000,0.1255,1744713600000),(1742000000000,2.0,1742000000000)])
 oc.commit(); oc.close()
 now=datetime.fromisoformat('2025-04-15T12:00:00+00:00')
-print(json.dumps(namespace['summary'](conn, now=now),sort_keys=True,separators=(',',':')))
+print(json.dumps(namespace['summary'](conn, now=now),separators=(',',':')))
 "#;
 
 const PY_OPTIONAL_ORACLE: &str = r#"
@@ -85,7 +85,7 @@ print(json.dumps({
  'invalid_host':namespace['host_health'](now,path=invalid_host),
  'stale_host':namespace['host_health'](now,path=stale_host),
  'invalid_db':namespace['opencode_usage'](now,path=invalid_db)
-},sort_keys=True,separators=(',',':')))
+},separators=(',',':')))
 "#;
 
 fn fixture_paths() -> (
