@@ -904,7 +904,7 @@ mod tests {
             Some("Project project-one is live"),
             message.summary.subject.as_deref()
         );
-        assert!(inbox.unread_for_pane("w2:p2").unwrap() > 0);
+        assert_eq!("owner", message.summary.mailbox);
 
         let raw = dispatcher
             .dispatch("start_agent", &json!({}), &desk)
