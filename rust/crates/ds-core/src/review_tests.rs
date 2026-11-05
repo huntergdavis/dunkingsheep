@@ -1568,10 +1568,9 @@ async fn account_reuses_an_existing_open_accounting_branch_without_overwriting_i
         .unwrap();
     assert_eq!(Some(811), accounting_pr);
     let accounting = review_event_meta(&dir.path().join("tasks.db"), &stored.id, "accounting");
-    assert!(accounting["reason"]
-        .as_str()
-        .unwrap()
-        .contains("already open"));
+    let persisted_reason = accounting["reason"].as_str().unwrap();
+    assert!(persisted_reason.contains("no accounting PR for body PR #7"));
+    assert!(persisted_reason.contains("already open"));
 }
 
 #[tokio::test]
