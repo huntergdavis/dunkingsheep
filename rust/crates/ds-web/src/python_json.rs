@@ -7,10 +7,9 @@
 
 use std::fmt::Write as _;
 
-// The HTTP facade accepts at most 4096 request bytes, so 2048 nested
-// one-byte containers cover every body it can receive without inheriting
-// serde_json's unrelated default depth limit.
-const MAX_JSON_DEPTH: usize = 2048;
+// Keep recursive parsing below the platform's small worker-thread stack. The raw
+// HTTP body limit can otherwise contain enough nested arrays to abort the process.
+const MAX_JSON_DEPTH: usize = 512;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
@@ -730,8 +729,17 @@ mod tests {
             response_bytes(&Value::String(PythonString::from_text("☃")), None),
             br#""\u2603""#
         );
-        let nested = format!("{}0{}", "[".repeat(2047), "]".repeat(2047));
-        assert_eq!(nested.len(), 4095);
+        let nested = format!(
+            "{}0{}",
+            "[".repeat(MAX_JSON_DEPTH),
+            "]".repeat(MAX_JSON_DEPTH)
+        );
         assert!(loads(nested.as_bytes()).is_ok());
+        let too_deep = format!(
+            "{}0{}",
+            "[".repeat(MAX_JSON_DEPTH + 1),
+            "]".repeat(MAX_JSON_DEPTH + 1)
+        );
+        assert!(loads(too_deep.as_bytes()).is_err());
     }
 }
