@@ -1006,6 +1006,8 @@ impl Dispatcher {
 
     /// Register only the T39 task mutation and lease handlers assigned to t2966.
     pub fn register_task_mutation_leases(&mut self) {
+        self.register("task_owner_question", h_task_owner_question);
+        self.register("task_owner_answer", h_task_owner_answer);
         self.register("task_update", h_task_update);
         self.register("task_assign", h_task_assign);
         self.register("task_note", h_task_note);
@@ -3077,6 +3079,71 @@ pub fn h_task_assign(context: &HandlerContext<'_>, args: Args) -> Result<Value, 
         pane,
     ))??;
     Ok(task.wire)
+}
+
+/// Read one owner question and its current blocked-event version.
+pub fn h_task_owner_question(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let role = context
+        .flock
+        .caller_role(context.self_pane_id(), context.env)?;
+    if !matches!(role.as_str(), "owner" | "web") {
+        return Err(DunkError::Refused("owner role required".into()));
+    }
+    let id = args
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| DunkError::Refused("task id is required".into()))?;
+    let tasks = context
+        .flock
+        .stores()
+        .tasks
+        .ok_or_else(|| DunkError::Refused("the task store is not attached".into()))?;
+    context.block_on(tasks.owner_question(id, context.self_pane_id()))?
+}
+
+/// Record and unblock one specifically versioned owner question atomically.
+pub fn h_task_owner_answer(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let role = context
+        .flock
+        .caller_role(context.self_pane_id(), context.env)?;
+    if !matches!(role.as_str(), "owner" | "web") {
+        return Err(DunkError::Refused("owner role required".into()));
+    }
+    let id = args
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| DunkError::Refused("task id is required".into()))?;
+    let version = args
+        .get("version")
+        .and_then(Value::as_i64)
+        .filter(|v| *v > 0)
+        .ok_or_else(|| DunkError::Refused("question version is required".into()))?;
+    let option = match args.get("option_number") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(
+            v.as_u64()
+                .filter(|v| *v > 0)
+                .ok_or_else(|| DunkError::Refused("invalid owner option".into()))?,
+        ),
+    };
+    let reply = match args.get("reply") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(v)) => Some(v.as_str()),
+        _ => return Err(DunkError::Refused("invalid owner reply".into())),
+    };
+    let tasks = context
+        .flock
+        .stores()
+        .tasks
+        .ok_or_else(|| DunkError::Refused("the task store is not attached".into()))?;
+    context.block_on(tasks.owner_answer(
+        id,
+        version,
+        option,
+        reply,
+        context.self_pane_id(),
+        context.self_pane_id(),
+    ))?
 }
 
 /// `dunk_api.h_task_note`.

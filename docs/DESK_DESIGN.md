@@ -188,3 +188,9 @@ viewport report.
 - No auto-scroll while reading up; new-content arrow; visible draggable
   scrollbars; short bubbles hug text (section 4.1).
 - `grep -r "subprocess\|sqlite3" web/` returns only the session store.
+
+Owner-decision questions may use `needs-owner: question | options: 1=label; 2=label`.
+The desk fetches the current question generation before showing its choices; the
+answer sends that generation with the selected number. A stale generation is
+refused, and an identical repeated answer is a no-op. Questions without options
+retain a freeform answer field.

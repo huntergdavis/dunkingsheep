@@ -15,7 +15,7 @@ use serde_json::{json, Map, Value};
 #[derive(Debug, Clone, Copy)]
 pub struct Param {
     pub name: &'static str,
-    pub schema: &'static str,   // compact JSON, exactly the Python's param dict
+    pub schema: &'static str, // compact JSON, exactly the Python's param dict
 }
 
 /// One command: everything the three surfaces need to describe it.
@@ -1142,6 +1142,20 @@ pub static COMMANDS: &[Command] = &[
         roles: &["owner", "web", "worker", "reviewer"],
     },
     Command {
+        name: "task_owner_question",
+        description: "Read an owner question with its current generation.",
+        params: &[Param { name: "id", schema: "{\"type\":\"string\"}" }],
+        dispatch_required: &["id"], required: &["id"], mcp: false, owner_only: true,
+        roles: &["owner", "web"],
+    },
+    Command {
+        name: "task_owner_answer",
+        description: "Atomically answer one versioned owner question.",
+        params: &[Param { name: "id", schema: "{\"type\":\"string\"}" }, Param { name: "version", schema: "{\"type\":\"integer\"}" }, Param { name: "option_number", schema: "{\"type\":\"integer\"}" }, Param { name: "reply", schema: "{\"type\":\"string\"}" }],
+        dispatch_required: &["id", "version"], required: &["id", "version"], mcp: false, owner_only: true,
+        roles: &["owner", "web"],
+    },
+    Command {
         name: "task_note",
         description: "Append an explanatory event to a task's history, including after the task row was deleted; the board's history explains its own gaps.",
         params: &[Param { name: "id", schema: "{\"type\":\"string\",\"description\":\"Task id, e.g. t12.\"}" }, Param { name: "event", schema: "{\"type\":\"string\",\"description\":\"Event name (default 'note').\"}" }, Param { name: "reason", schema: "{\"type\":\"string\",\"description\":\"Human rationale stored in meta.reason.\"}" }],
@@ -1371,16 +1385,23 @@ pub fn input_schema(name: &str) -> Option<Value> {
     let command = command(name)?;
     let mut properties = Map::new();
     for param in command.params {
-        let schema: Value = serde_json::from_str(param.schema)
-            .expect("generated param schema is valid JSON");
+        let schema: Value =
+            serde_json::from_str(param.schema).expect("generated param schema is valid JSON");
         properties.insert(param.name.to_string(), schema);
     }
     let mut schema = Map::new();
     schema.insert("type".into(), Value::from("object"));
     schema.insert("properties".into(), Value::Object(properties));
-    schema.insert("required".into(),
-                  Value::Array(command.required.iter()
-                      .map(|name| Value::from(*name)).collect()));
+    schema.insert(
+        "required".into(),
+        Value::Array(
+            command
+                .required
+                .iter()
+                .map(|name| Value::from(*name))
+                .collect(),
+        ),
+    );
     schema.insert("additionalProperties".into(), Value::Bool(false));
     Some(Value::Object(schema))
 }
@@ -1392,11 +1413,14 @@ pub fn input_schema(name: &str) -> Option<Value> {
 pub fn grouped_input_schema(name: &str) -> Option<Value> {
     let group = GROUPS.iter().find(|group| group.name == name)?;
     let mut properties = Map::new();
-    properties.insert("action".to_string(), json!({
-        "type": "string",
-        "enum": group.actions.iter().map(|(action, _)| *action).collect::<Vec<_>>(),
-        "description": "Which operation to run.",
-    }));
+    properties.insert(
+        "action".to_string(),
+        json!({
+            "type": "string",
+            "enum": group.actions.iter().map(|(action, _)| *action).collect::<Vec<_>>(),
+            "description": "Which operation to run.",
+        }),
+    );
     for (action, command_name) in group.actions {
         let _ = action;
         if let Some(command) = command(command_name) {
@@ -1420,5 +1444,8 @@ pub fn grouped_input_schema(name: &str) -> Option<Value> {
 
 /// The group of `action -> command` pairs, for the CLI's `mcp-map`.
 pub fn group_map() -> BTreeMap<&'static str, &'static [(&'static str, &'static str)]> {
-    GROUPS.iter().map(|group| (group.name, group.actions)).collect()
+    GROUPS
+        .iter()
+        .map(|group| (group.name, group.actions))
+        .collect()
 }

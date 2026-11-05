@@ -591,6 +591,8 @@ mod tests {
             "task_update",
             "task_assign",
             "task_note",
+            "task_owner_question",
+            "task_owner_answer",
             "task_block",
             "task_unblock",
             "task_cancel",

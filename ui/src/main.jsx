@@ -701,13 +701,25 @@ function Budget({ data }) {
   </section>;
 }
 
-function NeedsOwner({ rows, asks, onAnswer, onNotNow, busy }) {
+function NeedsOwner({ rows, asks, onAnswer, onNotNow, busy, revision }) {
   // DESK_DESIGN 4.1 (t997): the questions the owner owes an answer to, at the top of the
   // desk. Each row shows the LANE'S QUESTION VERBATIM (the board carries it, the desk does
   // not paraphrase), its age and what an answer unblocks. Collapses to one line when there
   // is nothing waiting, because an empty panel that still takes a screen is a lie about
   // how much there is to do.
   const [reply, setReply] = useState({});
+  const [questions, setQuestions] = useState({});
+  const rowIds = rows.map(row => row.id).join(',');
+  useEffect(() => {
+    let active = true;
+    Promise.all(rows.map(async row => {
+      try {
+        const q = await api('/ops-board/question', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ task_id: row.id }) });
+        return [row.id, q];
+      } catch (error) { return [row.id, { error: error.message }]; }
+    })).then(entries => { if (active) setQuestions(Object.fromEntries(entries)); });
+    return () => { active = false; };
+  }, [rowIds, revision]);
   const age = seconds => seconds == null ? 'unknown' : seconds < 3600
     ? `${Math.floor(seconds / 60)}m` : `${Math.floor(seconds / 3600)}h`;
   if (!rows.length) return <p className="ops-owner-empty" data-ops-section="needs-owner">Nothing needs your decision.</p>;
@@ -717,20 +729,20 @@ function NeedsOwner({ rows, asks, onAnswer, onNotNow, busy }) {
       {rows.map(row => <li key={row.id}>
         <div className="ops-owner-line">
           <code>{row.id}</code>
-          <span className="ops-owner-question">{row.needs_owner_question}</span>
+          <span className="ops-owner-question">{questions[row.id]?.question || row.needs_owner_question}</span>
           <span className="ops-owner-age" title={`waiting ${age(row.age_s)}`}>{age(row.age_s)}</span>
         </div>
         {row.blocks?.length > 0 && <p className="ops-owner-blocks">
           unblocks {row.blocks.map(id => <code key={id}>{id}</code>)}
         </p>}
         <div className="ops-owner-reply">
-          <input aria-label={`Answer ${row.id}`} placeholder="Answer the lane…"
-                 value={reply[row.id] || ''}
-                 onChange={event => setReply(state => ({ ...state, [row.id]: event.target.value }))} />
-          <button disabled={busy || !(reply[row.id] || '').trim()}
-                  onClick={() => { onAnswer(row.id, reply[row.id]); setReply(state => ({ ...state, [row.id]: '' })); }}>
-            Answer
-          </button>
+          {questions[row.id]?.error && <span role="alert">{questions[row.id].error}</span>}
+          {questions[row.id] && !questions[row.id].error && (questions[row.id].options?.length > 0
+            ? questions[row.id].options.map(option => <button key={option.number} disabled={busy}
+                onClick={() => onAnswer(row.id, { version: questions[row.id].version, option_number: option.number })}>{option.number}: {option.label}</button>)
+            : <><input aria-label={`Answer ${row.id}`} placeholder="Answer the lane…"
+                 value={reply[row.id] || ''} onChange={event => setReply(state => ({ ...state, [row.id]: event.target.value }))} />
+              <button disabled={busy || !(reply[row.id] || '').trim()} onClick={() => onAnswer(row.id, { version: questions[row.id].version, reply: reply[row.id] })}>Answer</button></>)}
           <button className="ops-owner-notnow" disabled={busy} onClick={() => onNotNow(row.id)}>Not now</button>
         </div>
       </li>)}
@@ -752,9 +764,9 @@ function OpsBoard({ standalone = false }) {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [acting, setActing] = useState(false);
-  async function answer(taskId, reply) {
+  async function answer(taskId, decision) {
     setActing(true);
-    try { await api('/ops-board/answer', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ task_id: taskId, reply }) }); await load(true); }
+    try { await api('/ops-board/answer', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ task_id: taskId, ...decision }) }); await load(true); }
     catch (e) { setError(e.message); } finally { setActing(false); }
   }
   async function notNow(taskId) {
@@ -790,7 +802,7 @@ function OpsBoard({ standalone = false }) {
       {board && <>
         <NeedsOwner rows={(board.reference?.tasks?.items || []).filter(row => row.needs_owner_question)}
                     asks={board.reference?.asks?.asks || []}
-                    onAnswer={answer} onNotNow={notNow} busy={acting} />
+                    onAnswer={answer} onNotNow={notNow} busy={acting} revision={board.generated_at} />
         <section className="ops-brief" data-ops-section="brief">
           <strong>{alarms.length ? `${alarms.length} alarms` : 'Alarms: none'}</strong>
           <p title={evidence(tasks)}>{number(tasks, 'open')} open tasks · {number(tasks, 'owner')} assigned to you</p>
