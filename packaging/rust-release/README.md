@@ -52,8 +52,10 @@ packaging/rust-release/uninstall-release.sh --prefix DIR --bin-dir DIR --unit-di
 
 - `release id` is letters, digits, `.`, `_` and `-`, starting with a letter or digit.
 - Paths that go into unit files must be absolute and use only `A-Za-z0-9._/-`.
-- Uninstall and rollback write only the files the saved pair names. Anything the
-  install did not write is left alone.
+- Uninstall refuses to change a drop-in it did not write (no `release_id` line). A
+  rollback never destroys the pair it replaces, because that pair is saved as `previous`.
+- The poll wrapper pins an absolute `python3`. A `python3` found through a relative PATH
+  entry is refused, so the wrapper never depends on the working directory.
 
 ## Activation gate (not part of this change)
 

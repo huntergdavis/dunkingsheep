@@ -120,6 +120,19 @@ impl Sandbox {
         )
     }
 
+    fn uninstall(&self, extra: &[&str]) -> Output {
+        let mut args = vec![
+            "--prefix",
+            self.prefix.to_str().expect("utf-8 path"),
+            "--bin-dir",
+            self.bin.to_str().expect("utf-8 path"),
+            "--unit-dir",
+            self.unit.to_str().expect("utf-8 path"),
+        ];
+        args.extend_from_slice(extra);
+        run_script("uninstall-release.sh", &args)
+    }
+
     fn rollback(&self, extra: &[&str]) -> Output {
         let mut args = vec![
             "--prefix",
@@ -339,6 +352,75 @@ fn rollback_without_a_prior_state_removes_both_generated_files() {
     assert!(
         !sandbox.bin.join("dunk-poll").exists(),
         "the generated poll wrapper is removed"
+    );
+}
+
+#[test]
+fn uninstall_restores_a_pre_existing_operator_drop_in() {
+    let sandbox = Sandbox::new();
+    let operator = "[Service]\nEnvironment=OPERATOR=1\n";
+    std::fs::create_dir_all(sandbox.dropin().parent().expect("drop-in directory"))
+        .expect("drop-in directory");
+    std::fs::write(sandbox.dropin(), operator).expect("operator drop-in");
+    ok(&sandbox.install("rel-op"));
+    assert!(std::fs::read_to_string(sandbox.dropin())
+        .expect("drop-in")
+        .contains("# release_id=rel-op\n"));
+    ok(&sandbox.uninstall(&[]));
+    assert_eq!(
+        operator,
+        std::fs::read_to_string(sandbox.dropin()).expect("restored operator drop-in")
+    );
+}
+
+#[test]
+fn uninstall_refuses_to_remove_a_drop_in_it_did_not_write() {
+    let sandbox = Sandbox::new();
+    ok(&sandbox.install("rel-own"));
+    let unowned = "[Service]\nEnvironment=SOMEONE_ELSE=1\n";
+    std::fs::write(sandbox.dropin(), unowned).expect("unowned drop-in");
+    let refused = sandbox.uninstall(&[]);
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("not written by install-release.sh"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert_eq!(
+        unowned,
+        std::fs::read_to_string(sandbox.dropin()).expect("unowned drop-in kept")
+    );
+}
+
+#[test]
+fn install_refuses_a_python_found_through_a_relative_path_entry() {
+    let sandbox = Sandbox::new();
+    ok(&sandbox.install("rel-py"));
+    let python = ["/usr/bin/python3", "/bin/python3"]
+        .into_iter()
+        .map(PathBuf::from)
+        .find(|path| path.is_file())
+        .expect("a python3 on the host");
+    let relative = sandbox.root.join("relpy");
+    std::fs::create_dir_all(&relative).expect("relative PATH entry");
+    std::os::unix::fs::symlink(&python, relative.join("python3")).expect("python3 link");
+    let cli = sandbox.release("rel-py").join("dunkingsheep");
+    let output = Command::new(&cli)
+        .args([
+            "install",
+            "--bin-dir",
+            sandbox.bin.to_str().expect("utf-8 path"),
+        ])
+        .current_dir(&sandbox.root)
+        .env("PATH", "relpy:/usr/bin:/bin")
+        .env("HOME", &sandbox.root)
+        .output()
+        .expect("run install with a relative PATH entry");
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("relative PATH entry"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 

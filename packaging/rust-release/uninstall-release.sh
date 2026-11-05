@@ -43,6 +43,10 @@ if [ "$dry_run" -eq 1 ]; then
     exit 0
 fi
 
+# A drop-in without our release_id line was not written by install-release.sh. Leave it.
+if [ -f "$dropin" ] && [ -z "$(dropin_release_id "$dropin")" ]; then
+    die "refusing to change $dropin: it was not written by install-release.sh"
+fi
 restore_pair "$original" "$dropin" "$bin_dir"
 if [ "$purge" -eq 1 ]; then
     rm -rf "$prefix/releases" "$prefix/rollback"

@@ -1500,6 +1500,12 @@ fn install_launcher(ns: &Map<String, Value>, json: bool) -> Outcome {
             ));
         }
         let python = python.ok_or_else(|| "no python3 found on PATH for dunk-poll".to_string())?;
+        if !python.is_absolute() {
+            return Err(format!(
+                "python3 was found through a relative PATH entry ({}); put an absolute directory first on PATH, then install again",
+                python.display()
+            ));
+        }
         let launcher = bin_dir.join("dunkingsheep");
         let poll_launcher = bin_dir.join("dunk-poll");
         write_executable(
