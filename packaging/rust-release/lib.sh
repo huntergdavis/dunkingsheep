@@ -78,3 +78,36 @@ restore_pair() {
         fi
     done
 }
+
+# guard_pair EXPECTED DROPIN BIN_DIR
+# Refuses when the live drop-in or a launcher differs from what EXPECTED records. A file
+# that EXPECTED records as absent must not exist. Nothing is changed when this refuses.
+guard_pair() {
+    if [ -f "$1/dropin.conf" ]; then
+        if ! cmp -s "$2" "$1/dropin.conf" 2>/dev/null; then
+            die "drift: $2 differs from the last state this layout wrote; refusing to change it"
+        fi
+    elif [ -f "$1/dropin.absent" ] && [ -e "$2" ]; then
+        die "drift: $2 exists but this layout left it absent; refusing to change it"
+    fi
+    for name in dunkingsheep dunk-poll; do
+        if [ -f "$1/$name" ]; then
+            if ! cmp -s "$3/$name" "$1/$name" 2>/dev/null; then
+                die "drift: $3/$name differs from the last state this layout wrote; refusing to change it"
+            fi
+        elif [ -f "$1/$name.absent" ] && [ -e "$3/$name" ]; then
+            die "drift: $3/$name exists but this layout left it absent; refusing to change it"
+        fi
+    done
+}
+
+# guard_against_drift ROLLBACK_DIR DROPIN BIN_DIR
+# Checks the live pair against the last state this layout wrote (owned/), or against the
+# pre-Rust state (original/) before anything was written. With neither, nothing to check.
+guard_against_drift() {
+    if [ -d "$1/owned" ]; then
+        guard_pair "$1/owned" "$2" "$3"
+    elif [ -d "$1/original" ]; then
+        guard_pair "$1/original" "$2" "$3"
+    fi
+}

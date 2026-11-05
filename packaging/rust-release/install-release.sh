@@ -70,6 +70,7 @@ fi
 dropin_dir="$unit_dir/dunkingsheep.service.d"
 dropin="$dropin_dir/10-rust-release.conf"
 
+guard_against_drift "$prefix/rollback" "$dropin" "$bin_dir"
 if [ "$dry_run" -eq 1 ]; then
     echo "dry run: release $release_id -> $release_dir (reuse=$reuse)"
     echo "dry run: launchers -> $bin_dir (dunkingsheep, dunk-poll)"
@@ -102,6 +103,7 @@ mkdir -p "$rollback_dir" "$bin_dir" "$dropin_dir"
 if [ ! -d "$rollback_dir/original" ]; then
     snapshot_pair "$rollback_dir/original" "$dropin" "$bin_dir"
 fi
+guard_against_drift "$rollback_dir" "$dropin" "$bin_dir"
 if [ "$(dropin_release_id "$dropin")" != "$release_id" ]; then
     snapshot_pair "$rollback_dir/previous" "$dropin" "$bin_dir"
 fi
@@ -109,6 +111,7 @@ fi
 render_dropin "$SCRIPT_DIR/templates/10-rust-release.conf.in" "$release_id" \
     "$release_dir/dunkingsheep" "$dropin"
 
+snapshot_pair "$rollback_dir/owned" "$dropin" "$bin_dir"
 echo "installed release $release_id"
 echo "release:  $release_dir"
 echo "launcher: $bin_dir/dunkingsheep"

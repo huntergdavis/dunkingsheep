@@ -47,7 +47,9 @@ fi
 if [ -f "$dropin" ] && [ -z "$(dropin_release_id "$dropin")" ]; then
     die "refusing to change $dropin: it was not written by install-release.sh"
 fi
+guard_against_drift "$prefix/rollback" "$dropin" "$bin_dir"
 restore_pair "$original" "$dropin" "$bin_dir"
+snapshot_pair "$prefix/rollback/owned" "$dropin" "$bin_dir"
 if [ "$purge" -eq 1 ]; then
     rm -rf "$prefix/releases" "$prefix/rollback"
 fi

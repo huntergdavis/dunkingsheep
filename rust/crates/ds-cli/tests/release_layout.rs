@@ -424,6 +424,88 @@ fn install_refuses_a_python_found_through_a_relative_path_entry() {
     );
 }
 
+#[test]
+fn reinstall_of_the_same_release_refuses_an_operator_modified_launcher() {
+    let sandbox = Sandbox::new();
+    ok(&sandbox.install("rel-drift"));
+    let operator = "#!/bin/sh\necho operator launcher\n";
+    std::fs::write(sandbox.bin.join("dunkingsheep"), operator).expect("operator launcher");
+    let refused = sandbox.install("rel-drift");
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("drift"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert_eq!(
+        operator,
+        std::fs::read_to_string(sandbox.bin.join("dunkingsheep")).expect("launcher kept")
+    );
+}
+
+#[test]
+fn uninstall_refuses_an_operator_launcher_that_replaced_ours() {
+    let sandbox = Sandbox::new();
+    ok(&sandbox.install("rel-replaced"));
+    let operator = "#!/bin/sh\necho operator launcher\n";
+    std::fs::write(sandbox.bin.join("dunkingsheep"), operator).expect("operator launcher");
+    let refused = sandbox.uninstall(&[]);
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("drift"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert_eq!(
+        operator,
+        std::fs::read_to_string(sandbox.bin.join("dunkingsheep")).expect("launcher kept")
+    );
+    assert!(sandbox.dropin().is_file(), "nothing was changed");
+}
+
+#[test]
+fn rollback_refuses_a_launcher_edited_after_the_last_install() {
+    let sandbox = Sandbox::new();
+    std::fs::write(sandbox.bin.join("dunkingsheep"), python_era_launcher()).expect("launcher");
+    ok(&sandbox.install("rel-r1"));
+    ok(&sandbox.install("rel-r2"));
+    let operator = "#!/bin/sh\necho operator launcher\n";
+    std::fs::write(sandbox.bin.join("dunkingsheep"), operator).expect("operator launcher");
+    let refused = sandbox.rollback(&[]);
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("drift"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert_eq!(
+        operator,
+        std::fs::read_to_string(sandbox.bin.join("dunkingsheep")).expect("launcher kept")
+    );
+    assert!(std::fs::read_to_string(sandbox.dropin())
+        .expect("drop-in kept")
+        .contains("# release_id=rel-r2\n"));
+}
+
+#[test]
+fn uninstall_refuses_a_drop_in_edited_after_the_last_install() {
+    let sandbox = Sandbox::new();
+    ok(&sandbox.install("rel-d2"));
+    let edited = "# release_id=rel-d2\n[Service]\nEnvironment=OPERATOR=1\n";
+    std::fs::write(sandbox.dropin(), edited).expect("edited drop-in");
+    let refused = sandbox.uninstall(&[]);
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("drift"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert_eq!(
+        edited,
+        std::fs::read_to_string(sandbox.dropin()).expect("edited drop-in kept")
+    );
+}
+
 /// Kills the probe daemon if the test fails before it shuts the daemon down.
 struct CleanupChild(Option<Child>);
 

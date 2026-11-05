@@ -53,6 +53,7 @@ if [ -n "$to" ]; then
     require_release_id "$to"
     target="$prefix/releases/$to/dunkingsheep"
     [ -x "$target" ] || die "release $to is not installed: $target"
+    guard_against_drift "$rollback_dir" "$dropin" "$bin_dir"
     if [ "$dry_run" -eq 1 ]; then
         echo "dry run: drop-in and launchers -> release $to"
         exit 0
@@ -62,6 +63,7 @@ if [ -n "$to" ]; then
     snapshot_pair "$swap" "$dropin" "$bin_dir"
     "$target" install --bin-dir "$bin_dir" > /dev/null
     render_dropin "$SCRIPT_DIR/templates/10-rust-release.conf.in" "$to" "$target" "$dropin"
+    snapshot_pair "$rollback_dir/owned" "$dropin" "$bin_dir"
     rm -rf "$rollback_dir/previous"
     mv "$swap" "$rollback_dir/previous"
     echo "drop-in and launchers now point at release $to"
@@ -77,6 +79,7 @@ else
     what="the state before the last install or rollback"
 fi
 [ -d "$source_dir" ] || die "no saved state to restore ($what): run install-release.sh first, or pass --to ID"
+guard_against_drift "$rollback_dir" "$dropin" "$bin_dir"
 if [ "$dry_run" -eq 1 ]; then
     echo "dry run: restore $what from $source_dir"
     exit 0
@@ -86,6 +89,7 @@ fi
 swap="$rollback_dir/.swap.$$"
 snapshot_pair "$swap" "$dropin" "$bin_dir"
 restore_pair "$source_dir" "$dropin" "$bin_dir"
+snapshot_pair "$rollback_dir/owned" "$dropin" "$bin_dir"
 rm -rf "$rollback_dir/previous"
 mv "$swap" "$rollback_dir/previous"
 echo "restored $what (drop-in and launchers as one pair)"
