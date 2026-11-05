@@ -560,7 +560,13 @@ mod tests {
 
     #[test]
     fn h_metrics_coverage_infinite_timestamp_survives_common_wire_codec() {
-        let (dir, flock) = flock("api-metrics-coverage-infinity");
+        let dir = crate::testsupport::dir("api-metrics-coverage-infinity");
+        let flock = Flock::new(
+            dir.path().join("launches.json"),
+            dir.path().join("lanes.json"),
+            true,
+        );
+        flock.wire_observability(dir.path(), None).unwrap();
         attach_inbox(&flock, dir.path());
         let metrics = flock.stores().metrics.unwrap();
         metrics.record(&crate::metrics::Event {
