@@ -288,23 +288,9 @@ fn python_int(value: &serde_json::Value) -> Result<i64, String> {
             }
             value.trunc() as i128
         }
-        serde_json::Value::String(value) => match value.trim().parse::<i128>() {
-            Ok(value) => value,
-            Err(_)
-                if value
-                    .trim()
-                    .trim_start_matches(['+', '-'])
-                    .bytes()
-                    .all(|b| b.is_ascii_digit()) =>
-            {
-                if value.trim_start().starts_with('-') {
-                    i128::MIN
-                } else {
-                    i128::MAX
-                }
-            }
-            Err(_) => return Err("cols and rows must be integers".into()),
-        },
+        serde_json::Value::String(value) => python_int_string(value)
+            .ok_or_else(|| "cols and rows must be integers".to_owned())?
+            as i128,
         _ => return Err("cols and rows must be integers".into()),
     };
     if parsed < i64::MIN as i128 {
@@ -314,6 +300,45 @@ fn python_int(value: &serde_json::Value) -> Result<i64, String> {
     } else {
         Ok(parsed as i64)
     }
+}
+
+pub(crate) fn python_int_string(value: &str) -> Option<i64> {
+    let value = value.trim();
+    let (negative, digits) = match value.as_bytes().first() {
+        Some(b'-') => (true, &value[1..]),
+        Some(b'+') => (false, &value[1..]),
+        _ => (false, value),
+    };
+    let characters = digits.chars().collect::<Vec<_>>();
+    if characters.is_empty() {
+        return None;
+    }
+    let mut magnitude = 0_i128;
+    let mut saw_digit = false;
+    let mut previous_digit = false;
+    for (index, character) in characters.iter().copied().enumerate() {
+        if character == '_' {
+            if !previous_digit
+                || !characters
+                    .get(index + 1)
+                    .and_then(|next| crate::python_json::decimal_digit(*next))
+                    .is_some()
+            {
+                return None;
+            }
+            previous_digit = false;
+            continue;
+        }
+        let digit = crate::python_json::decimal_digit(character)?;
+        saw_digit = true;
+        previous_digit = true;
+        magnitude = magnitude.saturating_mul(10).saturating_add(digit as i128);
+    }
+    if !saw_digit || !previous_digit {
+        return None;
+    }
+    let signed = if negative { -magnitude } else { magnitude };
+    Some(signed.clamp(i64::MIN as i128, i64::MAX as i128) as i64)
 }
 
 #[derive(Clone)]
@@ -433,6 +458,19 @@ async fn post(state: HttpState, uri: Uri, request: Request<Body>) -> Response<Bo
     };
     match result {
         Ok(payload) => json_response(200, payload.into(), true),
+        Err(error)
+            if error.context.contains_key("requested")
+                && ["cols", "rows"].into_iter().any(|name| {
+                    matches!(parsed.resize_value(name), Some(Value::Float(value)) if value.is_infinite())
+                }) =>
+        {
+            let message = "internal error: cannot convert float infinity to integer";
+            json_response(
+                500,
+                Value::from(serde_json::json!({"error": message})),
+                false,
+            )
+        }
         Err(error) if error.context.contains_key("requested") => {
             resize_error_response(error, &parsed)
         }

@@ -13,7 +13,7 @@ use axum::{
     Router,
 };
 use tokio::{
-    io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
 };
 use tower::ServiceExt;
@@ -60,8 +60,13 @@ async fn serve_connection(
     let (read, mut write) = stream.into_split();
     let mut reader = BufReader::new(read);
     let mut line = Vec::new();
-    if !read_line_bounded(&mut reader, &mut line, MAX_LINE).await? {
-        return Ok(());
+    match read_line_bounded(&mut reader, &mut line, MAX_LINE).await {
+        Ok(false) => return Ok(()),
+        Ok(true) => {}
+        Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+            return write_error(&mut write, 414, "URI Too Long", "URI Too Long").await;
+        }
+        Err(error) => return Err(error),
     }
     let request_line = trim_crlf(&line);
     let mut words = request_line.split_ascii_whitespace();
@@ -79,15 +84,28 @@ async fn serve_connection(
     }
 
     let mut headers = Vec::<(String, String)>::new();
+    let mut header_count = 0;
     loop {
         line.clear();
-        if !read_line_bounded(&mut reader, &mut line, MAX_LINE).await? {
-            return Ok(());
+        match read_line_bounded(&mut reader, &mut line, MAX_LINE).await {
+            Ok(false) => return Ok(()),
+            Ok(true) => {}
+            Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+                return write_error(
+                    &mut write,
+                    431,
+                    "Request Header Fields Too Large",
+                    "Line too long",
+                )
+                .await;
+            }
+            Err(error) => return Err(error),
         }
         if line == b"\r\n" || line == b"\n" {
             break;
         }
-        if headers.len() == MAX_HEADERS {
+        header_count += 1;
+        if header_count > MAX_HEADERS {
             return write_error(
                 &mut write,
                 431,
@@ -106,7 +124,16 @@ async fn serve_connection(
 
     // `HTTPMessage.get` returns the first occurrence. The Python handler ignores
     // Transfer-Encoding entirely and reads zero bytes when Content-Length is absent.
-    let content_length = if method.eq_ignore_ascii_case("POST") {
+    if method != "GET" && method != "POST" {
+        return write_error(
+            &mut write,
+            501,
+            "Not Implemented",
+            &format!("Unsupported method ({})", python_repr(method)),
+        )
+        .await;
+    }
+    let content_length = if method == "POST" {
         headers.iter().find(|(name, _)| name == "content-length")
     } else {
         None
@@ -180,6 +207,8 @@ async fn serve_connection(
 }
 
 fn python_content_length(value: &str) -> Option<(bool, bool, bool)> {
+    // HTTPMessage decodes header octets as ISO-8859-1 before Python calls int;
+    // a UTF-8 Arabic digit therefore arrives as two non-decimal Latin-1 chars.
     let value = value.trim();
     let (negative, digits) = match value.as_bytes().first() {
         Some(b'-') => (true, &value[1..]),
@@ -256,10 +285,10 @@ async fn read_line_bounded<R: AsyncRead + Unpin>(
     }
 }
 
-fn trim_crlf(line: &[u8]) -> &str {
+fn trim_crlf(line: &[u8]) -> String {
     let line = line.strip_suffix(b"\n").unwrap_or(line);
     let line = line.strip_suffix(b"\r").unwrap_or(line);
-    std::str::from_utf8(line).unwrap_or("")
+    line.iter().map(|byte| char::from(*byte)).collect()
 }
 
 async fn write_response(
@@ -313,17 +342,38 @@ async fn write_error(
     reason: &str,
     message: &str,
 ) -> io::Result<()> {
-    let body = format!("{reason}: {message}\n");
+    let explanation = match status {
+        400 => "Bad request syntax or unsupported method",
+        414 => "URI is too long",
+        431 => {
+            "The server is unwilling to process the request because its header fields are too large"
+        }
+        501 => "Server does not support this operation",
+        _ => reason,
+    };
+    let body = format!(
+        "<!DOCTYPE HTML>\n<html lang=\"en\">\n    <head>\n        <meta charset=\"utf-8\">\n        <style type=\"text/css\">\n            :root {\n                color-scheme: light dark;\n            }\n        </style>\n        <title>Error response</title>\n    </head>\n    <body>\n        <h1>Error response</h1>\n        <p>Error code: {status}</p>\n        <p>Message: {}.</p>\n        <p>Error code explanation: {status} - {explanation}.</p>\n    </body>\n</html>\n",
+        html_escape(message),
+    );
     write
         .write_all(
             format!(
-                "HTTP/1.0 {status} {reason}\r\nContent-Length: {}\r\n\r\n{body}",
-                body.len()
+                "HTTP/1.0 {status} {reason}\r\nContent-Type: text/html;charset=utf-8\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len(),
             )
             .as_bytes(),
         )
         .await?;
     write.shutdown().await
+}
+
+fn html_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#x27;")
 }
 
 #[cfg(test)]
@@ -388,6 +438,7 @@ mod tests {
         use serde_json::{json, Map, Value as SerdeValue};
         use std::collections::BTreeSet;
 
+        #[derive(Default)]
         struct OracleBackend;
         impl Backend for OracleBackend {
             fn name(&self) -> String {
@@ -407,16 +458,20 @@ mod tests {
             ) -> Result<Map<String, SerdeValue>, String> {
                 for value in [cols, rows] {
                     let integer = match value {
-                        SerdeValue::Bool(value) => i64::from(*value),
+                        SerdeValue::Bool(value) => {
+                            if *value {
+                                1
+                            } else {
+                                0
+                            }
+                        }
                         SerdeValue::Number(number) => number
                             .as_i64()
                             .or_else(|| number.as_u64().map(|value| value as i64))
                             .or_else(|| number.as_f64().map(|value| value.trunc() as i64))
                             .ok_or_else(|| "cols and rows must be integers".to_owned())?,
-                        SerdeValue::String(value) => value
-                            .trim()
-                            .parse::<i64>()
-                            .map_err(|_| "cols and rows must be integers".to_owned())?,
+                        SerdeValue::String(value) => crate::http_adapter::python_int_string(value)
+                            .ok_or_else(|| "cols and rows must be integers".to_owned())?,
                         _ => return Err("cols and rows must be integers".into()),
                     };
                     if !(1..=1000).contains(&integer) {
@@ -457,7 +512,7 @@ server.serve_forever()
         output.read_line(&mut port).unwrap();
         let port = port.trim().parse::<u16>().expect("oracle port");
 
-        let requests: [&[u8]; 12] = [
+        let requests: [&[u8]; 19] = [
             b"POST /no-route HTTP/1.0\r\nContent-Length: 4\r\nContent-Length: 100\r\n\r\n{\"x\":1}",
             b"POST /no-route HTTP/1.0\r\nContent-Length: 100\r\nContent-Length: 4\r\n\r\n{\"x\":1}",
             b"POST /no-route HTTP/1.0\r\nContent-Length: 100\r\n\r\n{}",
@@ -470,37 +525,89 @@ server.serve_forever()
             b"POST /api/terminals/test/resize HTTP/1.0\r\nContent-Length: 100\r\n\r\n{\"cols\":[1,2],\"rows\":24}",
             b"POST /api/terminals/test/resize HTTP/1.0\r\nContent-Length: 100\r\n\r\n{\"cols\":{\"nested\":1},\"rows\":24}",
             b"POST /api/terminals/test/resize HTTP/1.0\r\nContent-Length: 100\r\n\r\n{\"cols\":80,\"rows\":24}",
+            b"PUT /healthz HTTP/1.0\r\nContent-Length: 0\r\n\r\n",
+            b"POST /api/terminals/test/resize HTTP/1.0\r\nContent-Length: 100\r\n\r\n{\"cols\":NaN,\"rows\":24}",
+            b"POST /api/terminals/test/resize HTTP/1.0\r\nContent-Length: 100\r\n\r\n{\"cols\":Infinity,\"rows\":24}",
+            b"POST /api/terminals/test/resize HTTP/1.0\r\nContent-Length: 100\r\n\r\n{\"cols\":-Infinity,\"rows\":24}",
+            b"POST /api/terminals/test/resize HTTP/1.0\r\nContent-Length: 100\r\n\r\n{\"cols\":1e999,\"rows\":24}",
+            b"POST /api/terminals/test/resize HTTP/1.0\r\nContent-Length: 100\r\n\r\n{\"cols\":\"1_0\",\"rows\":24}",
+            b"POST /api/terminals/test/resize HTTP/1.0\r\nContent-Length: 100\r\n\r\n{\"cols\":\"\\u0661\",\"rows\":24}",
         ];
         for (request_bytes, index) in requests.into_iter().zip(0..) {
-            let rust = raw_request(
-                router(FakeDaemon::default(), OracleBackend::default()),
+            compare_oracle_request(
+                port,
+                router(FakeDaemon::default(), OracleBackend),
                 request_bytes,
+                index,
             );
-            let mut python = TcpStream::connect(("127.0.0.1", port)).unwrap();
-            python.write_all(request_bytes).unwrap();
-            python.shutdown(std::net::Shutdown::Write).unwrap();
-            let mut python_response = Vec::new();
-            python.read_to_end(&mut python_response).unwrap();
-            assert_response_equivalent(&python_response, &rust, index);
         }
         let mut request = b"POST /no-route HTTP/1.0\r\nContent-Length: 4096\r\n\r\n".to_vec();
         request.extend_from_slice(b"{}");
         request.resize(request.len() + 4094, b' ');
-        let rust = raw_request(
-            router(FakeDaemon::default(), OracleBackend::default()),
+        compare_oracle_request(
+            port,
+            router(FakeDaemon::default(), OracleBackend),
             &request,
+            19,
         );
-        let mut python = TcpStream::connect(("127.0.0.1", port)).unwrap();
-        python.write_all(&request).unwrap();
-        python.shutdown(std::net::Shutdown::Write).unwrap();
-        let mut python_response = Vec::new();
-        python.read_to_end(&mut python_response).unwrap();
-        assert_response_equivalent(&python_response, &rust, 12);
+
+        let mut long_request_line = b"GET /".to_vec();
+        long_request_line.resize(MAX_LINE + 1, b'a');
+        long_request_line.extend_from_slice(b"\r\n");
+        compare_oracle_request(
+            port,
+            router(FakeDaemon::default(), OracleBackend),
+            &long_request_line,
+            20,
+        );
+        let mut long_header_line = b"GET /healthz HTTP/1.0\r\nX: ".to_vec();
+        long_header_line.resize(MAX_LINE + 1, b'a');
+        long_header_line.extend_from_slice(b"\r\n\r\n");
+        compare_oracle_request(
+            port,
+            router(FakeDaemon::default(), OracleBackend),
+            &long_header_line,
+            21,
+        );
+        let mut too_many_headers = b"GET /healthz HTTP/1.0\r\n".to_vec();
+        for _ in 0..101 {
+            too_many_headers.extend_from_slice(b"X: y\r\n");
+        }
+        too_many_headers.extend_from_slice(b"\r\n");
+        compare_oracle_request(
+            port,
+            router(FakeDaemon::default(), OracleBackend),
+            &too_many_headers,
+            22,
+        );
+        compare_oracle_request(
+            port,
+            router(FakeDaemon::default(), OracleBackend),
+            b"GARBAGE\r\n",
+            23,
+        );
+        compare_oracle_request(
+            port,
+            router(FakeDaemon::default(), OracleBackend),
+            b"POST /no-route HTTP/1.0\r\nContent-Length: \xd9\xa1\r\n\r\n",
+            24,
+        );
         child.kill().unwrap();
         child.wait().unwrap();
     }
 
-    fn assert_response_equivalent(python: &[u8], rust: &[u8], case: usize) {
+    fn compare_oracle_request(port: u16, app: Router, request: &[u8], case: usize) {
+        let rust = raw_request(app, request);
+        let mut python = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        python.write_all(request).unwrap();
+        python.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut python_response = Vec::new();
+        python.read_to_end(&mut python_response).unwrap();
+        let compare_error_page = !matches!(case, 12 | 20 | 21 | 22 | 23);
+        assert_response_equivalent(&python_response, &rust, case, compare_error_page);
+    }
+
+    fn assert_response_equivalent(python: &[u8], rust: &[u8], case: usize, compare_body: bool) {
         fn split(response: &[u8]) -> (u16, Vec<(String, String)>, &[u8]) {
             let boundary = response
                 .windows(4)
@@ -530,8 +637,35 @@ server.serve_forever()
             py_status, rs_status,
             "status case {case}: {python:?} vs {rust:?}"
         );
-        assert_eq!(py_body, rs_body, "body case {case}: {python:?} vs {rust:?}");
-        for name in ["content-type", "content-length", "cache-control"] {
+        if compare_body {
+            assert_eq!(py_body, rs_body, "body case {case}: {python:?} vs {rust:?}");
+        } else {
+            assert_eq!(
+                py_headers
+                    .iter()
+                    .find(|(key, _)| key == "content-length")
+                    .unwrap()
+                    .1
+                    .parse::<usize>()
+                    .unwrap(),
+                py_body.len()
+            );
+            assert_eq!(
+                rs_headers
+                    .iter()
+                    .find(|(key, _)| key == "content-length")
+                    .unwrap()
+                    .1
+                    .parse::<usize>()
+                    .unwrap(),
+                rs_body.len()
+            );
+        }
+        for name in if compare_body {
+            &["content-type", "content-length", "cache-control"][..]
+        } else {
+            &["content-type", "cache-control"][..]
+        } {
             assert_eq!(
                 py_headers.iter().find(|(key, _)| key == name),
                 rs_headers.iter().find(|(key, _)| key == name),
