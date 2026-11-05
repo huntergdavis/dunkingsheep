@@ -1018,17 +1018,19 @@ pub fn summary(
         &[&PROJECT],&["number","state","merged_at","last_seen_at"])?;
     let telemetry=conn.query_row(
         "SELECT generated_at,interval_start,interval_end,schema_version,payload_json FROM dunk_metrics_snapshots ORDER BY id DESC LIMIT 1",
-        [],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,i64>(3)?,row.get_ref(4)?.to_owned())),
+        [],|row| {
+            let payload = match row.get_ref(4)? {
+                rusqlite::types::ValueRef::Text(bytes) | rusqlite::types::ValueRef::Blob(bytes) => Some(bytes.to_vec()),
+                _ => None,
+            };
+            Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,i64>(3)?,payload))
+        },
     ).optional()?;
     let telemetry = match telemetry {
         Some((generated, start, end, version, payload)) => Some(json!({
             "generated_at":generated,"age_s":age(now,&generated)?,
             "interval":{"start":start,"end":end},"schema_version":version,
-            "data":match payload {
-                rusqlite::types::Value::Text(payload) => serde_json::from_str::<Value>(&payload)?,
-                rusqlite::types::Value::Blob(payload) => serde_json::from_slice::<Value>(&payload)?,
-                _ => return Err(SummaryError::InvalidPayloadType),
-            }
+            "data":serde_json::from_slice::<Value>(payload.as_deref().ok_or(SummaryError::InvalidPayloadType)?)?
         })),
         None => None,
     };
