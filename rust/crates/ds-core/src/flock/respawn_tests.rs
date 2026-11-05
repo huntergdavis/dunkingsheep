@@ -8,7 +8,7 @@ use crate::flock::{
 use crate::{db::ReadPool, inbox_store::Store, roles::Roles, terminal::tmux::TmuxBackend};
 use std::{
     os::unix::fs::PermissionsExt,
-    process::{Child, Command},
+    process::{Child, Command, Stdio},
     sync::Arc,
 };
 const P: &str = "%2";
@@ -84,12 +84,18 @@ impl Fixture {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
         let binary = dir.path().join("claude");
-        std::fs::copy("/bin/sleep", &binary).unwrap();
+        std::fs::copy("/bin/sh", &binary).unwrap();
         let mut children = Children(Vec::new());
         for _ in 0..3 {
-            children
-                .0
-                .push(spawn_fixture_child(|| Command::new(&binary).arg("300").spawn()).unwrap());
+            children.0.push(
+                spawn_fixture_child(|| {
+                    Command::new(&binary)
+                        .args(["-c", "read _"])
+                        .stdin(Stdio::piped())
+                        .spawn()
+                })
+                .unwrap(),
+            );
         }
         let pids: Vec<_> = children.0.iter().map(Child::id).collect();
         std::fs::write(dir.path().join("pid"), pids[0].to_string()).unwrap();
@@ -332,6 +338,24 @@ impl InboxEnv for Fixture {
             .collect::<Vec<_>>()))
     }
 }
+#[test]
+fn fixture_children_keep_claude_identity_and_are_cleaned_up() {
+    let pids = {
+        let fixture = Fixture::new();
+        let pids: Vec<_> = fixture.children.0.iter().map(Child::id).collect();
+        for &pid in &pids {
+            let pid = i64::from(pid);
+            let info = crate::proc::stat(pid).expect("fixture child has proc identity");
+            assert_eq!(info.comm, "claude");
+            assert!(crate::proc::process_alive(pid, Some(&info.start)));
+        }
+        pids
+    };
+    for pid in pids {
+        assert!(!crate::proc::process_alive(i64::from(pid), None));
+    }
+}
+
 #[test]
 fn requires_positive_idle_confirmation() {
     let f = Fixture::new();
