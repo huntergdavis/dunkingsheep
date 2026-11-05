@@ -237,7 +237,7 @@ fn quick_timeouts() -> Timeouts {
         game_start: Duration::from_millis(600),
         slot_wait: Duration::from_secs(3),
         xvfb_ready_polls: 30,
-        post_launch: Duration::from_millis(100),
+        post_launch: Duration::from_secs(1),
         terminate: Duration::from_secs(1),
     }
 }
@@ -262,14 +262,20 @@ fn write_script(path: &Path, body: &str) {
 
 impl Harness {
     fn new() -> Self {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let target_tmp = Path::new(env!("CARGO_TARGET_TMPDIR"));
+        fs::create_dir_all(target_tmp).expect("target tmp directory");
+        let dir = tempfile::Builder::new()
+            .prefix("t3211-game-backend-")
+            .tempdir_in(target_tmp)
+            .expect("tempdir under the worktree target directory");
         let root = dir.path().to_path_buf();
         let repo = root.join("repo");
         let data = root.join("data");
         let codewheel = root.join("codewheel");
         let state = root.join("state");
         let bin = root.join("bin");
-        for path in [&repo, &data, &codewheel, &state, &bin] {
+        let probe = root.join("x11-probe");
+        for path in [&repo, &data, &codewheel, &state, &bin, &probe] {
             fs::create_dir_all(path).expect("create fixture directory");
         }
         fs::create_dir_all(state.join("templates")).expect("templates directory");
@@ -333,6 +339,7 @@ impl Harness {
             replacement_dispatch: self.repo.join("resources/hybrid/play-dispatch.txt"),
             tools: Tools::capture(&path_var),
             path_var,
+            probe_dir: self.root.join("x11-probe"),
             timeouts,
         }
     }
@@ -555,7 +562,8 @@ fn stop_terminates_the_owned_display_and_session() {
 fn restart_reuses_the_last_run_without_preparing_a_new_copy() {
     let harness = Harness::new();
     let session = harness.session();
-    let (_, first) = start(&session, &harness.codewheel, true);
+    let (first_status, first) = start(&session, &harness.codewheel, true);
+    assert_eq!(first_status, StatusCode::OK, "{first}");
     let _ = stop(&session);
     let (status, second) = start(&session, &harness.codewheel, false);
     assert_eq!(status, StatusCode::OK, "{second}");
@@ -874,12 +882,16 @@ fn live_video_and_audio_fail_explicitly_while_streaming_is_blocked() {
     let session = harness.session();
     let (status, _) = start(&session, &harness.codewheel, true);
     assert_eq!(status, StatusCode::OK);
-    // The stream body needs futures-core or http-body, which ds-web does not
-    // depend on. Until that dependency exists the route refuses with a 500.
+    // Live streaming is NOT implemented: see STREAM_BLOCKER in game_backend.rs.
+    // Until the body adapter exists, the routes refuse with a 500.
     let (status, _) = send(media_app(&session), "GET", "/api/game/video", None);
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     let (status, _) = send(media_app(&session), "GET", "/api/game/audio", None);
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(
+        !harness.read_state_file("calls.log").contains("ffmpeg"),
+        "a refused stream must not start an ffmpeg process"
+    );
     let _ = stop(&session);
 }
 
@@ -1053,6 +1065,8 @@ fn archive_status_verifies_manifest_entries_and_rejects_escapes() {
     assert_eq!(body["state_archive"]["status"], json!("unavailable"));
 }
 
+/// Argument shapes only. This starts no stream, which stays blocked
+/// (`STREAM_BLOCKER`).
 #[test]
 fn stream_commands_match_the_python_argv() {
     let video = game_backend::stream_command(

@@ -4,6 +4,16 @@
 //! `audio`). It ports `GameSession` from `web/gameplay.py` and the route
 //! semantics in `web/app.py` lines 1467-1564, plus `web/codeword.py`.
 //!
+//! Status, stated narrowly:
+//! - Implemented: lifecycle (`status`, `start`, `stop`), key and text input,
+//!   save-state list, save and load, codeword recognition, emulator and archive
+//!   evidence, orphan recovery.
+//! - NOT implemented: live video and audio. See `STREAM_BLOCKER`. Once the Python
+//!   preconditions pass, `video` and `audio` return 500, and no ffmpeg stream
+//!   process is started. The stream-process lifecycle is also not implemented:
+//!   one stream per kind, replacement of the previous stream, termination on
+//!   client disconnect, and termination on shutdown.
+//!
 //! Ownership: every external program runs from an absolute path captured in
 //! [`Tools`] at construction. The Xvfb child is owned by the session and is
 //! terminated by process group. DOSBox-X lives in the private tmux server and
@@ -11,11 +21,9 @@
 //! no network access.
 //!
 //! Blockers, reported rather than stubbed:
-//! - `GameMediaBackend::stream` (live video/audio) cannot build an axum `Body`
-//!   stream. That needs `futures_core::Stream` or `http_body::Frame`, which
-//!   `ds-web` does not name or depend on, and Cargo.toml is outside this batch.
-//!   `stream` runs the Python preconditions and then refuses with an explicit
-//!   failure. It never fabricates a stream.
+//! - `GameMediaBackend::stream` (live video/audio) cannot build an axum `Body`.
+//!   The exact constraint is recorded in `STREAM_BLOCKER`. `stream` runs the
+//!   Python preconditions and then refuses. It never fabricates a stream.
 //! - The `GameInputBackend` and `GameLifecycleBackend` signatures cannot express
 //!   Python's HTTP 500 for internal failures. Those surface as 400 or 503 (see
 //!   `input_error` and the lifecycle impl).
@@ -71,7 +79,19 @@ const TMUX_SOCKET: &str = "vp-poolrad";
 const TMUX_SESSION: &str = "oracle";
 const SINK_PREFIX: &str = "vp_poolrad_";
 const GAME_START_MARKER: &[u8] = b"Packed file is corrupt";
-const STREAM_BLOCKER: &str = "live game streaming is blocked: ds-web has no futures-core or http-body dependency to build an axum streaming Body; no stream was started";
+/// The exact constraint behind the video and audio refusal. Keep this text in
+/// sync with the task note and the handoff.
+const STREAM_BLOCKER: &str = concat!(
+    "BLOCKER t3211-stream: GameMediaBackend::stream must return axum::body::Body, ",
+    "a streaming body for the video (multipart/x-mixed-replace) and audio (audio/ogg) routes. ",
+    "axum 0.8.9 builds a streaming Body through Body::from_stream, which needs futures_core::TryStream, ",
+    "or through Body::new, which needs an http_body::Body with Data = Bytes whose poll_frame returns http_body::Frame. ",
+    "axum re-exports only HttpBody (= http_body::Body), Body and BodyDataStream; it does not re-export Frame or Stream. ",
+    "ds-web Cargo.toml has no futures-core, futures-util or http-body dependency. ",
+    "Unblock: add http-body = \"1\" (1.1.0 is already in Cargo.lock) to ds-web. That is a Cargo change outside t3211's owned files. ",
+    "Then wrap a tokio mpsc receiver fed by the ffmpeg stdout reader. ",
+    "Not implemented: the ffmpeg stream-process lifecycle. No process is started and no stream is returned."
+);
 
 /// `gameplay.GameError` (`Game`) versus any other exception (`Failure`).
 /// The route layer maps `Game` to the Python 4xx or 503 detail and `Failure` to
@@ -221,6 +241,10 @@ pub struct SessionConfig {
     pub replacement_registry: PathBuf,
     pub replacement_dispatch: PathBuf,
     pub path_var: String,
+    /// Directory probed for `.X<n>-lock` and `.X11-unix/X<n>`. Python uses a
+    /// fixed `/tmp`, which stays the production default. Tests point it at a
+    /// private directory, so host X displays cannot change their results.
+    pub probe_dir: PathBuf,
     pub tools: Tools,
     pub timeouts: Timeouts,
 }
@@ -276,6 +300,7 @@ impl SessionConfig {
             replacement_dispatch,
             path_var,
             tools,
+            probe_dir: PathBuf::from("/tmp"),
             timeouts: Timeouts::default(),
         })
     }
@@ -1285,9 +1310,13 @@ fn touch_private(path: &Path) -> Res<()> {
 fn start_display(ctx: &Ctx, st: &mut Session, run_dir: &Path) -> Res<(String, PathBuf)> {
     let auth = run_dir.join(".vp-xauthority");
     for number in 90..130 {
-        if Path::new(&format!("/tmp/.X{number}-lock")).exists()
-            || Path::new(&format!("/tmp/.X11-unix/X{number}")).exists()
-        {
+        let lock = ctx.cfg.probe_dir.join(format!(".X{number}-lock"));
+        let socket = ctx
+            .cfg
+            .probe_dir
+            .join(".X11-unix")
+            .join(format!("X{number}"));
+        if lock.exists() || socket.exists() {
             continue;
         }
         let display = format!(":{number}");
@@ -3148,8 +3177,9 @@ impl GameMediaBackend for OwnedGameSession {
         })
     }
 
-    /// Runs the Python preconditions, then refuses. No ffmpeg process is started
-    /// and no fake stream is returned (see `STREAM_BLOCKER`).
+    /// Runs the Python preconditions, then refuses with `STREAM_BLOCKER`. No
+    /// ffmpeg process is started and no fake stream is returned. Live video and
+    /// audio are NOT implemented.
     fn stream<'a>(
         &'a self,
         kind: GameStreamKind,
