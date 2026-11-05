@@ -419,6 +419,7 @@ pub fn run(
         return Ok(report);
     }
 
+    let current: BTreeSet<String> = findings.iter().map(dedupe_key).collect();
     let mut group_lines = Vec::new();
     let mut vp = vp_pending;
     let group: Vec<Value> = vp
