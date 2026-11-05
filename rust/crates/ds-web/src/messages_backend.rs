@@ -21,7 +21,7 @@
 use std::{
     collections::HashMap,
     fmt, fs,
-    fs::OpenOptions,
+    fs::{File, OpenOptions},
     io::{Read, Write},
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
@@ -1092,7 +1092,7 @@ impl MessagesBackend {
         force: bool,
     ) -> Result<Value, Fault> {
         let id = int_of(row, "id")?;
-        let pane_id = text_field(pane, "pane_id")?.to_owned();
+        let pane_id = pane_id_of(pane)?;
         let (prompt, attachment_paths) = {
             let connection = self.connect()?;
             let prompt = prompt_for(&connection, row)?;
@@ -1233,7 +1233,7 @@ impl MessagesBackend {
             json!({"queued": [], "recent": []})
         };
         let queued_by_id = index_by_message_id(&recent)?;
-        let mut writes = connection;
+        let writes = connection;
 
         for row in &queued {
             if !row.get("direct_transport").is_some_and(Value::is_null) {
