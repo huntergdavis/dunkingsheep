@@ -909,11 +909,11 @@ mod tests {
         let raw = dispatcher
             .dispatch("start_agent", &json!({}), &desk)
             .unwrap_err();
-        assert!(raw.to_string().contains("not permitted"), "{raw}");
+        assert!(raw.to_string().contains("requires a superuser"), "{raw}");
         let stop = dispatcher
             .dispatch("stop_all", &json!({}), &desk)
             .unwrap_err();
-        assert!(stop.to_string().contains("not permitted"), "{stop}");
+        assert!(stop.to_string().contains("requires a superuser"), "{stop}");
         services.shutdown();
     }
 
