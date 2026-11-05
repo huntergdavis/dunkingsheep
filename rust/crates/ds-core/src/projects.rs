@@ -1211,7 +1211,7 @@ async fn start_project_agent_durable<T: ProjectTerminal + ?Sized>(
         argv: argv.to_vec(),
         workspace_id: project.workspace_id.clone(),
         cwd: Some(project.dir.display().to_string()),
-        label: Some(name),
+        label: Some(name.clone()),
         ..AgentSpec::default()
     };
     let result = match terminal.start_agent(&spec) {

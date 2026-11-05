@@ -186,7 +186,8 @@ pub trait CommandEnv: PaneInfoEnv {
             .terminal()
             .lock()
             .map_err(|_| DunkError::Refused("terminal lock poisoned".into()))?;
-        operation(&mut **terminal)
+        let mut project_terminal = ProjectTerminalAdapter(&mut **terminal);
+        operation(&mut project_terminal)
     }
 
     fn health_state_env(&self) -> Result<&dyn health_state::HealthStateEnv, DunkError> {
@@ -454,6 +455,26 @@ pub trait CommandEnv: PaneInfoEnv {
     /// Fallible PM routing and digest services. Runtime composition is assigned to t1605.
     fn pm_env(&self) -> Result<&dyn crate::pm::PmEnv, DunkError> {
         Err(DunkError::Refused("PM adapter is not wired".into()))
+    }
+}
+
+struct ProjectTerminalAdapter<'a>(&'a mut dyn Terminal);
+
+impl crate::projects::ProjectTerminal for ProjectTerminalAdapter<'_> {
+    fn create_workspace(
+        &mut self,
+        label: Option<&str>,
+        cwd: Option<&str>,
+        focus: bool,
+    ) -> Result<crate::terminal::Workspace, crate::terminal::TerminalError> {
+        self.0.create_workspace(label, cwd, focus)
+    }
+
+    fn start_agent(
+        &mut self,
+        spec: &crate::terminal::AgentSpec,
+    ) -> Result<crate::terminal::Pane, crate::terminal::TerminalError> {
+        self.0.start_agent(spec)
     }
 }
 

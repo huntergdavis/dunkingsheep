@@ -168,7 +168,7 @@ pub fn h_project_spawn(context: &HandlerContext<'_>, args: Args) -> Result<Value
                     &config.provider,
                     &config.provider_home,
                     config.now,
-                ))?,
+                ))??,
             };
             let five_hour_usage = if config.provider_reading.is_some() {
                 budget.five_hour_usage_from_reading(&config.provider, &reading, config.now)
@@ -219,7 +219,7 @@ pub fn h_project_spawn(context: &HandlerContext<'_>, args: Args) -> Result<Value
                             .await;
                         projects.shutdown().await;
                         result
-                    })?;
+                    })??;
                     response = Some(serde_json::to_value(project)?);
                     Ok(Value::Null)
                 };

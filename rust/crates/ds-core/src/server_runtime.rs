@@ -580,7 +580,12 @@ impl crate::api::CommandEnv for RequestRuntimeAdapter<'_> {
             &mut dyn crate::projects::ProjectTerminal,
         ) -> Result<(), DunkError>,
     ) -> Result<(), DunkError> {
-        operation(&mut self.terminal)
+        let mut terminal = TerminalCallAdapter {
+            flock: self.terminal.flock,
+            terminal: self.terminal.terminal,
+            runtime: self.terminal.runtime,
+        };
+        operation(&mut terminal)
     }
 
     fn add_dunk(
