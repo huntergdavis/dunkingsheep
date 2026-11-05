@@ -296,6 +296,7 @@ fn is_utc_stamp(text: &str) -> bool {
 // Pure helpers: Python oracle comparisons.
 // ---------------------------------------------------------------------------
 
+// P1 optional (t3239): progress percentages in compact_view.
 #[test]
 fn percent_matches_python_oracle() {
     let cases = [
@@ -323,6 +324,7 @@ fn percent_matches_python_oracle() {
     }
 }
 
+// P1 optional (t3239): the progress view's generated stamp in compact_view.
 #[test]
 fn pacific_stamps_match_python_zoneinfo_across_dst_edges() {
     let cases = [
@@ -501,6 +503,7 @@ fn absent_daemon_is_unavailable_not_invented() {
 // Poolrad progress: published checkpoint in SQLite, real checkout, real git.
 // ---------------------------------------------------------------------------
 
+// P1 optional (t3239): Poolrad progress from a published checkpoint.
 #[test]
 fn progress_matches_python_oracle_for_the_published_checkpoint() {
     let dir = TempDir::new().unwrap();
@@ -570,6 +573,7 @@ fn progress_matches_python_oracle_for_the_published_checkpoint() {
     assert_eq!(view, expected);
 }
 
+// P1 optional (t3239): the unported Poolrad progress fallback.
 #[test]
 fn progress_without_a_published_row_is_unavailable_never_zero() {
     let dir = TempDir::new().unwrap();
@@ -588,6 +592,7 @@ fn progress_without_a_published_row_is_unavailable_never_zero() {
     );
 }
 
+// P1 optional (t3239): the Poolrad replacement record.
 #[test]
 fn progress_reports_duplicate_replacement_ids_as_unavailable() {
     let dir = TempDir::new().unwrap();
@@ -606,6 +611,7 @@ fn progress_reports_duplicate_replacement_ids_as_unavailable() {
     assert!(view["replacements"].get("truth").is_none());
 }
 
+// P1 optional (t3239): the Poolrad progress cache TTL.
 #[test]
 fn progress_cache_holds_for_sixty_seconds_then_rereads_the_checkpoint() {
     let dir = TempDir::new().unwrap();
@@ -646,6 +652,7 @@ fn progress_cache_holds_for_sixty_seconds_then_rereads_the_checkpoint() {
 // Static dashboard page, reports, refresh, and the desk bundle.
 // ---------------------------------------------------------------------------
 
+// P1 optional (t3239): the Poolrad dashboard page, reports, and refresh.
 #[test]
 fn dashboard_page_reports_and_refresh_contracts() {
     let dir = TempDir::new().unwrap();
@@ -684,6 +691,7 @@ fn dashboard_page_reports_and_refresh_contracts() {
     );
 }
 
+// P1 optional (t3239): the Poolrad dashboard when the checkout is not built.
 #[test]
 fn dashboard_page_is_absent_when_the_checkout_is_not_built() {
     let dir = TempDir::new().unwrap();
@@ -763,6 +771,7 @@ fn activity_routes_answer_success_unknown_and_error_over_http() {
     );
 }
 
+// P1 optional (t3239): the Poolrad progress route.
 #[test]
 fn progress_route_serves_the_checkpoint_and_reports_missing_sources() {
     let dir = TempDir::new().unwrap();
@@ -844,8 +853,9 @@ fn progress_route_serves_the_checkpoint_and_reports_missing_sources() {
     );
 }
 
+// P1 optional (t3239): the Poolrad dashboard page, reports, and refresh routes.
 #[test]
-fn dashboard_and_dash_routes_serve_only_the_allowlisted_static_contracts() {
+fn poolrad_dashboard_routes_serve_only_allowlisted_contracts() {
     let dir = TempDir::new().unwrap();
     let paths = paths_in(dir.path());
     fs::write(paths.dashboard_dir.join("dashboard.py"), "# present\n").unwrap();
@@ -861,8 +871,6 @@ fn dashboard_and_dash_routes_serve_only_the_allowlisted_static_contracts() {
         b"report",
     )
     .unwrap();
-    fs::create_dir_all(&paths.ui_dist).unwrap();
-    fs::write(paths.ui_dist.join("index.html"), b"<html>desk</html>").unwrap();
     let (auth, session) = owner_session(&dir.path().join("desk"));
 
     let dashboard = dashboard_router(
@@ -912,18 +920,49 @@ fn dashboard_and_dash_routes_serve_only_the_allowlisted_static_contracts() {
         StatusCode::SERVICE_UNAVAILABLE,
         "refresh stays unavailable, never a fake success"
     );
+}
+
+// P0 core: the desk bundle at /dash, with its redirects, session check, and headers.
+#[test]
+fn desk_dash_routes_serve_the_built_bundle_with_session_checks() {
+    let dir = TempDir::new().unwrap();
+    let paths = paths_in(dir.path());
+    fs::create_dir_all(&paths.ui_dist).unwrap();
+    fs::write(paths.ui_dist.join("index.html"), b"<html>desk</html>").unwrap();
+    let (auth, session) = owner_session(&dir.path().join("desk"));
 
     let dash = dash_router(
         Arc::new(DashBackend::new(paths.ui_dist.clone())) as Arc<dyn DashRoutes>,
         auth.clone(),
         RequestScheme::Http,
     );
-    let (status, _, body) = send(&dash, "GET", "/dash/cos", Some(&session));
+    let (status, headers, body) = send(&dash, "GET", "/dash/cos", Some(&session));
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, b"<html>desk</html>");
+    assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+    assert_eq!(headers[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
+
     let (status, headers, _) = send(&dash, "GET", "/dash", None);
     assert_eq!(status, StatusCode::TEMPORARY_REDIRECT);
     assert_eq!(headers[header::LOCATION], "/dash/cos");
-    let (status, _, _) = send(&dash, "GET", "/dash/cos", None);
+
+    let (status, headers, _) = send(&dash, "GET", "/dash/poolrad", Some(&session));
+    assert_eq!(status, StatusCode::TEMPORARY_REDIRECT);
+    assert_eq!(headers[header::LOCATION], "/dash/operations#poolrad");
+
+    let (status, headers, _) = send(&dash, "GET", "/dash/cos", None);
     assert_eq!(status, StatusCode::FOUND, "no session goes to sign-in");
+    assert!(headers[header::LOCATION]
+        .to_str()
+        .unwrap()
+        .starts_with("/?next="));
+
+    let unbuilt = dash_router(
+        Arc::new(DashBackend::new(dir.path().join("no-bundle"))) as Arc<dyn DashRoutes>,
+        auth,
+        RequestScheme::Http,
+    );
+    let (status, _, body) = send(&unbuilt, "GET", "/dash/cos", Some(&session));
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(json_of(&body), json!({"detail": "Desk UI is not built"}));
 }

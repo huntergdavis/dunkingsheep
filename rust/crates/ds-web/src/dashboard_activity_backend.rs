@@ -6,6 +6,17 @@
 //! explicit input (the captured daemon client, configured paths, and a clock). A source that
 //! cannot be read stays unavailable; it never becomes a zero or a success.
 //!
+//! Scope (t3213 owner policy update):
+//! - P0 core: `DashBackend::index_html`, the static desk bundle, and
+//!   `ActivityPoolradBackend::{panes_activity, activity}`. That covers the 4 s pane TTL,
+//!   failure caching, per-row read errors, channel resolution, and daemon errors.
+//! - P1 optional, tracked as t3239: `ActivityPoolradBackend::poolrad_progress`,
+//!   `PoolradDashboardBackend` (page, reports, refresh), and the DS-internal renderer. They
+//!   stay honest: refresh is unavailable, and progress without a published checkpoint is
+//!   unavailable. Nothing is fabricated.
+//! - Core deviations to categorize: the bytes-only seam drops `FileResponse` stat semantics on
+//!   the desk page as well, and pane reads are serial.
+//!
 //! Gaps, reported rather than papered over:
 //! - `refresh()` needs `ops_metrics.published_accounting()` (a `gh api` network read) and
 //!   `dashboard.py render` (Python). Neither runs in Rust, so refresh reports unavailable and
