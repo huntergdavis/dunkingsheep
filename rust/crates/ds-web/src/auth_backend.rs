@@ -452,6 +452,50 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     #[tokio::test]
+    async fn invalid_bearer_falls_back_to_cookie_and_expired_cookie_is_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let auth =
+            PersistentAuth::open_with_password(dir.path(), Some("original-password")).unwrap();
+        let cookie = auth.login("one", "original-password").await.unwrap();
+        assert_eq!(
+            auth.identity(Some("invalid-token"), Some(&cookie))
+                .await
+                .unwrap(),
+            Identity::Owner
+        );
+        assert!(matches!(
+            auth.identity(Some("invalid-token"), None).await,
+            Err(AuthError::SignInRequired)
+        ));
+        let expired = "expired-fixture";
+        auth.db()
+            .unwrap()
+            .execute(
+                "INSERT INTO sessions(token_hash,expires_at) VALUES(?,?)",
+                params![session_key(expired), 0.0],
+            )
+            .unwrap();
+        assert!(matches!(
+            auth.identity(None, Some(expired)).await,
+            Err(AuthError::SignInRequired)
+        ));
+        let count: i64 = auth
+            .db()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM sessions WHERE token_hash=?",
+                [session_key(expired)],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
+        assert_eq!(
+            auth.identity(None, Some(&cookie)).await.unwrap(),
+            Identity::Owner
+        );
+    }
+
+    #[tokio::test]
     async fn password_change_waits_for_shared_kdf_capacity() {
         let dir = tempfile::tempdir().unwrap();
         let auth =
