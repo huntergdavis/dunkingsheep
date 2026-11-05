@@ -96,10 +96,12 @@ async fn serve_connection(
     log.request_line.clone_from(&request_line);
     let mut words = request_line.split_ascii_whitespace();
     let Some(method) = words.next() else {
-        return write_error(&mut write, 400, "Bad Request", "bad request syntax", &log).await;
+        return write_error_legacy(&mut write, 400, "Bad Request", "bad request syntax", &log)
+            .await;
     };
     let Some(target) = words.next() else {
-        return write_error(&mut write, 400, "Bad Request", "bad request syntax", &log).await;
+        return write_error_legacy(&mut write, 400, "Bad Request", "bad request syntax", &log)
+            .await;
     };
     let Some(version) = words.next() else {
         return write_error(&mut write, 400, "Bad Request", "bad request syntax", &log).await;
@@ -375,19 +377,7 @@ async fn write_error(
     log: &RequestLog,
 ) -> io::Result<()> {
     log_response(log, status);
-    let explanation = match status {
-        400 => "Bad request syntax or unsupported method",
-        414 => "URI is too long",
-        431 => {
-            "The server is unwilling to process the request because its header fields are too large"
-        }
-        501 => "Server does not support this operation",
-        _ => reason,
-    };
-    let body = format!(
-        "<!DOCTYPE HTML>\n<html lang=\"en\">\n    <head>\n        <meta charset=\"utf-8\">\n        <style type=\"text/css\">\n            :root {{\n                color-scheme: light dark;\n            }}\n        </style>\n        <title>Error response</title>\n    </head>\n    <body>\n        <h1>Error response</h1>\n        <p>Error code: {status}</p>\n        <p>Message: {}.</p>\n        <p>Error code explanation: {status} - {explanation}.</p>\n    </body>\n</html>\n",
-        html_escape(message),
-    );
+    let body = error_page(status, reason, message);
     write
         .write_all(
             format!(
@@ -398,6 +388,35 @@ async fn write_error(
         )
         .await?;
     write.shutdown().await
+}
+
+async fn write_error_legacy(
+    write: &mut tokio::net::tcp::OwnedWriteHalf,
+    status: u16,
+    reason: &str,
+    message: &str,
+    log: &RequestLog,
+) -> io::Result<()> {
+    log_response(log, status);
+    let body = error_page(status, reason, message);
+    write.write_all(body.as_bytes()).await?;
+    write.shutdown().await
+}
+
+fn error_page(status: u16, reason: &str, message: &str) -> String {
+    let explanation = match status {
+        400 => "Bad request syntax or unsupported method",
+        414 => "URI is too long",
+        431 => {
+            "The server is unwilling to process the request because its header fields are too large"
+        }
+        501 => "Server does not support this operation",
+        _ => reason,
+    };
+    format!(
+        "<!DOCTYPE HTML>\n<html lang=\"en\">\n    <head>\n        <meta charset=\"utf-8\">\n        <style type=\"text/css\">\n            :root {{\n                color-scheme: light dark;\n            }}\n        </style>\n        <title>Error response</title>\n    </head>\n    <body>\n        <h1>Error response</h1>\n        <p>Error code: {status}</p>\n        <p>Message: {}.</p>\n        <p>Error code explanation: {status} - {explanation}.</p>\n    </body>\n</html>\n",
+        html_escape(message),
+    );
 }
 
 fn html_escape(value: &str) -> String {
@@ -718,6 +737,10 @@ server.serve_forever()
     }
 
     fn assert_response_equivalent(python: &[u8], rust: &[u8], case: usize, compare_body: bool) {
+        if case == 23 {
+            assert_eq!(python, rust, "legacy HTTP/0.9 case {case}");
+            return;
+        }
         for (label, response) in [("Python", python), ("Rust", rust)] {
             assert!(
                 response.windows(4).any(|part| part == b"\r\n\r\n"),
