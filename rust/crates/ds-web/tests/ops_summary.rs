@@ -15,7 +15,7 @@ from pathlib import Path
 
 repo, db_path, host_path, opencode_path = map(Path, sys.argv[1:5])
 fixture_mode = sys.argv[5]
-blob_payload = fixture_mode == 'payload_blob'
+blob_payload = fixture_mode in {'payload_blob', 'payload_utf16', 'payload_utf32'}
 source = (repo / 'bridges/ops_metrics.py').read_text()
 tree = ast.parse(source)
 names = {'iso','parse_time','_unique_authored_trial','experiment_summary','host_health','opencode_usage','summary'}
@@ -32,6 +32,8 @@ conn = sqlite3.connect(db_path)
 conn.row_factory = sqlite3.Row
 conn.executescript(namespace['SCHEMA'])
 conn.execute("INSERT INTO collection_runs(id,observed_at,panes_state,github_state,vp_messages_state,dunk_metrics_state,accounting_state,agent_messages_state,errors_json) VALUES(1,'2025-04-15T11:59:00Z','ok','ok','ok','ok','ok','ok','{}')")
+if fixture_mode == 'ignored_errors_blob':
+    conn.execute("UPDATE collection_runs SET errors_json=? WHERE id=1", (sqlite3.Binary(b'{bad'),))
 conn.executemany("INSERT INTO pane_samples(run_id,pane_id,project,agent_kind,agent_status,agent_name,lane_name,role) VALUES(1,?,?,?,?,?,?,?)", [
     ('%1','poolrad','codex','running','builder','lane-a','coder'),
     ('%2','poolrad','codex','idle','reviewer','lane-b','reviewer')])
@@ -45,7 +47,14 @@ if fixture_mode == 'row_blob':
 conn.executemany("INSERT INTO accounting_snapshots(project,observed_at,commit_oid,strict_full_c,verified_game_identities,ceiling,bound_kind,source_signature,evidence_ref) VALUES('poolrad',?,?,?,?,815,'upper_bound','sig','docs/re/test')", [
     ('2025-04-15T10:30:00Z','a'*40,50,60),('2025-04-15T11:30:00Z','b'*40,60,70)])
 conn.execute("INSERT INTO pr_latest(project,number,state,head_oid,merged_at,first_seen_at,last_seen_at) VALUES('poolrad',42,'OPEN',NULL,NULL,'2025-04-01T00:00:00Z','2025-04-15T11:00:00Z')")
-payload = sqlite3.Binary(b'{"events":3}') if blob_payload else '{"events":3}'
+if fixture_mode == 'payload_utf16':
+    payload = sqlite3.Binary('{"events":3}'.encode('utf-16'))
+elif fixture_mode == 'payload_utf32':
+    payload = sqlite3.Binary('{"events":3}'.encode('utf-32'))
+elif blob_payload:
+    payload = sqlite3.Binary(b'{"events":3}')
+else:
+    payload = '{"events":3}'
 conn.execute("INSERT INTO dunk_metrics_snapshots(observed_at,generated_at,interval_start,interval_end,schema_version,payload_json) VALUES('2025-04-15T11:50:00Z','2025-04-15T11:50:00Z','2025-04-15T11:00:00Z','2025-04-15T11:50:00Z',1,?)", (payload,))
 conn.execute("INSERT INTO vp_message_counts(run_id,channel,role,total) VALUES(1,'cos','pm',4)")
 conn.executemany("INSERT INTO agent_message_events(source_event_id,occurred_at,pane_id,kind,delivery_source,source_ref,mailbox_alias) VALUES(?,?,?,?,?,?,?)", [
@@ -262,6 +271,12 @@ fn python_rounding_and_database_errors_are_explicit() {
     assert_eq!(ops_summary::round_even(1.35, 1), 1.4);
     assert_eq!(ops_summary::round_even(2.675, 2), 2.67);
     assert_eq!(ops_summary::round_even(1.234_567_5, 6), 1.234_568);
+    let negative_zero = ops_summary::round_even(-0.001, 2);
+    assert!(negative_zero.is_sign_negative());
+    assert_eq!(
+        serde_json::to_string(&ops_summary::number(negative_zero)).unwrap(),
+        "-0.0"
+    );
     let conn = Connection::open_in_memory().unwrap();
     let now = DateTime::parse_from_rfc3339("2025-04-15T12:00:00Z")
         .unwrap()
@@ -287,6 +302,48 @@ fn summary_parses_json_stored_as_sqlite_blob_like_python_bytes() {
         .with_timezone(&Utc);
     let actual =
         ops_summary::summary(&conn, now, &host, &opencode).expect("summary with BLOB payload");
+    assert_eq!(canonical_json(actual), canonical_json(expected));
+}
+
+#[test]
+fn summary_parses_utf16_json_blob_like_python_bytes() {
+    let (_dir, db, host, opencode) = fixture_paths();
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let expected = setup_oracle(&repo, &db, &host, &opencode, "payload_utf16");
+    let conn = Connection::open(&db).expect("fixture operations database");
+    let now = DateTime::parse_from_rfc3339("2025-04-15T12:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let actual = ops_summary::summary(&conn, now, &host, &opencode)
+        .expect("summary with UTF-16 BLOB payload");
+    assert_eq!(canonical_json(actual), canonical_json(expected));
+}
+
+#[test]
+fn summary_parses_utf32_json_blob_like_python_bytes() {
+    let (_dir, db, host, opencode) = fixture_paths();
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let expected = setup_oracle(&repo, &db, &host, &opencode, "payload_utf32");
+    let conn = Connection::open(&db).expect("fixture operations database");
+    let now = DateTime::parse_from_rfc3339("2025-04-15T12:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let actual = ops_summary::summary(&conn, now, &host, &opencode)
+        .expect("summary with UTF-32 BLOB payload");
+    assert_eq!(canonical_json(actual), canonical_json(expected));
+}
+
+#[test]
+fn summary_ignores_unreadable_collection_errors_like_python() {
+    let (_dir, db, host, opencode) = fixture_paths();
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let expected = setup_oracle(&repo, &db, &host, &opencode, "ignored_errors_blob");
+    let conn = Connection::open(&db).expect("fixture operations database");
+    let now = DateTime::parse_from_rfc3339("2025-04-15T12:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let actual = ops_summary::summary(&conn, now, &host, &opencode)
+        .expect("unused errors_json blob does not affect summary");
     assert_eq!(canonical_json(actual), canonical_json(expected));
 }
 

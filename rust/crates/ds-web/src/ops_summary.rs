@@ -17,6 +17,7 @@ pub enum SummaryError {
     Sql(rusqlite::Error),
     Timestamp(String),
     Json(serde_json::Error),
+    InvalidJsonEncoding,
     InvalidPayloadType,
 }
 
@@ -38,6 +39,9 @@ impl std::fmt::Display for SummaryError {
             Self::Sql(error) => write!(formatter, "SQLite error: {error}"),
             Self::Timestamp(value) => write!(formatter, "invalid timestamp: {value}"),
             Self::Json(error) => write!(formatter, "invalid JSON: {error}"),
+            Self::InvalidJsonEncoding => {
+                write!(formatter, "JSON payload has invalid Unicode encoding")
+            }
             Self::InvalidPayloadType => {
                 write!(formatter, "telemetry payload must be JSON text or bytes")
             }
@@ -390,7 +394,11 @@ pub(super) fn round_even(value: f64, digits: i32) -> f64 {
     let Some(scaled) = rounded_scaled_integer(value, digits as u32) else {
         return value;
     };
-    scaled as f64 / 10_f64.powi(digits)
+    if scaled == 0 && value.is_sign_negative() {
+        -0.0
+    } else {
+        scaled as f64 / 10_f64.powi(digits)
+    }
 }
 
 // Round the exact binary value after multiplying by 10^digits. Scaling in
@@ -468,6 +476,69 @@ fn field(row: &Row<'_>, name: &str) -> rusqlite::Result<Value> {
             )),
         )),
     }
+}
+
+fn decode_json_bytes(bytes: &[u8]) -> SummaryResult<String> {
+    let utf16 = |bytes: &[u8], little_endian: bool| -> SummaryResult<String> {
+        if bytes.len() & 1 != 0 {
+            return Err(SummaryError::InvalidJsonEncoding);
+        }
+        let units = bytes
+            .chunks_exact(2)
+            .map(|pair| {
+                let pair = [pair[0], pair[1]];
+                if little_endian {
+                    u16::from_le_bytes(pair)
+                } else {
+                    u16::from_be_bytes(pair)
+                }
+            })
+            .collect::<Vec<_>>();
+        String::from_utf16(&units).map_err(|_| SummaryError::InvalidJsonEncoding)
+    };
+    let utf32 = |bytes: &[u8], little_endian: bool| -> SummaryResult<String> {
+        if bytes.len() & 3 != 0 {
+            return Err(SummaryError::InvalidJsonEncoding);
+        }
+        let mut text = String::new();
+        for chunk in bytes.chunks_exact(4) {
+            let chunk = [chunk[0], chunk[1], chunk[2], chunk[3]];
+            let value = if little_endian {
+                u32::from_le_bytes(chunk)
+            } else {
+                u32::from_be_bytes(chunk)
+            };
+            text.push(char::from_u32(value).ok_or(SummaryError::InvalidJsonEncoding)?);
+        }
+        Ok(text)
+    };
+
+    if let Some(rest) = bytes.strip_prefix(&[0x00, 0x00, 0xfe, 0xff]) {
+        utf32(rest, false)
+    } else if let Some(rest) = bytes.strip_prefix(&[0xff, 0xfe, 0x00, 0x00]) {
+        utf32(rest, true)
+    } else if let Some(rest) = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]) {
+        String::from_utf8(rest.to_vec()).map_err(|_| SummaryError::InvalidJsonEncoding)
+    } else if let Some(rest) = bytes.strip_prefix(&[0xfe, 0xff]) {
+        utf16(rest, false)
+    } else if let Some(rest) = bytes.strip_prefix(&[0xff, 0xfe]) {
+        utf16(rest, true)
+    } else if bytes.len() >= 4 && bytes[0] == 0 && bytes[1] == 0 {
+        utf32(bytes, false)
+    } else if bytes.len() >= 4 && bytes[0] == 0 {
+        utf16(bytes, false)
+    } else if bytes.len() >= 4 && bytes[1] == 0 && bytes[2] == 0 && bytes[3] == 0 {
+        utf32(bytes, true)
+    } else if bytes.len() >= 4 && bytes[1] == 0 {
+        utf16(bytes, true)
+    } else {
+        String::from_utf8(bytes.to_vec()).map_err(|_| SummaryError::InvalidJsonEncoding)
+    }
+}
+
+fn parse_json_bytes(bytes: &[u8]) -> SummaryResult<Value> {
+    let text = decode_json_bytes(bytes)?;
+    Ok(serde_json::from_str(&text)?)
 }
 
 fn row_object(row: &Row<'_>, columns: &[&str]) -> rusqlite::Result<Value> {
@@ -839,7 +910,6 @@ pub fn summary(
                         "dunk_metrics_state",
                         "accounting_state",
                         "agent_messages_state",
-                        "errors_json",
                     ],
                 )
             },
@@ -1027,7 +1097,8 @@ pub fn summary(
         "SELECT generated_at,interval_start,interval_end,schema_version,payload_json FROM dunk_metrics_snapshots ORDER BY id DESC LIMIT 1",
         [],|row| {
             let payload = match row.get_ref(4)? {
-                rusqlite::types::ValueRef::Text(bytes) | rusqlite::types::ValueRef::Blob(bytes) => Some(bytes.to_vec()),
+                rusqlite::types::ValueRef::Text(bytes) => Some((false, bytes.to_vec())),
+                rusqlite::types::ValueRef::Blob(bytes) => Some((true, bytes.to_vec())),
                 _ => None,
             };
             Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,i64>(3)?,payload))
@@ -1037,7 +1108,11 @@ pub fn summary(
         Some((generated, start, end, version, payload)) => Some(json!({
             "generated_at":generated,"age_s":age(now,&generated)?,
             "interval":{"start":start,"end":end},"schema_version":version,
-            "data":serde_json::from_slice::<Value>(payload.as_deref().ok_or(SummaryError::InvalidPayloadType)?)?
+            "data":match payload {
+                Some((true, bytes)) => parse_json_bytes(&bytes)?,
+                Some((false, bytes)) => serde_json::from_slice::<Value>(&bytes)?,
+                None => return Err(SummaryError::InvalidPayloadType),
+            }
         })),
         None => None,
     };
