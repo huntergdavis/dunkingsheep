@@ -316,8 +316,8 @@ impl Flock {
                 .get(pane_id)?
                 .iter()
                 .rev()
+                .map(crate::terminal::raw::string)
                 .find(|text| !text.is_empty() && crate::stuck::collapse(text) == flat)
-                .cloned()
         });
         if owned
             .as_deref()
@@ -869,6 +869,10 @@ fn hold_backoff_s(attempts: i64) -> f64 {
 
 pub type HoldSignature = (String, String);
 
+/// Python dict ordering is part of queue lookup, list ties, and persisted restore order.
+/// The accepted dependency disables defaults; use the existing standard-library hasher.
+pub type Outbox = indexmap::IndexMap<String, Vec<Message>, std::collections::hash_map::RandomState>;
+
 struct OutboxHold<'a> {
     message: &'a Message,
     now: f64,
@@ -924,6 +928,19 @@ pub(crate) enum DeliveryOutcome {
 /// the flock's recent-send history and queued outbox; a shape match alone never authorizes a key.
 pub trait SendPreparationEnv: FlushEnv + super::send_keys::KeyPressEnv {
     fn send_text(&mut self, pane_id: &str, text: &str) -> (bool, String);
+    fn send_text_raw(
+        &mut self,
+        pane_id: &str,
+        text: &serde_json::Value,
+    ) -> Result<(bool, String), DunkError> {
+        for chunk in crate::terminal::raw::text_chunks(text)? {
+            let result = self.send_text(pane_id, &chunk);
+            if !result.0 {
+                return Ok(result);
+            }
+        }
+        Ok((true, "typed".into()))
+    }
     fn attempt_generation(&self, pane_id: &str) -> Option<String>;
     /// Persist typed-attempt state for the actual message when a delivery frame exists.
     /// `None` preserves the low-level `submit_text` path, which has no message authority.
@@ -1129,10 +1146,49 @@ fn submit_text_with_options(
     env: &mut dyn SendPreparationEnv,
     pane_id: &str,
     text: &str,
-    mut options: SubmitOptions<'_>,
+    options: SubmitOptions<'_>,
     guard: Option<&TypingGuard<'_>>,
 ) -> SendAction {
+    submit_text_value_with_options(flock, env, pane_id, text, None, options, guard)
+        .unwrap_or_else(|error| SendAction::completed(false, error.to_string()))
+}
+
+/// Direct create-command submission; the raw value reaches the terminal after preflight.
+/// A thrown input error bypasses post-create writeback, unlike normal send refusal.
+pub fn submit_text_raw(
+    flock: &Flock,
+    env: &mut dyn SendPreparationEnv,
+    pane_id: &str,
+    text: &serde_json::Value,
+) -> Result<SendAction, DunkError> {
+    let display = crate::terminal::raw::string(text);
+    submit_text_value_with_options(
+        flock,
+        env,
+        pane_id,
+        &display,
+        Some(text),
+        SubmitOptions {
+            press_enter: true,
+            check_box: false,
+            attempt_generation: AttemptGeneration::Capture,
+            message: None,
+        },
+        None,
+    )
+}
+
+fn submit_text_value_with_options(
+    flock: &Flock,
+    env: &mut dyn SendPreparationEnv,
+    pane_id: &str,
+    text: &str,
+    raw: Option<&serde_json::Value>,
+    mut options: SubmitOptions<'_>,
+    guard: Option<&TypingGuard<'_>>,
+) -> Result<SendAction, DunkError> {
     let guarded = guard.is_some();
+    let mut input_error = None;
     let mut perform = Some(|guard: &TypingGuard<'_>| {
         if let Some(dead) = dead_session(env, pane_id) {
             return Err(format!(
@@ -1166,11 +1222,25 @@ fn submit_text_with_options(
                 || strip_ansi(&before)
                     .to_lowercase()
                     .contains("tab to queue message"));
-        let (ok, detail) = env.send_text(pane_id, text);
+        let (ok, detail) = if let Some(raw) = raw {
+            match env.send_text_raw(pane_id, raw) {
+                Ok(result) => result,
+                Err(error) => {
+                    input_error = Some(error);
+                    return Err(String::new());
+                }
+            }
+        } else {
+            env.send_text(pane_id, text)
+        };
         if !ok {
             return Err(detail);
         }
-        flock.remember_typed(pane_id, text);
+        if let Some(raw) = raw {
+            flock.remember_typed_raw(pane_id, raw);
+        } else {
+            flock.remember_typed(pane_id, text);
+        }
         if !env.persist_typed_attempt(
             options.message.take(),
             pane_id,
@@ -1206,14 +1276,17 @@ fn submit_text_with_options(
         Some(guard) => perform.take().expect("submit operation is available")(guard),
         None => match flock.typing_guard(pane_id) {
             Ok(guard) => perform.take().expect("submit operation is available")(&guard),
-            Err(error) => return SendAction::completed(false, error.to_string()),
+            Err(error) => return Ok(SendAction::completed(false, error.to_string())),
         },
     };
     drop(perform);
-    match prepared {
+    if let Some(error) = input_error {
+        return Err(error);
+    }
+    Ok(match prepared {
         Ok(value) => value,
         Err(detail) => SendAction::completed(false, detail),
-    }
+    })
 }
 
 /// Run confirmation after the typing guard has been released. `guarded=true` selects the bounded
@@ -1250,6 +1323,51 @@ pub fn confirm_send_action(env: &mut dyn SendPreparationEnv, action: &mut SendAc
     };
     action.ok = result.0;
     action.detail = result.1;
+}
+
+fn raw_metric_error(value: &serde_json::Value) -> Option<DunkError> {
+    if !crate::terminal::raw::truthy(value) || value.is_string() {
+        return None;
+    }
+    let kind = match value {
+        serde_json::Value::Array(_) => "list",
+        serde_json::Value::Object(_) => "dict",
+        serde_json::Value::Bool(_) => "bool",
+        serde_json::Value::Number(n) if n.to_string().contains(['.', 'e', 'E']) => "float",
+        _ => "int",
+    };
+    Some(DunkError::Refused(format!(
+        "'{kind}' object has no attribute 'encode'"
+    )))
+}
+
+/// Preserve the raw command's metrics conversion error after confirmed typing.
+/// The regular string-only callers continue to use `confirm_send_action`.
+pub fn confirm_send_action_raw(
+    env: &mut dyn SendPreparationEnv,
+    action: &mut SendAction,
+    raw: &serde_json::Value,
+) -> Result<(), DunkError> {
+    let Some(confirmation) = action.confirmation.take() else {
+        return Ok(());
+    };
+    let mut input_error = None;
+    let result = press_until_submitted_value(
+        env,
+        &confirmation.pane_id,
+        &confirmation.text,
+        true,
+        confirmation.busy_hint,
+        StatusBaseline::Captured(confirmation.baseline),
+        Some(raw),
+        &mut input_error,
+    );
+    if let Some(error) = input_error {
+        return Err(error);
+    }
+    action.ok = result.0;
+    action.detail = result.1;
+    Ok(())
 }
 
 /// Route an already-normalized key list once while the caller holds the typing guard. Pending
@@ -1546,7 +1664,12 @@ fn dim_bodies_accounted(flock: &Flock, pane_id: &str, screen: &str) -> bool {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get(pane_id)
-        .cloned()
+        .map(|values| {
+            values
+                .iter()
+                .map(crate::terminal::raw::string)
+                .collect::<Vec<_>>()
+        })
         .unwrap_or_default();
     {
         let outbox = outbox_lock(&flock.outbox);
@@ -1787,6 +1910,29 @@ pub fn press_until_submitted(
     busy_hint: bool,
     baseline: StatusBaseline,
 ) -> (bool, String) {
+    press_until_submitted_value(
+        env,
+        pane_id,
+        text,
+        first_pressed,
+        busy_hint,
+        baseline,
+        None,
+        &mut None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn press_until_submitted_value(
+    env: &mut dyn SubmitEnv,
+    pane_id: &str,
+    text: &str,
+    first_pressed: bool,
+    busy_hint: bool,
+    baseline: StatusBaseline,
+    raw: Option<&serde_json::Value>,
+    input_error: &mut Option<DunkError>,
+) -> (bool, String) {
     if let Some(dead) = dead_session(env, pane_id) {
         return (
             false,
@@ -1843,6 +1989,10 @@ pub fn press_until_submitted(
                     if attempt > 1 {
                         env.remember_submit_key(pane_id, if key == "Tab" { "Enter" } else { &key });
                     }
+                    if let Some(error) = raw.and_then(raw_metric_error) {
+                        *input_error = Some(error);
+                        return (false, String::new());
+                    }
                     env.record_submit_attempt(pane_id, "ok", attempt, text.len());
                     return (
                         true,
@@ -1861,6 +2011,10 @@ pub fn press_until_submitted(
                                 if key == "Tab" { "Enter" } else { &key },
                             );
                         }
+                        if let Some(error) = raw.and_then(raw_metric_error) {
+                            *input_error = Some(error);
+                            return (false, String::new());
+                        }
                         env.record_submit_attempt(pane_id, "ok-turn", attempt, text.len());
                         return (true, "sent (confirmed by the turn it started)".to_string());
                     }
@@ -1874,6 +2028,10 @@ pub fn press_until_submitted(
                 if attempt > 1 {
                     env.remember_submit_key(pane_id, if key == "Tab" { "Enter" } else { &key });
                 }
+                if let Some(error) = raw.and_then(raw_metric_error) {
+                    *input_error = Some(error);
+                    return (false, String::new());
+                }
                 env.record_submit_attempt(pane_id, "ok-turn", attempt, text.len());
                 return (true, "sent (confirmed by the turn it started)".to_string());
             }
@@ -1884,6 +2042,10 @@ pub fn press_until_submitted(
             if attempt > 1 {
                 // Python resets a busy Tab echo to Enter once the turn itself confirms delivery.
                 env.remember_submit_key(pane_id, "Enter");
+            }
+            if let Some(error) = raw.and_then(raw_metric_error) {
+                *input_error = Some(error);
+                return (false, String::new());
             }
             env.record_submit_attempt(pane_id, "ok-turn", attempt, text.len());
             return (true, "sent (confirmed by the turn it started)".to_string());
@@ -2307,7 +2469,7 @@ impl CompletionWaiter {
     }
 
     #[allow(dead_code)] // Used by the separate terminal outcome interface in this leaf.
-    fn settle(&self) {
+    pub(super) fn settle(&self) {
         let mut state = lock_unpoison(&self.state);
         if !state.settled {
             state.settled = true;
@@ -2459,6 +2621,12 @@ impl PartialEq for DunkDeliveryAction {
 }
 
 impl Message {
+    pub(super) fn cancel_at(&mut self, now: f64) {
+        self.status = "cancelled".into();
+        self.finished_at = Some(now);
+        *lock_unpoison(&self.attempt_state.cancelled_at) = Some(now);
+    }
+
     pub(super) fn set_dunk_delivery(&mut self, action: Arc<DunkDeliveryAction>) {
         self.dunk_delivery = Some(action);
     }
@@ -2466,6 +2634,8 @@ impl Message {
 
 #[derive(Debug, Default)]
 struct MessageAttemptState {
+    // Shared by the captured callback and queue row, independent of bounded history retention.
+    cancelled_at: Mutex<Option<f64>>,
     receipt_ids: Mutex<Vec<String>>,
     folded_text: Mutex<Option<String>>,
 }
@@ -3158,6 +3328,49 @@ pub trait OutboxWake: Send + Sync {
     fn ensure_worker(&self, flock: &Arc<Flock>, pane_id: &str) -> Result<(), DunkError>;
 }
 
+/// Input only: no wire/snapshot representation and no policy callbacks.
+enum KeyInput<'a> {
+    Typed(&'a [String]),
+    Raw(&'a Value),
+}
+
+impl KeyInput<'_> {
+    fn normalized(self) -> Result<Vec<String>, DunkError> {
+        let keys = match self {
+            Self::Typed(keys) => keys.to_vec(),
+            Self::Raw(Value::String(key)) => vec![key.clone()],
+            Self::Raw(Value::Array(keys)) => {
+                keys.iter().map(crate::api::python_value_string).collect()
+            }
+            Self::Raw(Value::Object(keys)) => keys.keys().cloned().collect(),
+            Self::Raw(value) => {
+                let kind = match value {
+                    Value::Null => "NoneType",
+                    Value::Bool(_) => "bool",
+                    Value::Number(number) if number.to_string().contains(['.', 'e', 'E']) => {
+                        "float"
+                    }
+                    Value::Number(_) => "int",
+                    _ => unreachable!("iterable JSON values handled above"),
+                };
+                return Err(DunkError::Refused(format!(
+                    "'{kind}' object is not iterable"
+                )));
+            }
+        };
+        // Match Python str.strip's 29 characters, including the four information separators.
+        Ok(keys
+            .into_iter()
+            .filter(|key| {
+                !key.trim_matches(|ch: char| {
+                    ch.is_whitespace() || matches!(ch, '\u{1c}'..='\u{1f}')
+                })
+                .is_empty()
+            })
+            .collect())
+    }
+}
+
 /// Arguments shared by the public direct-send entry points.
 #[derive(Debug, Clone)]
 pub struct DirectSendOptions<'a> {
@@ -3443,7 +3656,7 @@ pub(crate) fn outbox_step<E: SendPreparationEnv + PaneInfoEnv>(
         };
         queue.retain(|message| message.status == "queued");
         let Some(stored_head) = queue.first_mut() else {
-            outbox.remove(pane_id);
+            outbox.shift_remove(pane_id);
             return OutboxStep::Empty;
         };
         stored_head.prepare_receipt_frame();
@@ -3530,7 +3743,7 @@ pub(crate) fn outbox_step<E: SendPreparationEnv + PaneInfoEnv>(
             Some(current) if current.same_lifetime(&head) => {}
             Some(_) => return OutboxStep::Delivered,
             None => {
-                outbox.remove(pane_id);
+                outbox.shift_remove(pane_id);
                 return OutboxStep::Empty;
             }
         }
@@ -3547,17 +3760,29 @@ pub(crate) fn outbox_step<E: SendPreparationEnv + PaneInfoEnv>(
 /// `_outbox_worker`: run deterministic queue steps, report stale modals, and make one real
 /// owned-text recovery transition when the same box remains visible. Runtime adapters provide
 /// terminal I/O and a stop-aware wait; tests can advance a fake clock without spawning threads.
+pub(crate) struct OutboxWorkerContext<'a, P> {
+    pub(crate) inbox: &'a dyn InboxEnv,
+    pub(crate) pane_id: &'a str,
+    pub(crate) stopped: &'a AtomicBool,
+    pub(crate) reporter: &'a mut super::loops_stuck::StalePanelReporter,
+    pub(crate) wait: &'a dyn Fn(f64) -> bool,
+    pub(crate) permission: P,
+}
+
 #[allow(dead_code)] // Production worker startup is gated to a separate runtime task.
-pub(crate) fn outbox_worker<E: SendPreparationEnv + PaneInfoEnv>(
-    flock: &Flock,
-    env: &mut E,
-    inbox: &dyn InboxEnv,
-    pane_id: &str,
-    stopped: &AtomicBool,
-    reporter: &mut super::loops_stuck::StalePanelReporter,
-    wait: &dyn Fn(f64) -> bool,
-    mut permission: impl FnMut() -> Option<String>,
-) {
+pub(crate) fn outbox_worker<E, P>(flock: &Flock, env: &mut E, context: OutboxWorkerContext<'_, P>)
+where
+    E: SendPreparationEnv + PaneInfoEnv,
+    P: FnMut() -> Option<String>,
+{
+    let OutboxWorkerContext {
+        inbox,
+        pane_id,
+        stopped,
+        reporter,
+        wait,
+        mut permission,
+    } = context;
     let mut seen: Option<HoldSignature> = None;
     let mut seen_since = env.now_s();
     loop {
@@ -3619,9 +3844,7 @@ pub(crate) fn outbox_worker<E: SendPreparationEnv + PaneInfoEnv>(
     }
 }
 
-pub(crate) fn outbox_lock(
-    outbox: &Mutex<BTreeMap<String, Vec<Message>>>,
-) -> MutexGuard<'_, BTreeMap<String, Vec<Message>>> {
+pub(crate) fn outbox_lock(outbox: &Mutex<Outbox>) -> MutexGuard<'_, Outbox> {
     outbox
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -3640,11 +3863,19 @@ impl Flock {
         let (message, attempts, terminal) = {
             let mut outbox = outbox_lock(&self.outbox);
             let pane_id = &message.pane_id;
-            let Some(queue) = outbox.get_mut(pane_id) else {
-                return DeliveryOutcome::Missing;
-            };
-            let Some(stored) = queue.iter_mut().find(|row| row.same_lifetime(message)) else {
-                return DeliveryOutcome::Missing;
+            let Some(stored) = outbox
+                .get_mut(pane_id)
+                .and_then(|queue| queue.iter_mut().find(|row| row.same_lifetime(message)))
+            else {
+                drop(outbox);
+                return self.record_cancelled_outbox_hold(OutboxHold {
+                    message,
+                    now,
+                    permanent,
+                    reason,
+                    refused_detail,
+                    signature,
+                });
             };
             if stored.status != "queued" {
                 return DeliveryOutcome::AlreadyDecided;
@@ -3674,10 +3905,11 @@ impl Flock {
             let mut message = stored.clone();
             message.refresh_notify_for_from_frame();
             if terminal {
+                let queue = outbox
+                    .get_mut(pane_id)
+                    .expect("selected queue remains locked");
                 queue.retain(|row| !row.same_lifetime(&message));
-                if queue.is_empty() {
-                    outbox.remove(pane_id);
-                }
+                // Python keeps the pane slot until the next empty worker step.
             }
             (message, attempts, terminal)
         };
@@ -3725,6 +3957,129 @@ impl Flock {
             DeliveryOutcome::Undeliverable
         } else {
             let _ = self.save();
+            DeliveryOutcome::Held
+        }
+    }
+
+    /// Python `_deliver` keeps its original Message object when cancellation removes the
+    /// queue row. A later guard refusal mutates that object's history alias, not a replacement.
+    fn record_cancelled_outbox_hold(&self, hold: OutboxHold<'_>) -> DeliveryOutcome {
+        let (message, attempts, terminal) = {
+            let mut history = lock_unpoison(&self.message_history);
+            let cancelled_at = *lock_unpoison(&hold.message.attempt_state.cancelled_at);
+            let Some(cancelled_at) = cancelled_at else {
+                return DeliveryOutcome::Missing;
+            };
+            let mut stored = history
+                .iter()
+                .find(|row| row.same_lifetime(hold.message))
+                .cloned()
+                .unwrap_or_else(|| {
+                    // Python's captured Message survives eviction from message_history.
+                    let mut original = hold.message.clone();
+                    original.status = "cancelled".into();
+                    original.finished_at = Some(cancelled_at);
+                    original
+                });
+            if stored.status != "cancelled" {
+                return DeliveryOutcome::AlreadyDecided;
+            }
+            stored.holds = stored.holds.saturating_add(1);
+            let attempts = stored.holds.min(HOLD_ATTEMPT_LIMIT);
+            // This is the reached Python _deliver refusal branch, whose budget applies to
+            // every refusal (including a transient one), even after cancellation.
+            let delivered_refusal = hold.refused_detail.is_some();
+            let terminal =
+                (delivered_refusal || hold.permanent) && stored.holds >= HOLD_ATTEMPT_LIMIT;
+            let reason = hold
+                .reason
+                .filter(|reason| !reason.is_empty())
+                .unwrap_or("unknown");
+            if terminal {
+                stored.status = "undeliverable".into();
+                stored.detail = Some(if delivered_refusal {
+                    format!("undeliverable after {attempts} refused attempts (last reason: {reason}); not retried again")
+                } else {
+                    format!("undeliverable after {attempts} deferred attempts ({reason}); the target cannot accept")
+                });
+                stored.finished_at = Some(if delivered_refusal {
+                    clock::now_s()
+                } else {
+                    hold.now
+                });
+            } else {
+                stored.next_attempt_at = Some(hold.now + hold_backoff_s(attempts));
+                stored.hold_signature_kind = Some(hold.signature.0);
+                stored.hold_signature = Some(hold.signature.1);
+                stored.detail = Some(if delivered_refusal {
+                    hold.refused_detail
+                        .filter(|detail| !detail.is_empty())
+                        .or(hold.reason.filter(|reason| !reason.is_empty()))
+                        .unwrap_or("held")
+                        .to_owned()
+                } else {
+                    let delay = hold_backoff_s(attempts);
+                    format!("deferred ({reason}); attempt {attempts} of {HOLD_ATTEMPT_LIMIT}, next attempt in {delay:.0}s")
+                });
+            }
+            let mut message = stored.clone();
+            message.refresh_notify_for_from_frame();
+            for alias in history.iter_mut().filter(|row| row.same_lifetime(&message)) {
+                *alias = message.clone();
+            }
+            (message, attempts, terminal)
+        };
+        if let Some(metrics) = self.stores().metrics {
+            for kind in [
+                Some("message.held"),
+                terminal.then_some("message.undeliverable"),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                metrics.record(&crate::metrics::Event {
+                    at: 0.0,
+                    kind: kind.into(),
+                    pane_id: Some(message.pane_id.clone()),
+                    mailbox: Some(message.target_label.clone()),
+                    sender: None,
+                    source: Some(message.source.clone()),
+                    outcome: Some(
+                        if kind == "message.held" {
+                            "held"
+                        } else {
+                            "undeliverable"
+                        }
+                        .into(),
+                    ),
+                    reason: hold.reason.map(str::to_owned),
+                    duration_ms: None,
+                    attempts: Some(attempts),
+                    bytes: Some(message.text.len() as i64),
+                });
+            }
+        }
+        if terminal {
+            // Python remembers again only at the terminal budget; an ordinary refusal
+            // merely updates the already-present cancellation alias and emits no receipt.
+            self.remember(&message);
+        }
+        match self.save_classified() {
+            Ok(()) | Err(SnapshotSaveFailure::Io(_)) => {}
+            // The existing worker interface has no error return. Python lets non-OSError
+            // persistence failures terminate this worker; do not turn them into success.
+            Err(SnapshotSaveFailure::Other(error)) => std::panic::panic_any(error),
+        }
+        if terminal {
+            self.record_delivery_outcome(
+                &message,
+                false,
+                message.detail.as_deref(),
+                "undeliverable",
+                None,
+            );
+            DeliveryOutcome::Undeliverable
+        } else {
             DeliveryOutcome::Held
         }
     }
@@ -3912,9 +4267,7 @@ impl Flock {
                 message.refresh_notify_for_from_frame();
                 if let Some(queue) = outbox.get_mut(&pane_id) {
                     queue.retain(|row| !row.same_lifetime(&message));
-                    if queue.is_empty() {
-                        outbox.remove(&pane_id);
-                    }
+                    // Preserve the pane's insertion slot until the worker observes it empty.
                 }
             }
             self.remember(&message);
@@ -4010,6 +4363,12 @@ impl Flock {
             .message_history
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Python history retains references to the original Message. A cancellation can
+        // remember it before an already-running callback completes; refresh those aliases
+        // from that exact lifetime, never a replacement which merely reused its ID.
+        for previous in history.iter_mut().filter(|row| row.same_lifetime(message)) {
+            *previous = message.clone();
+        }
         history.push_back(message.clone());
         while history.len() > MESSAGE_HISTORY {
             history.pop_front();
@@ -4422,15 +4781,22 @@ impl Flock {
     /// human draft. The state remains in memory, as in Python's `sent_text_by_pane`.
     #[allow(dead_code)] // The guarded send caller is assigned to a dependent T33 leaf.
     pub(crate) fn remember_typed(&self, pane_id: &str, text: &str) {
+        self.remember_typed_raw(pane_id, &serde_json::Value::String(text.into()));
+    }
+
+    pub(crate) fn remember_typed_raw(&self, pane_id: &str, text: &serde_json::Value) {
         let mut history = self
             .sent_text_by_pane
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let recent = history.entry(pane_id.to_string()).or_default();
-        if let Some(index) = recent.iter().position(|previous| previous == text) {
+        if let Some(index) = recent
+            .iter()
+            .position(|previous| crate::terminal::raw::equal(previous, text))
+        {
             recent.remove(index);
         }
-        recent.push(text.to_string());
+        recent.push(text.clone());
         if recent.len() > REMEMBERED_SENDS {
             let excess = recent.len() - REMEMBERED_SENDS;
             recent.drain(..excess);
@@ -4477,7 +4843,12 @@ impl Flock {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(pane_id)
-            .cloned()
+            .map(|values| {
+                values
+                    .iter()
+                    .map(crate::terminal::raw::string)
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default();
         {
             let outbox = outbox_lock(&self.outbox);
@@ -4631,6 +5002,51 @@ impl Flock {
         env: &mut dyn SendPreparationEnv,
         wake: &dyn OutboxWake,
         store: &dyn SnapshotStore,
+        permission: impl FnMut() -> Option<String>,
+    ) -> Result<Value, DunkError> {
+        self.send_keys_input(
+            target,
+            KeyInput::Typed(keys),
+            options,
+            env,
+            wake,
+            store,
+            permission,
+        )
+    }
+
+    /// Python's raw key input boundary; normalization follows the same target resolution.
+    #[allow(clippy::too_many_arguments)]
+    pub fn send_keys_raw_now(
+        self: &Arc<Self>,
+        target: &Value,
+        keys: &Value,
+        options: DirectSendOptions<'_>,
+        env: &mut dyn SendPreparationEnv,
+        wake: &dyn OutboxWake,
+        store: &dyn SnapshotStore,
+        permission: impl FnMut() -> Option<String>,
+    ) -> Result<Value, DunkError> {
+        self.send_keys_input(
+            target,
+            KeyInput::Raw(keys),
+            options,
+            env,
+            wake,
+            store,
+            permission,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn send_keys_input(
+        self: &Arc<Self>,
+        target: &Value,
+        keys: KeyInput<'_>,
+        options: DirectSendOptions<'_>,
+        env: &mut dyn SendPreparationEnv,
+        wake: &dyn OutboxWake,
+        store: &dyn SnapshotStore,
         mut permission: impl FnMut() -> Option<String>,
     ) -> Result<Value, DunkError> {
         let panes = env.list_panes_grouped();
@@ -4651,11 +5067,7 @@ impl Flock {
             )?
             .clone()
         };
-        let normalized: Vec<String> = keys
-            .iter()
-            .filter(|key| !key.trim().is_empty())
-            .cloned()
-            .collect();
+        let normalized = keys.normalized()?;
         if normalized.is_empty() {
             return Err(DunkError::Refused(
                 "keys are required, e.g. 'Enter' or 'ctrl+c'".into(),
@@ -4772,7 +5184,7 @@ impl Flock {
     }
 
     /// Current pane queues for the snapshot-store seam and deterministic tests.
-    pub fn outbox_snapshot(&self) -> BTreeMap<String, Vec<Message>> {
+    pub fn outbox_snapshot(&self) -> Outbox {
         outbox_lock(&self.outbox).clone()
     }
 }

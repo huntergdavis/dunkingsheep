@@ -9,6 +9,8 @@
 //! `_pane_info`, and the construction of the stores that have no Rust owner yet
 //! (Superusers, MemoryStore, NextJobs, Allocator, outbox/stuck state).
 
+mod outbox_api;
+
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -82,6 +84,10 @@ pub struct CallerState {
     pub socket_peer_ok: Option<bool>,
 }
 
+// Canonical launch insertion order matches Python dict; persistence remains sorted JSON.
+type LaunchMap =
+    indexmap::IndexMap<String, Map<String, Value>, std::collections::hash_map::RandomState>;
+
 /// The flock. Slice 1 holds launch memory, the lane registry path and caller state.
 #[derive(Debug)]
 pub struct Flock {
@@ -89,14 +95,14 @@ pub struct Flock {
     pub lane_registry_path: PathBuf,
     pub persist_enabled: bool,
     /// pane_id -> {agent, session, session_kind, cwd, argv, command, source, recorded_at}
-    launches: Mutex<BTreeMap<String, Map<String, Value>>>,
+    launches: Mutex<LaunchMap>,
     /// The in-memory dunk list and next_id slot. Whole-state persistence is owned by the
     /// later snapshot leaf; this leaf only loads/extracts dunk fields and invokes its seam.
     #[allow(dead_code)]
     // Snapshot and runtime dunk CRUD callers are assigned to dependent leaves.
     pub(crate) dunks: dunks::DunkList,
     /// pane_id -> FIFO messages waiting for the pane's outbox worker.
-    pub(crate) outbox: Mutex<BTreeMap<String, Vec<sends::Message>>>,
+    pub(crate) outbox: Mutex<sends::Outbox>,
     /// pane_id -> the latest delivery intent used by the stuck observer.
     #[allow(dead_code)] // The stuck-recovery integration caller is owned by a later leaf.
     pub(crate) stuck_candidates: Mutex<BTreeMap<String, sends::StuckCandidate>>,
@@ -114,7 +120,7 @@ pub struct Flock {
     pub(crate) stuck_last_check: Mutex<BTreeMap<String, f64>>,
     /// pane_id -> the bounded recent text this flock typed into its composer.
     #[allow(dead_code)] // The send integration callers are assigned to dependent T33 leaves.
-    pub(crate) sent_text_by_pane: Mutex<BTreeMap<String, Vec<String>>>,
+    pub(crate) sent_text_by_pane: Mutex<BTreeMap<String, Vec<serde_json::Value>>>,
     /// Next direct-message identity, matching `_new_message`'s monotonic `mN` allocation.
     next_message_id: AtomicU64,
     /// One whole-send lock per pane (`Flock._lock_for`). The `Arc` lets a caller keep the
@@ -164,9 +170,9 @@ impl Flock {
             launches_file: launches_file.into(),
             lane_registry_path: lane_registry_path.into(),
             persist_enabled: persist,
-            launches: Mutex::new(BTreeMap::new()),
+            launches: Mutex::new(LaunchMap::default()),
             dunks: dunks::DunkList::new(),
-            outbox: Mutex::new(BTreeMap::new()),
+            outbox: Mutex::new(sends::Outbox::default()),
             stuck_candidates: Mutex::new(BTreeMap::new()),
             message_history: Mutex::new(VecDeque::new()),
             decided: Mutex::new(sends::DecidedMessages::default()),
@@ -337,7 +343,7 @@ impl Flock {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .by_id
             .clone();
-        let mut restored = BTreeMap::<String, Vec<sends::Message>>::new();
+        let mut restored = sends::Outbox::default();
         for row in rows {
             let Some(message) = sends::message_from_snapshot(row) else {
                 continue;
@@ -524,7 +530,13 @@ impl Flock {
         if !self.persist_enabled {
             return;
         }
-        let panes = self.launches.lock().expect("launches lock").clone();
+        let panes: BTreeMap<_, _> = self
+            .launches
+            .lock()
+            .expect("launches lock")
+            .clone()
+            .into_iter()
+            .collect();
         let payload = json!({"version": 1, "panes": panes});
         if let Err(error) = atomic_json::write(&self.launches_file, &payload) {
             eprintln!("could not write {}: {error}", self.launches_file.display());
@@ -828,6 +840,7 @@ pub mod loops_stuck;
 pub mod mailbox;
 pub mod panes;
 pub mod project_summary;
+pub mod recovery_commands;
 pub mod resolve;
 pub mod retire;
 mod retired;
@@ -876,3 +889,5 @@ mod status_tests;
 mod tests;
 
 pub mod respawn;
+
+pub mod context_mutations;

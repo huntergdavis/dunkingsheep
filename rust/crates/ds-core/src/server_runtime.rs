@@ -6,6 +6,7 @@
 
 mod delivery;
 mod dispatcher;
+mod health_state;
 mod inbox;
 mod inbox_api;
 mod inbox_data;
@@ -14,6 +15,10 @@ mod inbox_metrics;
 mod inbox_stores;
 mod keypress;
 mod layout;
+mod layout_agent;
+mod layout_close;
+mod layout_create;
+mod outbox_messages;
 mod outbox_runtime;
 mod owner_push;
 mod poolrad;
@@ -314,6 +319,32 @@ impl SendEnv for TerminalCallAdapter<'_> {
 }
 
 impl crate::flock::commands_layout::LayoutBackend for RequestRuntimeAdapter<'_> {
+    fn create_workspace_raw(
+        &mut self,
+        label: &Value,
+        cwd: &Value,
+        focus: bool,
+    ) -> crate::flock::commands_layout::RawCreateResult {
+        self.helper_layoutbackend_create_workspace_raw(label, cwd, focus)
+    }
+    fn create_tab_raw(
+        &mut self,
+        workspace: Option<&str>,
+        label: &Value,
+        cwd: &Value,
+        focus: bool,
+    ) -> crate::flock::commands_layout::RawCreateResult {
+        self.helper_layoutbackend_create_tab_raw(workspace, label, cwd, focus)
+    }
+    fn split_pane_raw(
+        &mut self,
+        pane: &str,
+        direction: &str,
+        cwd: &Value,
+        focus: bool,
+    ) -> crate::flock::commands_layout::RawCreateResult {
+        self.helper_layoutbackend_split_pane_raw(pane, direction, cwd, focus)
+    }
     fn list_panes(&self) -> Vec<Value> {
         self.helper_layoutbackend_list_panes()
     }
@@ -377,6 +408,35 @@ impl crate::flock::commands_layout::LayoutBackend for RequestRuntimeAdapter<'_> 
         self.helper_layoutbackend_start_agent(name, argv, workspace_id, tab_id, split, cwd, focus)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn start_agent_raw(
+        &mut self,
+        name: &str,
+        argv: &[String],
+        workspace: Option<&str>,
+        tab: Option<&str>,
+        split: Option<&str>,
+        cwd: Option<&str>,
+        focus: bool,
+    ) -> crate::flock::commands_layout::RawCreateResult {
+        self.helper_layoutbackend_start_agent_raw(name, argv, workspace, tab, split, cwd, focus)
+    }
+    fn rename_raw(
+        &mut self,
+        kind: &str,
+        target: &str,
+        label: &str,
+    ) -> crate::flock::commands_layout::RawCreateResult {
+        self.helper_layoutbackend_rename_raw(kind, target, label)
+    }
+    fn focus_raw(&mut self, kind: &str, target: &str) -> Result<Value, String> {
+        self.terminal.with_terminal_mut(|terminal| {
+            terminal
+                .focus_raw(kind, target)
+                .map(|()| serde_json::json!({}))
+                .map_err(|error| error.message)
+        })
+    }
     fn rename(&mut self, kind: &str, target_id: &str, label: &str) -> Result<Value, String> {
         self.helper_layoutbackend_rename(kind, target_id, label)
     }
@@ -425,6 +485,17 @@ impl PaneInfoEnv for RequestRuntimeAdapter<'_> {
 }
 
 impl crate::api::CommandEnv for RequestRuntimeAdapter<'_> {
+    fn layout_close_env(&self) -> Result<&dyn crate::api::layout_close::LayoutCloseEnv, DunkError> {
+        Ok(self)
+    }
+
+    fn with_layout_agent(
+        &self,
+        operation: &mut crate::flock::commands_layout::AgentOperation<'_>,
+    ) -> Result<Value, DunkError> {
+        self.with_request_layout_agent(operation)
+    }
+
     fn poolrad_sync_args(&self, args: &crate::api::Args) -> Result<Value, DunkError> {
         self.runtime_poolrad_sync_args(args)
     }
@@ -435,6 +506,18 @@ impl crate::api::CommandEnv for RequestRuntimeAdapter<'_> {
 
     fn poolrad_progress(&self) -> Result<Value, DunkError> {
         self.runtime_poolrad_progress()
+    }
+
+    fn health_state_env(&self) -> Result<&dyn crate::api::health_state::HealthStateEnv, DunkError> {
+        self.terminal.flock.status_state()?;
+        Ok(self)
+    }
+
+    fn with_layout_create(
+        &self,
+        operation: &mut crate::flock::commands_layout::CreateOperation<'_>,
+    ) -> Result<Value, DunkError> {
+        self.with_request_layout_create(operation)
     }
 
     fn with_inbox_env(
@@ -509,6 +592,16 @@ impl crate::api::CommandEnv for RequestRuntimeAdapter<'_> {
             .get()
     }
 
+    fn with_outbox_commands(
+        &self,
+        operation: &mut dyn FnMut(
+            &dyn crate::api::outbox_messages::OutboxCommandEnv,
+        ) -> Result<Value, DunkError>,
+    ) -> Result<Value, DunkError> {
+        self.require_send_outbox()?;
+        operation(self)
+    }
+
     fn send_commands(&self) -> Result<&dyn crate::api::SendCommandEnv, DunkError> {
         self.require_send_outbox()?;
         Ok(self)
@@ -563,6 +656,13 @@ impl crate::api::CommandEnv for RequestRuntimeAdapter<'_> {
 
     fn now_s(&self) -> f64 {
         crate::clock::now_s()
+    }
+
+    fn project_summary_env(
+        &self,
+    ) -> Result<&dyn crate::flock::project_summary::SummaryEnv, DunkError> {
+        self.terminal.flock.status_state()?;
+        Ok(self)
     }
 
     fn status_env(&self) -> Result<&dyn crate::flock::status::StatusEnv, DunkError> {

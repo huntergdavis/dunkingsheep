@@ -304,3 +304,79 @@ fn test_write_report_is_sorted_two_space_json_without_trailing_newline() {
         "{\n  \"a\": [\n    1,\n    2\n  ],\n  \"b\": 1\n}"
     );
 }
+
+#[test]
+fn repair_preserves_typed_failure_and_stops_before_later_maintenance() {
+    use std::cell::RefCell;
+    struct Failing<'a> {
+        inner: &'a StoreEnv,
+        calls: RefCell<Vec<&'static str>>,
+        fail_recover: bool,
+    }
+    impl HealthEnv for Failing<'_> {
+        fn memory_enabled(&self) -> bool {
+            true
+        }
+        fn memory_stats(&self) -> Result<Value, String> {
+            self.inner.memory_stats()
+        }
+        fn memory_status(&self) -> Result<Value, String> {
+            self.inner.memory_status()
+        }
+        fn recover_leases(&self) -> Result<(), DunkError> {
+            self.calls.borrow_mut().push("recover");
+            if self.fail_recover {
+                Err(DunkError::Busy)
+            } else {
+                Ok(())
+            }
+        }
+        fn requeue_partial(&self) -> Result<(), DunkError> {
+            self.calls.borrow_mut().push("requeue");
+            Err(DunkError::Retryable("writer stopped".into()))
+        }
+        fn checkpoint(&self) -> Result<(), DunkError> {
+            self.calls.borrow_mut().push("checkpoint");
+            Ok(())
+        }
+        fn task_totals(&self) -> Result<Value, String> {
+            panic!("not reached after maintenance error")
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let inner = StoreEnv::new(dir.path());
+    let sample = inner.sample(dir.path(), "stale.jsonl");
+    {
+        let mut conn = inner.conn.lock().unwrap();
+        ingest::enqueue(&mut conn, &sample, Some("generic"), None).unwrap();
+        ingest::claim_next(&mut conn, 60.0).unwrap();
+        conn.execute("UPDATE ingest_queue SET lease_until=0", [])
+            .unwrap();
+    }
+    for fail_recover in [true, false] {
+        let env = Failing {
+            inner: &inner,
+            calls: RefCell::new(vec![]),
+            fail_recover,
+        };
+        let error = run_health(
+            &env,
+            true,
+            false,
+            dir.path(),
+            now(),
+            &Thresholds {
+                wal_warn_bytes: -1,
+                ..Thresholds::default()
+            },
+        )
+        .unwrap_err();
+        if fail_recover {
+            assert!(matches!(error, DunkError::Busy));
+            assert_eq!(*env.calls.borrow(), ["recover"]);
+        } else {
+            assert!(matches!(error, DunkError::Retryable(_)));
+            assert_eq!(*env.calls.borrow(), ["recover", "requeue"]);
+        }
+    }
+}

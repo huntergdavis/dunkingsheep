@@ -37,7 +37,7 @@ impl RequestRuntimeAdapter<'_> {
         self.terminal
             .flock
             .outbox_snapshot()
-            .remove(pane_id)
+            .shift_remove(pane_id)
             .unwrap_or_default()
             .into_iter()
             .filter(|message| message.status == "queued")

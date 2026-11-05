@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 #[cfg(test)]
 use super::ingest::enqueue;
 use super::ingest::{claim_next, finish, recover_leases, requeue_partial, Outcome};
-use super::jsonl::IngestStats;
+use super::jsonl::{IngestStats, Throttle};
 use super::service::{MemoryWriter, WriterSink};
 use super::sources::ingest_path;
 #[cfg(test)]
@@ -47,7 +47,7 @@ pub struct Status {
 pub struct Ingestor {
     writer: Arc<MemoryWriter>,
     poll: Duration,
-    throttle: Duration,
+    throttle: Throttle,
     stop: Arc<AtomicBool>,
     paused: Arc<AtomicBool>,
     wake: Arc<(Mutex<()>, Condvar)>,
@@ -76,8 +76,20 @@ impl Ingestor {
                 .unwrap_or(DEFAULT_THROTTLE_S);
             Duration::from_secs_f64(seconds.max(0.0))
         });
-        Ingestor {
-            writer: Arc::new(MemoryWriter::new(path.as_ref())),
+        Self::with_writer(
+            Arc::new(MemoryWriter::new(path.as_ref())),
+            poll,
+            throttle.into(),
+        )
+    }
+
+    pub(crate) fn with_writer(
+        writer: Arc<MemoryWriter>,
+        poll: Duration,
+        throttle: Throttle,
+    ) -> Self {
+        Self {
+            writer,
             poll,
             throttle,
             stop: Arc::new(AtomicBool::new(false)),
@@ -88,16 +100,6 @@ impl Ingestor {
             done: Arc::new((Mutex::new(true), Condvar::new())),
             parse_hook: Mutex::new(None),
         }
-    }
-
-    pub(crate) fn with_writer(
-        writer: Arc<MemoryWriter>,
-        poll: Duration,
-        throttle: Duration,
-    ) -> Self {
-        let mut ingestor = Self::new(writer.path(), poll, Some(throttle));
-        ingestor.writer = writer;
-        ingestor
     }
 
     #[cfg(test)]
@@ -259,7 +261,7 @@ impl Ingestor {
         Status {
             running,
             paused: self.paused(),
-            throttle_s: self.throttle.as_secs_f64(),
+            throttle_s: self.throttle.seconds(),
             last_error: shared.last_error.clone(),
             last_result: shared.last_result.clone(),
         }
@@ -274,7 +276,7 @@ impl Drop for Ingestor {
 
 fn run_loop(
     writer: Arc<MemoryWriter>,
-    timing: (Duration, Duration),
+    timing: (Duration, Throttle),
     stop: &AtomicBool,
     paused: &AtomicBool,
     wake: &(Mutex<()>, Condvar),

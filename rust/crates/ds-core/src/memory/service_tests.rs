@@ -474,11 +474,11 @@ fn raw_since_uses_python_float_conversion_and_preserves_integer_overflow() {
 fn oversized_event_keeps_post_append_batch_and_role_flush_boundaries() {
     let (dir, service, _) = fixture();
     let path = dir.path().join("oversized.jsonl");
-    // More than 500 2000-character chunks even without counting overlap.
+    // More than 500 4000-character chunks even without counting overlap.
     // Distinct role changes before/after expose accidental cross-role grouping.
     let events = [
         json!({"role":"user", "text":"before oversized event"}),
-        json!({"role":"assistant", "text":"x".repeat(1_100_000)}),
+        json!({"role":"assistant", "text":"x".repeat(2_200_000)}),
         json!({"role":"user", "text":"after oversized event"}),
     ];
     std::fs::write(
@@ -518,4 +518,188 @@ fn oversized_event_keeps_post_append_batch_and_role_flush_boundaries() {
             ("after oversized event".into(), 0)
         ]
     );
+}
+
+#[test]
+fn runtime_memory_reaper_uses_shared_writer_during_real_ingest_and_reports_closed_owner() {
+    use crate::server_runtime::LoopRuntimeAdapter;
+    use crate::terminal::fakes::FakeTerminal;
+    let (dir, service, _) = fixture();
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let release_rx = Mutex::new(release_rx);
+    service.set_parse_hook(Arc::new(move || {
+        entered_tx.send(()).unwrap();
+        release_rx
+            .lock()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(30))
+            .unwrap();
+    }));
+    let source = source(&dir);
+    service.enqueue(&source, Some("generic"), None).unwrap();
+    service.start().unwrap();
+    entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    // The actual parser is gated outside SQL while maintenance uses its same writer.
+    let expired = dir.path().join("expired.jsonl");
+    let partial = dir.path().join("partial.jsonl");
+    std::fs::write(&expired, "{}\n").unwrap();
+    std::fs::write(&partial, "{}\n").unwrap();
+    service
+        .writer
+        .call(move |db| {
+            ingest::enqueue(db, expired.to_str().unwrap(), Some("generic"), None)?;
+            ingest::claim_next(db, -1.0)?.unwrap();
+            ingest::enqueue(db, partial.to_str().unwrap(), Some("generic"), None)?;
+            let lease = ingest::claim_next(db, 60.0)?.unwrap();
+            ingest::finish(
+                db,
+                &lease,
+                ingest::Outcome::Skipped("stopped by operator"),
+                &json!({}),
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let flock = Arc::new(crate::flock::Flock::new(
+        dir.path().join("launches"),
+        dir.path().join("lanes"),
+        false,
+    ));
+    flock.attach_memory_service(service.clone()).unwrap();
+    let adapter = LoopRuntimeAdapter::new(flock, Arc::new(|| Box::new(FakeTerminal::new())));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(adapter.helper_reaperenv_memory_maintenance());
+    assert_eq!(service.stats().unwrap()["queue"]["queued"], 2);
+    assert_eq!(service.stats().unwrap()["queue"]["leased"], 1);
+    // Stop before releasing the gate so the recovered sources cannot enter it again.
+    assert!(!service.ingestor.stop_with_timeout(Duration::ZERO));
+    release_tx.send(()).unwrap();
+    service.stop_and_join().unwrap();
+    assert!(service.worker_id().is_none());
+    assert!(service.recover_leases().is_err());
+    assert!(service.requeue_partial().is_err());
+    // A closed service is not replaced with a fresh path-based writer by the reaper.
+    let before = service.stats().unwrap()["queue"].clone();
+    runtime.block_on(adapter.helper_reaperenv_memory_maintenance());
+    assert_eq!(before, service.stats().unwrap()["queue"]);
+}
+
+#[test]
+fn memory_throttle_real_worker_accepts_raw_float_then_fails_after_committed_flush() {
+    for (seconds, message) in [
+        (-1.0, "sleep length must be non-negative"),
+        (f64::NAN, "Invalid value NaN (not a number)"),
+        (f64::INFINITY, "timestamp out of range for platform time_t"),
+        (
+            f64::NEG_INFINITY,
+            "timestamp out of range for platform time_t",
+        ),
+        (1e300, "timestamp out of range for platform time_t"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let service = MemoryService::create_at_start(
+            dir.path().join("memory.db"),
+            2,
+            Duration::from_millis(1),
+            Throttle::Python(seconds),
+        )
+        .unwrap();
+        let empty = dir.path().join("empty.jsonl");
+        std::fs::write(&empty, "{}\n").unwrap();
+        service
+            .enqueue(empty.to_str().unwrap(), Some("generic"), None)
+            .unwrap();
+        service.start().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while service.stats().unwrap()["queue"]["done"] != 1 {
+            assert!(
+                Instant::now() < deadline,
+                "empty input failed: {:?}",
+                service.ingestor.status()
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(service.ingestor.status().last_error.is_none());
+        let raw = service.ingestor.status().throttle_s;
+        assert!(raw.to_bits() == seconds.to_bits() || (raw.is_nan() && seconds.is_nan()));
+        let text = dir.path().join("text.jsonl");
+        std::fs::write(
+            &text,
+            "{\"role\":\"user\",\"text\":\"committed before native sleep failure\"}\n",
+        )
+        .unwrap();
+        service
+            .enqueue(text.to_str().unwrap(), Some("generic"), None)
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if service.ingestor.status().last_error.as_deref() == Some(message) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "missing delayed error: {:?}",
+                service.ingestor.status()
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let (state, queue_state, source_error, queue_error, stored) = service.pool.with(|db| {
+            db.query_row("SELECT s.state,q.state,s.error,q.error,(SELECT text FROM chunks WHERE session_id='text') FROM sources s JOIN ingest_queue q ON q.source_id=s.id WHERE s.path=?", [text.to_str().unwrap()], |row| {
+                Ok((row.get::<_,String>(0)?, row.get::<_,String>(1)?, row.get::<_,String>(2)?, row.get::<_,String>(3)?, row.get::<_,String>(4)?))
+            }).map_err(map_sqlite)
+        }).unwrap();
+        assert_eq!(state, "error");
+        assert_eq!(queue_state, "failed");
+        assert_eq!(source_error, message);
+        assert_eq!(queue_error, message);
+        assert_eq!(stored, "committed before native sleep failure");
+        service.stop_and_join().unwrap();
+        assert!(service.worker_id().is_none());
+    }
+}
+
+#[test]
+fn memory_throttle_status_preserves_numeric_and_wire_nonfinite_values() {
+    for (seconds, token) in [
+        (f64::NAN, "NaN"),
+        (f64::INFINITY, "Infinity"),
+        (f64::NEG_INFINITY, "-Infinity"),
+        (-0.0, "-0.0"),
+        (-1.0, "-1.0"),
+        (1e300, "1e+300"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let service = MemoryService::create_at_start(
+            dir.path().join("memory.db"),
+            2,
+            Duration::from_millis(1),
+            Throttle::Python(seconds),
+        )
+        .unwrap();
+        let status = service.status().unwrap();
+        assert!(status["ingestor"]["throttle_s"].is_number());
+        assert_eq!(
+            crate::wire_json::to_string(&status["ingestor"]["throttle_s"]).unwrap(),
+            token
+        );
+        // Same direct Value move and response encoder as the memory.status handler.
+        let response = crate::protocol::Response::ok(json!(1), status);
+        let wire = crate::protocol::encode_line(&response);
+        assert!(wire.contains(&format!("\"throttle_s\":{token}")), "{wire}");
+        let parsed = crate::wire_json::from_str(&wire).unwrap();
+        assert!(parsed["result"]["ingestor"]["throttle_s"].is_number());
+        let output = std::process::Command::new("python3")
+            .args(["-c", "import json,math,sys; v=json.loads(sys.argv[1])['result']['ingestor']['throttle_s']; e=float(sys.argv[2]); assert isinstance(v,float); assert (math.isnan(v) and math.isnan(e)) or (v==e and math.copysign(1,v)==math.copysign(1,e))"])
+            .arg(&wire).arg(token).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        service.stop_and_join().unwrap();
+    }
 }

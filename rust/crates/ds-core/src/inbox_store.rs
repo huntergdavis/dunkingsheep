@@ -22,7 +22,7 @@ use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
 
 use crate::clock::now_s;
-use crate::db::{map_sqlite, ReadPool, SyncWriter, DEFAULT_READ_POOL};
+use crate::db::{map_sqlite, ErrorContext, ReadPool, SyncWriter, DEFAULT_READ_POOL};
 use crate::error::DunkError;
 use crate::flock::mailbox::OWNER_MAILBOX;
 use crate::inbox::{
@@ -159,33 +159,44 @@ impl Store {
     /// Open (creating) the database and the blob directory. A new database gets the
     /// verbatim schema; an existing one is left alone.
     pub fn open(path: impl AsRef<Path>, blob_dir: impl AsRef<Path>) -> Result<Self, DunkError> {
+        Self::open_context(path, blob_dir, &ErrorContext::default())
+    }
+    pub(crate) fn open_context(
+        path: impl AsRef<Path>,
+        blob_dir: impl AsRef<Path>,
+        context: &ErrorContext,
+    ) -> Result<Self, DunkError> {
         let path = path.as_ref();
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| refuse(format!("{}: {e}", parent.display())))?;
+            fs::create_dir_all(parent).map_err(|e| context.io(e, parent, "create_parent"))?;
         }
         let blob_dir = blob_dir.as_ref().to_path_buf();
         fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
             .create(&blob_dir)
-            .map_err(|e| refuse(format!("{}: {e}", blob_dir.display())))?;
-        let writer = SyncWriter::spawn(path)?;
-        writer.call(|connection| {
+            .map_err(|e| context.io(e, &blob_dir, "create_attachments"))?;
+        let writer = SyncWriter::spawn_context(path, context)?;
+        let captured = context.clone();
+        let db_path = path.to_path_buf();
+        writer.call(move |connection| {
             let exists: i64 = connection
                 .query_row(
                     "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'messages'",
                     [],
                     |row| row.get(0),
                 )
-                .map_err(map_sqlite)?;
+                .map_err(|e| captured.sqlite(e, &db_path, "inbox_schema"))?;
             if exists == 0 {
                 for statement in SCHEMA {
-                    connection.execute_batch(statement).map_err(map_sqlite)?;
+                    connection
+                        .execute_batch(statement)
+                        .map_err(|e| captured.sqlite(e, &db_path, "inbox_schema"))?;
                 }
             }
             Ok(())
         })?;
-        let readers = ReadPool::open(path, DEFAULT_READ_POOL)?;
+        let readers = ReadPool::open_context(path, DEFAULT_READ_POOL, context)?;
         Ok(Store {
             writer,
             readers,
@@ -327,6 +338,13 @@ impl Store {
 
     /// Capture the committed full row before notification mutates its state.
     pub fn send_snapshot(&self, outgoing: &Outgoing) -> Result<Message, DunkError> {
+        self.send_snapshot_context(outgoing, ErrorContext::default())
+    }
+    pub(crate) fn send_snapshot_context(
+        &self,
+        outgoing: &Outgoing,
+        context: ErrorContext,
+    ) -> Result<Message, DunkError> {
         let subject = outgoing.subject.map(|s| JsonValue::String(s.into()));
         let attachments = JsonValue::Array(
             outgoing
@@ -335,7 +353,7 @@ impl Store {
                 .map(|p| JsonValue::String(p.to_string_lossy().into_owned()))
                 .collect(),
         );
-        self.send_snapshot_wire(outgoing, subject.as_ref(), Some(&attachments))
+        self.send_snapshot_wire_context(outgoing, subject.as_ref(), Some(&attachments), context)
     }
 
     pub fn send_snapshot_wire(
@@ -343,6 +361,15 @@ impl Store {
         outgoing: &Outgoing,
         subject: Option<&JsonValue>,
         attachments: Option<&JsonValue>,
+    ) -> Result<Message, DunkError> {
+        self.send_snapshot_wire_context(outgoing, subject, attachments, ErrorContext::default())
+    }
+    fn send_snapshot_wire_context(
+        &self,
+        outgoing: &Outgoing,
+        subject: Option<&JsonValue>,
+        attachments: Option<&JsonValue>,
+        context: ErrorContext,
     ) -> Result<Message, DunkError> {
         let mailbox = outgoing.mailbox.trim().to_string();
         if mailbox.is_empty() {
@@ -372,9 +399,11 @@ impl Store {
             .external_id
             .filter(|id| !id.is_empty())
             .map(str::to_string);
+        let db_path = self.writer.path().to_path_buf();
         self.writer.call(move |connection| {
+            let map_sqlite = |error| context.sqlite(error, &db_path, "send_snapshot");
             let transaction = connection.transaction().map_err(map_sqlite)?;
-            let message_id = next_message_id(&transaction)?;
+            let message_id = next_message_id_context(&transaction, &map_sqlite)?;
             let created = now_s();
             transaction
                 .execute(
@@ -423,7 +452,7 @@ impl Store {
                     |row| full_from_row(row, now_s()),
                 )
                 .map_err(map_sqlite)?;
-            message.attachments = attachments_of(connection, &message_id)?;
+            message.attachments = attachments_of_context(connection, &message_id, &map_sqlite)?;
             Ok(message)
         })
     }
@@ -1429,6 +1458,13 @@ fn attachments_of(
     connection: &rusqlite::Connection,
     message_id: &str,
 ) -> Result<Vec<AttachmentRow>, DunkError> {
+    attachments_of_context(connection, message_id, &map_sqlite)
+}
+fn attachments_of_context(
+    connection: &rusqlite::Connection,
+    message_id: &str,
+    map_sqlite: &impl Fn(rusqlite::Error) -> DunkError,
+) -> Result<Vec<AttachmentRow>, DunkError> {
     let mut statement = connection
         .prepare(
             "SELECT id, filename, media_type, size FROM attachments \
@@ -1450,6 +1486,12 @@ fn attachments_of(
 
 /// `_next_id`: the counter lives beside the messages, so ids survive restarts.
 fn next_message_id(transaction: &rusqlite::Transaction) -> Result<String, DunkError> {
+    next_message_id_context(transaction, &map_sqlite)
+}
+fn next_message_id_context(
+    transaction: &rusqlite::Transaction,
+    map_sqlite: &impl Fn(rusqlite::Error) -> DunkError,
+) -> Result<String, DunkError> {
     let stored_number: Option<i64> = transaction
         .query_row(
             "SELECT value FROM counters WHERE name = 'message'",

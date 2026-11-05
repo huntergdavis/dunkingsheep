@@ -16,7 +16,7 @@ use super::Flock;
 use crate::error::DunkError;
 use crate::flock::panes::PaneInfoEnv;
 use crate::tasks::metrics::MetricsOptions;
-use crate::tasks::{AddOptions, Decorated, FieldEdit, RecentNote, Task, Tasks};
+use crate::tasks::{AddOptions, Decorated, FieldEdit, ListVisibleOptions, RecentNote, Task, Tasks};
 use crate::tasks::{ClaimOptions, ClaimOutcome};
 
 /// `TASK_GLOBAL`.
@@ -294,16 +294,16 @@ impl Flock {
         };
         let limit = if limit == 0 { 200 } else { limit };
         let rows = tasks
-            .list_visible(
-                explicit.as_deref(),
+            .list_visible(ListVisibleOptions {
+                scope: explicit.as_deref(),
                 status,
                 assignee,
                 include_done,
                 limit,
-                self_pane_id,
+                pane_id: self_pane_id,
                 kind,
                 needs_owner,
-            )
+            })
             .await?;
         Ok((explicit, rows))
     }

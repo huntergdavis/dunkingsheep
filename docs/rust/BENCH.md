@@ -45,3 +45,160 @@ produced p50 **334,994 ns**, p95 **339,475 ns**, p99 **342,765 ns**, and max
 These timings measure only cloning the preloaded synthetic pane table. They do
 not measure tmux I/O, live pane discovery, socket RPC, or end-to-end daemon
 latency, and do not establish the separate production performance gate.
+
+## Real socket RPCs
+
+The existing `service` target also runs these named benchmarks:
+
+```sh
+cd rust
+cargo bench -p ds-core --bench service -- bench_status_30_clients
+cargo bench -p ds-core --bench service -- bench_inbox_read
+cargo bench -p ds-core --bench service -- bench_task_next
+```
+
+Each uses an isolated temporary Unix socket, `FlockServer`, the canonical
+`RuntimeServices::production_dispatcher`, real task/inbox SQLite stores and
+registered worker role. Only terminal discovery uses a controlled one-pane
+fixture with an explicit mailbox label matching the seeded key. Its pane root
+is the live process returned by the production caller
+resolver. Every connection checks `whoami` for the worker role and successful
+kernel-peer identity binding before warmup. No live daemon or terminal is used.
+Temporary fixture data lives under the working directory (override with
+`DS_BENCH_DIR` to select a shorter workspace path for the Unix socket limit).
+No additional Cargo target or dependency is introduced.
+
+All timings include request serialization, socket write/read, the real handler
+and response decoding. Socket connection, identity preflight, fixture setup,
+semantic assertions and cleanup are outside timing. Clients keep their sockets
+open; these are warm persistent-connection RPC latencies, not connection setup
+or subprocess CLI latencies. Each client performs 20 warmup calls and 200
+measured calls. Percentiles use sorted observations at index `(n - 1) * p / 100`.
+
+- `bench_status_30_clients`: 30 established clients start together on separate
+  threads, each running requests serially. Reports pooled per-request latency
+  across 6,000 successful measured calls, not batch throughput. Every response
+  must contain the fixture version, process PID, bound pane and empty fixture
+  dunk/outbox counts. This measures default `status` options: its polling view,
+  not `full=true` global inbox/task scans.
+- `bench_inbox_read`: one client consumes one newly seeded unread message per
+  call with default options (including task queues). Seeding is outside timing;
+  every response must return the exact message ID/body and mark one message read.
+  The canonical store must then report zero unread. Read history grows through
+  the 220 calls; the benchmark does not replace a read with an empty/peek result.
+- `bench_task_next`: one client repeatedly claims one real assigned task and
+  checks its ID and `in_progress` status. The same authenticated caller releases
+  it to `open` outside timing after every call. Task event history grows through
+  220 successful claims; empty/refused claims abort the run.
+
+The existing p50 requirements are **CEILING** values: status **<2 ms**, inbox
+read **<5 ms**, task next **<10 ms**. Output labels each observed comparison
+PASS or FAIL without weakening the threshold; semantic failure aborts instead
+of producing valid samples. Timing failures remain reported measurements, not
+claims that the harness itself malfunctioned. Host, CPU, load before/after,
+revision, counts, p50/p95/p99 and max are printed. The service benchmark workflow
+runs each name in a separate invocation, including the existing 1,000-pane
+case, and uploads the full log. A failed case marks the job failed while allowing
+the remaining cases to execute.
+
+All benchmark-owned client and accept-loop threads are joined; clients finish
+responses and close sockets before service shutdown. `FlockServer` currently
+keeps no public join handles for its internal connection threads. These runs
+therefore do **not** verify the separate production request-thread drain gate.
+They also do **not** satisfy parent t822's final accepted Phase-1 release-build
+comparison, which remains **NOT VERIFIED**.
+
+### RPC measurements
+
+No local cold build has been attempted. Initial run [41899705529](https://github.com/huntergdavis/dunkingsheep/actions/runs/41899705529)
+compiled and passed connection identity checks, then aborted during status
+warmup because the harness incorrectly required task totals from the default
+polling view. It produced zero valid measured RPC samples; inbox/task cases
+were NOT RUN. The corrected assertions validate the actual default response.
+
+
+[Exact-head run 41900583730](https://github.com/huntergdavis/dunkingsheep/actions/runs/41900583730)
+measured revision `8177413df095ad76a6eb65a5f2da545547829342` with Rust 1.99.1
+on `runnervm7aw5e`, Linux 7.0.0-1017-azure x86_64, AMD EPYC 7763 (4 vCPUs).
+Load before execution was `4.34 1.94 0.75`; the run aborted before its final
+load snapshot. The command supplied all four names to the service target.
+
+| RPC | Warmup | Measured successful calls | p50 | p95 | p99 | Max | CEILING result |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| status, 30 clients | 20/client | 6,000 | 3.748419 ms | 12.569635 ms | 20.585465 ms | 57.764464 ms | **FAIL**, p50 exceeds 2 ms |
+| inbox_read | first call refused | 0 | NOT MEASURED | NOT MEASURED | NOT MEASURED | NOT MEASURED | NOT RUN |
+| task_next | NOT RUN | 0 | NOT MEASURED | NOT MEASURED | NOT MEASURED | NOT MEASURED | NOT RUN |
+
+The production dispatcher refused `inbox_read` with `command inbox_read is not
+ported yet`. Source audit confirmed `production_handlers` omits the existing
+`register_inbox_messages` registration. This is a real assembly prerequisite;
+the harness does not substitute a synthetic handler. The status CEILING failure
+is retained. No production performance acceptance is inferred from this run.
+
+
+The separate-invocation [run 41901640842](https://github.com/huntergdavis/dunkingsheep/actions/runs/41901640842)
+measured revision `a785ac9c32bf7f0a0994dab6e71e6a114ef294e8`. With the same
+20 warmups/client and sample counts, status p50/p95/p99/max were
+**3.668626 / 13.330133 / 24.405846 / 61.204259 ms** across 6,000 calls
+(**CEILING 2 ms FAIL**). Task next completed **200 successful claims** with
+p50/p95/p99/max **1.318461 / 1.614316 / 3.421033 / 4.080889 ms**
+(**CEILING 10 ms PASS**). Inbox still produced zero valid samples because of the
+missing registration. The logs include CPU/host and each invocation's load;
+status and task load before/after was `3.75 1.84 0.73`.
+
+The bounded registration repair reuses `register_inbox_messages` from accepted,
+merged PR #660 (`0d90c35f3210c46502c6e0e5e0b3f8d66bd51d7f`), with its existing
+canonical request provider. The exact registration inventory and
+`production_dispatcher_socket_inbox_read_consumes_canonical_message` regression
+cover the assembly: a real bound socket caller reads a seeded message, verifies
+its body and read transition, then sees an empty unread batch. Post-repair
+measurements are recorded below; the earlier CEILING failures remain valid evidence.
+
+
+Post-registration run [41902731459](https://github.com/huntergdavis/dunkingsheep/actions/runs/41902731459)
+at `d4de10d74fccf0c122d32232539e391c0a8feabe` reached the real Inbox handler,
+but the fixture still carried FakeTerminal's canned `π - work` mailbox label
+while seeding `w1:p1`. The canonical resolver correctly preferred the label;
+the inbox benchmark and its new socket regression failed their mailbox check.
+No valid inbox samples are claimed. The fixture now explicitly labels its pane
+`w1:p1`, matching its seeded mailbox through the actual unique-label resolver.
+No mailbox resolver, provider, timing threshold or sample count was changed.
+
+
+### Completed real RPC measurement (2026-11-04)
+
+[Exact-head run 41903566477](https://github.com/huntergdavis/dunkingsheep/actions/runs/41903566477)
+executed all four named cases at
+`7d902f97a184054254ad0f7c0200d4f865fc280a` using Rust 1.99.1, optimized bench
+profile, on `runnervm7aw5e` (Linux 7.0.0-1017-azure x86_64, Intel Xeon Platinum
+8370C at 2.80 GHz, 4 vCPUs). Each RPC client completed 20 warmup calls followed
+by 200 measured successful calls. All semantic assertions passed.
+
+| RPC | Clients | Measured calls | p50 | p95 | p99 | Max | CEILING result |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| status | 30 | 6,000 | 2.224582 ms | 7.409879 ms | 12.375675 ms | 20.765078 ms | **FAIL**, p50 >= 2 ms |
+| inbox_read | 1 | 200 | 1.417313 ms | 1.845139 ms | 1.965668 ms | 2.368102 ms | **PASS**, p50 < 5 ms |
+| task_next | 1 | 200 | 1.118579 ms | 1.315321 ms | 1.763645 ms | 2.135533 ms | **PASS**, p50 < 10 ms |
+
+Status and inbox load before/after was `3.33 1.72 0.69`. Task load was
+`3.33 1.72 0.69` before and `3.14 1.70 0.69` after. The preserved synthetic
+1,000-pane case also ran (p50 264,418 ns/call). CI invoked each case as:
+
+```sh
+cargo bench --manifest-path rust/Cargo.toml -p ds-core --bench service -- NAME
+```
+
+with `NAME` set successively to `bench_list_panes_1000`,
+`bench_status_30_clients`, `bench_inbox_read`, and `bench_task_next`.
+The downloadable `service-benchmark` artifact contains the complete logs.
+
+[Exact-head build/test run 41903554341](https://github.com/huntergdavis/dunkingsheep/actions/runs/41903554341)
+passed formatting, build and workspace tests; core had 2,382 passed, zero failed,
+and one ignored. The real socket regression and exact registration inventory
+each executed once and passed. Clippy still failed in unchanged sends/watchdog
+code; it is not reported as green.
+
+The harness executed successfully, but **status still fails its performance
+CEILING**. Different runner CPUs and load prevent interpreting the lower status
+latency here as a proven optimization. Parent t822's final accepted Phase-1
+release comparison and production connection-thread drain remain **NOT VERIFIED**.

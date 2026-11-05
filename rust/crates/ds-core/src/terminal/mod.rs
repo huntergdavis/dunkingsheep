@@ -17,9 +17,28 @@ pub mod composer;
 pub mod control;
 pub mod fakes;
 pub mod parse;
+pub(crate) mod raw;
 pub mod screen;
 pub mod tmux;
 pub mod tmux_registry;
+
+/// Item observed immediately after the rename mutation, before registry persistence.
+#[derive(Debug, Clone)]
+pub enum RenamedItem {
+    Pane {
+        pane: Box<Pane>,
+        agent_status: Option<String>,
+        managed: Option<bool>,
+    },
+    Tab(Tab),
+    Workspace {
+        workspace: Workspace,
+        tabs: Vec<Tab>,
+    },
+}
+
+/// Outer errors are thrown registry exceptions; inner errors are normal backend refusals.
+pub type RawCreateResult<T> = Result<Result<T, TerminalError>, tmux_registry::RegistryError>;
 
 /// One pane, as `tmux list-panes -F PANE_FORMAT` describes it.
 ///
@@ -162,6 +181,21 @@ pub struct AgentSpec {
 pub trait Terminal: std::fmt::Debug {
     /// e.g. "tmux 3.4" - the version string the daemon logs.
     fn version(&self) -> String;
+    /// Explicit backend identity; passthrough must never emulate typing in a pane.
+    fn backend_name(&self) -> &str {
+        "tmux"
+    }
+    fn herdr_run(
+        &self,
+        _argv: &[String],
+        _timeout_s: u64,
+    ) -> Result<(i32, String, String), crate::error::DunkError> {
+        Err(crate::error::refusal("herdr command backend is not wired"))
+    }
+    fn close_raw(&mut self, kind: &str, target_id: &str) -> RawCreateResult<()> {
+        Ok(self.close(kind, target_id))
+    }
+
     /// Whether the backend can be used at all right now.
     fn is_available(&self) -> bool;
     /// Whether this backend represents real panes rather than a fixture.
@@ -215,7 +249,109 @@ pub trait Terminal: std::fmt::Debug {
         direction: &str,
         cwd: Option<&str>,
     ) -> Result<Pane, TerminalError>;
+    /// Raw create inputs retain Python truthiness until the backend operation.
+    fn create_workspace_raw(
+        &mut self,
+        label: &serde_json::Value,
+        cwd: &serde_json::Value,
+        focus: bool,
+    ) -> RawCreateResult<Workspace> {
+        Ok(self.create_workspace(
+            raw::optional(label).as_deref(),
+            raw::optional(cwd).as_deref(),
+            focus,
+        ))
+    }
+    fn create_tab_raw(
+        &mut self,
+        workspace: Option<&str>,
+        label: &serde_json::Value,
+        cwd: &serde_json::Value,
+        focus: bool,
+    ) -> RawCreateResult<Tab> {
+        Ok(self.create_tab(
+            workspace,
+            raw::optional(label).as_deref(),
+            raw::optional(cwd).as_deref(),
+            focus,
+        ))
+    }
+    fn split_pane_raw(
+        &mut self,
+        pane: &str,
+        direction: &str,
+        cwd: &serde_json::Value,
+        focus: bool,
+    ) -> RawCreateResult<Pane> {
+        let created = match self.split_pane(pane, direction, raw::optional(cwd).as_deref()) {
+            Ok(value) => value,
+            Err(error) => return Ok(Err(error)),
+        };
+        if !focus {
+            if let Err(error) = self.focus("pane", pane) {
+                return Ok(Err(error));
+            }
+        }
+        Ok(Ok(created))
+    }
+    /// Outer error is a thrown input error; inner error is the backend's normal refusal.
+    fn send_text_raw(
+        &mut self,
+        pane: &str,
+        text: &serde_json::Value,
+    ) -> Result<Result<(), TerminalError>, crate::error::DunkError> {
+        for chunk in raw::text_chunks(text)? {
+            if let Err(error) = self.send_text(pane, &chunk) {
+                return Ok(Err(error));
+            }
+        }
+        Ok(Ok(()))
+    }
     fn start_agent(&mut self, spec: &AgentSpec) -> Result<Pane, TerminalError>;
+    fn start_agent_raw(&mut self, spec: &AgentSpec, _focus: bool) -> RawCreateResult<Pane> {
+        Ok(self.start_agent(spec))
+    }
+    fn rename_raw(
+        &mut self,
+        kind: &str,
+        target: &str,
+        label: &str,
+    ) -> RawCreateResult<Option<RenamedItem>> {
+        match self.rename(kind, target, label) {
+            Ok(()) => Ok(Ok(self.renamed_item(kind, target))),
+            Err(error) => Ok(Err(error)),
+        }
+    }
+    /// Legacy backends capture their typed result here; registry-backed raw paths
+    /// override rename_raw to capture before saving their registry.
+    fn renamed_item(&self, kind: &str, target: &str) -> Option<RenamedItem> {
+        match kind {
+            "pane" => self
+                .get_pane_with_status(target)
+                .map(|(pane, agent_status)| RenamedItem::Pane {
+                    pane: Box::new(pane),
+                    agent_status,
+                    managed: None,
+                }),
+            "tab" => self
+                .list_tabs()
+                .into_iter()
+                .find(|tab| tab.tab_id == target)
+                .map(RenamedItem::Tab),
+            "workspace" => {
+                let tabs = self.list_tabs();
+                self.list_workspaces()
+                    .into_iter()
+                    .find(|workspace| workspace.workspace_id == target)
+                    .map(|workspace| RenamedItem::Workspace { workspace, tabs })
+            }
+            _ => None,
+        }
+    }
+    fn focus_raw(&mut self, kind: &str, target: &str) -> Result<(), TerminalError> {
+        self.focus(kind, target)
+    }
+
     /// Guarded same-pane replacement. Unsupported backends must refuse explicitly.
     fn guarded_respawn(
         &mut self,
@@ -497,3 +633,9 @@ mod tests {
         assert!(error.backend_unavailable);
     }
 }
+
+#[cfg(test)]
+mod layout_agent_tests;
+
+#[cfg(test)]
+mod layout_close_tests;

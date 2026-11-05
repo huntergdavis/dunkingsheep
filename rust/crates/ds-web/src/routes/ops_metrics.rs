@@ -4,6 +4,8 @@
 //! narrow backend boundary. The handlers own authentication, query validation, and
 //! Python-compatible HTTP error shaping.
 
+use super::response_error::WebResponseError;
+
 use std::{future::Future, pin::Pin, sync::Arc};
 
 use axum::{
@@ -87,13 +89,13 @@ async fn operations_metrics_history(
     request: Request,
 ) -> Response {
     if let Err(response) = authenticate(auth.as_ref(), request.headers(), scheme).await {
-        return response;
+        return response.into_response();
     }
     let query = parse_query(request.uri().query());
     let hours_raw = query.get("hours").map(String::as_str);
     let hours = match parse_hours(hours_raw) {
         Ok(hours) => hours,
-        Err(response) => return response,
+        Err(response) => return response.into_response(),
     };
     match backend.history(hours).await {
         Ok(value) => Json(value).into_response(),
@@ -111,7 +113,7 @@ async fn refresh_operations_metrics(
     request: Request,
 ) -> Response {
     if let Err(response) = authenticate(auth.as_ref(), request.headers(), scheme).await {
-        return response;
+        return response.into_response();
     }
     match backend.refresh().await {
         Ok(value) => Json(value).into_response(),
@@ -129,7 +131,7 @@ async fn operations_board(
     request: Request,
 ) -> Response {
     if let Err(response) = authenticate(auth.as_ref(), request.headers(), scheme).await {
-        return response;
+        return response.into_response();
     }
     match backend.board_snapshot().await {
         Ok(value) => Json(value).into_response(),
@@ -140,7 +142,7 @@ async fn operations_board(
     }
 }
 
-fn parse_hours(raw: Option<&str>) -> Result<u16, Response> {
+fn parse_hours(raw: Option<&str>) -> Result<u16, WebResponseError> {
     let Some(raw) = raw else { return Ok(24) };
     let parsed = match parse_python_decimal(raw) {
         Ok(parsed) => parsed,
@@ -154,7 +156,8 @@ fn parse_hours(raw: Option<&str>) -> Result<u16, Response> {
                     "input": raw
                 }]})),
             )
-                .into_response());
+                .into_response()
+                .into());
         }
         Err(PythonIntParseError::TooManyDigits) => {
             return Err((
@@ -166,15 +169,13 @@ fn parse_hours(raw: Option<&str>) -> Result<u16, Response> {
                     "input": raw
                 }]})),
             )
-                .into_response());
+                .into_response()
+                .into());
         }
     };
     match parsed {
         ParsedPythonInteger::OutOfRange => {
-            return Err(detail_response(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                HISTORY_WINDOW_ERROR,
-            ));
+            Err(detail_response(StatusCode::UNPROCESSABLE_ENTITY, HISTORY_WINDOW_ERROR).into())
         }
         ParsedPythonInteger::InRange(hours) => Ok(hours),
     }
@@ -262,9 +263,9 @@ async fn authenticate(
     backend: &dyn AuthBackend,
     headers: &HeaderMap,
     scheme: RequestScheme,
-) -> Result<Identity, Response> {
+) -> Result<Identity, WebResponseError> {
     if let Some(response) = same_origin_refusal(headers, scheme) {
-        return Err(response);
+        return Err(response.into());
     }
     let bearer = bearer_value(headers);
     let cookie = cookie_value(headers, "vp_session");
@@ -272,6 +273,7 @@ async fn authenticate(
         .identity(bearer.as_deref(), cookie.as_deref())
         .await
         .map_err(auth_error_response)
+        .map_err(WebResponseError::from)
 }
 
 fn same_origin_refusal(headers: &HeaderMap, scheme: RequestScheme) -> Option<Response> {

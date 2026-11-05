@@ -87,8 +87,8 @@ fn py_strip(text: &str) -> &str {
 }
 
 /// Default chunk size and overlap (`DEFAULT_CHUNK_CHARS` / `DEFAULT_OVERLAP_CHARS`).
-pub const DEFAULT_CHUNK_CHARS: usize = 2_000;
-pub const DEFAULT_OVERLAP_CHARS: usize = 200;
+pub const DEFAULT_CHUNK_CHARS: usize = 4_000;
+pub const DEFAULT_OVERLAP_CHARS: usize = 400;
 
 /// Python's `round(value, places)`: the EXACT binary value rounded half-to-even. Formatting to a
 /// fixed number of places is exact in Rust too, so format-then-parse matches, where

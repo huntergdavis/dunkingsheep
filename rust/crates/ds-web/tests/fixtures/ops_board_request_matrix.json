@@ -1,0 +1,966 @@
+{
+  "versions": {
+    "fastapi": "0.162.0",
+    "starlette": "1.10.0"
+  },
+  "cases": [
+    {
+      "name": "missing",
+      "body": "",
+      "body_hex": "",
+      "content_type": null,
+      "fail_auth": false,
+      "status": 422,
+      "json": {
+        "detail": [
+          {
+            "type": "missing",
+            "loc": [
+              "body"
+            ],
+            "msg": "Field required",
+            "input": null
+          }
+        ]
+      },
+      "calls": [
+        "auth"
+      ]
+    },
+    {
+      "name": "missing",
+      "body": "",
+      "body_hex": "",
+      "content_type": null,
+      "fail_auth": true,
+      "status": 401,
+      "json": {
+        "detail": "Sign in required"
+      },
+      "calls": [
+        "auth"
+      ]
+    },
+    {
+      "name": "null",
+      "body": "null",
+      "body_hex": "6e756c6c",
+      "content_type": "application/json",
+      "fail_auth": false,
+      "status": 422,
+      "json": {
+        "detail": [
+          {
+            "type": "dict_type",
+            "loc": [
+              "body"
+            ],
+            "msg": "Input should be a valid dictionary",
+            "input": null
+          }
+        ]
+      },
+      "calls": [
+        "auth"
+      ]
+    },
+    {
+      "name": "null",
+      "body": "null",
+      "body_hex": "6e756c6c",
+      "content_type": "application/json",
+      "fail_auth": true,
+      "status": 401,
+      "json": {
+        "detail": "Sign in required"
+      },
+      "calls": [
+        "auth"
+      ]
+    },
+    {
+      "name": "array",
+      "body": "[]",
+      "body_hex": "5b5d",
+      "content_type": "application/json",
+      "fail_auth": false,
+      "status": 422,
+      "json": {
+        "detail": [
+          {
+            "type": "dict_type",
+            "loc": [
+              "body"
+            ],
+            "msg": "Input should be a valid dictionary",
+            "input": []
+          }
+        ]
+      },
+      "calls": [
+        "auth"
+      ]
+    },
+    {
+      "name": "array",
+      "body": "[]",
+      "body_hex": "5b5d",
+      "content_type": "application/json",
+      "fail_auth": true,
+      "status": 401,
+      "json": {
+        "detail": "Sign in required"
+      },
+      "calls": [
+        "auth"
+      ]
+    },
+    {
+      "name": "string",
+      "body": "\"x\"",
+      "body_hex": "227822",
+      "content_type": "application/json",
+      "fail_auth": false,
+      "status": 422,
+      "json": {
+        "detail": [
+          {
+            "type": "dict_type",
+            "loc": [
+              "body"
+            ],
+            "msg": "Input should be a valid dictionary",
+            "input": "x"
+          }
+        ]
+      },
+      "calls": [
+        "auth"
+      ]
+    },
+    {
+      "name": "string",
+      "body": "\"x\"",
+      "body_hex": "227822",
+      "content_type": "application/json",
+      "fail_auth": true,
+      "status": 401,
+      "json": {
+        "detail": "Sign in required"
+      },
+      "calls": [
+        "auth"
+      ]
+    },
+    {
+      "name": "invalid",
+      "body": "{",
+      "body_hex": "7b",
+      "content_type": "application/json",
+      "fail_auth": false,
+      "status": 422,
+      "json": {
+        "detail": [
+          {
+            "type": "json_invalid",
+            "loc": [
+              "body",
+              1
+            ],
+            "msg": "JSON decode error",
+            "input": {},
+            "ctx": {
+              "error": "Expecting property name enclosed in double quotes"
+            }
+          }
+        ]
+      },
+      "calls": []
+    },
+    {
+      "name": "invalid",
+      "body": "{",
+      "body_hex": "7b",
+      "content_type": "application/json",
+      "fail_auth": true,
+      "status": 422,
+      "json": {
+        "detail": [
+          {
+            "type": "json_invalid",
+            "loc": [
+              "body",
+              1
+            ],
+            "msg": "JSON decode error",
+            "input": {},
+            "ctx": {
+              "error": "Expecting property name enclosed in double quotes"
+            }
+          }
+        ]
+      },
+      "calls": []
+    },
+    {
+      "name": "trailing",
+      "body": "{\"task_id\":1}x",
+      "body_hex": "7b227461736b5f6964223a317d78",
+      "content_type": "application/json",
+      "fail_auth": false,
+      "status": 422,
+      "json": {
+        "detail": [
+          {
+            "type": "json_invalid",
+            "loc": [
+              "body",
+              13
+            ],
+            "msg": "JSON decode error",
+            "input": {},
+            "ctx": {
+              "error": "Extra data"
+            }
+          }
+        ]
+      },
+      "calls": []
+    },
+    {
+      "name": "trailing",
+      "body": "{\"task_id\":1}x",
+      "body_hex": "7b227461736b5f6964223a317d78",
+      "content_type": "application/json",
+      "fail_auth": true,
+      "status": 422,
+      "json": {
+        "detail": [
+          {
+            "type": "json_invalid",
+            "loc": [
+              "body",
+              13
+            ],
+            "msg": "JSON decode error",
+            "input": {},
+            "ctx": {
+              "error": "Extra data"
+            }
+          }
+        ]
+      },
+      "calls": []
+    },
+    {
+      "name": "text",
+      "body": "{\"task_id\":\"t9\"}",
+      "body_hex": "7b227461736b5f6964223a227439227d",
+      "content_type": "text/plain",
+      "fail_auth": false,
+      "status": 422,
+      "json": {
+        "detail": [
+          {
+            "type": "dict_type",
+            "loc": [
+              "body"
+            ],
+            "msg": "Input should be a valid dictionary",
+            "input": "{\"task_id\":\"t9\"}"
+          }
+        ]
+      },
+      "calls": [
+        "auth"
+      ]
+    },
+    {
+      "name": "text",
+      "body": "{\"task_id\":\"t9\"}",
+      "body_hex": "7b227461736b5f6964223a227439227d",
+      "content_type": "text/plain",
+      "fail_auth": true,
+      "status": 401,
+      "json": {
+        "detail": "Sign in required"
+      },
+      "calls": [
+        "auth"
+      ]
+    },
+    {
+      "name": "no_type",
+      "body": "{\"task_id\":\"t9\"}",
+      "body_hex": "7b227461736b5f6964223a227439227d",
+      "content_type": null,
+      "fail_auth": false,
+      "status": 422,
+      "json": {
+        "detail": [
+          {
+            "type": "dict_type",
+            "loc": [
+              "body"
+            ],
+            "msg": "Input should be a valid dictionary",
+            "input": "{\"task_id\":\"t9\"}"
+          }
+        ]
+      },
+      "calls": [
+        "auth"
+      ]
+    },
+    {
+      "name": "no_type",
+      "body": "{\"task_id\":\"t9\"}",
+      "body_hex": "7b227461736b5f6964223a227439227d",
+      "content_type": null,
+      "fail_auth": true,
+      "status": 401,
+      "json": {
+        "detail": "Sign in required"
+      },
+      "calls": [
+        "auth"
+      ]
+    },
+    {
+      "name": "suffix",
+      "body": "{\"task_id\":\"t9\"}",
+      "body_hex": "7b227461736b5f6964223a227439227d",
+      "content_type": "application/problem+json",
+      "fail_auth": false,
+      "status": 200,
+      "json": {
+        "task_id": "t9",
+        "priority": "low",
+        "task": {
+          "id": "t9",
+          "priority": "low"
+        }
+      },
+      "calls": [
+        "auth",
+        [
+          "defer",
+          "t9"
+        ]
+      ]
+    },
+    {
+      "name": "suffix",
+      "body": "{\"task_id\":\"t9\"}",
+      "body_hex": "7b227461736b5f6964223a227439227d",
+      "content_type": "application/problem+json",
+      "fail_auth": true,
+      "status": 401,
+      "json": {
+        "detail": "Sign in required"
+      },
+      "calls": [
+        "auth"
+      ]
+    },
+    {
+      "name": "list",
+      "body": "{\"task_id\":[\"t9\",true]}",
+      "body_hex": "7b227461736b5f6964223a5b227439222c747275655d7d",
+      "content_type": "application/json",
+      "fail_auth": false,
+      "status": 200,
+      "json": {
+        "task_id": "['t9', True]",
+        "priority": "low",
+        "task": {
+          "id": "['t9', True]",
+          "priority": "low"
+        }
+      },
+      "calls": [
+        "auth",
+        [
+          "defer",
+          "['t9', True]"
+        ]
+      ]
+    },
+    {
+      "name": "list",
+      "body": "{\"task_id\":[\"t9\",true]}",
+      "body_hex": "7b227461736b5f6964223a5b227439222c747275655d7d",
+      "content_type": "application/json",
+      "fail_auth": true,
+      "status": 401,
+      "json": {
+        "detail": "Sign in required"
+      },
+      "calls": [
+        "auth"
+      ]
+    },
+    {
+      "name": "map",
+      "body": "{\"task_id\":{\"z\":1,\"a\":false}}",
+      "body_hex": "7b227461736b5f6964223a7b227a223a312c2261223a66616c73657d7d",
+      "content_type": "application/json",
+      "fail_auth": false,
+      "status": 200,
+      "json": {
+        "task_id": "{'z': 1, 'a': False}",
+        "priority": "low",
+        "task": {
+          "id": "{'z': 1, 'a': False}",
+          "priority": "low"
+        }
+      },
+      "calls": [
+        "auth",
+        [
+          "defer",
+          "{'z': 1, 'a': False}"
+        ]
+      ]
+    },
+    {
+      "name": "map",
+      "body": "{\"task_id\":{\"z\":1,\"a\":false}}",
+      "body_hex": "7b227461736b5f6964223a7b227a223a312c2261223a66616c73657d7d",
+      "content_type": "application/json",
+      "fail_auth": true,
+      "status": 401,
+      "json": {
+        "detail": "Sign in required"
+      },
+      "calls": [
+        "auth"
+      ]
+    },
+    {
+      "name": "unicode_strip",
+      "body": "{\"task_id\": \"\\u001ct9\\u001f\"}",
+      "body_hex": "7b227461736b5f6964223a20225c753030316374395c7530303166227d",
+      "content_type": "application/json",
+      "fail_auth": false,
+      "status": 200,
+      "json": {
+        "task_id": "t9",
+        "priority": "low",
+        "task": {
+          "id": "t9",
+          "priority": "low"
+        }
+      },
+      "calls": [
+        "auth",
+        [
+          "defer",
+          "t9"
+        ]
+      ]
+    },
+    {
+      "name": "unicode_strip",
+      "body": "{\"task_id\": \"\\u001ct9\\u001f\"}",
+      "body_hex": "7b227461736b5f6964223a20225c753030316374395c7530303166227d",
+      "content_type": "application/json",
+      "fail_auth": true,
+      "status": 401,
+      "json": {
+        "detail": "Sign in required"
+      },
+      "calls": [
+        "auth"
+      ]
+    },
+    {
+      "name": "false",
+      "body": "{\"task_id\": false}",
+      "body_hex": "7b227461736b5f6964223a2066616c73657d",
+      "content_type": "application/json",
+      "fail_auth": false,
+      "status": 400,
+      "json": {
+        "detail": "task_id is required"
+      },
+      "calls": [
+        "auth"
+      ]
+    },
+    {
+      "name": "false",
+      "body": "{\"task_id\": false}",
+      "body_hex": "7b227461736b5f6964223a2066616c73657d",
+      "content_type": "application/json",
+      "fail_auth": true,
+      "status": 401,
+      "json": {
+        "detail": "Sign in required"
+      },
+      "calls": [
+        "auth"
+      ]
+    },
+    {
+      "name": "zero",
+      "body": "{\"task_id\": 0}",
+      "body_hex": "7b227461736b5f6964223a20307d",
+      "content_type": "application/json",
+      "fail_auth": false,
+      "status": 400,
+      "json": {
+        "detail": "task_id is required"
+      },
+      "calls": [
+        "auth"
+      ]
+    },
+    {
+      "name": "zero",
+      "body": "{\"task_id\": 0}",
+      "body_hex": "7b227461736b5f6964223a20307d",
+      "content_type": "application/json",
+      "fail_auth": true,
+      "status": 401,
+      "json": {
+        "detail": "Sign in required"
+      },
+      "calls": [
+        "auth"
+      ]
+    },
+    {
+      "name": "empty_list",
+      "body": "{\"task_id\": []}",
+      "body_hex": "7b227461736b5f6964223a205b5d7d",
+      "content_type": "application/json",
+      "fail_auth": false,
+      "status": 400,
+      "json": {
+        "detail": "task_id is required"
+      },
+      "calls": [
+        "auth"
+      ]
+    },
+    {
+      "name": "empty_list",
+      "body": "{\"task_id\": []}",
+      "body_hex": "7b227461736b5f6964223a205b5d7d",
+      "content_type": "application/json",
+      "fail_auth": true,
+      "status": 401,
+      "json": {
+        "detail": "Sign in required"
+      },
+      "calls": [
+        "auth"
+      ]
+    },
+    {
+      "name": "empty_map",
+      "body": "{\"task_id\": {}}",
+      "body_hex": "7b227461736b5f6964223a207b7d7d",
+      "content_type": "application/json",
+      "fail_auth": false,
+      "status": 400,
+      "json": {
+        "detail": "task_id is required"
+      },
+      "calls": [
+        "auth"
+      ]
+    },
+    {
+      "name": "empty_map",
+      "body": "{\"task_id\": {}}",
+      "body_hex": "7b227461736b5f6964223a207b7d7d",
+      "content_type": "application/json",
+      "fail_auth": true,
+      "status": 401,
+      "json": {
+        "detail": "Sign in required"
+      },
+      "calls": [
+        "auth"
+      ]
+    },
+    {
+      "name": "float",
+      "body": "{\"task_id\": 1e-07}",
+      "body_hex": "7b227461736b5f6964223a2031652d30377d",
+      "content_type": "application/json",
+      "fail_auth": false,
+      "status": 200,
+      "json": {
+        "task_id": "1e-07",
+        "priority": "low",
+        "task": {
+          "id": "1e-07",
+          "priority": "low"
+        }
+      },
+      "calls": [
+        "auth",
+        [
+          "defer",
+          "1e-07"
+        ]
+      ]
+    },
+    {
+      "name": "float",
+      "body": "{\"task_id\": 1e-07}",
+      "body_hex": "7b227461736b5f6964223a2031652d30377d",
+      "content_type": "application/json",
+      "fail_auth": true,
+      "status": 401,
+      "json": {
+        "detail": "Sign in required"
+      },
+      "calls": [
+        "auth"
+      ]
+    },
+    {
+      "name": "large_integer",
+      "body": "{\"task_id\": 1267650600228229401496703205376}",
+      "body_hex": "7b227461736b5f6964223a20313236373635303630303232383232393430313439363730333230353337367d",
+      "content_type": "application/json",
+      "fail_auth": false,
+      "status": 200,
+      "json": {
+        "task_id": "1267650600228229401496703205376",
+        "priority": "low",
+        "task": {
+          "id": "1267650600228229401496703205376",
+          "priority": "low"
+        }
+      },
+      "calls": [
+        "auth",
+        [
+          "defer",
+          "1267650600228229401496703205376"
+        ]
+      ]
+    },
+    {
+      "name": "large_integer",
+      "body": "{\"task_id\": 1267650600228229401496703205376}",
+      "body_hex": "7b227461736b5f6964223a20313236373635303630303232383232393430313439363730333230353337367d",
+      "content_type": "application/json",
+      "fail_auth": true,
+      "status": 401,
+      "json": {
+        "detail": "Sign in required"
+      },
+      "calls": [
+        "auth"
+      ]
+    },
+    {
+      "name": "nested",
+      "body": "{\"task_id\": {\"quote\": [\"a'b\", null, true]}}",
+      "body_hex": "7b227461736b5f6964223a207b2271756f7465223a205b22612762222c206e756c6c2c20747275655d7d7d",
+      "content_type": "application/json",
+      "fail_auth": false,
+      "status": 200,
+      "json": {
+        "task_id": "{'quote': [\"a'b\", None, True]}",
+        "priority": "low",
+        "task": {
+          "id": "{'quote': [\"a'b\", None, True]}",
+          "priority": "low"
+        }
+      },
+      "calls": [
+        "auth",
+        [
+          "defer",
+          "{'quote': [\"a'b\", None, True]}"
+        ]
+      ]
+    },
+    {
+      "name": "nested",
+      "body": "{\"task_id\": {\"quote\": [\"a'b\", null, true]}}",
+      "body_hex": "7b227461736b5f6964223a207b2271756f7465223a205b22612762222c206e756c6c2c20747275655d7d7d",
+      "content_type": "application/json",
+      "fail_auth": true,
+      "status": 401,
+      "json": {
+        "detail": "Sign in required"
+      },
+      "calls": [
+        "auth"
+      ]
+    },
+    {
+      "name": "nan",
+      "body": "{\"task_id\": NaN}",
+      "body_hex": "7b227461736b5f6964223a204e614e7d",
+      "content_type": "application/json",
+      "fail_auth": false,
+      "status": 200,
+      "json": {
+        "task_id": "nan",
+        "priority": "low",
+        "task": {
+          "id": "nan",
+          "priority": "low"
+        }
+      },
+      "calls": [
+        "auth",
+        [
+          "defer",
+          "nan"
+        ]
+      ]
+    },
+    {
+      "name": "nan",
+      "body": "{\"task_id\": NaN}",
+      "body_hex": "7b227461736b5f6964223a204e614e7d",
+      "content_type": "application/json",
+      "fail_auth": true,
+      "status": 401,
+      "json": {
+        "detail": "Sign in required"
+      },
+      "calls": [
+        "auth"
+      ]
+    },
+    {
+      "name": "infinity",
+      "body": "{\"task_id\": Infinity}",
+      "body_hex": "7b227461736b5f6964223a20496e66696e6974797d",
+      "content_type": "application/json",
+      "fail_auth": false,
+      "status": 200,
+      "json": {
+        "task_id": "inf",
+        "priority": "low",
+        "task": {
+          "id": "inf",
+          "priority": "low"
+        }
+      },
+      "calls": [
+        "auth",
+        [
+          "defer",
+          "inf"
+        ]
+      ]
+    },
+    {
+      "name": "infinity",
+      "body": "{\"task_id\": Infinity}",
+      "body_hex": "7b227461736b5f6964223a20496e66696e6974797d",
+      "content_type": "application/json",
+      "fail_auth": true,
+      "status": 401,
+      "json": {
+        "detail": "Sign in required"
+      },
+      "calls": [
+        "auth"
+      ]
+    },
+    {
+      "name": "negative_infinity",
+      "body": "{\"task_id\": -Infinity}",
+      "body_hex": "7b227461736b5f6964223a202d496e66696e6974797d",
+      "content_type": "application/json",
+      "fail_auth": false,
+      "status": 200,
+      "json": {
+        "task_id": "-inf",
+        "priority": "low",
+        "task": {
+          "id": "-inf",
+          "priority": "low"
+        }
+      },
+      "calls": [
+        "auth",
+        [
+          "defer",
+          "-inf"
+        ]
+      ]
+    },
+    {
+      "name": "negative_infinity",
+      "body": "{\"task_id\": -Infinity}",
+      "body_hex": "7b227461736b5f6964223a202d496e66696e6974797d",
+      "content_type": "application/json",
+      "fail_auth": true,
+      "status": 401,
+      "json": {
+        "detail": "Sign in required"
+      },
+      "calls": [
+        "auth"
+      ]
+    },
+    {
+      "name": "invalid_nan",
+      "body": "NaN",
+      "body_hex": "4e614e",
+      "content_type": "application/json",
+      "fail_auth": false,
+      "status": 500,
+      "json": "Internal Server Error",
+      "calls": [
+        "auth"
+      ]
+    },
+    {
+      "name": "invalid_nan",
+      "body": "NaN",
+      "body_hex": "4e614e",
+      "content_type": "application/json",
+      "fail_auth": true,
+      "status": 401,
+      "json": {
+        "detail": "Sign in required"
+      },
+      "calls": [
+        "auth"
+      ]
+    },
+    {
+      "name": "invalid_inf",
+      "body": "Infinity",
+      "body_hex": "496e66696e697479",
+      "content_type": "application/json",
+      "fail_auth": false,
+      "status": 500,
+      "json": "Internal Server Error",
+      "calls": [
+        "auth"
+      ]
+    },
+    {
+      "name": "invalid_inf",
+      "body": "Infinity",
+      "body_hex": "496e66696e697479",
+      "content_type": "application/json",
+      "fail_auth": true,
+      "status": 401,
+      "json": {
+        "detail": "Sign in required"
+      },
+      "calls": [
+        "auth"
+      ]
+    },
+    {
+      "name": "invalid_nested",
+      "body": "[NaN]",
+      "body_hex": "5b4e614e5d",
+      "content_type": "application/json",
+      "fail_auth": false,
+      "status": 500,
+      "json": "Internal Server Error",
+      "calls": [
+        "auth"
+      ]
+    },
+    {
+      "name": "invalid_nested",
+      "body": "[NaN]",
+      "body_hex": "5b4e614e5d",
+      "content_type": "application/json",
+      "fail_auth": true,
+      "status": 401,
+      "json": {
+        "detail": "Sign in required"
+      },
+      "calls": [
+        "auth"
+      ]
+    },
+    {
+      "name": "raw_invalid",
+      "body": "\\xff",
+      "body_hex": "ff",
+      "content_type": "text/plain",
+      "fail_auth": false,
+      "status": 500,
+      "json": "Internal Server Error",
+      "calls": [
+        "auth"
+      ]
+    },
+    {
+      "name": "raw_invalid",
+      "body": "\\xff",
+      "body_hex": "ff",
+      "content_type": "text/plain",
+      "fail_auth": true,
+      "status": 401,
+      "json": {
+        "detail": "Sign in required"
+      },
+      "calls": [
+        "auth"
+      ]
+    },
+    {
+      "name": "raw_invalid_no_type",
+      "body": "\\xff",
+      "body_hex": "ff",
+      "content_type": null,
+      "fail_auth": false,
+      "status": 500,
+      "json": "Internal Server Error",
+      "calls": [
+        "auth"
+      ]
+    },
+    {
+      "name": "raw_invalid_no_type",
+      "body": "\\xff",
+      "body_hex": "ff",
+      "content_type": null,
+      "fail_auth": true,
+      "status": 401,
+      "json": {
+        "detail": "Sign in required"
+      },
+      "calls": [
+        "auth"
+      ]
+    },
+    {
+      "name": "json_invalid_encoding",
+      "body": "\\xff",
+      "body_hex": "ff",
+      "content_type": "application/json",
+      "fail_auth": false,
+      "status": 400,
+      "json": {
+        "detail": "There was an error parsing the body"
+      },
+      "calls": []
+    },
+    {
+      "name": "json_invalid_encoding",
+      "body": "\\xff",
+      "body_hex": "ff",
+      "content_type": "application/json",
+      "fail_auth": true,
+      "status": 400,
+      "json": {
+        "detail": "There was an error parsing the body"
+      },
+      "calls": []
+    }
+  ]
+}

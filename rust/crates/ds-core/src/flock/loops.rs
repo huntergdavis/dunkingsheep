@@ -371,7 +371,7 @@ mod owner_tests {
                 env: Env::default(),
                 observability: Some(RuntimeObservability {
                     state_dir: dir.path().join("state-dir"),
-                    memory_db: None,
+                    memory_db: Some(dir.path().join("memory.db")),
                 }),
                 runtime,
                 terminal_factory: Arc::new(move || {

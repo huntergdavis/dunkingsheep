@@ -8,11 +8,21 @@
 //!
 //! NOT in this slice: the handlers themselves.
 
+mod context_mutations;
+pub mod health_state;
+pub use context_mutations::{h_context_add, h_context_promote, h_memory_backfill};
 pub mod inbox_messages;
+pub use health_state::{h_health, h_state_capture, h_state_latest};
+pub mod outbox_messages;
+pub use outbox_messages::{h_cancel_message, h_get_message, h_list_messages};
 mod poll_roster_turn_end;
 pub use poll_roster_turn_end::{h_poll, h_roster, h_turn_end};
 mod owner_push;
 pub use owner_push::{h_owner_poll, h_owner_push, h_owner_take};
+mod recovery;
+pub use recovery::{h_doctor, h_recover};
+pub mod runtime_control;
+pub use runtime_control::{h_allocation, h_dispatch, h_shutdown};
 mod metrics;
 pub use metrics::h_metrics;
 mod dunks;
@@ -22,6 +32,14 @@ pub use dunks::{
 };
 mod dunk_get;
 pub use dunk_get::h_get_dunk;
+mod project_summary;
+pub use project_summary::h_project_summary;
+mod layout_agent;
+pub mod layout_close;
+pub use layout_close::{h_close, h_herdr, h_herdr_help};
+mod layout_create;
+pub use layout_agent::{h_focus, h_rename, h_start_agent};
+pub use layout_create::{h_create_tab, h_create_workspace, h_split_pane};
 mod respawn;
 pub use respawn::h_respawn_pane;
 
@@ -67,6 +85,26 @@ pub trait SendCommandEnv {
         wait_s: f64,
     ) -> Result<Value, DunkError>;
 
+    /// Raw JSON keys are normalized only by the concrete Flock path, after target resolution.
+    /// Existing string-only adapters remain compatible; non-string input fails closed unless wired.
+    fn send_keys_raw(
+        &self,
+        target: &Value,
+        keys: &Value,
+        self_pane_id: Option<&str>,
+        hold_while_typing: bool,
+        wait_s: f64,
+    ) -> Result<Value, DunkError> {
+        match keys {
+            Value::String(keys) => {
+                self.send_keys(target, keys, self_pane_id, hold_while_typing, wait_s)
+            }
+            _ => Err(DunkError::Refused(
+                "raw key command adapter is not wired".into(),
+            )),
+        }
+    }
+
     fn flush_box(&self, target: &Value, self_pane_id: Option<&str>) -> Result<Value, DunkError>;
 }
 
@@ -84,6 +122,46 @@ pub trait OwnerViewEnv {
 /// A synchronous adapter for command dependencies. All methods are object-safe so a daemon can
 /// supply one per request without putting backend types in handler signatures.
 pub trait CommandEnv: PaneInfoEnv {
+    fn layout_close_env(&self) -> Result<&dyn layout_close::LayoutCloseEnv, DunkError> {
+        Err(crate::error::refusal("layout close adapter is not wired"))
+    }
+
+    fn health_state_env(&self) -> Result<&dyn health_state::HealthStateEnv, DunkError> {
+        Err(DunkError::Refused(
+            "health/state adapter is not wired".into(),
+        ))
+    }
+
+    fn with_layout_agent(
+        &self,
+        _operation: &mut crate::flock::commands_layout::AgentOperation<'_>,
+    ) -> Result<Value, DunkError> {
+        Err(DunkError::Refused(
+            "layout agent adapter is not wired".into(),
+        ))
+    }
+
+    /// Borrow the request's layout and pane services, with confirmed command submission.
+    fn with_layout_create(
+        &self,
+        _operation: &mut crate::flock::commands_layout::CreateOperation<'_>,
+    ) -> Result<Value, DunkError> {
+        Err(DunkError::Refused(
+            "layout create adapter is not wired".into(),
+        ))
+    }
+
+    fn with_outbox_commands(
+        &self,
+        _operation: &mut dyn FnMut(
+            &dyn outbox_messages::OutboxCommandEnv,
+        ) -> Result<Value, DunkError>,
+    ) -> Result<Value, DunkError> {
+        Err(DunkError::Refused(
+            "outbox command adapter is not wired".into(),
+        ))
+    }
+
     /// Borrow the validated inbox services for this request on its owning thread.
     fn with_inbox_env(
         &self,
@@ -209,11 +287,32 @@ pub trait CommandEnv: PaneInfoEnv {
         Ok(TRANSPORT.get_or_init(crate::github::ReqwestTransport::default))
     }
 
+    /// Borrow the canonical recovery providers for this request. Live composition is t1605.
+    fn recover_env(&self) -> Result<&dyn crate::flock::recovery_commands::RecoverEnv, DunkError> {
+        Err(DunkError::Refused("recovery adapter is not wired".into()))
+    }
+
     /// Status sources for the `status` handler. Existing fixtures may stage this adapter, but
     /// production dispatch must supply the real daemon snapshot.
     fn status_env(&self) -> Result<&dyn crate::flock::status::StatusEnv, DunkError> {
         Err(DunkError::Refused(
             "status command adapter is not wired".into(),
+        ))
+    }
+
+    /// Borrow canonical control services; production composition is supplied by t1605.
+    fn runtime_control_env(&self) -> Result<&dyn runtime_control::RuntimeControlEnv, DunkError> {
+        Err(DunkError::Refused(
+            "runtime control adapter is not wired".into(),
+        ))
+    }
+
+    /// Existing fallible project summary sources, including captured startup paths.
+    fn project_summary_env(
+        &self,
+    ) -> Result<&dyn crate::flock::project_summary::SummaryEnv, DunkError> {
+        Err(DunkError::Refused(
+            "project summary adapter is not wired".into(),
         ))
     }
 
@@ -396,7 +495,7 @@ fn py_int(value: &Value) -> Option<i64> {
 }
 
 /// Python truthiness of a JSON value (`args.get(k) or default`).
-fn truthy(value: &Value) -> bool {
+pub(crate) fn truthy(value: &Value) -> bool {
     match value {
         Value::Null => false,
         Value::Bool(b) => *b,
@@ -460,7 +559,8 @@ pub(crate) fn python_value_repr(value: &Value) -> String {
     }
 }
 
-fn python_value_string(value: &Value) -> String {
+/// Python string coercion for JSON values at shared protocol boundaries.
+pub fn python_value_string(value: &Value) -> String {
     match value {
         Value::String(value) => value.clone(),
         Value::Array(_) | Value::Object(_) => python_value_repr(value),
@@ -604,6 +704,12 @@ pub struct Dispatcher {
 }
 
 impl Dispatcher {
+    pub fn register_health_state(&mut self) {
+        self.register("health", h_health);
+        self.register("state_capture", h_state_capture);
+        self.register("state_latest", h_state_latest);
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -634,6 +740,11 @@ impl Dispatcher {
         self.register("roster", h_roster);
     }
 
+    /// Register only the T39 project summary handler.
+    pub fn register_project_summary(&mut self) {
+        self.register("project_summary", h_project_summary);
+    }
+
     /// Register only the T39 help handler leaf.
     pub fn register_help(&mut self) {
         self.register("help", h_help);
@@ -653,6 +764,12 @@ impl Dispatcher {
     }
 
     /// Register only the T39 context supersede and retire handlers.
+    pub fn register_context_mutations(&mut self) {
+        self.register("context_add", h_context_add);
+        self.register("context_promote", h_context_promote);
+        self.register("memory_backfill", h_memory_backfill);
+    }
+
     pub fn register_context_supersede_retire(&mut self) {
         self.register("context_supersede", h_context_supersede);
         self.register("context_retire", h_context_retire);
@@ -707,6 +824,19 @@ impl Dispatcher {
     pub fn register_review_sync_list(&mut self) {
         self.register("review_sync", h_review_sync);
         self.register("review_list", h_review_list);
+    }
+
+    /// Register the recovery handlers; metrics keeps its existing registration.
+    pub fn register_doctor_recover(&mut self) {
+        self.register("doctor", h_doctor);
+        self.register("recover", h_recover);
+    }
+
+    /// Register only dispatch, allocation, and shutdown.
+    pub fn register_runtime_control(&mut self) {
+        self.register("dispatch", h_dispatch);
+        self.register("allocation", h_allocation);
+        self.register("shutdown", h_shutdown);
     }
 
     /// Register only the T39 operations metrics summary handler.
@@ -798,6 +928,12 @@ impl Dispatcher {
     }
 
     /// Register only the T39 direct-send handlers.
+    pub fn register_outbox_messages(&mut self) {
+        self.register("list_messages", h_list_messages);
+        self.register("get_message", h_get_message);
+        self.register("cancel_message", h_cancel_message);
+    }
+
     pub fn register_send_text_keys_flush_box(&mut self) {
         self.register("send_text", h_send_text);
         self.register("send_keys", h_send_keys);
@@ -840,6 +976,25 @@ impl Dispatcher {
         self.register("stop_all", h_stop_all);
         self.register("fire_dunk", h_fire_dunk);
         self.register("list_dunks", h_list_dunks);
+    }
+
+    /// Register only the three create-layout commands.
+    pub fn register_layout_close(&mut self) {
+        self.register("close", h_close);
+        self.register("herdr", h_herdr);
+        self.register("herdr_help", h_herdr_help);
+    }
+
+    pub fn register_layout_agent(&mut self) {
+        self.register("start_agent", h_start_agent);
+        self.register("rename", h_rename);
+        self.register("focus", h_focus);
+    }
+
+    pub fn register_layout_create(&mut self) {
+        self.register("create_workspace", h_create_workspace);
+        self.register("create_tab", h_create_tab);
+        self.register("split_pane", h_split_pane);
     }
 
     /// `dunk_api.dispatch(flock, name, args, self_pane_id)`, with the acting pane read only from
@@ -1206,11 +1361,10 @@ pub fn h_send_keys(context: &HandlerContext<'_>, args: Args) -> Result<Value, Du
     let target = send_target(context, &args, "send_keys")?;
     let keys = args
         .get("keys")
-        .and_then(Value::as_str)
-        .ok_or_else(|| DunkError::Refused("send_keys: keys must be a string".into()))?;
+        .ok_or_else(|| DunkError::Refused("'keys'".into()))?;
     let hold_while_typing = python_bool_arg(&args, "hold_while_typing", true);
     let wait_s = send_wait_s(&args, "send_keys")?;
-    context.env.send_commands()?.send_keys(
+    context.env.send_commands()?.send_keys_raw(
         &target,
         keys,
         context.self_pane_id(),

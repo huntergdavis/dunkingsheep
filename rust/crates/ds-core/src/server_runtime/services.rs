@@ -7,9 +7,11 @@
 use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 
+use crate::memory::service::MemoryService;
+use std::time::Duration;
 use tokio::runtime::Runtime;
 
 use super::{dispatcher::RuntimeDispatcher, outbox_runtime::OutboxRuntime, LoopRuntimeAdapter};
@@ -31,10 +33,51 @@ pub struct RuntimeObservability {
     pub memory_db: Option<PathBuf>,
 }
 
+/// A path already resolved by startup and timing parsed from its captured environment.
+/// HOME/default resolution remains with the daemon assembly; no process environment reads.
+#[derive(Debug, Clone)]
+pub struct RuntimeMemoryConfig {
+    path: PathBuf,
+    poll: Duration,
+    throttle: f64,
+}
+impl RuntimeMemoryConfig {
+    pub fn captured(path: PathBuf, env: &Env) -> Result<Self, DunkError> {
+        if path.as_os_str().is_empty() || path == std::path::Path::new(":memory:") {
+            return Err(refusal(
+                "runtime memory requires an explicit database file path",
+            ));
+        }
+        let raw = env.get("DUNKINGSHEEP_MEMORY_THROTTLE_S").unwrap_or("0.1");
+        let seconds = crate::github::parse_python_float(raw).ok_or_else(|| {
+            refusal(format!(
+                "could not convert memory throttle string to float: {raw:?}"
+            ))
+        })?;
+        Ok(Self {
+            path,
+            poll: Duration::from_millis(500),
+            throttle: seconds,
+        })
+    }
+}
+
+/// Own startup rollback even after the Flock has acquired an additional service Arc.
+struct StartingMemory(Option<Arc<MemoryService>>);
+impl Drop for StartingMemory {
+    fn drop(&mut self) {
+        if let Some(service) = &self.0 {
+            if let Err(error) = service.stop_and_join() {
+                eprintln!("memory startup cleanup failed: {error}");
+            }
+        }
+    }
+}
+
 /// The concrete resources captured once at daemon startup.
 ///
 /// `stores` must contain the already opened task and inbox stores. When `observability` is
-/// present, its explicit paths open metrics and the optional memory read pool; otherwise a
+/// present, its explicit paths open metrics and the canonical memory service; otherwise a
 /// caller must supply an already opened metrics store in `stores`. Roles and the legacy
 /// superuser policy are also the actual opened instances, never defaults synthesized here.
 pub struct RuntimeServiceInputs {
@@ -71,11 +114,52 @@ pub struct RuntimeServices {
     pub(crate) allocator: crate::flock::allocator::Allocator,
     pub(super) owner_push: super::owner_push::OwnerPushService,
     stopped: AtomicBool,
+    shutdown_lock: Mutex<()>,
+    memory: Option<Arc<MemoryService>>,
 }
 
 impl RuntimeServices {
     /// Build the one canonical Flock and its two request/background managers.
     pub fn new(inputs: RuntimeServiceInputs) -> Result<Arc<Self>, DunkError> {
+        let memory = if inputs.persist_enabled {
+            let path = inputs
+                .observability
+                .as_ref()
+                .and_then(|o| o.memory_db.clone())
+                .ok_or_else(|| {
+                    refusal("persistent runtime requires a startup-selected memory database path")
+                })?;
+            Some(RuntimeMemoryConfig::captured(path, &inputs.env)?)
+        } else {
+            None
+        };
+        Self::new_with_memory(inputs, memory)
+    }
+
+    /// Standard-thread startup, including when metrics were opened separately. The caller
+    /// supplies the already captured path/config; a persistent runtime cannot omit memory.
+    pub fn new_with_memory(
+        inputs: RuntimeServiceInputs,
+        memory: Option<RuntimeMemoryConfig>,
+    ) -> Result<Arc<Self>, DunkError> {
+        Self::build(inputs, memory, |_| {})
+    }
+
+    fn build(
+        inputs: RuntimeServiceInputs,
+        memory: Option<RuntimeMemoryConfig>,
+        after_memory_start: impl FnOnce(&Option<Arc<MemoryService>>),
+    ) -> Result<Arc<Self>, DunkError> {
+        if inputs.persist_enabled != memory.is_some() {
+            return Err(refusal(
+                "runtime memory configuration must match persistence",
+            ));
+        }
+        if memory.is_some() && inputs.stores.memory.is_some() {
+            return Err(refusal(
+                "runtime canonical memory conflicts with an attached read pool",
+            ));
+        }
         for (name, path) in [
             ("launches file", &inputs.launches_file),
             ("lane registry file", &inputs.lane_registry_file),
@@ -147,9 +231,24 @@ impl RuntimeServices {
         ));
         flock.attach_stores(inputs.stores);
         if let Some(observability) = inputs.observability {
-            flock
-                .wire_observability(&observability.state_dir, observability.memory_db.as_deref())?;
+            flock.wire_observability(&observability.state_dir, None)?;
         }
+        // Declare the runtime first so rollback joins memory before runtime destruction.
+        let runtime = inputs.runtime;
+        let mut starting_memory = StartingMemory(match memory {
+            Some(config) => Some(Arc::new(MemoryService::create_at_start(
+                &config.path,
+                2,
+                config.poll,
+                crate::memory::jsonl::Throttle::Python(config.throttle),
+            )?)),
+            None => None,
+        });
+        if let Some(service) = &starting_memory.0 {
+            flock.attach_memory_service(Arc::clone(service))?;
+            service.start()?;
+        }
+        after_memory_start(&starting_memory.0);
         flock.attach_roles(inputs.roles, inputs.legacy_superusers);
         flock.attach_status_state(StatusState::at_start(
             inputs.release_version,
@@ -158,7 +257,6 @@ impl RuntimeServices {
             inputs.env.clone(),
         ))?;
 
-        let runtime = inputs.runtime;
         let terminal_factory = inputs.terminal_factory;
         let stuck_reporter = StalePanelReporter::new();
         let outbox = OutboxRuntime::new_with_reporter(
@@ -185,6 +283,8 @@ impl RuntimeServices {
             allocator: crate::flock::allocator::Allocator::new(),
             owner_push: super::owner_push::OwnerPushService::default(),
             stopped: AtomicBool::new(false),
+            shutdown_lock: Mutex::new(()),
+            memory: starting_memory.0.take(),
         }))
     }
 
@@ -413,14 +513,42 @@ impl RuntimeServices {
 
     /// Stop/join outbox workers while their Flock, stores, and runtime remain alive.
     /// The startup owner calls this after FlockServer has stopped accepting and drained/joined
-    /// its request threads (the remaining t1605 shutdown gate).
+    /// its request threads (the remaining t1605 shutdown gate). Call on a standard thread;
+    /// async owners must await `shutdown_async` so no Tokio worker waits on SyncWriter.
     pub fn shutdown(&self) {
+        assert!(
+            self.memory.is_none() || tokio::runtime::Handle::try_current().is_err(),
+            "persistent runtime shutdown requires a standard thread; use shutdown_async"
+        );
+        // Every caller waits for the same completed teardown, not merely a stop flag.
+        let _shutdown = self.shutdown_lock.lock().expect("runtime shutdown lock");
         if !self.stopped.swap(true, Ordering::AcqRel) {
             self.outbox.stop_manual_fire_workers();
             self.outbox.stop_timer_workers();
             self.allocator.stop_and_join();
             self.outbox.stop_outbox_workers();
+            if let Some(memory) = &self.memory {
+                if let Err(error) = memory.stop_and_join() {
+                    eprintln!("runtime memory shutdown failed: {error}");
+                }
+            }
         }
+    }
+
+    /// Await the same complete teardown without running synchronous owners on Tokio workers.
+    /// The final request-drain prerequisite is unchanged.
+    pub async fn shutdown_async(self: &Arc<Self>) -> Result<(), DunkError> {
+        let services = Arc::clone(self);
+        crate::flock::loop_env::with_sync_store(move || {
+            std::thread::Builder::new()
+                .name("runtime-shutdown".into())
+                .spawn(move || services.shutdown())
+                .map_err(|error| refusal(format!("runtime shutdown thread: {error}")))?
+                .join()
+                .map_err(|_| refusal("runtime shutdown thread panicked"))
+        })
+        .await
+        .map_err(|error| refusal(format!("runtime shutdown worker: {error}")))?
     }
 
     pub(super) fn is_stopped(&self) -> bool {
@@ -1622,5 +1750,298 @@ mod tests {
         );
         assert!(adapter.with_next_jobs(&services.next_jobs).is_err());
         services.shutdown();
+    }
+
+    fn memory_inputs(dir: &tempfile::TempDir, env: Env, persist: bool) -> RuntimeServiceInputs {
+        let runtime = Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let (tasks, inbox) = tasks_and_inbox(&runtime, dir);
+        let mut inputs = startup_inputs(
+            dir,
+            runtime,
+            env,
+            fake_factory_with_current_pane(),
+            Stores {
+                tasks: Some(tasks),
+                inbox: Some(inbox),
+                ..Stores::default()
+            },
+        );
+        inputs.persist_enabled = persist;
+        inputs.observability.as_mut().unwrap().memory_db =
+            Some(dir.path().join("memory/nested/memory.db"));
+        inputs
+    }
+
+    #[test]
+    fn runtime_memory_first_run_existing_db_and_exact_alias_survive_observability() {
+        let dir = tempfile::tempdir().unwrap();
+        let services = RuntimeServices::new(memory_inputs(&dir, Env::default(), true)).unwrap();
+        let service = services.flock.memory_service().unwrap();
+        assert!(Arc::ptr_eq(&service, services.memory.as_ref().unwrap()));
+        assert!(Arc::ptr_eq(
+            service.read_pool(),
+            services.flock.stores().memory.as_ref().unwrap()
+        ));
+        assert_eq!(
+            service.status().unwrap()["ingestor"]["throttle_s"],
+            json!(0.1)
+        );
+        let worker = service.worker_id().unwrap();
+        service.start().unwrap();
+        assert_eq!(Some(worker), service.worker_id());
+        // A late observability call must neither open this invalid path nor replace the alias.
+        services
+            .flock
+            .wire_observability(&dir.path().join("metrics-later"), Some(dir.path()))
+            .unwrap();
+        assert!(Arc::ptr_eq(
+            service.read_pool(),
+            services.flock.stores().memory.as_ref().unwrap()
+        ));
+        let initial_stores = services.flock.stores();
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let a = Arc::clone(&barrier);
+        let flock = Arc::clone(&services.flock);
+        let stores = initial_stores.clone();
+        let attach_stores = std::thread::spawn(move || {
+            a.wait();
+            for _ in 0..30 {
+                flock.attach_stores(stores.clone());
+            }
+        });
+        let b = Arc::clone(&barrier);
+        let flock = Arc::clone(&services.flock);
+        let owner = Arc::clone(&service);
+        let attach_service = std::thread::spawn(move || {
+            b.wait();
+            for _ in 0..30 {
+                flock.attach_memory_service(Arc::clone(&owner)).unwrap();
+            }
+        });
+        barrier.wait();
+        attach_stores.join().unwrap();
+        attach_service.join().unwrap();
+        assert!(Arc::ptr_eq(
+            service.read_pool(),
+            services.flock.stores().memory.as_ref().unwrap()
+        ));
+        let path = service.path().to_owned();
+        let source = dir.path().join("source.jsonl");
+        std::fs::write(
+            &source,
+            "{\"role\":\"user\",\"text\":\"persisted memory needle\",\"session_id\":\"fixture\"}\n",
+        )
+        .unwrap();
+        service.pause();
+        service
+            .enqueue(source.to_str().unwrap(), Some("generic"), None)
+            .unwrap();
+        services
+            .runtime
+            .block_on(services.shutdown_async())
+            .unwrap();
+        services.shutdown();
+        assert!(service.worker_id().is_none());
+        assert!(service.checkpoint().is_err());
+        assert!(services
+            .flock
+            .attach_memory_service(Arc::clone(&service))
+            .is_err());
+        drop(services);
+        let reopened =
+            MemoryService::open(path, 2, Duration::from_millis(500), Duration::ZERO).unwrap();
+        assert_eq!(reopened.stats().unwrap()["queue"]["queued"], 1);
+        reopened.stop_and_join().unwrap();
+    }
+
+    #[test]
+    fn runtime_memory_absence_and_startup_config_errors_are_explicit() {
+        let dir = tempfile::tempdir().unwrap();
+        let services = RuntimeServices::new(memory_inputs(
+            &dir,
+            Env::from_pairs(&[("DUNKINGSHEEP_MEMORY_THROTTLE_S", "bad")]),
+            false,
+        ))
+        .unwrap();
+        assert!(services.memory.is_none());
+        assert!(services.flock.memory_service().is_none());
+        assert!(services.flock.stores().memory.is_none());
+        assert!(!dir.path().join("memory").exists());
+        services.shutdown();
+        drop(services);
+        let path = dir.path().join("new.db");
+        for raw in ["", "wrong", "1__0"] {
+            let result = RuntimeMemoryConfig::captured(
+                path.clone(),
+                &Env::from_pairs(&[("DUNKINGSHEEP_MEMORY_THROTTLE_S", raw)]),
+            );
+            assert!(result
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("could not convert"));
+        }
+        for raw in [
+            "-1",
+            "NaN",
+            "-inf",
+            "Infinity",
+            "1e300",
+            "-0.0",
+            "1e-300",
+            " ١_٢.٥e-2 ",
+        ] {
+            let config = RuntimeMemoryConfig::captured(
+                path.clone(),
+                &Env::from_pairs(&[("DUNKINGSHEEP_MEMORY_THROTTLE_S", raw)]),
+            )
+            .unwrap();
+            let expected = crate::github::parse_python_float(raw).unwrap();
+            assert_eq!(config.poll, Duration::from_millis(500));
+            assert!(
+                config.throttle.to_bits() == expected.to_bits()
+                    || (config.throttle.is_nan() && expected.is_nan())
+            );
+        }
+        let mut missing = memory_inputs(&dir, Env::default(), true);
+        missing.observability.as_mut().unwrap().memory_db = None;
+        assert!(RuntimeServices::new(missing)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("startup-selected"));
+        assert!(!path.exists());
+        // An existing non-database must fail, never silently disable memory or replace it.
+        let mut bad = memory_inputs(&dir, Env::default(), true);
+        std::fs::write(&path, b"not sqlite").unwrap();
+        bad.observability.as_mut().unwrap().memory_db = Some(path.clone());
+        assert!(RuntimeServices::new(bad).is_err());
+        assert_eq!(std::fs::read(path).unwrap(), b"not sqlite");
+    }
+
+    #[test]
+    fn runtime_memory_partial_startup_failure_joins_worker_and_closes_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let inputs = memory_inputs(
+            &dir,
+            Env::from_pairs(&[("DUNKINGSHEEP_VIEW_CACHE_S", "bad")]),
+            true,
+        );
+        let config = RuntimeMemoryConfig::captured(
+            inputs
+                .observability
+                .as_ref()
+                .unwrap()
+                .memory_db
+                .clone()
+                .unwrap(),
+            &inputs.env,
+        )
+        .unwrap();
+        let mut observed = None;
+        let error = RuntimeServices::build(inputs, Some(config), |owner| {
+            let service = owner.as_ref().unwrap();
+            assert!(service.worker_id().is_some());
+            observed = Some(Arc::clone(service));
+        })
+        .err()
+        .unwrap();
+        assert!(error.to_string().contains("DUNKINGSHEEP_VIEW_CACHE_S"));
+        let service = observed.unwrap();
+        assert!(service.worker_id().is_none());
+        assert!(service.start().is_err());
+        assert!(service.checkpoint().is_err());
+        service.stop_and_join().unwrap();
+    }
+
+    #[test]
+    fn runtime_memory_final_join_waits_for_real_worker_after_python_stop_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let services = RuntimeServices::new(memory_inputs(&dir, Env::default(), true)).unwrap();
+        let service = services.memory.as_ref().unwrap().clone();
+        assert!(service.stop().unwrap());
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let release_rx = Mutex::new(release_rx);
+        service.set_parse_hook(Arc::new(move || {
+            entered_tx.send(()).unwrap();
+            release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(30))
+                .unwrap();
+        }));
+        let source = dir.path().join("gated.jsonl");
+        std::fs::write(&source, "{\"role\":\"user\",\"text\":\"gated message\"}\n").unwrap();
+        service
+            .enqueue(source.to_str().unwrap(), Some("generic"), None)
+            .unwrap();
+        service.start().unwrap();
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let before = std::time::Instant::now();
+        assert!(
+            !service.stop().unwrap(),
+            "busy Python-style stop retains worker"
+        );
+        assert!(before.elapsed() >= Duration::from_secs(5));
+        assert!(service.worker_id().is_some());
+        let (done_tx, done_rx) = mpsc::channel();
+        let first = Arc::clone(&services);
+        let tx = done_tx.clone();
+        let join1 = std::thread::spawn(move || {
+            first.shutdown();
+            tx.send(()).unwrap();
+        });
+        let second = Arc::clone(&services);
+        let join2 = std::thread::spawn(move || {
+            second.shutdown();
+            done_tx.send(()).unwrap();
+        });
+        assert!(done_rx.recv_timeout(Duration::from_millis(100)).is_err());
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while service.checkpoint().is_ok() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "final stop did not begin"
+            );
+            std::thread::yield_now();
+        }
+        let flock = Arc::clone(&services.flock);
+        let owner = Arc::clone(&service);
+        let (attached_tx, attached_rx) = mpsc::channel();
+        let attacher = std::thread::spawn(move || {
+            attached_tx
+                .send(flock.attach_memory_service(owner))
+                .unwrap();
+        });
+        assert!(
+            attached_rx
+                .recv_timeout(Duration::from_millis(100))
+                .is_err(),
+            "attachment must serialize behind final join"
+        );
+        release_tx.send(()).unwrap();
+        done_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        done_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        join1.join().unwrap();
+        join2.join().unwrap();
+        assert!(attached_rx
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .is_err());
+        attacher.join().unwrap();
+        assert!(service.worker_id().is_none());
+        assert!(service.start().is_err());
+        assert!(service
+            .enqueue(source.to_str().unwrap(), None, None)
+            .is_err());
+        assert!(
+            services.flock.stores().tasks.is_some(),
+            "stores outlive joined worker"
+        );
     }
 }

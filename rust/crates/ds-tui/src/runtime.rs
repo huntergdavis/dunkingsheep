@@ -131,9 +131,7 @@ impl LineModalProvider for TerminalModals {
                 self.io_error = Some(error);
                 return None;
             }
-            let Some(key) = self.next_key() else {
-                return None;
-            };
+            let key = self.next_key()?;
             match modal.handle_key(key) {
                 LineModalResult::Pending => {}
                 LineModalResult::Cancelled => return None,
@@ -151,9 +149,7 @@ impl TargetModalProvider for TerminalModals {
                 self.io_error = Some(error);
                 return None;
             }
-            let Some(key) = self.next_key() else {
-                return None;
-            };
+            let key = self.next_key()?;
             match picker.handle_key(key) {
                 TargetPickerResult::Pending => {}
                 TargetPickerResult::Cancelled => return None,
@@ -175,9 +171,7 @@ impl TextModalProvider for TerminalModals {
                 self.io_error = Some(error);
                 return None;
             }
-            let Some(key) = self.next_key() else {
-                return None;
-            };
+            let key = self.next_key()?;
             match modal.handle_key(key, viewport_height) {
                 TextModalResult::Pending => {}
                 TextModalResult::Cancelled => return None,

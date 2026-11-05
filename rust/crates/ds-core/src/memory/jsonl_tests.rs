@@ -325,3 +325,224 @@ fn iso_time_follows_the_python() {
     );
     assert_eq!(None, iso_time(&json!("yesterday")));
 }
+
+struct TraceWriter<'a> {
+    db: &'a mut Connection,
+    flushes: Vec<Value>,
+}
+impl MemoryWrite for TraceWriter<'_> {
+    fn upsert_session(
+        &mut self,
+        id: &str,
+        harness: &str,
+        project: Option<&str>,
+        cwd: Option<&str>,
+        title: Option<&str>,
+        started: Option<f64>,
+        updated: Option<f64>,
+        metadata: Option<&Value>,
+    ) -> Result<(), DunkError> {
+        self.db
+            .upsert_session(id, harness, project, cwd, title, started, updated, metadata)
+    }
+    fn insert_chunks(
+        &mut self,
+        id: &str,
+        chunks: &[String],
+        role: Option<&str>,
+        kind: Option<&str>,
+        at: Option<f64>,
+        metadata: Option<&Value>,
+    ) -> Result<usize, DunkError> {
+        let inserted = self
+            .db
+            .insert_chunks(id, chunks, role, kind, at, metadata)?;
+        self.flushes.push(json!([chunks.len(), role, inserted]));
+        Ok(inserted)
+    }
+    fn upsert_source_row(
+        &mut self,
+        path: &str,
+        harness: &str,
+        project: Option<&str>,
+    ) -> Result<(), DunkError> {
+        self.db.upsert_source_row(path, harness, project)
+    }
+}
+
+fn throttle_oracle_case(
+    events: &[Value],
+    raw: &str,
+    stop_at: Option<usize>,
+    duplicate: bool,
+) -> Value {
+    use sha2::{Digest, Sha256};
+    let (dir, mut db) = store();
+    let path = write(&dir, "throttle.jsonl", events, "");
+    let python_db = dir.path().join("python.db");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let stop = stop_at
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| "never".into());
+    let output = std::process::Command::new("python3")
+        .args(["-c", include_str!("throttle_oracle.py")])
+        .arg(&path)
+        .arg(python_db)
+        .arg(raw)
+        .arg(stop)
+        .arg(if duplicate { "yes" } else { "no" })
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let expected: Value = serde_json::from_slice(&output.stdout).unwrap();
+    if duplicate {
+        ingest_jsonl(&mut db, &path, "generic", None, &never, Duration::ZERO).unwrap();
+    }
+    let calls = std::cell::Cell::new(0);
+    let should_stop = || {
+        calls.set(calls.get() + 1);
+        stop_at.is_some_and(|n| calls.get() >= n)
+    };
+    let seconds = crate::github::parse_python_float(raw).unwrap();
+    let mut trace = TraceWriter {
+        db: &mut db,
+        flushes: Vec::new(),
+    };
+    let result = ingest_jsonl_classified(
+        &mut trace,
+        &path,
+        "generic",
+        None,
+        &should_stop,
+        Throttle::Python(seconds),
+    );
+    let (error, result) = match result {
+        Ok(stats) => {
+            let mut value =
+                json!({"sessions":stats.sessions,"chunks":stats.chunks,"harness":stats.harness});
+            if stats.stopped {
+                value["stopped"] = json!(true);
+            }
+            (Value::Null, value)
+        }
+        Err(IngestFailure::Sleep(failure)) => (
+            json!([failure.python_class(), failure.message()]),
+            Value::Null,
+        ),
+        Err(other) => panic!("unexpected store error: {other:?}"),
+    };
+    let flushes = std::mem::take(&mut trace.flushes);
+    drop(trace);
+    let reader = crate::db::open_reader(&dir.path().join("memory.db")).unwrap();
+    let mut statement = reader
+        .prepare("SELECT role, ordinal, text FROM chunks ORDER BY id")
+        .unwrap();
+    let rows: Vec<Value> = statement
+        .query_map([], |row| {
+            let role: String = row.get(0)?;
+            let ordinal: i64 = row.get(1)?;
+            let text: String = row.get(2)?;
+            Ok(json!([
+                role,
+                ordinal,
+                text.chars().count(),
+                format!("{:x}", Sha256::digest(text.as_bytes()))
+            ]))
+        })
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let actual = json!({"error":error,"flushes":flushes,"rows":rows,"result":result,"throttle":crate::usage::py_float_repr(seconds)});
+    for field in ["error", "flushes", "result", "throttle"] {
+        assert_eq!(
+            actual[field], expected[field],
+            "field={field}, raw={raw}, stop={stop_at:?}, duplicate={duplicate}"
+        );
+    }
+    let actual_rows = actual["rows"].as_array().unwrap();
+    let expected_rows = expected["rows"].as_array().unwrap();
+    assert_eq!(
+        actual_rows.len(),
+        expected_rows.len(),
+        "committed row count, raw={raw}"
+    );
+    for (index, (actual, expected)) in actual_rows.iter().zip(expected_rows).enumerate() {
+        assert_eq!(actual, expected, "committed row {index}, raw={raw}");
+    }
+    actual
+}
+
+#[test]
+fn memory_throttle_python_native_errors_follow_nonempty_flush_and_preserve_commits() {
+    let one = [json!({"role":"user","text":"first committed needle","timestamp":100})];
+    for raw in [
+        "-1",
+        "NaN",
+        "Infinity",
+        "-Infinity",
+        "1e300",
+        "-1e300",
+        "-1e-300",
+        "-9223372036.854776",
+        "-9223372036.854778",
+    ] {
+        let empty = throttle_oracle_case(&[json!({})], raw, None, false);
+        assert!(empty["error"].is_null());
+        let eof = throttle_oracle_case(&one, raw, None, false);
+        assert_eq!(eof["rows"].as_array().unwrap().len(), 1);
+        assert!(!eof["error"].is_null());
+        let no_flush = throttle_oracle_case(&one, raw, Some(1), false);
+        assert!(no_flush["error"].is_null());
+        let stopped = throttle_oracle_case(
+            &[
+                one[0].clone(),
+                json!({"role":"user","text":"never buffered"}),
+            ],
+            raw,
+            Some(2),
+            false,
+        );
+        assert_eq!(stopped["rows"].as_array().unwrap().len(), 1);
+    }
+}
+
+#[test]
+fn memory_throttle_python_role_flush_overshoot_zero_and_duplicate_boundaries() {
+    let roles = [
+        json!({"role":"user","text":"user first"}),
+        json!({"role":"assistant","text":"assistant second"}),
+        json!({"role":"user","text":"user last"}),
+    ];
+    for raw in ["-1", "NaN", "Infinity", "0", "-0.0", "1e-12"] {
+        let result = throttle_oracle_case(&roles, raw, None, false);
+        if result["error"].is_null() {
+            assert_eq!(result["flushes"].as_array().unwrap().len(), 3);
+        } else {
+            assert_eq!(result["flushes"], json!([[1, "user", 1]]));
+        }
+    }
+    let huge = [
+        json!({"role":"assistant","text":"abcdefghij".repeat(220_000)}),
+        json!({"role":"user","text":"not reached after failure"}),
+    ];
+    for raw in ["-1", "NaN", "Infinity", "0"] {
+        let result = throttle_oracle_case(&huge, raw, None, false);
+        assert!(
+            result["flushes"][0][0].as_u64().unwrap() > 500,
+            "whole event overshoots before the flush"
+        );
+        assert_eq!(
+            result["rows"][500][1], 500,
+            "no ordinal reset inside the large event"
+        );
+    }
+    // Python sleeps even if the real nonempty flush inserts zero deduplicated rows.
+    let duplicate = throttle_oracle_case(&roles[..1], "NaN", None, true);
+    assert_eq!(duplicate["flushes"], json!([[1, "user", 0]]));
+    assert_eq!(duplicate["error"][0], "ValueError");
+}

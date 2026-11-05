@@ -270,6 +270,15 @@ pub fn git_merges(repo: &str, limit: i64) -> Value {
 /// `git_merges` with the program and deadline as parameters (the test uses a fake git).
 pub fn git_merges_with(repo: &str, limit: i64, program: &str, timeout_s: f64) -> Value {
     let path = expand_home(repo);
+    git_merges_expanded_with(path, limit, program, timeout_s)
+}
+
+/// A path already expanded by a captured configuration owner. Do not expand it twice.
+pub(crate) fn git_merges_expanded(path: &str, limit: i64) -> Value {
+    git_merges_expanded_with(path.to_string(), limit, "git", 10.0)
+}
+
+fn git_merges_expanded_with(path: String, limit: i64, program: &str, timeout_s: f64) -> Value {
     if !Path::new(&path).join(".git").is_dir() {
         return json!({"repo": path, "merges": [], "as_of": null, "reason": format!("{path} is not a git repository")});
     }
@@ -318,9 +327,20 @@ pub fn git_merges_with(repo: &str, limit: i64, program: &str, timeout_s: f64) ->
 }
 
 fn expand_home(path: &str) -> String {
-    match (path.strip_prefix("~/"), std::env::var("HOME")) {
-        (Some(rest), Ok(home)) => format!("{home}/{rest}"),
-        _ => path.to_string(),
+    expand_home_with(path, || std::env::var("HOME"))
+}
+
+fn expand_home_with(
+    path: &str,
+    home: impl FnOnce() -> Result<String, std::env::VarError>,
+) -> String {
+    // Like Python expanduser, ordinary paths do not consult HOME or the account database.
+    let Some(rest) = path.strip_prefix("~/") else {
+        return path.to_string();
+    };
+    match home() {
+        Ok(home) => format!("{home}/{rest}"),
+        Err(_) => path.to_string(),
     }
 }
 
@@ -419,6 +439,52 @@ pub fn reply_stats(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn git_merges_expanded_preserves_a_retained_tilde_path() {
+        let path = "~/a/workspace/summary-no-such-repository";
+        let output = super::git_merges_expanded_with(path.into(), 10, "/nonexistent/git", 0.1);
+        assert_eq!(output["repo"], path);
+        assert_eq!(output["reason"], format!("{path} is not a git repository"));
+    }
+
+    #[test]
+    fn git_merge_ordinary_paths_do_not_read_missing_or_bad_home() {
+        use std::cell::Cell;
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+        for path in ["/explicit/repository", "relative/repository", ""] {
+            for home in [
+                Err(std::env::VarError::NotPresent),
+                Err(std::env::VarError::NotUnicode(OsString::from_vec(vec![
+                    0xff,
+                ]))),
+                Ok("~".to_string()),
+                Ok(String::new()),
+            ] {
+                let called = Cell::new(false);
+                assert_eq!(
+                    super::expand_home_with(path, || {
+                        called.set(true);
+                        home
+                    }),
+                    path
+                );
+                assert!(
+                    !called.get(),
+                    "ordinary path must return before HOME lookup"
+                );
+            }
+        }
+        assert_eq!(
+            super::expand_home_with("~/repo", || Ok("/captured".into())),
+            "/captured/repo"
+        );
+        assert_eq!(
+            super::expand_home_with("~/repo", || Err(std::env::VarError::NotPresent)),
+            "~/repo"
+        );
+    }
+
     use super::*;
     use std::process::Command;
 

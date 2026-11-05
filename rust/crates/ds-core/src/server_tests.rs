@@ -361,3 +361,60 @@ fn a_connections_requests_all_run_on_one_thread_and_connections_do_not_share() {
     stop.store(true, Ordering::SeqCst);
     thread.join().unwrap();
 }
+
+#[test]
+fn socket_python_nonfinite_wire_preserves_raw_literals_and_collisions() {
+    let running = start("nonfinite-wire");
+    let mut conn = connect(&running.path);
+    conn.writer
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .unwrap();
+    conn.send(concat!(
+        r#"{"id":NaN,"cmd":"args","args":{"raw":[NaN,Infinity,-Infinity,1e309],"literal":"Infinity","nested":{"$serde_json::private::Number":"NaN"},"escaped":"\"NaN","huge":123456789012345678901234567890}}"#,
+        "\n"
+    ));
+    let mut reply = String::new();
+    conn.reader.read_line(&mut reply).unwrap();
+    assert_eq!(
+        reply,
+        concat!(
+            r#"{"id":NaN,"ok":true,"result":{"raw":[NaN,Infinity,-Infinity,Infinity],"literal":"Infinity","nested":{"$serde_json::private::Number":"NaN"},"escaped":"\"NaN","huge":123456789012345678901234567890}}"#,
+            "\n"
+        )
+    );
+    // Invalid numeric grammar does not dispatch, and the following frame still succeeds.
+    conn.send("{\"id\":1,\"cmd\":\"args\",\"args\":{\"x\":NaNx}}\n{\"id\":2,\"cmd\":\"whoami\"}\n");
+    assert_eq!(
+        conn.line(),
+        json!({"id":null,"ok":false,"error":"invalid JSON"})
+    );
+    let identity = conn.line();
+    assert_eq!(identity["result"]["socket_peer"], true);
+    assert!(identity["result"]["caller_pid"].is_i64());
+    assert_eq!(identity["result"]["self_pane_id"], Value::Null);
+}
+
+#[test]
+fn actual_client_and_server_preserve_nonfinite_number_arguments() {
+    let running = start("nonfinite-client");
+    let mut client = crate::client::FlockClient::new(
+        crate::client::UnixTransport {
+            path: running.path.clone(),
+        },
+        Some("w1:p1".into()),
+        "fixture".into(),
+        std::time::Duration::from_secs(5),
+        None,
+    );
+    let args = crate::wire_json::from_str(r#"{"n":NaN,"p":Infinity,"m":-Infinity,"literal":"NaN","$serde_json::private::Number":"Infinity"}"#).unwrap();
+    let result = client
+        .call("args", args.as_object().unwrap().clone())
+        .unwrap();
+    assert_eq!(
+        crate::wire_json::to_string(&result).unwrap(),
+        crate::wire_json::to_string(&args).unwrap()
+    );
+    assert!(result["n"].is_number());
+    assert_eq!(crate::api::python_value_string(&result["n"]), "nan");
+    assert_eq!(result["literal"], "NaN");
+}

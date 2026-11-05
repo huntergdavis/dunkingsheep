@@ -3,6 +3,8 @@
 //! Database and upload-root access remain behind the injected backend. This module
 //! owns query/form parsing, authentication, response headers, and pagination.
 
+use super::response_error::WebResponseError;
+
 use std::{
     collections::hash_map::RandomState,
     future::poll_fn,
@@ -120,7 +122,7 @@ async fn search(
     request: Request,
 ) -> Response {
     if let Err(response) = authenticate(auth.as_ref(), request.headers(), scheme).await {
-        return response;
+        return response.into_response();
     }
     let query = match parse_query(request.uri().query()) {
         Ok(query) => query,
@@ -216,7 +218,7 @@ async fn upload(
         Err(MultipartFileError::BodyFailure) => return too_large(),
     };
     if let Err(response) = authenticate(auth.as_ref(), &headers, scheme).await {
-        return response;
+        return response.into_response();
     }
     if parsed.bytes.len() > MAX_UPLOAD {
         return too_large();
@@ -245,7 +247,7 @@ async fn download(
     request: Request,
 ) -> Response {
     if let Err(response) = authenticate(auth.as_ref(), request.headers(), scheme).await {
-        return response;
+        return response.into_response();
     }
     let query = match parse_query(request.uri().query()) {
         Ok(query) => query,
@@ -327,7 +329,7 @@ fn download_response(
     if !use_range {
         *response.status_mut() = StatusCode::OK;
         *response.body_mut() = Body::from(file.bytes);
-        return response;
+        return response.into_response();
     }
 
     let parsed = match parse_byte_ranges(range.unwrap_or_default(), content_length) {
@@ -996,7 +998,7 @@ async fn authenticate(
     auth: &dyn AuthBackend,
     headers: &HeaderMap,
     scheme: RequestScheme,
-) -> Result<(), Response> {
+) -> Result<(), WebResponseError> {
     if let Some(origin) = headers
         .get(header::ORIGIN)
         .and_then(|value| value.to_str().ok())
@@ -1010,10 +1012,9 @@ async fn authenticate(
             RequestScheme::Https => "https",
         };
         if !origin.is_empty() && origin != format!("{expected}://{host}") {
-            return Err(detail_response(
-                StatusCode::FORBIDDEN,
-                "Cross-origin request refused",
-            ));
+            return Err(
+                detail_response(StatusCode::FORBIDDEN, "Cross-origin request refused").into(),
+            );
         }
     }
     let bearer = headers
@@ -1025,6 +1026,7 @@ async fn authenticate(
         .await
         .map(|_| ())
         .map_err(auth_error_response)
+        .map_err(WebResponseError::from)
 }
 
 fn session_cookie(headers: &HeaderMap) -> Option<String> {
@@ -1043,7 +1045,7 @@ fn session_cookie(headers: &HeaderMap) -> Option<String> {
     session
 }
 
-fn unquote_cookie_value(value: &str) -> String {
+pub(super) fn unquote_cookie_value(value: &str) -> String {
     if value.len() < 2 || !value.starts_with('"') || !value.ends_with('"') {
         return value.to_owned();
     }

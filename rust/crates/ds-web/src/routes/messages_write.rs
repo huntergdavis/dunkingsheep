@@ -4,6 +4,8 @@
 //! HTTP contract (validation, auth, status, and JSON shaping) and can be tested without
 //! opening the desk database or contacting a pane.
 
+use super::response_error::WebResponseError;
+
 use std::{future::Future, pin::Pin, sync::Arc};
 
 use axum::{
@@ -95,18 +97,18 @@ async fn post_message(
     let headers = request.headers().clone();
     let body = match request_json(request).await {
         Ok(body) => body,
-        Err(response) => return response,
+        Err(response) => return response.into_response(),
     };
     let identity = match authenticate(auth.as_ref(), &headers, scheme).await {
         Ok(identity) => identity,
-        Err(response) => return response,
+        Err(response) => return response.into_response(),
     };
     let Some(body) = body else {
         return required_body_error();
     };
     let data = match message_input(&body) {
         Ok(data) => data,
-        Err(response) => return response,
+        Err(response) => return response.into_response(),
     };
     match backend.post_message(data, identity).await {
         Ok(value) => Json(value).into_response(),
@@ -123,7 +125,7 @@ async fn send_now(
 ) -> Response {
     let identity = match authenticate(auth.as_ref(), &headers, scheme).await {
         Ok(identity) => identity,
-        Err(response) => return response,
+        Err(response) => return response.into_response(),
     };
     let Some(message_id) = python_path_integer(&message_id) else {
         return path_integer_error(&message_id);
@@ -146,18 +148,18 @@ async fn post_brief(
     let headers = request.headers().clone();
     let body = match request_json(request).await {
         Ok(body) => body,
-        Err(response) => return response,
+        Err(response) => return response.into_response(),
     };
     let identity = match authenticate(auth.as_ref(), &headers, scheme).await {
         Ok(identity) => identity,
-        Err(response) => return response,
+        Err(response) => return response.into_response(),
     };
     let Some(body) = body else {
         return required_body_error();
     };
     let data = match brief_input(&body) {
         Ok(data) => data,
-        Err(response) => return response,
+        Err(response) => return response.into_response(),
     };
     if identity != Identity::Api {
         return detail_response(StatusCode::FORBIDDEN, "API token required");
@@ -168,9 +170,9 @@ async fn post_brief(
     }
 }
 
-fn message_input(body: &Value) -> Result<MessageIn, Response> {
+fn message_input(body: &Value) -> Result<MessageIn, WebResponseError> {
     let Some(object) = body.as_object() else {
-        return Err(model_attributes_error(body));
+        return Err(model_attributes_error(body).into());
     };
     let mut errors = Vec::new();
     let channel =
@@ -180,7 +182,7 @@ fn message_input(body: &Value) -> Result<MessageIn, Response> {
     let attachment_ids = string_list(object, "attachment_ids", 10, &mut errors);
     let external_id = optional_string(object, "external_id", body, 100, &mut errors);
     if !errors.is_empty() {
-        return Err(validation_errors(errors));
+        return Err(validation_errors(errors).into());
     }
     Ok(MessageIn {
         channel,
@@ -190,9 +192,9 @@ fn message_input(body: &Value) -> Result<MessageIn, Response> {
     })
 }
 
-fn brief_input(body: &Value) -> Result<BriefIn, Response> {
+fn brief_input(body: &Value) -> Result<BriefIn, WebResponseError> {
     let Some(object) = body.as_object() else {
-        return Err(model_attributes_error(body));
+        return Err(model_attributes_error(body).into());
     };
     let mut errors = Vec::new();
     // Keep this order aligned with BriefIn in web/app.py: answers, channel, body,
@@ -203,7 +205,7 @@ fn brief_input(body: &Value) -> Result<BriefIn, Response> {
     let text = string_field(object, "body", body, true, 1, 20_000, &mut errors).unwrap_or_default();
     let attachment_ids = string_list(object, "attachment_ids", 10, &mut errors);
     if !errors.is_empty() {
-        return Err(validation_errors(errors));
+        return Err(validation_errors(errors).into());
     }
     Ok(BriefIn {
         answers,
@@ -222,8 +224,8 @@ fn model_attributes_error(body: &Value) -> Response {
     }))
 }
 
-fn string_field<'a>(
-    object: &'a Map<String, Value>,
+fn string_field(
+    object: &Map<String, Value>,
     name: &str,
     body: &Value,
     required: bool,
@@ -471,7 +473,7 @@ fn missing_field_error(name: &str, body: &Value) -> Value {
     })
 }
 
-async fn request_json(request: Request) -> Result<Option<Value>, Response> {
+async fn request_json(request: Request) -> Result<Option<Value>, WebResponseError> {
     let is_json = request
         .headers()
         .get(header::CONTENT_TYPE)
@@ -493,9 +495,11 @@ async fn request_json(request: Request) -> Result<Option<Value>, Response> {
             String::from_utf8_lossy(&bytes).into_owned(),
         )));
     }
-    serde_json::from_slice(&bytes).map(Some).map_err(|error| {
-        let input = String::from_utf8_lossy(&bytes);
-        (
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|error| {
+            let input = String::from_utf8_lossy(&bytes);
+            (
             StatusCode::UNPROCESSABLE_ENTITY,
             Json(json!({"detail": [{
                 "type": "json_invalid", "loc": ["body", json_error_position(&input, &error)],
@@ -503,7 +507,8 @@ async fn request_json(request: Request) -> Result<Option<Value>, Response> {
             }]})),
         )
             .into_response()
-    })
+        })
+        .map_err(WebResponseError::from)
 }
 
 fn is_json_media_type(content_type: &str) -> bool {
@@ -545,11 +550,11 @@ fn python_json_error(error: &serde_json::Error) -> String {
     }
 }
 
-async fn authenticate(
+pub(super) async fn authenticate(
     auth: &dyn AuthBackend,
     headers: &HeaderMap,
     scheme: RequestScheme,
-) -> Result<Identity, Response> {
+) -> Result<Identity, WebResponseError> {
     if let Some(origin) = headers
         .get_all(header::ORIGIN)
         .iter()
@@ -567,10 +572,9 @@ async fn authenticate(
             RequestScheme::Https => "https",
         };
         if !origin.is_empty() && origin != format!("{scheme_text}://{host}") {
-            return Err(detail_response(
-                StatusCode::FORBIDDEN,
-                "Cross-origin request refused",
-            ));
+            return Err(
+                detail_response(StatusCode::FORBIDDEN, "Cross-origin request refused").into(),
+            );
         }
     }
     let authorization = headers
@@ -585,6 +589,7 @@ async fn authenticate(
     auth.identity(bearer, cookie.as_deref())
         .await
         .map_err(auth_error_response)
+        .map_err(WebResponseError::from)
 }
 
 fn header_latin1(value: &HeaderValue) -> String {
@@ -612,25 +617,7 @@ fn session_cookie(headers: &HeaderMap) -> Option<String> {
 }
 
 fn python_cookie_unquote(value: &str) -> String {
-    let characters: Vec<char> = value.chars().collect();
-    if characters.len() < 2 || characters[0] != '"' || characters[characters.len() - 1] != '"' {
-        return value.to_owned();
-    }
-    let mut result = String::new();
-    let mut index = 1;
-    let end = characters.len() - 1;
-    while index < end {
-        if characters[index] == '\\' {
-            index += 1;
-            if index < end {
-                result.push(characters[index]);
-            }
-        } else {
-            result.push(characters[index]);
-        }
-        index += 1;
-    }
-    result
+    super::search_attachments::unquote_cookie_value(value)
 }
 
 fn auth_error_response(error: AuthError) -> Response {

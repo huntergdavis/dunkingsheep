@@ -620,17 +620,21 @@ impl<T: Transport> FlockClient<T> {
         } else {
             self.self_pane_id.clone()
         };
-        let mut request = json!({
-            "id": self.next_id,
-            "cmd": cmd,
-            "args": args,
-            "self_pane_id": pane,
-        });
+        // Move raw Values directly: serde_json::to_value (including json!) rejects
+        // the pinned numeric NaN carrier before the wire codec can serialize it.
+        let mut request = Map::new();
+        request.insert("id".into(), self.next_id.into());
+        request.insert("cmd".into(), cmd.into());
+        request.insert("args".into(), Value::Object(args));
+        request.insert(
+            "self_pane_id".into(),
+            pane.map(Value::String).unwrap_or(Value::Null),
+        );
         if let Some(token) = &self.token {
-            request["service_token"] = json!(token);
+            request.insert("service_token".into(), json!(token));
         }
         self.next_id += 1;
-        let line = request.to_string();
+        let line = crate::wire_json::to_string(&request).expect("request values serialize");
         let attempts = 1 + if IDEMPOTENT_READS.contains(&cmd) {
             READ_RETRIES
         } else {
@@ -656,7 +660,7 @@ impl<T: Transport> FlockClient<T> {
                 "daemon closed the connection without replying".to_string(),
             ));
         };
-        let response: Value = serde_json::from_str(raw.trim_end())
+        let response: Value = crate::wire_json::from_str(raw.trim_end())
             .map_err(|error| ClientError::Protocol(format!("invalid daemon reply: {error}")))?;
         if response.get("ok").and_then(Value::as_bool) != Some(true) {
             let text = response

@@ -14,6 +14,9 @@ use axum::{
 use ds_web::{
     router_with_scheme,
     routes::auth::{AuthBackend, AuthError, AuthFuture, Identity},
+    routes::ops_board::{
+        router as ops_board_router, OpsBoardBackend, OpsBoardError, OpsBoardFuture,
+    },
     routes::ops_metrics::{
         router as ops_metrics_router, OpsMetricsBackend, OpsMetricsError, OpsMetricsFuture,
     },
@@ -292,6 +295,104 @@ fn operations_metrics_history_range_error_matches_python_fixture() {
         .get(header::SET_COOKIE)
         .map(|value| value.to_str().unwrap());
     assert_eq!(set_cookie, expected["set_cookie"].as_str());
+    let bytes = block_on(to_bytes(response.into_body(), usize::MAX)).expect("response body");
+    let raw = String::from_utf8(bytes.to_vec()).expect("UTF-8 JSON body");
+    assert_eq!(raw, expected["body"].as_str().unwrap());
+    assert_eq!(
+        serde_json::from_str::<Value>(&raw).unwrap(),
+        expected["json"]
+    );
+}
+
+struct FixtureAuth;
+
+impl AuthBackend for FixtureAuth {
+    fn login<'a>(&'a self, _: &'a str, _: &'a str) -> AuthFuture<'a, Result<String, AuthError>> {
+        Box::pin(async { Err(AuthError::Internal("unused".into())) })
+    }
+
+    fn identity<'a>(
+        &'a self,
+        _: Option<&'a str>,
+        _: Option<&'a str>,
+    ) -> AuthFuture<'a, Result<Identity, AuthError>> {
+        Box::pin(async { Ok(Identity::Owner) })
+    }
+
+    fn logout<'a>(&'a self, _: Option<&'a str>) -> AuthFuture<'a, Result<(), AuthError>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn change_password<'a>(
+        &'a self,
+        _: &'a str,
+        _: &'a str,
+        _: Option<&'a str>,
+    ) -> AuthFuture<'a, Result<(), AuthError>> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+struct FixtureOpsBoard;
+
+impl OpsBoardBackend for FixtureOpsBoard {
+    fn defer_question<'a>(
+        &'a self,
+        task_id: &'a str,
+    ) -> OpsBoardFuture<'a, Result<Value, OpsBoardError>> {
+        Box::pin(async move { Ok(json!({"id": task_id, "priority": "low"})) })
+    }
+
+    fn refresh<'a>(&'a self) -> OpsBoardFuture<'a, Result<Value, OpsBoardError>> {
+        Box::pin(async { Ok(json!({})) })
+    }
+}
+
+#[test]
+fn ops_board_not_now_matches_python_fixture() {
+    let fixture: Value = serde_json::from_str(include_str!("fixtures/ops_board_not_now.json"))
+        .expect("valid shared Python/Rust fixture");
+    let request_fixture = &fixture["request"];
+    let request_body = serde_json::to_vec(&request_fixture["json"]).expect("request JSON");
+    let board: Arc<dyn OpsBoardBackend> = Arc::new(FixtureOpsBoard);
+    let auth: Arc<dyn AuthBackend> = Arc::new(FixtureAuth);
+    let app = ops_board_router(board, auth, RequestScheme::Http);
+    let request = Request::builder()
+        .method(request_fixture["method"].as_str().unwrap())
+        .uri(request_fixture["path"].as_str().unwrap())
+        .header(
+            header::HOST,
+            request_fixture["headers"]["host"].as_str().unwrap(),
+        )
+        .header(
+            header::CONTENT_TYPE,
+            request_fixture["headers"]["content-type"].as_str().unwrap(),
+        )
+        .body(Body::from(request_body))
+        .expect("valid fixture request");
+
+    let response = block_on(app.oneshot(request)).expect("in-process router response");
+    let expected = &fixture["response"];
+    assert_eq!(
+        response.status().as_u16(),
+        expected["status"].as_u64().unwrap() as u16
+    );
+    for (name, value) in expected["headers"].as_object().unwrap() {
+        assert_eq!(
+            response.headers().get(name).unwrap().to_str().unwrap(),
+            value.as_str().unwrap(),
+            "header {name}"
+        );
+    }
+    let set_cookie = response
+        .headers()
+        .get(header::SET_COOKIE)
+        .map(|value| value.to_str().unwrap());
+    assert_eq!(
+        serde_json::to_value(set_cookie).unwrap(),
+        expected["set_cookie"]
+    );
+
     let bytes = block_on(to_bytes(response.into_body(), usize::MAX)).expect("response body");
     let raw = String::from_utf8(bytes.to_vec()).expect("UTF-8 JSON body");
     assert_eq!(raw, expected["body"].as_str().unwrap());
