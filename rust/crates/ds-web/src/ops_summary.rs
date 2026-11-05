@@ -31,6 +31,18 @@ impl From<serde_json::Error> for SummaryError {
     }
 }
 
+impl std::fmt::Display for SummaryError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Sql(error) => write!(formatter, "SQLite error: {error}"),
+            Self::Timestamp(value) => write!(formatter, "invalid timestamp: {value}"),
+            Self::Json(error) => write!(formatter, "invalid JSON: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for SummaryError {}
+
 fn parse_time(value: &str) -> SummaryResult<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(value)
         .map(|value| value.with_timezone(&Utc))
