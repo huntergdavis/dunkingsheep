@@ -799,10 +799,10 @@ mod tests {
             "whoami",
             serde_json::json!({}),
             Some(shutdown_token),
-            Some("w1:p2"),
+            Some("w2:p2"),
         );
         assert_eq!(true, other_pane_identity["ok"], "{other_pane_identity}");
-        assert_eq!("w1:p2", other_pane_identity["result"]["pane_id"]);
+        assert_eq!("w2:p2", other_pane_identity["result"]["pane_id"]);
         assert_eq!(
             true, other_pane_identity["result"]["bound"],
             "{other_pane_identity}"
@@ -813,7 +813,7 @@ mod tests {
             "task_read",
             serde_json::json!({"id": private_id}),
             None,
-            Some("w1:p2"),
+            Some("w2:p2"),
         );
         assert_eq!(false, private_read["ok"], "{private_read}");
         assert!(
