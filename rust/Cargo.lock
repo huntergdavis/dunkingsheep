@@ -473,11 +473,14 @@ name = "ds-web"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64 0.22.1",
  "chrono",
  "ds-core",
+ "ring",
  "rusqlite",
  "serde",
  "serde_json",
+ "subtle",
  "tempfile",
  "tokio",
  "tower",
