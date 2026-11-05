@@ -41,6 +41,8 @@ fn run_cli_with_env_bounded(socket: &str, command: &[String], env: &[(&str, &str
     let mut cli = Command::new(env!("CARGO_BIN_EXE_dunkingsheep"));
     cli.args(["--socket", socket, "--self-pane", "%99"])
         .args(command)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .env_remove("DUNKINGSHEEP_SOCKET")
         .env_remove("DUNKINGSHEEP_SERVICE_TOKEN")
         .env_remove("DUNKINGSHEEP_SERVICE_TOKEN_FILE")
@@ -1465,17 +1467,12 @@ fn cli_route_56_mcp_setup() {
     std::fs::create_dir_all(&quoted_dir).unwrap();
     let quoted_executable = quoted_dir.join("dunkingsheep");
     let source_executable = env!("CARGO_BIN_EXE_dunkingsheep");
-    let staged_executable = tempfile::NamedTempFile::new_in(&quoted_dir).unwrap();
-    std::fs::copy(source_executable, staged_executable.path()).unwrap();
+    std::fs::copy(source_executable, &quoted_executable).unwrap();
     std::fs::set_permissions(
-        staged_executable.path(),
+        &quoted_executable,
         std::fs::metadata(source_executable).unwrap().permissions(),
     )
     .unwrap();
-    staged_executable
-        .into_temp_path()
-        .persist(&quoted_executable)
-        .unwrap();
     let run_quoted = |harness: &str| {
         Command::new(&quoted_executable)
             .args(["mcp-setup", harness])
