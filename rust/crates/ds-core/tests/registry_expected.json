@@ -2632,6 +2632,12 @@
    },
    "description": "Project PMs. action=digest publishes or updates ONE digest per project under a stable id (pm-digest:<project>) with changed/blocked/owner_decisions/numbers so a PM is a digest, not a stream; routing shows the lane->PM registry and whether stray VP mail is redirected or flagged."
   },
+  "projects": {
+   "actions": {
+    "spawn": "project_spawn"
+   },
+   "description": "Budget-admitted project lifecycle. action=spawn starts a project using daemon-owned approval, provider usage and team policy."
+  },
   "superuser": {
    "actions": {
     "add": "superuser_add",
