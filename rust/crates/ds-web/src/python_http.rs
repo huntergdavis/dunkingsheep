@@ -94,27 +94,53 @@ async fn serve_connection(
     }
     let request_line = trim_crlf(&line);
     log.request_line.clone_from(&request_line);
-    let mut words = request_line.split_ascii_whitespace();
-    let Some(method) = words.next() else {
+    let words: Vec<_> = request_line.split_ascii_whitespace().collect();
+    if words.is_empty() {
         return Ok(());
-    };
-    let Some(target) = words.next() else {
+    }
+    let method = words[0];
+    if words.len() < 2 {
         let message = format!("Bad request syntax ({})", python_repr(&request_line));
         return write_error_legacy(&mut write, 400, "Bad Request", &message, &log).await;
-    };
-    let version = words.next();
-    let short_legacy_request = version.is_none();
+    }
+    let target = words[1];
+    let short_legacy_request = words.len() == 2;
     if short_legacy_request && method != "GET" {
         let message = format!("Bad HTTP/0.9 request type ({})", python_repr(method));
         return write_error_legacy(&mut write, 400, "Bad Request", &message, &log).await;
     }
-    let version = version.unwrap_or("HTTP/0.9");
-    let legacy_response = short_legacy_request || version == "HTTP/0.9";
-    if words.next().is_some()
-        || !(version == "HTTP/0.9" || version == "HTTP/1.0" || version == "HTTP/1.1")
-    {
-        return write_error(&mut write, 400, "Bad Request", "bad request syntax", &log).await;
+    let version = if words.len() >= 3 {
+        let candidate = words[words.len() - 1];
+        let Some((major, minor)) = parse_http_version(candidate) else {
+            let message = format!("Bad request version ({})", python_repr(candidate));
+            return write_error_legacy(&mut write, 400, "Bad Request", &message, &log).await;
+        };
+        if (major, minor) >= (2, 0) {
+            let base_version = candidate.strip_prefix("HTTP/").unwrap_or(candidate);
+            let message = format!("Invalid HTTP version ({base_version})");
+            return write_error_legacy(
+                &mut write,
+                505,
+                "HTTP Version Not Supported",
+                &message,
+                &log,
+            )
+            .await;
+        }
+        Some(candidate)
+    } else {
+        None
+    };
+    let legacy_response = short_legacy_request || version == Some("HTTP/0.9");
+    if !(2..=3).contains(&words.len()) {
+        let message = format!("Bad request syntax ({})", python_repr(&request_line));
+        return if legacy_response {
+            write_error_legacy(&mut write, 400, "Bad Request", &message, &log).await
+        } else {
+            write_error(&mut write, 400, "Bad Request", &message, &log).await
+        };
     }
+    let version = version.unwrap_or("HTTP/0.9");
     let mut headers = Vec::<(String, String)>::new();
     let mut header_count = 0;
     while !short_legacy_request {
@@ -268,6 +294,21 @@ fn python_content_length(value: &str) -> Option<(bool, bool, bool)> {
     let zero = magnitude.is_empty();
     let too_large = magnitude.len() > 4 || (magnitude.len() == 4 && magnitude > "4096");
     Some((negative && !zero, zero, too_large))
+}
+
+fn parse_http_version(value: &str) -> Option<(u64, u64)> {
+    let version = value.strip_prefix("HTTP/")?;
+    let (major, minor) = version.split_once('.')?;
+    if major.is_empty()
+        || minor.is_empty()
+        || major.len() > 10
+        || minor.len() > 10
+        || !major.bytes().all(|byte| byte.is_ascii_digit())
+        || !minor.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    Some((major.parse().ok()?, minor.parse().ok()?))
 }
 
 fn python_repr(value: &str) -> String {
@@ -431,12 +472,13 @@ fn error_page(status: u16, reason: &str, message: &str) -> String {
             "The server is unwilling to process the request because its header fields are too large"
         }
         501 => "Server does not support this operation",
+        505 => "Cannot fulfill request",
         _ => reason,
     };
     format!(
         "<!DOCTYPE HTML>\n<html lang=\"en\">\n    <head>\n        <meta charset=\"utf-8\">\n        <style type=\"text/css\">\n            :root {{\n                color-scheme: light dark;\n            }}\n        </style>\n        <title>Error response</title>\n    </head>\n    <body>\n        <h1>Error response</h1>\n        <p>Error code: {status}</p>\n        <p>Message: {}.</p>\n        <p>Error code explanation: {status} - {explanation}.</p>\n    </body>\n</html>\n",
         html_escape(message),
-    );
+    )
 }
 
 fn html_escape(value: &str) -> String {
@@ -707,6 +749,19 @@ server.serve_forever()
             b"GET /healthz\r\n",
             28,
         );
+        for (request, case) in [
+            (b"GET /healthz extra HTTP/1.0\r\n".as_slice(), 29),
+            (b"GET /healthz HTTP/1.0 extra\r\n", 30),
+            (b"GET /healthz HTTP/nope\r\n", 31),
+            (b"GET /healthz HTTP/2.0\r\n", 32),
+        ] {
+            compare_oracle_request(
+                port,
+                router(FakeDaemon::default(), OracleBackend),
+                request,
+                case,
+            );
+        }
         compare_expect_continue(port, router(FakeDaemon::default(), OracleBackend));
         child.kill().unwrap();
         child.wait().unwrap();
@@ -719,7 +774,7 @@ server.serve_forever()
         python.shutdown(std::net::Shutdown::Write).unwrap();
         let mut python_response = Vec::new();
         python.read_to_end(&mut python_response).unwrap();
-        let compare_error_page = !matches!(case, 12 | 20 | 21 | 22 | 23);
+        let compare_error_page = !matches!(case, 12 | 20 | 21 | 22 | 23 | 29);
         assert_response_equivalent(&python_response, &rust, case, compare_error_page);
     }
 
@@ -777,7 +832,7 @@ server.serve_forever()
     }
 
     fn assert_response_equivalent(python: &[u8], rust: &[u8], case: usize, compare_body: bool) {
-        if matches!(case, 23 | 27 | 28) {
+        if matches!(case, 23 | 27 | 28 | 30 | 31 | 32) {
             assert_eq!(python, rust, "legacy HTTP/0.9 case {case}");
             return;
         }
