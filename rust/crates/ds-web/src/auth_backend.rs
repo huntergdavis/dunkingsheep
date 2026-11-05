@@ -370,6 +370,15 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
+    #[test]
+    fn password_digest_matches_python_pbkdf2() {
+        let salt: Vec<u8> = (0..16).collect();
+        assert_eq!(
+            hex(&derive("fixture-🔒", &salt)),
+            "b54996009e6c640e70353b694757189cbdb3ae2ed570c351e63a7251659089f3"
+        );
+    }
+
     #[tokio::test]
     async fn python_compatible_credentials_sessions_and_restart() {
         let dir = tempfile::tempdir().unwrap();
