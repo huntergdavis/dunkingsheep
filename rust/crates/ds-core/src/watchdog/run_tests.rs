@@ -199,6 +199,13 @@ fn desk_channel_reads_watermark_and_refuses_malformed_or_wrong_route() {
         std::fs::write(&path, status.to_string()).unwrap();
         assert_eq!(channel.confirmed_through().unwrap(), expected);
     }
+    let large_id: Value = serde_json::from_str("92233720368547758081234").unwrap();
+    std::fs::write(
+        &path,
+        format!(r#"{{"channel":"cos","last_brief_id":{large_id}}}"#),
+    )
+    .unwrap();
+    assert_eq!(channel.confirmed_through().unwrap(), Some(large_id));
     for value in [json!(true), json!("1065"), json!(1.5), json!([]), json!({})] {
         std::fs::write(
             &path,
@@ -348,6 +355,45 @@ fn run_confirms_matching_route_and_reports_channel_mismatch_once() {
     assert_eq!(retry["problems"], json!([]));
     assert_eq!(retry["sent"], json!([]));
     assert!(owner.posts.borrow().is_empty());
+}
+
+#[test]
+fn confirm_pending_sorts_pages_and_accepts_python_sized_ids() {
+    let (_dir, config) = run_fixture();
+    let large_id: Value = serde_json::from_str("92233720368547758081234").unwrap();
+    let mut pages = serde_json::Map::new();
+    // Insert in reverse lexical order so the observed problem order proves the sort.
+    pages.insert(
+        "z-page".into(),
+        json!({"brief_id":1,"posted_at":90.0,"confirmed_at":null,"desk_channel":"vp"}),
+    );
+    pages.insert(
+        "a-page".into(),
+        json!({"brief_id":1,"posted_at":90.0,"confirmed_at":null,"desk_channel":"vp"}),
+    );
+    pages.insert(
+        "large-page".into(),
+        json!({"brief_id":large_id,"posted_at":90.0,"confirmed_at":null,"desk_channel":"cos"}),
+    );
+    let mut state = super::super::state::empty_state();
+    state["owner_pages"] = Value::Object(pages);
+    let owner = FakeOwner {
+        route: "cos".into(),
+        through: Some(large_id),
+        posts: RefCell::new(vec![]),
+        fail: false,
+    };
+    let mut problems = Vec::new();
+    confirm_pending(&config, &mut state, &owner, 100.0, &mut problems);
+    assert!(problems[0]
+        .as_str()
+        .unwrap()
+        .starts_with("owner page a-page"));
+    assert!(problems[1]
+        .as_str()
+        .unwrap()
+        .starts_with("owner page z-page"));
+    assert_eq!(state["owner_pages"]["large-page"]["confirmed_at"], 100.0);
 }
 
 #[test]

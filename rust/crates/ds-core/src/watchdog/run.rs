@@ -1,5 +1,6 @@
 //! Watchdog delivery adapters and one deterministic run engine. No clients or credentials are
 //! discovered here; the sender, owner transport, pane provider, and host sampler are injected.
+use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -47,6 +48,53 @@ fn refused(text: impl Into<String>) -> DunkError {
 }
 fn read_json(path: &Path) -> Result<Value, DunkError> {
     serde_json::from_str(&std::fs::read_to_string(path)?).map_err(|e| refused(e.to_string()))
+}
+
+/// Return an integer's exact JSON spelling. `arbitrary_precision` keeps Python-sized integers
+/// in `Number`, but `as_i64`/`as_u64` still reject values outside machine ranges.
+fn integer_text(value: &Value) -> Option<String> {
+    let Value::Number(number) = value else {
+        return None;
+    };
+    let text = number.to_string();
+    let digits = text.strip_prefix('-').unwrap_or(&text);
+    (!digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())).then_some(text)
+}
+
+fn compare_integer_text(left: &str, right: &str) -> Ordering {
+    fn parts(value: &str) -> (bool, &str) {
+        let negative = value.starts_with('-');
+        let digits = value
+            .strip_prefix('-')
+            .unwrap_or(value)
+            .trim_start_matches('0');
+        if digits.is_empty() {
+            (false, "0")
+        } else {
+            (negative, digits)
+        }
+    }
+    let (left_negative, left_digits) = parts(left);
+    let (right_negative, right_digits) = parts(right);
+    match (left_negative, right_negative) {
+        (true, false) => Ordering::Less,
+        (false, true) => Ordering::Greater,
+        (false, false) => left_digits
+            .len()
+            .cmp(&right_digits.len())
+            .then_with(|| left_digits.cmp(right_digits)),
+        (true, true) => right_digits
+            .len()
+            .cmp(&left_digits.len())
+            .then_with(|| right_digits.cmp(left_digits)),
+    }
+}
+
+fn compare_json_integers(left: &Value, right: &Value) -> Option<Ordering> {
+    Some(compare_integer_text(
+        &integer_text(left)?,
+        &integer_text(right)?,
+    ))
 }
 
 /// Persist each accepted submission before trying the next recipient. An accepted submission
@@ -176,7 +224,7 @@ impl<R: Fn(&Path) -> Result<String, DunkError>> DeskBriefChannel<R> {
         }
         match status.get("last_brief_id") {
             None | Some(Value::Null) => Ok(None),
-            Some(value) if value.is_i64() || value.is_u64() => Ok(Some(value.clone())),
+            Some(value) if integer_text(value).is_some() => Ok(Some(value.clone())),
             Some(value) => {
                 let repr = crate::api::python_value_repr(value);
                 Err(refused(format!("last_brief_id is not an integer: {repr}")))
@@ -226,13 +274,14 @@ fn confirm_pending(
     now: f64,
     problems: &mut Vec<String>,
 ) {
-    let pending: Vec<String> = state["owner_pages"]
+    let mut pending: Vec<String> = state["owner_pages"]
         .as_object()
         .into_iter()
         .flat_map(|pages| pages.iter())
         .filter(|(_, page)| page["confirmed_at"].is_null() && page["status"] != "undelivered")
         .map(|(key, _)| key.clone())
         .collect();
+    pending.sort();
     if pending.is_empty() {
         return;
     }
@@ -266,11 +315,10 @@ fn confirm_pending(
                 "owner page {key} (brief {}) channel {page_channel} differs from confirmation channel {channel_name}; recorded as UNDELIVERED",
                 page["brief_id"]
             ));
-        } else if through
-            .as_ref()
-            .and_then(Value::as_i64)
-            .is_some_and(|id| page["brief_id"].as_i64().is_some_and(|brief| brief <= id))
-        {
+        } else if through.as_ref().is_some_and(|id| {
+            compare_json_integers(&page["brief_id"], id)
+                .is_some_and(|ordering| ordering != Ordering::Greater)
+        }) {
             page["confirmed_at"] = json!(now);
         } else if page["posted_at"]
             .as_f64()
