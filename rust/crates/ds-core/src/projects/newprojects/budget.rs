@@ -137,6 +137,63 @@ impl ProjectBudgetConfig {
         )))
     }
 
+    /// Extract the legacy five-hour guard from an actual provider snapshot. Missing windows,
+    /// stale/error measurements, and malformed percentages remain unknown rather than becoming
+    /// zero. The provider's configured freshness ceiling is the only accepted age bound.
+    pub fn five_hour_usage_from_reading(&self, provider: &str, reading: &Value, now: f64) -> Usage {
+        let unknown = |why: &str| Usage::Unknown(why.to_string());
+        if reading["provider"].as_str() != Some(provider)
+            || reading["status"].as_str() != Some("ok")
+            || reading["meaning"].as_str() != Some("percent_used")
+            || !reading["source"]
+                .as_str()
+                .is_some_and(|source| !source.is_empty())
+            || !now.is_finite()
+        {
+            return unknown(
+                reading["reason"]
+                    .as_str()
+                    .unwrap_or("provider usage reading is unavailable or malformed"),
+            );
+        }
+        let Some(measured_at) = reading["measured_at"].as_f64() else {
+            return unknown("provider usage measurement time is unavailable");
+        };
+        let Some(policy) = self.providers.get(provider) else {
+            return unknown("provider budget policy is unavailable");
+        };
+        let max_age = policy
+            .subscription
+            .0
+            .as_ref()
+            .map(|item| item.max_age_seconds)
+            .into_iter()
+            .chain(
+                policy
+                    .credit_fallback
+                    .0
+                    .as_ref()
+                    .map(|item| item.max_age_seconds),
+            )
+            .reduce(f64::max)
+            .unwrap_or(0.0);
+        if !measured_at.is_finite() || measured_at > now || now - measured_at > max_age {
+            return unknown("provider usage measurement is stale or from the future");
+        }
+        reading["windows"]
+            .as_array()
+            .and_then(|windows| {
+                windows.iter().find(|window| {
+                    window["window_minutes"].as_f64() == Some(300.0)
+                        || window["name"].as_str() == Some("300min")
+                })
+            })
+            .and_then(|window| window["percent_used"].as_f64())
+            .filter(|percent| percent.is_finite() && (0.0..=100.0).contains(percent))
+            .map(Usage::Percent)
+            .unwrap_or_else(|| unknown("provider reading has no valid five-hour usage window"))
+    }
+
     /// Run the existing provider-specific reader off the async executor. Unknown/error
     /// providers stay unknown; no generic account probe or estimate is substituted.
     pub async fn read_provider(

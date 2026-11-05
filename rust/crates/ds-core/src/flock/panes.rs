@@ -61,6 +61,39 @@ impl std::fmt::Debug for Stores {
 }
 
 impl Flock {
+    /// Attach the one startup-supplied project policy to this canonical Flock.
+    pub fn attach_project_runtime_policy(
+        &self,
+        policy: std::sync::Arc<crate::server_runtime::ProjectRuntimePolicy>,
+    ) -> Result<(), crate::error::DunkError> {
+        let mut slot = self
+            .project_runtime_policy
+            .0
+            .lock()
+            .expect("project runtime policy lock");
+        if let Some(current) = slot.as_ref() {
+            if !std::sync::Arc::ptr_eq(current, &policy) {
+                return Err(crate::error::DunkError::Refused(
+                    "a different project runtime policy is already attached".into(),
+                ));
+            }
+        } else {
+            *slot = Some(policy);
+        }
+        Ok(())
+    }
+
+    /// Clone the canonical policy Arc and release the Flock slot lock before use.
+    pub fn project_runtime_policy(
+        &self,
+    ) -> Option<std::sync::Arc<crate::server_runtime::ProjectRuntimePolicy>> {
+        self.project_runtime_policy
+            .0
+            .lock()
+            .expect("project runtime policy lock")
+            .clone()
+    }
+
     /// Attach the canonical memory service and retain its own pool as the legacy read alias.
     pub fn attach_memory_service(
         &self,

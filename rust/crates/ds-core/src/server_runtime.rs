@@ -22,6 +22,7 @@ mod outbox_messages;
 mod outbox_runtime;
 mod owner_push;
 mod poolrad;
+mod project_runtime;
 mod push;
 mod push_eligibility;
 mod registrations;
@@ -41,6 +42,7 @@ mod verify;
 
 #[cfg(test)]
 pub(crate) use outbox_runtime::{CountdownGate, SubmitGate};
+pub use project_runtime::{ProjectRuntimeEntry, ProjectRuntimePolicy};
 pub use services::{RuntimeObservability, RuntimeServiceInputs, RuntimeServices};
 
 use std::collections::BTreeSet;
@@ -292,6 +294,24 @@ fn federated_input_enabled(value: Option<&OsStr>) -> bool {
     value == Some(OsStr::new("1"))
 }
 
+impl crate::projects::ProjectTerminal for TerminalCallAdapter<'_> {
+    fn create_workspace(
+        &mut self,
+        label: Option<&str>,
+        cwd: Option<&str>,
+        focus: bool,
+    ) -> Result<crate::terminal::Workspace, crate::terminal::TerminalError> {
+        self.with_terminal_mut(|terminal| terminal.create_workspace(label, cwd, focus))
+    }
+
+    fn start_agent(
+        &mut self,
+        spec: &crate::terminal::AgentSpec,
+    ) -> Result<crate::terminal::Pane, crate::terminal::TerminalError> {
+        self.with_terminal_mut(|terminal| terminal.start_agent(spec))
+    }
+}
+
 impl SendEnv for TerminalCallAdapter<'_> {
     fn read_pane(&self, pane_id: &str, lines: i64, ansi: bool) -> Option<String> {
         self.helper_sendenv_read_pane(pane_id, lines, ansi)
@@ -527,6 +547,45 @@ impl crate::api::CommandEnv for RequestRuntimeAdapter<'_> {
         ) -> Result<Value, DunkError>,
     ) -> Result<Value, DunkError> {
         self.with_request_inbox(operation)
+    }
+
+    fn project_spawn_config_for(
+        &self,
+        project_name: &str,
+        template: &str,
+    ) -> Result<crate::api::ProjectSpawnConfig, DunkError> {
+        self.terminal
+            .flock
+            .project_runtime_policy()
+            .ok_or_else(|| refusal("project runtime policy is not attached"))?
+            .request_config(project_name, template, self.runtime)
+    }
+
+    fn with_project_spawn_lock(
+        &self,
+        _project_name: &str,
+        operation: &mut dyn FnMut() -> Result<(), DunkError>,
+    ) -> Result<(), DunkError> {
+        let policy = self
+            .terminal
+            .flock
+            .project_runtime_policy()
+            .ok_or_else(|| refusal("project runtime policy is not attached"))?;
+        policy.with_spawn_gate(operation)
+    }
+
+    fn with_project_terminal(
+        &self,
+        operation: &mut dyn FnMut(
+            &mut dyn crate::projects::ProjectTerminal,
+        ) -> Result<(), DunkError>,
+    ) -> Result<(), DunkError> {
+        let mut terminal = TerminalCallAdapter {
+            flock: self.terminal.flock,
+            terminal: self.terminal.terminal,
+            runtime: self.terminal.runtime,
+        };
+        operation(&mut terminal)
     }
 
     fn add_dunk(

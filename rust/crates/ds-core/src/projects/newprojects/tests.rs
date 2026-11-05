@@ -1,7 +1,7 @@
 use super::*;
 use crate::error::DunkError;
-use crate::projects::{Authority, Projects, Request, State, Usage};
-use crate::terminal::fakes::FakeTerminal;
+use crate::projects::{Authority, ProjectAgentRegistrar, Projects, Request, State, Usage};
+use crate::terminal::{fakes::FakeTerminal, Pane};
 use serde_json::{json, Value};
 use std::fs;
 use std::path::Path;
@@ -48,6 +48,23 @@ fn request() -> Request {
         template: "standard".into(),
         soft_cap: None,
     }
+}
+
+#[test]
+fn missing_five_hour_usage_never_becomes_zero_headroom() {
+    let budget = ProjectBudgetConfig::from_json(&configured(Value::Null)).unwrap();
+    let reading = json!({
+        "provider":"codex",
+        "status":"ok",
+        "meaning":"percent_used",
+        "source":"fixture",
+        "measured_at":1000.0,
+        "windows":[{"name":"300min","window_minutes":300}]
+    });
+    assert!(matches!(
+        budget.five_hour_usage_from_reading("codex", &reading, 1001.0),
+        Usage::Unknown(_)
+    ));
 }
 
 #[test]
@@ -327,7 +344,7 @@ async fn durable_spawn_recovers_events_and_live_retry_is_idempotent() {
 }
 
 #[tokio::test]
-async fn durable_owner_report_failure_is_logged_and_retry_does_not_restart_agents() {
+async fn durable_owner_report_failure_is_uncertain_and_never_replayed() {
     let root = tempfile::tempdir().unwrap();
     let db = root.path().join("owned-projects.sqlite3");
     let provider_home = tempfile::tempdir().unwrap();
@@ -368,7 +385,7 @@ async fn durable_owner_report_failure_is_logged_and_retry_does_not_restart_agent
         .unwrap();
     assert!(events
         .iter()
-        .any(|event| event.step == "reported" && !event.ok));
+        .any(|event| event.step == "reported_uncertain" && !event.ok));
     assert!(!events
         .iter()
         .any(|event| event.step == "reported" && event.ok));
@@ -377,7 +394,7 @@ async fn durable_owner_report_failure_is_logged_and_retry_does_not_restart_agent
     let mut recovered = Projects::open_durable_with_reporter(&db, Box::new(reporter.clone()))
         .await
         .unwrap();
-    let live = recovered
+    let retry = recovered
         .spawn_from_sources(
             &mut terminal,
             root.path(),
@@ -390,11 +407,17 @@ async fn durable_owner_report_failure_is_logged_and_retry_does_not_restart_agent
             1001.0,
         )
         .await
-        .unwrap();
-    assert_eq!(State::Live, live.state);
-    assert_eq!(2, live.agents.len());
+        .unwrap_err()
+        .to_string();
+    assert!(retry.contains("outcome is uncertain"), "{retry}");
+    assert_eq!(State::Partial, recovered.get("budget-app").unwrap().state);
+    assert_eq!(2, recovered.get("budget-app").unwrap().agents.len());
     assert_eq!(calls_before_retry, terminal.layout_calls.len());
-    assert_eq!(1, reporter.calls.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(
+        0,
+        reporter.calls.load(std::sync::atomic::Ordering::SeqCst),
+        "an uncertain report is never blindly retried after restart"
+    );
     let events = recovered
         .store
         .as_ref()
@@ -403,10 +426,108 @@ async fn durable_owner_report_failure_is_logged_and_retry_does_not_restart_agent
         .await
         .unwrap();
     assert_eq!(
-        1,
+        0,
         events
             .iter()
             .filter(|event| event.step == "reported" && event.ok)
+            .count()
+    );
+    recovered.shutdown().await;
+}
+
+#[derive(Debug)]
+struct FailedProjectRoleRegistration;
+
+impl ProjectAgentRegistrar for FailedProjectRoleRegistration {
+    fn register(
+        &self,
+        _role: &str,
+        _pane: &Pane,
+        _provider: &str,
+        _model: &str,
+        _label: &str,
+    ) -> Result<(), String> {
+        Err("role store refused the receipt".into())
+    }
+}
+
+#[tokio::test]
+async fn failed_project_role_registration_keeps_pane_and_never_restarts_it() {
+    let root = tempfile::tempdir().unwrap();
+    let db = root.path().join("owned-projects.sqlite3");
+    let provider_home = tempfile::tempdir().unwrap();
+    let reading = codex_fixture(provider_home.path(), 1000.0, json!(15.0));
+    let config = configured(Value::Null);
+    let registrar = FailedProjectRoleRegistration;
+    let reporter = DurableReporter::default();
+    let mut terminal = FakeTerminal::new();
+    let mut projects = Projects::open_durable(&db).await.unwrap();
+    let failure = projects
+        .spawn_from_reading_with_reporter_and_registrar(
+            &mut terminal,
+            root.path(),
+            &request(),
+            &authority(),
+            &Usage::Percent(10.0),
+            &config,
+            "codex",
+            &reading,
+            1001.0,
+            &reporter,
+            &registrar,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        failure.contains("role registration is uncertain"),
+        "{failure}"
+    );
+    let project = projects.get("budget-app").unwrap();
+    assert_eq!(Some("writer_agent"), project.pending_step.as_deref());
+    assert_eq!(1, project.agents.len());
+    assert!(projects
+        .store
+        .as_ref()
+        .unwrap()
+        .events("budget-app".into())
+        .await
+        .unwrap()
+        .iter()
+        .any(|event| event.step == "writer_agent_uncertain" && !event.ok));
+    let started_before_recovery = terminal
+        .panes
+        .iter()
+        .filter(|pane| pane.label == "budget-app-writer")
+        .count();
+    assert_eq!(1, started_before_recovery);
+    projects.shutdown().await;
+
+    let mut recovered = Projects::open_durable(&db).await.unwrap();
+    let retry = recovered
+        .spawn_from_reading_with_reporter_and_registrar(
+            &mut terminal,
+            root.path(),
+            &request(),
+            &authority(),
+            &Usage::Percent(10.0),
+            &config,
+            "codex",
+            &reading,
+            1001.0,
+            &reporter,
+            &registrar,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(retry.contains("outcome is uncertain"), "{retry}");
+    assert_eq!(
+        started_before_recovery,
+        terminal
+            .panes
+            .iter()
+            .filter(|pane| pane.label == "budget-app-writer")
             .count()
     );
     recovered.shutdown().await;
@@ -559,6 +680,94 @@ async fn failed_result_write_keeps_intent_uncertain_in_memory_and_prevents_repla
     assert!(second.contains("outcome is uncertain"), "{second}");
     assert_eq!(terminal.layout_calls.len(), calls_after_first);
     projects.shutdown().await;
+}
+
+#[tokio::test]
+async fn failed_agent_pane_write_reports_identity_and_restart_refuses_replay() {
+    let root = tempfile::tempdir().unwrap();
+    let db = root.path().join("owned-projects.sqlite3");
+    let provider_home = tempfile::tempdir().unwrap();
+    let reading = codex_fixture(provider_home.path(), 1000.0, json!(15.0));
+    let config = configured(Value::Null);
+    let mut projects = open_with_reporter(&db).await.unwrap();
+    let connection = rusqlite::Connection::open(&db).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER reject_agent_pane BEFORE UPDATE ON project_state
+             WHEN NEW.payload LIKE '%w1:p-budget-app-writer%'
+             BEGIN SELECT RAISE(ABORT, 'injected pane persistence failure'); END;",
+        )
+        .unwrap();
+    drop(connection);
+    let mut terminal = FakeTerminal::new();
+
+    let failure = projects
+        .spawn_from_reading_with_reporter_and_registrar(
+            &mut terminal,
+            root.path(),
+            &request(),
+            &authority(),
+            &Usage::Percent(10.0),
+            &config,
+            "codex",
+            &reading,
+            1001.0,
+            &DurableReporter::default(),
+            &FailedProjectRoleRegistration,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(failure.contains("pane=w1:p-budget-app-writer"), "{failure}");
+    assert!(failure.contains("label=budget-app-writer"), "{failure}");
+    assert!(
+        failure.contains("durable pre-start intent remains pending"),
+        "{failure}"
+    );
+    assert_eq!(
+        Some("writer_agent"),
+        projects
+            .get("budget-app")
+            .and_then(|project| project.pending_step.as_deref())
+    );
+    assert_eq!(
+        1,
+        terminal
+            .panes
+            .iter()
+            .filter(|pane| pane.label == "budget-app-writer")
+            .count()
+    );
+    projects.shutdown().await;
+
+    let mut recovered = Projects::open_durable(&db).await.unwrap();
+    let retry = recovered
+        .spawn_from_reading_with_reporter_and_registrar(
+            &mut terminal,
+            root.path(),
+            &request(),
+            &authority(),
+            &Usage::Percent(10.0),
+            &config,
+            "codex",
+            &reading,
+            1001.0,
+            &DurableReporter::default(),
+            &FailedProjectRoleRegistration,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(retry.contains("outcome is uncertain"), "{retry}");
+    assert_eq!(
+        1,
+        terminal
+            .panes
+            .iter()
+            .filter(|pane| pane.label == "budget-app-writer")
+            .count()
+    );
+    recovered.shutdown().await;
 }
 
 #[tokio::test]
