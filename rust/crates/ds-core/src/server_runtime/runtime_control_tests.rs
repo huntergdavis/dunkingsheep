@@ -173,7 +173,7 @@ fn production_allocation_status_reads_shared_cache_without_running_a_tick() {
     let cached = json!({"allocation":"prior result"});
     services.allocator.seed_cache(cached.clone());
     let response = dispatcher(&services)
-        .dispatch("allocation", &json!({"action":"status"}), &request("w1:p1"))
+        .dispatch("allocation", &json!({"action":"status"}), &request("w2:p2"))
         .unwrap();
     assert_eq!(response["last_tick"], cached);
     assert_eq!(services.allocator.last_result(), cached);

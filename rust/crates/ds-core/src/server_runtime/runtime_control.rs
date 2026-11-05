@@ -640,7 +640,10 @@ impl AllocationStore for RequestRuntimeAdapter<'_> {
             .runtime
             .block_on(self.tasks()?.allocation_offer(task, pool, requires, caller))
             .map_err(backend)?;
-        self.task_get(&json!(task.id))
+        self.runtime
+            .block_on(self.tasks()?.get_full_wire(&task.id, None))
+            .map(|task| task.wire)
+            .map_err(backend)
     }
 
     fn review(
