@@ -7,6 +7,10 @@ description = "Dunking Sheep web adapter foundation (docs/rust/RUST_PORT.md sect
 
 [dependencies]
 axum.workspace = true
+base64 = "0.22"
+ring = "0.17"
+rusqlite = { version = "0.32", features = ["bundled"] }
+subtle = "2"
 # Reuse the already-locked chrono used by ds-core to match Python's local log timestamp;
 # std SystemTime has no local-time formatter, and UTC output would change log_message.
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
