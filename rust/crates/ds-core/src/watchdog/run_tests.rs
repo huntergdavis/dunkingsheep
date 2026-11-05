@@ -282,6 +282,62 @@ fn run_fixture() -> (tempfile::TempDir, Value) {
 }
 
 #[test]
+fn run_preserves_superuser_cooldown_when_finding_disappears_then_reappears() {
+    let (dir, mut config) = run_fixture();
+    config["enabled"] = json!(true);
+    config["dry_run"] = json!(false);
+    config["rules"]["fleet.assignment_starvation"]["superuser_panes"] = json!(["%2", "%15"]);
+    config["rules"]["fleet.assignment_starvation"]["cooldown_minutes"] = json!(1);
+    std::fs::write(
+        dir.path().join("superusers.json"),
+        r#"{"panes":["%2","%15"]}"#,
+    )
+    .unwrap();
+
+    let item = json!({"rule":"fleet.assignment_starvation","key":"fleet","severity":"warning","class":"ops","source":"watchdog-rule","threshold":"1 worker","measured":"2 workers","window":"10m","evidence":{}});
+    let mut state = super::super::state::empty_state();
+    let error = send_starvation_group(&config, &mut state, &item, 100.0, |pane, _, _| {
+        if pane == "%2" {
+            Err(SendError {
+                kind: "RuntimeError".into(),
+                message: "temporary failure".into(),
+            })
+        } else {
+            Ok(())
+        }
+    })
+    .unwrap_err();
+    assert_eq!(error.to_string(), "%2: RuntimeError: temporary failure");
+
+    // The next run has no starvation finding; the accepted-recipient cooldown must survive it.
+    let owner = FakeOwner {
+        route: "cos".into(),
+        through: None,
+        posts: RefCell::new(vec![]),
+        fail: false,
+    };
+    let mut sender = |_: &str, _: &str, _: &str| Ok(());
+    run(&config, 101.0, false, &mut sender, &owner, None, None).unwrap();
+
+    let mut state = read_json(&dir.path().join("state.json")).unwrap();
+    assert_eq!(
+        state["superuser_deliveries"][dedupe_key(&item)]["%15"],
+        100.0
+    );
+    let mut calls = Vec::new();
+    send_starvation_group(&config, &mut state, &item, 102.0, |pane, _, _| {
+        calls.push(pane.to_owned());
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(
+        calls,
+        ["%2"],
+        "reappearance retries only the failed recipient"
+    );
+}
+
+#[test]
 fn run_dry_run_matches_fixture_shape_and_never_writes_or_sends() {
     let (dir, mut config) = run_fixture();
     config["enabled"] = json!(true);

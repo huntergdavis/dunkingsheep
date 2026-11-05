@@ -419,10 +419,6 @@ pub fn run(
         return Ok(report);
     }
 
-    let current: BTreeSet<String> = findings.iter().map(dedupe_key).collect();
-    if let Some(deliveries) = state["superuser_deliveries"].as_object_mut() {
-        deliveries.retain(|key, _| current.contains(key));
-    }
     let mut group_lines = Vec::new();
     let mut vp = vp_pending;
     let group: Vec<Value> = vp
