@@ -166,7 +166,7 @@ impl Tasks {
     }
 }
 
-fn full_conn(
+pub(super) fn full_conn(
     conn: &Connection,
     id: &str,
     pane: Option<&str>,

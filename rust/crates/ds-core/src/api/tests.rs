@@ -3177,6 +3177,8 @@ fn test_owner_only_matches_the_python_superuser_only_set() {
         .collect();
     got.sort_unstable();
     let mut want = expected.to_vec();
+    // Rust-only owner decisions have no counterpart in the frozen Python registry.
+    want.extend(["task_owner_answer", "task_owner_question"]);
     want.sort_unstable();
     assert_eq!(got, want);
 }

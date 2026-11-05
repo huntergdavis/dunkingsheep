@@ -29,6 +29,69 @@ pub trait OpsBoardBackend: Send + Sync + 'static {
     ) -> OpsBoardFuture<'a, Result<Value, OpsBoardError>>;
 
     fn refresh<'a>(&'a self) -> OpsBoardFuture<'a, Result<Value, OpsBoardError>>;
+
+    fn owner_question<'a>(
+        &'a self,
+        _task_id: &'a str,
+    ) -> OpsBoardFuture<'a, Result<Value, OpsBoardError>> {
+        Box::pin(async {
+            Err(OpsBoardError::Failure(
+                "owner question adapter is not wired".into(),
+            ))
+        })
+    }
+    fn owner_answer<'a>(
+        &'a self,
+        _args: Value,
+    ) -> OpsBoardFuture<'a, Result<Value, OpsBoardError>> {
+        Box::pin(async {
+            Err(OpsBoardError::Failure(
+                "owner answer adapter is not wired".into(),
+            ))
+        })
+    }
+}
+
+/// Binds owner-decision operations to one already configured daemon client.
+/// The caller supplies the authenticated service client; no per-request store is opened.
+pub struct SocketOwnerDecisions {
+    pub board: Arc<dyn OpsBoardBackend>,
+    pub client: Arc<std::sync::Mutex<ds_core::client::FlockClient<ds_core::client::UnixTransport>>>,
+}
+impl SocketOwnerDecisions {
+    async fn call(&self, name: &'static str, args: Value) -> Result<Value, OpsBoardError> {
+        let client = Arc::clone(&self.client);
+        tokio::task::spawn_blocking(move || {
+            let mut client = client
+                .lock()
+                .map_err(|_| OpsBoardError::Failure("daemon client lock poisoned".into()))?;
+            client
+                .call(name, args.as_object().cloned().unwrap_or_default())
+                .map_err(|error| OpsBoardError::Failure(error.to_string()))
+        })
+        .await
+        .map_err(|error| OpsBoardError::Failure(error.to_string()))?
+    }
+}
+impl OpsBoardBackend for SocketOwnerDecisions {
+    fn defer_question<'a>(
+        &'a self,
+        id: &'a str,
+    ) -> OpsBoardFuture<'a, Result<Value, OpsBoardError>> {
+        self.board.defer_question(id)
+    }
+    fn refresh<'a>(&'a self) -> OpsBoardFuture<'a, Result<Value, OpsBoardError>> {
+        self.board.refresh()
+    }
+    fn owner_question<'a>(
+        &'a self,
+        id: &'a str,
+    ) -> OpsBoardFuture<'a, Result<Value, OpsBoardError>> {
+        Box::pin(async move { self.call("task_owner_question", json!({"id":id})).await })
+    }
+    fn owner_answer<'a>(&'a self, args: Value) -> OpsBoardFuture<'a, Result<Value, OpsBoardError>> {
+        Box::pin(async move { self.call("task_owner_answer", args).await })
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -44,10 +107,86 @@ pub fn router(
 ) -> Router {
     Router::new()
         .route("/api/ops-board/not-now", post(not_now_owner_question))
+        .route("/api/ops-board/question", post(owner_question))
+        .route("/api/ops-board/answer", post(owner_answer))
         .route("/api/ops-board/refresh", post(refresh_operations_board))
         .layer(Extension(backend))
         .layer(Extension(auth_backend))
         .layer(Extension(request_scheme))
+}
+
+async fn owner_request(
+    backend: Arc<dyn OpsBoardBackend>,
+    auth: Arc<dyn AuthBackend>,
+    scheme: RequestScheme,
+    request: Request,
+    answer: bool,
+) -> Response {
+    let headers = request.headers().clone();
+    let payload = match request_payload(request).await {
+        Ok(v) => v,
+        Err(e) => return e.into_response(),
+    };
+    if let Err(response) = authenticate(auth.as_ref(), &headers, scheme).await {
+        return response.into_response();
+    }
+    let payload = match payload {
+        Some(RequestPayload::Json(Value::Object(v))) => v,
+        _ => {
+            return body_validation(
+                "dict_type",
+                "Input should be a valid dictionary",
+                Value::Null,
+            )
+        }
+    };
+    let Some(id) = payload
+        .get("task_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return detail_response(StatusCode::BAD_REQUEST, "task_id is required");
+    };
+    let result = if answer {
+        let Some(version) = payload
+            .get("version")
+            .and_then(Value::as_str)
+            .filter(|v| v.parse::<i64>().is_ok_and(|n| n > 0))
+        else {
+            return detail_response(StatusCode::BAD_REQUEST, "question version is required");
+        };
+        let option = payload.get("option_number").cloned().unwrap_or(Value::Null);
+        let reply = payload.get("reply").cloned().unwrap_or(Value::Null);
+        backend
+            .owner_answer(json!({"id":id,"version":version,"option_number":option,"reply":reply}))
+            .await
+    } else {
+        backend.owner_question(id).await
+    };
+    match result {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => detail_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("Could not answer {id}: {}", error.kind()),
+        ),
+    }
+}
+async fn owner_question(
+    Extension(backend): Extension<Arc<dyn OpsBoardBackend>>,
+    Extension(auth): Extension<Arc<dyn AuthBackend>>,
+    Extension(scheme): Extension<RequestScheme>,
+    request: Request,
+) -> Response {
+    owner_request(backend, auth, scheme, request, false).await
+}
+async fn owner_answer(
+    Extension(backend): Extension<Arc<dyn OpsBoardBackend>>,
+    Extension(auth): Extension<Arc<dyn AuthBackend>>,
+    Extension(scheme): Extension<RequestScheme>,
+    request: Request,
+) -> Response {
+    owner_request(backend, auth, scheme, request, true).await
 }
 
 async fn not_now_owner_question(
@@ -297,6 +436,7 @@ mod tests {
     #[derive(Default)]
     struct FakeBoard {
         deferred: Mutex<Vec<String>>,
+        answers: Mutex<Vec<Value>>,
         refresh_calls: AtomicUsize,
         fail_defer: bool,
         fail_refresh: bool,
@@ -313,6 +453,24 @@ mod tests {
                 }
                 self.deferred.lock().unwrap().push(task_id.to_owned());
                 Ok(json!({"id": task_id, "priority": "low"}))
+            })
+        }
+
+        fn owner_question<'a>(
+            &'a self,
+            id: &'a str,
+        ) -> OpsBoardFuture<'a, Result<Value, OpsBoardError>> {
+            Box::pin(async move {
+                Ok(json!({"task_id":id,"version":"42","options":[{"number":1,"label":"yes"}]}))
+            })
+        }
+        fn owner_answer<'a>(
+            &'a self,
+            args: Value,
+        ) -> OpsBoardFuture<'a, Result<Value, OpsBoardError>> {
+            Box::pin(async move {
+                self.answers.lock().unwrap().push(args);
+                Ok(json!({"changed":true}))
             })
         }
 
@@ -346,6 +504,91 @@ mod tests {
             seen: Arc::default(),
         });
         router(board, auth, RequestScheme::Http)
+    }
+
+    #[tokio::test]
+    async fn owner_answer_uses_one_actual_unix_socket_command() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+        use std::time::Duration;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("daemon.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            let request: Value = serde_json::from_str(&line).unwrap();
+            tx.send((request["cmd"].clone(), request["args"].clone()))
+                .unwrap();
+            writeln!(
+                stream,
+                "{}",
+                json!({"id":request["id"],"ok":true,"result":{"changed":true}})
+            )
+            .unwrap();
+        });
+        let client = ds_core::client::FlockClient::new(
+            ds_core::client::UnixTransport { path },
+            None,
+            "test".into(),
+            Duration::from_secs(2),
+            Some("fixture-token".into()),
+        );
+        let board: Arc<dyn OpsBoardBackend> = Arc::new(SocketOwnerDecisions {
+            board: Arc::new(FakeBoard::default()),
+            client: Arc::new(std::sync::Mutex::new(client)),
+        });
+        let auth: Arc<dyn AuthBackend> = Arc::new(FakeAuth {
+            fail_identity: false,
+            identity_calls: Arc::new(AtomicUsize::new(0)),
+            seen: Arc::default(),
+        });
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/ops-board/answer")
+            .header(header::HOST, "desk.test")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"task_id":"t9","version":"42","option_number":1}"#,
+            ))
+            .unwrap();
+        let response = router(board, auth, RequestScheme::Http)
+            .oneshot(request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            (
+                json!("task_owner_answer"),
+                json!({"id":"t9","version":"42","option_number":1,"reply":null})
+            )
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn owner_answer_routes_one_versioned_backend_call() {
+        let board = Arc::new(FakeBoard::default());
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/ops-board/answer")
+            .header(header::HOST, "desk.test")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"task_id":"t9","version":"42","option_number":1}"#,
+            ))
+            .unwrap();
+        let response = block_on(app(board.clone()).oneshot(request)).unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            *board.answers.lock().unwrap(),
+            vec![json!({"id":"t9","version":"42","option_number":1,"reply":null})]
+        );
     }
 
     #[test]
