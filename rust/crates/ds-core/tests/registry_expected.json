@@ -1357,6 +1357,39 @@
    "required": [],
    "type": "object"
   },
+  "project_spawn": {
+   "additionalProperties": false,
+   "properties": {
+    "brief": {
+     "description": "Project brief written to BRIEF.md.",
+     "type": "string"
+    },
+    "name": {
+     "description": "Project slug (2-39 lowercase letters, digits, or hyphens).",
+     "type": "string"
+    },
+    "soft_cap": {
+     "description": "Optional positive project soft cap.",
+     "exclusiveMinimum": 0,
+     "type": [
+      "number",
+      "null"
+     ]
+    },
+    "template": {
+     "description": "Approved project team template; defaults to standard.",
+     "enum": [
+      "standard"
+     ],
+     "type": "string"
+    }
+   },
+   "required": [
+    "name",
+    "brief"
+   ],
+   "type": "object"
+  },
   "project_summary": {
    "additionalProperties": false,
    "properties": {
@@ -3118,6 +3151,16 @@
   "poolrad_sync": {
    "dispatch_required": [],
    "mcp_required": []
+  },
+  "project_spawn": {
+   "dispatch_required": [
+    "name",
+    "brief"
+   ],
+   "mcp_required": [
+    "name",
+    "brief"
+   ]
   },
   "project_summary": {
    "dispatch_required": [],

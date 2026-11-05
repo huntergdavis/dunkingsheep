@@ -3,10 +3,10 @@
 use super::*;
 
 #[test]
-fn the_desk_has_a_narrow_grant_of_reversible_queue_actions_and_nothing_destructive() {
+fn the_desk_has_a_narrow_grant_of_reversible_actions_and_project_spawn() {
     // owner decision 2026-10-31: block, unblock and update. Assign is NOT granted (its
     // handler refuses a desk anyway, t1172), so the allowlist must not promise it.
-    for verb in ["task_block", "task_unblock", "task_update"] {
+    for verb in ["task_block", "task_unblock", "task_update", "project_spawn"] {
         assert!(allowed("desk", verb), "{verb}");
     }
     for verb in [
@@ -23,6 +23,7 @@ fn the_desk_has_a_narrow_grant_of_reversible_queue_actions_and_nothing_destructi
         "close",
         "shutdown",
         "create_workspace",
+        "project_stop",
         "superuser_add",
         "retire_pane",
         "add_dunk",
@@ -39,6 +40,7 @@ fn the_rest_of_the_allowlist_shape() {
     assert!(allowed("owner", "shutdown"));
     assert!(!allowed("web", "shutdown"));
     assert!(allowed("web", "send_text"));
+    assert!(!allowed("web", "project_spawn"));
     assert!(!allowed("desk", "send_text"));
     assert!(!allowed("desk", "inbox_send"));
     assert!(!allowed("desk", "task_complete"));
@@ -86,7 +88,7 @@ fn the_tables_have_the_pythons_sizes() {
     assert_eq!(47, READ_ONLY.len());
     assert_eq!(28, WORKER_EXTRA.len());
     assert_eq!(30, SYSTEM_EXTRA.len());
-    assert_eq!(15, DESK_EXTRA.len());
+    assert_eq!(16, DESK_EXTRA.len());
     assert_eq!(3, PLANNER_EXTRA.len());
     assert_eq!(30, WEB_DENIED.len());
 }
@@ -105,6 +107,7 @@ fn the_desk_grant_is_exactly_the_reviewed_set() {
             "owner_poll",
             "owner_reply",
             "owner_take",
+            "project_spawn",
             "read_pane",
             "report_run",
             "task_add",

@@ -1,12 +1,6 @@
-//! `project_spawn` (t1171, contract in docs/PROJECTS.md): the front desk asks, the DAEMON
-//! starts a project with its own authority. Slice 1: the guards, the idempotent and
-//! resumable step runner, and the events - driven through the `Terminal` trait so a test
-//! uses `FakeTerminal` and never a real agent.
-//!
-//! NOT in this slice (named so nobody reads it as done): wiring into the command table and
-//! `ALLOW['desk']`, persistence of the registry, the owner-mailbox report, model choice by
-//! usage headroom, and the "one word" approval transport (docs/PROJECTS.md "Not decided").
-//! The live registry is in memory, so a daemon restart forgets a half-spawned project.
+//! `project_spawn` (t1171): the front desk asks, the DAEMON starts a project with its own
+//! authority. Project state, durable step events, agent starts, and owner reporting are
+//! kept behind this module so a restart can resume without replaying an uncertain action.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -37,11 +31,12 @@ pub enum Usage {
 }
 
 /// The steps of a spawn, in order; each is an event, so a half-spawned project is visible.
-pub const STEPS: [&str; 5] = [
+pub const STEPS: [&str; 6] = [
     "validated",
     "scaffolded",
     "workspace",
-    "research_agent",
+    "writer_agent",
+    "reviewer_agent",
     "reported",
 ];
 
@@ -91,7 +86,7 @@ impl Project {
 }
 
 /// What the desk sends: the contract's `project_spawn(name, brief, template, soft_cap)` and
-/// nothing else. Whether the owner approved, and which command starts the research agent,
+/// nothing else. Whether the owner approved, and the commands used for project agents,
 /// are NOT the caller's to say - see [`Authority`].
 #[derive(Debug, Clone)]
 pub struct Request {
@@ -101,20 +96,44 @@ pub struct Request {
     pub soft_cap: Option<f64>,
 }
 
-/// What the DAEMON knows and the desk must never supply: the owner's one word, and the
-/// command that starts the research agent (the daemon picks the model). A desk-controlled
-/// `research_argv` would be an arbitrary command run with daemon authority.
+/// What the DAEMON knows and the desk must never supply: the owner's one word. Project agent
+/// commands are built from the approved template below; a desk-controlled argv would be an
+/// arbitrary command run with daemon authority.
 #[derive(Debug, Clone)]
 pub struct Authority {
     /// The owner's one word has been given (read from the owner's mailbox, daemon-side).
     pub approved: bool,
-    pub research_argv: Vec<String>,
+    /// Writer and reviewer argv are explicit daemon authority, never request fields.
+    pub writer_argv: Vec<String>,
+    pub reviewer_argv: Vec<String>,
+}
+
+impl Authority {
+    /// The approved project template: one Luna low writer and one Luna medium reviewer.
+    /// Budget admission is performed against the configured Codex subscription before this
+    /// template can cause any project write or agent start.
+    pub fn project_template(approved: bool) -> Self {
+        let argv = |effort: &str| {
+            vec![
+                "codex".into(),
+                "--model".into(),
+                "gpt-6-luna".into(),
+                "--config".into(),
+                format!("model_reasoning_effort={effort}"),
+            ]
+        };
+        Self {
+            approved,
+            writer_argv: argv("low"),
+            reviewer_argv: argv("medium"),
+        }
+    }
 }
 
 /// Posts the "project is live" report to the owner's mailbox (docs/PROJECTS.md step 7). A trait
 /// so the registry is tested without a mailbox; the daemon's implementation sends through the
 /// inbox store. `Ok` carries the message id the report was filed under.
-pub trait Reporter: std::fmt::Debug + Send + Sync {
+pub trait Reporter: std::fmt::Debug {
     fn report(&self, project: &str, body: &str) -> Result<String, String>;
 }
 
@@ -253,7 +272,7 @@ impl Projects {
     /// Budgeted async entry point. The legacy synchronous entry point has no budget configuration
     /// and is therefore refused before it can write a project.
     #[allow(clippy::too_many_arguments)]
-    async fn spawn_budgeted<T: Terminal + Send>(
+    async fn spawn_budgeted<T: Terminal + ?Sized>(
         &mut self,
         terminal: &mut T,
         root: &Path,
@@ -264,6 +283,7 @@ impl Projects {
         provider: &str,
         provider_reading: &serde_json::Value,
         now: f64,
+        reporter_override: Option<&dyn Reporter>,
     ) -> Result<Project, DunkError> {
         let store = self
             .store
@@ -300,6 +320,11 @@ impl Projects {
             if existing.state == State::Live {
                 return Ok(existing.clone());
             }
+            if authority.approved && reporter_override.is_none() && self.reporter.is_none() {
+                return Err(DunkError::Refused(
+                    "owner mailbox reporter is not wired".into(),
+                ));
+            }
             let approved_root = canonical_project_root(root)?;
             validate_owned_project_dir(&approved_root, &name, existing)?;
             if !existing.done("scaffolded") && project_path_present(&existing.dir)? {
@@ -326,6 +351,11 @@ impl Projects {
                     "{} already exists and is not a project this daemon started; pick another name",
                     dir.display()
                 )));
+            }
+            if authority.approved && reporter_override.is_none() && self.reporter.is_none() {
+                return Err(DunkError::Refused(
+                    "owner mailbox reporter is not wired".into(),
+                ));
             }
             // A new name is budget-admitted before any durable project state is written.
             budget.admit(&name, provider, five_hour_usage, provider_reading, now)?;
@@ -360,7 +390,7 @@ impl Projects {
         budget.admit(&name, provider, five_hour_usage, provider_reading, now)?;
         self.projects[index].state = State::Partial;
         store.save(self.projects[index].clone(), None).await?;
-        let reporter = self.reporter.as_deref();
+        let reporter = reporter_override.or(self.reporter.as_deref());
         run_steps_durable(
             &mut self.projects[index],
             terminal,
@@ -378,7 +408,7 @@ impl Projects {
     /// Production-facing provider path: run the configured real usage reader, then validate that
     /// measurement and persist only after admission succeeds.
     #[allow(clippy::too_many_arguments)]
-    pub async fn spawn_from_sources<T: Terminal + Send>(
+    pub async fn spawn_from_sources<T: Terminal + ?Sized>(
         &mut self,
         terminal: &mut T,
         root: &Path,
@@ -389,6 +419,67 @@ impl Projects {
         provider: &str,
         provider_home: &Path,
         now: f64,
+    ) -> Result<Project, DunkError> {
+        self.spawn_from_sources_reporter(
+            terminal,
+            root,
+            request,
+            authority,
+            five_hour_usage,
+            budget_json,
+            provider,
+            provider_home,
+            now,
+            None,
+        )
+        .await
+    }
+
+    /// Production-facing variant with a request-scoped owner mailbox reporter. The reporter is
+    /// borrowed only for this call, so a daemon can use its existing inbox adapter without
+    /// storing borrowed runtime state inside `Projects`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn spawn_from_sources_with_reporter<T: Terminal + ?Sized>(
+        &mut self,
+        terminal: &mut T,
+        root: &Path,
+        request: &Request,
+        authority: &Authority,
+        five_hour_usage: &Usage,
+        budget_json: &str,
+        provider: &str,
+        provider_home: &Path,
+        now: f64,
+        reporter: &dyn Reporter,
+    ) -> Result<Project, DunkError> {
+        self.spawn_from_sources_reporter(
+            terminal,
+            root,
+            request,
+            authority,
+            five_hour_usage,
+            budget_json,
+            provider,
+            provider_home,
+            now,
+            Some(reporter),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn spawn_from_sources_reporter<T: Terminal + ?Sized>(
+        &mut self,
+        terminal: &mut T,
+        root: &Path,
+        request: &Request,
+        authority: &Authority,
+        five_hour_usage: &Usage,
+        budget_json: &str,
+        provider: &str,
+        provider_home: &Path,
+        now: f64,
+        reporter: Option<&dyn Reporter>,
     ) -> Result<Project, DunkError> {
         let budget = newprojects::ProjectBudgetConfig::from_json(budget_json)?;
         let reading = budget.read_provider(provider, provider_home, now).await?;
@@ -402,6 +493,7 @@ impl Projects {
             provider,
             &reading,
             now,
+            reporter,
         )
         .await
     }
@@ -843,7 +935,7 @@ fn validate_owned_project_dir(root: &Path, name: &str, project: &Project) -> Res
     Ok(())
 }
 
-async fn run_steps_durable<T: Terminal + Send>(
+async fn run_steps_durable<T: Terminal + ?Sized>(
     project: &mut Project,
     terminal: &mut T,
     request: &Request,
@@ -885,44 +977,24 @@ async fn run_steps_durable<T: Terminal + Send>(
             .map_err(|error| error.to_string());
         finish_external_step(project, "workspace", result, store).await?;
     }
-    if !project.done("research_agent") {
-        if project.agents.len() >= MAX_AGENTS_PER_PROJECT {
-            let reason =
-                format!("{MAX_AGENTS_PER_PROJECT} agents already (MAX_AGENTS_PER_PROJECT)");
-            durable_log(project, "research_agent", false, reason.clone(), store).await?;
-            return Err(DunkError::Refused(format!(
-                "project {}: step research_agent failed: {reason}",
-                project.name
-            )));
-        }
-        if authority.research_argv.is_empty() {
-            let reason = "no launch command for the research agent";
-            durable_log(project, "research_agent", false, reason, store).await?;
-            return Err(DunkError::Refused(format!(
-                "project {}: step research_agent failed: {reason}",
-                project.name
-            )));
-        }
-        begin_external_step(project, "research_agent", store).await?;
-        let spec = AgentSpec {
-            name: format!("{}-research", project.name),
-            argv: authority.research_argv.clone(),
-            workspace_id: project.workspace_id.clone(),
-            cwd: Some(project.dir.display().to_string()),
-            label: Some(format!("{}-research", project.name)),
-            ..AgentSpec::default()
-        };
-        let result = terminal
-            .start_agent(&spec)
-            .map(|pane| {
-                project
-                    .agents
-                    .push(("research".into(), pane.pane_id.clone()));
-                pane.pane_id
-            })
-            .map_err(|error| error.to_string());
-        finish_external_step(project, "research_agent", result, store).await?;
-    }
+    start_project_agent_durable(
+        project,
+        terminal,
+        store,
+        "writer_agent",
+        "writer",
+        &authority.writer_argv,
+    )
+    .await?;
+    start_project_agent_durable(
+        project,
+        terminal,
+        store,
+        "reviewer_agent",
+        "reviewer",
+        &authority.reviewer_argv,
+    )
+    .await?;
     if !project.done("reported") {
         let panes: Vec<String> = project
             .agents
@@ -966,6 +1038,53 @@ async fn run_steps_durable<T: Terminal + Send>(
         }
     }
     Ok(())
+}
+
+async fn start_project_agent_durable<T: Terminal + ?Sized>(
+    project: &mut Project,
+    terminal: &mut T,
+    store: &newprojects::ProjectStore,
+    step: &str,
+    role: &str,
+    argv: &[String],
+) -> Result<(), DunkError> {
+    if project.done(step) {
+        return Ok(());
+    }
+    if project.agents.len() >= MAX_AGENTS_PER_PROJECT {
+        let reason = format!("{MAX_AGENTS_PER_PROJECT} agents already (MAX_AGENTS_PER_PROJECT)");
+        durable_log(project, step, false, reason.clone(), store).await?;
+        return Err(DunkError::Refused(format!(
+            "project {}: step {step} failed: {reason}",
+            project.name
+        )));
+    }
+    if argv.is_empty() {
+        let reason = format!("no launch command for the {role}");
+        durable_log(project, step, false, reason.clone(), store).await?;
+        return Err(DunkError::Refused(format!(
+            "project {}: step {step} failed: {reason}",
+            project.name
+        )));
+    }
+    begin_external_step(project, step, store).await?;
+    let name = format!("{}-{role}", project.name);
+    let spec = AgentSpec {
+        name: name.clone(),
+        argv: argv.to_vec(),
+        workspace_id: project.workspace_id.clone(),
+        cwd: Some(project.dir.display().to_string()),
+        label: Some(name),
+        ..AgentSpec::default()
+    };
+    let result = terminal
+        .start_agent(&spec)
+        .map(|pane| {
+            project.agents.push((role.into(), pane.pane_id.clone()));
+            pane.pane_id
+        })
+        .map_err(|error| error.to_string());
+    finish_external_step(project, step, result, store).await
 }
 
 #[cfg(test)]
@@ -1014,37 +1133,38 @@ fn run_steps(
             Err(error) => return fail(project, "workspace", error.to_string()),
         }
     }
-    if !project.done("research_agent") {
+    for (step, role, argv) in [
+        ("writer_agent", "writer", &authority.writer_argv),
+        ("reviewer_agent", "reviewer", &authority.reviewer_argv),
+    ] {
+        if project.done(step) {
+            continue;
+        }
         if project.agents.len() >= MAX_AGENTS_PER_PROJECT {
             return fail(
                 project,
-                "research_agent",
+                step,
                 format!("{MAX_AGENTS_PER_PROJECT} agents already (MAX_AGENTS_PER_PROJECT)"),
             );
         }
-        if authority.research_argv.is_empty() {
-            return fail(
-                project,
-                "research_agent",
-                "no launch command for the research agent".into(),
-            );
+        if argv.is_empty() {
+            return fail(project, step, format!("no launch command for the {role}"));
         }
+        let name = format!("{}-{role}", project.name);
         let spec = AgentSpec {
-            name: format!("{}-research", project.name),
-            argv: authority.research_argv.clone(),
+            name: name.clone(),
+            argv: argv.clone(),
             workspace_id: project.workspace_id.clone(),
             cwd: Some(project.dir.display().to_string()),
-            label: Some(format!("{}-research", project.name)),
+            label: Some(name),
             ..AgentSpec::default()
         };
         match terminal.start_agent(&spec) {
             Ok(pane) => {
-                project
-                    .agents
-                    .push(("research".into(), pane.pane_id.clone()));
-                log(project, "research_agent", true, pane.pane_id);
+                project.agents.push((role.into(), pane.pane_id.clone()));
+                log(project, step, true, pane.pane_id);
             }
-            Err(error) => return fail(project, "research_agent", error.to_string()),
+            Err(error) => return fail(project, step, error.to_string()),
         }
     }
     if !project.done("reported") {
@@ -1149,10 +1269,7 @@ mod tests {
     }
 
     fn authority(approved: bool) -> Authority {
-        Authority {
-            approved,
-            research_argv: vec!["claude".into()],
-        }
+        Authority::project_template(approved)
     }
 
     fn root(tag: &str) -> crate::testsupport::Scratch<PathBuf> {
@@ -1166,6 +1283,31 @@ mod tests {
         for bad in ["", "a", "-x", "x-", "Up", "a b", "../etc", &"a".repeat(40)] {
             assert!(validate_name(bad).is_err(), "{bad:?} must be refused");
         }
+    }
+
+    #[test]
+    fn approved_template_starts_one_luna_low_writer_and_one_luna_medium_reviewer() {
+        let authority = Authority::project_template(true);
+        assert_eq!(
+            authority.writer_argv,
+            vec![
+                "codex".to_string(),
+                "--model".to_string(),
+                "gpt-6-luna".to_string(),
+                "--config".to_string(),
+                "model_reasoning_effort=low".to_string()
+            ]
+        );
+        assert_eq!(
+            authority.reviewer_argv,
+            vec![
+                "codex".to_string(),
+                "--model".to_string(),
+                "gpt-6-luna".to_string(),
+                "--config".to_string(),
+                "model_reasoning_effort=medium".to_string()
+            ]
+        );
     }
 
     #[test]
@@ -1214,7 +1356,7 @@ mod tests {
                 && root.join("app/dunkingsheep").is_dir()
                 && root.join("app/.git").exists()
         );
-        assert_eq!(1, live.agents.len());
+        assert_eq!(2, live.agents.len());
         let steps: Vec<&str> = live.events.iter().map(|e| e.step.as_str()).collect();
         assert_eq!(steps, STEPS.to_vec());
     }
@@ -1345,7 +1487,7 @@ mod tests {
     #[test]
     fn a_name_already_on_disk_is_refused_and_its_files_are_untouched() {
         // Finding 1: BRIEF.md of an existing directory (a shared checkout, or a project from
-        // before a restart) was overwritten and a research agent started in it.
+        // before a restart) was overwritten and project agents were started in it.
         let (mut term, mut projects, root) = (FakeTerminal::new(), Projects::new(), root("exists"));
         std::fs::create_dir_all(root.join("app")).unwrap();
         std::fs::write(root.join("app/BRIEF.md"), "PRECIOUS").unwrap();
@@ -1408,7 +1550,8 @@ mod tests {
             (FakeTerminal::new(), Projects::new(), root("authority"));
         let nobody = Authority {
             approved: true,
-            research_argv: vec![],
+            writer_argv: vec![],
+            reviewer_argv: vec![],
         };
         let err = projects
             .spawn_unbudgeted_for_test(
@@ -1420,15 +1563,12 @@ mod tests {
             )
             .unwrap_err()
             .to_string();
-        assert!(
-            err.contains("no launch command for the research agent"),
-            "{err}"
-        );
+        assert!(err.contains("no launch command for the writer"), "{err}");
     }
 
     #[test]
-    fn the_report_step_says_it_was_not_sent() {
-        // Finding 3: a Live project must not claim a report nothing made.
+    fn missing_owner_reporter_does_not_mark_the_report_sent() {
+        // A missing mailbox adapter is visible and never becomes a successful report event.
         let (mut term, mut projects, root) =
             (FakeTerminal::new(), Projects::new(), root("reported"));
         let live = projects
@@ -1440,6 +1580,7 @@ mod tests {
                 &Usage::Percent(10.0),
             )
             .unwrap();
+        assert_eq!(live.state, State::Live);
         let reported = live.events.iter().find(|e| e.step == "reported").unwrap();
         assert!(!reported.ok);
         assert!(
@@ -1674,7 +1815,7 @@ mod tests {
         let event = live.events.iter().find(|e| e.step == "reported").unwrap();
         assert!(event.ok, "{}", event.detail);
         assert!(
-            event.detail.starts_with("sent i1; research="),
+            event.detail.starts_with("sent i1; writer=") && event.detail.contains("reviewer="),
             "{}",
             event.detail
         );
@@ -1682,7 +1823,9 @@ mod tests {
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].0, "app");
         assert!(
-            sent[0].1.contains("project app is live") && sent[0].1.contains("agents: research="),
+            sent[0].1.contains("project app is live")
+                && sent[0].1.contains("agents: writer=")
+                && sent[0].1.contains("reviewer="),
             "{}",
             sent[0].1
         );
@@ -1741,9 +1884,9 @@ mod tests {
         assert_eq!(
             live.events
                 .iter()
-                .filter(|e| e.step == "research_agent" && e.ok)
+                .filter(|e| matches!(e.step.as_str(), "writer_agent" | "reviewer_agent") && e.ok)
                 .count(),
-            1
+            2
         );
         assert_eq!(
             reporter.sent.lock().unwrap().len(),

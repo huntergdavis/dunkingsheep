@@ -1,8 +1,10 @@
 use super::*;
+use crate::error::DunkError;
 use crate::projects::{Authority, Projects, Request, State, Usage};
 use crate::terminal::fakes::FakeTerminal;
 use serde_json::{json, Value};
 use std::fs;
+use std::path::Path;
 
 fn configured(credit_fallback: Value) -> String {
     json!({
@@ -68,10 +70,30 @@ fn synchronous_spawn_without_budget_refuses_before_writes() {
 }
 
 fn authority() -> Authority {
-    Authority {
-        approved: true,
-        research_argv: vec!["claude".into()],
+    Authority::project_template(true)
+}
+
+#[derive(Debug, Clone, Default)]
+struct DurableReporter {
+    fail_next: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl crate::projects::Reporter for DurableReporter {
+    fn report(&self, _project: &str, _body: &str) -> Result<String, String> {
+        if self
+            .fail_next
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err("owner mailbox unavailable".into());
+        }
+        let id = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        Ok(format!("i-{id}"))
     }
+}
+
+async fn open_with_reporter(path: &Path) -> Result<Projects, DunkError> {
+    Projects::open_durable_with_reporter(path, Box::new(DurableReporter::default())).await
 }
 
 #[test]
@@ -248,7 +270,7 @@ async fn durable_spawn_recovers_events_and_live_retry_is_idempotent() {
     let _ = codex_fixture(provider_home.path(), 1000.0, json!(15.0));
     let config = configured(Value::Null);
     let mut terminal = FakeTerminal::new();
-    let mut projects = Projects::open_durable(&db).await.unwrap();
+    let mut projects = open_with_reporter(&db).await.unwrap();
     let live = projects
         .spawn_from_sources(
             &mut terminal,
@@ -277,7 +299,10 @@ async fn durable_spawn_recovers_events_and_live_retry_is_idempotent() {
         .any(|event| event.step == "workspace_started"));
     assert!(durable_events
         .iter()
-        .any(|event| event.step == "research_agent_started"));
+        .any(|event| event.step == "writer_agent_started"));
+    assert!(durable_events
+        .iter()
+        .any(|event| event.step == "reviewer_agent_started"));
     projects.shutdown().await;
 
     let mut recovered = Projects::open_durable(&db).await.unwrap();
@@ -302,6 +327,92 @@ async fn durable_spawn_recovers_events_and_live_retry_is_idempotent() {
 }
 
 #[tokio::test]
+async fn durable_owner_report_failure_is_logged_and_retry_does_not_restart_agents() {
+    let root = tempfile::tempdir().unwrap();
+    let db = root.path().join("owned-projects.sqlite3");
+    let provider_home = tempfile::tempdir().unwrap();
+    let _ = codex_fixture(provider_home.path(), 1000.0, json!(15.0));
+    let config = configured(Value::Null);
+    let reporter = DurableReporter {
+        fail_next: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        ..DurableReporter::default()
+    };
+    let mut terminal = FakeTerminal::new();
+    let mut projects = Projects::open_durable_with_reporter(&db, Box::new(reporter.clone()))
+        .await
+        .unwrap();
+    let failed = projects
+        .spawn_from_sources(
+            &mut terminal,
+            root.path(),
+            &request(),
+            &authority(),
+            &Usage::Percent(10.0),
+            &config,
+            "codex",
+            provider_home.path(),
+            1001.0,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(failed.contains("owner mailbox unavailable"), "{failed}");
+    assert_eq!(State::Partial, projects.get("budget-app").unwrap().state);
+    let calls_before_retry = terminal.layout_calls.len();
+    let events = projects
+        .store
+        .as_ref()
+        .unwrap()
+        .events("budget-app".into())
+        .await
+        .unwrap();
+    assert!(events
+        .iter()
+        .any(|event| event.step == "reported" && !event.ok));
+    assert!(!events
+        .iter()
+        .any(|event| event.step == "reported" && event.ok));
+    projects.shutdown().await;
+
+    let mut recovered = Projects::open_durable_with_reporter(&db, Box::new(reporter.clone()))
+        .await
+        .unwrap();
+    let live = recovered
+        .spawn_from_sources(
+            &mut terminal,
+            root.path(),
+            &request(),
+            &authority(),
+            &Usage::Percent(10.0),
+            &config,
+            "codex",
+            provider_home.path(),
+            1001.0,
+        )
+        .await
+        .unwrap();
+    assert_eq!(State::Live, live.state);
+    assert_eq!(2, live.agents.len());
+    assert_eq!(calls_before_retry, terminal.layout_calls.len());
+    assert_eq!(1, reporter.calls.load(std::sync::atomic::Ordering::SeqCst));
+    let events = recovered
+        .store
+        .as_ref()
+        .unwrap()
+        .events("budget-app".into())
+        .await
+        .unwrap();
+    assert_eq!(
+        1,
+        events
+            .iter()
+            .filter(|event| event.step == "reported" && event.ok)
+            .count()
+    );
+    recovered.shutdown().await;
+}
+
+#[tokio::test]
 async fn failed_external_step_is_durable_and_retry_does_not_repeat_completed_steps() {
     let root = tempfile::tempdir().unwrap();
     let db = root.path().join("owned-projects.sqlite3");
@@ -310,7 +421,7 @@ async fn failed_external_step_is_durable_and_retry_does_not_repeat_completed_ste
     let config = configured(Value::Null);
     let mut terminal = FakeTerminal::new();
     terminal.fail_layout = Some("workspace offline".into());
-    let mut projects = Projects::open_durable(&db).await.unwrap();
+    let mut projects = open_with_reporter(&db).await.unwrap();
     let failure = projects
         .spawn_from_sources(
             &mut terminal,
@@ -346,7 +457,7 @@ async fn failed_external_step_is_durable_and_retry_does_not_repeat_completed_ste
     );
     projects.shutdown().await;
 
-    let mut recovered = Projects::open_durable(&db).await.unwrap();
+    let mut recovered = open_with_reporter(&db).await.unwrap();
     terminal.fail_layout = None;
     let live = recovered
         .spawn_from_sources(
@@ -396,7 +507,7 @@ async fn failed_result_write_keeps_intent_uncertain_in_memory_and_prevents_repla
     let provider_home = tempfile::tempdir().unwrap();
     let _ = codex_fixture(provider_home.path(), 1000.0, json!(15.0));
     let config = configured(Value::Null);
-    let mut projects = Projects::open_durable(&db).await.unwrap();
+    let mut projects = open_with_reporter(&db).await.unwrap();
     let connection = rusqlite::Connection::open(&db).unwrap();
     connection
         .execute_batch(
@@ -467,7 +578,7 @@ async fn restart_with_an_unresolved_external_intent_refuses_without_replay() {
         workspace_id: None,
         agents: Vec::new(),
         events: Vec::new(),
-        pending_step: Some("research_agent".into()),
+        pending_step: Some("writer_agent".into()),
     };
     projects
         .store
@@ -536,6 +647,43 @@ async fn missing_budget_refuses_before_project_state_or_directory_writes() {
 }
 
 #[tokio::test]
+async fn approved_durable_spawn_requires_owner_reporter_before_project_writes() {
+    let root = tempfile::tempdir().unwrap();
+    let db = root.path().join("owned-projects.sqlite3");
+    let provider_home = tempfile::tempdir().unwrap();
+    let _ = codex_fixture(provider_home.path(), 1000.0, json!(15.0));
+    let config = configured(Value::Null);
+    let mut projects = Projects::open_durable(&db).await.unwrap();
+    let error = projects
+        .spawn_from_sources(
+            &mut FakeTerminal::new(),
+            root.path(),
+            &request(),
+            &authority(),
+            &Usage::Percent(10.0),
+            &config,
+            "codex",
+            provider_home.path(),
+            1001.0,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert_eq!(error, "owner mailbox reporter is not wired");
+    assert!(projects.get("budget-app").is_none());
+    assert!(!root.path().join("budget-app").exists());
+    assert!(projects
+        .store
+        .as_ref()
+        .unwrap()
+        .load()
+        .await
+        .unwrap()
+        .is_empty());
+    projects.shutdown().await;
+}
+
+#[tokio::test]
 async fn a_foreign_project_directory_is_never_overwritten() {
     let root = tempfile::tempdir().unwrap();
     let db = root.path().join("owned-projects.sqlite3");
@@ -545,7 +693,7 @@ async fn a_foreign_project_directory_is_never_overwritten() {
     let provider_home = tempfile::tempdir().unwrap();
     let _ = codex_fixture(provider_home.path(), 1000.0, json!(15.0));
     let config = configured(Value::Null);
-    let mut projects = Projects::open_durable(&db).await.unwrap();
+    let mut projects = open_with_reporter(&db).await.unwrap();
     assert!(projects
         .spawn_from_sources(
             &mut FakeTerminal::new(),
@@ -602,7 +750,7 @@ async fn a_recovered_project_path_outside_the_approved_root_is_refused() {
         .unwrap();
     projects.shutdown().await;
 
-    let mut recovered = Projects::open_durable(&db).await.unwrap();
+    let mut recovered = open_with_reporter(&db).await.unwrap();
     let mut terminal = FakeTerminal::new();
     let error = recovered
         .spawn_from_sources(

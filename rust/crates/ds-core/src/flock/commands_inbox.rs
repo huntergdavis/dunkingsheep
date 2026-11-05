@@ -154,6 +154,49 @@ pub struct SendArgs<'a> {
     pub system_sender: Option<&'a str>,
 }
 
+/// Project lifecycle reports use the daemon's existing inbox store and the reserved owner
+/// mailbox. A successful return carries the committed inbox message id; no pane is typed into.
+pub struct OwnerMailboxReporter<'a> {
+    pub flock: &'a Flock,
+    pub env: &'a dyn InboxEnv,
+    pub self_pane_id: Option<&'a str>,
+}
+
+impl std::fmt::Debug for OwnerMailboxReporter<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OwnerMailboxReporter")
+            .field("self_pane_id", &self.self_pane_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl crate::projects::Reporter for OwnerMailboxReporter<'_> {
+    fn report(&self, project: &str, body: &str) -> Result<String, String> {
+        let subject = format!("Project {project} is live");
+        let result = self
+            .flock
+            .inbox_send(
+                self.env,
+                &SendArgs {
+                    to: "owner",
+                    body,
+                    subject: Some(&subject),
+                    notify: false,
+                    self_pane_id: self.self_pane_id,
+                    ..SendArgs::default()
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        if result.mailbox != "owner" || result.outcome.is_some() {
+            return Err(format!(
+                "owner mailbox send did not resolve to the reserved owner inbox ({}; outcome {:?})",
+                result.mailbox, result.outcome
+            ));
+        }
+        Ok(result.message_id)
+    }
+}
+
 /// What `inbox_send` returns: the stored message's id plus the fields the Python adds.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SendResult {

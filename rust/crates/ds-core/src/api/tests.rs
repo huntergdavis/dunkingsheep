@@ -1947,6 +1947,54 @@ fn h_lane_handlers_refuse_non_string_pane_values() {
     );
 }
 
+#[test]
+fn rust_project_spawn_is_desk_only_and_requires_explicit_runtime_config() {
+    let command = crate::registry::command("project_spawn").unwrap();
+    assert_eq!(command.roles, &["owner", "desk"]);
+    assert!(!command.owner_only);
+    assert!(crate::roles::allowed("desk", "project_spawn"));
+    assert!(!crate::roles::allowed("web", "project_spawn"));
+    assert!(!crate::roles::allowed("worker", "project_spawn"));
+    assert!(!crate::roles::allowed("desk", "project_stop"));
+    assert!(!crate::roles::allowed("desk", "start_agent"));
+    assert!(!crate::roles::allowed("desk", "create_workspace"));
+    assert!(!crate::roles::allowed("desk", "close"));
+
+    let (_dir, flock) = flock();
+    let env = TestEnv::default();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_project_spawn();
+    let request = RequestCtx::default();
+    let supplied = Some(args(json!({"name": "budget-app", "brief": "test"})));
+    let error = dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("desk", false),
+        "project_spawn",
+        supplied.clone(),
+        &request,
+        &env,
+    )
+    .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "project spawn config adapter is not wired",
+        "the Rust handler is reached, then refuses before any side effect without explicit runtime config"
+    );
+
+    let denied = dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("worker", false),
+        "project_spawn",
+        supplied,
+        &request,
+        &env,
+    )
+    .unwrap_err();
+    assert!(denied.to_string().contains("not permitted for role worker"));
+}
+
 static CONTEXT_LEDGER_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 struct ContextLedgerEnv(Option<std::ffi::OsString>);
