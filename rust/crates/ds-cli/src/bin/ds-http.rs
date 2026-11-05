@@ -21,14 +21,14 @@ fn main() -> ExitCode {
             Arg::new("host")
                 .long("host")
                 .value_name("HOST")
-                .default_value(defaults.host),
+                .default_value(defaults.host.as_str()),
         )
         .arg(
             Arg::new("port")
                 .long("port")
                 .value_name("PORT")
                 .value_parser(value_parser!(u16))
-                .default_value(port_default),
+                .default_value(port_default.as_str()),
         )
         .get_matches();
 

@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 pub mod http_adapter;
+pub mod python_http;
 pub mod python_json;
 pub mod roster;
 pub mod routes;

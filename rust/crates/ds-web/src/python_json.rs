@@ -81,13 +81,14 @@ pub fn response_bytes(value: &Value, indent: Option<usize>) -> Vec<u8> {
 }
 
 impl Value {
-    /// Project only the two fields consumed by the existing resize route.
-    /// Unknown keys (including keys containing lone surrogates) are ignored as
-    /// they are by `route_post`; selected values must be representable by the
-    /// route's serde value interface or projection returns an explicit error.
-    pub fn resize_fields(&self) -> Result<serde_json::Value, ProjectionError> {
+    /// Build the carrier used to reach the existing route/backend validation.
+    /// The original values stay in this AST and are used for Python-compatible
+    /// error echoes. Values which serde cannot represent are mapped only to a
+    /// value with the same Python `int(...)` failure class; they are never used
+    /// for serialization or echoed to the caller.
+    pub fn resize_fields(&self) -> serde_json::Value {
         let Self::Object(items) = self else {
-            return Ok(serde_json::Value::Null);
+            return serde_json::Value::Null;
         };
         let mut out = serde_json::Map::new();
         for name in ["cols", "rows"] {
@@ -95,55 +96,46 @@ impl Value {
                 .iter()
                 .find(|(key, _)| key.0 == name.encode_utf16().collect::<Vec<_>>())
             {
-                out.insert(name.to_owned(), value.to_serde()?);
+                out.insert(name.to_owned(), value.to_resize_carrier());
             }
         }
-        Ok(serde_json::Value::Object(out))
+        serde_json::Value::Object(out)
     }
 
-    fn to_serde(&self) -> Result<serde_json::Value, ProjectionError> {
+    pub fn resize_value(&self, name: &str) -> Option<&Value> {
+        let Self::Object(items) = self else {
+            return None;
+        };
+        items
+            .iter()
+            .find(|(key, _)| key.0 == name.encode_utf16().collect::<Vec<_>>())
+            .map(|(_, value)| value)
+    }
+
+    fn to_resize_carrier(&self) -> serde_json::Value {
         use serde_json::Value as J;
-        Ok(match self {
+        match self {
             Self::Null => J::Null,
             Self::Bool(value) => J::Bool(*value),
-            Self::Integer(token) => J::Number(
-                token
-                    .parse()
-                    .map_err(|_| ProjectionError("integer outside route carrier"))?,
-            ),
-            Self::Float(value) => J::Number(
-                ds_core::wire_json::float_value(*value)
-                    .as_number()
-                    .expect("wire JSON float adapter always returns a number")
-                    .clone(),
-            ),
-            Self::String(value) => {
-                J::String(value.to_rust_string().map_err(|_| {
-                    ProjectionError("selected route string contains a lone surrogate")
-                })?)
+            Self::Integer(token) => {
+                let fallback = if token.starts_with('-') {
+                    serde_json::Number::from(i64::MIN)
+                } else {
+                    serde_json::Number::from(i64::MAX)
+                };
+                J::Number(token.parse::<serde_json::Number>().unwrap_or(fallback))
             }
-            Self::Array(values) => J::Array(
-                values
-                    .iter()
-                    .map(Self::to_serde)
-                    .collect::<Result<_, _>>()?,
-            ),
-            Self::Object(items) => {
-                let mut out = serde_json::Map::new();
-                for (key, value) in items {
-                    let key = key.to_rust_string().map_err(|_| {
-                        ProjectionError("selected route object key contains a lone surrogate")
-                    })?;
-                    out.insert(key, value.to_serde()?);
-                }
-                J::Object(out)
-            }
-        })
+            Self::Float(value) if value.is_finite() => serde_json::Number::from_f64(*value)
+                .map(J::Number)
+                .unwrap_or(J::Null),
+            Self::Float(_) => J::Null,
+            Self::String(value) => J::String(value.to_rust_string().unwrap_or_default()),
+            // `int(list)` and `int(dict)` fail regardless of their contents.
+            Self::Array(_) => J::Array(Vec::new()),
+            Self::Object(_) => J::Object(serde_json::Map::new()),
+        }
     }
 }
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ProjectionError(pub &'static str);
 
 impl From<serde_json::Value> for Value {
     fn from(value: serde_json::Value) -> Self {
@@ -614,11 +606,24 @@ mod tests {
     fn resize_projection_ignores_unknown_lone_surrogate_fields() {
         let value = loads(br#"{"\ud800":"ignored","cols":80.0,"rows":24}"#).unwrap();
         assert_eq!(
-            value.resize_fields().unwrap(),
+            value.resize_fields(),
             serde_json::json!({"cols":80.0,"rows":24})
         );
         let surrogate_selected = loads(br#"{"cols":"\ud800","rows":24}"#).unwrap();
-        assert!(surrogate_selected.resize_fields().is_err());
+        assert_eq!(
+            surrogate_selected.resize_fields(),
+            serde_json::json!({"cols":"","rows":24})
+        );
+        assert_eq!(
+            dumps(
+                &Value::Object(vec![(
+                    PythonString::from_str("cols"),
+                    surrogate_selected.resize_value("cols").unwrap().clone(),
+                )]),
+                None,
+            ),
+            r#"{"cols": "\ud800"}"#
+        );
     }
 
     #[test]

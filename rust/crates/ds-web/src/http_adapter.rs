@@ -71,6 +71,9 @@ pub fn request_json(body: &[u8]) -> Result<Value, JsonError> {
     python_json::loads(body)
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct PythonNegativeLength;
+
 pub const DEFAULT_API_HOST: &str = "127.0.0.1";
 pub const DEFAULT_API_PORT: u16 = 8792;
 
@@ -113,11 +116,7 @@ pub async fn serve_configured(
     port: u16,
 ) -> std::io::Result<()> {
     println!("dunkingsheep api listening on http://{host}:{port}");
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .await
+    crate::python_http::serve(listener, app).await
 }
 
 pub async fn serve_with_shutdown<F>(
@@ -128,9 +127,7 @@ pub async fn serve_with_shutdown<F>(
 where
     F: Future<Output = ()> + Send + 'static,
 {
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown)
-        .await
+    crate::python_http::serve_with_shutdown(listener, app, shutdown).await
 }
 
 /// Production route graph. Daemon connection/start is lazy, so `/healthz`
@@ -383,6 +380,7 @@ async fn dispatch(
 }
 
 async fn post(state: HttpState, uri: Uri, request: Request<Body>) -> Response<Body> {
+    let python_unbounded_read = request.extensions().get::<PythonNegativeLength>().is_some();
     if request
         .headers()
         .get(header::CONTENT_LENGTH)
@@ -395,13 +393,18 @@ async fn post(state: HttpState, uri: Uri, request: Request<Body>) -> Response<Bo
             format!("body larger than {} bytes", ds_core::http::MAX_POST_BYTES),
         ));
     }
-    let body = match to_bytes(request.into_body(), ds_core::http::MAX_POST_BYTES + 1).await {
+    let body_limit = if python_unbounded_read {
+        usize::MAX
+    } else {
+        ds_core::http::MAX_POST_BYTES + 1
+    };
+    let body = match to_bytes(request.into_body(), body_limit).await {
         Ok(body) => body,
         Err(_) => {
             return api_error_response(ApiError::new(400, "body must be JSON"));
         }
     };
-    if body.len() > ds_core::http::MAX_POST_BYTES {
+    if !python_unbounded_read && body.len() > ds_core::http::MAX_POST_BYTES {
         return api_error_response(ApiError::new(
             413,
             format!("body larger than {} bytes", ds_core::http::MAX_POST_BYTES),
@@ -415,16 +418,7 @@ async fn post(state: HttpState, uri: Uri, request: Request<Body>) -> Response<Bo
             Err(_) => return api_error_response(ApiError::new(400, "body must be JSON")),
         }
     };
-    let payload = match parsed.resize_fields() {
-        Ok(payload) => payload,
-        Err(error) => {
-            return json_response(
-                500,
-                Value::from(serde_json::json!({"error":format!("internal error: {}", error.0)})),
-                false,
-            );
-        }
-    };
+    let payload = parsed.resize_fields();
     let result = match state.backend.lock() {
         Ok(backend) => ds_core::http::route_post(
             uri.path(),
@@ -439,8 +433,40 @@ async fn post(state: HttpState, uri: Uri, request: Request<Body>) -> Response<Bo
     };
     match result {
         Ok(payload) => json_response(200, payload.into(), true),
+        Err(error) if error.context.contains_key("requested") => {
+            resize_error_response(error, &parsed)
+        }
         Err(error) => api_error_response(error),
     }
+}
+
+fn resize_error_response(error: ApiError, requested: &Value) -> Response<Body> {
+    let mut fields = vec![(
+        python_json::PythonString::from_str("error"),
+        Value::String(python_json::PythonString::from_str(&error.message)),
+    )];
+    for key in ["name", "pane_id"] {
+        if let Some(value) = error.context.get(key) {
+            fields.push((
+                python_json::PythonString::from_str(key),
+                Value::from(value.clone()),
+            ));
+        }
+    }
+    let requested_fields = ["cols", "rows"]
+        .into_iter()
+        .filter_map(|name| {
+            requested
+                .resize_value(name)
+                .cloned()
+                .map(|value| (python_json::PythonString::from_str(name), value))
+        })
+        .collect();
+    fields.push((
+        python_json::PythonString::from_str("requested"),
+        Value::Object(requested_fields),
+    ));
+    json_response(error.status, Value::Object(fields), true)
 }
 
 fn api_error_response(error: ApiError) -> Response<Body> {
@@ -502,7 +528,7 @@ fn percent_decode(raw: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use axum::{body::to_bytes, http::header, http::Request};
     use serde_json::{json, Map};
@@ -525,7 +551,7 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct FakeDaemon(Mutex<Vec<(String, serde_json::Value)>>);
+    pub(crate) struct FakeDaemon(Mutex<Vec<(String, serde_json::Value)>>);
 
     impl Daemon for FakeDaemon {
         fn call(
@@ -539,7 +565,7 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct FakeBackend(Mutex<Vec<(String, serde_json::Value, serde_json::Value)>>);
+    pub(crate) struct FakeBackend(Mutex<Vec<(String, serde_json::Value, serde_json::Value)>>);
 
     impl Backend for FakeBackend {
         fn name(&self) -> String {
@@ -557,6 +583,11 @@ mod tests {
             cols: &serde_json::Value,
             rows: &serde_json::Value,
         ) -> Result<Map<String, serde_json::Value>, String> {
+            let cols_int = python_int(cols)?;
+            let rows_int = python_int(rows)?;
+            if !(1..=1000).contains(&cols_int) || !(1..=1000).contains(&rows_int) {
+                return Err("cols and rows must be between 1 and 1000".into());
+            }
             self.0
                 .lock()
                 .unwrap()
@@ -605,7 +636,7 @@ mod tests {
         let body = br#"{"cols":80,"rows":24,"unknown":"\ud800"}"#;
         let parsed = request_json(body).unwrap();
         assert_eq!(
-            parsed.resize_fields().unwrap(),
+            parsed.resize_fields(),
             serde_json::json!({"cols":80,"rows":24})
         );
         assert!(request_json(b"{bad").is_err());
@@ -675,6 +706,38 @@ mod tests {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let bytes = block_on(to_bytes(response.into_body(), usize::MAX)).unwrap();
         assert_eq!(bytes.as_ref(), b"{\n  \"error\": \"body must be JSON\"\n}");
+    }
+
+    #[test]
+    fn post_error_echo_retains_surrogates_huge_integers_lists_and_objects() {
+        for (body, expected) in [
+            (
+                br#"{"cols":"\ud800","rows":24}"#.as_slice(),
+                "{\n  \"error\": \"cols and rows must be integers\",\n  \"name\": \"test\",\n  \"pane_id\": \"w1:p1\",\n  \"requested\": {\n    \"cols\": \"\\ud800\",\n    \"rows\": 24\n  }\n}",
+            ),
+            (
+                br#"{"cols":999999999999999999999999999999999999999999999999,"rows":24}"#.as_slice(),
+                "{\n  \"error\": \"cols and rows must be between 1 and 1000\",\n  \"name\": \"test\",\n  \"pane_id\": \"w1:p1\",\n  \"requested\": {\n    \"cols\": 999999999999999999999999999999999999999999999999,\n    \"rows\": 24\n  }\n}",
+            ),
+            (
+                br#"{"cols":[1,2],"rows":24}"#.as_slice(),
+                "{\n  \"error\": \"cols and rows must be integers\",\n  \"name\": \"test\",\n  \"pane_id\": \"w1:p1\",\n  \"requested\": {\n    \"cols\": [\n      1,\n      2\n    ],\n    \"rows\": 24\n  }\n}",
+            ),
+            (
+                br#"{"cols":{"nested":1},"rows":24}"#.as_slice(),
+                "{\n  \"error\": \"cols and rows must be integers\",\n  \"name\": \"test\",\n  \"pane_id\": \"w1:p1\",\n  \"requested\": {\n    \"cols\": {\n      \"nested\": 1\n    },\n    \"rows\": 24\n  }\n}",
+            ),
+        ] {
+            let response = block_on(test_router().oneshot(request(
+                Method::POST,
+                "/api/terminals/test/resize",
+                Body::from(body),
+            )))
+            .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let bytes = block_on(to_bytes(response.into_body(), usize::MAX)).unwrap();
+            assert_eq!(bytes.as_ref(), expected.as_bytes());
+        }
     }
 
     #[test]
