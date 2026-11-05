@@ -37,7 +37,11 @@ fn run_cli_with_env(socket: &str, command: &[&str], env: &[(&str, &str)]) -> Out
 }
 
 #[cfg(unix)]
-fn run_cli_with_env_bounded(socket: &str, command: &[String], env: &[(&str, &str)]) -> Output {
+fn run_cli_with_env_bounded(
+    socket: &str,
+    command: &[impl AsRef<std::ffi::OsStr>],
+    env: &[(&str, &str)],
+) -> Output {
     let mut cli = Command::new(env!("CARGO_BIN_EXE_dunkingsheep"));
     cli.args(["--socket", socket, "--self-pane", "%99"])
         .args(command)
@@ -60,7 +64,7 @@ fn run_cli_with_env_bounded(socket: &str, command: &[String], env: &[(&str, &str
                 let _ = child.kill();
                 let output = child.wait_with_output().expect("collect stopped Rust CLI");
                 panic!(
-                    "Rust CLI did not finish without reading the token FIFO; stdout={:?}, stderr={:?}",
+                    "Rust CLI did not finish within five seconds; stdout={:?}, stderr={:?}",
                     String::from_utf8_lossy(&output.stdout),
                     String::from_utf8_lossy(&output.stderr)
                 );
@@ -5119,8 +5123,9 @@ fn cli_route_52_watchdog_deadman() {
     let status_file = temp.path().join("status.json");
     let inbox_file = temp.path().join("inbox.db");
     let listener = UnixListener::bind(&socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
     let daemon = std::thread::spawn(move || {
-        let (send_stream, _) = listener.accept().unwrap();
+        let send_stream = accept_fake_daemon(&listener);
         let mut send_line = String::new();
         BufReader::new(&send_stream)
             .read_line(&mut send_line)
@@ -5128,6 +5133,7 @@ fn cli_route_52_watchdog_deadman() {
         let send: Value = serde_json::from_str(&send_line).unwrap();
         assert_eq!("inbox_send", send["cmd"]);
         assert_eq!(Value::Null, send["self_pane_id"]);
+        assert_eq!("watchdog-fixture-token", send["service_token"]);
         let args = send["args"].clone();
         let mut writer = &send_stream;
         writer.write_all(b"{\"ok\":true,\"result\":{}}\n").unwrap();
@@ -5161,12 +5167,13 @@ fn cli_route_52_watchdog_deadman() {
         "2000000000",
         "--json",
     ];
-    let output = run_cli_with_env(
+    let output = run_cli_with_env_bounded(
         &unused_root_socket_text,
         &command,
         &[
             ("DUNKINGSHEEP_DIR", dir_text.as_str()),
             ("DUNKINGSHEEP_SOCKET", socket_text.as_str()),
+            ("DUNKINGSHEEP_SERVICE_TOKEN", "watchdog-fixture-token"),
         ],
     );
     let args = daemon.join().unwrap();
