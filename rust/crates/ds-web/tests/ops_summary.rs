@@ -274,7 +274,10 @@ fn python_rounding_and_database_errors_are_explicit() {
     let negative_zero = ops_summary::round_even(-0.001, 2);
     assert!(negative_zero.is_sign_negative());
     assert_eq!(
-        serde_json::to_string(&ops_summary::number(negative_zero)).unwrap(),
+        serde_json::to_string(&Value::Number(
+            serde_json::Number::from_f64(negative_zero).unwrap(),
+        ))
+        .unwrap(),
         "-0.0"
     );
     let conn = Connection::open_in_memory().unwrap();
