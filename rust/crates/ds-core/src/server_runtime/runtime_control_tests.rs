@@ -245,7 +245,8 @@ fn production_allocation_mutations_use_authenticated_canonical_tasks_and_preserv
             &request("w2:p2"),
         )
         .unwrap();
-    assert_eq!(reviewed["kind"], "review");
+    assert_eq!(reviewed["kind"], "work");
+    assert_eq!(reviewed["title"], "Review: Review source");
     assert_eq!(reviewed["scope"], "global");
     assert_eq!(services.allocator.last_result(), cached);
     services.shutdown_checked().unwrap();
