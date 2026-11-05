@@ -36,6 +36,44 @@ fn run_cli_with_env(socket: &str, command: &[&str], env: &[(&str, &str)]) -> Out
     cli.output().expect("run Rust CLI")
 }
 
+#[cfg(unix)]
+fn run_cli_with_env_bounded(
+    socket: &str,
+    command: &[impl AsRef<std::ffi::OsStr>],
+    env: &[(&str, &str)],
+) -> Output {
+    let mut cli = Command::new(env!("CARGO_BIN_EXE_dunkingsheep"));
+    cli.args(["--socket", socket, "--self-pane", "%99"])
+        .args(command)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env_remove("DUNKINGSHEEP_SOCKET")
+        .env_remove("DUNKINGSHEEP_SERVICE_TOKEN")
+        .env_remove("DUNKINGSHEEP_SERVICE_TOKEN_FILE")
+        .env_remove("DUNKINGSHEEP_CLIENT_TIMEOUT")
+        .env_remove("DUNKINGSHEEP_SEND_TIMEOUT_S");
+    for (key, value) in env {
+        cli.env(key, value);
+    }
+    let mut child = cli.spawn().expect("start Rust CLI");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match child.try_wait().expect("poll Rust CLI") {
+            Some(_) => return child.wait_with_output().expect("collect Rust CLI output"),
+            None if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let output = child.wait_with_output().expect("collect stopped Rust CLI");
+                panic!(
+                    "Rust CLI did not finish within five seconds; stdout={:?}, stderr={:?}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            None => std::thread::sleep(std::time::Duration::from_millis(10)),
+        }
+    }
+}
+
 fn run_binary_without_command(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_dunkingsheep"))
         .args(args)
@@ -1433,17 +1471,12 @@ fn cli_route_56_mcp_setup() {
     std::fs::create_dir_all(&quoted_dir).unwrap();
     let quoted_executable = quoted_dir.join("dunkingsheep");
     let source_executable = env!("CARGO_BIN_EXE_dunkingsheep");
-    let staged_executable = tempfile::NamedTempFile::new_in(&quoted_dir).unwrap();
-    std::fs::copy(source_executable, staged_executable.path()).unwrap();
+    std::fs::copy(source_executable, &quoted_executable).unwrap();
     std::fs::set_permissions(
-        staged_executable.path(),
+        &quoted_executable,
         std::fs::metadata(source_executable).unwrap().permissions(),
     )
     .unwrap();
-    staged_executable
-        .into_temp_path()
-        .persist(&quoted_executable)
-        .unwrap();
     let run_quoted = |harness: &str| {
         Command::new(&quoted_executable)
             .args(["mcp-setup", harness])
@@ -5048,6 +5081,305 @@ fn cli_route_58_commands_map() {
     assert_matches_python(&["mcp-map", "--json"]);
     assert_matches_python(&["--json", "mcp-map"]);
     assert_matches_python(&["mcp-map", "--markdown"]);
+}
+
+fn replace_route_option<'a>(args: &mut Vec<&'a str>, flag: &str, value: &'a str) {
+    let index = args.iter().position(|arg| *arg == flag).unwrap();
+    args[index + 1] = value;
+}
+
+#[cfg(unix)]
+fn create_fifo(path: &Path) {
+    use std::ffi::CString;
+    use std::os::raw::{c_char, c_int, c_uint};
+
+    unsafe extern "C" {
+        fn mkfifo(pathname: *const c_char, mode: c_uint) -> c_int;
+    }
+
+    let path = CString::new(path.to_string_lossy().as_bytes()).unwrap();
+    // SAFETY: path is NUL-terminated and remains alive for the duration of mkfifo.
+    let result = unsafe { mkfifo(path.as_ptr(), 0o600) };
+    assert_eq!(
+        0,
+        result,
+        "create token FIFO: {}",
+        std::io::Error::last_os_error()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_route_52_watchdog_deadman() {
+    let temp = tempfile::tempdir().unwrap();
+    let socket = temp.path().join("daemon.sock");
+    let socket_text = socket.display().to_string();
+    let unused_root_socket = temp.path().join("root-socket-must-not-be-used.sock");
+    let unused_root_socket_text = unused_root_socket.display().to_string();
+    let dir_text = temp.path().display().to_string();
+    let heartbeat = temp.path().join("heartbeat.json");
+    let state = temp.path().join("state.json");
+    let error_file = temp.path().join("watchdog.config-error");
+    let status_file = temp.path().join("status.json");
+    let inbox_file = temp.path().join("inbox.db");
+    let listener = UnixListener::bind(&socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let daemon = std::thread::spawn(move || {
+        let send_stream = accept_fake_daemon(&listener);
+        let mut send_line = String::new();
+        BufReader::new(&send_stream)
+            .read_line(&mut send_line)
+            .unwrap();
+        let send: Value = serde_json::from_str(&send_line).unwrap();
+        assert_eq!("inbox_send", send["cmd"]);
+        assert_eq!(Value::Null, send["self_pane_id"]);
+        assert_eq!("watchdog-fixture-token", send["service_token"]);
+        let args = send["args"].clone();
+        let mut writer = &send_stream;
+        writer.write_all(b"{\"ok\":true,\"result\":{}}\n").unwrap();
+        args
+    });
+
+    let heartbeat_text = heartbeat.display().to_string();
+    let state_text = state.display().to_string();
+    let error_text = error_file.display().to_string();
+    let status_text = status_file.display().to_string();
+    let inbox_text = inbox_file.display().to_string();
+    let command = [
+        "watchdog-deadman",
+        "--heartbeat",
+        &heartbeat_text,
+        "--cadence-minutes",
+        "1",
+        "--to",
+        "vp-test",
+        "--state",
+        &state_text,
+        "--error-file",
+        &error_text,
+        "--status",
+        &status_text,
+        "--inbox",
+        &inbox_text,
+        "--cooldown-minutes",
+        "30",
+        "--now",
+        "2000000000",
+        "--json",
+    ];
+    let output = run_cli_with_env_bounded(
+        &unused_root_socket_text,
+        &command,
+        &[
+            ("DUNKINGSHEEP_DIR", dir_text.as_str()),
+            ("DUNKINGSHEEP_SOCKET", socket_text.as_str()),
+            ("DUNKINGSHEEP_SERVICE_TOKEN", "watchdog-fixture-token"),
+        ],
+    );
+    let args = daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    assert!(
+        output.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!("watchdog.deadman", report["rule"]);
+    assert_eq!(heartbeat.display().to_string(), report["heartbeat"]);
+    assert!(report["stale"].as_bool().unwrap());
+    assert!(report["alerted"].as_bool().unwrap());
+    assert_eq!("daemon", report["delivered_via"]);
+    assert!(state.exists());
+    assert_eq!("vp-test", args["to"]);
+    assert_eq!("watchdog", args["system_sender"]);
+    assert_eq!(
+        "watchdog.deadman: watchdog heartbeat stale",
+        args["subject"]
+    );
+    assert_eq!(
+        format!(
+            "[critical] watchdog.deadman: the watchdog heartbeat {} is missing (the watchdog has never completed a live run). Fleet exceptions are NOT being watched until it runs again. Check `systemctl --user status dunkingsheep-watchdog.timer` and `dunkingsheep watchdog --dry-run`.",
+            heartbeat.display()
+        ),
+        args["body"]
+    );
+
+    let other_dir = temp.path().join("other");
+    std::fs::create_dir(&other_dir).unwrap();
+    let other_socket = other_dir.join("daemon.sock");
+    let other_socket_text = other_socket.display().to_string();
+    let wrong_dir_state = temp.path().join("wrong-dir-state.json");
+    let wrong_dir_state_text = wrong_dir_state.display().to_string();
+    let other_listener = UnixListener::bind(&other_socket).unwrap();
+    other_listener.set_nonblocking(true).unwrap();
+    let mut wrong_dir_command = command.to_vec();
+    replace_route_option(
+        &mut wrong_dir_command,
+        "--state",
+        wrong_dir_state_text.as_str(),
+    );
+    wrong_dir_command.extend([
+        "--socket",
+        other_socket_text.as_str(),
+        "--expected-socket-dir",
+        "",
+    ]);
+    let refused = run_cli_with_env(
+        &unused_root_socket_text,
+        &wrong_dir_command,
+        &[("DUNKINGSHEEP_DIR", dir_text.as_str())],
+    );
+    assert!(matches!(
+        other_listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    ));
+    assert_eq!(Some(2), refused.status.code());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("VP alert NOT delivered [config_bad]"),
+        "stderr: {}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    let refused_report: Value = serde_json::from_slice(&refused.stdout).unwrap();
+    assert_eq!("config_bad", refused_report["cause"]);
+    assert!(refused_report["delivery_error"]
+        .as_str()
+        .unwrap()
+        .contains("is not the expected directory"));
+
+    let dry_socket = temp.path().join("dry-run.sock");
+    let dry_socket_text = dry_socket.display().to_string();
+    let dry_state = temp.path().join("dry-run-state.json");
+    let dry_state_text = dry_state.display().to_string();
+    let mut dry_run_command = command.to_vec();
+    replace_route_option(&mut dry_run_command, "--state", dry_state_text.as_str());
+    dry_run_command.extend(["--socket", dry_socket_text.as_str(), "--dry-run"]);
+    let dry_run = run_cli_with_env(
+        &unused_root_socket_text,
+        &dry_run_command,
+        &[("DUNKINGSHEEP_DIR", dir_text.as_str())],
+    );
+    assert_eq!(Some(0), dry_run.status.code());
+    assert!(dry_run.stderr.is_empty());
+    let dry_report: Value = serde_json::from_slice(&dry_run.stdout).unwrap();
+    assert_eq!("dry-run", dry_report["mode"]);
+    assert!(!dry_state.exists());
+
+    let missing_socket = temp.path().join("missing-daemon.sock");
+    let missing_socket_text = missing_socket.display().to_string();
+    let failed_state = temp.path().join("failed-send-state.json");
+    let failed_state_text = failed_state.display().to_string();
+    let failed_status = temp.path().join("failed-send-status.json");
+    let failed_status_text = failed_status.display().to_string();
+    let failed_inbox = temp.path().join("inbox-is-directory");
+    std::fs::create_dir(&failed_inbox).unwrap();
+    let failed_inbox_text = failed_inbox.display().to_string();
+    let mut fallback_command = command.to_vec();
+    replace_route_option(&mut fallback_command, "--state", failed_state_text.as_str());
+    replace_route_option(
+        &mut fallback_command,
+        "--status",
+        failed_status_text.as_str(),
+    );
+    replace_route_option(&mut fallback_command, "--inbox", failed_inbox_text.as_str());
+    fallback_command.extend(["--socket", missing_socket_text.as_str()]);
+    let fallback = run_cli_with_env_bounded(
+        &unused_root_socket_text,
+        &fallback_command,
+        &[
+            ("DUNKINGSHEEP_DIR", dir_text.as_str()),
+            ("DUNKINGSHEEP_SERVICE_TOKEN", "watchdog-fixture-token"),
+        ],
+    );
+    assert_eq!(Some(1), fallback.status.code());
+    let fallback_stderr = String::from_utf8_lossy(&fallback.stderr);
+    assert!(
+        fallback_stderr.contains("VP alert NOT delivered [daemon_down]"),
+        "unexpected fallback stderr: {fallback_stderr}"
+    );
+    let fallback_report: Value = serde_json::from_slice(&fallback.stdout).unwrap();
+    assert_eq!("daemon_down", fallback_report["cause"]);
+    assert!(fallback_report["delivery_error"]
+        .as_str()
+        .is_some_and(|error| !error.is_empty()));
+    let status_record: Value =
+        serde_json::from_slice(&std::fs::read(failed_status).unwrap()).unwrap();
+    assert_eq!("daemon_down", status_record["cause"]);
+    assert_eq!("direct", status_record["attempted"]);
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_route_52_no_delivery_does_not_open_service_token_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let unused_root_socket = temp.path().join("root-socket-must-not-be-used.sock");
+    let unused_root_socket_text = unused_root_socket.display().to_string();
+    let dir = temp.path().join("config");
+    std::fs::create_dir(&dir).unwrap();
+    let dir_text = dir.display().to_string();
+    const NOW: &str = "2000000000";
+
+    for scenario in ["dry-run", "fresh", "cooldown"] {
+        let case_dir = temp.path().join(scenario);
+        std::fs::create_dir(&case_dir).unwrap();
+        let token_fifo = case_dir.join("token.fifo");
+        create_fifo(&token_fifo);
+        let heartbeat = case_dir.join("heartbeat.json");
+        let state = case_dir.join("state.json");
+        if scenario == "fresh" {
+            std::fs::write(&heartbeat, r#"{"cadence_minutes":1}"#).unwrap();
+            std::fs::File::open(&heartbeat)
+                .unwrap()
+                .set_times(std::fs::FileTimes::new().set_modified(
+                    std::time::SystemTime::UNIX_EPOCH
+                        + std::time::Duration::from_secs(1_999_999_995),
+                ))
+                .unwrap();
+        } else if scenario == "cooldown" {
+            std::fs::write(&state, r#"{"last_alerted":1999999000}"#).unwrap();
+        }
+
+        let heartbeat_text = heartbeat.display().to_string();
+        let state_text = state.display().to_string();
+        let token_fifo_text = token_fifo.display().to_string();
+        let mut command = vec![
+            "watchdog-deadman".to_owned(),
+            "--heartbeat".to_owned(),
+            heartbeat_text,
+            "--cadence-minutes".to_owned(),
+            "1".to_owned(),
+            "--to".to_owned(),
+            "vp-test".to_owned(),
+            "--state".to_owned(),
+            state_text,
+            "--cooldown-minutes".to_owned(),
+            "30".to_owned(),
+            "--now".to_owned(),
+            NOW.to_owned(),
+            "--json".to_owned(),
+        ];
+        if scenario == "dry-run" {
+            command.push("--dry-run".to_owned());
+        }
+
+        let output = run_cli_with_env_bounded(
+            &unused_root_socket_text,
+            &command,
+            &[
+                ("DUNKINGSHEEP_DIR", dir_text.as_str()),
+                ("DUNKINGSHEEP_SOCKET", unused_root_socket_text.as_str()),
+                ("DUNKINGSHEEP_SERVICE_TOKEN_FILE", token_fifo_text.as_str()),
+            ],
+        );
+        assert_eq!(Some(0), output.status.code(), "{scenario}");
+        assert!(output.stderr.is_empty(), "{scenario}: {:?}", output.stderr);
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        match scenario {
+            "dry-run" => assert_eq!("dry-run", report["mode"]),
+            "fresh" => assert_eq!(false, report["stale"]),
+            "cooldown" => assert_eq!("cooldown", report["reason"]),
+            _ => unreachable!(),
+        }
+    }
 }
 
 #[cfg(unix)]

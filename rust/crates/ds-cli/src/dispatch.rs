@@ -212,6 +212,113 @@ fn joined_words(ns: &Map<String, Value>, key: &str) -> String {
         .unwrap_or_default()
 }
 
+fn watchdog_deadman(ns: &Map<String, Value>) -> Outcome {
+    use ds_core::client::{default_timeout, service_token, FlockClient, UnixTransport};
+    use ds_core::config::{config_dir, socket_path, Env};
+    use std::path::PathBuf;
+
+    let env = Env::from_process();
+    let config = match config_dir(&env) {
+        Ok(path) => path,
+        Err(error) => {
+            return Outcome {
+                stdout: String::new(),
+                stderr: format!("error: {error}\n"),
+                code: error.exit_code().max(2),
+            }
+        }
+    };
+    let route_socket = text(ns, "daemon_path");
+    let default_socket = std::env::var("DUNKINGSHEEP_SOCKET")
+        .ok()
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| socket_path(&env).ok());
+    let socket = route_socket
+        .map(PathBuf::from)
+        .or(default_socket)
+        .unwrap_or_else(|| config.join("dunkingsheep.sock"));
+    let socket_text =
+        match ds_core::terminal::tmux_registry::expand_home(&socket.to_string_lossy(), &env) {
+            Ok(path) => path.to_string_lossy().into_owned(),
+            Err(error) => {
+                return Outcome {
+                    stdout: String::new(),
+                    stderr: format!("error: {error}\n"),
+                    code: 2,
+                }
+            }
+        };
+    let process_env = |name: &str| std::env::var(name).ok();
+    let client = FlockClient::new_with_lazy_token(
+        UnixTransport {
+            path: PathBuf::from(socket_text.clone()),
+        },
+        // This is always a pane-less system sender. Resolving inherited shell/tmux identity
+        // before the watchdog checks for dry-run/fresh/cooldown can fail a no-send invocation.
+        None,
+        "watchdog system sender".to_string(),
+        default_timeout(&process_env),
+        || {
+            let process_env = |name: &str| std::env::var(name).ok();
+            service_token(&process_env, &|path| std::fs::read_to_string(path))
+        },
+    );
+
+    let expand = |path: &str| ds_core::terminal::tmux_registry::expand_home(path, &env);
+    let expected_dir = match text(ns, "expected_dir").filter(|path| !path.is_empty()) {
+        Some(path) => match expand(path) {
+            Ok(path) => path,
+            Err(error) => {
+                return Outcome {
+                    stdout: String::new(),
+                    stderr: format!("error: {error}\n"),
+                    code: 2,
+                }
+            }
+        },
+        None => config,
+    };
+    let heartbeat = text(ns, "heartbeat").unwrap_or("");
+    let to = text(ns, "to").unwrap_or("");
+    let state = text(ns, "state").unwrap_or("");
+    let error_file = text(ns, "error_file").unwrap_or("");
+    let status = text(ns, "status").unwrap_or("");
+    let inbox = text(ns, "inbox").unwrap_or("");
+    let args = ds_core::watchdog_deadman::MainArgs {
+        heartbeat,
+        cadence_minutes: ns.get("cadence_minutes").cloned().unwrap_or(Value::Null),
+        multiplier: ns.get("multiplier").cloned().unwrap_or(Value::from(3)),
+        to,
+        state,
+        cooldown_minutes: ns
+            .get("cooldown_minutes")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0),
+        now: ns.get("now").and_then(Value::as_f64),
+        dry_run: matches!(ns.get("dry_run"), Some(Value::Bool(true))),
+        error_file,
+        status,
+        inbox,
+        daemon_path: Some(&socket_text),
+        expected_dir: Some(&expected_dir),
+        json: matches!(ns.get("json"), Some(Value::Bool(true))),
+    };
+    let mut stdout = Vec::new();
+    match ds_core::watchdog_deadman::main(&args, client, &mut stdout) {
+        Ok(code) => Outcome {
+            stdout: String::from_utf8_lossy(&stdout).into_owned(),
+            stderr: String::new(),
+            code,
+        },
+        Err(error) => Outcome {
+            stdout: String::new(),
+            stderr: format!("error: {error}\n"),
+            code: error.exit_code().max(2),
+        },
+    }
+}
+
 fn string_values(value: &Value) -> Vec<String> {
     value
         .as_array()
@@ -3281,6 +3388,7 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
                 json,
             )
         }
+        "watchdog-deadman" => watchdog_deadman(ns),
         "github" => github(ns),
         "guard" => guard(ns),
         "report" => report(ns),

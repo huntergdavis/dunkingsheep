@@ -2,6 +2,8 @@
 //! plus the owner-only spawn guard. No socket and no real sleep.
 
 use std::cell::{Cell, RefCell};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use super::*;
@@ -671,6 +673,35 @@ fn the_request_carries_an_id_the_pane_and_the_token_only_when_there_is_one() {
     let sent: Value = serde_json::from_str(&fake.sent.borrow()[0]).unwrap();
     assert_eq!(json!("tok-1"), sent["service_token"]);
     assert_eq!(Value::Null, sent["self_pane_id"]);
+}
+
+#[test]
+fn a_lazy_service_token_is_loaded_once_at_the_first_rpc() {
+    let fake = Fake::replying(vec![ok(json!(null)), ok(json!(null))]);
+    let loads = Arc::new(AtomicUsize::new(0));
+    let loads_for_provider = Arc::clone(&loads);
+    let mut client = FlockClient::new_with_lazy_token(
+        fake.clone(),
+        None,
+        "anonymous".into(),
+        Duration::from_secs(1),
+        move || {
+            loads_for_provider.fetch_add(1, Ordering::SeqCst);
+            Some("tok-lazy".into())
+        },
+    );
+
+    assert_eq!(0, loads.load(Ordering::SeqCst), "construction is lazy");
+    client.call("task_next", Map::new()).unwrap();
+    assert_eq!(1, loads.load(Ordering::SeqCst));
+    client.call("task_next", Map::new()).unwrap();
+    assert_eq!(1, loads.load(Ordering::SeqCst), "the token is cached");
+
+    for request in &*fake.sent.borrow() {
+        let request: Value = serde_json::from_str(request).unwrap();
+        assert_eq!(json!("tok-lazy"), request["service_token"]);
+        assert_eq!(Value::Null, request["self_pane_id"]);
+    }
 }
 
 #[test]

@@ -577,6 +577,7 @@ pub struct FlockClient<T: Transport> {
     pub identity_note: String,
     pub timeout: Duration,
     token: Option<String>,
+    token_loader: Option<Box<dyn FnOnce() -> Option<String> + Send>>,
     next_id: u64,
 }
 
@@ -594,14 +595,32 @@ impl<T: Transport> FlockClient<T> {
             identity_note,
             timeout,
             token,
+            token_loader: None,
             next_id: 1,
         }
+    }
+
+    /// Construct a client whose service token is resolved at its first RPC. This lets callers
+    /// that may exit without delivery avoid opening the configured token file on no-send paths.
+    pub fn new_with_lazy_token(
+        transport: T,
+        self_pane_id: Option<String>,
+        identity_note: String,
+        timeout: Duration,
+        token_loader: impl FnOnce() -> Option<String> + Send + 'static,
+    ) -> Self {
+        let mut client = Self::new(transport, self_pane_id, identity_note, timeout, None);
+        client.token_loader = Some(Box::new(token_loader));
+        client
     }
 
     /// `call`: one command, its result or the reason it failed. No pane and no token is enough for
     /// a READ and not for a write (t602); a SYSTEM SENDER carries no pane by definition (attaching
     /// one made the daemon refuse the claim and the watchdog went silent).
     pub fn call(&mut self, cmd: &str, args: Map<String, Value>) -> Result<Value, ClientError> {
+        if let Some(load_token) = self.token_loader.take() {
+            self.token = load_token();
+        }
         if let Some(refusal) = identity_refusal_for(
             cmd,
             self.self_pane_id.as_deref(),
