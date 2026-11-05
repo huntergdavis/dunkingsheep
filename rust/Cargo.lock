@@ -475,6 +475,7 @@ dependencies = [
  "axum",
  "chrono",
  "ds-core",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
