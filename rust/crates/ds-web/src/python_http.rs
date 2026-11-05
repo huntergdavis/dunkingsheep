@@ -21,6 +21,25 @@ use tower::ServiceExt;
 const MAX_LINE: usize = 65_536;
 const MAX_HEADERS: usize = 100;
 
+struct RequestLog {
+    client_ip: String,
+    request_line: String,
+}
+
+fn python_log_message(client_ip: &str, date: &str, request_line: &str, status: u16) -> String {
+    format!("{client_ip} - - [{date}] \"{request_line}\" {status} -")
+}
+
+fn log_response(log: &RequestLog, status: u16) {
+    if std::env::var("DUNKINGSHEEP_API_VERBOSE").as_deref() == Ok("1") {
+        let date = chrono::Local::now().format("%d/%b/%Y %H:%M:%S").to_string();
+        eprintln!(
+            "{}",
+            python_log_message(&log.client_ip, &date, &log.request_line, status)
+        );
+    }
+}
+
 pub async fn serve(listener: TcpListener, app: Router) -> io::Result<()> {
     loop {
         let (stream, peer) = listener.accept().await?;
@@ -60,27 +79,33 @@ async fn serve_connection(
     let (read, mut write) = stream.into_split();
     let mut reader = BufReader::new(read);
     let mut line = Vec::new();
+    let mut log = RequestLog {
+        client_ip: peer.ip().to_string(),
+        request_line: String::new(),
+    };
     match read_line_bounded(&mut reader, &mut line, MAX_LINE).await {
         Ok(false) => return Ok(()),
         Ok(true) => {}
         Err(error) if error.kind() == io::ErrorKind::InvalidData => {
-            return write_error(&mut write, 414, "URI Too Long", "URI Too Long").await;
+            log.request_line = trim_crlf(&line);
+            return write_error(&mut write, 414, "URI Too Long", "URI Too Long", &log).await;
         }
         Err(error) => return Err(error),
     }
     let request_line = trim_crlf(&line);
+    log.request_line.clone_from(&request_line);
     let mut words = request_line.split_ascii_whitespace();
     let Some(method) = words.next() else {
-        return write_error(&mut write, 400, "Bad Request", "bad request syntax").await;
+        return write_error(&mut write, 400, "Bad Request", "bad request syntax", &log).await;
     };
     let Some(target) = words.next() else {
-        return write_error(&mut write, 400, "Bad Request", "bad request syntax").await;
+        return write_error(&mut write, 400, "Bad Request", "bad request syntax", &log).await;
     };
     let Some(version) = words.next() else {
-        return write_error(&mut write, 400, "Bad Request", "bad request syntax").await;
+        return write_error(&mut write, 400, "Bad Request", "bad request syntax", &log).await;
     };
     if words.next().is_some() || !(version == "HTTP/1.0" || version == "HTTP/1.1") {
-        return write_error(&mut write, 400, "Bad Request", "bad request syntax").await;
+        return write_error(&mut write, 400, "Bad Request", "bad request syntax", &log).await;
     }
 
     let mut headers = Vec::<(String, String)>::new();
@@ -96,6 +121,7 @@ async fn serve_connection(
                     431,
                     "Request Header Fields Too Large",
                     "Line too long",
+                    &log,
                 )
                 .await;
             }
@@ -111,6 +137,7 @@ async fn serve_connection(
                 431,
                 "Request Header Fields Too Large",
                 "Too many headers",
+                &log,
             )
             .await;
         }
@@ -130,6 +157,7 @@ async fn serve_connection(
             501,
             "Not Implemented",
             &format!("Unsupported method ({})", python_repr(method)),
+            &log,
         )
         .await;
     }
@@ -148,7 +176,7 @@ async fn serve_connection(
                     "internal error: invalid literal for int() with base 10: {}",
                     python_repr(length)
                 );
-                return write_json_error(&mut write, 500, &message).await;
+                return write_json_error(&mut write, 500, &message, &log).await;
             }
         };
         if !negative && !zero && !too_large {
@@ -187,23 +215,23 @@ async fn serve_connection(
     }
     let mut request = match builder.body(Body::from(body)) {
         Ok(request) => request,
-        Err(_) => return write_error(&mut write, 400, "Bad Request", "bad request syntax").await,
+        Err(_) => {
+            return write_error(&mut write, 400, "Bad Request", "bad request syntax", &log).await
+        }
     };
     if negative_length {
         request
             .extensions_mut()
             .insert(crate::http_adapter::PythonNegativeLength);
     }
-    request
-        .extensions_mut()
-        .insert(axum::extract::ConnectInfo(peer));
     let response = match app.oneshot(request).await {
         Ok(response) => response,
         Err(_) => {
-            return write_json_error(&mut write, 500, "internal error: HTTP adapter failed").await
+            return write_json_error(&mut write, 500, "internal error: HTTP adapter failed", &log)
+                .await
         }
     };
-    write_response(&mut write, response).await
+    write_response(&mut write, response, &log).await
 }
 
 fn python_content_length(value: &str) -> Option<(bool, bool, bool)> {
@@ -294,8 +322,10 @@ fn trim_crlf(line: &[u8]) -> String {
 async fn write_response(
     write: &mut tokio::net::tcp::OwnedWriteHalf,
     response: Response<Body>,
+    log: &RequestLog,
 ) -> io::Result<()> {
     let status = response.status();
+    log_response(log, status.as_u16());
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .map_err(io::Error::other)?;
@@ -325,6 +355,7 @@ async fn write_json_error(
     write: &mut tokio::net::tcp::OwnedWriteHalf,
     status: u16,
     message: &str,
+    log: &RequestLog,
 ) -> io::Result<()> {
     let payload = crate::python_json::Value::Object(vec![(
         crate::python_json::PythonString::from_str("error"),
@@ -333,7 +364,7 @@ async fn write_json_error(
     let response = crate::http_adapter::EncodedResponse::json(status, &payload, false)
         .into_axum()
         .map_err(io::Error::other)?;
-    write_response(write, response).await
+    write_response(write, response, log).await
 }
 
 async fn write_error(
@@ -341,7 +372,9 @@ async fn write_error(
     status: u16,
     reason: &str,
     message: &str,
+    log: &RequestLog,
 ) -> io::Result<()> {
+    log_response(log, status);
     let explanation = match status {
         400 => "Bad request syntax or unsupported method",
         414 => "URI is too long",
@@ -386,6 +419,28 @@ mod tests {
         thread,
         time::Duration,
     };
+
+    #[test]
+    fn verbose_log_format_uses_client_ip_requestline_status_and_python_date_shape() {
+        assert_eq!(
+            python_log_message(
+                "127.0.0.1",
+                "04/Nov/2026 17:30:00",
+                "GET /healthz HTTP/1.0",
+                200,
+            ),
+            "127.0.0.1 - - [04/Nov/2026 17:30:00] \"GET /healthz HTTP/1.0\" 200 -"
+        );
+        assert_eq!(
+            python_log_message(
+                "127.0.0.1",
+                "04/Nov/2026 17:30:00",
+                "POST /healthz HTTP/1.1",
+                404,
+            ),
+            "127.0.0.1 - - [04/Nov/2026 17:30:00] \"POST /healthz HTTP/1.1\" 404 -"
+        );
+    }
 
     fn raw_request(app: Router, bytes: &[u8]) -> Vec<u8> {
         let runtime = tokio::runtime::Builder::new_current_thread()

@@ -7,6 +7,9 @@ description = "Dunking Sheep web adapter foundation (docs/rust/RUST_PORT.md sect
 
 [dependencies]
 axum.workspace = true
+# Reuse the already-locked chrono used by ds-core to match Python's local log timestamp;
+# std SystemTime has no local-time formatter, and UTC output would change log_message.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 ds-core = { path = "../ds-core" }
 serde.workspace = true
 serde_json.workspace = true

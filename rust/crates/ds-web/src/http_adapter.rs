@@ -7,7 +7,6 @@
 use std::{
     collections::BTreeMap,
     future::Future,
-    net::SocketAddr,
     path::PathBuf,
     sync::{Arc, Mutex},
     time::Duration,
@@ -370,14 +369,6 @@ async fn dispatch(
 ) -> Response<Body> {
     let method = request.method().clone();
     let uri = request.uri().clone();
-    if std::env::var("DUNKINGSHEEP_API_VERBOSE").as_deref() == Ok("1") {
-        let peer = request
-            .extensions()
-            .get::<axum::extract::ConnectInfo<SocketAddr>>()
-            .map(|peer| peer.0.to_string())
-            .unwrap_or_else(|| "-".into());
-        eprintln!("{peer} - - \"{method} {uri} HTTP/1.1\"");
-    }
     match method {
         Method::GET => {
             let query = parse_query(uri.query().unwrap_or_default());
