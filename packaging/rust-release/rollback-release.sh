@@ -1,14 +1,17 @@
 #!/bin/sh
 # Rolls the Rust CLI back (t3229, audit P0-1). Never runs systemctl.
 #
-#   no --to ID:  restore the drop-in saved by the last install-release.sh run. If that run
-#                found no drop-in, remove it, so ExecStart returns to the base unit. Restore
-#                the launchers saved as *.pre-rust, if present.
-#   --to ID:     point the drop-in and the launchers at release ID, which must already be
-#                installed under <prefix>/releases/ID. The drop-in state being replaced is
-#                kept as *.prev, so a second rollback can undo this one.
+# The drop-in and both launchers always move together as one pair, so a rollback never
+# leaves a launcher that disagrees with the drop-in:
+#   (no option)  restore the pair saved before the last install-release.sh run or rollback
+#   --to ID      point the drop-in and the launchers at release ID, installed under
+#                <prefix>/releases/ID
+#   --original   restore the pair saved before the first install (the pre-Rust state)
+# Each of these saves the pair being replaced as "previous". Running the same rollback
+# again therefore undoes it.
 #
-# usage: rollback-release.sh --prefix DIR --bin-dir DIR --unit-dir DIR [--to ID] [--dry-run]
+# usage: rollback-release.sh --prefix DIR --bin-dir DIR --unit-dir DIR
+#            [--to ID | --original] [--dry-run]
 
 set -eu
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
@@ -18,6 +21,7 @@ prefix=""
 bin_dir=""
 unit_dir=""
 to=""
+original=0
 dry_run=0
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -25,8 +29,9 @@ while [ "$#" -gt 0 ]; do
         --bin-dir) bin_dir=${2:-}; shift 2 ;;
         --unit-dir) unit_dir=${2:-}; shift 2 ;;
         --to) to=${2:-}; shift 2 ;;
+        --original) original=1; shift ;;
         --dry-run) dry_run=1; shift ;;
-        -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
         *) die "unknown argument: $1" ;;
     esac
 done
@@ -37,9 +42,12 @@ done
 require_plain_path --prefix "$prefix"
 require_plain_path --bin-dir "$bin_dir"
 require_plain_path --unit-dir "$unit_dir"
+if [ -n "$to" ] && [ "$original" -eq 1 ]; then
+    die "--to and --original are exclusive"
+fi
 
-dropin_dir="$unit_dir/dunkingsheep.service.d"
-dropin="$dropin_dir/10-rust-release.conf"
+dropin="$unit_dir/dunkingsheep.service.d/10-rust-release.conf"
+rollback_dir="$prefix/rollback"
 
 if [ -n "$to" ]; then
     require_release_id "$to"
@@ -49,35 +57,36 @@ if [ -n "$to" ]; then
         echo "dry run: drop-in and launchers -> release $to"
         exit 0
     fi
+    mkdir -p "$rollback_dir" "$unit_dir/dunkingsheep.service.d" "$bin_dir"
+    swap="$rollback_dir/.swap.$$"
+    snapshot_pair "$swap" "$dropin" "$bin_dir"
     "$target" install --bin-dir "$bin_dir" > /dev/null
-    if [ -f "$dropin" ]; then
-        cp "$dropin" "$dropin.prev"
-    else
-        printf '# none\n' > "$dropin.prev"
-    fi
     render_dropin "$SCRIPT_DIR/templates/10-rust-release.conf.in" "$to" "$target" "$dropin"
+    rm -rf "$rollback_dir/previous"
+    mv "$swap" "$rollback_dir/previous"
     echo "drop-in and launchers now point at release $to"
     echo "not activated: no systemctl was run. Reload and restart only after the cutover gate."
     exit 0
 fi
 
-[ -f "$dropin.prev" ] || die "no saved drop-in to restore: run install-release.sh first, or pass --to ID"
+if [ "$original" -eq 1 ]; then
+    source_dir="$rollback_dir/original"
+    what="the pre-Rust state"
+else
+    source_dir="$rollback_dir/previous"
+    what="the state before the last install or rollback"
+fi
+[ -d "$source_dir" ] || die "no saved state to restore ($what): run install-release.sh first, or pass --to ID"
 if [ "$dry_run" -eq 1 ]; then
-    echo "dry run: restore the drop-in from $dropin.prev and the launchers from *.pre-rust"
+    echo "dry run: restore $what from $source_dir"
     exit 0
 fi
-if [ "$(head -n 1 "$dropin.prev")" = "# none" ]; then
-    rm -f "$dropin"
-    echo "removed the Rust drop-in; ExecStart returns to the base unit"
-else
-    mv "$dropin.prev" "$dropin"
-    echo "restored the previous drop-in"
-fi
-rm -f "$dropin.prev"
-for name in dunkingsheep dunk-poll; do
-    if [ -f "$bin_dir/$name.pre-rust" ]; then
-        mv "$bin_dir/$name.pre-rust" "$bin_dir/$name"
-        echo "restored launcher $bin_dir/$name"
-    fi
-done
+
+# Save the pair being replaced before restoring, because the source may be "previous".
+swap="$rollback_dir/.swap.$$"
+snapshot_pair "$swap" "$dropin" "$bin_dir"
+restore_pair "$source_dir" "$dropin" "$bin_dir"
+rm -rf "$rollback_dir/previous"
+mv "$swap" "$rollback_dir/previous"
+echo "restored $what (drop-in and launchers as one pair)"
 echo "not activated: no systemctl was run. Reload and restart only after the cutover gate."

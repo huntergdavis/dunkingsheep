@@ -38,3 +38,43 @@ dropin_release_id() {
     [ -f "$1" ] || return 0
     sed -n 's/^# release_id=//p' "$1" | head -n 1
 }
+
+# snapshot_pair DIR DROPIN BIN_DIR
+# Records the drop-in and both launchers as they are now, so a rollback restores the
+# same pair. A file that is absent is recorded as an .absent marker, so a restore
+# removes it. The drop-in and the launchers always move together.
+snapshot_pair() {
+    rm -rf "$1"
+    mkdir -p "$1"
+    if [ -f "$2" ]; then
+        cp -p "$2" "$1/dropin.conf"
+    else
+        : > "$1/dropin.absent"
+    fi
+    for name in dunkingsheep dunk-poll; do
+        if [ -f "$3/$name" ]; then
+            cp -p "$3/$name" "$1/$name"
+        else
+            : > "$1/$name.absent"
+        fi
+    done
+}
+
+# restore_pair DIR DROPIN BIN_DIR
+# Puts back the pair recorded by snapshot_pair. Anything not recorded is removed.
+restore_pair() {
+    if [ -f "$1/dropin.conf" ]; then
+        mkdir -p "$(dirname "$2")"
+        cp -p "$1/dropin.conf" "$2"
+    else
+        rm -f "$2"
+    fi
+    mkdir -p "$3"
+    for name in dunkingsheep dunk-poll; do
+        if [ -f "$1/$name" ]; then
+            cp -p "$1/$name" "$3/$name"
+        else
+            rm -f "$3/$name"
+        fi
+    done
+}

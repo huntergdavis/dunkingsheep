@@ -37,20 +37,23 @@ packaging/rust-release/uninstall-release.sh --prefix DIR --bin-dir DIR --unit-di
 
 - **install** creates `releases/<id>/` atomically. Re-running with identical bytes is
   a no-op. Different bytes under an existing id are refused, because releases are
-  immutable. Before the first Rust install, existing launchers are saved as
-  `<name>.pre-rust`. The drop-in state being replaced is saved as `10-rust-release.conf.prev`.
-- **rollback**, with no `--to`, restores the saved drop-in and the `*.pre-rust`
-  launchers. If the saved state was "no drop-in", it removes the drop-in. With
-  `--to ID`, it repoints the drop-in and launchers at an installed release.
-- **uninstall** removes the drop-in and our launchers, and restores `*.pre-rust`.
-  It keeps release directories unless `--purge` is given.
+  immutable. Before changing anything, the drop-in and both launchers are saved as one
+  pair under `<prefix>/rollback/`: `original` (the pre-Rust state, saved once) and
+  `previous` (the state before this install, saved per release).
+- **rollback** restores one saved pair, so the drop-in and the launchers always agree.
+  With no option, it restores `previous`. With `--original`, it restores the pre-Rust
+  state. With `--to ID`, it repoints both files at an installed release. Each rollback
+  saves the pair it replaces as `previous`, so running it again undoes it. A file that
+  was absent when the pair was saved is removed on restore.
+- **uninstall** restores the pre-Rust pair from `original`. It keeps release
+  directories and the rollback history unless `--purge` is given.
 
 ## Safety rules the scripts enforce
 
 - `release id` is letters, digits, `.`, `_` and `-`, starting with a letter or digit.
 - Paths that go into unit files must be absolute and use only `A-Za-z0-9._/-`.
-- Launchers the scripts do not own are not touched. Uninstall only removes launchers
-  that carry a Rust marker.
+- Uninstall and rollback write only the files the saved pair names. Anything the
+  install did not write is left alone.
 
 ## Activation gate (not part of this change)
 

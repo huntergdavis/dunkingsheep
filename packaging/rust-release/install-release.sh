@@ -8,10 +8,11 @@
 #       drop-in that resets ExecStart to the release binary and keeps DUNKINGSHEEP_SUPERVISED=1
 #
 # Every path is required. Nothing defaults to $HOME, and systemctl is never run, so
-# activation stays a separate, owner-approved step. Before the first Rust install, any
-# existing launchers are kept as <name>.pre-rust for rollback. Re-running with the same
-# release id and identical bytes is a no-op. Different bytes under an existing id are
-# refused, because releases are immutable.
+# activation stays a separate, owner-approved step. Before changing anything, the pair of
+# drop-in and launchers is snapshotted under <prefix>/rollback: once as "original", the
+# pre-Rust state, and as "previous", the state before this install. Re-running with the
+# same release id and identical bytes is a no-op. Different bytes under an existing id
+# are refused, because releases are immutable.
 #
 # usage: install-release.sh --binary FILE --poll FILE --release-id ID --prefix DIR
 #            --bin-dir DIR --unit-dir DIR [--revision TEXT] [--dry-run]
@@ -71,8 +72,9 @@ dropin="$dropin_dir/10-rust-release.conf"
 
 if [ "$dry_run" -eq 1 ]; then
     echo "dry run: release $release_id -> $release_dir (reuse=$reuse)"
-    echo "dry run: launchers -> $bin_dir (dunkingsheep, dunk-poll; originals kept as *.pre-rust)"
-    echo "dry run: drop-in -> $dropin (previous state kept as $dropin.prev)"
+    echo "dry run: launchers -> $bin_dir (dunkingsheep, dunk-poll)"
+    echo "dry run: drop-in -> $dropin"
+    echo "dry run: pair snapshots -> $prefix/rollback (original once; previous per release)"
     exit 0
 fi
 
@@ -95,22 +97,15 @@ if [ "$reuse" -eq 0 ]; then
     mv "$staging" "$release_dir"
 fi
 
-mkdir -p "$bin_dir"
-for name in dunkingsheep dunk-poll; do
-    if [ -e "$bin_dir/$name" ] && [ ! -e "$bin_dir/$name.pre-rust" ]; then
-        cp "$bin_dir/$name" "$bin_dir/$name.pre-rust"
-    fi
-done
-"$release_dir/dunkingsheep" install --bin-dir "$bin_dir" > /dev/null
-
-mkdir -p "$dropin_dir"
-if [ "$(dropin_release_id "$dropin")" != "$release_id" ]; then
-    if [ -f "$dropin" ]; then
-        cp "$dropin" "$dropin.prev"
-    else
-        printf '# none\n' > "$dropin.prev"
-    fi
+rollback_dir="$prefix/rollback"
+mkdir -p "$rollback_dir" "$bin_dir" "$dropin_dir"
+if [ ! -d "$rollback_dir/original" ]; then
+    snapshot_pair "$rollback_dir/original" "$dropin" "$bin_dir"
 fi
+if [ "$(dropin_release_id "$dropin")" != "$release_id" ]; then
+    snapshot_pair "$rollback_dir/previous" "$dropin" "$bin_dir"
+fi
+"$release_dir/dunkingsheep" install --bin-dir "$bin_dir" > /dev/null
 render_dropin "$SCRIPT_DIR/templates/10-rust-release.conf.in" "$release_id" \
     "$release_dir/dunkingsheep" "$dropin"
 
@@ -118,5 +113,6 @@ echo "installed release $release_id"
 echo "release:  $release_dir"
 echo "launcher: $bin_dir/dunkingsheep"
 echo "poll:     $bin_dir/dunk-poll"
-echo "drop-in:  $dropin (previous state kept as $dropin.prev)"
+echo "drop-in:  $dropin"
+echo "rollback: $rollback_dir (original and previous pairs)"
 echo "not activated: no systemctl was run. Reload and restart only after the cutover gate."

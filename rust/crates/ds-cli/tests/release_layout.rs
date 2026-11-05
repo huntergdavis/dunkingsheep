@@ -252,56 +252,6 @@ fn install_writes_an_immutable_release_launchers_and_drop_in() {
 }
 
 #[test]
-fn rollback_restores_the_previous_drop_in_and_the_pre_rust_launcher() {
-    let sandbox = Sandbox::new();
-    std::fs::write(sandbox.bin.join("dunkingsheep"), python_era_launcher()).expect("launcher");
-    ok(&sandbox.install("rel-a"));
-    let dropin_a = std::fs::read_to_string(sandbox.dropin()).expect("drop-in a");
-    ok(&sandbox.install("rel-b"));
-    assert!(std::fs::read_to_string(sandbox.dropin())
-        .expect("drop-in b")
-        .contains("# release_id=rel-b\n"));
-    assert!(sandbox.bin.join("dunkingsheep.pre-rust").is_file());
-
-    ok(&sandbox.rollback(&[]));
-    assert_eq!(
-        dropin_a,
-        std::fs::read_to_string(sandbox.dropin()).expect("restored")
-    );
-    assert_eq!(
-        python_era_launcher(),
-        std::fs::read_to_string(sandbox.bin.join("dunkingsheep")).expect("launcher")
-    );
-    assert!(!sandbox.dropin().with_extension("conf.prev").exists());
-    let again = sandbox.rollback(&[]);
-    assert!(
-        !again.status.success(),
-        "a second plain rollback has nothing saved"
-    );
-
-    ok(&sandbox.rollback(&["--to", "rel-b"]));
-    assert!(std::fs::read_to_string(sandbox.dropin())
-        .expect("drop-in")
-        .contains("# release_id=rel-b\n"));
-    assert_eq!(
-        launcher_body(&sandbox.release("rel-b").join("dunkingsheep")),
-        std::fs::read_to_string(sandbox.bin.join("dunkingsheep")).expect("launcher")
-    );
-}
-
-#[test]
-fn rollback_without_a_previous_drop_in_removes_the_rust_drop_in() {
-    let sandbox = Sandbox::new();
-    ok(&sandbox.install("rel-only"));
-    assert!(sandbox.dropin().is_file());
-    ok(&sandbox.rollback(&[]));
-    assert!(
-        !sandbox.dropin().exists(),
-        "ExecStart returns to the base unit"
-    );
-}
-
-#[test]
 fn uninstall_removes_our_artifacts_and_keeps_releases_unless_purged() {
     let sandbox = Sandbox::new();
     std::fs::write(sandbox.bin.join("dunkingsheep"), python_era_launcher()).expect("launcher");
@@ -330,6 +280,65 @@ fn uninstall_removes_our_artifacts_and_keeps_releases_unless_purged() {
     assert!(
         !sandbox.release("rel-u").exists(),
         "purge removes the releases"
+    );
+}
+
+#[test]
+fn rollback_restores_a_consistent_drop_in_and_launcher_pair() {
+    let sandbox = Sandbox::new();
+    std::fs::write(sandbox.bin.join("dunkingsheep"), python_era_launcher()).expect("launcher");
+    ok(&sandbox.install("rel-a"));
+    ok(&sandbox.install("rel-b"));
+    assert_pair(&sandbox, "rel-b");
+
+    // The plain rollback restores the pair from before rel-b: rel-a in both files.
+    ok(&sandbox.rollback(&[]));
+    assert_pair(&sandbox, "rel-a");
+    // The same command again undoes it.
+    ok(&sandbox.rollback(&[]));
+    assert_pair(&sandbox, "rel-b");
+
+    // --original restores the pre-Rust state: no drop-in and the python-era launcher.
+    ok(&sandbox.rollback(&["--original"]));
+    assert!(!sandbox.dropin().exists());
+    assert_eq!(
+        python_era_launcher(),
+        std::fs::read_to_string(sandbox.bin.join("dunkingsheep")).expect("launcher")
+    );
+
+    ok(&sandbox.rollback(&["--to", "rel-b"]));
+    assert_pair(&sandbox, "rel-b");
+}
+
+/// The drop-in names `id`, and the launcher execs that same release binary.
+fn assert_pair(sandbox: &Sandbox, id: &str) {
+    let dropin = std::fs::read_to_string(sandbox.dropin()).expect("drop-in");
+    assert!(dropin.contains(&format!("# release_id={id}\n")), "{dropin}");
+    assert_eq!(
+        launcher_body(&sandbox.release(id).join("dunkingsheep")),
+        std::fs::read_to_string(sandbox.bin.join("dunkingsheep")).expect("launcher"),
+        "the launcher does not match the drop-in for {id}"
+    );
+}
+
+#[test]
+fn rollback_without_a_prior_state_removes_both_generated_files() {
+    let sandbox = Sandbox::new();
+    ok(&sandbox.install("rel-only"));
+    assert!(sandbox.dropin().is_file());
+    assert!(sandbox.bin.join("dunkingsheep").is_file());
+    ok(&sandbox.rollback(&[]));
+    assert!(
+        !sandbox.dropin().exists(),
+        "ExecStart returns to the base unit"
+    );
+    assert!(
+        !sandbox.bin.join("dunkingsheep").exists(),
+        "the generated launcher is removed"
+    );
+    assert!(
+        !sandbox.bin.join("dunk-poll").exists(),
+        "the generated poll wrapper is removed"
     );
 }
 
