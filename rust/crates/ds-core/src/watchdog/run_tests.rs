@@ -231,3 +231,300 @@ fn desk_channel_reads_watermark_and_refuses_malformed_or_wrong_route() {
         "desk brief post not wired: desk API token handling awaits VP decision"
     );
 }
+
+struct FakeOwner {
+    route: String,
+    through: Option<Value>,
+    posts: RefCell<Vec<String>>,
+    fail: bool,
+}
+impl OwnerTransport for FakeOwner {
+    fn desk_channel(&self) -> Result<String, DunkError> {
+        Ok(self.route.clone())
+    }
+    fn post(&self, body: &str) -> Result<i64, SendError> {
+        self.posts.borrow_mut().push(body.to_owned());
+        if self.fail {
+            Err(SendError {
+                kind: "RuntimeError".into(),
+                message: "fake post failure".into(),
+            })
+        } else {
+            Ok(1065)
+        }
+    }
+    fn confirmed_through(&self) -> Result<Option<Value>, DunkError> {
+        Ok(self.through.clone())
+    }
+}
+
+fn run_fixture() -> (tempfile::TempDir, Value) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config: Value = serde_json::from_str(include_str!(
+        "../../../../../packaging/watchdog.example.json"
+    ))
+    .unwrap();
+    config["stores"]["config_dir"] = json!(dir.path());
+    config["state_path"] = json!(dir.path().join("state.json"));
+    config["heartbeat_path"] = json!(dir.path().join("heartbeat.json"));
+    for rule in config["rules"].as_object_mut().unwrap().values_mut() {
+        rule["enabled"] = json!(false);
+    }
+    (dir, config)
+}
+
+#[test]
+fn run_dry_run_matches_fixture_shape_and_never_writes_or_sends() {
+    let (dir, mut config) = run_fixture();
+    config["enabled"] = json!(true);
+    config["dry_run"] = json!(true);
+    let state_path = dir.path().join("state.json");
+    std::fs::write(&state_path, r#"{"alerts":{"kept":{"last_seen":1}}}"#).unwrap();
+    let owner = FakeOwner {
+        route: "cos".into(),
+        through: None,
+        posts: RefCell::new(vec![]),
+        fail: false,
+    };
+    let mut sends = Vec::new();
+    let mut sender = |to: &str, subject: &str, body: &str| -> Result<(), SendError> {
+        sends.push((to.to_owned(), subject.to_owned(), body.to_owned()));
+        Ok(())
+    };
+    let report = run(&config, 100.0, false, &mut sender, &owner, None, None).unwrap();
+    assert_eq!(report["mode"], "dry-run");
+    assert_eq!(report["why_not_live"], "config dry_run=true");
+    assert_eq!(
+        report["counts"],
+        json!({"findings":0,"vp":0,"owner":0,"needs_attention":0})
+    );
+    assert_eq!(report["lines"], json!([]));
+    assert!(sends.is_empty());
+    assert!(owner.posts.borrow().is_empty());
+    assert_eq!(
+        std::fs::read_to_string(state_path).unwrap(),
+        r#"{"alerts":{"kept":{"last_seen":1}}}"#
+    );
+    assert!(!dir.path().join("heartbeat.json").exists());
+}
+
+#[test]
+fn run_confirms_matching_route_and_reports_channel_mismatch_once() {
+    let (dir, mut config) = run_fixture();
+    config["enabled"] = json!(true);
+    config["dry_run"] = json!(false);
+    let mut state = super::super::state::empty_state();
+    state["owner_pages"]["cos-page"] =
+        json!({"brief_id":1065,"posted_at":90.0,"confirmed_at":null,"desk_channel":"cos"});
+    state["owner_pages"]["legacy-page"] =
+        json!({"brief_id":9,"posted_at":90.0,"confirmed_at":null});
+    save_state(&dir.path().join("state.json"), &state).unwrap();
+    let owner = FakeOwner {
+        route: "cos".into(),
+        through: Some(json!(1065)),
+        posts: RefCell::new(vec![]),
+        fail: false,
+    };
+    let mut sender = |_: &str, _: &str, _: &str| Ok(());
+    let report = run(&config, 100.0, false, &mut sender, &owner, None, None).unwrap();
+    let persisted = read_json(&dir.path().join("state.json")).unwrap();
+    assert_eq!(persisted["owner_pages"]["cos-page"]["confirmed_at"], 100.0);
+    assert_eq!(
+        persisted["owner_pages"]["legacy-page"]["status"],
+        "undelivered"
+    );
+    assert_eq!(
+        persisted["owner_pages"]["legacy-page"]["undelivered_reason"],
+        "channel-mismatch"
+    );
+    assert!(report["problems"][0]
+        .as_str()
+        .unwrap()
+        .contains("UNDELIVERED"));
+    assert_eq!(report["sent"], json!(["vp"]));
+    assert!(dir.path().join("heartbeat.json").exists());
+
+    let retry = run(&config, 101.0, false, &mut sender, &owner, None, None).unwrap();
+    assert_eq!(retry["problems"], json!([]));
+    assert_eq!(retry["sent"], json!([]));
+    assert!(owner.posts.borrow().is_empty());
+}
+
+#[test]
+fn run_vp_delivery_failure_persists_failure_without_refreshing_heartbeat() {
+    let (dir, mut config) = run_fixture();
+    config["enabled"] = json!(true);
+    config["dry_run"] = json!(false);
+    config["rules"]["host.load"]["enabled"] = json!(true);
+    super::super::state::save_state(
+        &dir.path().join("state.json"),
+        &super::super::state::empty_state(),
+    )
+    .unwrap();
+    let owner = FakeOwner {
+        route: "cos".into(),
+        through: None,
+        posts: RefCell::new(vec![]),
+        fail: false,
+    };
+    let host = |_path: &Path| {
+        Ok(super::super::rules_host::HostSample {
+            load1: 8.0,
+            load5: Some(8.0),
+            cpus: 1,
+            used_fraction: 0.5,
+            free_bytes: 8_000_000_000,
+            inode_used_fraction: 0.1,
+        })
+    };
+    let mut sender = |_: &str, _: &str, _: &str| {
+        Err(SendError {
+            kind: "RuntimeError".into(),
+            message: "fake transport down".into(),
+        })
+    };
+    let report = run(
+        &config,
+        100.0,
+        false,
+        &mut sender,
+        &owner,
+        None,
+        Some(&host),
+    )
+    .unwrap();
+    assert_eq!(
+        report["delivery_error"],
+        "RuntimeError: fake transport down"
+    );
+    assert!(!dir.path().join("heartbeat.json").exists());
+    let persisted = read_json(&dir.path().join("state.json")).unwrap();
+    assert_eq!(persisted["delivery_failure_count"], 1);
+    assert_eq!(persisted["last_run"], 100.0);
+}
+
+#[test]
+fn run_cooldown_dedupes_across_persisted_state_and_reopens_at_boundary() {
+    let (dir, mut config) = run_fixture();
+    config["enabled"] = json!(true);
+    config["dry_run"] = json!(false);
+    config["rules"]["host.load"]["enabled"] = json!(true);
+    save_state(
+        &dir.path().join("state.json"),
+        &super::super::state::empty_state(),
+    )
+    .unwrap();
+    let owner = FakeOwner {
+        route: "cos".into(),
+        through: None,
+        posts: RefCell::new(vec![]),
+        fail: false,
+    };
+    let host = |_path: &Path| {
+        Ok(super::super::rules_host::HostSample {
+            load1: 8.0,
+            load5: Some(8.0),
+            cpus: 1,
+            used_fraction: 0.5,
+            free_bytes: 8_000_000_000,
+            inode_used_fraction: 0.1,
+        })
+    };
+    let sends = RefCell::new(Vec::new());
+    let mut sender = |to: &str, subject: &str, body: &str| {
+        sends
+            .borrow_mut()
+            .push((to.to_owned(), subject.to_owned(), body.to_owned()));
+        Ok(())
+    };
+    let first = run(
+        &config,
+        100.0,
+        false,
+        &mut sender,
+        &owner,
+        None,
+        Some(&host),
+    )
+    .unwrap();
+    assert_eq!(first["sent"], json!(["vp"]));
+    assert_eq!(sends.borrow().len(), 1);
+    let second = run(
+        &config,
+        101.0,
+        false,
+        &mut sender,
+        &owner,
+        None,
+        Some(&host),
+    )
+    .unwrap();
+    assert_eq!(second["decisions"][0]["vp"], "dedupe");
+    assert_eq!(second["sent"], json!([]));
+    assert_eq!(
+        sends.borrow().len(),
+        1,
+        "persisted cooldown prevents a duplicate send"
+    );
+    let boundary = run(
+        &config,
+        1900.0,
+        false,
+        &mut sender,
+        &owner,
+        None,
+        Some(&host),
+    )
+    .unwrap();
+    assert_eq!(boundary["sent"], json!(["vp"]));
+    assert_eq!(
+        sends.borrow().len(),
+        2,
+        "exact cooldown boundary permits a new send"
+    );
+}
+
+#[test]
+fn run_retries_confirmation_without_reposting_and_sends_resolution_once() {
+    let (dir, mut config) = run_fixture();
+    config["enabled"] = json!(true);
+    config["dry_run"] = json!(false);
+    let mut state = super::super::state::empty_state();
+    state["owner_pages"]["host.disk_full|/tmp:0.98"] = json!({
+        "brief_id":1065,"posted_at":90.0,"confirmed_at":null,"desk_channel":"cos"
+    });
+    save_state(&dir.path().join("state.json"), &state).unwrap();
+    let owner = FakeOwner {
+        route: "cos".into(),
+        through: None,
+        posts: RefCell::new(vec![]),
+        fail: false,
+    };
+    let mut sender = |_: &str, _: &str, _: &str| Ok(());
+    let first = run(&config, 100.0, false, &mut sender, &owner, None, None).unwrap();
+    assert_eq!(first["sent"], json!([]));
+    assert!(owner.posts.borrow().is_empty());
+    assert!(
+        read_json(&dir.path().join("state.json")).unwrap()["owner_pages"]
+            ["host.disk_full|/tmp:0.98"]["confirmed_at"]
+            .is_null()
+    );
+
+    // The bridge watermark advances on the next invocation; the runner confirms and resolves
+    // the prior page without reposting the original page.
+    let owner = FakeOwner {
+        route: "cos".into(),
+        through: Some(json!(1065)),
+        posts: RefCell::new(vec![]),
+        fail: false,
+    };
+    let second = run(&config, 101.0, false, &mut sender, &owner, None, None).unwrap();
+    assert_eq!(second["sent"], json!([]));
+    assert_eq!(owner.posts.borrow().len(), 1);
+    assert!(owner.posts.borrow()[0].contains("Watchdog OWNER resolved"));
+    assert!(
+        read_json(&dir.path().join("state.json")).unwrap()["owner_pages"]
+            .get("host.disk_full|/tmp:0.98")
+            .is_none()
+    );
+}
