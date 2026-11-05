@@ -53,7 +53,7 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|x| format!("{x:02x}")).collect()
 }
 fn unhex(s: &str) -> Result<Vec<u8>, AuthError> {
-    if s.len() % 2 != 0 || !s.is_ascii() {
+    if !s.len().is_multiple_of(2) || !s.is_ascii() {
         return Err(internal("invalid hex"));
     }
     (0..s.len())
