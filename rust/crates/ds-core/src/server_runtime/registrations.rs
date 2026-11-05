@@ -874,7 +874,7 @@ mod tests {
         assert_eq!(ended["pane_id"], "w1:p1");
 
         let poll = call("poll", json!({}));
-        assert_eq!(poll["self_pane_id"], "w1:p1");
+        assert_eq!(poll["status"]["self_pane_id"], "w1:p1");
         assert!(poll["inbox_count"].is_object(), "{poll}");
         let roster = call("roster", json!({}));
         assert!(roster["as_of"].is_string(), "{roster}");
