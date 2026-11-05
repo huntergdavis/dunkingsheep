@@ -3010,6 +3010,10 @@ async fn run_fresh_conflict_is_reported_without_filing_a_review_task() {
         .is_empty());
     assert!(report["filed"].as_array().unwrap().is_empty());
     assert_eq!(1, report["conflicted"].as_array().unwrap().len());
+    assert_eq!(
+        json!({"repo":"o/r", "pr":7, "head":"conflict-hea"}),
+        report["conflicted"][0]
+    );
     assert_eq!(0, report["errors"].as_array().unwrap().len());
     assert_eq!(2, sync.transport.requests.lock().unwrap().len());
 }
