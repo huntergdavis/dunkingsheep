@@ -36,6 +36,38 @@ fn run_cli_with_env(socket: &str, command: &[&str], env: &[(&str, &str)]) -> Out
     cli.output().expect("run Rust CLI")
 }
 
+#[cfg(unix)]
+fn run_cli_with_env_bounded(socket: &str, command: &[String], env: &[(&str, &str)]) -> Output {
+    let mut cli = Command::new(env!("CARGO_BIN_EXE_dunkingsheep"));
+    cli.args(["--socket", socket, "--self-pane", "%99"])
+        .args(command)
+        .env_remove("DUNKINGSHEEP_SOCKET")
+        .env_remove("DUNKINGSHEEP_SERVICE_TOKEN")
+        .env_remove("DUNKINGSHEEP_SERVICE_TOKEN_FILE")
+        .env_remove("DUNKINGSHEEP_CLIENT_TIMEOUT")
+        .env_remove("DUNKINGSHEEP_SEND_TIMEOUT_S");
+    for (key, value) in env {
+        cli.env(key, value);
+    }
+    let mut child = cli.spawn().expect("start Rust CLI");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match child.try_wait().expect("poll Rust CLI") {
+            Some(_) => return child.wait_with_output().expect("collect Rust CLI output"),
+            None if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let output = child.wait_with_output().expect("collect stopped Rust CLI");
+                panic!(
+                    "Rust CLI did not finish without reading the token FIFO; stdout={:?}, stderr={:?}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            None => std::thread::sleep(std::time::Duration::from_millis(10)),
+        }
+    }
+}
+
 fn run_binary_without_command(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_dunkingsheep"))
         .args(args)
@@ -5056,6 +5088,26 @@ fn replace_route_option<'a>(args: &mut Vec<&'a str>, flag: &str, value: &'a str)
 }
 
 #[cfg(unix)]
+fn create_fifo(path: &Path) {
+    use std::ffi::CString;
+    use std::os::raw::{c_char, c_int, c_uint};
+
+    unsafe extern "C" {
+        fn mkfifo(pathname: *const c_char, mode: c_uint) -> c_int;
+    }
+
+    let path = CString::new(path.to_string_lossy().as_bytes()).unwrap();
+    // SAFETY: path is NUL-terminated and remains alive for the duration of mkfifo.
+    let result = unsafe { mkfifo(path.as_ptr(), 0o600) };
+    assert_eq!(
+        0,
+        result,
+        "create token FIFO: {}",
+        std::io::Error::last_os_error()
+    );
+}
+
+#[cfg(unix)]
 #[test]
 fn cli_route_52_watchdog_deadman() {
     let temp = tempfile::tempdir().unwrap();
@@ -5244,6 +5296,81 @@ fn cli_route_52_watchdog_deadman() {
         serde_json::from_slice(&std::fs::read(failed_status).unwrap()).unwrap();
     assert_eq!("daemon_down", status_record["cause"]);
     assert_eq!("direct", status_record["attempted"]);
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_route_52_no_delivery_does_not_open_service_token_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let unused_root_socket = temp.path().join("root-socket-must-not-be-used.sock");
+    let unused_root_socket_text = unused_root_socket.display().to_string();
+    let dir = temp.path().join("config");
+    std::fs::create_dir(&dir).unwrap();
+    let dir_text = dir.display().to_string();
+    const NOW: &str = "2000000000";
+
+    for scenario in ["dry-run", "fresh", "cooldown"] {
+        let case_dir = temp.path().join(scenario);
+        std::fs::create_dir(&case_dir).unwrap();
+        let token_fifo = case_dir.join("token.fifo");
+        create_fifo(&token_fifo);
+        let heartbeat = case_dir.join("heartbeat.json");
+        let state = case_dir.join("state.json");
+        if scenario == "fresh" {
+            std::fs::write(&heartbeat, r#"{"cadence_minutes":1}"#).unwrap();
+            std::fs::File::open(&heartbeat)
+                .unwrap()
+                .set_times(std::fs::FileTimes::new().set_modified(
+                    std::time::SystemTime::UNIX_EPOCH
+                        + std::time::Duration::from_secs(1_999_999_995),
+                ))
+                .unwrap();
+        } else if scenario == "cooldown" {
+            std::fs::write(&state, r#"{"last_alerted":1999999000}"#).unwrap();
+        }
+
+        let heartbeat_text = heartbeat.display().to_string();
+        let state_text = state.display().to_string();
+        let token_fifo_text = token_fifo.display().to_string();
+        let mut command = vec![
+            "watchdog-deadman".to_owned(),
+            "--heartbeat".to_owned(),
+            heartbeat_text,
+            "--cadence-minutes".to_owned(),
+            "1".to_owned(),
+            "--to".to_owned(),
+            "vp-test".to_owned(),
+            "--state".to_owned(),
+            state_text,
+            "--cooldown-minutes".to_owned(),
+            "30".to_owned(),
+            "--now".to_owned(),
+            NOW.to_owned(),
+            "--json".to_owned(),
+        ];
+        if scenario == "dry-run" {
+            command.push("--dry-run".to_owned());
+        }
+
+        let output = run_cli_with_env_bounded(
+            &unused_root_socket_text,
+            &command,
+            &[
+                ("DUNKINGSHEEP_DIR", dir_text.as_str()),
+                ("DUNKINGSHEEP_SOCKET", unused_root_socket_text.as_str()),
+                ("DUNKINGSHEEP_SERVICE_TOKEN_FILE", token_fifo_text.as_str()),
+            ],
+        );
+        assert_eq!(Some(0), output.status.code(), "{scenario}");
+        assert!(output.stderr.is_empty(), "{scenario}: {:?}", output.stderr);
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        match scenario {
+            "dry-run" => assert_eq!("dry-run", report["mode"]),
+            "fresh" => assert_eq!(false, report["stale"]),
+            "cooldown" => assert_eq!("cooldown", report["reason"]),
+            _ => unreachable!(),
+        }
+    }
 }
 
 #[cfg(unix)]

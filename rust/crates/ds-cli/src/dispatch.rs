@@ -273,15 +273,17 @@ fn watchdog_deadman(ns: &Map<String, Value>) -> Outcome {
         },
     };
     let process_env = |name: &str| std::env::var(name).ok();
-    let token = service_token(&process_env, &|path| std::fs::read_to_string(path));
-    let client = FlockClient::new(
+    let client = FlockClient::new_with_lazy_token(
         UnixTransport {
             path: PathBuf::from(socket_text.clone()),
         },
         pane,
         identity_note,
         default_timeout(&process_env),
-        token,
+        || {
+            let process_env = |name: &str| std::env::var(name).ok();
+            service_token(&process_env, &|path| std::fs::read_to_string(path))
+        },
     );
 
     let expand = |path: &str| ds_core::terminal::tmux_registry::expand_home(path, &env);
