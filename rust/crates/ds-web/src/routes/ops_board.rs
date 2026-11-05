@@ -78,7 +78,36 @@ impl OpsBoardBackend for SocketOwnerDecisions {
         &'a self,
         id: &'a str,
     ) -> OpsBoardFuture<'a, Result<Value, OpsBoardError>> {
-        self.board.defer_question(id)
+        let id = id.to_owned();
+        let client = Arc::clone(&self.client);
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || {
+                let mut client = client
+                    .lock()
+                    .map_err(|_| OpsBoardError::Failure("RuntimeError".into()))?;
+                client
+                    .call(
+                        "task_update",
+                        json!({"id": id, "priority": "low"})
+                            .as_object()
+                            .cloned()
+                            .unwrap_or_default(),
+                    )
+                    .map_err(|error| {
+                        OpsBoardError::Failure(
+                            match error {
+                                ds_core::client::ClientError::Dunk(_) => "DunkError",
+                                ds_core::client::ClientError::Unavailable(_) => "DaemonUnavailable",
+                                ds_core::client::ClientError::Protocol(_) => "ValueError",
+                                ds_core::client::ClientError::Io(_) => "OSError",
+                            }
+                            .into(),
+                        )
+                    })
+            })
+            .await
+            .map_err(|_| OpsBoardError::Failure("RuntimeError".into()))?
+        })
     }
     fn refresh<'a>(&'a self) -> OpsBoardFuture<'a, Result<Value, OpsBoardError>> {
         self.board.refresh()
@@ -504,6 +533,83 @@ mod tests {
             seen: Arc::default(),
         });
         router(board, auth, RequestScheme::Http)
+    }
+
+    #[tokio::test]
+    async fn not_now_uses_daemon_update_and_reports_refusal() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+        use std::time::Duration;
+
+        for succeeds in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("daemon.sock");
+            let listener = UnixListener::bind(&path).unwrap();
+            let (tx, rx) = std::sync::mpsc::channel();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut line = String::new();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut line)
+                    .unwrap();
+                let request: Value = serde_json::from_str(&line).unwrap();
+                tx.send((request["cmd"].clone(), request["args"].clone()))
+                    .unwrap();
+                let response = if succeeds {
+                    json!({"id":request["id"],"ok":true,"result":{"id":"t9","priority":"low"}})
+                } else {
+                    json!({"id":request["id"],"ok":false,"error":"refused"})
+                };
+                writeln!(stream, "{response}").unwrap();
+            });
+            let client = ds_core::client::FlockClient::new(
+                ds_core::client::UnixTransport { path },
+                None,
+                "test".into(),
+                Duration::from_secs(2),
+                Some("fixture-token".into()),
+            );
+            let board: Arc<dyn OpsBoardBackend> = Arc::new(SocketOwnerDecisions {
+                board: Arc::new(FakeBoard::default()),
+                client: Arc::new(std::sync::Mutex::new(client)),
+            });
+            let auth: Arc<dyn AuthBackend> = Arc::new(FakeAuth {
+                fail_identity: false,
+                identity_calls: Arc::new(AtomicUsize::new(0)),
+                seen: Arc::default(),
+            });
+            let request = Request::builder()
+                .method("POST")
+                .uri("/api/ops-board/not-now")
+                .header(header::HOST, "desk.test")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"task_id":"t9"}"#))
+                .unwrap();
+            let response = router(board, auth, RequestScheme::Http)
+                .oneshot(request)
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                if succeeds {
+                    StatusCode::OK
+                } else {
+                    StatusCode::SERVICE_UNAVAILABLE
+                }
+            );
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let body: Value = serde_json::from_slice(&body).unwrap();
+            if succeeds {
+                assert_eq!(body["task"]["priority"], "low");
+            } else {
+                assert_eq!(body["detail"], "Could not lower t9: DunkError");
+            }
+            assert_eq!(
+                rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+                (json!("task_update"), json!({"id":"t9","priority":"low"}))
+            );
+            server.join().unwrap();
+        }
     }
 
     #[tokio::test]
