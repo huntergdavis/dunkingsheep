@@ -422,6 +422,7 @@ dependencies = [
  "ds-core",
  "ds-mcp",
  "ds-tui",
+ "ds-web",
  "serde_json",
  "tempfile",
  "tokio",
