@@ -173,9 +173,8 @@ impl std::fmt::Debug for OwnerMailboxReporter<'_> {
 impl crate::projects::Reporter for OwnerMailboxReporter<'_> {
     fn report(&self, project: &str, body: &str) -> Result<String, String> {
         let subject = format!("Project {project} is live");
-        let result = self
-            .flock
-            .inbox_send(
+        let send = || {
+            self.flock.inbox_send(
                 self.env,
                 &SendArgs {
                     to: "owner",
@@ -186,7 +185,22 @@ impl crate::projects::Reporter for OwnerMailboxReporter<'_> {
                     ..SendArgs::default()
                 },
             )
-            .map_err(|error| error.to_string())?;
+        };
+        // The project engine awaits SQLite writes on Tokio, while the canonical inbox store is
+        // synchronous and owns a current-thread runtime. Leave the Tokio worker's async context
+        // before calling it so the committed message id remains available to the engine.
+        let send_result = match tokio::runtime::Handle::try_current() {
+            Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+                tokio::task::block_in_place(send)
+            }
+            Ok(_) => {
+                return Err(
+                    "owner inbox report requires a multi-thread runtime blocking boundary".into(),
+                );
+            }
+            Err(_) => send(),
+        };
+        let result = send_result.map_err(|error| error.to_string())?;
         if result.mailbox != "owner" || result.outcome.is_some() {
             return Err(format!(
                 "owner mailbox send did not resolve to the reserved owner inbox ({}; outcome {:?})",

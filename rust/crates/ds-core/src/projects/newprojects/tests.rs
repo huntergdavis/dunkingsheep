@@ -413,7 +413,11 @@ async fn durable_owner_report_failure_is_uncertain_and_never_replayed() {
     assert_eq!(State::Partial, recovered.get("budget-app").unwrap().state);
     assert_eq!(2, recovered.get("budget-app").unwrap().agents.len());
     assert_eq!(calls_before_retry, terminal.layout_calls.len());
-    assert_eq!(1, reporter.calls.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(
+        0,
+        reporter.calls.load(std::sync::atomic::Ordering::SeqCst),
+        "an uncertain report is never blindly retried after restart"
+    );
     let events = recovered
         .store
         .as_ref()

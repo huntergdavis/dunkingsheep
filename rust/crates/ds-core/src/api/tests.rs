@@ -2144,7 +2144,7 @@ fn project_spawn_rejects_caller_supplied_authority_paths_and_argv() {
         &env,
     )
     .unwrap_err();
-    assert!(error.to_string().contains("caller-controlled field"));
+    assert!(error.to_string().contains("unknown argument(s)"));
     assert!(!store_path.exists());
 }
 
