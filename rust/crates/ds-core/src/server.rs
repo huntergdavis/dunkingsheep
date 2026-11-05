@@ -88,6 +88,7 @@ pub struct FlockServer {
     connections: Arc<Mutex<ConnectionRegistry>>,
     connections_changed: Arc<std::sync::Condvar>,
     dispatcher_closed: bool,
+    shutdown_failure: Option<Arc<ShutdownFailure>>,
 }
 
 struct ConnectionWorker {
@@ -119,6 +120,7 @@ impl FlockServer {
             connections: Arc::new(Mutex::new(ConnectionRegistry::new())),
             connections_changed: Arc::new(std::sync::Condvar::new()),
             dispatcher_closed: false,
+            shutdown_failure: None,
         }
     }
 
@@ -220,6 +222,9 @@ impl FlockServer {
     }
 
     pub fn close(&mut self) -> Result<(), BindError> {
+        if let Some(failure) = &self.shutdown_failure {
+            return Err(BindError::Shutdown(Arc::clone(failure)));
+        }
         self.stop.store(true, Ordering::SeqCst);
         self.listener = None;
         let (panicked_workers, wake_errors, registry_poisoned) =
@@ -237,19 +242,20 @@ impl FlockServer {
             Err(error) => Some(error),
         };
         tracing::info!("daemon stopped");
-        if registry_poisoned
-            || !panicked_workers.is_empty()
-            || !wake_errors.is_empty()
-            || dispatcher_panicked
-            || socket_error.is_some()
-        {
-            return Err(BindError::Shutdown {
-                worker_panics: panicked_workers,
-                worker_wake_errors: wake_errors,
-                dispatcher_panicked,
-                registry_poisoned,
-                socket_error,
-            });
+        let failure = ShutdownFailure {
+            worker_panics: panicked_workers,
+            worker_wake_errors: wake_errors
+                .into_iter()
+                .map(|(id, error)| (id, error.to_string()))
+                .collect(),
+            dispatcher_panicked,
+            registry_poisoned,
+            socket_error: socket_error.map(|error| error.to_string()),
+        };
+        if failure.has_errors() {
+            let failure = Arc::new(failure);
+            self.shutdown_failure = Some(Arc::clone(&failure));
+            return Err(BindError::Shutdown(failure));
         }
         Ok(())
     }
@@ -262,19 +268,33 @@ impl FlockServer {
     }
 }
 
+/// Terminal cleanup errors are cached so a repeated close cannot hide a failed shutdown.
+#[derive(Debug, Clone)]
+pub struct ShutdownFailure {
+    pub worker_panics: Vec<u64>,
+    pub worker_wake_errors: Vec<(u64, String)>,
+    pub dispatcher_panicked: bool,
+    pub registry_poisoned: bool,
+    pub socket_error: Option<String>,
+}
+
+impl ShutdownFailure {
+    fn has_errors(&self) -> bool {
+        !self.worker_panics.is_empty()
+            || !self.worker_wake_errors.is_empty()
+            || self.dispatcher_panicked
+            || self.registry_poisoned
+            || self.socket_error.is_some()
+    }
+}
+
 #[derive(Debug)]
 pub enum BindError {
     AlreadyRunning(AlreadyRunning),
     Io(std::io::Error),
     RegistryPoisoned,
     WorkerPanicked(Vec<u64>),
-    Shutdown {
-        worker_panics: Vec<u64>,
-        worker_wake_errors: Vec<(u64, std::io::Error)>,
-        dispatcher_panicked: bool,
-        registry_poisoned: bool,
-        socket_error: Option<std::io::Error>,
-    },
+    Shutdown(Arc<ShutdownFailure>),
     ServeAndShutdown {
         serve: Box<BindError>,
         shutdown: Box<BindError>,
@@ -288,9 +308,14 @@ impl std::fmt::Display for BindError {
             BindError::Io(error) => error.fmt(f),
             BindError::RegistryPoisoned => f.write_str("connection registry lock was poisoned"),
             BindError::WorkerPanicked(ids) => write!(f, "connection workers panicked: {ids:?}"),
-            BindError::Shutdown { worker_panics, worker_wake_errors, dispatcher_panicked, registry_poisoned, socket_error } => write!(
+            BindError::Shutdown(failure) => write!(
                 f,
-                "shutdown incomplete: worker panics={worker_panics:?}, worker wake errors={worker_wake_errors:?}, dispatcher panicked={dispatcher_panicked}, registry poisoned={registry_poisoned}, socket cleanup error={socket_error:?}"
+                "shutdown incomplete: worker panics={:?}, worker wake errors={:?}, dispatcher panicked={}, registry poisoned={}, socket cleanup error={:?}",
+                failure.worker_panics,
+                failure.worker_wake_errors,
+                failure.dispatcher_panicked,
+                failure.registry_poisoned,
+                failure.socket_error
             ),
             BindError::ServeAndShutdown { serve, shutdown } => {
                 write!(f, "serve failed ({serve}); shutdown also failed ({shutdown})")

@@ -388,7 +388,7 @@ fn finished_worker_panics_are_joined_and_reported() {
     drop(peer);
 }
 
-struct PanickingClose;
+struct PanickingClose(Arc<std::sync::atomic::AtomicUsize>);
 
 impl Dispatcher for PanickingClose {
     fn dispatch(&self, _: &str, _: &Value, _: &RequestCtx) -> Result<Value, DunkError> {
@@ -396,6 +396,7 @@ impl Dispatcher for PanickingClose {
     }
 
     fn close(&self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
         panic!("dispatcher close failed");
     }
 }
@@ -404,21 +405,37 @@ impl Dispatcher for PanickingClose {
 fn dispatcher_close_panics_are_reported_after_socket_cleanup() {
     let dir = sock_dir("close-panic");
     let path = dir.path().join("s.sock");
-    let mut server = FlockServer::new(Arc::new(PanickingClose), path.clone());
+    let close_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut server = FlockServer::new(
+        Arc::new(PanickingClose(Arc::clone(&close_calls))),
+        path.clone(),
+    );
     server.bind().unwrap();
+    let (wake, _peer) = UnixStream::pair().unwrap();
+    let worker = std::thread::spawn(|| panic!("connection worker failed"));
+    server
+        .connections
+        .lock()
+        .unwrap()
+        .workers
+        .insert(41, ConnectionWorker { wake, join: worker });
 
     assert!(matches!(
         server.close(),
-        Err(BindError::Shutdown {
-            dispatcher_panicked: true,
-            worker_panics,
-            worker_wake_errors,
-            registry_poisoned: false,
-            socket_error: None,
-        }) if worker_panics.is_empty() && worker_wake_errors.is_empty()
+        Err(BindError::Shutdown(failure))
+            if failure.dispatcher_panicked
+                && failure.worker_panics == vec![41]
+                && failure.worker_wake_errors.is_empty()
+                && !failure.registry_poisoned
+                && failure.socket_error.is_none()
     ));
     assert!(!path.exists());
-    server.close().unwrap();
+    assert!(matches!(
+        server.close(),
+        Err(BindError::Shutdown(failure))
+            if failure.dispatcher_panicked && failure.worker_panics == vec![41]
+    ));
+    assert_eq!(close_calls.load(Ordering::SeqCst), 1);
 }
 
 #[test]
