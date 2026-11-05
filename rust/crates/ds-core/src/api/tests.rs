@@ -1965,7 +1965,7 @@ fn rust_project_spawn_is_desk_only_and_requires_explicit_runtime_config() {
     let mut dispatcher = Dispatcher::new();
     dispatcher.register_project_spawn();
     let request = RequestCtx::default();
-    let supplied = Some(args(json!({"name": "budget-app", "brief": "test"})));
+    let supplied = args(json!({"name": "budget-app", "brief": "test"}));
     let error = dispatch_with_env(
         &dispatcher,
         &flock,
