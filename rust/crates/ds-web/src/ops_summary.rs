@@ -595,8 +595,8 @@ fn experiment_summary(conn: &Connection, now: DateTime<Utc>) -> SummaryResult<Va
             "accepted_bodies":0,"completed_accepted_bodies":0,"completed_hours":0.0,
             "inbox_deliveries":0,"direct_sends":0,"metered_usd":0.0,"all_completed_costs_sourced":true
         }));
+        group["trials"] = json!(group["trials"].as_i64().unwrap_or(0) + 1);
         for name in [
-            "trials",
             "authored_bodies",
             "accepted_bodies",
             "inbox_deliveries",
