@@ -119,7 +119,7 @@ fn events_db(dir: &Path, statements: &[String]) -> PathBuf {
     let path = dir.join("metrics.db");
     let conn = Connection::open(&path).unwrap();
     conn.execute_batch(
-        "CREATE TABLE events (id INTEGER PRIMARY KEY, at, kind, pane_id, source, sender, mailbox, bytes, duration_ms, attempts);",
+        "CREATE TABLE events (id, at, kind, pane_id, source, sender, mailbox, bytes, duration_ms, attempts);",
     )
     .unwrap();
     for statement in statements {
@@ -1551,6 +1551,190 @@ fn python_source_still_has_the_contract_this_port_encodes() {
         create_table_names(OPS_SCHEMA),
         "the Python SCHEMA and ops_schema.sql declare the same tables"
     );
+}
+
+/// Parses a JSON fixture with `serde_json`, so integers above 64 bits keep their exact digits.
+fn doc(text: &str) -> Value {
+    serde_json::from_str(text).expect("valid JSON fixture")
+}
+
+/// Python's `int()` accepts any size, so an oversized value fails only when SQLite binds it, inside
+/// the write transaction. Malformed text is a caught source error, and the run still commits.
+#[test]
+fn oversized_integers_fault_at_the_sqlite_bind_not_at_the_source_read() {
+    let t0 = epoch(18, 0);
+    let run_with_event = |id_sql: &str| {
+        let dir = TempDir::new().unwrap();
+        let mut conn = ops_db(dir.path());
+        let messages = message_db(dir.path(), &[]);
+        let events = events_db(
+            dir.path(),
+            &[format!(
+                "INSERT INTO events VALUES ({id_sql}, {t0}, 'inbox.sent', '%7', 'cli', 'a', 'b', 1, 1, 1)"
+            )],
+        );
+        let calls = Calls::default();
+        let mut collector = collector_with(
+            &messages,
+            &events,
+            FakeDaemon::healthy(&calls),
+            FakeGitHub::healthy(&calls),
+        );
+        let outcome = collector.collect(&mut conn, now(), false, run_count);
+        (dir, conn, outcome)
+    };
+
+    for id_sql in ["'99999999999999999999'", "1e30"] {
+        let (_dir, conn, outcome) = run_with_event(id_sql);
+        match outcome {
+            Err(CollectError::Fault(fault)) => {
+                assert_eq!(fault.python_type, "OverflowError", "{id_sql}")
+            }
+            other => panic!("{id_sql}: expected an OverflowError fault, got {other:?}"),
+        }
+        assert_no_rows_written(&conn);
+    }
+
+    let (_dir, conn, outcome) = run_with_event("'12abc'");
+    assert_eq!(
+        outcome.unwrap(),
+        1,
+        "a malformed id is caught, so the run commits"
+    );
+    assert_eq!(
+        read_row::<String>(&conn, "SELECT errors_json FROM collection_runs"),
+        r#"{"agent_messages": "ValueError"}"#
+    );
+    assert_eq!(count(&conn, "agent_message_events"), 0);
+
+    let dir = TempDir::new().unwrap();
+    let mut conn = ops_db(dir.path());
+    let messages = message_db(dir.path(), &[]);
+    let events = events_db(
+        dir.path(),
+        &[
+            format!("INSERT INTO events VALUES (' 42 ', {t0}, 'inbox.sent', '%7', 'cli', 'a', 'b', 1, 1, 1)"),
+            format!("INSERT INTO events VALUES (7.9, {t0}, 'inbox.sent', '%7', 'cli', 'a', 'b', 1, 1, 1)"),
+        ],
+    );
+    let calls = Calls::default();
+    let mut collector = collector_with(
+        &messages,
+        &events,
+        FakeDaemon::healthy(&calls),
+        FakeGitHub::healthy(&calls),
+    );
+    collector
+        .collect(&mut conn, now(), false, run_count)
+        .unwrap();
+    collector
+        .collect(&mut conn, now() + TimeDelta::seconds(1), false, run_count)
+        .unwrap();
+    assert_eq!(
+        count(&conn, "agent_message_events"),
+        2,
+        "a TEXT id sorts above the newest integer, so reruns re-read it and OR IGNORE keeps one row"
+    );
+    let mut statement = conn
+        .prepare(
+            "SELECT source_event_id, source_ref FROM agent_message_events ORDER BY source_event_id",
+        )
+        .unwrap();
+    let written: Vec<(i64, String)> = statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(
+        written,
+        vec![
+            (7, "dunkingsheep:metrics.db:events:7.9".to_owned()),
+            (42, "dunkingsheep:metrics.db:events: 42 ".to_owned()),
+        ],
+        "int() strips whitespace, and a REAL id keeps Python's float spelling in source_ref"
+    );
+
+    // A PR number above the 64-bit range binds before the list-valued head is converted, so the
+    // fault is OverflowError, not ProgrammingError.
+    let dir = TempDir::new().unwrap();
+    let mut conn = ops_db(dir.path());
+    let messages = message_db(dir.path(), &[]);
+    let events = events_db(dir.path(), &[]);
+    let calls = Calls::default();
+    let github = FakeGitHub {
+        prs: Ok(doc(
+            r#"[{"number": 99999999999999999999, "state": "OPEN", "headRefOid": [1]}]"#,
+        )),
+        ..FakeGitHub::healthy(&calls)
+    };
+    let mut collector = collector_with(&messages, &events, FakeDaemon::healthy(&calls), github);
+    match collector.collect(&mut conn, now(), false, run_count) {
+        Err(CollectError::Fault(fault)) => assert_eq!(fault.python_type, "OverflowError"),
+        other => panic!("expected OverflowError for the PR number, got {other:?}"),
+    }
+    assert_no_rows_written(&conn);
+
+    // Accounting counts above the 64-bit range pass Python's validation, then fail at the bind.
+    let checkpoint = doc(
+        r#"{"schema_version": 1, "strict_full_c_originals": 99999999999999999999, "verified_game_identities": 99999999999999999999, "inputs": {"b": 2, "a": "x"}}"#,
+    );
+    let census = doc(
+        r#"{"count": 99999999999999999999, "status": "reviewed", "reviewed_by": "PM", "bound_kind": "upper_bound", "scope": "original-game-functions-overlay-and-resident", "source_digests": {"a": "x", "b": 2}, "evidence_doc": "docs/re/evidence.md"}"#,
+    );
+    let accepted = published_accounting(&mut FakeGitHub::with_documents(
+        &calls,
+        &checkpoint,
+        &census,
+    ))
+    .unwrap();
+    assert_eq!(accepted.strict_full_c.as_decimal(), "99999999999999999999");
+    let dir = TempDir::new().unwrap();
+    let mut conn = ops_db(dir.path());
+    let messages = message_db(dir.path(), &[]);
+    let events = events_db(dir.path(), &[]);
+    let mut collector = collector_with(
+        &messages,
+        &events,
+        FakeDaemon::healthy(&calls),
+        FakeGitHub::with_documents(&calls, &checkpoint, &census),
+    );
+    match collector.collect(&mut conn, now(), false, run_count) {
+        Err(CollectError::Fault(fault)) => assert_eq!(fault.python_type, "OverflowError"),
+        other => panic!("expected OverflowError for the accounting counts, got {other:?}"),
+    }
+    assert_no_rows_written(&conn);
+}
+
+/// Python compares an int with a float exactly, so `10**30` (an int) and `1e30` (a float equal to
+/// 1000000000000000019884624838656) are different values, and only an identical int matches.
+#[test]
+fn json_numbers_compare_exactly_like_python() {
+    let calls = Calls::default();
+    let checkpoint = doc(
+        r#"{"schema_version": 1, "strict_full_c_originals": 1, "verified_game_identities": 2, "inputs": {"a": 1000000000000000000000000000000}}"#,
+    );
+    let census = |digests: &str| {
+        doc(&format!(
+            r#"{{"count": 3, "status": "reviewed", "reviewed_by": "PM", "bound_kind": "exact", "scope": "original-game-functions-overlay-and-resident", "source_digests": {digests}, "evidence_doc": "docs/re/x.md"}}"#
+        ))
+    };
+    for digests in [
+        r#"{"a": 1e30}"#,
+        r#"{"a": 1000000000000000000000000000000.0}"#,
+    ] {
+        let result = published_accounting(&mut FakeGitHub::with_documents(
+            &calls,
+            &checkpoint,
+            &census(digests),
+        ));
+        assert_eq!(result.unwrap_err().python_type, "ValueError", "{digests}");
+    }
+    let same = published_accounting(&mut FakeGitHub::with_documents(
+        &calls,
+        &checkpoint,
+        &census(r#"{"a": 1000000000000000000000000000000}"#),
+    ));
+    assert!(same.is_ok(), "the identical integer compares equal");
 }
 
 #[test]

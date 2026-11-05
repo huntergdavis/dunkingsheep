@@ -22,10 +22,12 @@
 //!
 //! Approximations of Python's dynamic typing, kept deliberately narrow: `datetime.fromisoformat`
 //! is approximated by RFC 3339 (`T` or space separator, explicit offset required); BLOB values
-//! are rendered with a simplified `bytes` repr; integers beyond `i64` fail at the SQLite bind
-//! point; `int()` and `float()` accept only ASCII digits and reject underscores in floats.
+//! are rendered with a simplified `bytes` repr; `int()` accepts ASCII digits only, and `float()`
+//! rejects underscores. Integers are exact at any size (`PyInt`). Only the SQLite bind is limited
+//! to 64 bits, as in Python.
 
 use std::{
+    cmp::Ordering,
     collections::BTreeMap,
     io::Read as _,
     path::{Path, PathBuf},
@@ -616,7 +618,7 @@ struct RawEvent {
 /// One delivery-metadata row for `agent_message_events` (no message text, no account details).
 #[derive(Debug, Clone, PartialEq)]
 pub struct AgentEvent {
-    pub source_event_id: i64,
+    pub source_event_id: PyInt,
     pub occurred_at: String,
     pub pane_id: String,
     pub kind: String,
@@ -698,16 +700,25 @@ fn convert_event(raw: RawEvent) -> Result<AgentEvent, ReadFailure> {
     })
 }
 
-/// Python `int(value)` for an event id column. A `None` or BLOB raises `TypeError` in Python,
-/// which escapes the `try`, so it is a fault here.
-fn sql_int(value: &SqlValue) -> Result<i64, ReadFailure> {
+/// Python `int(value)` for an event id. Malformed text, NaN and infinity are caught source errors,
+/// since `ValueError` and `OverflowError` are in the `except` tuple. A well-formed integer above
+/// the 64-bit range is kept: Python only fails when SQLite binds it, inside the write transaction
+/// (see `PyInt::bind`). A `None` raises `TypeError`, which escapes the `try`, so it is a fault.
+///
+/// The real Dunking Sheep table declares `id INTEGER PRIMARY KEY AUTOINCREMENT` (dunk_metrics.py),
+/// a rowid alias that only holds integers, so the oversized case cannot come from that table.
+/// The code keeps Python's behaviour for any table it is pointed at.
+fn sql_int(value: &SqlValue) -> Result<PyInt, ReadFailure> {
     match value {
-        SqlValue::Integer(number) => Ok(*number),
-        SqlValue::Real(number) => float_to_int(*number).map_err(ReadFailure::Caught),
+        SqlValue::Integer(number) => Ok(PyInt::from_integer(*number)),
+        SqlValue::Real(number) => PyInt::from_float(*number).map_err(ReadFailure::Caught),
         SqlValue::Text(text) => parse_py_int(text).map_err(ReadFailure::Caught),
-        SqlValue::Null | SqlValue::Blob(_) => Err(ReadFailure::Stop(fault(
+        // int() takes an ASCII bytes literal. Anything else fails inside parse_py_int as ValueError.
+        SqlValue::Blob(bytes) => parse_py_int(std::str::from_utf8(bytes).unwrap_or_default())
+            .map_err(ReadFailure::Caught),
+        SqlValue::Null => Err(ReadFailure::Stop(fault(
             "TypeError",
-            "int() argument must be a string or a real number",
+            "int() argument must be a string, a bytes-like object or a real number",
         ))),
     }
 }
@@ -761,9 +772,9 @@ fn read_accounting<G: GitHubSource>(github: &mut G) -> Result<Accounting, ReadFa
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Accounting {
     pub commit_oid: String,
-    pub strict_full_c: i64,
-    pub verified_game_identities: i64,
-    pub ceiling: i64,
+    pub strict_full_c: PyInt,
+    pub verified_game_identities: PyInt,
+    pub ceiling: PyInt,
     pub bound_kind: String,
     pub source_signature: String,
     pub evidence_ref: String,
@@ -864,11 +875,11 @@ fn validate_published(
         .get("source_digests")
         .is_some_and(|digests| py_eq(digests, &Value::Object(inputs.clone())));
     let well_formed = py_eq_int(checkpoint.get("schema_version"), 1)
-        && strict >= 0
-        && identities >= 0
-        && ceiling > 0
-        && strict <= identities
-        && identities <= ceiling
+        && !strict.is_negative()
+        && !identities.is_negative()
+        && ceiling.is_positive()
+        && strict.cmp_exact(&identities).is_le()
+        && identities.cmp_exact(&ceiling).is_le()
         && census.get("status").and_then(Value::as_str) == Some("reviewed")
         && census.get("reviewed_by").and_then(Value::as_str) == Some("PM")
         && matches!(bound_kind, Some("exact" | "upper_bound"))
@@ -878,13 +889,12 @@ fn validate_published(
     if !well_formed {
         return Err(invalid());
     }
-    let to_i64 = |value: i128| i64::try_from(value).map_err(|_| invalid());
     let signature = sha256_hex(py_dumps(&Value::Object(inputs.clone()), ", ", ": ").as_bytes());
     Ok(Accounting {
         commit_oid: commit,
-        strict_full_c: to_i64(strict)?,
-        verified_game_identities: to_i64(identities)?,
-        ceiling: to_i64(ceiling)?,
+        strict_full_c: strict,
+        verified_game_identities: identities,
+        ceiling,
         bound_kind: bound_kind.unwrap_or_default().to_owned(),
         source_signature: signature,
         evidence_ref: evidence.unwrap_or_default().to_owned(),
@@ -1117,12 +1127,14 @@ fn write_vp_counts(
 /// `INSERT OR IGNORE`: an event id that already exists is skipped, so reruns are idempotent.
 fn write_agent_events(tx: &Connection, events: &[AgentEvent]) -> Result<(), Stop> {
     for event in events {
+        // Python binds source_event_id first, so an oversized id fails here, inside the transaction.
+        let source_event_id = event.source_event_id.bind()?;
         tx.execute(
             "INSERT OR IGNORE INTO agent_message_events(source_event_id,occurred_at,pane_id,kind,\
              delivery_source,sender_alias,mailbox_alias,message_bytes,duration_ms,attempts,\
              source_ref) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
             params![
-                event.source_event_id,
+                source_event_id,
                 event.occurred_at,
                 event.pane_id,
                 event.kind,
@@ -1154,6 +1166,8 @@ fn write_prs(tx: &Connection, prs: &[Value], observed_at: &str) -> Result<(), St
             pr.get("state")
                 .ok_or_else(|| fault("KeyError", "'state'"))?,
         );
+        // Python binds the statement's parameters in column order, so the number's bind comes first.
+        let number = number.bind()?;
         let head = if truthy(pr.get("headRefOid")) {
             json_to_sql(pr.get("headRefOid"))?
         } else {
@@ -1211,6 +1225,10 @@ fn write_accounting(
     accounting: &Accounting,
 ) -> Result<(), Stop> {
     let when = iso(&parse_time(observed_at)?);
+    // Python binds the integer columns in order, so a count above the 64-bit range fails here.
+    let strict_full_c = accounting.strict_full_c.bind()?;
+    let verified_game_identities = accounting.verified_game_identities.bind()?;
+    let ceiling = accounting.ceiling.bind()?;
     tx.execute(
         "INSERT OR IGNORE INTO accounting_snapshots(project,observed_at,commit_oid,\
          strict_full_c,verified_game_identities,ceiling,bound_kind,source_signature,evidence_ref) \
@@ -1219,9 +1237,9 @@ fn write_accounting(
             PROJECT,
             when,
             accounting.commit_oid,
-            accounting.strict_full_c,
-            accounting.verified_game_identities,
-            accounting.ceiling,
+            strict_full_c,
+            verified_game_identities,
+            ceiling,
             accounting.bound_kind,
             accounting.source_signature,
             accounting.evidence_ref
@@ -1230,18 +1248,14 @@ fn write_accounting(
     Ok(())
 }
 
-/// Python `int(value)` for a JSON value inside the write block: every failure is a fault.
-fn py_int(value: &Value) -> Result<i64, Stop> {
+/// Python `int(value)` for a JSON value in the write block. Every failure escapes the unguarded
+/// block, so it is a fault. An integer above the 64-bit range is kept and fails at its bind.
+fn py_int(value: &Value) -> Result<PyInt, Stop> {
     match value {
-        Value::Bool(flag) => Ok(i64::from(*flag)),
+        Value::Bool(flag) => Ok(PyInt::from_integer(i64::from(*flag))),
         Value::Number(number) => match integer_token(number) {
-            Some(text) => text.parse::<i64>().map_err(|_| {
-                fault(
-                    "OverflowError",
-                    "int too large to convert to SQLite INTEGER",
-                )
-            }),
-            None => float_to_int(number.as_f64().unwrap_or(f64::NAN)).map_err(Stop::from),
+            Some(text) => Ok(PyInt::canonical(&text)),
+            None => PyInt::from_float(number.as_f64().unwrap_or(f64::NAN)).map_err(Stop::from),
         },
         Value::String(text) => parse_py_int(text).map_err(Stop::from),
         _ => Err(fault(
@@ -1251,33 +1265,92 @@ fn py_int(value: &Value) -> Result<i64, Stop> {
     }
 }
 
-/// Python `int(float)`: truncation toward zero; NaN and infinity raise.
-fn float_to_int(value: f64) -> Result<i64, SourceError> {
-    if value.is_nan() {
-        return Err(SourceError::new(
-            "ValueError",
-            "cannot convert float NaN to integer",
-        ));
+/// A Python `int`, kept as canonical decimal text: an optional `-`, then digits with no leading
+/// zeros, and `0` is never negative. Python ints have no size limit. SQLite binding is the only
+/// step limited to 64 bits, so that check lives in `bind`, as it does in Python.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PyInt(String);
+
+impl PyInt {
+    fn from_integer(value: i64) -> Self {
+        PyInt(value.to_string())
     }
-    if value.is_infinite() {
-        return Err(SourceError::new(
-            "OverflowError",
-            "cannot convert float infinity to integer",
-        ));
+
+    /// Canonical form of an optional sign followed by ASCII digits.
+    fn canonical(text: &str) -> Self {
+        let (negative, digits) = match text.strip_prefix('-') {
+            Some(rest) => (true, rest),
+            None => (false, text.strip_prefix('+').unwrap_or(text)),
+        };
+        let digits = digits.trim_start_matches('0');
+        if digits.is_empty() {
+            PyInt("0".to_owned())
+        } else if negative {
+            PyInt(format!("-{digits}"))
+        } else {
+            PyInt(digits.to_owned())
+        }
     }
-    let truncated = value.trunc();
-    if truncated < i64::MIN as f64 || truncated >= i64::MAX as f64 {
-        return Err(SourceError::new(
-            "OverflowError",
-            "float out of integer range",
-        ));
+
+    /// Python `int(value)` for a finite float: truncation toward zero, with exact digits.
+    fn from_float(value: f64) -> Result<Self, SourceError> {
+        if value.is_nan() {
+            return Err(SourceError::new(
+                "ValueError",
+                "cannot convert float NaN to integer",
+            ));
+        }
+        if value.is_infinite() {
+            return Err(SourceError::new(
+                "OverflowError",
+                "cannot convert float infinity to integer",
+            ));
+        }
+        Ok(PyInt::canonical(&format!("{:.0}", value.trunc())))
     }
-    Ok(truncated as i64)
+
+    /// The decimal text, as Python's `str()` prints the integer.
+    pub fn as_decimal(&self) -> &str {
+        &self.0
+    }
+
+    fn is_negative(&self) -> bool {
+        self.0.starts_with('-')
+    }
+
+    fn is_positive(&self) -> bool {
+        !self.is_negative() && self.0 != "0"
+    }
+
+    /// Exact ordering, as Python compares ints.
+    fn cmp_exact(&self, other: &PyInt) -> Ordering {
+        match (self.is_negative(), other.is_negative()) {
+            (false, true) => Ordering::Greater,
+            (true, false) => Ordering::Less,
+            (false, false) => cmp_magnitude(&self.0, &other.0),
+            (true, true) => cmp_magnitude(&other.0[1..], &self.0[1..]),
+        }
+    }
+
+    /// Binding to a SQLite INTEGER. Above the 64-bit range Python raises `OverflowError` here,
+    /// inside the write transaction, so the whole run rolls back.
+    fn bind(&self) -> Result<i64, Stop> {
+        self.0.parse::<i64>().map_err(|_| {
+            fault(
+                "OverflowError",
+                "Python int too large to convert to SQLite INTEGER",
+            )
+        })
+    }
+}
+
+fn cmp_magnitude(a: &str, b: &str) -> Ordering {
+    a.len().cmp(&b.len()).then_with(|| a.cmp(b))
 }
 
 /// Python `int(text)` for base 10: surrounding whitespace, one optional sign, and underscores
-/// only between digits.
-fn parse_py_int(text: &str) -> Result<i64, SourceError> {
+/// only between digits. The value is exact at any size.
+fn parse_py_int(text: &str) -> Result<PyInt, SourceError> {
     let invalid = || {
         SourceError::new(
             "ValueError",
@@ -1301,9 +1374,7 @@ fn parse_py_int(text: &str) -> Result<i64, SourceError> {
         return Err(invalid());
     }
     let compact: String = digits.chars().filter(|c| *c != '_').collect();
-    format!("{sign}{compact}")
-        .parse::<i64>()
-        .map_err(|_| SourceError::new("OverflowError", format!("int literal too large: {text:?}")))
+    Ok(PyInt::canonical(&format!("{sign}{compact}")))
 }
 
 /// Python `float(text)`: whitespace-trimmed; underscores are rejected (approximation).
@@ -1330,12 +1401,7 @@ fn json_to_sql(value: Option<&Value>) -> Result<SqlValue, Stop> {
         None | Some(Value::Null) => SqlValue::Null,
         Some(Value::Bool(flag)) => SqlValue::Integer(i64::from(*flag)),
         Some(Value::Number(number)) => match integer_token(number) {
-            Some(text) => SqlValue::Integer(text.parse::<i64>().map_err(|_| {
-                fault(
-                    "OverflowError",
-                    "Python int too large to convert to SQLite INTEGER",
-                )
-            })?),
+            Some(text) => SqlValue::Integer(PyInt::canonical(&text).bind()?),
             None => SqlValue::Real(number.as_f64().unwrap_or(f64::NAN)),
         },
         Some(Value::String(text)) => SqlValue::Text(text.clone()),
@@ -1497,21 +1563,19 @@ fn integer_token(number: &Number) -> Option<String> {
     }
 }
 
-/// `int` value of a JSON number literal, if it is an integer literal that fits `i128`.
-fn json_int(value: Option<&Value>) -> Option<i128> {
+/// Python `type(value) is int`: a JSON integer literal. Booleans and floats are not ints here.
+fn json_int(value: Option<&Value>) -> Option<PyInt> {
     match value {
-        Some(Value::Number(number)) => integer_token(number)?.parse::<i128>().ok(),
+        Some(Value::Number(number)) => integer_token(number).map(|text| PyInt::canonical(&text)),
         _ => None,
     }
 }
 
 /// Python `value == n` for `n` an int: `True == 1` and `1.0 == 1`.
 fn py_eq_int(value: Option<&Value>, expected: i64) -> bool {
-    match value {
-        Some(Value::Bool(flag)) => i64::from(*flag) == expected,
-        Some(Value::Number(number)) => number.as_f64() == Some(expected as f64),
-        _ => false,
-    }
+    value
+        .and_then(num_of)
+        .is_some_and(|number| num_eq(&number, &Num::Int(PyInt::from_integer(expected))))
 }
 
 /// Python `==` for JSON-derived values. `True == 1`, `1 == 1.0`, and NaN is never equal.
@@ -1527,26 +1591,41 @@ fn py_eq(left: &Value, right: &Value) -> bool {
                 && a.iter()
                     .all(|(key, value)| b.get(key).is_some_and(|other| py_eq(value, other)))
         }
-        _ => match (numeric(left), numeric(right)) {
-            (Some((Some(a), _)), Some((Some(b), _))) => a == b,
-            (Some((_, a)), Some((_, b))) => a == b,
+        _ => match (num_of(left), num_of(right)) {
+            (Some(a), Some(b)) => num_eq(&a, &b),
             _ => false,
         },
     }
 }
 
-/// `(integer value when the token is an integer literal, float value)` for bools and numbers.
-fn numeric(value: &Value) -> Option<(Option<i128>, f64)> {
+/// A JSON bool or number as Python sees it: an exact int, or a float.
+enum Num {
+    Int(PyInt),
+    Float(f64),
+}
+
+fn num_of(value: &Value) -> Option<Num> {
     match value {
-        Value::Bool(flag) => {
-            let integer = i128::from(*flag);
-            Some((Some(integer), integer as f64))
-        }
-        Value::Number(number) => Some((
-            integer_token(number).and_then(|text| text.parse::<i128>().ok()),
-            number.as_f64()?,
-        )),
+        Value::Bool(flag) => Some(Num::Int(PyInt::from_integer(i64::from(*flag)))),
+        Value::Number(number) => match integer_token(number) {
+            Some(text) => Some(Num::Int(PyInt::canonical(&text))),
+            None => number.as_f64().map(Num::Float),
+        },
         _ => None,
+    }
+}
+
+/// Python `==` between two numbers. Int against int is exact, and so is int against float:
+/// `10**30 != 1e30`, because the float is exactly 1000000000000000019884624838656.
+fn num_eq(left: &Num, right: &Num) -> bool {
+    match (left, right) {
+        (Num::Int(a), Num::Int(b)) => a == b,
+        (Num::Float(a), Num::Float(b)) => a == b,
+        (Num::Int(int), Num::Float(float)) | (Num::Float(float), Num::Int(int)) => {
+            float.is_finite()
+                && float.fract() == 0.0
+                && PyInt::from_float(*float).is_ok_and(|exact| exact == *int)
+        }
     }
 }
 
