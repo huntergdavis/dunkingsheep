@@ -266,6 +266,35 @@ impl Harness {
         }
     }
 
+    /// A GET with explicit request headers, for conditional and range requests.
+    async fn send_with_headers(&self, uri: &str, headers: &[(header::HeaderName, &str)]) -> Reply {
+        let mut builder = Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .header(header::AUTHORIZATION, format!("Bearer {OWNER}"));
+        for (name, value) in headers {
+            builder = builder.header(name.clone(), *value);
+        }
+        let request = builder.body(Body::empty()).expect("request");
+        let response = self
+            .app
+            .clone()
+            .oneshot(request)
+            .await
+            .expect("the router answers every request");
+        let status = response.status();
+        let headers = response.headers().clone();
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body")
+            .to_vec();
+        Reply {
+            status,
+            headers,
+            body,
+        }
+    }
+
     async fn get(&self, uri: &str, token: &str) -> Reply {
         self.send(Method::GET, uri, Some(token), None, None, Vec::new())
             .await
@@ -680,6 +709,113 @@ async fn upload_is_private_and_download_serves_ranges_with_stat_headers() {
     let missing = harness.get("/api/uploads/nope", OWNER).await;
     assert_eq!(missing.status, StatusCode::NOT_FOUND);
     assert_eq!(missing.json(), json!({"detail": "Attachment not found"}));
+}
+
+#[tokio::test]
+async fn download_range_contract_holds_on_the_stored_file() {
+    let harness = Harness::new(sent_handler);
+    let saved = harness
+        .backend
+        .save_upload(UploadPart {
+            filename: "range.txt".to_owned(),
+            response_mime: Some("text/plain".to_owned()),
+            storage_mime: "text/plain".to_owned(),
+            bytes: b"hello world".to_vec(),
+        })
+        .expect("save the upload");
+    let id = saved["id"].as_str().expect("attachment id").to_owned();
+    let uri = format!("/api/uploads/{id}");
+    let stored = harness
+        .backend
+        .attachment(&id)
+        .expect("attachment lookup")
+        .expect("attachment present");
+
+    let partial = harness
+        .send(
+            Method::GET,
+            &uri,
+            Some(OWNER),
+            None,
+            Some("bytes=6-10"),
+            Vec::new(),
+        )
+        .await;
+    assert_eq!(partial.status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(partial.body, b"world".to_vec());
+
+    let unsatisfiable = harness
+        .send(
+            Method::GET,
+            &uri,
+            Some(OWNER),
+            None,
+            Some("bytes=100-200"),
+            Vec::new(),
+        )
+        .await;
+    assert_eq!(unsatisfiable.status, StatusCode::RANGE_NOT_SATISFIABLE);
+    assert_eq!(
+        unsatisfiable
+            .headers
+            .get(header::CONTENT_RANGE)
+            .and_then(|value| value.to_str().ok()),
+        Some("bytes */11")
+    );
+
+    let malformed = harness
+        .send(
+            Method::GET,
+            &uri,
+            Some(OWNER),
+            None,
+            Some("pages=0-1"),
+            Vec::new(),
+        )
+        .await;
+    assert_eq!(malformed.status, StatusCode::BAD_REQUEST);
+
+    // If-Range: the stored validator keeps the range; a stale validator returns the whole file.
+    let etag = stored.metadata.etag.clone();
+    let matched = harness
+        .send_with_headers(
+            &uri,
+            &[
+                (header::RANGE, "bytes=0-4"),
+                (header::IF_RANGE, etag.as_str()),
+            ],
+        )
+        .await;
+    assert_eq!(matched.status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(matched.body, b"hello".to_vec());
+    let stale = harness
+        .send_with_headers(
+            &uri,
+            &[
+                (header::RANGE, "bytes=0-4"),
+                (header::IF_RANGE, "\"stale\""),
+            ],
+        )
+        .await;
+    assert_eq!(stale.status, StatusCode::OK);
+    assert_eq!(stale.body, b"hello world".to_vec());
+
+    let multipart = harness
+        .send(
+            Method::GET,
+            &uri,
+            Some(OWNER),
+            None,
+            Some("bytes=0-1,6-7"),
+            Vec::new(),
+        )
+        .await;
+    assert_eq!(multipart.status, StatusCode::PARTIAL_CONTENT);
+    assert!(multipart
+        .headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("multipart/byteranges")));
 }
 
 #[tokio::test]
