@@ -14,6 +14,16 @@
 //!   `dashboard.py progress()` (Python). It reports unavailable (503).
 //! - The traits are synchronous. Daemon RPCs (up to 2 s), `git show` (5 s), and SQLite reads
 //!   block the calling thread, so startup integration must run them off async workers.
+//! - The route traits return bytes only. Python's `FileResponse` also sends stat-derived
+//!   headers and may answer conditional requests (and, depending on the pinned Starlette,
+//!   range requests). This seam cannot carry file metadata, so those semantics are not
+//!   represented. Byte and stat parity needs the route trait signatures to change, which is
+//!   out of scope for this batch.
+//! - Pane reads run one at a time behind the single daemon client, where Python fans them
+//!   out over four workers. With N slow panes a refresh can block for up to N timeouts of 2 s
+//!   each, more if the client retries a timed-out read. Channel activity waits on the same
+//!   client until the refresh ends. Startup integration needs a blocking pool and a client
+//!   pool to restore the fan-out.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;

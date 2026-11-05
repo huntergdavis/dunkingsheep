@@ -764,6 +764,87 @@ fn activity_routes_answer_success_unknown_and_error_over_http() {
 }
 
 #[test]
+fn progress_route_serves_the_checkpoint_and_reports_missing_sources() {
+    let dir = TempDir::new().unwrap();
+    let paths = paths_in(dir.path());
+    fs::write(paths.dashboard_dir.join("dashboard.py"), "# present\n").unwrap();
+    let sha = poolrad_checkout(&paths.dashboard_repo, GOOD_REPLACEMENTS);
+    record_checkpoint(&paths.operations_db, "2026-11-05T09:30:00-08:00", &sha);
+    let (auth, session) = owner_session(&dir.path().join("desk"));
+
+    let published = Arc::new(activity_backend(
+        &dir.path().join("unused.sock"),
+        paths.clone(),
+        Arc::new(SystemClock::new()),
+    ));
+    let app = activity_router(
+        published as Arc<dyn ActivityRoutes>,
+        auth.clone(),
+        RequestScheme::Http,
+    );
+    let (status, _, body) = send(
+        &app,
+        "GET",
+        "/api/poolrad-dashboard/progress",
+        Some(&session),
+    );
+    assert_eq!(status, StatusCode::OK);
+    let view = json_of(&body);
+    assert_eq!(view["source"], "published main");
+    assert_eq!(view["strict_percent"], json!(40.0));
+    assert_eq!(view["identity_percent"], json!(43.3));
+    assert_eq!(view["observed_at"], "2026-11-05T09:30:00-08:00");
+    assert_eq!(view["refresh_after_seconds"], json!(60));
+    assert_eq!(view["replacements"]["state"], "ok");
+    assert_eq!(view["replacements"]["count"], json!(2));
+
+    // A fresh backend has an empty cache. Without the checkpoint row the unported fallback
+    // applies, so the route answers unavailable rather than a zero.
+    fs::remove_file(&paths.operations_db).unwrap();
+    let unpublished = Arc::new(activity_backend(
+        &dir.path().join("unused.sock"),
+        paths.clone(),
+        Arc::new(SystemClock::new()),
+    ));
+    let app = activity_router(
+        unpublished as Arc<dyn ActivityRoutes>,
+        auth.clone(),
+        RequestScheme::Http,
+    );
+    let (status, _, body) = send(
+        &app,
+        "GET",
+        "/api/poolrad-dashboard/progress",
+        Some(&session),
+    );
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        json_of(&body),
+        json!({"detail": "Poolrad dashboard progress unavailable"})
+    );
+
+    // Without dashboard.py the progress route is absent, as in Python.
+    fs::remove_file(paths.dashboard_dir.join("dashboard.py")).unwrap();
+    let absent = Arc::new(activity_backend(
+        &dir.path().join("unused.sock"),
+        paths,
+        Arc::new(SystemClock::new()),
+    ));
+    let app = activity_router(absent as Arc<dyn ActivityRoutes>, auth, RequestScheme::Http);
+    let (status, _, body) = send(
+        &app,
+        "GET",
+        "/api/poolrad-dashboard/progress",
+        Some(&session),
+    );
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        json_of(&body),
+        json!({"detail": "Poolrad dashboard unavailable"})
+    );
+}
+
+#[test]
 fn dashboard_and_dash_routes_serve_only_the_allowlisted_static_contracts() {
     let dir = TempDir::new().unwrap();
     let paths = paths_in(dir.path());
