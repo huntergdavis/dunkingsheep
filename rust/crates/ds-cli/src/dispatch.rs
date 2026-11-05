@@ -213,11 +213,8 @@ fn joined_words(ns: &Map<String, Value>, key: &str) -> String {
 }
 
 fn watchdog_deadman(ns: &Map<String, Value>) -> Outcome {
-    use ds_core::client::{
-        default_timeout, resolve_system_identity, service_token, FlockClient, UnixTransport,
-    };
+    use ds_core::client::{default_timeout, service_token, FlockClient, UnixTransport};
     use ds_core::config::{config_dir, socket_path, Env};
-    use ds_core::error::DunkError;
     use std::path::PathBuf;
 
     let env = Env::from_process();
@@ -252,33 +249,15 @@ fn watchdog_deadman(ns: &Map<String, Value>) -> Outcome {
                 }
             }
         };
-    let (pane, identity_note) = match text(ns, "self_pane").filter(|pane| !pane.is_empty()) {
-        Some(pane) => (Some(pane.to_owned()), "explicit".to_string()),
-        None => match resolve_system_identity(None, true) {
-            Ok(identity) => identity,
-            Err(DunkError::Unavailable(message)) => {
-                return Outcome {
-                    stdout: String::new(),
-                    stderr: message,
-                    code: 3,
-                }
-            }
-            Err(error) => {
-                return Outcome {
-                    stdout: String::new(),
-                    stderr: format!("error: {error}\n"),
-                    code: error.exit_code().max(2),
-                }
-            }
-        },
-    };
     let process_env = |name: &str| std::env::var(name).ok();
     let client = FlockClient::new_with_lazy_token(
         UnixTransport {
             path: PathBuf::from(socket_text.clone()),
         },
-        pane,
-        identity_note,
+        // This is always a pane-less system sender. Resolving inherited shell/tmux identity
+        // before the watchdog checks for dry-run/fresh/cooldown can fail a no-send invocation.
+        None,
+        "watchdog system sender".to_string(),
         default_timeout(&process_env),
         || {
             let process_env = |name: &str| std::env::var(name).ok();
