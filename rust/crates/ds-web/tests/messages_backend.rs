@@ -354,7 +354,7 @@ fn snapshot(database: &Connection, question_id: i64) -> (i64, i64, Option<String
 
 #[tokio::test]
 async fn reads_have_python_shapes_on_an_empty_database() {
-    let harness = Harness::new(|cmd, args| sent_handler(cmd, args));
+    let harness = Harness::new(sent_handler);
     let page = harness.get("/api/messages?channel=pane-7", OWNER).await;
     assert_eq!(page.status, StatusCode::OK);
     assert_eq!(
@@ -739,16 +739,23 @@ async fn send_now_delivers_a_held_message_once_its_draft_clears() {
 
 #[tokio::test]
 async fn pickup_receipt_reconciles_an_owner_push_on_the_next_read() {
-    let harness = Harness::new(|cmd, _args| {
-        lane_command(cmd).unwrap_or_else(|| match cmd {
-            "delivery_capability" => Ok(json!({"alive": true, "send": "owner_push", "agent_alive": true})),
-            "owner_push" => Ok(json!({"id": 42, "pane_id": "%7", "at": 1.0, "outcome": "stored", "expect": "pickup"})),
-            "owner_receipts" => {
-                let now = now_seconds();
-                Ok(json!({"receipts": [{"id": 42, "pane_id": "%7", "created_at": now, "taken_at": now}]}))
-            }
-            other => Err(format!("unexpected daemon command {other}")),
-        })
+    // Overrides come first: lane_command would otherwise answer delivery_capability as guarded.
+    let harness = Harness::new(|cmd, _args| match cmd {
+        "delivery_capability" => {
+            Ok(json!({"alive": true, "send": "owner_push", "agent_alive": true}))
+        }
+        "owner_push" => Ok(
+            json!({"id": 42, "pane_id": "%7", "at": 1.0, "outcome": "stored", "expect": "pickup"}),
+        ),
+        "owner_receipts" => {
+            let now = now_seconds();
+            Ok(
+                json!({"receipts": [{"id": 42, "pane_id": "%7", "created_at": now, "taken_at": now}]}),
+            )
+        }
+        other => {
+            lane_command(other).unwrap_or_else(|| Err(format!("unexpected daemon command {other}")))
+        }
     });
     let posted = harness
         .post(
@@ -869,9 +876,14 @@ wanted = {
 found = set()
 for node in ast.walk(tree):
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in wanted:
-        for sub in ast.walk(node):
-            if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
-                found.add(sub.value)
+        body = node.body
+        first = body[0] if body else None
+        if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) and isinstance(first.value.value, str):
+            body = body[1:]
+        for statement in body:
+            for sub in ast.walk(statement):
+                if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
+                    found.add(sub.value)
 keep = sorted(s for s in found if len(s.strip()) >= 4 and "%s" not in s)
 print(json.dumps([json.dumps(s)[1:-1] for s in keep]))
 "#,
@@ -890,6 +902,14 @@ print(json.dumps([json.dumps(s)[1:-1] for s in keep]))
         "image/jpeg",
         "image/gif",
         "image/webp",
+        // Request validation and authorization are the route layer's (messages_read.rs,
+        // messages_write.rs, search_attachments.rs), not the backend's.
+        "API token required",
+        "Owner sign-in required",
+        "Invalid message IDs",
+        "Too many or invalid message IDs",
+        // Upload filename sanitization is the route's `sanitize_filename`.
+        "[^\\\\w. ()-]",
     ];
     let module = normalize(
         &std::fs::read_to_string(concat!(

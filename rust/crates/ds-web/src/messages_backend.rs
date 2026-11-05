@@ -214,7 +214,7 @@ fn md5_hex(input: &[u8]) -> String {
         message.push(0);
     }
     message.extend_from_slice(&bit_length.to_le_bytes());
-    for block in message.chunks_exact(64) {
+    for block in message.as_chunks::<64>().0 {
         let words: [u32; 16] = core::array::from_fn(|index| {
             u32::from_le_bytes([
                 block[index * 4],
