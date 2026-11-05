@@ -422,8 +422,10 @@ dependencies = [
  "ds-core",
  "ds-mcp",
  "ds-tui",
+ "ds-web",
  "serde_json",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]
@@ -474,6 +476,7 @@ dependencies = [
  "ds-core",
  "serde",
  "serde_json",
+ "tokio",
  "tower",
 ]
 
