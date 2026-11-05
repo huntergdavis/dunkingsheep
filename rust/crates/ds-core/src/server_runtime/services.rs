@@ -14,6 +14,7 @@ use crate::memory::service::MemoryService;
 use std::time::Duration;
 use tokio::runtime::Runtime;
 
+use super::runtime_control::RuntimeControlState;
 use super::{dispatcher::RuntimeDispatcher, outbox_runtime::OutboxRuntime, LoopRuntimeAdapter};
 use crate::config::Env;
 use crate::error::{refusal, DunkError};
@@ -112,6 +113,7 @@ pub struct RuntimeServices {
     pub(super) runtime: Runtime,
     pub(super) stuck_reporter: StalePanelReporter,
     pub(crate) allocator: crate::flock::allocator::Allocator,
+    pub(super) runtime_control: RuntimeControlState,
     pub(super) owner_push: super::owner_push::OwnerPushService,
     stopped: AtomicBool,
     shutdown_lock: Mutex<()>,
@@ -282,6 +284,18 @@ impl RuntimeServices {
         after_memory_start(&flock, &starting_memory.0)?;
 
         let terminal_factory = inputs.terminal_factory;
+        let control_config_dir = inputs
+            .launches_file
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .to_path_buf();
+        let runtime_control = RuntimeControlState::new(
+            control_config_dir,
+            inputs
+                .env
+                .get("DUNKINGSHEEP_DISPATCH_LANES")
+                .map(str::to_owned),
+        );
         let stuck_reporter = StalePanelReporter::new();
         let outbox = OutboxRuntime::new_with_reporter(
             Arc::clone(&flock),
@@ -305,6 +319,7 @@ impl RuntimeServices {
             runtime,
             stuck_reporter,
             allocator: crate::flock::allocator::Allocator::new(),
+            runtime_control,
             owner_push: super::owner_push::OwnerPushService::default(),
             stopped: AtomicBool::new(false),
             shutdown_lock: Mutex::new(()),

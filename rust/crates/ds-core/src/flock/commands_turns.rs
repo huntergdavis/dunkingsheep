@@ -114,6 +114,15 @@ fn valid_handoff_id(id: &str) -> bool {
 }
 
 impl Flock {
+    /// The retained end timestamp used by dispatch's unread-mail freshness gate.
+    pub fn turn_ended_at(&self, pane_id: &str) -> Option<f64> {
+        self.turn_states
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(pane_id)
+            .and_then(|state| state.ended_at)
+    }
+
     /// `require_turn_caller`: authenticate a socket turn event. A request's pane labels alone
     /// prove nothing: the event must target the caller's own pane, and the caller's process
     /// must descend from that pane's root (`pane_pid`, from the live pane record).

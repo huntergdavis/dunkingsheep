@@ -619,6 +619,25 @@ fn test_remove_and_missing_items() {
     );
 }
 
+#[test]
+fn test_raw_queue_values_preserve_sqlite_integer_overflow() {
+    let (_dir, queue) = queue();
+    let too_large = json!(u64::MAX);
+    let error = queue
+        .add_values(&json!("x"), &too_large, &Value::Null)
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "Error binding parameter 1: Python int too large to convert to SQLite INTEGER"
+    );
+    let error = queue.remove_value(&too_large).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "Error binding parameter 1: Python int too large to convert to SQLite INTEGER"
+    );
+    assert!(queue.items(true).unwrap().is_empty());
+}
+
 // -- TickTests (5b) ---------------------------------------------------------------------
 
 struct TickRig {

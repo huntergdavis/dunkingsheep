@@ -43,6 +43,66 @@ CREATE TABLE IF NOT EXISTS standby (
 );
 ";
 
+fn json_truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(value) => *value,
+        Value::Number(value) => value.as_f64().is_none_or(|value| value != 0.0),
+        Value::String(value) => !value.is_empty(),
+        Value::Array(value) => !value.is_empty(),
+        Value::Object(value) => !value.is_empty(),
+    }
+}
+
+fn python_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "NoneType",
+        Value::Bool(_) => "bool",
+        Value::Number(number) if number.is_i64() || number.is_u64() => "int",
+        Value::Number(_) => "float",
+        Value::String(_) => "str",
+        Value::Array(_) => "list",
+        Value::Object(_) => "dict",
+    }
+}
+
+fn sqlite_value(value: &Value, parameter: usize) -> Result<rusqlite::types::Value, DispatchError> {
+    use rusqlite::types::Value as SqlValue;
+    Ok(match value {
+        Value::Null => SqlValue::Null,
+        Value::Bool(value) => SqlValue::Integer(if *value { 1 } else { 0 }),
+        Value::Number(value) => {
+            if let Some(value) = value.as_i64() {
+                SqlValue::Integer(value)
+            } else if let Some(value) = value.as_u64() {
+                let value = i64::try_from(value).map_err(|_| {
+                    DispatchError(format!(
+                        "Error binding parameter {parameter}: Python int too large to convert to SQLite INTEGER"
+                    ))
+                })?;
+                SqlValue::Integer(value)
+            } else if let Some(value) = value.as_f64() {
+                SqlValue::Real(value)
+            } else {
+                return Err(DispatchError(format!(
+                    "Error binding parameter {parameter}: Python int too large to convert to SQLite INTEGER"
+                )));
+            }
+        }
+        Value::String(value) => SqlValue::Text(value.clone()),
+        value => {
+            return Err(DispatchError(format!(
+                "Error binding parameter {parameter}: type '{}' is not supported",
+                python_type_name(value)
+            )))
+        }
+    })
+}
+
+fn python_repr(value: &Value) -> String {
+    crate::api::python_value_repr(value)
+}
+
 /// The standby list.
 pub struct Queue {
     db: Mutex<Connection>,
@@ -137,6 +197,48 @@ impl Queue {
         Ok(self.get(id)?.unwrap_or(Value::Null))
     }
 
+    /// Wire-compatible raw add used by `h_dispatch`; preserve Python's validation and SQLite
+    /// binding order instead of coercing values in the request adapter.
+    pub fn add_values(
+        &self,
+        brief: &Value,
+        task_id: &Value,
+        lane: &Value,
+    ) -> Result<Value, DispatchError> {
+        let brief = match brief {
+            Value::Null | Value::Bool(false) => "",
+            Value::Number(number) if number.as_f64() == Some(0.0) => "",
+            Value::String(text) => text.as_str(),
+            value if json_truthy(value) => {
+                return Err(DispatchError(format!(
+                    "'{}' object has no attribute 'strip'",
+                    python_type_name(value)
+                )));
+            }
+            _ => "",
+        }
+        .trim();
+        if brief.is_empty() {
+            return Err(DispatchError(
+                "a standby item needs a one-line brief".into(),
+            ));
+        }
+        // Python reaches SQLite binding only after `.strip()` and the non-empty check.
+        let task_id = sqlite_value(task_id, 1)?;
+        let lane = sqlite_value(lane, 2)?;
+        let id = {
+            let connection = self.connection();
+            connection
+                .execute(
+                    "INSERT INTO standby (task_id, brief, lane, created_at) VALUES (?,?,?,?)",
+                    params![task_id, brief, lane, crate::clock::now_s()],
+                )
+                .map_err(|e| DispatchError(e.to_string()))?;
+            connection.last_insert_rowid()
+        };
+        Ok(self.get(id)?.unwrap_or(Value::Null))
+    }
+
     /// `get(item_id)`.
     pub fn get(&self, item_id: i64) -> Result<Option<Value>, DispatchError> {
         let connection = self.connection();
@@ -175,6 +277,25 @@ impl Queue {
             return Err(DispatchError(format!("no standby item {item_id}")));
         }
         Ok(json!({"removed": item_id}))
+    }
+
+    /// Raw `Queue.remove(id)` boundary for request handlers.
+    pub fn remove_value(&self, item_id: &Value) -> Result<Value, DispatchError> {
+        let requested = item_id.clone();
+        let item_id = sqlite_value(item_id, 1)?;
+        let changed = {
+            let connection = self.connection();
+            connection
+                .execute("DELETE FROM standby WHERE id = ?", [item_id])
+                .map_err(|e| DispatchError(e.to_string()))?
+        };
+        if changed == 0 {
+            return Err(DispatchError(format!(
+                "no standby item {}",
+                python_repr(&requested)
+            )));
+        }
+        Ok(json!({"removed": requested}))
     }
 
     /// `take(item_id, lane, sent_message, now)`: mark the item taken; refuses a missing or
