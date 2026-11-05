@@ -13,6 +13,7 @@ use std::sync::Arc;
 pub(crate) fn production_handlers() -> Dispatcher {
     let mut handlers = Dispatcher::new();
     handlers.register_status_whoami_turn_start();
+    handlers.register_turn_end_poll_roster();
     handlers.register_help();
     handlers.register_health_state();
     handlers.register_lanes();
@@ -47,6 +48,7 @@ pub(crate) fn production_handlers() -> Dispatcher {
     handlers.register_get_dunk();
     handlers.register_stop_all_fire_list_dunks();
     handlers.register_send_text_keys_flush_box();
+    handlers.register_runtime_control();
     handlers.register_outbox_messages();
     handlers.register_inbox_messages();
     handlers.register_clear_box_delivery_capability();
@@ -54,7 +56,6 @@ pub(crate) fn production_handlers() -> Dispatcher {
     handlers.register_layout_create();
     handlers.register_layout_agent();
     handlers.register_layout_close();
-    handlers.register("shutdown", crate::api::h_shutdown);
     handlers
 }
 
@@ -71,7 +72,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use crate::api::CommandEnv;
-    use crate::config::Env;
+    use crate::config::{CapturedPythonHome, Env};
     use crate::error::DunkError;
     use crate::flock::loop_env::LoopTerminalFactory;
     use crate::flock::panes::Stores;
@@ -80,7 +81,8 @@ mod tests {
     use crate::roles::Roles;
     use crate::server::RequestCtx;
     use crate::server_runtime::{
-        RequestRuntimeAdapter, RuntimeObservability, RuntimeServiceInputs,
+        DaemonOptions, DaemonStartup, RequestRuntimeAdapter, RuntimeObservability,
+        RuntimeServiceInputs,
     };
     use crate::tasks::Tasks;
     use crate::terminal::{
@@ -442,6 +444,96 @@ mod tests {
         }
     }
 
+    fn production_socket_call(
+        socket: &std::path::Path,
+        id: u64,
+        command: &str,
+        args: Value,
+        service_token: &str,
+        self_pane_id: &str,
+    ) -> Result<Value, String> {
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::Shutdown;
+        use std::os::unix::net::UnixStream;
+
+        let mut stream = UnixStream::connect(socket).map_err(|error| error.to_string())?;
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .map_err(|error| error.to_string())?;
+        let request = json!({
+            "id": id,
+            "cmd": command,
+            "args": args,
+            "service_token": service_token,
+            "self_pane_id": self_pane_id,
+        });
+        serde_json::to_writer(&mut stream, &request).map_err(|error| error.to_string())?;
+        stream.write_all(b"\n").map_err(|error| error.to_string())?;
+        stream
+            .shutdown(Shutdown::Write)
+            .map_err(|error| error.to_string())?;
+        let mut line = String::new();
+        if BufReader::new(stream)
+            .read_line(&mut line)
+            .map_err(|error| error.to_string())?
+            == 0
+        {
+            return Err("production socket closed before replying".into());
+        }
+        let response: Value = serde_json::from_str(&line).map_err(|error| error.to_string())?;
+        if response.get("id") != Some(&json!(id)) {
+            return Err(format!("response id mismatch: {response}"));
+        }
+        Ok(response)
+    }
+
+    struct ProductionDaemonGuard {
+        socket: std::path::PathBuf,
+        token: String,
+        stop: Arc<AtomicBool>,
+        result: std::sync::mpsc::Receiver<Result<i32, DunkError>>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl ProductionDaemonGuard {
+        fn finish(&mut self) -> Result<i32, DunkError> {
+            let result = self
+                .result
+                .recv_timeout(Duration::from_secs(10))
+                .expect("production daemon did not stop after shutdown response");
+            self.thread
+                .take()
+                .expect("production daemon thread is joinable")
+                .join()
+                .expect("production daemon thread did not panic");
+            result
+        }
+    }
+
+    impl Drop for ProductionDaemonGuard {
+        fn drop(&mut self) {
+            use std::os::unix::net::UnixStream;
+
+            if self.thread.is_none() {
+                return;
+            }
+            let _ = production_socket_call(
+                &self.socket,
+                u64::MAX,
+                "shutdown",
+                json!({}),
+                &self.token,
+                "w1:p1",
+            );
+            self.stop.store(true, Ordering::SeqCst);
+            let _ = UnixStream::connect(&self.socket);
+            let _ = self.result.recv_timeout(Duration::from_secs(5));
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+
     struct CountingStatusEnv<'a> {
         inner: &'a dyn StatusEnv,
         version_calls: &'a AtomicUsize,
@@ -544,6 +636,11 @@ mod tests {
             "state_latest",
             "status",
             "turn_start",
+            "turn_end",
+            "poll",
+            "roster",
+            "dispatch",
+            "allocation",
             "send_text",
             "send_keys",
             "flush_box",
@@ -660,6 +757,195 @@ mod tests {
             actual.len(),
             "duplicate registration attempt"
         );
+    }
+
+    #[test]
+    fn production_daemon_socket_routes_p0_handlers_and_stops_after_reply() {
+        let dir = crate::testsupport::dir("production-p0-registry");
+        let config = dir.path().join("config");
+        std::fs::create_dir_all(&config).expect("temporary daemon config");
+        let socket = dir.path().join("runtime.sock");
+        let state_file = config.join("dunks.json");
+        let service_token = "t3240-temporary-owner-token";
+        let mut tokens = serde_json::Map::new();
+        tokens.insert(
+            crate::roles::hash_token(service_token),
+            json!({"role": "owner", "label": "t3240-test"}),
+        );
+        std::fs::write(
+            config.join("service-tokens.json"),
+            json!({"tokens": tokens}).to_string(),
+        )
+        .expect("temporary service-token fixture");
+
+        let env = Env::from_pairs(&[
+            ("DUNKINGSHEEP_DIR", config.to_str().unwrap()),
+            ("DUNKINGSHEEP_SOCKET", socket.to_str().unwrap()),
+            ("DUNKINGSHEEP_SUPERVISED", "1"),
+            ("HOME", dir.path().to_str().unwrap()),
+        ]);
+        let home = CapturedPythonHome::capture_with(&env, || Ok(None));
+        let caller = crate::proc::caller_from_peer(
+            Some(i64::from(std::process::id())),
+            Some("w1:p1".into()),
+        );
+        assert!(crate::proc::caller_alive(Some(&caller)));
+        let pane_pid = caller.pid.expect("live socket peer identity");
+        let terminal_factory: LoopTerminalFactory = Arc::new(move || {
+            let mut terminal = FakeTerminal::new();
+            for pane in &mut terminal.panes {
+                pane.pane_pid = Some(pane_pid);
+            }
+            terminal.statuses.insert("w1:p1".into(), "idle".into());
+            terminal.statuses.insert("w2:p2".into(), "idle".into());
+            terminal.screens.insert("w1:p1".into(), "❯\u{a0}\n".into());
+            Box::new(terminal)
+        });
+        let stop = Arc::new(AtomicBool::new(false));
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(0);
+        let startup = DaemonStartup {
+            env,
+            home,
+            executable: std::env::current_exe().expect("test executable"),
+            release_version: "t3240-test".into(),
+            terminal_factory: Some(terminal_factory),
+            loop_intervals: Some(crate::flock::loops::LoopIntervals {
+                push: Duration::from_secs(3_600),
+                stuck: Duration::from_secs(3_600),
+                reaper: Duration::from_secs(3_600),
+            }),
+            install_signals: false,
+            ready: Some(ready_tx),
+            loop_test_gate: None,
+            stop_test_handle: Some(Arc::clone(&stop)),
+        };
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let daemon_socket = socket.clone();
+        let daemon_state = state_file.clone();
+        let thread = std::thread::spawn(move || {
+            let result = crate::server_runtime::run_daemon_captured(
+                DaemonOptions {
+                    socket_path: Some(daemon_socket),
+                    state_file: Some(daemon_state),
+                    no_log_file: true,
+                },
+                startup,
+            );
+            let _ = result_tx.send(result);
+        });
+        let mut daemon = ProductionDaemonGuard {
+            socket: socket.clone(),
+            token: service_token.into(),
+            stop,
+            result: result_rx,
+            thread: Some(thread),
+        };
+        ready_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("production daemon bound its temporary socket");
+
+        let mut sequence = 1;
+        let mut call = |command: &str, args: Value| {
+            let id = sequence;
+            sequence += 1;
+            let response =
+                production_socket_call(&socket, id, command, args, service_token, "w1:p1")
+                    .unwrap_or_else(|error| panic!("{command} socket request failed: {error}"));
+            assert_eq!(response["ok"], true, "{command}: {response}");
+            response["result"].clone()
+        };
+
+        let started = call(
+            "turn_start",
+            json!({"pane":"w1:p1","ttl_s":60,"source":"t3240"}),
+        );
+        let turn_id = started["turn_id"].as_str().expect("generated turn id");
+        let stale_end = call(
+            "turn_end",
+            json!({"pane":"w1:p1","turn_id":"wrong-generation"}),
+        );
+        assert_eq!(stale_end["ended"], false);
+        assert_eq!(stale_end["reason"], "turn_mismatch");
+        let ended = call(
+            "turn_end",
+            json!({"pane":"w1:p1","turn_id":turn_id,"reason":"t3240"}),
+        );
+        assert_eq!(ended["ended"], true);
+        assert_eq!(ended["pane_id"], "w1:p1");
+
+        let poll = call("poll", json!({}));
+        assert_eq!(poll["self_pane_id"], "w1:p1");
+        assert!(poll["inbox_count"].is_object(), "{poll}");
+        let roster = call("roster", json!({}));
+        assert!(roster["as_of"].is_string(), "{roster}");
+        assert!(roster["lanes"].is_array(), "{roster}");
+        assert!(
+            roster["lanes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|lane| lane["pane_id"] == "w2:p2"),
+            "roster must contain the actual FakeTerminal agent lane: {roster}"
+        );
+
+        let added = call(
+            "dispatch",
+            json!({"action":"add","brief":"production registry item","task_id":"t3240"}),
+        );
+        let listed = call("dispatch", json!({"action":"list"}));
+        assert_eq!(listed["pending"], 1);
+        assert_eq!(listed["items"][0]["id"], added["id"]);
+        let tick = call(
+            "dispatch",
+            json!({"action":"tick","lanes":"w1:p1","dry_run":true}),
+        );
+        assert!(tick["dispatched_count"].is_number(), "{tick}");
+        let status = call("dispatch", json!({"action":"status"}));
+        assert_eq!(status["pending"], 1);
+        let removed = call("dispatch", json!({"action":"remove","id":added["id"]}));
+        assert_eq!(removed["removed"], added["id"]);
+        assert_eq!(call("dispatch", json!({"action":"list"}))["pending"], 0);
+
+        let allocation = call("allocation", json!({"action":"status"}));
+        assert!(allocation["workers"].is_array(), "{allocation}");
+        assert!(allocation["offers"].is_array(), "{allocation}");
+        let registered = call(
+            "allocation",
+            json!({"action":"register","pane_id":"w2:p2","pools":["code"],"roles":["worker"],"skills":["rust"]}),
+        );
+        assert!(registered["workers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|worker| { worker["pane_id"] == "w2:p2" && worker["registered_by"] == "w1:p1" }));
+        let task = call(
+            "task_add",
+            json!({"scope":"global","title":"t3240 offered task","body":"source body","assignees":["w2:p2"]}),
+        );
+        let offered = call(
+            "allocation",
+            json!({"action":"offer","task_id":task["id"],"pool":"code"}),
+        );
+        assert_eq!(offered["id"], task["id"]);
+        assert_eq!(offered["title"], "t3240 offered task");
+
+        let dunk = call(
+            "add_dunk",
+            json!({"target":"w3:p3","text":"temporary shutdown persistence","interval_minutes":60,"start":true}),
+        );
+        let shutdown = call("shutdown", json!({"stop_all":true}));
+        assert_eq!(shutdown["shutting_down"], true);
+        assert_eq!(shutdown["stopped_all"], true);
+        drop(call);
+        assert_eq!(daemon.finish().unwrap(), 0);
+        assert!(!socket.exists(), "production shutdown unlinks its socket");
+        let snapshot: Value = serde_json::from_slice(
+            &std::fs::read(state_file).expect("shutdown persisted temporary state"),
+        )
+        .unwrap();
+        assert!(snapshot["dunkers"].as_array().unwrap().iter().any(|row| {
+            row["id"] == dunk["id"] && row["running"] == false && row["next_send_at"].is_null()
+        }));
     }
 
     fn project_entry(subscription: bool, credit_fallback: bool) -> ProjectRuntimeEntry {
