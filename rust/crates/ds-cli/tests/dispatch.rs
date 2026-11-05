@@ -495,17 +495,35 @@ fn github_protect_uses_fixture_app_and_fake_gh() {
     );
 }
 
-/// `install` writes the Rust launcher and stdlib poll wrapper only in the requested sandbox.
+/// `install` writes the Rust launcher and the poll wrapper only in the requested
+/// sandbox. It runs from an installed release, never from a build tree (t3229).
 #[test]
 fn install_launcher_runs_end_to_end_in_a_sandbox() {
     use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
 
     let temp = tempfile::tempdir().unwrap();
+    let release = temp.path().join("releases/t3229-sandbox");
+    std::fs::create_dir_all(&release).unwrap();
+    let release = std::fs::canonicalize(&release).unwrap();
+    let cli = release.join("dunkingsheep");
+    std::fs::copy(env!("CARGO_BIN_EXE_dunkingsheep"), &cli).unwrap();
+    let project_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(3)
+        .unwrap();
+    let poller = release.join("dunk-poll.py");
+    std::fs::copy(project_root.join("tools/dunk_poll.py"), &poller).unwrap();
+    let python = ["/usr/bin/python3", "/bin/python3"]
+        .into_iter()
+        .map(std::path::PathBuf::from)
+        .find(|path| path.is_file())
+        .expect("a python3 on the host");
+
     let bin_dir = temp.path().join("bin");
     let bin_text = bin_dir.display().to_string();
     let path = format!("{bin_text}:/usr/bin:/bin");
-    let output = Command::new(env!("CARGO_BIN_EXE_dunkingsheep"))
+    let output = Command::new(&cli)
         .args(["install", "--bin-dir", &bin_text])
         .env("PATH", &path)
         .env("HOME", temp.path())
@@ -514,19 +532,13 @@ fn install_launcher_runs_end_to_end_in_a_sandbox() {
         .env_remove("DUNKINGSHEEP_SERVICE_TOKEN")
         .env_remove("DUNKINGSHEEP_SERVICE_TOKEN_FILE")
         .output()
-        .expect("run Rust install command");
+        .expect("run the release install command");
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let cli = std::fs::canonicalize(env!("CARGO_BIN_EXE_dunkingsheep")).unwrap();
-    let project_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(3)
-        .unwrap();
-    let poller = project_root.join("tools/dunk_poll.py");
     let launcher = bin_dir.join("dunkingsheep");
     let poll_launcher = bin_dir.join("dunk-poll");
     let rows = [
@@ -550,15 +562,20 @@ fn install_launcher_runs_end_to_end_in_a_sandbox() {
     let launcher_body = std::fs::read_to_string(&launcher).unwrap();
     assert!(launcher_body.starts_with("#!/bin/sh\n"));
     assert!(launcher_body.contains(&cli.display().to_string()));
+    assert!(
+        !launcher_body.contains("/target/"),
+        "the launcher must not point at a build tree"
+    );
     assert!(launcher_body.ends_with("\"$@\"\n"));
     let poll_body = std::fs::read_to_string(&poll_launcher).unwrap();
-    assert!(poll_body.starts_with("#!/bin/sh\nexec "));
+    assert!(poll_body.starts_with("#!/bin/sh\n"));
+    assert!(poll_body.contains(&python.display().to_string()));
     assert!(poll_body.contains(&poller.display().to_string()));
     assert!(poll_body.ends_with("\"$@\"\n"));
     for path in [launcher, poll_launcher] {
         assert_eq!(
             0o755,
-            std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777
         );
     }
 }

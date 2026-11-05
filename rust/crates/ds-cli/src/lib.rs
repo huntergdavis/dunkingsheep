@@ -8,6 +8,7 @@ pub mod daemon_cmd;
 pub mod dispatch;
 pub mod github_cmd;
 pub mod local;
+pub mod release_layout;
 pub mod render;
 pub mod render_fleet;
 pub mod render_print;
