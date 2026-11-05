@@ -214,6 +214,12 @@ impl DunkTimerOwner {
     }
 
     pub(super) fn stop_all(&self) {
+        if let Err(error) = self.stop_all_checked() {
+            eprintln!("dunk timer shutdown failed: {error}");
+        }
+    }
+
+    pub(super) fn stop_all_checked(&self) -> Result<(), DunkError> {
         let workers = {
             let mut workers = self.workers.lock().unwrap_or_else(|e| e.into_inner());
             self.stopped.store(true, Ordering::Release);
@@ -229,8 +235,16 @@ impl DunkTimerOwner {
             worker.signal.changed.notify_all();
             drop(guard);
         }
-        for (_, worker) in workers {
-            let _ = worker.join.join();
+        let mut failures = Vec::new();
+        for (key, worker) in workers {
+            if worker.join.join().is_err() {
+                failures.push(format!("timer worker {key} panicked"));
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(crate::error::refusal(failures.join("; ")))
         }
     }
 }

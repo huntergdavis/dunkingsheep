@@ -89,17 +89,152 @@ fn recorded_context_steps_run_end_to_end_through_the_parser_and_dispatch() {
 }
 
 #[test]
-fn commands_without_a_body_say_so_and_exit_1() {
-    // The Rust TUI route is wired; serve remains outside the ported CLI surface.
-    let argv = vec!["dunkingsheep", "serve"];
+fn serve_options_are_parsed_for_the_daemon_entry() {
+    let argv = vec![
+        "dunkingsheep",
+        "--socket",
+        "/tmp/ds-test.sock",
+        "serve",
+        "--state-file",
+        "/tmp/ds-state.json",
+        "--no-log-file",
+    ];
     let ns = try_parse(&argv).unwrap();
-    let out = run(&ns);
-    assert_eq!(1, out.code, "{argv:?}");
-    assert_eq!("", out.stdout);
+    assert_eq!(Some("serve"), ns.get("command").and_then(Value::as_str));
+    assert_eq!(
+        Some("/tmp/ds-test.sock"),
+        ns.get("socket").and_then(Value::as_str)
+    );
+    assert_eq!(
+        Some("/tmp/ds-state.json"),
+        ns.get("state_file").and_then(Value::as_str)
+    );
+    assert_eq!(Some(&Value::Bool(true)), ns.get("no_log_file"));
+}
+
+#[cfg(unix)]
+#[test]
+fn ds_cli_serve_uses_temp_config_socket_and_exits_after_shutdown() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::net::UnixStream;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    struct CleanupChild(Option<std::process::Child>);
+    impl Drop for CleanupChild {
+        fn drop(&mut self) {
+            if let Some(child) = self.0.as_mut() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+
+    let dir = tempfile::tempdir().expect("temporary daemon fixture");
+    let config = dir.path().join("config");
+    std::fs::create_dir_all(&config).unwrap();
+    let socket = dir.path().join("runtime.sock");
+    let state_file = dir.path().join("dunks.json");
+    let tmux = dir.path().join("tmux-fixture");
+    std::fs::write(
+        &tmux,
+        "#!/bin/sh\nprintf '%%99\\037$1\\037@1\\037/tmp\\037bash\\037fixture\\0371\\037fixture\\037fixture\\0370\\0370\\0371\\03780\\03724\\n'\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(
+        config.join("roles.json"),
+        r#"{"default":"anonymous","lanes":{"%99":{"role":"owner"}}}"#,
+    )
+    .unwrap();
+
+    let binary = env!("CARGO_BIN_EXE_dunkingsheep");
+    let mut daemon = CleanupChild(Some(
+        Command::new(binary)
+            .args(["serve", "--state-file"])
+            .arg(&state_file)
+            .arg("--no-log-file")
+            .env("HOME", dir.path())
+            .env("DUNKINGSHEEP_DIR", &config)
+            .env("DUNKINGSHEEP_SOCKET", &socket)
+            .env("DUNKINGSHEEP_TMUX_BIN", &tmux)
+            .env("DUNKINGSHEEP_BIND_IDENTITY", "0")
+            .env_remove("DUNKINGSHEEP_SERVICE_TOKEN")
+            .env_remove("DUNKINGSHEEP_SERVICE_TOKEN_FILE")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn real serve binary"),
+    ));
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if socket.exists() && UnixStream::connect(&socket).is_ok() {
+            break;
+        }
+        if let Some(status) = daemon
+            .0
+            .as_mut()
+            .expect("daemon child guard")
+            .try_wait()
+            .expect("check daemon process")
+        {
+            panic!("serve exited before binding the fixture socket: {status}");
+        }
+        if Instant::now() >= deadline {
+            panic!("serve did not bind the fixture socket before deadline");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let shutdown = Command::new(binary)
+        .args(["--self-pane", "%99", "shutdown"])
+        .env("HOME", dir.path())
+        .env("DUNKINGSHEEP_DIR", &config)
+        .env("DUNKINGSHEEP_SOCKET", &socket)
+        .env("DUNKINGSHEEP_TMUX_BIN", &tmux)
+        .env_remove("DUNKINGSHEEP_SERVICE_TOKEN")
+        .env_remove("DUNKINGSHEEP_SERVICE_TOKEN_FILE")
+        .output()
+        .expect("run shutdown through the real CLI binary");
+    assert_eq!(Some(0), shutdown.status.code(), "{shutdown:?}");
     assert!(
-        out.stderr.contains("is parsed but not ported yet"),
+        shutdown.stderr.is_empty(),
         "{}",
-        out.stderr
+        String::from_utf8_lossy(&shutdown.stderr)
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(status) = daemon
+            .0
+            .as_mut()
+            .expect("daemon child guard")
+            .try_wait()
+            .expect("check daemon exit")
+        {
+            assert_eq!(Some(0), status.code());
+            break;
+        }
+        if Instant::now() >= deadline {
+            panic!("serve did not exit after the shutdown response");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let status = daemon
+        .0
+        .take()
+        .expect("daemon child guard")
+        .wait()
+        .expect("reap daemon process");
+    assert_eq!(Some(0), status.code());
+    assert!(
+        !socket.exists(),
+        "daemon removes its temporary socket on close"
+    );
+    assert!(
+        !config.join("daemon.log").exists(),
+        "--no-log-file suppresses the log"
     );
 }
 

@@ -187,6 +187,29 @@ impl Env {
         Env(std::env::vars().collect())
     }
 
+    /// Capture the real environment without panicking on a non-UTF-8 key or value.
+    pub fn try_from_process() -> Result<Self, DunkError> {
+        let mut values = BTreeMap::new();
+        for (key, value) in std::env::vars_os() {
+            let Ok(key) = key.into_string() else {
+                continue;
+            };
+            if !ENV_VARS.contains(&key.as_str())
+                && !matches!(
+                    key.as_str(),
+                    "HOME" | "USERPROFILE" | "DUNKINGSHEEP_VERSION"
+                )
+            {
+                continue;
+            }
+            let value = value.into_string().map_err(|_| {
+                crate::error::refusal(format!("environment variable {key:?} is not valid UTF-8"))
+            })?;
+            values.insert(key, value);
+        }
+        Ok(Env(values))
+    }
+
     /// A fixed table (tests, and the differential harness's recorded requests).
     pub fn from_pairs(pairs: &[(&str, &str)]) -> Self {
         Env(pairs

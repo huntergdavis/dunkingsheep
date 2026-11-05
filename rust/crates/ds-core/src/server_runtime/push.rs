@@ -15,23 +15,59 @@ impl LoopRuntimeAdapter {
     pub(crate) fn helper_pushenv_list_panes<'a>(
         &'a self,
     ) -> LoopFuture<'a, Result<Vec<Value>, DunkError>> {
-        let worker = self.with_loop_terminal(|_, terminal| {
-            terminal.with_terminal(|backend| {
+        #[cfg(test)]
+        let test_gate = self.test_gate.clone();
+        let worker = self.with_loop_terminal(move |_, terminal| {
+            // Hold this exact push-loop worker after its worker-local Terminal and call adapter
+            // exist, then signal completion only after the backend pane-list returns.
+            #[cfg(test)]
+            let completed = if let Some(gate) = test_gate {
+                let barrier = gate
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .take();
+                if let Some((entered, release, completed, _)) = barrier {
+                    entered.send(()).expect("test observer remains connected");
+                    release.recv().expect("test loop barrier release");
+                    Some(completed)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            let result = terminal.with_terminal(|backend| {
                 backend
                     .try_list_panes_with_status()
                     .map(|panes| {
                         panes
                             .into_iter()
                             .map(|(pane, status)| pane_to_json(&pane, status.as_deref()))
-                            .collect()
+                            .collect::<Vec<_>>()
                     })
                     .map_err(|error| DunkError::Refused(error.to_string()))
-            })
+            });
+            #[cfg(test)]
+            if let Some(completed) = completed {
+                let _ = completed.send(());
+            }
+            result
         });
+        #[cfg(test)]
+        let test_pane_list_result = self.test_pane_list_result.clone();
         Box::pin(async move {
-            worker
+            let result = worker
                 .await
-                .map_err(|error| refusal(format!("terminal pane-list worker failed: {error}")))?
+                .map_err(|error| refusal(format!("terminal pane-list worker failed: {error}")))?;
+            #[cfg(test)]
+            if let Some(observer) = test_pane_list_result {
+                let observed = result
+                    .as_ref()
+                    .map(|panes| panes.len())
+                    .map_err(ToString::to_string);
+                let _ = observer.send(observed);
+            }
+            result
         })
     }
 

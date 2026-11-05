@@ -24,7 +24,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use crate::config::Env;
-use crate::error::DunkError;
+use crate::error::{refusal, DunkError};
 use crate::proc::{caller_from_peer, caller_pane_auth_failure, Caller};
 use crate::protocol::{encode_line, Response};
 use crate::terminal::Terminal;
@@ -112,11 +112,19 @@ impl ConnectionRegistry {
 
 impl FlockServer {
     pub fn new(dispatcher: Arc<dyn Dispatcher>, socket_path: impl Into<PathBuf>) -> Self {
+        Self::new_with_stop(dispatcher, socket_path, Arc::new(AtomicBool::new(false)))
+    }
+
+    pub fn new_with_stop(
+        dispatcher: Arc<dyn Dispatcher>,
+        socket_path: impl Into<PathBuf>,
+        stop: Arc<AtomicBool>,
+    ) -> Self {
         Self {
             dispatcher,
             socket_path: socket_path.into(),
             listener: None,
-            stop: Arc::new(AtomicBool::new(false)),
+            stop,
             connections: Arc::new(Mutex::new(ConnectionRegistry::new())),
             connections_changed: Arc::new(std::sync::Condvar::new()),
             dispatcher_closed: false,
@@ -158,9 +166,21 @@ impl FlockServer {
             }
             Err(error) => return Err(BindError::Io(error)),
         };
-        std::fs::set_permissions(&self.socket_path, std::fs::Permissions::from_mode(0o600))
-            .map_err(BindError::Io)?;
-        listener.set_nonblocking(true).map_err(BindError::Io)?;
+        let setup =
+            std::fs::set_permissions(&self.socket_path, std::fs::Permissions::from_mode(0o600))
+                .and_then(|()| listener.set_nonblocking(true));
+        if let Err(error) = setup {
+            drop(listener);
+            if let Err(cleanup) = std::fs::remove_file(&self.socket_path) {
+                if cleanup.kind() != std::io::ErrorKind::NotFound {
+                    return Err(BindError::SetupAndCleanup {
+                        setup: error,
+                        cleanup,
+                    });
+                }
+            }
+            return Err(BindError::Io(error));
+        }
         self.listener = Some(listener);
         tracing::info!(
             "dunkingsheep listening on {} (pid {})",
@@ -292,6 +312,10 @@ impl ShutdownFailure {
 pub enum BindError {
     AlreadyRunning(AlreadyRunning),
     Io(std::io::Error),
+    SetupAndCleanup {
+        setup: std::io::Error,
+        cleanup: std::io::Error,
+    },
     RegistryPoisoned,
     WorkerPanicked(Vec<u64>),
     Shutdown(Arc<ShutdownFailure>),
@@ -306,6 +330,9 @@ impl std::fmt::Display for BindError {
         match self {
             BindError::AlreadyRunning(error) => error.fmt(f),
             BindError::Io(error) => error.fmt(f),
+            BindError::SetupAndCleanup { setup, cleanup } => {
+                write!(f, "socket setup failed ({setup}); socket rollback failed ({cleanup})")
+            }
             BindError::RegistryPoisoned => f.write_str("connection registry lock was poisoned"),
             BindError::WorkerPanicked(ids) => write!(f, "connection workers panicked: {ids:?}"),
             BindError::Shutdown(failure) => write!(
@@ -656,6 +683,60 @@ pub fn startup_refusal(
     None
 }
 
+/// Python-compatible daemon gate that preserves fallible backend enumeration.
+/// The caller runs the supervised default-socket check first, before constructing
+/// stores or otherwise producing startup side effects.
+pub fn startup_refusal_fallible(
+    env: &Env,
+    backend: &dyn Terminal,
+    backend_name: &str,
+) -> Result<Option<(i32, String)>, DunkError> {
+    if env.get("DUNKINGSHEEP_ALLOW_EMPTY_BACKEND") == Some("1") {
+        return Ok(None);
+    }
+    let panes = match backend.try_list_panes() {
+        Ok(panes) => panes,
+        Err(error) => {
+            return Ok(Some((
+                4,
+                format!("could not list backend {backend_name:?} panes: {error}"),
+            )));
+        }
+    };
+    if panes.is_empty() {
+        return Ok(Some((
+            4,
+            format!(
+                "refusing to start: backend {backend_name:?} sees zero panes. This daemon delivers \
+                 by reading and typing into panes; with none it would accept every message and \
+                 fail every delivery. Start it in an environment where the backend has panes, or \
+                 set DUNKINGSHEEP_ALLOW_EMPTY_BACKEND=1 for a deliberate trial."
+            ),
+        )));
+    }
+    Ok(None)
+}
+
+/// Gate the supervised default socket without constructing or probing the backend.
+pub fn supervised_default_socket_refusal(
+    env: &Env,
+    socket_path: &Path,
+    default_socket: &Path,
+    unit_exists: bool,
+) -> Option<(i32, String)> {
+    (socket_path == default_socket
+        && env.get("DUNKINGSHEEP_SUPERVISED") != Some("1")
+        && unit_exists)
+        .then(|| {
+            (
+                3,
+                "dunkingsheep.service supervises this daemon; refusing an unsupervised start. Run: \
+                 systemctl --user start dunkingsheep.service"
+                    .into(),
+            )
+        })
+}
+
 /// SIGTERM the daemon's whole process group (t212). A no-op unless `DUNKINGSHEEP_TEST_SPAWN=1`:
 /// a lane's auto-started daemon must outlive the call that started it.
 pub fn kill_own_process_group(env: &Env) -> bool {
@@ -686,22 +767,67 @@ pub fn parent_to_watch(env: &Env, own_ppid: i64) -> Option<i64> {
         .flatten()
 }
 
-/// Watch `pid` every 2 s and exit HARD when it is gone (group kill is the bound; calling a
-/// graceful shutdown from here deadlocked the Python daemon, measured 12 s later still alive).
-pub fn spawn_parent_watch(pid: i64, env: Env) {
+/// Watch one startup-selected parent, retaining a cancellable join for normal daemon close.
+/// When the parent actually disappears, preserve Python's hard process exit behavior.
+pub struct ParentWatch {
+    stop: Arc<(Mutex<bool>, std::sync::Condvar)>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+pub fn spawn_parent_watch(pid: i64, env: Env) -> Result<ParentWatch, DunkError> {
     use nix::sys::signal::kill;
     use nix::unistd::Pid;
-    std::thread::Builder::new()
+    let stop = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+    let worker_stop = Arc::clone(&stop);
+    let worker = std::thread::Builder::new()
         .name("die-with-parent".into())
         .spawn(move || loop {
-            std::thread::sleep(Duration::from_secs(2));
+            let (lock, changed) = &*worker_stop;
+            let stopping = lock.lock().unwrap_or_else(|error| error.into_inner());
+            let (stopping, _) = changed
+                .wait_timeout_while(stopping, Duration::from_secs(2), |stopping| !*stopping)
+                .unwrap_or_else(|error| error.into_inner());
+            if *stopping {
+                return;
+            }
+            drop(stopping);
             if kill(Pid::from_raw(pid as i32), None).is_err() {
                 tracing::warn!("parent pid {pid} is gone; a test-spawned daemon exits with it");
                 kill_own_process_group(&env);
                 std::process::exit(0);
             }
         })
-        .ok();
+        .map_err(|error| refusal(format!("cannot start parent watcher: {error}")))?;
+    Ok(ParentWatch {
+        stop,
+        worker: Some(worker),
+    })
+}
+
+impl ParentWatch {
+    pub fn join(mut self) -> Result<(), DunkError> {
+        self.stop_and_join()
+    }
+
+    fn stop_and_join(&mut self) -> Result<(), DunkError> {
+        if let Some(worker) = self.worker.take() {
+            let (lock, changed) = &*self.stop;
+            *lock.lock().unwrap_or_else(|error| error.into_inner()) = true;
+            changed.notify_all();
+            worker
+                .join()
+                .map_err(|_| refusal("parent watcher panicked"))?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for ParentWatch {
+    fn drop(&mut self) {
+        if let Err(error) = self.stop_and_join() {
+            tracing::error!("{error}");
+        }
+    }
 }
 
 /// SIGTERM/SIGINT: block them in the calling thread (call BEFORE spawning others so all inherit
@@ -724,6 +850,112 @@ pub fn install_signal_stop(stop: Arc<AtomicBool>, env: Env) -> Result<(), DunkEr
         })
         .map(|_| ())
         .map_err(|e| DunkError::Refused(format!("cannot start the signal thread: {e}")))
+}
+
+/// Stoppable signal waiter used by the owning daemon. SIGURG is reserved as its private
+/// cancellation wake; SIGTERM/SIGINT still request the server's ordinary drain path.
+pub struct SignalStop {
+    stop: Arc<AtomicBool>,
+    waiter: Option<std::thread::JoinHandle<Result<(), String>>>,
+    previous_mask: nix::sys::signal::SigSet,
+}
+
+impl SignalStop {
+    pub fn install(env: Env) -> Result<Self, DunkError> {
+        use nix::sys::signal::{SigSet, SigmaskHow, Signal};
+        let mut set = SigSet::empty();
+        set.add(Signal::SIGTERM);
+        set.add(Signal::SIGINT);
+        set.add(Signal::SIGURG);
+        let mut previous_mask = SigSet::empty();
+        nix::sys::signal::pthread_sigmask(
+            SigmaskHow::SIG_BLOCK,
+            Some(&set),
+            Some(&mut previous_mask),
+        )
+        .map_err(|error| refusal(format!("cannot block daemon signals: {error}")))?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stop);
+        let waiter = std::thread::Builder::new()
+            .name("daemon-signals".into())
+            .spawn(move || loop {
+                match set.wait() {
+                    Ok(Signal::SIGURG) => return Ok(()),
+                    Ok(signal) => {
+                        tracing::info!("received signal {}, draining daemon", signal as i32);
+                        kill_own_process_group(&env);
+                        worker_stop.store(true, Ordering::SeqCst);
+                    }
+                    Err(error) => return Err(error.to_string()),
+                }
+            });
+        let waiter = match waiter {
+            Ok(waiter) => waiter,
+            Err(error) => {
+                nix::sys::signal::pthread_sigmask(
+                    SigmaskHow::SIG_SETMASK,
+                    Some(&previous_mask),
+                    None,
+                )
+                .map_err(|restore| {
+                    refusal(format!(
+                        "cannot start daemon signal waiter ({error}); cannot restore signal mask: {restore}"
+                    ))
+                })?;
+                return Err(refusal(format!(
+                    "cannot start daemon signal waiter: {error}"
+                )));
+            }
+        };
+        Ok(Self {
+            stop,
+            waiter: Some(waiter),
+            previous_mask,
+        })
+    }
+
+    pub fn stop_handle(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.stop)
+    }
+
+    pub fn join(mut self) -> Result<(), DunkError> {
+        self.cancel_and_join()
+    }
+
+    fn cancel_and_join(&mut self) -> Result<(), DunkError> {
+        if let Some(waiter) = self.waiter.take() {
+            use nix::sys::signal::{kill, SigmaskHow, Signal};
+            use nix::unistd::Pid;
+            let mut failures = Vec::new();
+            if let Err(error) = kill(Pid::this(), Signal::SIGURG) {
+                failures.push(format!("cannot stop daemon signal waiter: {error}"));
+            }
+            match waiter.join() {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => failures.push(format!("daemon signal waiter failed: {error}")),
+                Err(_) => failures.push("daemon signal waiter panicked".to_owned()),
+            }
+            if let Err(error) = nix::sys::signal::pthread_sigmask(
+                SigmaskHow::SIG_SETMASK,
+                Some(&self.previous_mask),
+                None,
+            ) {
+                failures.push(format!("cannot restore daemon signal mask: {error}"));
+            }
+            if !failures.is_empty() {
+                return Err(refusal(failures.join("; ")));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Drop for SignalStop {
+    fn drop(&mut self) {
+        if let Err(error) = self.cancel_and_join() {
+            tracing::error!("{error}");
+        }
+    }
 }
 
 #[cfg(test)]
