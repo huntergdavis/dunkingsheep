@@ -679,6 +679,94 @@ async fn failed_result_write_keeps_intent_uncertain_in_memory_and_prevents_repla
 }
 
 #[tokio::test]
+async fn failed_agent_pane_write_reports_identity_and_restart_refuses_replay() {
+    let root = tempfile::tempdir().unwrap();
+    let db = root.path().join("owned-projects.sqlite3");
+    let provider_home = tempfile::tempdir().unwrap();
+    let reading = codex_fixture(provider_home.path(), 1000.0, json!(15.0));
+    let config = configured(Value::Null);
+    let mut projects = open_with_reporter(&db).await.unwrap();
+    let connection = rusqlite::Connection::open(&db).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER reject_agent_pane BEFORE UPDATE ON project_state
+             WHEN NEW.payload LIKE '%w1:p-budget-app-writer%'
+             BEGIN SELECT RAISE(ABORT, 'injected pane persistence failure'); END;",
+        )
+        .unwrap();
+    drop(connection);
+    let mut terminal = FakeTerminal::new();
+
+    let failure = projects
+        .spawn_from_reading_with_reporter_and_registrar(
+            &mut terminal,
+            root.path(),
+            &request(),
+            &authority(),
+            &Usage::Percent(10.0),
+            &config,
+            "codex",
+            &reading,
+            1001.0,
+            &DurableReporter::default(),
+            &FailedProjectRoleRegistration,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(failure.contains("pane=w1:p-budget-app-writer"), "{failure}");
+    assert!(failure.contains("label=budget-app-writer"), "{failure}");
+    assert!(
+        failure.contains("durable pre-start intent remains pending"),
+        "{failure}"
+    );
+    assert_eq!(
+        Some("writer_agent"),
+        projects
+            .get("budget-app")
+            .and_then(|project| project.pending_step.as_deref())
+    );
+    assert_eq!(
+        1,
+        terminal
+            .panes
+            .iter()
+            .filter(|pane| pane.label == "budget-app-writer")
+            .count()
+    );
+    projects.shutdown().await;
+
+    let mut recovered = Projects::open_durable(&db).await.unwrap();
+    let retry = recovered
+        .spawn_from_reading_with_reporter_and_registrar(
+            &mut terminal,
+            root.path(),
+            &request(),
+            &authority(),
+            &Usage::Percent(10.0),
+            &config,
+            "codex",
+            &reading,
+            1001.0,
+            &DurableReporter::default(),
+            &FailedProjectRoleRegistration,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(retry.contains("outcome is uncertain"), "{retry}");
+    assert_eq!(
+        1,
+        terminal
+            .panes
+            .iter()
+            .filter(|pane| pane.label == "budget-app-writer")
+            .count()
+    );
+    recovered.shutdown().await;
+}
+
+#[tokio::test]
 async fn restart_with_an_unresolved_external_intent_refuses_without_replay() {
     let root = tempfile::tempdir().unwrap();
     let db = root.path().join("owned-projects.sqlite3");

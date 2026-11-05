@@ -1234,7 +1234,24 @@ async fn start_project_agent_durable<T: ProjectTerminal + ?Sized>(
             // Persist the returned pane identity before role registration. If registration or
             // its receipt fails, a retry sees the pane and refuses to start a duplicate.
             project.agents.push((role.into(), pane.pane_id.clone()));
-            store.save(project.clone(), None).await?;
+            if let Err(save_error) = store.save(project.clone(), None).await {
+                let identity = format!("pane={} label={name}", pane.pane_id);
+                let detail =
+                    format!("{identity}; pane started but role/state receipt failed: {save_error}");
+                let receipt = retain_uncertain_external_step(project, step, detail, store).await;
+                let recovery = match receipt {
+                    Ok(()) => format!(
+                        "state save failed: {save_error}; uncertainty receipt persisted"
+                    ),
+                    Err(receipt_error) => format!(
+                        "state save failed: {save_error}; uncertainty receipt also failed: {receipt_error}; the durable pre-start intent remains pending"
+                    ),
+                };
+                return Err(DunkError::Refused(format!(
+                    "project {}: {role} start outcome is uncertain ({identity}; {recovery}); inspect before retry",
+                    project.name
+                )));
+            }
             let registered = match registrar {
                 Some(registrar) => registrar
                     .register(role, &pane, "codex", "gpt-6-luna", &name)

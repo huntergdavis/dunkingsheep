@@ -4,6 +4,7 @@
 //! Tests reject duplicate attempts in this fixed assembly; the underlying dispatcher
 //! retains its existing replacement behavior at runtime.
 use super::services::RuntimeServices;
+use super::{ProjectRuntimeEntry, ProjectRuntimePolicy};
 use crate::api::Dispatcher;
 use crate::server::Dispatcher as ServerDispatcher;
 use std::sync::Arc;
