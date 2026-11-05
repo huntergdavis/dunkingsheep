@@ -1,7 +1,8 @@
 //! `tick`, the state file and `summary` (`dunk_dispatch.tick`, `_load_state`, `_write_state`,
 //! `_dispatched_in_window`, `summary`): fill idle lanes from the standby queue.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::fmt::Display;
 use std::fs;
 use std::path::Path;
 
@@ -19,6 +20,46 @@ pub struct Tick<'a> {
     pub state_path: Option<&'a Path>,
     /// Board items derived for this tick (`derive_board_items`).
     pub derived: &'a [Value],
+}
+
+/// Minimal queue effects used by the shared tick engine. The production adapter uses
+/// RuntimeControlEnv so its queue remains the same lazy service used by the handler.
+pub trait TickQueue {
+    type Error: From<DunkError> + Display;
+    fn next_for(&self, lane: &str) -> Result<Option<Value>, Self::Error>;
+    fn take(
+        &self,
+        item_id: &Value,
+        lane: &str,
+        sent_message: Option<&str>,
+        now: f64,
+    ) -> Result<Value, Self::Error>;
+    fn items(&self) -> Result<Vec<Value>, Self::Error>;
+}
+
+impl TickQueue for Queue {
+    type Error = DispatchError;
+
+    fn next_for(&self, lane: &str) -> Result<Option<Value>, Self::Error> {
+        Queue::next_for(self, lane)
+    }
+
+    fn take(
+        &self,
+        item_id: &Value,
+        lane: &str,
+        sent_message: Option<&str>,
+        now: f64,
+    ) -> Result<Value, Self::Error> {
+        let Some(item_id) = item_id.as_i64() else {
+            return Err(DispatchError(format!("no standby item {item_id}")));
+        };
+        Queue::take(self, item_id, lane, sent_message, Some(now))
+    }
+
+    fn items(&self) -> Result<Vec<Value>, Self::Error> {
+        Queue::items(self, true)
+    }
 }
 
 /// `_load_state`: an unreadable or malformed file is an empty state.
@@ -116,11 +157,94 @@ pub fn tick(
     send: &mut dyn FnMut(&str, &str) -> Result<Value, String>,
     options: &Tick<'_>,
 ) -> Result<Value, DispatchError> {
+    let plan = lane_plan(panes, delivery, unread, options.lanes);
+    tick_with_plan(queue, send, options, plan)
+}
+
+/// Production variant: real delivery and inbox failures must abort the tick instead of being
+/// collapsed into a synthetic `unknown`/zero-unread result.
+pub fn tick_fallible<Q: TickQueue>(
+    queue: &Q,
+    panes: &[Value],
+    delivery: &dyn Fn(&Value) -> Result<Value, Q::Error>,
+    unread: &dyn Fn(&Value) -> Result<i64, Q::Error>,
+    send: &mut dyn FnMut(&str, &str) -> Result<Value, String>,
+    options: &Tick<'_>,
+) -> Result<Value, Q::Error> {
+    let plan = lane_plan_fallible(panes, delivery, unread, options.lanes)?;
+    tick_with_plan(queue, send, options, plan)
+}
+
+fn lane_plan_fallible<E>(
+    panes: &[Value],
+    delivery: &dyn Fn(&Value) -> Result<Value, E>,
+    unread: &dyn Fn(&Value) -> Result<i64, E>,
+    lanes: Option<&BTreeSet<String>>,
+) -> Result<Value, E> {
+    let mut out: BTreeMap<&str, Vec<Value>> = ["ready", "has_mail", "blocked", "dead", "working"]
+        .into_iter()
+        .map(|key| (key, Vec::new()))
+        .collect();
+    for pane in panes {
+        let Some(pane_id) = pane
+            .get("pane_id")
+            .and_then(Value::as_str)
+            .filter(|pane| !pane.is_empty())
+        else {
+            continue;
+        };
+        if lanes.is_some_and(|allowed| !allowed.contains(pane_id)) {
+            continue;
+        }
+        let state = delivery(pane)?;
+        let reason = state.get("reason").cloned().unwrap_or(Value::Null);
+        let name = pane
+            .get("agent_name")
+            .filter(|name| super::truthy(name))
+            .cloned()
+            .unwrap_or_else(|| json!(pane_id));
+        let entry = json!({"pane_id": pane_id, "name": name, "reason": reason});
+        match state.get("state").and_then(Value::as_str) {
+            Some("dead") => out.get_mut("dead").expect("bucket").push(entry),
+            Some("blocked") => out.get_mut("blocked").expect("bucket").push(entry),
+            Some("working") => out.get_mut("working").expect("bucket").push(entry),
+            Some("ready") => {
+                let waiting = unread(pane)?;
+                if waiting != 0 {
+                    let mut with_mail = entry;
+                    with_mail["unread"] = json!(waiting);
+                    out.get_mut("has_mail").expect("bucket").push(with_mail);
+                } else {
+                    out.get_mut("ready").expect("bucket").push(entry);
+                }
+            }
+            _ => {
+                let mut blocked = entry;
+                blocked["reason"] = if super::truthy(&reason) {
+                    reason
+                } else {
+                    json!("unknown state")
+                };
+                out.get_mut("blocked").expect("bucket").push(blocked);
+            }
+        }
+    }
+    Ok(json!({
+        "ready": out["ready"], "has_mail": out["has_mail"], "blocked": out["blocked"],
+        "dead": out["dead"], "working": out["working"],
+    }))
+}
+
+fn tick_with_plan<Q: TickQueue>(
+    queue: &Q,
+    send: &mut dyn FnMut(&str, &str) -> Result<Value, String>,
+    options: &Tick<'_>,
+    plan: Value,
+) -> Result<Value, Q::Error> {
     let now = options
         .now
         .filter(|n| *n != 0.0)
         .unwrap_or_else(crate::clock::now_s);
-    let plan = lane_plan(panes, delivery, unread, options.lanes);
     // Derived board items first: they are the real backlog. The hand queue is for work that is not
     // a task yet, so it comes second rather than starving it.
     let mut pending_derived: VecDeque<Value> = options.derived.iter().cloned().collect();
@@ -149,12 +273,10 @@ pub fn tick(
                 record["message_id"] = message_id.clone();
                 record["sent"] = json!(true);
                 if !item.get("derived").is_some_and(truthy) {
-                    let item_id = item["id"]
-                        .as_i64()
-                        .ok_or_else(|| format!("no standby item {}", py_str(item.get("id"))))?;
+                    let item_id = item.get("id").cloned().unwrap_or(Value::Null);
                     let message = message_id.as_str().map(str::to_string);
                     queue
-                        .take(item_id, pane_id, message.as_deref(), Some(now))
+                        .take(&item_id, pane_id, message.as_deref(), now)
                         .map_err(|e| e.to_string())?;
                 }
                 Ok(())
@@ -167,7 +289,7 @@ pub fn tick(
         dispatched.push(record);
     }
 
-    let pending = queue.items(true)?;
+    let pending = queue.items()?;
     let unfilled_derived = !pending_derived.is_empty();
     let filled: BTreeSet<String> = dispatched
         .iter()
@@ -206,7 +328,7 @@ pub fn tick(
     });
     state["dispatched_1h"] = json!(0);
     if let Some(path) = options.state_path {
-        write_state(&mut state, path)?; // computes dispatched_1h from the history
+        write_state(&mut state, path).map_err(Q::Error::from)?; // computes dispatched_1h from history
     }
     Ok(state)
 }

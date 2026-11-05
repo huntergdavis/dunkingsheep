@@ -70,6 +70,23 @@ impl Allocator {
         }
     }
 
+    /// The shared cache displayed by runtime-control status; this performs no allocation tick.
+    pub(crate) fn last_result(&self) -> Value {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .last_result
+            .clone()
+    }
+
+    /// Invalidate only the monotonic throttle after a successful allocation mutation.
+    pub(crate) fn reset_last_tick(&self) {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .last_tick = Duration::ZERO;
+    }
+
     /// Stop scheduling and wait until every spawned pass has resolved its actor reply.
     pub(crate) fn stop_and_join(&self) {
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());

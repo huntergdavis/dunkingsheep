@@ -30,6 +30,7 @@ mod registrations;
 mod retire_inbox;
 mod retire_roles;
 mod roster;
+mod runtime_control;
 mod send_commands;
 mod services;
 mod status;
@@ -525,6 +526,15 @@ impl PaneInfoEnv for RequestRuntimeAdapter<'_> {
 }
 
 impl crate::api::CommandEnv for RequestRuntimeAdapter<'_> {
+    fn runtime_control_env(
+        &self,
+    ) -> Result<&dyn crate::api::runtime_control::RuntimeControlEnv, DunkError> {
+        if self.dunk_runtime.is_none() {
+            return Err(refusal("request runtime services are not attached"));
+        }
+        Ok(self)
+    }
+
     fn layout_close_env(&self) -> Result<&dyn crate::api::layout_close::LayoutCloseEnv, DunkError> {
         Ok(self)
     }

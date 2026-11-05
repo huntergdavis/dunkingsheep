@@ -325,6 +325,16 @@ impl Store {
         Ok(counts.unread)
     }
 
+    /// Dispatch's 600-second fresh-mail gate, with the lane's last turn-end timestamp.
+    pub fn sweep_gate(
+        &self,
+        pane_id: &str,
+        since: Option<f64>,
+        now: f64,
+    ) -> Result<(i64, bool), DunkError> {
+        crate::inbox::sweep_gate(&self.readers, pane_id, since, now)
+    }
+
     /// `send`: put a message in a mailbox. Returns its id (`i<N>`); read the row back with
     /// `inbox::get` on a `ReadPool` (a write here is visible to a fresh pool).
     ///

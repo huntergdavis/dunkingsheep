@@ -22,6 +22,14 @@ impl From<DunkError> for ControlError {
         Self::Backend(value)
     }
 }
+impl std::fmt::Display for ControlError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Backend(error) => write!(formatter, "{error}"),
+            Self::Python { kind, message } => write!(formatter, "{kind}: {message}"),
+        }
+    }
+}
 fn python(kind: &'static str, message: impl Into<String>) -> ControlError {
     ControlError::Python {
         kind,
@@ -202,6 +210,18 @@ pub trait DispatchQueue {
     fn add(&self, brief: &Value, task_id: &Value, lane: &Value) -> ControlResult<Value>;
     fn items(&self) -> ControlResult<Vec<Value>>;
     fn remove(&self, id: &Value) -> ControlResult<Value>;
+    fn next_for(&self, _lane: &str) -> ControlResult<Option<Value>> {
+        Err(DunkError::Refused("dispatch queue next_for is not wired".into()).into())
+    }
+    fn take(
+        &self,
+        _id: &Value,
+        _lane: &str,
+        _sent_message: Option<&str>,
+        _now: f64,
+    ) -> ControlResult<Value> {
+        Err(DunkError::Refused("dispatch queue take is not wired".into()).into())
+    }
 }
 /// Explicit inputs to the existing dispatch tick producer. The provider must use the
 /// same queue, actual delivery probes, fresh-mail gate (600s and turn ended_at), and
