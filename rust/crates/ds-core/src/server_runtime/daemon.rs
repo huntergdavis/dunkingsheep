@@ -133,6 +133,10 @@ pub fn run_daemon_captured(
     }
     drop(backend);
 
+    // Store parents are created only after the supervised and backend refusal gates.
+    std::fs::create_dir_all(&config_dir)
+        .map_err(|error| refusal(format!("could not create daemon config directory: {error}")))?;
+
     let state_file = options
         .state_file
         .filter(|path| !path.as_os_str().is_empty())
@@ -581,7 +585,7 @@ mod tests {
     fn run_daemon_starts_workers_serves_and_joins_before_close() {
         let dir = crate::testsupport::dir("run-daemon-lifecycle");
         let config = dir.path().join("config");
-        std::fs::create_dir_all(&config).expect("config directory");
+        std::fs::create_dir_all(&config).expect("config directory for token fixture");
         let socket = dir.path().join("daemon.sock");
         let shutdown_token = "daemon-test-owner-token";
         let token_hash = crate::roles::hash_token(shutdown_token);
@@ -611,7 +615,13 @@ mod tests {
         let factory_request_block = Arc::clone(&request_block);
         let factory_request_entered = request_entered_tx;
         let factory_request_release = Arc::clone(&request_release_rx);
-        let caller_pid = std::process::id() as i64;
+        let caller =
+            crate::proc::caller_from_peer(Some(std::process::id() as i64), Some("w1:p1".into()));
+        assert!(
+            crate::proc::caller_alive(Some(&caller)),
+            "test caller is live"
+        );
+        let caller_root_pid = caller.pid.expect("resolved caller root pid");
         let terminal_factory: LoopTerminalFactory = Arc::new(move || {
             let is_connection = std::thread::current()
                 .name()
@@ -630,7 +640,7 @@ mod tests {
             }
             let mut terminal = crate::terminal::fakes::FakeTerminal::new();
             for pane in &mut terminal.panes {
-                pane.pane_pid = Some(caller_pid);
+                pane.pane_pid = Some(caller_root_pid);
             }
             Box::new(terminal)
         });
@@ -745,6 +755,18 @@ mod tests {
             "created through the production dispatcher",
             read["result"]["body"]
         );
+
+        let identity = daemon_call_with_identity(
+            &socket,
+            9,
+            "whoami",
+            serde_json::json!({}),
+            Some(shutdown_token),
+            Some("w1:p1"),
+        );
+        assert_eq!(true, identity["ok"], "{identity}");
+        assert_eq!("w1:p1", identity["result"]["pane_id"]);
+        assert_eq!(true, identity["result"]["bound"], "{identity}");
 
         let private = daemon_call_with_identity(
             &socket,
@@ -1013,6 +1035,8 @@ mod tests {
             )
             .expect("AlreadyRunning is a normal code-3 refusal")
         );
+        assert!(config.is_dir(), "first-run config directory is created");
+        assert!(config.join("tasks.db").exists());
         assert!(
             socket.exists(),
             "rollback must not unlink another daemon's socket"
