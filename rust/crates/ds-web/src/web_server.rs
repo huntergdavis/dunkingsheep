@@ -36,8 +36,9 @@
 //!   mount's 405 (Allow `GET, HEAD`) and a GET gets a 404. The 405 wrongly implies the path takes only
 //!   GET and HEAD. This is documented rather than fixed.
 //! - `POST /api/ops-board/question` is registered by `routes::ops_board`, but web/app.py has no such
-//!   route, and the gate sends it to the mount. It is unreachable through the composition. Remove it
-//!   or document it in the producer module.
+//!   route. The gate sends it to the mount, which answers 405 with Allow `GET, HEAD`, so the
+//!   registration is unreachable through the composition. The route is kept; the producer module
+//!   documents it at its registration.
 //! - `PYTHON_ROUTES` is a hand-maintained copy of the P0 routes in web/app.py. The integration test
 //!   `python_routes_match_the_mounted_routes` checks it against the mounted axum routes and the
 //!   Python source, in both directions.
