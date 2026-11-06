@@ -1780,7 +1780,7 @@ fn timestamps_and_json_spelling_match_cpython() {
     );
     assert_eq!(
         py_dumps(&json!("😀"), ",", ":"),
-        r#""😀""#,
+        r#""\ud83d\ude00""#,
         "astral characters are surrogate pairs"
     );
     assert_eq!(
