@@ -437,7 +437,7 @@ pub trait CommandEnv: PaneInfoEnv {
 
     /// The retired-pane archive used by `retire_pane`.
     fn retired_panes_path(&self) -> Result<PathBuf, DunkError> {
-        crate::panes::default_path(&crate::config::Env::from_process())
+        crate::panes::default_path(&crate::config::Env::try_from_process()?)
     }
 
     /// The terminal send/queue service. Production wiring is owned by t1605.
