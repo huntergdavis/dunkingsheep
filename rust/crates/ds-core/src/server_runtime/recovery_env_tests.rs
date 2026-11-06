@@ -85,26 +85,21 @@ fn executable(path: &Path, body: &[u8]) {
 }
 
 /// One indexed codex session at `/work`, so `_launch_for` finds it through the memory service.
-fn seed_memory(db: &Path, source_dir: &Path) {
-    let mut writer = crate::db::open_writer(db).unwrap();
+/// The row goes in through `upsert_session` (the codex JSONL parser reads rollouts, not the
+/// generic layout), the same statement the ingest worker uses.
+fn seed_memory(db: &Path) {
+    let writer = crate::db::open_writer(db).unwrap();
     crate::memory::ingest::apply_full_schema(&writer).unwrap();
-    let source = source_dir.join("codex.jsonl");
-    std::fs::write(
-        &source,
-        format!(
-            "{}\n",
-            json!({"role": "user", "text": "resume me", "session_id": "s-codex-1",
-                   "cwd": "/work", "timestamp": 1780000000})
-        ),
-    )
-    .unwrap();
-    crate::memory::jsonl::ingest_jsonl(
-        &mut writer,
-        &source,
+    crate::memory::ingest::upsert_session(
+        &writer,
+        "s-codex-1",
         "codex",
         Some("work"),
-        &|| false,
-        std::time::Duration::ZERO,
+        Some("/work"),
+        None,
+        Some(1_780_000_000.0),
+        Some(1_780_000_000.0),
+        None,
     )
     .unwrap();
 }
@@ -125,7 +120,7 @@ fn build(tag: &str, panes: Vec<Pane>, launches: &Value, with_memory_session: boo
     )
     .unwrap();
     if with_memory_session {
-        seed_memory(&config.join("memory.db"), dir.path());
+        seed_memory(&config.join("memory.db"));
     }
     let path = std::env::join_paths([config.join("bin"), bin.clone()]).unwrap();
     let env = Env::from_pairs(&[
@@ -616,7 +611,7 @@ fn a_detached_adapter_refuses_the_recovery_providers() {
 /// real `dunk_guard` module (this process's HOME, DUNKINGSHEEP_DIR and PATH) and a backend fake
 /// that returns the pane dicts the Rust adapter produced.
 const PYTHON_ORACLE: &str = r#"
-import ast,copy,json,sys,threading
+import ast,copy,json,math,os,re,shlex,sys,threading,time,types
 import dunk_roles
 payload=json.load(sys.stdin)
 tree=ast.parse(payload['source'])
