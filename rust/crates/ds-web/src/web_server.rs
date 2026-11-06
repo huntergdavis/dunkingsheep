@@ -55,6 +55,7 @@ use std::{
 };
 
 use axum::{
+    body::{Body, Bytes},
     extract::{Extension, Request},
     http::{header, HeaderValue, Method, StatusCode, Uri},
     middleware::{self, Next},
@@ -62,7 +63,9 @@ use axum::{
     Json, Router,
 };
 use ds_core::client::{FlockClient, UnixTransport};
+use futures_util::stream;
 use serde_json::{json, Value};
+use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
 
 use crate::{
@@ -826,9 +829,10 @@ enum Lookup {
     Denied,
 }
 
-/// A file read for the response: its body (empty for HEAD), its length, and its media type.
+/// A file opened for one response: the handle its body streams from (none for HEAD, which answers
+/// the headers alone), its length, and its media type.
 struct StaticFile {
-    body: Vec<u8>,
+    handle: Option<fs::File>,
     length: u64,
     media: &'static str,
 }
@@ -888,23 +892,66 @@ fn not_found_page(root: &Path, head: bool) -> Lookup {
     Lookup::NotFoundPage(read_file(&page, head).ok())
 }
 
+/// Bytes per streamed chunk of a static body. A large bundle file streams in pieces of this size.
+const STATIC_CHUNK_BYTES: u64 = 64 * 1024;
+
+/// Opens a file for its response. A GET keeps the open handle so the body streams from it, and the
+/// length comes from that same handle, so Content-Length and the streamed bytes describe one file. A
+/// HEAD only stats the path.
 fn read_file(path: &Path, head: bool) -> std::io::Result<StaticFile> {
-    let length = fs::metadata(path)?.len();
-    let body = if head { Vec::new() } else { fs::read(path)? };
+    let (length, handle) = if head {
+        (fs::metadata(path)?.len(), None)
+    } else {
+        let handle = fs::File::open(path)?;
+        (handle.metadata()?.len(), Some(handle))
+    };
     Ok(StaticFile {
-        body,
+        handle,
         length,
         media: media_type(path),
     })
 }
 
 fn file_response(file: StaticFile, status: StatusCode) -> Response {
-    let mut response = Response::new(file.body.into());
+    let body = match file.handle {
+        Some(handle) => streamed_body(handle, file.length),
+        None => Body::empty(),
+    };
+    let mut response = Response::new(body);
     *response.status_mut() = status;
     let headers = response.headers_mut();
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(file.media));
     headers.insert(header::CONTENT_LENGTH, HeaderValue::from(file.length));
     response
+}
+
+/// The body of a static file, read from its open handle one chunk at a time. It yields exactly
+/// `length` bytes, the length the response declares. A file that shrinks after it was opened ends
+/// the body with an error, so the connection closes rather than sending a short body under a longer
+/// Content-Length.
+fn streamed_body(handle: fs::File, length: u64) -> Body {
+    let file = tokio::fs::File::from_std(handle);
+    let chunks = stream::unfold((file, length), |(mut file, remaining)| async move {
+        if remaining == 0 {
+            return None;
+        }
+        let mut chunk = vec![0u8; remaining.min(STATIC_CHUNK_BYTES) as usize];
+        match file.read(&mut chunk).await {
+            Ok(0) => Some((
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "static file shrank while it was streamed",
+                )),
+                (file, 0),
+            )),
+            Ok(read) => {
+                chunk.truncate(read);
+                Some((Ok(Bytes::from(chunk)), (file, remaining - read as u64)))
+            }
+            Err(error) => Some((Err(error), (file, 0))),
+        }
+    });
+    Body::from_stream(chunks)
 }
 
 /// Starlette's `os.path.normpath` over the route's `/` segments. `None` when `..` climbs above the

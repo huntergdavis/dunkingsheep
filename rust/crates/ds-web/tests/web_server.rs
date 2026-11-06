@@ -331,6 +331,54 @@ fn the_bundle_and_its_assets_are_served_without_a_session() {
 }
 
 #[test]
+fn large_static_files_stream_the_same_bytes_and_length() {
+    let (root, config) = fixture();
+    let assets = root.path().join("ui/dist/assets");
+    // Empty, exactly one streamed chunk, and several chunks ending in a short one.
+    let cases: [(&str, Vec<u8>); 3] = [
+        ("empty.bin", Vec::new()),
+        ("exact.bin", vec![7; 64 * 1024]),
+        (
+            "large.bin",
+            (0..300_003u32).map(|index| (index % 251) as u8).collect(),
+        ),
+    ];
+    for (name, bytes) in &cases {
+        std::fs::write(assets.join(name), bytes).unwrap();
+    }
+    let server = Server::start(config);
+
+    for (name, bytes) in &cases {
+        let target = format!("/assets/{name}");
+        let length = bytes.len().to_string();
+
+        let get = request(server.addr, "GET", &target, &[], None);
+        assert_eq!(get.status, 200, "GET {target}");
+        assert_eq!(
+            get.header("content-length"),
+            Some(length.as_str()),
+            "GET {target}"
+        );
+        assert_eq!(get.body.len(), bytes.len(), "GET {target}: body length");
+        assert!(
+            get.body == *bytes,
+            "GET {target}: body bytes differ from the file"
+        );
+
+        let head = request(server.addr, "HEAD", &target, &[], None);
+        assert_eq!(head.status, 200, "HEAD {target}");
+        assert_eq!(
+            head.header("content-length"),
+            Some(length.as_str()),
+            "HEAD {target}"
+        );
+        assert!(head.body.is_empty(), "HEAD {target} has no body");
+    }
+
+    assert_eq!(server.shutdown(), Ok(()));
+}
+
+#[test]
 fn legacy_bookmarks_redirect_into_the_dash_shell_before_routing() {
     let (_root, config) = fixture();
     let server = Server::start(config);
