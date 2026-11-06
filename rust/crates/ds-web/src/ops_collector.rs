@@ -40,8 +40,13 @@
 //! JSON decoding also differs from CPython's `json.loads` in two places. CPython accepts a lone
 //! surrogate escape such as `\ud800`, which serde_json rejects. A daemon reply that contains one
 //! gives RuntimeError, `gh` output gives JSONDecodeError, and a published accounting file gives
-//! ValueError. CPython also accepts a UTF-8 byte-order mark at the start of bytes input. The
-//! published accounting path keeps the BOM, so that file is reported invalid (ValueError).
+//! ValueError. CPython `json.loads` detects the encoding of bytes input as UTF-8, UTF-16 or UTF-32.
+//! It accepts a UTF-8 byte-order mark, and UTF-16 and UTF-32 input with or without a BOM. The
+//! published accounting path decodes only UTF-8 and keeps any BOM, so a UTF-8 file with a BOM, and
+//! any UTF-16 or UTF-32 file, is reported invalid (ValueError) where CPython accepts it. That path
+//! also decodes its base64 content strictly. CPython's non-strict `b64decode` keeps decoding after
+//! padding that is not at the end (`YQ==YQ==` decodes), so such content is reported invalid
+//! (ValueError) here.
 //!
 //! Daemon replies differ in two more places. CPython treats any truthy `ok` as success (executed:
 //! `ok` as 1, "yes", "false" and [1]), while the port accepts only the JSON boolean `true`, so
