@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
-# t1605 slice 3, CI job "production replay (send)".
+# t1605 slice 3, CI job "production replay (send, task follow)".
 #
 #   tools/ci_production_replay.sh                 the job step: builds the throwaway sandbox,
 #                                                 replays from its owner pane, prints the output
 #   tools/ci_production_replay.sh pane DIR NAME   the owner pane's script, run inside pane %2
+#
+# t1605 slice 4 adds a second replay on the same sandbox daemon, from the same owner pane: the
+# recorded task-follow traffic (task_add seeds a task, then task_follow, task_followers,
+# task_unfollow, task_followers). Each replay keeps its own output and exit code, and the job
+# fails when either fails.
 #
 # Everything the job creates lives in one temp directory: a tmux server on a private socket name
 # (TMUX_TMPDIR inside the directory), a throwaway sandbox daemon with its own state and socket, and
@@ -21,6 +26,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COMMANDS="send_text,send_keys,flush_box,clear_box,delivery,delivery_capability"
+TASK_FOLLOW_COMMANDS="task_add,task_follow,task_followers,task_unfollow"
 PY=/usr/bin/python3
 TMUX_BIN=/usr/bin/tmux
 OWNER_PANE="%2"
@@ -33,6 +39,7 @@ pane_main() {
   local temp="$1" name="$2"
   local sock="$temp/ds.sock" state="$temp/state" home="$temp/home" status="$temp/replay.status"
   local daemon="" code=1 up=""
+  local task_follow_code=1
 
   finish() {
     local rc=$?
@@ -91,7 +98,19 @@ sys.exit(0 if reply and reply.get("ok") else 1)' "$ROOT/tools" "$sock" 2>/dev/nu
     --against "$sock" --commands "$COMMANDS" --volatile "$ROOT/rust/fixtures/volatile.json" \
     > "$temp/replay.out" 2>&1
   code=$?
+  # t1605 slice 4: the task-follow replay, on the same daemon from the same owner pane, after the
+  # send replay. Its exit code is written apart from the send replay's so the job output names
+  # which replay failed; the pane exits non-zero when either did.
+  "$PY" "$ROOT/tools/production_replay.py" --traffic "$ROOT/rust/fixtures/task_follow_replay.jsonl" \
+    --against "$sock" --commands "$TASK_FOLLOW_COMMANDS" --volatile "$ROOT/rust/fixtures/volatile.json" \
+    > "$temp/replay-task-follow.out" 2>&1
+  task_follow_code=$?
   set -e
+  echo "$code" > "$temp/replay-send.status"
+  echo "$task_follow_code" > "$temp/replay-task-follow.status"
+  if [ "$code" -eq 0 ]; then
+    code="$task_follow_code"
+  fi
   exit "$code"
 }
 
@@ -147,7 +166,7 @@ job_main() {
   fi
 
   local name
-  for name in recover.out replay.out daemon.log; do
+  for name in recover.out replay.out replay-task-follow.out daemon.log; do
     echo "== $name =="
     cat "$TEMP_DIR/$name" 2>/dev/null || echo "(no $name)"
   done
@@ -157,6 +176,8 @@ job_main() {
   sandbox_tmux capture-pane -p -t "$owner" 2>&1 | tail -n 80 || echo "(no capture)"
   echo "== the tmux pane list =="
   sandbox_tmux list-panes -a -F '#{pane_id} #{session_name} #{window_name} #{pane_pid}' 2>&1 || echo "(no pane list)"
+  echo "send replay exit=$(cat "$TEMP_DIR/replay-send.status" 2>/dev/null || echo unknown)"
+  echo "task-follow replay exit=$(cat "$TEMP_DIR/replay-task-follow.status" 2>/dev/null || echo unknown)"
   echo "replay exit=$code"
   exit "$code"
 }

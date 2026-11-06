@@ -8,7 +8,9 @@
 #                        CI ran the exact command successfully.
 #   production-replay-send (t1605 slice 3) runs the send replay against a throwaway sandbox
 #                        daemon in an owner pane, with its own tmux server and no secrets.
-#                        It is not a required check yet.
+#                        Slice 4 added the task-follow replay (task_add, task_follow,
+#                        task_followers, task_unfollow) to the same job. It is not a required
+#                        check yet.
 name: rust
 
 on:
@@ -56,9 +58,10 @@ jobs:
   # t1605 slice 3. The job creates its own throwaway sandbox inside one temp directory: a tmux server
   # on a private socket, a sandbox daemon with its own state, and an owner pane (pane %2). The owner
   # registers itself with superuser recover from its own process tree, then replays the recorded
-  # send traffic from there. No token, no secret, and no live socket. The unit tests run first.
+  # send traffic and the recorded task-follow traffic (t1605 slice 4) from there. No token, no
+  # secret, and no live socket. The unit tests run first.
   production-replay-send:
-    name: production replay (send)
+    name: production replay (send, task follow)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -69,8 +72,8 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq tmux
       - name: gate unit tests (no daemon, no tmux)
         run: |
-          for test in test_production_replay test_diff_harness_sandbox test_send_scenario test_ci_production_replay; do
+          for test in test_production_replay test_diff_harness_sandbox test_send_scenario test_task_follow_scenario test_ci_production_replay; do
             python3 -I "tests/$test.py"
           done
-      - name: replay the recorded send traffic from an owner pane
+      - name: replay the recorded send and task-follow traffic from an owner pane
         run: bash tools/ci_production_replay.sh
