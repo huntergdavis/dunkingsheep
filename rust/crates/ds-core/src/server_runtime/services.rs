@@ -855,10 +855,12 @@ mod tests {
             }]
         });
 
+        let github = GitHubProvider::production(&inputs.env);
         let services = RuntimeServices::build(
             inputs,
             memory,
             Some(snapshot),
+            github,
             |flock, memory| {
                 let memory = memory
                     .as_ref()
@@ -2160,10 +2162,12 @@ mod tests {
         )
         .unwrap();
         let mut observed = None;
+        let github = GitHubProvider::production(&inputs.env);
         let error = RuntimeServices::build(
             inputs,
             Some(config),
             None,
+            github,
             |_, _| {},
             |_flock, owner| {
                 let service = owner.as_ref().unwrap();
