@@ -5629,6 +5629,42 @@ fn stale_or_edited_scheduled_reminders_never_replay() {
     );
 }
 
+// t3355 (t820 proof D) scheduled row 38 (oracle 79bc92fa). The candidate, its schedule and the spent
+// budget survive a restart through the state file. The restored flock presses nothing before the
+// threshold, and then presses exactly once. The reminder is created at a real time, because the
+// currency gate reads the real clock; the scans run on a timeline offset from it.
+#[test]
+fn a_restored_scheduled_recovery_keeps_its_budget_and_presses_once() {
+    let base = crate::clock::now_s();
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state.json");
+    let (flock, mut env) = scheduled_candidate_fixture(dir.path(), "\u{203a}", "failed", base);
+    flock.save().unwrap();
+    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap();
+    drop(flock);
+    let restored = persistent_recovery_flock(dir.path(), &state);
+    {
+        let mut config = restored.stuck_config.lock().unwrap();
+        config.threshold_s = 120.0;
+        config.observation_interval_s = 20.0;
+        config.max_attempts = 1;
+    }
+    restored.restore_snapshot(&saved);
+    crate::flock::loops_stuck::strict_stuck_observer_scan(&restored, &mut env, base + 1000.0)
+        .unwrap();
+    assert!(
+        env.keys.is_empty(),
+        "no key before the threshold after the restart"
+    );
+    crate::flock::loops_stuck::strict_stuck_observer_scan(&restored, &mut env, base + 1120.0)
+        .unwrap();
+    assert_eq!(
+        1,
+        env.keys.len(),
+        "the restored schedule presses once at the threshold"
+    );
+}
+
 // T55 rows 16 and 65 (t3344 proof C), test-only. Python oracle: tests/test_dunk_stuck_recovery.py
 // at 79bc92fa. Row 16 is ReviewBlockerTests.test_a_dunk_notice_with_no_message_row_is_still_tracked_and_recovered
 // and row 65 is AttemptGenerationTests.test_the_attempt_identity_is_captured_before_delivery_not_after.

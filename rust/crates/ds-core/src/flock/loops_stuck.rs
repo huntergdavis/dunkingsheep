@@ -159,6 +159,9 @@ pub(crate) fn strict_stuck_observer_scan<E: SendEnv + PaneInfoEnv>(
                 .forget(&pane_id);
             continue;
         }
+        // Python binds the restored candidate to the live generation here, and only then does its
+        // persisted text count as ownership evidence.
+        flock.bind_candidate_ownership(&pane_id, &entry);
         let Some(screen) = screen else {
             flock
                 .stuck_tracker
