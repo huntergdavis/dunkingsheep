@@ -5355,8 +5355,23 @@ mod stuck_gap_tests {
         flock.remember_typed(PANE, TEXT);
         let mut env = live_pane(frame(TEXT, &[]));
         env.after_key_screen = Some(frame("\x1b[2mAsk Codex to do anything\x1b[0m", &[]));
-        // No Message row: the identity is the text fingerprint, and the text is ours.
-        assert!(flock.unwedge(&mut env, PANE, TEXT, Some(98.0), None, 100.0, None, false));
+        // The first tick only sees the notice: it is tracked, and nothing is sent yet.
+        assert!(!flock.unwedge(&mut env, PANE, TEXT, Some(99.5), None, 100.0, None, false));
+        assert!(
+            env.keys.is_empty(),
+            "the clock has not reached the threshold"
+        );
+        assert!(
+            flock
+                .stuck_tracker
+                .lock()
+                .unwrap()
+                .records
+                .contains_key(PANE),
+            "a dunk notice with no message row is still tracked"
+        );
+        // Past the threshold the text fingerprint is the identity: one Enter, consumed.
+        assert!(flock.unwedge(&mut env, PANE, TEXT, Some(98.0), None, 200.0, None, false));
         assert_eq!(1, env.keys.len());
     }
 
@@ -5590,5 +5605,70 @@ mod stuck_gap_tests {
         let candidates = after.stuck_candidates.lock().unwrap();
         assert_eq!("generation-changed", candidates[PANE].status);
         assert!(!candidates[PANE].eligible);
+    }
+
+    // RestartRecoveryTests.test_the_restarted_worker_actually_recovers (row 51), on the strict
+    // path with the real composer matcher. After a restart the persisted text must be
+    // rehydrated once the candidate is bound, and then the worker presses once.
+    #[test]
+    fn the_restarted_worker_recovers_through_the_real_matcher() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state.json");
+        let before = persistent_recovery_flock(dir.path(), &state);
+        let mut env = live_pane(frame(TEXT, &[]));
+        let message = failed_candidate(&env, 1.0);
+        before.note_stuck_candidate(&message);
+        before.save().unwrap();
+        // The restarted daemon: a fresh flock restored from the saved state.
+        let after = persistent_recovery_flock(dir.path(), &state);
+        after.restore_snapshot(&before.snapshot());
+        {
+            let mut config = after.stuck_config.lock().unwrap();
+            config.threshold_s = 1.0;
+            config.observation_interval_s = 0.1;
+            config.max_attempts = 1;
+        }
+        // A restart remembers no sends by itself.
+        assert!(after
+            .sent_text_by_pane
+            .lock()
+            .unwrap()
+            .get(PANE)
+            .is_none_or(Vec::is_empty));
+        // The first tick after the restart binds the candidate and starts the window.
+        assert!(!after.unwedge(
+            &mut env,
+            PANE,
+            TEXT,
+            Some(99.5),
+            Some(&message),
+            100.0,
+            None,
+            true
+        ));
+        assert!(
+            env.keys.is_empty(),
+            "the first tick after a restart is only evidence"
+        );
+        assert!(
+            after
+                .sent_text_by_pane
+                .lock()
+                .unwrap()
+                .get(PANE)
+                .is_some_and(|rows| rows.iter().any(|row| row.as_str() == Some(TEXT))),
+            "the persisted text must be rehydrated once the candidate is bound"
+        );
+        assert!(after.unwedge(
+            &mut env,
+            PANE,
+            TEXT,
+            Some(98.0),
+            Some(&message),
+            200.0,
+            None,
+            true
+        ));
+        assert_eq!(1, env.keys.len(), "the restarted worker presses once");
     }
 }
