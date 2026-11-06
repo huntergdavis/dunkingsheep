@@ -552,6 +552,32 @@ impl StalePanelReporter {
     }
 }
 
+impl Flock {
+    /// The policy from `DUNKINGSHEEP_STUCK_CONFIG`, applied after the saved state is restored, so
+    /// the env source wins over it (Python precedence: argument > env > state file > defaults).
+    /// A value that does not parse or validate is reported and ignored, and the policy in place
+    /// stays, as the Python ignores a bad value.
+    pub(crate) fn apply_stuck_config_env(&self, env: &crate::config::Env) {
+        let raw = match crate::config::stuck_config_source(env) {
+            Ok(Some(raw)) => raw,
+            Ok(None) => return,
+            Err(error) => {
+                eprintln!("ignoring DUNKINGSHEEP_STUCK_CONFIG: {error}");
+                return;
+            }
+        };
+        match crate::stuck::Config::from_raw(&raw) {
+            Ok(config) => {
+                *self
+                    .stuck_config
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = config;
+            }
+            Err(error) => eprintln!("ignoring DUNKINGSHEEP_STUCK_CONFIG: {error}"),
+        }
+    }
+}
+
 /// The last 4000 characters (Python slices code points, not bytes).
 fn tail_chars(text: &str, count: usize) -> String {
     let total = text.chars().count();

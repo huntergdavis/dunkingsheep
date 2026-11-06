@@ -4086,6 +4086,92 @@ fn unwedge_reserves_before_one_key_and_does_not_claim_unchanged_text() {
     assert_eq!(1, env.keys.len());
 }
 
+/// Port of `ReviewBlockerTests.test_the_env_config_source_changes_real_worker_behaviour` (oracle
+/// 79bc92fa). `DUNKINGSHEEP_STUCK_CONFIG` carries the policy: the same unwedge that presses once
+/// with recovery enabled (the control below) presses nothing when the policy disables it.
+#[test]
+fn the_env_source_disables_recovery_as_the_python_case_does() {
+    let dir = tempfile::tempdir().unwrap();
+    let (flock, mut env, message) = env_policy_case(
+        dir.path(),
+        r#"{"enabled": false, "threshold_s": 1.0, "observation_interval_s": 0.1, "max_attempts": 1}"#,
+    );
+    assert!(!flock.stuck_config.lock().unwrap().enabled);
+    assert!(!flock.unwedge(
+        &mut env,
+        "%1",
+        "stuck body",
+        Some(98.0),
+        Some(&message),
+        100.0,
+        None,
+        true
+    ));
+    assert!(
+        env.keys.is_empty(),
+        "a disabled policy presses nothing: {:?}",
+        env.keys
+    );
+}
+
+#[test]
+fn the_same_env_source_enabled_presses_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let (flock, mut env, message) = env_policy_case(
+        dir.path(),
+        r#"{"enabled": true, "threshold_s": 1.0, "observation_interval_s": 0.1, "max_attempts": 1}"#,
+    );
+    assert!(!flock.unwedge(
+        &mut env,
+        "%1",
+        "stuck body",
+        Some(98.0),
+        Some(&message),
+        100.0,
+        None,
+        true
+    ));
+    assert_eq!(vec![("%1".into(), "Enter".into())], env.keys);
+}
+
+#[test]
+fn the_env_source_wins_over_a_saved_policy_after_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = persistent_recovery_flock(dir.path(), &dir.path().join("state.json"));
+    flock.restore_snapshot(&serde_json::json!({"stuck_config": {"enabled": true}}));
+    assert!(flock.stuck_config.lock().unwrap().enabled);
+    let policy =
+        crate::config::Env::from_pairs(&[("DUNKINGSHEEP_STUCK_CONFIG", r#"{"enabled": false}"#)]);
+    flock.apply_stuck_config_env(&policy);
+    assert!(!flock.stuck_config.lock().unwrap().enabled);
+}
+
+/// The case of `unwedge_reserves_before_one_key_and_does_not_claim_unchanged_text`, with the
+/// policy given by the env source instead of by editing the config fields.
+fn env_policy_case(dir: &std::path::Path, policy: &str) -> (Flock, Pane, Message) {
+    let flock = persistent_recovery_flock(dir, &dir.join("state.json"));
+    flock.apply_stuck_config_env(&crate::config::Env::from_pairs(&[(
+        "DUNKINGSHEEP_STUCK_CONFIG",
+        policy,
+    )]));
+    let mut env = Pane::default();
+    env.panes
+        .push(serde_json::json!({"pane_id": "%1", "pane_pid": std::process::id()}));
+    env.statuses.insert("%1".into(), "idle".into());
+    env.screens.insert("%1".into(), frame("stuck body", &[]));
+    flock
+        .sent_text_by_pane
+        .lock()
+        .unwrap()
+        .insert("%1".into(), vec!["stuck body".into()]);
+    let mut message = Message::new("m1", "%1", "writer", "stuck body", "send_text");
+    message.created_at = 1.0;
+    message.status = "failed".into();
+    message.attempt_generation = pane_generation(&env, "%1");
+    flock.note_stuck_candidate(&message);
+    (flock, env, message)
+}
+
 #[test]
 fn unwedge_verifies_a_newly_cleared_composer_after_the_key() {
     let dir = tempfile::tempdir().unwrap();

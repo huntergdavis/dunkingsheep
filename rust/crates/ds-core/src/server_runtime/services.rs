@@ -308,6 +308,9 @@ impl RuntimeServices {
         if let Some(snapshot) = snapshot.as_ref() {
             flock.restore_snapshot(snapshot);
         }
+        // The env source is applied after the restore, so a saved policy never replaces it
+        // (Python precedence: argument > DUNKINGSHEEP_STUCK_CONFIG > state file > defaults).
+        flock.apply_stuck_config_env(&inputs.env);
 
         // Keep the restored Flock state visible before any runtime worker, including the
         // first-run memory ingestor, can observe or act on this service set.

@@ -246,6 +246,94 @@ impl Env {
     }
 }
 
+/// `DUNKINGSHEEP_STUCK_CONFIG`: the runtime source for the stuck-recovery policy, read the way the
+/// Python does (`Flock._stuck_config_source`). Inline JSON only: a value that does not start with
+/// `{` is refused by name, not read as a path. Unset or blank is `None`.
+///
+/// The shape and types follow the Python `Config.from_mapping`. `enabled` is a boolean or one of
+/// the strings it accepts; numbers may be numeric strings; `null` means "use the default" for the
+/// tunables and is refused for `max_attempts`, as the Python refuses it. Anything else is an error
+/// here, never a coercion. Unknown keys are ignored, as the Python ignores them.
+pub fn stuck_config_source(env: &Env) -> Result<Option<crate::stuck::RawConfig>, String> {
+    let Some(text) = env.get("DUNKINGSHEEP_STUCK_CONFIG").map(str::trim) else {
+        return Ok(None);
+    };
+    if text.is_empty() {
+        return Ok(None);
+    }
+    if !text.starts_with('{') {
+        return Err("DUNKINGSHEEP_STUCK_CONFIG must be inline JSON (an object), not a path".into());
+    }
+    let value: serde_json::Value = serde_json::from_str(text)
+        .map_err(|error| format!("DUNKINGSHEEP_STUCK_CONFIG is not valid JSON: {error}"))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| "stuck recovery config must be an object".to_string())?;
+    Ok(Some(crate::stuck::RawConfig {
+        enabled: stuck_flag(object.get("enabled"))?,
+        threshold_s: stuck_number(object.get("threshold_s"), "threshold_s")?,
+        max_attempts: stuck_integer(object.get("max_attempts"))?,
+        cooldown_s: stuck_number(object.get("cooldown_s"), "cooldown_s")?,
+        observation_interval_s: stuck_number(
+            object.get("observation_interval_s"),
+            "observation_interval_s",
+        )?,
+    }))
+}
+
+fn stuck_flag(value: Option<&serde_json::Value>) -> Result<Option<bool>, String> {
+    use serde_json::Value;
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Bool(flag)) => Ok(Some(*flag)),
+        Some(Value::String(text)) => match text.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" => Ok(Some(true)),
+            "0" | "false" | "no" => Ok(Some(false)),
+            _ => Err(format!("enabled must be a boolean, got {text:?}")),
+        },
+        Some(other) => Err(format!("enabled must be a boolean, got {other}")),
+    }
+}
+
+fn stuck_number(value: Option<&serde_json::Value>, what: &str) -> Result<Option<f64>, String> {
+    use serde_json::Value;
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Number(number)) => number
+            .as_f64()
+            .map(Some)
+            .ok_or_else(|| format!("{what} must be a number, got {number}")),
+        Some(Value::String(text)) => text
+            .trim()
+            .parse::<f64>()
+            .map(Some)
+            .map_err(|_| format!("{what} must be a number, got {text:?}")),
+        Some(other) => Err(format!("{what} must be a number, got {other}")),
+    }
+}
+
+fn stuck_integer(value: Option<&serde_json::Value>) -> Result<Option<i64>, String> {
+    use serde_json::Value;
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let refused = || format!("max_attempts must be an integer, got {value}");
+    match value {
+        Value::Number(number) => number
+            .as_i64()
+            .or_else(|| {
+                number
+                    .as_f64()
+                    .filter(|f| f.is_finite())
+                    .map(|f| f.trunc() as i64)
+            })
+            .map(Some)
+            .ok_or_else(refused),
+        Value::String(text) => text.trim().parse::<i64>().map(Some).map_err(|_| refused()),
+        _ => Err(refused()),
+    }
+}
+
 /// The config directory: `DUNKINGSHEEP_DIR`, else `~/.config/dunkingsheep`.
 ///
 /// NOT the install directory. Setting this to a release path was a live defect
@@ -367,5 +455,46 @@ mod tests {
         assert_eq!(1.5, env.float("DUNKINGSHEEP_MISSING", 1.5));
         assert!(env.flag("DUNKINGSHEEP_NO_START_DAEMON", false));
         assert!(!env.flag("DUNKINGSHEEP_MISSING", false));
+    }
+
+    #[test]
+    fn the_stuck_env_source_is_absent_or_blank_until_set() {
+        assert!(stuck_config_source(&Env::from_pairs(&[]))
+            .unwrap()
+            .is_none());
+        let blank = Env::from_pairs(&[("DUNKINGSHEEP_STUCK_CONFIG", "  ")]);
+        assert!(stuck_config_source(&blank).unwrap().is_none());
+    }
+
+    #[test]
+    fn the_stuck_env_source_reads_inline_json_like_the_python() {
+        let env = Env::from_pairs(&[(
+            "DUNKINGSHEEP_STUCK_CONFIG",
+            r#"{"enabled": "no", "threshold_s": "30", "max_attempts": 2.0, "cooldown_s": null, "unknown": 1}"#,
+        )]);
+        assert_eq!(
+            Ok(Some(crate::stuck::RawConfig {
+                enabled: Some(false),
+                threshold_s: Some(30.0),
+                max_attempts: Some(2),
+                cooldown_s: None,
+                observation_interval_s: None,
+            })),
+            stuck_config_source(&env)
+        );
+    }
+
+    #[test]
+    fn the_stuck_env_source_refuses_what_the_python_refuses() {
+        for raw in [
+            "/etc/dunkingsheep/stuck.json",
+            r#"{"enabled": "maybe"}"#,
+            r#"{"max_attempts": null}"#,
+            r#"{"threshold_s": "soon"}"#,
+            r#"{"enabled": "#,
+        ] {
+            let env = Env::from_pairs(&[("DUNKINGSHEEP_STUCK_CONFIG", raw)]);
+            assert!(stuck_config_source(&env).is_err(), "{raw} must be refused");
+        }
     }
 }
