@@ -4086,6 +4086,159 @@ fn unwedge_reserves_before_one_key_and_does_not_claim_unchanged_text() {
     assert_eq!(1, env.keys.len());
 }
 
+// t3355 (t820 proof D) outbox and observer fixture, shared by the three rows below. A failed
+// message for pane %1 is the candidate, and the screen shows its text as the composer.
+fn outbox_observer_fixture(dir: &std::path::Path) -> (Flock, Pane) {
+    let flock = persistent_recovery_flock(dir, &dir.join("state.json"));
+    {
+        let mut config = flock.stuck_config.lock().unwrap();
+        config.threshold_s = 1.0;
+        config.observation_interval_s = 0.1;
+        config.max_attempts = 1;
+    }
+    let mut env = Pane::default();
+    env.panes
+        .push(serde_json::json!({"pane_id": "%1", "pane_pid": std::process::id()}));
+    env.statuses.insert("%1".into(), "idle".into());
+    env.screens.insert("%1".into(), frame("stuck body", &[]));
+    flock
+        .sent_text_by_pane
+        .lock()
+        .unwrap()
+        .insert("%1".into(), vec!["stuck body".into()]);
+    (flock, env)
+}
+
+fn failed_outbox_message(id: &str, env: &Pane, created_at: f64, press_enter: bool) -> Message {
+    let mut message = Message::new(id, "%1", "writer", "stuck body", "send_text");
+    message.created_at = created_at;
+    message.status = "failed".into();
+    message.press_enter = press_enter;
+    message.attempt_generation = pane_generation(env, "%1");
+    message
+}
+
+// t3355 (t820 proof D) scheduled row 36: test_dunk_scheduled_recovery.py::
+// test_outbox_cannot_refund_budget_by_changing_to_standalone_observer (oracle 79bc92fa). The outbox
+// spends the single attempt, and later standalone observer ticks must press nothing more.
+#[test]
+fn a_spent_outbox_budget_is_not_refunded_by_standalone_observer_ticks() {
+    let dir = tempfile::tempdir().unwrap();
+    let (flock, mut env) = outbox_observer_fixture(dir.path());
+    let message = failed_outbox_message("m1", &env, 1.0, true);
+    flock.note_stuck_candidate(&message);
+    flock.unwedge(
+        &mut env,
+        "%1",
+        "stuck body",
+        Some(98.0),
+        Some(&message),
+        100.0,
+        None,
+        true,
+    );
+    assert_eq!(1, env.keys.len(), "the outbox spends the single attempt");
+    for now in [102.0, 130.0, 200.0] {
+        crate::flock::loops_stuck::strict_stuck_observer_scan(&flock, &mut env, now).unwrap();
+    }
+    assert_eq!(
+        1,
+        env.keys.len(),
+        "standalone observer ticks must not refund the spent attempt"
+    );
+}
+
+// t3355 (t820 proof D) scheduled row 37: test_dunk_scheduled_recovery.py::
+// test_newer_no_enter_intent_also_blocks_outbox_recovery (oracle 79bc92fa). A newer message with
+// press_enter false blocks the outbox recovery of the older text. The older message alone presses
+// once, which is the positive control.
+#[test]
+fn a_newer_no_enter_intent_blocks_outbox_recovery() {
+    let dir = tempfile::tempdir().unwrap();
+    let (flock, mut env) = outbox_observer_fixture(dir.path());
+    let older = failed_outbox_message("m1", &env, 1.0, true);
+    let newer = failed_outbox_message("m2", &env, 2.0, false);
+    flock.note_stuck_candidate(&older);
+    flock.note_stuck_candidate(&newer);
+    flock.unwedge(
+        &mut env,
+        "%1",
+        "stuck body",
+        Some(98.0),
+        Some(&newer),
+        100.0,
+        None,
+        true,
+    );
+    assert!(
+        env.keys.is_empty(),
+        "a newer no-enter intent blocks the outbox recovery"
+    );
+
+    let control_dir = tempfile::tempdir().unwrap();
+    let (control_flock, mut control_env) = outbox_observer_fixture(control_dir.path());
+    control_flock.note_stuck_candidate(&older);
+    control_flock.unwedge(
+        &mut control_env,
+        "%1",
+        "stuck body",
+        Some(98.0),
+        Some(&older),
+        100.0,
+        None,
+        true,
+    );
+    assert_eq!(
+        1,
+        control_env.keys.len(),
+        "the older message alone presses once"
+    );
+}
+
+// t3355 (t820 proof D) wiring row 18: test_dunk_recovery_wiring.py::test_reservation_failure_never_presses
+// (oracle 79bc92fa). When the durable reservation cannot be saved, the outbox presses no key.
+#[test]
+fn a_failed_durable_reservation_never_presses_from_the_outbox() {
+    let dir = tempfile::tempdir().unwrap();
+    let (flock, mut env) = outbox_observer_fixture(dir.path());
+    let message = failed_outbox_message("m1", &env, 1.0, true);
+    flock.note_stuck_candidate(&message);
+    // A directory where the state file belongs makes the reservation save fail.
+    let state = dir.path().join("state.json");
+    let _ = std::fs::remove_file(&state);
+    std::fs::create_dir(&state).unwrap();
+    flock.unwedge(
+        &mut env,
+        "%1",
+        "stuck body",
+        Some(98.0),
+        Some(&message),
+        100.0,
+        None,
+        true,
+    );
+    assert!(env.keys.is_empty(), "no key without a durable reservation");
+
+    let control_dir = tempfile::tempdir().unwrap();
+    let (control_flock, mut control_env) = outbox_observer_fixture(control_dir.path());
+    control_flock.note_stuck_candidate(&message);
+    control_flock.unwedge(
+        &mut control_env,
+        "%1",
+        "stuck body",
+        Some(98.0),
+        Some(&message),
+        100.0,
+        None,
+        true,
+    );
+    assert_eq!(
+        1,
+        control_env.keys.len(),
+        "with a writable state file it presses once"
+    );
+}
+
 #[test]
 fn unwedge_verifies_a_newly_cleared_composer_after_the_key() {
     let dir = tempfile::tempdir().unwrap();
