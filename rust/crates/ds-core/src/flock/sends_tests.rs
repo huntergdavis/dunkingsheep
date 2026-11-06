@@ -17,6 +17,10 @@ use crate::terminal::screen::{box_text, AMBIGUOUS_COMPOSER};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 
+/// t3355 group D rows (t820 proof D): child module with its own file, see sends_tests/group_d.rs.
+#[cfg(test)]
+mod group_d;
+
 #[derive(Default)]
 struct Pane {
     screens: BTreeMap<String, String>,
