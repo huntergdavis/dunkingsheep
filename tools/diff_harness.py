@@ -60,7 +60,7 @@ DEFAULT_STATE = os.path.join(FIXTURES, "state")
 
 SECRET_KEYS = frozenset({
     "service_token", "token", "tokens", "password", "secret", "api_token",
-    "gh_token", "bearer",
+    "gh_token", "bearer", "desk_token",
 })
 SCRUB = "<scrubbed>"
 MASK = "<volatile>"
