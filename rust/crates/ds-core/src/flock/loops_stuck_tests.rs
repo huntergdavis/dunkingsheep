@@ -1203,3 +1203,61 @@ fn federated_cancelled_or_replaced_candidates_never_press() {
         );
     }
 }
+
+// t3355 (t820 proof D) scheduled row 29: test_dunk_scheduled_recovery.py::
+// test_scheduled_failure_is_persisted_with_exact_expanded_text_and_generation (oracle 79bc92fa).
+// A scheduled failure is an eligible candidate that holds the expanded text and the pane
+// generation, and the state file holds the same entry as the in-memory candidate.
+#[test]
+fn scheduled_failure_is_persisted_with_expanded_text_and_generation() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = persisted_flock(&dir);
+    let generation = federated_probe().generation;
+    let expanded = "Scheduled check d7: read your inbox and finish the assigned work.";
+    let mut message = Message::new("m1", "%1", "lane", expanded, "send_text");
+    message.scheduled = true;
+    message.status = "sent".into();
+    message.attempt_generation = Some(generation.clone());
+    message.schedule_template =
+        Some("Scheduled check {id}: read your inbox and finish the assigned work.".into());
+    flock.note_stuck_candidate(&message);
+    let entry = flock
+        .stuck_candidates
+        .lock()
+        .unwrap()
+        .get("%1")
+        .cloned()
+        .expect("a scheduled failure is a stuck candidate");
+    let snapshot = crate::flock::sends::candidate_snapshot(&entry);
+    assert_eq!(json!(true), snapshot["eligible"]);
+    assert_eq!(json!(expanded), snapshot["text"]);
+    assert_eq!(json!(generation), snapshot["generation"]);
+    flock.save().unwrap();
+    let saved: Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.path().join("state.json")).unwrap())
+            .unwrap();
+    assert_eq!(snapshot, saved["stuck_candidates"]["%1"]);
+}
+
+// t3355 (t820 proof D) scheduled row 44, partial: test_dunk_scheduled_recovery.py::
+// test_long_false_sent_composer_stays_observable (oracle 79bc92fa). This covers only the box
+// condition: an 18-line false-sent composer keeps its full collapsed text in the box read. The
+// Python test also asserts that the status stays sent, that exactly one recovery key follows
+// over ticks, and that no consumed outcome is recorded. Those are not covered here.
+#[test]
+fn long_false_sent_composer_keeps_its_full_collapsed_text_in_the_box() {
+    let text = (0..18)
+        .map(|i| format!("scheduled line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let frame = format!(
+        "\u{1b}[1m\u{203a}\u{1b}[0m {text}\n  GPT-6-Astra high \u{b7} ~/workspace \u{b7} task\n"
+    );
+    let probe = scripted_probe(vec![frame], vec![std::process::id()]);
+    let (screen, box_text, _detail) = crate::flock::sends::read_box(&probe, "%1");
+    assert!(screen.is_some(), "the pane must be readable");
+    assert_eq!(
+        crate::stuck::collapse(&text),
+        crate::stuck::collapse(&box_text)
+    );
+}
