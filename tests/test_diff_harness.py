@@ -307,6 +307,25 @@ class CheckedInFixtureTests(HarnessTestCase):
         self.assertEqual([], result["errors"])
         self.assertEqual([], result["diffs"])
 
+    def test_checked_in_task_metrics_and_reap_requests_replay_with_zero_diffs(self):
+        """t1551: the checked-in traffic holds one task_metrics and one task_reap request, the two
+        commands the t1605 replay sends to the Rust daemon. This checks the harness path only: the
+        fake daemon answers with the recorded replies."""
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        entries = harness.load_traffic(os.path.join(root, "rust", "fixtures", "traffic.jsonl"))
+        commands = ["task_metrics", "task_reap"]
+        replies = {}
+        for command in commands:
+            matching = [entry for entry in entries if entry["cmd"] == command]
+            self.assertTrue(matching, f"rust/fixtures/traffic.jsonl needs a {command} request")
+            replies[command] = matching[0]["response"]
+        daemon = FakeDaemon(replies, self.path("daemon-tasks.sock")).start()
+        self.addCleanup(daemon.stop)
+        result = harness.replay(entries, daemon.path, commands=commands, verbose=False)
+        self.assertGreater(result["sent"], 0, "the replayed request count must be above zero")
+        self.assertEqual([], result["errors"])
+        self.assertEqual([], result["diffs"])
+
 
 if __name__ == "__main__":
     unittest.main()
