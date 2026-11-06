@@ -279,6 +279,43 @@ async fn claim_next_skips_blocked_wrong_kind_and_own_author_and_says_why() {
 }
 
 #[tokio::test]
+async fn a_review_routed_by_allocation_is_not_claimed_by_its_author() {
+    // test_legacy_claim_does_not_bypass_review_routing: the author completes the source, a review
+    // is routed for it, and the author's default claim (scope mine) must still return nothing.
+    let tasks = store("legacy-review-claim").await;
+    tasks.allocation_init().await.unwrap();
+    let source = tasks
+        .add("global", "the work", "concrete acceptance")
+        .await
+        .unwrap();
+    tasks.assign(&source.id, &["%leader"], "set").await.unwrap();
+    tasks
+        .task_complete(&source.id, Some("%leader"), true)
+        .await
+        .unwrap();
+    let revision = "a".repeat(40);
+    tasks
+        .allocation_review(
+            &source.id,
+            &revision,
+            "review",
+            "code",
+            &serde_json::json!([]),
+            "%leader",
+        )
+        .await
+        .unwrap();
+    let outcome = tasks
+        .claim_next("mine", "%leader", ClaimOptions::default())
+        .await
+        .unwrap();
+    assert!(
+        !matches!(outcome, ClaimOutcome::Claimed { .. }),
+        "a routed review must not come back to its author"
+    );
+}
+
+#[tokio::test]
 async fn claim_next_scope_mine_and_refusals_are_named() {
     let tasks = store("claim-mine").await;
     assert!(tasks
