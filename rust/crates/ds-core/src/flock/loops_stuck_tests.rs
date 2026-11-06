@@ -840,3 +840,261 @@ fn federated_recovery_refuses_no_enter_intent_and_queued_panes() {
     );
     assert!(probe.keys.lock().unwrap().is_empty());
 }
+
+/// A failed-or-otherwise candidate for `%1` with the probe's attempt generation.
+fn observed_candidate(
+    probe: &RecoveryProbe,
+    id: &str,
+    status: &str,
+    press_enter: bool,
+    created_at: f64,
+) -> Message {
+    let mut message = failed_federated_candidate(probe);
+    message.id = id.into();
+    message.status = status.into();
+    message.press_enter = press_enter;
+    message.created_at = created_at;
+    message
+}
+
+/// Runs the federated observer at each time and asserts that none of them acts.
+fn federated_steps_without_acting(flock: &Flock, probe: &mut RecoveryProbe, times: &[f64]) {
+    for now in times {
+        assert_eq!(
+            0,
+            federated_recovery_step(flock, probe, *now, &|_| {}).unwrap(),
+            "no action at t={now}"
+        );
+    }
+}
+
+// StandaloneObserverTests.test_exactly_one_action_at_the_threshold_and_no_second_message (row 38)
+#[test]
+fn federated_recovery_at_the_threshold_acts_once_and_creates_no_second_message() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = persisted_flock(&dir);
+    let mut probe = federated_probe();
+    flock.note_stuck_candidate(&failed_federated_candidate(&probe));
+    federated_steps_without_acting(&flock, &mut probe, &[100.0]);
+    let messages_before = flock.message_history.lock().unwrap().len();
+    assert_eq!(
+        1,
+        federated_recovery_step(&flock, &mut probe, 221.0, &|_| {}).unwrap()
+    );
+    assert_eq!(vec!["Enter".to_string()], *probe.keys.lock().unwrap());
+    assert_eq!(
+        messages_before,
+        flock.message_history.lock().unwrap().len(),
+        "recovery must not create or send a second message"
+    );
+}
+
+// ObserverBoundaryTests.test_a_newer_sent_delivery_also_supersedes (row 46)
+#[test]
+fn a_newer_sent_delivery_with_enter_supersedes_an_older_failed_candidate() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = persisted_flock(&dir);
+    let mut probe = federated_probe();
+    flock.note_stuck_candidate(&observed_candidate(&probe, "m1", "failed", true, 10.0));
+    flock.note_stuck_candidate(&observed_candidate(&probe, "m2", "sent", true, 11.0));
+    federated_steps_without_acting(&flock, &mut probe, &[100.0, 221.0, 821.0]);
+    assert!(
+        probe.keys.lock().unwrap().is_empty(),
+        "the pane's latest intent is a clean send"
+    );
+}
+
+// IntentOrderingTests.test_a_late_older_failure_cannot_undo_a_newer_clean_send (row 54)
+#[test]
+fn a_late_older_failure_cannot_undo_a_newer_clean_send() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = persisted_flock(&dir);
+    let mut probe = federated_probe();
+    flock.note_stuck_candidate(&observed_candidate(&probe, "m2", "sent", true, 20.0));
+    flock.note_stuck_candidate(&observed_candidate(&probe, "m1", "failed", true, 10.0));
+    federated_steps_without_acting(&flock, &mut probe, &[100.0, 221.0]);
+    assert!(probe.keys.lock().unwrap().is_empty());
+}
+
+// IntentOrderingTests.test_a_late_older_failure_cannot_undo_a_newer_cancellation (row 55)
+#[test]
+fn a_late_older_failure_cannot_undo_a_newer_cancellation() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = persisted_flock(&dir);
+    let mut probe = federated_probe();
+    flock.note_stuck_candidate(&observed_candidate(&probe, "m2", "cancelled", true, 20.0));
+    flock.note_stuck_candidate(&observed_candidate(&probe, "m1", "failed", true, 10.0));
+    federated_steps_without_acting(&flock, &mut probe, &[100.0, 221.0]);
+    assert!(probe.keys.lock().unwrap().is_empty());
+}
+
+// SameTimestampOrderTests.test_same_timestamp_uses_message_sequence_not_lexical_order (row 59)
+#[test]
+fn same_timestamp_uses_message_sequence_not_lexical_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = persisted_flock(&dir);
+    let mut probe = federated_probe();
+    // m10 is the newer message by sequence; the older-by-string m9 FAILED arrives later.
+    flock.note_stuck_candidate(&observed_candidate(&probe, "m10", "sent", false, 50.0));
+    flock.note_stuck_candidate(&observed_candidate(&probe, "m9", "failed", true, 50.0));
+    federated_steps_without_acting(&flock, &mut probe, &[100.0, 221.0, 821.0]);
+    assert!(
+        probe.keys.lock().unwrap().is_empty(),
+        "'m10' must outrank 'm9' by sequence, not by string order"
+    );
+}
+
+// SameTimestampOrderTests.test_consumption_keeps_the_watermark (row 60)
+#[test]
+fn consumption_keeps_the_watermark_against_a_late_older_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = persisted_flock(&dir);
+    let mut probe = federated_probe();
+    probe.federated = false;
+    let empty_frame = format!(
+        "  >_ OpenAI Codex (v0.165.0)\n     ~/workspace/fixture\n  permissions: YOLO mode\n{}\u{203a} Ask Codex to do anything\n\n  GPT-6-Astra high \u{b7} ~/workspace/fixture\n  ? for shortcuts                                      \u{26a0} 1 warning \u{b7} f2 to view",
+        "\n".repeat(16)
+    );
+    *probe.screen.lock().unwrap() = empty_frame;
+    flock.note_stuck_candidate(&observed_candidate(&probe, "m2", "failed", true, 10.0));
+    assert_eq!(
+        0,
+        strict_stuck_observer_scan(&flock, &mut probe, 221.0).unwrap()
+    );
+    assert_eq!(
+        "consumed",
+        flock.stuck_candidates.lock().unwrap()["%1"].status
+    );
+    // A late, older FAILED decision must not resurrect the work.
+    flock.note_stuck_candidate(&observed_candidate(&probe, "m1", "failed", true, 9.0));
+    *probe.screen.lock().unwrap() = federated_probe().screen.lock().unwrap().clone();
+    for now in [231.0, 341.0, 701.0] {
+        assert_eq!(
+            0,
+            strict_stuck_observer_scan(&flock, &mut probe, now).unwrap(),
+            "no action at t={now}"
+        );
+    }
+    assert!(
+        probe.keys.lock().unwrap().is_empty(),
+        "the watermark must survive consumption"
+    );
+    let candidates = flock.stuck_candidates.lock().unwrap();
+    assert_eq!("m2", candidates["%1"].message_id);
+    assert_eq!("consumed", candidates["%1"].status);
+}
+
+/// A flock with persistence off: a restart is modelled by restoring a snapshot.
+fn in_memory_flock(dir: &tempfile::TempDir) -> Flock {
+    Flock::new(
+        dir.path().join("launches.json"),
+        dir.path().join("lanes.json"),
+        false,
+    )
+}
+
+// ObserverBoundaryTests.test_the_candidate_survives_a_restart (row 49)
+#[test]
+fn the_candidate_survives_a_restart_with_its_enter_and_message_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let before = in_memory_flock(&dir);
+    let probe = federated_probe();
+    before.note_stuck_candidate(&observed_candidate(&probe, "m1", "failed", true, 10.0));
+    let after = in_memory_flock(&dir);
+    after.restore_snapshot(&before.snapshot());
+    let candidates = after.stuck_candidates.lock().unwrap();
+    assert_eq!("m1", candidates["%1"].message_id);
+    assert!(
+        candidates["%1"].press_enter,
+        "the restored candidate keeps its Enter intent"
+    );
+}
+
+// RestartRecoveryTests.test_the_restarted_worker_actually_recovers (row 51)
+#[test]
+fn the_restarted_worker_recovers_the_persisted_candidate() {
+    let dir = tempfile::tempdir().unwrap();
+    let before = in_memory_flock(&dir);
+    let mut probe = federated_probe();
+    before.note_stuck_candidate(&observed_candidate(&probe, "m1", "failed", true, 10.0));
+    let after = in_memory_flock(&dir);
+    after.restore_snapshot(&before.snapshot());
+    federated_steps_without_acting(&after, &mut probe, &[100.0]);
+    assert!(
+        probe.keys.lock().unwrap().is_empty(),
+        "the first step after a restart is only evidence"
+    );
+    assert_eq!(
+        1,
+        federated_recovery_step(&after, &mut probe, 221.0, &|_| {}).unwrap()
+    );
+    assert_eq!(vec!["Enter".to_string()], *probe.keys.lock().unwrap());
+}
+
+// GenerationBindingTests.test_the_same_generation_still_recovers_with_the_real_matcher (row 62)
+#[test]
+fn the_same_generation_after_a_restart_still_presses_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let before = in_memory_flock(&dir);
+    let mut probe = federated_probe();
+    before.note_stuck_candidate(&observed_candidate(&probe, "m1", "failed", true, 10.0));
+    let after = in_memory_flock(&dir);
+    after.restore_snapshot(&before.snapshot());
+    assert_eq!(
+        Some(probe.generation.clone()),
+        after.stuck_candidates.lock().unwrap()["%1"].generation,
+        "the persisted attempt generation survives the restart"
+    );
+    federated_steps_without_acting(&after, &mut probe, &[100.0]);
+    assert_eq!(
+        1,
+        federated_recovery_step(&after, &mut probe, 221.0, &|_| {}).unwrap()
+    );
+    assert_eq!(1, probe.keys.lock().unwrap().len());
+}
+
+// GenerationBindingTests.test_a_replacement_generation_is_retired_not_adopted (row 63)
+#[test]
+fn a_replacement_generation_after_a_restart_is_retired_not_adopted() {
+    let dir = tempfile::tempdir().unwrap();
+    let before = in_memory_flock(&dir);
+    let mut probe = federated_probe();
+    probe.federated = false;
+    before.note_stuck_candidate(&observed_candidate(&probe, "m1", "failed", true, 10.0));
+    let after = in_memory_flock(&dir);
+    after.restore_snapshot(&before.snapshot());
+    // The pane is now a different live process at the same pane id.
+    probe.generation = "pid:1:start:replaced".into();
+    for now in [100.0, 221.0, 441.0] {
+        assert_eq!(
+            0,
+            strict_stuck_observer_scan(&after, &mut probe, now).unwrap(),
+            "no action at t={now}"
+        );
+    }
+    assert!(
+        probe.keys.lock().unwrap().is_empty(),
+        "a replacement pane must never inherit the old authority"
+    );
+    let candidates = after.stuck_candidates.lock().unwrap();
+    assert_eq!("generation-changed", candidates["%1"].status);
+    assert!(!candidates["%1"].eligible);
+}
+
+// DaemonStateFileTests.test_a_declared_config_wins_over_the_saved_one (row 24)
+// DIVERGENCE: Python lets the declared config win over the saved state file; Rust restore
+// overwrites the declared config with the saved one (flock/mod.rs restore_snapshot).
+#[test]
+#[ignore = "t3354 row 24: restore overwrites a declared stuck config with the saved one; owner ruling pending"]
+fn a_declared_config_wins_over_the_saved_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let saved = in_memory_flock(&dir);
+    let payload = saved.snapshot();
+    let declared = in_memory_flock(&dir);
+    declared.stuck_config.lock().unwrap().enabled = false;
+    declared.restore_snapshot(&payload);
+    assert!(
+        !declared.stuck_config.lock().unwrap().enabled,
+        "a declared config must not be overwritten by the state file"
+    );
+}
