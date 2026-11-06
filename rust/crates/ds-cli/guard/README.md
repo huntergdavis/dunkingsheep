@@ -33,13 +33,19 @@ comment above it.
 
 Full Python retirement of the shims stays gated: the native shim rewrite, the `python3` dependency of
 `guard check`, and deleting the root copies (T63). Deleting the root copies does not break the release
-binary build, because the release build reads no repo-root file. Test builds do read the Python tree,
+binary build, because the release build reads no repo-root file. Test builds and some root data still read the Python tree,
 so these reads must move before the Python tree is deleted:
 
 - `dunk_core.py`, `dunk_api.py`, and `dunk_roles.py`: `ds-core` `src/api/recovery_tests.rs`.
 - `dunk_core.py`: `ds-core` `src/flock/recovery_commands_tests.rs`.
+- `dunk_api.py`, `dunk_core.py`, `dunk_dispatch.py`, and `dunk_roles.py`: `ds-core`
+  `src/api/runtime_control_tests.rs`. The test runs `src/api/runtime_control_oracle.py` with the repo
+  root as its working directory. The oracle reads `dunk_api.py` and `dunk_core.py`, and imports
+  `dunk_dispatch` and `dunk_roles`.
+- `dunk_memory.py`: `ds-core` `src/memory/jsonl_tests.rs`. The test runs `src/memory/throttle_oracle.py`
+  from the repo root, and that oracle imports `dunk_memory`.
 - `dunk_tasks.py` and `dunk_core.py`: `ds-core` `src/tasks/wire/tests.rs`.
-- `dunk_poolrad.py`: `ds-core` `src/server_runtime/poolrad/tests.rs`.
+- `dunk_poolrad.py` and `tools/overlay/*.py`: `ds-core` `src/server_runtime/poolrad/tests.rs`.
 - `dunk_watchdog_deadman.py`: `ds-core` `src/watchdog_deadman.rs`, `src/watchdog_deadman/check_tests.rs`,
   and `src/watchdog_deadman/main_tests.rs`. The last also imports `tests/test_dunk_watchdog.py`.
 - `dunk_health.py`, `dunk_state.py`, `dunk_api.py`, and `tools/diff_harness.py`: `ds-core`
@@ -47,9 +53,29 @@ so these reads must move before the Python tree is deleted:
 - `dunk_http.py` and `dunk_terminal.py`: `ds-web` `src/python_http.rs`.
 - The Python reference `dunkingsheep`: `ds-cli` `tests/command_routes.rs`.
 - `tools/dunk_poll.py`: `ds-cli` `tests/dispatch.rs` and `tests/release_layout.rs`.
+- `bridges/ops_metrics.py`: `ds-web` `tests/ops_summary.rs` (`PY_ORACLE` and `PY_OPTIONAL_ORACLE`).
+- `dunk_core.py`: `ds-mcp` `tests/mcp.rs`, in `version_matches_the_python_while_it_exists`. The test
+  returns early when the file is absent.
+- Root data, JSON rather than Python, kept until moved. Deleting the root `tests/` directory would break
+  these test builds: `tests/fixtures/t416-native-turn-timeline.json` (`ds-core`
+  `src/native_session_tests.rs`), `tests/fixtures/send_keys_raw_oracle.json` (`ds-core`
+  `src/server_runtime/send_commands/raw_keys_tests.rs`), and `tests/fixtures/wire_nonfinite_oracle.json`
+  (`ds-core` `src/wire_json.rs`).
 
-This list comes from a search of `rust/crates` at this head for `python3` runs, `include_str!` of
-repo-root files, and root-relative paths. The crate-local copies under `guard/` are not root reads.
+Scope. This list covers reads of the Python tree, and of root data, by test builds. Other root files are
+not Python and do not depend on the Python tree: `packaging/watchdog.example.json` (ds-core watchdog
+tests, and `ds-cli` `tests/command_routes.rs`), the `packaging/rust-release/` scripts (`ds-cli`
+`tests/release_layout.rs`), and `docs/GUIDE.md` (ds-core `src/help/tests.rs`). Runtime reads are not build
+reads, so they are not listed. For example, `ds-core` `src/poolrad.rs` runs
+`tools/overlay/strict_candidate_queue.py` from the repo named by `DUNKINGSHEEP_POOLRAD_REPO`. The ignored
+test in `src/context/golden_tests.rs` needs `tools/context_live_diff.py` and does not run by default.
+
+Search basis. Searched `rust/crates` at commit `573493c2` (the code has not changed since) with `git grep -n`
+for `python3`, for `\.py"` string references, for `include_str!` and `include_bytes!` whose relative path
+leaves the crate, for `CARGO_MANIFEST_DIR` joined with `../`, and for `tests/fixtures`, `bridges/`,
+`packaging/` and `docs/`. Each hit was classified as a crate-local file, a host or temporary fixture, a
+runtime read, or a repo-root read. Inline `python3 -c` code with no repo file is not a read. The
+crate-local copies under `guard/` are not root reads.
 
 ## Tests
 
