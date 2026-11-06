@@ -3614,9 +3614,11 @@ impl OutboxWorkerPool {
         let worker_pane = pane_id.to_owned();
         let worker_key = key.clone();
         let (start_tx, start_rx) = std::sync::mpsc::sync_channel::<()>(0);
+        let log = crate::daemon_log::ThreadLog::capture();
         let handle = thread::Builder::new()
             .name(format!("outbox-{pane_id}"))
             .spawn(move || {
+                log.adopt();
                 if start_rx.recv().is_err() {
                     return;
                 }

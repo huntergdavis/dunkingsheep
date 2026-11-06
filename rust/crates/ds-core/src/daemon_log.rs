@@ -5,12 +5,15 @@
 //! file. Lines follow the Python `%(asctime)s %(levelname)s %(name)s: %(message)s` format, and
 //! every `tracing` event at INFO and above becomes such a line.
 //!
-//! ROUTED, NOT FANNED OUT: each thread carries the sink of the daemon that spawned it. The
-//! daemon thread adopts its sink in [`DaemonLog::configure`]; the threads the server spawns and
-//! the tokio runtime's threads inherit it through [`ThreadLog::capture`] and
-//! [`ThreadLog::adopt`]. A thread no daemon adopted (a store writer, a worker spawned deeper in
-//! the port) reaches the process's only daemon when there is exactly one, and nothing when there
-//! are several (a test process), so one daemon's lines never land in another daemon's file.
+//! ROUTED, NOT FANNED OUT: each thread carries the sink of the daemon that spawned it, and an
+//! event on a thread that carries none goes nowhere. The daemon thread adopts its sink in
+//! [`DaemonLog::configure`]; every thread the daemon's work spawns inherits it through
+//! [`ThreadLog::capture`] and [`ThreadLog::adopt`]: the connection workers, signal waiters and
+//! parent watcher (server.rs), the tokio runtime's threads (`on_thread_start`), and the outbox,
+//! dunk timer and manual fire workers. A server that is not a daemon (a fixture in this crate's
+//! tests) logs nowhere, so one daemon's lines never land in another daemon's file. The crate's
+//! remaining thread spawns (store actors, the memory ingestor, the reaper's probes, the pid
+//! probe) emit no `tracing` events.
 //!
 //! DIFFERENCE: the file is created mode 0600 (the Python `FileHandler` uses the umask).
 
@@ -18,7 +21,7 @@ use std::cell::RefCell;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex};
 
 pub(crate) const SERVER_LOGGER: &str = "dunkingsheep.server";
 pub(crate) const CORE_LOGGER: &str = "dunkingsheep";
@@ -47,27 +50,10 @@ thread_local! {
     static THREAD_LOG: RefCell<Option<Arc<LogSink>>> = const { RefCell::new(None) };
 }
 
-/// The sinks of the daemons configured in this process: the fallback for a thread no daemon
-/// adopted, honoured only while exactly one daemon is configured.
-static ACTIVE_LOGS: Mutex<Vec<Weak<LogSink>>> = Mutex::new(Vec::new());
 static BRIDGE: std::sync::Once = std::sync::Once::new();
 
-fn active_logs() -> std::sync::MutexGuard<'static, Vec<Weak<LogSink>>> {
-    ACTIVE_LOGS
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-}
-
 fn sink_for_current_thread() -> Option<Arc<LogSink>> {
-    if let Some(sink) = THREAD_LOG.with(|slot| slot.borrow().clone()) {
-        return Some(sink);
-    }
-    let mut live: Vec<Arc<LogSink>> = active_logs().iter().filter_map(Weak::upgrade).collect();
-    if live.len() == 1 {
-        live.pop()
-    } else {
-        None
-    }
+    THREAD_LOG.with(|slot| slot.borrow().clone())
 }
 
 /// The daemon sink the calling thread logs to, cloneable into a thread it is about to spawn.
@@ -77,7 +63,7 @@ pub struct ThreadLog(Option<Arc<LogSink>>);
 impl ThreadLog {
     /// The calling thread's sink (none outside a daemon).
     pub fn capture() -> Self {
-        Self(THREAD_LOG.with(|slot| slot.borrow().clone()))
+        Self(sink_for_current_thread())
     }
 
     /// Make the calling thread log to the captured daemon's sink.
@@ -116,7 +102,6 @@ impl DaemonLog {
             // where that subscriber sends them.
             let _ = tracing::subscriber::set_global_default(TracingBridge);
         });
-        active_logs().push(Arc::downgrade(&sink));
         let log = Self { sink };
         log.thread_log().adopt();
         log
@@ -134,6 +119,8 @@ impl DaemonLog {
 }
 
 impl Drop for DaemonLog {
+    /// The daemon thread stops logging with its daemon; threads that inherited the sink keep
+    /// their own clone until they exit, which the daemon's joins order before this drop.
     fn drop(&mut self) {
         THREAD_LOG.with(|slot| {
             let mut slot = slot.borrow_mut();
@@ -143,10 +130,6 @@ impl Drop for DaemonLog {
             {
                 *slot = None;
             }
-        });
-        active_logs().retain(|weak| {
-            weak.upgrade()
-                .is_some_and(|sink| !Arc::ptr_eq(&sink, &self.sink))
         });
     }
 }
@@ -288,7 +271,7 @@ mod tests {
 
     /// Two daemons in one process, alive at the same time: each file holds only the lines of
     /// its own daemon's threads (the daemon thread, a thread it spawned, its own refusals), and
-    /// a thread neither daemon adopted reaches no file while both live.
+    /// a thread neither daemon adopted reaches no file.
     #[test]
     fn events_reach_only_the_emitting_threads_daemon() {
         let dir = crate::testsupport::dir("daemon-log-routing");
@@ -340,43 +323,24 @@ mod tests {
         }
     }
 
-    /// A thread no daemon adopted reaches the process's only daemon. Run in a child process so
-    /// this test's daemon is the only one configured; parallel tests would add others.
+    /// A thread that did not inherit a sink logs nowhere, even while exactly one daemon is
+    /// configured: a server that is not a daemon must not borrow a daemon's file. After the
+    /// daemon's log is dropped its own thread logs nowhere too.
     #[test]
-    fn a_thread_no_daemon_adopted_reaches_the_only_daemon_log() {
-        if std::env::var_os("DS_DAEMON_LOG_FALLBACK_FIXTURE").is_none() {
-            let output =
-                std::process::Command::new(std::env::current_exe().expect("test executable"))
-                    .args([
-                        "--exact",
-                        "daemon_log::tests::a_thread_no_daemon_adopted_reaches_the_only_daemon_log",
-                        "--nocapture",
-                    ])
-                    .env("DS_DAEMON_LOG_FALLBACK_FIXTURE", "1")
-                    .output()
-                    .expect("run the fixture process");
-            assert!(
-                output.status.success(),
-                "{}\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-            return;
-        }
-        let dir = crate::testsupport::dir("daemon-log-fallback");
+    fn a_thread_no_daemon_adopted_logs_nowhere() {
+        let dir = crate::testsupport::dir("daemon-log-unadopted");
         let config = dir.path().join("config");
         let log = DaemonLog::configure(&config, false);
         std::thread::spawn(|| tracing::warn!("adopted by nobody"))
             .join()
             .expect("unadopted thread");
+        tracing::info!("the daemon thread itself");
         drop(log);
-        std::thread::spawn(|| tracing::warn!("after the only daemon closed"))
-            .join()
-            .expect("unadopted thread");
+        tracing::warn!("after the daemon log is gone");
         let text = std::fs::read_to_string(config.join("daemon.log")).expect("daemon.log");
         let suffixes: Vec<&str> = text.lines().map(|line| &line[24..]).collect();
         assert_eq!(
-            vec!["WARNING dunkingsheep: adopted by nobody"],
+            vec!["INFO dunkingsheep: the daemon thread itself"],
             suffixes,
             "{text}"
         );
