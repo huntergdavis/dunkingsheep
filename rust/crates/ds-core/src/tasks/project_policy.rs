@@ -372,6 +372,10 @@ mod tests {
         .to_string()
     }
 
+    /// Answer a policy task with a valid reply through the guarded answer path, then store the
+    /// reply under test in its place. The answer path refuses malformed policy replies, so this is
+    /// the only way to exercise the receipt reader on them: the state an older daemon could have
+    /// written. The reader must still refuse it.
     async fn answered_task(body: &str, reply: &str) -> (Tasks, String, tempfile::TempDir) {
         let dir = tempdir().unwrap();
         let tasks = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
@@ -390,10 +394,34 @@ mod tests {
                 &task.id,
                 version,
                 None,
-                Some(reply),
+                Some(subscription_answer("demo").as_str()),
                 Some("owner-pane"),
                 None,
             )
+            .await
+            .unwrap();
+        let stored_reply = reply.to_owned();
+        let task_id = task.id.clone();
+        tasks
+            .writer
+            .call(move |conn| {
+                let (event_id, meta): (i64, String) = conn
+                    .query_row(
+                        "SELECT id, meta FROM task_events WHERE task_id = ? AND event = 'owner_answer'",
+                        params![task_id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .map_err(crate::db::map_sqlite)?;
+                let mut value: Value = serde_json::from_str(&meta)
+                    .map_err(|_| refused("test owner answer metadata is invalid"))?;
+                value["reply"] = json!(stored_reply);
+                conn.execute(
+                    "UPDATE task_events SET meta = ? WHERE id = ?",
+                    params![value.to_string(), event_id],
+                )
+                .map_err(crate::db::map_sqlite)?;
+                Ok(())
+            })
             .await
             .unwrap();
         (tasks, task.id, dir)

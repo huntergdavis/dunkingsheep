@@ -250,7 +250,27 @@ fn a_credit_fallback_without_an_explicit_limit_is_refused() {
         "credit_fallback": {"enabled": true, "max_age_seconds": 60.0},
     })
     .to_string();
-    let id = answered(&rt, &tasks, &manifest("demo", "codex"), &reply);
+    // The answer path refuses this reply before any event is written, so the task stays blocked
+    // and the startup load admits nothing.
+    let id = blocked(&rt, &tasks, &manifest("demo", "codex"));
+    let version = rt.block_on(tasks.owner_question(&id, None)).unwrap()["version"]
+        .as_str()
+        .unwrap()
+        .parse::<i64>()
+        .unwrap();
+    let answer = rt.block_on(tasks.owner_answer(
+        &id,
+        version,
+        None,
+        Some(reply.as_str()),
+        Some("owner-pane"),
+        None,
+    ));
+    assert!(
+        answer.is_err(),
+        "a credit fallback without a limit was written as an answer"
+    );
+    assert_eq!(rt.block_on(tasks.get(&id)).unwrap().status, "blocked");
     let path = write_config(
         dir.path(),
         json!({"demo": {"provider": "codex", "approval_task": id}}),

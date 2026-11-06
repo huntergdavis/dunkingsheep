@@ -607,7 +607,7 @@ impl crate::api::CommandEnv for RequestRuntimeAdapter<'_> {
         self.terminal
             .flock
             .project_runtime_policy()
-            .ok_or_else(|| project_policy_load::not_attached_refusal(&self.terminal.flock))?
+            .ok_or_else(|| project_policy_load::not_attached_refusal(self.terminal.flock))?
             .request_config(project_name, template, self.runtime)
     }
 
@@ -620,7 +620,7 @@ impl crate::api::CommandEnv for RequestRuntimeAdapter<'_> {
             .terminal
             .flock
             .project_runtime_policy()
-            .ok_or_else(|| project_policy_load::not_attached_refusal(&self.terminal.flock))?;
+            .ok_or_else(|| project_policy_load::not_attached_refusal(self.terminal.flock))?;
         policy.with_spawn_gate(operation)
     }
 
