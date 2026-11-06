@@ -5662,6 +5662,54 @@ fn cli_route_51_watchdog() {
     assert!(replay_result["counts"]["dunk.skip_loop"].is_object());
     assert!(replay_result["counts"]["inbox.ambiguous_sender"].is_object());
 
+    // Python raises an uncaught ValueError for these (traceback, exit 1). The port keeps the same
+    // message and reports it as a usage error, exit 2: an intentional deviation.
+    let reversed = run_cli(
+        socket.to_str().unwrap(),
+        &[
+            "watchdog",
+            "--config",
+            config_arg,
+            "--error-file",
+            error_arg,
+            "--replay",
+            "--from",
+            "1700000060",
+            "--to",
+            "1700000000",
+            "--step",
+            "1",
+        ],
+    );
+    assert_eq!(Some(2), reversed.status.code());
+    assert!(reversed.stdout.is_empty());
+    assert_eq!(
+        "watchdog: replay needs step > 0 and end >= start\n",
+        String::from_utf8(reversed.stderr).unwrap()
+    );
+    let negative_step = run_cli(
+        socket.to_str().unwrap(),
+        &[
+            "watchdog",
+            "--config",
+            config_arg,
+            "--error-file",
+            error_arg,
+            "--replay",
+            "--from",
+            "1700000000",
+            "--to",
+            "1700000060",
+            "--step=-1",
+        ],
+    );
+    assert_eq!(Some(2), negative_step.status.code());
+    assert!(negative_step.stdout.is_empty());
+    assert_eq!(
+        "watchdog: replay needs step > 0 and end >= start\n",
+        String::from_utf8(negative_step.stderr).unwrap()
+    );
+
     let invalid_path = temp.path().join("missing.json");
     let invalid = run_cli(
         socket.to_str().unwrap(),
@@ -5736,6 +5784,65 @@ fn cli_route_51_watchdog() {
     );
     assert!(!state_path.exists());
     assert!(!heartbeat_path.exists());
+
+    // A failed escalation in the state file is carried into the dry-run text. Python quotes the
+    // target with repr() and prints None for a missing reason or pending. Dry-run never rewrites
+    // the state file.
+    let carried_cases = [
+        (
+            json!({"at": 1_699_999_940, "target": "vp of agentry", "reason": "x", "pending": 2}),
+            "CARRIED: escalation to 'vp of agentry' failed at 1699999940 (x); 2 line(s) were pending - resend them from the state record if they still matter [1 failed escalation(s) since this state file began]",
+        ),
+        (
+            json!({"at": 1_699_999_940, "target": "o'brien", "reason": "x", "pending": 2}),
+            "CARRIED: escalation to \"o'brien\" failed at 1699999940 (x); 2 line(s) were pending - resend them from the state record if they still matter [1 failed escalation(s) since this state file began]",
+        ),
+        (
+            json!({"at": 1_699_999_940, "target": "vp of agentry"}),
+            "CARRIED: escalation to 'vp of agentry' failed at 1699999940 (None); None line(s) were pending - resend them from the state record if they still matter [1 failed escalation(s) since this state file began]",
+        ),
+    ];
+    for (failure, expected) in carried_cases {
+        let seeded = serde_json::to_vec_pretty(&json!({
+            "alerts": {},
+            "streaks": {},
+            "owner_pages": {},
+            "owner_page_times": [],
+            "delivery_failure": failure,
+            "delivery_failure_count": 1,
+        }))
+        .unwrap();
+        std::fs::write(&state_path, &seeded).unwrap();
+        let carried = run_cli(
+            socket.to_str().unwrap(),
+            &[
+                "watchdog",
+                "--config",
+                config_arg,
+                "--error-file",
+                error_arg,
+                "--dry-run",
+                "--now",
+                "1700000000",
+            ],
+        );
+        assert_eq!(Some(0), carried.status.code());
+        assert!(
+            carried.stderr.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&carried.stderr)
+        );
+        let text = String::from_utf8(carried.stdout).unwrap();
+        assert_eq!(Some(expected), text.lines().next(), "{text}");
+        assert_eq!(
+            seeded,
+            std::fs::read(&state_path).unwrap(),
+            "dry-run must not rewrite the state file"
+        );
+        assert!(!heartbeat_path.exists());
+    }
+    std::fs::remove_file(&state_path).unwrap();
+
     assert!(
         matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
         "watchdog local routes unexpectedly connected to the daemon socket"

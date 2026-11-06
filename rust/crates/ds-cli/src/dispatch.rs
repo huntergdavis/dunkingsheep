@@ -3364,6 +3364,9 @@ fn watchdog_replay(
         state::empty_state,
     };
 
+    // Python raises an uncaught ValueError here: a traceback and exit 1. The port returns the same
+    // message as a usage error (exit 2), the exit the replay contract gives argument errors.
+    // Intentional deviation, pinned by cli_route_51_watchdog.
     if step_minutes <= 0.0 || end < start {
         return Err("replay needs step > 0 and end >= start".into());
     }
@@ -3389,19 +3392,25 @@ fn watchdog_replay(
         let streaks = advance_streaks(config, &state, &findings, at);
         for decision in plan(config, &findings, &state, &streaks, at, None) {
             let rule = decision["finding"]["rule"].as_str().unwrap_or("");
+            // evaluate() only runs the replayable rules, so this lookup cannot miss today. If that
+            // ever changes, return a clean error instead of panicking.
+            let Some(tally) = counts.get_mut(rule) else {
+                return Err(format!(
+                    "replay got a finding for non-replayable rule {rule:?}"
+                ));
+            };
             if decision["vp"] == "no" {
-                counts[rule]["vp"] =
-                    serde_json::json!(counts[rule]["vp"].as_i64().unwrap_or(0) + 1);
-                state["alerts"]
+                tally["vp"] = serde_json::json!(tally["vp"].as_i64().unwrap_or(0) + 1);
+                let alerts = state["alerts"]
                     .as_object_mut()
-                    .unwrap()
+                    .ok_or("replay state alerts must be an object")?;
+                alerts
                     .entry(dedupe_key(&decision["finding"]))
                     .or_insert_with(|| serde_json::json!({}))["last_alerted"] =
                     serde_json::json!(at);
             }
             if decision["owner"] == "no" {
-                counts[rule]["owner"] =
-                    serde_json::json!(counts[rule]["owner"].as_i64().unwrap_or(0) + 1);
+                tally["owner"] = serde_json::json!(tally["owner"].as_i64().unwrap_or(0) + 1);
             }
         }
         state["streaks"] = streaks;
@@ -3468,9 +3477,13 @@ fn watchdog_text(report: &Value) -> String {
             } else {
                 String::new()
             };
-            lines.insert(0, format!("CARRIED: escalation to {:?} failed at {} ({}); {} line(s) were pending - resend them from the state record if they still matter{suffix}",
-                carried["target"].as_str().unwrap_or(""), carried["at"].as_f64().unwrap_or(0.0) as i64,
-                carried["reason"].as_str().unwrap_or(""), carried["pending"].as_i64().unwrap_or(0)));
+            // Python: `{carried.get('target')!r}` for the target, `str()` for reason and pending.
+            // A missing or null value prints as None, which the shared printers already do.
+            lines.insert(0, format!("CARRIED: escalation to {} failed at {} ({}); {} line(s) were pending - resend them from the state record if they still matter{suffix}",
+                crate::render_print::py_repr_value(&carried["target"]),
+                carried["at"].as_f64().unwrap_or(0.0) as i64,
+                crate::render_print::py_str(&carried["reason"]),
+                crate::render_print::py_str(&carried["pending"])));
         }
     }
     format!("{}\n", lines.join("\n"))
