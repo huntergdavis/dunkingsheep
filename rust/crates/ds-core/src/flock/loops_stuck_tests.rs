@@ -1151,10 +1151,10 @@ fn federated_failed_durable_reservation_never_presses() {
         flock.save().is_err(),
         "precondition: the reservation save must fail"
     );
-    assert_eq!(
-        0,
-        federated_recovery_step(&flock, &mut probe, 221.0, &|_| {}).unwrap()
-    );
+    // The step decides not to press, then its closing save reports the failure as an error.
+    let error = federated_recovery_step(&flock, &mut probe, 221.0, &|_| {})
+        .expect_err("the failed reservation save is reported, not hidden");
+    assert!(error.to_string().contains("state.json"), "{error}");
     assert!(probe.keys.lock().unwrap().is_empty());
 
     let control_dir = tempfile::tempdir().unwrap();
