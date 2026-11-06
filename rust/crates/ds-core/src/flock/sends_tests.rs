@@ -5088,3 +5088,158 @@ fn test_a_refused_message_keeps_its_place_and_is_delivered_later() {
         .collect();
     assert_eq!(vec!["m-hello", "m-after"], sent);
 }
+
+// T55 rows 16 and 65 (t3344 proof C), test-only. Python oracle: tests/test_dunk_stuck_recovery.py
+// at 79bc92fa. Row 16 is ReviewBlockerTests.test_a_dunk_notice_with_no_message_row_is_still_tracked_and_recovered
+// and row 65 is AttemptGenerationTests.test_the_attempt_identity_is_captured_before_delivery_not_after.
+// No production code is changed by these tests.
+mod t55_rows_16_65 {
+    use super::*;
+    use crate::flock::panes::Stores;
+    use crate::metrics::MetricsStore;
+    use std::sync::Arc;
+
+    const PANE: &str = "%1";
+
+    /// The composer hint screen the Python oracle uses: an empty box with the "new task?" hint.
+    fn hint_screen() -> String {
+        "\u{276f}\u{a0}\n\x1b[2mnew task? /clear to save 497.4k tokens\x1b[0m\n".to_string()
+    }
+
+    #[test]
+    fn a_dunk_notice_with_no_message_row_is_tracked_and_its_consumed_recovery_is_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state.json");
+        let flock = persistent_recovery_flock(dir.path(), &state);
+        let metrics = Arc::new(MetricsStore::open(dir.path().join("metrics.db")).unwrap());
+        flock.attach_stores(Stores {
+            metrics: Some(metrics.clone()),
+            ..Stores::default()
+        });
+        {
+            let mut config = flock.stuck_config.lock().unwrap();
+            config.threshold_s = 1.0;
+            config.observation_interval_s = 0.1;
+            config.max_attempts = 1;
+        }
+        let mut env = Pane::default();
+        env.panes
+            .push(serde_json::json!({"pane_id": PANE, "pane_pid": std::process::id()}));
+        env.statuses.insert(PANE.into(), "idle".into());
+        env.screens.insert(PANE.into(), frame("stuck body", &[]));
+        env.after_key_screen = Some(frame("\x1b[2mAsk Codex to do anything\x1b[0m", &[]));
+        flock
+            .sent_text_by_pane
+            .lock()
+            .unwrap()
+            .insert(PANE.into(), vec!["stuck body".into()]);
+        // The dunk notice was sent, and its Message row has left the outbox.
+        let mut notice = Message::new("d1-notice", PANE, "dunk", "stuck body", "d1");
+        notice.created_at = 1.0;
+        notice.status = "failed".into();
+        notice.attempt_generation = pane_generation(&env, PANE);
+        flock.note_stuck_candidate(&notice);
+
+        // No Message row, so the head is None and the identity is the text fingerprint.
+        assert!(!flock.unwedge(
+            &mut env,
+            PANE,
+            "stuck body",
+            Some(99.5),
+            None,
+            100.0,
+            None,
+            false
+        ));
+        assert!(
+            env.keys.is_empty(),
+            "the clock has not reached the threshold"
+        );
+        assert!(
+            flock
+                .stuck_tracker
+                .lock()
+                .unwrap()
+                .records
+                .contains_key(PANE),
+            "a dunk notice with no message row is still tracked"
+        );
+        assert!(flock.unwedge(
+            &mut env,
+            PANE,
+            "stuck body",
+            Some(98.0),
+            None,
+            200.0,
+            None,
+            false
+        ));
+        assert_eq!(1, env.keys.len());
+        let outcomes: Vec<String> = metrics
+            .events_between(0.0, f64::MAX)
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.kind == "stuck.recover")
+            .filter_map(|event| event.outcome)
+            .collect();
+        let consumed = outcomes
+            .iter()
+            .filter(|outcome| *outcome == "consumed")
+            .count();
+        assert_eq!(
+            1, consumed,
+            "one consumed stuck.recover event, got {outcomes:?}"
+        );
+    }
+
+    #[test]
+    fn the_attempt_identity_and_the_registry_generation_are_captured_before_delivery() {
+        let dir = tempfile::tempdir().unwrap();
+        let flock = Flock::new(
+            dir.path().join("launches.json"),
+            dir.path().join("lanes.json"),
+            false,
+        );
+        let message = Message::new("m-attempt", PANE, "pane", "hello", "test");
+        flock
+            .outbox
+            .lock()
+            .unwrap()
+            .insert(PANE.into(), vec![message]);
+        let mut pane = Pane::default();
+        pane.screens.insert(PANE.into(), hint_screen());
+        // The pane is replaced mid-attempt: the first identity read is the pre-delivery one.
+        *pane.attempt_generation_script.borrow_mut() = VecDeque::from([
+            Some("pid:1:start:before".to_string()),
+            Some("pid:2:start:after".to_string()),
+        ]);
+        let _ = flock.deliver_message("m-attempt", 100.0, &mut pane, || None);
+        let delivered = flock
+            .message_history
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|m| m.id == "m-attempt")
+            .map(|m| m.attempt_generation.clone());
+        let held = flock.outbox_snapshot()[PANE]
+            .iter()
+            .find(|m| m.id == "m-attempt")
+            .map(|m| m.attempt_generation.clone());
+        assert_eq!(
+            Some(Some("pid:1:start:before".to_string())),
+            delivered.or(held),
+            "the attempt identity must be the pane the text went into"
+        );
+        let registry = flock
+            .stuck_candidates
+            .lock()
+            .unwrap()
+            .get(PANE)
+            .and_then(|candidate| candidate.generation.clone());
+        assert_eq!(
+            Some("pid:1:start:before".to_string()),
+            registry,
+            "the registry must carry the ATTEMPT generation, not the pane's generation after delivery"
+        );
+    }
+}
