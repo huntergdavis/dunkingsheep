@@ -72,5 +72,16 @@ class CiReplayContractTests(unittest.TestCase):
         self.assertIn('python3 -I "tests/$test.py"', job_text)
 
 
+    def test_the_owner_pane_wait_is_bounded_below_the_job_timeout_and_the_message_matches(self):
+        script = read(SCRIPT)
+        workflow = read(WORKFLOW)
+        job = workflow[workflow.index(JOB):]
+        timeout_s = int(re.search(r"timeout-minutes: (\d+)", job).group(1)) * 60
+        ticks = int(re.search(
+            r'for _ in \$\(seq 1 (\d+)\); do\n    \[ -s "\$TEMP_DIR/replay\.status" \]', script).group(1))
+        self.assertLess(ticks, timeout_s)
+        self.assertIn("did not finish in %d s" % ticks, script)
+
+
 if __name__ == "__main__":
     unittest.main()

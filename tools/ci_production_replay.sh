@@ -129,14 +129,16 @@ job_main() {
   sandbox_tmux send-keys -t "$owner" Enter
 
   local code
-  for _ in $(seq 1 900); do
+  # 200 one-second ticks, well under the job's five-minute timeout, so the screen dump below prints
+  # before GitHub cancels the job.
+  for _ in $(seq 1 200); do
     [ -s "$TEMP_DIR/replay.status" ] && break
     sleep 1
   done
   if [ -s "$TEMP_DIR/replay.status" ]; then
     code="$(cat "$TEMP_DIR/replay.status")"
   else
-    echo "the owner pane did not finish in 900 s; its screen:" >&2
+    echo "the owner pane did not finish in 200 s; its screen:" >&2
     sandbox_tmux capture-pane -p -t "$owner" | tail -n 60 >&2 || true
     code=1
   fi
