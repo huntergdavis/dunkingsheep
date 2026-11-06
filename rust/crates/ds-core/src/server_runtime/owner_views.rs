@@ -276,7 +276,10 @@ mod tests {
         // The panic that `Env::from_process` raised on this input is now a named refusal.
         let bad = std::path::Path::new(std::ffi::OsStr::from_bytes(b"/tmp/\xff.sqlite3"));
         let _app_db = AppDbEnv::set(bad);
-        let error = view_env().err().expect("a non-UTF-8 value must be refused");
+        let error = match view_env() {
+            Ok(_) => panic!("a non-UTF-8 value must be refused"),
+            Err(error) => error,
+        };
         assert!(
             matches!(&error, DunkError::Refused(text)
                 if text.contains("DUNKINGSHEEP_APP_DB") && text.contains("not valid UTF-8")),
