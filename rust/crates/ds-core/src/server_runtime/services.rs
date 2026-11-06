@@ -14,6 +14,7 @@ use crate::memory::service::MemoryService;
 use std::time::Duration;
 use tokio::runtime::Runtime;
 
+use super::github_provider::GitHubProvider;
 use super::runtime_control::RuntimeControlState;
 use super::{dispatcher::RuntimeDispatcher, outbox_runtime::OutboxRuntime, LoopRuntimeAdapter};
 use crate::config::Env;
@@ -115,6 +116,7 @@ pub struct RuntimeServices {
     pub(crate) allocator: crate::flock::allocator::Allocator,
     pub(super) runtime_control: RuntimeControlState,
     pub(super) owner_push: super::owner_push::OwnerPushService,
+    pub(super) github: GitHubProvider,
     stopped: AtomicBool,
     shutdown_lock: Mutex<()>,
     shutdown_failure: Mutex<Option<String>>,
@@ -145,7 +147,8 @@ impl RuntimeServices {
         inputs: RuntimeServiceInputs,
         memory: Option<RuntimeMemoryConfig>,
     ) -> Result<Arc<Self>, DunkError> {
-        Self::build(inputs, memory, None, |_, _| {}, |_, _| Ok(()))
+        let github = GitHubProvider::production(&inputs.env);
+        Self::build(inputs, memory, None, github, |_, _| {}, |_, _| Ok(()))
     }
 
     /// Build services with the already decoded whole-Flock state. Restoration happens
@@ -155,13 +158,36 @@ impl RuntimeServices {
         memory: Option<RuntimeMemoryConfig>,
         snapshot: Option<serde_json::Value>,
     ) -> Result<Arc<Self>, DunkError> {
-        Self::build(inputs, memory, snapshot, |_, _| {}, |_, _| Ok(()))
+        let github = GitHubProvider::production(&inputs.env);
+        Self::build(inputs, memory, snapshot, github, |_, _| {}, |_, _| Ok(()))
+    }
+
+    /// Construction seam for tests that inject a fake GitHub App endpoint (t3241). Production
+    /// composition always goes through `GitHubProvider::production`.
+    #[cfg(test)]
+    pub(crate) fn new_with_github(
+        inputs: RuntimeServiceInputs,
+        memory: Option<RuntimeMemoryConfig>,
+        github: GitHubProvider,
+    ) -> Result<Arc<Self>, DunkError> {
+        Self::build(inputs, memory, None, github, |_, _| {}, |_, _| Ok(()))
+    }
+
+    /// The one GitHub App token cache this runtime's requests borrow (t3241).
+    pub(crate) fn github_tokens(&self) -> Result<&crate::github::Tokens, DunkError> {
+        self.github.tokens()
+    }
+
+    /// The review service's GitHub transport, owned by the same provider as the token cache.
+    pub(crate) fn github_review_transport(&self) -> &dyn crate::github::GitHubTransport {
+        self.github.review_transport()
     }
 
     fn build(
         inputs: RuntimeServiceInputs,
         memory: Option<RuntimeMemoryConfig>,
         snapshot: Option<serde_json::Value>,
+        github: GitHubProvider,
         before_memory_start: impl FnOnce(&Flock, &Option<Arc<MemoryService>>),
         after_memory_start: impl FnOnce(&Flock, &Option<Arc<MemoryService>>) -> Result<(), DunkError>,
     ) -> Result<Arc<Self>, DunkError> {
@@ -321,6 +347,7 @@ impl RuntimeServices {
             allocator: crate::flock::allocator::Allocator::new(),
             runtime_control,
             owner_push: super::owner_push::OwnerPushService::default(),
+            github,
             stopped: AtomicBool::new(false),
             shutdown_lock: Mutex::new(()),
             shutdown_failure: Mutex::new(None),
@@ -833,10 +860,12 @@ mod tests {
             }]
         });
 
+        let github = GitHubProvider::production(&inputs.env);
         let services = RuntimeServices::build(
             inputs,
             memory,
             Some(snapshot),
+            github,
             |flock, memory| {
                 let memory = memory
                     .as_ref()
@@ -2138,10 +2167,12 @@ mod tests {
         )
         .unwrap();
         let mut observed = None;
+        let github = GitHubProvider::production(&inputs.env);
         let error = RuntimeServices::build(
             inputs,
             Some(config),
             None,
+            github,
             |_, _| {},
             |_flock, owner| {
                 let service = owner.as_ref().unwrap();

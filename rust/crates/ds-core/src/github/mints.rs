@@ -44,17 +44,28 @@ pub fn author_mint_path(path: Option<&Path>, config_dir: &Path) -> PathBuf {
         .unwrap_or_else(|| config_dir.join(AUTHOR_MINT_FILE))
 }
 
-/// Return None for blank panes or filesystem failures. Source type/coercion errors remain
-/// errors; the Python gh_token caller catches these independently of token minting.
-pub fn record_author_mint(
+/// What `record_author_mint_outcome` did, so `gh_token` can report provenance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthorMintRecord {
+    /// A blank pane has no identity, so nothing was attempted.
+    NotApplicable,
+    /// The mint time was written to this file.
+    Recorded(PathBuf),
+    /// The write failed. The token is still valid; the reason is the filesystem error.
+    WriteFailed { path: PathBuf, reason: String },
+}
+
+/// Record a mint and report exactly what happened. Source type or coercion errors remain
+/// errors; filesystem failures come back as `WriteFailed`, never as a silent `None`.
+pub fn record_author_mint_outcome(
     pane: &str,
     at: Option<f64>,
     path: Option<&Path>,
     config_dir: &Path,
-) -> Result<Option<PathBuf>, GitHubError> {
+) -> Result<AuthorMintRecord, GitHubError> {
     let pane = pane.trim();
     if pane.is_empty() {
-        return Ok(None);
+        return Ok(AuthorMintRecord::NotApplicable);
     }
     let path = author_mint_path(path, config_dir);
     let now = at.unwrap_or_else(crate::clock::now_s);
@@ -108,10 +119,29 @@ pub fn record_author_mint(
         }
         fs::rename(&temporary, &path)
     };
-    if write().is_err() {
-        return Ok(None);
+    match write() {
+        Ok(()) => Ok(AuthorMintRecord::Recorded(path)),
+        Err(error) => Ok(AuthorMintRecord::WriteFailed {
+            path,
+            reason: error.to_string(),
+        }),
     }
-    Ok(Some(path))
+}
+
+/// Return None for blank panes or filesystem failures. Source type/coercion errors remain
+/// errors; the Python gh_token caller catches these independently of token minting.
+pub fn record_author_mint(
+    pane: &str,
+    at: Option<f64>,
+    path: Option<&Path>,
+    config_dir: &Path,
+) -> Result<Option<PathBuf>, GitHubError> {
+    Ok(
+        match record_author_mint_outcome(pane, at, path, config_dir)? {
+            AuthorMintRecord::Recorded(path) => Some(path),
+            AuthorMintRecord::NotApplicable | AuthorMintRecord::WriteFailed { .. } => None,
+        },
+    )
 }
 
 pub fn author_from_mints(

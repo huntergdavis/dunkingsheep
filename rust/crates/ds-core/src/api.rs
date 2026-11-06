@@ -2506,22 +2506,53 @@ pub fn h_gh_token(context: &HandlerContext<'_>, args: Args) -> Result<Value, Dun
         .get("token")
         .cloned()
         .ok_or_else(|| crate::github::GitHubError("'token'".into()))?;
-    if kind == "author" {
-        if let Some(pane_id) = context.self_pane_id().filter(|pane| !pane.is_empty()) {
-            let now = context.env.now_s();
-            context.flock.record_gh_token_mint(pane_id, now);
-            let _ =
-                crate::github::record_author_mint(pane_id, Some(now), None, tokens.config_dir());
-        }
-    }
-    Ok(json!({
+    let mut response = json!({
         "token": token,
         "kind": kind,
         "role": role,
         "slug": entry.get("slug").cloned().unwrap_or(Value::Null),
         "expires_at": entry.get("expires_at").cloned().unwrap_or(Value::Null),
         "cached": entry.get("cached").cloned().unwrap_or(Value::Bool(false)),
-    }))
+    });
+    if kind == "author" {
+        // The mint record is best effort: a lost record never fails the token, but the
+        // response says what happened (t3241 review finding 2).
+        let provenance = match context.self_pane_id().filter(|pane| !pane.is_empty()) {
+            Some(pane_id) => {
+                let now = context.env.now_s();
+                context.flock.record_gh_token_mint(pane_id, now);
+                author_mint_provenance(crate::github::record_author_mint_outcome(
+                    pane_id,
+                    Some(now),
+                    None,
+                    tokens.config_dir(),
+                ))
+            }
+            None => no_pane_provenance(),
+        };
+        response["provenance"] = provenance;
+    }
+    Ok(response)
+}
+
+/// The provenance answer for an author mint: whether the record was written, and why not.
+fn author_mint_provenance(
+    outcome: Result<crate::github::AuthorMintRecord, crate::github::GitHubError>,
+) -> Value {
+    use crate::github::AuthorMintRecord;
+    match outcome {
+        Ok(AuthorMintRecord::Recorded(_)) => json!({"recorded": true}),
+        Ok(AuthorMintRecord::NotApplicable) => no_pane_provenance(),
+        Ok(AuthorMintRecord::WriteFailed { reason, .. }) => json!({
+            "recorded": false,
+            "reason": format!("could not write the author mint record: {reason}"),
+        }),
+        Err(error) => json!({"recorded": false, "reason": error.to_string()}),
+    }
+}
+
+fn no_pane_provenance() -> Value {
+    json!({"recorded": false, "reason": "no pane identity, so no author mint was recorded"})
 }
 
 /// `dunk_api.h_poolrad_sync` through the accepted T52 Poolrad service.
