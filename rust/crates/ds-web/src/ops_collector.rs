@@ -36,6 +36,12 @@
 //! OverflowError, so the whole run fails with no rows written. Here `dunk_timestamp` returns a
 //! caught ValueError, so the run commits with `dunk_metrics` unavailable. Integers are exact at
 //! any size (`PyInt`). Only the SQLite bind is limited to 64 bits, as in Python.
+//!
+//! JSON decoding also differs from CPython's `json.loads` in two places. CPython accepts a lone
+//! surrogate escape such as `\ud800`, which serde_json rejects. A daemon reply that contains one
+//! gives RuntimeError, `gh` output gives JSONDecodeError, and a published accounting file gives
+//! ValueError. CPython also accepts a UTF-8 byte-order mark at the start of bytes input. The
+//! published accounting path keeps the BOM, so that file is reported invalid (ValueError).
 
 use std::{
     cmp::Ordering,
