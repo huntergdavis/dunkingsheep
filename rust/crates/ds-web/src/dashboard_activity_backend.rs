@@ -163,8 +163,11 @@ pub struct ActivityPoolradBackend<T: Transport + Send + 'static> {
     clock: Arc<dyn Clock>,
     panes: Mutex<TimedCache>,
     progress: Mutex<TimedCache>,
-    capabilities: Mutex<HashMap<String, (f64, Map<String, Value>)>>,
+    capabilities: Mutex<CapabilityCache>,
 }
+
+/// Delivery capability payloads by pane id, each with the Unix time it was fetched.
+type CapabilityCache = HashMap<String, (f64, Map<String, Value>)>;
 
 impl<T: Transport + Send + 'static> ActivityPoolradBackend<T> {
     /// `client` serves channel calls, pane listing, and capability checks. `readers` serve the
