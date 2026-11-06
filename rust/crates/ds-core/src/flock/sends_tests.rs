@@ -5659,6 +5659,43 @@ mod stuck_gap_tests {
                 .is_some_and(|rows| rows.iter().any(|row| row.as_str() == Some(TEXT))),
             "the persisted text must be rehydrated once the candidate is bound"
         );
+        // TEMP DIAG (remove before landing): the restored candidate and each gate's inputs.
+        {
+            let candidates = after.stuck_candidates.lock().unwrap();
+            let entry = &candidates[PANE];
+            eprintln!(
+                "DIAG eligible={} status={} press_enter={} kind={} generation={:?} pane_gen={:?} created_at={} text={:?} typed_at_present={} native_recovery={:?} native_binding={} invalid={} scheduled={} source={}",
+                entry.eligible,
+                entry.status,
+                entry.press_enter,
+                entry.kind,
+                entry.generation,
+                pane_generation(&env, PANE),
+                entry.created_at,
+                entry.text,
+                entry.typed_at_present,
+                entry.native_recovery,
+                entry.native_binding.is_some(),
+                entry.native_binding_invalid.is_some(),
+                entry.scheduled,
+                entry.source,
+            );
+        }
+        eprintln!(
+            "DIAG status={} owned={} records={} save_ok={} sent={:?} persist={} cfg={:?}",
+            after.stuck_status(&env, PANE),
+            after.stuck_text_is_ours(&env, PANE, Some(TEXT), TEXT),
+            after
+                .stuck_tracker
+                .lock()
+                .unwrap()
+                .records
+                .contains_key(PANE),
+            after.save().is_ok(),
+            after.sent_text_by_pane.lock().unwrap().get(PANE).cloned(),
+            after.persist_enabled,
+            *after.stuck_config.lock().unwrap(),
+        );
         assert!(after.unwedge(
             &mut env,
             PANE,
