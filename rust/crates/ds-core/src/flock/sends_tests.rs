@@ -5611,7 +5611,6 @@ mod stuck_gap_tests {
     // path with the real composer matcher. After a restart the persisted text must be
     // rehydrated once the candidate is bound, and then the worker presses once.
     #[test]
-    #[ignore = "t3354 row 51 divergence: after a restart the persisted sent text is not rehydrated, so the strict press refuses (Python rehydrates at bind); owner ruling pending"]
     fn the_restarted_worker_recovers_through_the_real_matcher() {
         let dir = tempfile::tempdir().unwrap();
         let state = dir.path().join("state.json");
@@ -5677,7 +5676,6 @@ mod stuck_gap_tests {
     // (row 62), on the strict path: the restored candidate keeps its attempt generation, and
     // after the bind the real matcher authorises one press.
     #[test]
-    #[ignore = "t3354 row 62 divergence: after a same-generation restart on the strict path the persisted sent text is not rehydrated, so the second tick does not press (Python presses); owner ruling pending"]
     fn the_same_generation_restart_recovers_through_the_real_matcher() {
         let dir = tempfile::tempdir().unwrap();
         let state = dir.path().join("state.json");
