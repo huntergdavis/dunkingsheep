@@ -214,7 +214,7 @@ fn wiring_26_missing_native_binding_records_one_named_refusal_and_presses_nothin
 /// (sends.rs:2833; the only copy is sends.rs:4525), so no diagnostic is recorded. Ignored until the
 /// owner rules on the divergence; no production code is changed here.
 #[test]
-#[ignore = "divergence: Python logs 'attempt generation unknown' once; Rust never sets unobservable_logged"]
+#[ignore = "divergence tracked by t3468: Python logs 'attempt generation unknown' once; Rust never sets unobservable_logged"]
 fn wiring_25_unbound_failure_has_one_named_diagnostic_and_never_recovers() {
     let mut env = Pane::default();
     env.panes
