@@ -1291,3 +1291,44 @@ fn workspace_last_message_follows_submit_and_survives_refusal() {
     );
     assert_eq!(flock.last_message(), "Created workspace new");
 }
+
+// t3355 (t820 proof D) gap row: test_recover.py::test_start_agent_records_the_exact_argv
+// (oracle 79bc92fa). The persisted launch record, not just the returned argv, must hold the
+// exact argv and source "start_agent".
+#[test]
+fn start_agent_persists_the_exact_argv_and_source_in_the_launch_record() {
+    let mut herdr = FakeLayout::new();
+    let flock = flock_for_tests("start-launch-record");
+    let (mut verify, mut register) = (no_verify(), no_register());
+    let started = start_agent(
+        &mut herdr,
+        &flock,
+        "builder",
+        "codex --model gpt-5",
+        Some("w1"),
+        None,
+        None,
+        None,
+        false,
+        None,
+        None,
+        None,
+        None,
+        None,
+        StartHooks {
+            verify: &mut verify,
+            lane_register: &mut register,
+        },
+    )
+    .unwrap();
+    let pane_id = started["pane_id"]
+        .as_str()
+        .expect("started pane id")
+        .to_string();
+    let launches = flock.launches.lock().unwrap();
+    let entry = launches
+        .get(&pane_id)
+        .expect("launch record for the started pane");
+    assert_eq!(json!(["codex", "--model", "gpt-5"]), entry["argv"]);
+    assert_eq!(json!("start_agent"), entry["source"]);
+}
