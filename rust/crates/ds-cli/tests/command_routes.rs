@@ -5686,6 +5686,28 @@ fn cli_route_51_watchdog() {
         "dry-run config refusal must not write the marker"
     );
 
+    let invalid_live = run_cli(
+        socket.to_str().unwrap(),
+        &[
+            "watchdog",
+            "--config",
+            invalid_path.to_str().unwrap(),
+            "--error-file",
+            error_arg,
+        ],
+    );
+    assert_eq!(Some(2), invalid_live.status.code());
+    assert!(invalid_live.stdout.is_empty());
+    let config_error = format!(
+        "CONFIG: <file>: config file not found: {}\n",
+        invalid_path.display()
+    );
+    assert_eq!(
+        format!("watchdog: refusing to start: {config_error}"),
+        String::from_utf8(invalid_live.stderr).unwrap()
+    );
+    assert_eq!(config_error, std::fs::read_to_string(&error_path).unwrap());
+
     config["enabled"] = json!(true);
     config["dry_run"] = json!(false);
     std::fs::write(&config_path, serde_json::to_vec_pretty(&config).unwrap()).unwrap();
