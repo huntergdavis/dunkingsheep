@@ -392,6 +392,23 @@ fn not_ported(command: &str) -> Outcome {
     }
 }
 
+/// A bare `report` or `state` is an uncaught exception in the Python CLI: their subparser
+/// groups are not `required`, so argparse accepts the bare command and the body then fails.
+/// Python prints a traceback and exits 1; the frames are Python's own, the last line is
+/// reproduced. A Python bug, fixed after cutover, not now.
+fn python_uncaught(ns: &Map<String, Value>, last_line: &str) -> Outcome {
+    // Python's main() builds and probes the client before run_client_command raises, so an
+    // unreachable daemon is still that refusal, not the traceback.
+    if let Err(outcome) = crate::daemon_cmd::connect(ns) {
+        return outcome;
+    }
+    Outcome {
+        stdout: String::new(),
+        stderr: format!("Traceback (most recent call last):\n{last_line}\n"),
+        code: 1,
+    }
+}
+
 fn serve(ns: &Map<String, Value>) -> Outcome {
     let options = ds_core::server_runtime::DaemonOptions {
         socket_path: text(ns, "socket")
@@ -1134,6 +1151,48 @@ fn context_local(ns: &Map<String, Value>, json: bool) -> Option<Outcome> {
             value.insert("stores".into(), Value::Object(snapshots));
             let value = Value::Object(value);
             Some(outcome(value.clone(), ordered_json(&value) + "\n"))
+        }
+        "ledger" if text(ns, "action") == Some("status") => {
+            // `context ledger status`: every live entry's ledger state, then the row count.
+            // Reading the ledger connects to it, so the first status creates the file, as
+            // the Python does.
+            let store = Store::new(path.as_deref(), global);
+            let mut ledger = Ledger::new(None);
+            let mut rows = Vec::new();
+            for entry in store.live_entries() {
+                let content = match std::fs::read_to_string(&entry.path) {
+                    Ok(content) => content,
+                    Err(error) => return Some(failed(error.to_string())),
+                };
+                let state = match ledger.status(&store.root, &entry.slug, &content) {
+                    Ok(state) => state.as_str(),
+                    Err(error) => return Some(failed(error.to_string())),
+                };
+                rows.push(serde_json::json!({
+                    "slug": entry.slug,
+                    "class": entry.get("class"),
+                    "state": state,
+                }));
+            }
+            let count = match ledger.count() {
+                Ok(count) => count,
+                Err(error) => return Some(failed(error.to_string())),
+            };
+            let listing = rows
+                .iter()
+                .map(|row| {
+                    format!(
+                        "{:<11} {:<13} {}\n",
+                        row["state"].as_str().unwrap_or(""),
+                        row["class"].as_str().unwrap_or("None"),
+                        row["slug"].as_str().unwrap_or("")
+                    )
+                })
+                .collect::<String>();
+            Some(outcome(
+                serde_json::json!({"entries": rows, "count": count}),
+                listing,
+            ))
         }
         "ledger" if text(ns, "action") == Some("adopt") => {
             if std::env::var("DUNKINGSHEEP_SUPERUSER").ok().as_deref() != Some("1") {
@@ -2809,9 +2868,8 @@ fn owner_outbox(ns: &Map<String, Value>) -> Outcome {
 }
 
 fn state(ns: &Map<String, Value>) -> Outcome {
-    let command = text(ns, "state_command").unwrap_or("");
-    let (rpc, args) = match command {
-        "capture" => {
+    let (rpc, args) = match text(ns, "state_command") {
+        Some("capture") => {
             let mut args = Map::new();
             args.insert(
                 "source".into(),
@@ -2821,7 +2879,7 @@ fn state(ns: &Map<String, Value>) -> Outcome {
             );
             ("state_capture", args)
         }
-        "latest" => {
+        Some("latest") => {
             let mut args = Map::new();
             for (source, target) in [
                 ("pane", "pane_id"),
@@ -2834,7 +2892,9 @@ fn state(ns: &Map<String, Value>) -> Outcome {
             }
             ("state_latest", args)
         }
-        other => return not_ported(&format!("state {other}")),
+        // Bare `state` indexes `{"capture": ..., "latest": ...}[None]` in Python.
+        None => return python_uncaught(ns, "KeyError: None"),
+        Some(other) => return not_ported(&format!("state {other}")),
     };
     crate::daemon_cmd::run_command(ns, rpc, args, crate::render_print::render_view)
 }
@@ -3211,7 +3271,12 @@ fn report(ns: &Map<String, Value>) -> Outcome {
             })
         }
         Some(other) => not_ported(&format!("report {other}")),
-        None => not_ported("report"),
+        // Bare `report` falls into `report run` in Python and reads `args.prose`, which only
+        // the `run` subparser defines.
+        None => python_uncaught(
+            ns,
+            "AttributeError: 'Namespace' object has no attribute 'prose'",
+        ),
     }
 }
 
