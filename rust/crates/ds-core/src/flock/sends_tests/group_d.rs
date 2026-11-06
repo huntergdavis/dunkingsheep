@@ -18,8 +18,9 @@ const SESSION: &str = "01a173ee-beed-7461-a560-e5f6c1f666a7";
 const TEXT: &str = "Scheduled check d7: read your inbox and finish the assigned work.";
 const FOOTER: &str = "  GPT-6-Astra high · ~/workspace · task\n";
 
-/// A real process named `codex`, started with the given environment, so the native-binding read
-/// sees exactly those variables (the existing scheduled-evidence test does the same).
+/// A real process named `codex`, started with exactly the given native-state environment. The
+/// Codex home and the hook state directory are removed first, so a case with no pairs reads the
+/// same empty environment as the Python fixture does.
 fn spawn_codex(
     dir: &std::path::Path,
     env: &[(&str, &std::path::Path)],
@@ -28,6 +29,8 @@ fn spawn_codex(
     std::fs::copy("/bin/sleep", &binary).unwrap();
     let mut command = std::process::Command::new(binary);
     command.arg("300");
+    command.env_remove("CODEX_HOME");
+    command.env_remove("DUNKINGSHEEP_CODEX_STATE_DIR");
     for (key, value) in env {
         command.env(key, value);
     }
@@ -163,23 +166,14 @@ fn wiring_24_hook_record_binds_the_root_pid_start_and_pane() {
 }
 
 /// Oracle test_missing_native_binding_has_one_named_diagnostic (wiring row 26): with no native
-/// binding, the observer presses nothing, and the refusal is recorded once with its name.
+/// binding and no state directory (the Python fixture's empty environment), the observer presses
+/// nothing, and the named refusal is recorded once.
 #[test]
 fn wiring_26_missing_native_binding_records_one_named_refusal_and_presses_nothing() {
     let dir = tempfile::tempdir().unwrap();
-    let home = dir.path().join("home");
-    let hooks = dir.path().join("hooks");
     let cwd = dir.path().join("cwd");
-    for path in [&home, &hooks, &cwd] {
-        std::fs::create_dir_all(path).unwrap();
-    }
-    let (_child, pid, _start) = spawn_codex(
-        dir.path(),
-        &[
-            ("CODEX_HOME", home.as_path()),
-            ("DUNKINGSHEEP_CODEX_STATE_DIR", hooks.as_path()),
-        ],
-    );
+    std::fs::create_dir_all(&cwd).unwrap();
+    let (_child, pid, _start) = spawn_codex(dir.path(), &[]);
     let screen = "› stuck body\n\n  model · /tmp/test\n";
     let mut env = bound_pane(pid, &cwd, screen);
     let flock = Flock::new(
@@ -248,6 +242,36 @@ fn wiring_25_unbound_failure_has_one_named_diagnostic_and_never_recovers() {
     observe(&flock, &mut env, 101.0);
     observe(&flock, &mut env, 220.0);
     assert!(env.keys.is_empty());
+}
+
+/// Oracle test_styled_schedule_survives_restart_with_provenance_for_echo (scheduled row 40): the
+/// echo of an earlier message stays this pane's provenance across a restart, so after the restart
+/// the bright schedule recovers exactly once, at two minutes.
+#[test]
+fn scheduled_40_styled_schedule_survives_restart_with_provenance_for_echo() {
+    let (flock, mut env, created) = scheduled_fixture("failed", i64::from(std::process::id()));
+    let echo = "[inbox] new message for Codex. Read it with: dunkingsheep inbox read";
+    flock
+        .sent_text_by_pane
+        .lock()
+        .unwrap()
+        .insert("%1".into(), vec![echo.into()]);
+    env.screens.insert(
+        "%1".into(),
+        format!("\x1b[1;2m›\x1b[0m {echo}\n\n\x1b[1m›\x1b[0m {TEXT}\n\n\n{FOOTER}"),
+    );
+    let payload = flock.snapshot();
+    drop(flock);
+    let restarted = Flock::new(
+        std::path::PathBuf::from("/nonexistent/launches.json"),
+        std::path::PathBuf::from("/nonexistent/lanes.json"),
+        false,
+    );
+    restarted.restore_snapshot(&payload);
+    observe(&restarted, &mut env, created + 1.0);
+    assert!(env.keys.is_empty(), "no press before two minutes");
+    observe(&restarted, &mut env, created + 120.0);
+    assert_eq!(1, env.keys.len(), "one recovery after the restart");
 }
 
 /// Oracle test_unaccounted_styled_human_line_remains_unknown (scheduled row 41): a human line
