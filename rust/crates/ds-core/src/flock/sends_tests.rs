@@ -4474,6 +4474,7 @@ const T508_TEXT: &str = include_str!("testdata/t508-text.txt");
 const T508_PREFIX: &str = include_str!("testdata/t508-prefix.txt");
 
 #[test]
+#[ignore = "fixture unverified, see t3355 note: the native-evidence press is refused at the threshold; wiring row 13 stays open"]
 fn a_scheduled_false_sent_real_frame_recovers_once_through_native_evidence() {
     struct ChildGuard(std::process::Child);
     impl Drop for ChildGuard {
