@@ -1269,6 +1269,62 @@ esac"#,
 }
 
 #[test]
+fn fromtimestamp_utc_raises_the_exception_classes_cpython_raises() {
+    // Expected classes come from CPython 3.14 `datetime.fromtimestamp(value, timezone.utc)`.
+    let cases: [(f64, Result<(), &str>); 14] = [
+        (253_402_300_800.0, Err("ValueError")),
+        (-62_135_596_801.0, Err("ValueError")),
+        (-62_135_596_800.0, Ok(())),
+        (1e300, Err("OverflowError")),
+        (-1e300, Err("OverflowError")),
+        (9.3e18, Err("OverflowError")),
+        (9e18, Err("OSError")),
+        (1e17, Err("OSError")),
+        (6.7e16, Err("ValueError")),
+        (200_000_000_000.0, Ok(())),
+        (67_768_036_160_140_800.0, Err("ValueError")),
+        (67_768_036_191_676_800.0, Err("OSError")),
+        (-67_768_040_641_276_800.0, Err("OSError")),
+        (-67_768_040_609_740_800.0, Err("ValueError")),
+    ];
+    for (value, expected) in cases {
+        let actual = fromtimestamp_utc(value)
+            .map(|_| ())
+            .map_err(|error| error.python_type);
+        assert_eq!(actual, expected, "fromtimestamp({value})");
+    }
+}
+
+#[test]
+fn published_accounting_raises_type_error_for_an_unhashable_bound_kind() {
+    // Python's `bound_kind not in {"exact", "upper_bound"}` raises TypeError for a list or an
+    // object, but only when the checks before it in its `or` chain have passed.
+    let calls = Calls::default();
+    for unhashable in [json!(["exact"]), json!({"kind": "exact"})] {
+        let mut census = census_json();
+        census["bound_kind"] = unhashable;
+        let error = published_accounting(&mut FakeGitHub::with_documents(
+            &calls,
+            &checkpoint_json(),
+            &census,
+        ))
+        .unwrap_err();
+        assert_eq!(error.python_type, "TypeError");
+    }
+    // A failed earlier check wins. The reviewer is not PM, so Python raises ValueError first.
+    let mut census = census_json();
+    census["bound_kind"] = json!(["exact"]);
+    census["reviewed_by"] = json!("agent");
+    let error = published_accounting(&mut FakeGitHub::with_documents(
+        &calls,
+        &checkpoint_json(),
+        &census,
+    ))
+    .unwrap_err();
+    assert_eq!(error.python_type, "ValueError");
+}
+
+#[test]
 fn daemon_socket_round_trips_and_maps_each_failure_like_the_cli() {
     enum Reply {
         Answer(Value),
@@ -1335,13 +1391,29 @@ fn daemon_socket_round_trips_and_maps_each_failure_like_the_cli() {
     );
     assert_eq!(
         direct[2].as_ref().unwrap_err().python_type,
-        "JSONDecodeError",
-        "a non-JSON reply"
+        "RuntimeError",
+        "a non-JSON reply makes the CLI exit non-zero"
     );
     assert_eq!(
         direct[3].as_ref().unwrap_err().python_type,
         "RuntimeError",
         "no reply is unavailable"
+    );
+    let mut absent = FlockClient::new(
+        UnixTransport {
+            path: dir.path().join("absent.sock"),
+        },
+        None,
+        "ops-collector-test".to_owned(),
+        Duration::from_secs(5),
+        None,
+    );
+    assert_eq!(
+        DaemonCalls::call(&mut absent, "list_panes", Map::new())
+            .unwrap_err()
+            .python_type,
+        "RuntimeError",
+        "an absent socket makes the CLI exit non-zero"
     );
 
     let mut conn = ops_db(dir.path());

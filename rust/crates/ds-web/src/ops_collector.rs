@@ -20,11 +20,16 @@
 //! Nothing here reads the environment or the home directory. The poll timer, startup, the
 //! summary and history readers, and the other `record_*` writers are separate slices.
 //!
-//! Approximations of Python's dynamic typing, kept deliberately narrow: `datetime.fromisoformat`
-//! is approximated by RFC 3339 (`T` or space separator, explicit offset required); BLOB values
-//! are rendered with a simplified `bytes` repr; `int()` accepts ASCII digits only, and `float()`
-//! rejects underscores. Integers are exact at any size (`PyInt`). Only the SQLite bind is limited
-//! to 64 bits, as in Python.
+//! Approximations of Python's dynamic typing, kept deliberately narrow. `datetime.fromisoformat`
+//! accepts only RFC 3339 (`T` or space separator, explicit offset required), so CPython's other
+//! forms are rejected here: any single-character separator, minute-only times, the basic format,
+//! and more fractional digits. `int()` accepts ASCII digits only, where CPython also accepts
+//! other Unicode decimal digits. `float()` rejects underscores, where CPython accepts them. The
+//! `repr` of a string inside a container escapes only C0 controls and DEL, where CPython also
+//! escapes other non-printable code points (for example U+00A0, U+0085, and U+200B). The `bytes`
+//! repr always uses single quotes, where CPython switches to double quotes when the bytes contain
+//! a single quote. BLOB values use that simplified `bytes` repr. Integers are exact at any size
+//! (`PyInt`). Only the SQLite bind is limited to 64 bits, as in Python.
 
 use std::{
     cmp::Ordering,
@@ -211,9 +216,10 @@ impl<T: Transport> DaemonCalls for FlockClient<T> {
     }
 }
 
-/// Maps a daemon-client failure to the exception class the Python CLI would surface: a refused
-/// or unavailable command exits non-zero (`RuntimeError`), an unparseable reply is
-/// `JSONDecodeError`, and a socket timeout is `TimeoutExpired`.
+/// Maps a daemon-client failure to the exception class the Python oracle surfaces. The oracle
+/// reads the daemon through the CLI subprocess, so any failure the CLI cannot answer (an absent
+/// or refused socket, no reply, a refusal, or a reply its `json.loads` rejects) makes the CLI
+/// exit non-zero, and `command_json` raises `RuntimeError`. A socket timeout is `TimeoutExpired`.
 fn daemon_error(error: ClientError) -> SourceError {
     match error {
         ClientError::Io(io)
@@ -224,10 +230,7 @@ fn daemon_error(error: ClientError) -> SourceError {
         {
             SourceError::new("TimeoutExpired", io.to_string())
         }
-        ClientError::Io(io) => SourceError::new("OSError", io.to_string()),
-        ClientError::Protocol(text) => SourceError::new("JSONDecodeError", text),
-        ClientError::Unavailable(text) => SourceError::new("RuntimeError", text),
-        ClientError::Dunk(error) => SourceError::new("RuntimeError", error.to_string()),
+        other => SourceError::new("RuntimeError", other.to_string()),
     }
 }
 
@@ -764,7 +767,15 @@ fn read_metrics<D: DaemonCalls>(daemon: &mut D) -> Result<Value, ReadFailure> {
 }
 
 fn read_accounting<G: GitHubSource>(github: &mut G) -> Result<Accounting, ReadFailure> {
-    Ok(published_accounting(github)?)
+    match published_accounting(github) {
+        Ok(accounting) => Ok(accounting),
+        // The only TypeError published_accounting raises is the unhashable bound_kind check. It
+        // escapes Python's `try`, so it stops the run instead of being recorded as unavailable.
+        Err(error) if error.python_type == "TypeError" => {
+            Err(ReadFailure::Stop(fault("TypeError", error.detail)))
+        }
+        Err(error) => Err(ReadFailure::Caught(error)),
+    }
 }
 
 /// One PM-reviewed accounting snapshot: the `published_accounting` return value.
@@ -857,44 +868,58 @@ fn validate_published(
             "published accounting and census are not jointly reviewed",
         )
     };
-    let (Some(strict), Some(identities), Some(ceiling)) = (
+    // Python's `or` chain stops at its first true test, so each test below runs only when the
+    // ones before it passed. An unhashable bound_kind raises TypeError, reached only in that case.
+    let (Some(strict), Some(identities)) = (
         json_int(checkpoint.get("strict_full_c_originals")),
         json_int(checkpoint.get("verified_game_identities")),
-        json_int(census.get("count")),
     ) else {
         return Err(invalid());
     };
+    if !py_eq_int(checkpoint.get("schema_version"), 1)
+        || strict.is_negative()
+        || identities.is_negative()
+        || census.get("status").and_then(Value::as_str) != Some("reviewed")
+        || census.get("reviewed_by").and_then(Value::as_str) != Some("PM")
+    {
+        return Err(invalid());
+    }
+    let bound_kind = match census.get("bound_kind") {
+        Some(Value::Array(_) | Value::Object(_)) => {
+            return Err(SourceError::new(
+                "TypeError",
+                "unhashable type in the bound_kind membership test",
+            ));
+        }
+        Some(Value::String(kind)) if kind == "exact" || kind == "upper_bound" => kind.as_str(),
+        _ => return Err(invalid()),
+    };
+    let ceiling = json_int(census.get("count"));
     let inputs = match checkpoint.get("inputs") {
         Some(Value::Object(map)) if !map.is_empty() => map,
         _ => return Err(invalid()),
     };
-    let bound_kind = census.get("bound_kind").and_then(Value::as_str);
     let evidence = census.get("evidence_doc").and_then(Value::as_str);
     let digests_match = census
         .get("source_digests")
         .is_some_and(|digests| py_eq(digests, &Value::Object(inputs.clone())));
-    let well_formed = py_eq_int(checkpoint.get("schema_version"), 1)
-        && !strict.is_negative()
-        && !identities.is_negative()
-        && ceiling.is_positive()
-        && strict.cmp_exact(&identities).is_le()
-        && identities.cmp_exact(&ceiling).is_le()
-        && census.get("status").and_then(Value::as_str) == Some("reviewed")
-        && census.get("reviewed_by").and_then(Value::as_str) == Some("PM")
-        && matches!(bound_kind, Some("exact" | "upper_bound"))
-        && census.get("scope").and_then(Value::as_str) == Some(CENSUS_SCOPE)
+    let well_formed = ceiling.as_ref().is_some_and(|ceiling| {
+        ceiling.is_positive()
+            && strict.cmp_exact(&identities).is_le()
+            && identities.cmp_exact(ceiling).is_le()
+    }) && census.get("scope").and_then(Value::as_str) == Some(CENSUS_SCOPE)
         && digests_match
         && evidence.is_some_and(|doc| doc.starts_with("docs/re/"));
-    if !well_formed {
+    let Some(ceiling) = ceiling.filter(|_| well_formed) else {
         return Err(invalid());
-    }
+    };
     let signature = sha256_hex(py_dumps(&Value::Object(inputs.clone()), ", ", ": ").as_bytes());
     Ok(Accounting {
         commit_oid: commit,
         strict_full_c: strict,
         verified_game_identities: identities,
         ceiling,
-        bound_kind: bound_kind.unwrap_or_default().to_owned(),
+        bound_kind: bound_kind.to_owned(),
         source_signature: signature,
         evidence_ref: evidence.unwrap_or_default().to_owned(),
     })
@@ -1009,6 +1034,14 @@ pub fn fromtimestamp_utc(value: f64) -> Result<DateTime<Utc>, SourceError> {
         ));
     }
     let whole = value.trunc();
+    // CPython converts the integral part to a C time_t first; anything outside 64 bits overflows.
+    const TWO_POW_63: f64 = 9_223_372_036_854_775_808.0;
+    if !(-TWO_POW_63..TWO_POW_63).contains(&whole) {
+        return Err(SourceError::new(
+            "OverflowError",
+            "timestamp out of range for platform time_t",
+        ));
+    }
     let mut seconds = whole as i64;
     let mut micros = ((value - whole) * 1_000_000.0).round_ties_even() as i64;
     if micros >= 1_000_000 {
@@ -1018,8 +1051,40 @@ pub fn fromtimestamp_utc(value: f64) -> Result<DateTime<Utc>, SourceError> {
         seconds -= 1;
         micros += 1_000_000;
     }
+    // gmtime fails with EOVERFLOW (an OSError) once the year no longer fits C's int tm_year. Years
+    // that still fit are then checked against 1..9999, which is a ValueError in CPython.
+    let year = civil_year(seconds.div_euclid(86_400));
+    if !(-2_147_481_748..=2_147_485_547).contains(&year) {
+        return Err(SourceError::new(
+            "OSError",
+            "[Errno 75] Value too large for defined data type",
+        ));
+    }
+    if !(1..=9_999).contains(&year) {
+        return Err(SourceError::new(
+            "ValueError",
+            format!("year {year} is out of range"),
+        ));
+    }
     DateTime::from_timestamp(seconds, (micros * 1_000) as u32)
         .ok_or_else(|| SourceError::new("ValueError", format!("timestamp {value} out of range")))
+}
+
+/// Proleptic Gregorian year of a day count from 1970-01-01 (Howard Hinnant's civil_from_days).
+fn civil_year(days: i64) -> i64 {
+    let shifted = days + 719_468;
+    let era = shifted.div_euclid(146_097);
+    let day_of_era = shifted.rem_euclid(146_097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let shifted_month = (5 * day_of_year + 2) / 153;
+    let year = year_of_era + era * 400;
+    if shifted_month >= 10 {
+        year + 1
+    } else {
+        year
+    }
 }
 
 /// Python `INSERT INTO collection_runs`: one row per run, with each source state and the
