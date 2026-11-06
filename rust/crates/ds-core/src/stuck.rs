@@ -1201,4 +1201,52 @@ mod tests {
         assert_eq!("reset", tracker.decide(&after, &config, 1120.0).action);
         assert!(!tracker.decide(&after, &config, 1240.0).recovers());
     }
+
+    /// t3355 (t820 proof D) wiring row 28, plain message-id form: test_dunk_recovery_wiring.py::
+    /// test_native_upgrade_does_not_refund_an_existing_legacy_key (oracle 79bc92fa). The Python test
+    /// spends the canonical key (message identity, native pane generation, canonical fingerprint),
+    /// then ticks under native evidence. A trace of the oracle shows max_attempts 1. The first
+    /// sighting takes the spent count, and the threshold tick goes terminal instead of pressing.
+    /// sends_tests asserts the native-proof form only for the identity m1@100, so this is the plain
+    /// message-id form. Tracker layer.
+    #[test]
+    fn native_upgrade_does_not_refund_a_spent_canonical_key_for_a_plain_message_id() {
+        let config = Config {
+            threshold_s: 120.0,
+            max_attempts: 1,
+            cooldown_s: 60.0,
+            observation_interval_s: 20.0,
+            ..Config::default()
+        };
+        let native = observation("wiring text");
+        let canonical = fingerprint("wiring text");
+        let mut spent = Tracker::default();
+        spent.spent.insert(
+            ledger_key(
+                &native.pane_id,
+                "m1",
+                native.generation.as_deref(),
+                &canonical,
+            ),
+            1,
+        );
+        assert_eq!("wait", spent.decide(&native, &config, 1000.0).action);
+        let terminal = spent.decide(&native, &config, 1120.0);
+        assert_eq!("terminal", terminal.action);
+        assert!(!terminal.recovers());
+        assert!(
+            spent.reserved(
+                &native.pane_id,
+                "m1",
+                native.generation.as_deref(),
+                &canonical
+            ) >= 1,
+            "the spent canonical key must not be refunded"
+        );
+
+        // Positive control: with no spent canonical key, the same two ticks recover once.
+        let mut fresh = Tracker::default();
+        assert_eq!("wait", fresh.decide(&native, &config, 1000.0).action);
+        assert!(fresh.decide(&native, &config, 1120.0).recovers());
+    }
 }
