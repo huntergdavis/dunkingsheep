@@ -993,6 +993,8 @@ struct Plan {
     list_messages: Value,
     cancel: Result<Value, String>,
     lane_alive: bool,
+    /// What delivery_capability reports for agent_alive, which the 20-second cache keeps.
+    capability_alive: bool,
 }
 
 impl Default for Plan {
@@ -1007,6 +1009,7 @@ impl Default for Plan {
             list_messages: json!({"queued": [{"message_id": "q-1", "blocked_by": "input box contains a draft"}], "recent": []}),
             cancel: Ok(json!({"message_id": "q-1", "status": "cancelled"})),
             lane_alive: true,
+            capability_alive: true,
         }
     }
 }
@@ -1029,7 +1032,7 @@ fn planned_harness(plan: Arc<Mutex<Plan>>) -> Harness {
                 Ok(json!({"panes": [pane]}))
             }
             "delivery_capability" => {
-                Ok(json!({"alive": true, "send": "guarded", "agent_alive": plan.lane_alive}))
+                Ok(json!({"alive": true, "send": "guarded", "agent_alive": plan.capability_alive}))
             }
             other => Err(format!("unexpected daemon command {other}")),
         }
@@ -1038,7 +1041,12 @@ fn planned_harness(plan: Arc<Mutex<Plan>>) -> Harness {
 
 /// Posts message 1 as a guarded queued send and returns its harness and plan.
 async fn posted_queued() -> (Harness, Arc<Mutex<Plan>>) {
-    let plan = Arc::new(Mutex::new(Plan::default()));
+    posted_queued_with(Plan::default()).await
+}
+
+/// Like `posted_queued`, with the daemon answering from `initial`.
+async fn posted_queued_with(initial: Plan) -> (Harness, Arc<Mutex<Plan>>) {
+    let plan = Arc::new(Mutex::new(initial));
     let harness = planned_harness(Arc::clone(&plan));
     let posted = harness
         .post(
@@ -1210,7 +1218,13 @@ async fn send_now_refusals_use_the_python_states_and_details() {
 #[tokio::test]
 async fn send_now_pane_loss_and_urgent_failure_leave_the_message_uncertain() {
     // The lane stops being an agent after the message was held.
-    let (harness, plan) = posted_queued().await;
+    // The post caches a capability that says the pane is not an agent (the cache lasts 20 seconds),
+    // so the lane loss below is what send-now sees and refuses on.
+    let (harness, plan) = posted_queued_with(Plan {
+        capability_alive: false,
+        ..Plan::default()
+    })
+    .await;
     plan.lock().expect("plan").lane_alive = false;
     assert_refusal(
         send_now_one(&harness).await,
@@ -1248,6 +1262,7 @@ async fn send_now_pane_loss_and_urgent_failure_leave_the_message_uncertain() {
 async fn post_refuses_when_no_agent_is_available_in_the_channel() {
     let plan = Arc::new(Mutex::new(Plan {
         lane_alive: false,
+        capability_alive: false,
         ..Plan::default()
     }));
     let harness = planned_harness(plan);
