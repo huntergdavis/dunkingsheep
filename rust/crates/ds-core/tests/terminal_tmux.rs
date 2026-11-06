@@ -597,8 +597,61 @@ fn a_refused_resize_reports_tmux_words_and_no_geometry() {
     permissions.set_mode(0o755);
     fs::set_permissions(&script, permissions).unwrap();
     let mut backend = isolated_backend(script);
+    // Read the window back from tmux before the refused resize, and again after it.
+    let before = backend.get_pane("%2").map(|pane| (pane.width, pane.height));
     let error = backend.resize("%2", 999, 999).expect_err("tmux refused");
     assert_eq!("width too large", error.message);
+    let after = backend.get_pane("%2").map(|pane| (pane.width, pane.height));
+    assert_eq!(Some((120, 40)), before, "the listing before the refusal");
+    assert_eq!(
+        before, after,
+        "a refused resize leaves the geometry exactly as it was"
+    );
+    let argv = fs::read_to_string(dir.path().join("argv.txt")).unwrap_or_default();
+    assert!(
+        argv.contains("resize-window -t %2 -x 999 -y 999"),
+        "tmux was asked and refused: {argv}"
+    );
+}
+
+#[test]
+fn a_multi_pane_window_says_which_panes_it_moved() {
+    let _serial = serial();
+    let dir = tempdir();
+    // Window @2 holds the target %2 and its neighbour %3. %9 is in another window: it must not count.
+    let target = pane_line("%2", "$2", "@2", "claude", "2202")
+        .replace(&["120", "40"].join(SEP), &["60", "40"].join(SEP));
+    let neighbour = pane_line("%3", "$2", "@2", "claude", "2203")
+        .replace(&["120", "40"].join(SEP), &["59", "40"].join(SEP));
+    let other = pane_line("%9", "$2", "@9", "claude", "2209");
+    let before = format!("{target}\n{neighbour}\n{other}");
+    // The re-layout moves both panes of the window and leaves the other window alone.
+    let target_after = pane_line("%2", "$2", "@2", "claude", "2202")
+        .replace(&["120", "40"].join(SEP), &["45", "30"].join(SEP));
+    let neighbour_after = pane_line("%3", "$2", "@2", "claude", "2203")
+        .replace(&["120", "40"].join(SEP), &["44", "30"].join(SEP));
+    let after = format!("{target_after}\n{neighbour_after}\n{other}");
+    let fake = fake_tmux_that_resizes(dir.path(), &before, &after);
+    let mut backend = isolated_backend(fake);
+
+    let resize = backend.resize("%2", 45, 30).expect("resize");
+    assert_eq!(2, resize.window_pane_count, "the window holds two panes");
+    assert_eq!((Some(45), Some(30)), (resize.cols, resize.rows));
+    // Every pane whose size changed is reported with its size before; the other window is not.
+    let moved: Vec<&str> = resize
+        .resized_panes
+        .iter()
+        .map(|pane| pane.pane_id.as_str())
+        .collect();
+    assert_eq!(vec!["%2", "%3"], moved);
+    let (first, second) = (&resize.resized_panes[0], &resize.resized_panes[1]);
+    assert_eq!((Some(60), Some(40)), (first.cols_before, first.rows_before));
+    assert_eq!((45, 30), (first.cols, first.rows));
+    assert_eq!(
+        (Some(59), Some(40)),
+        (second.cols_before, second.rows_before)
+    );
+    assert_eq!((44, 30), (second.cols, second.rows));
 }
 
 fn isolated_backend(binary: impl Into<PathBuf>) -> TmuxBackend {

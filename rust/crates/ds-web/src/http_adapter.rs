@@ -255,7 +255,7 @@ fn http_pane(pane: &Pane) -> serde_json::Value {
         "agent":agent,"agent_status":"unknown","agent_session":null,
         "focused":pane.active,"label":pane.label,"terminal_title_stripped":pane.label,
         "terminal_title":pane.title,"pane_pid":pane.pane_pid,
-        "cols":pane.width,"rows":pane.height,"managed":false,
+        "cols":pane.known_width(),"rows":pane.known_height(),"managed":false,
         "tab_label":pane.tab,"workspace_label":pane.workspace,
         "tab_number":pane.window_index,"workspace_number":pane.workspace_index
     })
@@ -821,6 +821,38 @@ pub(crate) mod tests {
                 port: 0
             }
         );
+    }
+
+    #[test]
+    fn a_pane_with_no_geometry_emits_null_cols_and_rows() {
+        // The parser stores an absent geometry field as 0. The route says null, as the Python
+        // does, and a measured size still comes through as a number.
+        let unknown = Pane {
+            pane_id: "%2".into(),
+            window_id: "@2".into(),
+            ..Default::default()
+        };
+        let row = http_pane(&unknown);
+        assert!(row["cols"].is_null(), "{row}");
+        assert!(row["rows"].is_null(), "{row}");
+        let measured = Pane {
+            width: 120,
+            height: 40,
+            ..unknown
+        };
+        let row = http_pane(&measured);
+        assert_eq!(120, row["cols"]);
+        assert_eq!(40, row["rows"]);
+    }
+
+    #[test]
+    fn the_tmux_backend_advertises_resize() {
+        // Row 36 (T55 Q1), the positive half: the production tmux backend advertises resize.
+        // The ds-core route gates resize on that advertisement (http.rs), so this is the
+        // capability the live route depends on. The Python's full set is not mirrored here.
+        let terminal = TmuxBackend::with_registry("/no/tmux", "/no/registry.json");
+        let backend = TmuxHttpBackend(std::sync::Mutex::new(terminal));
+        assert!(backend.capabilities().contains("resize"));
     }
 
     #[tokio::test]

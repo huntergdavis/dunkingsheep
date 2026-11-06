@@ -98,6 +98,9 @@ fn a_twelve_field_line_parses_with_no_geometry() {
         (pane.width, pane.height),
         "no size is not size zero-by-guess"
     );
+    // The route reads these: an absent size is not known, so it is null there, never 0.
+    assert_eq!(None, pane.known_width());
+    assert_eq!(None, pane.known_height());
     assert!(!pane.active);
     assert_eq!(Some(1101), pane.pane_pid);
 }

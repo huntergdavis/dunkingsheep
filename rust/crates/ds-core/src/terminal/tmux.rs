@@ -1188,7 +1188,9 @@ impl Terminal for TmuxBackend {
         let Some(before) = self.get_pane(pane_id) else {
             return Err(TerminalError::refused(format!("no such pane {pane_id}")));
         };
-        let window = before.tab_id();
+        // tmux's window id (`@N`), which the Python calls `tab_id`. `Pane::tab_id` is the
+        // pane-id prefix, not a tmux window, so keying on it saw only the target pane.
+        let window = before.window_id.clone();
         let geometry_before = self.window_geometry(&window);
         let attached = self.client_count(&before.workspace);
         let result = self.run(&[
@@ -1415,8 +1417,11 @@ impl TmuxBackend {
     /// second subprocess - and it is measured AFTER the call, which is the point.
     fn window_geometry(&self, window_id: &str) -> std::collections::BTreeMap<String, (i64, i64)> {
         let mut geometry = std::collections::BTreeMap::new();
+        if window_id.is_empty() {
+            return geometry;
+        }
         for pane in self.list_panes() {
-            if pane.window_id == window_id || pane.tab_id() == window_id {
+            if pane.window_id == window_id {
                 geometry.insert(pane.pane_id.clone(), (pane.width, pane.height));
             }
         }
