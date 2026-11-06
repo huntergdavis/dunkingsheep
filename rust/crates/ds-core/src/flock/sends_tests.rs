@@ -33,6 +33,10 @@ struct Pane {
     screen_script: RefCell<VecDeque<Option<String>>>,
     status_script: RefCell<VecDeque<Option<String>>>,
     attempt_generation_script: RefCell<VecDeque<Option<String>>>,
+    /// The generation read once the script is empty. `generation_after_send` replaces it when the
+    /// terminal action (`send_text`) runs, as a pane swap does mid-attempt.
+    generation: RefCell<Option<String>>,
+    generation_after_send: RefCell<Option<String>>,
     now: f64,
     sleeps: Vec<f64>,
     remembered: BTreeMap<String, String>,
@@ -177,6 +181,9 @@ impl SendPreparationEnv for Pane {
         if let Some(callback) = self.on_send_text.borrow_mut().as_mut() {
             callback();
         }
+        if let Some(next) = self.generation_after_send.borrow_mut().take() {
+            *self.generation.borrow_mut() = Some(next);
+        }
         self.events.push("typed");
         self.typed.push((pane_id.into(), text.into()));
         match &self.send_refusal {
@@ -188,6 +195,9 @@ impl SendPreparationEnv for Pane {
     fn attempt_generation(&self, pane_id: &str) -> Option<String> {
         if let Some(generation) = self.attempt_generation_script.borrow_mut().pop_front() {
             return generation;
+        }
+        if let Some(generation) = self.generation.borrow().clone() {
+            return Some(generation);
         }
         pane_generation(self, pane_id)
     }
@@ -5195,25 +5205,49 @@ mod t55_rows_16_65 {
     #[test]
     fn the_attempt_identity_and_the_registry_generation_are_captured_before_delivery() {
         let dir = tempfile::tempdir().unwrap();
-        let flock = Flock::new(
-            dir.path().join("launches.json"),
-            dir.path().join("lanes.json"),
-            false,
-        );
-        let message = Message::new("m-attempt", PANE, "pane", "hello", "test");
+        let flock = Arc::new(persistent_receipt_flock(dir.path()));
+        // These flags are the ones the Sent path is pinned by, so the delivery reaches the
+        // typed-attempt receipt (see fold_during_success_and_failure_settles_the_exact_receipt_frame).
+        let mut message = Message::new("m-attempt", PANE, "pane", "hello", "test");
+        message.hold_while_typing = false;
+        message.press_enter = false;
         flock
             .outbox
             .lock()
             .unwrap()
             .insert(PANE.into(), vec![message]);
-        let mut pane = Pane::default();
-        pane.screens.insert(PANE.into(), hint_screen());
-        // The pane is replaced mid-attempt: the first identity read is the pre-delivery one.
-        *pane.attempt_generation_script.borrow_mut() = VecDeque::from([
-            Some("pid:1:start:before".to_string()),
-            Some("pid:2:start:after".to_string()),
-        ]);
-        let _ = flock.deliver_message("m-attempt", 100.0, &mut pane, || None);
+        let mut pane = Pane {
+            receipt_forward: Some(real_receipt_forward(
+                Arc::clone(&flock),
+                serde_json::json!({"pane_id": PANE}),
+            )),
+            ..Pane::default()
+        };
+        // The pane holds the pre-delivery generation. The terminal action (send_text) replaces the
+        // pane, so every read after it returns the new generation.
+        *pane.generation.borrow_mut() = Some("pid:1:start:before".to_string());
+        *pane.generation_after_send.borrow_mut() = Some("pid:2:start:after".to_string());
+        let before = "pid:1:start:before".to_string();
+        let after = "pid:2:start:after".to_string();
+        assert_eq!(
+            Some(before.clone()),
+            pane.attempt_generation(PANE),
+            "premise: the pane is read as the pre-delivery generation"
+        );
+        assert_eq!(
+            DeliveryOutcome::Sent,
+            flock.deliver_message("m-attempt", 100.0, &mut pane, || None),
+            "the delivery reaches the typed-attempt receipt and is sent"
+        );
+        assert_eq!(
+            Some(after.clone()),
+            pane.attempt_generation(PANE),
+            "premise: the terminal action replaced the pane"
+        );
+        assert_ne!(
+            before, after,
+            "premise: the generation changed during delivery"
+        );
         let delivered = flock
             .message_history
             .lock()
@@ -5226,9 +5260,9 @@ mod t55_rows_16_65 {
             .find(|m| m.id == "m-attempt")
             .map(|m| m.attempt_generation.clone());
         assert_eq!(
-            Some(Some("pid:1:start:before".to_string())),
+            Some(Some(before.clone())),
             delivered.or(held),
-            "the attempt identity must be the pane the text went into"
+            "the attempt identity must be the pane the text went into, not the one after the action"
         );
         let registry = flock
             .stuck_candidates
@@ -5237,7 +5271,7 @@ mod t55_rows_16_65 {
             .get(PANE)
             .and_then(|candidate| candidate.generation.clone());
         assert_eq!(
-            Some("pid:1:start:before".to_string()),
+            Some(before),
             registry,
             "the registry must carry the ATTEMPT generation, not the pane's generation after delivery"
         );
