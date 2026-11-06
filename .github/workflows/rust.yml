@@ -96,7 +96,7 @@ jobs:
         run: cargo build --manifest-path rust/Cargo.toml -p ds-cli --bin dunkingsheep
       - name: gate unit tests (no daemon, no tmux)
         run: |
-          for test in test_production_replay test_diff_harness_sandbox test_send_scenario test_ci_production_replay; do
+          for test in test_production_replay test_diff_harness_sandbox test_send_scenario test_task_follow_scenario test_ci_production_replay; do
             python3 -I "tests/$test.py"
           done
       - name: replay the recorded send traffic against the Rust daemon
