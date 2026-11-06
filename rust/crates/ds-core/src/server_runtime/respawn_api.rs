@@ -185,13 +185,14 @@ mod tests {
         } else {
             format!("echo {new_pid} > pid; printf '› Ask Codex to do anything\\n' > screen")
         };
+        let sep = crate::terminal::parse::pane_separator();
         let body = format!(
             r##"#!/bin/sh
 cd {root} || exit 1
 case "$1" in
 list-panes)
   p=$(cat pid)
-  printf '%%2\037$1\037@1\037{cwd}\037claude\037worker\0371\037ws\037tab\0370\0370\037%s\03780\03724\n' "$p"
+  printf '%%2{sep}$1{sep}@1{sep}{cwd}{sep}claude{sep}worker{sep}1{sep}ws{sep}tab{sep}0{sep}0{sep}%s{sep}80{sep}24\n' "$p"
   ;;
 capture-pane) cat screen ;;
 respawn-pane)
