@@ -3344,6 +3344,329 @@ fn api(ns: &Map<String, Value>) -> Outcome {
     }
 }
 
+fn watchdog_error(message: impl Into<String>) -> Outcome {
+    Outcome {
+        stdout: String::new(),
+        stderr: message.into(),
+        code: 2,
+    }
+}
+
+fn watchdog_replay(
+    config: &Value,
+    start: f64,
+    end: f64,
+    step_minutes: f64,
+) -> Result<Value, String> {
+    use ds_core::watchdog::{
+        evaluate,
+        planner::{advance_streaks, dedupe_key, plan},
+        state::empty_state,
+    };
+
+    // Python raises an uncaught ValueError here: a traceback and exit 1. The port returns the same
+    // message as a usage error (exit 2), the exit the replay contract gives argument errors.
+    // Intentional deviation, pinned by cli_route_51_watchdog.
+    if step_minutes <= 0.0 || end < start {
+        return Err("replay needs step > 0 and end >= start".into());
+    }
+    let replayable: Vec<&str> = ["dunk.skip_loop", "inbox.ambiguous_sender"]
+        .into_iter()
+        .filter(|rule| config["rules"][*rule]["enabled"] == true)
+        .collect();
+    let mut state = empty_state();
+    let mut counts = serde_json::Map::new();
+    for rule in &replayable {
+        counts.insert((*rule).into(), serde_json::json!({"vp": 0, "owner": 0}));
+    }
+    let mut errors = Vec::new();
+    let mut at = start;
+    while at <= end {
+        let result = evaluate::evaluate(config, at, None, None, Some(&replayable));
+        for error in result["errors"].as_array().into_iter().flatten() {
+            let mut entry = error.clone();
+            entry["at"] = serde_json::json!(at);
+            errors.push(entry);
+        }
+        let findings = result["findings"].as_array().cloned().unwrap_or_default();
+        let streaks = advance_streaks(config, &state, &findings, at);
+        for decision in plan(config, &findings, &state, &streaks, at, None) {
+            let rule = decision["finding"]["rule"].as_str().unwrap_or("");
+            // evaluate() only runs the replayable rules, so this lookup cannot miss today. If that
+            // ever changes, return a clean error instead of panicking.
+            let Some(tally) = counts.get_mut(rule) else {
+                return Err(format!(
+                    "replay got a finding for non-replayable rule {rule:?}"
+                ));
+            };
+            if decision["vp"] == "no" {
+                tally["vp"] = serde_json::json!(tally["vp"].as_i64().unwrap_or(0) + 1);
+                let alerts = state["alerts"]
+                    .as_object_mut()
+                    .ok_or("replay state alerts must be an object")?;
+                alerts
+                    .entry(dedupe_key(&decision["finding"]))
+                    .or_insert_with(|| serde_json::json!({}))["last_alerted"] =
+                    serde_json::json!(at);
+            }
+            if decision["owner"] == "no" {
+                tally["owner"] = serde_json::json!(tally["owner"].as_i64().unwrap_or(0) + 1);
+            }
+        }
+        state["streaks"] = streaks;
+        at += step_minutes * 60.0;
+    }
+    let rules = config["rules"]
+        .as_object()
+        .ok_or("rules must be an object")?;
+    let mut not_replayable: Vec<_> = rules
+        .iter()
+        .filter(|(name, rule)| rule["enabled"] == true && !replayable.contains(&name.as_str()))
+        .map(|(name, _)| name.clone())
+        .collect();
+    not_replayable.sort();
+    Ok(
+        serde_json::json!({"from":start,"to":end,"step_minutes":step_minutes,"counts":counts,
+        "not_replayable":not_replayable,"errors":errors}),
+    )
+}
+
+fn watchdog_text(report: &Value) -> String {
+    let head = format!(
+        "watchdog {}{}  findings {}  vp {}  owner {}  needs_attention {}",
+        report["mode"].as_str().unwrap_or(""),
+        report["why_not_live"]
+            .as_str()
+            .map(|why| format!(" ({why})"))
+            .unwrap_or_default(),
+        report["counts"]["findings"],
+        report["counts"]["vp"],
+        report["counts"]["owner"],
+        report["counts"]["needs_attention"]
+    );
+    let mut lines = vec![head];
+    lines.extend(
+        report["lines"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_owned),
+    );
+    for problem in report["problems"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+    {
+        if report["mode"] != "live" {
+            lines.push(format!("SELF source=watchdog-self {problem}"));
+        }
+    }
+    if let Some(error) = report["delivery_error"].as_str() {
+        lines.push(format!("DELIVERY FAILED (source=watchdog-self): {error}; heartbeat not touched, so the dead-man check will report it"));
+    }
+    if !report["delivery_error"].is_string() {
+        if let Some(carried) = report
+            .get("carried_failure")
+            .filter(|value| !value.is_null())
+        {
+            let count = report["delivery_failure_count"].as_i64().unwrap_or(0);
+            let suffix = if count != 0 {
+                format!(" [{count} failed escalation(s) since this state file began]")
+            } else {
+                String::new()
+            };
+            // Python: `{carried.get('target')!r}` for the target, `str()` for reason and pending.
+            // A missing or null value prints as None, which the shared printers already do.
+            lines.insert(0, format!("CARRIED: escalation to {} failed at {} ({}); {} line(s) were pending - resend them from the state record if they still matter{suffix}",
+                crate::render_print::py_repr_value(&carried["target"]),
+                carried["at"].as_f64().unwrap_or(0.0) as i64,
+                crate::render_print::py_str(&carried["reason"]),
+                crate::render_print::py_str(&carried["pending"])));
+        }
+    }
+    format!("{}\n", lines.join("\n"))
+}
+
+/// The Rust CLI has no owner-channel route resolver. Keep this missing integration explicit and
+/// fail closed instead of injecting a closure that looks like a production route reader.
+struct WatchdogOwnerRouteUnconfigured;
+
+impl ds_core::watchdog::run::OwnerTransport for WatchdogOwnerRouteUnconfigured {
+    fn desk_channel(&self) -> Result<String, ds_core::error::DunkError> {
+        Err(ds_core::error::DunkError::Unavailable(
+            "watchdog owner route is not configured in the Rust CLI".into(),
+        ))
+    }
+
+    fn post(&self, _body: &str) -> Result<i64, ds_core::watchdog::run::SendError> {
+        Err(ds_core::watchdog::run::SendError {
+            kind: "OwnerChannelUnavailable".into(),
+            message: "watchdog owner route is not configured in the Rust CLI".into(),
+        })
+    }
+
+    fn confirmed_through(&self) -> Result<Option<Value>, ds_core::error::DunkError> {
+        Err(ds_core::error::DunkError::Unavailable(
+            "watchdog owner route is not configured in the Rust CLI".into(),
+        ))
+    }
+}
+
+fn watchdog(ns: &Map<String, Value>) -> Outcome {
+    use ds_core::watchdog::{
+        config::load_config,
+        run::{self, SendError},
+    };
+    use std::path::PathBuf;
+
+    let path = |key: &str, default: &str| -> PathBuf {
+        PathBuf::from(ds_core::native_session::expanduser(
+            text(ns, key).unwrap_or(default),
+        ))
+    };
+    let config_path = path("config", "~/.config/dunkingsheep/watchdog.json");
+    let error_path = path("error_file", "~/.config/dunkingsheep/watchdog.config-error");
+    let config_path_text = config_path.to_string_lossy();
+    let config = match load_config(&config_path_text) {
+        Ok(config) => config,
+        Err(error) => {
+            let message = format!("CONFIG: {error}");
+            let mut outcome = watchdog_error(format!("watchdog: refusing to start: {message}\n"));
+            if ns.get("dry_run") != Some(&Value::Bool(true))
+                && ns.get("replay") != Some(&Value::Bool(true))
+            {
+                if let Some(parent) = error_path
+                    .parent()
+                    .filter(|parent| !parent.as_os_str().is_empty())
+                {
+                    if let Err(write_error) = std::fs::create_dir_all(parent)
+                        .and_then(|_| std::fs::write(&error_path, format!("{message}\n")))
+                    {
+                        outcome.stderr.push_str(&format!(
+                            "watchdog: could not write config error marker: {write_error}\n"
+                        ));
+                    }
+                } else if let Err(write_error) = std::fs::write(&error_path, format!("{message}\n"))
+                {
+                    outcome.stderr.push_str(&format!(
+                        "watchdog: could not write config error marker: {write_error}\n"
+                    ));
+                }
+            }
+            return outcome;
+        }
+    };
+    let replay = ns.get("replay") == Some(&Value::Bool(true));
+    let dry_run = ns.get("dry_run") == Some(&Value::Bool(true));
+    if error_path.exists() && !dry_run && !replay {
+        if let Err(error) = std::fs::remove_file(&error_path) {
+            return watchdog_error(format!(
+                "watchdog: could not remove config error marker: {error}\n"
+            ));
+        }
+    }
+    let live = config["enabled"] == true && config["dry_run"] == false && !dry_run && !replay;
+    if live && ns.get("now").is_some_and(|value| !value.is_null()) {
+        return watchdog_error(
+            "watchdog: refusing --now on a live run (use --dry-run or --replay)\n",
+        );
+    }
+    let now = ns.get("now").and_then(Value::as_f64).unwrap_or_else(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64()
+    });
+    if replay {
+        let (Some(start), Some(step)) = (
+            ns.get("replay_from").and_then(Value::as_f64),
+            ns.get("replay_step")
+                .and_then(Value::as_f64)
+                .filter(|value| *value != 0.0),
+        ) else {
+            return watchdog_error("watchdog: --replay needs --from and --step\n");
+        };
+        // Match Python's `args.replay_to or now`: an explicit numeric zero is falsy.
+        let end = ns
+            .get("replay_to")
+            .and_then(Value::as_f64)
+            .filter(|value| *value != 0.0)
+            .unwrap_or(now);
+        return match watchdog_replay(&config, start, end, step) {
+            Ok(result) if matches!(ns.get("json"), Some(Value::Bool(true))) => Outcome {
+                stdout: format!("{}\n", sorted_json(&result)),
+                stderr: String::new(),
+                code: 0,
+            },
+            Ok(result) => {
+                let mut lines = Vec::new();
+                for (rule, counts) in result["counts"].as_object().into_iter().flatten() {
+                    lines.push(format!(
+                        "REPLAY rule={rule} would_notify_vp={} would_page_owner={}",
+                        counts["vp"], counts["owner"]
+                    ));
+                }
+                for rule in result["not_replayable"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                {
+                    lines.push(format!("REPLAY rule={rule} not replayable"));
+                }
+                for error in result["errors"].as_array().into_iter().flatten() {
+                    lines.push(format!(
+                        "SKIPPED rule={} at={} error={}",
+                        error["rule"].as_str().unwrap_or(""),
+                        error["at"],
+                        error["error"].as_str().unwrap_or("")
+                    ));
+                }
+                Outcome {
+                    stdout: if lines.is_empty() {
+                        String::new()
+                    } else {
+                        format!("{}\n", lines.join("\n"))
+                    },
+                    stderr: String::new(),
+                    code: 0,
+                }
+            }
+            Err(error) => watchdog_error(format!("watchdog: {error}\n")),
+        };
+    }
+    let mut client = None;
+    let mut send = |to: &str, subject: &str, body: &str| -> Result<(), SendError> {
+        if client.is_none() {
+            client = Some(
+                crate::daemon_cmd::raw_client(ns).map_err(|error| SendError {
+                    kind: "DaemonUnavailable".into(),
+                    message: error.to_string(),
+                })?,
+            );
+        }
+        run::inbox_sender(client.as_mut().unwrap(), to, subject, body).map_err(|error| SendError {
+            kind: "ClientError".into(),
+            message: error.to_string(),
+        })
+    };
+    let channel = WatchdogOwnerRouteUnconfigured;
+    match run::run(&config, now, dry_run, &mut send, &channel, None, None) {
+        Ok(report) => Outcome {
+            stdout: if matches!(ns.get("json"), Some(Value::Bool(true))) {
+                format!("{}\n", sorted_json(&report))
+            } else {
+                watchdog_text(&report)
+            },
+            stderr: String::new(),
+            code: 0,
+        },
+        Err(error) => watchdog_error(format!("watchdog: {error}\n")),
+    }
+}
+
 /// Run one parsed command (`ns` is the argparse namespace as a dictionary).
 pub fn run(ns: &Map<String, Value>) -> Outcome {
     let command = text(ns, "command").unwrap_or("");
@@ -3371,6 +3694,7 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
         }
         "install" => install_launcher(ns, json),
         "api" => api(ns),
+        "watchdog" => watchdog(ns),
         "mcp-setup" => mcp_setup(ns),
         "context" => context(ns, json),
         // `secrets-check [--base REF] [--cwd DIR] [--quiet]`: exit 1 + the refusal on stderr.
