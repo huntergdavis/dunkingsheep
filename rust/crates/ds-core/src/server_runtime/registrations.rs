@@ -444,10 +444,12 @@ mod tests {
         }
     }
 
-    /// A request from a process that is NOT in the pane's process tree. `sh` starts the client in
-    /// the background and exits at once, so the client is re-parented away from this test process
-    /// (the pane) and its ancestry never reaches the pane. The client writes the daemon's reply to
-    /// `out` once it has one, and the reply is returned.
+    /// A request from a process that is NOT in the pane's frame. Two things keep it out. It starts
+    /// a new session (`os.setsid()`), because `caller_from_peer` attributes a process with no agent
+    /// ancestor to its session leader, and this test's pane frame is that leader, so a same-session
+    /// client would be the pane. And `sh` starts the client in the background and exits at once,
+    /// so the client is re-parented and its ancestry never reaches the pane. The client writes the
+    /// daemon's reply to `out` once it has one, and the reply is returned.
     fn orphaned_socket_call(
         dir: &std::path::Path,
         socket: &std::path::Path,
@@ -460,6 +462,7 @@ mod tests {
         const CLIENT: &str = r#"import json, os, socket, sys
 request_path, socket_path, out_path = sys.argv[1], sys.argv[2], sys.argv[3]
 try:
+    os.setsid()
     with open(request_path, "rb") as handle:
         request = handle.read()
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -985,10 +988,13 @@ os.rename(out_path + ".tmp", out_path)
         let allocation = call("allocation", json!({"action":"status"}));
         assert!(allocation["workers"].is_array(), "{allocation}");
         assert!(allocation["offers"].is_array(), "{allocation}");
-        // A process outside the pane's tree is refused on the real socket: its register and offer
-        // are not authenticated, and nothing is written. The bound operator peer (this process) is
-        // accepted below. The missing-peer half of the Python case cannot be produced on a Linux
-        // unix socket, which always carries peer credentials; that half is a residual.
+        // A process outside the pane's frame is refused on the real socket: its register and offer
+        // are not authenticated, and nothing is written. The pane frame for this test is the
+        // session leader that caller_from_peer resolves for this process, not the test process
+        // itself, so the orphaned client must be in its own session as well as re-parented. The
+        // bound operator peer (this process) is accepted below. The missing-peer half of the Python
+        // case cannot be produced on a Linux unix socket, which always carries peer credentials;
+        // that half is a residual.
         for (id, command, args) in [
             (
                 9001,
