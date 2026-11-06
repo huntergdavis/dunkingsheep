@@ -5174,15 +5174,19 @@ fn stale_or_edited_scheduled_reminders_never_replay() {
     let edited_dir = tempfile::tempdir().unwrap();
     let (edited, mut edited_env) =
         scheduled_candidate_fixture(edited_dir.path(), bright, "failed", base);
-    let changed = serde_json::json!({"dunkers": [{
-        "id": "d7",
-        "running": true,
-        "target_pane_id": "%1",
-        "target_agent": "codex",
-        "target_cwd": "/work",
-        "text": "current owner-priority instruction"
-    }]});
-    edited.dunks.load(changed.as_object().unwrap());
+    // Edit the running dunk in place, as the Python test does (`dunker.text = ...`). `load` appends
+    // rows, so loading the edit would leave the old d7 in the list with its matching template.
+    edited
+        .dunks
+        .update(
+            "d7",
+            None,
+            &crate::flock::dunks::UpdateArgs {
+                text: Some("current owner-priority instruction".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
     for now in [base + 1300.0, base + 1420.0] {
         crate::flock::loops_stuck::strict_stuck_observer_scan(&edited, &mut edited_env, now)
             .unwrap();
