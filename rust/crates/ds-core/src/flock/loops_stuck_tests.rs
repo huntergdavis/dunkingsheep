@@ -1074,10 +1074,12 @@ fn federated_new_dialog_at_key_time_refuses() {
         crate::terminal::screen::modal_open(&dialog),
         "precondition: the dialog frame is a dialog"
     );
+    // A modal on screen is never a federated frame (composer_tests), so the key-time composer
+    // re-read refuses it. The modal branch of the key-time check is therefore not isolated here.
     assert_eq!(
-        crate::terminal::composer::federated_composer(true, &frame),
+        None,
         crate::terminal::composer::federated_composer(true, &dialog),
-        "precondition: the dialog must not change the composer text"
+        "precondition: a dialog is never a federated composer"
     );
     let dir = tempfile::tempdir().unwrap();
     let flock = scripted_candidate(&dir);
@@ -1140,8 +1142,11 @@ fn federated_failed_durable_reservation_never_presses() {
         0,
         federated_recovery_step(&flock, &mut probe, 100.0, &|_| {}).unwrap()
     );
-    // Removing the state directory makes the durable reservation save fail.
-    std::fs::remove_dir_all(dir.path()).unwrap();
+    // A directory where the state file belongs makes the durable reservation save fail. (Removing
+    // the directory does not: the save recreates it.)
+    let state_file = dir.path().join("state.json");
+    let _ = std::fs::remove_file(&state_file);
+    std::fs::create_dir(&state_file).unwrap();
     assert!(
         flock.save().is_err(),
         "precondition: the reservation save must fail"
