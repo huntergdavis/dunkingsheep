@@ -1124,4 +1124,81 @@ mod tests {
             );
         }
     }
+
+    /// t3355 (t820 proof D) scheduled rows 32 and 35: test_dunk_scheduled_recovery.py::
+    /// test_busy_turn_does_not_submit_owned_prompt and test_unknown_native_status_stays_unknown
+    /// (oracle 79bc92fa). A working or unknown status never recovers over two ticks and keeps no
+    /// clock. Tracker layer; the observer tick path is not reproduced.
+    #[test]
+    fn busy_or_unknown_status_never_recovers_over_two_ticks() {
+        let config = Config {
+            threshold_s: 120.0,
+            max_attempts: 1,
+            cooldown_s: 60.0,
+            observation_interval_s: 20.0,
+            ..Config::default()
+        };
+        for status in ["working", "unknown"] {
+            let mut blocked = observation("scheduled text");
+            blocked.status = status.into();
+            let mut tracker = Tracker::default();
+            assert!(
+                !tracker.decide(&blocked, &config, 1000.0).recovers(),
+                "{status}"
+            );
+            assert!(
+                !tracker.decide(&blocked, &config, 1120.0).recovers(),
+                "{status}"
+            );
+            assert!(tracker.records.is_empty(), "{status} keeps no clock");
+        }
+    }
+
+    /// t3355 (t820 proof D) scheduled row 31: test_dunk_scheduled_recovery.py::
+    /// test_added_human_continuation_never_submits (oracle 79bc92fa). A human addition makes the
+    /// composer text not provably ours, so the tracker resets, keeps no record, and presses
+    /// nothing at the threshold. Tracker layer.
+    #[test]
+    fn a_human_addition_resets_the_clock_and_never_recovers() {
+        let config = Config {
+            threshold_s: 120.0,
+            max_attempts: 1,
+            cooldown_s: 60.0,
+            observation_interval_s: 20.0,
+            ..Config::default()
+        };
+        let owned = observation("scheduled text");
+        let mut added = owned.clone();
+        added.text = Some("scheduled text plus a human line".into());
+        added.owned = false;
+        let mut tracker = Tracker::default();
+        assert_eq!("wait", tracker.decide(&owned, &config, 1000.0).action);
+        assert_eq!("reset", tracker.decide(&added, &config, 1060.0).action);
+        assert!(tracker.records.is_empty());
+        assert!(!tracker.decide(&added, &config, 1240.0).recovers());
+    }
+
+    /// t3355 (t820 proof D) scheduled row 39 and wiring row 19 (decision layer only):
+    /// test_dunk_scheduled_recovery.py::test_schedule_records_pre_send_generation_not_replacement
+    /// and test_dunk_recovery_wiring.py::test_different_native_process_binding_not_adopted (oracle
+    /// 79bc92fa). The tracker keys its clock on the pane generation, so a replaced generation
+    /// resets the clock and the next ticks start a new one. The binding table in
+    /// recovery_native is not exercised here.
+    #[test]
+    fn a_replaced_pane_generation_never_recovers_on_the_old_clock() {
+        let config = Config {
+            threshold_s: 120.0,
+            max_attempts: 1,
+            cooldown_s: 60.0,
+            observation_interval_s: 20.0,
+            ..Config::default()
+        };
+        let before = observation("scheduled text");
+        let mut after = before.clone();
+        after.generation = Some("pid:13:start:999".into());
+        let mut tracker = Tracker::default();
+        assert_eq!("wait", tracker.decide(&before, &config, 1000.0).action);
+        assert_eq!("reset", tracker.decide(&after, &config, 1120.0).action);
+        assert!(!tracker.decide(&after, &config, 1240.0).recovers());
+    }
 }
