@@ -68,7 +68,7 @@ impl Flock {
     ) -> Result<(), crate::error::DunkError> {
         let mut slot = self
             .project_runtime_policy
-            .0
+            .policy
             .lock()
             .expect("project runtime policy lock");
         if let Some(current) = slot.as_ref() {
@@ -88,9 +88,28 @@ impl Flock {
         &self,
     ) -> Option<std::sync::Arc<crate::server_runtime::ProjectRuntimePolicy>> {
         self.project_runtime_policy
-            .0
+            .policy
             .lock()
             .expect("project runtime policy lock")
+            .clone()
+    }
+
+    /// Record why startup attached no policy, or only part of one. The reason is startup
+    /// evidence only; it never grants approval.
+    pub fn attach_project_runtime_refusal(&self, reason: String) {
+        *self
+            .project_runtime_policy
+            .refusal
+            .lock()
+            .expect("project runtime refusal lock") = Some(reason);
+    }
+
+    /// The startup refusal recorded by `attach_project_runtime_refusal`, if any.
+    pub fn project_runtime_policy_refusal(&self) -> Option<String> {
+        self.project_runtime_policy
+            .refusal
+            .lock()
+            .expect("project runtime refusal lock")
             .clone()
     }
 

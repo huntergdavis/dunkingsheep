@@ -181,6 +181,42 @@ fn parse_reply(
     })
 }
 
+/// Refuse a free-form owner reply that could never become a usable policy receipt.
+///
+/// A task is a policy task only when its body is a JSON object whose `schema` is
+/// `project-policy/v1`; ordinary task replies are not affected. For a policy task the manifest and
+/// the reply must name the same canonical project and a supported provider, and the reply must
+/// pass the same parser the receipt reader uses.
+///
+/// Only free-text answers reach this check; `owner_answer` calls it from the free-text branch and
+/// nothing else. An option answer on a policy task is not checked here. The receipt reader refuses
+/// it at startup, because option answers are not JSON replies.
+pub(crate) fn validate_answer_for_task_body(
+    body: &str,
+    raw_reply: Option<&str>,
+) -> Result<(), DunkError> {
+    let is_policy_task = serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("schema")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .is_some_and(|schema| schema == POLICY_SCHEMA);
+    if !is_policy_task {
+        return Ok(());
+    }
+    let manifest: ProjectPolicyManifest = serde_json::from_str(body)
+        .map_err(|_| refused("project policy task manifest is invalid"))?;
+    let project = canonical_project(&manifest.project)?;
+    canonical_provider(&manifest.provider)?;
+    parse_manifest(body, &project, &manifest.provider)?;
+    let raw = raw_reply.ok_or_else(|| refused("a reply is required"))?;
+    parse_reply(raw, &project, &manifest.provider)?;
+    Ok(())
+}
+
 impl Tasks {
     /// Read an answered, explicitly mapped project policy task from the task actor.
     ///
@@ -339,6 +375,10 @@ mod tests {
         .to_string()
     }
 
+    /// Answer a policy task with a valid reply through the guarded answer path, then store the
+    /// reply under test in its place. The answer path refuses malformed policy replies, so this is
+    /// the only way to exercise the receipt reader on them: the state an older daemon could have
+    /// written. The reader must still refuse it.
     async fn answered_task(body: &str, reply: &str) -> (Tasks, String, tempfile::TempDir) {
         let dir = tempdir().unwrap();
         let tasks = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
@@ -357,10 +397,34 @@ mod tests {
                 &task.id,
                 version,
                 None,
-                Some(reply),
+                Some(subscription_answer("demo").as_str()),
                 Some("owner-pane"),
                 None,
             )
+            .await
+            .unwrap();
+        let stored_reply = reply.to_owned();
+        let task_id = task.id.clone();
+        tasks
+            .writer
+            .call(move |conn| {
+                let (event_id, meta): (i64, String) = conn
+                    .query_row(
+                        "SELECT id, meta FROM task_events WHERE task_id = ? AND event = 'owner_answer'",
+                        params![task_id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .map_err(crate::db::map_sqlite)?;
+                let mut value: Value = serde_json::from_str(&meta)
+                    .map_err(|_| refused("test owner answer metadata is invalid"))?;
+                value["reply"] = json!(stored_reply);
+                conn.execute(
+                    "UPDATE task_events SET meta = ? WHERE id = ?",
+                    params![value.to_string(), event_id],
+                )
+                .map_err(crate::db::map_sqlite)?;
+                Ok(())
+            })
             .await
             .unwrap();
         (tasks, task.id, dir)
@@ -524,5 +588,44 @@ mod tests {
             .project_policy_receipt(&task.id, "demo", "codex")
             .await
             .is_err());
+    }
+
+    #[test]
+    fn answer_guard_leaves_ordinary_task_replies_alone() {
+        validate_answer_for_task_body("ordinary task body", Some("anything")).unwrap();
+        validate_answer_for_task_body(r#"{"note":"no schema"}"#, Some("{")).unwrap();
+        validate_answer_for_task_body(&manifest("demo", "codex"), None).unwrap_err();
+    }
+
+    #[test]
+    fn answer_guard_accepts_only_the_exact_policy_reply() {
+        validate_answer_for_task_body(
+            &manifest("demo", "codex"),
+            Some(subscription_answer("demo").as_str()),
+        )
+        .unwrap();
+        validate_answer_for_task_body(
+            &manifest("demo", "codex"),
+            Some(credit_answer("demo").as_str()),
+        )
+        .unwrap();
+        let refused = [
+            "not-json",
+            r#"{"schema":"project-policy/v1","project":"other","provider":"codex","subscription":null,"credit_fallback":null}"#,
+            r#"{"schema":"project-policy/v1","project":"demo","provider":"pi","subscription":null,"credit_fallback":null}"#,
+            r#"{"schema":"project-policy/v1","project":"demo","provider":"codex","subscription":null,"credit_fallback":{"enabled":true,"max_age_seconds":60.0}}"#,
+            r#"{"schema":"project-policy/v1","project":"demo","provider":"codex","subscription":null,"credit_fallback":null}"#,
+        ];
+        for reply in refused {
+            assert!(
+                validate_answer_for_task_body(&manifest("demo", "codex"), Some(reply)).is_err(),
+                "accepted {reply}"
+            );
+        }
+        assert!(validate_answer_for_task_body(
+            r#"{"schema":"project-policy/v1","project":"demo","provider":"codex","extra":1}"#,
+            Some(subscription_answer("demo").as_str()),
+        )
+        .is_err());
     }
 }

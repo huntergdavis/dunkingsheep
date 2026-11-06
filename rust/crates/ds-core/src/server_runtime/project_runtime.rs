@@ -144,6 +144,12 @@ impl ProjectRuntimePolicy {
         })
     }
 
+    /// The policy entry admitted for one project. Production entries exist only when startup read
+    /// a current owner receipt for that exact project and provider.
+    pub fn entry(&self, project_name: &str) -> Option<&ProjectRuntimeEntry> {
+        self.projects.get(project_name)
+    }
+
     pub(crate) fn with_spawn_gate<T>(
         &self,
         operation: impl FnOnce() -> Result<T, DunkError>,
