@@ -444,6 +444,82 @@ mod tests {
         }
     }
 
+    /// A request from a process that is NOT in the pane's process tree. `sh` starts the client in
+    /// the background and exits at once, so the client is re-parented away from this test process
+    /// (the pane) and its ancestry never reaches the pane. The client writes the daemon's reply to
+    /// `out` once it has one, and the reply is returned.
+    fn orphaned_socket_call(
+        dir: &std::path::Path,
+        socket: &std::path::Path,
+        id: u64,
+        command: &str,
+        args: Value,
+        service_token: &str,
+        self_pane_id: &str,
+    ) -> Value {
+        const CLIENT: &str = r#"import json, os, socket, sys
+request_path, socket_path, out_path = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    with open(request_path, "rb") as handle:
+        request = handle.read()
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.settimeout(5)
+    client.connect(socket_path)
+    client.sendall(request)
+    client.shutdown(socket.SHUT_WR)
+    reply = client.makefile("rb").readline()
+except Exception as error:
+    reply = json.dumps({"client_error": str(error)}).encode() + b"\n"
+with open(out_path + ".tmp", "wb") as handle:
+    handle.write(reply)
+os.rename(out_path + ".tmp", out_path)
+"#;
+        let client = dir.join(format!("orphan-client-{id}.py"));
+        std::fs::write(&client, CLIENT).expect("orphaned client script");
+        let request = dir.join(format!("orphan-{id}.request.json"));
+        let mut line = json!({
+            "id": id,
+            "cmd": command,
+            "args": args,
+            "service_token": service_token,
+            "self_pane_id": self_pane_id,
+        })
+        .to_string();
+        line.push('\n');
+        std::fs::write(&request, line).expect("orphaned request");
+        let out = dir.join(format!("orphan-{id}.reply.json"));
+        let started = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("python3 -I \"$1\" \"$2\" \"$3\" \"$4\" >/dev/null 2>&1 &")
+            .arg("sh")
+            .arg(&client)
+            .arg(&request)
+            .arg(socket)
+            .arg(&out)
+            .status()
+            .expect("start the orphaned client");
+        assert!(
+            started.success(),
+            "the shell that orphans the client exits cleanly"
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !out.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the orphaned client never got a reply"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let text = std::fs::read_to_string(&out).expect("orphaned reply");
+        let reply: Value = serde_json::from_str(&text).expect("orphaned reply is JSON");
+        assert!(
+            reply.get("client_error").is_none(),
+            "the orphaned client could not reach the daemon: {reply}"
+        );
+        assert_eq!(reply["id"], json!(id), "{reply}");
+        reply
+    }
+
     fn production_socket_call(
         socket: &std::path::Path,
         id: u64,
@@ -909,6 +985,37 @@ mod tests {
         let allocation = call("allocation", json!({"action":"status"}));
         assert!(allocation["workers"].is_array(), "{allocation}");
         assert!(allocation["offers"].is_array(), "{allocation}");
+        // A process outside the pane's tree is refused on the real socket: its register and offer
+        // are not authenticated, and nothing is written. The bound operator peer (this process) is
+        // accepted below. The missing-peer half of the Python case cannot be produced on a Linux
+        // unix socket, which always carries peer credentials; that half is a residual.
+        for (id, command, args) in [
+            (
+                9001,
+                "allocation",
+                json!({"action":"register","pane_id":"w2:p2","pools":["code"],"roles":["worker"],"skills":["rust"]}),
+            ),
+            (
+                9002,
+                "allocation",
+                json!({"action":"offer","task_id":"t999","pool":"code"}),
+            ),
+        ] {
+            let refused = orphaned_socket_call(
+                dir.path(),
+                &socket,
+                id,
+                command,
+                args,
+                service_token,
+                "w1:p1",
+            );
+            assert_eq!(refused["ok"], false, "{refused}");
+            assert!(refused.to_string().contains("turn event"), "{refused}");
+        }
+        let after_refused = call("allocation", json!({"action":"status"}));
+        assert_eq!(after_refused["workers"], json!([]), "{after_refused}");
+        assert_eq!(after_refused["offers"], json!([]), "{after_refused}");
         let registered = call(
             "allocation",
             json!({"action":"register","pane_id":"w2:p2","pools":["code"],"roles":["worker"],"skills":["rust"]}),

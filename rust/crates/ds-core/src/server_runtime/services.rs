@@ -1164,6 +1164,153 @@ mod tests {
         services.shutdown();
     }
 
+    /// One offered task, one idle authenticated pane, one tick. `fail_inbox` aborts every write
+    /// to the inbox `messages` table with a trigger, so the next-job materialise fails for real.
+    /// Returns the tick result, the stored next-job handoffs, the number of `nj-` messages
+    /// written, and the task's status.
+    fn allocator_tick_with_inbox(
+        fail_inbox: bool,
+    ) -> (
+        serde_json::Value,
+        Vec<serde_json::Map<String, serde_json::Value>>,
+        i64,
+        String,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let handle = runtime.handle().clone();
+        let (tasks, inbox) = tasks_and_inbox(&runtime, &dir);
+        let task = handle
+            .block_on(tasks.add("global", "offered", "acceptance"))
+            .unwrap();
+        handle
+            .block_on(tasks.update(
+                &task.id,
+                crate::tasks::FieldEdit {
+                    assignees: Some(vec!["w2:p2".into()]),
+                    ..Default::default()
+                },
+                None,
+            ))
+            .unwrap();
+        handle
+            .block_on(tasks.allocation_offer(&task.id, "code", &serde_json::json!([]), "w2:p2"))
+            .unwrap();
+        handle
+            .block_on(tasks.allocation_register(
+                "w1:p1",
+                &serde_json::json!(["code"]),
+                &serde_json::json!(["worker"]),
+                &serde_json::json!([]),
+                "w2:p2",
+                &serde_json::json!(true),
+            ))
+            .unwrap();
+        let inbox_path = dir.path().join("inbox.db");
+        if fail_inbox {
+            rusqlite::Connection::open(&inbox_path)
+                .unwrap()
+                .execute_batch(
+                    "CREATE TRIGGER mail_unavailable BEFORE INSERT ON messages \
+                     BEGIN SELECT RAISE(ABORT, 'mail unavailable'); END;",
+                )
+                .unwrap();
+        }
+        let stores = Stores {
+            tasks: Some(Arc::clone(&tasks)),
+            inbox: Some(inbox),
+            ..Stores::default()
+        };
+        let env = configured_env(&dir, "1");
+        let factory: LoopTerminalFactory = Arc::new(|| {
+            let mut terminal = FakeTerminal::new();
+            terminal.panes[0].command = "codex".into();
+            terminal.panes[0].pane_pid = Some(i64::from(std::process::id()));
+            terminal
+                .screens
+                .insert("w1:p1".into(), "› Ask Codex to do anything\n".into());
+            Box::new(terminal)
+        });
+        let services =
+            RuntimeServices::new(startup_inputs(&dir, runtime, env, factory, stores)).unwrap();
+        let pid = i64::from(std::process::id());
+        services.flock().set_caller(Some(serde_json::json!({"pid":pid,"start":process_start(pid),"name":"codex","pane_id":"w1:p1","source":"agent"})));
+        services
+            .flock()
+            .turn_start(
+                None,
+                None,
+                None,
+                Some("w1:p1"),
+                None,
+                &crate::flock::commands_turns::NoHooks,
+            )
+            .unwrap();
+        services
+            .flock()
+            .turn_end(
+                None,
+                "done",
+                Some("w1:p1"),
+                None,
+                false,
+                &crate::flock::commands_turns::NoHooks,
+            )
+            .unwrap();
+        services.flock().clear_caller();
+        let result = handle.block_on(services.allocator_tick()).unwrap();
+        let handoffs = handle
+            .block_on(tasks.next_job_handoffs(Some("w1:p1")))
+            .unwrap();
+        let written: i64 = rusqlite::Connection::open(&inbox_path)
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE id LIKE 'nj-%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let status = handle.block_on(tasks.get(&task.id)).unwrap().status;
+        services.shutdown();
+        (result, handoffs, written, status)
+    }
+
+    #[test]
+    fn runtime_allocator_keeps_the_committed_handoff_when_the_inbox_write_fails() {
+        // test_runtime_durable_intent_survives_inbox_failure. The control run is the same tick with
+        // a working inbox: the next-job message is written. With the inbox aborting its writes, the
+        // tick still reports one allocation, the handoff stays pending, and no message is written.
+        // The Python ERROR log is an eprintln! in allocator_materialise: that equivalence is a
+        // residual, not asserted here.
+        let (control, control_handoffs, control_written, control_status) =
+            allocator_tick_with_inbox(false);
+        assert_eq!(
+            control["allocated"].as_array().map(Vec::len),
+            Some(1),
+            "{control}"
+        );
+        assert_eq!(
+            control_written, 1,
+            "a working inbox receives the next-job message"
+        );
+        assert_eq!(control_status, "in_progress");
+        assert_eq!(control_handoffs.len(), 1, "{control_handoffs:?}");
+
+        let (failed, handoffs, written, status) = allocator_tick_with_inbox(true);
+        assert_eq!(
+            failed["allocated"].as_array().map(Vec::len),
+            Some(1),
+            "{failed}"
+        );
+        assert_eq!(handoffs.len(), 1, "{handoffs:?}");
+        assert_eq!(handoffs[0]["state"], "pending");
+        assert_eq!(written, 0, "the aborted write leaves no next-job message");
+        assert_eq!(status, "in_progress");
+    }
+
     #[test]
     fn runtime_allocator_caller_cancellation_does_not_abandon_commit_before_shutdown() {
         let dir = tempfile::tempdir().unwrap();
