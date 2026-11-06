@@ -4891,6 +4891,40 @@ impl Flock {
         }
     }
 
+    /// Python's bound ownership evidence (`_stuck_observer_step`, CoS i31802 #1). Once the observer
+    /// has bound a candidate to the live pane generation, its exact text and transcript texts become
+    /// remembered-send evidence for that pane. Restore does not do this: the persisted text is not
+    /// ownership evidence until the bind, so an unbound restore stays unowned. Append only absent
+    /// texts, then keep the last REMEMBERED_SENDS, as Python does.
+    pub(crate) fn bind_candidate_ownership(&self, pane_id: &str, entry: &StuckCandidate) {
+        let mut history = self
+            .sent_text_by_pane
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let remembered = history.entry(pane_id.to_string()).or_default();
+        for owned in entry
+            .transcript_texts
+            .iter()
+            .map(String::as_str)
+            .chain(std::iter::once(entry.text.as_str()))
+        {
+            if owned.is_empty() {
+                continue;
+            }
+            let value = serde_json::Value::String(owned.to_string());
+            if !remembered
+                .iter()
+                .any(|known| crate::terminal::raw::equal(known, &value))
+            {
+                remembered.push(value);
+            }
+        }
+        if remembered.len() > REMEMBERED_SENDS {
+            let excess = remembered.len() - REMEMBERED_SENDS;
+            remembered.drain(..excess);
+        }
+    }
+
     /// Whether a composer contains text owned by this flock, from a notice, recent typed
     /// history, or the pane's queued outbox messages.
     ///
