@@ -4272,7 +4272,7 @@ fn scheduled_candidate_fixture(
     env.screens.insert(
         "%1".into(),
         format!(
-            "Previous response.\n\n{} {}\n\n\n  GPT-6-Astra high \u{b7} ~/workspace \u{b7} task\n",
+            "Previous response.\n\n{} {}\n  GPT-6-Astra high \u{b7} ~/workspace \u{b7} task\n",
             sigil, REPORTED_SENT_TEXT
         ),
     );
@@ -4347,6 +4347,14 @@ fn a_reported_sent_schedule_is_not_submitted_from_a_dim_or_unstyled_echo() {
 fn an_ambiguous_scheduled_composer_recovers_once_after_two_minutes() {
     let dir = tempfile::tempdir().unwrap();
     let (flock, mut env) = scheduled_candidate_fixture(dir.path(), "\u{203a}", "failed", 0.0);
+    // The oracle FRAME: two blank rows between the composer and the footer.
+    env.screens.insert(
+        "%1".into(),
+        format!(
+            "Previous response.\n\n{} {}\n\n\n  GPT-6-Astra high \u{b7} ~/workspace \u{b7} task\n",
+            "\u{203a}", REPORTED_SENT_TEXT
+        ),
+    );
     for now in [1000.0, 1100.0] {
         crate::flock::loops_stuck::strict_stuck_observer_scan(&flock, &mut env, now).unwrap();
     }
