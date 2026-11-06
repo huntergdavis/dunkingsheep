@@ -8,6 +8,7 @@ So the token is random per process, and these tests pin its shape, check that tw
 different tokens, and check that titles and cwds carrying the literal old token keep their fields.
 """
 import os
+import random
 import re
 import subprocess
 import sys
@@ -124,6 +125,26 @@ class FreeTextThatCarriesTheOldToken(unittest.TestCase):
         self.assertEqual("tab @@ds@@", pane["tab_label"])
         self.assertEqual(9911, pane["pane_pid"])
         self.assertEqual((200, 50), (pane["cols"], pane["rows"]))
+
+
+    def test_a_sweep_of_token_shaped_text_never_shifts_a_field(self):
+        """Collision sweep: titles and cwds built from the literal old token and from token-shaped
+        strings. Every line must still parse to one pane with each field where it belongs."""
+        rng = random.Random(752)
+        fragments = ["@@ds@@"] + ["@@ds%08x@@" % rng.getrandbits(32) for _ in range(8)]
+        backend = make_backend()
+        for n in range(200):
+            title = " ".join(rng.choice(fragments) for _ in range(rng.randint(1, 3)))
+            cwd = "/work/" + "/".join(rng.choice(fragments) for _ in range(rng.randint(0, 2)))
+            where = (n, title, cwd)
+            panes = backend._parse_panes(pane_line(SEP, cwd=cwd, title=title))
+            self.assertEqual(1, len(panes), where)
+            pane = panes[0]
+            self.assertEqual(9911, pane["pane_pid"], where)
+            self.assertEqual((200, 50), (pane["cols"], pane["rows"]), where)
+            self.assertTrue(pane["focused"], where)
+            self.assertEqual(cwd, pane["cwd"], where)
+            self.assertEqual(title, pane["terminal_title"], where)
 
 
 if __name__ == "__main__":
