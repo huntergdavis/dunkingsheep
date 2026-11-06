@@ -4230,6 +4230,45 @@ fn stuck_text_is_ours_requires_complete_matching_text_and_readable_screen() {
     assert!(!flock.stuck_text_is_ours(&env, "%1", Some("stuck body"), "stuck body plus edit"));
 }
 
+// t3355 (t820 proof D) federated row 2: test_dunk_federated_recovery.py::test_strict_mode_unchanged
+// (oracle 79bc92fa). With the federated flag off, the scrolled pending native frame has no
+// federated composer and is not owned. Python composer_region_is_owned does not read the flag; its
+// refusal comes from dim-transcript accounting. The Rust counterpart is owned_composer_region,
+// reached through stuck_text_is_ours, and it reads no flag either. The positive control shows the
+// same owned text is owned on a plain single-sigil composer, so the refusal is not vacuous.
+#[test]
+fn strict_mode_does_not_own_a_scrolled_pending_frame() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Flock::new(dir.path().join("launches"), dir.path().join("lanes"), false);
+    let tail = "visible tail of an owner message    \u{2191}\n  continuation and reply receipt";
+    flock
+        .sent_text_by_pane
+        .lock()
+        .unwrap()
+        .insert("%1".into(), vec![tail.into()]);
+    let scrolled = "\u{1b}[1;2m\u{203a}\u{1b}[0m previous truncated request\u{2026}\n  An arbitrary agent response, not equal to the previous request.\n\n\u{1b}[1m\u{203a}\u{1b}[0m visible tail of an owner message    \u{1b}[2m\u{2191}\u{1b}[0m\n  continuation and reply receipt\n\n\n  GPT-6-Astra high \u{b7} ~/workspace/chief-of-staff \u{b7} Read the inbox message\n";
+    let mut env = Pane::default();
+    assert!(!env.federated_input(), "strict mode");
+    assert_eq!(
+        None,
+        crate::terminal::composer::federated_composer(false, scrolled)
+    );
+    env.screens.insert("%1".into(), scrolled.into());
+    assert!(
+        !flock.stuck_text_is_ours(&env, "%1", Some(tail), tail),
+        "a scrolled pending frame must not be owned in strict mode"
+    );
+    // Positive control: the same owned text on a plain single-sigil composer is owned.
+    env.screens.insert(
+        "%1".into(),
+        frame(
+            "visible tail of an owner message \u{2191}",
+            &["continuation and reply receipt"],
+        ),
+    );
+    assert!(flock.stuck_text_is_ours(&env, "%1", Some(tail), tail));
+}
+
 #[test]
 fn press_stuck_enter_refuses_replaced_pane_before_sending_key() {
     let dir = tempfile::tempdir().unwrap();

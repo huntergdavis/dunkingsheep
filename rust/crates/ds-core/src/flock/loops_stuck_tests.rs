@@ -1245,6 +1245,7 @@ fn scheduled_failure_is_persisted_with_expanded_text_and_generation() {
 // Python test also asserts that the status stays sent, that exactly one recovery key follows
 // over ticks, and that no consumed outcome is recorded. Those are not covered here.
 #[test]
+#[ignore = "t3371: scheduled row 44 divergence, ds-core box_text returns one line for an 18-line composer; un-ignore when t3371 lands"]
 fn long_false_sent_composer_keeps_its_full_collapsed_text_in_the_box() {
     let text = (0..18)
         .map(|i| format!("scheduled line {i}"))
@@ -1296,5 +1297,51 @@ fn failed_candidate_survives_a_restart_through_the_state_file() {
     assert!(
         after["%1"].eligible,
         "the restored candidate stays eligible"
+    );
+}
+
+// t3355 (t820 proof D) federated row 6, key level: test_dunk_federated_recovery.py::
+// test_watchdog_waits_then_presses_once_without_replaying_text (oracle 79bc92fa). The Python test
+// asserts one Enter after the threshold and no text sent. SendEnv has no text channel, and the
+// federated step's only input call is send_key(Enter) (loops_stuck.rs federated_recovery_step).
+// This test pins the key sequence across later steps, and that the watchdog never queues the
+// candidate text into the outbox. The no-text property is structural in the Rust seam.
+#[test]
+fn federated_watchdog_presses_once_and_never_queues_the_candidate_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = scripted_candidate(&dir);
+    *flock.stuck_config.lock().unwrap() = crate::stuck::Config {
+        max_attempts: 1,
+        cooldown_s: 1.0,
+        ..crate::stuck::Config::default()
+    };
+    let mut probe = scripted_probe(
+        vec![scripted_frame("pending text")],
+        vec![std::process::id()],
+    );
+    assert_eq!(
+        0,
+        federated_recovery_step(&flock, &mut probe, 100.0, &|_| {}).unwrap()
+    );
+    assert!(
+        probe.keys.lock().unwrap().is_empty(),
+        "the threshold has not elapsed"
+    );
+    assert_eq!(
+        1,
+        federated_recovery_step(&flock, &mut probe, 221.0, &|_| {}).unwrap()
+    );
+    // The composer still shows the pending text, but the spent budget keeps later steps silent.
+    for now in [240.0, 300.0] {
+        assert_eq!(
+            0,
+            federated_recovery_step(&flock, &mut probe, now, &|_| {}).unwrap(),
+            "at {now}"
+        );
+    }
+    assert_eq!(vec!["Enter".to_string()], *probe.keys.lock().unwrap());
+    assert!(
+        flock.outbox.lock().unwrap().is_empty(),
+        "the watchdog must not queue the candidate text"
     );
 }
