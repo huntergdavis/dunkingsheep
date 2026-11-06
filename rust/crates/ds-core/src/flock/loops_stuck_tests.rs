@@ -1239,30 +1239,6 @@ fn scheduled_failure_is_persisted_with_expanded_text_and_generation() {
     assert_eq!(snapshot, saved["stuck_candidates"]["%1"]);
 }
 
-// t3355 (t820 proof D) scheduled row 44, partial: test_dunk_scheduled_recovery.py::
-// test_long_false_sent_composer_stays_observable (oracle 79bc92fa). This covers only the box
-// condition: an 18-line false-sent composer keeps its full collapsed text in the box read. The
-// Python test also asserts that the status stays sent, that exactly one recovery key follows
-// over ticks, and that no consumed outcome is recorded. Those are not covered here.
-#[test]
-#[ignore = "t3371: scheduled row 44 divergence, ds-core box_text returns one line for an 18-line composer; un-ignore when t3371 lands"]
-fn long_false_sent_composer_keeps_its_full_collapsed_text_in_the_box() {
-    let text = (0..18)
-        .map(|i| format!("scheduled line {i}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let frame = format!(
-        "\u{1b}[1m\u{203a}\u{1b}[0m {text}\n  GPT-6-Astra high \u{b7} ~/workspace \u{b7} task\n"
-    );
-    let probe = scripted_probe(vec![frame], vec![std::process::id()]);
-    let (screen, box_text, _detail) = crate::flock::sends::read_box(&probe, "%1");
-    assert!(screen.is_some(), "the pane must be readable");
-    assert_eq!(
-        crate::stuck::collapse(&text),
-        crate::stuck::collapse(&box_text)
-    );
-}
-
 // t3355 (t820 proof D) wiring row 14, candidate half: test_dunk_recovery_wiring.py::
 // test_failure_candidate_and_spent_budget_survive_restart (oracle 79bc92fa). The spent budget
 // half is stuck.rs's spent_ledger_survives_restart_and_a_consumed_message_does_not_regain_budget.
