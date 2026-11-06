@@ -5111,11 +5111,6 @@ mod t55_rows_16_65 {
 
     const PANE: &str = "%1";
 
-    /// The composer hint screen the Python oracle uses: an empty box with the "new task?" hint.
-    fn hint_screen() -> String {
-        "\u{276f}\u{a0}\n\x1b[2mnew task? /clear to save 497.4k tokens\x1b[0m\n".to_string()
-    }
-
     #[test]
     fn a_dunk_notice_with_no_message_row_is_tracked_and_its_consumed_recovery_is_recorded() {
         let dir = tempfile::tempdir().unwrap();
