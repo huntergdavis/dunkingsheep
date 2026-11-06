@@ -1587,11 +1587,13 @@ fn install_launcher(ns: &Map<String, Value>, json: bool) -> Outcome {
         Ok(path) => path,
         Err(error) => return install_error(error.to_string()),
     };
-    let project_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(3)
-        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")));
-    let poller = project_root.join("tools/dunk_poll.py");
+    // P0-1 (t3229): launchers may only point at an installed release. A Cargo
+    // build tree or a dev checkout is refused before anything is written.
+    let release_dir = match crate::release_layout::release_dir_of(&executable) {
+        Ok(dir) => dir,
+        Err(message) => return install_error(message),
+    };
+    let poller = release_dir.join(crate::release_layout::POLL_SCRIPT);
     let path_env = std::env::var("PATH").unwrap_or_default();
     let python = find_executable("python3", &path_env);
 
@@ -1599,22 +1601,37 @@ fn install_launcher(ns: &Map<String, Value>, json: bool) -> Outcome {
         std::fs::create_dir_all(&bin_dir)
             .map_err(|error| format!("cannot create {}: {error}", bin_dir.display()))?;
         if !poller.is_file() {
-            return Err(format!("no dunk-poll script at {}", poller.display()));
+            return Err(format!(
+                "no dunk-poll copy in the release at {}",
+                poller.display()
+            ));
         }
         let python = python.ok_or_else(|| "no python3 found on PATH for dunk-poll".to_string())?;
+        if !python.is_absolute() {
+            return Err(format!(
+                "python3 was found through a relative PATH entry ({}); put an absolute directory first on PATH, then install again",
+                python.display()
+            ));
+        }
         let launcher = bin_dir.join("dunkingsheep");
         let poll_launcher = bin_dir.join("dunk-poll");
-        let launcher_body = format!(
-            "#!/bin/sh\n# Dunking Sheep Rust CLI launcher, installed by `dunkingsheep install`.\nexec {} \"$@\"\n",
-            shell_quote(&executable.display().to_string())
-        );
-        let poll_body = format!(
-            "#!/bin/sh\nexec {} {} \"$@\"\n",
-            shell_quote(&python.display().to_string()),
-            shell_quote(&poller.display().to_string())
-        );
-        write_executable(&launcher, &launcher_body)?;
-        write_executable(&poll_launcher, &poll_body)?;
+        // A launcher that is a symbolic link would be written through to another file.
+        for path in [&launcher, &poll_launcher] {
+            if std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+                return Err(format!(
+                    "refusing to write through the symbolic link {}",
+                    path.display()
+                ));
+            }
+        }
+        write_executable(
+            &launcher,
+            &crate::release_layout::launcher_body(&executable),
+        )?;
+        write_executable(
+            &poll_launcher,
+            &crate::release_layout::poll_launcher_body(&python, &poller),
+        )?;
 
         let on_path_here = std::env::split_paths(&path_env)
             .filter(|path| !path.as_os_str().is_empty())
