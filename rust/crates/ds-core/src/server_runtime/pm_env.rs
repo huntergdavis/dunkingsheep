@@ -2,7 +2,7 @@
 //!
 //! `PmEnv` requires the whole `InboxEnv` surface, so the PM view is lent to the handler for one
 //! call, the way `with_inbox_env` lends the inbox view. It borrows the request's inbox view and
-//! carries the request's configuration `Env`, captured from the process environment.
+//! carries the request's configuration `Env`, read by `owner_views::view_env` without panicking.
 
 use serde_json::Value;
 
@@ -132,7 +132,7 @@ pub(super) fn with_request_pm_env(
     adapter: &RequestRuntimeAdapter<'_>,
     operation: &mut dyn FnMut(&dyn PmEnv) -> Result<Value, DunkError>,
 ) -> Result<Value, DunkError> {
-    let config = Env::from_process();
+    let config = super::owner_views::view_env()?;
     adapter.with_request_inbox(&mut |inbox| {
         let view = PmRuntimeView {
             inbox,

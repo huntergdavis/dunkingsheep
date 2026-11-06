@@ -22,7 +22,7 @@ const APP_DB_RELATIVE: &str = "workspace/vp-of-agentry/data/messages.sqlite3";
 
 impl OwnerViewEnv for RequestRuntimeAdapter<'_> {
     fn app_db_path(&self) -> Result<PathBuf, DunkError> {
-        app_db_path_from(&Env::from_process())
+        app_db_path_from(&view_env()?)
     }
 
     fn inbox_status(&self, message_id: &str, now: f64) -> Result<Option<Value>, DunkError> {
@@ -58,6 +58,34 @@ fn attached_inbox<'a>(adapter: &'a RequestRuntimeAdapter<'_>) -> Result<&'a Stor
         .inbox
         .as_deref()
         .ok_or_else(|| refusal("owner view inbox store is not attached"))
+}
+
+/// The environment the PM and owner views read, captured without panicking. `Env::from_process`
+/// panics on a non-UTF-8 variable. `Env::try_from_process` would drop `POOLRAD_CHECKPOINT`, because
+/// every name in `ENV_VARS` must start with DUNKINGSHEEP_, and Python's dunk_pm reads it. So the
+/// names the views look up are read here, and a non-UTF-8 value is a named refusal.
+pub(super) fn view_env() -> Result<Env, DunkError> {
+    const NAMES: [&str; 5] = [
+        "DUNKINGSHEEP_APP_DB",
+        "DUNKINGSHEEP_PM_ROUTING",
+        "DUNKINGSHEEP_VP_PANE",
+        "POOLRAD_CHECKPOINT",
+        "HOME",
+    ];
+    let mut values = Vec::new();
+    for name in NAMES {
+        if let Some(value) = std::env::var_os(name) {
+            let value = value.into_string().map_err(|_| {
+                refusal(format!("environment variable {name:?} is not valid UTF-8"))
+            })?;
+            values.push((name, value));
+        }
+    }
+    let pairs: Vec<(&str, &str)> = values
+        .iter()
+        .map(|(name, value)| (*name, value.as_str()))
+        .collect();
+    Ok(Env::from_pairs(&pairs))
 }
 
 /// `dunk_views.APP_DB`: `DUNKINGSHEEP_APP_DB` when it is set, else `os.path.expanduser` of the
@@ -238,6 +266,38 @@ mod tests {
         assert_eq!(
             app_db_path_from(&default).unwrap(),
             PathBuf::from("/home/owner/workspace/vp-of-agentry/data/messages.sqlite3")
+        );
+    }
+
+    #[test]
+    fn view_env_refuses_a_non_utf8_value_without_panicking() {
+        use std::os::unix::ffi::OsStrExt;
+        let _env_lock = lock_env();
+        // The panic that `Env::from_process` raised on this input is now a named refusal.
+        let bad = std::path::Path::new(std::ffi::OsStr::from_bytes(b"/tmp/\xff.sqlite3"));
+        let _app_db = AppDbEnv::set(bad);
+        let error = view_env().err().expect("a non-UTF-8 value must be refused");
+        assert!(
+            matches!(&error, DunkError::Refused(text)
+                if text.contains("DUNKINGSHEEP_APP_DB") && text.contains("not valid UTF-8")),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn view_env_keeps_the_python_checkpoint_override() {
+        let _env_lock = lock_env();
+        let checkpoint = "/tmp/poolrad-checkpoint-under-test.json";
+        let previous = std::env::var_os("POOLRAD_CHECKPOINT");
+        std::env::set_var("POOLRAD_CHECKPOINT", checkpoint);
+        let captured = view_env();
+        match previous {
+            Some(value) => std::env::set_var("POOLRAD_CHECKPOINT", value),
+            None => std::env::remove_var("POOLRAD_CHECKPOINT"),
+        }
+        assert_eq!(
+            captured.unwrap().get("POOLRAD_CHECKPOINT"),
+            Some(checkpoint)
         );
     }
 
