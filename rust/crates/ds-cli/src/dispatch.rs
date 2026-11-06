@@ -2018,44 +2018,10 @@ fn guard_install(no_shadow: bool) -> Result<Value, String> {
     Ok(value)
 }
 
-fn guard_status() -> Value {
-    let dir = guard_config_dir();
-    let guard_dir = dir.join("bin");
-    let target = guard_dir.join("herdr");
-    let installed = target.exists();
-    let path = std::env::var_os("PATH").unwrap_or_default();
-    let resolved = find_executable("herdr", &path.to_string_lossy());
-    let active = resolved.as_ref().is_some_and(|path| {
-        path.parent()
-            .is_some_and(|parent| real_path(parent) == real_path(&guard_dir))
-    });
-    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
-    let bashrc = home.join(".bashrc");
-    let shell_configured = std::fs::read_to_string(bashrc)
-        .map(|contents| contents.contains("# dunkingsheep herdr guard"))
-        .unwrap_or(false);
-    let (herdr, real_herdr) = resolve_real_herdr(&guard_dir, &home);
-    let shadowing = file_has_marker(&herdr, b"dunkingsheep-herdr-guard") && real_herdr.exists();
-    let tmux_dir = dir.join("tmux-guard");
-    let tmux_wrapper = tmux_dir.join("tmux");
-    let tmux_real = tmux_dir.join("tmux-real");
-    serde_json::json!({
-        "installed": installed,
-        "wrapper": if installed { Some(target) } else { None::<PathBuf> },
-        "shell_configured": shell_configured,
-        "active_in_this_shell": active,
-        "shadowing_herdr": shadowing,
-        "covers_agents_started_by_herdr": shadowing,
-        "herdr_resolves_to": resolved,
-        "real_herdr": if shadowing { real_herdr } else { herdr },
-        "guarded_commands": ["pane run", "pane send-text", "pane send-keys", "agent send", "pane close", "pane kill", "tab close", "workspace close", "pane split/rename/focus", "tab create/rename/focus", "workspace create/rename/focus", "agent start"],
-        "tmux_guard": {
-            "installed": tmux_wrapper.exists(),
-            "wrapper": if tmux_wrapper.exists() { Some(tmux_wrapper) } else { None::<PathBuf> },
-            "real_tmux": if tmux_real.exists() { Some(tmux_real) } else { None::<PathBuf> },
-            "covers": "agent panes started by TmuxBackend (PATH prefix); user shells untouched"
-        }
-    })
+/// `dunk_guard.status()`: the one producer lives in ds-core, where the daemon's `doctor` reads
+/// it too. `Err` is the exception text (an unreadable `~/.bashrc`), which Python lets escape.
+fn guard_status() -> Result<Value, String> {
+    ds_core::guard::status(&ds_core::guard::GuardPaths::from_process())
 }
 
 fn guard_unshadow() -> Result<Value, String> {
@@ -2068,7 +2034,7 @@ fn guard_unshadow() -> Result<Value, String> {
     } else {
         false
     };
-    let mut value = guard_status();
+    let mut value = guard_status()?;
     value["restored"] = Value::Bool(restored);
     value["herdr"] = serde_json::to_value(herdr).unwrap();
     Ok(value)
@@ -2104,7 +2070,7 @@ fn guard_shadow() -> Result<Value, String> {
         std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o755))
             .map_err(|error| error.to_string())?;
     }
-    let mut value = guard_status();
+    let mut value = guard_status()?;
     value["shadowed"] = Value::Bool(true);
     Ok(value)
 }
@@ -2148,7 +2114,7 @@ fn guard_uninstall() -> Result<Value, String> {
             std::fs::write(bashrc, cleaned).map_err(|error| error.to_string())?;
         }
     }
-    let mut value = guard_status();
+    let mut value = guard_status()?;
     value["wrapper_removed"] = Value::Bool(wrapper_removed);
     value["bashrc_cleaned"] = Value::Bool(bashrc_cleaned);
     Ok(value)
@@ -2729,7 +2695,7 @@ fn pm(ns: &Map<String, Value>) -> Outcome {
 fn guard(ns: &Map<String, Value>) -> Outcome {
     let action = text(ns, "action").unwrap_or("status");
     let result = match action {
-        "status" => Ok(guard_status()),
+        "status" => guard_status(),
         "install" => guard_install(matches!(ns.get("no_shadow"), Some(Value::Bool(true)))),
         "install-tmux" => guard_install_tmux(),
         "check" => guard_check(),

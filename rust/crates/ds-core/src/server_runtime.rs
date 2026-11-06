@@ -30,6 +30,7 @@ mod project_policy_load;
 mod project_runtime;
 mod push;
 mod push_eligibility;
+mod recovery_env;
 mod registrations;
 mod retire_inbox;
 mod retire_roles;
@@ -555,6 +556,12 @@ impl crate::api::CommandEnv for RequestRuntimeAdapter<'_> {
             return Err(refusal("request runtime services are not attached"));
         }
         Ok(self)
+    }
+
+    /// The canonical recovery providers (t1605): this request's terminal, the captured guard
+    /// paths and the attached memory service. Composed in `recovery_env.rs`.
+    fn recover_env(&self) -> Result<&dyn crate::flock::recovery_commands::RecoverEnv, DunkError> {
+        self.recovery_env()
     }
 
     fn layout_close_env(&self) -> Result<&dyn crate::api::layout_close::LayoutCloseEnv, DunkError> {

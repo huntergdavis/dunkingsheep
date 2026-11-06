@@ -256,7 +256,7 @@ fn py_int(value: &Value) -> Result<i64, String> {
 }
 
 /// Python's `str(OSError)` for the failures a file read can have.
-fn os_error_text(error: &std::io::Error, path: &Path) -> String {
+pub(crate) fn os_error_text(error: &std::io::Error, path: &Path) -> String {
     match error.raw_os_error() {
         Some(code) => {
             let text = error.to_string();
