@@ -1765,6 +1765,18 @@ fn guard_config_dir() -> PathBuf {
         })
 }
 
+/// The CLI the guard shims run: the packaged launcher `~/.local/bin/dunkingsheep`, which the
+/// `dunkingsheep install` packaging points at the active release. It is never a build tree or the
+/// repo checkout, so retiring the Python tree does not break the guard.
+fn guard_cli_path() -> Result<PathBuf, String> {
+    let home =
+        PathBuf::from(std::env::var_os("HOME").ok_or_else(|| "HOME is not set".to_string())?);
+    if !home.is_absolute() {
+        return Err("HOME must be an absolute path for the guard shims".into());
+    }
+    Ok(home.join(".local/bin/dunkingsheep"))
+}
+
 fn executable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     path.is_file()
@@ -1864,9 +1876,8 @@ fn guard_install_tmux() -> Result<Value, String> {
             .or_else(|_| std::fs::copy(&real, &link).map(|_| ()))
             .map_err(|e| e.to_string())?;
     }
-    let source = include_str!("../../../../dunk_tmux_guard.py");
-    let cli = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../dunkingsheep");
-    let cli = std::fs::canonicalize(&cli).unwrap_or(cli);
+    let source = include_str!("../guard/dunk_tmux_guard.py");
+    let cli = guard_cli_path()?;
     let template = "os.path.expanduser(\n    \"~/.local/bin/dunkingsheep\")";
     let rendered = source.replace(template, &format!("{:?}", cli.to_string_lossy()));
     std::fs::write(&target, &rendered).map_err(|e| e.to_string())?;
@@ -1892,9 +1903,8 @@ fn guard_install(no_shadow: bool) -> Result<Value, String> {
     let guard_dir = dir.join("bin");
     std::fs::create_dir_all(&guard_dir).map_err(|e| e.to_string())?;
     let target = guard_dir.join("herdr");
-    let source = include_str!("../../../../dunk_guard_wrapper.py");
-    let cli = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../dunkingsheep");
-    let cli = std::fs::canonicalize(&cli).unwrap_or(cli);
+    let source = include_str!("../guard/dunk_guard_wrapper.py");
+    let cli = guard_cli_path()?;
     let rendered = source.replace("__DUNKINGSHEEP__", &format!("{:?}", cli.to_string_lossy()));
     std::fs::write(&target, &rendered).map_err(|e| e.to_string())?;
     #[cfg(unix)]
@@ -2085,9 +2095,8 @@ fn guard_shadow() -> Result<Value, String> {
         std::fs::rename(&herdr, &real_herdr).map_err(|error| error.to_string())?;
     }
     std::fs::create_dir_all(&guard_dir).map_err(|error| error.to_string())?;
-    let source = include_str!("../../../../dunk_guard_wrapper.py");
-    let cli = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../dunkingsheep");
-    let cli = std::fs::canonicalize(&cli).unwrap_or(cli);
+    let source = include_str!("../guard/dunk_guard_wrapper.py");
+    let cli = guard_cli_path()?;
     let rendered = source.replace("__DUNKINGSHEEP__", &format!("{:?}", cli.to_string_lossy()));
     let wrapper = guard_dir.join("herdr");
     for target in [&herdr, &wrapper] {
