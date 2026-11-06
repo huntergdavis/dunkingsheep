@@ -1980,7 +1980,11 @@ pub fn h_owner_conversation(context: &HandlerContext<'_>, args: Args) -> Result<
     };
     let before = match args.get("before") {
         None | Some(Value::Null) => None,
-        Some(Value::Number(number)) => number.as_f64(),
+        // `as_f64` refuses nonfinite numbers, so NaN and Infinity tokens are re-read from
+        // the raw token: Python's float(before) keeps them and the store binds them.
+        Some(Value::Number(number)) => number
+            .as_f64()
+            .or_else(|| number.to_string().parse::<f64>().ok()),
         Some(Value::Bool(value)) => Some(if *value { 1.0 } else { 0.0 }),
         Some(Value::String(text)) => Some(text.trim().parse::<f64>().map_err(|_| {
             DunkError::Refused(format!(

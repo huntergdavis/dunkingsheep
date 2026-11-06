@@ -9071,6 +9071,105 @@ fn h_owner_conversation_matches_python() {
     ));
 }
 
+/// Python `float(before)` on the owner conversation cursor, over a real Unix socket.
+/// dunk_inbox.conversation binds `created_at < float(before)`: an absent cursor, Infinity
+/// and 1e309 keep every row; NaN, -Infinity and the string "NaN" keep none.
+#[test]
+fn owner_conversation_before_cursor_matches_python_over_real_socket() {
+    struct OwnerPeer<'a> {
+        dispatcher: &'a Dispatcher,
+        flock: &'a Flock,
+        env: &'a OwnerApiEnv,
+    }
+    impl crate::server::Dispatcher for OwnerPeer<'_> {
+        fn dispatch(&self, cmd: &str, input: &Value, ctx: &RequestCtx) -> Result<Value, DunkError> {
+            dispatch_owner_api(
+                self.dispatcher,
+                self.flock,
+                self.env,
+                cmd,
+                input.as_object().cloned(),
+                ctx.self_pane_id.as_deref(),
+            )
+        }
+    }
+    let (dir, flock, env) = owner_api_fixture("owner-before-socket");
+    let inbox = flock.stores().inbox.unwrap();
+    for body in ["question", "answer"] {
+        inbox
+            .send(&crate::inbox_store::Outgoing {
+                mailbox: crate::flock::mailbox::OWNER_MAILBOX,
+                body: Some(body),
+                sender: Some("agent:%7"),
+                mailbox_label: Some(crate::flock::mailbox::OWNER_MAILBOX),
+                transport: Some("telegram"),
+                ..crate::inbox_store::Outgoing::default()
+            })
+            .unwrap();
+    }
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_owner_stats_receipts_conversation();
+    let peer = OwnerPeer {
+        dispatcher: &dispatcher,
+        flock: &flock,
+        env: &env,
+    };
+    let path = dir.path().join("owner-before.sock");
+    let listener = UnixListener::bind(&path).unwrap();
+    // The fixture env is not Sync, so the server stays on this thread and only the client is
+    // spawned; its panics are re-raised so the assertion message reaches the test output.
+    std::thread::scope(|scope| {
+        let client = scope.spawn(|| {
+            let mut socket = UnixStream::connect(&path).unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut reader = BufReader::new(socket.try_clone().unwrap());
+            let mut conversation = |args: &str| -> Value {
+                let request = format!(
+                    r#"{{"id":1,"cmd":"owner_conversation","args":{args},"self_pane_id":"w1:p1"}}"#
+                );
+                socket.write_all(format!("{request}\n").as_bytes()).unwrap();
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let reply = crate::wire_json::from_str(&line).unwrap();
+                assert_eq!(reply["ok"], json!(true), "{line}");
+                reply["result"].clone()
+            };
+            assert_eq!(conversation("{}")["count"], 2);
+            assert_eq!(conversation(r#"{"before":Infinity}"#)["count"], 2);
+            assert_eq!(conversation(r#"{"before":1e309}"#)["count"], 2);
+            assert_eq!(
+                conversation(r#"{"before":NaN}"#),
+                json!({
+                    "mailbox": crate::flock::mailbox::OWNER_MAILBOX,
+                    "messages": [],
+                    "count": 0,
+                    "waiting": [],
+                })
+            );
+            assert_eq!(conversation(r#"{"before":-Infinity}"#)["count"], 0);
+            assert_eq!(conversation(r#"{"before":"NaN"}"#)["count"], 0);
+            assert_eq!(conversation(r#"{"before":0}"#)["count"], 0);
+        });
+        let (mut socket, _) = listener.accept().unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let peer_pid = crate::server::peer_pid(&socket);
+        let reader = BufReader::new(socket.try_clone().unwrap());
+        for line in reader.lines() {
+            let (response, _) = crate::server::handle_line(&peer, &line.unwrap(), peer_pid);
+            socket
+                .write_all(crate::protocol::encode_line(&response).as_bytes())
+                .unwrap();
+        }
+        client
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    });
+}
+
 #[test]
 fn h_owner_reply_matches_python() {
     let (_dir, flock, env) = owner_api_fixture("owner-reply-api");
