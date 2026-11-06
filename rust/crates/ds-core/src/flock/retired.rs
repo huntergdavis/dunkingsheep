@@ -536,4 +536,109 @@ mod tests {
         )
         .is_ok());
     }
+
+    /// Runs the sweep's own authorization with `change` between the preview and the
+    /// fresh check inside the transaction. `change` runs on the writer thread after the
+    /// preview is computed, so it may change files and rows but must not call the Store.
+    fn run_with_boundary_change<C>(fixture: &Fixture, change: C) -> Result<usize, DunkError>
+    where
+        C: Fn(&Connection) + Send + 'static,
+    {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let retired_path = fixture.retired_path.clone();
+        let lane_path = fixture.lane_path.clone();
+        let live = vec!["w1:p1".to_string()];
+        let calls = AtomicUsize::new(0);
+        fixture.store.archive_retired(
+            RetiredArchiveOptions {
+                age_s: 86_400.0,
+                now: Some(172_800.0),
+                reason: None,
+            },
+            move |connection: &Connection| {
+                let authorized = eligible_now(connection, &retired_path, &lane_path, &live, &live)?;
+                if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    change(connection);
+                }
+                Ok(authorized)
+            },
+        )
+    }
+
+    #[test]
+    fn flock_retired_archive_rechecks_a_binding_added_at_the_boundary() {
+        let fixture = new_fixture();
+        retirement(&fixture, 100.0);
+        declared_lane(&fixture, "old-lane", 99.0);
+        let old = send_old(&fixture, "w1:p9");
+        let rebound = old.clone();
+        let count = run_with_boundary_change(&fixture, move |connection| {
+            connection
+                .execute(
+                    "UPDATE messages SET pane_id = 'w1:p1' WHERE id = ?",
+                    [&rebound],
+                )
+                .expect("bind the old row to a live pane");
+        })
+        .unwrap();
+        assert_eq!(0, count);
+        assert_eq!("queued", state(&fixture, &old));
+    }
+
+    #[test]
+    fn flock_retired_archive_rechecks_a_retirement_revoked_at_the_boundary() {
+        let fixture = new_fixture();
+        retirement(&fixture, 100.0);
+        declared_lane(&fixture, "old-lane", 99.0);
+        let old = send_old(&fixture, "w1:p9");
+        let retired_path = fixture.retired_path.clone();
+        let count = run_with_boundary_change(&fixture, move |_| {
+            crate::atomic_json::write(&retired_path, &json!({})).expect("revoke the retirement");
+        })
+        .unwrap();
+        assert_eq!(0, count);
+        assert_eq!("queued", state(&fixture, &old));
+    }
+
+    #[test]
+    fn flock_retired_archive_rechecks_a_registry_identity_changed_at_the_boundary() {
+        let fixture = new_fixture();
+        retirement(&fixture, 100.0);
+        declared_lane(&fixture, "old-lane", 99.0);
+        let old = send_old(&fixture, "w1:p9");
+        let lane_path = fixture.lane_path.clone();
+        let count = run_with_boundary_change(&fixture, move |_| {
+            // Re-declared at the retirement time: not strictly older, so no longer evidence.
+            crate::atomic_json::write(
+                &lane_path,
+                &json!({"w1:p9": {"mailbox": "old-lane", "declared": true, "declared_at": 100.0}}),
+            )
+            .expect("re-declare the lane");
+        })
+        .unwrap();
+        assert_eq!(0, count);
+        assert_eq!("queued", state(&fixture, &old));
+    }
+
+    #[test]
+    fn flock_retired_archive_protects_a_declared_name_that_no_longer_matches() {
+        let fixture = new_fixture();
+        retirement(&fixture, 100.0);
+        declared_lane(&fixture, "new-lane", 99.0);
+        let old = send_old(&fixture, "w1:p9");
+        assert_eq!(0, run(&fixture, json!([{"pane_id":"w1:p1"}])).unwrap());
+        assert_eq!("queued", state(&fixture, &old));
+    }
+
+    #[test]
+    fn flock_retired_archive_is_idempotent_across_sweeps() {
+        let fixture = new_fixture();
+        retirement(&fixture, 100.0);
+        declared_lane(&fixture, "old-lane", 99.0);
+        let old = send_old(&fixture, "w1:p9");
+        assert_eq!(1, run(&fixture, json!([{"pane_id":"w1:p1"}])).unwrap());
+        assert_eq!("archived", state(&fixture, &old));
+        assert_eq!(0, run(&fixture, json!([{"pane_id":"w1:p1"}])).unwrap());
+        assert_eq!("archived", state(&fixture, &old));
+    }
 }

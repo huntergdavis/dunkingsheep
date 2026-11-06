@@ -372,4 +372,96 @@ mod tests {
             .execute_batch("ROLLBACK")
             .expect("caller rollback");
     }
+
+    #[test]
+    fn retired_archive_keeps_rows_younger_than_the_cutoff_queued() {
+        let (_dir, store) = store();
+        let older = send(&store, "old-lane", Some("w1:p1"));
+        let younger = send(&store, "old-lane", Some("w1:p1"));
+        store
+            .writer
+            .call({
+                let older = older.clone();
+                let younger = younger.clone();
+                move |connection| {
+                    connection
+                        .execute(
+                            "UPDATE messages SET created_at = ? WHERE id = ?",
+                            params![86_399.0, older],
+                        )
+                        .map_err(crate::db::map_sqlite)?;
+                    connection
+                        .execute(
+                            "UPDATE messages SET created_at = ? WHERE id = ?",
+                            params![86_401.0, younger],
+                        )
+                        .map_err(crate::db::map_sqlite)?;
+                    Ok(())
+                }
+            })
+            .expect("age rows around the cutoff");
+        let changed = store
+            .archive_retired(
+                RetiredArchiveOptions {
+                    now: Some(172_800.0),
+                    ..RetiredArchiveOptions::default()
+                },
+                eligible("old-lane"),
+            )
+            .expect("archive");
+        assert_eq!(1, changed);
+        assert_eq!("archived", fields(&store, &older).0);
+        assert_eq!("queued", fields(&store, &younger).0);
+    }
+
+    #[test]
+    fn retired_archive_holds_the_sqlite_writer_lock_during_revalidation() {
+        let (_dir, store) = store();
+        let id = send(&store, "old-lane", Some("w1:p1"));
+        store
+            .writer
+            .call({
+                let id = id.clone();
+                move |connection| {
+                    connection
+                        .execute("UPDATE messages SET created_at = 1 WHERE id = ?", [id])
+                        .map_err(crate::db::map_sqlite)?;
+                    Ok(())
+                }
+            })
+            .expect("age row");
+        let path = store.path().to_path_buf();
+        let calls = Arc::new(Mutex::new(0));
+        let seen = Arc::clone(&calls);
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let record = Arc::clone(&observed);
+        let count = store
+            .archive_retired(
+                RetiredArchiveOptions {
+                    now: Some(172_800.0),
+                    ..RetiredArchiveOptions::default()
+                },
+                move |connection| {
+                    let mut calls = seen.lock().expect("calls lock");
+                    *calls += 1;
+                    if *calls == 1 {
+                        return Ok(vec!["old-lane".to_string()]);
+                    }
+                    // The fresh check runs inside BEGIN IMMEDIATE: a rival writer is refused.
+                    let rival = Connection::open(&path).expect("rival connection");
+                    let refused = rival
+                        .execute("UPDATE messages SET subject = 'rival'", ())
+                        .is_err();
+                    record
+                        .lock()
+                        .expect("record lock")
+                        .push((!connection.is_autocommit(), refused));
+                    Ok(Vec::new())
+                },
+            )
+            .expect("archive");
+        assert_eq!(0, count);
+        assert_eq!(vec![(true, true)], *observed.lock().expect("record lock"));
+        assert_eq!("queued", fields(&store, &id).0);
+    }
 }
