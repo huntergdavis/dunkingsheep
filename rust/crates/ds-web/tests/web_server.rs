@@ -1,15 +1,19 @@
 //! Loopback acceptance for the composed desk (`src/web_server.rs`). Every test boots the real
 //! route assembly on 127.0.0.1 with a temporary data directory, a temporary built UI, and a daemon
-//! socket that is deliberately absent, so no route can succeed by reaching a daemon. Nothing
-//! touches a live service, a credential or the network, and Python is never run.
+//! socket that is deliberately absent, so no route can succeed by reaching a daemon. The happy-path
+//! tests for the fleet, pane-send and operations-metrics routes are the exception: they point the
+//! desk at a fake daemon socket that answers only the commands those routes need, and they assert
+//! the response shapes that `web/app.py` and `bridges/ops_metrics.py` produce. Nothing touches a
+//! live service, a credential or the network, and Python is never run.
 
 use std::{
-    io::{Read, Write},
+    io::{BufRead, BufReader, Read, Write},
     net::{SocketAddr, TcpStream},
-    path::Path,
-    sync::mpsc,
+    os::unix::net::UnixListener,
+    path::{Path, PathBuf},
+    sync::{mpsc, Arc, Mutex},
     thread,
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 use axum::{
@@ -23,7 +27,7 @@ use ds_web::{
     RequestScheme,
 };
 use rusqlite::Connection;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use tempfile::TempDir;
 use tower::ServiceExt;
 
@@ -813,4 +817,486 @@ fn python_routes_match_the_mounted_routes() {
         "PYTHON_ROUTES and the mounted routes disagree:\n{}",
         failures.join("\n")
     );
+}
+
+/// A command the desk sent to the fake daemon, with its arguments and the service token it sent.
+#[derive(Clone, Debug)]
+struct Sent {
+    command: String,
+    args: Map<String, Value>,
+    token: Option<String>,
+}
+
+/// A local Unix-socket daemon for the happy-path tests. It answers one JSON line per connection, as
+/// the daemon does, with `answer`'s result or its error, and it records every command it reads.
+struct FakeDaemon {
+    socket: PathBuf,
+    sent: Arc<Mutex<Vec<Sent>>>,
+}
+
+impl FakeDaemon {
+    fn start(dir: &Path, answer: fn(&str, &Map<String, Value>) -> Result<Value, String>) -> Self {
+        let socket = dir.join("daemon.sock");
+        let listener = UnixListener::bind(&socket).expect("bind the fake daemon socket");
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let log = Arc::clone(&sent);
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let Ok(reader_side) = stream.try_clone() else {
+                    continue;
+                };
+                let mut line = String::new();
+                if BufReader::new(reader_side)
+                    .read_line(&mut line)
+                    .unwrap_or(0)
+                    == 0
+                {
+                    continue;
+                }
+                let Ok(request) = serde_json::from_str::<Value>(&line) else {
+                    continue;
+                };
+                let command = request["cmd"].as_str().unwrap_or_default().to_owned();
+                let args = request["args"].as_object().cloned().unwrap_or_default();
+                log.lock().unwrap().push(Sent {
+                    command: command.clone(),
+                    args: args.clone(),
+                    token: request["service_token"].as_str().map(str::to_owned),
+                });
+                let reply = match answer(&command, &args) {
+                    Ok(result) => json!({"id": request["id"], "ok": true, "result": result}),
+                    Err(error) => json!({"id": request["id"], "ok": false, "error": error}),
+                };
+                let _ = writeln!(stream, "{reply}");
+            }
+        });
+        FakeDaemon { socket, sent }
+    }
+
+    fn sent(&self) -> Vec<Sent> {
+        self.sent.lock().unwrap().clone()
+    }
+}
+
+/// The lanes the fake daemon knows. `%7` is a guarded lane with a registry name and three unread
+/// messages; `%9` is an owner-push lane with a label and two pending pushes; `%10` is a lane whose
+/// capability says it is not alive; `%8` is a shell, and a shell is not a lane.
+fn lanes_answer(command: &str, args: &Map<String, Value>) -> Result<Value, String> {
+    let text = args.get("text").and_then(Value::as_str).unwrap_or_default();
+    match command {
+        "list_panes" => Ok(json!({"panes": [
+            {"pane_id": "%7", "agent": "claude", "cwd": "/work/alpha/"},
+            {"pane_id": "%8", "agent": "", "cwd": "/work/shell"},
+            {"pane_id": "%9", "agent": "pi", "cwd": "/work/beta", "label": "beta-label"},
+            {"pane_id": "%10", "agent": "codex", "cwd": "/work/gamma"},
+        ]})),
+        "state_latest" => Ok(json!({"rows": [{"pane_id": "%7", "session_id": "sid-alpha"}]})),
+        // Python keys a lane's unread count by its name and by its pane id, and a row adds both
+        // lookups. This lane names only its name, so its three messages are counted once.
+        "roster" => Ok(json!({"lanes": [
+            {"name": "alpha-lane", "inbox": {"unread": 3}},
+        ]})),
+        "delivery_capability" => match args.get("target").and_then(Value::as_str) {
+            Some("%7") => Ok(json!({"alive": true, "send": "guarded", "drains": false})),
+            Some("%9") => Ok(json!({"alive": true, "send": "owner_push", "drains": true})),
+            Some("%10") => Ok(json!({"alive": false, "send": null, "drains": false})),
+            _ => Err("no such pane".to_owned()),
+        },
+        "owner_stats" => Ok(json!({"ok": true, "pending": [
+            {"pane_id": "%9"}, {"pane_id": "%9"}, {"pane_id": "%7"},
+        ]})),
+        "send_text" => Ok(match text {
+            "queue this" => {
+                json!({"outcome": "queued", "message_id": 42, "message": "held by the typing guard"})
+            }
+            "refuse this" => {
+                json!({"outcome": "refused", "message": "lane is not accepting input"})
+            }
+            _ => json!({"outcome": "sent", "message_id": 41, "message": "typed into the box"}),
+        }),
+        "owner_push" => Ok(json!({"outcome": "stored", "id": 5, "message": "stored for the lane"})),
+        other => Err(format!("unexpected command {other}")),
+    }
+}
+
+/// The keys of a JSON object, compared as a set, so a missing or an extra field fails with both.
+fn assert_keys(value: &Value, expected: &[&str]) {
+    let mut actual: Vec<&str> = value
+        .as_object()
+        .expect("a JSON object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    actual.sort_unstable();
+    let mut wanted = expected.to_vec();
+    wanted.sort_unstable();
+    assert_eq!(actual, wanted);
+}
+
+/// Python's `time.strftime("%Y-%m-%dT%H:%M:%SZ")`: twenty characters with the separators in place.
+fn assert_stamp(value: &Value) {
+    let text = value.as_str().expect("a timestamp string");
+    let shaped = text.len() == 20
+        && text.ends_with('Z')
+        && text.as_bytes()[10] == b'T'
+        && text.chars().filter(char::is_ascii_digit).count() == 14;
+    assert!(shaped, "not a daemon stamp: {text}");
+}
+
+const FLEET_KEYS: &[&str] = &["count", "generated_at", "note", "rows", "state", "unrouted"];
+
+const LANE_ROW_KEYS: &[&str] = &[
+    "agent",
+    "alive",
+    "can_type",
+    "cwd",
+    "drains",
+    "last_activity_s",
+    "name",
+    "pane_id",
+    "pending",
+    "pending_state",
+    "project",
+    "send",
+    "session",
+    "unread",
+];
+
+const OPS_SUMMARY_KEYS: &[&str] = &[
+    "generated_at",
+    "project",
+    "latest_sample_at",
+    "latest_sample_age_s",
+    "sources",
+    "source_freshness",
+    "staff",
+    "pane_roster",
+    "quota",
+    "quotas",
+    "subscriptions",
+    "monthly_fixed_usd",
+    "fixed_subscription_usd_per_calendar_hour",
+    "calendar_hours_in_month",
+    "billing_month",
+    "usage_cost_usd",
+    "opencode_usage",
+    "host_health",
+    "goals",
+    "function_progress",
+    "completion_rate",
+    "tracked_recent_prs",
+    "vp_message_counts",
+    "dunk_metrics",
+    "experiment_lab",
+    "limitations",
+];
+
+/// GET /api/fleet answers the Python payload: the envelope, one row per lane in project order, and
+/// the same fourteen row keys. The fake daemon supplies the roster, the capabilities and the pending
+/// pushes. The lane registry and the transcript are temporary files.
+#[test]
+fn fleet_lists_the_lanes_in_the_python_shape() {
+    let (root, mut config) = fixture();
+    let dir = root.path();
+    let daemon = FakeDaemon::start(dir, lanes_answer);
+    config.daemon_socket = daemon.socket.clone();
+    std::fs::write(
+        dir.join("config/lanes.json"),
+        json!({"%7": "alpha-lane", "%10": {"mailbox": "gamma-box", "alive": false}}).to_string(),
+    )
+    .unwrap();
+    let transcript = dir.join("home/.claude/projects/-work-alpha/sid-alpha.jsonl");
+    std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    std::fs::write(&transcript, "{}\n").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&transcript)
+        .unwrap()
+        .set_modified(SystemTime::now() - Duration::from_secs(120))
+        .unwrap();
+
+    let server = Server::start(config);
+    let addr = server.addr;
+    let cookie = format!("vp_session={}", login(addr));
+    let session = [("Cookie", cookie.as_str())];
+    let fleet = request(addr, "GET", "/api/fleet", &session, None);
+    assert_eq!(fleet.status, 200, "{}", fleet.text());
+    let body = fleet.json();
+    assert_keys(&body, FLEET_KEYS);
+    assert_eq!(body["state"], "ok");
+    assert_eq!(
+        body["note"],
+        "shells and dead panes are not lanes and are not listed"
+    );
+    assert_stamp(&body["generated_at"]);
+    // No tmux exists in the fixture, so the inventory reports itself unavailable, with Python's
+    // fields and no rows.
+    assert_eq!(
+        body["unrouted"],
+        json!({"state": "unavailable", "rows": [], "reason": "Process or pane inventory unavailable"})
+    );
+
+    let rows = body["rows"].as_array().expect("rows is a list");
+    assert_eq!(
+        body["count"].as_u64(),
+        Some(3),
+        "the shell %8 is not a lane: {body}"
+    );
+    assert_eq!(rows.len(), 3);
+    for row in rows {
+        assert_keys(row, LANE_ROW_KEYS);
+    }
+
+    let alpha = &rows[0];
+    assert_eq!(alpha["pane_id"], "%7");
+    assert_eq!(alpha["name"], "alpha-lane");
+    assert_eq!(alpha["project"], "alpha");
+    assert_eq!(alpha["cwd"], "/work/alpha/");
+    assert_eq!(alpha["agent"], "claude");
+    assert_eq!(alpha["alive"], true);
+    assert_eq!(alpha["unread"], 3);
+    assert_eq!(alpha["session"], "sid-alpha");
+    assert_eq!(alpha["send"], "guarded");
+    assert_eq!(alpha["drains"], false);
+    assert_eq!(alpha["pending"], 1);
+    assert_eq!(alpha["pending_state"], "ok");
+    assert_eq!(alpha["can_type"], true);
+    let idle = alpha["last_activity_s"]
+        .as_i64()
+        .expect("the transcript gives an age");
+    assert!((115..=140).contains(&idle), "age {idle}");
+
+    let beta = &rows[1];
+    assert_eq!(beta["pane_id"], "%9");
+    assert_eq!(beta["name"], "beta-label");
+    assert_eq!(beta["project"], "beta");
+    assert_eq!(beta["agent"], "pi");
+    assert_eq!(beta["unread"], 0);
+    assert_eq!(beta["send"], "owner_push");
+    assert_eq!(beta["drains"], true);
+    assert_eq!(beta["pending"], 2);
+    assert_eq!(beta["can_type"], false);
+    assert!(beta["session"].is_null());
+    assert!(beta["last_activity_s"].is_null());
+
+    let gamma = &rows[2];
+    assert_eq!(gamma["pane_id"], "%10");
+    assert_eq!(gamma["name"], "gamma-box");
+    assert_eq!(gamma["project"], "gamma");
+    assert_eq!(gamma["alive"], true);
+    assert!(gamma["send"].is_null());
+    assert_eq!(gamma["pending"], 0);
+    assert_eq!(gamma["pending_state"], "ok");
+    assert_eq!(gamma["can_type"], false);
+
+    assert_eq!(server.shutdown(), Ok(()));
+}
+
+/// POST /api/pane-send to a guarded lane answers with the Python outcome shapes: `sent` and `queued`
+/// are ok (`queued` also sets its flag), and `refused` is not ok. Each text reaches the daemon as
+/// `send_text` for its target, under the desk's service token.
+#[test]
+fn pane_send_to_a_guarded_lane_answers_with_the_python_outcomes() {
+    let (root, mut config) = fixture();
+    let daemon = FakeDaemon::start(root.path(), lanes_answer);
+    config.daemon_socket = daemon.socket.clone();
+    let server = Server::start(config);
+    let addr = server.addr;
+    let cookie = format!("vp_session={}", login(addr));
+    let session = [("Cookie", cookie.as_str())];
+    let send = |text: &str| {
+        let body = json!({"pane": "%7", "text": text}).to_string();
+        request(addr, "POST", "/api/pane-send", &session, Some(&body))
+    };
+
+    let sent = send("hello lane");
+    assert_eq!(sent.status, 200, "{}", sent.text());
+    assert_eq!(
+        sent.json(),
+        json!({
+            "ok": true,
+            "pane": "%7",
+            "route": "guarded",
+            "outcome": "sent",
+            "message_id": 41,
+            "detail": "typed into the box",
+            "note": "Confirmed by the box clearing or by the turn it started - that is delivery to the lane, not proof the agent acted on it."
+        })
+    );
+
+    let queued = send("queue this");
+    assert_eq!(queued.status, 200, "{}", queued.text());
+    assert_eq!(
+        queued.json(),
+        json!({
+            "ok": true,
+            "pane": "%7",
+            "route": "guarded",
+            "outcome": "queued",
+            "queued": true,
+            "message_id": 42,
+            "detail": "held by the typing guard",
+            "note": "Held by the typing guard or not yet delivered. It has NOT arrived - do not read this as delivered."
+        })
+    );
+
+    let refused = send("refuse this");
+    assert_eq!(refused.status, 200, "{}", refused.text());
+    assert_eq!(
+        refused.json(),
+        json!({
+            "ok": false,
+            "pane": "%7",
+            "route": "guarded",
+            "outcome": "refused",
+            "message_id": null,
+            "detail": "lane is not accepting input"
+        })
+    );
+
+    let typed: Vec<String> = daemon
+        .sent()
+        .iter()
+        .filter(|call| call.command == "send_text")
+        .map(|call| call.args["text"].as_str().unwrap_or_default().to_owned())
+        .collect();
+    assert_eq!(typed, ["hello lane", "queue this", "refuse this"]);
+    assert!(daemon
+        .sent()
+        .iter()
+        .all(|call| call.token.as_deref() == Some("web-desk-test-token")));
+    assert_eq!(server.shutdown(), Ok(()));
+}
+
+/// POST /api/pane-send to an owner-push lane stores the message for the lane to drain, and the
+/// answer says so: `stored` is not `read`, and nothing is typed into the pane.
+#[test]
+fn pane_send_to_an_owner_push_lane_reports_the_stored_shape() {
+    let (root, mut config) = fixture();
+    let daemon = FakeDaemon::start(root.path(), lanes_answer);
+    config.daemon_socket = daemon.socket.clone();
+    let server = Server::start(config);
+    let addr = server.addr;
+    let cookie = format!("vp_session={}", login(addr));
+    let session = [("Cookie", cookie.as_str())];
+
+    let body = json!({"pane": "%9", "text": "push this"}).to_string();
+    let pushed = request(addr, "POST", "/api/pane-send", &session, Some(&body));
+    assert_eq!(pushed.status, 200, "{}", pushed.text());
+    assert_eq!(
+        pushed.json(),
+        json!({
+            "ok": true,
+            "pane": "%9",
+            "route": "owner_push",
+            "outcome": "stored",
+            "push_id": 5,
+            "detail": "stored for the lane",
+            "note": "Stored for the lane to drain; nothing typed into the pane. 'stored' is not 'read' - it has not arrived until the lane takes it."
+        })
+    );
+
+    let pushes: Vec<Sent> = daemon
+        .sent()
+        .into_iter()
+        .filter(|call| call.command == "owner_push")
+        .collect();
+    assert_eq!(pushes.len(), 1, "one push, no typed send");
+    assert_eq!(pushes[0].args["target"], "%9");
+    assert_eq!(pushes[0].args["body"], "push this");
+    assert_eq!(server.shutdown(), Ok(()));
+}
+
+/// GET /api/ops-metrics answers the Python `summary` dict: the same twenty-six top-level keys, with
+/// the collection run, staff counts, roster and subscriptions read from a temporary operations
+/// database. The fixed-cost figures follow the Python arithmetic.
+#[test]
+fn ops_metrics_reports_the_python_summary_shape() {
+    let (root, mut config) = fixture();
+    let daemon = FakeDaemon::start(root.path(), lanes_answer);
+    config.daemon_socket = daemon.socket.clone();
+    std::fs::create_dir_all(&config.data_dir).unwrap();
+    let conn = open_operations_db(&config.operations_db).unwrap();
+    conn.execute_batch(
+        "INSERT INTO collection_runs (id, observed_at, panes_state, github_state, vp_messages_state,
+            dunk_metrics_state, accounting_state, agent_messages_state, errors_json)
+         VALUES (1, '2026-11-06T10:00:00Z', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', '[]');
+         INSERT INTO pane_samples (run_id, pane_id, project, agent_kind, agent_status, agent_name,
+            lane_name, role)
+         VALUES (1, '%7', 'poolrad', 'claude', 'working', 'alpha', 'alpha-lane', 'coder');
+         INSERT INTO subscription_costs (project, provider, monthly_usd_cents, observed_at,
+            evidence_ref)
+         VALUES ('poolrad', 'claude', 2000, '2026-11-06T09:00:00Z', 'test:claude');",
+    )
+    .unwrap();
+    drop(conn);
+
+    let server = Server::start(config);
+    let addr = server.addr;
+    let cookie = format!("vp_session={}", login(addr));
+    let session = [("Cookie", cookie.as_str())];
+    let metrics = request(addr, "GET", "/api/ops-metrics", &session, None);
+    assert_eq!(metrics.status, 200, "{}", metrics.text());
+    let summary = metrics.json();
+    assert_keys(&summary, OPS_SUMMARY_KEYS);
+
+    assert_eq!(summary["project"], "poolrad");
+    assert_eq!(summary["latest_sample_at"], "2026-11-06T10:00:00Z");
+    assert_eq!(
+        summary["sources"],
+        json!({
+            "panes": "ok",
+            "github": "ok",
+            "vp_messages": "ok",
+            "agent_messages": "ok",
+            "dunk_metrics": "ok",
+            "accounting": "ok"
+        })
+    );
+    assert_eq!(
+        summary["source_freshness"]["panes"]["last_ok_at"],
+        "2026-11-06T10:00:00Z"
+    );
+    assert_eq!(summary["staff"]["coder"]["working"], 1);
+    assert_eq!(
+        summary["pane_roster"],
+        json!([{
+            "pane_id": "%7",
+            "role": "coder",
+            "agent_kind": "claude",
+            "agent_status": "working",
+            "agent_name": "alpha",
+            "lane_name": "alpha-lane"
+        }])
+    );
+
+    let subscription = &summary["subscriptions"][0];
+    assert_eq!(subscription["provider"], "claude");
+    assert_eq!(subscription["monthly_usd"].as_f64(), Some(20.0));
+    assert_eq!(summary["monthly_fixed_usd"].as_f64(), Some(20.0));
+    let hours = summary["calendar_hours_in_month"]
+        .as_i64()
+        .expect("calendar hours");
+    assert!([672, 696, 720, 744].contains(&hours), "hours {hours}");
+    let hourly = summary["fixed_subscription_usd_per_calendar_hour"]
+        .as_f64()
+        .expect("hourly fixed cost");
+    assert!(
+        (hourly - 20.0 / hours as f64).abs() < 0.0001,
+        "hourly {hourly}"
+    );
+    let generated = summary["generated_at"].as_str().expect("generated_at");
+    assert_eq!(summary["billing_month"].as_str(), Some(&generated[..7]));
+
+    assert!(summary["dunk_metrics"].is_null());
+    assert!(summary["function_progress"].is_null());
+    assert!(summary["completion_rate"].is_null());
+    assert_eq!(summary["quotas"], json!({"codex": null, "claude": null}));
+    assert_eq!(summary["goals"], json!([]));
+    assert_eq!(summary["tracked_recent_prs"], json!([]));
+    assert_eq!(summary["vp_message_counts"], json!([]));
+    assert!(summary["limitations"].is_array());
+
+    assert_eq!(server.shutdown(), Ok(()));
 }
