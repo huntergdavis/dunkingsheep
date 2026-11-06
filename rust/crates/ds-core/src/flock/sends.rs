@@ -4508,6 +4508,7 @@ impl Flock {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(existing) = candidates.get(&message.pane_id) else {
+            Self::mark_unobservable_once(&message.pane_id, &mut candidate);
             candidates.insert(message.pane_id.clone(), candidate);
             return;
         };
@@ -4566,7 +4567,29 @@ impl Flock {
                 .rev()
                 .collect();
         }
+        Self::mark_unobservable_once(&message.pane_id, &mut candidate);
         candidates.insert(message.pane_id.clone(), candidate);
+    }
+
+    /// Python logs once, when a failed or typed text candidate has no attempt generation, that
+    /// its recovery cannot be observed, and sets `unobservable_logged` (dunk_core.py 6203-6206).
+    fn mark_unobservable_once(pane_id: &str, candidate: &mut StuckCandidate) {
+        let unknown_generation = candidate.generation.as_deref().is_none_or(str::is_empty);
+        if !matches!(candidate.status.as_str(), "typed" | "failed")
+            || !candidate.press_enter
+            || candidate.kind != "text"
+            || !unknown_generation
+            || candidate.unobservable_logged == Some(true)
+        {
+            return;
+        }
+        candidate.unobservable_logged = Some(true);
+        tracing::warn!(
+            pane_id,
+            message_id = %candidate.message_id,
+            created_at = candidate.created_at,
+            "recovery not observable: attempt generation unknown"
+        );
     }
 
     /// Apply an observer result only to the candidate identity that produced it.
