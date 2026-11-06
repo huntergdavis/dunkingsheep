@@ -1261,3 +1261,40 @@ fn long_false_sent_composer_keeps_its_full_collapsed_text_in_the_box() {
         crate::stuck::collapse(&box_text)
     );
 }
+
+// t3355 (t820 proof D) wiring row 14, candidate half: test_dunk_recovery_wiring.py::
+// test_failure_candidate_and_spent_budget_survive_restart (oracle 79bc92fa). The spent budget
+// half is stuck.rs's spent_ledger_survives_restart_and_a_consumed_message_does_not_regain_budget.
+// This test covers the failed candidate: after a save and a restore into a fresh flock, the
+// candidate holds the same persisted fields. The comparison is on candidate_snapshot, the form
+// the state file stores.
+#[test]
+fn failed_candidate_survives_a_restart_through_the_state_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = scripted_candidate(&dir);
+    flock.save().unwrap();
+    let saved: Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.path().join("state.json")).unwrap())
+            .unwrap();
+    let restarted_dir = tempfile::tempdir().unwrap();
+    let restarted = persisted_flock(&restarted_dir);
+    restarted.restore_snapshot(&saved);
+    let before = flock.stuck_candidates.lock().unwrap().clone();
+    let after = restarted.stuck_candidates.lock().unwrap().clone();
+    assert_eq!(
+        before.keys().map(String::as_str).collect::<Vec<_>>(),
+        vec!["%1"]
+    );
+    assert_eq!(
+        before.keys().collect::<Vec<_>>(),
+        after.keys().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        crate::flock::sends::candidate_snapshot(&before["%1"]),
+        crate::flock::sends::candidate_snapshot(&after["%1"])
+    );
+    assert!(
+        after["%1"].eligible,
+        "the restored candidate stays eligible"
+    );
+}
