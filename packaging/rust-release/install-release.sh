@@ -81,9 +81,9 @@ guard_against_drift "$rollback_dir" "$dropin" "$bin_dir"
 # systemd applies drop-ins in name order, and the last ExecStart wins. A drop-in that sorts
 # after ours and sets ExecStart would silently override the release, so refuse instead.
 ours=$(basename "$dropin")
-later=$(find "$dropin_dir" -maxdepth 1 -type f -name '*.conf' -exec basename {} \; 2>/dev/null | LC_ALL=C sort | awk -v me="$ours" '$0 > me')
+later=$(find "$dropin_dir" -maxdepth 1 \( -type f -o -type l \) -name '*.conf' -exec basename {} \; 2>/dev/null | LC_ALL=C sort | awk -v me="$ours" '$0 > me')
 for name in $later; do
-    if grep -q '^ExecStart=' "$dropin_dir/$name"; then
+    if drop_in_sets_execstart "$dropin_dir/$name"; then
         die "refusing to install: $dropin_dir/$name sorts after $ours and sets ExecStart, so it would override the release"
     fi
 done

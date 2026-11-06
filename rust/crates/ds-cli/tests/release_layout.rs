@@ -634,6 +634,71 @@ fn install_is_not_blocked_by_an_earlier_drop_in_that_sets_execstart() {
     assert_pair(&sandbox, "rel-a");
 }
 
+#[test]
+fn install_refuses_a_later_drop_in_whose_execstart_has_spaces_or_indent() {
+    let variants = [
+        "[Service]\nExecStart = /usr/bin/python3 /old/dunkingsheep serve\n",
+        "[Service]\n  ExecStart=/usr/bin/python3 /old/dunkingsheep serve\n",
+        "[Service]\nExecStart\t=\t/usr/bin/python3 /old/dunkingsheep serve\n",
+        "[Service]\r\nExecStart = /usr/bin/python3 /old/dunkingsheep serve\r\n",
+    ];
+    for body in variants {
+        let sandbox = Sandbox::new();
+        let dropins = sandbox.unit.join("dunkingsheep.service.d");
+        std::fs::create_dir_all(&dropins).expect("drop-in dir");
+        std::fs::write(dropins.join("zz-operator.conf"), body).expect("later drop-in");
+
+        let failed = sandbox.install("rel-a");
+        assert!(
+            !failed.status.success(),
+            "a later drop-in that sets ExecStart must block the install: {body:?}"
+        );
+        assert!(
+            !sandbox.dropin().exists(),
+            "nothing is written after a refusal: {body:?}"
+        );
+    }
+}
+
+#[test]
+fn install_refuses_a_later_symlinked_drop_in_that_sets_execstart() {
+    let sandbox = Sandbox::new();
+    let dropins = sandbox.unit.join("dunkingsheep.service.d");
+    std::fs::create_dir_all(&dropins).expect("drop-in dir");
+    let target = sandbox.bin.join("zz-target.conf");
+    std::fs::write(
+        &target,
+        "[Service]\nExecStart=/usr/bin/python3 /old/dunkingsheep serve\n",
+    )
+    .expect("symlink target");
+    std::os::unix::fs::symlink(&target, dropins.join("zz-link.conf")).expect("symlink");
+
+    let failed = sandbox.install("rel-a");
+    assert!(
+        !failed.status.success(),
+        "a symlinked later drop-in that sets ExecStart must block the install"
+    );
+    assert!(
+        !sandbox.dropin().exists(),
+        "nothing is written after a refusal"
+    );
+}
+
+#[test]
+fn install_accepts_a_later_drop_in_that_only_names_execstart_in_comments_or_other_keys() {
+    let sandbox = Sandbox::new();
+    let dropins = sandbox.unit.join("dunkingsheep.service.d");
+    std::fs::create_dir_all(&dropins).expect("drop-in dir");
+    std::fs::write(
+        dropins.join("zz-notes.conf"),
+        "[Service]\n# ExecStart=/bin/false\n; ExecStart=/bin/false\nExecStartPre=/bin/true\nEnvironment=ExecStart=/bin/false\n",
+    )
+    .expect("later drop-in");
+
+    ok(&sandbox.install("rel-a"));
+    assert_pair(&sandbox, "rel-a");
+}
+
 /// Kills the probe daemon if the test fails before it shuts the daemon down.
 struct CleanupChild(Option<Child>);
 

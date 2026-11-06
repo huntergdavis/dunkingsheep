@@ -164,3 +164,27 @@ arm_transaction() {
 disarm_transaction() {
     trap - EXIT HUP INT TERM
 }
+
+# drop_in_sets_execstart FILE
+# True when FILE assigns ExecStart. Parses the way systemd.syntax(7) describes it: leading and
+# trailing whitespace is ignored, so is whitespace before and after "=", lines starting with #
+# or ; are comments, and keys are exact and case-sensitive. The check is deliberately broad:
+# it does not require the [Service] section, so a match is a refusal, never a pass.
+drop_in_sets_execstart() {
+    awk '
+        {
+            line = $0
+            sub(/^[[:space:]]+/, "", line)
+            sub(/[[:space:]]+$/, "", line)
+        }
+        line == "" || line ~ /^[#;]/ { next }
+        {
+            eq = index(line, "=")
+            if (eq == 0) next
+            key = substr(line, 1, eq - 1)
+            sub(/[[:space:]]+$/, "", key)
+            if (key == "ExecStart") found = 1
+        }
+        END { exit (found ? 0 : 1) }
+    ' "$1"
+}

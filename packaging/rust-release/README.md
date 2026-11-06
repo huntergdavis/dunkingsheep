@@ -65,7 +65,11 @@ packaging/rust-release/uninstall-release.sh --prefix DIR --bin-dir DIR --unit-di
 - The drop-in is `99-rust-release.conf`, so it sorts after the operator drop-ins. systemd
   applies drop-ins in name order and the last `ExecStart` wins. Install refuses when a
   drop-in that sorts after it sets `ExecStart`, because that drop-in would silently override
-  the release.
+  the release. The check reads each drop-in the way systemd does: whitespace around `=` and
+  before a key is ignored, and comment lines are skipped. Symlinked drop-ins are read too. It
+  checks only the directory given with `--unit-dir`. systemd also reads drop-ins from other
+  search paths (for example `/etc/systemd/user`, `/run` and `/usr/lib`). Those are not checked,
+  so the cutover checklist must confirm them with `systemctl --user show -p DropInPaths`.
 
 ## Activation gate (not part of this change)
 
