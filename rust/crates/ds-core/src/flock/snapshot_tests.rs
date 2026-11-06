@@ -246,8 +246,28 @@ fn save_writes_a_complete_atomic_snapshot_to_the_attached_state_path() {
         "stuck_config",
         "outbox",
         "decided",
-        "decided_order",
     ] {
         assert!(payload.get(field).is_some(), "missing {field}");
     }
+    // The Python file has exactly these top-level keys, in this order, and no extra key.
+    let keys: Vec<&str> = payload
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        vec![
+            "version",
+            "next_id",
+            "next_message_id",
+            "dunkers",
+            "stuck_candidates",
+            "stuck",
+            "stuck_config",
+            "outbox",
+            "decided",
+        ],
+        keys
+    );
 }

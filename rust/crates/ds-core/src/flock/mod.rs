@@ -281,12 +281,14 @@ impl Flock {
             .stuck_config
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let (decided, decided_order) = {
+        // Rows stay in decided-order (the Map keeps insertion order), which is the order the Python
+        // file lists them in. A separate order list would be an extra key the Python never writes.
+        let decided = {
             let decided = self
                 .decided
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let rows = decided
+            decided
                 .order
                 .iter()
                 .filter_map(|id| {
@@ -297,14 +299,7 @@ impl Flock {
                         )
                     })
                 })
-                .collect::<Map<String, Value>>();
-            let order = decided
-                .order
-                .iter()
-                .filter(|id| rows.contains_key(*id))
-                .cloned()
-                .collect::<Vec<_>>();
-            (rows, order)
+                .collect::<Map<String, Value>>()
         };
         json!({
             "version": 1,
@@ -322,7 +317,6 @@ impl Flock {
             },
             "outbox": outbox,
             "decided": decided,
-            "decided_order": decided_order,
         })
     }
 
@@ -351,10 +345,14 @@ impl Flock {
             .state_file
             .clone();
         let payload = self.snapshot();
-        crate::atomic_json::write_classified(&path, &payload).map_err(|error| match error {
-            atomic_json::ClassifiedWriteError::Io(error) => sends::SnapshotSaveFailure::Io(error),
-            atomic_json::ClassifiedWriteError::Other(error) => {
-                sends::SnapshotSaveFailure::Other(error)
+        crate::atomic_json::write_python_state_classified(&path, &payload).map_err(|error| {
+            match error {
+                atomic_json::ClassifiedWriteError::Io(error) => {
+                    sends::SnapshotSaveFailure::Io(error)
+                }
+                atomic_json::ClassifiedWriteError::Other(error) => {
+                    sends::SnapshotSaveFailure::Other(error)
+                }
             }
         })
     }
@@ -472,6 +470,9 @@ impl Flock {
         }
         if let Some(decided) = root.get("decided").and_then(Value::as_object) {
             let mut state = sends::DecidedMessages::default();
+            // The order the file lists the ids in (preserve_order keeps it): the Python writes
+            // them in decided order, so that is the order a restart must keep.
+            let mut file_order: Vec<String> = Vec::with_capacity(decided.len());
             for (id, entry) in decided {
                 let (status, created_at) = match entry {
                     Value::Object(row) => (
@@ -487,7 +488,10 @@ impl Flock {
                 state
                     .by_id
                     .insert(id.clone(), sends::DecidedTombstone { status, created_at });
+                file_order.push(id.clone());
             }
+            // Files written before the Python-compatible writer carry a separate `decided_order`
+            // (the Rust writer sorted keys then); it still wins for those files.
             if let Some(order) = root.get("decided_order").and_then(Value::as_array) {
                 for id in order.iter().filter_map(Value::as_str) {
                     if state.by_id.contains_key(id) && !state.order.iter().any(|seen| seen == id) {
@@ -495,9 +499,9 @@ impl Flock {
                     }
                 }
             }
-            for id in state.by_id.keys() {
-                if !state.order.iter().any(|seen| seen == id) {
-                    state.order.push_back(id.clone());
+            for id in file_order {
+                if !state.order.iter().any(|seen| *seen == id) {
+                    state.order.push_back(id);
                 }
             }
             while state.order.len() > sends::DECIDED_KEPT {
@@ -887,6 +891,8 @@ mod commands_inbox_tests;
 mod commands_owner_views_tests;
 #[cfg(test)]
 mod commands_turns_tests;
+#[cfg(test)]
+mod dunks_state_file_tests;
 #[cfg(test)]
 mod dunks_tests;
 #[cfg(test)]

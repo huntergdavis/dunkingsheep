@@ -1966,6 +1966,86 @@ mod tests {
         assert!(owner.dunk_timers.workers.lock().unwrap().is_empty());
     }
 
+    /// T32 residual (t3300): each RUNNING dunk owns its own live timer worker, and no other dunk
+    /// shares it. The worker is an OS thread named `dunk-timer-<id>` that holds a tokio `Handle`;
+    /// it is not a tokio task. Owner decision A on t800 accepts that mapping and records it as a
+    /// deviation from the literal "one tokio task per running dunk" wording. Long intervals keep
+    /// every timer waiting, so nothing is sent during the test.
+    #[test]
+    fn each_running_dunk_owns_its_own_live_timer_worker() {
+        use super::dunk_timers::DunkTimerOwner;
+        let dir = tempfile::tempdir().unwrap();
+        let flock = Arc::new(Flock::new(
+            dir.path().join("launches"),
+            dir.path().join("lanes"),
+            false,
+        ));
+        flock.attach_stores(crate::flock::panes::Stores {
+            inbox: Some(Arc::new(
+                crate::inbox_store::Store::open(
+                    dir.path().join("inbox.db"),
+                    dir.path().join("blobs"),
+                )
+                .unwrap(),
+            )),
+            ..Default::default()
+        });
+        for (index, start) in [true, true, false, true].into_iter().enumerate() {
+            let pane = serde_json::json!({"pane_id": format!("w1:p{}", index + 1)});
+            let args = AddArgs {
+                interval: Some("60".into()),
+                start,
+                hold_while_typing: Some("false".into()),
+                ..AddArgs::default()
+            };
+            flock.dunks.add(pane.as_object(), &args).unwrap();
+        }
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let owner = OutboxRuntime::new(
+            Arc::clone(&flock),
+            runtime.handle().clone(),
+            Arc::new(|| Box::new(FakeTerminal::new())),
+        )
+        .unwrap();
+        let key = |id: &str| DunkTimerOwner::key(&flock.dunks.handle(id).unwrap());
+
+        {
+            let workers = owner.dunk_timers.workers.lock().unwrap();
+            assert_eq!(3, workers.len(), "one worker per running dunk, none for d3");
+            assert!(
+                !workers.contains_key(&key("d3")),
+                "a stopped dunk has no worker"
+            );
+            let mut threads = std::collections::HashSet::new();
+            for id in ["d1", "d2", "d4"] {
+                let worker = workers
+                    .get(&key(id))
+                    .unwrap_or_else(|| panic!("{id} is running but owns no worker"));
+                assert!(!worker.join.is_finished(), "{id}'s worker is alive");
+                let expected = format!("dunk-timer-{id}");
+                assert_eq!(Some(expected.as_str()), worker.join.thread().name());
+                assert!(
+                    threads.insert(worker.join.thread().id()),
+                    "{id} shares a thread with another dunk"
+                );
+            }
+        }
+
+        owner.stop_dunk("d2").unwrap();
+        {
+            let workers = owner.dunk_timers.workers.lock().unwrap();
+            assert_eq!(2, workers.len(), "stopping d2 retires only d2's worker");
+            assert!(!workers.contains_key(&key("d2")));
+            assert!(workers.contains_key(&key("d1")));
+            assert!(workers.contains_key(&key("d4")));
+        }
+        owner.stop_and_join();
+        assert!(owner.dunk_timers.workers.lock().unwrap().is_empty());
+    }
+
     #[test]
     fn scheduled_idle_gate_holds_until_policy_changes_then_delivers() {
         let dir = tempfile::tempdir().unwrap();

@@ -61,13 +61,6 @@ pub(crate) fn write_classified<T: serde::Serialize>(
     path: &Path,
     value: &T,
 ) -> Result<(), ClassifiedWriteError> {
-    let directory = path.parent().ok_or_else(|| {
-        ClassifiedWriteError::Other(DunkError::Refused(format!(
-            "{} has no parent directory",
-            path.display()
-        )))
-    })?;
-    fs::create_dir_all(directory).map_err(|error| ClassifiedWriteError::Io(error.into()))?;
     // State files are written with sorted keys (the Python's `sort_keys=True`). serde_json now
     // keeps insertion order (`preserve_order`), so sort explicitly instead of leaning on a
     // BTreeMap: the file bytes and the order a reader sees stay what they were.
@@ -76,6 +69,33 @@ pub(crate) fn write_classified<T: serde::Serialize>(
     let text = serde_json::to_string_pretty(&sorted_keys(json))
         .map_err(|error| ClassifiedWriteError::Other(error.into()))?
         + "\n";
+    write_text_atomically(path, &text)
+}
+
+/// The whole-Flock state file (`dunks.json`), written with the layout of the Python daemon's
+/// `json.dump(payload, handle, indent=2)`: insertion order (no sorting), `ensure_ascii` escapes,
+/// Python float `repr`, and no trailing newline. Byte identity is proven only for dunk state, by
+/// the sanitized fixture in `flock/dunks_state_file_tests.rs`. It is not yet proven for populated
+/// state: an outbox row has Rust's 21-key layout rather than Python's 13 keys, and stuck candidates
+/// and the stuck records/spent maps are BTreeMaps (sorted, not insertion order) whose rows carry
+/// the Rust key set. Those are split off to a follow-up parked under t1605 (owner decision B on
+/// t800, a cutover state-preservation requirement); no follow-up task has been filed yet.
+pub(crate) fn write_python_state_classified(
+    path: &Path,
+    value: &serde_json::Value,
+) -> Result<(), ClassifiedWriteError> {
+    write_text_atomically(path, &python_json_indent2(value))
+}
+
+/// Temp file in the same directory, created 0600, fsynced, then renamed over `path`.
+fn write_text_atomically(path: &Path, text: &str) -> Result<(), ClassifiedWriteError> {
+    let directory = path.parent().ok_or_else(|| {
+        ClassifiedWriteError::Other(DunkError::Refused(format!(
+            "{} has no parent directory",
+            path.display()
+        )))
+    })?;
+    fs::create_dir_all(directory).map_err(|error| ClassifiedWriteError::Io(error.into()))?;
     let temporary = temporary_path(path);
     {
         let mut file = OpenOptions::new()
@@ -123,6 +143,173 @@ pub fn sorted_keys(value: serde_json::Value) -> serde_json::Value {
         Value::Array(items) => Value::Array(items.into_iter().map(sorted_keys).collect()),
         other => other,
     }
+}
+
+/// Python's `json.dumps(value, indent=2)`, the text `json.dump(payload, handle, indent=2)`
+/// writes: two-space indent, `,` then a newline between items, `": "` after keys, `ensure_ascii`
+/// escapes, Python float `repr`, and empty containers as `[]` and `{}`. No trailing newline.
+pub fn python_json_indent2(value: &serde_json::Value) -> String {
+    let mut out = String::new();
+    write_python_value(&mut out, value, 0);
+    out
+}
+
+fn write_python_value(out: &mut String, value: &serde_json::Value, depth: usize) {
+    use serde_json::Value;
+    match value {
+        Value::Null => out.push_str("null"),
+        Value::Bool(flag) => out.push_str(if *flag { "true" } else { "false" }),
+        Value::Number(number) => out.push_str(&python_number(number)),
+        Value::String(text) => out.push_str(&python_string(text)),
+        Value::Array(items) => {
+            if items.is_empty() {
+                out.push_str("[]");
+                return;
+            }
+            out.push('[');
+            for (index, item) in items.iter().enumerate() {
+                push_item_break(out, index, depth + 1);
+                write_python_value(out, item, depth + 1);
+            }
+            push_close(out, depth, ']');
+        }
+        Value::Object(map) => {
+            if map.is_empty() {
+                out.push_str("{}");
+                return;
+            }
+            out.push('{');
+            for (index, (key, item)) in map.iter().enumerate() {
+                push_item_break(out, index, depth + 1);
+                out.push_str(&python_string(key));
+                out.push_str(": ");
+                write_python_value(out, item, depth + 1);
+            }
+            push_close(out, depth, '}');
+        }
+    }
+}
+
+fn push_item_break(out: &mut String, index: usize, depth: usize) {
+    if index > 0 {
+        out.push(',');
+    }
+    out.push('\n');
+    push_indent(out, depth);
+}
+
+fn push_close(out: &mut String, depth: usize, close: char) {
+    out.push('\n');
+    push_indent(out, depth);
+    out.push(close);
+}
+
+fn push_indent(out: &mut String, depth: usize) {
+    out.extend(std::iter::repeat_n(' ', depth * 2));
+}
+
+/// A JSON number as Python reads and prints it. A token with a fraction or an exponent is a
+/// Python float, so it is re-rendered with `repr`; an integer token is written as it is.
+fn python_number(number: &serde_json::Number) -> String {
+    let token = number.to_string();
+    if token.contains(['.', 'e', 'E']) {
+        match token.parse::<f64>() {
+            Ok(value) => python_float_repr(value),
+            Err(_) => token,
+        }
+    } else {
+        token
+    }
+}
+
+/// Python's `repr(float)`: the shortest digits that round-trip, in fixed notation when the
+/// decimal exponent is in [-4, 16), otherwise `d[.ddd]e±XX` with at least two exponent digits.
+pub fn python_float_repr(value: f64) -> String {
+    if value.is_nan() {
+        return "NaN".into();
+    }
+    if value.is_infinite() {
+        return if value > 0.0 { "Infinity" } else { "-Infinity" }.into();
+    }
+    if value == 0.0 {
+        return if value.is_sign_negative() {
+            "-0.0"
+        } else {
+            "0.0"
+        }
+        .into();
+    }
+    // Rust's `{:e}` prints the same shortest round-trip digits that Python's repr uses.
+    let scientific = format!("{value:e}");
+    let (mantissa, exponent) = scientific
+        .split_once('e')
+        .unwrap_or((scientific.as_str(), "0"));
+    let exponent: i32 = exponent.parse().unwrap_or(0);
+    let (sign, unsigned) = match mantissa.strip_prefix('-') {
+        Some(rest) => ("-", rest),
+        None => ("", mantissa),
+    };
+    let digits: String = unsigned.chars().filter(|c| *c != '.').collect();
+    let mut out = String::from(sign);
+    if (-4..16).contains(&exponent) {
+        let point = exponent + 1;
+        if point <= 0 {
+            out.push_str("0.");
+            out.extend(std::iter::repeat_n('0', point.unsigned_abs() as usize));
+            out.push_str(&digits);
+        } else if point as usize >= digits.len() {
+            out.push_str(&digits);
+            out.extend(std::iter::repeat_n('0', point as usize - digits.len()));
+            out.push_str(".0");
+        } else {
+            let (whole, fraction) = digits.split_at(point as usize);
+            out.push_str(whole);
+            out.push('.');
+            out.push_str(fraction);
+        }
+    } else {
+        out.push_str(&digits[..1]);
+        if digits.len() > 1 {
+            out.push('.');
+            out.push_str(&digits[1..]);
+        }
+        out.push('e');
+        out.push(if exponent < 0 { '-' } else { '+' });
+        let magnitude = exponent.unsigned_abs();
+        if magnitude < 10 {
+            out.push('0');
+        }
+        out.push_str(&magnitude.to_string());
+    }
+    out
+}
+
+/// A Python `json` string literal with `ensure_ascii`: `"`, `\` and the control characters use
+/// their short escapes or `\u00XX`; every other character outside printable ASCII becomes
+/// `\uXXXX` in lowercase hex, as a UTF-16 surrogate pair above U+FFFF.
+fn python_string(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for ch in text.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{8}' => out.push_str("\\b"),
+            '\u{c}' => out.push_str("\\f"),
+            ' '..='~' => out.push(ch),
+            _ => {
+                let mut units = [0u16; 2];
+                for unit in ch.encode_utf16(&mut units) {
+                    out.push_str(&format!("\\u{unit:04x}"));
+                }
+            }
+        }
+    }
+    out.push('"');
+    out
 }
 
 fn temporary_path(path: &Path) -> PathBuf {
@@ -225,5 +412,90 @@ mod tests {
             .filter(|name| name.ends_with(".tmp"))
             .collect();
         assert!(leftovers.is_empty(), "left {leftovers:?}");
+    }
+
+    // Expected values were produced by CPython 3 with `json.dumps(v, indent=2)` and `repr`.
+    #[test]
+    fn python_floats_print_like_python_repr() {
+        let cases: &[(f64, &str)] = &[
+            (0.0, "0.0"),
+            (-0.0, "-0.0"),
+            (1.0, "1.0"),
+            (15.0, "15.0"),
+            (2.5, "2.5"),
+            (0.001, "0.001"),
+            (0.0001, "0.0001"),
+            (0.00001, "1e-05"),
+            (1e-7, "1e-07"),
+            (1e15, "1000000000000000.0"),
+            (1e16, "1e+16"),
+            (1.5e16, "1.5e+16"),
+            (1.5e300, "1.5e+300"),
+            (-2.5e-5, "-2.5e-05"),
+            (1_793_000_000.5, "1793000000.5"),
+            (1_793_000_000.123_456_7, "1793000000.1234567"),
+            (4_102_444_800.25, "4102444800.25"),
+            (1.2345678901234568e17, "1.2345678901234568e+17"),
+            (0.1, "0.1"),
+            (1.0 / 3.0, "0.3333333333333333"),
+            (5e-324, "5e-324"),
+            (f64::MAX, "1.7976931348623157e+308"),
+        ];
+        for (value, expected) in cases {
+            assert_eq!(*expected, python_float_repr(*value), "repr of {value:e}");
+        }
+    }
+
+    #[test]
+    fn python_strings_escape_like_ensure_ascii() {
+        // The expected text is the escaped JSON itself, so every backslash is spelled out.
+        assert_eq!(
+            "\"e\\u00e9\\u2014\\ud83d\\ude00\\u0001\\u007f\\t\\\"\\\\/\"",
+            python_string("e\u{e9}\u{2014}\u{1F600}\u{1}\u{7f}\t\"\\/")
+        );
+    }
+
+    #[test]
+    fn indent_two_layout_matches_json_dump_without_a_trailing_newline() {
+        let value = json!({"a": [], "b": {}, "c": [1, {"x": null}]});
+        assert_eq!(
+            "{\n  \"a\": [],\n  \"b\": {},\n  \"c\": [\n    1,\n    {\n      \"x\": null\n    }\n  ]\n}",
+            python_json_indent2(&value)
+        );
+    }
+
+    #[test]
+    fn state_file_keeps_insertion_order_and_python_bytes() {
+        let dir = tempdir();
+        let path = dir.path().join("dunks.json");
+        let value = json!({
+            "version": 1,
+            "next_id": 7,
+            "dunkers": [{"id": "d1", "text": "tab\there", "interval_minutes": 15.0}],
+            "decided": {"m30": {"status": "delivered"}, "m4": {"status": "failed"}},
+        });
+        write_python_state_classified(&path, &value).unwrap();
+        let bytes = fs::read(&path).unwrap();
+        assert_eq!(python_json_indent2(&value).as_bytes(), bytes.as_slice());
+        assert!(
+            !bytes.ends_with(b"\n"),
+            "json.dump writes no trailing newline"
+        );
+        assert_eq!(0o600, mode(&path).unwrap());
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(
+            text.find("\"version\"") < text.find("\"dunkers\""),
+            "{text}"
+        );
+        assert!(
+            text.find("\"dunkers\"") < text.find("\"decided\""),
+            "{text}"
+        );
+        assert!(
+            text.find("\"m30\"") < text.find("\"m4\""),
+            "not sorted: {text}"
+        );
+        assert!(text.contains("\"tab\\there\""), "{text}");
+        assert!(text.contains("\"interval_minutes\": 15.0"), "{text}");
     }
 }
