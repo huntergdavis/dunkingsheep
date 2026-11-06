@@ -98,26 +98,30 @@ impl Sandbox {
     }
 
     fn install(&self, id: &str) -> Output {
+        self.install_with(id, &[])
+    }
+
+    fn install_with(&self, id: &str, extra: &[&str]) -> Output {
         let poll = project_root().join("tools/dunk_poll.py");
-        run_script(
-            "install-release.sh",
-            &[
-                "--binary",
-                env!("CARGO_BIN_EXE_dunkingsheep"),
-                "--poll",
-                poll.to_str().expect("utf-8 path"),
-                "--release-id",
-                id,
-                "--prefix",
-                self.prefix.to_str().expect("utf-8 path"),
-                "--bin-dir",
-                self.bin.to_str().expect("utf-8 path"),
-                "--unit-dir",
-                self.unit.to_str().expect("utf-8 path"),
-                "--revision",
-                "f76c1801",
-            ],
-        )
+        let mut args = vec![
+            "--binary",
+            env!("CARGO_BIN_EXE_dunkingsheep"),
+            "--poll",
+            poll.to_str().expect("utf-8 path"),
+            "--release-id",
+            id,
+            "--prefix",
+            self.prefix.to_str().expect("utf-8 path"),
+            "--bin-dir",
+            self.bin.to_str().expect("utf-8 path"),
+            "--unit-dir",
+            self.unit.to_str().expect("utf-8 path"),
+            "--revision",
+            "f76c1801",
+            "--no-standard-scan",
+        ];
+        args.extend_from_slice(extra);
+        run_script("install-release.sh", &args)
     }
 
     fn uninstall(&self, extra: &[&str]) -> Output {
@@ -142,6 +146,7 @@ impl Sandbox {
             "--unit-dir",
             self.unit.to_str().expect("utf-8 path"),
         ];
+        args.push("--no-standard-scan");
         args.extend_from_slice(extra);
         run_script("rollback-release.sh", &args)
     }
@@ -254,6 +259,7 @@ fn install_writes_an_immutable_release_launchers_and_drop_in() {
             sandbox.bin.to_str().expect("utf-8 path"),
             "--unit-dir",
             sandbox.unit.to_str().expect("utf-8 path"),
+            "--no-standard-scan",
         ],
     );
     assert!(!refused.status.success());
@@ -697,6 +703,125 @@ fn install_accepts_a_later_drop_in_that_only_names_execstart_in_comments_or_othe
 
     ok(&sandbox.install("rel-a"));
     assert_pair(&sandbox, "rel-a");
+}
+
+#[test]
+fn a_failed_install_leaves_the_rollback_history_as_it_was() {
+    let sandbox = Sandbox::new();
+    ok(&sandbox.install("rel-a"));
+    assert!(sandbox
+        .prefix
+        .join("rollback/previous/dropin.absent")
+        .exists());
+
+    // A read-only entry inside owned makes the owned snapshot fail after previous has already been
+    // replaced for rel-b.
+    let locked = sandbox.prefix.join("rollback/owned/locked");
+    std::fs::create_dir_all(&locked).expect("locked entry");
+    std::fs::write(locked.join("keep"), "x").expect("entry");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).expect("read-only");
+
+    let failed = sandbox.install("rel-b");
+    assert!(!failed.status.success(), "the owned snapshot must fail");
+    assert_pair(&sandbox, "rel-a");
+    assert!(
+        sandbox
+            .prefix
+            .join("rollback/previous/dropin.absent")
+            .exists(),
+        "previous must still be the pre-rel-a state, not rel-a"
+    );
+
+    // The replaced owned copy may still hold the read-only entry. Make it writable so the sandbox
+    // can be removed, then roll back.
+    for entry in std::fs::read_dir(sandbox.prefix.join("rollback")).expect("rollback dir") {
+        let stale = entry.expect("entry").path().join("locked");
+        if stale.exists() {
+            std::fs::set_permissions(&stale, std::fs::Permissions::from_mode(0o755))
+                .expect("writable");
+        }
+    }
+    ok(&sandbox.rollback(&[]));
+    assert!(
+        !sandbox.dropin().exists(),
+        "a plain rollback must restore the pre-rel-a state, not rel-a"
+    );
+}
+
+#[test]
+fn install_refuses_a_later_drop_in_in_an_extra_scan_root() {
+    let sandbox = Sandbox::new();
+    let extra = sandbox.prefix.join("extra-unit-path");
+    std::fs::create_dir_all(extra.join("dunkingsheep.service.d")).expect("extra root");
+    std::fs::write(
+        extra.join("dunkingsheep.service.d/zz-override.conf"),
+        "[Service]\nExecStart=/usr/bin/python3 /old/dunkingsheep serve\n",
+    )
+    .expect("override");
+
+    let failed = sandbox.install_with(
+        "rel-a",
+        &["--scan-dir", extra.to_str().expect("utf-8 path")],
+    );
+    assert!(
+        !failed.status.success(),
+        "an override in an extra scan root must block the install"
+    );
+    assert!(
+        String::from_utf8_lossy(&failed.stderr).contains("zz-override.conf"),
+        "the refusal must name the override"
+    );
+    assert!(
+        !sandbox.dropin().exists(),
+        "nothing is written after a refusal"
+    );
+}
+
+#[test]
+fn install_refuses_a_later_type_wide_drop_in_that_sets_execstart() {
+    let sandbox = Sandbox::new();
+    let service_d = sandbox.unit.join("service.d");
+    std::fs::create_dir_all(&service_d).expect("type-wide drop-in dir");
+    std::fs::write(
+        service_d.join("zz-all-services.conf"),
+        "[Service]\nExecStart=/usr/bin/python3 /old/dunkingsheep serve\n",
+    )
+    .expect("type-wide drop-in");
+
+    let failed = sandbox.install("rel-a");
+    assert!(
+        !failed.status.success(),
+        "a later type-wide drop-in that sets ExecStart must block the install"
+    );
+    assert!(
+        !sandbox.dropin().exists(),
+        "nothing is written after a refusal"
+    );
+}
+
+#[test]
+fn install_refuses_a_same_named_drop_in_elsewhere_that_sets_execstart() {
+    let sandbox = Sandbox::new();
+    let extra = sandbox.prefix.join("shadow-root");
+    std::fs::create_dir_all(extra.join("dunkingsheep.service.d")).expect("extra root");
+    std::fs::write(
+        extra.join("dunkingsheep.service.d/99-rust-release.conf"),
+        "[Service]\nExecStart=/usr/bin/python3 /old/dunkingsheep serve\n",
+    )
+    .expect("shadow drop-in");
+
+    let failed = sandbox.install_with(
+        "rel-a",
+        &["--scan-dir", extra.to_str().expect("utf-8 path")],
+    );
+    assert!(
+        !failed.status.success(),
+        "a same-named drop-in that sets ExecStart elsewhere must block the install"
+    );
+    assert!(
+        !sandbox.dropin().exists(),
+        "nothing is written after a refusal"
+    );
 }
 
 /// Kills the probe daemon if the test fails before it shuts the daemon down.

@@ -45,22 +45,22 @@ dropin_release_id() {
 # The snapshot is built beside DIR and then moved into place, so an interrupted snapshot
 # never leaves a partial DIR.
 snapshot_pair() {
-    rm -rf "$1.tmp.$$"
-    mkdir -p "$1.tmp.$$"
+    rm -rf "$1.tmp"
+    mkdir -p "$1.tmp"
     if [ -f "$2" ]; then
-        cp -p "$2" "$1.tmp.$$/dropin.conf"
+        cp -p "$2" "$1.tmp/dropin.conf"
     else
-        : > "$1.tmp.$$/dropin.absent"
+        : > "$1.tmp/dropin.absent"
     fi
     for name in dunkingsheep dunk-poll; do
         if [ -f "$3/$name" ]; then
-            cp -p "$3/$name" "$1.tmp.$$/$name"
+            cp -p "$3/$name" "$1.tmp/$name"
         else
-            : > "$1.tmp.$$/$name.absent"
+            : > "$1.tmp/$name.absent"
         fi
     done
     rm -rf "$1"
-    mv "$1.tmp.$$" "$1"
+    mv "$1.tmp" "$1"
 }
 
 # put_file SRC DST
@@ -94,10 +94,14 @@ restore_pair() {
 # Makes the pair saved in TXN the "previous" pair. The copy is made first, so the old
 # previous pair survives until the new one is in place.
 replace_previous() {
-    rm -rf "$1/previous.new"
+    clear_tree "$1/previous.new"
     cp -R "$2" "$1/previous.new"
-    rm -rf "$1/previous"
+    clear_tree "$1/previous.bad"
+    if [ -e "$1/previous" ]; then
+        mv "$1/previous" "$1/previous.bad"
+    fi
     mv "$1/previous.new" "$1/previous"
+    clear_tree "$1/previous.bad" 2>/dev/null || :
 }
 
 # guard_pair EXPECTED DROPIN BIN_DIR
@@ -134,18 +138,23 @@ guard_against_drift() {
 }
 
 # transaction_exit: the EXIT handler of install, rollback and uninstall. A mutation that
-# started (mutated=1) and did not finish restores the pair saved in $txn, so a failed run
-# never leaves a mixed pair. Callers set txn, dropin, bin_dir and mutated, then call
+# started (mutated=1) and did not finish restores the pair saved in $txn and the rollback history
+# saved in $txn_meta, so a failed run never leaves a mixed pair or a changed history. Callers set
+# txn, txn_meta, dropin, bin_dir, rollback_dir and mutated, then call
 # arm_transaction. Signals are ignored while the restore runs, so it is not cut short.
-# shellcheck disable=SC2154 # txn, dropin, bin_dir and mutated are set by the calling script
+# shellcheck disable=SC2154 # txn, txn_meta, dropin, bin_dir, rollback_dir and mutated come from the caller
 transaction_exit() {
     status=$?
     trap '' HUP INT TERM
     if [ "${mutated:-0}" -eq 1 ]; then
-        if restore_pair "$txn" "$dropin" "$bin_dir"; then
-            echo "error: the operation failed; the drop-in and launchers were restored to their previous state" >&2
+        pair_ok=0
+        meta_ok=0
+        if restore_pair "$txn" "$dropin" "$bin_dir"; then pair_ok=1; fi
+        if restore_metadata "$txn_meta" "$rollback_dir"; then meta_ok=1; fi
+        if [ "$pair_ok" -eq 1 ] && [ "$meta_ok" -eq 1 ]; then
+            echo "error: the operation failed; the drop-in, the launchers and the rollback history were restored to their previous state" >&2
         else
-            echo "error: the operation failed and the saved pair in $txn could not be fully restored" >&2
+            echo "error: the operation failed and the saved state could not be fully restored; see $txn and $txn_meta" >&2
         fi
     fi
     exit "$status"
@@ -187,4 +196,114 @@ drop_in_sets_execstart() {
         }
         END { exit (found ? 0 : 1) }
     ' "$1"
+}
+
+# clear_tree DIR
+# Removes a directory that a transaction created. A copy keeps the modes of its source, so an
+# entry that was read-only is made writable first. A missing path is not an error.
+clear_tree() {
+    chmod -R u+w -- "$1" 2>/dev/null || :
+    rm -rf -- "$1"
+}
+
+# save_metadata TXN_META ROLLBACK_DIR
+# Saves the "previous" and "owned" snapshots before a transaction changes anything, so a failed
+# run can put back the rollback history it replaced. An absent snapshot gets an .absent marker.
+save_metadata() {
+    clear_tree "$1"
+    mkdir -p "$1" || return 1
+    for name in previous owned; do
+        if [ -d "$2/$name" ]; then
+            cp -Rp "$2/$name" "$1/$name" || return 1
+        else
+            : > "$1/$name.absent" || return 1
+        fi
+    done
+}
+
+# restore_metadata TXN_META ROLLBACK_DIR
+# Puts back the snapshots saved by save_metadata. Each copy is made beside its target, the current
+# snapshot is renamed aside, and the copy is renamed into place. Renaming needs write access only
+# to the rollback directory, so a snapshot with a read-only entry does not block the restore. The
+# renamed-aside snapshot is removed on a best-effort basis.
+restore_metadata() {
+    for name in previous owned; do
+        clear_tree "$2/$name.restore" || return 1
+        if [ -d "$1/$name" ]; then
+            cp -Rp "$1/$name" "$2/$name.restore" || return 1
+        fi
+        clear_tree "$2/$name.bad" || return 1
+        if [ -e "$2/$name" ]; then
+            mv "$2/$name" "$2/$name.bad" || return 1
+        fi
+        if [ -d "$1/$name" ]; then
+            mv "$2/$name.restore" "$2/$name" || return 1
+        fi
+        clear_tree "$2/$name.bad" 2>/dev/null || :
+    done
+}
+
+# standard_roots UNIT_DIR
+# The unit load paths systemd reads for the user manager (systemd.unit(5), with the default XDG
+# variables). UNIT_DIR comes first. systemd merges the <unit>.d and type-wide service.d drop-ins
+# from all of them and applies them in name order, whichever directory they are in.
+standard_roots() {
+    uid=$(id -u)
+    printf '%s\n' \
+        "$1" \
+        "$HOME/.config/systemd/user.control" \
+        "/run/user/$uid/systemd/user.control" \
+        "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user" \
+        "/etc/xdg/systemd/user" \
+        "/etc/systemd/user" \
+        "/run/user/$uid/systemd/user" \
+        "/run/systemd/user" \
+        "${XDG_DATA_HOME:-$HOME/.local/share}/systemd/user" \
+        "/usr/local/share/systemd/user" \
+        "/usr/share/systemd/user" \
+        "/usr/local/lib/systemd/user" \
+        "/usr/lib/systemd/user"
+}
+
+# scan_roots UNIT_DIR STANDARD EXTRA
+# The roots refuse_later_execstart scans: the standard unit load paths when STANDARD is 1, or only
+# UNIT_DIR when it is 0 (the test fixtures use 0, so they never read the host's drop-ins), plus
+# EXTRA, a newline-separated list of further roots given with --scan-dir.
+scan_roots() {
+    if [ "$2" -eq 1 ]; then
+        standard_roots "$1"
+    else
+        printf '%s\n' "$1"
+    fi
+    if [ -n "$3" ]; then
+        printf '%s\n' "$3"
+    fi
+}
+
+# refuse_later_execstart DROPIN ROOTS
+# Dies when a drop-in in ROOTS would override the release. In each root it looks at the
+# <root>/dunkingsheep.service.d and the type-wide <root>/service.d. A drop-in that sorts after
+# DROPIN and assigns ExecStart is refused, because systemd applies it later. So is a drop-in with
+# the same name that assigns ExecStart elsewhere, because it can shadow ours. Drop-ins that sort
+# before DROPIN are not refused, because DROPIN applies after them.
+refuse_later_execstart() {
+    ours=$(basename "$1")
+    ours_dir=$(dirname "$1")
+    while IFS= read -r root; do
+        [ -n "$root" ] || continue
+        for f in "$root/dunkingsheep.service.d"/*.conf "$root/service.d"/*.conf; do
+            { [ -e "$f" ] || [ -L "$f" ]; } || continue
+            name=$(basename "$f")
+            if [ "$name" = "$ours" ]; then
+                [ "$(dirname "$f")" = "$ours_dir" ] && continue
+            elif [ "$(awk -v a="$ours" -v b="$name" 'BEGIN { print (b > a) ? "later" : "earlier" }')" = earlier ]; then
+                continue
+            fi
+            if drop_in_sets_execstart "$f"; then
+                die "refusing to install: $f sets ExecStart and sorts after $ours or shares its name, so it would override the release"
+            fi
+        done
+    done <<ROOTS
+$2
+ROOTS
 }

@@ -13,7 +13,7 @@
 # a drop-in or launcher that differs from the last state this layout wrote.
 #
 # usage: rollback-release.sh --prefix DIR --bin-dir DIR --unit-dir DIR
-#            [--to ID | --original] [--dry-run]
+#            [--to ID | --original] [--scan-dir DIR]... [--no-standard-scan] [--dry-run]
 
 set -eu
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
@@ -25,6 +25,8 @@ bin_dir=""
 unit_dir=""
 to=""
 original=0
+standard_scan=1
+extra_roots=""
 dry_run=0
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -33,6 +35,9 @@ while [ "$#" -gt 0 ]; do
         --unit-dir) unit_dir=${2:-}; shift 2 ;;
         --to) to=${2:-}; shift 2 ;;
         --original) original=1; shift ;;
+        --scan-dir) require_plain_path --scan-dir "${2:-}"; extra_roots="$extra_roots
+$2"; shift 2 ;;
+        --no-standard-scan) standard_scan=0; shift ;;
         --dry-run) dry_run=1; shift ;;
         -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
         *) die "unknown argument: $1" ;;
@@ -57,13 +62,17 @@ if [ -n "$to" ]; then
     target="$prefix/releases/$to/dunkingsheep"
     [ -x "$target" ] || die "release $to is not installed: $target"
     guard_against_drift "$rollback_dir" "$dropin" "$bin_dir"
+    roots=$(scan_roots "$unit_dir" "$standard_scan" "$extra_roots")
+    refuse_later_execstart "$dropin" "$roots"
     if [ "$dry_run" -eq 1 ]; then
         echo "dry run: drop-in and launchers -> release $to"
         exit 0
     fi
     mkdir -p "$rollback_dir" "$unit_dir/dunkingsheep.service.d" "$bin_dir"
     txn="$rollback_dir/.txn"
+    txn_meta="$rollback_dir/.txn-meta"
     snapshot_pair "$txn" "$dropin" "$bin_dir"
+    save_metadata "$txn_meta" "$rollback_dir"
     mutated=1
     arm_transaction
     "$target" install --bin-dir "$bin_dir" > /dev/null
@@ -72,6 +81,7 @@ if [ -n "$to" ]; then
     snapshot_pair "$rollback_dir/owned" "$dropin" "$bin_dir"
     mutated=0
     rm -rf "$txn"
+    clear_tree "$txn_meta" 2>/dev/null || :
     disarm_transaction
     echo "drop-in and launchers now point at release $to"
     echo "not activated: no systemctl was run. Reload and restart only after the cutover gate."
@@ -94,7 +104,9 @@ fi
 
 # The transaction. The live pair is saved first. The source is read before "previous" changes.
 txn="$rollback_dir/.txn"
+txn_meta="$rollback_dir/.txn-meta"
 snapshot_pair "$txn" "$dropin" "$bin_dir"
+save_metadata "$txn_meta" "$rollback_dir"
 mutated=1
 arm_transaction
 restore_pair "$source_dir" "$dropin" "$bin_dir"
@@ -102,6 +114,7 @@ replace_previous "$rollback_dir" "$txn"
 snapshot_pair "$rollback_dir/owned" "$dropin" "$bin_dir"
 mutated=0
 rm -rf "$txn"
+clear_tree "$txn_meta" 2>/dev/null || :
 disarm_transaction
 echo "restored $what (drop-in and launchers as one pair)"
 echo "not activated: no systemctl was run. Reload and restart only after the cutover gate."

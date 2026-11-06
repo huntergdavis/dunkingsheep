@@ -55,9 +55,11 @@ packaging/rust-release/uninstall-release.sh --prefix DIR --bin-dir DIR --unit-di
 - Install, rollback and uninstall refuse to change a drop-in or launcher that differs from
   the last state this layout wrote (`rollback/owned`, or `original` before the first
   install). They print `drift` and change nothing, so an operator edit is never overwritten.
-- Install, rollback and uninstall are transactions. The live pair is saved first. A failed
-  step, or a HUP, INT or TERM signal, restores that pair, so such a run never leaves a mixed
-  drop-in and launcher pair. `previous` and `owned` are recorded only after success.
+- Install, rollback and uninstall are transactions. The live pair and the rollback history
+  (`previous` and `owned`) are saved first. A failed step, or a HUP, INT or TERM signal,
+  restores both, so such a run never leaves a mixed drop-in and launcher pair, and never changes
+  what a rollback would restore. `previous` and `owned` are replaced only after the new state is
+  complete.
 - Uninstall refuses to change a drop-in it did not write (no `release_id` line). A
   rollback never destroys the pair it replaces, because that pair is saved as `previous`.
 - The poll wrapper pins an absolute `python3`. A `python3` found through a relative PATH
@@ -66,10 +68,14 @@ packaging/rust-release/uninstall-release.sh --prefix DIR --bin-dir DIR --unit-di
   applies drop-ins in name order and the last `ExecStart` wins. Install refuses when a
   drop-in that sorts after it sets `ExecStart`, because that drop-in would silently override
   the release. The check reads each drop-in the way systemd does: whitespace around `=` and
-  before a key is ignored, and comment lines are skipped. Symlinked drop-ins are read too. It
-  checks only the directory given with `--unit-dir`. systemd also reads drop-ins from other
-  search paths (for example `/etc/systemd/user`, `/run` and `/usr/lib`). Those are not checked,
-  so the cutover checklist must confirm them with `systemctl --user show -p DropInPaths`.
+  before a key is ignored, comment lines are skipped, and symlinked drop-ins are read too. It
+  scans the user unit load paths from systemd.unit(5), including `~/.config/systemd/user`,
+  `/etc/systemd/user`, `/run/systemd/user` and `/usr/lib/systemd/user`, and the type-wide
+  `service.d` directory in each. A same-named drop-in elsewhere that sets `ExecStart` is refused
+  too, because it can shadow ours. `--scan-dir DIR` adds a root. `--no-standard-scan` limits the
+  scan to `--unit-dir` and exists for the test fixtures; the cutover must not use it. A drop-in
+  created after install is not seen, so the cutover must confirm the effective drop-ins with
+  `systemctl --user show -p DropInPaths dunkingsheep.service`.
 
 ## Activation gate (not part of this change)
 
@@ -86,10 +92,12 @@ steps are in the t3229 task notes. These scripts only prepare the artifacts.
   not changed here.
 - The drop-in template targets the base unit `dunkingsheep.service`. The live
   Python drop-in is not read or changed.
-- A SIGKILL or a power loss during a run can leave the live pair mixed. The next run then
-  refuses with `drift`. The pair saved before the run is in `<prefix>/rollback/.txn`. Restore
-  it by hand: copy each saved file back, or remove the live file whose `.absent` marker is in
-  `.txn`. Then run the command again.
+- A SIGKILL or a power loss during a run can leave the live state mixed. The next run then
+  refuses with `drift`. The state saved before the run is in `<prefix>/rollback/.txn` (the drop-in
+  and launchers) and `<prefix>/rollback/.txn-meta` (`previous` and `owned`). Restore each saved
+  file or directory by hand, or remove the live one whose `.absent` marker is present, then run
+  the command again. A failed run keeps both directories until the next run replaces them. A
+  `*.bad` directory in the rollback directory is a replaced copy and is safe to remove.
 - A failed install can leave a `releases/.staging-*` directory. It is never used and can be
   removed.
 - Six operator drop-ins on the reviewed host (numbered 30 to 96) set `ExecStart` to Python

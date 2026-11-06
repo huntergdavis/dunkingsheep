@@ -55,13 +55,16 @@ guard_against_drift "$rollback_dir" "$dropin" "$bin_dir"
 
 # The transaction. The live pair is saved, and transaction_exit restores it if the restore fails.
 txn="$rollback_dir/.txn"
+txn_meta="$rollback_dir/.txn-meta"
 snapshot_pair "$txn" "$dropin" "$bin_dir"
+save_metadata "$txn_meta" "$rollback_dir"
 mutated=1
 arm_transaction
 restore_pair "$original" "$dropin" "$bin_dir"
 snapshot_pair "$rollback_dir/owned" "$dropin" "$bin_dir"
 mutated=0
 rm -rf "$txn"
+clear_tree "$txn_meta" 2>/dev/null || :
 disarm_transaction
 
 if [ "$purge" -eq 1 ]; then
