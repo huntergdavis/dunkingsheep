@@ -190,9 +190,12 @@ fn production_allocation_without_peer_credentials_is_refused_and_writes_nothing(
     let mut handlers = api::Dispatcher::new();
     handlers.register_runtime_control();
     let dispatcher = services.dispatcher(handlers);
+    // w2:p2 is an owner in this fixture's roles registry, so the role check passes and the refusal
+    // comes from the peer check. w1:p1 is a worker, and a worker claim is refused by the role check
+    // before the peer is looked at, which is why it is not used here.
     let no_peer = RequestCtx {
         caller: None,
-        self_pane_id: Some("w1:p1".into()),
+        self_pane_id: Some("w2:p2".into()),
         socket_peer: Some(false),
         ..RequestCtx::default()
     };
