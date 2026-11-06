@@ -81,8 +81,10 @@ impl Tasks {
             let answer = if choices.is_empty() {
                 if option.is_some() { return Err(DunkError::Refused("owner question has no options".into())); }
                 let answer = reply.as_deref().map(str::trim).filter(|s| !s.is_empty()).ok_or_else(|| DunkError::Refused("a reply is required".into()))?.to_owned();
-                // A project-policy task is refused here, before any event is written, unless the
-                // reply is the exact policy the daemon could later load (t1692).
+                // Free-text answers to a project-policy task are checked here, before any event is
+                // written (t1692). Option answers never reach this branch and are not checked at
+                // answer time; the receipt reader refuses them at startup, because a policy reply
+                // must be JSON.
                 let body: String = tx.query_row("SELECT body FROM tasks WHERE id=?", [&id], |row| row.get(0)).map_err(db::map_sqlite)?;
                 validate_answer_for_task_body(&body, reply.as_deref())?;
                 answer

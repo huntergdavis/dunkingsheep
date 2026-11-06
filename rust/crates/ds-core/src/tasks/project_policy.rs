@@ -186,8 +186,11 @@ fn parse_reply(
 /// A task is a policy task only when its body is a JSON object whose `schema` is
 /// `project-policy/v1`; ordinary task replies are not affected. For a policy task the manifest and
 /// the reply must name the same canonical project and a supported provider, and the reply must
-/// pass the same parser the receipt reader uses. Refusing here keeps an owner mistake from being
-/// written as an answer that the next daemon start would reject.
+/// pass the same parser the receipt reader uses.
+///
+/// Only free-text answers reach this check; `owner_answer` calls it from the free-text branch and
+/// nothing else. An option answer on a policy task is not checked here. The receipt reader refuses
+/// it at startup, because option answers are not JSON replies.
 pub(crate) fn validate_answer_for_task_body(
     body: &str,
     raw_reply: Option<&str>,
