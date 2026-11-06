@@ -25,6 +25,8 @@ mod manual_fire;
 use manual_fire::ManualFireOwner;
 #[cfg(test)]
 pub(crate) use manual_fire::{CountdownGate, SubmitGate};
+#[cfg(test)]
+mod restored_outbox;
 
 type Factory = dyn Fn() -> Box<dyn Terminal> + Send + Sync + 'static;
 
