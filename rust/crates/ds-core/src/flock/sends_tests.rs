@@ -5777,4 +5777,112 @@ mod stuck_gap_tests {
             "the persisted text must not authorise a modified composer"
         );
     }
+
+    // RestartRecoveryTests.test_a_human_continuation_is_refused_after_a_restart_by_the_real_matcher
+    // (row 52), with the rehydration in place and no pre-set sent text. The bind tick rehydrates
+    // the restored text, and a composer with a typed continuation below it is still never pressed.
+    #[test]
+    fn a_human_continuation_after_restart_is_refused_once_rehydrated() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state.json");
+        let before = persistent_recovery_flock(dir.path(), &state);
+        let mut env = live_pane(frame(TEXT, &[]));
+        let message = failed_candidate(&env, 1.0);
+        before.note_stuck_candidate(&message);
+        before.save().unwrap();
+        let after = persistent_recovery_flock(dir.path(), &state);
+        after.restore_snapshot(&before.snapshot());
+        {
+            let mut config = after.stuck_config.lock().unwrap();
+            config.threshold_s = 1.0;
+            config.observation_interval_s = 0.1;
+            config.max_attempts = 1;
+        }
+        env.screens.insert(
+            PANE.into(),
+            frame(TEXT, &["  and one more thing I was typing"]),
+        );
+        for now in [99.5, 200.0, 300.0] {
+            assert!(!after.unwedge(
+                &mut env,
+                PANE,
+                TEXT,
+                Some(98.0),
+                Some(&message),
+                now,
+                None,
+                true
+            ));
+        }
+        assert!(
+            env.keys.is_empty(),
+            "the rehydrated text must not authorise a modified composer"
+        );
+        assert!(
+            after
+                .sent_text_by_pane
+                .lock()
+                .unwrap()
+                .get(PANE)
+                .is_some_and(|rows| rows.iter().any(|row| row.as_str() == Some(TEXT))),
+            "the restored text is rehydrated on the bind tick"
+        );
+    }
+
+    // Python _stuck_observer_step skips ineligible entries before the bind and the rehydration.
+    // A cancelled message is an ineligible candidate: its text must never become ownership
+    // evidence after a restart.
+    #[test]
+    fn an_ineligible_candidate_text_is_never_rehydrated() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state.json");
+        let before = persistent_recovery_flock(dir.path(), &state);
+        let mut env = live_pane(frame(TEXT, &[]));
+        let mut message = failed_candidate(&env, 1.0);
+        message.status = "cancelled".into();
+        before.note_stuck_candidate(&message);
+        before.save().unwrap();
+        let after = persistent_recovery_flock(dir.path(), &state);
+        after.restore_snapshot(&before.snapshot());
+        {
+            let mut config = after.stuck_config.lock().unwrap();
+            config.threshold_s = 1.0;
+            config.observation_interval_s = 0.1;
+            config.max_attempts = 1;
+        }
+        assert!(
+            after
+                .stuck_candidates
+                .lock()
+                .unwrap()
+                .get(PANE)
+                .is_none_or(|entry| !entry.eligible),
+            "premise: the cancelled candidate is ineligible"
+        );
+        for now in [99.5, 200.0, 300.0] {
+            assert!(!after.unwedge(
+                &mut env,
+                PANE,
+                TEXT,
+                Some(98.0),
+                Some(&message),
+                now,
+                None,
+                true
+            ));
+        }
+        assert!(
+            env.keys.is_empty(),
+            "an ineligible candidate's text must not authorise a press"
+        );
+        assert!(
+            after
+                .sent_text_by_pane
+                .lock()
+                .unwrap()
+                .get(PANE)
+                .is_none_or(|rows| rows.iter().all(|row| row.as_str() != Some(TEXT))),
+            "an ineligible candidate's text must not be rehydrated"
+        );
+    }
 }
