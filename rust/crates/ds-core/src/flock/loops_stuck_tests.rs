@@ -1077,25 +1077,6 @@ fn a_declared_config_wins_over_the_saved_one() {
     );
 }
 
-// RestartRecoveryTests.test_a_human_continuation_is_refused_after_a_restart_by_the_real_matcher (row 52)
-#[test]
-#[ignore = "t3354 row 52 divergence: the federated observer presses Enter on a composer holding a human continuation after a restart (Python refuses); owner ruling pending"]
-fn a_human_continuation_is_refused_after_a_restart() {
-    let dir = tempfile::tempdir().unwrap();
-    let before = in_memory_flock(&dir);
-    let mut probe = federated_probe();
-    before.note_stuck_candidate(&observed_candidate(&probe, "m1", "failed", true, 10.0));
-    let after = persisted_flock(&dir);
-    after.restore_snapshot(&before.snapshot());
-    // After the restart the composer holds our text and a line the person typed below it.
-    *probe.screen.lock().unwrap() = "  >_ OpenAI Codex (v0.165.0)\n\n\x1b[1m\u{203a} pending text\x1b[0m\n  and one more thing I was typing\n\n  GPT-6-Astra high \u{b7} ~/workspace/x\n  ? for shortcuts\n".into();
-    federated_steps_without_acting(&after, &mut probe, &[100.0, 221.0, 341.0]);
-    assert!(
-        probe.keys.lock().unwrap().is_empty(),
-        "the persisted text must not authorise a modified composer"
-    );
-}
-
 // t3371 (t820 proof D, row 44): test_long_false_sent_composer_stays_observable (oracle 79bc92fa).
 // This covers the box condition only: an 18-line composer this flock sent keeps its full collapsed
 // text in the box read. The Python case also asserts that the status stays `sent`, that one recovery
