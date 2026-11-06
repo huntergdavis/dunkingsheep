@@ -265,7 +265,7 @@ esac
                 std::fs::remove_file(dir.path().join("fail")).unwrap();
             }
         }
-        std::fs::write(dir.path().join("inventory"), owned).unwrap();
+        std::fs::write(dir.path().join("inventory"), &owned).unwrap();
         backend.close(kind, id).unwrap();
         assert!(std::fs::read_to_string(dir.path().join("calls"))
             .unwrap()

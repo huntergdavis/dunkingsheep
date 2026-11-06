@@ -185,7 +185,7 @@ mod tests {
         } else {
             format!("echo {new_pid} > pid; printf '› Ask Codex to do anything\\n' > screen")
         };
-        let sep = ds_core::terminal::parse::pane_separator();
+        let sep = crate::terminal::parse::pane_separator();
         let body = format!(
             r##"#!/bin/sh
 cd {root} || exit 1
