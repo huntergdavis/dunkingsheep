@@ -38,8 +38,9 @@
 //! - `POST /api/ops-board/question` is registered by `routes::ops_board`, but web/app.py has no such
 //!   route, and the gate sends it to the mount. It is unreachable through the composition. Remove it
 //!   or document it in the producer module.
-//! - `PYTHON_ROUTES` is a hand-maintained copy of the P0 routes in web/app.py. No test checks it
-//!   against the mounted axum routes yet.
+//! - `PYTHON_ROUTES` is a hand-maintained copy of the P0 routes in web/app.py. The integration test
+//!   `python_routes_match_the_mounted_routes` checks it against the mounted axum routes and the
+//!   Python source, in both directions.
 //! - `GET /api/poolrad-dashboard/progress` is a P0 route (web/app.py:1953) mounted through
 //!   `routes::activity_poolrad`. The poolrad dashboard page, its reports, and its refresh are P1 and
 //!   not mounted here.
@@ -431,8 +432,9 @@ const FORCED_STATIC_PATH: &str = "/__desk_static__";
 
 /// The routes Python registers in `web/app.py`, as (method, path pattern). A `{name}` segment
 /// matches one non-empty segment, and `{path:path}` matches the rest of the path. A method that a
-/// path does not list is not a route for that request.
-const PYTHON_ROUTES: &[(&str, &str)] = &[
+/// path does not list is not a route for that request. It is public so the route cross-check in
+/// `tests/web_server.rs` can compare it with the mounted routes.
+pub const PYTHON_ROUTES: &[(&str, &str)] = &[
     ("POST", "/api/login"),
     ("POST", "/api/logout"),
     ("POST", "/api/password"),

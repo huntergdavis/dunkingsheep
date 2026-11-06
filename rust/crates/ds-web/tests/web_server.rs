@@ -12,6 +12,11 @@ use std::{
     time::Duration,
 };
 
+use axum::{
+    body::{to_bytes, Body},
+    http::{header, Request, StatusCode},
+    Router,
+};
 use ds_web::{
     ops_board_runtime::OpenDb,
     web_server::{self, DeskConfig, DeskError},
@@ -20,6 +25,7 @@ use ds_web::{
 use rusqlite::Connection;
 use serde_json::{json, Value};
 use tempfile::TempDir;
+use tower::ServiceExt;
 
 const PASSWORD: &str = "correct horse battery";
 const INDEX: &str = "<!doctype html><title>desk</title>";
@@ -616,4 +622,195 @@ fn shutdown_stops_the_background_work_and_returns_cleanly() {
     assert_eq!(served.status, 200);
     // A shutdown that completes within the timeout proves the timer and usage workers joined.
     assert_eq!(server.shutdown(), Ok(()));
+}
+
+/// The Python routes the table is checked against: every decorator in `web/app.py`, then the
+/// router `app.include_router` adds from `web/character_editor.py`, under that router's prefix.
+/// The sources are read as text, and Python is never run.
+fn python_routes() -> Vec<(String, String)> {
+    const APP: &str = include_str!("../../../../web/app.py");
+    const EDITOR: &str = include_str!("../../../../web/character_editor.py");
+    assert!(
+        EDITOR.contains("prefix='/api/character-editor'"),
+        "web/character_editor.py no longer declares the prefix this check reads"
+    );
+    let mut routes = decorated_routes(APP, "app", "");
+    routes.extend(decorated_routes(EDITOR, "routes", "/api/character-editor"));
+    assert!(
+        routes
+            .iter()
+            .any(|(_, path)| path.starts_with("/api/character-editor/")),
+        "no character editor route was read from web/character_editor.py"
+    );
+    routes
+}
+
+/// The `(method, path)` of each `@<receiver>.<method>("<path>", ...)` decorator in `source`, with
+/// `prefix` in front of the path. Both quote styles are read, because the Python files use both.
+fn decorated_routes(source: &str, receiver: &str, prefix: &str) -> Vec<(String, String)> {
+    const METHODS: [&str; 7] = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
+    let marker = format!("@{receiver}.");
+    source
+        .lines()
+        .filter_map(|line| {
+            let (method, args) = line
+                .trim_start()
+                .strip_prefix(marker.as_str())?
+                .split_once('(')?;
+            let method = method.to_ascii_uppercase();
+            if !METHODS.contains(&method.as_str()) {
+                return None;
+            }
+            let quote = args.chars().next().filter(|c| *c == '"' || *c == '\'')?;
+            let path = args[1..].split(quote).next()?;
+            Some((method, format!("{prefix}{path}")))
+        })
+        .collect()
+}
+
+/// A request path that `pattern` matches. Each `{name}` becomes one segment and each `{name:path}`
+/// becomes two, so the path converter has something to match.
+fn concrete_path(pattern: &str) -> String {
+    let segments: Vec<&str> = pattern
+        .split('/')
+        .map(|segment| {
+            match segment
+                .strip_prefix('{')
+                .and_then(|rest| rest.strip_suffix('}'))
+            {
+                Some(name) if name.ends_with(":path") => "probe/nested",
+                Some(_) => "probe",
+                None => segment,
+            }
+        })
+        .collect();
+    segments.join("/")
+}
+
+/// What the router answered for one probe request.
+struct Probe {
+    status: StatusCode,
+    allow: String,
+    body: Vec<u8>,
+}
+
+/// Sends one request with no session and no body. `PROBE` is registered by no route, so a matched
+/// path answers with the router's own 405 and an unmatched path reaches the static mount. No
+/// handler runs either way.
+async fn probe(router: &Router, method: &str, path: &str) -> Probe {
+    let request = Request::builder()
+        .method(method)
+        .uri(path)
+        .body(Body::empty())
+        .expect("probe request");
+    let response = router
+        .clone()
+        .oneshot(request)
+        .await
+        .expect("the router does not fail");
+    let status = response.status();
+    let allow = response
+        .headers()
+        .get(header::ALLOW)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    let body = to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .expect("probe body")
+        .to_vec();
+    Probe {
+        status,
+        allow,
+        body,
+    }
+}
+
+/// The methods the mounted routes at a path answer, from the `Allow` the router sets on its 405.
+/// An unmatched path reaches the static mount, whose 405 is the same for every path, so that
+/// answer means no route is mounted there.
+fn mounted_methods(unmatched: &Probe, answer: &Probe) -> Vec<String> {
+    if answer.status == unmatched.status && answer.body == unmatched.body {
+        return Vec::new();
+    }
+    answer
+        .allow
+        .split(',')
+        .map(|method| method.trim().to_ascii_uppercase())
+        .filter(|method| !method.is_empty())
+        .collect()
+}
+
+/// `PYTHON_ROUTES` and the mounted routes must agree both ways, and the table must be Python's.
+/// The router is probed directly, below the path gate, so each route is judged by what the router
+/// mounts. HEAD is not compared: axum answers HEAD for every GET route, and FastAPI's APIRoute does
+/// not. `POST /api/ops-board/question` is mounted but not declared by Python, so this check does
+/// not cover it (t3328).
+#[test]
+fn python_routes_match_the_mounted_routes() {
+    let (_root, config) = fixture();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("probe runtime");
+    let failures = runtime.block_on(async {
+        // Built inside the runtime, as `serve` builds it, so the router sees a Tokio context.
+        let desk = web_server::Desk::open(config)
+            .unwrap_or_else(|error| panic!("the desk opens: {error}"));
+        let router = desk.router();
+        let unmatched = probe(&router, "PROBE", "/api/__not_a_route__").await;
+        assert_eq!(unmatched.status, StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(unmatched.allow, "GET, HEAD");
+
+        let python = python_routes();
+        let table = web_server::PYTHON_ROUTES;
+        let mut failures = Vec::new();
+
+        for &(method, pattern) in table {
+            let declared = python
+                .iter()
+                .any(|(m, p)| m.as_str() == method && p.as_str() == pattern);
+            if !declared {
+                failures.push(format!(
+                    "{method} {pattern} is in PYTHON_ROUTES, but web/app.py does not declare it"
+                ));
+            }
+        }
+
+        for &(method, pattern) in table {
+            let answer = probe(&router, "PROBE", &concrete_path(pattern)).await;
+            let methods = mounted_methods(&unmatched, &answer);
+            if !methods.iter().any(|mounted| mounted.as_str() == method) {
+                failures.push(format!(
+                    "{method} {pattern} has no mounted route (status {}, Allow {methods:?})",
+                    answer.status
+                ));
+            }
+        }
+
+        for (method, pattern) in &python {
+            let listed = table
+                .iter()
+                .any(|&(m, p)| m == method.as_str() && p == pattern.as_str());
+            if listed {
+                continue;
+            }
+            let answer = probe(&router, "PROBE", &concrete_path(pattern)).await;
+            let methods = mounted_methods(&unmatched, &answer);
+            if methods
+                .iter()
+                .any(|mounted| mounted.as_str() == method.as_str())
+            {
+                failures.push(format!(
+                    "{method} {pattern} is mounted, but PYTHON_ROUTES does not list it"
+                ));
+            }
+        }
+        failures
+    });
+    assert!(
+        failures.is_empty(),
+        "PYTHON_ROUTES and the mounted routes disagree:\n{}",
+        failures.join("\n")
+    );
 }
