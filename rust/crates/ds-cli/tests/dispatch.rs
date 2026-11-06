@@ -138,7 +138,7 @@ fn ds_cli_serve_uses_temp_config_socket_and_exits_after_shutdown() {
     let tmux = dir.path().join("tmux-fixture");
     std::fs::write(
         &tmux,
-        "#!/bin/sh\nprintf '%%99\\037$1\\037@1\\037/tmp\\037bash\\037fixture\\0371\\037fixture\\037fixture\\0370\\0370\\0371\\03780\\03724\\n'\n",
+        format!("#!/bin/sh\nprintf '%%99{sep}$1{sep}@1{sep}/tmp{sep}bash{sep}fixture{sep}1{sep}fixture{sep}fixture{sep}0{sep}0{sep}1{sep}80{sep}24\\n'\n", sep = ds_core::terminal::parse::pane_separator()),
     )
     .unwrap();
     std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o755)).unwrap();

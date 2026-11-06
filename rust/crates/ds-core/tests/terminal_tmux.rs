@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use ds_core::flock::lanes::TerminalEnv;
 use ds_core::flock::Flock;
-use ds_core::terminal::tmux::{shell_join, TmuxBackend, PANE_FORMAT};
+use ds_core::terminal::tmux::{pane_format, pane_separator, shell_join, TmuxBackend};
 use ds_core::terminal::{Terminal, TerminalError};
 
 use std::sync::{Mutex, MutexGuard};
@@ -31,7 +31,9 @@ fn serial() -> MutexGuard<'static, ()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-const SEP: &str = "\x1f";
+fn sep() -> &'static str {
+    pane_separator()
+}
 
 /// Write a fake tmux that logs its argv to `<dir>/argv.txt` and prints `stdout`,
 /// exiting with `code`.
@@ -70,7 +72,7 @@ fn pane_line(pane: &str, session: &str, window: &str, command: &str, pid: &str) 
         "120",
         "40",
     ]
-    .join(SEP)
+    .join(sep())
 }
 
 #[test]
@@ -220,9 +222,12 @@ fn fallible_listing_keeps_a_missing_server_as_an_empty_world() {
 fn the_pane_format_is_the_python_format() {
     let _serial = serial();
     // Fourteen fields, in the Python's order, separator included.
-    assert_eq!(14, PANE_FORMAT.split('\x1f').count());
-    assert!(PANE_FORMAT.starts_with("#{pane_id}"));
-    assert!(PANE_FORMAT.ends_with("#{pane_width}\x1f#{pane_height}"));
+    assert_eq!(14, pane_format().split(pane_separator()).count());
+    assert!(pane_format().starts_with("#{pane_id}"));
+    assert!(pane_format().ends_with(&format!(
+        "#{{pane_width}}{}#{{pane_height}}",
+        pane_separator()
+    )));
 }
 
 #[test]
@@ -508,7 +513,7 @@ fn resize_sends_the_python_argv_and_reports_the_size_read_back() {
     let dir = tempdir();
     let before = pane_line("%2", "$2", "@2", "claude", "2202");
     let after = pane_line("%2", "$2", "@2", "claude", "2202")
-        .replace(&["120", "40"].join(SEP), &["90", "30"].join(SEP));
+        .replace(&["120", "40"].join(sep()), &["90", "30"].join(sep()));
     let fake = fake_tmux_that_resizes(dir.path(), &before, &after);
     let mut backend = isolated_backend(fake);
 
@@ -620,16 +625,16 @@ fn a_multi_pane_window_says_which_panes_it_moved() {
     let dir = tempdir();
     // Window @2 holds the target %2 and its neighbour %3. %9 is in another window: it must not count.
     let target = pane_line("%2", "$2", "@2", "claude", "2202")
-        .replace(&["120", "40"].join(SEP), &["60", "40"].join(SEP));
+        .replace(&["120", "40"].join(sep()), &["60", "40"].join(sep()));
     let neighbour = pane_line("%3", "$2", "@2", "claude", "2203")
-        .replace(&["120", "40"].join(SEP), &["59", "40"].join(SEP));
+        .replace(&["120", "40"].join(sep()), &["59", "40"].join(sep()));
     let other = pane_line("%9", "$2", "@9", "claude", "2209");
     let before = format!("{target}\n{neighbour}\n{other}");
     // The re-layout moves both panes of the window and leaves the other window alone.
     let target_after = pane_line("%2", "$2", "@2", "claude", "2202")
-        .replace(&["120", "40"].join(SEP), &["45", "30"].join(SEP));
+        .replace(&["120", "40"].join(sep()), &["45", "30"].join(sep()));
     let neighbour_after = pane_line("%3", "$2", "@2", "claude", "2203")
-        .replace(&["120", "40"].join(SEP), &["44", "30"].join(SEP));
+        .replace(&["120", "40"].join(sep()), &["44", "30"].join(sep()));
     let after = format!("{target_after}\n{neighbour_after}\n{other}");
     let fake = fake_tmux_that_resizes(dir.path(), &before, &after);
     let mut backend = isolated_backend(fake);

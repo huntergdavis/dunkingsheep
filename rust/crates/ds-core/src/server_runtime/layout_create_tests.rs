@@ -396,14 +396,14 @@ cd "$(dirname "$0")" || exit 1
 printf '%s\n' "$@" >> calls
 case "$1" in
 new-session) printf '%s' "$4" > created ;;
-list-sessions) printf '$1\037%s\0370\n' "$(cat created 2>/dev/null)" ;;
-list-windows) printf '@1\037$1\037tab\0370\0371\n' ;;
+list-sessions) printf '$1__SEP__%s__SEP__0\n' "$(cat created 2>/dev/null)" ;;
+list-windows) printf '@1__SEP__$1__SEP__tab__SEP__0__SEP__1\n' ;;
 list-panes)
-  printf 'w2:p2\037$old\037@old\037/work\037bash\037owner\0371\037owner\037owner\0370\0370\0372202\03780\03724\n'
-  printf '%%1\037$1\037@1\037/work\037bash\037new\0371\037new\037tab\0370\0370\0371\03780\03724\n'
+  printf 'w2:p2__SEP__$old__SEP__@old__SEP__/work__SEP__bash__SEP__owner__SEP__1__SEP__owner__SEP__owner__SEP__0__SEP__0__SEP__2202__SEP__80__SEP__24\n'
+  printf '%%1__SEP__$1__SEP__@1__SEP__/work__SEP__bash__SEP__new__SEP__1__SEP__new__SEP__tab__SEP__0__SEP__0__SEP__1__SEP__80__SEP__24\n'
   ;;
 esac
-"#).unwrap();
+"#.replace("__SEP__", crate::terminal::parse::pane_separator())).unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
     let parent = disk.path().join("parent");
     std::fs::write(&parent, b"file").unwrap();
