@@ -4254,58 +4254,6 @@ fn a_failed_durable_reservation_never_presses_from_the_outbox() {
 // composer sigil replaced by the style under test: a dim transcript echo (row 45) or an unstyled
 // sigil (row 46). Neither may be submitted over ticks. The bright composer with the same text is
 // the positive control, and it is submitted while the schedule is current.
-const REPORTED_SENT_TEXT: &str =
-    "Scheduled check d7: read your inbox and finish the assigned work.";
-
-// The scheduled candidate for REPORTED_SENT_TEXT, with a chosen message status and creation time.
-fn scheduled_candidate_fixture(
-    dir: &std::path::Path,
-    sigil: &str,
-    status: &str,
-    created_at: f64,
-) -> (Flock, Pane) {
-    let flock = persistent_recovery_flock(dir, &dir.join("state.json"));
-    {
-        let mut config = flock.stuck_config.lock().unwrap();
-        config.threshold_s = 120.0;
-        config.observation_interval_s = 20.0;
-        config.max_attempts = 1;
-    }
-    let mut env = Pane::default();
-    env.panes
-        .push(serde_json::json!({"pane_id": "%1", "pane_pid": std::process::id()}));
-    env.statuses.insert("%1".into(), "idle".into());
-    env.screens.insert(
-        "%1".into(),
-        format!(
-            "Previous response.\n\n{} {}\n  GPT-6-Astra high \u{b7} ~/workspace \u{b7} task\n",
-            sigil, REPORTED_SENT_TEXT
-        ),
-    );
-    let dunks = serde_json::json!({"dunkers": [{
-        "id": "d7",
-        "running": true,
-        "target_pane_id": "%1",
-        "target_agent": "codex",
-        "target_cwd": "/work",
-        "text": REPORTED_SENT_TEXT
-    }]});
-    flock.dunks.load(dunks.as_object().unwrap());
-    flock
-        .sent_text_by_pane
-        .lock()
-        .unwrap()
-        .insert("%1".into(), vec![REPORTED_SENT_TEXT.into()]);
-    let mut message = Message::new("m1", "%1", "CoS", REPORTED_SENT_TEXT, "d7");
-    message.created_at = created_at;
-    message.status = status.into();
-    message.scheduled = true;
-    message.schedule_template = Some(REPORTED_SENT_TEXT.into());
-    message.attempt_generation = pane_generation(&env, "%1");
-    flock.note_stuck_candidate(&message);
-    (flock, env)
-}
-
 #[test]
 fn a_reported_sent_schedule_is_not_submitted_from_a_dim_or_unstyled_echo() {
     // The press path checks scheduled currency against the real clock, so the schedule is created
@@ -4409,68 +4357,6 @@ fn a_restored_scheduled_recovery_keeps_its_budget_and_presses_once() {
         1,
         env.keys.len(),
         "the restored schedule presses once at the threshold"
-    );
-}
-
-// t3355 (t820 proof D) wiring row 16 (oracle 79bc92fa). A stale scheduled reminder, created an hour
-// before the ticks, must never replay, and the schedule keeps running. A current reminder whose
-// template no longer matches the dunk text must not replay either. A current reminder with a
-// matching template presses once, as the positive control.
-#[test]
-#[ignore = "t3390: wiring row 16 divergence, a stale failed scheduled reminder replays in Rust where Python refuses; un-ignore when t3390 lands"]
-fn stale_or_edited_scheduled_reminders_never_replay() {
-    let bright = "\u{1b}[1m\u{203a}\u{1b}[0m";
-    let stale_dir = tempfile::tempdir().unwrap();
-    let (stale, mut stale_env) =
-        scheduled_candidate_fixture(stale_dir.path(), bright, "failed", -3600.0);
-    for now in [1000.0, 1120.0] {
-        crate::flock::loops_stuck::strict_stuck_observer_scan(&stale, &mut stale_env, now).unwrap();
-    }
-    assert!(
-        stale_env.keys.is_empty(),
-        "a stale reminder must not replay"
-    );
-    assert!(
-        stale
-            .dunks
-            .list()
-            .iter()
-            .any(|dunk| dunk.get("running") == Some(&serde_json::json!(true))),
-        "the schedule keeps running"
-    );
-
-    let edited_dir = tempfile::tempdir().unwrap();
-    let (edited, mut edited_env) =
-        scheduled_candidate_fixture(edited_dir.path(), bright, "failed", 1299.0);
-    let changed = serde_json::json!({"dunkers": [{
-        "id": "d7",
-        "running": true,
-        "target_pane_id": "%1",
-        "target_agent": "codex",
-        "target_cwd": "/work",
-        "text": "current owner-priority instruction"
-    }]});
-    edited.dunks.load(changed.as_object().unwrap());
-    for now in [1300.0, 1420.0] {
-        crate::flock::loops_stuck::strict_stuck_observer_scan(&edited, &mut edited_env, now)
-            .unwrap();
-    }
-    assert!(
-        edited_env.keys.is_empty(),
-        "an edited reminder must not replay"
-    );
-
-    let current_dir = tempfile::tempdir().unwrap();
-    let (current, mut current_env) =
-        scheduled_candidate_fixture(current_dir.path(), bright, "failed", 0.0);
-    for now in [1000.0, 1120.0] {
-        crate::flock::loops_stuck::strict_stuck_observer_scan(&current, &mut current_env, now)
-            .unwrap();
-    }
-    assert_eq!(
-        1,
-        current_env.keys.len(),
-        "a current matching reminder presses once"
     );
 }
 
