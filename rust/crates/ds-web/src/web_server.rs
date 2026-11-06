@@ -361,6 +361,38 @@ impl Desk {
     }
 }
 
+/// Rewrites the request path to its decoded form before routing, as uvicorn decodes the path before
+/// Starlette routes it. `Router::layer` wraps matched endpoints, so the rewrite has to sit in front
+/// of the router itself: `/%61pi/health` must match the `/api/health` route.
+#[derive(Clone)]
+struct DecodedPathRouting<S> {
+    inner: S,
+}
+
+impl<S, B> tower::Service<Request<B>> for DecodedPathRouting<S>
+where
+    S: tower::Service<Request<B>>,
+{
+    type Response = S::Response;
+    type Error = S::Error;
+    type Future = S::Future;
+
+    fn poll_ready(
+        &mut self,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(context)
+    }
+
+    fn call(&mut self, mut request: Request<B>) -> Self::Future {
+        let decoded = percent_decode(request.uri().path());
+        if let Some(routed) = routed_uri(request.uri(), &decoded) {
+            *request.uri_mut() = routed;
+        }
+        self.inner.call(request)
+    }
+}
+
 /// Serves the desk until `shutdown` resolves, then stops the background work. The startup order
 /// matches Python's lifespan: open and warm everything, then accept requests.
 pub async fn serve(
@@ -374,7 +406,9 @@ pub async fn serve(
     let app = desk.router();
     let served = axum::serve(
         listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
+        axum::ServiceExt::<Request>::into_make_service_with_connect_info::<SocketAddr>(
+            DecodedPathRouting { inner: app },
+        ),
     )
     .with_graceful_shutdown(shutdown)
     .await;
@@ -602,11 +636,8 @@ fn legacy_view(path: &str) -> &'static str {
 /// Python `retire_the_desk_ui`: runs before routing. The path is decoded first, as uvicorn decodes
 /// it before Starlette routes, so `/%61pi/health` reaches `/api/health`. Paths the desk keeps pass
 /// through, and every other path gets a 307 to the dashboard shell. The query string is dropped.
-async fn retire_the_desk_ui(mut request: Request, next: Next) -> Response {
+async fn retire_the_desk_ui(request: Request, next: Next) -> Response {
     let path = percent_decode(request.uri().path());
-    if let Some(routed) = routed_uri(request.uri(), &path) {
-        *request.uri_mut() = routed;
-    }
     if path == "/" || desk_keeps(&path) {
         return next.run(request).await;
     }
