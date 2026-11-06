@@ -30,6 +30,7 @@ struct Pane {
     reads: RefCell<Vec<(String, bool)>>,
     on_read: RefCell<Option<Box<dyn FnMut()>>>,
     on_send_text: RefCell<Option<Box<dyn FnMut()>>>,
+    on_send_key: RefCell<Option<Box<dyn FnMut()>>>,
     screen_script: RefCell<VecDeque<Option<String>>>,
     status_script: RefCell<VecDeque<Option<String>>>,
     attempt_generation_script: RefCell<VecDeque<Option<String>>>,
@@ -78,6 +79,9 @@ impl SendEnv for Pane {
     }
     fn send_key(&mut self, pane_id: &str, key: &str) -> (bool, String) {
         self.events.push("key");
+        if let Some(callback) = self.on_send_key.borrow_mut().as_mut() {
+            callback();
+        }
         if let Some(reason) = &self.key_refusal {
             return (false, reason.clone());
         }
@@ -5390,6 +5394,617 @@ mod t55_rows_16_65 {
             Some(before),
             registry,
             "the registry must carry the ATTEMPT generation, not the pane's generation after delivery"
+        );
+    }
+}
+
+/// t3354 (t820 proof C): wiring cases from `tests/test_dunk_stuck_recovery.py` that the
+/// audit left GAP or PARTIAL. Each test names the Python case it ports.
+#[cfg(test)]
+mod stuck_gap_tests {
+    use super::super::loops_stuck::strict_stuck_observer_scan;
+    use super::super::sends::{pane_generation, Message};
+    use super::{frame, persistent_recovery_flock, Flock, Pane};
+    use crate::terminal::composer::composer_region_text;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::sync::Arc;
+
+    const PANE: &str = "%1";
+    const TEXT: &str = "stuck body";
+
+    /// A live, idle pane with pid evidence showing `screen`.
+    fn live_pane(screen: String) -> Pane {
+        let mut env = Pane::default();
+        env.panes
+            .push(serde_json::json!({"pane_id": PANE, "pane_pid": std::process::id()}));
+        env.statuses.insert(PANE.into(), "idle".into());
+        env.screens.insert(PANE.into(), screen);
+        env
+    }
+
+    /// A failed message for `PANE`, with the attempt generation read from `env`.
+    fn failed_candidate(env: &Pane, created_at: f64) -> Message {
+        let mut message = Message::new("m1", PANE, "writer", TEXT, "send_text");
+        message.created_at = created_at;
+        message.status = "failed".into();
+        message.attempt_generation = pane_generation(env, PANE);
+        message
+    }
+
+    // ReviewBlockerTests.test_a_disabled_recovery_presses_nothing_and_tracks_nothing (row 9)
+    #[test]
+    fn a_disabled_recovery_presses_nothing_and_tracks_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state.json");
+        let flock = persistent_recovery_flock(dir.path(), &state);
+        flock.stuck_config.lock().unwrap().enabled = false;
+        flock.remember_typed(PANE, TEXT);
+        let mut env = live_pane(frame(TEXT, &[]));
+        let message = failed_candidate(&env, 1.0);
+        assert!(!flock.unwedge(
+            &mut env,
+            PANE,
+            TEXT,
+            Some(98.0),
+            Some(&message),
+            100.0,
+            None,
+            true
+        ));
+        assert!(env.keys.is_empty(), "disabled means no action at all");
+        assert!(
+            flock.stuck_tracker.lock().unwrap().records.is_empty(),
+            "and no tracking either"
+        );
+    }
+
+    // ReviewBlockerTests.test_a_pane_without_pid_and_start_evidence_is_never_pressed (row 13)
+    #[test]
+    fn a_pane_without_pid_evidence_yields_no_generation_and_is_never_pressed() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state.json");
+        let flock = persistent_recovery_flock(dir.path(), &state);
+        {
+            let mut config = flock.stuck_config.lock().unwrap();
+            config.threshold_s = 1.0;
+            config.observation_interval_s = 0.1;
+            config.max_attempts = 1;
+        }
+        flock
+            .sent_text_by_pane
+            .lock()
+            .unwrap()
+            .insert(PANE.into(), vec![TEXT.into()]);
+        let mut env = live_pane(frame(TEXT, &[]));
+        // The attempt generation is captured while the pid is live, as in the Python setUp.
+        let message = failed_candidate(&env, 1.0);
+        assert!(message.attempt_generation.is_some());
+        flock.note_stuck_candidate(&message);
+        env.panes[0].as_object_mut().unwrap().remove("pane_pid");
+        assert_eq!(
+            None,
+            pane_generation(&env, PANE),
+            "no pid means no generation"
+        );
+        assert!(!flock.unwedge(
+            &mut env,
+            PANE,
+            TEXT,
+            Some(98.0),
+            Some(&message),
+            100.0,
+            None,
+            true
+        ));
+        assert!(env.keys.is_empty(), "no generation evidence, no action");
+    }
+
+    // CurrentMergedMatcherTests.test_the_known_extraction_gap_after_PR74_is_pinned (row 20)
+    #[test]
+    fn a_bordered_composer_with_a_plain_rule_line_fails_closed_and_is_never_pressed() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state.json");
+        let flock = persistent_recovery_flock(dir.path(), &state);
+        {
+            let mut config = flock.stuck_config.lock().unwrap();
+            config.threshold_s = 1.0;
+            config.observation_interval_s = 0.1;
+            config.max_attempts = 1;
+        }
+        // A bordered composer: the last row is a plain rule, not a middle-dot footer.
+        let bordered = format!("│ ✻ idle\n❯ {TEXT}\n{}\n", "─".repeat(14));
+        assert_eq!("", composer_region_text(&bordered));
+        let mut env = live_pane(bordered);
+        flock
+            .sent_text_by_pane
+            .lock()
+            .unwrap()
+            .insert(PANE.into(), vec![TEXT.into()]);
+        let message = failed_candidate(&env, 1.0);
+        flock.note_stuck_candidate(&message);
+        assert!(!flock.unwedge(
+            &mut env,
+            PANE,
+            TEXT,
+            Some(98.0),
+            Some(&message),
+            100.0,
+            None,
+            true
+        ));
+        assert!(
+            env.keys.is_empty(),
+            "a bordered frame is a known gap, not a green light"
+        );
+    }
+
+    // DaemonStateFileTests.test_the_observation_interval_is_consumed_not_just_validated (row 26)
+    #[test]
+    fn the_observation_interval_is_consumed_not_just_validated() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state.json");
+        let flock = persistent_recovery_flock(dir.path(), &state);
+        {
+            let mut config = flock.stuck_config.lock().unwrap();
+            config.threshold_s = 0.01;
+            config.max_attempts = 2;
+            config.cooldown_s = 0.01;
+            config.observation_interval_s = 600.0;
+        }
+        let mut env = live_pane(frame(TEXT, &[]));
+        flock
+            .sent_text_by_pane
+            .lock()
+            .unwrap()
+            .insert(PANE.into(), vec![TEXT.into()]);
+        let message = failed_candidate(&env, 1.0);
+        flock.note_stuck_candidate(&message);
+        flock.unwedge(
+            &mut env,
+            PANE,
+            TEXT,
+            Some(98.0),
+            Some(&message),
+            100.0,
+            None,
+            true,
+        );
+        assert_eq!(1, env.keys.len(), "premise: the first tick acts once");
+        flock.unwedge(
+            &mut env,
+            PANE,
+            TEXT,
+            Some(98.0),
+            Some(&message),
+            101.0,
+            None,
+            true,
+        );
+        assert_eq!(
+            1,
+            env.keys.len(),
+            "inside the observation interval the worker must not act again"
+        );
+    }
+
+    /// Whether the state file on disk already holds a non-empty spent ledger.
+    fn spent_is_saved(state: &std::path::Path) -> bool {
+        let text = std::fs::read_to_string(state).unwrap_or_default();
+        let Ok(root) = serde_json::from_str::<serde_json::Value>(&text) else {
+            return false;
+        };
+        root.pointer("/stuck/spent")
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|spent| !spent.is_empty())
+    }
+
+    // ReviewBlockerTests.test_the_attempt_is_reserved_and_saved_before_the_key (row 11)
+    #[test]
+    fn the_attempt_is_reserved_and_saved_before_the_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state.json");
+        let flock = persistent_recovery_flock(dir.path(), &state);
+        {
+            let mut config = flock.stuck_config.lock().unwrap();
+            config.threshold_s = 1.0;
+            config.observation_interval_s = 0.1;
+            config.max_attempts = 1;
+        }
+        let mut env = live_pane(frame(TEXT, &[]));
+        flock
+            .sent_text_by_pane
+            .lock()
+            .unwrap()
+            .insert(PANE.into(), vec![TEXT.into()]);
+        let message = failed_candidate(&env, 1.0);
+        flock.note_stuck_candidate(&message);
+        // What the state file holds at the instant the Enter goes out.
+        let saved_at_key = Rc::new(RefCell::new(Vec::new()));
+        let seen = Rc::clone(&saved_at_key);
+        let path = state.clone();
+        *env.on_send_key.borrow_mut() = Some(Box::new(move || {
+            seen.borrow_mut().push(spent_is_saved(&path));
+        }));
+        flock.unwedge(
+            &mut env,
+            PANE,
+            TEXT,
+            Some(98.0),
+            Some(&message),
+            100.0,
+            None,
+            true,
+        );
+        assert_eq!(1, env.keys.len(), "premise: the attempt sends one Enter");
+        assert_eq!(
+            vec![true],
+            *saved_at_key.borrow(),
+            "the reservation must be durable before the Enter goes out"
+        );
+    }
+
+    // FinalBoundaryGuardTests.test_a_failed_reservation_save_refuses_to_press (row 29)
+    #[test]
+    fn a_failed_reservation_save_refuses_to_press() {
+        let dir = tempfile::tempdir().unwrap();
+        // A file where the state directory should be: every save fails.
+        let blocker = dir.path().join("not-a-directory");
+        std::fs::write(&blocker, b"file").unwrap();
+        let flock = persistent_recovery_flock(dir.path(), &blocker.join("state.json"));
+        {
+            let mut config = flock.stuck_config.lock().unwrap();
+            config.threshold_s = 1.0;
+            config.observation_interval_s = 0.1;
+            config.max_attempts = 1;
+        }
+        let mut env = live_pane(frame(TEXT, &[]));
+        flock
+            .sent_text_by_pane
+            .lock()
+            .unwrap()
+            .insert(PANE.into(), vec![TEXT.into()]);
+        let message = failed_candidate(&env, 1.0);
+        flock.note_stuck_candidate(&message);
+        assert!(!flock.unwedge(
+            &mut env,
+            PANE,
+            TEXT,
+            Some(98.0),
+            Some(&message),
+            100.0,
+            None,
+            true
+        ));
+        assert!(env.keys.is_empty(), "no durable reservation means no key");
+    }
+
+    // RetirementRaceTests.test_a_new_candidate_arriving_during_an_empty_read_survives (row 61)
+    #[test]
+    fn a_new_candidate_arriving_during_an_empty_read_survives() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state.json");
+        let flock = Arc::new(persistent_recovery_flock(dir.path(), &state));
+        let mut env = live_pane(frame("\x1b[2mAsk Codex to do anything\x1b[0m", &[]));
+        flock.note_stuck_candidate(&failed_candidate(&env, 1000.0));
+        // The observer reads the composer, gets an EMPTY (stale) snapshot, and while it
+        // reads, a NEWER failed message m2 is noted. Only the entry the observer saw (m1)
+        // may be retired.
+        let mut newer = Message::new("m2", PANE, "writer", "a newer stalled line", "send_text");
+        newer.created_at = 2000.0;
+        newer.status = "failed".into();
+        newer.attempt_generation = pane_generation(&env, PANE);
+        let racer = Arc::clone(&flock);
+        let mut raced = false;
+        *env.on_read.borrow_mut() = Some(Box::new(move || {
+            if !raced {
+                raced = true;
+                racer.note_stuck_candidate(&newer);
+            }
+        }));
+        assert_eq!(
+            0,
+            strict_stuck_observer_scan(&flock, &mut env, 221.0).unwrap()
+        );
+        let candidates = flock.stuck_candidates.lock().unwrap();
+        assert_eq!(
+            "m2", candidates[PANE].message_id,
+            "the newer candidate must survive a stale empty read"
+        );
+        assert!(
+            candidates[PANE].eligible,
+            "and it stays eligible for its own clock"
+        );
+    }
+
+    // ReviewBlockerTests.test_a_text_edited_between_observation_and_press_is_not_pressed (row 14)
+    #[test]
+    fn a_text_edited_after_the_reservation_save_is_not_pressed() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state.json");
+        let flock = persistent_recovery_flock(dir.path(), &state);
+        {
+            let mut config = flock.stuck_config.lock().unwrap();
+            config.threshold_s = 1.0;
+            config.observation_interval_s = 0.1;
+            config.max_attempts = 1;
+        }
+        let mut env = live_pane(frame(TEXT, &[]));
+        flock
+            .sent_text_by_pane
+            .lock()
+            .unwrap()
+            .insert(PANE.into(), vec![TEXT.into()]);
+        let message = failed_candidate(&env, 1.0);
+        flock.note_stuck_candidate(&message);
+        // The reservation save that precedes the press.
+        flock.save().unwrap();
+        // A person types after the save and before the press-time revalidation.
+        env.screens.insert(
+            PANE.into(),
+            frame(&format!("{TEXT} and one more thing"), &[]),
+        );
+        let generation = pane_generation(&env, PANE).unwrap();
+        let (pressed, detail) = flock.press_stuck_enter(
+            &mut env,
+            PANE,
+            &crate::stuck::fingerprint(TEXT),
+            &generation,
+            "m1",
+            Some(TEXT),
+            Some(&message),
+            true,
+            Some(1.0),
+        );
+        assert!(!pressed);
+        // Which gate refuses is not the condition; a person's text in the composer is
+        // refused before the press (here by the status gate, "target not ready").
+        assert!(!detail.is_empty(), "the refusal names its reason");
+        assert!(
+            env.keys.is_empty(),
+            "the press-time revalidation must refuse"
+        );
+    }
+
+    // AttemptGenerationTests.test_a_pane_replaced_during_the_attempt_gets_no_watcher_key (row 66)
+    // Watcher level: an attempt recorded under the generation it was typed into, then the
+    // pane is replaced by another live process. The delivery-side capture is row 65.
+    #[test]
+    fn a_pane_replaced_during_the_attempt_gets_no_watcher_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state.json");
+        let flock = persistent_recovery_flock(dir.path(), &state);
+        {
+            let mut config = flock.stuck_config.lock().unwrap();
+            config.threshold_s = 1.0;
+            config.observation_interval_s = 0.1;
+            config.max_attempts = 1;
+        }
+        let mut env = live_pane(frame(TEXT, &[]));
+        flock
+            .sent_text_by_pane
+            .lock()
+            .unwrap()
+            .insert(PANE.into(), vec![TEXT.into()]);
+        let message = failed_candidate(&env, 1.0);
+        flock.note_stuck_candidate(&message);
+        // pid 1 is always another live process, so its generation differs from ours.
+        env.panes[0]
+            .as_object_mut()
+            .unwrap()
+            .insert("pane_pid".into(), serde_json::json!(1));
+        for now in [100.0, 221.0, 341.0] {
+            assert_eq!(
+                0,
+                strict_stuck_observer_scan(&flock, &mut env, now).unwrap()
+            );
+        }
+        assert!(
+            env.keys.is_empty(),
+            "a replacement pane must never inherit the old attempt's authority"
+        );
+        let candidates = flock.stuck_candidates.lock().unwrap();
+        assert_eq!("generation-changed", candidates[PANE].status);
+        assert!(!candidates[PANE].eligible);
+    }
+
+    // GenerationBindingTests.test_a_replacement_generation_is_retired_not_adopted (row 63)
+    #[test]
+    fn a_replacement_generation_after_a_restart_is_retired_not_adopted() {
+        let dir = tempfile::tempdir().unwrap();
+        let before = Flock::new(dir.path().join("launches.json"), dir.path(), false);
+        let attempt_env = live_pane(frame(TEXT, &[]));
+        before.note_stuck_candidate(&failed_candidate(&attempt_env, 1.0));
+        let after = Flock::new(dir.path().join("launches.json"), dir.path(), false);
+        after.restore_snapshot(&before.snapshot());
+        // After the restart the pane is another live process at the same pane id.
+        let mut env = live_pane(frame(TEXT, &[]));
+        env.panes[0]
+            .as_object_mut()
+            .unwrap()
+            .insert("pane_pid".into(), serde_json::json!(1));
+        for now in [100.0, 221.0, 441.0] {
+            assert_eq!(
+                0,
+                strict_stuck_observer_scan(&after, &mut env, now).unwrap(),
+                "no action at t={now}"
+            );
+        }
+        assert!(
+            env.keys.is_empty(),
+            "a replacement pane must never inherit the old authority"
+        );
+        let candidates = after.stuck_candidates.lock().unwrap();
+        assert_eq!("generation-changed", candidates[PANE].status);
+        assert!(!candidates[PANE].eligible);
+    }
+
+    // RestartRecoveryTests.test_the_restarted_worker_actually_recovers (row 51), on the strict
+    // path with the real composer matcher. After a restart the persisted text must be
+    // rehydrated once the candidate is bound, and then the worker presses once.
+    #[test]
+    #[ignore = "t3354 row 51 divergence: after a restart the persisted sent text is not rehydrated, so the strict press refuses (Python rehydrates at bind); owner ruling pending"]
+    fn the_restarted_worker_recovers_through_the_real_matcher() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state.json");
+        let before = persistent_recovery_flock(dir.path(), &state);
+        let mut env = live_pane(frame(TEXT, &[]));
+        let message = failed_candidate(&env, 1.0);
+        before.note_stuck_candidate(&message);
+        before.save().unwrap();
+        // The restarted daemon: a fresh flock restored from the saved state.
+        let after = persistent_recovery_flock(dir.path(), &state);
+        after.restore_snapshot(&before.snapshot());
+        {
+            let mut config = after.stuck_config.lock().unwrap();
+            config.threshold_s = 1.0;
+            config.observation_interval_s = 0.1;
+            config.max_attempts = 1;
+        }
+        // A restart remembers no sends by itself.
+        assert!(after
+            .sent_text_by_pane
+            .lock()
+            .unwrap()
+            .get(PANE)
+            .is_none_or(Vec::is_empty));
+        // The first tick after the restart binds the candidate and starts the window.
+        assert!(!after.unwedge(
+            &mut env,
+            PANE,
+            TEXT,
+            Some(99.5),
+            Some(&message),
+            100.0,
+            None,
+            true
+        ));
+        assert!(
+            env.keys.is_empty(),
+            "the first tick after a restart is only evidence"
+        );
+        assert!(
+            after
+                .sent_text_by_pane
+                .lock()
+                .unwrap()
+                .get(PANE)
+                .is_some_and(|rows| rows.iter().any(|row| row.as_str() == Some(TEXT))),
+            "the persisted text must be rehydrated once the candidate is bound"
+        );
+        assert!(after.unwedge(
+            &mut env,
+            PANE,
+            TEXT,
+            Some(98.0),
+            Some(&message),
+            200.0,
+            None,
+            true
+        ));
+        assert_eq!(1, env.keys.len(), "the restarted worker presses once");
+    }
+
+    // GenerationBindingTests.test_the_same_generation_still_recovers_with_the_real_matcher
+    // (row 62), on the strict path: the restored candidate keeps its attempt generation, and
+    // after the bind the real matcher authorises one press.
+    #[test]
+    #[ignore = "t3354 row 62 divergence: after a same-generation restart on the strict path the persisted sent text is not rehydrated, so the second tick does not press (Python presses); owner ruling pending"]
+    fn the_same_generation_restart_recovers_through_the_real_matcher() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state.json");
+        let before = persistent_recovery_flock(dir.path(), &state);
+        let mut env = live_pane(frame(TEXT, &[]));
+        let message = failed_candidate(&env, 1.0);
+        before.note_stuck_candidate(&message);
+        before.save().unwrap();
+        let after = persistent_recovery_flock(dir.path(), &state);
+        after.restore_snapshot(&before.snapshot());
+        {
+            let mut config = after.stuck_config.lock().unwrap();
+            config.threshold_s = 1.0;
+            config.observation_interval_s = 0.1;
+            config.max_attempts = 1;
+        }
+        assert_eq!(
+            pane_generation(&env, PANE),
+            after.stuck_candidates.lock().unwrap()[PANE].generation,
+            "the persisted attempt generation survives the restart"
+        );
+        // The first tick after the restart binds the candidate and starts the window.
+        assert!(!after.unwedge(
+            &mut env,
+            PANE,
+            TEXT,
+            Some(99.5),
+            Some(&message),
+            100.0,
+            None,
+            true
+        ));
+        assert!(env.keys.is_empty(), "the bind is only evidence");
+        assert!(after.unwedge(
+            &mut env,
+            PANE,
+            TEXT,
+            Some(98.0),
+            Some(&message),
+            200.0,
+            None,
+            true
+        ));
+        assert_eq!(
+            1,
+            env.keys.len(),
+            "a same-generation restart still presses once"
+        );
+    }
+
+    // RestartRecoveryTests.test_a_human_continuation_is_refused_after_a_restart_by_the_real_matcher
+    // (row 52), on the strict path (federated input off, as in the Python case). After a restart
+    // the composer holds our text and a line typed below it. Even with our text known as sent,
+    // the strict path must not authorise that composer, so no Enter is sent over several ticks.
+    #[test]
+    fn a_human_continuation_is_refused_after_a_restart_on_the_strict_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state.json");
+        let before = persistent_recovery_flock(dir.path(), &state);
+        let mut env = live_pane(frame(TEXT, &[]));
+        let message = failed_candidate(&env, 1.0);
+        before.note_stuck_candidate(&message);
+        before.save().unwrap();
+        let after = persistent_recovery_flock(dir.path(), &state);
+        after.restore_snapshot(&before.snapshot());
+        {
+            let mut config = after.stuck_config.lock().unwrap();
+            config.threshold_s = 1.0;
+            config.observation_interval_s = 0.1;
+            config.max_attempts = 1;
+        }
+        after
+            .sent_text_by_pane
+            .lock()
+            .unwrap()
+            .insert(PANE.into(), vec![TEXT.into()]);
+        env.screens.insert(
+            PANE.into(),
+            frame(TEXT, &["  and one more thing I was typing"]),
+        );
+        for now in [99.5, 200.0, 300.0] {
+            assert!(!after.unwedge(
+                &mut env,
+                PANE,
+                TEXT,
+                Some(98.0),
+                Some(&message),
+                now,
+                None,
+                true
+            ));
+        }
+        assert!(
+            env.keys.is_empty(),
+            "the persisted text must not authorise a modified composer"
         );
     }
 }
