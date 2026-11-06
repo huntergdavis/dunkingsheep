@@ -55,10 +55,11 @@ pub fn run_daemon(options: DaemonOptions) -> Result<i32, DunkError> {
             "could not resolve daemon executable identity: {error}"
         ))
     })?;
+    // `status.version` is the release the CLI's `--version` prints (`dunk_core.VERSION`), not
+    // the crate version (t3463); DUNKINGSHEEP_VERSION stays a test-only override.
     let release_version = env
         .get("DUNKINGSHEEP_VERSION")
-        .or(option_env!("CARGO_PKG_VERSION"))
-        .unwrap_or("unknown")
+        .unwrap_or(crate::release_identity::VERSION)
         .to_owned();
     run_daemon_captured(
         options,

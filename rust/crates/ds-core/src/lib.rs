@@ -56,6 +56,7 @@ pub mod report;
 // rustfmt must not rewrite it: formatting it makes the generator's --check fail.
 #[rustfmt::skip]
 pub mod registry;
+pub mod release_identity;
 pub mod retry;
 pub mod review;
 pub mod roles;
