@@ -4188,7 +4188,7 @@ fn owned_recovery_evidence_preserves_malformed_binding_as_a_refusal() {
         candidate.native_binding_invalid,
         Some(row["native_binding"].clone())
     );
-    let round_trip = candidate_snapshot(&candidate);
+    let round_trip = candidate_snapshot("%1", &candidate);
     assert_eq!(round_trip["native_binding"], row["native_binding"]);
     assert!(round_trip.get("typed_at").is_none());
 }

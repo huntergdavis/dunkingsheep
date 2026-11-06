@@ -1,0 +1,80 @@
+{
+  "version": 1,
+  "next_id": 3,
+  "next_message_id": 9,
+  "dunkers": [],
+  "stuck_candidates": {},
+  "stuck": {
+    "records": {},
+    "spent": {}
+  },
+  "stuck_config": {
+    "enabled": true,
+    "threshold_s": 120.0,
+    "max_attempts": 2,
+    "cooldown_s": 60.0,
+    "observation_interval_s": 20.0
+  },
+  "outbox": [
+    {
+      "id": "m5",
+      "pane_id": "w9:p1",
+      "target_label": "example-lane",
+      "text": "please pick up the example task",
+      "source": "send_text",
+      "kind": "text",
+      "hold_while_typing": true,
+      "is_notice": false,
+      "notify_for": [],
+      "holds": 0,
+      "next_attempt_at": null,
+      "hold_signature": null,
+      "created_at": 1793000500.5
+    },
+    {
+      "id": "m6",
+      "pane_id": "w9:p1",
+      "target_label": "example-lane",
+      "text": "2 new inbox messages",
+      "source": "send_text",
+      "kind": "text",
+      "hold_while_typing": true,
+      "is_notice": true,
+      "notify_for": [
+        "i14",
+        "i15"
+      ],
+      "holds": 2,
+      "next_attempt_at": 1793000600.25,
+      "hold_signature": [
+        "box",
+        "> draft left in the box"
+      ],
+      "created_at": 1793000510.0
+    },
+    {
+      "id": "m7",
+      "pane_id": "w9:p2",
+      "target_label": "example-two",
+      "text": "status? \u2014 reply briefly",
+      "source": "d2",
+      "kind": "text",
+      "hold_while_typing": false,
+      "is_notice": false,
+      "notify_for": [],
+      "holds": 1,
+      "next_attempt_at": null,
+      "hold_signature": [
+        "modal",
+        "Save changes? [y/N]"
+      ],
+      "created_at": 1793000520.75
+    }
+  ],
+  "decided": {
+    "m4": {
+      "status": "delivered",
+      "created_at": 1793000400.25
+    }
+  }
+}
