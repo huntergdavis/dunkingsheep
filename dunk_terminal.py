@@ -194,7 +194,12 @@ class TmuxBackend(TerminalBackend):
 
     name = "tmux"
     live = True
-    PANE_SEP = "\x1f"
+    # The field separator must be printable ASCII. tmux 3.4 writes a control character in
+    # format output as a backslash escape (0x1f comes back as the four characters \037), so a
+    # control-character separator splits nothing and every pane line is dropped. Measured in
+    # CI on the runner's tmux 3.4 (t1605): list-panes exit 0, zero parsed panes, the daemon
+    # refused to start. tmux 3.6 writes the raw byte, which is why it worked on the live host.
+    PANE_SEP = "@@ds@@"
     # The last two fields are APPENDED, never inserted: every earlier field keeps
     # its position, and _parse_panes still accepts a 12-field line (a fixture, an
     # older capture) with cols/rows absent rather than guessing a size.
