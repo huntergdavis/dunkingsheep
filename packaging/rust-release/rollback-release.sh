@@ -7,14 +7,17 @@
 #   --to ID      point the drop-in and the launchers at release ID, installed under
 #                <prefix>/releases/ID
 #   --original   restore the pair saved before the first install (the pre-Rust state)
-# Each of these saves the pair being replaced as "previous". Running the same rollback
-# again therefore undoes it.
+# A rollback is a transaction. If any step fails, the live pair is restored, and "previous"
+# and "owned" are left as they were. On success, the pair being replaced is saved as
+# "previous", so running the same rollback again undoes it. A rollback first refuses drift:
+# a drop-in or launcher that differs from the last state this layout wrote.
 #
 # usage: rollback-release.sh --prefix DIR --bin-dir DIR --unit-dir DIR
 #            [--to ID | --original] [--dry-run]
 
 set -eu
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source=lib.sh
 . "$SCRIPT_DIR/lib.sh"
 
 prefix=""
@@ -31,7 +34,7 @@ while [ "$#" -gt 0 ]; do
         --to) to=${2:-}; shift 2 ;;
         --original) original=1; shift ;;
         --dry-run) dry_run=1; shift ;;
-        -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
         *) die "unknown argument: $1" ;;
     esac
 done
@@ -46,7 +49,7 @@ if [ -n "$to" ] && [ "$original" -eq 1 ]; then
     die "--to and --original are exclusive"
 fi
 
-dropin="$unit_dir/dunkingsheep.service.d/10-rust-release.conf"
+dropin="$unit_dir/dunkingsheep.service.d/99-rust-release.conf"
 rollback_dir="$prefix/rollback"
 
 if [ -n "$to" ]; then
@@ -59,13 +62,17 @@ if [ -n "$to" ]; then
         exit 0
     fi
     mkdir -p "$rollback_dir" "$unit_dir/dunkingsheep.service.d" "$bin_dir"
-    swap="$rollback_dir/.swap.$$"
-    snapshot_pair "$swap" "$dropin" "$bin_dir"
+    txn="$rollback_dir/.txn"
+    snapshot_pair "$txn" "$dropin" "$bin_dir"
+    mutated=1
+    arm_transaction
     "$target" install --bin-dir "$bin_dir" > /dev/null
-    render_dropin "$SCRIPT_DIR/templates/10-rust-release.conf.in" "$to" "$target" "$dropin"
+    render_dropin "$SCRIPT_DIR/templates/99-rust-release.conf.in" "$to" "$target" "$dropin"
+    replace_previous "$rollback_dir" "$txn"
     snapshot_pair "$rollback_dir/owned" "$dropin" "$bin_dir"
-    rm -rf "$rollback_dir/previous"
-    mv "$swap" "$rollback_dir/previous"
+    mutated=0
+    rm -rf "$txn"
+    disarm_transaction
     echo "drop-in and launchers now point at release $to"
     echo "not activated: no systemctl was run. Reload and restart only after the cutover gate."
     exit 0
@@ -85,12 +92,16 @@ if [ "$dry_run" -eq 1 ]; then
     exit 0
 fi
 
-# Save the pair being replaced before restoring, because the source may be "previous".
-swap="$rollback_dir/.swap.$$"
-snapshot_pair "$swap" "$dropin" "$bin_dir"
+# The transaction. The live pair is saved first. The source is read before "previous" changes.
+txn="$rollback_dir/.txn"
+snapshot_pair "$txn" "$dropin" "$bin_dir"
+mutated=1
+arm_transaction
 restore_pair "$source_dir" "$dropin" "$bin_dir"
+replace_previous "$rollback_dir" "$txn"
 snapshot_pair "$rollback_dir/owned" "$dropin" "$bin_dir"
-rm -rf "$rollback_dir/previous"
-mv "$swap" "$rollback_dir/previous"
+mutated=0
+rm -rf "$txn"
+disarm_transaction
 echo "restored $what (drop-in and launchers as one pair)"
 echo "not activated: no systemctl was run. Reload and restart only after the cutover gate."

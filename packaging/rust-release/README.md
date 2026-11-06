@@ -13,7 +13,7 @@ is a separate, owner-approved cutover step.
 <prefix>/releases/<id>/MANIFEST       release_id, revision, sha256 of both files (0444)
 <bin-dir>/dunkingsheep                launcher: exec the release binary
 <bin-dir>/dunk-poll                   poll wrapper: pinned python3 + the release's poller copy
-<unit-dir>/dunkingsheep.service.d/10-rust-release.conf
+<unit-dir>/dunkingsheep.service.d/99-rust-release.conf
                                       drop-in: ExecStart reset to the release binary, serve;
                                       DUNKINGSHEEP_SUPERVISED=1 kept
 ```
@@ -55,10 +55,17 @@ packaging/rust-release/uninstall-release.sh --prefix DIR --bin-dir DIR --unit-di
 - Install, rollback and uninstall refuse to change a drop-in or launcher that differs from
   the last state this layout wrote (`rollback/owned`, or `original` before the first
   install). They print `drift` and change nothing, so an operator edit is never overwritten.
+- Install, rollback and uninstall are transactions. The live pair is saved first. A failed
+  step, or a HUP, INT or TERM signal, restores that pair, so such a run never leaves a mixed
+  drop-in and launcher pair. `previous` and `owned` are recorded only after success.
 - Uninstall refuses to change a drop-in it did not write (no `release_id` line). A
   rollback never destroys the pair it replaces, because that pair is saved as `previous`.
 - The poll wrapper pins an absolute `python3`. A `python3` found through a relative PATH
   entry is refused, so the wrapper never depends on the working directory.
+- The drop-in is `99-rust-release.conf`, so it sorts after the operator drop-ins. systemd
+  applies drop-ins in name order and the last `ExecStart` wins. Install refuses when a
+  drop-in that sorts after it sets `ExecStart`, because that drop-in would silently override
+  the release.
 
 ## Activation gate (not part of this change)
 
@@ -75,6 +82,16 @@ steps are in the t3229 task notes. These scripts only prepare the artifacts.
   not changed here.
 - The drop-in template targets the base unit `dunkingsheep.service`. The live
   Python drop-in is not read or changed.
+- A SIGKILL or a power loss during a run can leave the live pair mixed. The next run then
+  refuses with `drift`. The pair saved before the run is in `<prefix>/rollback/.txn`. Restore
+  it by hand: copy each saved file back, or remove the live file whose `.absent` marker is in
+  `.txn`. Then run the command again.
+- A failed install can leave a `releases/.staging-*` directory. It is never used and can be
+  removed.
+- Six operator drop-ins on the reviewed host (numbered 30 to 96) set `ExecStart` to Python
+  releases. They are left unchanged here, and `99-rust-release.conf` overrides them while it is
+  installed. Retiring them belongs to the owner-authorized cutover. Read the effective value with
+  `systemctl --user show -p ExecStart dunkingsheep.service`; this change never runs that.
 
 ## NOT VERIFIED
 

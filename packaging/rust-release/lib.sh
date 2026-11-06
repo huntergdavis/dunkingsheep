@@ -40,43 +40,64 @@ dropin_release_id() {
 }
 
 # snapshot_pair DIR DROPIN BIN_DIR
-# Records the drop-in and both launchers as they are now, so a rollback restores the
-# same pair. A file that is absent is recorded as an .absent marker, so a restore
-# removes it. The drop-in and the launchers always move together.
+# Records the drop-in and both launchers as they are now, so a restore puts back the same
+# pair. A file that is absent is recorded as an .absent marker, so a restore removes it.
+# The snapshot is built beside DIR and then moved into place, so an interrupted snapshot
+# never leaves a partial DIR.
 snapshot_pair() {
-    rm -rf "$1"
-    mkdir -p "$1"
+    rm -rf "$1.tmp.$$"
+    mkdir -p "$1.tmp.$$"
     if [ -f "$2" ]; then
-        cp -p "$2" "$1/dropin.conf"
+        cp -p "$2" "$1.tmp.$$/dropin.conf"
     else
-        : > "$1/dropin.absent"
+        : > "$1.tmp.$$/dropin.absent"
     fi
     for name in dunkingsheep dunk-poll; do
         if [ -f "$3/$name" ]; then
-            cp -p "$3/$name" "$1/$name"
+            cp -p "$3/$name" "$1.tmp.$$/$name"
         else
-            : > "$1/$name.absent"
+            : > "$1.tmp.$$/$name.absent"
+        fi
+    done
+    rm -rf "$1"
+    mv "$1.tmp.$$" "$1"
+}
+
+# put_file SRC DST
+# Copies SRC beside DST and moves it over DST, so DST is never left half written. The move
+# replaces the directory entry, so a read-only DST does not block it.
+put_file() {
+    cp -p "$1" "$2.restore.$$" || { rm -f "$2.restore.$$"; return 1; }
+    mv -f "$2.restore.$$" "$2" || { rm -f "$2.restore.$$"; return 1; }
+}
+
+# restore_pair DIR DROPIN BIN_DIR
+# Puts back the pair recorded by snapshot_pair. Anything not recorded is removed. Returns
+# non-zero when a step fails, so a caller never reports a partial restore as a full one.
+restore_pair() {
+    mkdir -p "$(dirname "$2")" "$3" || return 1
+    if [ -f "$1/dropin.conf" ]; then
+        put_file "$1/dropin.conf" "$2" || return 1
+    else
+        rm -f "$2" || return 1
+    fi
+    for name in dunkingsheep dunk-poll; do
+        if [ -f "$1/$name" ]; then
+            put_file "$1/$name" "$3/$name" || return 1
+        else
+            rm -f "$3/$name" || return 1
         fi
     done
 }
 
-# restore_pair DIR DROPIN BIN_DIR
-# Puts back the pair recorded by snapshot_pair. Anything not recorded is removed.
-restore_pair() {
-    if [ -f "$1/dropin.conf" ]; then
-        mkdir -p "$(dirname "$2")"
-        cp -p "$1/dropin.conf" "$2"
-    else
-        rm -f "$2"
-    fi
-    mkdir -p "$3"
-    for name in dunkingsheep dunk-poll; do
-        if [ -f "$1/$name" ]; then
-            cp -p "$1/$name" "$3/$name"
-        else
-            rm -f "$3/$name"
-        fi
-    done
+# replace_previous ROLLBACK_DIR TXN
+# Makes the pair saved in TXN the "previous" pair. The copy is made first, so the old
+# previous pair survives until the new one is in place.
+replace_previous() {
+    rm -rf "$1/previous.new"
+    cp -R "$2" "$1/previous.new"
+    rm -rf "$1/previous"
+    mv "$1/previous.new" "$1/previous"
 }
 
 # guard_pair EXPECTED DROPIN BIN_DIR
@@ -110,4 +131,36 @@ guard_against_drift() {
     elif [ -d "$1/original" ]; then
         guard_pair "$1/original" "$2" "$3"
     fi
+}
+
+# transaction_exit: the EXIT handler of install, rollback and uninstall. A mutation that
+# started (mutated=1) and did not finish restores the pair saved in $txn, so a failed run
+# never leaves a mixed pair. Callers set txn, dropin, bin_dir and mutated, then call
+# arm_transaction. Signals are ignored while the restore runs, so it is not cut short.
+# shellcheck disable=SC2154 # txn, dropin, bin_dir and mutated are set by the calling script
+transaction_exit() {
+    status=$?
+    trap '' HUP INT TERM
+    if [ "${mutated:-0}" -eq 1 ]; then
+        if restore_pair "$txn" "$dropin" "$bin_dir"; then
+            echo "error: the operation failed; the drop-in and launchers were restored to their previous state" >&2
+        else
+            echo "error: the operation failed and the saved pair in $txn could not be fully restored" >&2
+        fi
+    fi
+    exit "$status"
+}
+
+# arm_transaction: sets transaction_exit as the EXIT handler, and turns HUP, INT and TERM into
+# a normal exit, so a signal also runs the EXIT handler and restores the saved pair.
+arm_transaction() {
+    trap transaction_exit EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+}
+
+# disarm_transaction: removes the handlers once the transaction has committed.
+disarm_transaction() {
+    trap - EXIT HUP INT TERM
 }

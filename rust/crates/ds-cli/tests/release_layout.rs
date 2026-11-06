@@ -94,7 +94,7 @@ impl Sandbox {
 
     fn dropin(&self) -> PathBuf {
         self.unit
-            .join("dunkingsheep.service.d/10-rust-release.conf")
+            .join("dunkingsheep.service.d/99-rust-release.conf")
     }
 
     fn install(&self, id: &str) -> Output {
@@ -504,6 +504,134 @@ fn uninstall_refuses_a_drop_in_edited_after_the_last_install() {
         edited,
         std::fs::read_to_string(sandbox.dropin()).expect("edited drop-in kept")
     );
+}
+
+#[test]
+fn install_that_fails_after_the_first_launcher_write_restores_the_pair() {
+    let sandbox = Sandbox::new();
+    std::fs::write(sandbox.bin.join("dunkingsheep"), python_era_launcher()).expect("launcher");
+    // A read-only poll wrapper makes the second launcher write fail, after the first succeeded.
+    let poll_wrapper =
+        "#!/bin/sh\n# operator poll wrapper (fixture)\nexec /usr/bin/python3 old-poll\n";
+    let poll = sandbox.bin.join("dunk-poll");
+    std::fs::write(&poll, poll_wrapper).expect("poll wrapper");
+    std::fs::set_permissions(&poll, std::fs::Permissions::from_mode(0o444)).expect("read-only");
+
+    let failed = sandbox.install("rel-fail");
+    assert!(
+        !failed.status.success(),
+        "the second launcher write must fail"
+    );
+    let stderr = String::from_utf8_lossy(&failed.stderr);
+    assert!(
+        stderr.contains("cannot write") && stderr.contains("dunk-poll"),
+        "the failure must come from the second launcher write: {stderr}"
+    );
+    assert!(
+        stderr.contains("restored to their previous state"),
+        "the EXIT handler must restore the pair: {stderr}"
+    );
+    assert_eq!(
+        python_era_launcher(),
+        std::fs::read_to_string(sandbox.bin.join("dunkingsheep")).expect("launcher restored")
+    );
+    assert_eq!(
+        poll_wrapper,
+        std::fs::read_to_string(&poll).expect("poll wrapper restored")
+    );
+    assert!(!sandbox.dropin().exists(), "the drop-in was never written");
+    assert!(
+        !sandbox.prefix.join("rollback/owned").exists(),
+        "no owned pair is recorded for a failed install"
+    );
+
+    // Recovery: once the poll wrapper is writable, the same install succeeds.
+    std::fs::set_permissions(&poll, std::fs::Permissions::from_mode(0o644)).expect("writable");
+    ok(&sandbox.install("rel-fail"));
+    assert_pair(&sandbox, "rel-fail");
+}
+
+#[test]
+fn rollback_to_a_release_that_fails_mid_write_keeps_the_pair_and_previous() {
+    let sandbox = Sandbox::new();
+    ok(&sandbox.install("rel-a"));
+    ok(&sandbox.install("rel-b"));
+    assert_pair(&sandbox, "rel-b");
+    let previous = sandbox.prefix.join("rollback/previous/dropin.conf");
+    let previous_before = std::fs::read_to_string(&previous).expect("previous pair");
+    assert!(previous_before.contains("# release_id=rel-a\n"));
+    let poll = sandbox.bin.join("dunk-poll");
+    std::fs::set_permissions(&poll, std::fs::Permissions::from_mode(0o444)).expect("read-only");
+
+    let failed = sandbox.rollback(&["--to", "rel-a"]);
+    assert!(
+        !failed.status.success(),
+        "the second launcher write must fail"
+    );
+    let stderr = String::from_utf8_lossy(&failed.stderr);
+    assert!(
+        stderr.contains("cannot write") && stderr.contains("dunk-poll"),
+        "the failure must come from the second launcher write: {stderr}"
+    );
+    assert!(
+        stderr.contains("restored to their previous state"),
+        "the EXIT handler must restore the pair: {stderr}"
+    );
+    assert_pair(&sandbox, "rel-b");
+    assert_eq!(
+        previous_before,
+        std::fs::read_to_string(&previous).expect("previous kept")
+    );
+
+    // Recovery: the plain rollback still restores the pair before rel-b.
+    ok(&sandbox.rollback(&[]));
+    assert_pair(&sandbox, "rel-a");
+}
+
+#[test]
+fn install_refuses_when_a_later_drop_in_sets_execstart() {
+    let sandbox = Sandbox::new();
+    let dropins = sandbox.unit.join("dunkingsheep.service.d");
+    std::fs::create_dir_all(&dropins).expect("drop-in dir");
+    std::fs::write(
+        dropins.join("zz-operator.conf"),
+        "[Service]\nExecStart=/bin/false\n",
+    )
+    .expect("later drop-in");
+
+    let failed = sandbox.install("rel-a");
+    assert!(
+        !failed.status.success(),
+        "a later drop-in with ExecStart must block the install"
+    );
+    let stderr = String::from_utf8_lossy(&failed.stderr);
+    assert!(
+        stderr.contains("zz-operator.conf") && stderr.contains("sorts after 99-rust-release.conf"),
+        "the refusal must name the later drop-in: {stderr}"
+    );
+    assert!(
+        !sandbox.dropin().exists(),
+        "nothing is written after a refusal"
+    );
+    assert!(
+        !sandbox.bin.join("dunkingsheep").exists(),
+        "no launcher is written after a refusal"
+    );
+}
+
+#[test]
+fn install_is_not_blocked_by_an_earlier_drop_in_that_sets_execstart() {
+    let sandbox = Sandbox::new();
+    let dropins = sandbox.unit.join("dunkingsheep.service.d");
+    std::fs::create_dir_all(&dropins).expect("drop-in dir");
+    std::fs::write(
+        dropins.join("96-review-status-reconcile.conf"),
+        "[Service]\nExecStart=\nExecStart=/usr/bin/python3 /old/dunkingsheep serve\n",
+    )
+    .expect("earlier drop-in");
+
+    ok(&sandbox.install("rel-a"));
+    assert_pair(&sandbox, "rel-a");
 }
 
 /// Kills the probe daemon if the test fails before it shuts the daemon down.
