@@ -1767,7 +1767,7 @@ fn timestamps_and_json_spelling_match_cpython() {
 
     assert_eq!(
         py_dumps(&json!({"b": 1, "a": "é"}), ", ", ": "),
-        r#"{"a": "é", "b": 1}"#
+        r#"{"a": "\u00e9", "b": 1}"#
     );
     assert_eq!(
         py_dumps(
