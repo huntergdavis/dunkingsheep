@@ -24,6 +24,7 @@ mod outbox_messages;
 mod outbox_runtime;
 mod owner_push;
 mod poolrad;
+mod project_policy_load;
 mod project_runtime;
 mod push;
 mod push_eligibility;
@@ -606,7 +607,7 @@ impl crate::api::CommandEnv for RequestRuntimeAdapter<'_> {
         self.terminal
             .flock
             .project_runtime_policy()
-            .ok_or_else(|| refusal("project runtime policy is not attached"))?
+            .ok_or_else(|| project_policy_load::not_attached_refusal(&self.terminal.flock))?
             .request_config(project_name, template, self.runtime)
     }
 
@@ -619,7 +620,7 @@ impl crate::api::CommandEnv for RequestRuntimeAdapter<'_> {
             .terminal
             .flock
             .project_runtime_policy()
-            .ok_or_else(|| refusal("project runtime policy is not attached"))?;
+            .ok_or_else(|| project_policy_load::not_attached_refusal(&self.terminal.flock))?;
         policy.with_spawn_gate(operation)
     }
 

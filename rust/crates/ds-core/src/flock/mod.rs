@@ -36,17 +36,20 @@ impl std::fmt::Debug for MemoryServiceSlot {
 }
 
 /// Holds the one explicitly attached project policy for this canonical Flock.
+/// The attached project policy plus the startup reason any part of it was refused (t1692).
 #[derive(Default)]
-pub(crate) struct ProjectRuntimePolicySlot(
-    Mutex<Option<Arc<crate::server_runtime::ProjectRuntimePolicy>>>,
-);
+pub(crate) struct ProjectRuntimePolicySlot {
+    policy: Mutex<Option<Arc<crate::server_runtime::ProjectRuntimePolicy>>>,
+    refusal: Mutex<Option<String>>,
+}
 
 impl std::fmt::Debug for ProjectRuntimePolicySlot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("ProjectRuntimePolicySlot")
+        f.debug_struct("ProjectRuntimePolicySlot")
             .field(
+                "attached",
                 &self
-                    .0
+                    .policy
                     .lock()
                     .expect("project runtime policy lock")
                     .is_some(),

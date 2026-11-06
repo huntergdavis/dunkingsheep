@@ -1,4 +1,5 @@
 //! Transactional owner decisions on the task actor.
+use super::project_policy::validate_answer_for_task_body;
 use super::{db, json, params, DunkError, OptionalExtension, Tasks};
 use rusqlite::TransactionBehavior;
 use serde_json::Value;
@@ -79,7 +80,12 @@ impl Tasks {
             let choices = options(&reason)?;
             let answer = if choices.is_empty() {
                 if option.is_some() { return Err(DunkError::Refused("owner question has no options".into())); }
-                reply.as_deref().map(str::trim).filter(|s| !s.is_empty()).ok_or_else(|| DunkError::Refused("a reply is required".into()))?.to_owned()
+                let answer = reply.as_deref().map(str::trim).filter(|s| !s.is_empty()).ok_or_else(|| DunkError::Refused("a reply is required".into()))?.to_owned();
+                // A project-policy task is refused here, before any event is written, unless the
+                // reply is the exact policy the daemon could later load (t1692).
+                let body: String = tx.query_row("SELECT body FROM tasks WHERE id=?", [&id], |row| row.get(0)).map_err(db::map_sqlite)?;
+                validate_answer_for_task_body(&body, reply.as_deref())?;
+                answer
             } else {
                 if reply.is_some() { return Err(DunkError::Refused("select an owner option".into())); }
                 choices.iter().find(|(n,_)| Some(*n)==option).map(|(_,label)|label.clone()).ok_or_else(|| DunkError::Refused("unknown owner option".into()))?
@@ -281,5 +287,62 @@ mod tests {
             .owner_answer(&task.id, version, Some(1), None, Some("owner"), None)
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn malformed_project_policy_reply_is_refused_before_any_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let tasks = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+        let body =
+            json!({"schema":"project-policy/v1","project":"demo","provider":"codex"}).to_string();
+        let task = tasks.add("global", "project policy", &body).await.unwrap();
+        tasks
+            .block(&task.id, "needs-owner: reply with project-policy/v1 JSON")
+            .await
+            .unwrap();
+        let version = tasks.owner_question(&task.id, None).await.unwrap()["version"]
+            .as_str()
+            .unwrap()
+            .parse::<i64>()
+            .unwrap();
+        for reply in [
+            "not-json",
+            r#"{"schema":"project-policy/v1","project":"demo","provider":"codex","subscription":null,"credit_fallback":null}"#,
+        ] {
+            assert!(tasks
+                .owner_answer(&task.id, version, None, Some(reply), Some("owner"), None)
+                .await
+                .is_err());
+        }
+        assert_eq!(tasks.get(&task.id).await.unwrap().status, "blocked");
+        let answers: i64 = tasks
+            .writer
+            .call(move |conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM task_events WHERE event = 'owner_answer'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(db::map_sqlite)
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            answers, 0,
+            "a refused policy reply wrote an owner_answer event"
+        );
+        let subscription = json!({"schema":"project-policy/v1","project":"demo","provider":"codex","subscription":{"window":"weekly","max_used_percent":80.0,"max_age_seconds":300.0},"credit_fallback":null}).to_string();
+        tasks
+            .owner_answer(
+                &task.id,
+                version,
+                None,
+                Some(subscription.as_str()),
+                Some("owner"),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(tasks.get(&task.id).await.unwrap().status, "open");
     }
 }

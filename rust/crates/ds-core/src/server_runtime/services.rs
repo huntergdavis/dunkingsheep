@@ -15,6 +15,7 @@ use std::time::Duration;
 use tokio::runtime::Runtime;
 
 use super::github_provider::GitHubProvider;
+use super::project_policy_load::attach_startup_policy;
 use super::runtime_control::RuntimeControlState;
 use super::{dispatcher::RuntimeDispatcher, outbox_runtime::OutboxRuntime, LoopRuntimeAdapter};
 use crate::config::Env;
@@ -270,6 +271,11 @@ impl RuntimeServices {
             &inputs.lane_registry_file,
             inputs.persist_enabled,
         ));
+        let startup_tasks = inputs
+            .stores
+            .tasks
+            .clone()
+            .ok_or_else(|| refusal("runtime task store is not attached"))?;
         flock.attach_stores(inputs.stores);
         if let Some(observability) = inputs.observability {
             flock.wire_observability(&observability.state_dir, None)?;
@@ -289,6 +295,9 @@ impl RuntimeServices {
             flock.attach_memory_service(Arc::clone(service))?;
         }
         flock.attach_roles(inputs.roles, inputs.legacy_superusers);
+        // Once per canonical Flock, from the captured config directory and the attached task
+        // store. Absence or refusal never fails startup; it only leaves project_spawn refusing.
+        attach_startup_policy(&flock, &startup_tasks, &inputs.env, runtime.handle())?;
         flock.attach_status_state(StatusState::at_start(
             inputs.release_version,
             &inputs.state_file,
@@ -817,6 +826,177 @@ mod tests {
             .shutdown_checked()
             .expect("restored timer joins before resource close");
         assert_eq!(0, services.outbox.dunk_timer_worker_count());
+    }
+
+    /// Answer one policy task through the production owner-answer path; returns its task ID.
+    fn answer_policy_task(
+        runtime: &Runtime,
+        tasks: &Tasks,
+        project: &str,
+        provider: &str,
+    ) -> String {
+        let body = json!({"schema": "project-policy/v1", "project": project, "provider": provider})
+            .to_string();
+        let reply = json!({
+            "schema": "project-policy/v1",
+            "project": project,
+            "provider": provider,
+            "subscription": {"window": "weekly", "max_used_percent": 80.0, "max_age_seconds": 300.0},
+            "credit_fallback": null,
+        })
+        .to_string();
+        runtime.block_on(async {
+            let task = tasks.add("global", "project policy", &body).await.unwrap();
+            tasks
+                .block(&task.id, "needs-owner: reply with project-policy/v1 JSON")
+                .await
+                .unwrap();
+            let version = tasks.owner_question(&task.id, None).await.unwrap()["version"]
+                .as_str()
+                .unwrap()
+                .parse::<i64>()
+                .unwrap();
+            tasks
+                .owner_answer(
+                    &task.id,
+                    version,
+                    None,
+                    Some(reply.as_str()),
+                    Some("owner-pane"),
+                    None,
+                )
+                .await
+                .unwrap();
+            task.id.clone()
+        })
+    }
+
+    fn write_project_runtime_config(dir: &std::path::Path, projects: serde_json::Value) {
+        std::fs::create_dir_all(dir.join("projects")).unwrap();
+        std::fs::create_dir_all(dir.join("codex-home")).unwrap();
+        let config = json!({
+            "schema": "project-runtime/v1",
+            "project_root": dir.join("projects"),
+            "store_path": dir.join("projects.sqlite3"),
+            "provider_homes": {"codex": dir.join("codex-home")},
+            "projects": projects,
+        });
+        std::fs::write(
+            dir.join(crate::server_runtime::project_policy_load::PROJECT_RUNTIME_CONFIG_FILE),
+            config.to_string(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn production_build_attaches_the_owner_approved_policy_from_the_config_dir() {
+        let dir = crate::testsupport::dir("runtime-project-policy-attached");
+        let runtime = Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("daemon runtime");
+        let (tasks, inbox) = tasks_and_inbox(&runtime, &dir);
+        let approval = answer_policy_task(&runtime, &tasks, "demo", "codex");
+        write_project_runtime_config(
+            dir.path(),
+            json!({"demo": {"provider": "codex", "approval_task": approval}}),
+        );
+        let stores = Stores {
+            tasks: Some(tasks),
+            inbox: Some(inbox),
+            ..Stores::default()
+        };
+        let inputs = startup_inputs(
+            &dir,
+            runtime,
+            configured_env(&dir, "0"),
+            Arc::new(|| Box::new(FakeTerminal::new())),
+            stores,
+        );
+
+        let services = RuntimeServices::new(inputs).expect("startup with an owner-approved policy");
+        let policy = services
+            .flock
+            .project_runtime_policy()
+            .expect("the owner-approved policy is attached once");
+        assert!(policy.entry("demo").is_some_and(|entry| entry.approved));
+        assert!(services.flock.project_runtime_policy_refusal().is_none());
+        assert!(
+            !dir.path().join("projects.sqlite3").exists(),
+            "startup must not open the project store"
+        );
+        services.shutdown_checked().expect("clean shutdown");
+    }
+
+    #[test]
+    fn production_build_without_a_startup_file_attaches_no_policy() {
+        let dir = crate::testsupport::dir("runtime-project-policy-absent");
+        let runtime = Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("daemon runtime");
+        let (tasks, inbox) = tasks_and_inbox(&runtime, &dir);
+        let stores = Stores {
+            tasks: Some(tasks),
+            inbox: Some(inbox),
+            ..Stores::default()
+        };
+        let inputs = startup_inputs(
+            &dir,
+            runtime,
+            configured_env(&dir, "0"),
+            Arc::new(|| Box::new(FakeTerminal::new())),
+            stores,
+        );
+
+        let services = RuntimeServices::new(inputs).expect("startup without a project file");
+        assert!(services.flock.project_runtime_policy().is_none());
+        assert!(services.flock.project_runtime_policy_refusal().is_none());
+        services.shutdown_checked().expect("clean shutdown");
+    }
+
+    #[test]
+    fn an_invalid_startup_file_is_recorded_and_never_fails_the_daemon() {
+        let dir = crate::testsupport::dir("runtime-project-policy-invalid");
+        let runtime = Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("daemon runtime");
+        let (tasks, inbox) = tasks_and_inbox(&runtime, &dir);
+        std::fs::write(
+            dir.path()
+                .join(crate::server_runtime::project_policy_load::PROJECT_RUNTIME_CONFIG_FILE),
+            "{ not the project runtime schema",
+        )
+        .unwrap();
+        let stores = Stores {
+            tasks: Some(tasks),
+            inbox: Some(inbox),
+            ..Stores::default()
+        };
+        let inputs = startup_inputs(
+            &dir,
+            runtime,
+            configured_env(&dir, "0"),
+            Arc::new(|| Box::new(FakeTerminal::new())),
+            stores,
+        );
+
+        let services =
+            RuntimeServices::new(inputs).expect("a bad project file must not fail the daemon");
+        assert!(services.flock.project_runtime_policy().is_none());
+        let refusal = services
+            .flock
+            .project_runtime_policy_refusal()
+            .expect("the refusal is recorded for project_spawn");
+        assert_eq!(refusal, "project runtime config is invalid");
+        let named =
+            crate::server_runtime::project_policy_load::not_attached_refusal(&services.flock);
+        assert_eq!(
+            named.to_string(),
+            "project runtime policy is not attached: project runtime config is invalid"
+        );
+        services.shutdown_checked().expect("clean shutdown");
     }
 
     #[test]
