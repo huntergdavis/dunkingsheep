@@ -4992,7 +4992,7 @@ fn test_a_failed_send_is_reported_not_retried() {
     );
     {
         let history = flock.message_history.lock().unwrap();
-        let last = history.last().expect("the failed send is recorded");
+        let last = history.back().expect("the failed send is recorded");
         assert_eq!(
             ("m-doomed", "failed"),
             (last.id.as_str(), last.status.as_str())
