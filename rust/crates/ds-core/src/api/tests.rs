@@ -9077,24 +9077,31 @@ fn h_owner_conversation_matches_python() {
 /// the float range raises OverflowError, which the daemon answers as an internal error.
 #[test]
 fn owner_conversation_before_cursor_matches_python_over_real_socket() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::{UnixListener, UnixStream};
+    use std::time::Duration;
+    // `Dispatcher` is Send + Sync, and OwnerApiEnv holds a terminal that is not Sync, so the
+    // peer keeps only the owner-push path and clock and builds its env for each request.
     struct OwnerPeer<'a> {
         dispatcher: &'a Dispatcher,
         flock: &'a Flock,
-        env: &'a OwnerApiEnv,
+        owner_push: PathBuf,
+        now_s: f64,
     }
     impl crate::server::Dispatcher for OwnerPeer<'_> {
         fn dispatch(&self, cmd: &str, input: &Value, ctx: &RequestCtx) -> Result<Value, DunkError> {
+            let env = OwnerApiEnv::new(&self.owner_push, self.now_s);
             dispatch_owner_api(
                 self.dispatcher,
                 self.flock,
-                self.env,
+                &env,
                 cmd,
                 input.as_object().cloned(),
                 ctx.self_pane_id.as_deref(),
             )
         }
     }
-    let (dir, flock, env) = owner_api_fixture("owner-before-socket");
+    let (dir, flock, _env) = owner_api_fixture("owner-before-socket");
     let inbox = flock.stores().inbox.unwrap();
     for body in ["question", "answer"] {
         inbox
@@ -9113,7 +9120,8 @@ fn owner_conversation_before_cursor_matches_python_over_real_socket() {
     let peer = OwnerPeer {
         dispatcher: &dispatcher,
         flock: &flock,
-        env: &env,
+        owner_push: dir.path().join("owner-before-socket-owner-push.db"),
+        now_s: 1_800_000_100.0,
     };
     let path = dir.path().join("owner-before.sock");
     let listener = UnixListener::bind(&path).unwrap();
