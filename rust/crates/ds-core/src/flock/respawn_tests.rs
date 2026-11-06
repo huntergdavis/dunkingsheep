@@ -111,7 +111,7 @@ list-panes)
   reads=0; test ! -f reads || reads=$(cat reads); reads=$((reads+1)); echo "$reads" > reads
   if test -f race && test "$reads" -ge 2; then echo {new} > pid; fi
   p=$(cat pid)
-  printf '%%2\037$1\037@1\037/tmp\037claude\037worker\0371\037ws\037tab\0370\0370\037%s\03780\03724\n' "$p"
+  printf '%%2{sep}$1{sep}@1{sep}/tmp{sep}claude{sep}worker{sep}1{sep}ws{sep}tab{sep}0{sep}0{sep}%s{sep}80{sep}24\n' "$p"
   ;;
 capture-pane) cat screen ;;
 respawn-pane)
@@ -127,7 +127,8 @@ respawn-pane)
 esac
 "#,
             new = pids[1],
-            rollback = pids[2]
+            rollback = pids[2],
+            sep = crate::terminal::parse::pane_separator()
         );
         std::fs::write(&script, body).unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -707,9 +708,10 @@ fn shared_codex_home_in_requested_and_rollback_argv_is_refused() {
     for rollback in 0..3 {
         let f = Fixture::new();
         let path = f.dir.path().join("tmux");
-        let script = std::fs::read_to_string(&path)
-            .unwrap()
-            .replace("\\037claude\\037", "\\037codex\\037");
+        let script = std::fs::read_to_string(&path).unwrap().replace(
+            &format!("{s}claude{s}", s = crate::terminal::parse::pane_separator()),
+            &format!("{s}codex{s}", s = crate::terminal::parse::pane_separator()),
+        );
         std::fs::write(&path, script).unwrap();
         let shared = vec![
             "env".into(),

@@ -33,6 +33,10 @@ struct Pane {
     screen_script: RefCell<VecDeque<Option<String>>>,
     status_script: RefCell<VecDeque<Option<String>>>,
     attempt_generation_script: RefCell<VecDeque<Option<String>>>,
+    /// The generation read once the script is empty. `generation_after_send` replaces it when the
+    /// terminal action (`send_text`) runs, as a pane swap does mid-attempt.
+    generation: RefCell<Option<String>>,
+    generation_after_send: RefCell<Option<String>>,
     now: f64,
     sleeps: Vec<f64>,
     remembered: BTreeMap<String, String>,
@@ -177,6 +181,9 @@ impl SendPreparationEnv for Pane {
         if let Some(callback) = self.on_send_text.borrow_mut().as_mut() {
             callback();
         }
+        if let Some(next) = self.generation_after_send.borrow_mut().take() {
+            *self.generation.borrow_mut() = Some(next);
+        }
         self.events.push("typed");
         self.typed.push((pane_id.into(), text.into()));
         match &self.send_refusal {
@@ -188,6 +195,9 @@ impl SendPreparationEnv for Pane {
     fn attempt_generation(&self, pane_id: &str) -> Option<String> {
         if let Some(generation) = self.attempt_generation_script.borrow_mut().pop_front() {
             return generation;
+        }
+        if let Some(generation) = self.generation.borrow().clone() {
+            return Some(generation);
         }
         pane_generation(self, pane_id)
     }
@@ -5244,4 +5254,178 @@ fn a_restored_scheduled_recovery_keeps_its_budget_and_presses_once() {
         env.keys.len(),
         "the restored schedule presses once at the threshold"
     );
+}
+
+// T55 rows 16 and 65 (t3344 proof C), test-only. Python oracle: tests/test_dunk_stuck_recovery.py
+// at 79bc92fa. Row 16 is ReviewBlockerTests.test_a_dunk_notice_with_no_message_row_is_still_tracked_and_recovered
+// and row 65 is AttemptGenerationTests.test_the_attempt_identity_is_captured_before_delivery_not_after.
+// No production code is changed by these tests.
+mod t55_rows_16_65 {
+    use super::*;
+    use crate::flock::panes::Stores;
+    use crate::metrics::MetricsStore;
+    use std::sync::Arc;
+
+    const PANE: &str = "%1";
+
+    #[test]
+    fn a_dunk_notice_with_no_message_row_is_tracked_and_its_consumed_recovery_is_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state.json");
+        let flock = persistent_recovery_flock(dir.path(), &state);
+        let metrics = Arc::new(MetricsStore::open(dir.path().join("metrics.db")).unwrap());
+        flock.attach_stores(Stores {
+            metrics: Some(metrics.clone()),
+            ..Stores::default()
+        });
+        {
+            let mut config = flock.stuck_config.lock().unwrap();
+            config.threshold_s = 1.0;
+            config.observation_interval_s = 0.1;
+            config.max_attempts = 1;
+        }
+        let mut env = Pane::default();
+        env.panes
+            .push(serde_json::json!({"pane_id": PANE, "pane_pid": std::process::id()}));
+        env.statuses.insert(PANE.into(), "idle".into());
+        env.screens.insert(PANE.into(), frame("stuck body", &[]));
+        env.after_key_screen = Some(frame("\x1b[2mAsk Codex to do anything\x1b[0m", &[]));
+        flock
+            .sent_text_by_pane
+            .lock()
+            .unwrap()
+            .insert(PANE.into(), vec!["stuck body".into()]);
+        // The dunk notice was sent, and its Message row has left the outbox.
+        let mut notice = Message::new("d1-notice", PANE, "dunk", "stuck body", "d1");
+        notice.created_at = 1.0;
+        notice.status = "failed".into();
+        notice.attempt_generation = pane_generation(&env, PANE);
+        flock.note_stuck_candidate(&notice);
+
+        // No Message row, so the head is None and the identity is the text fingerprint.
+        assert!(!flock.unwedge(
+            &mut env,
+            PANE,
+            "stuck body",
+            Some(99.5),
+            None,
+            100.0,
+            None,
+            false
+        ));
+        assert!(
+            env.keys.is_empty(),
+            "the clock has not reached the threshold"
+        );
+        assert!(
+            flock
+                .stuck_tracker
+                .lock()
+                .unwrap()
+                .records
+                .contains_key(PANE),
+            "a dunk notice with no message row is still tracked"
+        );
+        assert!(flock.unwedge(
+            &mut env,
+            PANE,
+            "stuck body",
+            Some(98.0),
+            None,
+            200.0,
+            None,
+            false
+        ));
+        assert_eq!(1, env.keys.len());
+        let outcomes: Vec<String> = metrics
+            .events_between(0.0, f64::MAX)
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.kind == "stuck.recover")
+            .filter_map(|event| event.outcome)
+            .collect();
+        let consumed = outcomes
+            .iter()
+            .filter(|outcome| *outcome == "consumed")
+            .count();
+        assert_eq!(
+            1, consumed,
+            "one consumed stuck.recover event, got {outcomes:?}"
+        );
+    }
+
+    #[test]
+    fn the_attempt_identity_and_the_registry_generation_are_captured_before_delivery() {
+        let dir = tempfile::tempdir().unwrap();
+        let flock = Arc::new(persistent_receipt_flock(dir.path()));
+        // These flags are the ones the Sent path is pinned by, so the delivery reaches the
+        // typed-attempt receipt (see fold_during_success_and_failure_settles_the_exact_receipt_frame).
+        let mut message = Message::new("m-attempt", PANE, "pane", "hello", "test");
+        message.hold_while_typing = false;
+        message.press_enter = false;
+        flock
+            .outbox
+            .lock()
+            .unwrap()
+            .insert(PANE.into(), vec![message]);
+        let mut pane = Pane {
+            receipt_forward: Some(real_receipt_forward(
+                Arc::clone(&flock),
+                serde_json::json!({"pane_id": PANE}),
+            )),
+            ..Pane::default()
+        };
+        // The pane holds the pre-delivery generation. The terminal action (send_text) replaces the
+        // pane, so every read after it returns the new generation.
+        *pane.generation.borrow_mut() = Some("pid:1:start:before".to_string());
+        *pane.generation_after_send.borrow_mut() = Some("pid:2:start:after".to_string());
+        let before = "pid:1:start:before".to_string();
+        let after = "pid:2:start:after".to_string();
+        assert_eq!(
+            Some(before.clone()),
+            pane.attempt_generation(PANE),
+            "premise: the pane is read as the pre-delivery generation"
+        );
+        assert_eq!(
+            DeliveryOutcome::Sent,
+            flock.deliver_message("m-attempt", 100.0, &mut pane, || None),
+            "the delivery reaches the typed-attempt receipt and is sent"
+        );
+        assert_eq!(
+            Some(after.clone()),
+            pane.attempt_generation(PANE),
+            "premise: the terminal action replaced the pane"
+        );
+        assert_ne!(
+            before, after,
+            "premise: the generation changed during delivery"
+        );
+        let delivered = flock
+            .message_history
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|m| m.id == "m-attempt")
+            .map(|m| m.attempt_generation.clone());
+        let held = flock.outbox_snapshot()[PANE]
+            .iter()
+            .find(|m| m.id == "m-attempt")
+            .map(|m| m.attempt_generation.clone());
+        assert_eq!(
+            Some(Some(before.clone())),
+            delivered.or(held),
+            "the attempt identity must be the pane the text went into, not the one after the action"
+        );
+        let registry = flock
+            .stuck_candidates
+            .lock()
+            .unwrap()
+            .get(PANE)
+            .and_then(|candidate| candidate.generation.clone());
+        assert_eq!(
+            Some(before),
+            registry,
+            "the registry must carry the ATTEMPT generation, not the pane's generation after delivery"
+        );
+    }
 }

@@ -1,7 +1,7 @@
 //! Parsing tmux's `list-panes -F PANE_FORMAT` output (T21).
 //!
 //! Ported from `TmuxBackend._parse_panes` plus `_agent_kind` and `_safe_name`. The
-//! fields come back `\x1f`-separated on one line per pane, positionally.
+//! fields come back separated by [`pane_separator`] on one line per pane, positionally.
 //!
 //! The rule this file exists to keep: EVERY FIELD IS PARSED ON ITS OWN. The Python's
 //! old single try/except meant a blank `session_index` (tmux leaves it empty when a
@@ -12,8 +12,92 @@
 
 use crate::terminal::{Pane, Tab, Workspace};
 
-/// tmux's field separator (ASCII unit separator): it cannot appear in a pane title.
-pub const PANE_SEP: char = '\x1f';
+/// Fields in one pane line, as `pane_format` defines them (the Python's `PANE_FORMAT`).
+pub const PANE_FIELD_COUNT: usize = 14;
+/// Fields in one tab line: window id, session id, name, index, active.
+pub const TAB_FIELD_COUNT: usize = 5;
+/// Fields in one workspace line: session id, name, index.
+pub const WORKSPACE_FIELD_COUNT: usize = 3;
+
+/// The field separator for tmux format output: a printable token, random for each process.
+///
+/// tmux 3.4 writes a control character in format output as a backslash escape (PR 752), so a
+/// raw 0x1f split nothing and every pane line was dropped. A printable token is not escaped on
+/// any tmux version. It is random per process, so a pane title does not carry it by chance. A
+/// title that does carry it adds fields, and the listing is refused rather than misread.
+pub fn pane_separator() -> &'static str {
+    static TOKEN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    TOKEN.get_or_init(random_token).as_str()
+}
+
+/// Twenty-four ASCII letters and digits from the OS random source. The fallback hashes a
+/// per-process `RandomState`, which is itself seeded from the OS, so it stays unpredictable.
+fn random_token() -> String {
+    use std::io::Read;
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    let mut bytes = [0u8; 24];
+    let from_os =
+        std::fs::File::open("/dev/urandom").and_then(|mut file| file.read_exact(&mut bytes));
+    if from_os.is_err() {
+        use std::hash::{BuildHasher, Hasher};
+        let state = std::collections::hash_map::RandomState::new();
+        for (index, byte) in bytes.iter_mut().enumerate() {
+            let mut hasher = state.build_hasher();
+            hasher.write_usize(index);
+            *byte = hasher.finish().to_le_bytes()[0];
+        }
+    }
+    bytes
+        .iter()
+        .map(|byte| char::from(ALPHABET[usize::from(*byte) % ALPHABET.len()]))
+        .collect()
+}
+
+/// A listing refused because one of its lines did not have the format's field count.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListingError {
+    /// The 1-based line number of the first line that did not parse.
+    pub line: usize,
+    /// The fields that line split into.
+    pub fields: usize,
+    /// The fields the format defines.
+    pub expected: usize,
+}
+
+impl std::fmt::Display for ListingError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "tmux listing refused: line {} has {} fields, expected {}",
+            self.line, self.fields, self.expected
+        )
+    }
+}
+
+impl std::error::Error for ListingError {}
+
+/// Split a listing into rows of exactly `expected` fields. Blank lines are skipped. Any other
+/// line with a different field count refuses the whole listing: a partial row, or a row a title
+/// split with the separator, cannot be read as the rows that were asked for.
+fn split_listing(output: &str, expected: usize) -> Result<Vec<Vec<&str>>, ListingError> {
+    let separator = pane_separator();
+    let mut rows = Vec::new();
+    for (index, line) in output.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let fields: Vec<&str> = line.split(separator).collect();
+        if fields.len() != expected {
+            return Err(ListingError {
+                line: index + 1,
+                fields: fields.len(),
+                expected,
+            });
+        }
+        rows.push(fields);
+    }
+    Ok(rows)
+}
 
 /// The agent kinds a start_agent request may name (herdr 0.9.5's list, which is
 /// also the set `_agent_kind` matches against).
@@ -112,19 +196,18 @@ pub fn safe_name(label: &str, fallback: &str) -> String {
     chosen.chars().take(60).collect()
 }
 
-/// Parse `list-panes -F PANE_FORMAT` output.
+/// Parse `list-panes -F PANE_FORMAT` output: fourteen fields per line, as the format defines.
 ///
-/// A line with fewer than 12 fields is SKIPPED (a partial write, a fixture from
-/// before geometry was appended); a 12-field line parses with cols/rows absent rather
-/// than guessing a size. `label_of` is the registry lookup the Python does
+/// A listing whose lines do not all have fourteen fields is refused whole ([`ListingError`]).
+/// A short line is a partial write, and a long one means a field carried the separator, so the
+/// fields after it cannot be trusted. `label_of` is the registry lookup the Python does
 /// (`dunks.json`'s recorded start_agent name), which is why it is a parameter.
-pub fn parse_panes(output: &str, label_of: &dyn Fn(&str) -> Option<String>) -> Vec<Pane> {
+pub fn parse_panes(
+    output: &str,
+    label_of: &dyn Fn(&str) -> Option<String>,
+) -> Result<Vec<Pane>, ListingError> {
     let mut panes = Vec::new();
-    for line in output.lines() {
-        let fields: Vec<&str> = line.split(PANE_SEP).collect();
-        if fields.len() < 12 {
-            continue;
-        }
+    for fields in split_listing(output, PANE_FIELD_COUNT)? {
         let (pane_id, session_id, window_id, cwd, command, title, active) = (
             fields[0], fields[1], fields[2], fields[3], fields[4], fields[5], fields[6],
         );
@@ -160,45 +243,35 @@ pub fn parse_panes(output: &str, label_of: &dyn Fn(&str) -> Option<String>) -> V
             window_index: int_or(window_index, 0),
             workspace_index: int_or(session_index, 0),
             pane_pid: optional_int(pane_pid),
-            width: fields.get(12).map(|value| int_or(value, 0)).unwrap_or(0),
-            height: fields.get(13).map(|value| int_or(value, 0)).unwrap_or(0),
+            width: int_or(fields[12], 0),
+            height: int_or(fields[13], 0),
         });
     }
-    panes
+    Ok(panes)
 }
 
 /// Parse `list-windows -F TAB_FORMAT` output (`window_id`, session, name, index, active).
-pub fn parse_tabs(output: &str) -> Vec<Tab> {
-    let mut tabs = Vec::new();
-    for line in output.lines() {
-        let fields: Vec<&str> = line.split(PANE_SEP).collect();
-        if fields.len() < 5 {
-            continue;
-        }
-        tabs.push(Tab {
+pub fn parse_tabs(output: &str) -> Result<Vec<Tab>, ListingError> {
+    Ok(split_listing(output, TAB_FIELD_COUNT)?
+        .into_iter()
+        .map(|fields| Tab {
             tab_id: fields[0].to_string(),
             workspace_id: fields[1].to_string(),
             label: fields[2].to_string(),
             index: int_or(fields[3], 0),
             active: fields[4] == "1",
-        });
-    }
-    tabs
+        })
+        .collect())
 }
 
 /// Parse `list-sessions -F WORKSPACE_FORMAT` output (`session_id`, name, index).
-pub fn parse_workspaces(output: &str) -> Vec<Workspace> {
-    let mut workspaces = Vec::new();
-    for line in output.lines() {
-        let fields: Vec<&str> = line.split(PANE_SEP).collect();
-        if fields.len() < 3 {
-            continue;
-        }
-        workspaces.push(Workspace {
+pub fn parse_workspaces(output: &str) -> Result<Vec<Workspace>, ListingError> {
+    Ok(split_listing(output, WORKSPACE_FIELD_COUNT)?
+        .into_iter()
+        .map(|fields| Workspace {
             workspace_id: fields[0].to_string(),
             label: fields[1].to_string(),
             index: int_or(fields[2], 0),
-        });
-    }
-    workspaces
+        })
+        .collect())
 }
