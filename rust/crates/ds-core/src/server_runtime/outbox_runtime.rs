@@ -1967,7 +1967,10 @@ mod tests {
     }
 
     /// T32 residual (t3300): each RUNNING dunk owns its own live timer worker, and no other dunk
-    /// shares it. Long intervals keep every timer waiting, so nothing is sent during the test.
+    /// shares it. The worker is an OS thread named `dunk-timer-<id>` that holds a tokio `Handle`;
+    /// it is not a tokio task. Owner decision A on t800 accepts that mapping and records it as a
+    /// deviation from the literal "one tokio task per running dunk" wording. Long intervals keep
+    /// every timer waiting, so nothing is sent during the test.
     #[test]
     fn each_running_dunk_owns_its_own_live_timer_worker() {
         use super::dunk_timers::DunkTimerOwner;

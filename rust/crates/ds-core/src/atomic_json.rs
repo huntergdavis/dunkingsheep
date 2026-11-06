@@ -78,7 +78,8 @@ pub(crate) fn write_classified<T: serde::Serialize>(
 /// the sanitized fixture in `flock/dunks_state_file_tests.rs`. It is not yet proven for populated
 /// state: an outbox row has Rust's 21-key layout rather than Python's 13 keys, and stuck candidates
 /// and the stuck records/spent maps are BTreeMaps (sorted, not insertion order) whose rows carry
-/// the Rust key set. Those are split off to a follow-up.
+/// the Rust key set. Those are split off to a follow-up parked under t1605 (owner decision B on
+/// t800, a cutover state-preservation requirement); no follow-up task has been filed yet.
 pub(crate) fn write_python_state_classified(
     path: &Path,
     value: &serde_json::Value,
