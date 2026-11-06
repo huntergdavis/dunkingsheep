@@ -908,6 +908,8 @@ mod mailbox_tests;
 #[cfg(test)]
 mod panes_tests;
 #[cfg(test)]
+mod populated_state_file_tests;
+#[cfg(test)]
 mod resolve_tests;
 #[cfg(test)]
 mod roles_gate_tests;
