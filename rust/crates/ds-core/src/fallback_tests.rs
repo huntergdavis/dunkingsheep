@@ -197,6 +197,16 @@ fn live_json_readings_convert_with_booleans_and_strings_as_non_numbers() {
     assert_eq!(credit.states.len(), 2, "a blank provider is skipped");
 }
 
+#[test]
+fn json_string_percent_is_not_a_number() {
+    // test_non_numeric_window_is_unknown: the Python input is the JSON string "lots". The live
+    // conversion must read it as NotANumber, as it does a boolean, so the provider is unknown.
+    let bad = json!({"provider": "codex", "status": "ok", "windows": [
+        {"name": "weekly", "percent_remaining": "lots"}]});
+    let credit = credit_state(&[Reading::from_json(&bad)]);
+    assert_eq!(credit.state_of("codex"), "unknown");
+}
+
 // ---- TransitionTableTests ----
 
 #[test]
@@ -557,6 +567,20 @@ fn unnamed_window_is_not_dropped_from_the_contract() {
 }
 
 #[test]
+fn json_window_without_a_name_is_the_empty_name_and_stays_unknown() {
+    // test_unnamed_window_is_not_dropped_from_the_contract, JSON form: a window with no 'name'
+    // key converts to the empty name, so codex is unknown and the claude pane is skipped.
+    let codex = Reading::from_json(&json!({"provider": "codex", "status": "ok", "windows": [
+        {"name": "weekly", "percent_remaining": 99.0},
+        {"percent_remaining": 0.0}]}));
+    assert_eq!(codex.windows[1].name, "");
+    let credit = credit_state(&[claude_spent_reading(), codex]);
+    assert_eq!(credit.state_of("codex"), "unknown");
+    let decision = plan_swap(&p("claude"), &credit, None).unwrap();
+    assert_eq!(decision["action"], "skip");
+}
+
+#[test]
 fn duplicate_window_names_are_not_last_wins() {
     let (credit, decision) = plan_with_codex(vec![win("weekly", 0.0), win("weekly", 99.0)]);
     assert_eq!(credit.state_of("codex"), "unknown");
@@ -578,6 +602,30 @@ fn same_numbers_same_target_twice() {
     let first = plan_swap(&p("claude"), &credit, None).unwrap();
     let second = plan_swap(&p("claude"), &credit, None).unwrap();
     assert_eq!(first, second);
+}
+
+#[test]
+fn same_pane_with_reversed_keys_gets_the_same_decision() {
+    // test_same_numbers_same_target_twice: the Python second call passes the pane dict with its
+    // key order reversed. The workspace enables serde_json preserve_order, so the order survives
+    // into a Value; the first assertion checks that the reversal really changed it.
+    let forward = p("claude");
+    let mut reversed = Map::new();
+    for (key, value) in forward.as_object().unwrap().iter().rev() {
+        reversed.insert(key.clone(), value.clone());
+    }
+    let reversed = Value::Object(reversed);
+    let forward_keys: Vec<&String> = forward.as_object().unwrap().keys().collect();
+    let reversed_keys: Vec<&String> = reversed.as_object().unwrap().keys().collect();
+    assert_ne!(
+        forward_keys, reversed_keys,
+        "the reversal must change the key order"
+    );
+    let credit = credit_state(&claude_codex_spent());
+    assert_eq!(
+        plan_swap(&forward, &credit, None).unwrap(),
+        plan_swap(&reversed, &credit, None).unwrap()
+    );
 }
 
 #[test]
@@ -670,6 +718,20 @@ fn allowlist_member_is_planned() {
     let allowed = ["%2".to_string()];
     let decision = plan_swap(
         &pane("claude", Some("idle"), false, "%2"),
+        &credit_state(&claude_spent()),
+        Some(&allowed),
+    )
+    .unwrap();
+    assert_eq!(decision["action"], "swap");
+}
+
+#[test]
+fn allowlist_member_is_planned_when_the_pane_itself_says_owned() {
+    // test_allowlist_member_is_planned: the Python pane defaults to owned_by_mechanism=true. With
+    // an allowlist given, membership alone decides ownership (plan_swap ignores the flag then).
+    let allowed = ["%2".to_string()];
+    let decision = plan_swap(
+        &pane("claude", Some("idle"), true, "%2"),
         &credit_state(&claude_spent()),
         Some(&allowed),
     )
