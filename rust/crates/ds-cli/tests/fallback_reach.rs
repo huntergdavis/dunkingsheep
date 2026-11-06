@@ -129,7 +129,13 @@ fn optional_groups_accept_the_bare_command_and_refuse_an_unknown_subcommand() {
             "{group}: the Python group is not required"
         );
         let ns = try_parse(["dunkingsheep", group]).unwrap_or_else(|e| panic!("bare {group}: {e}"));
-        assert_eq!(ns[dest], Value::Null, "bare {group}");
+        // argparse leaves the dest as None; the generated table omits an absent subcommand's
+        // dest, which the dispatcher reads the same way (`text(ns, dest)` is None).
+        assert!(
+            ns.get(dest).is_none_or(Value::is_null),
+            "bare {group}: {:?}",
+            ns.get(dest)
+        );
         assert_eq!(
             code(&[group, "no-such-subcommand"]),
             Some(2),
