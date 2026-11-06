@@ -4308,7 +4308,11 @@ fn a_reported_sent_schedule_is_not_submitted_from_a_dim_or_unstyled_echo() {
 #[test]
 fn an_ambiguous_scheduled_composer_recovers_once_after_two_minutes() {
     let dir = tempfile::tempdir().unwrap();
-    let (flock, mut env) = scheduled_candidate_fixture(dir.path(), "\u{203a}", "failed", 0.0);
+    // The schedule is current on the real clock (main's failed-reminder currency gate), so the
+    // reminder is created at the real clock and the oracle ticks 1000, 1100, 1120 and 1300 are
+    // offsets 1, 101, 121 and 301 from that base.
+    let base = crate::clock::now_s();
+    let (flock, mut env) = scheduled_candidate_fixture(dir.path(), "\u{203a}", "failed", base);
     // The oracle FRAME: two blank rows between the composer and the footer.
     env.screens.insert(
         "%1".into(),
@@ -4317,13 +4321,14 @@ fn an_ambiguous_scheduled_composer_recovers_once_after_two_minutes() {
             "\u{203a}", REPORTED_SENT_TEXT
         ),
     );
-    for now in [1000.0, 1100.0] {
-        crate::flock::loops_stuck::strict_stuck_observer_scan(&flock, &mut env, now).unwrap();
+    for offset in [1.0, 101.0] {
+        crate::flock::loops_stuck::strict_stuck_observer_scan(&flock, &mut env, base + offset)
+            .unwrap();
     }
     assert!(env.keys.is_empty(), "no key before two minutes");
-    crate::flock::loops_stuck::strict_stuck_observer_scan(&flock, &mut env, 1120.0).unwrap();
+    crate::flock::loops_stuck::strict_stuck_observer_scan(&flock, &mut env, base + 121.0).unwrap();
     assert_eq!(1, env.keys.len(), "exactly one key at two minutes");
-    crate::flock::loops_stuck::strict_stuck_observer_scan(&flock, &mut env, 1300.0).unwrap();
+    crate::flock::loops_stuck::strict_stuck_observer_scan(&flock, &mut env, base + 301.0).unwrap();
     assert_eq!(1, env.keys.len(), "no key after the single attempt");
 }
 
