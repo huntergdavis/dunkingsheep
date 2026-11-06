@@ -57,6 +57,7 @@ pane_main() {
     "DUNKINGSHEEP_TMUX_GUARD_DIR=$temp/no-guard" "DUNKINGSHEEP_CLI=$ROOT/dunkingsheep"
     "DUNKINGSHEEP_NO_START_DAEMON=1")
 
+  "${sandbox[@]}" "$PY" -I -c 'import sys; sys.path.insert(0, sys.argv[1]); import dunk_terminal as t; c, o, e = t.get_backend()._run(["list-panes", "-a", "-F", t.TmuxBackend.PANE_FORMAT]); print("list-panes exit", c, "stdout", repr(o), "stderr", repr(e))' "$ROOT" || true
   "${sandbox[@]}" "$PY" "$ROOT/dunkingsheep" serve > "$temp/daemon.log" 2>&1 &
   daemon=$!
   for _ in $(seq 1 150); do
