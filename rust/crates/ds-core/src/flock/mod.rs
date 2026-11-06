@@ -21,6 +21,7 @@ use regex::Regex;
 use serde_json::{json, Map, Value};
 
 use crate::error::DunkError;
+use crate::ordered_map::OrderedMap;
 use crate::{atomic_json, clock, lock};
 
 /// Holds the one canonical memory service without exposing its internals via `Flock: Debug`.
@@ -128,7 +129,7 @@ pub struct Flock {
     pub(crate) outbox: Mutex<sends::Outbox>,
     /// pane_id -> the latest delivery intent used by the stuck observer.
     #[allow(dead_code)] // The stuck-recovery integration caller is owned by a later leaf.
-    pub(crate) stuck_candidates: Mutex<BTreeMap<String, sends::StuckCandidate>>,
+    pub(crate) stuck_candidates: Mutex<OrderedMap<sends::StuckCandidate>>,
     /// Bounded recently decided messages, used by the message-list view.
     #[allow(dead_code)] // The list consumer is owned by a dependent T33 integration slice.
     pub(crate) message_history: Mutex<VecDeque<sends::Message>>,
@@ -198,7 +199,7 @@ impl Flock {
             launches: Mutex::new(LaunchMap::default()),
             dunks: dunks::DunkList::new(),
             outbox: Mutex::new(sends::Outbox::default()),
-            stuck_candidates: Mutex::new(BTreeMap::new()),
+            stuck_candidates: Mutex::new(OrderedMap::new()),
             message_history: Mutex::new(VecDeque::new()),
             decided: Mutex::new(sends::DecidedMessages::default()),
             stuck_tracker: Mutex::new(crate::stuck::Tracker::default()),
@@ -270,7 +271,7 @@ impl Flock {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
-            .map(|(pane, candidate)| (pane.clone(), sends::candidate_snapshot(candidate)))
+            .map(|(pane, candidate)| (pane.clone(), sends::candidate_snapshot(pane, candidate)))
             .collect::<Map<String, Value>>();
         let stuck = self
             .stuck_tracker
