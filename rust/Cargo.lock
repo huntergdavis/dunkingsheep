@@ -423,6 +423,7 @@ dependencies = [
  "ds-mcp",
  "ds-tui",
  "ds-web",
+ "rusqlite",
  "serde_json",
  "tempfile",
  "tokio",

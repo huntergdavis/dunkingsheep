@@ -2,9 +2,8 @@
 //! A wrong shape must teach, not traceback. Like the Python class, each test runs the
 //! `dunkingsheep` binary as a subprocess inside a throwaway project and store.
 //!
-//! Not ported: `test_context_search_survives_a_stale_cache`. It plants a drifted FTS5 index
-//! with SQL, and ds-cli does not depend on rusqlite. The same scenario runs at the store
-//! level in ds-core as
+//! The stale-cache test plants its drifted FTS5 index with `rusqlite`, the same 0.32 that
+//! ds-core uses. ds-core's store-level twin is
 //! `context::store::store_tests::test_context_search_survives_a_stale_cache_and_a_fresh_search_finds_the_entry`.
 
 use std::path::Path;
@@ -159,4 +158,46 @@ fn test_get_original_slug_and_subject_resolve_three_revision_head() {
         "{}",
         text(&result.stdout)
     );
+}
+
+#[test]
+fn test_context_search_survives_a_stale_cache() {
+    let sandbox = tempfile::tempdir().unwrap();
+    let root = sandbox.path().join(".dunkingsheep");
+    let store = Store::new(Some(root.as_path()), false);
+    store
+        .add(
+            "the wiki artefact pattern is a durable design rule",
+            &AddArgs {
+                cls: "fact",
+                subject: "wiki-artefact-pattern",
+                type_: "reference",
+                authority: Some("measured"),
+                ..AddArgs::default()
+            },
+            None,
+        )
+        .unwrap();
+    store.index().unwrap();
+    let path = store.index_path();
+    std::fs::remove_file(&path).unwrap();
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute(
+        "CREATE VIRTUAL TABLE entries USING fts5(slug, subject, body)",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO entries VALUES ('drifted','drifted','body')",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    let found = run_cli(sandbox.path(), &["context", "search", "artefact"]);
+    let stdout = text(&found.stdout);
+    let output = format!("{}{}", text(&found.stderr), stdout);
+    assert_eq!(Some(0), found.status.code(), "{output}");
+    assert!(!output.contains("no such column"), "{output}");
+    assert!(stdout.contains("wiki-artefact-pattern"), "{stdout}");
 }
