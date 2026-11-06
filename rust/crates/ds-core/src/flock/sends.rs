@@ -611,7 +611,8 @@ impl Flock {
             })
             .map(|entry| {
                 // Python appends the transcript texts first, then the candidate's own text, and
-                // keeps the last REMEMBERED_SENDS. The text must come last so the cap keeps it.
+                // keeps the last REMEMBERED_SENDS. Appends skip texts already remembered, so the
+                // candidate's text is last only when it was not already present.
                 entry
                     .transcript_texts
                     .into_iter()
