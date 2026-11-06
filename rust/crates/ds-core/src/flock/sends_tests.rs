@@ -5099,6 +5099,127 @@ fn test_a_refused_message_keeps_its_place_and_is_delivered_later() {
     assert_eq!(vec!["m-hello", "m-after"], sent);
 }
 
+const REPORTED_SENT_TEXT: &str =
+    "Scheduled check d7: read your inbox and finish the assigned work.";
+
+// The scheduled candidate for REPORTED_SENT_TEXT, with a chosen message status and creation time.
+fn scheduled_candidate_fixture(
+    dir: &std::path::Path,
+    sigil: &str,
+    status: &str,
+    created_at: f64,
+) -> (Flock, Pane) {
+    let flock = persistent_recovery_flock(dir, &dir.join("state.json"));
+    {
+        let mut config = flock.stuck_config.lock().unwrap();
+        config.threshold_s = 120.0;
+        config.observation_interval_s = 20.0;
+        config.max_attempts = 1;
+    }
+    let mut env = Pane::default();
+    env.panes
+        .push(serde_json::json!({"pane_id": "%1", "pane_pid": std::process::id()}));
+    env.statuses.insert("%1".into(), "idle".into());
+    env.screens.insert(
+        "%1".into(),
+        format!(
+            "Previous response.\n\n{} {}\n  GPT-6-Astra high \u{b7} ~/workspace \u{b7} task\n",
+            sigil, REPORTED_SENT_TEXT
+        ),
+    );
+    let dunks = serde_json::json!({"dunkers": [{
+        "id": "d7",
+        "running": true,
+        "target_pane_id": "%1",
+        "target_agent": "codex",
+        "target_cwd": "/work",
+        "text": REPORTED_SENT_TEXT
+    }]});
+    flock.dunks.load(dunks.as_object().unwrap());
+    flock
+        .sent_text_by_pane
+        .lock()
+        .unwrap()
+        .insert("%1".into(), vec![REPORTED_SENT_TEXT.into()]);
+    let mut message = Message::new("m1", "%1", "CoS", REPORTED_SENT_TEXT, "d7");
+    message.created_at = created_at;
+    message.status = status.into();
+    message.scheduled = true;
+    message.schedule_template = Some(REPORTED_SENT_TEXT.into());
+    message.attempt_generation = pane_generation(&env, "%1");
+    flock.note_stuck_candidate(&message);
+    (flock, env)
+}
+
+// t3355 (t820 proof D) wiring row 16 (oracle 79bc92fa). A stale scheduled reminder, created an hour
+// before the ticks, must never replay, and the schedule keeps running. A current reminder whose
+// template no longer matches the dunk text must not replay either. A current reminder with a
+// matching template presses once, as the positive control.
+#[test]
+fn stale_or_edited_scheduled_reminders_never_replay() {
+    let bright = "\u{1b}[1m\u{203a}\u{1b}[0m";
+    // The press-time currency gate reads the real clock (clock::now_s). Each reminder is therefore
+    // created at a real time, and the scans run on a timeline offset from it, so the observer sees
+    // the same 1000 s and 1120 s ages the original scans saw.
+    let base = crate::clock::now_s();
+    let stale_dir = tempfile::tempdir().unwrap();
+    let (stale, mut stale_env) =
+        scheduled_candidate_fixture(stale_dir.path(), bright, "failed", base - 3600.0);
+    for now in [base + 1000.0, base + 1120.0] {
+        crate::flock::loops_stuck::strict_stuck_observer_scan(&stale, &mut stale_env, now).unwrap();
+    }
+    assert!(
+        stale_env.keys.is_empty(),
+        "a stale reminder must not replay"
+    );
+    assert!(
+        stale
+            .dunks
+            .list()
+            .iter()
+            .any(|dunk| dunk.get("running") == Some(&serde_json::json!(true))),
+        "the schedule keeps running"
+    );
+
+    let edited_dir = tempfile::tempdir().unwrap();
+    let (edited, mut edited_env) =
+        scheduled_candidate_fixture(edited_dir.path(), bright, "failed", base);
+    // Edit the running dunk in place, as the Python test does (`dunker.text = ...`). `load` appends
+    // rows, so loading the edit would leave the old d7 in the list with its matching template.
+    edited
+        .dunks
+        .update(
+            "d7",
+            None,
+            &crate::flock::dunks::UpdateArgs {
+                text: Some("current owner-priority instruction".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    for now in [base + 1300.0, base + 1420.0] {
+        crate::flock::loops_stuck::strict_stuck_observer_scan(&edited, &mut edited_env, now)
+            .unwrap();
+    }
+    assert!(
+        edited_env.keys.is_empty(),
+        "an edited reminder must not replay"
+    );
+
+    let current_dir = tempfile::tempdir().unwrap();
+    let (current, mut current_env) =
+        scheduled_candidate_fixture(current_dir.path(), bright, "failed", base);
+    for now in [base + 1000.0, base + 1120.0] {
+        crate::flock::loops_stuck::strict_stuck_observer_scan(&current, &mut current_env, now)
+            .unwrap();
+    }
+    assert_eq!(
+        1,
+        current_env.keys.len(),
+        "a current matching reminder presses once"
+    );
+}
+
 // T55 rows 16 and 65 (t3344 proof C), test-only. Python oracle: tests/test_dunk_stuck_recovery.py
 // at 79bc92fa. Row 16 is ReviewBlockerTests.test_a_dunk_notice_with_no_message_row_is_still_tracked_and_recovered
 // and row 65 is AttemptGenerationTests.test_the_attempt_identity_is_captured_before_delivery_not_after.
