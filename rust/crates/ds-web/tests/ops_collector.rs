@@ -1286,18 +1286,84 @@ fn dunk_timestamp_wraps_every_numeric_failure_as_the_labelled_value_error() {
         assert_eq!(error.python_type, "ValueError", "{item}");
         assert_eq!(error.detail, "Dunking Sheep generated_at invalid", "{item}");
     }
-    for item in [
-        json!(1_700_000_000_i64),
-        json!(0_i64),
-        json!(1_700_000_000.5),
+    // CPython literals, not this crate's own fromtimestamp_utc.
+    for (item, expected) in [
+        (json!(1_700_000_000_i64), "2023-11-14T22:13:20Z"),
+        (json!(0_i64), "1970-01-01T00:00:00Z"),
+        (json!(1_700_000_000.5), "2023-11-14T22:13:20Z"),
     ] {
-        let expected = iso(&fromtimestamp_utc(item.as_f64().unwrap()).unwrap());
         assert_eq!(
             dunk_timestamp(Some(&item), "generated_at").unwrap(),
             expected,
             "{item}"
         );
     }
+}
+
+#[test]
+fn metrics_timestamp_failures_reach_collect_as_dunk_metrics_value_error() {
+    // CPython validates the metrics inside collect's try block, and _dunk_timestamp re-raises each
+    // fromtimestamp failure as a labelled ValueError. collect records dunk_metrics "ValueError"
+    // and writes no snapshot row.
+    let rejected = [
+        doc(
+            r#"{"schema_version": 1, "generated_at": "2026-11-05T19:00:00Z", "interval": {"start": 253402300800, "end": "2026-11-05T19:00:00Z"}}"#,
+        ),
+        doc(
+            r#"{"schema_version": 1, "generated_at": 1e300, "interval": {"start": "2026-11-05T18:00:00Z", "end": "2026-11-05T19:00:00Z"}}"#,
+        ),
+    ];
+    for metrics in rejected {
+        let dir = TempDir::new().unwrap();
+        let mut conn = ops_db(dir.path());
+        let messages = message_db(dir.path(), &[]);
+        let events = events_db(dir.path(), &[]);
+        let calls = Calls::default();
+        let daemon = FakeDaemon {
+            metrics: Ok(metrics.clone()),
+            ..FakeDaemon::healthy(&calls)
+        };
+        let mut collector = collector_with(&messages, &events, daemon, FakeGitHub::healthy(&calls));
+        collector
+            .collect(&mut conn, now(), false, run_count)
+            .unwrap();
+        assert_eq!(
+            read_row::<String>(&conn, "SELECT dunk_metrics_state FROM collection_runs"),
+            "unavailable",
+            "{metrics}"
+        );
+        assert_eq!(
+            read_row::<String>(&conn, "SELECT errors_json FROM collection_runs"),
+            r#"{"dunk_metrics": "ValueError"}"#,
+            "{metrics}"
+        );
+        assert_eq!(count(&conn, "dunk_metrics_snapshots"), 0, "{metrics}");
+    }
+
+    // 253402300799 is 9999-12-31T23:59:59Z: the last second before year 10000 in CPython.
+    let dir = TempDir::new().unwrap();
+    let mut conn = ops_db(dir.path());
+    let messages = message_db(dir.path(), &[]);
+    let events = events_db(dir.path(), &[]);
+    let calls = Calls::default();
+    let daemon = FakeDaemon {
+        metrics: Ok(doc(
+            r#"{"schema_version": 1, "generated_at": 253402300799, "interval": {"start": "2026-11-05T18:00:00Z", "end": "2026-11-05T19:00:00Z"}}"#,
+        )),
+        ..FakeDaemon::healthy(&calls)
+    };
+    let mut collector = collector_with(&messages, &events, daemon, FakeGitHub::healthy(&calls));
+    collector
+        .collect(&mut conn, now(), false, run_count)
+        .unwrap();
+    assert_eq!(
+        read_row::<String>(&conn, "SELECT dunk_metrics_state FROM collection_runs"),
+        "ok"
+    );
+    assert_eq!(
+        read_row::<String>(&conn, "SELECT generated_at FROM dunk_metrics_snapshots"),
+        "9999-12-31T23:59:59Z"
+    );
 }
 
 #[test]

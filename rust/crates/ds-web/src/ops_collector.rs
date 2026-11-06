@@ -20,18 +20,22 @@
 //! Nothing here reads the environment or the home directory. The poll timer, startup, the
 //! summary and history readers, and the other `record_*` writers are separate slices.
 //!
-//! Approximations of Python's dynamic typing, kept deliberately narrow. `datetime.fromisoformat`
-//! accepts only RFC 3339 (`T` or space separator, explicit offset required), so CPython's other
-//! forms are rejected here: any single-character separator, minute-only times, and the basic
-//! format. The string path (`parse_time`) also accepts what CPython rejects: year 0, a UTC
-//! instant outside years 1..9999 (CPython raises OverflowError from `astimezone`), and a
-//! lowercase `z`. `int()` accepts ASCII digits only, where CPython also accepts
-//! other Unicode decimal digits. `float()` rejects underscores, where CPython accepts them. The
-//! `repr` of a string inside a container escapes only C0 controls and DEL, where CPython also
-//! escapes other non-printable code points (for example U+00A0, U+0085, and U+200B). The `bytes`
-//! repr always uses single quotes, where CPython switches to double quotes when the bytes contain
-//! a single quote. BLOB values use that simplified `bytes` repr. Integers are exact at any size
-//! (`PyInt`). Only the SQLite bind is limited to 64 bits, as in Python.
+//! Approximations of Python's dynamic typing, kept deliberately narrow. The string path
+//! (`parse_time`) is RFC 3339, so CPython's other `datetime.fromisoformat` forms are rejected
+//! here: any single-character separator, minute-only times, the basic format, an offset without a
+//! colon (`+0100`), an hours-only offset (`+01`), an offset with seconds (`+01:00:30`), and a
+//! decimal comma (`10:00:00,5`). The string path also accepts what CPython rejects: a leap second
+//! (`23:59:60`), year 0, a UTC instant outside years 1..9999 (CPython raises OverflowError from
+//! `astimezone`), and a lowercase `z`. `int()` accepts ASCII digits only, where CPython also
+//! accepts other Unicode decimal digits. `float()` rejects underscores, where CPython accepts
+//! them. The `repr` of a string inside a container escapes only C0 controls and DEL, where
+//! CPython also escapes other non-printable code points (for example U+00A0, U+0085, and
+//! U+200B). The `bytes` repr always uses single quotes, where CPython switches to double quotes
+//! when the bytes contain a single quote. BLOB values use that simplified `bytes` repr. An integer
+//! literal beyond the float range (about 1.8e308) fails in CPython outside its `try`, as
+//! OverflowError, so the whole run fails with no rows written. Here `dunk_timestamp` returns a
+//! caught ValueError, so the run commits with `dunk_metrics` unavailable. Integers are exact at
+//! any size (`PyInt`). Only the SQLite bind is limited to 64 bits, as in Python.
 
 use std::{
     cmp::Ordering,
