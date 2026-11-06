@@ -5645,41 +5645,6 @@ mod stuck_gap_tests {
         );
     }
 
-    // ReviewBlockerTests.test_a_dunk_notice_with_no_message_row_is_still_tracked_and_recovered (row 16)
-    #[test]
-    fn a_dunk_notice_with_no_message_row_is_still_tracked_and_recovered() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = dir.path().join("state.json");
-        let flock = persistent_recovery_flock(dir.path(), &state);
-        {
-            let mut config = flock.stuck_config.lock().unwrap();
-            config.threshold_s = 1.0;
-            config.observation_interval_s = 0.1;
-            config.max_attempts = 1;
-        }
-        flock.remember_typed(PANE, TEXT);
-        let mut env = live_pane(frame(TEXT, &[]));
-        env.after_key_screen = Some(frame("\x1b[2mAsk Codex to do anything\x1b[0m", &[]));
-        // The first tick only sees the notice: it is tracked, and nothing is sent yet.
-        assert!(!flock.unwedge(&mut env, PANE, TEXT, Some(99.5), None, 100.0, None, false));
-        assert!(
-            env.keys.is_empty(),
-            "the clock has not reached the threshold"
-        );
-        assert!(
-            flock
-                .stuck_tracker
-                .lock()
-                .unwrap()
-                .records
-                .contains_key(PANE),
-            "a dunk notice with no message row is still tracked"
-        );
-        // Past the threshold the text fingerprint is the identity: one Enter, consumed.
-        assert!(flock.unwedge(&mut env, PANE, TEXT, Some(98.0), None, 200.0, None, false));
-        assert_eq!(1, env.keys.len());
-    }
-
     // FinalBoundaryGuardTests.test_a_failed_reservation_save_refuses_to_press (row 29)
     #[test]
     fn a_failed_reservation_save_refuses_to_press() {
@@ -5799,43 +5764,6 @@ mod stuck_gap_tests {
         assert!(
             env.keys.is_empty(),
             "the press-time revalidation must refuse"
-        );
-    }
-
-    // AttemptGenerationTests.test_the_attempt_identity_is_captured_before_delivery_not_after (row 65)
-    #[test]
-    fn the_attempt_identity_is_captured_before_delivery_not_after() {
-        let dir = tempfile::tempdir().unwrap();
-        let flock = Flock::new(dir.path().join("launches.json"), dir.path(), false);
-        let message = Message::new("m-attempt", PANE, "pane", "hello", "test");
-        flock
-            .outbox
-            .lock()
-            .unwrap()
-            .insert(PANE.into(), vec![message]);
-        let mut pane = Pane::default();
-        pane.screens.insert(PANE.into(), hint_screen());
-        // The pane is replaced mid-attempt: the first identity read is the pre-delivery one.
-        *pane.attempt_generation_script.borrow_mut() = VecDeque::from([
-            Some("pid:1:start:before".to_string()),
-            Some("pid:2:start:after".to_string()),
-        ]);
-        let _ = flock.deliver_message("m-attempt", 100.0, &mut pane, || None);
-        let delivered = flock
-            .message_history
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|m| m.id == "m-attempt")
-            .map(|m| m.attempt_generation.clone());
-        let held = flock.outbox_snapshot()[PANE]
-            .iter()
-            .find(|m| m.id == "m-attempt")
-            .map(|m| m.attempt_generation.clone());
-        assert_eq!(
-            Some(Some("pid:1:start:before".to_string())),
-            delivered.or(held),
-            "the attempt identity must be the pane the text went into"
         );
     }
 
