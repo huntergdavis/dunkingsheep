@@ -456,6 +456,10 @@ fn captured_loop_intervals(env: &Env) -> Result<LoopIntervals, DunkError> {
 }
 
 #[cfg(test)]
+#[path = "daemon_socket_tests.rs"]
+mod socket_tests;
+
+#[cfg(test)]
 mod tests {
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::Shutdown;
