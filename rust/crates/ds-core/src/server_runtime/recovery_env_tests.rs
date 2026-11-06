@@ -18,7 +18,7 @@ use crate::flock::loop_env::LoopTerminalFactory;
 use crate::flock::panes::Stores;
 use crate::flock::recovery_commands::RecoverEnv;
 use crate::roles::Roles;
-use crate::server::{Dispatcher as _, RequestCtx};
+use crate::server::RequestCtx;
 use crate::server_runtime::services::{
     RuntimeMemoryConfig, RuntimeObservability, RuntimeServiceInputs, RuntimeServices,
 };

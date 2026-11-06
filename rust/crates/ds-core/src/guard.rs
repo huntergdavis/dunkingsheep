@@ -288,10 +288,10 @@ mod tests {
     fn nothing_installed_reports_the_home_fallback() {
         let dir = crate::testsupport::dir("guard-status");
         let paths = paths(dir.path());
-        let status = status(&paths).unwrap();
+        let report = status(&paths).unwrap();
         let home = dir.path().join("home");
         assert_eq!(
-            status,
+            report,
             json!({
                 "installed": false, "wrapper": null, "shell_configured": false,
                 "active_in_this_shell": false, "shadowing_herdr": false,
@@ -318,39 +318,35 @@ mod tests {
         let bin = dir.path().join("bin");
         executable(&bin.join("herdr"), b"#!/bin/sh\necho real\n");
         paths.path = Some(std::env::join_paths([&guard_dir, &bin]).unwrap());
-        let status = status(&paths).unwrap();
-        assert_eq!(status["installed"], true);
-        assert_eq!(status["wrapper"], guard_dir.join("herdr").to_str().unwrap());
-        assert_eq!(status["shell_configured"], true);
-        assert_eq!(status["active_in_this_shell"], true);
-        assert_eq!(status["shadowing_herdr"], false);
+        let report = status(&paths).unwrap();
+        assert_eq!(report["installed"], true);
+        assert_eq!(report["wrapper"], guard_dir.join("herdr").to_str().unwrap());
+        assert_eq!(report["shell_configured"], true);
+        assert_eq!(report["active_in_this_shell"], true);
+        assert_eq!(report["shadowing_herdr"], false);
         assert_eq!(
-            status["herdr_resolves_to"],
+            report["herdr_resolves_to"],
             guard_dir.join("herdr").to_str().unwrap()
         );
-        assert_eq!(status["real_herdr"], bin.join("herdr").to_str().unwrap());
+        assert_eq!(report["real_herdr"], bin.join("herdr").to_str().unwrap());
         // The shadow: the wrapper where herdr lived, the real binary beside it.
         executable(
             &bin.join("herdr"),
             b"#!/bin/sh\n# dunkingsheep-herdr-guard\n",
         );
         executable(&bin.join("herdr-real"), b"#!/bin/sh\necho real\n");
-        let status = status(&paths).unwrap();
-        assert_eq!(status["shadowing_herdr"], true);
-        assert_eq!(status["covers_agents_started_by_herdr"], true);
+        let report = status(&paths).unwrap();
+        assert_eq!(report["shadowing_herdr"], true);
+        assert_eq!(report["covers_agents_started_by_herdr"], true);
         assert_eq!(
-            status["real_herdr"],
+            report["real_herdr"],
             bin.join("herdr-real").to_str().unwrap()
         );
         // The marker counts only within the first 400 bytes, as `_is_guard` reads them.
         let mut late = vec![b'#'; 400];
         late.extend_from_slice(b"\n# dunkingsheep-herdr-guard\n");
         executable(&bin.join("herdr"), &late);
-        assert_eq!(status_of(&paths)["shadowing_herdr"], false);
-    }
-
-    fn status_of(paths: &GuardPaths) -> Value {
-        status(paths).unwrap()
+        assert_eq!(status(&paths).unwrap()["shadowing_herdr"], false);
     }
 
     #[test]
