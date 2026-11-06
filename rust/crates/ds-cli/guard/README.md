@@ -65,9 +65,10 @@ so these reads must move before the Python tree is deleted:
 Scope. This list covers reads of the Python tree, and of root data, by test builds. Other root files are
 not Python and do not depend on the Python tree: `packaging/watchdog.example.json` (ds-core watchdog
 tests, and `ds-cli` `tests/command_routes.rs`), and `docs/GUIDE.md` (ds-core `src/help/tests.rs`). The
-`packaging/rust-release/` install does depend on Python: `install-release.sh` takes `--poll` (documented as
-`tools/dunk_poll.py`) and copies it into each release as `dunk-poll.py`, so that copy is an install-time
-input, not a test read. Runtime reads are not build reads, so they are not listed. For example, `ds-core` `src/poolrad.rs` runs
+`packaging/rust-release/` install does depend on Python: `install-release.sh` takes `--poll tools/dunk_poll.py`
+and copies that file into each release as `dunk-poll.py`, so `tools/dunk_poll.py` is also an install-time
+input. The `release_layout` tests pass the same file as `--poll`, as listed above. Runtime reads are not
+build reads, so they are not listed. For example, `ds-core` `src/poolrad.rs` runs
 `tools/overlay/strict_candidate_queue.py` from the repo named by `DUNKINGSHEEP_POOLRAD_REPO`. The ignored
 test in `src/context/golden_tests.rs` needs `tools/context_live_diff.py` and does not run by default.
 
