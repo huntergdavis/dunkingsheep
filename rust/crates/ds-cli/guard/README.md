@@ -32,8 +32,24 @@ comment above it.
 ## Gated, not declared complete
 
 Full Python retirement of the shims stays gated: the native shim rewrite, the `python3` dependency of
-`guard check`, and deleting the root copies (T63). Retiring the Python tree does not break a build,
-because nothing in the Rust crate reads the repo root any more.
+`guard check`, and deleting the root copies (T63). Deleting the root copies does not break the release
+binary build, because the release build reads no repo-root file. Test builds do read the Python tree,
+so these reads must move before the Python tree is deleted:
+
+- `dunk_core.py`, `dunk_api.py`, and `dunk_roles.py`: `ds-core` `src/api/recovery_tests.rs`.
+- `dunk_core.py`: `ds-core` `src/flock/recovery_commands_tests.rs`.
+- `dunk_tasks.py` and `dunk_core.py`: `ds-core` `src/tasks/wire/tests.rs`.
+- `dunk_poolrad.py`: `ds-core` `src/server_runtime/poolrad/tests.rs`.
+- `dunk_watchdog_deadman.py`: `ds-core` `src/watchdog_deadman.rs`, `src/watchdog_deadman/check_tests.rs`,
+  and `src/watchdog_deadman/main_tests.rs`. The last also imports `tests/test_dunk_watchdog.py`.
+- `dunk_health.py`, `dunk_state.py`, `dunk_api.py`, and `tools/diff_harness.py`: `ds-core`
+  `src/server_runtime/health_state.rs`.
+- `dunk_http.py` and `dunk_terminal.py`: `ds-web` `src/python_http.rs`.
+- The Python reference `dunkingsheep`: `ds-cli` `tests/command_routes.rs`.
+- `tools/dunk_poll.py`: `ds-cli` `tests/dispatch.rs` and `tests/release_layout.rs`.
+
+This list comes from a search of `rust/crates` at this head for `python3` runs, `include_str!` of
+repo-root files, and root-relative paths. The crate-local copies under `guard/` are not root reads.
 
 ## Tests
 
