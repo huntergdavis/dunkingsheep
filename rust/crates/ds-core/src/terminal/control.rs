@@ -21,7 +21,7 @@
 
 use std::collections::BTreeMap;
 
-use super::tmux::PANE_FORMAT;
+use super::tmux::pane_format;
 use super::{Pane, Tab, Workspace};
 
 /// One parsed control-mode event.
@@ -250,15 +250,16 @@ pub struct PaneTable {
 }
 
 impl PaneTable {
-    /// Replace the pane set from a `list-panes -a -F PANE_FORMAT` reply.
-    pub fn load_panes(&mut self, output: &str) -> usize {
-        let parsed = super::parse::parse_panes(output, &|_| None);
+    /// Replace the pane set from a `list-panes -a -F PANE_FORMAT` reply. A refused listing keeps
+    /// the last good set and stays stale, so the next event asks tmux again.
+    pub fn load_panes(&mut self, output: &str) -> Result<usize, super::parse::ListingError> {
+        let parsed = super::parse::parse_panes(output, &|_| None)?;
         self.panes = parsed
             .into_iter()
             .map(|pane| (pane.pane_id.clone(), pane))
             .collect();
         self.stale = false;
-        self.panes.len()
+        Ok(self.panes.len())
     }
 
     /// `get_pane` is a map lookup: this is the whole point of the task (RUST_PORT 5.1).
@@ -343,6 +344,6 @@ impl Client {
 
     /// The command a refresh sends (the Python's `list-panes -a -F PANE_FORMAT`).
     pub fn refresh_command() -> String {
-        format!("list-panes -a -F {PANE_FORMAT}")
+        format!("list-panes -a -F {}", pane_format())
     }
 }
