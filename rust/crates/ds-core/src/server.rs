@@ -83,6 +83,8 @@ impl std::fmt::Display for AlreadyRunning {
 pub struct FlockServer {
     dispatcher: Arc<dyn Dispatcher>,
     pub socket_path: PathBuf,
+    /// The release the daemon logs on bind (`dunk_core.VERSION` in the Python line).
+    version: String,
     listener: Option<UnixListener>,
     stop: Arc<AtomicBool>,
     connections: Arc<Mutex<ConnectionRegistry>>,
@@ -123,6 +125,7 @@ impl FlockServer {
         Self {
             dispatcher,
             socket_path: socket_path.into(),
+            version: "unknown".into(),
             listener: None,
             stop,
             connections: Arc::new(Mutex::new(ConnectionRegistry::new())),
@@ -130,6 +133,12 @@ impl FlockServer {
             dispatcher_closed: false,
             shutdown_failure: None,
         }
+    }
+
+    /// The version named in the "listening on" log line.
+    pub fn with_version(mut self, version: impl Into<String>) -> Self {
+        self.version = version.into();
+        self
     }
 
     pub fn is_bound(&self) -> bool {
@@ -183,7 +192,8 @@ impl FlockServer {
         }
         self.listener = Some(listener);
         tracing::info!(
-            "dunkingsheep listening on {} (pid {})",
+            "dunkingsheep {} listening on {} (pid {})",
+            self.version,
             self.socket_path.display(),
             std::process::id()
         );
@@ -882,7 +892,7 @@ impl SignalStop {
                 match set.wait() {
                     Ok(Signal::SIGURG) => return Ok(()),
                     Ok(signal) => {
-                        tracing::info!("received signal {}, draining daemon", signal as i32);
+                        tracing::info!("received signal {}, shutting down", signal as i32);
                         kill_own_process_group(&env);
                         worker_stop.store(true, Ordering::SeqCst);
                     }

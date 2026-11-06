@@ -32,6 +32,7 @@ const SELF_PANE: &str = "w2:p2";
 /// One production daemon on its own socket, with the Python fixture's client.
 struct ProductionDaemon {
     socket: PathBuf,
+    config: PathBuf,
     /// Every backend event of every worker-local fake terminal, in one shared log: the
     /// Python fake is one object, so `self.herdr.sends` sees what a worker thread typed.
     events: Arc<Mutex<Vec<Value>>>,
@@ -46,6 +47,11 @@ struct ProductionDaemon {
 impl ProductionDaemon {
     /// `ServerRoundTripTests.setUp`.
     fn start(tag: &str) -> Self {
+        Self::start_with(tag, true)
+    }
+
+    /// The same daemon, with (`no_log_file: false`) or without the daemon log file.
+    fn start_with(tag: &str, no_log_file: bool) -> Self {
         let dir = crate::testsupport::dir(&format!("daemon-socket-{tag}"));
         let config = dir.path().join("config");
         std::fs::create_dir_all(&config).expect("config directory");
@@ -108,7 +114,7 @@ impl ProductionDaemon {
         let options = DaemonOptions {
             socket_path: Some(socket.clone()),
             state_file: Some(dir.path().join("dunks.json")),
-            no_log_file: true,
+            no_log_file,
         };
         let (finished_tx, finished_rx) = mpsc::channel();
         let handle = std::thread::spawn(move || {
@@ -121,6 +127,7 @@ impl ProductionDaemon {
             .expect("daemon bound and ready");
         Self {
             socket,
+            config,
             events,
             finished: finished_rx,
             handle: Some(handle),
@@ -329,4 +336,65 @@ fn shutdown_command_stops_the_server() {
         "the socket file is removed on close"
     );
     assert!(!daemon.is_running(), "nothing answers on the closed socket");
+}
+
+/// `configure_logging` through the whole lifecycle: the bind and stop lines reach the daemon
+/// log in the Python format (`%(asctime)s %(levelname)s %(name)s: %(message)s`), with the
+/// release version and pid the Python `FlockServer.bind` logs.
+#[test]
+fn daemon_log_carries_the_python_lifecycle_lines() {
+    let mut daemon = ProductionDaemon::start_with("log", false);
+    let result = daemon.call("shutdown", json!({}));
+    assert_eq!(json!(true), result["shutting_down"], "{result}");
+    assert_eq!(
+        0,
+        daemon
+            .join_within(Duration::from_secs(3))
+            .expect("clean daemon exit after the shutdown command")
+    );
+    let text = std::fs::read_to_string(daemon.config.join("daemon.log")).expect("daemon.log");
+    let listening = format!(
+        " INFO dunkingsheep.server: dunkingsheep test listening on {} (pid {})",
+        daemon.socket.display(),
+        std::process::id()
+    );
+    let lines: Vec<&str> = text.lines().collect();
+    assert!(
+        lines
+            .iter()
+            .any(|line| has_python_timestamp(line) && line.ends_with(&listening)),
+        "{text}"
+    );
+    assert!(
+        lines.iter().any(|line| {
+            has_python_timestamp(line)
+                && line.ends_with(" INFO dunkingsheep.server: daemon stopped")
+        }),
+        "{text}"
+    );
+    let listening_at = lines.iter().position(|line| line.ends_with(&listening));
+    let stopped_at = lines
+        .iter()
+        .position(|line| line.ends_with(" INFO dunkingsheep.server: daemon stopped"));
+    assert!(
+        listening_at < stopped_at,
+        "bind is logged before stop: {text}"
+    );
+}
+
+/// `YYYY-MM-DD HH:MM:SS,mmm ` as logging's default `asctime` prints it.
+fn has_python_timestamp(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    bytes.len() > 24
+        && bytes[23] == b' '
+        && bytes[..23]
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| match index {
+                4 | 7 => *byte == b'-',
+                10 => *byte == b' ',
+                13 | 16 => *byte == b':',
+                19 => *byte == b',',
+                _ => byte.is_ascii_digit(),
+            })
 }

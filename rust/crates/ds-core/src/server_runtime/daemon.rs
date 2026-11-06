@@ -1,7 +1,7 @@
 //! Canonical process assembly for the Rust daemon.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 use std::{fs::OpenOptions, io::Write};
 
@@ -86,7 +86,8 @@ pub fn run_daemon_captured(
 ) -> Result<i32, DunkError> {
     let env = &startup.env;
     let config_dir = common_config_dir(env, &startup.home)?;
-    let mut log = DaemonLog::configure(&config_dir, options.no_log_file);
+    let log = DaemonLog::configure(&config_dir, options.no_log_file);
+    let release_version = startup.release_version.clone();
     let default_socket = config_dir.join("dunkingsheep.sock");
     let socket_path = options
         .socket_path
@@ -258,7 +259,8 @@ pub fn run_daemon_captured(
             None => None,
         };
     let mut server =
-        FlockServer::new_with_stop(services.production_dispatcher(), socket_path, stop);
+        FlockServer::new_with_stop(services.production_dispatcher(), socket_path, stop)
+            .with_version(release_version);
     if let Err(error) = server.bind() {
         let loop_result = services.runtime_handle().block_on(loops.stop());
         let shutdown = services.shutdown_checked();
@@ -340,32 +342,182 @@ pub fn run_daemon_captured(
     Ok(0)
 }
 
-struct DaemonLog(Option<std::fs::File>);
+/// `configure_logging`: the daemon log file under the config directory plus stderr when it is
+/// a terminal, or stderr alone with `--no-log-file` or an unwritable file. Lines follow the
+/// Python `%(asctime)s %(levelname)s %(name)s: %(message)s` format, and every `tracing`
+/// event of the process (bind, signals, stop, refusals) reaches the sink while it is
+/// configured. DIFFERENCE: the file is created mode 0600 (the Python's FileHandler uses the
+/// umask).
+struct DaemonLog {
+    sink: Arc<LogSink>,
+}
+
+struct LogSink {
+    file: Option<Mutex<std::fs::File>>,
+    stderr: bool,
+}
+
+/// The sinks of the daemons configured in this process: one in production; parallel test
+/// daemons each receive every event, so their own lines always reach their own file.
+static ACTIVE_LOGS: Mutex<Vec<Weak<LogSink>>> = Mutex::new(Vec::new());
+static BRIDGE: std::sync::Once = std::sync::Once::new();
+
+fn active_logs() -> std::sync::MutexGuard<'static, Vec<Weak<LogSink>>> {
+    ACTIVE_LOGS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+}
 
 impl DaemonLog {
     fn configure(config_dir: &Path, no_log_file: bool) -> Self {
-        if no_log_file {
-            return Self(None);
-        }
+        use std::io::IsTerminal;
         use std::os::unix::fs::OpenOptionsExt;
-        let path = config_dir.join("daemon.log");
-        let file = std::fs::create_dir_all(config_dir)
-            .and_then(|()| {
-                OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .mode(0o600)
-                    .open(&path)
-            })
-            .ok();
-        Self(file)
+        let file = if no_log_file {
+            None
+        } else {
+            std::fs::create_dir_all(config_dir)
+                .and_then(|()| {
+                    OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .mode(0o600)
+                        .open(config_dir.join("daemon.log"))
+                })
+                .ok()
+                .map(Mutex::new)
+        };
+        let stderr = file.is_none() || std::io::stderr().is_terminal();
+        let sink = Arc::new(LogSink { file, stderr });
+        BRIDGE.call_once(|| {
+            // A process that already chose a subscriber keeps it; the daemon's events then go
+            // where that subscriber sends them.
+            let _ = tracing::subscriber::set_global_default(TracingBridge);
+        });
+        active_logs().push(Arc::downgrade(&sink));
+        Self { sink }
     }
 
-    fn error(&mut self, message: &str) {
-        if let Some(file) = &mut self.0 {
-            let _ = writeln!(file, "ERROR {message}");
+    fn error(&self, message: &str) {
+        self.sink.write("ERROR", SERVER_LOGGER, message);
+    }
+}
+
+impl Drop for DaemonLog {
+    fn drop(&mut self) {
+        active_logs().retain(|weak| {
+            weak.upgrade()
+                .is_some_and(|sink| !Arc::ptr_eq(&sink, &self.sink))
+        });
+    }
+}
+
+impl LogSink {
+    fn write(&self, level: &str, name: &str, message: &str) {
+        let line = format_log_line(chrono::Local::now(), level, name, message);
+        if let Some(file) = &self.file {
+            let _ = file
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .write_all(line.as_bytes());
+        }
+        if self.stderr {
+            let _ = std::io::stderr().write_all(line.as_bytes());
+        }
+    }
+}
+
+const SERVER_LOGGER: &str = "dunkingsheep.server";
+const CORE_LOGGER: &str = "dunkingsheep";
+
+/// One Python logging line with the default `asctime` (local time, milliseconds after a comma).
+fn format_log_line(
+    at: chrono::DateTime<chrono::Local>,
+    level: &str,
+    name: &str,
+    message: &str,
+) -> String {
+    format!(
+        "{} {level} {name}: {message}\n",
+        at.format("%Y-%m-%d %H:%M:%S,%3f")
+    )
+}
+
+/// Every `tracing` event is one log line: WARN is Python's WARNING; events from the server and
+/// the daemon assembly (`dunk_server.py`) carry the `dunkingsheep.server` logger name and the
+/// rest of the port (`dunk_core.py` and its modules) the `dunkingsheep` name.
+struct TracingBridge;
+
+impl tracing::Subscriber for TracingBridge {
+    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        metadata.is_event() && *metadata.level() <= tracing::Level::INFO
+    }
+
+    fn new_span(&self, _attributes: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+
+    fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+
+    fn event(&self, event: &tracing::Event<'_>) {
+        let sinks: Vec<Arc<LogSink>> = active_logs().iter().filter_map(Weak::upgrade).collect();
+        if sinks.is_empty() {
+            return;
+        }
+        let mut message = EventMessage::default();
+        event.record(&mut message);
+        let message = message.finish();
+        let level = match *event.metadata().level() {
+            tracing::Level::ERROR => "ERROR",
+            tracing::Level::WARN => "WARNING",
+            _ => "INFO",
+        };
+        let target = event.metadata().target();
+        let name = if target == "ds_core::server" || target.starts_with(module_path!()) {
+            SERVER_LOGGER
         } else {
-            eprintln!("{message}");
+            CORE_LOGGER
+        };
+        for sink in sinks {
+            sink.write(level, name, &message.text);
+        }
+    }
+
+    fn enter(&self, _span: &tracing::span::Id) {}
+
+    fn exit(&self, _span: &tracing::span::Id) {}
+}
+
+/// The event's `message` field first, then any other fields as `name=value`.
+#[derive(Default)]
+struct EventMessage {
+    text: String,
+    fields: String,
+}
+
+impl EventMessage {
+    fn finish(mut self) -> Self {
+        if !self.fields.is_empty() {
+            if !self.text.is_empty() {
+                self.text.push(' ');
+            }
+            self.text.push_str(&self.fields);
+            self.fields.clear();
+        }
+        self
+    }
+}
+
+impl tracing::field::Visit for EventMessage {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            self.text = format!("{value:?}");
+        } else {
+            if !self.fields.is_empty() {
+                self.fields.push(' ');
+            }
+            self.fields.push_str(&format!("{}={value:?}", field.name()));
         }
     }
 }
@@ -969,6 +1121,74 @@ mod tests {
     }
 
     #[test]
+    fn log_lines_use_the_python_logging_format() {
+        use chrono::TimeZone;
+        let at = chrono::Local
+            .with_ymd_and_hms(2026, 11, 6, 11, 16, 31)
+            .single()
+            .expect("unambiguous local time")
+            + chrono::Duration::milliseconds(26);
+        assert_eq!(
+            "2026-11-06 11:16:31,026 INFO dunkingsheep.server: dunkingsheep 2.71.4 listening on /tmp/s.sock (pid 7)\n",
+            format_log_line(
+                at,
+                "INFO",
+                SERVER_LOGGER,
+                "dunkingsheep 2.71.4 listening on /tmp/s.sock (pid 7)"
+            )
+        );
+    }
+
+    #[test]
+    fn tracing_events_become_python_log_lines_for_every_configured_daemon() {
+        let dir = crate::testsupport::dir("daemon-log-bridge");
+        let config = dir.path().join("config");
+        let log = DaemonLog::configure(&config, false);
+        tracing::warn!("identity mismatch cmd=\"status\" claimed=\"w1:p9\"");
+        log.error("refusing to start: fixture");
+        drop(log);
+        tracing::info!("after the sink is gone");
+        let text = std::fs::read_to_string(config.join("daemon.log")).expect("daemon.log");
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(
+            lines.iter().any(|line| {
+                has_python_timestamp(line)
+                    && line.ends_with(
+                        " WARNING dunkingsheep.server: identity mismatch cmd=\"status\" claimed=\"w1:p9\"",
+                    )
+            }),
+            "{text}"
+        );
+        assert!(
+            lines.iter().any(|line| {
+                has_python_timestamp(line)
+                    && line.ends_with(" ERROR dunkingsheep.server: refusing to start: fixture")
+            }),
+            "{text}"
+        );
+        assert!(
+            !text.contains("after the sink is gone"),
+            "a dropped daemon log receives nothing: {text}"
+        );
+    }
+
+    /// `YYYY-MM-DD HH:MM:SS,mmm ` as logging's default `asctime` prints it.
+    fn has_python_timestamp(line: &str) -> bool {
+        let bytes = line.as_bytes();
+        bytes.len() > 24
+            && bytes[4] == b'-'
+            && bytes[7] == b'-'
+            && bytes[10] == b' '
+            && bytes[13] == b':'
+            && bytes[16] == b':'
+            && bytes[19] == b','
+            && bytes[23] == b' '
+            && bytes[..23].iter().enumerate().all(|(index, byte)| {
+                matches!(index, 4 | 7 | 10 | 13 | 16 | 19) || byte.is_ascii_digit()
+            })
+    }
+
+    #[test]
     fn loop_intervals_use_the_captured_environment() {
         let env = Env::from_pairs(&[("DUNKINGSHEEP_PUSH_S", "2.5"), ("DUNKINGSHEEP_REAP_S", "4")]);
         let intervals = captured_loop_intervals(&env).expect("valid captured cadence");
@@ -1007,6 +1227,19 @@ mod tests {
         );
         assert!(!config.join("tasks.db").exists());
         assert!(!config.join("inbox.db").exists());
+        // `log.error(...)` before `return 3`, in the configured log file and format.
+        let text = std::fs::read_to_string(config.join("daemon.log")).expect("daemon.log");
+        assert!(
+            text.lines().any(|line| {
+                has_python_timestamp(line)
+                    && line.ends_with(
+                        " ERROR dunkingsheep.server: dunkingsheep.service supervises this daemon; \
+                         refusing an unsupervised start. Run: systemctl --user start \
+                         dunkingsheep.service",
+                    )
+            }),
+            "{text}"
+        );
     }
 
     #[test]
