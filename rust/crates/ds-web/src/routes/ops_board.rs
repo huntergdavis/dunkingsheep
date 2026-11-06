@@ -147,11 +147,11 @@ pub fn router(
 ) -> Router {
     Router::new()
         .route("/api/ops-board/not-now", post(not_now_owner_question))
-        // Not a Python route: web/app.py registers only /api/ops-board/answer and
-        // /api/ops-board/not-now. The composition's route gate never sends this path here, because
-        // PYTHON_ROUTES does not list it, so the desk serves it from the static mount and this
-        // registration is unreachable through `web_server::Desk` (t3328). Removing it needs the
-        // owner's approval; until then this comment is the documentation.
+        // web/app.py has no /api/ops-board/question route. Its ops-board routes are GET
+        // /api/ops-board and POST /api/ops-board/answer, /api/ops-board/not-now and
+        // /api/ops-board/refresh. This registration is unreachable through `web_server::Desk`:
+        // PYTHON_ROUTES does not list it, so the gate sends a POST to the static mount, which
+        // answers 405 with Allow GET, HEAD. The route is kept; removing it is left for later.
         .route("/api/ops-board/question", post(owner_question))
         .route("/api/ops-board/answer", post(owner_answer))
         .route("/api/ops-board/refresh", post(refresh_operations_board))
