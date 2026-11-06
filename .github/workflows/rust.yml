@@ -77,3 +77,31 @@ jobs:
           done
       - name: replay the recorded send and task-follow traffic from an owner pane
         run: bash tools/ci_production_replay.sh
+
+  # t3384, the Rust daemon. The same replay as production-replay-send, but the sandbox daemon and the
+  # owner's superuser recover run the dunkingsheep binary built from this commit (DS_BIN). The build runs
+  # inside this job, so the job has its own timeout. The Python job keeps its five minutes.
+  production-replay-send-rust:
+    name: production replay (send, Rust daemon)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: install tmux
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq tmux
+      # Release build: a debug binary hashes its own executable at start (flock/status.rs), and that is
+      # about 95 s on a loaded host (owner i45559). The release binary starts in about a second.
+      - name: build the dunkingsheep binary (release)
+        run: cargo build --release --manifest-path rust/Cargo.toml -p ds-cli --bin dunkingsheep
+      - name: gate unit tests (no daemon, no tmux)
+        run: |
+          for test in test_production_replay test_diff_harness_sandbox test_send_scenario test_task_follow_scenario test_ci_production_replay; do
+            python3 -I "tests/$test.py"
+          done
+      - name: replay the recorded send traffic against the Rust daemon
+        env:
+          DS_BIN: ${{ github.workspace }}/rust/target/release/dunkingsheep
+        run: bash tools/ci_production_replay.sh
