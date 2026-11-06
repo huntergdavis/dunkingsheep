@@ -160,7 +160,9 @@ fn activity_backend(
     paths: DashboardPaths,
     clock: Arc<dyn Clock>,
 ) -> ActivityPoolradBackend<UnixTransport> {
-    ActivityPoolradBackend::new(daemon_client(socket), Vec::new(), paths, clock)
+    // Four reader clients, as production uses (Python's max_workers=4).
+    let readers: Vec<FlockClient<UnixTransport>> = (0..4).map(|_| daemon_client(socket)).collect();
+    ActivityPoolradBackend::new(daemon_client(socket), readers, Vec::new(), paths, clock)
 }
 
 fn runtime() -> tokio::runtime::Runtime {
@@ -432,10 +434,15 @@ fn panes_activity_matches_python_oracle_and_refreshes_once_per_ttl() {
 
     let calls = log.lock().unwrap().clone();
     let commands: Vec<&str> = calls.iter().map(|(cmd, _)| cmd.as_str()).collect();
-    assert_eq!(
-        commands,
-        ["list_panes", "read_pane", "read_pane", "read_pane"]
-    );
+    assert_eq!(commands[0], "list_panes");
+    assert_eq!(commands.len(), 4, "one listing, then one read per pane");
+    // The reads run concurrently across the reader clients, so compare their targets as a set.
+    let mut targets: Vec<&str> = calls[1..]
+        .iter()
+        .map(|(_, args)| args["target"].as_str().unwrap())
+        .collect();
+    targets.sort_unstable();
+    assert_eq!(targets, ["%9", "w1:p1", "w1:p2"]);
     assert!(calls[1..]
         .iter()
         .all(|(_, args)| args["lines"] == json!(40)));

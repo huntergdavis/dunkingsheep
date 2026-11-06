@@ -14,8 +14,8 @@
 //!   `PoolradDashboardBackend` (page, reports, refresh), and the DS-internal renderer. They
 //!   stay honest: refresh is unavailable, and progress without a published checkpoint is
 //!   unavailable. Nothing is fabricated.
-//! - Core deviations to categorize: the bytes-only seam drops `FileResponse` stat semantics on
-//!   the desk page as well, and pane reads are serial.
+//! - Core deviation, accepted by the owner: the bytes-only seam drops `FileResponse` stat
+//!   semantics on the desk page. t3216 owns it, and this module does not claim it.
 //!
 //! Gaps, reported rather than papered over:
 //! - `refresh()` needs `ops_metrics.published_accounting()` (a `gh api` network read) and
@@ -26,15 +26,15 @@
 //! - The traits are synchronous. Daemon RPCs (up to 2 s), `git show` (5 s), and SQLite reads
 //!   block the calling thread, so startup integration must run them off async workers.
 //! - The route traits return bytes only. Python's `FileResponse` also sends stat-derived
-//!   headers and may answer conditional requests (and, depending on the pinned Starlette,
-//!   range requests). This seam cannot carry file metadata, so those semantics are not
-//!   represented. Byte and stat parity needs the route trait signatures to change, which is
-//!   out of scope for this batch.
-//! - Pane reads run one at a time behind the single daemon client, where Python fans them
-//!   out over four workers. With N slow panes a refresh can block for up to N timeouts of 2 s
-//!   each, more if the client retries a timed-out read. Channel activity waits on the same
-//!   client until the refresh ends. Startup integration needs a blocking pool and a client
-//!   pool to restore the fan-out.
+//!   headers and may answer conditional or range requests. This seam cannot carry file
+//!   metadata, so those semantics are not represented. Owner decision: accepted as documented
+//!   and owned by the t3216 static composition. Byte and stat parity is not claimed here.
+//! - Pane reads fan out over the reader clients, with at most one read in flight per client
+//!   (production: four, as Python's `max_workers=4`). The channel client serves `list_panes`,
+//!   channel reads, and capability checks, so a panes refresh does not hold up channel
+//!   activity. With no readers, panes are read serially through the channel client. A refresh
+//!   can still take about ceil(N / readers) timeouts of 2 s each. Startup integration must run
+//!   the blocking calls off async workers.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -151,7 +151,12 @@ struct TimedCache {
 
 /// Pane activity, channel activity, and reviewed progress, backed by the captured daemon client.
 pub struct ActivityPoolradBackend<T: Transport + Send + 'static> {
+    /// Channel calls, `list_panes`, and capability checks. Pane fan-out never uses it, so a
+    /// panes refresh cannot hold up channel activity.
     client: Mutex<FlockClient<T>>,
+    /// Pane reads during a refresh, one read in flight per client. Empty means serial reads
+    /// through `client`.
+    readers: Vec<Mutex<FlockClient<T>>>,
     default_timeout: Duration,
     channels: Vec<Value>,
     paths: DashboardPaths,
@@ -162,10 +167,14 @@ pub struct ActivityPoolradBackend<T: Transport + Send + 'static> {
 }
 
 impl<T: Transport + Send + 'static> ActivityPoolradBackend<T> {
-    /// `client` is the explicitly captured daemon client, and `channels` is the validated channel
-    /// registry (Python `CHANNELS`). The client's timeout is the default for channel calls.
+    /// `client` serves channel calls, pane listing, and capability checks. `readers` serve the
+    /// pane reads of a refresh, one read in flight per reader (production: four, as Python's
+    /// `max_workers=4`). Empty `readers` reads panes serially through `client`. `channels` is the
+    /// validated channel registry (Python `CHANNELS`). The client's timeout is the default for
+    /// channel calls.
     pub fn new(
         client: FlockClient<T>,
+        readers: Vec<FlockClient<T>>,
         channels: Vec<Value>,
         paths: DashboardPaths,
         clock: Arc<dyn Clock>,
@@ -173,6 +182,7 @@ impl<T: Transport + Send + 'static> ActivityPoolradBackend<T> {
         let default_timeout = client.timeout;
         Self {
             client: Mutex::new(client),
+            readers: readers.into_iter().map(Mutex::new).collect(),
             default_timeout,
             channels,
             paths,
@@ -274,12 +284,15 @@ impl<T: Transport + Send + 'static> ActivityPoolradBackend<T> {
     }
 
     /// Python `panes_activity`'s refresh body: any failure means `None`, which is cached.
-    fn refresh_panes(&self, client: &mut FlockClient<T>) -> Option<Value> {
-        client.timeout = PANES_RPC_TIMEOUT;
-        let listing = rpc(client, "list_panes", Map::new()).ok()?;
-        let panes = listing.get("panes")?.as_array()?;
-        let rows = build_roster(&[], panes, true, None).ok()?;
-        let rows: Vec<Value> = rows.iter().map(|row| self.pane_row(client, row)).collect();
+    fn refresh_panes(&self) -> Option<Value> {
+        let rows = {
+            let mut client = locked(&self.client);
+            client.timeout = PANES_RPC_TIMEOUT;
+            let listing = rpc(&mut *client, "list_panes", Map::new()).ok()?;
+            let panes = listing.get("panes")?.as_array()?;
+            build_roster(&[], panes, true, None).ok()?
+        };
+        let rows = self.read_rows(rows);
         Some(json!({
             "panes": rows,
             "checked_at": utc_stamp(self.clock.unix_seconds()),
@@ -287,9 +300,48 @@ impl<T: Transport + Send + 'static> ActivityPoolradBackend<T> {
         }))
     }
 
+    /// Reads the pane rows across the reader clients, at most one read in flight per client.
+    /// Rows are split into contiguous chunks, and the results are joined in input order.
+    fn read_rows(&self, rows: Vec<Value>) -> Vec<Value> {
+        if rows.is_empty() {
+            return Vec::new();
+        }
+        let lanes: Vec<&Mutex<FlockClient<T>>> = if self.readers.is_empty() {
+            vec![&self.client]
+        } else {
+            self.readers.iter().collect()
+        };
+        let chunk_size = rows.len().div_ceil(lanes.len());
+        let chunks: Vec<&[Value]> = rows.chunks(chunk_size).collect();
+        std::thread::scope(|scope| {
+            let workers: Vec<_> = chunks
+                .iter()
+                .copied()
+                .zip(lanes)
+                .map(|(chunk, lane)| {
+                    scope.spawn(move || {
+                        let mut client = locked(lane);
+                        client.timeout = PANES_RPC_TIMEOUT;
+                        chunk
+                            .iter()
+                            .map(|row| Self::panes_row(&mut *client, row))
+                            .collect::<Vec<Value>>()
+                    })
+                })
+                .collect();
+            let mut joined = Vec::with_capacity(rows.len());
+            for (worker, chunk) in workers.into_iter().zip(chunks.iter().copied()) {
+                match worker.join() {
+                    Ok(part) => joined.extend(part),
+                    Err(_) => joined.extend(chunk.iter().map(Self::unread_row)),
+                }
+            }
+            joined
+        })
+    }
+
     /// One pane row of the panes snapshot. A failed read keeps the row and marks it.
-    fn pane_row(&self, client: &mut FlockClient<T>, row: &Value) -> Value {
-        let mut merged = row.as_object().cloned().unwrap_or_default();
+    fn panes_row(client: &mut FlockClient<T>, row: &Value) -> Value {
         match read_pane_activity(client, row, PANES_READ_LINES) {
             Ok(mut output) => {
                 let text = output
@@ -298,14 +350,20 @@ impl<T: Transport + Send + 'static> ActivityPoolradBackend<T> {
                     .unwrap_or_default()
                     .to_string();
                 output.insert("text".into(), json!(trim_pane_text(&text)));
+                let mut merged = row.as_object().cloned().unwrap_or_default();
                 merged.extend(output);
                 merged.insert("error".into(), Value::Null);
+                Value::Object(merged)
             }
-            Err(_) => {
-                merged.insert("text".into(), json!(""));
-                merged.insert("error".into(), json!("Pane output unavailable"));
-            }
+            Err(_) => Self::unread_row(row),
         }
+    }
+
+    /// Python `{**row, "text": "", "error": "Pane output unavailable"}`.
+    fn unread_row(row: &Value) -> Value {
+        let mut merged = row.as_object().cloned().unwrap_or_default();
+        merged.insert("text".into(), json!(""));
+        merged.insert("error".into(), json!("Pane output unavailable"));
         Value::Object(merged)
     }
 
@@ -329,8 +387,7 @@ impl<T: Transport + Send + 'static> ActivityPoolradRoutes for ActivityPoolradBac
     fn panes_activity(&self) -> Result<Option<Value>, ActivityPoolradError> {
         let mut cache = locked(&self.panes);
         if self.clock.monotonic() >= cache.expires {
-            let mut client = locked(&self.client);
-            cache.data = self.refresh_panes(&mut client);
+            cache.data = self.refresh_panes();
             cache.expires = self.clock.monotonic() + PANES_TTL_SECONDS as f64;
         }
         Ok(cache.data.clone())
