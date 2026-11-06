@@ -21,6 +21,7 @@ use serde_json::{json, Value};
 
 use super::{run_daemon_captured, DaemonOptions, DaemonStartup};
 use crate::config::{CapturedPythonHome, Env};
+use crate::daemon_log::has_python_timestamp;
 use crate::error::DunkError;
 use crate::flock::loop_env::LoopTerminalFactory;
 use crate::flock::loops::LoopIntervals;
@@ -359,34 +360,27 @@ fn daemon_log_carries_the_python_lifecycle_lines() {
         std::process::id()
     );
     let lines: Vec<&str> = text.lines().collect();
-    // Every daemon of this test process reaches every configured sink (see `DaemonLog`), so
-    // only this daemon's own listening line (its socket path is unique) anchors the order.
-    let listening_at = lines
+    // Events are routed per daemon, so this file holds this daemon's lines only: exactly one
+    // bind line (this socket, this pid) and exactly one stop line, in that order. A parallel
+    // test daemon's lines would show up as a second bind or stop line.
+    let binds: Vec<usize> = lines
         .iter()
-        .position(|line| has_python_timestamp(line) && line.ends_with(&listening))
-        .unwrap_or_else(|| panic!("the bind line is logged: {text}"));
+        .enumerate()
+        .filter(|(_, line)| line.contains(" listening on "))
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(1, binds.len(), "exactly one bind line: {text}");
     assert!(
-        lines[listening_at + 1..].iter().any(|line| {
-            has_python_timestamp(line)
-                && line.ends_with(" INFO dunkingsheep.server: daemon stopped")
-        }),
-        "stop is logged after bind: {text}"
+        has_python_timestamp(lines[binds[0]]) && lines[binds[0]].ends_with(&listening),
+        "{text}"
     );
-}
-
-/// `YYYY-MM-DD HH:MM:SS,mmm ` as logging's default `asctime` prints it.
-fn has_python_timestamp(line: &str) -> bool {
-    let bytes = line.as_bytes();
-    bytes.len() > 24
-        && bytes[23] == b' '
-        && bytes[..23]
-            .iter()
-            .enumerate()
-            .all(|(index, byte)| match index {
-                4 | 7 => *byte == b'-',
-                10 => *byte == b' ',
-                13 | 16 => *byte == b':',
-                19 => *byte == b',',
-                _ => byte.is_ascii_digit(),
-            })
+    let stops: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.ends_with(" INFO dunkingsheep.server: daemon stopped"))
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(1, stops.len(), "exactly one stop line: {text}");
+    assert!(has_python_timestamp(lines[stops[0]]), "{text}");
+    assert!(binds[0] < stops[0], "bind is logged before stop: {text}");
 }

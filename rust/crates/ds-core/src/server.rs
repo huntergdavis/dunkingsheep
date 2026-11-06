@@ -450,9 +450,13 @@ fn admit_connection(
     }
     let wake = conn.try_clone().map_err(BindError::Io)?;
     let _ = conn.set_nonblocking(false);
+    let log = crate::daemon_log::ThreadLog::capture();
     let join = std::thread::Builder::new()
         .name(format!("dunk-connection-{id}"))
-        .spawn(move || serve_connection(dispatcher, conn, stop))
+        .spawn(move || {
+            log.adopt();
+            serve_connection(dispatcher, conn, stop)
+        })
         .map_err(BindError::Io)?;
     registry.workers.insert(id, ConnectionWorker { wake, join });
     Ok(())
@@ -789,22 +793,26 @@ pub fn spawn_parent_watch(pid: i64, env: Env) -> Result<ParentWatch, DunkError> 
     use nix::unistd::Pid;
     let stop = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
     let worker_stop = Arc::clone(&stop);
+    let log = crate::daemon_log::ThreadLog::capture();
     let worker = std::thread::Builder::new()
         .name("die-with-parent".into())
-        .spawn(move || loop {
-            let (lock, changed) = &*worker_stop;
-            let stopping = lock.lock().unwrap_or_else(|error| error.into_inner());
-            let (stopping, _) = changed
-                .wait_timeout_while(stopping, Duration::from_secs(2), |stopping| !*stopping)
-                .unwrap_or_else(|error| error.into_inner());
-            if *stopping {
-                return;
-            }
-            drop(stopping);
-            if kill(Pid::from_raw(pid as i32), None).is_err() {
-                tracing::warn!("parent pid {pid} is gone; a test-spawned daemon exits with it");
-                kill_own_process_group(&env);
-                std::process::exit(0);
+        .spawn(move || {
+            log.adopt();
+            loop {
+                let (lock, changed) = &*worker_stop;
+                let stopping = lock.lock().unwrap_or_else(|error| error.into_inner());
+                let (stopping, _) = changed
+                    .wait_timeout_while(stopping, Duration::from_secs(2), |stopping| !*stopping)
+                    .unwrap_or_else(|error| error.into_inner());
+                if *stopping {
+                    return;
+                }
+                drop(stopping);
+                if kill(Pid::from_raw(pid as i32), None).is_err() {
+                    tracing::warn!("parent pid {pid} is gone; a test-spawned daemon exits with it");
+                    kill_own_process_group(&env);
+                    std::process::exit(0);
+                }
             }
         })
         .map_err(|error| refusal(format!("cannot start parent watcher: {error}")))?;
@@ -849,9 +857,11 @@ pub fn install_signal_stop(stop: Arc<AtomicBool>, env: Env) -> Result<(), DunkEr
     set.add(Signal::SIGINT);
     nix::sys::signal::pthread_sigmask(SigmaskHow::SIG_BLOCK, Some(&set), None)
         .map_err(|e| DunkError::Refused(format!("cannot block signals: {e}")))?;
+    let log = crate::daemon_log::ThreadLog::capture();
     std::thread::Builder::new()
         .name("signals".into())
         .spawn(move || {
+            log.adopt();
             if let Ok(signal) = set.wait() {
                 tracing::info!("received signal {}, shutting down", signal as i32);
                 kill_own_process_group(&env);
@@ -886,17 +896,21 @@ impl SignalStop {
         .map_err(|error| refusal(format!("cannot block daemon signals: {error}")))?;
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop);
+        let log = crate::daemon_log::ThreadLog::capture();
         let waiter = std::thread::Builder::new()
             .name("daemon-signals".into())
-            .spawn(move || loop {
-                match set.wait() {
-                    Ok(Signal::SIGURG) => return Ok(()),
-                    Ok(signal) => {
-                        tracing::info!("received signal {}, shutting down", signal as i32);
-                        kill_own_process_group(&env);
-                        worker_stop.store(true, Ordering::SeqCst);
+            .spawn(move || {
+                log.adopt();
+                loop {
+                    match set.wait() {
+                        Ok(Signal::SIGURG) => return Ok(()),
+                        Ok(signal) => {
+                            tracing::info!("received signal {}, shutting down", signal as i32);
+                            kill_own_process_group(&env);
+                            worker_stop.store(true, Ordering::SeqCst);
+                        }
+                        Err(error) => return Err(error.to_string()),
                     }
-                    Err(error) => return Err(error.to_string()),
                 }
             });
         let waiter = match waiter {
