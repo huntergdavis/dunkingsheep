@@ -6171,4 +6171,64 @@ mod stuck_gap_tests {
             "the last four are the three newest transcripts and the candidate's own text"
         );
     }
+
+    // The in-process case: the candidate's text is already remembered when four transcripts
+    // follow. Python appends the transcripts first and skips the text (already present), so the
+    // cap drops the remembered text and keeps the last four transcripts. Only a fresh restore
+    // keeps the candidate's own text.
+    #[test]
+    fn rehydration_drops_an_already_remembered_candidate_text_after_four_transcripts() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state.json");
+        let before = persistent_recovery_flock(dir.path(), &state);
+        let mut env = live_pane(frame(TEXT, &[]));
+        let message = failed_candidate(&env, 1.0);
+        before.note_stuck_candidate(&message);
+        {
+            let mut candidates = before.stuck_candidates.lock().unwrap();
+            let entry = candidates.get_mut(PANE).expect("the candidate is recorded");
+            entry.transcript_texts = ["t1", "t2", "t3", "t4"].map(str::to_owned).to_vec();
+        }
+        before.save().unwrap();
+        let after = persistent_recovery_flock(dir.path(), &state);
+        after.restore_snapshot(&before.snapshot());
+        {
+            let mut config = after.stuck_config.lock().unwrap();
+            config.threshold_s = 1.0;
+            config.observation_interval_s = 0.1;
+            config.max_attempts = 1;
+        }
+        // The candidate's text is already remembered in-process before the bind tick.
+        after
+            .sent_text_by_pane
+            .lock()
+            .unwrap()
+            .insert(PANE.into(), vec![TEXT.into()]);
+        assert!(!after.unwedge(
+            &mut env,
+            PANE,
+            TEXT,
+            Some(99.5),
+            Some(&message),
+            100.0,
+            None,
+            true
+        ));
+        let rows: Vec<String> = after
+            .sent_text_by_pane
+            .lock()
+            .unwrap()
+            .get(PANE)
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|row| row.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert_eq!(
+            vec!["t1", "t2", "t3", "t4"],
+            rows,
+            "the remembered text is skipped and dropped by the cap, as in Python"
+        );
+    }
 }
