@@ -3,13 +3,20 @@
 #![forbid(unsafe_code)]
 
 pub mod auth_backend;
+pub mod dashboard_activity_backend;
 pub mod http_adapter;
+pub mod messages_backend;
+pub mod ops_board_runtime;
+pub mod ops_collector;
 pub mod ops_history;
+pub mod ops_summary;
+pub mod owner_fleet_backend;
 pub mod panes_backend;
 pub mod python_http;
 pub mod python_json;
 pub mod roster;
 pub mod routes;
+pub mod web_server;
 
 pub use routes::auth::RequestScheme;
 
