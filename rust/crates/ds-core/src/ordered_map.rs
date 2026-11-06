@@ -163,7 +163,7 @@ mod tests {
         let mut map = OrderedMap::new();
         map.insert("w9:p2".to_owned(), 1);
         map.insert("w9:p1".to_owned(), 2);
-        assert_eq!(Some(2), map.insert("w9:p2".to_owned(), 3));
+        assert_eq!(Some(1), map.insert("w9:p2".to_owned(), 3));
         assert_eq!(keys(&map), ["w9:p2", "w9:p1"]);
         assert_eq!(3, map["w9:p2"]);
     }
