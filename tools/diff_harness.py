@@ -10,7 +10,7 @@ diffed. This file stays Python; it is the harness every port task runs.
     tools/diff_harness.py replay --traffic rust/fixtures/traffic.jsonl \
         --against /tmp/ds-rs.sock --commands task_list,status
     tools/diff_harness.py golden --traffic rust/fixtures/traffic.jsonl \
-        --state rust/fixtures/state
+        --state rust/fixtures/state --tmux-socket ds-sandbox
 
 Wire protocol (dunk_server): one newline-delimited JSON request per connection,
 one newline-delimited JSON reply.
@@ -48,6 +48,13 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 FIXTURES = os.path.join(ROOT, "rust", "fixtures")
 DEFAULT_TRAFFIC = os.path.join(FIXTURES, "traffic.jsonl")
+# t1605 sandbox rule: recording, replay and golden runs reach the sandbox daemon only. The live
+# daemon's socket and config dir are refused by name, and a daemon started here gets an explicit
+# environment (sandbox_env), never the caller's TMUX*, HERDR_* or guard-shim PATH.
+LIVE_CONFIG_DIR = os.path.expanduser("~/.config/dunkingsheep")
+LIVE_SOCKET = os.path.join(LIVE_CONFIG_DIR, "dunkingsheep.sock")
+SANDBOX_PATH = "/usr/bin:/bin"
+TMUX_BIN = "/usr/bin/tmux"
 DEFAULT_VOLATILE = os.path.join(FIXTURES, "volatile.json")
 DEFAULT_STATE = os.path.join(FIXTURES, "state")
 
@@ -333,18 +340,63 @@ def replay(entries, against, commands=None, volatile=None, service_token=None,
 
 # -- golden: a frozen state dir, no live daemon -----------------------------
 
-def start_daemon(state_dir, socket_path, python=None, launcher=None, wait_s=30.0):
-    """Start `dunkingsheep serve` against a COPY of `state_dir` and wait for it."""
+def refuse_live_socket(socket_path):
+    """SystemExit for the live daemon's socket: recording, replay and golden runs use the sandbox."""
+    if os.path.realpath(socket_path) == os.path.realpath(LIVE_SOCKET):
+        raise SystemExit(f"refusing the live daemon socket {socket_path}: recording and replay "
+                         "target the sandbox socket only")
+
+
+def refuse_live_state(state_dir):
+    """SystemExit for the live state dir: a golden run copies a state dir, and the live one holds
+    credentials."""
+    if os.path.realpath(state_dir) == os.path.realpath(LIVE_CONFIG_DIR):
+        raise SystemExit(f"refusing the live state dir {state_dir}: a golden run copies a sandbox "
+                         "state dir only")
+
+
+def sandbox_env(copy, socket_path, tmux_socket, workdir, launcher, tmux_bin=TMUX_BIN):
+    """The daemon's whole environment: an explicit allowlist, never the caller's.
+
+    The caller's TMUX, TMUX_PANE, HERDR_* and PATH are not inherited (an agent pane carries the
+    guard shims on PATH), and tmux is reached only on the named sandbox server.
+    """
+    return {
+        "PATH": SANDBOX_PATH,
+        "HOME": os.path.join(workdir, "home"),
+        "LANG": "C.UTF-8",
+        "DUNKINGSHEEP_DIR": copy,
+        "DUNKINGSHEEP_SOCKET": socket_path,
+        "DUNKINGSHEEP_TERMINAL_BACKEND": "tmux",
+        "DUNKINGSHEEP_TMUX_SOCKET": tmux_socket,
+        "DUNKINGSHEEP_TMUX_BIN": tmux_bin,
+        "DUNKINGSHEEP_TMUX_REGISTRY": os.path.join(copy, "tmux-panes.json"),
+        "DUNKINGSHEEP_TMUX_GUARD_DIR": os.path.join(workdir, "no-guard"),
+        "DUNKINGSHEEP_CLI": launcher,
+        # A golden run must not touch the live fleet, including through its timers.
+        "DUNKINGSHEEP_NO_START_DAEMON": "1",
+    }
+
+
+def start_daemon(state_dir, socket_path, tmux_socket, python=None, launcher=None, wait_s=30.0,
+                 tmux_bin=TMUX_BIN):
+    """Start `dunkingsheep serve` against a COPY of `state_dir` and wait for it.
+
+    The daemon runs under sandbox_env(). An empty `tmux_socket` is refused: the daemon would then
+    use the default tmux server, which is the live fleet's.
+    """
+    if not tmux_socket:
+        raise SystemExit("start_daemon: name the sandbox tmux server (tmux -L name); without it the "
+                         "daemon would use the default, live tmux server")
+    refuse_live_state(state_dir)
+    refuse_live_socket(socket_path)
     python = python or sys.executable
     launcher = launcher or os.path.join(ROOT, "dunkingsheep")
     workdir = tempfile.mkdtemp(prefix="ds-golden-state-")
+    os.makedirs(os.path.join(workdir, "home"))
     copy = os.path.join(workdir, "state")
     shutil.copytree(state_dir, copy)
-    env = dict(os.environ)
-    env["DUNKINGSHEEP_DIR"] = copy
-    env["DUNKINGSHEEP_SOCKET"] = socket_path
-    # A golden run must not touch the live fleet, including through its timers.
-    env["DUNKINGSHEEP_NO_START_DAEMON"] = "1"
+    env = sandbox_env(copy, socket_path, tmux_socket, workdir, launcher, tmux_bin)
     log_path = os.path.join(workdir, "daemon.log")
     log = open(log_path, "wb")
     proc = subprocess.Popen([python, launcher, "serve", "--no-log-file"],
@@ -410,12 +462,17 @@ def main(argv=None):
     gold.add_argument("--traffic", default=DEFAULT_TRAFFIC)
     gold.add_argument("--state", default=DEFAULT_STATE)
     gold.add_argument("--commands", default="")
+    gold.add_argument("--tmux-socket", default="",
+                      help="the sandbox tmux server name (tmux -L); required, because the "
+                           "daemon must never use the default, live tmux server")
     gold.add_argument("--volatile", default=None)
     gold.add_argument("--socket", default=None)
 
     args = parser.parse_args(argv)
 
     if args.action == "record":
+        refuse_live_socket(args.target)
+        refuse_live_socket(args.listen)
         if not args.append and os.path.exists(args.out):
             os.unlink(args.out)
         if not os.path.exists(os.path.dirname(os.path.abspath(args.out))):
@@ -428,6 +485,7 @@ def main(argv=None):
         return 0
 
     if args.action == "replay":
+        refuse_live_socket(args.against)
         token = None
         if args.service_token_file:
             with open(args.service_token_file, encoding="utf-8") as handle:
@@ -446,10 +504,14 @@ def main(argv=None):
         if not os.path.isdir(args.state):
             print(f"golden: no state snapshot at {args.state}", file=sys.stderr)
             return 2
+        if not args.tmux_socket:
+            print("golden: --tmux-socket names the sandbox tmux server (tmux -L name)",
+                  file=sys.stderr)
+            return 2
         entries = load_traffic(args.traffic)
         socket_path = args.socket or os.path.join(
             tempfile.mkdtemp(prefix="ds-golden-sock-"), "daemon.sock")
-        proc, workdir, log = start_daemon(args.state, socket_path)
+        proc, workdir, log = start_daemon(args.state, socket_path, args.tmux_socket)
         try:
             commands = args.commands.split(",") if args.commands else None
             result = replay(entries, socket_path, commands=commands,

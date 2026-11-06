@@ -74,6 +74,7 @@ def main(argv=None):
     parser.add_argument("--volatile", default=None,
                         help="optional volatile-field rules for the harness")
     args = parser.parse_args(argv)
+    harness.refuse_live_socket(args.against)
     commands = [cmd.strip() for cmd in args.commands.split(",") if cmd.strip()]
     entries = harness.load_traffic(args.traffic)
     result = harness.replay(entries, args.against, commands=commands,
