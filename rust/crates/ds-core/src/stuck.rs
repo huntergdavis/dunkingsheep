@@ -1249,4 +1249,29 @@ mod tests {
         assert_eq!("wait", fresh.decide(&native, &config, 1000.0).action);
         assert!(fresh.decide(&native, &config, 1120.0).recovers());
     }
+
+    /// t3355 (t820 proof D) scheduled row 43: test_dunk_scheduled_recovery.py::
+    /// test_reported_sent_but_bright_pending_schedule_recovers (oracle 79bc92fa). A schedule reported
+    /// sent, with native text still pending, recovers once at the 120 s threshold. The recovery
+    /// records and spends its single attempt, so later ticks go terminal and press nothing more.
+    /// Tracker layer; the observer tick path is not reproduced.
+    #[test]
+    fn a_reported_sent_schedule_recovers_once_at_the_threshold() {
+        let config = Config {
+            threshold_s: 120.0,
+            max_attempts: 1,
+            cooldown_s: 60.0,
+            observation_interval_s: 20.0,
+            ..Config::default()
+        };
+        let pending = observation("scheduled text");
+        let mut tracker = Tracker::default();
+        assert_eq!("wait", tracker.decide(&pending, &config, 1000.0).action);
+        assert!(tracker.decide(&pending, &config, 1120.0).recovers());
+        for now in [1240.0, 1360.0] {
+            let later = tracker.decide(&pending, &config, now);
+            assert!(!later.recovers(), "a second key at {now}");
+            assert_eq!("terminal", later.action, "at {now}");
+        }
+    }
 }
