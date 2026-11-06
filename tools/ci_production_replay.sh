@@ -78,7 +78,10 @@ pane_main() {
   "${sandbox[@]}" "$PY" -I -c 'import sys; sys.path.insert(0, sys.argv[1]); import dunk_terminal as t; c, o, e = t.get_backend()._run(["list-panes", "-a", "-F", t.TmuxBackend.PANE_FORMAT]); print("list-panes exit", c, "stdout", repr(o), "stderr", repr(e))' "$ROOT" || true
   "${sandbox[@]}" "${cli[@]}" serve > "$temp/daemon.log" 2>&1 &
   daemon=$!
-  for _ in $(seq 1 150); do
+  # 600 ticks of 0.2 s, 120 s in all. A cold start of the Rust daemon on a loaded runner can take
+  # longer than 30 s. A daemon that is still starting is not stopped by the finish trap until this
+  # budget has run out. The owner pane's 200 s wait below still bounds the whole run.
+  for _ in $(seq 1 600); do
     if "$PY" -I -c 'import sys
 sys.path.insert(0, sys.argv[1])
 import diff_harness as harness

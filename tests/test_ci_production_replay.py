@@ -164,6 +164,13 @@ class CiReplayContractTests(unittest.TestCase):
         self.assertIn("'${DS_BIN:-}'", script)
         self.assertNotIn('"$PY" "$ROOT/dunkingsheep"', script.split("pane_main() {", 1)[1])
 
+    def test_the_sandbox_readiness_wait_is_120_seconds_and_below_the_owner_pane_wait(self):
+        script = read(SCRIPT)
+        self.assertIn("for _ in $(seq 1 600); do", script)
+        readiness_s = 600 * 0.2
+        self.assertEqual(120, readiness_s)
+        self.assertLess(readiness_s, 200)
+
     def test_the_rust_job_builds_the_binary_and_replays_against_it_within_its_timeout(self):
         workflow = read(WORKFLOW)
         self.assertIn(RUST_JOB, workflow)
