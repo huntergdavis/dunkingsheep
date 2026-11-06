@@ -641,4 +641,54 @@ mod tests {
         assert_eq!(0, run(&fixture, json!([{"pane_id":"w1:p1"}])).unwrap());
         assert_eq!("archived", state(&fixture, &old));
     }
+
+    #[test]
+    fn flock_retired_archive_rechecks_a_retirement_time_changed_at_the_boundary() {
+        let fixture = new_fixture();
+        retirement(&fixture, 100.0);
+        declared_lane(&fixture, "old-lane", 99.0);
+        let old = send_old(&fixture, "w1:p9");
+        let retired_path = fixture.retired_path.clone();
+        let count = run_with_boundary_change(&fixture, move |_| {
+            // Retired at 99: the declaration at 99 is no longer strictly older.
+            panes::retire(
+                "w1:p9",
+                "replaced",
+                None,
+                &["old-lane"],
+                &["old-lane"],
+                &retired_path,
+                Some(99.0),
+            )
+            .expect("re-retire at the boundary");
+        })
+        .unwrap();
+        assert_eq!(0, count);
+        assert_eq!("queued", state(&fixture, &old));
+    }
+
+    #[test]
+    fn flock_retired_archive_rechecks_a_retirement_alias_changed_at_the_boundary() {
+        let fixture = new_fixture();
+        retirement(&fixture, 100.0);
+        declared_lane(&fixture, "old-lane", 99.0);
+        let old = send_old(&fixture, "w1:p9");
+        let retired_path = fixture.retired_path.clone();
+        let count = run_with_boundary_change(&fixture, move |_| {
+            // The retired pane now claims another mailbox, so the declared name no longer matches.
+            panes::retire(
+                "w1:p9",
+                "replaced",
+                None,
+                &["other-lane"],
+                &["other-lane"],
+                &retired_path,
+                Some(100.0),
+            )
+            .expect("re-retire with another alias");
+        })
+        .unwrap();
+        assert_eq!(0, count);
+        assert_eq!("queued", state(&fixture, &old));
+    }
 }
