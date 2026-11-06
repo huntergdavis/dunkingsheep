@@ -2859,6 +2859,9 @@ pub(crate) struct StuckCandidate {
     pub consumed_at: Option<f64>,
     /// Unknown Python candidate keys are retained at top level for forward-compatible saves.
     pub extra_fields: Map<String, Value>,
+    /// The keys this row holds, in the order it holds them: the file's order for a restored row, and
+    /// Python's order of assignment for one made here. Empty means the base order.
+    pub key_order: Vec<String>,
 }
 
 /// Native evidence is retained until the final key boundary so its process and rollout can
@@ -3029,6 +3032,10 @@ impl StuckCandidate {
             retired_at: None,
             consumed_at: None,
             extra_fields: Map::new(),
+            key_order: CANDIDATE_BASE_KEYS
+                .iter()
+                .map(|key| (*key).to_owned())
+                .collect(),
         }
     }
 }
@@ -3062,50 +3069,119 @@ const CANDIDATE_SNAPSHOT_FIELDS: &[&str] = &[
     "consumed_at",
 ];
 
-pub(crate) fn candidate_snapshot(candidate: &StuckCandidate) -> Value {
+/// The keys `_note_stuck_candidate` writes for every candidate, in Python's literal order. A candidate
+/// made in this process starts from this order; a restored row keeps the order its file gave it.
+const CANDIDATE_BASE_KEYS: &[&str] = &[
+    "message_id",
+    "pane_id",
+    "created_at",
+    "press_enter",
+    "status",
+    "kind",
+    "scheduled",
+    "source",
+    "notify_for",
+    "schedule_template",
+    "typed_at",
+    "text",
+    "label",
+    "generation",
+    "eligible",
+    "superseded_by",
+];
+
+/// Keys Python's recovery code adds after the base set, in the order they are first assigned. One of
+/// these is written only when it is set: a null or an empty list is not set. A row that already lists
+/// the key keeps it, null included.
+const CANDIDATE_LATER_KEYS: &[&str] = &[
+    "transcript_texts",
+    "native_binding",
+    "recovery_outcome",
+    "recovery_detail",
+    "recovered_at",
+    "receipts_reconciled",
+    "native_refusal",
+    "unobservable_logged",
+    "native_recovery",
+    "retired_at",
+    "consumed_at",
+];
+
+/// The value this candidate holds for one key the type models (null when that field is unset). `None`
+/// for any other key: the caller then reads it from the unknown keys kept from the file.
+fn candidate_value(pane: &str, candidate: &StuckCandidate, key: &str) -> Option<Value> {
     let native_binding = candidate
         .native_binding
         .as_ref()
         .map(|(pid, start, session)| json!([pid, start, session]));
-    let known = json!({
-        "message_id": candidate.message_id,
-        "created_at": candidate.created_at,
-        "press_enter": candidate.press_enter,
-        "status": candidate.status,
-        "kind": candidate.kind,
-        "scheduled": candidate.scheduled,
-        "source": candidate.source,
-        "notify_for": candidate.notify_for,
-        "text": candidate.text,
-        "label": candidate.label,
-        "generation": candidate.generation,
-        "eligible": candidate.eligible,
-        "superseded_by": candidate.superseded_by,
-        "transcript_texts": candidate.transcript_texts,
-        "typed_at": candidate.typed_at,
-        "native_binding": native_binding,
-        "recovery_outcome": candidate.recovery_outcome,
-        "recovery_detail": candidate.recovery_detail,
-        "recovered_at": candidate.recovered_at,
-        "receipts_reconciled": candidate.receipts_reconciled,
-        "native_refusal": candidate.native_refusal,
-        "unobservable_logged": candidate.unobservable_logged,
-        "native_recovery": candidate.native_recovery,
-        "schedule_template": candidate.schedule_template,
-        "retired_at": candidate.retired_at,
-        "consumed_at": candidate.consumed_at,
-    });
-    let mut snapshot = candidate.extra_fields.clone();
-    if let Some(fields) = known.as_object() {
-        snapshot.extend(fields.clone());
+    let value = match key {
+        "message_id" => json!(candidate.message_id),
+        "pane_id" => json!(pane),
+        "created_at" => json!(candidate.created_at),
+        "press_enter" => json!(candidate.press_enter),
+        "status" => json!(candidate.status),
+        "kind" => json!(candidate.kind),
+        "scheduled" => json!(candidate.scheduled),
+        "source" => json!(candidate.source),
+        "notify_for" => json!(candidate.notify_for),
+        "schedule_template" => json!(candidate.schedule_template),
+        "typed_at" => json!(candidate.typed_at),
+        "text" => json!(candidate.text),
+        "label" => json!(candidate.label),
+        "generation" => json!(candidate.generation),
+        "eligible" => json!(candidate.eligible),
+        "superseded_by" => json!(candidate.superseded_by),
+        "transcript_texts" => json!(candidate.transcript_texts),
+        "native_binding" => match &candidate.native_binding_invalid {
+            Some(invalid) => invalid.clone(),
+            None => json!(native_binding),
+        },
+        "recovery_outcome" => json!(candidate.recovery_outcome),
+        "recovery_detail" => json!(candidate.recovery_detail),
+        "recovered_at" => json!(candidate.recovered_at),
+        "receipts_reconciled" => json!(candidate.receipts_reconciled),
+        "native_refusal" => json!(candidate.native_refusal),
+        "unobservable_logged" => json!(candidate.unobservable_logged),
+        "native_recovery" => json!(candidate.native_recovery),
+        "retired_at" => json!(candidate.retired_at),
+        "consumed_at" => json!(candidate.consumed_at),
+        _ => return candidate.extra_fields.get(key).cloned(),
+    };
+    Some(value)
+}
+
+/// One stuck-candidate row, in the layout Python writes. The row's keys come out in the order the row
+/// holds them, with presence kept. Keys this candidate sets that the row did not list come after them,
+/// and unknown keys from the file come last.
+pub(crate) fn candidate_snapshot(pane: &str, candidate: &StuckCandidate) -> Value {
+    let order: Vec<String> = if candidate.key_order.is_empty() {
+        CANDIDATE_BASE_KEYS
+            .iter()
+            .map(|key| (*key).to_owned())
+            .collect()
+    } else {
+        candidate.key_order.clone()
+    };
+    let mut row = Map::new();
+    for key in &order {
+        let value = candidate_value(pane, candidate, key).unwrap_or(Value::Null);
+        row.insert(key.clone(), value);
     }
-    if !candidate.typed_at_present {
-        snapshot.remove("typed_at");
+    for key in CANDIDATE_LATER_KEYS {
+        if row.contains_key(*key) {
+            continue;
+        }
+        let value = candidate_value(pane, candidate, key).unwrap_or(Value::Null);
+        if !value.is_null() && value != json!([]) {
+            row.insert((*key).to_owned(), value);
+        }
     }
-    if let Some(invalid) = &candidate.native_binding_invalid {
-        snapshot.insert("native_binding".into(), invalid.clone());
+    for (key, value) in &candidate.extra_fields {
+        if !row.contains_key(key) {
+            row.insert(key.clone(), value.clone());
+        }
     }
-    Value::Object(snapshot)
+    Value::Object(row)
 }
 
 pub(crate) fn candidate_from_snapshot(value: &Value) -> Option<StuckCandidate> {
@@ -3192,9 +3268,14 @@ pub(crate) fn candidate_from_snapshot(value: &Value) -> Option<StuckCandidate> {
         retired_at: row.get("retired_at").and_then(Value::as_f64),
         consumed_at: row.get("consumed_at").and_then(Value::as_f64),
         extra_fields,
+        key_order: row.keys().cloned().collect(),
     })
 }
 
+/// One queued outbox row, in exactly the layout Python's `dunk_core._save` writes: these 13 keys, in
+/// this order. Python writes no press_enter, attempt_generation, scheduled, schedule_template, detail,
+/// finished_at or typed_at for an outbox row, so this writer writes none of them either. A restart
+/// restores those fields to Python's defaults (the post-cutover bug, t3370).
 pub(crate) fn message_snapshot(message: &Message) -> Value {
     json!({
         "id": message.id,
@@ -3202,24 +3283,16 @@ pub(crate) fn message_snapshot(message: &Message) -> Value {
         "target_label": message.target_label,
         "text": message.text,
         "source": message.source,
-        "status": message.status,
-        "hold_while_typing": message.hold_while_typing,
         "kind": message.kind,
-        "press_enter": message.press_enter,
-        "scheduled": message.scheduled,
-        "schedule_template": message.schedule_template,
-        "attempt_generation": message.attempt_generation,
+        "hold_while_typing": message.hold_while_typing,
         "is_notice": message.is_notice,
         "notify_for": message.notify_for,
-        "detail": message.detail,
         "holds": message.holds,
         "next_attempt_at": message.next_attempt_at,
         "hold_signature": message.hold_signature.as_ref().map(|text| {
             json!([message.hold_signature_kind.as_deref().unwrap_or("box"), text])
         }),
         "created_at": message.created_at,
-        "finished_at": message.finished_at,
-        "typed_at": message.typed_at,
     })
 }
 

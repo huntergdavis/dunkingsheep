@@ -36,6 +36,7 @@ pub mod lock;
 pub mod memory;
 pub mod metrics;
 pub mod native_session;
+pub mod ordered_map;
 pub mod owner;
 pub mod pane_record;
 pub mod panes;

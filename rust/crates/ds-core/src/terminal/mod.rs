@@ -71,6 +71,18 @@ impl Pane {
     pub fn tab_id(&self) -> String {
         self.pane_id.split(':').next().unwrap_or("").to_string()
     }
+
+    /// The measured column count, or `None` when tmux reported none. The parser stores an
+    /// absent or unreadable geometry field as 0, and tmux never reports a 0-cell pane, so 0
+    /// means "not known" (the Python's None). The JSON routes emit null for it.
+    pub fn known_width(&self) -> Option<i64> {
+        (self.width > 0).then_some(self.width)
+    }
+
+    /// The measured row count, or `None` when tmux reported none (see [`Pane::known_width`]).
+    pub fn known_height(&self) -> Option<i64> {
+        (self.height > 0).then_some(self.height)
+    }
 }
 
 /// One tab (window), as `TAB_FORMAT` describes it.

@@ -181,6 +181,43 @@ fn production_allocation_status_reads_shared_cache_without_running_a_tick() {
 }
 
 #[test]
+fn production_allocation_without_peer_credentials_is_refused_and_writes_nothing() {
+    // Python row 57, peer None: a request with no peer credentials is refused for register and
+    // offer even when it claims a pane, and nothing is written. This is the in-process form of
+    // the missing-peer half. A real Linux unix socket always carries SO_PEERCRED, so the socket
+    // itself cannot produce this case.
+    let (_dir, services) = services();
+    let mut handlers = api::Dispatcher::new();
+    handlers.register_runtime_control();
+    let dispatcher = services.dispatcher(handlers);
+    // w2:p2 is an owner in this fixture's roles registry, so the role check passes and the refusal
+    // comes from the peer check. w1:p1 is a worker, and a worker claim is refused by the role check
+    // before the peer is looked at, which is why it is not used here.
+    let no_peer = RequestCtx {
+        caller: None,
+        self_pane_id: Some("w2:p2".into()),
+        socket_peer: Some(false),
+        ..RequestCtx::default()
+    };
+    for args in [
+        json!({"action":"register","pane_id":"w2:p2","pools":["code"],"roles":["worker"],"skills":["rust"]}),
+        json!({"action":"offer","task_id":"t999","pool":"code"}),
+    ] {
+        let error = dispatcher
+            .dispatch("allocation", &args, &no_peer)
+            .expect_err("a request without peer credentials must be refused");
+        assert!(error.to_string().contains("not authenticated"), "{error}");
+    }
+    let tasks = services.flock().stores().tasks.unwrap();
+    let status = services
+        .runtime_handle()
+        .block_on(tasks.allocation_status())
+        .unwrap();
+    assert_eq!(status["workers"], json!([]), "{status}");
+    assert_eq!(status["offers"], json!([]), "{status}");
+}
+
+#[test]
 fn production_allocation_mutations_use_authenticated_canonical_tasks_and_preserve_cache() {
     let (_dir, services) = services();
     let tasks = services.flock().stores().tasks.unwrap();
