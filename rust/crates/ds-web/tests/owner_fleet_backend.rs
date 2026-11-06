@@ -462,6 +462,55 @@ async fn missing_daemon_and_bad_summary_path_are_reported_without_starting_servi
 }
 
 #[tokio::test]
+async fn stale_daemon_socket_without_listener_is_reported_unavailable() {
+    let dir = fixture_dir();
+    init_desk_db(&dir.path().join("messages.sqlite3"));
+    let socket = fixture_socket();
+    // A dead daemon leaves its socket file behind with nothing listening on it.
+    {
+        let _stale_listener = UnixListener::bind(&socket).unwrap();
+    }
+    let rpc = rpc_backend(dir.path(), &socket);
+    let backend = make_backend(
+        dir.path(),
+        rpc.clone(),
+        dir.path().join("missing-ops.sqlite3"),
+    );
+    let app = router(backend, rpc);
+    let (status, cap) = body(
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/capability?pane=%257")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert!(cap["detail"]
+        .as_str()
+        .unwrap()
+        .contains("could not describe"));
+    let (status, fleet) = body(
+        app.oneshot(
+            Request::builder()
+                .uri("/api/fleet")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(fleet["state"], "unavailable");
+    fs::remove_file(socket).unwrap();
+}
+
+#[tokio::test]
 async fn operations_summary_reads_existing_collector_schema_and_returns_real_payload() {
     let dir = fixture_dir();
     init_desk_db(&dir.path().join("messages.sqlite3"));
