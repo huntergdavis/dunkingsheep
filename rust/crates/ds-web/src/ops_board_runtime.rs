@@ -988,11 +988,8 @@ fn read_panes(daemon: &dyn BoardCalls) -> Result<Value, PyError> {
     }
     let status_is =
         |row: &Value, wanted: &str| field_of(row, "agent_status").as_str() == Some(wanted);
-    let working = items
-        .iter()
-        .filter(|row| status_is(*row, "working"))
-        .count();
-    let idle = items.iter().filter(|row| status_is(*row, "idle")).count();
+    let working = items.iter().filter(|row| status_is(row, "working")).count();
+    let idle = items.iter().filter(|row| status_is(row, "idle")).count();
     let gap = iter_values(field(&listing, "registry_gap"))?;
     let mut dead = Vec::new();
     for row in &gap {
@@ -1012,14 +1009,14 @@ fn read_panes(daemon: &dyn BoardCalls) -> Result<Value, PyError> {
                 Some("working" | "idle")
             )
     };
-    let bare = items.iter().filter(|row| !is_lane(*row)).count();
+    let bare = items.iter().filter(|row| !is_lane(row)).count();
     let unknown_turns = items
         .iter()
-        .filter(|row| is_lane(*row) && !status_is(*row, "working") && !status_is(*row, "idle"))
+        .filter(|row| is_lane(row) && !status_is(row, "working") && !status_is(row, "idle"))
         .count();
     let registry_alive = gap
         .iter()
-        .filter(|row| field_of(*row, "alive") == &Value::Bool(true))
+        .filter(|row| field_of(row, "alive") == &Value::Bool(true))
         .count();
     Ok(json!({
         "state": "ok",
@@ -2095,7 +2092,7 @@ fn seconds_until(now: DateTime<Utc>, value: &Value) -> Option<i64> {
         return None;
     }
     let micros = (moment_of(value)? - now).num_microseconds()?;
-    (micros > 0).then(|| micros / 1_000_000)
+    (micros > 0).then_some(micros / 1_000_000)
 }
 
 /// Python `json.dumps` spelling of a dict key: strings as-is, scalars as their JSON text.

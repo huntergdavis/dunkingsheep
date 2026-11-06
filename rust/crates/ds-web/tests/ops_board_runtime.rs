@@ -138,6 +138,8 @@ fn start_daemon(dir: &Path, handler: Handler) -> Daemon {
     Daemon { socket, calls }
 }
 
+/// The web desk is pane-less, so its client writes with a service token, as the composition
+/// will. Without one the client refuses `task_update` locally (identity refused).
 fn shared_client(socket: &Path) -> SharedDaemon {
     SharedDaemon::new(FlockClient::new(
         UnixTransport {
@@ -146,7 +148,7 @@ fn shared_client(socket: &Path) -> SharedDaemon {
         None,
         "ops-board-test".to_owned(),
         Duration::from_secs(5),
-        None,
+        Some("ops-board-test-token".to_owned()),
     ))
 }
 
@@ -954,7 +956,7 @@ fn routes_serve_cold_refresh_stale_failure_and_restart_states() {
             config(h.dir.path(), Duration::from_secs(3600)),
             shared_client(&h.daemon.socket),
             open_switchable_for_routes,
-            Arc::new(TestClock(Mutex::new(h.clock.0.lock().unwrap().clone()))),
+            Arc::new(TestClock(Mutex::new(*h.clock.0.lock().unwrap()))),
             h.usage.clone(),
             Dispatch::Inline,
         );
