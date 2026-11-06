@@ -6,6 +6,9 @@
 #                        complete current-main workspace passed `-D warnings`.
 #   clippy               blocking after the cleanup batch merged and current-main
 #                        CI ran the exact command successfully.
+#   production-replay-send (t1605 slice 3) runs the send replay against a throwaway sandbox
+#                        daemon in an owner pane, with its own tmux server and no secrets.
+#                        It is not a required check yet.
 name: rust
 
 on:
@@ -49,3 +52,22 @@ jobs:
         with:
           components: clippy
       - run: cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets -- -D warnings
+
+  # t1605 slice 3. The job creates its own throwaway sandbox inside one temp directory: a tmux server
+  # on a private socket, a sandbox daemon with its own state, and an owner pane (pane %2). The owner
+  # registers itself with superuser recover from its own process tree, then replays the recorded
+  # send traffic from there. No token, no secret, and no live socket. The unit tests run first.
+  production-replay-send:
+    name: production replay (send)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install tmux
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq tmux
+      - name: gate unit tests (no daemon, no tmux)
+        run: |
+          for test in test_production_replay test_diff_harness_sandbox test_send_scenario test_ci_production_replay; do
+            python3 -I "tests/$test.py"
+          done
+      - name: replay the recorded send traffic from an owner pane
+        run: bash tools/ci_production_replay.sh
