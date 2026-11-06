@@ -45,7 +45,7 @@ so these reads must move before the Python tree is deleted:
 - `dunk_memory.py`: `ds-core` `src/memory/jsonl_tests.rs`. The test runs `src/memory/throttle_oracle.py`
   from the repo root, and that oracle imports `dunk_memory`.
 - `dunk_tasks.py` and `dunk_core.py`: `ds-core` `src/tasks/wire/tests.rs`.
-- `dunk_poolrad.py` and `tools/overlay/*.py`: `ds-core` `src/server_runtime/poolrad/tests.rs`.
+- `dunk_poolrad.py`: `ds-core` `src/server_runtime/poolrad/tests.rs`.
 - `dunk_watchdog_deadman.py`: `ds-core` `src/watchdog_deadman.rs`, `src/watchdog_deadman/check_tests.rs`,
   and `src/watchdog_deadman/main_tests.rs`. The last also imports `tests/test_dunk_watchdog.py`.
 - `dunk_health.py`, `dunk_state.py`, `dunk_api.py`, and `tools/diff_harness.py`: `ds-core`
@@ -64,9 +64,10 @@ so these reads must move before the Python tree is deleted:
 
 Scope. This list covers reads of the Python tree, and of root data, by test builds. Other root files are
 not Python and do not depend on the Python tree: `packaging/watchdog.example.json` (ds-core watchdog
-tests, and `ds-cli` `tests/command_routes.rs`), the `packaging/rust-release/` scripts (`ds-cli`
-`tests/release_layout.rs`), and `docs/GUIDE.md` (ds-core `src/help/tests.rs`). Runtime reads are not build
-reads, so they are not listed. For example, `ds-core` `src/poolrad.rs` runs
+tests, and `ds-cli` `tests/command_routes.rs`), and `docs/GUIDE.md` (ds-core `src/help/tests.rs`). The
+`packaging/rust-release/` install does depend on Python: `install-release.sh` takes `--poll` (documented as
+`tools/dunk_poll.py`) and copies it into each release as `dunk-poll.py`, so that copy is an install-time
+input, not a test read. Runtime reads are not build reads, so they are not listed. For example, `ds-core` `src/poolrad.rs` runs
 `tools/overlay/strict_candidate_queue.py` from the repo named by `DUNKINGSHEEP_POOLRAD_REPO`. The ignored
 test in `src/context/golden_tests.rs` needs `tools/context_live_diff.py` and does not run by default.
 
