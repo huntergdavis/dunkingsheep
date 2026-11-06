@@ -290,5 +290,23 @@ class GoldenEntryTests(HarnessTestCase):
         self.assertEqual(["status"], [entry["cmd"] for entry in harness.load_traffic(path)])
 
 
+class CheckedInFixtureTests(HarnessTestCase):
+    """The checked-in traffic holds a send_text request. Replaying it against a daemon that answers
+    with the recorded reply gives a request count above zero and zero diffs."""
+
+    def test_checked_in_send_text_request_replays_with_zero_diffs(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        entries = harness.load_traffic(os.path.join(root, "rust", "fixtures", "traffic.jsonl"))
+        send_text = [entry for entry in entries if entry["cmd"] == "send_text"]
+        self.assertTrue(send_text, "rust/fixtures/traffic.jsonl needs a send_text request")
+        daemon = FakeDaemon({"send_text": send_text[0]["response"]},
+                            self.path("daemon.sock")).start()
+        self.addCleanup(daemon.stop)
+        result = harness.replay(entries, daemon.path, commands=["send_text"], verbose=False)
+        self.assertGreater(result["sent"], 0, "the replayed request count must be above zero")
+        self.assertEqual([], result["errors"])
+        self.assertEqual([], result["diffs"])
+
+
 if __name__ == "__main__":
     unittest.main()

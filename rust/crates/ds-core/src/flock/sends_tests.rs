@@ -4901,3 +4901,190 @@ fn cancelled_captured_message_survives_history_eviction_without_reinsertion() {
     assert_eq!(history.len(), 50);
     assert!(history.iter().all(|message| message.id != "evicted"));
 }
+
+/// Python `test_queued_messages_keep_their_order_per_pane`: three messages wait behind a human
+/// draft and go out in the order they were queued. Each `outbox_step` touches only the queue head.
+#[test]
+fn test_queued_messages_keep_their_order_per_pane() {
+    use std::sync::atomic::AtomicBool;
+
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Flock::new(dir.path().join("launches.json"), dir.path(), false);
+    let mut queued = Vec::new();
+    for text in ["first", "second", "third"] {
+        let mut message = Message::new(&format!("m-{text}"), P, "pane", text, "test");
+        message.press_enter = false;
+        queued.push(message);
+    }
+    flock.outbox.lock().unwrap().insert(P.into(), queued);
+    let mut pane = Pane {
+        receipt_ok: true,
+        ..Pane::default()
+    };
+    pane.statuses.insert(P.into(), "idle".into());
+    pane.panes = vec![serde_json::json!({
+        "pane_id": P,
+        "pane_pid": std::process::id(),
+    })];
+    pane.screens
+        .insert(P.into(), submit_pending_screen("human draft"));
+    let stopped = AtomicBool::new(false);
+    let step = |pane: &mut Pane, now: f64| {
+        outbox_step(&flock, pane, P, now, &stopped, &|_| false, &mut || None)
+    };
+    let order = |flock: &Flock| -> Vec<String> {
+        flock.outbox_snapshot()[P]
+            .iter()
+            .map(|message| message.id.clone())
+            .collect()
+    };
+
+    assert_eq!(OutboxStep::Held, step(&mut pane, 100.0));
+    assert!(pane.typed.is_empty(), "a human draft is never typed over");
+    assert_eq!(vec!["m-first", "m-second", "m-third"], order(&flock));
+
+    pane.screens.insert(P.into(), hint_screen());
+    for _ in 0..3 {
+        assert_eq!(OutboxStep::Delivered, step(&mut pane, 100.0));
+    }
+    assert_eq!(OutboxStep::Empty, step(&mut pane, 100.0));
+    let sent: Vec<String> = flock
+        .message_history
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|message| message.id.clone())
+        .collect();
+    assert_eq!(vec!["m-first", "m-second", "m-third"], sent);
+    let typed: Vec<String> = pane.typed.iter().map(|(_, text)| text.clone()).collect();
+    assert_eq!(vec!["first", "second", "third"], typed);
+}
+
+/// Python `test_a_failed_send_is_reported_not_retried`: a send that fails is reported as failed,
+/// is not left queued, and is never attempted again.
+#[test]
+fn test_a_failed_send_is_reported_not_retried() {
+    use std::sync::atomic::AtomicBool;
+
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Flock::new(dir.path().join("launches.json"), dir.path(), false);
+    let mut message = Message::new("m-doomed", P, "pane", "doomed", "test");
+    message.hold_while_typing = false;
+    message.press_enter = false;
+    let waiter = message.done.clone();
+    flock.outbox.lock().unwrap().insert(P.into(), vec![message]);
+    let mut pane = Pane {
+        receipt_ok: false,
+        ..Pane::default()
+    };
+    pane.panes = vec![serde_json::json!({
+        "pane_id": P,
+        "pane_pid": std::process::id(),
+    })];
+
+    assert_eq!(
+        DeliveryOutcome::Failed,
+        flock.deliver_message("m-doomed", 100.0, &mut pane, || None)
+    );
+    assert!(
+        waiter.is_set(),
+        "the waiting sender is released with the failure"
+    );
+    {
+        let history = flock.message_history.lock().unwrap();
+        let last = history.last().expect("the failed send is recorded");
+        assert_eq!(
+            ("m-doomed", "failed"),
+            (last.id.as_str(), last.status.as_str())
+        );
+    }
+    let queued = flock
+        .outbox_snapshot()
+        .get(P)
+        .map_or(0, |queue| queue.len());
+    assert_eq!(0, queued, "a failed send is not left queued");
+    assert_eq!(1, pane.typed.len(), "the send was attempted once");
+
+    let stopped = AtomicBool::new(false);
+    assert_eq!(
+        OutboxStep::Empty,
+        outbox_step(
+            &flock,
+            &mut pane,
+            P,
+            101.0,
+            &stopped,
+            &|_| false,
+            &mut || None
+        )
+    );
+    assert_eq!(
+        DeliveryOutcome::AlreadyDecided,
+        flock.deliver_message("m-doomed", 102.0, &mut pane, || None)
+    );
+    assert_eq!(1, pane.typed.len(), "a failed send is never retried");
+}
+
+/// Python `test_a_refused_message_keeps_its_place_and_is_delivered_later`: a refused head stays
+/// queued and is not typed over, and the message behind it keeps its place. Both go out later.
+#[test]
+fn test_a_refused_message_keeps_its_place_and_is_delivered_later() {
+    use std::sync::atomic::AtomicBool;
+
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Flock::new(dir.path().join("launches.json"), dir.path(), false);
+    let mut refused = Message::new("m-hello", P, "pane", "hello", "test");
+    refused.press_enter = false;
+    let mut behind = Message::new("m-after", P, "pane", "after", "test");
+    behind.press_enter = false;
+    flock
+        .outbox
+        .lock()
+        .unwrap()
+        .insert(P.into(), vec![refused, behind]);
+    let mut pane = Pane {
+        receipt_ok: true,
+        ..Pane::default()
+    };
+    pane.statuses.insert(P.into(), "idle".into());
+    pane.panes = vec![serde_json::json!({
+        "pane_id": P,
+        "pane_pid": std::process::id(),
+    })];
+    pane.screens
+        .insert(P.into(), submit_pending_screen("human draft"));
+    let stopped = AtomicBool::new(false);
+    let step = |pane: &mut Pane, now: f64| {
+        outbox_step(&flock, pane, P, now, &stopped, &|_| false, &mut || None)
+    };
+
+    assert_eq!(OutboxStep::Held, step(&mut pane, 100.0));
+    assert!(pane.typed.is_empty(), "the refusal types nothing");
+    let queue = flock.outbox_snapshot();
+    assert_eq!(
+        vec![("m-hello", "queued", 1), ("m-after", "queued", 0)],
+        queue[P]
+            .iter()
+            .map(|message| (message.id.as_str(), message.status.as_str(), message.holds))
+            .collect::<Vec<_>>()
+    );
+    // The same draft, still there: the held head waits for its backoff and is not retried.
+    assert_eq!(OutboxStep::Due, step(&mut pane, 100.0));
+    assert!(pane.typed.is_empty());
+
+    // The draft is gone. Both messages go out, in the order they were queued.
+    pane.screens.insert(P.into(), hint_screen());
+    assert_eq!(OutboxStep::Delivered, step(&mut pane, 106.0));
+    assert_eq!(OutboxStep::Delivered, step(&mut pane, 106.0));
+    assert_eq!(OutboxStep::Empty, step(&mut pane, 106.0));
+    let typed: Vec<String> = pane.typed.iter().map(|(_, text)| text.clone()).collect();
+    assert_eq!(vec!["hello", "after"], typed);
+    let sent: Vec<String> = flock
+        .message_history
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|message| message.id.clone())
+        .collect();
+    assert_eq!(vec!["m-hello", "m-after"], sent);
+}
