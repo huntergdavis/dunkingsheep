@@ -174,7 +174,7 @@ class CiReplayContractTests(unittest.TestCase):
         checkout = job[job.index("actions/checkout@v4"):job.index("- name: install tmux")]
         self.assertIn("persist-credentials: false", checkout)
         timeout_s = int(re.search(r"timeout-minutes: (\d+)", job).group(1)) * 60
-        self.assertLessEqual(timeout_s, 20 * 60)
+        self.assertLessEqual(timeout_s, 10 * 60)
         self.assertIn("for test in test_production_replay test_diff_harness_sandbox "
                       "test_send_scenario test_ci_production_replay; do", job)
 
