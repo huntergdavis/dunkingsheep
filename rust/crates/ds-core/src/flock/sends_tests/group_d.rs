@@ -251,16 +251,23 @@ fn wiring_25_unbound_failure_has_one_named_diagnostic_and_never_recovers() {
 fn scheduled_40_styled_schedule_survives_restart_with_provenance_for_echo() {
     let (flock, mut env, created) = scheduled_fixture("failed", i64::from(std::process::id()));
     let echo = "[inbox] new message for Codex. Read it with: dunkingsheep inbox read";
-    flock
-        .sent_text_by_pane
-        .lock()
-        .unwrap()
-        .insert("%1".into(), vec![echo.into()]);
     env.screens.insert(
         "%1".into(),
         format!("\x1b[1;2m›\x1b[0m {echo}\n\n\x1b[1m›\x1b[0m {TEXT}\n\n\n{FOOTER}"),
     );
+    // Python keeps sent_text_by_pane out of a restart (dunk_core.py:6155). The echo is recognised
+    // after the restart from the inbox-notice form alone, so no provenance is seeded here.
+    let expected = flock.stuck_candidates.lock().unwrap()["%1"].clone();
     let payload = flock.snapshot();
+    // Control: the same scenario without a restart presses once at two minutes.
+    observe(&flock, &mut env, created + 1.0);
+    observe(&flock, &mut env, created + 120.0);
+    assert_eq!(
+        1,
+        env.keys.len(),
+        "control: the scenario presses once without a restart"
+    );
+    env.keys.clear();
     drop(flock);
     let restarted = Flock::new(
         std::path::PathBuf::from("/nonexistent/launches.json"),
@@ -268,6 +275,19 @@ fn scheduled_40_styled_schedule_survives_restart_with_provenance_for_echo() {
         false,
     );
     restarted.restore_snapshot(&payload);
+    let restored = restarted.stuck_candidates.lock().unwrap()["%1"].clone();
+    assert_eq!(
+        expected.typed_at, restored.typed_at,
+        "typed_at survives the restart"
+    );
+    assert_eq!(
+        expected.generation, restored.generation,
+        "the attempt generation survives"
+    );
+    assert!(
+        restored.eligible,
+        "the restored candidate is still eligible"
+    );
     observe(&restarted, &mut env, created + 1.0);
     assert!(env.keys.is_empty(), "no press before two minutes");
     observe(&restarted, &mut env, created + 120.0);
