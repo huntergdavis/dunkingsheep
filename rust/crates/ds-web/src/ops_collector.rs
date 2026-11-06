@@ -29,7 +29,6 @@
 use std::{
     cmp::Ordering,
     collections::BTreeMap,
-    io::Read as _,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread::JoinHandle,
@@ -1485,8 +1484,7 @@ fn py_strip(text: &str) -> &str {
 /// Python `Path(text).name`: the last component, ignoring empty and `.` parts.
 fn path_name(text: &str) -> &str {
     text.split('/')
-        .filter(|part| !part.is_empty() && *part != ".")
-        .next_back()
+        .rfind(|part| !part.is_empty() && *part != ".")
         .unwrap_or("")
 }
 

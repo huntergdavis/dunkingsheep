@@ -37,6 +37,16 @@ const PYTHON_SOURCE: &str = concat!(
     "/../../../bridges/ops_metrics.py"
 );
 const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+
+/// One `pane_samples` row as the success test reads it back.
+type PaneSampleRow = (
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    String,
+);
 const CHECKPOINT_PATH: &str = "docs/re/function_accounting_checkpoint.json";
 const CENSUS_PATH: &str = "docs/re/function_ceiling_census.json";
 /// `sha256` of `{"a": "x", "b": 2}`, the Python `json.dumps(sort_keys=True)` spelling of the
@@ -369,14 +379,7 @@ fn success_run_writes_every_table_with_python_values() {
         "{}"
     );
 
-    let panes: Vec<(
-        String,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        String,
-    )> = {
+    let panes: Vec<PaneSampleRow> = {
         let mut statement = conn
             .prepare("SELECT pane_id,agent_kind,agent_status,agent_name,lane_name,role FROM pane_samples WHERE run_id=? ORDER BY pane_id")
             .unwrap();
