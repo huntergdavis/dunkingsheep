@@ -23,6 +23,15 @@ SEND_COMMANDS = (
     "delivery_capability",
 )
 
+# t1605 slice 4: the task-follow replay (tools/task_follow_scenario.py). task_add seeds a task
+# first; task_followers is replayed twice, before and after the unfollow.
+TASK_FOLLOW_COMMANDS = (
+    "task_add",
+    "task_follow",
+    "task_followers",
+    "task_unfollow",
+)
+
 
 def requested_counts(entries, commands):
     """Recorded requests per wanted command, zero when the traffic has none."""
