@@ -884,3 +884,317 @@ fn long_false_sent_composer_keeps_its_full_collapsed_text_in_the_box() {
         shown.map(|read| crate::terminal::screen::collapse(&read))
     );
 }
+// t3355 (t820 proof D) federated gap and partial rows: test_dunk_federated_recovery.py,
+// oracle commit 79bc92fa. ScriptedProbe replays a script: read_pane call n returns
+// screens[min(n, last)] and get_pane call n reports pids[min(n, last)]. A federated step reads
+// the screen for its decision, reads again for dead_session, and then re-reads the composer at
+// key time. A script therefore changes exactly the read it names. Each refusal is paired with a
+// control that presses once, so a refusal cannot pass only because the candidate was never read.
+
+struct ScriptedProbe {
+    screens: Vec<String>,
+    pids: Vec<u32>,
+    reads: Mutex<usize>,
+    lookups: Mutex<usize>,
+    keys: Mutex<Vec<String>>,
+}
+
+impl SendEnv for ScriptedProbe {
+    fn read_pane(&self, _: &str, _: i64, _: bool) -> Option<String> {
+        let mut reads = self.reads.lock().unwrap();
+        let index = (*reads).min(self.screens.len() - 1);
+        *reads += 1;
+        Some(self.screens[index].clone())
+    }
+    fn pane_harness(&self, _: &str) -> Option<String> {
+        Some("codex".into())
+    }
+    fn session_process_gone(&self, _: &str) -> bool {
+        false
+    }
+    fn read_status(&self, _: &str) -> Option<String> {
+        Some("idle".into())
+    }
+    fn send_key(&mut self, _: &str, key: &str) -> (bool, String) {
+        self.keys.lock().unwrap().push(key.into());
+        (true, "sent".into())
+    }
+    fn federated_input(&self) -> bool {
+        true
+    }
+}
+
+impl PaneInfoEnv for ScriptedProbe {
+    fn list_panes_grouped(&self) -> Vec<Value> {
+        vec![self.get_pane("%1").unwrap()]
+    }
+    fn get_pane(&self, pane_id: &str) -> Option<Value> {
+        let mut lookups = self.lookups.lock().unwrap();
+        let index = (*lookups).min(self.pids.len() - 1);
+        *lookups += 1;
+        (pane_id == "%1")
+            .then(|| json!({"pane_id": "%1", "pane_pid": self.pids[index], "agent": "codex"}))
+    }
+}
+
+fn scripted_probe(screens: Vec<String>, pids: Vec<u32>) -> ScriptedProbe {
+    ScriptedProbe {
+        screens,
+        pids,
+        reads: Mutex::default(),
+        lookups: Mutex::default(),
+        keys: Mutex::default(),
+    }
+}
+
+fn scripted_frame(pending: &str) -> String {
+    format!(
+        "  >_ OpenAI Codex (v0.165.0)\n\n\x1b[1m\u{203a} {pending}\x1b[0m\n\n  GPT-6-Astra high \u{b7} ~/workspace/x\n  ? for shortcuts\n"
+    )
+}
+
+/// A persisted flock holding the failed federated candidate for the scripted pane.
+fn scripted_candidate(dir: &tempfile::TempDir) -> Flock {
+    let flock = persisted_flock(dir);
+    flock.note_stuck_candidate(&failed_federated_candidate(&federated_probe()));
+    flock
+}
+
+#[test]
+fn federated_edit_between_steps_resets_the_stable_timer() {
+    let frame = scripted_frame("pending text");
+    let dir = tempfile::tempdir().unwrap();
+    let flock = scripted_candidate(&dir);
+    // Reads 0 and 1 belong to the step at 100; read 2 is the decision read of the step at 221.
+    let mut probe = scripted_probe(
+        vec![
+            frame.clone(),
+            frame.clone(),
+            scripted_frame("pending text edited"),
+        ],
+        vec![std::process::id()],
+    );
+    assert_eq!(
+        0,
+        federated_recovery_step(&flock, &mut probe, 100.0, &|_| {}).unwrap()
+    );
+    assert_eq!(
+        0,
+        federated_recovery_step(&flock, &mut probe, 221.0, &|_| {}).unwrap(),
+        "an edited composer restarts the stable timer"
+    );
+    assert!(probe.keys.lock().unwrap().is_empty());
+
+    let control_dir = tempfile::tempdir().unwrap();
+    let control_flock = scripted_candidate(&control_dir);
+    let mut control = scripted_probe(vec![frame], vec![std::process::id()]);
+    federated_recovery_step(&control_flock, &mut control, 100.0, &|_| {}).unwrap();
+    assert_eq!(
+        1,
+        federated_recovery_step(&control_flock, &mut control, 221.0, &|_| {}).unwrap()
+    );
+    assert_eq!(vec!["Enter".to_string()], *control.keys.lock().unwrap());
+}
+
+#[test]
+fn federated_changed_content_at_key_time_refuses() {
+    let frame = scripted_frame("pending text");
+    let changed = scripted_frame("pending text, changed by a human");
+    assert_ne!(
+        crate::terminal::composer::federated_composer(true, &frame),
+        crate::terminal::composer::federated_composer(true, &changed),
+        "precondition: the changed screen must hold different composer text"
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let flock = scripted_candidate(&dir);
+    // Reads 0-1 are the step at 100 and reads 2-3 the decision of the step at 221; read 4 is
+    // the composer re-read at key time.
+    let mut probe = scripted_probe(
+        vec![
+            frame.clone(),
+            frame.clone(),
+            frame.clone(),
+            frame.clone(),
+            changed,
+        ],
+        vec![std::process::id()],
+    );
+    federated_recovery_step(&flock, &mut probe, 100.0, &|_| {}).unwrap();
+    assert_eq!(
+        0,
+        federated_recovery_step(&flock, &mut probe, 221.0, &|_| {}).unwrap()
+    );
+    assert!(probe.keys.lock().unwrap().is_empty());
+
+    let control_dir = tempfile::tempdir().unwrap();
+    let control_flock = scripted_candidate(&control_dir);
+    let mut control = scripted_probe(vec![frame], vec![std::process::id()]);
+    federated_recovery_step(&control_flock, &mut control, 100.0, &|_| {}).unwrap();
+    assert_eq!(
+        1,
+        federated_recovery_step(&control_flock, &mut control, 221.0, &|_| {}).unwrap()
+    );
+}
+
+#[test]
+fn federated_changed_generation_at_key_time_refuses() {
+    let frame = scripted_frame("pending text");
+    let dir = tempfile::tempdir().unwrap();
+    let flock = scripted_candidate(&dir);
+    // Pane lookups 0 and 1 are the decision generations of the steps at 100 and 221. Lookup 2
+    // is the generation re-read at key time, reported as pid 1, which no longer matches.
+    let me = std::process::id();
+    let mut probe = scripted_probe(vec![frame.clone()], vec![me, me, 1]);
+    federated_recovery_step(&flock, &mut probe, 100.0, &|_| {}).unwrap();
+    assert_eq!(
+        0,
+        federated_recovery_step(&flock, &mut probe, 221.0, &|_| {}).unwrap()
+    );
+    assert!(probe.keys.lock().unwrap().is_empty());
+
+    let control_dir = tempfile::tempdir().unwrap();
+    let control_flock = scripted_candidate(&control_dir);
+    let mut control = scripted_probe(vec![frame], vec![me]);
+    federated_recovery_step(&control_flock, &mut control, 100.0, &|_| {}).unwrap();
+    assert_eq!(
+        1,
+        federated_recovery_step(&control_flock, &mut control, 221.0, &|_| {}).unwrap()
+    );
+}
+
+#[test]
+fn federated_new_dialog_at_key_time_refuses() {
+    let frame = scripted_frame("pending text");
+    let dialog = format!("{frame}{MODAL}");
+    assert!(
+        !crate::terminal::screen::modal_open(&frame),
+        "precondition: the composer frame is not a dialog"
+    );
+    assert!(
+        crate::terminal::screen::modal_open(&dialog),
+        "precondition: the dialog frame is a dialog"
+    );
+    assert_eq!(
+        crate::terminal::composer::federated_composer(true, &frame),
+        crate::terminal::composer::federated_composer(true, &dialog),
+        "precondition: the dialog must not change the composer text"
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let flock = scripted_candidate(&dir);
+    // The decision reads (2-3) see the composer; the key-time composer re-read (4) sees the dialog.
+    let mut probe = scripted_probe(
+        vec![
+            frame.clone(),
+            frame.clone(),
+            frame.clone(),
+            frame.clone(),
+            dialog,
+        ],
+        vec![std::process::id()],
+    );
+    federated_recovery_step(&flock, &mut probe, 100.0, &|_| {}).unwrap();
+    assert_eq!(
+        0,
+        federated_recovery_step(&flock, &mut probe, 221.0, &|_| {}).unwrap()
+    );
+    assert!(probe.keys.lock().unwrap().is_empty());
+
+    let control_dir = tempfile::tempdir().unwrap();
+    let control_flock = scripted_candidate(&control_dir);
+    let mut control = scripted_probe(vec![frame], vec![std::process::id()]);
+    federated_recovery_step(&control_flock, &mut control, 100.0, &|_| {}).unwrap();
+    assert_eq!(
+        1,
+        federated_recovery_step(&control_flock, &mut control, 221.0, &|_| {}).unwrap()
+    );
+}
+
+#[test]
+fn federated_dialog_held_across_steps_never_authorizes_keys() {
+    let dialog = format!("{}{MODAL}", scripted_frame("pending text"));
+    assert!(
+        crate::terminal::screen::modal_open(&dialog),
+        "precondition: the dialog frame is a dialog"
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let flock = scripted_candidate(&dir);
+    let mut probe = scripted_probe(vec![dialog], vec![std::process::id()]);
+    assert_eq!(
+        0,
+        federated_recovery_step(&flock, &mut probe, 100.0, &|_| {}).unwrap()
+    );
+    assert_eq!(
+        0,
+        federated_recovery_step(&flock, &mut probe, 221.0, &|_| {}).unwrap()
+    );
+    assert!(probe.keys.lock().unwrap().is_empty());
+}
+
+#[test]
+fn federated_failed_durable_reservation_never_presses() {
+    let frame = scripted_frame("pending text");
+    let dir = tempfile::tempdir().unwrap();
+    let flock = scripted_candidate(&dir);
+    let mut probe = scripted_probe(vec![frame.clone()], vec![std::process::id()]);
+    assert_eq!(
+        0,
+        federated_recovery_step(&flock, &mut probe, 100.0, &|_| {}).unwrap()
+    );
+    // Removing the state directory makes the durable reservation save fail.
+    std::fs::remove_dir_all(dir.path()).unwrap();
+    assert!(
+        flock.save().is_err(),
+        "precondition: the reservation save must fail"
+    );
+    assert_eq!(
+        0,
+        federated_recovery_step(&flock, &mut probe, 221.0, &|_| {}).unwrap()
+    );
+    assert!(probe.keys.lock().unwrap().is_empty());
+
+    let control_dir = tempfile::tempdir().unwrap();
+    let control_flock = scripted_candidate(&control_dir);
+    let mut control = scripted_probe(vec![frame], vec![std::process::id()]);
+    federated_recovery_step(&control_flock, &mut control, 100.0, &|_| {}).unwrap();
+    assert_eq!(
+        1,
+        federated_recovery_step(&control_flock, &mut control, 221.0, &|_| {}).unwrap()
+    );
+}
+
+#[test]
+fn federated_cancelled_or_replaced_candidates_never_press() {
+    let frame = scripted_frame("pending text");
+    // Control: the unchanged candidate presses once, so the refusals below test the change.
+    let control_dir = tempfile::tempdir().unwrap();
+    let control_flock = scripted_candidate(&control_dir);
+    let mut control = scripted_probe(vec![frame.clone()], vec![std::process::id()]);
+    federated_recovery_step(&control_flock, &mut control, 100.0, &|_| {}).unwrap();
+    assert_eq!(
+        1,
+        federated_recovery_step(&control_flock, &mut control, 221.0, &|_| {}).unwrap()
+    );
+
+    for change in ["cancelled", "replaced"] {
+        let dir = tempfile::tempdir().unwrap();
+        let flock = persisted_flock(&dir);
+        let mut candidate = failed_federated_candidate(&federated_probe());
+        if change == "cancelled" {
+            candidate.status = "cancelled".into();
+        } else {
+            candidate.attempt_generation = Some("replacement-generation".into());
+        }
+        flock.note_stuck_candidate(&candidate);
+        let mut probe = scripted_probe(vec![frame.clone()], vec![std::process::id()]);
+        federated_recovery_step(&flock, &mut probe, 100.0, &|_| {}).unwrap();
+        assert_eq!(
+            0,
+            federated_recovery_step(&flock, &mut probe, 221.0, &|_| {}).unwrap(),
+            "{change} candidate"
+        );
+        assert!(
+            probe.keys.lock().unwrap().is_empty(),
+            "{change} candidate pressed"
+        );
+    }
+}
