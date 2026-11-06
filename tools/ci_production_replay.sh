@@ -81,6 +81,7 @@ pane_main() {
   # 600 ticks of 0.2 s, 120 s in all. A cold start of the Rust daemon on a loaded runner can take
   # longer than 30 s. A daemon that is still starting is not stopped by the finish trap until this
   # budget has run out. The owner pane's 200 s wait below still bounds the whole run.
+  local start=$SECONDS
   for _ in $(seq 1 600); do
     if "$PY" -I -c 'import sys
 sys.path.insert(0, sys.argv[1])
@@ -88,6 +89,8 @@ import diff_harness as harness
 reply, _latency = harness.call(sys.argv[2], {"id": 0, "cmd": "status", "args": {}})
 sys.exit(0 if reply and reply.get("ok") else 1)' "$ROOT/tools" "$sock" 2>/dev/null; then
       up=yes
+      # The job prints daemon.log, so the measured start time lands in the job log on every run.
+      echo "sandbox daemon answered status after $((SECONDS - start)) s" >> "$temp/daemon.log"
       break
     fi
     if ! kill -0 "$daemon" 2>/dev/null; then

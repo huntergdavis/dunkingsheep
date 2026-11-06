@@ -170,6 +170,7 @@ class CiReplayContractTests(unittest.TestCase):
         readiness_s = 600 * 0.2
         self.assertEqual(120, readiness_s)
         self.assertLess(readiness_s, 200)
+        self.assertIn("answered status after", script)
 
     def test_the_rust_job_builds_the_binary_and_replays_against_it_within_its_timeout(self):
         workflow = read(WORKFLOW)
