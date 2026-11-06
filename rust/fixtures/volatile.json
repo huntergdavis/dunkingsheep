@@ -54,6 +54,8 @@
     "^t[0-9]+$",
     "^d[0-9]+$",
     "^nj-[0-9a-f]+$",
-    "^[0-9a-f]{40}$"
+    "^[0-9a-f]{40}$",
+    "^no input box found \\(no prompt sigil in the last 14 rows of [0-9]+\\)$",
+    "^nothing to submit: no input box found \\(no prompt sigil in the last 14 rows of [0-9]+\\)$"
   ]
 }
