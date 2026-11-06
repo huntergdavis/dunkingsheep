@@ -536,6 +536,15 @@ impl crate::api::CommandEnv for RequestRuntimeAdapter<'_> {
         services.github_tokens()
     }
 
+    /// The review service's transport, owned by the same provider as the token cache (t3241).
+    /// A detached adapter refuses rather than reaching the network through a default.
+    fn review_transport(&self) -> Result<&dyn crate::github::GitHubTransport, DunkError> {
+        let services = self
+            .dunk_runtime
+            .ok_or_else(|| refusal("request runtime services are not attached"))?;
+        Ok(services.github_review_transport())
+    }
+
     fn runtime_control_env(
         &self,
     ) -> Result<&dyn crate::api::runtime_control::RuntimeControlEnv, DunkError> {

@@ -1,27 +1,30 @@
-//! The daemon's production GitHub App token provider (t3241, audit P0-3).
+//! The daemon's production GitHub token provider (t3241, audit P0-3).
 //!
-//! `RuntimeServices` builds exactly one accepted [`Tokens`] cache when it is constructed. The
-//! cache resolves everything from the same captured [`Env`] that places the daemon's other
-//! stores: the config directory is `config::config_dir` (`DUNKINGSHEEP_DIR`, else
-//! `HOME/.config/dunkingsheep`), the cache is `github-tokens.json` in that directory (mode
-//! 0600), and the App registrations and API root are the paths Python reads. Requests borrow
-//! the cache through `RequestRuntimeAdapter::github_tokens`; nothing rebuilds it per request,
-//! so the in-memory cache, its operation lock and the persisted file share one lifecycle. The
-//! App calls keep the accepted reqwest transport.
+//! `RuntimeServices` builds exactly one accepted [`Tokens`] cache and one review transport
+//! when it is constructed, and both come from the same captured [`Env`] that places the
+//! daemon's other stores. The config directory is `config::config_dir` (`DUNKINGSHEEP_DIR`,
+//! else `HOME/.config/dunkingsheep`). The cache is `github-tokens.json` in that directory
+//! (mode 0600). The App registrations and API root are read from the same place Python reads
+//! them. Requests borrow the cache through `RequestRuntimeAdapter::github_tokens`, and the
+//! review service borrows the transport through `RequestRuntimeAdapter::review_transport`.
+//! Nothing is rebuilt per request, so the in-memory cache, its operation lock and the
+//! persisted file share one lifecycle.
 //!
-//! Construction never fails the daemon. When the config directory cannot be resolved, the
-//! reason is stored and reported by the first command that needs a token, so a daemon that
-//! never touches GitHub starts exactly as it did before.
+//! Construction performs no network I/O and never fails the daemon. The two reqwest clients
+//! are built here, once. When the config directory cannot be resolved, the reason is stored
+//! and reported by the first command that needs a token.
 
 use std::path::PathBuf;
 
 use crate::config::{self, Env};
 use crate::error::{refusal, DunkError};
-use crate::github::{OsAppFileSystem, ReqwestTransport, Tokens, DEFAULT_API};
+use crate::github::{GitHubTransport, OsAppFileSystem, ReqwestTransport, Tokens, DEFAULT_API};
 
 /// One process's GitHub token provider, owned by `RuntimeServices`.
 pub(crate) struct GitHubProvider {
     tokens: Result<Tokens, String>,
+    /// The transport the review service calls GitHub through.
+    review: Box<dyn GitHubTransport>,
 }
 
 impl GitHubProvider {
@@ -44,15 +47,20 @@ impl GitHubProvider {
                     Box::new(OsAppFileSystem),
                 )
             });
-        Self { tokens }
+        Self {
+            tokens,
+            review: Box::new(ReqwestTransport::default()),
+        }
     }
 
-    /// Explicit composition for tests: a fake App endpoint and fixture App files.
+    /// Explicit composition for tests: a fake App endpoint, a fake review transport, and
+    /// fixture App files.
     #[cfg(test)]
     pub(crate) fn with_parts(
         path: PathBuf,
         config_dir: PathBuf,
-        transport: Box<dyn crate::github::GitHubTransport>,
+        transport: Box<dyn GitHubTransport>,
+        review: Box<dyn GitHubTransport>,
         api_root: &str,
         app_files: Box<dyn crate::github::AppFileSystem>,
     ) -> Self {
@@ -64,6 +72,7 @@ impl GitHubProvider {
                 Some(api_root.to_owned()),
                 app_files,
             )),
+            review,
         }
     }
 
@@ -73,9 +82,16 @@ impl GitHubProvider {
             .as_ref()
             .map_err(|message| refusal(message.clone()))
     }
+
+    /// The transport the review service calls GitHub through.
+    pub(crate) fn review_transport(&self) -> &dyn GitHubTransport {
+        self.review.as_ref()
+    }
 }
 
-/// A blank override counts as unset, as Python's `environ.get(...) or default` does.
+/// A blank or whitespace-only override counts as unset. `config::config_dir` already treats a
+/// blank `DUNKINGSHEEP_DIR` this way. Python's `environ.get(key, default)` keeps an explicitly
+/// empty value instead, so this is a deliberate difference for blank overrides.
 fn nonblank(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
 }

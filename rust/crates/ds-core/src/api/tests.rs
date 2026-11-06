@@ -5590,8 +5590,9 @@ fn test_gh_token_follows_the_role() {
     let mut dispatcher = Dispatcher::new();
     dispatcher.register_gh_token();
 
-    let worker =
+    let mut worker =
         dispatch_as_flock_role(&dispatcher, &flock, &env, Some("w1:p1"), "gh_token", None).unwrap();
+    let provenance = worker.as_object_mut().unwrap().remove("provenance");
     assert_eq!(
         json!({
             "token": "fake-author-token",
@@ -5603,6 +5604,7 @@ fn test_gh_token_follows_the_role() {
         }),
         worker
     );
+    assert_eq!(Some(json!({"recorded": true})), provenance);
     assert_eq!(
         Some(&env.now_s),
         flock.gh_token_mints.lock().unwrap().get("w1:p1")

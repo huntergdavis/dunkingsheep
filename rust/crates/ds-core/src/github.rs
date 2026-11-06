@@ -6,7 +6,10 @@
 
 mod mints;
 pub(crate) use mints::python_number_string;
-pub use mints::{author_from_mints, author_mint_path, record_author_mint, repos_config};
+pub use mints::{
+    author_from_mints, author_mint_path, record_author_mint, record_author_mint_outcome,
+    repos_config, AuthorMintRecord,
+};
 
 /// Parse a Python-compatible float string using the existing mint decoder.
 pub(crate) fn parse_python_float(raw: &str) -> Option<f64> {

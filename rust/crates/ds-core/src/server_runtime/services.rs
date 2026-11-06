@@ -178,6 +178,11 @@ impl RuntimeServices {
         self.github.tokens()
     }
 
+    /// The review service's GitHub transport, owned by the same provider as the token cache.
+    pub(crate) fn github_review_transport(&self) -> &dyn crate::github::GitHubTransport {
+        self.github.review_transport()
+    }
+
     fn build(
         inputs: RuntimeServiceInputs,
         memory: Option<RuntimeMemoryConfig>,
