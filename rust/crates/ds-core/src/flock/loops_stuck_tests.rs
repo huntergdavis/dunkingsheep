@@ -1072,3 +1072,21 @@ fn a_declared_config_wins_over_the_saved_one() {
         "a declared config must not be overwritten by the state file"
     );
 }
+
+// RestartRecoveryTests.test_a_human_continuation_is_refused_after_a_restart_by_the_real_matcher (row 52)
+#[test]
+fn a_human_continuation_is_refused_after_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let before = in_memory_flock(&dir);
+    let mut probe = federated_probe();
+    before.note_stuck_candidate(&observed_candidate(&probe, "m1", "failed", true, 10.0));
+    let after = persisted_flock(&dir);
+    after.restore_snapshot(&before.snapshot());
+    // After the restart the composer holds our text and a line the person typed below it.
+    *probe.screen.lock().unwrap() = "  >_ OpenAI Codex (v0.165.0)\n\n\x1b[1m\u{203a} pending text\x1b[0m\n  and one more thing I was typing\n\n  GPT-6-Astra high \u{b7} ~/workspace/x\n  ? for shortcuts\n".into();
+    federated_steps_without_acting(&after, &mut probe, &[100.0, 221.0, 341.0]);
+    assert!(
+        probe.keys.lock().unwrap().is_empty(),
+        "the persisted text must not authorise a modified composer"
+    );
+}
