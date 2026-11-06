@@ -6,6 +6,8 @@ use std::io::Write;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
+    // t3457: the build-time code identity (build.rs) replaces hashing the binary at startup.
+    ds_core::flock::status::embed_code_hash(option_env!("DS_CODE_HASH"));
     let argv: Vec<_> = std::env::args_os().collect();
     if argv.len() == 1 {
         // Python argparse prints the root help when no command words were supplied.

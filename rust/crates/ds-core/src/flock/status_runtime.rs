@@ -52,6 +52,14 @@ impl StatusState {
     }
 }
 
+impl StatusState {
+    /// Block until the binary's `code_hash` is settled (tests and acceptance checks only; the
+    /// daemon never waits on its own identity).
+    pub fn wait_for_code_hash(&self) {
+        self.code.wait_for_hash();
+    }
+}
+
 impl Flock {
     /// Attach the real startup snapshot exactly once. `Flock::new` intentionally leaves it
     /// unconfigured: its legacy arguments contain neither release nor whole-state path.

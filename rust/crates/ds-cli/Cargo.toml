@@ -24,6 +24,10 @@ tokio = { version = "=1.54.1", features = ["rt-multi-thread", "net", "time"] }
 # context digest takes `now` (NaiveDateTime); the same pinned chrono ds-core uses.
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 
+[build-dependencies]
+# t3457: build.rs digests the source tree into DS_CODE_HASH; sha2 is already a workspace crate.
+sha2 = "0.10"
+
 [dev-dependencies]
 tempfile = "3"
 # The stale-cache CLI test plants a drifted FTS5 index. Same declaration as ds-core, so

@@ -425,6 +425,7 @@ dependencies = [
  "ds-web",
  "rusqlite",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
 ]

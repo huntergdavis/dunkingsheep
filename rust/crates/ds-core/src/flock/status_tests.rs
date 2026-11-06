@@ -365,11 +365,19 @@ fn h_status_takes_the_cached_view_by_default_the_full_path_with_full_and_probes_
     );
 }
 
-// ---- CodeIdentity (leader's decision on t1397) -------------------------------------------
+// ---- CodeIdentity (leader's decision on t1397, amended by t3457) -------------------------
 
 mod code_identity {
-    use super::super::status::CodeIdentity;
+    use super::super::status::{embed_code_hash, embedded_code_hash, CodeIdentity};
     use serde_json::json;
+
+    const KEYS: [&str; 5] = [
+        "code_hash",
+        "code_mtime",
+        "code_stale",
+        "code_changed_modules",
+        "code_identity_errors",
+    ];
 
     fn fake_exe(dir: &tempfile::TempDir, bytes: &[u8]) -> std::path::PathBuf {
         let path = dir.path().join("dunkingsheep-daemon");
@@ -377,10 +385,18 @@ mod code_identity {
         path
     }
 
+    /// The fallback path: no embedded hash, the bytes hashed in the background, waited for.
+    fn hashed(path: &std::path::Path) -> CodeIdentity {
+        let identity = CodeIdentity::at_start_with(path, None);
+        identity.wait_for_hash();
+        assert!(identity.hash_ready());
+        identity
+    }
+
     #[test]
     fn the_hash_is_twelve_hex_of_sha256_over_the_bytes_and_an_untouched_binary_is_not_stale() {
         let dir = tempfile::tempdir().unwrap();
-        let identity = CodeIdentity::at_start(fake_exe(&dir, b"abc"));
+        let identity = hashed(&fake_exe(&dir, b"abc"));
         let status = identity.code_status();
         assert_eq!(json!("ba7816bf8f01"), status["code_hash"]);
         assert_eq!(json!(false), status["code_stale"]);
@@ -388,23 +404,114 @@ mod code_identity {
         assert_eq!(json!([]), status["code_identity_errors"]);
         assert!(status["code_mtime"].as_f64().unwrap() > 0.0);
         assert_eq!(
-            vec![
-                "code_hash",
-                "code_mtime",
-                "code_stale",
-                "code_changed_modules",
-                "code_identity_errors"
-            ],
+            KEYS.to_vec(),
             status.keys().map(String::as_str).collect::<Vec<_>>(),
             "the Python's key order"
         );
     }
 
     #[test]
+    fn the_background_hash_is_null_until_it_lands_and_the_shape_never_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let identity = CodeIdentity::at_start_with(fake_exe(&dir, b"abc"), None);
+        // Before the thread lands (or after: a 3-byte file is quick), the object has the same
+        // five keys, and an unknown hash means an unknown staleness, never false.
+        let early = identity.code_status();
+        assert_eq!(
+            KEYS.to_vec(),
+            early.keys().map(String::as_str).collect::<Vec<_>>()
+        );
+        if early["code_hash"].is_null() {
+            assert!(
+                early["code_stale"].is_null(),
+                "unknown, not false: {early:?}"
+            );
+            assert_eq!(json!([]), early["code_identity_errors"]);
+        } else {
+            assert_eq!(json!("ba7816bf8f01"), early["code_hash"]);
+        }
+        identity.wait_for_hash();
+        let late = identity.code_status();
+        assert_eq!(json!("ba7816bf8f01"), late["code_hash"]);
+        assert_eq!(json!(false), late["code_stale"]);
+        assert!(late["code_mtime"].as_f64().unwrap() > 0.0);
+    }
+
+    #[test]
+    fn an_embedded_hash_is_ready_at_start_without_reading_the_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = fake_exe(&dir, b"abc");
+        let identity = CodeIdentity::at_start_with(&path, Some("f00dbabe1234"));
+        assert!(identity.hash_ready(), "no thread, no wait");
+        let status = identity.code_status();
+        assert_eq!(
+            json!("f00dbabe1234"),
+            status["code_hash"],
+            "not the bytes' sha256"
+        );
+        assert_eq!(json!(false), status["code_stale"]);
+        assert_eq!(json!([]), status["code_identity_errors"]);
+        assert_eq!(
+            KEYS.to_vec(),
+            status.keys().map(String::as_str).collect::<Vec<_>>()
+        );
+        std::fs::write(&path, b"a rebuilt binary with other bytes").unwrap();
+        let status = identity.code_status();
+        assert_eq!(
+            json!(true),
+            status["code_stale"],
+            "staleness is the stat stamp, as before"
+        );
+        assert_eq!(
+            json!(["dunkingsheep-daemon"]),
+            status["code_changed_modules"]
+        );
+        assert_eq!(
+            json!("f00dbabe1234"),
+            status["code_hash"],
+            "frozen at start"
+        );
+    }
+
+    #[test]
+    fn a_blank_embedded_hash_means_the_fallback_and_a_missing_binary_stays_null_either_way() {
+        let dir = tempfile::tempdir().unwrap();
+        let identity = CodeIdentity::at_start_with(fake_exe(&dir, b"abc"), Some("  "));
+        identity.wait_for_hash();
+        assert_eq!(json!("ba7816bf8f01"), identity.code_status()["code_hash"]);
+        let missing = CodeIdentity::at_start_with(dir.path().join("missing"), Some("f00dbabe1234"));
+        let status = missing.code_status();
+        assert_eq!(
+            serde_json::Value::Null,
+            status["code_hash"],
+            "a read failure at start"
+        );
+        assert_eq!(serde_json::Value::Null, status["code_stale"]);
+        assert_eq!(json!(["missing"]), status["code_identity_errors"]);
+    }
+
+    #[test]
+    fn the_production_constructor_takes_the_embedded_hash_once_the_binary_sets_it() {
+        // The embed is process-wide and first-wins, so this test accepts whichever value
+        // landed first in this test binary; blank values never land.
+        embed_code_hash(Some(""));
+        embed_code_hash(None);
+        embed_code_hash(Some("0123456789ab"));
+        let embedded = embedded_code_hash().expect("set by this test or an earlier one");
+        assert_eq!(12, embedded.len());
+        embed_code_hash(Some("ffffffffffff"));
+        assert_eq!(Some(embedded), embedded_code_hash(), "first wins");
+        let dir = tempfile::tempdir().unwrap();
+        let identity = CodeIdentity::at_start(fake_exe(&dir, b"abc"));
+        assert!(identity.hash_ready());
+        assert_eq!(json!(embedded), identity.code_status()["code_hash"]);
+    }
+
+    #[test]
     fn replacing_the_file_under_a_running_daemon_is_stale_and_names_the_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = fake_exe(&dir, b"old build");
-        let identity = CodeIdentity::at_start(&path);
+        let identity = hashed(&path);
         // an installer replaces the file (new inode), exactly what a deploy does
         let replacement = dir.path().join("new");
         std::fs::write(&replacement, b"new build, different bytes").unwrap();
@@ -427,7 +534,7 @@ mod code_identity {
     fn a_size_change_in_place_is_stale_too() {
         let dir = tempfile::tempdir().unwrap();
         let path = fake_exe(&dir, b"short");
-        let identity = CodeIdentity::at_start(&path);
+        let identity = hashed(&path);
         std::fs::write(&path, b"a much longer rewrite in place").unwrap();
         assert_eq!(json!(true), identity.code_status()["code_stale"]);
     }
@@ -435,7 +542,8 @@ mod code_identity {
     #[test]
     fn an_unreadable_binary_has_no_hash_an_unknown_staleness_and_names_the_error() {
         let dir = tempfile::tempdir().unwrap();
-        let identity = CodeIdentity::at_start(dir.path().join("missing"));
+        let identity = CodeIdentity::at_start_with(dir.path().join("missing"), None);
+        assert!(identity.hash_ready(), "nothing to hash: no thread");
         let status = identity.code_status();
         assert_eq!(serde_json::Value::Null, status["code_hash"]);
         assert_eq!(
@@ -451,7 +559,7 @@ mod code_identity {
     fn a_binary_deleted_after_start_reports_the_error_not_a_change() {
         let dir = tempfile::tempdir().unwrap();
         let path = fake_exe(&dir, b"abc");
-        let identity = CodeIdentity::at_start(&path);
+        let identity = hashed(&path);
         std::fs::remove_file(&path).unwrap();
         let status = identity.code_status();
         assert_eq!(
@@ -460,5 +568,21 @@ mod code_identity {
         );
         assert_eq!(serde_json::Value::Null, status["code_stale"]);
         assert_eq!(json!([]), status["code_changed_modules"]);
+    }
+
+    #[test]
+    fn a_binary_that_vanishes_before_the_background_read_names_the_error_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = fake_exe(&dir, b"abc");
+        std::fs::remove_file(&path).unwrap();
+        // The stat at start fails, so no thread is spawned and the error is named once.
+        let identity = CodeIdentity::at_start_with(&path, None);
+        identity.wait_for_hash();
+        let status = identity.code_status();
+        assert_eq!(serde_json::Value::Null, status["code_hash"]);
+        assert_eq!(
+            json!(["dunkingsheep-daemon"]),
+            status["code_identity_errors"]
+        );
     }
 }

@@ -239,21 +239,55 @@ pub fn h_status(
 
 // -- code identity (the Rust meaning of `code_status`, decided by the leader on t1397) -----
 
+/// The build-time code identity, set once by the daemon binary before anything else runs
+/// (`embed_code_hash` in ds-cli's `main.rs`, from the `DS_CODE_HASH` its build.rs exports).
+/// Library users and tests that never set it get the fallback: the binary's bytes hashed in
+/// the background.
+static EMBEDDED_CODE_HASH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Record the build-time `code_hash` for every `CodeIdentity::at_start` after this call. The
+/// first non-empty value wins and later calls change nothing: a process has one identity.
+pub fn embed_code_hash(hash: Option<&str>) {
+    if let Some(hash) = hash.map(str::trim).filter(|hash| !hash.is_empty()) {
+        let _ = EMBEDDED_CODE_HASH.set(hash.to_string());
+    }
+}
+
+/// The embedded `code_hash`, when the binary set one.
+pub fn embedded_code_hash() -> Option<&'static str> {
+    EMBEDDED_CODE_HASH.get().map(String::as_str)
+}
+
+/// Where the running binary's `code_hash` comes from.
+#[derive(Debug, Clone)]
+enum CodeHash {
+    /// Known at start: the build-time identity.
+    Embedded(String),
+    /// The first 12 hex of sha256 over the binary's bytes, computed by a background thread:
+    /// `None` until it finishes, `Err(())` when the bytes could not be read.
+    Background(std::sync::Arc<std::sync::OnceLock<Result<String, ()>>>),
+}
+
 /// The identity of the running binary, frozen once at start (the Python freezes
 /// `CODE_IDENTITY` before importing application code).
 ///
-/// Decision (leader, t1397): `code_hash` is the first 12 hex of sha256 over the binary's BYTES
-/// read once at start (a rebuild with the same git sha and different bytes must read as
-/// different); `code_mtime` is the binary's mtime at start; `code_stale` compares
-/// `(mtime, size, inode)` of the file now with the start values (one stat, no re-hash); when
-/// stale, `code_changed_modules` is `[<file name>]` so a stale daemon says WHAT changed;
-/// `code_identity_errors` lists read failures. As in the Python, a read failure at start
-/// leaves `code_hash` null and `code_stale` null (unknown, not false).
+/// Decision (leader, t1397), amended by t3457: `code_hash` is 12 hex. It is the build-time
+/// identity when the binary embeds one (ds-cli's build.rs: a digest of the Rust source tree
+/// plus toolchain, profile and target, the same construction as the Python `code_identity`
+/// over its module tree, so two builds of different sources read as different code);
+/// otherwise it is the first 12 hex of sha256 over the binary's bytes, hashed once by a
+/// background thread so the daemon binds its socket first (hashing a 275 MB debug build took
+/// ~95 s before bind), and `code_hash` is null until that hash lands. `code_mtime` is the
+/// binary's mtime at start; `code_stale` compares `(mtime, size, inode)` of the file now with
+/// the start values (one stat, no re-hash); when stale, `code_changed_modules` is
+/// `[<file name>]` so a stale daemon says WHAT changed; `code_identity_errors` lists read
+/// failures. As in the Python, a read failure at start leaves `code_hash` null and
+/// `code_stale` null (unknown, not false), embedded hash or not.
 #[derive(Debug, Clone)]
 pub struct CodeIdentity {
     exe: std::path::PathBuf,
     name: String,
-    hash: Option<String>,
+    hash: Option<CodeHash>,
     mtime: Option<f64>,
     stamp: Option<(i128, u64, u64)>,
     errors: Vec<String>,
@@ -267,10 +301,47 @@ fn stamp_of(path: &std::path::Path) -> std::io::Result<(i128, u64, u64)> {
     Ok((nanos, meta.size(), meta.ino()))
 }
 
+/// Hash `exe`'s bytes on a background thread; the cell holds the result once it lands. The
+/// file is streamed through the hasher, never read whole into memory.
+fn hash_in_background(
+    exe: std::path::PathBuf,
+) -> std::sync::Arc<std::sync::OnceLock<Result<String, ()>>> {
+    use sha2::{Digest, Sha256};
+    let cell = std::sync::Arc::new(std::sync::OnceLock::new());
+    let slot = std::sync::Arc::clone(&cell);
+    let spawned = std::thread::Builder::new()
+        .name("code-identity".to_string())
+        .spawn(move || {
+            let result = std::fs::File::open(&exe).and_then(|mut file| {
+                let mut hasher = Sha256::new();
+                std::io::copy(&mut file, &mut hasher)?;
+                Ok(hasher
+                    .finalize()
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>()[..12]
+                    .to_string())
+            });
+            let _ = slot.set(result.map_err(|_| ()));
+        });
+    if spawned.is_err() {
+        let _ = cell.set(Err(()));
+    }
+    cell
+}
+
 impl CodeIdentity {
-    /// Read `exe` once: hash its bytes and record its stat stamp.
+    /// Stat `exe` once; take the embedded hash when the binary set one (`embed_code_hash`),
+    /// else hash the bytes in the background.
     pub fn at_start(exe: impl Into<std::path::PathBuf>) -> CodeIdentity {
-        use sha2::{Digest, Sha256};
+        Self::at_start_with(exe, embedded_code_hash())
+    }
+
+    /// `at_start` with the build-time hash given explicitly; `None` is the background fallback.
+    pub fn at_start_with(
+        exe: impl Into<std::path::PathBuf>,
+        embedded: Option<&str>,
+    ) -> CodeIdentity {
         let exe = exe.into();
         let name = exe
             .file_name()
@@ -278,18 +349,14 @@ impl CodeIdentity {
             .unwrap_or_else(|| "<binary>".to_string());
         let mut errors = Vec::new();
         let stamp = stamp_of(&exe).ok();
-        let hash = match std::fs::read(&exe) {
-            Ok(bytes) if stamp.is_some() => Some(
-                Sha256::digest(&bytes)
-                    .iter()
-                    .map(|b| format!("{b:02x}"))
-                    .collect::<String>()[..12]
-                    .to_string(),
-            ),
-            _ => {
+        let embedded = embedded.map(str::trim).filter(|hash| !hash.is_empty());
+        let hash = match (stamp, embedded) {
+            (None, _) => {
                 errors.push(name.clone());
                 None
             }
+            (Some(_), Some(hash)) => Some(CodeHash::Embedded(hash.to_string())),
+            (Some(_), None) => Some(CodeHash::Background(hash_in_background(exe.clone()))),
         };
         let mtime = stamp.map(|(nanos, _, _)| nanos as f64 / 1e9);
         CodeIdentity {
@@ -302,16 +369,47 @@ impl CodeIdentity {
         }
     }
 
+    /// True once `code_hash` is settled: embedded, hashed, or known unreadable.
+    pub fn hash_ready(&self) -> bool {
+        match &self.hash {
+            Some(CodeHash::Background(cell)) => cell.get().is_some(),
+            Some(CodeHash::Embedded(_)) | None => true,
+        }
+    }
+
+    /// Wait (at most two minutes) for `hash_ready()`. For tests and acceptance checks; the
+    /// daemon itself never waits on its own hash.
+    pub fn wait_for_hash(&self) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while !self.hash_ready() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    /// `(hash, the bytes could not be read)`.
+    fn current_hash(&self) -> (Option<String>, bool) {
+        match &self.hash {
+            None => (None, false),
+            Some(CodeHash::Embedded(hash)) => (Some(hash.clone()), false),
+            Some(CodeHash::Background(cell)) => match cell.get() {
+                None => (None, false),
+                Some(Ok(hash)) => (Some(hash.clone()), false),
+                Some(Err(())) => (None, true),
+            },
+        }
+    }
+
     /// `code_status()`: one stat per call, never a re-hash.
     pub fn code_status(&self) -> Map<String, Value> {
         let now = stamp_of(&self.exe);
+        let (hash, unreadable) = self.current_hash();
         let mut errors = self.errors.clone();
-        if now.is_err() {
+        if unreadable || now.is_err() {
             errors.push(self.name.clone());
         }
         errors.sort();
         errors.dedup();
-        let stale = match (&self.hash, &self.stamp, &now) {
+        let stale = match (&hash, &self.stamp, &now) {
             (Some(_), Some(start), Ok(current)) => Some(start != current),
             _ => None,
         };
@@ -321,7 +419,7 @@ impl CodeIdentity {
             vec![]
         };
         let mut out = Map::new();
-        put(&mut out, "code_hash", json!(self.hash));
+        put(&mut out, "code_hash", json!(hash));
         put(&mut out, "code_mtime", json!(self.mtime));
         put(&mut out, "code_stale", json!(stale));
         put(&mut out, "code_changed_modules", json!(changed));

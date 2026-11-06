@@ -96,6 +96,8 @@ fn production_env_status_core_uses_concrete_services() {
     let env = CommandEnv::status_env(&a).unwrap();
     assert_eq!(env.version(), "release-2.71.4");
     assert_eq!(env.federated_input(), json!(true));
+    // t3457: without an embedded hash the bytes are hashed in the background; settle it first.
+    f.flock.status_state().unwrap().wait_for_code_hash();
     let before = env.code_status();
     assert_eq!(before["code_stale"], false);
     assert_eq!(before["code_hash"].as_str().unwrap().len(), 12);
