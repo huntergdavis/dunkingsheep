@@ -22,8 +22,10 @@
 //!
 //! Approximations of Python's dynamic typing, kept deliberately narrow. `datetime.fromisoformat`
 //! accepts only RFC 3339 (`T` or space separator, explicit offset required), so CPython's other
-//! forms are rejected here: any single-character separator, minute-only times, the basic format,
-//! and more fractional digits. `int()` accepts ASCII digits only, where CPython also accepts
+//! forms are rejected here: any single-character separator, minute-only times, and the basic
+//! format. The string path (`parse_time`) also accepts what CPython rejects: year 0, a UTC
+//! instant outside years 1..9999 (CPython raises OverflowError from `astimezone`), and a
+//! lowercase `z`. `int()` accepts ASCII digits only, where CPython also accepts
 //! other Unicode decimal digits. `float()` rejects underscores, where CPython accepts them. The
 //! `repr` of a string inside a container escapes only C0 controls and DEL, where CPython also
 //! escapes other non-printable code points (for example U+00A0, U+0085, and U+200B). The `bytes`
@@ -969,26 +971,26 @@ fn has_content_key(value: &Value) -> bool {
     }
 }
 
-/// Python `_dunk_timestamp`: an ISO string, or a finite number of epoch seconds.
+/// Python `_dunk_timestamp`: an ISO string, or a finite number of epoch seconds. Python wraps every
+/// failure of the numeric `fromtimestamp` call as `ValueError` with the label, for integer and
+/// float tokens alike.
 pub fn dunk_timestamp(item: Option<&Value>, label: &str) -> Result<String, SourceError> {
+    let invalid = || SourceError::new("ValueError", format!("Dunking Sheep {label} invalid"));
     match item {
         Some(Value::String(text)) => Ok(iso(&parse_time(text)?)),
         Some(Value::Number(number)) if number.as_f64().is_some_and(|f| f.is_finite()) => {
-            match integer_token(number) {
+            let moment = match integer_token(number) {
+                // An integer token is exact in f64 for every year 1..9999. A larger magnitude fails
+                // in both implementations, so the conversion cannot change the outcome.
                 Some(text) => {
-                    let seconds: i64 = text.parse().map_err(|_| {
-                        SourceError::new("ValueError", format!("Dunking Sheep {label} invalid"))
-                    })?;
-                    DateTime::from_timestamp(seconds, 0)
-                        .map(|moment| iso(&moment))
-                        .ok_or_else(|| {
-                            SourceError::new("ValueError", format!("Dunking Sheep {label} invalid"))
-                        })
+                    let seconds: i64 = text.parse().map_err(|_| invalid())?;
+                    fromtimestamp_utc(seconds as f64).map_err(|_| invalid())?
                 }
-                None => Ok(iso(&fromtimestamp_utc(
-                    number.as_f64().unwrap_or(f64::NAN),
-                )?)),
-            }
+                None => {
+                    fromtimestamp_utc(number.as_f64().unwrap_or(f64::NAN)).map_err(|_| invalid())?
+                }
+            };
+            Ok(iso(&moment))
         }
         _ => Err(SourceError::new(
             "ValueError",

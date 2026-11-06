@@ -1269,6 +1269,38 @@ esac"#,
 }
 
 #[test]
+fn dunk_timestamp_wraps_every_numeric_failure_as_the_labelled_value_error() {
+    // Python's `_dunk_timestamp` wraps OverflowError, OSError, and ValueError from fromtimestamp
+    // as ValueError with the label, for integer and float tokens alike.
+    for item in [
+        json!(253_402_300_800_i64),
+        json!(-62_135_596_801_i64),
+        json!(1e300),
+        json!(-1e300),
+        json!(9.3e18),
+        json!(9e18),
+        json!(1e17),
+        json!(6.7e16),
+    ] {
+        let error = dunk_timestamp(Some(&item), "generated_at").unwrap_err();
+        assert_eq!(error.python_type, "ValueError", "{item}");
+        assert_eq!(error.detail, "Dunking Sheep generated_at invalid", "{item}");
+    }
+    for item in [
+        json!(1_700_000_000_i64),
+        json!(0_i64),
+        json!(1_700_000_000.5),
+    ] {
+        let expected = iso(&fromtimestamp_utc(item.as_f64().unwrap()).unwrap());
+        assert_eq!(
+            dunk_timestamp(Some(&item), "generated_at").unwrap(),
+            expected,
+            "{item}"
+        );
+    }
+}
+
+#[test]
 fn fromtimestamp_utc_raises_the_exception_classes_cpython_raises() {
     // Expected classes come from CPython 3.14 `datetime.fromtimestamp(value, timezone.utc)`.
     let cases: [(f64, Result<(), &str>); 14] = [
