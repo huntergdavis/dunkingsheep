@@ -53,6 +53,9 @@ pub struct OwnerFleetConfig {
     pub channels: HashMap<String, Value>,
     pub desk_channel: Option<Value>,
     pub summary_clock: Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>,
+    /// Expected owner of process entries. `None` means this process's real uid,
+    /// the value Python's `os.getuid()` reports.
+    pub process_uid: Option<u32>,
 }
 
 impl OwnerFleetConfig {
@@ -70,6 +73,7 @@ impl OwnerFleetConfig {
             channels: HashMap::new(),
             desk_channel: None,
             summary_clock: Arc::new(Utc::now),
+            process_uid: None,
         }
     }
 
@@ -111,6 +115,12 @@ impl OwnerFleetConfig {
         clock: impl Fn() -> DateTime<Utc> + Send + Sync + 'static,
     ) -> Self {
         self.summary_clock = Arc::new(clock);
+        self
+    }
+
+    /// Overrides the expected owner of process entries; tests use a foreign uid.
+    pub fn with_process_uid(mut self, uid: u32) -> Self {
+        self.process_uid = Some(uid);
         self
     }
 }
@@ -171,6 +181,7 @@ impl OwnerFleetBackend {
             .as_secs_f64()
     }
 
+    /// Discovery only: a live answer from the last 20 s is reused.
     async fn capability(&self, pane: &str) -> Result<Value, PanesWebError> {
         let now = self.rpc.now_seconds();
         if let Some((seen, value)) = self
@@ -184,6 +195,11 @@ impl OwnerFleetBackend {
                 return Ok(value);
             }
         }
+        self.fresh_capability(pane).await
+    }
+
+    /// Reads the daemon now. Sends use this path, never the cache.
+    async fn fresh_capability(&self, pane: &str) -> Result<Value, PanesWebError> {
         let value = self
             .rpc
             .rpc("delivery_capability", json!({"target": pane}))
@@ -256,9 +272,20 @@ impl OwnerFleetBackend {
     }
 
     async fn send_direct(&self, pane: &str, body: &str) -> Result<Value, String> {
-        let capability = self.capability(pane).await.map_err(|error| match error {
-            PanesWebError::Http { detail, .. } | PanesWebError::Failure(detail) => detail,
-        })?;
+        // web/app.py _send_to_pane reads the daemon on every send. The cache is for
+        // discovery only, so a lane that died inside the window is refused here.
+        let capability = self
+            .fresh_capability(pane)
+            .await
+            .map_err(|error| match error {
+                PanesWebError::Http { detail, .. } | PanesWebError::Failure(detail) => detail,
+            })?;
+        if !capability.is_object() {
+            return Err("the daemon could not describe this lane".into());
+        }
+        if !capability.get("alive").is_some_and(truthy) {
+            return Err(format!("{pane} is not alive: nothing to send to"));
+        }
         let route = capability.get("send").and_then(Value::as_str).unwrap_or("");
         if !matches!(route, "owner_push" | "guarded") {
             return Err(format!(
@@ -391,6 +418,7 @@ impl FleetSources for OwnerFleetBackend {
             &self.config.home,
             &self.config.tmux_program,
             routed,
+            self.config.process_uid,
         )
     }
 
@@ -827,12 +855,16 @@ fn collect_inventory(
     home: &Path,
     tmux_program: &Path,
     routed: &[String],
+    expected_uid: Option<u32>,
 ) -> Value {
     let started = Instant::now();
+    let Some(uid) = expected_uid.or_else(current_process_uid) else {
+        return json!({"state":"unavailable","rows":[],"reason":"Process or pane inventory unavailable"});
+    };
     let Some(pane_pids) = tmux_panes(tmux_program, started) else {
         return json!({"state":"unavailable","rows":[],"reason":"Process or pane inventory unavailable"});
     };
-    let processes = match process_rows(proc_root) {
+    let processes = match process_rows(proc_root, uid) {
         Ok(rows) => rows,
         Err(_) => {
             return json!({"state":"unavailable","rows":[],"reason":"Process or pane inventory unavailable"})
@@ -915,9 +947,8 @@ fn tmux_panes(program: &Path, started: Instant) -> Option<HashMap<u32, String>> 
     Some(panes)
 }
 
-fn process_rows(root: &Path) -> io::Result<HashMap<u32, ProcRow>> {
+fn process_rows(root: &Path, uid: u32) -> io::Result<HashMap<u32, ProcRow>> {
     use std::os::unix::fs::MetadataExt;
-    let uid = unsafe_uid();
     let mut rows = HashMap::new();
     for entry in fs::read_dir(root)?.take(MAX_PROCESSES) {
         let Ok(entry) = entry else {
@@ -982,10 +1013,17 @@ fn process_rows(root: &Path) -> io::Result<HashMap<u32, ProcRow>> {
     Ok(rows)
 }
 
-#[cfg(unix)]
-fn unsafe_uid() -> u32 {
-    use std::os::unix::fs::MetadataExt;
-    fs::metadata(".").map(|m| m.uid()).unwrap_or(u32::MAX)
+/// This process's real uid, the value Python's `os.getuid()` reports. `None` where
+/// `/proc` is unavailable, so the inventory fails closed as unavailable.
+fn current_process_uid() -> Option<u32> {
+    fs::read_to_string("/proc/self/status")
+        .ok()?
+        .lines()
+        .find_map(|line| line.strip_prefix("Uid:"))?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
 }
 
 fn harness(args: &[String], exe: &str) -> Option<String> {
