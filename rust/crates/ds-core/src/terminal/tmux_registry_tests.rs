@@ -152,7 +152,7 @@ exit 0
     assert!(second.managed("pane", "%1", &panes));
     std::fs::write(
         dir.path().join("extra"),
-        "%2\x1f$1\x1f@1\x1f/tmp\x1fsh\x1fhuman\x1f0\x1ffleet\x1ftab\x1f0\x1f0\x1f456\n"
+        "%2\x1f$1\x1f@1\x1f/tmp\x1fsh\x1fhuman\x1f0\x1ffleet\x1ftab\x1f0\x1f0\x1f456\x1f80\x1f24\n"
             .replace('\x1f', crate::terminal::parse::pane_separator()),
     )
     .unwrap();
