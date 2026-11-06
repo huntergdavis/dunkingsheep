@@ -5843,7 +5843,6 @@ mod stuck_gap_tests {
     // path with the real composer matcher. After a restart the persisted text must be
     // rehydrated once the candidate is bound, and then the worker presses once.
     #[test]
-    #[ignore = "t3354 row 51 divergence: after a restart the persisted sent text is not rehydrated, so the strict press refuses (Python rehydrates at bind); owner ruling pending"]
     fn the_restarted_worker_recovers_through_the_real_matcher() {
         let dir = tempfile::tempdir().unwrap();
         let state = dir.path().join("state.json");
@@ -5892,6 +5891,8 @@ mod stuck_gap_tests {
                 .is_some_and(|rows| rows.iter().any(|row| row.as_str() == Some(TEXT))),
             "the persisted text must be rehydrated once the candidate is bound"
         );
+        // The press verifies only if the composer is cleared after the Enter.
+        env.after_key_screen = Some(frame("\x1b[2mAsk Codex to do anything\x1b[0m", &[]));
         assert!(after.unwedge(
             &mut env,
             PANE,
@@ -5909,7 +5910,6 @@ mod stuck_gap_tests {
     // (row 62), on the strict path: the restored candidate keeps its attempt generation, and
     // after the bind the real matcher authorises one press.
     #[test]
-    #[ignore = "t3354 row 62 divergence: after a same-generation restart on the strict path the persisted sent text is not rehydrated, so the second tick does not press (Python presses); owner ruling pending"]
     fn the_same_generation_restart_recovers_through_the_real_matcher() {
         let dir = tempfile::tempdir().unwrap();
         let state = dir.path().join("state.json");
@@ -5943,6 +5943,8 @@ mod stuck_gap_tests {
             true
         ));
         assert!(env.keys.is_empty(), "the bind is only evidence");
+        // The press verifies only if the composer is cleared after the Enter.
+        env.after_key_screen = Some(frame("\x1b[2mAsk Codex to do anything\x1b[0m", &[]));
         assert!(after.unwedge(
             &mut env,
             PANE,
@@ -6005,6 +6007,228 @@ mod stuck_gap_tests {
         assert!(
             env.keys.is_empty(),
             "the persisted text must not authorise a modified composer"
+        );
+    }
+
+    // RestartRecoveryTests.test_a_human_continuation_is_refused_after_a_restart_by_the_real_matcher
+    // (row 52), with the rehydration in place and no pre-set sent text. The bind tick rehydrates
+    // the restored text, and a composer with a typed continuation below it is still never pressed.
+    #[test]
+    fn a_human_continuation_after_restart_is_refused_once_rehydrated() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state.json");
+        let before = persistent_recovery_flock(dir.path(), &state);
+        let mut env = live_pane(frame(TEXT, &[]));
+        let message = failed_candidate(&env, 1.0);
+        before.note_stuck_candidate(&message);
+        before.save().unwrap();
+        let after = persistent_recovery_flock(dir.path(), &state);
+        after.restore_snapshot(&before.snapshot());
+        {
+            let mut config = after.stuck_config.lock().unwrap();
+            config.threshold_s = 1.0;
+            config.observation_interval_s = 0.1;
+            config.max_attempts = 1;
+        }
+        env.screens.insert(
+            PANE.into(),
+            frame(TEXT, &["  and one more thing I was typing"]),
+        );
+        for now in [99.5, 200.0, 300.0] {
+            assert!(!after.unwedge(
+                &mut env,
+                PANE,
+                TEXT,
+                Some(98.0),
+                Some(&message),
+                now,
+                None,
+                true
+            ));
+        }
+        assert!(
+            env.keys.is_empty(),
+            "the rehydrated text must not authorise a modified composer"
+        );
+        assert!(
+            after
+                .sent_text_by_pane
+                .lock()
+                .unwrap()
+                .get(PANE)
+                .is_some_and(|rows| rows.iter().any(|row| row.as_str() == Some(TEXT))),
+            "the restored text is rehydrated on the bind tick"
+        );
+    }
+
+    // Python _stuck_observer_step skips ineligible entries before the bind and the rehydration.
+    // A cancelled message is an ineligible candidate: its text must never become ownership
+    // evidence after a restart.
+    #[test]
+    fn an_ineligible_candidate_text_is_never_rehydrated() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state.json");
+        let before = persistent_recovery_flock(dir.path(), &state);
+        let mut env = live_pane(frame(TEXT, &[]));
+        let mut message = failed_candidate(&env, 1.0);
+        message.status = "cancelled".into();
+        before.note_stuck_candidate(&message);
+        before.save().unwrap();
+        let after = persistent_recovery_flock(dir.path(), &state);
+        after.restore_snapshot(&before.snapshot());
+        {
+            let mut config = after.stuck_config.lock().unwrap();
+            config.threshold_s = 1.0;
+            config.observation_interval_s = 0.1;
+            config.max_attempts = 1;
+        }
+        assert!(
+            after
+                .stuck_candidates
+                .lock()
+                .unwrap()
+                .get(PANE)
+                .is_none_or(|entry| !entry.eligible),
+            "premise: the cancelled candidate is ineligible"
+        );
+        for now in [99.5, 200.0, 300.0] {
+            assert!(!after.unwedge(
+                &mut env,
+                PANE,
+                TEXT,
+                Some(98.0),
+                Some(&message),
+                now,
+                None,
+                true
+            ));
+        }
+        assert!(
+            env.keys.is_empty(),
+            "an ineligible candidate's text must not authorise a press"
+        );
+        assert!(
+            after
+                .sent_text_by_pane
+                .lock()
+                .unwrap()
+                .get(PANE)
+                .is_none_or(|rows| rows.iter().all(|row| row.as_str() != Some(TEXT))),
+            "an ineligible candidate's text must not be rehydrated"
+        );
+    }
+
+    // Python appends the transcript texts first, then the candidate's own text, and keeps the
+    // last REMEMBERED_SENDS (4). With four transcript texts the candidate's text must survive
+    // the cap, and it must be the last entry.
+    #[test]
+    fn rehydration_keeps_the_candidate_text_after_four_transcripts() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state.json");
+        let before = persistent_recovery_flock(dir.path(), &state);
+        let mut env = live_pane(frame(TEXT, &[]));
+        let message = failed_candidate(&env, 1.0);
+        before.note_stuck_candidate(&message);
+        {
+            let mut candidates = before.stuck_candidates.lock().unwrap();
+            let entry = candidates.get_mut(PANE).expect("the candidate is recorded");
+            entry.transcript_texts = ["t1", "t2", "t3", "t4"].map(str::to_owned).to_vec();
+        }
+        before.save().unwrap();
+        let after = persistent_recovery_flock(dir.path(), &state);
+        after.restore_snapshot(&before.snapshot());
+        {
+            let mut config = after.stuck_config.lock().unwrap();
+            config.threshold_s = 1.0;
+            config.observation_interval_s = 0.1;
+            config.max_attempts = 1;
+        }
+        // The bind tick: rehydration happens here, before any press decision.
+        assert!(!after.unwedge(
+            &mut env,
+            PANE,
+            TEXT,
+            Some(99.5),
+            Some(&message),
+            100.0,
+            None,
+            true
+        ));
+        let rows: Vec<String> = after
+            .sent_text_by_pane
+            .lock()
+            .unwrap()
+            .get(PANE)
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|row| row.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert_eq!(
+            vec!["t2", "t3", "t4", TEXT],
+            rows,
+            "the last four are the three newest transcripts and the candidate's own text"
+        );
+    }
+
+    // The in-process case: the candidate's text is already remembered when four transcripts
+    // follow. Python appends the transcripts first and skips the text (already present), so the
+    // cap drops the remembered text and keeps the last four transcripts. Only a fresh restore
+    // keeps the candidate's own text.
+    #[test]
+    fn rehydration_drops_an_already_remembered_candidate_text_after_four_transcripts() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state.json");
+        let before = persistent_recovery_flock(dir.path(), &state);
+        let mut env = live_pane(frame(TEXT, &[]));
+        let message = failed_candidate(&env, 1.0);
+        before.note_stuck_candidate(&message);
+        {
+            let mut candidates = before.stuck_candidates.lock().unwrap();
+            let entry = candidates.get_mut(PANE).expect("the candidate is recorded");
+            entry.transcript_texts = ["t1", "t2", "t3", "t4"].map(str::to_owned).to_vec();
+        }
+        before.save().unwrap();
+        let after = persistent_recovery_flock(dir.path(), &state);
+        after.restore_snapshot(&before.snapshot());
+        {
+            let mut config = after.stuck_config.lock().unwrap();
+            config.threshold_s = 1.0;
+            config.observation_interval_s = 0.1;
+            config.max_attempts = 1;
+        }
+        // The candidate's text is already remembered in-process before the bind tick.
+        after
+            .sent_text_by_pane
+            .lock()
+            .unwrap()
+            .insert(PANE.into(), vec![TEXT.into()]);
+        assert!(!after.unwedge(
+            &mut env,
+            PANE,
+            TEXT,
+            Some(99.5),
+            Some(&message),
+            100.0,
+            None,
+            true
+        ));
+        let rows: Vec<String> = after
+            .sent_text_by_pane
+            .lock()
+            .unwrap()
+            .get(PANE)
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|row| row.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert_eq!(
+            vec!["t1", "t2", "t3", "t4"],
+            rows,
+            "the remembered text is skipped and dropped by the cap, as in Python"
         );
     }
 }

@@ -597,6 +597,44 @@ impl Flock {
                 .forget(pane_id);
             return false;
         };
+        // Python rehydrates an eligible restored candidate's exact text and its transcript texts
+        // once the candidate is bound to this pane generation. Ineligible or unbound text is never
+        // injected as ownership evidence. The composer must still show exactly that text before
+        // anything is pressed.
+        let bound_texts = self
+            .stuck_candidates
+            .lock()
+            .ok()
+            .and_then(|c| c.get(pane_id).cloned())
+            .filter(|entry| {
+                entry.eligible && entry.generation.as_deref() == Some(generation.as_str())
+            })
+            .map(|entry| {
+                // Python appends the transcript texts first, then the candidate's own text, and
+                // keeps the last REMEMBERED_SENDS. Appends skip texts already remembered, so the
+                // candidate's text is last only when it was not already present.
+                entry
+                    .transcript_texts
+                    .into_iter()
+                    .chain(std::iter::once(entry.text))
+                    .filter(|text| !text.is_empty())
+                    .collect::<Vec<String>>()
+            })
+            .unwrap_or_default();
+        if !bound_texts.is_empty() {
+            let mut sent = self
+                .sent_text_by_pane
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let rows = sent.entry(pane_id.to_owned()).or_default();
+            for text in bound_texts {
+                if !rows.iter().any(|row| row.as_str() == Some(text.as_str())) {
+                    rows.push(serde_json::Value::String(text));
+                }
+            }
+            let excess = rows.len().saturating_sub(REMEMBERED_SENDS);
+            rows.drain(..excess);
+        }
         let native = read_screen(env, pane_id, None, true)
             .and_then(|screen| self.owned_recovery_evidence(env, pane_id, &screen));
         let authority = self
