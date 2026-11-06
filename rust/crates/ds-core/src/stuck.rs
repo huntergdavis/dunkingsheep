@@ -1069,4 +1069,31 @@ mod tests {
         assert_eq!(None, restored.records["w1:p3"].generation);
         assert_eq!(1, restored.records["w1:p3"].attempts);
     }
+
+    /// t3355 (t820 proof D) scheduled row 33: test_dunk_scheduled_recovery.py::
+    /// test_unreadable_then_owned_requires_fresh_stability_window (oracle 79bc92fa). The Python
+    /// steps are owned at 1000, unreadable at 1060, owned again at 1120 (no key), and a key at
+    /// 1240, one 120 s threshold after the second window opened. Tracker layer: an unreadable
+    /// read is observed with no text and not owned, which is how sends::stuck_text_is_ours
+    /// reports it, and the reset must restart first_seen rather than resume the old clock.
+    #[test]
+    fn unreadable_then_owned_requires_a_fresh_stability_window() {
+        let config = Config {
+            threshold_s: 120.0,
+            max_attempts: 1,
+            cooldown_s: 60.0,
+            observation_interval_s: 20.0,
+            ..Config::default()
+        };
+        let owned = observation("scheduled text");
+        let mut unreadable = owned.clone();
+        unreadable.text = None;
+        unreadable.owned = false;
+        let mut tracker = Tracker::default();
+        assert_eq!("wait", tracker.decide(&owned, &config, 1000.0).action);
+        assert_eq!("reset", tracker.decide(&unreadable, &config, 1060.0).action);
+        assert_eq!("wait", tracker.decide(&owned, &config, 1120.0).action);
+        assert!(!tracker.decide(&owned, &config, 1239.0).recovers());
+        assert!(tracker.decide(&owned, &config, 1240.0).recovers());
+    }
 }
