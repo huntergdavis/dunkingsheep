@@ -27,6 +27,7 @@ pub mod error;
 pub mod fallback;
 pub mod flock;
 pub mod github;
+pub mod guard;
 pub mod health;
 pub mod help;
 pub mod http;

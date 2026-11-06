@@ -2,9 +2,10 @@
 //! refusal, the owner gate / per-role gate, the desk argument clamp, the required and unknown
 //! argument checks, the handler call, and the desk result clamp, in exactly that order.
 //!
-//! Handlers live in a table keyed by registry command name. Every command not yet ported
-//! resolves to a NAMED refusal ("command <x> is not ported yet"), never a guess, so the later
-//! command-group slices (T34..T38) only call [`Dispatcher::register`].
+//! Handlers live in a table keyed by registry command name. The production table registers
+//! every registry command (`server_runtime::registrations::production_handlers`, enforced by a
+//! test over [`Dispatcher::missing_handlers`]); a partial table, which only tests build, refuses
+//! a missing handler by name ("internal error: no handler registered for <x>"), never a guess.
 //!
 //! NOT in this slice: the handlers themselves.
 
@@ -809,6 +810,15 @@ impl Dispatcher {
         self.handlers.insert(name, handler);
     }
 
+    /// Registry commands this table has no handler for: empty for the production assembly.
+    pub fn missing_handlers(&self) -> Vec<&'static str> {
+        registry::COMMANDS
+            .iter()
+            .map(|command| command.name)
+            .filter(|name| !self.handlers.contains_key(name))
+            .collect()
+    }
+
     #[cfg(test)]
     pub(crate) fn registration_attempts(&self) -> &[&'static str] {
         &self.registration_attempts
@@ -1152,10 +1162,15 @@ impl Dispatcher {
                 unknown.join(", ")
             )));
         }
-        let result = match self.handlers.get(command.name) {
-            Some(handler) => handler(context, args)?,
-            None => return Err(not_ported(command.name)),
-        };
+        // The production table is total (registrations.rs enforces it); only a partial test
+        // table can land here, and it is told so by name rather than given a guess.
+        let handler = self.handlers.get(command.name).ok_or_else(|| {
+            DunkError::Refused(format!(
+                "internal error: no handler registered for {}",
+                command.name
+            ))
+        })?;
+        let result = handler(context, args)?;
         Ok(if role == "desk" {
             roles::clamp_desk_result(&result)
         } else {
@@ -3388,11 +3403,6 @@ pub fn h_task_followers(context: &HandlerContext<'_>, _: Args) -> Result<Value, 
             .map(|(pane_id, scope)| json!({"pane_id": pane_id, "scope": scope}))
             .collect::<Vec<_>>(),
     }))
-}
-
-/// The named refusal for a registered command with no Rust handler yet.
-pub fn not_ported(name: &str) -> DunkError {
-    DunkError::Refused(format!("command {name} is not ported yet"))
 }
 
 /// Python `repr(str)` shared with native recovery's Unicode-aware formatter.
