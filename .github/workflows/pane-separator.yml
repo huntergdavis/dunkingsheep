@@ -1,0 +1,20 @@
+# t1605 / t3357: the tmux pane separator tests (tests/test_dunk_pane_separator.py). The pane parser
+# depends on the separator token, so this file runs on every PR and on main. It needs no tmux, no
+# daemon and no secret. It is not a required check yet.
+name: pane-separator
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  pane-separator:
+    name: pane separator tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python3 -I tests/test_dunk_pane_separator.py
