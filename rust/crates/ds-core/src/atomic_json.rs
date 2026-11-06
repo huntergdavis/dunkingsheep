@@ -444,8 +444,9 @@ mod tests {
 
     #[test]
     fn python_strings_escape_like_ensure_ascii() {
+        // The expected text is the escaped JSON itself, so every backslash is spelled out.
         assert_eq!(
-            r#""eé—😀\u0001\u007f\t\"\\/""#,
+            "\"e\\u00e9\\u2014\\ud83d\\ude00\\u0001\\u007f\\t\\\"\\\\/\"",
             python_string("e\u{e9}\u{2014}\u{1F600}\u{1}\u{7f}\t\"\\/")
         );
     }
