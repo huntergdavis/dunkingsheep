@@ -4137,18 +4137,38 @@ fn the_env_source_wins_over_a_saved_policy_after_a_restart() {
     assert!(flock.stuck_config.lock().unwrap().enabled);
     let policy =
         crate::config::Env::from_pairs(&[("DUNKINGSHEEP_STUCK_CONFIG", r#"{"enabled": false}"#)]);
-    flock.apply_stuck_config_env(&policy);
+    flock.apply_stuck_config_env(&policy).unwrap();
     assert!(!flock.stuck_config.lock().unwrap().enabled);
+}
+
+/// Python refuses a bad field value (the constructor raises), so the env policy stops startup,
+/// and the policy in place stays. A value that cannot be parsed is ignored with a warning.
+#[test]
+fn the_env_source_refuses_a_bad_field_and_ignores_broken_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = persistent_recovery_flock(dir.path(), &dir.path().join("state.json"));
+    let refused =
+        crate::config::Env::from_pairs(&[("DUNKINGSHEEP_STUCK_CONFIG", r#"{"enabled": "maybe"}"#)]);
+    assert!(flock.apply_stuck_config_env(&refused).is_err());
+    let broken =
+        crate::config::Env::from_pairs(&[("DUNKINGSHEEP_STUCK_CONFIG", r#"{"enabled": "#)]);
+    assert!(flock.apply_stuck_config_env(&broken).is_ok());
+    assert!(
+        flock.stuck_config.lock().unwrap().enabled,
+        "neither value changes the policy in place"
+    );
 }
 
 /// The case of `unwedge_reserves_before_one_key_and_does_not_claim_unchanged_text`, with the
 /// policy given by the env source instead of by editing the config fields.
 fn env_policy_case(dir: &std::path::Path, policy: &str) -> (Flock, Pane, Message) {
     let flock = persistent_recovery_flock(dir, &dir.join("state.json"));
-    flock.apply_stuck_config_env(&crate::config::Env::from_pairs(&[(
-        "DUNKINGSHEEP_STUCK_CONFIG",
-        policy,
-    )]));
+    flock
+        .apply_stuck_config_env(&crate::config::Env::from_pairs(&[(
+            "DUNKINGSHEEP_STUCK_CONFIG",
+            policy,
+        )]))
+        .unwrap();
     let mut env = Pane::default();
     env.panes
         .push(serde_json::json!({"pane_id": "%1", "pane_pid": std::process::id()}));

@@ -246,39 +246,55 @@ impl Env {
     }
 }
 
+/// What stops `DUNKINGSHEEP_STUCK_CONFIG` from being used, split the way the Python splits it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StuckConfigError {
+    /// A value that cannot be read or parsed. The Python warns and ignores it.
+    Ignored(String),
+    /// A field the Python refuses. `Config.from_mapping` raises, and the Flock constructor has no
+    /// `try`, so startup stops.
+    Refused(String),
+}
+
 /// `DUNKINGSHEEP_STUCK_CONFIG`: the runtime source for the stuck-recovery policy, read the way the
 /// Python does (`Flock._stuck_config_source`). A value that starts with `{` is inline JSON. Any
 /// other value is a path to a JSON file, after `~` expansion; the file holds the policy directly or
-/// under a `stuck_recovery` key. Unset or blank is `None`.
+/// under a `stuck_recovery` key. Unset or empty is `None`. Whitespace only is an empty path, which
+/// cannot be read, so it is `Ignored`, as in the Python.
 ///
-/// The shape and types follow the Python `Config.from_mapping`. `enabled` is a boolean or one of
-/// the strings it accepts. Numbers may be numeric strings. `null` means "use the default" for the
-/// tunables only; it is refused for `enabled` and `max_attempts`, as the Python refuses it. A JSON
-/// boolean is refused where a number is expected: Python takes `true` as 1, a documented difference
-/// (a boolean where a count belongs is a typo). Anything else is an error here, never a coercion.
-/// Unknown keys are ignored, as the Python ignores them. A file that does
-/// not read or parse is an error. A file whose top level is not an object is no policy (`None`),
-/// as the Python treats it.
-pub fn stuck_config_source(env: &Env) -> Result<Option<crate::stuck::RawConfig>, String> {
-    let Some(text) = env.get("DUNKINGSHEEP_STUCK_CONFIG").map(str::trim) else {
+/// The field rules follow the Python `Config.from_mapping`, and a field it refuses is `Refused`:
+/// `enabled` is a boolean or one of the strings it accepts; numbers may be numeric strings; a
+/// boolean counts as 1 or 0; `null` means "use the default" for the tunables only and is refused
+/// for `enabled` and `max_attempts`. The validation of `Config::from_raw` is applied here too. Unknown
+/// keys are ignored, as in the Python. A file whose top level is not an object is no policy (`None`),
+/// as in the Python.
+pub fn stuck_config_source(env: &Env) -> Result<Option<crate::stuck::RawConfig>, StuckConfigError> {
+    let Some(raw) = env.get("DUNKINGSHEEP_STUCK_CONFIG") else {
         return Ok(None);
     };
-    if text.is_empty() {
+    if raw.is_empty() {
         return Ok(None);
     }
+    let text = raw.trim();
     let mapping = if text.starts_with('{') {
-        let value: serde_json::Value = serde_json::from_str(text)
-            .map_err(|error| format!("the inline value is not valid JSON: {error}"))?;
+        let value: serde_json::Value = serde_json::from_str(text).map_err(|error| {
+            StuckConfigError::Ignored(format!("the inline value is not valid JSON: {error}"))
+        })?;
         match value {
             serde_json::Value::Object(mapping) => mapping,
-            _ => return Err("stuck recovery config must be an object".into()),
+            _ => {
+                return Err(StuckConfigError::Refused(
+                    "stuck recovery config must be an object".into(),
+                ))
+            }
         }
     } else {
         let path = expand_home(text, env);
         let contents = std::fs::read_to_string(&path)
-            .map_err(|error| format!("cannot read {text}: {error}"))?;
-        let payload: serde_json::Value = serde_json::from_str(&contents)
-            .map_err(|error| format!("{text} is not valid JSON: {error}"))?;
+            .map_err(|error| StuckConfigError::Ignored(format!("cannot read {text}: {error}")))?;
+        let payload: serde_json::Value = serde_json::from_str(&contents).map_err(|error| {
+            StuckConfigError::Ignored(format!("{text} is not valid JSON: {error}"))
+        })?;
         match payload {
             serde_json::Value::Object(mapping) => {
                 let inner = mapping
@@ -290,7 +306,9 @@ pub fn stuck_config_source(env: &Env) -> Result<Option<crate::stuck::RawConfig>,
             _ => return Ok(None),
         }
     };
-    Ok(Some(raw_from_mapping(&mapping)?))
+    let policy = raw_from_mapping(&mapping).map_err(StuckConfigError::Refused)?;
+    crate::stuck::Config::from_raw(&policy).map_err(StuckConfigError::Refused)?;
+    Ok(Some(policy))
 }
 
 /// `os.path.expanduser` for `~` and `~/...`, from HOME. Other forms, such as `~user/...`, are kept.
@@ -340,6 +358,7 @@ fn stuck_number(value: Option<&serde_json::Value>, what: &str) -> Result<Option<
     use serde_json::Value;
     match value {
         None | Some(Value::Null) => Ok(None),
+        Some(Value::Bool(flag)) => Ok(Some(if *flag { 1.0 } else { 0.0 })),
         Some(Value::Number(number)) => number
             .as_f64()
             .map(Some)
@@ -371,6 +390,7 @@ fn stuck_integer(value: Option<&serde_json::Value>) -> Result<Option<i64>, Strin
             .map(Some)
             .ok_or_else(refused),
         Value::String(text) => text.trim().parse::<i64>().map(Some).map_err(|_| refused()),
+        Value::Bool(flag) => Ok(Some(i64::from(*flag))),
         _ => Err(refused()),
     }
 }
@@ -499,12 +519,12 @@ mod tests {
     }
 
     #[test]
-    fn the_stuck_env_source_is_absent_or_blank_until_set() {
+    fn the_stuck_env_source_is_absent_or_empty_until_set() {
         assert!(stuck_config_source(&Env::from_pairs(&[]))
             .unwrap()
             .is_none());
-        let blank = Env::from_pairs(&[("DUNKINGSHEEP_STUCK_CONFIG", "  ")]);
-        assert!(stuck_config_source(&blank).unwrap().is_none());
+        let empty = Env::from_pairs(&[("DUNKINGSHEEP_STUCK_CONFIG", "")]);
+        assert!(stuck_config_source(&empty).unwrap().is_none());
     }
 
     #[test]
@@ -528,16 +548,57 @@ mod tests {
     #[test]
     fn the_stuck_env_source_refuses_what_the_python_refuses() {
         for raw in [
-            "/nonexistent/dunkingsheep/stuck.json",
             r#"{"enabled": "maybe"}"#,
             r#"{"enabled": null}"#,
+            r#"{"enabled": 1}"#,
             r#"{"max_attempts": null}"#,
             r#"{"threshold_s": "soon"}"#,
-            r#"{"enabled": "#,
+            r#"{"threshold_s": 0}"#,
+            r#"{"enabled": true, "threshold_s": 1, "observation_interval_s": 5}"#,
         ] {
             let env = Env::from_pairs(&[("DUNKINGSHEEP_STUCK_CONFIG", raw)]);
-            assert!(stuck_config_source(&env).is_err(), "{raw} must be refused");
+            assert!(
+                matches!(stuck_config_source(&env), Err(StuckConfigError::Refused(_))),
+                "{raw} must be refused"
+            );
         }
+    }
+
+    #[test]
+    fn the_stuck_env_source_ignores_what_the_python_ignores() {
+        let dir = tempfile::tempdir().unwrap();
+        let broken_file = dir.path().join("stuck.json");
+        std::fs::write(&broken_file, "{not json").unwrap();
+        for raw in [
+            "/nonexistent/dunkingsheep/stuck.json",
+            "   ",
+            r#"{"enabled": "#,
+            broken_file.to_str().unwrap(),
+        ] {
+            let env = Env::from_pairs(&[("DUNKINGSHEEP_STUCK_CONFIG", raw)]);
+            assert!(
+                matches!(stuck_config_source(&env), Err(StuckConfigError::Ignored(_))),
+                "{raw:?} must be ignored with a warning"
+            );
+        }
+    }
+
+    #[test]
+    fn booleans_count_as_numbers_like_the_python() {
+        let env = Env::from_pairs(&[(
+            "DUNKINGSHEEP_STUCK_CONFIG",
+            r#"{"enabled": false, "max_attempts": true, "cooldown_s": true}"#,
+        )]);
+        assert_eq!(
+            Ok(Some(crate::stuck::RawConfig {
+                enabled: Some(false),
+                threshold_s: None,
+                max_attempts: Some(1),
+                cooldown_s: Some(1.0),
+                observation_interval_s: None,
+            })),
+            stuck_config_source(&env)
+        );
     }
 
     #[test]
