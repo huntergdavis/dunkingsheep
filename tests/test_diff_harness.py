@@ -112,6 +112,12 @@ class ScrubTests(HarnessTestCase):
         self.assertIsNone(scrubbed["token"])
         self.assertEqual({}, scrubbed["tokens"])
 
+    def test_a_retired_desk_token_argument_never_reaches_the_fixture(self):
+        scrubbed = harness.scrub({"cmd": "send_text",
+                                  "args": {"target": "%2", "text": "hi", "desk_token": "dsk-live"}})
+        self.assertEqual(harness.SCRUB, scrubbed["args"]["desk_token"])
+        self.assertEqual("hi", scrubbed["args"]["text"])
+
 
 class MaskTests(HarnessTestCase):
     def rules(self, **overrides):

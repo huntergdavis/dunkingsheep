@@ -582,35 +582,88 @@ fn resize_names_a_missing_pane() {
     assert!(!argv.contains("resize-window"), "nothing to resize: {argv}");
 }
 
+/// A fake tmux that keeps ONE window's size in `<dir>/state.txt` and answers `list-panes`
+/// from that file, so the geometry it reports can change between two reads (t3366).
+///
+/// It follows the two behaviours the Python measured on real tmux (2026-10-28):
+/// - a size tmux accepts is applied, and the window follows what the attached client can
+///   show: anything wider than 80 columns comes back as 80, so the size reported must be
+///   read back after `resize-window`, not echoed from the request;
+/// - a size tmux refuses (wider than 400 columns, or taller than 200 rows) is refused in
+///   tmux's own words, and the window is left exactly as it was.
+fn fake_tmux_with_window(dir: &Path, cols: i64, rows: i64) -> PathBuf {
+    let script = dir.join("tmux");
+    let log = dir.join("argv.txt");
+    let state = dir.join("state.txt");
+    let template = dir.join("pane.template");
+    fs::write(&state, format!("{cols} {rows}\n")).expect("write state");
+    let pane = pane_line("%2", "$2", "@2", "claude", "2202")
+        .replace(&["120", "40"].join(SEP), &["@W@", "@H@"].join(SEP));
+    fs::write(&template, format!("{pane}\n")).expect("write template");
+    let body = format!(
+        "#!/bin/sh\n\
+         printf '%s\\n' \"$*\" >> '{log}'\n\
+         case \"$*\" in\n\
+           *resize-window*)\n\
+             x=$(printf '%s\\n' \"$*\" | sed -n 's/.*-x \\([0-9]*\\).*/\\1/p')\n\
+             y=$(printf '%s\\n' \"$*\" | sed -n 's/.*-y \\([0-9]*\\).*/\\1/p')\n\
+             if [ \"$x\" -gt 400 ]; then echo 'width too large' >&2; exit 1; fi\n\
+             if [ \"$y\" -gt 200 ]; then echo 'height too large' >&2; exit 1; fi\n\
+             if [ \"$x\" -gt 80 ]; then x=80; fi\n\
+             printf '%s %s\\n' \"$x\" \"$y\" > '{state}'\n\
+             exit 0 ;;\n\
+         esac\n\
+         case \"$*\" in\n\
+           *list-panes*)\n\
+             read -r w h < '{state}'\n\
+             sed \"s/@W@/$w/; s/@H@/$h/\" '{template}' ;;\n\
+         esac\n\
+         exit 0\n",
+        log = log.display(),
+        state = state.display(),
+        template = template.display(),
+    );
+    fs::write(&script, body).expect("write fake tmux");
+    let mut permissions = fs::metadata(&script).expect("stat").permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&script, permissions).expect("chmod");
+    script
+}
+
 #[test]
 fn a_refused_resize_reports_tmux_words_and_no_geometry() {
     let _serial = serial();
     let dir = tempdir();
-    // The listing stays the same; resize-window fails with tmux's own words.
-    let script = dir.path().join("tmux");
-    let log = dir.path().join("argv.txt");
-    let listing = pane_line("%2", "$2", "@2", "claude", "2202");
-    let body = format!(
-        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {log}\n\
-         case \"$*\" in\n  *resize-window*) echo 'width too large' >&2; exit 1 ;;\n\
-         esac\n\
-         case \"$*\" in\n  *list-panes*) echo '{listing}' ;;\n         esac\nexit 0\n",
-        log = log.display()
-    );
-    fs::write(&script, body).unwrap();
-    let mut permissions = fs::metadata(&script).unwrap().permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&script, permissions).unwrap();
-    let mut backend = isolated_backend(script);
-    // Read the window back from tmux before the refused resize, and again after it.
+    let fake = fake_tmux_with_window(dir.path(), 120, 40);
+    let mut backend = isolated_backend(fake);
+
+    // First a resize that tmux ACCEPTS, so the window is no longer the size it started at.
+    // The client shows only 80 columns, so 90 asked comes back as 80: the size reported
+    // is the one read back after resize-window, not the request echoed.
+    let applied = backend.resize("%2", 90, 30).expect("resize");
+    assert_eq!((Some(80), Some(30)), (applied.cols, applied.rows));
     let before = backend.get_pane("%2").map(|pane| (pane.width, pane.height));
+    assert_eq!(
+        Some((80, 30)),
+        before,
+        "the window after the applied resize"
+    );
+
+    // Then a resize that tmux REFUSES, with its own words. The refusal reports no geometry,
+    // and the window it leaves behind is the one read back before it.
     let error = backend.resize("%2", 999, 999).expect_err("tmux refused");
     assert_eq!("width too large", error.message);
     let after = backend.get_pane("%2").map(|pane| (pane.width, pane.height));
-    assert_eq!(Some((120, 40)), before, "the listing before the refusal");
     assert_eq!(
         before, after,
         "a refused resize leaves the geometry exactly as it was"
+    );
+    // tmux's own state, read straight from the fake, so the check does not depend on the
+    // backend's read-back being right.
+    let state = fs::read_to_string(dir.path().join("state.txt")).expect("read state");
+    assert_eq!(
+        "80 30\n", state,
+        "the refused size must not reach the window"
     );
     let argv = fs::read_to_string(dir.path().join("argv.txt")).unwrap_or_default();
     assert!(

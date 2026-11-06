@@ -48,7 +48,14 @@ fn queued_created_at(snapshot: &Value) -> Vec<f64> {
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter(|message| message.get("status").and_then(Value::as_str) == Some("queued"))
+        // The snapshot holds queued rows only, and Python's outbox rows carry no status key, so a
+        // row with no status is queued.
+        .filter(|message| {
+            message
+                .get("status")
+                .and_then(Value::as_str)
+                .is_none_or(|status| status == "queued")
+        })
         .filter_map(|message| message.get("created_at").and_then(Value::as_f64))
         .collect()
 }

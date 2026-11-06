@@ -2644,6 +2644,65 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pending_review_does_not_block_the_author_next_job() {
+        // test_pending_review_does_not_block_author_next_job: the review is older and has the same
+        // priority, but its author must never be handed it. The advance completes the source and
+        // chooses through the runtime's real planner (dispatch::next_job_plan).
+        let (_dir, jobs, tasks) = configured_jobs().await;
+        let source = tasks
+            .add("global", "source", "concrete acceptance")
+            .await
+            .unwrap();
+        tasks.assign(&source.id, &["%leader"], "set").await.unwrap();
+        let revision = "a".repeat(40);
+        let review = tasks
+            .allocation_review(
+                &source.id,
+                &revision,
+                "review",
+                "code",
+                &json!([]),
+                "%leader",
+            )
+            .await
+            .unwrap();
+        let successor = tasks
+            .add("global", "next", "concrete acceptance")
+            .await
+            .unwrap();
+        tasks
+            .assign(&successor.id, &["%leader"], "set")
+            .await
+            .unwrap();
+        let advance = jobs
+            .advance_with_materialiser(
+                AdvanceRequest {
+                    pane: "%leader",
+                    trigger: "completion",
+                    from_task: Some(&source.id),
+                    caller: None,
+                    operator_proof: None,
+                    dispatch_reason: None,
+                    unread: Some(0),
+                    pending_delivery: false,
+                },
+                |_| async {
+                    Err(MaterialiseError::DispatchPaused(
+                        "materialise is not what this case checks".to_owned(),
+                    ))
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(advance.plan["action"], "claim");
+        assert_eq!(
+            advance.plan["task_id"].as_str(),
+            Some(successor.id.as_str())
+        );
+        assert_eq!(tasks.get(&review.id).await.unwrap().status, "open");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn next_jobs_advance_records_handoff_and_progress() {
         let (_dir, jobs, tasks) = configured_jobs().await;
         let pane = "%1";
@@ -3085,6 +3144,19 @@ mod tests {
             .await
             .as_deref(),
             Some("not_allowed")
+        );
+        // Python (c): with the kill switch off, a registered pane whose registration is disabled
+        // still reads "disabled"; the switch is checked before the registration.
+        assert_eq!(
+            jobs.gate_with(
+                "%1",
+                Some(vec![json!({"pane_id":"%1"})]),
+                test_env(dir.path(), "0", ""),
+                None
+            )
+            .await
+            .as_deref(),
+            Some("disabled")
         );
     }
 

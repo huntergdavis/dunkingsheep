@@ -1,0 +1,82 @@
+{
+  "version": 1,
+  "next_id": 8,
+  "next_message_id": 9,
+  "dunkers": [],
+  "stuck_candidates": {
+    "w9:p2": {
+      "message_id": "m7",
+      "pane_id": "w9:p2",
+      "created_at": 1793000520.75,
+      "press_enter": true,
+      "status": "failed",
+      "kind": "text",
+      "scheduled": false,
+      "source": "d2",
+      "notify_for": [],
+      "schedule_template": null,
+      "typed_at": 1793000521.5,
+      "text": "status? \u2014 reply briefly",
+      "label": "example-two",
+      "generation": "gen-7f3a",
+      "eligible": true,
+      "superseded_by": "m7"
+    },
+    "w9:p1": {
+      "message_id": "m3",
+      "pane_id": "w9:p1",
+      "created_at": 1793000500.5,
+      "press_enter": true,
+      "status": "sent",
+      "kind": "text",
+      "scheduled": true,
+      "source": "send_text",
+      "notify_for": [],
+      "schedule_template": null,
+      "typed_at": null,
+      "text": "please pick up the example task",
+      "label": "example-lane",
+      "generation": "gen-2b9c",
+      "eligible": false,
+      "superseded_by": "m3",
+      "recovery_outcome": "exhausted",
+      "recovery_detail": "2 recovery attempt(s) did not clear the box",
+      "recovered_at": 1793000580.125
+    }
+  },
+  "stuck": {
+    "records": {
+      "w9:p2": {
+        "message_id": "m7",
+        "generation": "gen-7f3a",
+        "fingerprint": "fp-41",
+        "first_seen": 1793000522.0,
+        "last_attempt_at": 1793000560.5,
+        "attempts": 1,
+        "terminal": null
+      },
+      "w9:p1": {
+        "message_id": "m3",
+        "generation": "gen-2b9c",
+        "fingerprint": "fp-07",
+        "first_seen": 1793000501.0,
+        "last_attempt_at": 1793000540.0,
+        "attempts": 2,
+        "terminal": "2 recovery attempt(s) did not clear the box"
+      }
+    },
+    "spent": {
+      "w9:p2|m7|gen-7f3a|fp-41": 1,
+      "w9:p1|m3|gen-2b9c|fp-07": 2
+    }
+  },
+  "stuck_config": {
+    "enabled": true,
+    "threshold_s": 90.0,
+    "max_attempts": 2,
+    "cooldown_s": 45.0,
+    "observation_interval_s": 15.0
+  },
+  "outbox": [],
+  "decided": {}
+}
