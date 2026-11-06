@@ -27,7 +27,22 @@
 //!   is private, so the caller supplies the opener through `DeskConfig::open_operations_db`.
 //! - Static responses carry Content-Type and Content-Length. Starlette's ETag and Last-Modified
 //!   headers are not replicated, and neither is the exact MIME table of Python's `mimetypes`.
-//! - Game routes and the poolrad dashboard refresh are P1 and not mounted here.
+//! - Conditional GET and ranges are not implemented: no 304 for If-None-Match or If-Modified-Since,
+//!   no Accept-Ranges header, and no Range requests (206). Starlette's FileResponse answers them.
+//! - The 405 `Allow` is `GET, HEAD`, the value Starlette 1.10.0 sets in its StaticFiles method check,
+//!   the version in the release venv. `bridges/requirements.txt` pins ranges only, and the reviewer's
+//!   note that Starlette 0.46.x sent no Allow is not verified in this tree.
+//! - The P1 game routes are not in the route table. Python answers them, but here a POST gets the
+//!   mount's 405 (Allow `GET, HEAD`) and a GET gets a 404. The 405 wrongly implies the path takes only
+//!   GET and HEAD. This is documented rather than fixed.
+//! - `POST /api/ops-board/question` is registered by `routes::ops_board`, but web/app.py has no such
+//!   route, and the gate sends it to the mount. It is unreachable through the composition. Remove it
+//!   or document it in the producer module.
+//! - `PYTHON_ROUTES` is a hand-maintained copy of the P0 routes in web/app.py. No test checks it
+//!   against the mounted axum routes yet.
+//! - `GET /api/poolrad-dashboard/progress` is a P0 route (web/app.py:1953) mounted through
+//!   `routes::activity_poolrad`. The poolrad dashboard page, its reports, and its refresh are P1 and
+//!   not mounted here.
 
 use std::{
     collections::{HashMap, HashSet},
