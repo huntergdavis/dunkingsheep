@@ -57,6 +57,28 @@ fn the_adapter_carries_the_tmux_dict_keys() {
 }
 
 #[test]
+fn an_absent_geometry_is_null_not_zero() {
+    // The parser stores an absent geometry field as 0, and Python keeps None (JSON null).
+    // The adapter must not turn that absence into a size.
+    let unknown = crate::terminal::Pane {
+        pane_id: "w9:p9".into(),
+        window_id: "w9".into(),
+        ..Default::default()
+    };
+    let value = pane_to_json(&unknown, None);
+    assert!(value["cols"].is_null(), "{value}");
+    assert!(value["rows"].is_null(), "{value}");
+    let measured = crate::terminal::Pane {
+        width: 120,
+        height: 40,
+        ..unknown
+    };
+    let value = pane_to_json(&measured, None);
+    assert_eq!(120, value["cols"]);
+    assert_eq!(40, value["rows"]);
+}
+
+#[test]
 fn the_grouped_listing_is_sorted_and_labels_fall_back_to_ids() {
     let mut term = FakeTerminal::new();
     term.panes[0].tab = String::new(); // a tab with no label
