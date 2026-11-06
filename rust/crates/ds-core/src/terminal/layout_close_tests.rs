@@ -12,12 +12,12 @@ if [ -f refuse ] && [ "$(cat refuse)" = "$1" ]; then exit 1; fi
 case "$1" in
 new-window|split-window) printf '%%2\n' ;;
 list-panes)
- printf '%%1\037$1\037@1\037/work\037bash\037original\0371\037work\037tab\0370\0370\0371\03780\03724\n'
- printf '%%2\037$1\037@2\037/work\037codex\037%s\0371\037work\037tab\0370\0370\0371\03780\03724\n' "$(cat title 2>/dev/null)" ;;
-list-windows) printf '@1\037$1\037original\0370\0370\n@2\037$1\037new\0371\0371\n' ;;
+ printf '%%1__SEP__$1__SEP__@1__SEP__/work__SEP__bash__SEP__original__SEP__1__SEP__work__SEP__tab__SEP__0__SEP__0__SEP__1__SEP__80__SEP__24\n'
+ printf '%%2__SEP__$1__SEP__@2__SEP__/work__SEP__codex__SEP__%s__SEP__1__SEP__work__SEP__tab__SEP__0__SEP__0__SEP__1__SEP__80__SEP__24\n' "$(cat title 2>/dev/null)" ;;
+list-windows) printf '@1__SEP__$1__SEP__original__SEP__0__SEP__0\n@2__SEP__$1__SEP__new__SEP__1__SEP__1\n' ;;
 select-pane) if [ "$4" = '-T' ]; then printf '%s' "$5" > title; fi ;;
 esac
-"#).unwrap();
+"#.replace("__SEP__", crate::terminal::parse::pane_separator())).unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
     let backend = TmuxBackend::with_registry(script, dir.path().join("registry.json"));
     (dir, backend)
