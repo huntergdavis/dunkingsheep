@@ -33,7 +33,7 @@ use axum::http::StatusCode;
 use chrono::{DateTime, Utc};
 use ds_core::client::{FlockClient, Probe, UnixTransport};
 use ring::rand::{SecureRandom, SystemRandom};
-use rusqlite::{types::Value as SqlValue, types::ValueRef, Connection};
+use rusqlite::{types::Value as SqlValue, types::ValueRef, Connection, TransactionBehavior};
 use serde_json::{json, Map, Number, Value};
 
 use crate::{
@@ -1890,7 +1890,7 @@ impl MessagesBackend {
         };
 
         let mut connection = self.connect()?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         if let Some(external_id) = external_id {
             if let Some(existing) = first_row(
                 &transaction,
@@ -1924,7 +1924,7 @@ impl MessagesBackend {
                 sql_text(py_strip(&data.body)),
                 sql_text("pending"),
                 SqlValue::Real(now_epoch()),
-                data.external_id.as_deref().map_or(SqlValue::Null, sql_text),
+                external_id.map_or(SqlValue::Null, sql_text),
             ]),
         )?;
         let message_id = transaction.last_insert_rowid();
@@ -2139,7 +2139,7 @@ impl MessagesBackend {
             return Err(Fault::http(404, "Unknown channel"));
         }
         let mut connection = self.connect()?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         for attachment_id in &data.attachment_ids {
             if first_row(
                 &transaction,
@@ -2478,6 +2478,7 @@ mod unit {
     /// Runs `python3 -c` and returns its stdout, failing the test if Python is absent.
     fn python(script: &str) -> String {
         let output = std::process::Command::new("python3")
+            .arg("-I")
             .arg("-c")
             .arg(script)
             .output()

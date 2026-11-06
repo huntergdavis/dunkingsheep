@@ -346,6 +346,7 @@ fn multipart(filename: &str, mime: &str, bytes: &[u8]) -> (String, Vec<u8>) {
 /// Runs `python3 -c` and returns its stdout, failing the test if Python cannot run.
 fn python(script: &str, arguments: &[&str]) -> String {
     let output = Command::new("python3")
+        .arg("-I")
         .arg("-c")
         .arg(script)
         .args(arguments)
@@ -982,6 +983,346 @@ async fn attachment_metadata_matches_python_stat_formulas() {
     assert_eq!(file.metadata.last_modified, lines[1]);
     assert_eq!(file.metadata.content_length.to_string(), lines[2]);
     assert_eq!(file.bytes, b"%PDF-1.4 test".to_vec());
+}
+
+/// What the fake daemon answers for the delivery calls. Tests change it between requests.
+#[derive(Clone)]
+struct Plan {
+    send_text: Result<Value, String>,
+    get_message: Result<Value, String>,
+    list_messages: Value,
+    cancel: Result<Value, String>,
+    lane_alive: bool,
+}
+
+impl Default for Plan {
+    fn default() -> Self {
+        Self {
+            send_text: Ok(
+                json!({"ok": true, "queued": true, "outcome": "queued", "message_id": "q-1", "message": ""}),
+            ),
+            get_message: Ok(
+                json!({"message_id": "q-1", "pane_id": "%7", "text": "[VP web message #1; held]", "status": "queued", "message": "held"}),
+            ),
+            list_messages: json!({"queued": [{"message_id": "q-1", "blocked_by": "input box contains a draft"}], "recent": []}),
+            cancel: Ok(json!({"message_id": "q-1", "status": "cancelled"})),
+            lane_alive: true,
+        }
+    }
+}
+
+/// A harness whose daemon answers from `plan`, so a test can change the answers between requests.
+fn planned_harness(plan: Arc<Mutex<Plan>>) -> Harness {
+    Harness::new(move |cmd, _args| {
+        let plan: Plan = plan.lock().expect("plan").clone();
+        match cmd {
+            "send_text" => plan.send_text,
+            "get_message" => plan.get_message,
+            "list_messages" => Ok(plan.list_messages),
+            "cancel_message" => plan.cancel,
+            "list_panes" => {
+                let mut pane = json!({"pane_id": "%7", "tab_label": "lane", "workspace_label": "desk", "cwd": "/work/lane"});
+                if plan.lane_alive {
+                    pane["agent"] = json!("codex");
+                    pane["agent_status"] = json!("idle");
+                }
+                Ok(json!({"panes": [pane]}))
+            }
+            "delivery_capability" => {
+                Ok(json!({"alive": true, "send": "guarded", "agent_alive": plan.lane_alive}))
+            }
+            other => Err(format!("unexpected daemon command {other}")),
+        }
+    })
+}
+
+/// Posts message 1 as a guarded queued send and returns its harness and plan.
+async fn posted_queued() -> (Harness, Arc<Mutex<Plan>>) {
+    let plan = Arc::new(Mutex::new(Plan::default()));
+    let harness = planned_harness(Arc::clone(&plan));
+    let posted = harness
+        .post(
+            "/api/messages",
+            OWNER,
+            &json!({"channel": "pane-7", "body": "held"}),
+        )
+        .await
+        .json();
+    assert_eq!(posted["id"], json!(1));
+    assert_eq!(posted["delivery"], json!("queued"));
+    (harness, plan)
+}
+
+async fn send_now_one(harness: &Harness) -> Reply {
+    harness
+        .send(
+            Method::POST,
+            "/api/messages/1/send-now",
+            Some(OWNER),
+            None,
+            None,
+            Vec::new(),
+        )
+        .await
+}
+
+fn assert_refusal(reply: Reply, status: StatusCode, detail: &str) {
+    assert_eq!(reply.status, status, "{}", reply.text());
+    assert_eq!(reply.json(), json!({"detail": detail}));
+}
+
+/// Posts message 1, answers the daemon's record for it with `record`, and returns the item.
+async fn reconciled_with(record: Result<Value, String>) -> Value {
+    let (harness, plan) = posted_queued().await;
+    plan.lock().expect("plan").get_message = record;
+    harness
+        .get("/api/messages?channel=pane-7", OWNER)
+        .await
+        .json()["items"][0]
+        .clone()
+}
+
+#[tokio::test]
+async fn empty_external_id_is_absent_on_every_post() {
+    let harness = Harness::new(sent_handler);
+    let first = harness
+        .post(
+            "/api/messages",
+            OWNER,
+            &json!({"channel": "pane-7", "body": "one", "external_id": ""}),
+        )
+        .await;
+    let second = harness
+        .post(
+            "/api/messages",
+            OWNER,
+            &json!({"channel": "pane-7", "body": "two", "external_id": ""}),
+        )
+        .await;
+    assert_eq!(first.status, StatusCode::OK, "{}", first.text());
+    assert_eq!(second.status, StatusCode::OK, "{}", second.text());
+    assert_ne!(first.json()["id"], second.json()["id"]);
+    assert_eq!(harness.calls("send_text"), 2);
+}
+
+#[tokio::test]
+async fn guarded_receipts_reconcile_to_each_daemon_state() {
+    let text = "[VP web message #1; held]";
+    let sent = reconciled_with(Ok(json!({
+        "message_id": "q-1", "pane_id": "%7", "text": text,
+        "status": "sent", "message": "delivered", "finished_at": 1_700_000_000.5
+    })))
+    .await;
+    assert_eq!(sent["delivery"], json!("sent"));
+    assert_eq!(sent["delivery_detail"], json!("delivered"));
+    assert_eq!(sent["delivered_at"], json!(1_700_000_000.5));
+
+    let queued = reconciled_with(Ok(json!({
+        "message_id": "q-1", "pane_id": "%7", "text": text,
+        "status": "queued", "message": "waiting for the lane"
+    })))
+    .await;
+    assert_eq!(queued["delivery"], json!("queued"));
+    assert_eq!(queued["delivery_detail"], json!("waiting for the lane"));
+    assert_eq!(queued["delivered_at"], Value::Null);
+
+    let cancelled = reconciled_with(Ok(json!({
+        "message_id": "q-1", "pane_id": "%7", "text": text,
+        "status": "cancelled", "message": "cancelled by the owner"
+    })))
+    .await;
+    assert_eq!(cancelled["delivery"], json!("cancelled"));
+    assert_eq!(
+        cancelled["delivery_detail"],
+        json!("cancelled by the owner")
+    );
+
+    let uncertain = reconciled_with(Err("no message with id 'q-1'".to_owned())).await;
+    assert_eq!(uncertain["delivery"], json!("uncertain"));
+    assert_eq!(
+        uncertain["delivery_detail"],
+        json!("Delivery unconfirmed; the transport record for this send is unavailable. Check agent activity before sending again.")
+    );
+}
+
+#[tokio::test]
+async fn send_now_refusals_use_the_python_states_and_details() {
+    // No typing and no draft: the route will not force the held message out.
+    let (harness, plan) = posted_queued().await;
+    {
+        let mut plan = plan.lock().expect("plan");
+        plan.get_message = Ok(json!({"message_id": "q-1", "status": "queued", "message": "plain"}));
+        plan.list_messages =
+            json!({"queued": [{"message_id": "q-1", "blocked_by": null}], "recent": []});
+    }
+    assert_refusal(
+        send_now_one(&harness).await,
+        StatusCode::CONFLICT,
+        "This message is queued for transport, not held behind a draft",
+    );
+
+    // The transport record cannot be read.
+    let (harness, plan) = posted_queued().await;
+    plan.lock().expect("plan").get_message = Err("socket closed".to_owned());
+    assert_refusal(
+        send_now_one(&harness).await,
+        StatusCode::CONFLICT,
+        "Transport state unavailable; try again shortly",
+    );
+
+    // The daemon says the message already left the queue.
+    let (harness, plan) = posted_queued().await;
+    plan.lock().expect("plan").get_message =
+        Ok(json!({"message_id": "q-1", "status": "cancelled", "message": ""}));
+    assert_refusal(
+        send_now_one(&harness).await,
+        StatusCode::CONFLICT,
+        "Message is no longer queued; refresh its status",
+    );
+
+    // The cancel races a send: the record is still queued afterwards.
+    let (harness, plan) = posted_queued().await;
+    {
+        let mut plan = plan.lock().expect("plan");
+        plan.get_message =
+            Ok(json!({"message_id": "q-1", "status": "queued", "message": "someone is typing"}));
+        plan.cancel = Err("already gone".to_owned());
+    }
+    assert_refusal(
+        send_now_one(&harness).await,
+        StatusCode::CONFLICT,
+        "Message changed while sending; refresh its status",
+    );
+
+    // The message is recovering, so its delivery is no longer queued or pending.
+    let (harness, _plan) = posted_queued().await;
+    harness
+        .database()
+        .execute("UPDATE messages SET delivery='failed' WHERE id=1", [])
+        .expect("mark the message failed");
+    assert_refusal(
+        send_now_one(&harness).await,
+        StatusCode::CONFLICT,
+        "Message is being recovered; try again shortly",
+    );
+}
+
+#[tokio::test]
+async fn send_now_pane_loss_and_urgent_failure_leave_the_message_uncertain() {
+    // The lane stops being an agent after the message was held.
+    let (harness, plan) = posted_queued().await;
+    plan.lock().expect("plan").lane_alive = false;
+    assert_refusal(
+        send_now_one(&harness).await,
+        StatusCode::CONFLICT,
+        "Agent pane unavailable; delivery is unconfirmed",
+    );
+    let state: String = harness
+        .database()
+        .query_row(
+            "SELECT delivery || '|' || COALESCE(transport_id, 'null') FROM messages WHERE id=1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("the message row");
+    assert_eq!(state, "uncertain|null");
+
+    // The urgent send itself fails after the cancel succeeded.
+    let (harness, plan) = posted_queued().await;
+    plan.lock().expect("plan").send_text = Err("boom".to_owned());
+    assert_refusal(
+        send_now_one(&harness).await,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Urgent send unconfirmed; check agent activity before resending",
+    );
+    let delivery: String = harness
+        .database()
+        .query_row("SELECT delivery FROM messages WHERE id=1", [], |row| {
+            row.get(0)
+        })
+        .expect("the message row");
+    assert_eq!(delivery, "uncertain");
+}
+
+#[tokio::test]
+async fn post_refuses_when_no_agent_is_available_in_the_channel() {
+    let plan = Arc::new(Mutex::new(Plan {
+        lane_alive: false,
+        ..Plan::default()
+    }));
+    let harness = planned_harness(plan);
+    let refused = harness
+        .post(
+            "/api/messages",
+            OWNER,
+            &json!({"channel": "pane-7", "body": "nobody"}),
+        )
+        .await;
+    assert_refusal(
+        refused,
+        StatusCode::CONFLICT,
+        "No active agent is available in this channel",
+    );
+    assert_eq!(harness.calls("send_text"), 0);
+}
+
+#[tokio::test]
+async fn prompt_over_16000_characters_is_refused_before_the_daemon() {
+    let harness = Harness::new(sent_handler);
+    let mut attachments = Vec::new();
+    for index in 0..10usize {
+        // 176 digits and ".txt" make a 180-character filename, the route's maximum.
+        let name = format!("{index:0>176}.txt");
+        let (content_type, body) = multipart(&name, "text/plain", b"hello");
+        let upload = harness
+            .send(
+                Method::POST,
+                "/api/uploads",
+                Some(OWNER),
+                Some(&content_type),
+                None,
+                body,
+            )
+            .await;
+        assert_eq!(upload.status, StatusCode::OK, "{}", upload.text());
+        attachments.push(upload.json()["id"].clone());
+    }
+    // The body alone is at its 12000-character limit; the attachment references push the prompt past 16000.
+    let body = "x".repeat(12_000);
+    let posted = harness
+        .post(
+            "/api/messages",
+            OWNER,
+            &json!({"channel": "pane-7", "body": body, "attachment_ids": attachments}),
+        )
+        .await;
+    assert_eq!(posted.status, StatusCode::OK, "{}", posted.text());
+    let item = posted.json();
+    assert_eq!(item["delivery"], json!("uncertain"));
+    assert_eq!(
+        item["transport"]["error"],
+        json!("400: keep it under 16000 characters")
+    );
+    assert_eq!(harness.calls("send_text"), 0);
+    assert_eq!(harness.calls("delivery_capability"), 0);
+}
+
+#[tokio::test]
+async fn upload_over_25_mb_is_refused_by_the_backend() {
+    let harness = Harness::new(sent_handler);
+    let refused = harness.backend.save_upload(UploadPart {
+        filename: "large.bin".to_owned(),
+        response_mime: None,
+        storage_mime: "application/octet-stream".to_owned(),
+        bytes: vec![0u8; 25 * 1024 * 1024 + 1],
+    });
+    assert_eq!(
+        refused,
+        Err(routes::search_attachments::SearchAttachmentsError::Http {
+            status: StatusCode::PAYLOAD_TOO_LARGE,
+            detail: "Files must be 25 MB or smaller".to_owned(),
+        })
+    );
 }
 
 /// Whitespace-insensitive form of a SQL or message literal, with Python's JSON escapes
