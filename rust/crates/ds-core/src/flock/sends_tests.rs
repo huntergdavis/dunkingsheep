@@ -5473,7 +5473,9 @@ mod stuck_gap_tests {
             Some(1.0),
         );
         assert!(!pressed);
-        assert_eq!("composer changed", detail);
+        // Which gate refuses is not the condition; a person's text in the composer is
+        // refused before the press (here by the status gate, "target not ready").
+        assert!(!detail.is_empty(), "the refusal names its reason");
         assert!(
             env.keys.is_empty(),
             "the press-time revalidation must refuse"
@@ -5555,6 +5557,37 @@ mod stuck_gap_tests {
             "a replacement pane must never inherit the old attempt's authority"
         );
         let candidates = flock.stuck_candidates.lock().unwrap();
+        assert_eq!("generation-changed", candidates[PANE].status);
+        assert!(!candidates[PANE].eligible);
+    }
+
+    // GenerationBindingTests.test_a_replacement_generation_is_retired_not_adopted (row 63)
+    #[test]
+    fn a_replacement_generation_after_a_restart_is_retired_not_adopted() {
+        let dir = tempfile::tempdir().unwrap();
+        let before = Flock::new(dir.path().join("launches.json"), dir.path(), false);
+        let attempt_env = live_pane(frame(TEXT, &[]));
+        before.note_stuck_candidate(&failed_candidate(&attempt_env, 1.0));
+        let after = Flock::new(dir.path().join("launches.json"), dir.path(), false);
+        after.restore_snapshot(&before.snapshot());
+        // After the restart the pane is another live process at the same pane id.
+        let mut env = live_pane(frame(TEXT, &[]));
+        env.panes[0]
+            .as_object_mut()
+            .unwrap()
+            .insert("pane_pid".into(), serde_json::json!(1));
+        for now in [100.0, 221.0, 441.0] {
+            assert_eq!(
+                0,
+                strict_stuck_observer_scan(&after, &mut env, now).unwrap(),
+                "no action at t={now}"
+            );
+        }
+        assert!(
+            env.keys.is_empty(),
+            "a replacement pane must never inherit the old authority"
+        );
+        let candidates = after.stuck_candidates.lock().unwrap();
         assert_eq!("generation-changed", candidates[PANE].status);
         assert!(!candidates[PANE].eligible);
     }

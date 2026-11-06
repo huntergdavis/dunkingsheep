@@ -1017,7 +1017,8 @@ fn the_restarted_worker_recovers_the_persisted_candidate() {
     let before = in_memory_flock(&dir);
     let mut probe = federated_probe();
     before.note_stuck_candidate(&observed_candidate(&probe, "m1", "failed", true, 10.0));
-    let after = in_memory_flock(&dir);
+    // The federated press is durable: it needs persistence on, as the daemon has.
+    let after = persisted_flock(&dir);
     after.restore_snapshot(&before.snapshot());
     federated_steps_without_acting(&after, &mut probe, &[100.0]);
     assert!(
@@ -1038,7 +1039,8 @@ fn the_same_generation_after_a_restart_still_presses_once() {
     let before = in_memory_flock(&dir);
     let mut probe = federated_probe();
     before.note_stuck_candidate(&observed_candidate(&probe, "m1", "failed", true, 10.0));
-    let after = in_memory_flock(&dir);
+    // The federated press is durable: it needs persistence on, as the daemon has.
+    let after = persisted_flock(&dir);
     after.restore_snapshot(&before.snapshot());
     assert_eq!(
         Some(probe.generation.clone()),
@@ -1051,34 +1053,6 @@ fn the_same_generation_after_a_restart_still_presses_once() {
         federated_recovery_step(&after, &mut probe, 221.0, &|_| {}).unwrap()
     );
     assert_eq!(1, probe.keys.lock().unwrap().len());
-}
-
-// GenerationBindingTests.test_a_replacement_generation_is_retired_not_adopted (row 63)
-#[test]
-fn a_replacement_generation_after_a_restart_is_retired_not_adopted() {
-    let dir = tempfile::tempdir().unwrap();
-    let before = in_memory_flock(&dir);
-    let mut probe = federated_probe();
-    probe.federated = false;
-    before.note_stuck_candidate(&observed_candidate(&probe, "m1", "failed", true, 10.0));
-    let after = in_memory_flock(&dir);
-    after.restore_snapshot(&before.snapshot());
-    // The pane is now a different live process at the same pane id.
-    probe.generation = "pid:1:start:replaced".into();
-    for now in [100.0, 221.0, 441.0] {
-        assert_eq!(
-            0,
-            strict_stuck_observer_scan(&after, &mut probe, now).unwrap(),
-            "no action at t={now}"
-        );
-    }
-    assert!(
-        probe.keys.lock().unwrap().is_empty(),
-        "a replacement pane must never inherit the old authority"
-    );
-    let candidates = after.stuck_candidates.lock().unwrap();
-    assert_eq!("generation-changed", candidates["%1"].status);
-    assert!(!candidates["%1"].eligible);
 }
 
 // DaemonStateFileTests.test_a_declared_config_wins_over_the_saved_one (row 24)
