@@ -47,8 +47,9 @@ pub fn pane_to_json(pane: &Pane, agent_status: Option<&str>) -> Value {
         "terminal_title_stripped": pane.label,
         "terminal_title": pane.title,
         "pane_pid": pane.pane_pid,
-        "cols": pane.width,
-        "rows": pane.height,
+        // Absent geometry is None, so null, as Python's `_int(field, None)`: never 0.
+        "cols": pane.known_width(),
+        "rows": pane.known_height(),
         "tab_label": pane.tab,
         "workspace_label": pane.workspace,
         "tab_number": pane.window_index,
