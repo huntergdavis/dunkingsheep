@@ -6,6 +6,7 @@
 //! store attached to this request. A request without that store is refused by name, never answered
 //! with zero counts.
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 use serde_json::{json, Value};
@@ -63,8 +64,15 @@ fn attached_inbox<'a>(adapter: &'a RequestRuntimeAdapter<'_>) -> Result<&'a Stor
 /// The environment the PM and owner views read, captured without panicking. `Env::from_process`
 /// panics on a non-UTF-8 variable. `Env::try_from_process` would drop `POOLRAD_CHECKPOINT`, because
 /// every name in `ENV_VARS` must start with DUNKINGSHEEP_, and Python's dunk_pm reads it. So the
-/// names the views look up are read here, and a non-UTF-8 value is a named refusal.
+/// names the views look up are read here, and a non-UTF-8 value is a named refusal. Every name that
+/// a PM or owner view reads through `Env` must be listed in `NAMES` in `view_env_from`.
 pub(super) fn view_env() -> Result<Env, DunkError> {
+    view_env_from(|name| std::env::var_os(name))
+}
+
+/// `view_env` with the lookup injected, so a test can supply values without setting a process
+/// variable that a parallel test could see.
+fn view_env_from(lookup: impl Fn(&str) -> Option<OsString>) -> Result<Env, DunkError> {
     const NAMES: [&str; 5] = [
         "DUNKINGSHEEP_APP_DB",
         "DUNKINGSHEEP_PM_ROUTING",
@@ -74,7 +82,7 @@ pub(super) fn view_env() -> Result<Env, DunkError> {
     ];
     let mut values = Vec::new();
     for name in NAMES {
-        if let Some(value) = std::env::var_os(name) {
+        if let Some(value) = lookup(name) {
             let value = value.into_string().map_err(|_| {
                 refusal(format!("environment variable {name:?} is not valid UTF-8"))
             })?;
@@ -272,11 +280,16 @@ mod tests {
     #[test]
     fn view_env_refuses_a_non_utf8_value_without_panicking() {
         use std::os::unix::ffi::OsStrExt;
-        let _env_lock = lock_env();
-        // The panic that `Env::from_process` raised on this input is now a named refusal.
-        let bad = std::path::Path::new(std::ffi::OsStr::from_bytes(b"/tmp/\xff.sqlite3"));
-        let _app_db = AppDbEnv::set(bad);
-        let error = match view_env() {
+        // The lookup is injected, so this test sets no process variable that a parallel test
+        // could see. The panic that `Env::from_process` raised on this input is now a named refusal.
+        let bad = std::ffi::OsStr::from_bytes(b"/tmp/\xff.sqlite3").to_os_string();
+        let error = match view_env_from(|name| {
+            if name == "DUNKINGSHEEP_APP_DB" {
+                Some(bad.clone())
+            } else {
+                None
+            }
+        }) {
             Ok(_) => panic!("a non-UTF-8 value must be refused"),
             Err(error) => error,
         };
@@ -289,15 +302,15 @@ mod tests {
 
     #[test]
     fn view_env_keeps_the_python_checkpoint_override() {
-        let _env_lock = lock_env();
+        // Injected lookup again: no process variable is set, so no lock is needed.
         let checkpoint = "/tmp/poolrad-checkpoint-under-test.json";
-        let previous = std::env::var_os("POOLRAD_CHECKPOINT");
-        std::env::set_var("POOLRAD_CHECKPOINT", checkpoint);
-        let captured = view_env();
-        match previous {
-            Some(value) => std::env::set_var("POOLRAD_CHECKPOINT", value),
-            None => std::env::remove_var("POOLRAD_CHECKPOINT"),
-        }
+        let captured = view_env_from(|name| {
+            if name == "POOLRAD_CHECKPOINT" {
+                Some(OsString::from(checkpoint))
+            } else {
+                None
+            }
+        });
         assert_eq!(
             captured.unwrap().get("POOLRAD_CHECKPOINT"),
             Some(checkpoint)
