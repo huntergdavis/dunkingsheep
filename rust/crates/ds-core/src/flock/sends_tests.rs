@@ -5404,10 +5404,9 @@ mod t55_rows_16_65 {
 mod stuck_gap_tests {
     use super::super::loops_stuck::strict_stuck_observer_scan;
     use super::super::sends::{pane_generation, Message};
-    use super::{frame, hint_screen, persistent_recovery_flock, Flock, Pane};
+    use super::{frame, persistent_recovery_flock, Flock, Pane};
     use crate::terminal::composer::composer_region_text;
     use std::cell::RefCell;
-    use std::collections::VecDeque;
     use std::rc::Rc;
     use std::sync::Arc;
 
