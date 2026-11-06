@@ -279,6 +279,28 @@ fn test_federated_composer_is_off_unless_the_flag_is_set_and_reads_a_bold_native
     assert_eq!(None, federated_composer(true, ""));
 }
 
+/// The federated frame from tests/test_dunk_federated_recovery.py: a dim previous request, then a
+/// bold pending composer whose visible tail is the last composer row before the footer.
+const SCROLLED_FEDERATED_FRAME: &str = "\u{1b}[1;2m\u{203a}\u{1b}[0m previous truncated request\u{2026}\n  An arbitrary agent response, not equal to the previous request.\n\n\u{1b}[1m\u{203a}\u{1b}[0m visible tail of an owner message    \u{1b}[2m\u{2191}\u{1b}[0m\n  continuation and reply receipt\n\n\n  GPT-6-Astra high \u{b7} ~/workspace/chief-of-staff \u{b7} Read the inbox message\n";
+
+// t3355 (t820 proof D): test_dunk_federated_recovery.py::test_native_scrolled_pending_and_empty.
+#[test]
+fn federated_composer_reads_the_visible_tail_of_a_scrolled_pending_frame() {
+    let composer = federated_composer(true, SCROLLED_FEDERATED_FRAME)
+        .expect("a scrolled pending frame is a federated frame");
+    assert!(composer.contains("visible tail"), "{composer:?}");
+}
+
+// t3355 (t820 proof D): test_dunk_federated_recovery.py::test_unknown_or_second_bold_sigil_refuses.
+#[test]
+fn federated_composer_refuses_an_unknown_marker_or_a_second_bold_sigil() {
+    assert!(federated_composer(true, SCROLLED_FEDERATED_FRAME).is_some());
+    for prefix in ["\u{203a} unknown\n", "\u{1b}[1m\u{203a}\u{1b}[0m second\n"] {
+        let screen = format!("{prefix}{SCROLLED_FEDERATED_FRAME}");
+        assert_eq!(None, federated_composer(true, &screen), "prefix {prefix:?}");
+    }
+}
+
 #[test]
 fn test_trailing_region_and_prefix_accounting() {
     let screen = format!(

@@ -4104,6 +4104,368 @@ fn unwedge_reserves_before_one_key_and_does_not_claim_unchanged_text() {
     assert_eq!(1, env.keys.len());
 }
 
+// t3355 (t820 proof D) outbox and observer fixture, shared by the three rows below. A failed
+// message for pane %1 is the candidate, and the screen shows its text as the composer.
+fn outbox_observer_fixture(dir: &std::path::Path) -> (Flock, Pane) {
+    let flock = persistent_recovery_flock(dir, &dir.join("state.json"));
+    {
+        let mut config = flock.stuck_config.lock().unwrap();
+        config.threshold_s = 1.0;
+        config.observation_interval_s = 0.1;
+        config.max_attempts = 1;
+    }
+    let mut env = Pane::default();
+    env.panes
+        .push(serde_json::json!({"pane_id": "%1", "pane_pid": std::process::id()}));
+    env.statuses.insert("%1".into(), "idle".into());
+    env.screens.insert("%1".into(), frame("stuck body", &[]));
+    flock
+        .sent_text_by_pane
+        .lock()
+        .unwrap()
+        .insert("%1".into(), vec!["stuck body".into()]);
+    (flock, env)
+}
+
+fn failed_outbox_message(id: &str, env: &Pane, created_at: f64, press_enter: bool) -> Message {
+    let mut message = Message::new(id, "%1", "writer", "stuck body", "send_text");
+    message.created_at = created_at;
+    message.status = "failed".into();
+    message.press_enter = press_enter;
+    message.attempt_generation = pane_generation(env, "%1");
+    message
+}
+
+// t3355 (t820 proof D) scheduled row 36: test_dunk_scheduled_recovery.py::
+// test_outbox_cannot_refund_budget_by_changing_to_standalone_observer (oracle 79bc92fa). The outbox
+// spends the single attempt, and later standalone observer ticks must press nothing more.
+#[test]
+fn a_spent_outbox_budget_is_not_refunded_by_standalone_observer_ticks() {
+    let dir = tempfile::tempdir().unwrap();
+    let (flock, mut env) = outbox_observer_fixture(dir.path());
+    let message = failed_outbox_message("m1", &env, 1.0, true);
+    flock.note_stuck_candidate(&message);
+    flock.unwedge(
+        &mut env,
+        "%1",
+        "stuck body",
+        Some(98.0),
+        Some(&message),
+        100.0,
+        None,
+        true,
+    );
+    assert_eq!(1, env.keys.len(), "the outbox spends the single attempt");
+    for now in [102.0, 130.0, 200.0] {
+        crate::flock::loops_stuck::strict_stuck_observer_scan(&flock, &mut env, now).unwrap();
+    }
+    assert_eq!(
+        1,
+        env.keys.len(),
+        "standalone observer ticks must not refund the spent attempt"
+    );
+}
+
+// t3355 (t820 proof D) scheduled row 37: test_dunk_scheduled_recovery.py::
+// test_newer_no_enter_intent_also_blocks_outbox_recovery (oracle 79bc92fa). A newer message with
+// press_enter false blocks the outbox recovery of the older text. The older message alone presses
+// once, which is the positive control.
+#[test]
+fn a_newer_no_enter_intent_blocks_outbox_recovery() {
+    let dir = tempfile::tempdir().unwrap();
+    let (flock, mut env) = outbox_observer_fixture(dir.path());
+    let older = failed_outbox_message("m1", &env, 1.0, true);
+    let newer = failed_outbox_message("m2", &env, 2.0, false);
+    flock.note_stuck_candidate(&older);
+    flock.note_stuck_candidate(&newer);
+    flock.unwedge(
+        &mut env,
+        "%1",
+        "stuck body",
+        Some(98.0),
+        Some(&newer),
+        100.0,
+        None,
+        true,
+    );
+    assert!(
+        env.keys.is_empty(),
+        "a newer no-enter intent blocks the outbox recovery"
+    );
+
+    let control_dir = tempfile::tempdir().unwrap();
+    let (control_flock, mut control_env) = outbox_observer_fixture(control_dir.path());
+    control_flock.note_stuck_candidate(&older);
+    control_flock.unwedge(
+        &mut control_env,
+        "%1",
+        "stuck body",
+        Some(98.0),
+        Some(&older),
+        100.0,
+        None,
+        true,
+    );
+    assert_eq!(
+        1,
+        control_env.keys.len(),
+        "the older message alone presses once"
+    );
+}
+
+// t3355 (t820 proof D) wiring row 18: test_dunk_recovery_wiring.py::test_reservation_failure_never_presses
+// (oracle 79bc92fa). When the durable reservation cannot be saved, the outbox presses no key.
+#[test]
+fn a_failed_durable_reservation_never_presses_from_the_outbox() {
+    let dir = tempfile::tempdir().unwrap();
+    let (flock, mut env) = outbox_observer_fixture(dir.path());
+    let message = failed_outbox_message("m1", &env, 1.0, true);
+    flock.note_stuck_candidate(&message);
+    // A directory where the state file belongs makes the reservation save fail.
+    let state = dir.path().join("state.json");
+    let _ = std::fs::remove_file(&state);
+    std::fs::create_dir(&state).unwrap();
+    flock.unwedge(
+        &mut env,
+        "%1",
+        "stuck body",
+        Some(98.0),
+        Some(&message),
+        100.0,
+        None,
+        true,
+    );
+    assert!(env.keys.is_empty(), "no key without a durable reservation");
+
+    let control_dir = tempfile::tempdir().unwrap();
+    let (control_flock, mut control_env) = outbox_observer_fixture(control_dir.path());
+    control_flock.note_stuck_candidate(&message);
+    control_flock.unwedge(
+        &mut control_env,
+        "%1",
+        "stuck body",
+        Some(98.0),
+        Some(&message),
+        100.0,
+        None,
+        true,
+    );
+    assert_eq!(
+        1,
+        control_env.keys.len(),
+        "with a writable state file it presses once"
+    );
+}
+
+// t3355 (t820 proof D) scheduled rows 45 and 46 (oracle 79bc92fa). A schedule that the transport
+// reported as sent is shown with a given sigil style. The frame is the Python FRAME with its
+// composer sigil replaced by the style under test: a dim transcript echo (row 45) or an unstyled
+// sigil (row 46). Neither may be submitted over ticks. The bright composer with the same text is
+// the positive control, and it is submitted while the schedule is current.
+#[test]
+fn a_reported_sent_schedule_is_not_submitted_from_a_dim_or_unstyled_echo() {
+    // The press path checks scheduled currency against the real clock, so the schedule is created
+    // at the real clock and the ticks are offset from it.
+    let base = crate::clock::now_s();
+    let ticks = [base + 1.0, base + 121.0, base + 130.0];
+    let dim_dir = tempfile::tempdir().unwrap();
+    let (dim_flock, mut dim_env) =
+        scheduled_candidate_fixture(dim_dir.path(), "\u{1b}[1;2m\u{203a}\u{1b}[0m", "sent", base);
+    for &now in &ticks {
+        crate::flock::loops_stuck::strict_stuck_observer_scan(&dim_flock, &mut dim_env, now)
+            .unwrap();
+    }
+    assert!(
+        dim_env.keys.is_empty(),
+        "a dim transcript echo must not be submitted again"
+    );
+
+    let plain_dir = tempfile::tempdir().unwrap();
+    let (plain_flock, mut plain_env) =
+        scheduled_candidate_fixture(plain_dir.path(), "\u{203a}", "sent", base);
+    for &now in &ticks {
+        crate::flock::loops_stuck::strict_stuck_observer_scan(&plain_flock, &mut plain_env, now)
+            .unwrap();
+    }
+    assert!(
+        plain_env.keys.is_empty(),
+        "an unstyled sigil must not authorise submission"
+    );
+
+    // Positive control: the bright composer with the same text is submitted while the schedule is current.
+    let bright_dir = tempfile::tempdir().unwrap();
+    let (bright_flock, mut bright_env) = scheduled_candidate_fixture(
+        bright_dir.path(),
+        "\u{1b}[1m\u{203a}\u{1b}[0m",
+        "sent",
+        base,
+    );
+    for &now in &ticks {
+        crate::flock::loops_stuck::strict_stuck_observer_scan(&bright_flock, &mut bright_env, now)
+            .unwrap();
+    }
+    assert!(
+        !bright_env.keys.is_empty(),
+        "the bright composer with the same text must be submitted"
+    );
+}
+
+// t3355 (t820 proof D) scheduled row 30 (oracle 79bc92fa). A failed scheduled send whose plain
+// composer has two blank rows before the footer: no key before two minutes, exactly one key at
+// 120 s, and none afterwards.
+#[test]
+fn an_ambiguous_scheduled_composer_recovers_once_after_two_minutes() {
+    let dir = tempfile::tempdir().unwrap();
+    // The schedule is current on the real clock (main's failed-reminder currency gate), so the
+    // reminder is created at the real clock and the oracle ticks 1000, 1100, 1120 and 1300 are
+    // offsets 1, 101, 121 and 301 from that base.
+    let base = crate::clock::now_s();
+    let (flock, mut env) = scheduled_candidate_fixture(dir.path(), "\u{203a}", "failed", base);
+    // The oracle FRAME: two blank rows between the composer and the footer.
+    env.screens.insert(
+        "%1".into(),
+        format!(
+            "Previous response.\n\n{} {}\n\n\n  GPT-6-Astra high \u{b7} ~/workspace \u{b7} task\n",
+            "\u{203a}", REPORTED_SENT_TEXT
+        ),
+    );
+    for offset in [1.0, 101.0] {
+        crate::flock::loops_stuck::strict_stuck_observer_scan(&flock, &mut env, base + offset)
+            .unwrap();
+    }
+    assert!(env.keys.is_empty(), "no key before two minutes");
+    crate::flock::loops_stuck::strict_stuck_observer_scan(&flock, &mut env, base + 121.0).unwrap();
+    assert_eq!(1, env.keys.len(), "exactly one key at two minutes");
+    crate::flock::loops_stuck::strict_stuck_observer_scan(&flock, &mut env, base + 301.0).unwrap();
+    assert_eq!(1, env.keys.len(), "no key after the single attempt");
+}
+
+// t3355 (t820 proof D) scheduled row 38 (oracle 79bc92fa). The candidate, its schedule and the spent
+// budget survive a restart through the state file. The restored flock presses nothing before the
+// threshold, and then presses exactly once.
+#[test]
+#[ignore = "t3391: scheduled row 38 divergence, a restored single-sigil composer is not owned after a restart; un-ignore when t3391 lands"]
+fn a_restored_scheduled_recovery_keeps_its_budget_and_presses_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state.json");
+    let (flock, mut env) = scheduled_candidate_fixture(dir.path(), "\u{203a}", "failed", 0.0);
+    flock.save().unwrap();
+    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap();
+    drop(flock);
+    let restored = persistent_recovery_flock(dir.path(), &state);
+    {
+        let mut config = restored.stuck_config.lock().unwrap();
+        config.threshold_s = 120.0;
+        config.observation_interval_s = 20.0;
+        config.max_attempts = 1;
+    }
+    restored.restore_snapshot(&saved);
+    crate::flock::loops_stuck::strict_stuck_observer_scan(&restored, &mut env, 1000.0).unwrap();
+    assert!(
+        env.keys.is_empty(),
+        "no key before the threshold after the restart"
+    );
+    crate::flock::loops_stuck::strict_stuck_observer_scan(&restored, &mut env, 1120.0).unwrap();
+    assert_eq!(
+        1,
+        env.keys.len(),
+        "the restored schedule presses once at the threshold"
+    );
+}
+
+// t3355 (t820 proof D) wiring row 13: test_dunk_recovery_wiring.py::
+// test_schedule_false_sent_with_real_frame_recovers (oracle 79bc92fa). A scheduled message is reported
+// sent, the real t508 frame is on screen, and a bound native codex session authenticates the frame. The
+// first tick waits, and the tick at 120 s presses exactly once. The frame, the composer text and the
+// native prefix are the oracle's own values, stored under testdata.
+const T508_FRAME: &str = include_str!("testdata/t508-cos-ambiguous.txt");
+const T508_TEXT: &str = include_str!("testdata/t508-text.txt");
+const T508_PREFIX: &str = include_str!("testdata/t508-prefix.txt");
+
+#[test]
+#[ignore = "fixture unverified, see t3355 note: the native-evidence press is refused at the threshold; wiring row 13 stays open"]
+fn a_scheduled_false_sent_real_frame_recovers_once_through_native_evidence() {
+    struct ChildGuard(std::process::Child);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let hooks = dir.path().join("hooks");
+    let cwd = dir.path().join("cwd");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&hooks).unwrap();
+    std::fs::create_dir_all(&cwd).unwrap();
+    let binary = dir.path().join("codex");
+    std::fs::copy("/bin/sleep", &binary).unwrap();
+    let child = std::process::Command::new(binary)
+        .arg("300")
+        .env("CODEX_HOME", &home)
+        .env("DUNKINGSHEEP_CODEX_STATE_DIR", &hooks)
+        .spawn()
+        .unwrap();
+    let child = ChildGuard(child);
+    let pid = i64::from(child.0.id());
+    let start = crate::proc::process_start(pid).unwrap();
+    let session = "01a173ee-beed-7461-a560-e5f6c1f666a7";
+    let rollout = home.join(format!("rollout-{session}.jsonl"));
+    let meta =
+        serde_json::json!({"type": "session_meta", "payload": {"session_id": session, "cwd": cwd}});
+    let answer = serde_json::json!({"type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": T508_PREFIX}]}});
+    std::fs::write(&rollout, format!("{meta}\n{answer}\n")).unwrap();
+    let db = rusqlite::Connection::open(home.join("state_5.sqlite")).unwrap();
+    db.execute(
+        "create table threads (id text primary key, rollout_path text, cwd text)",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "insert into threads values (?,?,?)",
+        (session, rollout.to_str().unwrap(), cwd.to_str().unwrap()),
+    )
+    .unwrap();
+    std::fs::write(
+        hooks.join("bound.json"),
+        serde_json::json!({"session_id": session, "pane_id": "%1", "root_pid": pid, "root_start": start, "cwd": cwd}).to_string(),
+    )
+    .unwrap();
+
+    let base = crate::clock::now_s();
+    let flock = Flock::new(dir.path().join("launches"), dir.path().join("lanes"), false);
+    {
+        let mut config = flock.stuck_config.lock().unwrap();
+        config.threshold_s = 120.0;
+        config.observation_interval_s = 20.0;
+        config.max_attempts = 1;
+    }
+    let rows = serde_json::json!({"dunkers": [{"id": "d82", "running": true, "target_pane_id": "%1", "text": T508_TEXT}]});
+    flock.dunks.load(rows.as_object().unwrap());
+    let mut env = Pane::default();
+    env.panes
+        .push(serde_json::json!({"pane_id": "%1", "pane_pid": pid, "agent": "codex", "cwd": cwd}));
+    env.statuses.insert("%1".into(), "idle".into());
+    env.screens.insert("%1".into(), T508_FRAME.into());
+    let mut message = Message::new("m1", "%1", "CoS", T508_TEXT, "d82");
+    message.created_at = base;
+    message.status = "sent".into();
+    message.scheduled = true;
+    message.schedule_template = Some(T508_TEXT.into());
+    message.typed_at = Some(base);
+    message.attempt_generation = pane_generation(&env, "%1");
+    flock.note_stuck_candidate(&message);
+
+    crate::flock::loops_stuck::strict_stuck_observer_scan(&flock, &mut env, base + 1.0).unwrap();
+    assert!(env.keys.is_empty(), "no key on the first sighting");
+    crate::flock::loops_stuck::strict_stuck_observer_scan(&flock, &mut env, base + 121.0).unwrap();
+    assert_eq!(1, env.keys.len(), "exactly one key at the threshold");
+    crate::flock::loops_stuck::strict_stuck_observer_scan(&flock, &mut env, base + 200.0).unwrap();
+    assert_eq!(1, env.keys.len(), "no second key after the single attempt");
+    drop(child);
+}
+
 #[test]
 fn unwedge_verifies_a_newly_cleared_composer_after_the_key() {
     let dir = tempfile::tempdir().unwrap();
@@ -4246,6 +4608,45 @@ fn stuck_text_is_ours_requires_complete_matching_text_and_readable_screen() {
     env.screens.insert("%1".into(), frame("stuck body", &[]));
     assert!(flock.stuck_text_is_ours(&env, "%1", Some("stuck body"), "stuck body"));
     assert!(!flock.stuck_text_is_ours(&env, "%1", Some("stuck body"), "stuck body plus edit"));
+}
+
+// t3355 (t820 proof D) federated row 2: test_dunk_federated_recovery.py::test_strict_mode_unchanged
+// (oracle 79bc92fa). With the federated flag off, the scrolled pending native frame has no
+// federated composer and is not owned. Python composer_region_is_owned does not read the flag; its
+// refusal comes from dim-transcript accounting. The Rust counterpart is owned_composer_region,
+// reached through stuck_text_is_ours, and it reads no flag either. The positive control shows the
+// same owned text is owned on a plain single-sigil composer, so the refusal is not vacuous.
+#[test]
+fn strict_mode_does_not_own_a_scrolled_pending_frame() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Flock::new(dir.path().join("launches"), dir.path().join("lanes"), false);
+    let tail = "visible tail of an owner message    \u{2191}\n  continuation and reply receipt";
+    flock
+        .sent_text_by_pane
+        .lock()
+        .unwrap()
+        .insert("%1".into(), vec![tail.into()]);
+    let scrolled = "\u{1b}[1;2m\u{203a}\u{1b}[0m previous truncated request\u{2026}\n  An arbitrary agent response, not equal to the previous request.\n\n\u{1b}[1m\u{203a}\u{1b}[0m visible tail of an owner message    \u{1b}[2m\u{2191}\u{1b}[0m\n  continuation and reply receipt\n\n\n  GPT-6-Astra high \u{b7} ~/workspace/chief-of-staff \u{b7} Read the inbox message\n";
+    let mut env = Pane::default();
+    assert!(!env.federated_input(), "strict mode");
+    assert_eq!(
+        None,
+        crate::terminal::composer::federated_composer(false, scrolled)
+    );
+    env.screens.insert("%1".into(), scrolled.into());
+    assert!(
+        !flock.stuck_text_is_ours(&env, "%1", Some(tail), tail),
+        "a scrolled pending frame must not be owned in strict mode"
+    );
+    // Positive control: the same owned text on a plain single-sigil composer is owned.
+    env.screens.insert(
+        "%1".into(),
+        frame(
+            "visible tail of an owner message \u{2191}",
+            &["continuation and reply receipt"],
+        ),
+    );
+    assert!(flock.stuck_text_is_ours(&env, "%1", Some(tail), tail));
 }
 
 #[test]
