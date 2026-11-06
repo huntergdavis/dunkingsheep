@@ -4,8 +4,8 @@
 //!
 //! Not ported: `test_context_search_survives_a_stale_cache`. It plants a drifted FTS5 index
 //! with SQL, and ds-cli does not depend on rusqlite. The same scenario runs at the store
-//! level in ds-core as `context::store_tests::
-//! test_context_search_survives_a_stale_cache_and_a_fresh_search_finds_the_entry`.
+//! level in ds-core as
+//! `context::store::store_tests::test_context_search_survives_a_stale_cache_and_a_fresh_search_finds_the_entry`.
 
 use std::path::Path;
 use std::process::{Command, Output};
