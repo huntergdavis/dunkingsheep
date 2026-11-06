@@ -72,10 +72,13 @@ pub(crate) fn write_classified<T: serde::Serialize>(
     write_text_atomically(path, &text)
 }
 
-/// The whole-Flock state file (`dunks.json`), written the way the Python daemon writes it:
-/// `json.dump(payload, handle, indent=2)`. Key order is insertion order (no sorting), non-ASCII
-/// is escaped, floats use Python's `repr`, and there is no trailing newline, so a file written by
-/// either implementation reads back byte-identical from the other.
+/// The whole-Flock state file (`dunks.json`), written with the layout of the Python daemon's
+/// `json.dump(payload, handle, indent=2)`: insertion order (no sorting), `ensure_ascii` escapes,
+/// Python float `repr`, and no trailing newline. Byte identity is proven only for dunk state, by
+/// the sanitized fixture in `flock/dunks_state_file_tests.rs`. It is not yet proven for populated
+/// state: an outbox row has Rust's 21-key layout rather than Python's 13 keys, and stuck candidates
+/// and the stuck records/spent maps are BTreeMaps (sorted, not insertion order) whose rows carry
+/// the Rust key set. Those are split off to a follow-up.
 pub(crate) fn write_python_state_classified(
     path: &Path,
     value: &serde_json::Value,
