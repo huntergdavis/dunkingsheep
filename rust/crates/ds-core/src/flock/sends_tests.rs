@@ -4464,6 +4464,98 @@ fn stale_or_edited_scheduled_reminders_never_replay() {
     );
 }
 
+// t3355 (t820 proof D) wiring row 13: test_dunk_recovery_wiring.py::
+// test_schedule_false_sent_with_real_frame_recovers (oracle 79bc92fa). A scheduled message is reported
+// sent, the real t508 frame is on screen, and a bound native codex session authenticates the frame. The
+// first tick waits, and the tick at 120 s presses exactly once. The frame, the composer text and the
+// native prefix are the oracle's own values, stored under testdata.
+const T508_FRAME: &str = include_str!("testdata/t508-cos-ambiguous.txt");
+const T508_TEXT: &str = include_str!("testdata/t508-text.txt");
+const T508_PREFIX: &str = include_str!("testdata/t508-prefix.txt");
+
+#[test]
+fn a_scheduled_false_sent_real_frame_recovers_once_through_native_evidence() {
+    struct ChildGuard(std::process::Child);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let hooks = dir.path().join("hooks");
+    let cwd = dir.path().join("cwd");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&hooks).unwrap();
+    std::fs::create_dir_all(&cwd).unwrap();
+    let binary = dir.path().join("codex");
+    std::fs::copy("/bin/sleep", &binary).unwrap();
+    let child = std::process::Command::new(binary)
+        .arg("300")
+        .env("CODEX_HOME", &home)
+        .env("DUNKINGSHEEP_CODEX_STATE_DIR", &hooks)
+        .spawn()
+        .unwrap();
+    let child = ChildGuard(child);
+    let pid = i64::from(child.0.id());
+    let start = crate::proc::process_start(pid).unwrap();
+    let session = "01a173ee-beed-7461-a560-e5f6c1f666a7";
+    let rollout = home.join(format!("rollout-{session}.jsonl"));
+    let meta =
+        serde_json::json!({"type": "session_meta", "payload": {"session_id": session, "cwd": cwd}});
+    let answer = serde_json::json!({"type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": T508_PREFIX}]}});
+    std::fs::write(&rollout, format!("{meta}\n{answer}\n")).unwrap();
+    let db = rusqlite::Connection::open(home.join("state_5.sqlite")).unwrap();
+    db.execute(
+        "create table threads (id text primary key, rollout_path text, cwd text)",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "insert into threads values (?,?,?)",
+        (session, rollout.to_str().unwrap(), cwd.to_str().unwrap()),
+    )
+    .unwrap();
+    std::fs::write(
+        hooks.join("bound.json"),
+        serde_json::json!({"session_id": session, "pane_id": "%1", "root_pid": pid, "root_start": start, "cwd": cwd}).to_string(),
+    )
+    .unwrap();
+
+    let base = crate::clock::now_s();
+    let flock = Flock::new(dir.path().join("launches"), dir.path().join("lanes"), false);
+    {
+        let mut config = flock.stuck_config.lock().unwrap();
+        config.threshold_s = 120.0;
+        config.observation_interval_s = 20.0;
+        config.max_attempts = 1;
+    }
+    let rows = serde_json::json!({"dunkers": [{"id": "d82", "running": true, "target_pane_id": "%1", "text": T508_TEXT}]});
+    flock.dunks.load(rows.as_object().unwrap());
+    let mut env = Pane::default();
+    env.panes
+        .push(serde_json::json!({"pane_id": "%1", "pane_pid": pid, "agent": "codex", "cwd": cwd}));
+    env.statuses.insert("%1".into(), "idle".into());
+    env.screens.insert("%1".into(), T508_FRAME.into());
+    let mut message = Message::new("m1", "%1", "CoS", T508_TEXT, "d82");
+    message.created_at = base;
+    message.status = "sent".into();
+    message.scheduled = true;
+    message.schedule_template = Some(T508_TEXT.into());
+    message.typed_at = Some(base);
+    message.attempt_generation = pane_generation(&env, "%1");
+    flock.note_stuck_candidate(&message);
+
+    crate::flock::loops_stuck::strict_stuck_observer_scan(&flock, &mut env, base + 1.0).unwrap();
+    assert!(env.keys.is_empty(), "no key on the first sighting");
+    crate::flock::loops_stuck::strict_stuck_observer_scan(&flock, &mut env, base + 121.0).unwrap();
+    assert_eq!(1, env.keys.len(), "exactly one key at the threshold");
+    crate::flock::loops_stuck::strict_stuck_observer_scan(&flock, &mut env, base + 200.0).unwrap();
+    assert_eq!(1, env.keys.len(), "no second key after the single attempt");
+    drop(child);
+}
+
 #[test]
 fn unwedge_verifies_a_newly_cleared_composer_after_the_key() {
     let dir = tempfile::tempdir().unwrap();
