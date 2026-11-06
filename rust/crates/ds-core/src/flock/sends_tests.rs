@@ -4087,23 +4087,21 @@ fn unwedge_reserves_before_one_key_and_does_not_claim_unchanged_text() {
 }
 
 /// Port of `ReviewBlockerTests.test_the_env_config_source_changes_real_worker_behaviour` (oracle
-/// 79bc92fa). `DUNKINGSHEEP_STUCK_CONFIG` carries the policy: the same unwedge that presses once
-/// with recovery enabled (the control below) presses nothing when the policy disables it.
+/// 79bc92fa). The policy comes from `DUNKINGSHEEP_STUCK_CONFIG`. The text has been stuck for 600 s,
+/// longer than the default 120 s threshold, so the default policy would press. Only the env policy's
+/// `enabled: false` keeps the key back. The control below is the same call with `enabled: true`.
 #[test]
 fn the_env_source_disables_recovery_as_the_python_case_does() {
     let dir = tempfile::tempdir().unwrap();
-    let (flock, mut env, message) = env_policy_case(
-        dir.path(),
-        r#"{"enabled": false, "threshold_s": 1.0, "observation_interval_s": 0.1, "max_attempts": 1}"#,
-    );
+    let (flock, mut env, message) = env_policy_case(dir.path(), r#"{"enabled": false}"#);
     assert!(!flock.stuck_config.lock().unwrap().enabled);
     assert!(!flock.unwedge(
         &mut env,
         "%1",
         "stuck body",
-        Some(98.0),
+        Some(400.0),
         Some(&message),
-        100.0,
+        1000.0,
         None,
         true
     ));
@@ -4117,17 +4115,14 @@ fn the_env_source_disables_recovery_as_the_python_case_does() {
 #[test]
 fn the_same_env_source_enabled_presses_once() {
     let dir = tempfile::tempdir().unwrap();
-    let (flock, mut env, message) = env_policy_case(
-        dir.path(),
-        r#"{"enabled": true, "threshold_s": 1.0, "observation_interval_s": 0.1, "max_attempts": 1}"#,
-    );
+    let (flock, mut env, message) = env_policy_case(dir.path(), r#"{"enabled": true}"#);
     assert!(!flock.unwedge(
         &mut env,
         "%1",
         "stuck body",
-        Some(98.0),
+        Some(400.0),
         Some(&message),
-        100.0,
+        1000.0,
         None,
         true
     ));

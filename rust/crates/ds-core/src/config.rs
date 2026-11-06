@@ -252,9 +252,11 @@ impl Env {
 /// under a `stuck_recovery` key. Unset or blank is `None`.
 ///
 /// The shape and types follow the Python `Config.from_mapping`. `enabled` is a boolean or one of
-/// the strings it accepts; numbers may be numeric strings; `null` means "use the default" for the
-/// tunables and is refused for `max_attempts`, as the Python refuses it. Anything else is an error
-/// here, never a coercion. Unknown keys are ignored, as the Python ignores them. A file that does
+/// the strings it accepts. Numbers may be numeric strings. `null` means "use the default" for the
+/// tunables only; it is refused for `enabled` and `max_attempts`, as the Python refuses it. A JSON
+/// boolean is refused where a number is expected: Python takes `true` as 1, a documented difference
+/// (a boolean where a count belongs is a typo). Anything else is an error here, never a coercion.
+/// Unknown keys are ignored, as the Python ignores them. A file that does
 /// not read or parse is an error. A file whose top level is not an object is no policy (`None`),
 /// as the Python treats it.
 pub fn stuck_config_source(env: &Env) -> Result<Option<crate::stuck::RawConfig>, String> {
@@ -321,7 +323,9 @@ fn raw_from_mapping(
 fn stuck_flag(value: Option<&serde_json::Value>) -> Result<Option<bool>, String> {
     use serde_json::Value;
     match value {
-        None | Some(Value::Null) => Ok(None),
+        // An absent key takes the default. A present null is refused: Python's `enabled` must be a
+        // boolean or one of its strings, and null is neither.
+        None => Ok(None),
         Some(Value::Bool(flag)) => Ok(Some(*flag)),
         Some(Value::String(text)) => match text.trim().to_ascii_lowercase().as_str() {
             "1" | "true" | "yes" => Ok(Some(true)),
@@ -526,6 +530,7 @@ mod tests {
         for raw in [
             "/nonexistent/dunkingsheep/stuck.json",
             r#"{"enabled": "maybe"}"#,
+            r#"{"enabled": null}"#,
             r#"{"max_attempts": null}"#,
             r#"{"threshold_s": "soon"}"#,
             r#"{"enabled": "#,
