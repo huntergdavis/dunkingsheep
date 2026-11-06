@@ -21,6 +21,7 @@ tmux starts it with `new-window`/`split-window`. Callers only say "tab" or
 import json
 import os
 import re
+import secrets
 import shlex
 import shutil
 import subprocess
@@ -194,7 +195,15 @@ class TmuxBackend(TerminalBackend):
 
     name = "tmux"
     live = True
-    PANE_SEP = "\x1f"
+    # The field separator must be printable ASCII: tmux 3.4 writes a control character in format
+    # output as a backslash escape (0x1f came back as the four characters \037), so a
+    # control-character separator split nothing and every pane line was dropped (t1605, measured
+    # in CI on the runner's tmux 3.4). It must also be a token that free text cannot carry: a pane
+    # title, cwd, command or session name can hold any printable text, so a fixed token can be
+    # split on by accident and shift every later field (t3357 B1). The token is therefore random
+    # per process: 8 hex digits, generated when this module loads. The daemon formats and splits
+    # with the same token, so the two always agree.
+    PANE_SEP = "@@ds" + secrets.token_hex(4) + "@@"
     # The last two fields are APPENDED, never inserted: every earlier field keeps
     # its position, and _parse_panes still accepts a 12-field line (a fixture, an
     # older capture) with cols/rows absent rather than guessing a size.
