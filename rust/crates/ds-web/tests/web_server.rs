@@ -48,6 +48,8 @@ fn fixture() -> (TempDir, DeskConfig) {
     std::fs::create_dir_all(dir.join("ui/dist/assets/docs")).unwrap();
     std::fs::write(dir.join("ui/dist/index.html"), INDEX).unwrap();
     std::fs::write(dir.join("ui/dist/assets/docs/index.html"), "<h1>docs</h1>").unwrap();
+    std::fs::create_dir_all(dir.join("ui/dist/assets/café")).unwrap();
+    std::fs::write(dir.join("ui/dist/assets/café/index.html"), "<h1>cafe</h1>").unwrap();
     std::fs::write(dir.join("ui/dist/404.html"), "<h1>missing page</h1>").unwrap();
     std::fs::write(dir.join("ui/dist/assets/app.js"), "console.log('desk');").unwrap();
     std::fs::create_dir_all(dir.join("config")).unwrap();
@@ -316,6 +318,15 @@ fn the_bundle_and_its_assets_are_served_without_a_session() {
     assert_eq!(served.status, 200);
     assert_eq!(served.text(), "<h1>docs</h1>");
 
+    // A non-ASCII directory name redirects to a percent-encoded, ASCII Location.
+    let accented = request(server.addr, "GET", "/assets/caf%C3%A9", &[], None);
+    assert_eq!(accented.status, 307);
+    let accented_location = format!("http://{}/assets/caf%C3%A9/", server.addr);
+    assert_eq!(
+        accented.header("location"),
+        Some(accented_location.as_str())
+    );
+
     assert_eq!(server.shutdown(), Ok(()));
 }
 
@@ -409,6 +420,19 @@ fn api_fallbacks_and_traversal_follow_the_static_mount() {
     assert_eq!(wrong_method.status, 405);
     assert_eq!(wrong_method.header("allow"), Some("GET, HEAD"));
     assert_eq!(wrong_method.json(), json!({"detail": "Method Not Allowed"}));
+
+    // A wrong method on a registered route is not a route either: Starlette's mount answers it.
+    let wrong_on_route = request(addr, "POST", "/api/health", &[], Some("{}"));
+    assert_eq!(wrong_on_route.status, 405, "{}", wrong_on_route.text());
+    assert_eq!(wrong_on_route.header("allow"), Some("GET, HEAD"));
+    assert_eq!(
+        wrong_on_route.json(),
+        json!({"detail": "Method Not Allowed"})
+    );
+
+    // HEAD is not a method of the GET-only route, so the mount looks the path up and misses.
+    let head_on_route = request(addr, "HEAD", "/api/health", &[], None);
+    assert_eq!(head_on_route.status, 404, "{}", head_on_route.text());
 
     // Routing sees the decoded path, and `..` inside the bundle normalises as in Starlette.
     let decoded_route = request(addr, "GET", "/%61pi/health", &[], None);

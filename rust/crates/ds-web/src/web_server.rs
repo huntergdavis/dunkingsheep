@@ -9,11 +9,14 @@
 //! board runtime. Startup warms the provider usage cache and starts the board timer. Shutdown
 //! stops the timer and joins the usage workers.
 //!
-//! Routing order matches `web/app.py`. The legacy redirect middleware runs before routing, so it
-//! sees every path. A path the desk keeps (`/`, `/api...`, `/dash...`, `/assets...`) falls through
-//! to the routes. Every other path gets a 307 to `/dash/<view>`. Unmatched kept paths (the bundle
-//! at `/` and `/assets/*`) are served from the built UI directory, and unknown `/api/*` paths
-//! answer 404 with `{"detail": "Not Found"}`, as Starlette's static mount does.
+//! Routing follows Starlette. The path is decoded before routing, so `/%61pi/health` is
+//! `/api/health`. A request that a registered Python route claims for its method goes to that
+//! route. Every other request goes to the static mount, because Starlette's `/` mount takes any
+//! path the routes do not fully match. The mount answers GET and HEAD from the built UI directory:
+//! `..` normalises inside it, a directory without a trailing slash redirects, and a missing file
+//! serves the bundle's `404.html` or `{"detail": "Not Found"}`. Any other method gets a
+//! `{"detail": "Method Not Allowed"}` 405 whose `Allow` is `GET, HEAD`. The legacy shell middleware
+//! runs first, so a path the desk does not keep gets a 307 to `/dash/<view>`.
 //!
 //! Known gaps, reported rather than widened here:
 //! - The Python `vp-delivery-watch` loop (reconcile pending owner messages every 5 seconds) has no
@@ -351,12 +354,10 @@ impl Desk {
             )
             .merge(ops_board::router(board, auth.clone(), scheme))
             .merge(dash::router(dash, auth, scheme))
-            .fallback(
-                move |method: Method, uri: Uri, headers: axum::http::HeaderMap| {
-                    let root = ui_dist.clone();
-                    async move { serve_static(&root, &method, &uri, &headers).await }
-                },
-            )
+            .fallback(move |request: Request| {
+                let root = ui_dist.clone();
+                async move { serve_static(&root, request).await }
+            })
             .layer(middleware::from_fn(retire_the_desk_ui))
     }
 }
@@ -386,10 +387,104 @@ where
 
     fn call(&mut self, mut request: Request<B>) -> Self::Future {
         let decoded = percent_decode(request.uri().path());
-        if let Some(routed) = routed_uri(request.uri(), &decoded) {
-            *request.uri_mut() = routed;
+        if is_python_route(&decoded, request.method()) {
+            if let Some(routed) = routed_uri(request.uri(), &decoded) {
+                *request.uri_mut() = routed;
+            }
+        } else {
+            let query = request.uri().query().map(str::to_owned);
+            request.extensions_mut().insert(ForcedStatic {
+                path: decoded,
+                query,
+            });
+            *request.uri_mut() = Uri::from_static(FORCED_STATIC_PATH);
         }
         self.inner.call(request)
+    }
+}
+
+/// A request no Python route claims. It goes to the static mount with its decoded path and query,
+/// because Starlette's `/` mount answers every path the routes do not fully match.
+#[derive(Clone)]
+struct ForcedStatic {
+    path: String,
+    query: Option<String>,
+}
+
+/// A path no route matches, so the router's fallback answers it with the static mount.
+const FORCED_STATIC_PATH: &str = "/__desk_static__";
+
+/// The routes Python registers in `web/app.py`, as (method, path pattern). A `{name}` segment
+/// matches one non-empty segment, and `{path:path}` matches the rest of the path. A method that a
+/// path does not list is not a route for that request.
+const PYTHON_ROUTES: &[(&str, &str)] = &[
+    ("POST", "/api/login"),
+    ("POST", "/api/logout"),
+    ("POST", "/api/password"),
+    ("GET", "/api/panes/activity"),
+    ("GET", "/api/activity"),
+    ("GET", "/api/poolrad-dashboard/progress"),
+    ("GET", "/dash"),
+    ("GET", "/dash/"),
+    ("GET", "/dash/{path:path}"),
+    ("POST", "/api/pane-send"),
+    ("GET", "/api/fleet"),
+    ("GET", "/api/ops-metrics"),
+    ("GET", "/api/messages"),
+    ("GET", "/api/deliveries"),
+    ("GET", "/api/messages/{message_id}/context"),
+    ("POST", "/api/messages"),
+    ("POST", "/api/messages/{message_id}/send-now"),
+    ("POST", "/api/brief"),
+    ("POST", "/api/ops-board/not-now"),
+    ("POST", "/api/ops-board/answer"),
+    ("POST", "/api/ops-board/refresh"),
+    ("GET", "/api/ops-board"),
+    ("GET", "/api/ops-metrics/history"),
+    ("POST", "/api/ops-metrics/refresh"),
+    ("GET", "/api/capability"),
+    ("POST", "/api/owner-send"),
+    ("GET", "/api/owner-thread"),
+    ("POST", "/api/viewport"),
+    ("GET", "/api/channels"),
+    ("GET", "/api/pane-text"),
+    ("GET", "/api/search"),
+    ("POST", "/api/uploads"),
+    ("GET", "/api/uploads/{attachment_id}"),
+    ("GET", "/api/herdr-webui"),
+    ("GET", "/api/health"),
+    ("GET", "/api/version"),
+];
+
+/// Whether a Python route claims this decoded path for this method.
+fn is_python_route(decoded: &str, method: &Method) -> bool {
+    PYTHON_ROUTES.iter().any(|(route_method, pattern)| {
+        *route_method == method.as_str() && pattern_matches(pattern, decoded)
+    })
+}
+
+/// Matches one route pattern against a decoded path, as Starlette's path converters do.
+fn pattern_matches(pattern: &str, path: &str) -> bool {
+    if let Some(prefix) = pattern.strip_suffix("{path:path}") {
+        return path.starts_with(prefix);
+    }
+    let mut wanted = pattern.split('/');
+    let mut actual = path.split('/');
+    loop {
+        match (wanted.next(), actual.next()) {
+            (None, None) => return true,
+            (Some(segment), Some(value)) => {
+                let matches = if segment.starts_with('{') && segment.ends_with('}') {
+                    !value.is_empty()
+                } else {
+                    segment == value
+                };
+                if !matches {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
     }
 }
 
@@ -637,7 +732,10 @@ fn legacy_view(path: &str) -> &'static str {
 /// it before Starlette routes, so `/%61pi/health` reaches `/api/health`. Paths the desk keeps pass
 /// through, and every other path gets a 307 to the dashboard shell. The query string is dropped.
 async fn retire_the_desk_ui(request: Request, next: Next) -> Response {
-    let path = percent_decode(request.uri().path());
+    let path = match request.extensions().get::<ForcedStatic>() {
+        Some(forced) => forced.path.clone(),
+        None => percent_decode(request.uri().path()),
+    };
     if path == "/" || desk_keeps(&path) {
         return next.run(request).await;
     }
@@ -675,16 +773,19 @@ fn encode_path(decoded: &str) -> String {
 /// HTTPException. A directory serves its `index.html`, and a directory URL without a trailing
 /// slash redirects to one. `..` segments normalise first, and a path that climbs above the bundle
 /// is a 404. A missing file serves the bundle's `404.html` when there is one.
-async fn serve_static(
-    root: &Path,
-    method: &Method,
-    uri: &Uri,
-    headers: &axum::http::HeaderMap,
-) -> Response {
+async fn serve_static(root: &Path, request: Request) -> Response {
+    let method = request.method().clone();
     if method != Method::GET && method != Method::HEAD {
         return method_not_allowed();
     }
-    let decoded = percent_decode(uri.path());
+    let (decoded, query) = match request.extensions().get::<ForcedStatic>() {
+        Some(forced) => (forced.path.clone(), forced.query.clone()),
+        None => (
+            percent_decode(request.uri().path()),
+            request.uri().query().map(str::to_owned),
+        ),
+    };
+    let headers = request.headers().clone();
     let root_owned = root.to_path_buf();
     let head = method == Method::HEAD;
     let lookup_path = decoded.clone();
@@ -692,7 +793,7 @@ async fn serve_static(
     match looked {
         Ok(Lookup::File(file)) => file_response(file, StatusCode::OK),
         Ok(Lookup::DirectoryWithoutSlash) => {
-            let location = absolute_location(headers, &decoded, uri.query());
+            let location = absolute_location(&headers, &decoded, query.as_deref());
             Redirect::temporary(&location).into_response()
         }
         Ok(Lookup::NotFoundPage(Some(page))) => file_response(page, StatusCode::NOT_FOUND),
@@ -823,12 +924,27 @@ fn absolute_location(headers: &axum::http::HeaderMap, path: &str, query: Option<
         .get(header::HOST)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("localhost");
-    let mut location = format!("http://{host}{path}/");
+    let mut location = format!("http://{host}{}/", quote_location(path));
     if let Some(query) = query {
         location.push('?');
-        location.push_str(query);
+        location.push_str(&quote_location(query));
     }
     location
+}
+
+/// Percent-encodes a redirect target the way Starlette's `RedirectResponse` quotes it: the
+/// unreserved characters and Starlette's safe set stay, and every other byte, including non-ASCII,
+/// becomes `%XX`. The result is always ASCII, so the `Location` header is always valid.
+fn quote_location(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for byte in text.bytes() {
+        if byte.is_ascii_alphanumeric() || b"_.-~:/%#?=@[]!$&'()*+,;".contains(&byte) {
+            out.push(char::from(byte));
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
 }
 
 /// Starlette's `StaticFiles` 405 as FastAPI renders it: a JSON detail and the `Allow` header that
