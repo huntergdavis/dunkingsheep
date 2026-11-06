@@ -176,8 +176,8 @@ class CiReplayContractTests(unittest.TestCase):
         workflow = read(WORKFLOW)
         self.assertIn(RUST_JOB, workflow)
         job = workflow[workflow.index(RUST_JOB):]
-        self.assertIn("cargo build --manifest-path rust/Cargo.toml -p ds-cli --bin dunkingsheep", job)
-        self.assertIn("DS_BIN: ${{ github.workspace }}/rust/target/debug/dunkingsheep", job)
+        self.assertIn("cargo build --release --manifest-path rust/Cargo.toml -p ds-cli --bin dunkingsheep", job)
+        self.assertIn("DS_BIN: ${{ github.workspace }}/rust/target/release/dunkingsheep", job)
         self.assertIn("bash tools/ci_production_replay.sh", job)
         checkout = job[job.index("actions/checkout@v4"):job.index("- name: install tmux")]
         self.assertIn("persist-credentials: false", checkout)
