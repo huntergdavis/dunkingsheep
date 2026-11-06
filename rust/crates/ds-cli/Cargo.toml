@@ -26,3 +26,6 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 
 [dev-dependencies]
 tempfile = "3"
+# The stale-cache CLI test plants a drifted FTS5 index. Same declaration as ds-core, so
+# this adds a dependency edge to the rusqlite 0.32 already in Cargo.lock, not a new crate.
+rusqlite = { version = "0.32", features = ["bundled"] }

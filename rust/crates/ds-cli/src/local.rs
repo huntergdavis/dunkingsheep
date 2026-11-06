@@ -1,9 +1,12 @@
-//! Local-only CLI commands (T44), slice 1: `git-credential` and the `gh-token` printer.
+//! Local-only CLI commands (T44): the `git-credential` protocol and the `gh-token` printer.
 //!
 //! The pieces that need the daemon or the secrets scanner take them as closures, so the
-//! protocol logic is testable without either. NOT here yet: the secrets scanner itself
-//! (`dunk_secrets.refusal`, unported), the client wiring, and the rest of T44 (context
-//! reads, github protect/wrappers, install, guard install, doctor).
+//! protocol logic is testable without either. The callers are elsewhere: `secrets_cmd.rs`
+//! binds `dunk_secrets.refusal`, and `daemon_cmd.rs` calls `git_credential` and
+//! `print_gh_token`. The other T44 commands are implemented in their own modules: context
+//! reads in `context_cmd.rs`, `github protect` in `github_cmd.rs`, and `install`,
+//! `guard install` and `doctor` routed from `dispatch.rs`. The `test_dunk_context` CLI
+//! class is ported in `tests/context_cli.rs`.
 
 use std::io::{BufRead, Write};
 
