@@ -471,6 +471,16 @@ impl OpsBoardBackend for BoardRuntime {
             }
         })
     }
+
+    /// The owner's "not now" decision uses the same shared-client binding the route uses, so the
+    /// daemon call is not duplicated here.
+    fn defer_question<'a>(
+        &'a self,
+        task_id: &'a str,
+    ) -> OpsBoardFuture<'a, Result<Value, OpsBoardError>> {
+        let decisions = owner_board_backend(self);
+        Box::pin(async move { decisions.defer_question(task_id).await })
+    }
 }
 
 impl OpsMetricsBackend for BoardRuntime {
@@ -517,10 +527,7 @@ pub fn build(
 ) -> Result<Value, PyError> {
     let mut readings = Obj::new();
     let mut record = |name: &str, reading: Result<Value, PyError>| {
-        readings.insert(
-            name.to_owned(),
-            reading.unwrap_or_else(unavailable),
-        );
+        readings.insert(name.to_owned(), reading.unwrap_or_else(unavailable));
     };
     record("tasks", read_tasks(daemon, now));
     record("panes", read_panes(daemon));
