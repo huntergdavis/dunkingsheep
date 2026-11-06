@@ -141,6 +141,16 @@ impl CommandResult {
         let blob = format!("{}{}", self.stdout, self.stderr).to_lowercase();
         blob.contains("no server running") || blob.contains("no sessions")
     }
+
+    /// tmux's other wording for a server that is not there: "error connecting to <socket>
+    /// (No such file or directory)" (tmux 3.x with a named socket) and "failed to connect to
+    /// server". The Python `list_panes` swallows every non-zero exit, so an unreachable server
+    /// lists as no panes there (t3464: the roster answers `lanes: []`, not "cannot list
+    /// panes"). `is_available` keeps the narrow wording the Python's own check uses.
+    pub fn is_unreachable(&self) -> bool {
+        let blob = format!("{}{}", self.stdout, self.stderr).to_lowercase();
+        blob.contains("error connecting to") || blob.contains("failed to connect to server")
+    }
 }
 
 /// The tmux backend: sessions are workspaces, windows are tabs, panes are panes.
@@ -300,7 +310,7 @@ impl Terminal for TmuxBackend {
     fn try_list_panes(&self) -> Result<Vec<Pane>, TerminalError> {
         match self.run(&["list-panes", "-a", "-F", pane_format()]) {
             Ok(result) if result.code == 0 => self.parsed_panes(&result.stdout),
-            Ok(result) if result.is_no_server() => Ok(Vec::new()),
+            Ok(result) if result.is_no_server() || result.is_unreachable() => Ok(Vec::new()),
             Ok(result) => Err(TerminalError::refused(
                 result.message("tmux list-panes failed"),
             )),
