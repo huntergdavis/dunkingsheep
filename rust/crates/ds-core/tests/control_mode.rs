@@ -9,7 +9,9 @@
 
 use ds_core::terminal::control::{parse_line, Client, Event, PaneTable};
 
-const SEP: &str = "\x1f";
+fn sep() -> &'static str {
+    ds_core::terminal::parse::pane_separator()
+}
 
 fn pane_line(pane: &str, session: &str, window: &str, command: &str, pid: &str) -> String {
     [
@@ -28,7 +30,7 @@ fn pane_line(pane: &str, session: &str, window: &str, command: &str, pid: &str) 
         "120",
         "40",
     ]
-    .join(SEP)
+    .join(sep())
 }
 
 #[test]
@@ -133,7 +135,13 @@ fn a_reply_loads_the_pane_table_and_get_pane_is_a_lookup() {
     let reply = client
         .handle_line(&format!("%end 1 {number}"))
         .expect("reply");
-    assert_eq!(1, client.table.load_panes(&reply.text()));
+    assert_eq!(
+        1,
+        client
+            .table
+            .load_panes(&reply.text())
+            .expect("the listing parses")
+    );
     let pane = client.table.get_pane("%2").expect("in the table");
     assert_eq!("claude", pane.command);
     assert_eq!(Some(2202), pane.pane_pid);

@@ -118,13 +118,13 @@ cd "$(dirname "$0")" || exit 1
 printf '%s\n' "$@" >> argv
 case "$1" in
 new-session) printf '%s' "$4" > name ;;
-list-sessions) printf '$1\037%s\0370\n' "$(cat name)" ;;
-list-windows) printf '@1\037$1\037tab\0370\0371\n' ;;
-list-panes) printf '%%1\037$1\037@1\037/work\037bash\037shell\0371\037%s\037tab\0370\0370\0371\03780\03724\n' "$(cat name)" ;;
-new-window) printf '@1\037%%1\n' ;;
+list-sessions) printf '$1__SEP__%s__SEP__0\n' "$(cat name)" ;;
+list-windows) printf '@1__SEP__$1__SEP__tab__SEP__0__SEP__1\n' ;;
+list-panes) printf '%%1__SEP__$1__SEP__@1__SEP__/work__SEP__bash__SEP__shell__SEP__1__SEP__%s__SEP__tab__SEP__0__SEP__0__SEP__1__SEP__80__SEP__24\n' "$(cat name)" ;;
+new-window) printf '@1__SEP__%%1\n' ;;
 split-window) printf '%%1\n' ;;
 esac
-"#).unwrap();
+"#.replace("__SEP__", crate::terminal::parse::pane_separator())).unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         let registry = dir.path().join("registry.json");
         let mut backend = TmuxBackend::with_registry(&script, &registry);
@@ -231,11 +231,11 @@ cd "$(dirname "$0")" || exit 1
 printf '%s\n' "$1" >> calls
 case "$1" in
 new-session) printf '%s' "$4" > created ;;
-list-sessions) printf '$1\037%s\0370\n' "$(cat created)" ;;
-list-windows) printf '@1\037$1\037tab\0370\0371\n' ;;
-list-panes) printf '%%1\037$1\037@1\037/work\037bash\037shell\0371\037created\037tab\0370\0370\0371\03780\03724\n' ;;
+list-sessions) printf '$1__SEP__%s__SEP__0\n' "$(cat created)" ;;
+list-windows) printf '@1__SEP__$1__SEP__tab__SEP__0__SEP__1\n' ;;
+list-panes) printf '%%1__SEP__$1__SEP__@1__SEP__/work__SEP__bash__SEP__shell__SEP__1__SEP__created__SEP__tab__SEP__0__SEP__0__SEP__1__SEP__80__SEP__24\n' ;;
 esac
-"#).unwrap();
+"#.replace("__SEP__", crate::terminal::parse::pane_separator())).unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         let registry = dir.path().join("registry.json");
         let mut backend = TmuxBackend::with_registry(&script, &registry);

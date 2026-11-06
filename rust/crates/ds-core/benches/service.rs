@@ -2,7 +2,7 @@ use std::hint::black_box;
 use std::time::Instant;
 
 use ds_core::terminal::control::PaneTable;
-use ds_core::terminal::parse::PANE_SEP;
+use ds_core::terminal::parse::pane_separator;
 
 const PANE_COUNT: usize = 1_000;
 const WARMUP_ITERATIONS: usize = 1_000;
@@ -17,7 +17,7 @@ fn synthetic_panes(count: usize) -> String {
             output,
             "%{index}{sep}$1{sep}@{index}{sep}/workspace/project{index}{sep}bash{sep}synthetic-pane-{index}{sep}0{sep}session{sep}window{sep}{index}{sep}0{sep}{}{sep}120{sep}40",
             10_000 + index,
-            sep = PANE_SEP,
+            sep = pane_separator(),
         )
         .expect("writing to a String cannot fail");
     }
@@ -31,7 +31,9 @@ fn percentile(sorted: &[u128], percent: usize) -> u128 {
 fn bench_list_panes_1000() {
     let output = synthetic_panes(PANE_COUNT);
     let mut table = PaneTable::default();
-    let loaded = table.load_panes(&output);
+    let loaded = table
+        .load_panes(&output)
+        .expect("the synthetic listing parses");
     assert_eq!(PANE_COUNT, loaded, "all synthetic rows must parse");
     assert_eq!(PANE_COUNT, table.list_panes().len());
 
