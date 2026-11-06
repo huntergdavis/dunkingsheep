@@ -57,21 +57,6 @@ pane_main() {
     "DUNKINGSHEEP_TMUX_GUARD_DIR=$temp/no-guard" "DUNKINGSHEEP_CLI=$ROOT/dunkingsheep"
     "DUNKINGSHEEP_NO_START_DAEMON=1")
 
-  # Diagnostic (the first CI runs exited 4 at the daemon's pane check): the daemon's own pane listing,
-  # run in the same environment before the daemon starts. The job prints the file.
-  "${sandbox[@]}" "$PY" -I -c '
-import sys
-sys.path.insert(0, sys.argv[1])
-import dunk_terminal as terminal
-backend = terminal.get_backend()
-print("socket_name:", backend.socket_name, "tmux:", backend.tmux)
-code, out, err = backend._run(["display-message", "-p", "#{socket_path}"])
-print("socket_path:", code, out.strip(), err.strip())
-code, out, err = backend._run(["list-panes", "-a", "-F", "#{pane_id} #{session_name} #{window_name}"])
-print("list-panes:", code, repr(out[:500]), err.strip()[:500])
-print("panes the daemon would see:", len(backend.list_panes()))
-' "$ROOT" > "$temp/probe.out" 2>&1 || true
-
   "${sandbox[@]}" "$PY" "$ROOT/dunkingsheep" serve > "$temp/daemon.log" 2>&1 &
   daemon=$!
   for _ in $(seq 1 150); do
@@ -137,17 +122,6 @@ job_main() {
   fi
   sandbox_tmux select-pane -t "$owner" -T "$PIN_TITLE"
 
-  # Diagnostic: what the job's own tmux sees before the owner pane runs anything. The job prints it.
-  {
-    echo "tmux: $("$TMUX_BIN" -V 2>&1 || true)"
-    echo "python: $("$PY" --version 2>&1 || true)"
-    echo "owner socket: $(sandbox_tmux display-message -p -t "$owner" '#{socket_path}' 2>&1 || true)"
-    echo "panes:"
-    sandbox_tmux list-panes -a -F '#{pane_id} #{session_name} #{window_name} #{pane_pid}' 2>&1 || true
-    echo "tmux dir:"
-    ls -la "$TEMP_DIR/tmux" 2>&1 || true
-  } > "$TEMP_DIR/diag.txt"
-
   # The owner pane runs this same script in its pane mode, as its own child process.
   sandbox_tmux send-keys -t "$owner" -l \
     "bash '$ROOT/tools/ci_production_replay.sh' pane '$TEMP_DIR' '$TMUX_NAME'"
@@ -167,14 +141,16 @@ job_main() {
   fi
 
   local name
-  for name in diag.txt probe.out recover.out replay.out daemon.log; do
+  for name in recover.out replay.out daemon.log; do
     echo "== $name =="
     cat "$TEMP_DIR/$name" 2>/dev/null || echo "(no $name)"
   done
-  echo "== the daemon's own log (state/daemon.log) =="
+  echo "== the daemon log (state/daemon.log) =="
   cat "$TEMP_DIR/state/daemon.log" 2>/dev/null || echo "(no daemon log)"
-  echo "== the owner pane's screen =="
-  sandbox_tmux capture-pane -p -t "$owner" 2>/dev/null | tail -n 80 || true
+  echo "== the owner pane screen =="
+  sandbox_tmux capture-pane -p -t "$owner" 2>&1 | tail -n 80 || echo "(no capture)"
+  echo "== the tmux pane list =="
+  sandbox_tmux list-panes -a -F '#{pane_id} #{session_name} #{window_name} #{pane_pid}' 2>&1 || echo "(no pane list)"
   echo "replay exit=$code"
   exit "$code"
 }
