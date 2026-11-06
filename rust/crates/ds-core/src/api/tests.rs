@@ -1340,8 +1340,11 @@ impl CommandEnv for PmApiEnv {
         self.now
     }
 
-    fn pm_env(&self) -> Result<&dyn crate::pm::PmEnv, DunkError> {
-        Ok(self)
+    fn with_pm_env(
+        &self,
+        operation: &mut dyn FnMut(&dyn crate::pm::PmEnv) -> Result<Value, DunkError>,
+    ) -> Result<Value, DunkError> {
+        operation(self)
     }
 }
 
