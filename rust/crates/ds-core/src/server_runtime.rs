@@ -23,6 +23,7 @@ mod layout_create;
 mod outbox_messages;
 mod outbox_runtime;
 mod owner_push;
+mod owner_views;
 mod poolrad;
 mod project_policy_load;
 mod project_runtime;
@@ -781,6 +782,10 @@ impl crate::api::CommandEnv for RequestRuntimeAdapter<'_> {
 
     fn view_cache(&self) -> Result<&ViewCache, DunkError> {
         Ok(self.terminal.flock.view_cache())
+    }
+
+    fn owner_views(&self) -> Result<&dyn crate::api::OwnerViewEnv, DunkError> {
+        Ok(self)
     }
 }
 
