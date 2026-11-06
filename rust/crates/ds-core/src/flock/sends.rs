@@ -466,7 +466,6 @@ impl Flock {
                 || !matches!(entry.status.as_str(), "failed" | "sent" | "typed")
                 || crate::stuck::collapse(&entry.text) != crate::stuck::collapse(&content)
                 || (entry.scheduled
-                    && entry.status == "sent"
                     && !self.scheduled_recovery_current(pane_id, entry, clock::now_s()))
             {
                 return (false, "intent no longer authorizes the press".into());

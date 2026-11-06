@@ -106,15 +106,16 @@ fn created_workspace_persists_parent_and_root_across_backend_instances() {
     let dir = tempfile::tempdir().unwrap();
     let binary = dir.path().join("tmux");
     let root = crate::terminal::tmux::shell_join(&[dir.path().to_str().unwrap()]);
+    let sep = crate::terminal::parse::pane_separator();
     let script = format!(
         r#"#!/bin/sh
 cd {root} || exit 1
 printf '%s\n' "$*" >> calls
 case "$1" in
-new-window) if test "$5" = '#{{pane_id}}'; then printf '%%1\n'; else printf '@1\037%%1\n'; fi ;;
-list-sessions) printf '$1\037fleet\0370\n' ;;
-list-windows) printf '@1\037$1\037tab\0370\0371\n' ;;
-list-panes) printf '%%1\037$1\037@1\037/tmp\037sh\037root\0371\037fleet\037tab\0370\0370\037123\03780\03724\n'; test ! -f extra || cat extra ;;
+new-window) if test "$5" = '#{{pane_id}}'; then printf '%%1\n'; else printf '@1{sep}%%1\n'; fi ;;
+list-sessions) printf '$1{sep}fleet{sep}0\n' ;;
+list-windows) printf '@1{sep}$1{sep}tab{sep}0{sep}1\n' ;;
+list-panes) printf '%%1{sep}$1{sep}@1{sep}/tmp{sep}sh{sep}root{sep}1{sep}fleet{sep}tab{sep}0{sep}0{sep}123{sep}80{sep}24\n'; test ! -f extra || cat extra ;;
 esac
 exit 0
 "#
@@ -151,7 +152,8 @@ exit 0
     assert!(second.managed("pane", "%1", &panes));
     std::fs::write(
         dir.path().join("extra"),
-        "%2\x1f$1\x1f@1\x1f/tmp\x1fsh\x1fhuman\x1f0\x1ffleet\x1ftab\x1f0\x1f0\x1f456\n",
+        "%2\x1f$1\x1f@1\x1f/tmp\x1fsh\x1fhuman\x1f0\x1ffleet\x1ftab\x1f0\x1f0\x1f456\x1f80\x1f24\n"
+            .replace('\x1f', crate::terminal::parse::pane_separator()),
     )
     .unwrap();
     assert!(second.close("workspace", "$1").is_err());
@@ -226,7 +228,8 @@ esac
     let path = dir.path().join("registry.json");
     let registry = Registry::new(&path);
     let owned =
-        "%1\x1f$1\x1f@1\x1f/tmp\x1fsh\x1froot\x1f1\x1ffleet\x1ftab\x1f0\x1f0\x1f123\x1f80\x1f24\n";
+        "%1\x1f$1\x1f@1\x1f/tmp\x1fsh\x1froot\x1f1\x1ffleet\x1ftab\x1f0\x1f0\x1f123\x1f80\x1f24\n"
+            .replace('\x1f', crate::terminal::parse::pane_separator());
     for (kind, id, kill) in [
         ("tab", "@1", "kill-window"),
         ("workspace", "$1", "kill-session"),
@@ -237,7 +240,11 @@ esac
         for (inventory, fail) in [
             (owned.to_string(), true),
             (String::new(), false),
-            (format!("{owned}%2\x1f$1\x1f@1\n"), false),
+            (
+                format!("{owned}%2\x1f$1\x1f@1\n")
+                    .replace('\x1f', crate::terminal::parse::pane_separator()),
+                false,
+            ),
             (owned.replace("%1", "%2"), false),
             (owned.replace("$1", "$2").replace("@1", "@2"), false),
         ] {
@@ -258,7 +265,7 @@ esac
                 std::fs::remove_file(dir.path().join("fail")).unwrap();
             }
         }
-        std::fs::write(dir.path().join("inventory"), owned).unwrap();
+        std::fs::write(dir.path().join("inventory"), &owned).unwrap();
         backend.close(kind, id).unwrap();
         assert!(std::fs::read_to_string(dir.path().join("calls"))
             .unwrap()
