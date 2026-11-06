@@ -45,9 +45,9 @@ fn fixture() -> (TempDir, DeskConfig) {
     let root = TempDir::new().expect("temporary desk root");
     let dir = root.path();
     std::fs::create_dir_all(dir.join("ui/dist/assets")).unwrap();
-    std::fs::create_dir_all(dir.join("ui/dist/docs")).unwrap();
+    std::fs::create_dir_all(dir.join("ui/dist/assets/docs")).unwrap();
     std::fs::write(dir.join("ui/dist/index.html"), INDEX).unwrap();
-    std::fs::write(dir.join("ui/dist/docs/index.html"), "<h1>docs</h1>").unwrap();
+    std::fs::write(dir.join("ui/dist/assets/docs/index.html"), "<h1>docs</h1>").unwrap();
     std::fs::write(dir.join("ui/dist/404.html"), "<h1>missing page</h1>").unwrap();
     std::fs::write(dir.join("ui/dist/assets/app.js"), "console.log('desk');").unwrap();
     std::fs::create_dir_all(dir.join("config")).unwrap();
@@ -301,12 +301,18 @@ fn the_bundle_and_its_assets_are_served_without_a_session() {
     assert_eq!(missing.status, 404);
     assert_eq!(missing.text(), "<h1>missing page</h1>");
 
-    // A directory with an index redirects a URL without a trailing slash, to an absolute URL.
-    let directory = request(server.addr, "GET", "/docs", &[], None);
+    // The legacy shell catches /docs before the static mount, as it does in Python.
+    let retired = request(server.addr, "GET", "/docs", &[], None);
+    assert_eq!(retired.status, 307);
+    assert_eq!(retired.header("location"), Some("/dash/cos"));
+
+    // A directory with an index under /assets redirects a URL without a trailing slash, to the
+    // absolute slash URL that Starlette builds.
+    let directory = request(server.addr, "GET", "/assets/docs", &[], None);
     assert_eq!(directory.status, 307);
-    let expected = format!("http://{}/docs/", server.addr);
+    let expected = format!("http://{}/assets/docs/", server.addr);
     assert_eq!(directory.header("location"), Some(expected.as_str()));
-    let served = request(server.addr, "GET", "/docs/", &[], None);
+    let served = request(server.addr, "GET", "/assets/docs/", &[], None);
     assert_eq!(served.status, 200);
     assert_eq!(served.text(), "<h1>docs</h1>");
 
@@ -384,13 +390,20 @@ fn dash_routes_apply_the_session_gate_and_the_shell_redirects() {
 
 #[test]
 fn api_fallbacks_and_traversal_follow_the_static_mount() {
-    let (_root, config) = fixture();
+    let (root, config) = fixture();
     let server = Server::start(config);
     let addr = server.addr;
 
+    // A missing path under /api serves the bundle's 404.html, as Starlette's HTML mode does.
     let unknown = request(addr, "GET", "/api/nope", &[], None);
     assert_eq!(unknown.status, 404);
-    assert_eq!(unknown.json(), json!({"detail": "Not Found"}));
+    assert_eq!(unknown.text(), "<h1>missing page</h1>");
+
+    // Without a bundle 404.html the same miss answers Starlette's JSON 404.
+    std::fs::remove_file(root.path().join("ui/dist/404.html")).unwrap();
+    let bare = request(addr, "GET", "/api/nope", &[], None);
+    assert_eq!(bare.status, 404);
+    assert_eq!(bare.json(), json!({"detail": "Not Found"}));
 
     let wrong_method = request(addr, "POST", "/api/nope", &[], Some("{}"));
     assert_eq!(wrong_method.status, 405);
