@@ -1,0 +1,6 @@
+# Rust release drop-in (packaging/rust-release, t3229). Generated; do not edit.
+# release_id=@RELEASE_ID@
+[Service]
+ExecStart=
+ExecStart=@RELEASE_BINARY@ serve
+Environment=DUNKINGSHEEP_SUPERVISED=1
