@@ -42,6 +42,12 @@
 //! gives RuntimeError, `gh` output gives JSONDecodeError, and a published accounting file gives
 //! ValueError. CPython also accepts a UTF-8 byte-order mark at the start of bytes input. The
 //! published accounting path keeps the BOM, so that file is reported invalid (ValueError).
+//!
+//! Daemon replies differ in two more places. CPython treats any truthy `ok` as success (executed:
+//! `ok` as 1, "yes", "false" and [1]), while the port accepts only the JSON boolean `true`, so
+//! those replies give RuntimeError here. CPython decodes a reply with replacement characters, so
+//! invalid UTF-8 can still succeed. The port reads the reply into a `String`, which fails on
+//! invalid UTF-8, and that becomes RuntimeError.
 
 use std::{
     cmp::Ordering,
