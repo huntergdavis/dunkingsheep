@@ -9073,7 +9073,8 @@ fn h_owner_conversation_matches_python() {
 
 /// Python `float(before)` on the owner conversation cursor, over a real Unix socket.
 /// dunk_inbox.conversation binds `created_at < float(before)`: an absent cursor, Infinity
-/// and 1e309 keep every row; NaN, -Infinity and the string "NaN" keep none.
+/// and 1e309 keep every row; NaN, -Infinity and the string "NaN" keep none. An integer past
+/// the float range raises OverflowError, which the daemon answers as an internal error.
 #[test]
 fn owner_conversation_before_cursor_matches_python_over_real_socket() {
     struct OwnerPeer<'a> {
@@ -9125,22 +9126,24 @@ fn owner_conversation_before_cursor_matches_python_over_real_socket() {
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
             let mut reader = BufReader::new(socket.try_clone().unwrap());
-            let mut conversation = |args: &str| -> Value {
+            let mut call = |args: &str| -> Value {
                 let request = format!(
                     r#"{{"id":1,"cmd":"owner_conversation","args":{args},"self_pane_id":"w1:p1"}}"#
                 );
                 socket.write_all(format!("{request}\n").as_bytes()).unwrap();
                 let mut line = String::new();
                 reader.read_line(&mut line).unwrap();
-                let reply = crate::wire_json::from_str(&line).unwrap();
-                assert_eq!(reply["ok"], json!(true), "{line}");
+                crate::wire_json::from_str(&line).unwrap()
+            };
+            let result = |reply: &Value| -> Value {
+                assert_eq!(reply["ok"], json!(true), "{reply}");
                 reply["result"].clone()
             };
-            assert_eq!(conversation("{}")["count"], 2);
-            assert_eq!(conversation(r#"{"before":Infinity}"#)["count"], 2);
-            assert_eq!(conversation(r#"{"before":1e309}"#)["count"], 2);
+            assert_eq!(result(&call("{}"))["count"], 2);
+            assert_eq!(result(&call(r#"{"before":Infinity}"#))["count"], 2);
+            assert_eq!(result(&call(r#"{"before":1e309}"#))["count"], 2);
             assert_eq!(
-                conversation(r#"{"before":NaN}"#),
+                result(&call(r#"{"before":NaN}"#)),
                 json!({
                     "mailbox": crate::flock::mailbox::OWNER_MAILBOX,
                     "messages": [],
@@ -9148,9 +9151,25 @@ fn owner_conversation_before_cursor_matches_python_over_real_socket() {
                     "waiting": [],
                 })
             );
-            assert_eq!(conversation(r#"{"before":-Infinity}"#)["count"], 0);
-            assert_eq!(conversation(r#"{"before":"NaN"}"#)["count"], 0);
-            assert_eq!(conversation(r#"{"before":0}"#)["count"], 0);
+            assert_eq!(result(&call(r#"{"before":-Infinity}"#))["count"], 0);
+            assert_eq!(result(&call(r#"{"before":"NaN"}"#))["count"], 0);
+            assert_eq!(result(&call(r#"{"before":0}"#))["count"], 0);
+            // Python float(int) overflows past the float range; dispatch answers the
+            // OverflowError as "internal error: ..." (dunk_server.handle_line). A 309-digit
+            // integer is still finite and keeps every row.
+            let huge = format!("1{}", "0".repeat(400));
+            let overflow = json!({
+                "id": 1,
+                "ok": false,
+                "error": "internal error: int too large to convert to float",
+            });
+            assert_eq!(call(&format!(r#"{{"before":{huge}}}"#)), overflow);
+            assert_eq!(call(&format!(r#"{{"before":-{huge}}}"#)), overflow);
+            let finite = format!("1{}", "0".repeat(308));
+            assert_eq!(
+                result(&call(&format!(r#"{{"before":{finite}}}"#)))["count"],
+                2
+            );
         });
         let (mut socket, _) = listener.accept().unwrap();
         socket

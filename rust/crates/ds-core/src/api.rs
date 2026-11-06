@@ -1980,11 +1980,24 @@ pub fn h_owner_conversation(context: &HandlerContext<'_>, args: Args) -> Result<
     };
     let before = match args.get("before") {
         None | Some(Value::Null) => None,
-        // `as_f64` refuses nonfinite numbers, so NaN and Infinity tokens are re-read from
-        // the raw token: Python's float(before) keeps them and the store binds them.
-        Some(Value::Number(number)) => number
-            .as_f64()
-            .or_else(|| number.to_string().parse::<f64>().ok()),
+        // `as_f64` refuses nonfinite and overflowing numbers. An integer token past the float
+        // range is refused like Python's float(int): OverflowError, which the daemon answers as
+        // an internal error. NaN, Infinity and float tokens such as 1e309 keep their value.
+        Some(Value::Number(number)) => match number.as_f64() {
+            Some(value) => Some(value),
+            None => {
+                let token = number.to_string();
+                let digits = token.strip_prefix('-').unwrap_or(token.as_str());
+                if !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()) {
+                    return Err(DunkError::Refused(
+                        "internal error: int too large to convert to float".into(),
+                    ));
+                }
+                Some(token.parse::<f64>().map_err(|_| {
+                    DunkError::Refused(format!("could not convert number to float: {token}"))
+                })?)
+            }
+        },
         Some(Value::Bool(value)) => Some(if *value { 1.0 } else { 0.0 }),
         Some(Value::String(text)) => Some(text.trim().parse::<f64>().map_err(|_| {
             DunkError::Refused(format!(
