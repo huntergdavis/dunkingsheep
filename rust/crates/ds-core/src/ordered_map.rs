@@ -67,6 +67,11 @@ impl<V> OrderedMap<V> {
         self.entries.remove(key).map(|(_, value)| value)
     }
 
+    /// Every value, in insertion order.
+    pub(crate) fn values(&self) -> impl Iterator<Item = &V> {
+        self.iter().map(|(_, value)| value)
+    }
+
     /// The entry for `key`, so a caller can insert a default when the key is absent.
     pub(crate) fn entry(&mut self, key: String) -> Entry<'_, V> {
         Entry { map: self, key }
