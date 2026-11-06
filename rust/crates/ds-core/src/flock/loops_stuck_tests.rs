@@ -1060,16 +1060,19 @@ fn the_same_generation_after_a_restart_still_presses_once() {
 }
 
 // DaemonStateFileTests.test_a_declared_config_wins_over_the_saved_one (row 24)
-// DIVERGENCE: Python lets the declared config win over the saved state file; Rust restore
-// overwrites the declared config with the saved one (flock/mod.rs restore_snapshot).
+// Python keeps a declared stuck config (argument or env) on restart and adopts the state file
+// only when nothing was declared (dunk_core `_stuck_config_declared`). restore_snapshot now
+// honours the same flag (flock/mod.rs).
 #[test]
-#[ignore = "t3354 row 24: restore overwrites a declared stuck config with the saved one; owner ruling pending"]
 fn a_declared_config_wins_over_the_saved_one() {
     let dir = tempfile::tempdir().unwrap();
     let saved = in_memory_flock(&dir);
     let payload = saved.snapshot();
     let declared = in_memory_flock(&dir);
-    declared.stuck_config.lock().unwrap().enabled = false;
+    declared.declare_stuck_config(crate::stuck::Config {
+        enabled: false,
+        ..crate::stuck::Config::default()
+    });
     declared.restore_snapshot(&payload);
     assert!(
         !declared.stuck_config.lock().unwrap().enabled,
@@ -1552,5 +1555,55 @@ fn federated_watchdog_presses_once_and_never_queues_the_candidate_text() {
     assert!(
         flock.outbox.lock().unwrap().is_empty(),
         "the watchdog must not queue the candidate text"
+    );
+}
+
+// RestartRecoveryTests.test_a_human_continuation_is_refused_after_a_restart_by_the_real_matcher (row 52)
+// Python's case 52 is the legacy real-matcher refusal, a different path. This test covers the
+// federated native frame: Python's federated step submits the composer once and replays nothing,
+// and the owner ruled that stays (i45030). The test pins that observed behaviour.
+#[test]
+fn a_restarted_federated_composer_is_submitted_once_without_replay() {
+    let dir = tempfile::tempdir().unwrap();
+    let before = in_memory_flock(&dir);
+    let mut probe = federated_probe();
+    before.note_stuck_candidate(&observed_candidate(&probe, "m1", "failed", true, 10.0));
+    let after = persisted_flock(&dir);
+    after.restore_snapshot(&before.snapshot());
+    // The restarted worker runs the Python test's explicit config: one attempt, 120 s threshold.
+    after.declare_stuck_config(crate::stuck::Config {
+        enabled: true,
+        threshold_s: 120.0,
+        max_attempts: 1,
+        cooldown_s: 60.0,
+        observation_interval_s: 5.0,
+    });
+    // After the restart the composer holds our text and a line the person typed below it.
+    // Enter leaves that composer in place (Python: "receipt unverified"), so the attempt budget
+    // alone must stop a second press.
+    let frame = "  >_ OpenAI Codex (v0.165.0)\n\n\x1b[1m\u{203a} pending text\x1b[0m\n  and one more thing I was typing\n\n  GPT-6-Astra high \u{b7} ~/workspace/x\n  ? for shortcuts\n".to_string();
+    *probe.screen.lock().unwrap() = frame.clone();
+    probe.after_enter = frame;
+    assert_eq!(
+        0,
+        federated_recovery_step(&after, &mut probe, 100.0, &|_| {}).unwrap()
+    );
+    assert!(
+        probe.keys.lock().unwrap().is_empty(),
+        "no key before the threshold"
+    );
+    assert_eq!(
+        1,
+        federated_recovery_step(&after, &mut probe, 221.0, &|_| {}).unwrap()
+    );
+    assert_eq!(vec!["Enter".to_string()], *probe.keys.lock().unwrap());
+    assert_eq!(
+        0,
+        federated_recovery_step(&after, &mut probe, 341.0, &|_| {}).unwrap()
+    );
+    assert_eq!(
+        vec!["Enter".to_string()],
+        *probe.keys.lock().unwrap(),
+        "one Enter and no replay: SendEnv has no text method, so a replay would show as a key"
     );
 }
