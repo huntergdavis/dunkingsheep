@@ -4,8 +4,8 @@ use crate::error::DunkError;
 use crate::flock::loops_stuck::StalePanelReporter;
 use crate::flock::panes::PaneInfoEnv;
 use crate::flock::sends::{
-    outbox_worker, pane_generation, Message, OutboxWorkerContext, OutboxWorkerPool,
-    OutboxWorkerRunner, SendPreparationEnv, SnapshotStore,
+    outbox_lock, outbox_worker, pane_generation, Message, OutboxWake, OutboxWorkerContext,
+    OutboxWorkerPool, OutboxWorkerRunner, SendPreparationEnv, SnapshotStore,
 };
 use crate::flock::Flock;
 use crate::server::RequestCtx;
@@ -98,13 +98,32 @@ impl OutboxRuntime {
         for handle in flock.dunks.running_handles() {
             timers.start(handle)?;
         }
-        Ok(Self {
+        let owner = Self {
             flock,
             pool,
             dunk_timers: timers,
             manual_fire,
             dunk_lifecycle: Mutex::new(()),
-        })
+        };
+        owner.start_restored_outbox_workers();
+        Ok(owner)
+    }
+
+    /// A snapshot restore keeps queued rows but starts no worker; only an enqueue used to do
+    /// that. Start one worker per pane that still holds a queued row, once, after the pool and
+    /// its runner exist. The schedule never adds, drops, or reorders rows, and every delivery
+    /// decision stays with the worker's own guards.
+    fn start_restored_outbox_workers(&self) {
+        let panes: Vec<String> = outbox_lock(&self.flock.outbox)
+            .iter()
+            .filter(|(_, queue)| queue.iter().any(|row| row.status == "queued"))
+            .map(|(pane, _)| pane.clone())
+            .collect();
+        for pane in panes {
+            if let Err(error) = OutboxWake::ensure_worker(self.pool.as_ref(), &self.flock, &pane) {
+                eprintln!("restored outbox worker for {pane} did not start: {error}");
+            }
+        }
     }
 
     pub(crate) fn start_dunk(
