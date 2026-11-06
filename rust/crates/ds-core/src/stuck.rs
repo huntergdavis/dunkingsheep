@@ -18,10 +18,10 @@
 //! This module is the state machine only. It performs no I/O and reads no clock: the
 //! caller injects `now`, which is what makes the fake-clock tests exact.
 
-use std::collections::BTreeMap;
-
 use serde_json::{Map, Number, Value};
 use sha2::{Digest, Sha256};
+
+use crate::ordered_map::OrderedMap;
 
 /// The fields one pane's record carries, in the order the Python's schema lists them.
 pub const SCHEMA_FIELDS: [&str; 7] = [
@@ -237,8 +237,8 @@ pub struct Record {
 /// refund the attempt it reserved.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Tracker {
-    pub records: BTreeMap<String, Record>,
-    pub spent: BTreeMap<String, u32>,
+    pub records: OrderedMap<Record>,
+    pub spent: OrderedMap<u32>,
 }
 
 fn optional_string(row: &Map<String, Value>, field: &str) -> Option<Option<String>> {

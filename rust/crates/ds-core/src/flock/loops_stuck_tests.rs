@@ -1010,7 +1010,9 @@ fn the_candidate_survives_a_restart_with_its_enter_and_message_id() {
     );
 }
 
-// RestartRecoveryTests.test_the_restarted_worker_actually_recovers (row 51)
+// Federated analogue, accepted parity and NOT row 51 coverage. The Python row 51 case is strict
+// and runs through the real matcher; its Rust counterpart is sends_tests.rs stuck_gap_tests
+// (ignored until the rehydration PR lands). This test only shows the federated press after restart.
 #[test]
 fn the_restarted_worker_recovers_the_persisted_candidate() {
     let dir = tempfile::tempdir().unwrap();
@@ -1032,7 +1034,9 @@ fn the_restarted_worker_recovers_the_persisted_candidate() {
     assert_eq!(vec!["Enter".to_string()], *probe.keys.lock().unwrap());
 }
 
-// GenerationBindingTests.test_the_same_generation_still_recovers_with_the_real_matcher (row 62)
+// Federated analogue, accepted parity and NOT row 62 coverage. The Python row 62 case is strict
+// and runs through the real matcher; its Rust counterpart is sends_tests.rs stuck_gap_tests
+// (ignored until the rehydration PR lands). This test only shows the federated press after restart.
 #[test]
 fn the_same_generation_after_a_restart_still_presses_once() {
     let dir = tempfile::tempdir().unwrap();
@@ -1089,5 +1093,49 @@ fn a_human_continuation_is_refused_after_a_restart() {
     assert!(
         probe.keys.lock().unwrap().is_empty(),
         "the persisted text must not authorise a modified composer"
+    );
+}
+
+// t3371 (t820 proof D, row 44): test_long_false_sent_composer_stays_observable (oracle 79bc92fa).
+// This covers the box condition only: an 18-line composer this flock sent keeps its full collapsed
+// text in the box read. The Python case also asserts that the status stays `sent`, that one recovery
+// key follows over ticks, and that no consumed outcome is recorded. Those are not covered here.
+//
+// The Python reads the box with `_box_text`, which is `_recovery_box_text`: a composer whose whole
+// region is text this flock sent is read as that region (`_composer_ownership`). The module-level
+// `box_text` returns only the sigil line, in Python and in Rust alike, so this drives
+// `recovery_box_text`, the Rust `_box_text`.
+#[test]
+fn long_false_sent_composer_keeps_its_full_collapsed_text_in_the_box() {
+    let text = (0..18)
+        .map(|i| format!("scheduled line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let frame = format!(
+        "\u{1b}[1m\u{203a}\u{1b}[0m {text}\n  GPT-6-Astra high \u{b7} ~/workspace \u{b7} task\n"
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Flock::new(
+        dir.path().join("launches.json"),
+        dir.path().join("lanes.json"),
+        false,
+    );
+    // What Python's `_do_send` records for this pane: the text that was sent.
+    flock
+        .sent_text_by_pane
+        .lock()
+        .unwrap()
+        .insert("%1".into(), vec![text.clone().into()]);
+    let probe = RecoveryProbe {
+        screen: Mutex::new(frame.clone()),
+        after_enter: frame.clone(),
+        keys: Mutex::default(),
+        generation: String::new(),
+        federated: false,
+    };
+    let shown = flock.recovery_box_text(&probe, "%1", &frame);
+    assert_eq!(
+        Some(crate::terminal::screen::collapse(&text)),
+        shown.map(|read| crate::terminal::screen::collapse(&read))
     );
 }

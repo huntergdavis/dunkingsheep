@@ -476,6 +476,11 @@ fn runtime_control_errors_preserve_order_and_partial_mutation() {
         ),
         (
             "allocation",
+            json!({"action":"offer","task_id":"t9","pool":"code","requires":[]}),
+            vec!["store", "turn", "superuser", "offer", "reset", "wake"],
+        ),
+        (
+            "allocation",
             json!({"action":"status"}),
             vec!["store", "status", "last_result"],
         ),

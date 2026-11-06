@@ -4192,7 +4192,7 @@ fn owned_recovery_evidence_preserves_malformed_binding_as_a_refusal() {
         candidate.native_binding_invalid,
         Some(row["native_binding"].clone())
     );
-    let round_trip = candidate_snapshot(&candidate);
+    let round_trip = candidate_snapshot("%1", &candidate);
     assert_eq!(round_trip["native_binding"], row["native_binding"]);
     assert!(round_trip.get("typed_at").is_none());
 }
@@ -5725,6 +5725,54 @@ mod stuck_gap_tests {
             1,
             env.keys.len(),
             "a same-generation restart still presses once"
+        );
+    }
+
+    // RestartRecoveryTests.test_a_human_continuation_is_refused_after_a_restart_by_the_real_matcher
+    // (row 52), on the strict path (federated input off, as in the Python case). After a restart
+    // the composer holds our text and a line typed below it. Even with our text known as sent,
+    // the strict path must not authorise that composer, so no Enter is sent over several ticks.
+    #[test]
+    fn a_human_continuation_is_refused_after_a_restart_on_the_strict_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state.json");
+        let before = persistent_recovery_flock(dir.path(), &state);
+        let mut env = live_pane(frame(TEXT, &[]));
+        let message = failed_candidate(&env, 1.0);
+        before.note_stuck_candidate(&message);
+        before.save().unwrap();
+        let after = persistent_recovery_flock(dir.path(), &state);
+        after.restore_snapshot(&before.snapshot());
+        {
+            let mut config = after.stuck_config.lock().unwrap();
+            config.threshold_s = 1.0;
+            config.observation_interval_s = 0.1;
+            config.max_attempts = 1;
+        }
+        after
+            .sent_text_by_pane
+            .lock()
+            .unwrap()
+            .insert(PANE.into(), vec![TEXT.into()]);
+        env.screens.insert(
+            PANE.into(),
+            frame(TEXT, &["  and one more thing I was typing"]),
+        );
+        for now in [99.5, 200.0, 300.0] {
+            assert!(!after.unwedge(
+                &mut env,
+                PANE,
+                TEXT,
+                Some(98.0),
+                Some(&message),
+                now,
+                None,
+                true
+            ));
+        }
+        assert!(
+            env.keys.is_empty(),
+            "the persisted text must not authorise a modified composer"
         );
     }
 }

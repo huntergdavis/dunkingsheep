@@ -996,6 +996,31 @@ async fn a_new_revision_reuses_the_review_task_and_it_can_be_allocated_again() {
     );
 }
 
+#[tokio::test]
+async fn a_new_revision_reuses_the_review_task_after_release() {
+    // test_review_new_revision_reuses_task_after_release: the Python case releases the review
+    // between its completion and the corrected revision, so the release step is asserted too.
+    let t = store("revision-release").await;
+    let source = task(&t, "the work").await;
+    worker(&t, "%r", "reviewer", &[]).await;
+    let review = t
+        .allocation_review(&source.id, REV_A, "first", "code", &json!([]), "%leader")
+        .await
+        .unwrap();
+    t.allocation_allocate(&idle(&["%r"])).await.unwrap();
+    t.task_complete(&review.id, Some("%r"), true).await.unwrap();
+    t.release(&review.id, "%r").await.unwrap();
+    let new = t
+        .allocation_review(&source.id, REV_B, "second", "code", &json!([]), "%leader")
+        .await
+        .unwrap();
+    assert_eq!(review.id, new.id);
+    assert_eq!(
+        t.allocation_allocate(&idle(&["%r"])).await.unwrap().len(),
+        1
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn guarded_allocation_retries_lock_and_restores_sqlite_timeout() {
     use crate::flock::{panes::Stores, Flock};
