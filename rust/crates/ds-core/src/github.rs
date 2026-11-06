@@ -1772,4 +1772,4 @@ pub async fn graphql(
 
 #[cfg(test)]
 #[path = "github_tests.rs"]
-mod tests;
+pub(crate) mod tests;

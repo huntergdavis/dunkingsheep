@@ -7,6 +7,7 @@
 mod daemon;
 mod delivery;
 mod dispatcher;
+mod github_provider;
 mod health_state;
 mod inbox;
 mod inbox_api;
@@ -526,6 +527,15 @@ impl PaneInfoEnv for RequestRuntimeAdapter<'_> {
 }
 
 impl crate::api::CommandEnv for RequestRuntimeAdapter<'_> {
+    /// The daemon's one canonical GitHub token cache (t3241, audit P0-3). A detached adapter
+    /// refuses; it never falls back to the unwired default.
+    fn github_tokens(&self) -> Result<&crate::github::Tokens, DunkError> {
+        let services = self
+            .dunk_runtime
+            .ok_or_else(|| refusal("request runtime services are not attached"))?;
+        services.github_tokens()
+    }
+
     fn runtime_control_env(
         &self,
     ) -> Result<&dyn crate::api::runtime_control::RuntimeControlEnv, DunkError> {
