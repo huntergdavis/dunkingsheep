@@ -6,7 +6,13 @@ and answered), and no diff against the Python recording. Any diff is reported ve
 harness; this gate only decides pass or fail.
 """
 
+import argparse
 import collections
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import diff_harness as harness  # noqa: E402
 
 SEND_COMMANDS = (
     "send_text",
@@ -55,3 +61,29 @@ def gate(entries, result, commands):
             f"{cmd}: {status} requested={total} matched={matched} diffs={differing}{detail}"
         )
     return ok, lines
+
+
+def main(argv=None):
+    """Replay the traffic against one socket, print the per-command gate, and return 0 or 1."""
+    parser = argparse.ArgumentParser(
+        description="Replay recorded traffic against a daemon socket and gate each command.")
+    parser.add_argument("--traffic", required=True, help="the sanitized recording (JSONL)")
+    parser.add_argument("--against", required=True, help="the daemon socket to replay against")
+    parser.add_argument("--commands", default=",".join(SEND_COMMANDS),
+                        help="comma separated command names to replay and gate")
+    parser.add_argument("--volatile", default=None,
+                        help="optional volatile-field rules for the harness")
+    args = parser.parse_args(argv)
+    commands = [cmd.strip() for cmd in args.commands.split(",") if cmd.strip()]
+    entries = harness.load_traffic(args.traffic)
+    result = harness.replay(entries, args.against, commands=commands,
+                            volatile=args.volatile, verbose=True)
+    ok, lines = gate(entries, result, commands)
+    print("per-command gate:")
+    for line in lines:
+        print(f"  {line}")
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
