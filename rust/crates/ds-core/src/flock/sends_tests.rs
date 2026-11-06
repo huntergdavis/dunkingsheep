@@ -4239,6 +4239,97 @@ fn a_failed_durable_reservation_never_presses_from_the_outbox() {
     );
 }
 
+// t3355 (t820 proof D) scheduled rows 45 and 46 (oracle 79bc92fa). A schedule that the transport
+// reported as sent is shown with a given sigil style. The frame is the Python FRAME with its
+// composer sigil replaced by the style under test: a dim transcript echo (row 45) or an unstyled
+// sigil (row 46). Neither may be submitted over ticks. The bright composer with the same text is
+// the positive control, and it is submitted while the schedule is current.
+const REPORTED_SENT_TEXT: &str =
+    "Scheduled check d7: read your inbox and finish the assigned work.";
+
+fn reported_sent_schedule_fixture(dir: &std::path::Path, sigil: &str) -> (Flock, Pane) {
+    let flock = persistent_recovery_flock(dir, &dir.join("state.json"));
+    {
+        let mut config = flock.stuck_config.lock().unwrap();
+        config.threshold_s = 120.0;
+        config.observation_interval_s = 20.0;
+        config.max_attempts = 1;
+    }
+    let mut env = Pane::default();
+    env.panes
+        .push(serde_json::json!({"pane_id": "%1", "pane_pid": std::process::id()}));
+    env.statuses.insert("%1".into(), "idle".into());
+    env.screens.insert(
+        "%1".into(),
+        format!(
+            "Previous response.\n\n{} {}\n\n\n  GPT-6-Astra high \u{b7} ~/workspace \u{b7} task\n",
+            sigil, REPORTED_SENT_TEXT
+        ),
+    );
+    let dunks = serde_json::json!({"dunkers": [{
+        "id": "d7",
+        "running": true,
+        "target_pane_id": "%1",
+        "target_agent": "codex",
+        "target_cwd": "/work",
+        "text": REPORTED_SENT_TEXT
+    }]});
+    flock.dunks.load(dunks.as_object().unwrap());
+    flock
+        .sent_text_by_pane
+        .lock()
+        .unwrap()
+        .insert("%1".into(), vec![REPORTED_SENT_TEXT.into()]);
+    let mut message = Message::new("m1", "%1", "CoS", REPORTED_SENT_TEXT, "d7");
+    message.created_at = 0.0;
+    message.status = "sent".into();
+    message.scheduled = true;
+    message.schedule_template = Some(REPORTED_SENT_TEXT.into());
+    message.attempt_generation = pane_generation(&env, "%1");
+    flock.note_stuck_candidate(&message);
+    (flock, env)
+}
+
+#[test]
+fn a_reported_sent_schedule_is_not_submitted_from_a_dim_or_unstyled_echo() {
+    const TICKS: [f64; 3] = [1.0, 121.0, 130.0];
+    let dim_dir = tempfile::tempdir().unwrap();
+    let (dim_flock, mut dim_env) =
+        reported_sent_schedule_fixture(dim_dir.path(), "\u{1b}[1;2m\u{203a}\u{1b}[0m");
+    for &now in &TICKS {
+        crate::flock::loops_stuck::strict_stuck_observer_scan(&dim_flock, &mut dim_env, now)
+            .unwrap();
+    }
+    assert!(
+        dim_env.keys.is_empty(),
+        "a dim transcript echo must not be submitted again"
+    );
+
+    let plain_dir = tempfile::tempdir().unwrap();
+    let (plain_flock, mut plain_env) = reported_sent_schedule_fixture(plain_dir.path(), "\u{203a}");
+    for &now in &TICKS {
+        crate::flock::loops_stuck::strict_stuck_observer_scan(&plain_flock, &mut plain_env, now)
+            .unwrap();
+    }
+    assert!(
+        plain_env.keys.is_empty(),
+        "an unstyled sigil must not authorise submission"
+    );
+
+    // Positive control: the bright composer with the same text is submitted while the schedule is current.
+    let bright_dir = tempfile::tempdir().unwrap();
+    let (bright_flock, mut bright_env) =
+        reported_sent_schedule_fixture(bright_dir.path(), "\u{1b}[1m\u{203a}\u{1b}[0m");
+    for &now in &TICKS {
+        crate::flock::loops_stuck::strict_stuck_observer_scan(&bright_flock, &mut bright_env, now)
+            .unwrap();
+    }
+    assert!(
+        !bright_env.keys.is_empty(),
+        "the bright composer with the same text must be submitted"
+    );
+}
+
 #[test]
 fn unwedge_verifies_a_newly_cleared_composer_after_the_key() {
     let dir = tempfile::tempdir().unwrap();
