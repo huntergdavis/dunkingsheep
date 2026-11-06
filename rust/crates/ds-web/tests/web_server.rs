@@ -412,12 +412,20 @@ fn public_routes_answer_without_auth_and_protected_routes_fail_closed() {
     let anonymous = request(addr, "GET", "/api/channels", &[], None);
     assert_eq!(anonymous.status, 401);
 
-    // Signed in, but the daemon is absent: the route must refuse, never invent channels.
+    // Signed in, but the daemon is absent. Python's /api/channels catches the daemon outage and
+    // still answers 200 with daemon false, no panes, and every channel offline. The Rust route
+    // must do the same: the roster says the daemon is down, and nothing reads as online.
     let cookie = login(addr);
     let cookie_header = format!("vp_session={cookie}");
     let session = [("Cookie", cookie_header.as_str())];
     let channels = request(addr, "GET", "/api/channels", &session, None);
-    assert_eq!(channels.status, 503, "{}", channels.text());
+    assert_eq!(channels.status, 200, "{}", channels.text());
+    let roster = channels.json();
+    assert_eq!(roster["daemon"], false);
+    assert_eq!(roster["viewports"], json!([]));
+    assert_eq!(roster["channels"][0]["id"], "cos");
+    assert_eq!(roster["channels"][0]["online"], false);
+    assert_eq!(roster["channels"][0]["status"], "offline");
 
     assert_eq!(server.shutdown(), Ok(()));
 }
