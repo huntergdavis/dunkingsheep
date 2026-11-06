@@ -598,7 +598,7 @@ fn fake_tmux_with_window(dir: &Path, cols: i64, rows: i64) -> PathBuf {
     let template = dir.join("pane.template");
     fs::write(&state, format!("{cols} {rows}\n")).expect("write state");
     let pane = pane_line("%2", "$2", "@2", "claude", "2202")
-        .replace(&["120", "40"].join(SEP), &["@W@", "@H@"].join(SEP));
+        .replace(&["120", "40"].join(sep()), &["@W@", "@H@"].join(sep()));
     fs::write(&template, format!("{pane}\n")).expect("write template");
     let body = format!(
         "#!/bin/sh\n\
