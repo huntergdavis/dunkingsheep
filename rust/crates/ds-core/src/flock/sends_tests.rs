@@ -5671,4 +5671,58 @@ mod stuck_gap_tests {
         ));
         assert_eq!(1, env.keys.len(), "the restarted worker presses once");
     }
+
+    // GenerationBindingTests.test_the_same_generation_still_recovers_with_the_real_matcher
+    // (row 62), on the strict path: the restored candidate keeps its attempt generation, and
+    // after the bind the real matcher authorises one press.
+    #[test]
+    fn the_same_generation_restart_recovers_through_the_real_matcher() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state.json");
+        let before = persistent_recovery_flock(dir.path(), &state);
+        let mut env = live_pane(frame(TEXT, &[]));
+        let message = failed_candidate(&env, 1.0);
+        before.note_stuck_candidate(&message);
+        before.save().unwrap();
+        let after = persistent_recovery_flock(dir.path(), &state);
+        after.restore_snapshot(&before.snapshot());
+        {
+            let mut config = after.stuck_config.lock().unwrap();
+            config.threshold_s = 1.0;
+            config.observation_interval_s = 0.1;
+            config.max_attempts = 1;
+        }
+        assert_eq!(
+            pane_generation(&env, PANE),
+            after.stuck_candidates.lock().unwrap()[PANE].generation,
+            "the persisted attempt generation survives the restart"
+        );
+        // The first tick after the restart binds the candidate and starts the window.
+        assert!(!after.unwedge(
+            &mut env,
+            PANE,
+            TEXT,
+            Some(99.5),
+            Some(&message),
+            100.0,
+            None,
+            true
+        ));
+        assert!(env.keys.is_empty(), "the bind is only evidence");
+        assert!(after.unwedge(
+            &mut env,
+            PANE,
+            TEXT,
+            Some(98.0),
+            Some(&message),
+            200.0,
+            None,
+            true
+        ));
+        assert_eq!(
+            1,
+            env.keys.len(),
+            "a same-generation restart still presses once"
+        );
+    }
 }
