@@ -611,8 +611,12 @@ impl Flock {
                 entry.eligible && entry.generation.as_deref() == Some(generation.as_str())
             })
             .map(|entry| {
-                std::iter::once(entry.text)
-                    .chain(entry.transcript_texts)
+                // Python appends the transcript texts first, then the candidate's own text, and
+                // keeps the last REMEMBERED_SENDS. The text must come last so the cap keeps it.
+                entry
+                    .transcript_texts
+                    .into_iter()
+                    .chain(std::iter::once(entry.text))
                     .filter(|text| !text.is_empty())
                     .collect::<Vec<String>>()
             })

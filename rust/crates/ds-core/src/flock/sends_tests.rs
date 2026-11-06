@@ -5885,4 +5885,58 @@ mod stuck_gap_tests {
             "an ineligible candidate's text must not be rehydrated"
         );
     }
+
+    // Python appends the transcript texts first, then the candidate's own text, and keeps the
+    // last REMEMBERED_SENDS (4). With four transcript texts the candidate's text must survive
+    // the cap, and it must be the last entry.
+    #[test]
+    fn rehydration_keeps_the_candidate_text_after_four_transcripts() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state.json");
+        let before = persistent_recovery_flock(dir.path(), &state);
+        let mut env = live_pane(frame(TEXT, &[]));
+        let message = failed_candidate(&env, 1.0);
+        before.note_stuck_candidate(&message);
+        {
+            let mut candidates = before.stuck_candidates.lock().unwrap();
+            let entry = candidates.get_mut(PANE).expect("the candidate is recorded");
+            entry.transcript_texts = ["t1", "t2", "t3", "t4"].map(str::to_owned).to_vec();
+        }
+        before.save().unwrap();
+        let after = persistent_recovery_flock(dir.path(), &state);
+        after.restore_snapshot(&before.snapshot());
+        {
+            let mut config = after.stuck_config.lock().unwrap();
+            config.threshold_s = 1.0;
+            config.observation_interval_s = 0.1;
+            config.max_attempts = 1;
+        }
+        // The bind tick: rehydration happens here, before any press decision.
+        assert!(!after.unwedge(
+            &mut env,
+            PANE,
+            TEXT,
+            Some(99.5),
+            Some(&message),
+            100.0,
+            None,
+            true
+        ));
+        let rows: Vec<String> = after
+            .sent_text_by_pane
+            .lock()
+            .unwrap()
+            .get(PANE)
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|row| row.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert_eq!(
+            vec!["t2", "t3", "t4", TEXT],
+            rows,
+            "the last four are the three newest transcripts and the candidate's own text"
+        );
+    }
 }
