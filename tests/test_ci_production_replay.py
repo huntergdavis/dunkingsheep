@@ -21,6 +21,7 @@ SCRIPT = os.path.join(ROOT, "tools", "ci_production_replay.sh")
 WORKFLOW = os.path.join(ROOT, ".github", "workflows", "rust.yml")
 TASK_FOLLOW_FIXTURE = os.path.join(ROOT, "rust", "fixtures", "task_follow_replay.jsonl")
 JOB = "  production-replay-send:"
+RUST_JOB = "  production-replay-send-rust:"
 
 
 def read(path):
@@ -153,6 +154,29 @@ class CiReplayContractTests(unittest.TestCase):
         job = workflow[workflow.index(JOB):]
         checkout = job[job.index("actions/checkout@v4"):job.index("- name: install tmux")]
         self.assertIn("persist-credentials: false", checkout)
+
+    def test_the_script_takes_an_optional_built_binary_for_the_daemon_and_recover(self):
+        script = read(SCRIPT)
+        self.assertIn('bin="${3:-}"', script)
+        self.assertIn('cli=("$bin")', script)
+        self.assertIn('"${cli[@]}" serve', script)
+        self.assertIn('"TMUX_PANE=$TMUX_PANE" "${cli[@]}" \\', script)
+        self.assertIn("'${DS_BIN:-}'", script)
+        self.assertNotIn('"$PY" "$ROOT/dunkingsheep"', script.split("pane_main() {", 1)[1])
+
+    def test_the_rust_job_builds_the_binary_and_replays_against_it_within_its_timeout(self):
+        workflow = read(WORKFLOW)
+        self.assertIn(RUST_JOB, workflow)
+        job = workflow[workflow.index(RUST_JOB):]
+        self.assertIn("cargo build --manifest-path rust/Cargo.toml -p ds-cli --bin dunkingsheep", job)
+        self.assertIn("DS_BIN: ${{ github.workspace }}/rust/target/debug/dunkingsheep", job)
+        self.assertIn("bash tools/ci_production_replay.sh", job)
+        checkout = job[job.index("actions/checkout@v4"):job.index("- name: install tmux")]
+        self.assertIn("persist-credentials: false", checkout)
+        timeout_s = int(re.search(r"timeout-minutes: (\d+)", job).group(1)) * 60
+        self.assertLessEqual(timeout_s, 20 * 60)
+        self.assertIn("for test in test_production_replay test_diff_harness_sandbox "
+                      "test_send_scenario test_ci_production_replay; do", job)
 
 
 if __name__ == "__main__":

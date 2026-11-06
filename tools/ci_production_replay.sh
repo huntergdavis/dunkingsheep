@@ -3,7 +3,7 @@
 #
 #   tools/ci_production_replay.sh                 the job step: builds the throwaway sandbox,
 #                                                 replays from its owner pane, prints the output
-#   tools/ci_production_replay.sh pane DIR NAME   the owner pane's script, run inside pane %2
+#   tools/ci_production_replay.sh pane DIR NAME [BIN]   the owner pane's script, run inside pane %2
 #
 # t1605 slice 4 adds a second replay on the same sandbox daemon, from the same owner pane: the
 # recorded task-follow traffic (task_add seeds a task, then task_follow, task_followers,
@@ -15,6 +15,10 @@
 # an owner pane. The owner pane registers itself with `superuser recover` from its own process
 # tree, then runs the replay from that tree. That is the same identity path as the t1605 sandbox.
 # No token, no secret, no live socket, and nothing outside the directory.
+#
+# DS_BIN (optional) names a built dunkingsheep binary. When it is set, the sandbox daemon and the
+# owner's `superuser recover` run that binary instead of the Python launcher. The replay is the same
+# either way. The Rust job sets DS_BIN; the Python job leaves it unset.
 #
 # The recorded traffic names pane %2, so the owner pane is made %2: two placeholder panes come
 # first, and the job checks it. The recorded mailbox label is "cat". A pane's label comes from
@@ -36,10 +40,17 @@ PIN_TITLE="cat"
 # Runs inside the owner pane. The daemon binds a request to the pane whose root process is an
 # ancestor of the caller, so every process below is a child of this pane's shell.
 pane_main() {
-  local temp="$1" name="$2"
+  local temp="$1" name="$2" bin="${3:-}"
   local sock="$temp/ds.sock" state="$temp/state" home="$temp/home" status="$temp/replay.status"
   local daemon="" code=1 up=""
   local task_follow_code=1
+  # The CLI the sandbox runs: the built binary when DS_BIN names one, else the Python launcher.
+  local launcher="$ROOT/dunkingsheep"
+  local -a cli=("$PY" "$launcher")
+  if [ -n "$bin" ]; then
+    launcher="$bin"
+    cli=("$bin")
+  fi
 
   finish() {
     local rc=$?
@@ -61,11 +72,11 @@ pane_main() {
     "TMUX_TMPDIR=$temp/tmux" "DUNKINGSHEEP_DIR=$state" "DUNKINGSHEEP_SOCKET=$sock"
     "DUNKINGSHEEP_TERMINAL_BACKEND=tmux" "DUNKINGSHEEP_TMUX_SOCKET=$name"
     "DUNKINGSHEEP_TMUX_BIN=$TMUX_BIN" "DUNKINGSHEEP_TMUX_REGISTRY=$state/tmux-panes.json"
-    "DUNKINGSHEEP_TMUX_GUARD_DIR=$temp/no-guard" "DUNKINGSHEEP_CLI=$ROOT/dunkingsheep"
+    "DUNKINGSHEEP_TMUX_GUARD_DIR=$temp/no-guard" "DUNKINGSHEEP_CLI=$launcher"
     "DUNKINGSHEEP_NO_START_DAEMON=1")
 
   "${sandbox[@]}" "$PY" -I -c 'import sys; sys.path.insert(0, sys.argv[1]); import dunk_terminal as t; c, o, e = t.get_backend()._run(["list-panes", "-a", "-F", t.TmuxBackend.PANE_FORMAT]); print("list-panes exit", c, "stdout", repr(o), "stderr", repr(e))' "$ROOT" || true
-  "${sandbox[@]}" "$PY" "$ROOT/dunkingsheep" serve > "$temp/daemon.log" 2>&1 &
+  "${sandbox[@]}" "${cli[@]}" serve > "$temp/daemon.log" 2>&1 &
   daemon=$!
   for _ in $(seq 1 150); do
     if "$PY" -I -c 'import sys
@@ -90,7 +101,7 @@ sys.exit(0 if reply and reply.get("ok") else 1)' "$ROOT/tools" "$sock" 2>/dev/nu
   fi
 
   # The owner pane is the caller, so it registers itself. This is the bootstrap: no owner exists yet.
-  "${sandbox[@]}" "TMUX=${TMUX:-}" "TMUX_PANE=$TMUX_PANE" "$PY" "$ROOT/dunkingsheep" \
+  "${sandbox[@]}" "TMUX=${TMUX:-}" "TMUX_PANE=$TMUX_PANE" "${cli[@]}" \
     superuser recover > "$temp/recover.out" 2>&1
 
   set +e
@@ -124,6 +135,10 @@ sandbox_tmux() {
 }
 
 job_main() {
+  if [ -n "${DS_BIN:-}" ] && [ ! -x "$DS_BIN" ]; then
+    echo "DS_BIN is not an executable file: $DS_BIN" >&2
+    exit 1
+  fi
   TEMP_DIR="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/dsci.XXXXXX")"
   TMUX_NAME="ds-ci-$$"
   mkdir -p "$TEMP_DIR/tmux" "$TEMP_DIR/home" "$TEMP_DIR/state" "$TEMP_DIR/no-guard"
@@ -147,7 +162,7 @@ job_main() {
 
   # The owner pane runs this same script in its pane mode, as its own child process.
   sandbox_tmux send-keys -t "$owner" -l \
-    "bash '$ROOT/tools/ci_production_replay.sh' pane '$TEMP_DIR' '$TMUX_NAME'"
+    "bash '$ROOT/tools/ci_production_replay.sh' pane '$TEMP_DIR' '$TMUX_NAME' '${DS_BIN:-}'"
   sandbox_tmux send-keys -t "$owner" Enter
 
   local code
@@ -183,6 +198,6 @@ job_main() {
 }
 
 if [ "${1:-}" = "pane" ]; then
-  pane_main "${2:?the temp directory}" "${3:?the tmux socket name}"
+  pane_main "${2:?the temp directory}" "${3:?the tmux socket name}" "${4:-}"
 fi
 job_main
