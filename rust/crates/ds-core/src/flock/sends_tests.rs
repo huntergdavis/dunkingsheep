@@ -4248,6 +4248,16 @@ const REPORTED_SENT_TEXT: &str =
     "Scheduled check d7: read your inbox and finish the assigned work.";
 
 fn reported_sent_schedule_fixture(dir: &std::path::Path, sigil: &str) -> (Flock, Pane) {
+    scheduled_candidate_fixture(dir, sigil, "sent", 0.0)
+}
+
+// The scheduled candidate for REPORTED_SENT_TEXT, with a chosen message status and creation time.
+fn scheduled_candidate_fixture(
+    dir: &std::path::Path,
+    sigil: &str,
+    status: &str,
+    created_at: f64,
+) -> (Flock, Pane) {
     let flock = persistent_recovery_flock(dir, &dir.join("state.json"));
     {
         let mut config = flock.stuck_config.lock().unwrap();
@@ -4281,8 +4291,8 @@ fn reported_sent_schedule_fixture(dir: &std::path::Path, sigil: &str) -> (Flock,
         .unwrap()
         .insert("%1".into(), vec![REPORTED_SENT_TEXT.into()]);
     let mut message = Message::new("m1", "%1", "CoS", REPORTED_SENT_TEXT, "d7");
-    message.created_at = 0.0;
-    message.status = "sent".into();
+    message.created_at = created_at;
+    message.status = status.into();
     message.scheduled = true;
     message.schedule_template = Some(REPORTED_SENT_TEXT.into());
     message.attempt_generation = pane_generation(&env, "%1");
@@ -4327,6 +4337,116 @@ fn a_reported_sent_schedule_is_not_submitted_from_a_dim_or_unstyled_echo() {
     assert!(
         !bright_env.keys.is_empty(),
         "the bright composer with the same text must be submitted"
+    );
+}
+
+// t3355 (t820 proof D) scheduled row 30 (oracle 79bc92fa). A failed scheduled send whose plain
+// composer has two blank rows before the footer: no key before two minutes, exactly one key at
+// 120 s, and none afterwards.
+#[test]
+fn an_ambiguous_scheduled_composer_recovers_once_after_two_minutes() {
+    let dir = tempfile::tempdir().unwrap();
+    let (flock, mut env) = scheduled_candidate_fixture(dir.path(), "\u{203a}", "failed", 0.0);
+    for now in [1000.0, 1100.0] {
+        crate::flock::loops_stuck::strict_stuck_observer_scan(&flock, &mut env, now).unwrap();
+    }
+    assert!(env.keys.is_empty(), "no key before two minutes");
+    crate::flock::loops_stuck::strict_stuck_observer_scan(&flock, &mut env, 1120.0).unwrap();
+    assert_eq!(1, env.keys.len(), "exactly one key at two minutes");
+    crate::flock::loops_stuck::strict_stuck_observer_scan(&flock, &mut env, 1300.0).unwrap();
+    assert_eq!(1, env.keys.len(), "no key after the single attempt");
+}
+
+// t3355 (t820 proof D) scheduled row 38 (oracle 79bc92fa). The candidate, its schedule and the spent
+// budget survive a restart through the state file. The restored flock presses nothing before the
+// threshold, and then presses exactly once.
+#[test]
+fn a_restored_scheduled_recovery_keeps_its_budget_and_presses_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state.json");
+    let (flock, mut env) = scheduled_candidate_fixture(dir.path(), "\u{203a}", "failed", 0.0);
+    flock.save().unwrap();
+    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap();
+    drop(flock);
+    let restored = persistent_recovery_flock(dir.path(), &state);
+    {
+        let mut config = restored.stuck_config.lock().unwrap();
+        config.threshold_s = 120.0;
+        config.observation_interval_s = 20.0;
+        config.max_attempts = 1;
+    }
+    restored.restore_snapshot(&saved);
+    crate::flock::loops_stuck::strict_stuck_observer_scan(&restored, &mut env, 1000.0).unwrap();
+    assert!(
+        env.keys.is_empty(),
+        "no key before the threshold after the restart"
+    );
+    crate::flock::loops_stuck::strict_stuck_observer_scan(&restored, &mut env, 1120.0).unwrap();
+    assert_eq!(
+        1,
+        env.keys.len(),
+        "the restored schedule presses once at the threshold"
+    );
+}
+
+// t3355 (t820 proof D) wiring row 16 (oracle 79bc92fa). A stale scheduled reminder, created an hour
+// before the ticks, must never replay, and the schedule keeps running. A current reminder whose
+// template no longer matches the dunk text must not replay either. A current reminder with a
+// matching template presses once, as the positive control.
+#[test]
+fn stale_or_edited_scheduled_reminders_never_replay() {
+    let bright = "\u{1b}[1m\u{203a}\u{1b}[0m";
+    let stale_dir = tempfile::tempdir().unwrap();
+    let (stale, mut stale_env) =
+        scheduled_candidate_fixture(stale_dir.path(), bright, "failed", -3600.0);
+    for now in [1000.0, 1120.0] {
+        crate::flock::loops_stuck::strict_stuck_observer_scan(&stale, &mut stale_env, now).unwrap();
+    }
+    assert!(
+        stale_env.keys.is_empty(),
+        "a stale reminder must not replay"
+    );
+    assert!(
+        stale
+            .dunks
+            .list()
+            .iter()
+            .any(|dunk| dunk.get("running") == Some(&serde_json::json!(true))),
+        "the schedule keeps running"
+    );
+
+    let edited_dir = tempfile::tempdir().unwrap();
+    let (edited, mut edited_env) =
+        scheduled_candidate_fixture(edited_dir.path(), bright, "failed", 1299.0);
+    let changed = serde_json::json!({"dunkers": [{
+        "id": "d7",
+        "running": true,
+        "target_pane_id": "%1",
+        "target_agent": "codex",
+        "target_cwd": "/work",
+        "text": "current owner-priority instruction"
+    }]});
+    edited.dunks.load(changed.as_object().unwrap());
+    for now in [1300.0, 1420.0] {
+        crate::flock::loops_stuck::strict_stuck_observer_scan(&edited, &mut edited_env, now)
+            .unwrap();
+    }
+    assert!(
+        edited_env.keys.is_empty(),
+        "an edited reminder must not replay"
+    );
+
+    let current_dir = tempfile::tempdir().unwrap();
+    let (current, mut current_env) =
+        scheduled_candidate_fixture(current_dir.path(), bright, "failed", 0.0);
+    for now in [1000.0, 1120.0] {
+        crate::flock::loops_stuck::strict_stuck_observer_scan(&current, &mut current_env, now)
+            .unwrap();
+    }
+    assert_eq!(
+        1,
+        current_env.keys.len(),
+        "a current matching reminder presses once"
     );
 }
 
