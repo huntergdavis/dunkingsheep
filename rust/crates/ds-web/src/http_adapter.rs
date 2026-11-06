@@ -845,6 +845,16 @@ pub(crate) mod tests {
         assert_eq!(40, row["rows"]);
     }
 
+    #[test]
+    fn the_tmux_backend_advertises_resize() {
+        // Row 36 (T55 Q1), the positive half: the production tmux backend advertises resize.
+        // The ds-core route gates resize on that advertisement (http.rs), so this is the
+        // capability the live route depends on. The Python's full set is not mirrored here.
+        let terminal = TmuxBackend::with_registry("/no/tmux", "/no/registry.json");
+        let backend = TmuxHttpBackend(std::sync::Mutex::new(terminal));
+        assert!(backend.capabilities().contains("resize"));
+    }
+
     #[tokio::test]
     async fn ephemeral_listener_serves_until_shutdown_without_production_port() {
         let listener = bind_listener("127.0.0.1", 0).await.unwrap();
