@@ -643,7 +643,7 @@ impl Flock {
         );
         observation.generation = Some(generation.clone());
         observation.cancelled = head.as_ref().is_some_and(|m| m.status == "cancelled");
-        let decision = {
+        let (decision, clock_start) = {
             let mut tracker = self
                 .stuck_tracker
                 .lock()
@@ -676,13 +676,27 @@ impl Flock {
             if native.is_some() {
                 config.max_attempts = 1;
             }
-            if !tracker.records.contains_key(pane_id) {
+            // Python's first_observation: this call creates the record. The clock then starts at the
+            // stored first_seen, and the evidence line is printed once, for this first observation.
+            let first_observation = !tracker.records.contains_key(pane_id);
+            if first_observation {
                 if let Some(since) = since.filter(|s| *s != 0.0) {
                     tracker.decide(&observation, &config, since.min(now));
                 }
             }
-            tracker.decide(&observation, &config, now)
+            let decision = tracker.decide(&observation, &config, now);
+            let clock_start = if first_observation {
+                tracker.records.get(pane_id).map(|record| {
+                    crate::stuck::first_sighting_line(pane_id, record, now, config.threshold_s)
+                })
+            } else {
+                None
+            };
+            (decision, clock_start)
         };
+        if let Some(line) = clock_start {
+            self.record_clock_start(line);
+        }
         if !decision.recovers() {
             if decision.action == "terminal" {
                 self.reconcile_stuck(
@@ -773,6 +787,21 @@ impl Flock {
         );
         let _ = self.save();
         outcome == "consumed"
+    }
+
+    /// Prints the first-sighting evidence line and keeps the latest copies in a bounded log. The line
+    /// is built from the stored record only, never from composer text (Python's `_unwedge` log).
+    fn record_clock_start(&self, line: String) {
+        const KEPT: usize = 32;
+        eprintln!("{line}");
+        let mut log = self
+            .stuck_clock_log
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if log.len() == KEPT {
+            log.pop_front();
+        }
+        log.push_back(line);
     }
 
     fn record_stuck_recovery(

@@ -130,6 +130,8 @@ pub struct Flock {
     /// pane_id -> the latest delivery intent used by the stuck observer.
     #[allow(dead_code)] // The stuck-recovery integration caller is owned by a later leaf.
     pub(crate) stuck_candidates: Mutex<OrderedMap<sends::StuckCandidate>>,
+    /// The first-sighting evidence lines, oldest first and bounded (see `record_clock_start`).
+    pub(crate) stuck_clock_log: Mutex<VecDeque<String>>,
     /// Bounded recently decided messages, used by the message-list view.
     #[allow(dead_code)] // The list consumer is owned by a dependent T33 integration slice.
     pub(crate) message_history: Mutex<VecDeque<sends::Message>>,
@@ -200,6 +202,7 @@ impl Flock {
             dunks: dunks::DunkList::new(),
             outbox: Mutex::new(sends::Outbox::default()),
             stuck_candidates: Mutex::new(OrderedMap::new()),
+            stuck_clock_log: Mutex::new(VecDeque::new()),
             message_history: Mutex::new(VecDeque::new()),
             decided: Mutex::new(sends::DecidedMessages::default()),
             stuck_tracker: Mutex::new(crate::stuck::Tracker::default()),

@@ -5272,3 +5272,130 @@ mod t55_rows_16_65 {
         );
     }
 }
+
+// T55 rows 33, 34 and 35 (t3344 proof C): the first-sighting evidence line, once per record, built
+// from the stored record and carrying no composer text. Python oracle: tests/test_dunk_stuck_recovery.py
+// at 79bc92fa, FirstObservationEvidenceTests (lines 752-769).
+mod t3379_first_sighting {
+    use super::*;
+
+    const PANE: &str = "%1";
+    const OUR_TEXT: &str = "Please pick up the stuck body text from the lane queue.";
+
+    /// One stuck pane with one failed candidate, as the Python setUp builds it.
+    fn stuck_flock(dir: &std::path::Path) -> (Flock, Pane, Message) {
+        let flock = persistent_recovery_flock(dir, &dir.join("state.json"));
+        {
+            let mut config = flock.stuck_config.lock().unwrap();
+            config.threshold_s = 600.0;
+            config.observation_interval_s = 0.01;
+            config.max_attempts = 2;
+        }
+        let mut env = Pane::default();
+        env.panes
+            .push(serde_json::json!({"pane_id": PANE, "pane_pid": std::process::id()}));
+        env.statuses.insert(PANE.into(), "idle".into());
+        env.screens.insert(PANE.into(), frame(OUR_TEXT, &[]));
+        flock
+            .sent_text_by_pane
+            .lock()
+            .unwrap()
+            .insert(PANE.into(), vec![OUR_TEXT.into()]);
+        let mut message = Message::new("m1", PANE, "writer", OUR_TEXT, "send_text");
+        message.created_at = 1.0;
+        message.status = "failed".into();
+        message.attempt_generation = pane_generation(&env, PANE);
+        flock.note_stuck_candidate(&message);
+        (flock, env, message)
+    }
+
+    fn evidence_lines(flock: &Flock) -> Vec<String> {
+        flock
+            .stuck_clock_log
+            .lock()
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn the_evidence_line_carries_no_composer_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let (flock, mut env, message) = stuck_flock(dir.path());
+        // The Python observe(): a 30 s-old sighting under a 600 s threshold cannot act.
+        assert!(!flock.unwedge(
+            &mut env,
+            PANE,
+            OUR_TEXT,
+            Some(70.0),
+            Some(&message),
+            100.0,
+            None,
+            false
+        ));
+        let lines = evidence_lines(&flock);
+        assert_eq!(
+            1,
+            lines.len(),
+            "one evidence line for the first sighting: {lines:?}"
+        );
+        assert!(
+            !lines.join("\n").contains(&OUR_TEXT[..40]),
+            "pane content must not be logged: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn the_logged_first_seen_is_the_stored_one_not_the_tick_clock() {
+        let dir = tempfile::tempdir().unwrap();
+        let (flock, mut env, message) = stuck_flock(dir.path());
+        // The sighting is 300 s before this tick, as the Python test sets it.
+        let since = 700.0;
+        assert!(!flock.unwedge(
+            &mut env,
+            PANE,
+            OUR_TEXT,
+            Some(since),
+            Some(&message),
+            1000.0,
+            None,
+            false
+        ));
+        let stored = flock.stuck_tracker.lock().unwrap().records[PANE]
+            .first_seen
+            .expect("the record carries its clock start");
+        assert!(
+            (stored - since).abs() <= 2.0,
+            "the clock starts at the first sighting, not at this tick: {stored}"
+        );
+        let lines = evidence_lines(&flock);
+        let line = lines.last().expect("the first sighting logs one line");
+        assert!(line.contains(&format!("first_seen={stored:.3}")), "{line}");
+        assert!(line.contains("observed=1000.000"), "{line}");
+    }
+
+    #[test]
+    fn repeated_waits_do_not_spam_the_evidence_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let (flock, mut env, message) = stuck_flock(dir.path());
+        for tick in 0..4 {
+            let now = 100.0 + f64::from(tick);
+            assert!(!flock.unwedge(
+                &mut env,
+                PANE,
+                OUR_TEXT,
+                Some(now - 30.0),
+                Some(&message),
+                now,
+                None,
+                false
+            ));
+        }
+        assert_eq!(
+            1,
+            evidence_lines(&flock).len(),
+            "one line per record, not per tick"
+        );
+    }
+}
