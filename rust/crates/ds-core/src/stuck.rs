@@ -1096,4 +1096,32 @@ mod tests {
         assert!(!tracker.decide(&owned, &config, 1239.0).recovers());
         assert!(tracker.decide(&owned, &config, 1240.0).recovers());
     }
+
+    /// t3355 (t820 proof D) wiring row 27: test_dunk_recovery_wiring.py::
+    /// test_native_proof_cannot_downgrade_to_legacy_after_spending (oracle 79bc92fa). Native
+    /// evidence spends the single key at 1120. The rollout then disappears, the frame becomes a
+    /// legacy single-sigil frame, and ticks at 1300, 1420 and 1600 must press nothing. Tracker
+    /// layer: the observation loses its pane generation, but not its message or its text.
+    #[test]
+    fn native_proof_cannot_downgrade_to_legacy_after_spending() {
+        let config = Config {
+            threshold_s: 120.0,
+            max_attempts: 1,
+            cooldown_s: 60.0,
+            observation_interval_s: 20.0,
+            ..Config::default()
+        };
+        let native = observation("wiring text");
+        let mut legacy = native.clone();
+        legacy.generation = None;
+        let mut tracker = Tracker::default();
+        assert_eq!("wait", tracker.decide(&native, &config, 1000.0).action);
+        assert!(tracker.decide(&native, &config, 1120.0).recovers());
+        for now in [1300.0, 1420.0, 1600.0] {
+            assert!(
+                !tracker.decide(&legacy, &config, now).recovers(),
+                "a legacy observation recovered at {now}"
+            );
+        }
+    }
 }
