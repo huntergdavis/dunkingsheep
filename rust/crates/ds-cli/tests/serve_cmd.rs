@@ -244,8 +244,9 @@ fn serve_stops_on_sigterm_and_logs_the_signal() {
 /// `_watch_parent` does with `os._exit(0)`. The socket file stays, as after `os._exit`.
 #[test]
 fn serve_exits_when_the_watched_parent_is_gone() {
+    // Long-lived until the daemon is up, so a slow cold start cannot outlive the parent.
     let mut parent = Command::new("sleep")
-        .arg("1")
+        .arg("600")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -253,7 +254,8 @@ fn serve_exits_when_the_watched_parent_is_gone() {
         .expect("spawn the stand-in parent");
     let parent_pid = parent.id().to_string();
     let mut served = Served::start(&[("DUNKINGSHEEP_DIE_WITH_PARENT", parent_pid.clone())]);
-    parent.wait().expect("the stand-in parent exits");
+    parent.kill().expect("end the stand-in parent");
+    parent.wait().expect("reap the stand-in parent");
 
     let code = served.exit_code(Duration::from_secs(10), "its parent went away");
     assert_eq!(Some(0), code, "stderr: {}", served.stderr());
