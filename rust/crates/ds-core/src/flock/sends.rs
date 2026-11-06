@@ -3149,7 +3149,7 @@ pub(crate) fn candidate_snapshot(pane: &str, candidate: &StuckCandidate) -> Valu
         if row.contains_key(*key) {
             continue;
         }
-        let value = candidate_value(pane, candidate, *key).unwrap_or(Value::Null);
+        let value = candidate_value(pane, candidate, key).unwrap_or(Value::Null);
         if !value.is_null() && value != json!([]) {
             row.insert((*key).to_owned(), value);
         }
@@ -3250,13 +3250,12 @@ pub(crate) fn candidate_from_snapshot(value: &Value) -> Option<StuckCandidate> {
     })
 }
 
-/// One queued outbox row, in the layout Python's `dunk_core._save` writes: the same 13 keys in the
-/// same order. Rust-only state is added after them only when it differs from the restore default in
-/// `message_from_snapshot` (press_enter true, scheduled false, the rest absent). So a row Python wrote
-/// comes back byte for byte, and a Rust row never loses state. Python reads rows by key and ignores
-/// the extra ones.
+/// One queued outbox row, in exactly the layout Python's `dunk_core._save` writes: these 13 keys, in
+/// this order. Python writes no press_enter, attempt_generation, scheduled, schedule_template, detail,
+/// finished_at or typed_at for an outbox row, so this writer writes none of them either. A restart
+/// restores those fields to Python's defaults (the post-cutover bug, t3370).
 pub(crate) fn message_snapshot(message: &Message) -> Value {
-    let mut row = json!({
+    json!({
         "id": message.id,
         "pane_id": message.pane_id,
         "target_label": message.target_label,
@@ -3272,31 +3271,7 @@ pub(crate) fn message_snapshot(message: &Message) -> Value {
             json!([message.hold_signature_kind.as_deref().unwrap_or("box"), text])
         }),
         "created_at": message.created_at,
-    });
-    if let Some(fields) = row.as_object_mut() {
-        if !message.press_enter {
-            fields.insert("press_enter".into(), json!(false));
-        }
-        if message.scheduled {
-            fields.insert("scheduled".into(), json!(true));
-        }
-        if let Some(template) = &message.schedule_template {
-            fields.insert("schedule_template".into(), json!(template));
-        }
-        if let Some(generation) = &message.attempt_generation {
-            fields.insert("attempt_generation".into(), json!(generation));
-        }
-        if let Some(detail) = &message.detail {
-            fields.insert("detail".into(), json!(detail));
-        }
-        if let Some(at) = message.finished_at {
-            fields.insert("finished_at".into(), json!(at));
-        }
-        if let Some(at) = message.typed_at {
-            fields.insert("typed_at".into(), json!(at));
-        }
-    }
-    row
+    })
 }
 
 pub(crate) fn message_from_snapshot(value: &Value) -> Option<Message> {
