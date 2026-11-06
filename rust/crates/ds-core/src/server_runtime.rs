@@ -24,6 +24,7 @@ mod outbox_messages;
 mod outbox_runtime;
 mod owner_push;
 mod owner_views;
+mod pm_env;
 mod poolrad;
 mod project_policy_load;
 mod project_runtime;
@@ -786,6 +787,13 @@ impl crate::api::CommandEnv for RequestRuntimeAdapter<'_> {
 
     fn owner_views(&self) -> Result<&dyn crate::api::OwnerViewEnv, DunkError> {
         Ok(self)
+    }
+
+    fn with_pm_env(
+        &self,
+        operation: &mut dyn FnMut(&dyn crate::pm::PmEnv) -> Result<Value, DunkError>,
+    ) -> Result<Value, DunkError> {
+        pm_env::with_request_pm_env(self, operation)
     }
 }
 
