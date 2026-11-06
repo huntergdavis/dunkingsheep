@@ -1392,6 +1392,17 @@ mod tests {
         let foreign = handle.block_on(services.allocator_tick()).unwrap();
         assert_eq!(foreign["workers"]["w1:p1"], "caller_proc_missing");
         assert_eq!(foreign["allocated"], serde_json::json!([]));
+        // Python's foreign mode with a LIVE caller: pid 1 is alive with its real start time, and
+        // it is outside the pane's process tree (the pane is this test process), so the ancestry
+        // walk refuses it as pane_not_in_ancestry and nothing is allocated.
+        set_ended(
+            serde_json::json!({"pid":1,"start":process_start(1),"name":"codex","pane_id":"w1:p1","source":"agent"}),
+        );
+        services.allocator.seed_cache(serde_json::json!({}));
+        let live_foreign = handle.block_on(services.allocator_tick()).unwrap();
+        assert_eq!(live_foreign["workers"]["w1:p1"], "pane_not_in_ancestry");
+        assert_eq!(live_foreign["allocated"], serde_json::json!([]));
+        assert_eq!(handle.block_on(tasks.get(&task.id)).unwrap().status, "open");
         let pid = i64::from(std::process::id());
         set_ended(
             serde_json::json!({"pid":pid,"start":process_start(pid),"name":"codex","pane_id":"w1:p1","source":"agent"}),
