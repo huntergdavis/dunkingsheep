@@ -1034,7 +1034,9 @@ fn installed_release_serves_status_and_task_list_against_copied_state() {
     let tmux = state.join("tmux-fixture");
     std::fs::write(
         &tmux,
-        format!("#!/bin/sh\nprintf '%%99{sep}$1{sep}@1{sep}/tmp{sep}bash{sep}fixture{sep}1{sep}fixture{sep}fixture{sep}0{sep}0{sep}1{sep}80{sep}24\\n'\n", sep = ds_core::terminal::parse::pane_separator()),
+        // A separate process: it cannot share this test's token, so it reads the separator
+        // from the -F format it is given, as tmux expands it.
+        "#!/bin/sh\nfmt=\"\"; prev=\"\"; for a in \"$@\"; do if [ \"$prev\" = \"-F\" ]; then fmt=\"$a\"; fi; prev=\"$a\"; done\nsep=$(printf '%s' \"$fmt\" | sed -e 's/^#{[a-z_]*}//' -e 's/#{.*$//')\nprintf \"%%99${sep}\\$1${sep}@1${sep}/tmp${sep}bash${sep}fixture${sep}1${sep}fixture${sep}fixture${sep}0${sep}0${sep}1${sep}80${sep}24\\n\"\n",
     )
     .expect("tmux fixture");
     std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o755)).expect("chmod");
