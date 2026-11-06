@@ -45,7 +45,10 @@ fn fixture() -> (TempDir, DeskConfig) {
     let root = TempDir::new().expect("temporary desk root");
     let dir = root.path();
     std::fs::create_dir_all(dir.join("ui/dist/assets")).unwrap();
+    std::fs::create_dir_all(dir.join("ui/dist/docs")).unwrap();
     std::fs::write(dir.join("ui/dist/index.html"), INDEX).unwrap();
+    std::fs::write(dir.join("ui/dist/docs/index.html"), "<h1>docs</h1>").unwrap();
+    std::fs::write(dir.join("ui/dist/404.html"), "<h1>missing page</h1>").unwrap();
     std::fs::write(dir.join("ui/dist/assets/app.js"), "console.log('desk');").unwrap();
     std::fs::create_dir_all(dir.join("config")).unwrap();
     std::fs::create_dir_all(dir.join("home")).unwrap();
@@ -293,9 +296,19 @@ fn the_bundle_and_its_assets_are_served_without_a_session() {
         Some(INDEX.len().to_string().as_str())
     );
 
+    // A missing file serves the bundle's 404.html, as Starlette's HTML mode does.
     let missing = request(server.addr, "GET", "/assets/missing.js", &[], None);
     assert_eq!(missing.status, 404);
-    assert_eq!(missing.json(), json!({"detail": "Not Found"}));
+    assert_eq!(missing.text(), "<h1>missing page</h1>");
+
+    // A directory with an index redirects a URL without a trailing slash, to an absolute URL.
+    let directory = request(server.addr, "GET", "/docs", &[], None);
+    assert_eq!(directory.status, 307);
+    let expected = format!("http://{}/docs/", server.addr);
+    assert_eq!(directory.header("location"), Some(expected.as_str()));
+    let served = request(server.addr, "GET", "/docs/", &[], None);
+    assert_eq!(served.status, 200);
+    assert_eq!(served.text(), "<h1>docs</h1>");
 
     assert_eq!(server.shutdown(), Ok(()));
 }
@@ -382,6 +395,13 @@ fn api_fallbacks_and_traversal_follow_the_static_mount() {
     let wrong_method = request(addr, "POST", "/api/nope", &[], Some("{}"));
     assert_eq!(wrong_method.status, 405);
     assert_eq!(wrong_method.header("allow"), Some("GET, HEAD"));
+    assert_eq!(wrong_method.json(), json!({"detail": "Method Not Allowed"}));
+
+    // Routing sees the decoded path, and `..` inside the bundle normalises as in Starlette.
+    let decoded_route = request(addr, "GET", "/%61pi/health", &[], None);
+    assert_eq!(decoded_route.status, 200, "{}", decoded_route.text());
+    let normalised = request(addr, "GET", "/assets/../assets/app.js", &[], None);
+    assert_eq!(normalised.status, 200);
 
     let encoded = request(addr, "GET", "/assets/%2e%2e/%2e%2e/etc/passwd", &[], None);
     assert_eq!(
@@ -473,7 +493,7 @@ fn the_channel_registry_is_validated_like_the_python_loader() {
     assert!(message(check(
         r#"[{"id":"Bad","name":"x","match":"x","kind":"active"}]"#
     ))
-    .contains("invalid channel id"));
+    .ends_with("invalid channel id 'Bad'"));
     assert!(message(check(
         r#"[{"id":"a","name":"x","match":"x","kind":"busy"}]"#
     ))
@@ -493,9 +513,10 @@ fn the_channel_registry_is_validated_like_the_python_loader() {
     let missing = root.path().join("absent.json");
     let error =
         web_server::load_channel_registry(Some(missing.as_path()), root.path()).unwrap_err();
-    assert!(error
-        .to_string()
-        .contains("VP_CHANNELS_FILE does not exist"));
+    let text = error.to_string();
+    assert!(text.starts_with("VP_CHANNELS_FILE does not exist:"));
+    assert!(text.contains("(cp <checkout>/channels.json "));
+    assert!(text.ends_with("fall back to bridges/channels.example.json."));
 
     // Without an override the owner's file is used, and the checked-in example is the fallback.
     std::fs::remove_file(&registry).unwrap();
@@ -508,6 +529,45 @@ fn the_channel_registry_is_validated_like_the_python_loader() {
     .unwrap();
     let example = web_server::load_channel_registry(None, fallback_root.path()).unwrap();
     assert_eq!(example[0]["id"], "example");
+}
+
+#[test]
+fn fleet_routes_fail_closed_without_a_daemon() {
+    let (_root, mut config) = fixture();
+    // An operations database that cannot be opened: the metrics route must refuse, never zero.
+    let unopenable = config.operations_db.clone();
+    std::fs::create_dir_all(&unopenable).unwrap();
+    config.operations_db = unopenable;
+    let server = Server::start(config);
+    let addr = server.addr;
+
+    // The fleet view is public, as in Python. With no daemon it answers an unavailable roster.
+    let fleet = request(addr, "GET", "/api/fleet", &[], None);
+    assert_eq!(fleet.status, 200, "{}", fleet.text());
+    assert!(fleet.text().contains("unavailable"), "{}", fleet.text());
+
+    // Sending to a pane needs a session, and with no daemon it never reports a delivery.
+    let payload = r#"{"pane":"%9","text":"hi"}"#;
+    let anonymous = request(addr, "POST", "/api/pane-send", &[], Some(payload));
+    assert_eq!(anonymous.status, 401);
+    let cookie = login(addr);
+    let cookie_header = format!("vp_session={cookie}");
+    let session = [("Cookie", cookie_header.as_str())];
+    let send = request(addr, "POST", "/api/pane-send", &session, Some(payload));
+    assert!(matches!(send.status, 502 | 503), "{}", send.text());
+    assert!(send.json()["detail"].is_string());
+
+    // Operations metrics need a session, and refuse when the database cannot be read.
+    let metrics_anonymous = request(addr, "GET", "/api/ops-metrics", &[], None);
+    assert_eq!(metrics_anonymous.status, 401);
+    let metrics = request(addr, "GET", "/api/ops-metrics", &session, None);
+    assert_eq!(metrics.status, 503, "{}", metrics.text());
+    assert!(metrics.json()["detail"]
+        .as_str()
+        .unwrap_or_default()
+        .starts_with("Operations metrics unavailable"));
+
+    assert_eq!(server.shutdown(), Ok(()));
 }
 
 #[test]

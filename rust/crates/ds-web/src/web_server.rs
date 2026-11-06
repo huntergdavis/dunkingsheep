@@ -351,10 +351,12 @@ impl Desk {
             )
             .merge(ops_board::router(board, auth.clone(), scheme))
             .merge(dash::router(dash, auth, scheme))
-            .fallback(move |method: Method, uri: Uri| {
-                let root = ui_dist.clone();
-                async move { serve_static(&root, &method, &uri).await }
-            })
+            .fallback(
+                move |method: Method, uri: Uri, headers: axum::http::HeaderMap| {
+                    let root = ui_dist.clone();
+                    async move { serve_static(&root, &method, &uri, &headers).await }
+                },
+            )
             .layer(middleware::from_fn(retire_the_desk_ui))
     }
 }
@@ -391,10 +393,11 @@ pub fn load_channel_registry(
         Some(path) => {
             if !path.exists() {
                 return Err(DeskError::Config(format!(
-                    "VP_CHANNELS_FILE does not exist: {}. The channel registry is the owner's \
-                     channels.json, which the units point at inside the desk data dir; copy it \
-                     there or unset VP_CHANNELS_FILE to fall back to bridges/channels.example.json.",
-                    path.display()
+                    "VP_CHANNELS_FILE does not exist: {path}. The channel registry is the \
+                     owner's channels.json, which the units point at inside the desk data \
+                     dir; copy it there (cp <checkout>/channels.json {path}) or unset \
+                     VP_CHANNELS_FILE to fall back to bridges/channels.example.json.",
+                    path = path.display()
                 )));
             }
             path.to_path_buf()
@@ -438,18 +441,21 @@ pub fn load_channel_registry(
         let id = map.get("id").and_then(Value::as_str).unwrap_or_default();
         if !valid_channel_id(id) {
             return Err(DeskError::Config(format!(
-                "{shown}: invalid channel id {id:?}"
+                "{shown}: invalid channel id {}",
+                py_repr(id)
             )));
         }
         let kind = map.get("kind").and_then(Value::as_str).unwrap_or_default();
         if !matches!(kind, "active" | "standby" | "monitor") {
             return Err(DeskError::Config(format!(
-                "{shown}: invalid kind for channel {id:?}"
+                "{shown}: invalid kind for channel {}",
+                py_repr(id)
             )));
         }
         if !ids.insert(id.to_owned()) {
             return Err(DeskError::Config(format!(
-                "{shown}: duplicate channel id {id:?}"
+                "{shown}: duplicate channel id {}",
+                py_repr(id)
             )));
         }
         if let Some(dashboard) = map.get("dashboard") {
@@ -474,6 +480,45 @@ fn valid_channel_id(id: &str) -> bool {
     let mut characters = id.chars();
     matches!(characters.next(), Some(first) if first.is_ascii_lowercase())
         && characters.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+}
+
+/// Python's `repr()` of a `str`, which the channel loader's messages use to quote ids. The quote is
+/// `'` unless the text holds a `'` and no `"`. Backslashes, the quote, and control or non-printable
+/// characters are escaped the way CPython escapes them.
+fn py_repr(text: &str) -> String {
+    let quote = if text.contains('\'') && !text.contains('"') {
+        '"'
+    } else {
+        '\''
+    };
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push(quote);
+    for character in text.chars() {
+        let code = u32::from(character);
+        match character {
+            '\\' => out.push_str("\\\\"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            c if c == quote => {
+                out.push('\\');
+                out.push(c);
+            }
+            _ if code < 0x20 || code == 0x7f => out.push_str(&format!("\\x{code:02x}")),
+            _ if !character.is_ascii() && (character.is_control() || character.is_whitespace()) => {
+                if code <= 0xff {
+                    out.push_str(&format!("\\x{code:02x}"));
+                } else if code <= 0xffff {
+                    out.push_str(&format!("\\u{code:04x}"));
+                } else {
+                    out.push_str(&format!("\\U{code:08x}"));
+                }
+            }
+            _ => out.push(character),
+        }
+    }
+    out.push(quote);
+    out
 }
 
 fn daemon_client(
@@ -554,84 +599,227 @@ fn legacy_view(path: &str) -> &'static str {
     }
 }
 
-/// Python `retire_the_desk_ui`: runs before routing. Paths the desk keeps pass through, and every
-/// other path gets a 307 to the dashboard shell. The query string is dropped.
-async fn retire_the_desk_ui(request: Request, next: Next) -> Response {
+/// Python `retire_the_desk_ui`: runs before routing. The path is decoded first, as uvicorn decodes
+/// it before Starlette routes, so `/%61pi/health` reaches `/api/health`. Paths the desk keeps pass
+/// through, and every other path gets a 307 to the dashboard shell. The query string is dropped.
+async fn retire_the_desk_ui(mut request: Request, next: Next) -> Response {
     let path = percent_decode(request.uri().path());
+    if let Some(routed) = routed_uri(request.uri(), &path) {
+        *request.uri_mut() = routed;
+    }
     if path == "/" || desk_keeps(&path) {
         return next.run(request).await;
     }
     Redirect::temporary(&format!("/dash/{}", legacy_view(&path))).into_response()
 }
 
-/// Starlette's `StaticFiles(html=True)` at `/`: GET and HEAD only, directories serve their index,
-/// `..` is refused, and a missing file is `404 {"detail": "Not Found"}`.
-async fn serve_static(root: &Path, method: &Method, uri: &Uri) -> Response {
-    if method != Method::GET && method != Method::HEAD {
-        return (
-            StatusCode::METHOD_NOT_ALLOWED,
-            [(header::ALLOW, HeaderValue::from_static("GET, HEAD"))],
-            "Method Not Allowed",
-        )
-            .into_response();
-    }
-    let Some(target) = static_target(root, &percent_decode(uri.path())) else {
-        return not_found();
-    };
-    let head = method == Method::HEAD;
-    let served = tokio::task::spawn_blocking(move || read_static(&target, head)).await;
-    match served {
-        Ok(Some((bytes, length, media))) => {
-            let mut response = Response::new(bytes.into());
-            response
-                .headers_mut()
-                .insert(header::CONTENT_TYPE, HeaderValue::from_static(media));
-            response
-                .headers_mut()
-                .insert(header::CONTENT_LENGTH, HeaderValue::from(length));
-            response
+/// The request URI with its path re-encoded from the decoded path, so the router matches the same
+/// text Python's router sees. The query string is kept as sent.
+fn routed_uri(uri: &Uri, decoded: &str) -> Option<Uri> {
+    let query = uri
+        .query()
+        .map(|query| format!("?{query}"))
+        .unwrap_or_default();
+    format!("{}{}", encode_path(decoded), query)
+        .parse::<Uri>()
+        .ok()
+}
+
+/// Percent-encodes everything except the characters that need no escape in a path. `/` is kept,
+/// so the segments of the decoded path stay the segments the router sees.
+fn encode_path(decoded: &str) -> String {
+    let mut out = String::with_capacity(decoded.len());
+    for byte in decoded.bytes() {
+        if byte.is_ascii_alphanumeric() || b"-._~/!$&'()*+,;=:@".contains(&byte) {
+            out.push(char::from(byte));
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
         }
-        _ => not_found(),
+    }
+    out
+}
+
+/// Starlette's `StaticFiles(html=True)` at `/`, as the app mounts it. GET and HEAD only. Any other
+/// method gets Starlette's 405 with `Allow: GET, HEAD`, rendered as FastAPI renders an
+/// HTTPException. A directory serves its `index.html`, and a directory URL without a trailing
+/// slash redirects to one. `..` segments normalise first, and a path that climbs above the bundle
+/// is a 404. A missing file serves the bundle's `404.html` when there is one.
+async fn serve_static(
+    root: &Path,
+    method: &Method,
+    uri: &Uri,
+    headers: &axum::http::HeaderMap,
+) -> Response {
+    if method != Method::GET && method != Method::HEAD {
+        return method_not_allowed();
+    }
+    let decoded = percent_decode(uri.path());
+    let root_owned = root.to_path_buf();
+    let head = method == Method::HEAD;
+    let lookup_path = decoded.clone();
+    let looked = tokio::task::spawn_blocking(move || lookup(&root_owned, &lookup_path, head)).await;
+    match looked {
+        Ok(Lookup::File(file)) => file_response(file, StatusCode::OK),
+        Ok(Lookup::DirectoryWithoutSlash) => {
+            let location = absolute_location(headers, &decoded, uri.query());
+            Redirect::temporary(&location).into_response()
+        }
+        Ok(Lookup::NotFoundPage(Some(page))) => file_response(page, StatusCode::NOT_FOUND),
+        Ok(Lookup::NotFoundPage(None)) => not_found(),
+        Ok(Lookup::Denied) => unauthorized(),
+        Err(_) => not_found(),
     }
 }
 
-/// Resolves a decoded request path under `root`. Empty and `.` segments are ignored, and any
-/// `..` or backslash is refused.
-fn static_target(root: &Path, decoded: &str) -> Option<PathBuf> {
+/// What a static lookup resolved to, before any HTTP shape is applied.
+enum Lookup {
+    File(StaticFile),
+    DirectoryWithoutSlash,
+    NotFoundPage(Option<StaticFile>),
+    Denied,
+}
+
+/// A file read for the response: its body (empty for HEAD), its length, and its media type.
+struct StaticFile {
+    body: Vec<u8>,
+    length: u64,
+    media: &'static str,
+}
+
+/// Starlette's `lookup_path` for one request path under `root`, on the blocking pool.
+fn lookup(root: &Path, decoded: &str, head: bool) -> Lookup {
+    let route = decoded.trim_start_matches('/');
+    if route.contains('\0') {
+        return Lookup::NotFoundPage(None);
+    }
+    let Some(segments) = normalized_segments(route) else {
+        return not_found_page(root, head);
+    };
     let mut target = root.to_path_buf();
-    for segment in decoded.split('/') {
+    for segment in &segments {
+        target.push(segment);
+    }
+    if !within(root, &target) {
+        return not_found_page(root, head);
+    }
+    let metadata = match fs::metadata(&target) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            return Lookup::Denied;
+        }
+        Err(_) => return not_found_page(root, head),
+    };
+    if metadata.is_file() {
+        return read_static_file(&target, head);
+    }
+    if metadata.is_dir() {
+        let index = target.join("index.html");
+        if fs::metadata(&index).is_ok_and(|found| found.is_file()) {
+            if !decoded.ends_with('/') {
+                return Lookup::DirectoryWithoutSlash;
+            }
+            return read_static_file(&index, head);
+        }
+    }
+    not_found_page(root, head)
+}
+
+fn read_static_file(path: &Path, head: bool) -> Lookup {
+    match read_file(path, head) {
+        Ok(file) => Lookup::File(file),
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => Lookup::Denied,
+        Err(_) => Lookup::NotFoundPage(None),
+    }
+}
+
+/// The bundle's `404.html`, when it exists, as Starlette's HTML mode serves it with a 404.
+fn not_found_page(root: &Path, head: bool) -> Lookup {
+    let page = root.join("404.html");
+    if !fs::metadata(&page).is_ok_and(|found| found.is_file()) {
+        return Lookup::NotFoundPage(None);
+    }
+    Lookup::NotFoundPage(read_file(&page, head).ok())
+}
+
+fn read_file(path: &Path, head: bool) -> std::io::Result<StaticFile> {
+    let length = fs::metadata(path)?.len();
+    let body = if head { Vec::new() } else { fs::read(path)? };
+    Ok(StaticFile {
+        body,
+        length,
+        media: media_type(path),
+    })
+}
+
+fn file_response(file: StaticFile, status: StatusCode) -> Response {
+    let mut response = Response::new(file.body.into());
+    *response.status_mut() = status;
+    let headers = response.headers_mut();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(file.media));
+    headers.insert(header::CONTENT_LENGTH, HeaderValue::from(file.length));
+    response
+}
+
+/// Starlette's `os.path.normpath` over the route's `/` segments. `None` when `..` climbs above the
+/// bundle, which Starlette answers with a 404.
+fn normalized_segments(route: &str) -> Option<Vec<&str>> {
+    let mut stack: Vec<&str> = Vec::new();
+    for segment in route.split('/') {
         match segment {
             "" | "." => {}
-            ".." => return None,
-            other if other.contains(['\\', '\0']) => return None,
-            other => target.push(other),
+            ".." => {
+                stack.pop()?;
+            }
+            other => stack.push(other),
         }
     }
-    Some(target)
+    Some(stack)
 }
 
-/// Reads a static file (blocking, so it runs on the blocking pool). A directory serves its
-/// `index.html`. Returns the body, its length and its media type.
-fn read_static(target: &Path, head: bool) -> Option<(Vec<u8>, u64, &'static str)> {
-    let metadata = fs::metadata(target).ok()?;
-    let (file, metadata) = if metadata.is_dir() {
-        let index = target.join("index.html");
-        let metadata = fs::metadata(&index).ok()?;
-        if !metadata.is_file() {
-            return None;
-        }
-        (index, metadata)
-    } else if metadata.is_file() {
-        (target.to_path_buf(), metadata)
-    } else {
-        return None;
-    };
-    let body = if head {
-        Vec::new()
-    } else {
-        fs::read(&file).ok()?
-    };
-    Some((body, metadata.len(), media_type(&file)))
+/// Starlette's containment check: a target whose real path leaves the bundle is not served. A
+/// target that does not exist is contained, because normalisation already removed any climb.
+fn within(root: &Path, target: &Path) -> bool {
+    match (fs::canonicalize(root), fs::canonicalize(target)) {
+        (Ok(real_root), Ok(real_target)) => real_target.starts_with(real_root),
+        _ => true,
+    }
+}
+
+/// The absolute URL Starlette's directory redirect uses: `scheme://host` from the request, the
+/// decoded path with a trailing slash, and the query string as sent.
+fn absolute_location(headers: &axum::http::HeaderMap, path: &str, query: Option<&str>) -> String {
+    let host = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("localhost");
+    let mut location = format!("http://{host}{path}/");
+    if let Some(query) = query {
+        location.push('?');
+        location.push_str(query);
+    }
+    location
+}
+
+/// Starlette's `StaticFiles` 405 as FastAPI renders it: a JSON detail and the `Allow` header that
+/// Starlette sets for the method check.
+fn method_not_allowed() -> Response {
+    let mut response = (
+        StatusCode::METHOD_NOT_ALLOWED,
+        Json(json!({"detail": "Method Not Allowed"})),
+    )
+        .into_response();
+    response
+        .headers_mut()
+        .insert(header::ALLOW, HeaderValue::from_static("GET, HEAD"));
+    response
+}
+
+fn unauthorized() -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(json!({"detail": "Unauthorized"})),
+    )
+        .into_response()
 }
 
 fn media_type(path: &Path) -> &'static str {
