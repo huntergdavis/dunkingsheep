@@ -5148,10 +5148,14 @@ fn scheduled_candidate_fixture(
 #[test]
 fn stale_or_edited_scheduled_reminders_never_replay() {
     let bright = "\u{1b}[1m\u{203a}\u{1b}[0m";
+    // The press-time currency gate reads the real clock (clock::now_s). Each reminder is therefore
+    // created at a real time, and the scans run on a timeline offset from it, so the observer sees
+    // the same 1000 s and 1120 s ages the original scans saw.
+    let base = crate::clock::now_s();
     let stale_dir = tempfile::tempdir().unwrap();
     let (stale, mut stale_env) =
-        scheduled_candidate_fixture(stale_dir.path(), bright, "failed", -3600.0);
-    for now in [1000.0, 1120.0] {
+        scheduled_candidate_fixture(stale_dir.path(), bright, "failed", base - 3600.0);
+    for now in [base + 1000.0, base + 1120.0] {
         crate::flock::loops_stuck::strict_stuck_observer_scan(&stale, &mut stale_env, now).unwrap();
     }
     assert!(
@@ -5169,7 +5173,7 @@ fn stale_or_edited_scheduled_reminders_never_replay() {
 
     let edited_dir = tempfile::tempdir().unwrap();
     let (edited, mut edited_env) =
-        scheduled_candidate_fixture(edited_dir.path(), bright, "failed", 1299.0);
+        scheduled_candidate_fixture(edited_dir.path(), bright, "failed", base);
     let changed = serde_json::json!({"dunkers": [{
         "id": "d7",
         "running": true,
@@ -5179,7 +5183,7 @@ fn stale_or_edited_scheduled_reminders_never_replay() {
         "text": "current owner-priority instruction"
     }]});
     edited.dunks.load(changed.as_object().unwrap());
-    for now in [1300.0, 1420.0] {
+    for now in [base + 1300.0, base + 1420.0] {
         crate::flock::loops_stuck::strict_stuck_observer_scan(&edited, &mut edited_env, now)
             .unwrap();
     }
@@ -5190,8 +5194,8 @@ fn stale_or_edited_scheduled_reminders_never_replay() {
 
     let current_dir = tempfile::tempdir().unwrap();
     let (current, mut current_env) =
-        scheduled_candidate_fixture(current_dir.path(), bright, "failed", 0.0);
-    for now in [1000.0, 1120.0] {
+        scheduled_candidate_fixture(current_dir.path(), bright, "failed", base);
+    for now in [base + 1000.0, base + 1120.0] {
         crate::flock::loops_stuck::strict_stuck_observer_scan(&current, &mut current_env, now)
             .unwrap();
     }
