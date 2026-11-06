@@ -359,26 +359,18 @@ fn daemon_log_carries_the_python_lifecycle_lines() {
         std::process::id()
     );
     let lines: Vec<&str> = text.lines().collect();
+    // Every daemon of this test process reaches every configured sink (see `DaemonLog`), so
+    // only this daemon's own listening line (its socket path is unique) anchors the order.
+    let listening_at = lines
+        .iter()
+        .position(|line| has_python_timestamp(line) && line.ends_with(&listening))
+        .unwrap_or_else(|| panic!("the bind line is logged: {text}"));
     assert!(
-        lines
-            .iter()
-            .any(|line| has_python_timestamp(line) && line.ends_with(&listening)),
-        "{text}"
-    );
-    assert!(
-        lines.iter().any(|line| {
+        lines[listening_at + 1..].iter().any(|line| {
             has_python_timestamp(line)
                 && line.ends_with(" INFO dunkingsheep.server: daemon stopped")
         }),
-        "{text}"
-    );
-    let listening_at = lines.iter().position(|line| line.ends_with(&listening));
-    let stopped_at = lines
-        .iter()
-        .position(|line| line.ends_with(" INFO dunkingsheep.server: daemon stopped"));
-    assert!(
-        listening_at < stopped_at,
-        "bind is logged before stop: {text}"
+        "stop is logged after bind: {text}"
     );
 }
 
