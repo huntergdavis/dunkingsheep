@@ -12,10 +12,10 @@
 # No token, no secret, no live socket, and nothing outside the directory.
 #
 # The recorded traffic names pane %2, so the owner pane is made %2: two placeholder panes come
-# first, and the job checks it. The owner pane title is pinned to "cell" because the recorded
-# mailbox label is host-derived: tmux defaults a pane title to the host name, and the recording
-# ran on a machine named cell. This pin is temporary. Remove it once the fixture is re-recorded
-# with an explicit owner pane title (the t1605 follow-up).
+# first, and the job checks it. The recorded mailbox label is "cat". A pane's label comes from
+# its title, or from its window name when the title is empty, so the owner pane title is pinned
+# to "cat" to match the recording. The pin is temporary: remove it once the fixture is
+# re-recorded with an explicit owner pane title (the t1605 follow-up, after cutover).
 
 set -euo pipefail
 
@@ -24,8 +24,8 @@ COMMANDS="send_text,send_keys,flush_box,clear_box,delivery,delivery_capability"
 PY=/usr/bin/python3
 TMUX_BIN=/usr/bin/tmux
 OWNER_PANE="%2"
-# Host-derived label: the recording's mailbox name is this title. See the header.
-PIN_TITLE="cell"
+# The recorded mailbox label. See the header.
+PIN_TITLE="cat"
 
 # Runs inside the owner pane. The daemon binds a request to the pane whose root process is an
 # ancestor of the caller, so every process below is a child of this pane's shell.
@@ -114,7 +114,7 @@ job_main() {
   sandbox_tmux new-session -d -s w0 -x 200 -y 50 -c "$TEMP_DIR" 'exec sleep 3600'
   sandbox_tmux new-window -d -t w0 -c "$TEMP_DIR" 'exec sleep 3600'
   local owner
-  owner="$(sandbox_tmux new-window -t w0 -n owner -P -F '#{pane_id}' -c "$ROOT" \
+  owner="$(sandbox_tmux new-window -t w0 -P -F '#{pane_id}' -c "$ROOT" \
     'bash --noprofile --norc -i')"
   if [ "$owner" != "$OWNER_PANE" ]; then
     echo "the owner pane is $owner, expected $OWNER_PANE: the recording names $OWNER_PANE" >&2

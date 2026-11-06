@@ -41,12 +41,12 @@ class CiReplayContractTests(unittest.TestCase):
         self.assertIn('"${TMUX_PANE:-}" != "$OWNER_PANE"', script)
         self.assertIn('[ "$owner" != "$OWNER_PANE" ]', script)
 
-    def test_the_owner_pane_title_is_pinned_to_cell_with_the_reason_written_down(self):
+    def test_the_owner_pane_title_is_pinned_to_cat_with_the_reason_written_down(self):
         script = read(SCRIPT)
-        self.assertIn('PIN_TITLE="cell"', script)
+        self.assertIn('PIN_TITLE="cat"', script)
         self.assertIn('select-pane -t "$owner" -T "$PIN_TITLE"', script)
-        self.assertIn("host-derived", script)
-        self.assertIn("This pin is temporary", script)
+        self.assertIn("The pin is", script)
+        self.assertIn("temporary", script)
 
     def test_the_sandbox_gets_a_cleared_environment_and_its_own_state(self):
         script = read(SCRIPT)
