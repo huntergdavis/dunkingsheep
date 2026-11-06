@@ -83,5 +83,17 @@ class CiReplayContractTests(unittest.TestCase):
         self.assertIn("did not finish in %d s" % ticks, script)
 
 
+    def test_the_owner_window_is_named_bash_and_is_not_renamed(self):
+        script = read(SCRIPT)
+        self.assertIn("new-window -t w0 -n bash -P", script)
+        self.assertIn("set-option -g automatic-rename off", script)
+
+    def test_the_replay_checkout_does_not_keep_the_workflow_token(self):
+        workflow = read(WORKFLOW)
+        job = workflow[workflow.index(JOB):]
+        checkout = job[job.index("actions/checkout@v4"):job.index("- name: install tmux")]
+        self.assertIn("persist-credentials: false", checkout)
+
+
 if __name__ == "__main__":
     unittest.main()

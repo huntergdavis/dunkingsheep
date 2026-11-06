@@ -112,9 +112,12 @@ job_main() {
 
   # %0 and %1 are placeholders, so the owner pane is %2, the pane the recording names.
   sandbox_tmux new-session -d -s w0 -x 200 -y 50 -c "$TEMP_DIR" 'exec sleep 3600'
+  # The owner window keeps the name bash, as recorded: no automatic renaming, so tmux cannot rename
+  # it to whatever command is running later.
+  sandbox_tmux set-option -g automatic-rename off
   sandbox_tmux new-window -d -t w0 -c "$TEMP_DIR" 'exec sleep 3600'
   local owner
-  owner="$(sandbox_tmux new-window -t w0 -P -F '#{pane_id}' -c "$ROOT" \
+  owner="$(sandbox_tmux new-window -t w0 -n bash -P -F '#{pane_id}' -c "$ROOT" \
     'bash --noprofile --norc -i')"
   if [ "$owner" != "$OWNER_PANE" ]; then
     echo "the owner pane is $owner, expected $OWNER_PANE: the recording names $OWNER_PANE" >&2
