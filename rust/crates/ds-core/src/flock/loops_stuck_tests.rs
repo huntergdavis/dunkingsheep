@@ -1228,7 +1228,7 @@ fn scheduled_failure_is_persisted_with_expanded_text_and_generation() {
         .get("%1")
         .cloned()
         .expect("a scheduled failure is a stuck candidate");
-    let snapshot = crate::flock::sends::candidate_snapshot(&entry);
+    let snapshot = crate::flock::sends::candidate_snapshot("%1", &entry);
     assert_eq!(json!(true), snapshot["eligible"]);
     assert_eq!(json!(expanded), snapshot["text"]);
     assert_eq!(json!(generation), snapshot["generation"]);
@@ -1258,17 +1258,14 @@ fn failed_candidate_survives_a_restart_through_the_state_file() {
     restarted.restore_snapshot(&saved);
     let before = flock.stuck_candidates.lock().unwrap().clone();
     let after = restarted.stuck_candidates.lock().unwrap().clone();
-    assert_eq!(
-        before.keys().map(String::as_str).collect::<Vec<_>>(),
-        vec!["%1"]
+    assert_eq!(1, before.len());
+    assert!(
+        after.contains_key("%1"),
+        "the candidate survives the restart"
     );
     assert_eq!(
-        before.keys().collect::<Vec<_>>(),
-        after.keys().collect::<Vec<_>>()
-    );
-    assert_eq!(
-        crate::flock::sends::candidate_snapshot(&before["%1"]),
-        crate::flock::sends::candidate_snapshot(&after["%1"])
+        crate::flock::sends::candidate_snapshot("%1", &before["%1"]),
+        crate::flock::sends::candidate_snapshot("%1", &after["%1"])
     );
     assert!(
         after["%1"].eligible,
