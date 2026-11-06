@@ -67,6 +67,7 @@ require_plain_path --bin-dir "$bin_dir"
 require_plain_path --unit-dir "$unit_dir"
 [ -f "$binary" ] && [ -x "$binary" ] || die "--binary is not an executable file: $binary"
 [ -f "$poll" ] || die "--poll is not a file: $poll"
+check_scan_flags "$standard_scan"
 
 release_dir="$prefix/releases/$release_id"
 reuse=0
@@ -86,6 +87,7 @@ guard_against_drift "$rollback_dir" "$dropin" "$bin_dir"
 
 # systemd merges drop-ins from every unit load path and applies them in name order, and the last
 # ExecStart wins. Refuse when another drop-in would override the release.
+refuse_symlinks "$dropin" "$bin_dir"
 roots=$(scan_roots "$unit_dir" "$standard_scan" "$extra_roots")
 refuse_later_execstart "$dropin" "$roots"
 if [ "$dry_run" -eq 1 ]; then

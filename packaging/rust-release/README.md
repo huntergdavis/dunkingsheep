@@ -65,17 +65,24 @@ packaging/rust-release/uninstall-release.sh --prefix DIR --bin-dir DIR --unit-di
 - The poll wrapper pins an absolute `python3`. A `python3` found through a relative PATH
   entry is refused, so the wrapper never depends on the working directory.
 - The drop-in is `99-rust-release.conf`, so it sorts after the operator drop-ins. systemd
-  applies drop-ins in name order and the last `ExecStart` wins. Install refuses when a
-  drop-in that sorts after it sets `ExecStart`, because that drop-in would silently override
-  the release. The check reads each drop-in the way systemd does: whitespace around `=` and
-  before a key is ignored, comment lines are skipped, and symlinked drop-ins are read too. It
-  scans the user unit load paths from systemd.unit(5), including `~/.config/systemd/user`,
-  `/etc/systemd/user`, `/run/systemd/user` and `/usr/lib/systemd/user`, and the type-wide
-  `service.d` directory in each. A same-named drop-in elsewhere that sets `ExecStart` is refused
-  too, because it can shadow ours. `--scan-dir DIR` adds a root. `--no-standard-scan` limits the
-  scan to `--unit-dir` and exists for the test fixtures; the cutover must not use it. A drop-in
-  created after install is not seen, so the cutover must confirm the effective drop-ins with
+  applies drop-ins in name order and the last `ExecStart` wins. Install and rollback `--to`
+  refuse when a drop-in in the user unit load paths sorts after ours and sets `ExecStart`, or
+  when any drop-in with the same name sits in another load path, because that file replaces
+  ours in systemd's precedence order. The load paths are those of `systemd.unit(5)`, Table 2:
+  the `user.control`, `transient`, `generator.early`, `generator` and `generator.late`
+  directories under `$XDG_RUNTIME_DIR`; `$XDG_CONFIG_HOME` (or `~/.config`) and each
+  `$XDG_CONFIG_DIRS` entry; `/etc/systemd/user`; `/run/systemd/user`; `$XDG_DATA_HOME` (or
+  `~/.local/share`) and each `$XDG_DATA_DIRS` entry; `/usr/local/lib/systemd/user`; and
+  `/usr/lib/systemd/user`. Each contributes `<unit>.d` and the type-wide `service.d`. The check
+  reads each drop-in the way systemd does: whitespace around `=` and before a key is ignored,
+  comment lines are skipped, and symlinked drop-ins are read too. `--scan-dir DIR` adds a root.
+  `--no-standard-scan` limits the scan to `--unit-dir`, and is accepted only when
+  `DUNKINGSHEEP_RELEASE_TEST_FIXTURES=1`, which the test fixtures set. Manager environment
+  changes, such as `SYSTEMD_UNIT_PATH`, are not read here. A drop-in created after install is
+  not seen, so the cutover must confirm the effective drop-ins with
   `systemctl --user show -p DropInPaths dunkingsheep.service`.
+- A symbolic link at the drop-in or at a launcher path is refused before anything is written,
+  and a restore refuses a link too. Writing through a link would change another file.
 
 ## Activation gate (not part of this change)
 
@@ -96,7 +103,7 @@ steps are in the t3229 task notes. These scripts only prepare the artifacts.
   refuses with `drift`. The state saved before the run is in `<prefix>/rollback/.txn` (the drop-in
   and launchers) and `<prefix>/rollback/.txn-meta` (`previous` and `owned`). Restore each saved
   file or directory by hand, or remove the live one whose `.absent` marker is present, then run
-  the command again. A failed run keeps both directories until the next run replaces them. A
+  the command again. A handled failure restores the state and removes both directories. A
   `*.bad` directory in the rollback directory is a replaced copy and is safe to remove.
 - A failed install can leave a `releases/.staging-*` directory. It is never used and can be
   removed.

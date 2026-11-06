@@ -52,6 +52,7 @@ if [ -f "$dropin" ] && [ -z "$(dropin_release_id "$dropin")" ]; then
     die "refusing to change $dropin: it was not written by install-release.sh"
 fi
 guard_against_drift "$rollback_dir" "$dropin" "$bin_dir"
+refuse_symlinks "$dropin" "$bin_dir"
 
 # The transaction. The live pair is saved, and transaction_exit restores it if the restore fails.
 txn="$rollback_dir/.txn"

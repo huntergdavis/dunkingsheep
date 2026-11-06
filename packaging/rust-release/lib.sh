@@ -75,6 +75,9 @@ put_file() {
 # Puts back the pair recorded by snapshot_pair. Anything not recorded is removed. Returns
 # non-zero when a step fails, so a caller never reports a partial restore as a full one.
 restore_pair() {
+    if [ -L "$2" ] || [ -L "$3/dunkingsheep" ] || [ -L "$3/dunk-poll" ]; then
+        return 1
+    fi
     mkdir -p "$(dirname "$2")" "$3" || return 1
     if [ -f "$1/dropin.conf" ]; then
         put_file "$1/dropin.conf" "$2" || return 1
@@ -152,6 +155,8 @@ transaction_exit() {
         if restore_pair "$txn" "$dropin" "$bin_dir"; then pair_ok=1; fi
         if restore_metadata "$txn_meta" "$rollback_dir"; then meta_ok=1; fi
         if [ "$pair_ok" -eq 1 ] && [ "$meta_ok" -eq 1 ]; then
+            rm -rf "$txn" 2>/dev/null || :
+            clear_tree "$txn_meta" 2>/dev/null || :
             echo "error: the operation failed; the drop-in, the launchers and the rollback history were restored to their previous state" >&2
         else
             echo "error: the operation failed and the saved state could not be fully restored; see $txn and $txn_meta" >&2
@@ -243,26 +248,64 @@ restore_metadata() {
     done
 }
 
+# refuse_symlinks DROPIN BIN_DIR
+# Dies when the drop-in or a launcher path is a symbolic link. Writing through a link would change
+# another file, and a restore could then report success for the wrong file. Nothing is changed.
+refuse_symlinks() {
+    for path in "$1" "$2/dunkingsheep" "$2/dunk-poll"; do
+        if [ -L "$path" ]; then
+            die "refusing to change $path: it is a symbolic link, and writing through it would change another file"
+        fi
+    done
+}
+
+# check_scan_flags STANDARD
+# --no-standard-scan limits the drop-in scan to --unit-dir and --scan-dir. It exists for the test
+# fixtures, which must not read the host's drop-ins, so it is refused unless the test environment
+# sets DUNKINGSHEEP_RELEASE_TEST_FIXTURES=1.
+check_scan_flags() {
+    if [ "$1" -eq 0 ] && [ "${DUNKINGSHEEP_RELEASE_TEST_FIXTURES:-}" != 1 ]; then
+        die "--no-standard-scan is for the test fixtures only"
+    fi
+}
+
 # standard_roots UNIT_DIR
-# The unit load paths systemd reads for the user manager (systemd.unit(5), with the default XDG
-# variables). UNIT_DIR comes first. systemd merges the <unit>.d and type-wide service.d drop-ins
-# from all of them and applies them in name order, whichever directory they are in.
+# The unit load paths systemd reads for the user manager (systemd.unit(5), Table 2), in the table's
+# order, with the XDG variables honoured. UNIT_DIR comes first. systemd merges the <unit>.d and
+# type-wide service.d drop-ins from all of them and applies them in name order, whichever directory
+# they are in. Manager environment changes, such as SYSTEMD_UNIT_PATH, are not visible here; the
+# cutover's DropInPaths check is the authoritative list.
 standard_roots() {
     uid=$(id -u)
-    printf '%s\n' \
-        "$1" \
-        "$HOME/.config/systemd/user.control" \
-        "/run/user/$uid/systemd/user.control" \
-        "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user" \
-        "/etc/xdg/systemd/user" \
-        "/etc/systemd/user" \
-        "/run/user/$uid/systemd/user" \
+    config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
+    data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
+    runtime="${XDG_RUNTIME_DIR:-/run/user/$uid}"
+    printf '%s\n' "$1" \
+        "$config_home/systemd/user.control" \
+        "$runtime/systemd/user.control" \
+        "$runtime/systemd/transient" \
+        "$runtime/systemd/generator.early" \
+        "$config_home/systemd/user"
+    colon_list "${XDG_CONFIG_DIRS:-/etc/xdg}" "/systemd/user"
+    printf '%s\n' "/etc/systemd/user" \
+        "$runtime/systemd/user" \
         "/run/systemd/user" \
-        "${XDG_DATA_HOME:-$HOME/.local/share}/systemd/user" \
-        "/usr/local/share/systemd/user" \
-        "/usr/share/systemd/user" \
-        "/usr/local/lib/systemd/user" \
-        "/usr/lib/systemd/user"
+        "$runtime/systemd/generator" \
+        "$data_home/systemd/user"
+    colon_list "${XDG_DATA_DIRS:-/usr/local/share:/usr/share}" "/systemd/user"
+    printf '%s\n' "/usr/local/lib/systemd/user" \
+        "/usr/lib/systemd/user" \
+        "$runtime/systemd/generator.late"
+}
+
+# colon_list VALUE SUFFIX
+# Prints SUFFIX after each non-empty entry of a colon-separated list, as the XDG variables are.
+colon_list() {
+    printf '%s\n' "$1" | tr ':' '\n' | while IFS= read -r entry; do
+        if [ -n "$entry" ]; then
+            printf '%s%s\n' "$entry" "$2"
+        fi
+    done
 }
 
 # scan_roots UNIT_DIR STANDARD EXTRA
@@ -282,10 +325,11 @@ scan_roots() {
 
 # refuse_later_execstart DROPIN ROOTS
 # Dies when a drop-in in ROOTS would override the release. In each root it looks at the
-# <root>/dunkingsheep.service.d and the type-wide <root>/service.d. A drop-in that sorts after
-# DROPIN and assigns ExecStart is refused, because systemd applies it later. So is a drop-in with
-# the same name that assigns ExecStart elsewhere, because it can shadow ours. Drop-ins that sort
-# before DROPIN are not refused, because DROPIN applies after them.
+# <root>/dunkingsheep.service.d and the type-wide <root>/service.d. A drop-in with the same name
+# elsewhere is refused whatever it contains: systemd gives a same-named file in a higher-precedence
+# directory the place of ours, so our ExecStart would be lost. A drop-in that sorts after DROPIN and
+# assigns ExecStart is refused, because systemd applies it later. Drop-ins that sort before DROPIN
+# are not refused, because DROPIN applies after them.
 refuse_later_execstart() {
     ours=$(basename "$1")
     ours_dir=$(dirname "$1")
@@ -295,12 +339,16 @@ refuse_later_execstart() {
             { [ -e "$f" ] || [ -L "$f" ]; } || continue
             name=$(basename "$f")
             if [ "$name" = "$ours" ]; then
-                [ "$(dirname "$f")" = "$ours_dir" ] && continue
-            elif [ "$(awk -v a="$ours" -v b="$name" 'BEGIN { print (b > a) ? "later" : "earlier" }')" = earlier ]; then
+                if [ "$(dirname "$f")" = "$ours_dir" ]; then
+                    continue
+                fi
+                die "refusing to install: $f has the same name as $ours, so it would replace the release drop-in and the release would not be the effective unit"
+            fi
+            if [ "$(awk -v a="$ours" -v b="$name" 'BEGIN { print (b > a) ? "later" : "earlier" }')" = earlier ]; then
                 continue
             fi
             if drop_in_sets_execstart "$f"; then
-                die "refusing to install: $f sets ExecStart and sorts after $ours or shares its name, so it would override the release"
+                die "refusing to install: $f sets ExecStart and sorts after $ours, so it would override the release"
             fi
         done
     done <<ROOTS

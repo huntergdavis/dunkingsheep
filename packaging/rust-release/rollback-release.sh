@@ -53,6 +53,7 @@ require_plain_path --unit-dir "$unit_dir"
 if [ -n "$to" ] && [ "$original" -eq 1 ]; then
     die "--to and --original are exclusive"
 fi
+check_scan_flags "$standard_scan"
 
 dropin="$unit_dir/dunkingsheep.service.d/99-rust-release.conf"
 rollback_dir="$prefix/rollback"
@@ -62,6 +63,7 @@ if [ -n "$to" ]; then
     target="$prefix/releases/$to/dunkingsheep"
     [ -x "$target" ] || die "release $to is not installed: $target"
     guard_against_drift "$rollback_dir" "$dropin" "$bin_dir"
+    refuse_symlinks "$dropin" "$bin_dir"
     roots=$(scan_roots "$unit_dir" "$standard_scan" "$extra_roots")
     refuse_later_execstart "$dropin" "$roots"
     if [ "$dry_run" -eq 1 ]; then
@@ -97,6 +99,7 @@ else
 fi
 [ -d "$source_dir" ] || die "no saved state to restore ($what): run install-release.sh first, or pass --to ID"
 guard_against_drift "$rollback_dir" "$dropin" "$bin_dir"
+refuse_symlinks "$dropin" "$bin_dir"
 if [ "$dry_run" -eq 1 ]; then
     echo "dry run: restore $what from $source_dir"
     exit 0

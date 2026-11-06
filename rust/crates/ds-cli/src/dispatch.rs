@@ -1508,6 +1508,15 @@ fn install_launcher(ns: &Map<String, Value>, json: bool) -> Outcome {
         }
         let launcher = bin_dir.join("dunkingsheep");
         let poll_launcher = bin_dir.join("dunk-poll");
+        // A launcher that is a symbolic link would be written through to another file.
+        for path in [&launcher, &poll_launcher] {
+            if std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+                return Err(format!(
+                    "refusing to write through the symbolic link {}",
+                    path.display()
+                ));
+            }
+        }
         write_executable(
             &launcher,
             &crate::release_layout::launcher_body(&executable),

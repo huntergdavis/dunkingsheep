@@ -23,12 +23,21 @@ fn project_root() -> PathBuf {
 }
 
 fn run_script(name: &str, args: &[&str]) -> Output {
-    Command::new("sh")
+    run_script_env(name, args, &[])
+}
+
+/// Runs a release script with the test fixtures enabled. Later entries in `env` override earlier ones.
+fn run_script_env(name: &str, args: &[&str], env: &[(&str, &str)]) -> Output {
+    let mut command = Command::new("sh");
+    command
         .arg(project_root().join("packaging/rust-release").join(name))
         .args(args)
         .env("PATH", "/usr/bin:/bin")
-        .output()
-        .expect("run release script")
+        .env("DUNKINGSHEEP_RELEASE_TEST_FIXTURES", "1");
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    command.output().expect("run release script")
 }
 
 fn ok(output: &Output) {
@@ -102,6 +111,18 @@ impl Sandbox {
     }
 
     fn install_with(&self, id: &str, extra: &[&str]) -> Output {
+        self.install_with_env(id, extra, &[], false)
+    }
+
+    /// Runs the installer. With `standard` false the fixtures pass --no-standard-scan, so they never
+    /// read the host's drop-ins. With `standard` true the standard systemd load paths are scanned.
+    fn install_with_env(
+        &self,
+        id: &str,
+        extra: &[&str],
+        env: &[(&str, &str)],
+        standard: bool,
+    ) -> Output {
         let poll = project_root().join("tools/dunk_poll.py");
         let mut args = vec![
             "--binary",
@@ -118,10 +139,12 @@ impl Sandbox {
             self.unit.to_str().expect("utf-8 path"),
             "--revision",
             "f76c1801",
-            "--no-standard-scan",
         ];
+        if !standard {
+            args.push("--no-standard-scan");
+        }
         args.extend_from_slice(extra);
-        run_script("install-release.sh", &args)
+        run_script_env("install-release.sh", &args, env)
     }
 
     fn uninstall(&self, extra: &[&str]) -> Output {
@@ -822,6 +845,146 @@ fn install_refuses_a_same_named_drop_in_elsewhere_that_sets_execstart() {
         !sandbox.dropin().exists(),
         "nothing is written after a refusal"
     );
+}
+
+#[test]
+fn install_refuses_a_same_named_drop_in_elsewhere_without_execstart() {
+    let sandbox = Sandbox::new();
+    let extra = sandbox.prefix.join("shadow-root");
+    std::fs::create_dir_all(extra.join("dunkingsheep.service.d")).expect("extra root");
+    std::fs::write(
+        extra.join("dunkingsheep.service.d/99-rust-release.conf"),
+        "[Service]\nEnvironment=FOO=1\n",
+    )
+    .expect("same-named drop-in");
+
+    let failed = sandbox.install_with(
+        "rel-a",
+        &["--scan-dir", extra.to_str().expect("utf-8 path")],
+    );
+    assert!(
+        !failed.status.success(),
+        "a same-named drop-in replaces ours, so it must block the install even without ExecStart"
+    );
+    assert!(
+        !sandbox.dropin().exists(),
+        "nothing is written after a refusal"
+    );
+}
+
+#[test]
+fn install_refuses_a_symlinked_launcher_without_writing_through() {
+    let sandbox = Sandbox::new();
+    let target = sandbox.root.join("launcher-target");
+    std::fs::write(&target, "old target\n").expect("link target");
+    std::os::unix::fs::symlink(&target, sandbox.bin.join("dunkingsheep")).expect("launcher link");
+
+    let failed = sandbox.install("rel-a");
+    assert!(
+        !failed.status.success(),
+        "a symlinked launcher must block the install"
+    );
+    assert!(
+        String::from_utf8_lossy(&failed.stderr).contains("symbolic link"),
+        "the refusal must say why"
+    );
+    assert!(
+        std::fs::symlink_metadata(sandbox.bin.join("dunkingsheep"))
+            .expect("launcher path")
+            .file_type()
+            .is_symlink(),
+        "the launcher path must still be the link"
+    );
+    assert_eq!(
+        "old target\n",
+        std::fs::read_to_string(&target).expect("link target"),
+        "the file the link points at must not change"
+    );
+    assert!(
+        !sandbox.dropin().exists(),
+        "nothing is written after a refusal"
+    );
+}
+
+#[test]
+fn no_standard_scan_is_refused_outside_the_test_fixtures() {
+    let sandbox = Sandbox::new();
+    let failed = sandbox.install_with_env(
+        "rel-a",
+        &[],
+        &[("DUNKINGSHEEP_RELEASE_TEST_FIXTURES", "0")],
+        false,
+    );
+    assert!(
+        !failed.status.success(),
+        "--no-standard-scan must be refused outside the fixtures"
+    );
+    assert!(
+        String::from_utf8_lossy(&failed.stderr).contains("for the test fixtures only"),
+        "the refusal must say the flag is for the test fixtures"
+    );
+    assert!(
+        !sandbox.dropin().exists(),
+        "nothing is written after a refusal"
+    );
+}
+
+#[test]
+fn standard_scan_refuses_a_later_drop_in_in_every_xdg_load_path() {
+    let candidates = [
+        "runtime/systemd/user.control",
+        "runtime/systemd/transient",
+        "runtime/systemd/generator.early",
+        "runtime/systemd/user",
+        "runtime/systemd/generator",
+        "runtime/systemd/generator.late",
+        "config/systemd/user.control",
+        "config/systemd/user",
+        "xdg-config-a/systemd/user",
+        "xdg-config-b/systemd/user",
+        "data/systemd/user",
+        "xdg-data-a/systemd/user",
+        "xdg-data-b/systemd/user",
+    ];
+    for candidate in candidates {
+        let sandbox = Sandbox::new();
+        let root = sandbox.root.clone();
+        let dir = root.join(candidate).join("dunkingsheep.service.d");
+        std::fs::create_dir_all(&dir).expect("load path");
+        std::fs::write(
+            dir.join("zz-override.conf"),
+            "[Service]\nExecStart=/usr/bin/python3 /old/dunkingsheep serve\n",
+        )
+        .expect("override");
+
+        let home = root.display().to_string();
+        let runtime = root.join("runtime").display().to_string();
+        let config_home = root.join("config").display().to_string();
+        let data_home = root.join("data").display().to_string();
+        let config_dirs = format!("{home}/xdg-config-a:{home}/xdg-config-b");
+        let data_dirs = format!("{home}/xdg-data-a:{home}/xdg-data-b");
+        let env = [
+            ("HOME", home.as_str()),
+            ("XDG_RUNTIME_DIR", runtime.as_str()),
+            ("XDG_CONFIG_HOME", config_home.as_str()),
+            ("XDG_CONFIG_DIRS", config_dirs.as_str()),
+            ("XDG_DATA_HOME", data_home.as_str()),
+            ("XDG_DATA_DIRS", data_dirs.as_str()),
+        ];
+        let failed = sandbox.install_with_env("rel-a", &[], &env, true);
+        assert!(
+            !failed.status.success(),
+            "a later ExecStart drop-in under {candidate} must block the install"
+        );
+        assert!(
+            String::from_utf8_lossy(&failed.stderr).contains("zz-override.conf"),
+            "the refusal under {candidate} must name the override"
+        );
+        assert!(
+            !sandbox.dropin().exists(),
+            "nothing is written under {candidate}"
+        );
+    }
 }
 
 /// Kills the probe daemon if the test fails before it shuts the daemon down.
