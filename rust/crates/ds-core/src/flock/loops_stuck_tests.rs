@@ -803,21 +803,37 @@ fn strict_stuck_scan_records_consumed_at_when_composer_is_empty() {
 
 #[test]
 fn federated_recovery_refuses_no_enter_intent_and_queued_panes() {
+    // t3501 federated row 8: the no-enter case used a non-persistent flock, so its no-key result was
+    // vacuous. It now runs on a persisted flock, asserts the candidate was recorded, and has a positive
+    // control (the same candidate with Enter presses once at the threshold).
     let dir = tempfile::tempdir().unwrap();
-    let flock = Flock::new(
-        dir.path().join("launches.json"),
-        dir.path().join("lanes.json"),
-        false,
-    );
+    let flock = persisted_flock(&dir);
     let mut probe = federated_probe();
     let mut no_enter = failed_federated_candidate(&probe);
     no_enter.press_enter = false;
     flock.note_stuck_candidate(&no_enter);
+    assert!(
+        flock.stuck_candidates.lock().unwrap().contains_key("%1"),
+        "precondition: the no-enter candidate is recorded"
+    );
+    federated_steps_without_acting(&flock, &mut probe, &[100.0]);
     assert_eq!(
         0,
         federated_recovery_step(&flock, &mut probe, 221.0, &|_| {}).unwrap()
     );
     assert!(probe.keys.lock().unwrap().is_empty());
+
+    let dir = tempfile::tempdir().unwrap();
+    let flock = persisted_flock(&dir);
+    let mut probe = federated_probe();
+    flock.note_stuck_candidate(&failed_federated_candidate(&probe));
+    federated_steps_without_acting(&flock, &mut probe, &[100.0]);
+    assert_eq!(
+        1,
+        federated_recovery_step(&flock, &mut probe, 221.0, &|_| {}).unwrap(),
+        "positive control: the same candidate with Enter presses once"
+    );
+    assert_eq!(vec!["Enter".to_string()], *probe.keys.lock().unwrap());
 
     let dir = tempfile::tempdir().unwrap();
     let flock = Flock::new(
@@ -1350,6 +1366,28 @@ fn federated_new_dialog_at_key_time_refuses() {
     );
 }
 
+/// t3501 federated row 13, positive control for the dialog test below: the same candidate with no dialog
+/// presses once at the threshold, so the no-key result under the dialog is shown not to be vacuous.
+#[test]
+fn federated_dialog_control_without_the_dialog_presses_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = scripted_candidate(&dir);
+    let mut probe = scripted_probe(
+        vec![scripted_frame("pending text")],
+        vec![std::process::id()],
+    );
+    assert_eq!(
+        0,
+        federated_recovery_step(&flock, &mut probe, 100.0, &|_| {}).unwrap()
+    );
+    assert_eq!(
+        1,
+        federated_recovery_step(&flock, &mut probe, 221.0, &|_| {}).unwrap(),
+        "the candidate without a dialog presses once at the threshold"
+    );
+    assert_eq!(vec!["Enter".to_string()], *probe.keys.lock().unwrap());
+}
+
 #[test]
 fn federated_dialog_held_across_steps_never_authorizes_keys() {
     let dialog = format!("{}{MODAL}", scripted_frame("pending text"));
@@ -1452,13 +1490,20 @@ fn scheduled_failure_is_persisted_with_expanded_text_and_generation() {
     let dir = tempfile::tempdir().unwrap();
     let flock = persisted_flock(&dir);
     let generation = federated_probe().generation;
-    let expanded = "Scheduled check d7: read your inbox and finish the assigned work.";
-    let mut message = Message::new("m1", "%1", "lane", expanded, "send_text");
+    // t3501 scheduled row 29: the expansion is computed by the template path, not supplied. {id}
+    // expands to the dunk id at send time, and the persisted text must be that expansion.
+    let template = "Scheduled check {id}: read your inbox and finish the assigned work.";
+    let expanded =
+        crate::flock::dunks::expand_template(template, &crate::flock::dunks::Dunker::new("d7"));
+    assert_eq!(
+        "Scheduled check d7: read your inbox and finish the assigned work.", expanded,
+        "{{id}} expands to the dunk id"
+    );
+    let mut message = Message::new("m1", "%1", "lane", &expanded, "send_text");
     message.scheduled = true;
     message.status = "sent".into();
     message.attempt_generation = Some(generation.clone());
-    message.schedule_template =
-        Some("Scheduled check {id}: read your inbox and finish the assigned work.".into());
+    message.schedule_template = Some(template.into());
     flock.note_stuck_candidate(&message);
     let entry = flock
         .stuck_candidates

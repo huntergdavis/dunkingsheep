@@ -4335,6 +4335,12 @@ fn a_reported_sent_schedule_is_not_submitted_from_a_dim_or_unstyled_echo() {
 // t3355 (t820 proof D) scheduled row 30 (oracle 79bc92fa). A failed scheduled send whose plain
 // composer has two blank rows before the footer: no key before two minutes, exactly one key at
 // 120 s, and none afterwards.
+//
+// RESIDUAL (t3501 scheduled 30, owner decision): the oracle also asserts exactly one `stuck.recover` metric
+// with outcome `consumed`. In Rust that metric is recorded only by the federated watchdog path
+// (flock/loops_stuck.rs); the strict observer path this test drives records none. The key assertions below
+// are kept; the missing metric is a divergence named here and filed as a production follow-up, not changed in
+// t3501.
 #[test]
 fn an_ambiguous_scheduled_composer_recovers_once_after_two_minutes() {
     let dir = tempfile::tempdir().unwrap();
