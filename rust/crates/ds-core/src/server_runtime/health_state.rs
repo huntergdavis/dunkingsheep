@@ -502,7 +502,7 @@ mod tests {
         dispatcher.close();
     }
     #[test]
-    fn health_state_python_differential_replay_executes_all_three_commands() {
+    fn health_state_python_differential_replay_covers_every_request_shape() {
         use std::io::{BufRead, BufReader, Write};
         use std::os::unix::net::UnixListener;
         use std::process::Command;
@@ -526,7 +526,7 @@ flock=types.SimpleNamespace(memory=None,resolve_lanes=lambda:[])
 flock.health=lambda **kw:dunk_health.run_health(flock,**kw)
 dunk_state._proc_snapshot=lambda:({}, {})
 with open(traffic,'w') as out:
-    for cmd,args in [('health',{}),('state_capture',{'source':[1]}),('state_latest',{'limit':0})]:
+    for cmd,args in [('health',{}),('state_capture',{'source':[1]}),('state_latest',{'limit':0}),('state_latest',{'limit':5}),('state_latest',{'pane_id':'w1:p1'}),('state_latest',{'project':'proj'})]:
         try: response={'ok':True,'result':ns['h_'+cmd](flock,args,None)}
         except Exception as e: response={'ok':False,'error':'internal error: '+str(e)}
         out.write(json.dumps({'cmd':cmd,'args':args,'response':response})+'\n')
@@ -545,7 +545,7 @@ with open(traffic,'w') as out:
         let dispatcher = services.production_dispatcher();
         let thread = std::thread::spawn(move || {
             let mut seen = Vec::new();
-            for _ in 0..3 {
+            for _ in 0..6 {
                 let deadline = std::time::Instant::now() + Duration::from_secs(30);
                 let (mut stream, _) = loop {
                     match listener.accept() {
@@ -586,7 +586,22 @@ with open(traffic,'w') as out:
             .output()
             .unwrap();
         let seen = thread.join().unwrap();
-        assert_eq!(seen, ["health", "state_capture", "state_latest"]);
+        // Python order: the three original requests, then state_latest with a positive limit,
+        // a pane filter and a project filter (t3571). Filters run over an empty snapshot here,
+        // so they prove argument handling and ordering, not row selection. Health deep and
+        // repair are NOT replayed: the Python oracle's fake flock has no tasks (recorded
+        // "task stats failed"), so those two diff for oracle-setup reasons (t3571 blocker).
+        assert_eq!(
+            seen,
+            [
+                "health",
+                "state_capture",
+                "state_latest",
+                "state_latest",
+                "state_latest",
+                "state_latest"
+            ]
+        );
         assert!(
             result.status.success(),
             "{}\n{}",
@@ -594,7 +609,7 @@ with open(traffic,'w') as out:
             String::from_utf8_lossy(&result.stderr)
         );
         assert!(String::from_utf8_lossy(&result.stdout)
-            .contains("replayed 3 request(s): 0 diff(s), 0 error(s)"));
+            .contains("replayed 6 request(s): 0 diff(s), 0 error(s)"));
     }
     #[test]
     fn health_state_core_capture_uses_real_tasks_and_one_fake_process_snapshot() {
