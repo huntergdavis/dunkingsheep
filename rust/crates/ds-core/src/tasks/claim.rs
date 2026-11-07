@@ -192,11 +192,13 @@ impl Tasks {
                 let (id, pane) = (id.clone(), pane.clone());
                 move |conn| {
                     // t3582: the members of a batch share one deadline, so a heartbeat on any
-                    // of them extends every member the pane holds.
-                    let targets = heartbeat_targets(conn, &id, &pane)?;
+                    // of them extends every member the pane holds. The targets are read inside the
+                    // same immediate transaction as the writes (the review of #807 found they were
+                    // read on the connection first).
                     let tx = conn
                         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                         .map_err(db::map_sqlite)?;
+                    let targets = heartbeat_targets(&tx, &id, &pane)?;
                     let mut changed = 0;
                     for target in &targets {
                         let affected = match &caller {
