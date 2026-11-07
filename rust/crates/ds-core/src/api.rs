@@ -2120,11 +2120,49 @@ pub fn h_owner_ingest(context: &HandlerContext<'_>, args: Args) -> Result<Value,
         },
         context.self_pane_id(),
     )?;
+    // t1613: a new Telegram question nudges the desk once. Web is nudged by its own route, and a
+    // redelivery was nudged when it first arrived, so neither is nudged here.
+    if !ingested.duplicate && ingested.transport == "telegram" {
+        nudge_desk_for_telegram(context, &ingested.message);
+    }
     Ok(json!({
         "message": owner_message_value(&ingested.message),
         "duplicate": ingested.duplicate,
         "transport": ingested.transport,
     }))
+}
+
+/// Best effort: a missing desk or a refused write never fails the ingest, because the mailbox row is
+/// already the record. The write is the one the web route makes (no pane, no system sender, notify
+/// on), so the desk gets one inbox line and nothing is typed into a pane.
+fn nudge_desk_for_telegram(context: &HandlerContext<'_>, message: &crate::inbox_store::Message) {
+    let panes = context.env.list_panes_grouped();
+    let Some(desk) = desk_nudge::desk_pane_for(&panes) else {
+        return;
+    };
+    let Some(pane_id) = desk.get("pane_id").and_then(Value::as_str) else {
+        return;
+    };
+    let message_id = message.summary.message_id.clone();
+    let body = desk_nudge::nudge_body(&message_id, "telegram", &message.body);
+    let subject = desk_nudge::nudge_subject(&message_id);
+    let _ = context.env.with_inbox_env(&mut |env| {
+        context.flock.inbox_send_wire(
+            env,
+            &crate::flock::commands_inbox::SendArgs {
+                to: pane_id,
+                body: &body,
+                subject: Some(&subject),
+                attach: &[],
+                notify: true,
+                self_pane_id: None,
+                system_sender: None,
+            },
+            None,
+            None,
+        )?;
+        Ok(Value::Null)
+    });
 }
 
 /// `dunk_api.h_owner_outbox`.
@@ -3460,6 +3498,12 @@ fn py_repr(text: &str) -> String {
 
 #[cfg(test)]
 mod tests;
+
+mod desk_nudge;
+
+#[cfg(test)]
+#[path = "api/owner_ingest_nudge_tests.rs"]
+mod owner_ingest_nudge_tests;
 
 #[cfg(test)]
 mod landed_parity_tests;
