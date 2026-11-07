@@ -148,7 +148,16 @@ pub const DESK_EXTRA: [&str; 16] = [
 ];
 
 /// `ALLOW["planner"]` minus `READ_ONLY`.
-pub const PLANNER_EXTRA: [&str; 3] = ["inbox_read", "task_add", "task_note"];
+pub const PLANNER_EXTRA: [&str; 8] = [
+    "inbox_read",
+    "inbox_send",
+    "task_add",
+    "task_assign",
+    "task_block",
+    "task_note",
+    "task_unblock",
+    "task_update",
+];
 
 /// Verbs no token role may call: closing, shaping and stopping the fleet stays with a human.
 pub const WEB_DENIED: [&str; 30] = [

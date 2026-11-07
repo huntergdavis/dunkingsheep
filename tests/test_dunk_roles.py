@@ -159,7 +159,7 @@ class RegistryTests(unittest.TestCase):
             self.assertFalse(dunk_roles.allowed("desk", verb), f"the desk must not have {verb}")
 
     def test_the_rest_of_the_allowlist_shape(self):
-        self.assertFalse(dunk_roles.allowed("planner", "inbox_send"))
+        self.assertTrue(dunk_roles.allowed("planner", "inbox_send"))
         self.assertFalse(dunk_roles.allowed("anonymous", "task_next"))
         self.assertTrue(dunk_roles.allowed("anonymous", "task_list"))
         self.assertFalse(dunk_roles.allowed("worker", "task_assign"))
@@ -354,5 +354,28 @@ class ServerBindingTests(unittest.TestCase):
         self.assertIn("refused", reply["result"]["binding_note"])
 
 
+class PlannerAssignGateTests(unittest.TestCase):
+    """Owner decision 2026-11-07: the planner is the project's coordinating agent, so it may assign."""
+
+    class _Flock:
+        def __init__(self, role):
+            self.role = role
+            self.assigned = None
+
+        def caller_role(self, self_pane_id):
+            return self.role
+
+        def task_assign(self, task_id, assignees, mode="add", self_pane_id=None):
+            self.assigned = (task_id, assignees)
+            return {"id": task_id}
+
+    def test_the_planner_may_assign_and_a_worker_may_not(self):
+        from dunk_api import h_task_assign
+        flock = self._Flock("planner")
+        h_task_assign(flock, {"id": "t1", "assignees": ["w1:p1"]}, "w9:p1")
+        self.assertEqual(("t1", ["w1:p1"]), flock.assigned)
+        with self.assertRaises(Exception) as ctx:
+            h_task_assign(self._Flock("worker"), {"id": "t1", "assignees": ["w1:p1"]}, "w2:p2")
+        self.assertIn("requires the owner role", str(ctx.exception))
 if __name__ == "__main__":
     unittest.main()

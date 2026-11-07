@@ -138,6 +138,7 @@ ALLOW = {
     }),
     "planner": READ_ONLY | frozenset({
         "task_add", "task_note", "inbox_read", "turn_start", "turn_end",
+        "inbox_send", "task_assign", "task_update", "task_block", "task_unblock",
     }),
     "worker": _WORKER,
     "reviewer": _WORKER,
