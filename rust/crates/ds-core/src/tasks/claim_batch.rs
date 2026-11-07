@@ -86,6 +86,18 @@ impl Tasks {
         let wanted: Vec<String> = ids.to_vec();
         let pane = pane_id.to_string();
         let now = crate::clock::now_s();
+        // An expired batch releases its members at expiry, without waiting for reap (the owner's
+        // ruling on #807). Its own transaction, so a claim this call then refuses keeps the release.
+        self.writer
+            .call(move |conn| {
+                let tx = conn
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .map_err(db::map_sqlite)?;
+                release_expired_batches(&tx, now)?;
+                tx.commit().map_err(db::map_sqlite)?;
+                Ok(())
+            })
+            .await?;
         let claimed = self
             .writer
             .call(move |conn| {
@@ -534,6 +546,150 @@ pub(super) fn guard_completion(
                 "task {task_id} is in batch {batch}; its earlier member {earlier} must complete first (t3582)"
             )));
         }
+        // A dependant waits for its in-batch prerequisites (the owner's ruling on #807): only a
+        // done or cancelled prerequisite is satisfied. A blocked or open one holds the dependant,
+        // as the live dependency rule does for any blocked prerequisite.
+        if let Some((prerequisite, status)) = unmet_in_batch_prerequisite(conn, batch, task_id)? {
+            return Err(DunkError::Refused(format!(
+                "task {task_id} is in batch {batch}; its prerequisite {prerequisite} is {status}, not done or cancelled (t3582)"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// The first in-batch prerequisite of `task_id` that is neither done nor cancelled, with its status.
+/// Only the task's batch members count here: an outside prerequisite is the claim-time rule.
+fn unmet_in_batch_prerequisite(
+    conn: &Connection,
+    batch_id: i64,
+    task_id: &str,
+) -> Result<Option<(String, String)>, DunkError> {
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT depends_on FROM tasks WHERE id = ?",
+            params![task_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(db::map_sqlite)?;
+    for prerequisite in decode_list(raw.as_deref()) {
+        let member: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM task_batch_members WHERE batch_id = ? AND task_id = ?",
+                params![batch_id, prerequisite],
+                |row| row.get(0),
+            )
+            .map_err(db::map_sqlite)?;
+        if member == 0 {
+            continue;
+        }
+        let status: Option<String> = conn
+            .query_row(
+                "SELECT status FROM tasks WHERE id = ?",
+                params![prerequisite],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(db::map_sqlite)?;
+        if let Some(status) = status {
+            if status != "done" && status != "cancelled" {
+                return Ok(Some((prerequisite, status)));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Release the batches whose leases have all lapsed (the owner's ruling on #807). A batch is expired
+/// when it holds leases and none of them is live any more. Each of its active members is freed the
+/// way reap frees a lapsed claim: the lease goes, the status goes back to open when nothing else
+/// holds it, the event records the reason, and the batch ends. Reap is not needed for this.
+pub(super) fn release_expired_batches(
+    tx: &rusqlite::Transaction<'_>,
+    now: f64,
+) -> Result<(), DunkError> {
+    let batches: Vec<i64> = {
+        let mut stmt = tx
+            .prepare("SELECT DISTINCT batch_id FROM task_batch_members WHERE active = 1")
+            .map_err(db::map_sqlite)?;
+        let rows = stmt
+            .query_map([], |row| row.get(0))
+            .map_err(db::map_sqlite)?;
+        rows.collect::<Result<_, _>>().map_err(db::map_sqlite)?
+    };
+    for batch_id in batches {
+        let (leases, live): (i64, i64) = tx
+            .query_row(
+                "SELECT COUNT(l.task_id), COALESCE(SUM(CASE WHEN l.expires_at > ? THEN 1 ELSE 0 END), 0) \
+                 FROM task_batch_members AS m JOIN task_leases AS l ON l.task_id = m.task_id \
+                 WHERE m.batch_id = ? AND m.active = 1",
+                params![now, batch_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(db::map_sqlite)?;
+        if leases == 0 || live > 0 {
+            continue;
+        }
+        let pane: String = tx
+            .query_row(
+                "SELECT pane_id FROM task_batches WHERE batch_id = ?",
+                params![batch_id],
+                |row| row.get(0),
+            )
+            .map_err(db::map_sqlite)?;
+        let members: Vec<String> = {
+            let mut stmt = tx
+                .prepare(
+                    "SELECT task_id FROM task_batch_members WHERE batch_id = ? AND active = 1 ORDER BY position",
+                )
+                .map_err(db::map_sqlite)?;
+            let rows = stmt
+                .query_map(params![batch_id], |row| row.get(0))
+                .map_err(db::map_sqlite)?;
+            rows.collect::<Result<_, _>>().map_err(db::map_sqlite)?
+        };
+        for member in members {
+            let removed = tx
+                .execute(
+                    "DELETE FROM task_leases WHERE task_id = ? AND pane_id = ?",
+                    params![member, pane],
+                )
+                .map_err(db::map_sqlite)?;
+            if removed == 0 {
+                continue;
+            }
+            let (scope, priority, status, raw): (String, String, String, Option<String>) = tx
+                .query_row(
+                    "SELECT scope, priority, status, assignees FROM tasks WHERE id = ?",
+                    params![member],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .map_err(db::map_sqlite)?;
+            let owners = decode_list(raw.as_deref());
+            let resulting = super::claim::after_lease_change(tx, &member, &owners, now)?;
+            let event = if resulting == "open" {
+                "requeued"
+            } else {
+                "released"
+            };
+            tx.execute(
+                "INSERT INTO task_events (task_id, event, at, actor, scope, priority, status_from, status_to, meta) VALUES (?,?,?,?,?,?,?,?,?)",
+                params![
+                    member,
+                    event,
+                    now,
+                    pane,
+                    scope,
+                    priority,
+                    status,
+                    resulting,
+                    json!({"reason": "expired", "pane_gone": false}).to_string()
+                ],
+            )
+            .map_err(db::map_sqlite)?;
+        }
+        end_batch(tx, batch_id)?;
     }
     Ok(())
 }
@@ -563,3 +719,11 @@ mod claim_batch_lifecycle_tests;
 #[cfg(test)]
 #[path = "claim_batch_status_tests.rs"]
 mod claim_batch_status_tests;
+
+#[cfg(test)]
+#[path = "claim_batch_hold_tests.rs"]
+mod claim_batch_hold_tests;
+
+#[cfg(test)]
+#[path = "claim_batch_expiry_tests.rs"]
+mod claim_batch_expiry_tests;

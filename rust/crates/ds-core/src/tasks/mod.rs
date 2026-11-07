@@ -42,10 +42,7 @@ pub use claim::{
     claimable, refusal, CallerAlive, Candidate, ClaimOptions, ClaimOutcome, Refusal, Requeued,
 };
 pub use claim_batch::ClaimBatchOutcome;
-use claim_batch::{
-    active_batch_of, guard_completion, leave_batch_on_status, retire_member,
-    unfinished_earlier_member,
-};
+use claim_batch::{guard_completion, leave_batch_on_status, retire_member};
 
 /// `DEFAULT_LEASE_S`: how long a claim stays valid without a heartbeat. The Python reads
 /// `DUNKINGSHEEP_LEASE_S` once at import; this reads it per call.
@@ -548,15 +545,10 @@ impl Tasks {
                     return Err(DunkError::Refused(format!(
                         "task {id} is {current}; a finished task is not reopened by an edit (t854)")));
                 }
-                // t3582: a batch member completes only after its earlier internal members have.
-                if status == "done" && current != "done" {
-                    if let Some(batch) = active_batch_of(conn, &id)? {
-                        if let Some(earlier) = unfinished_earlier_member(conn, batch, &id)? {
-                            return Err(DunkError::Refused(format!(
-                                "task {id} is in batch {batch}; its earlier member {earlier} must complete first (t3582)")));
-                        }
-                    }
-                }
+                // t3582: a batch member completes only after its earlier members have left, and
+                // its in-batch prerequisites are done or cancelled. The same guard as every other
+                // status path (guard_completion), so no path can differ from another.
+                guard_completion(conn, &id, &current, &status)?;
                 // SQLite's attempted binding happens only after visibility and terminal-state
                 // checks, as in Python. The rejected composite value therefore cannot hide a
                 // refusal or partially change status, leases, or events.
@@ -639,9 +631,7 @@ impl Tasks {
                 // t3582: a member that leaves the work (done, cancelled or blocked) ends its own
                 // membership only; the rest of its batch goes on. The batch ends when its last
                 // active member leaves.
-                if matches!(status.as_str(), "done" | "cancelled" | "blocked") && current != status {
-                    retire_member(conn, &id)?;
-                }
+                leave_batch_on_status(conn, &id, &current, &status)?;
                 if status == "done" && current != "done" {
                     auto_unblock(conn, now, Some(&id))?;
                 }

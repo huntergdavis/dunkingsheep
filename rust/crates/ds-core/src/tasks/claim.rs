@@ -466,7 +466,7 @@ pub type CallerAlive = Box<dyn Fn(i64, Option<&str>) -> bool + Send>;
 /// A lease is activity: expiry, release and a reaped claim end the claim, not the
 /// assignment (t145), so the assignee list is written back as it was given. Returns the
 /// resulting status (F3: a task with another live lease stays in_progress).
-fn after_lease_change(
+pub(super) fn after_lease_change(
     tx: &rusqlite::Transaction<'_>,
     id: &str,
     assignees: &[String],
