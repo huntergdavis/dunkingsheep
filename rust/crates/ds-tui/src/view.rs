@@ -39,6 +39,8 @@ pub fn draw_dunks<C: RpcClient>(frame: &mut Frame<'_>, model: &TuiModel<C>, now:
         Style::default(),
     );
 
+    // The Python TUI formats rows with the full window width `w` and only then clips to
+    // `w - 1` in safe_addstr, so the text column is computed from `w`, not `w - 1`.
     let header = format_row(
         "#",
         "Status",
@@ -47,7 +49,7 @@ pub fn draw_dunks<C: RpcClient>(frame: &mut Frame<'_>, model: &TuiModel<C>, now:
         "Sent",
         "Gate",
         "Text",
-        width as i64,
+        i64::from(area.width),
     );
     draw_line(
         frame,
@@ -72,7 +74,7 @@ pub fn draw_dunks<C: RpcClient>(frame: &mut Frame<'_>, model: &TuiModel<C>, now:
     let end = model.dunks.len().min(start.saturating_add(visible_rows));
     for (offset, index) in (start..end).enumerate() {
         let dunk = &model.dunks[index];
-        let row = dunk_row(dunk, width);
+        let row = dunk_row(dunk, area.width);
         let style = if index == model.selected {
             Style::default().add_modifier(Modifier::REVERSED)
         } else {
@@ -131,7 +133,7 @@ pub fn draw_tasks<C: RpcClient>(frame: &mut Frame<'_>, model: &TuiModel<C>, now:
         "Scope",
         "Assignees",
         "Title",
-        width as i64,
+        i64::from(area.width),
     );
     draw_line(
         frame,
@@ -155,7 +157,7 @@ pub fn draw_tasks<C: RpcClient>(frame: &mut Frame<'_>, model: &TuiModel<C>, now:
     };
     let end = model.tasks.len().min(start.saturating_add(visible_rows));
     for (offset, index) in (start..end).enumerate() {
-        let row = task_row(&model.tasks[index], width);
+        let row = task_row(&model.tasks[index], area.width);
         let style = if index == model.task_selected {
             Style::default().add_modifier(Modifier::REVERSED)
         } else {
@@ -214,13 +216,16 @@ fn task_row(task: &Value, width: u16) -> String {
     )
 }
 
+/// One screen line, clipped like the Python `safe_addstr`: at most `w - 1` cells, and an
+/// overflowing value ends in `...` (`clip`) instead of being cut silently.
 fn draw_line(frame: &mut Frame<'_>, area: Rect, y: u16, text: &str, style: Style) {
     if y >= area.height {
         return;
     }
     let width = area.width.saturating_sub(1);
+    let text = crate::rows::clip(text, i64::from(width));
     frame.render_widget(
-        Paragraph::new(Line::raw(text.to_owned())).style(style),
+        Paragraph::new(Line::raw(text)).style(style),
         Rect::new(area.x, area.y + y, width, 1),
     );
 }
@@ -387,7 +392,7 @@ mod tests {
         assert!(!row_is_selected(&terminal, 4));
         assert_eq!(
             snapshot,
-            "00 Dunking Sheep TUI\n01 a add  d remove  c target  t test  i interval  e text  n name  o idle-gate  u s\n02 -------------------------------------------------------------------------------\n03 #    Status               Target                      Every   Sent Gate    ...\n04 (no dunkers - press a to add one, or let an agent add one)\n21 -------------------------------------------------------------------------------\n22 Ready"
+            "00 Dunking Sheep TUI\n01 a add  d remove  c target  t test  i interval  e text  n name  o idle-gate  ...\n02 -------------------------------------------------------------------------------\n03 #    Status               Target                      Every   Sent Gate     ...\n04 (no dunkers - press a to add one, or let an agent add one)\n21 -------------------------------------------------------------------------------\n22 Ready"
         );
     }
 
@@ -406,7 +411,7 @@ mod tests {
         assert!(row_is_selected(&terminal, 5));
         assert_eq!(
             snapshot,
-            "00 Dunking Sheep TUI\n01 a add  d remove  c target  t test  i interval  e text  n name  o idle-gate  u s\n02 -------------------------------------------------------------------------------\n03 #    Status               Target                      Every   Sent Gate    ...\n04 d1   running              w1:p1                           1      2 -       ...\n05 d2   stopped              w2:p2                         30s    3/5 idle+ski...\n21 -------------------------------------------------------------------------------\n22 2 dunkers (1 running)  |  changed"
+            "00 Dunking Sheep TUI\n01 a add  d remove  c target  t test  i interval  e text  n name  o idle-gate  ...\n02 -------------------------------------------------------------------------------\n03 #    Status               Target                      Every   Sent Gate     ...\n04 d1   running              w1:p1                           1      2 -        ...\n05 d2   stopped              w2:p2                         30s    3/5 idle+skip...\n21 -------------------------------------------------------------------------------\n22 2 dunkers (1 running)  |  changed"
         );
     }
 
@@ -424,7 +429,7 @@ mod tests {
         assert!(row_is_selected(&terminal, 6));
         assert_eq!(
             snapshot,
-            "00 Dunking Sheep TUI\n01 a add  d remove  c target  t test  i in\n02 ---------------------------------------\n03 #    Status               Target   ...\n04 d2   running              w2:p1    ...\n05 d3   running              w3:p1    ...\n06 d4   running              w4:p1    ...\n07 ---------------------------------------\n08 5 dunkers (2 running)  |  updated"
+            "00 Dunking Sheep TUI\n01 a add  d remove  c target  t test  i...\n02 ---------------------------------------\n03 #    Status               Target    ...\n04 d2   running              w2:p1     ...\n05 d3   running              w3:p1     ...\n06 d4   running              w4:p1     ...\n07 ---------------------------------------\n08 5 dunkers (2 running)  |  updated"
         );
     }
 
@@ -434,7 +439,7 @@ mod tests {
         let (snapshot, _) = snapshot(&model, 40, 10, 10.0);
         assert_eq!(
             snapshot,
-            "00 Dunking Sheep TUI\n01 a add  d remove  c target  t test  i in\n02 ---------------------------------------\n03 #    Status               Target   ...\n04 (no dunkers - press a to add one, or le\n07 ---------------------------------------"
+            "00 Dunking Sheep TUI\n01 a add  d remove  c target  t test  i...\n02 ---------------------------------------\n03 #    Status               Target    ...\n04 (no dunkers - press a to add one, or...\n07 ---------------------------------------"
         );
     }
 
@@ -446,7 +451,7 @@ mod tests {
         assert!(!row_is_selected(&terminal, 4));
         assert_eq!(
             snapshot,
-            "00 Dunking Sheep TUI - tasks\n01 a add  e title  c/space complete  s start  b block  u unblock  p priority  h he\n02 -------------------------------------------------------------------------------\n03 #     Status      Prio   Scope      Assignees          Title\n04 (no tasks - press a to add one, or n to take the next)\n21 -------------------------------------------------------------------------------\n22 Ready"
+            "00 Dunking Sheep TUI - tasks\n01 a add  e title  c/space complete  s start  b block  u unblock  p priority  h...\n02 -------------------------------------------------------------------------------\n03 #     Status      Prio   Scope      Assignees          Title\n04 (no tasks - press a to add one, or n to take the next)\n21 -------------------------------------------------------------------------------\n22 Ready"
         );
     }
 
@@ -465,7 +470,7 @@ mod tests {
         assert!(row_is_selected(&terminal, 5));
         assert_eq!(
             snapshot,
-            "00 Dunking Sheep TUI - tasks\n01 a add  e title  c/space complete  s start  b block  u unblock  p priority  h he\n02 -------------------------------------------------------------------------------\n03 #     Status      Prio   Scope      Assignees          Title\n04 t1    open        high   project    %1                 First task\n05 t2    in_progress medium global     %2,%3              Second task\n21 -------------------------------------------------------------------------------\n22 2 tasks (2 open/in-progress)  |  changed"
+            "00 Dunking Sheep TUI - tasks\n01 a add  e title  c/space complete  s start  b block  u unblock  p priority  h...\n02 -------------------------------------------------------------------------------\n03 #     Status      Prio   Scope      Assignees          Title\n04 t1    open        high   project    %1                 First task\n05 t2    in_progress medium global     %2,%3              Second task\n21 -------------------------------------------------------------------------------\n22 2 tasks (2 open/in-progress)  |  changed"
         );
     }
 
@@ -483,7 +488,7 @@ mod tests {
         assert!(row_is_selected(&terminal, 6));
         assert_eq!(
             snapshot,
-            "00 Dunking Sheep TUI - tasks\n01 a add  e title  c/space complete  s sta\n02 ---------------------------------------\n03 #     Status      Prio   Scope     ...\n04 t2    open        low    project   ...\n05 t3    open        low    project   ...\n06 t4    open        low    project   ...\n07 ---------------------------------------\n08 5 tasks (5 open/in-progress)  |  update"
+            "00 Dunking Sheep TUI - tasks\n01 a add  e title  c/space complete  s ...\n02 ---------------------------------------\n03 #     Status      Prio   Scope      ...\n04 t2    open        low    project    ...\n05 t3    open        low    project    ...\n06 t4    open        low    project    ...\n07 ---------------------------------------\n08 5 tasks (5 open/in-progress)  |  upd..."
         );
     }
 
@@ -493,7 +498,7 @@ mod tests {
         let (snapshot, _) = snapshot_tasks(&model, 40, 10, 10.0);
         assert_eq!(
             snapshot,
-            "00 Dunking Sheep TUI - tasks\n01 a add  e title  c/space complete  s sta\n02 ---------------------------------------\n03 #     Status      Prio   Scope     ...\n04 (no tasks - press a to add one, or n to\n07 ---------------------------------------"
+            "00 Dunking Sheep TUI - tasks\n01 a add  e title  c/space complete  s ...\n02 ---------------------------------------\n03 #     Status      Prio   Scope      ...\n04 (no tasks - press a to add one, or n...\n07 ---------------------------------------"
         );
     }
 }

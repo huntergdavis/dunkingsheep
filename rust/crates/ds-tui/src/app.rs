@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-use crate::model::{RpcClient, TuiModel, View};
+use crate::model::{RpcClient, TuiModel};
 
 /// The Python TUI uses a curses timeout of 200 ms between redraws.
 pub const REFRESH_INTERVAL: Duration = Duration::from_millis(200);
@@ -56,10 +56,7 @@ where
             model.quit_and_shutdown(now);
         }
         if control == Some('v') {
-            model.view = match model.view {
-                View::Dunks => View::Tasks,
-                View::Tasks => View::Dunks,
-            };
+            model.toggle_view(now);
         }
         if let Some(key) = key.filter(|_| control.is_none()) {
             io.handle_key(model, key)?;
@@ -101,6 +98,7 @@ mod tests {
     use serde_json::Value;
 
     use super::*;
+    use crate::model::View;
     use crate::model::{ClientMode, RpcError};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
