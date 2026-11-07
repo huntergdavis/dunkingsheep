@@ -4433,6 +4433,107 @@ fn a_scheduled_false_sent_real_frame_recovers_once_through_native_evidence() {
     drop(child);
 }
 
+/// Port of `ReviewBlockerTests.test_the_env_config_source_changes_real_worker_behaviour` (oracle
+/// 79bc92fa). The policy comes from `DUNKINGSHEEP_STUCK_CONFIG`. The text has been stuck for 600 s,
+/// longer than the default 120 s threshold, so the default policy would press. Only the env policy's
+/// `enabled: false` keeps the key back. The control below is the same call with `enabled: true`.
+#[test]
+fn the_env_source_disables_recovery_as_the_python_case_does() {
+    let dir = tempfile::tempdir().unwrap();
+    let (flock, mut env, message) = env_policy_case(dir.path(), r#"{"enabled": false}"#);
+    assert!(!flock.stuck_config.lock().unwrap().enabled);
+    assert!(!flock.unwedge(
+        &mut env,
+        "%1",
+        "stuck body",
+        Some(400.0),
+        Some(&message),
+        1000.0,
+        None,
+        true
+    ));
+    assert!(
+        env.keys.is_empty(),
+        "a disabled policy presses nothing: {:?}",
+        env.keys
+    );
+}
+
+#[test]
+fn the_same_env_source_enabled_presses_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let (flock, mut env, message) = env_policy_case(dir.path(), r#"{"enabled": true}"#);
+    assert!(!flock.unwedge(
+        &mut env,
+        "%1",
+        "stuck body",
+        Some(400.0),
+        Some(&message),
+        1000.0,
+        None,
+        true
+    ));
+    assert_eq!(vec![("%1".into(), "Enter".into())], env.keys);
+}
+
+#[test]
+fn the_env_source_wins_over_a_saved_policy_after_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = persistent_recovery_flock(dir.path(), &dir.path().join("state.json"));
+    flock.restore_snapshot(&serde_json::json!({"stuck_config": {"enabled": true}}));
+    assert!(flock.stuck_config.lock().unwrap().enabled);
+    let policy =
+        crate::config::Env::from_pairs(&[("DUNKINGSHEEP_STUCK_CONFIG", r#"{"enabled": false}"#)]);
+    flock.apply_stuck_config_env(&policy).unwrap();
+    assert!(!flock.stuck_config.lock().unwrap().enabled);
+}
+
+/// Python refuses a bad field value (the constructor raises), so the env policy stops startup,
+/// and the policy in place stays. A value that cannot be parsed is ignored with a warning.
+#[test]
+fn the_env_source_refuses_a_bad_field_and_ignores_broken_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = persistent_recovery_flock(dir.path(), &dir.path().join("state.json"));
+    let refused =
+        crate::config::Env::from_pairs(&[("DUNKINGSHEEP_STUCK_CONFIG", r#"{"enabled": "maybe"}"#)]);
+    assert!(flock.apply_stuck_config_env(&refused).is_err());
+    let broken =
+        crate::config::Env::from_pairs(&[("DUNKINGSHEEP_STUCK_CONFIG", r#"{"enabled": "#)]);
+    assert!(flock.apply_stuck_config_env(&broken).is_ok());
+    assert!(
+        flock.stuck_config.lock().unwrap().enabled,
+        "neither value changes the policy in place"
+    );
+}
+
+/// The case of `unwedge_reserves_before_one_key_and_does_not_claim_unchanged_text`, with the
+/// policy given by the env source instead of by editing the config fields.
+fn env_policy_case(dir: &std::path::Path, policy: &str) -> (Flock, Pane, Message) {
+    let flock = persistent_recovery_flock(dir, &dir.join("state.json"));
+    flock
+        .apply_stuck_config_env(&crate::config::Env::from_pairs(&[(
+            "DUNKINGSHEEP_STUCK_CONFIG",
+            policy,
+        )]))
+        .unwrap();
+    let mut env = Pane::default();
+    env.panes
+        .push(serde_json::json!({"pane_id": "%1", "pane_pid": std::process::id()}));
+    env.statuses.insert("%1".into(), "idle".into());
+    env.screens.insert("%1".into(), frame("stuck body", &[]));
+    flock
+        .sent_text_by_pane
+        .lock()
+        .unwrap()
+        .insert("%1".into(), vec!["stuck body".into()]);
+    let mut message = Message::new("m1", "%1", "writer", "stuck body", "send_text");
+    message.created_at = 1.0;
+    message.status = "failed".into();
+    message.attempt_generation = pane_generation(&env, "%1");
+    flock.note_stuck_candidate(&message);
+    (flock, env, message)
+}
+
 #[test]
 fn unwedge_verifies_a_newly_cleared_composer_after_the_key() {
     let dir = tempfile::tempdir().unwrap();
