@@ -881,8 +881,8 @@ impl crate::flock::loops_push::PushEnv for LoopRuntimeAdapter {
     fn registered_lanes(&self) -> Option<BTreeSet<String>> {
         self.helper_pushenv_registered_lanes()
     }
-    fn may_review(&self, pane_id: &str) -> bool {
-        self.helper_pushenv_may_review(pane_id)
+    fn may_review(&self, pane_id: &str, role: &str) -> bool {
+        self.helper_pushenv_may_review(pane_id, role)
     }
     fn provider_of(&self, pane_id: &str) -> Option<String> {
         self.helper_pushenv_provider_of(pane_id)

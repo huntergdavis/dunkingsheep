@@ -110,7 +110,7 @@ impl PushEnv for Fake {
     fn registered_lanes(&self) -> Option<BTreeSet<String>> {
         Some(self.roles.lock().unwrap().keys().cloned().collect())
     }
-    fn may_review(&self, pane_id: &str) -> bool {
+    fn may_review(&self, pane_id: &str, _role: &str) -> bool {
         self.may_review.lock().unwrap().contains(pane_id)
     }
     fn provider_of(&self, _: &str) -> Option<String> {
@@ -174,7 +174,7 @@ impl PushEnv for RuntimePushEnv<'_> {
     fn registered_lanes(&self) -> Option<BTreeSet<String>> {
         self.adapter.helper_pushenv_registered_lanes()
     }
-    fn may_review(&self, _: &str) -> bool {
+    fn may_review(&self, _: &str, _: &str) -> bool {
         false
     }
     fn provider_of(&self, _: &str) -> Option<String> {

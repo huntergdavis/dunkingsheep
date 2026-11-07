@@ -3,9 +3,10 @@
 use crate::server_runtime::LoopRuntimeAdapter;
 
 impl LoopRuntimeAdapter {
-    pub(crate) fn helper_pushenv_may_review(&self, pane_id: &str) -> bool {
+    /// `may_review(pane, role)` with the caller's resolved role; never re-resolved here.
+    pub(crate) fn helper_pushenv_may_review(&self, pane_id: &str, role: &str) -> bool {
         self.flock
-            .with_roles(|roles, _| roles.may_review(pane_id, Some("reviewer")))
+            .with_roles(|roles, _| roles.may_review(pane_id, Some(role)))
             .unwrap_or(false)
     }
 
@@ -71,8 +72,8 @@ mod tests {
             self.adapter.helper_pushenv_registered_lanes()
         }
 
-        fn may_review(&self, pane_id: &str) -> bool {
-            self.adapter.helper_pushenv_may_review(pane_id)
+        fn may_review(&self, pane_id: &str, role: &str) -> bool {
+            self.adapter.helper_pushenv_may_review(pane_id, role)
         }
 
         fn provider_of(&self, pane_id: &str) -> Option<String> {
@@ -149,12 +150,12 @@ mod tests {
             Arc::clone(&flock),
             Arc::new(|| Box::new(FakeTerminal::new())),
         );
-        assert!(adapter.helper_pushenv_may_review("w1:p1"));
+        assert!(adapter.helper_pushenv_may_review("w1:p1", "reviewer"));
         assert_eq!(
             adapter.helper_pushenv_provider_of("w1:p1"),
             Some("claude".into())
         );
-        assert!(!adapter.helper_pushenv_may_review("w2:p2"));
+        assert!(!adapter.helper_pushenv_may_review("w2:p2", "reviewer"));
         assert_eq!(
             adapter.helper_pushenv_provider_of("w2:p2"),
             Some("nvidia".into())
@@ -378,3 +379,7 @@ mod tests {
         assert_eq!(env.lane_agent_alive("missing-pane"), None);
     }
 }
+
+#[cfg(test)]
+#[path = "push_reviewer_parity_tests.rs"]
+mod push_reviewer_parity_tests;

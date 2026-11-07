@@ -50,8 +50,10 @@ pub trait PushEnv: Send + Sync {
     fn caller_role(&self, pane_id: &str, pane_info: Option<&Value>) -> String;
     /// `roles.describe()["lanes"]` keys; `None` when the registry is unavailable (followers only).
     fn registered_lanes(&self) -> Option<BTreeSet<String>>;
-    /// `roles.may_review(pane, role="reviewer")`.
-    fn may_review(&self, pane_id: &str) -> bool;
+    /// `roles.may_review(pane, role=role)`: `role` is the caller's RESOLVED role (the one
+    /// `caller_role` returned, with the live pane record). Re-resolving it here, without that
+    /// record, demotes a pid-bound reviewer to the default role (dunk_core.py push, 2026-10-30).
+    fn may_review(&self, pane_id: &str, role: &str) -> bool;
     /// `roles.provider_of(pane)`.
     fn provider_of(&self, pane_id: &str) -> Option<String>;
     /// `_lane_agent_alive`: `Some(false)` is evidence of a dead lane, `None` is "cannot say".
@@ -155,9 +157,10 @@ impl Flock {
         pane_id: &str,
         pane_info: Option<&Value>,
     ) -> bool {
-        match env.caller_role(pane_id, pane_info).as_str() {
+        let role = env.caller_role(pane_id, pane_info);
+        match role.as_str() {
             "owner" => true,
-            "reviewer" => env.may_review(pane_id),
+            "reviewer" => env.may_review(pane_id, &role),
             _ => false,
         }
     }
@@ -229,7 +232,7 @@ impl Flock {
                 continue;
             }
             let role = env.caller_role(pane_id, Some(pane));
-            if role == "reviewer" && !env.may_review(pane_id) {
+            if role == "reviewer" && !env.may_review(pane_id, &role) {
                 let provider = env.provider_of(pane_id).unwrap_or_else(|| "unknown".into());
                 note(
                     pane_id,

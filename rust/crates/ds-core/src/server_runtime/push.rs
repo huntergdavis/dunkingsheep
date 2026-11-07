@@ -379,7 +379,7 @@ mod tests {
             Some(BTreeSet::from([self.pane_id.clone()]))
         }
 
-        fn may_review(&self, _: &str) -> bool {
+        fn may_review(&self, _: &str, _: &str) -> bool {
             false
         }
 
@@ -1009,7 +1009,7 @@ mod tests {
         assert_eq!(adapter.caller_role("w1:p1", Some(pane)), "worker");
         assert!(adapter.registered_lanes().unwrap().contains("w1:p1"));
         assert_eq!(adapter.provider_of("w1:p1").as_deref(), Some("codex"));
-        assert!(adapter.may_review("w1:p1"));
+        assert!(adapter.may_review("w1:p1", "reviewer"));
         assert!(adapter.lane_agent_alive("w1:p1").is_some());
         // Real inbox writes occur through the worker-local terminal bridge.
         handle.block_on(async { adapter.announce_task("w1:p1", &task, 30.0).await });
