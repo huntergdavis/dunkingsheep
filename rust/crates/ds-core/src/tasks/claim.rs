@@ -28,6 +28,8 @@ pub struct Candidate {
     pub assignees: Vec<String>,
     pub multi_assignee: bool,
     pub allocation_waiting: bool,
+    /// The pane that routed the ready offer, when one is waiting (`allocation_offers.offered_by`).
+    pub offered_by: Option<String>,
     /// Panes holding a live lease.
     pub leased_by: Vec<String>,
     pub blocked_by: Vec<String>,
@@ -35,7 +37,12 @@ pub struct Candidate {
 
 /// `_claimable`: whether `pane_id` may take this task right now.
 pub fn claimable(task: &Candidate, pane_id: Option<&str>) -> bool {
-    if task.allocation_waiting {
+    let assigned_to_me = pane_id.is_some_and(|pane| task.assignees.iter().any(|a| a == pane));
+    let routed_by_me = pane_id.is_some_and(|pane| task.offered_by.as_deref() == Some(pane));
+    // A ready offer whose owners are exactly the assignees is waiting on its allocation. Only its
+    // assignee may take it (t3617), and only when that pane did not route the offer itself: a review
+    // routed by its author is offered by the author, and the author must not take it back.
+    if task.allocation_waiting && !(assigned_to_me && !routed_by_me) {
         return false;
     }
     if let Some(pane) = pane_id {
@@ -46,7 +53,6 @@ pub fn claimable(task: &Candidate, pane_id: Option<&str>) -> bool {
     if !task.leased_by.is_empty() {
         return task.multi_assignee;
     }
-    let assigned_to_me = pane_id.is_some_and(|pane| task.assignees.iter().any(|a| a == pane));
     match task.status.as_str() {
         // F2: a named assignee can pull its own task.
         "open" => task.assignees.is_empty() || task.multi_assignee || assigned_to_me,
@@ -353,19 +359,20 @@ impl Tasks {
                         .map_err(db::map_sqlite)?;
                     row.candidate.blocked_by = dependency_state_conn(&tx, &id)?.1.blocked_by;
                     // The allocation table may not exist yet (the Python tolerates that).
-                    let offer: Option<String> = match tx
-                        .query_row("SELECT owners FROM allocation_offers WHERE task_id = ? AND state = 'ready'",
-                                   params![id], |r| r.get(0))
+                    let offer: Option<(String, String)> = match tx
+                        .query_row("SELECT owners, offered_by FROM allocation_offers WHERE task_id = ? AND state = 'ready'",
+                                   params![id], |r| Ok((r.get(0)?, r.get(1)?)))
                         .optional()
                     {
                         Ok(found) => found,
                         Err(error) if error.to_string().contains("no such table") => None,
                         Err(error) => return Err(db::map_sqlite(error)),
                     };
-                    if let Some(owners) = offer {
+                    if let Some((owners, offered_by)) = offer {
                         let mut mine = row.candidate.assignees.clone();
                         mine.sort();
                         row.candidate.allocation_waiting = mine == decode_list(Some(&owners));
+                        row.candidate.offered_by = Some(offered_by);
                     }
                 }
                 rows.sort_by_key(|row| order_key(&row.priority, row.created_at, &row.candidate.id));
@@ -420,6 +427,14 @@ impl Tasks {
                     "UPDATE tasks SET status = 'in_progress', assignees = ?, attempts = attempts + 1, updated_at = ?, block_reason = NULL WHERE id = ?",
                     params![json!(assignees).to_string(), now, chosen.candidate.id],
                 ).map_err(db::map_sqlite)?;
+                if chosen.candidate.allocation_waiting {
+                    // The assignee took the task its ready offer named, so the allocation is done;
+                    // close the offer as `allocate` does (t3617).
+                    tx.execute(
+                        "UPDATE allocation_offers SET state='assigned' WHERE task_id=? AND state='ready'",
+                        params![chosen.candidate.id],
+                    ).map_err(db::map_sqlite)?;
+                }
                 tx.execute(
                     "INSERT INTO task_events (task_id, event, at, actor, scope, priority, status_from, status_to, duration_ms, meta) VALUES (?,?,?,?,?,?,?,?,?,?)",
                     params![chosen.candidate.id, "claimed", now, pane, chosen.scope, chosen.priority,
@@ -687,3 +702,7 @@ impl Tasks {
 #[cfg(test)]
 #[path = "claim_tests.rs"]
 mod claim_tests;
+
+#[cfg(test)]
+#[path = "claim_assigned_offer_tests.rs"]
+pub(crate) mod claim_assigned_offer_tests;
