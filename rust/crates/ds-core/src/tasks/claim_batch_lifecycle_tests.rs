@@ -250,23 +250,203 @@ async fn a_member_completes_only_after_its_earlier_members() {
     );
 }
 
+/// A cancelled prerequisite is satisfied (t530): it must not hold back the rest of the batch.
 #[tokio::test]
-async fn a_cancelled_earlier_member_still_holds_back_its_dependant() {
+async fn a_cancelled_earlier_member_does_not_hold_back_the_rest() {
     let tasks = store("cancelled").await;
     let a = tasks.add("global", "a", "").await.unwrap();
     let b = tasks.add("global", "b", "").await.unwrap();
-    tasks
-        .claim_batch(&ids(&[&a.id, &b.id]), "%1", ClaimOptions::default())
-        .await
-        .unwrap();
+    let c = tasks.add("global", "c", "").await.unwrap();
+    let batch_id = batch_of(
+        &tasks
+            .claim_batch(&ids(&[&a.id, &b.id, &c.id]), "%1", ClaimOptions::default())
+            .await
+            .unwrap(),
+    );
     tasks
         .set_status(&a.id, "cancelled", None, None)
         .await
         .unwrap();
-    // Removal never satisfies an internal prerequisite: only its completion does.
-    match tasks.complete(&b.id).await {
-        Err(DunkError::Refused(message)) => assert!(message.contains(a.id.as_str())),
-        other => panic!("b must stay held back by a: {other:?}"),
+    tasks.complete(&b.id).await.unwrap();
+    tasks.complete(&c.id).await.unwrap();
+    assert!(
+        all_inactive(&tasks, batch_id).await,
+        "the batch ends when its last active member leaves"
+    );
+}
+
+/// Blocking one member ends only that member. The rest of the batch keeps its identity, its
+/// leases and its order, and it can still complete.
+#[tokio::test]
+async fn a_blocked_member_ends_only_itself_and_the_batch_goes_on() {
+    let tasks = store("blocked").await;
+    let a = tasks.add("global", "a", "").await.unwrap();
+    let b = tasks.add("global", "b", "").await.unwrap();
+    let c = tasks.add("global", "c", "").await.unwrap();
+    let batch_id = batch_of(
+        &tasks
+            .claim_batch(&ids(&[&a.id, &b.id, &c.id]), "%1", ClaimOptions::default())
+            .await
+            .unwrap(),
+    );
+    tasks.block(&b.id, "waiting on the owner").await.unwrap();
+    assert_eq!(
+        members_of(&tasks, batch_id).await,
+        vec![(a.id.clone(), 1), (b.id.clone(), 0), (c.id.clone(), 1)],
+        "only the blocked member leaves the batch"
+    );
+    assert!(tasks.leases_for(&b.id, None).await.unwrap().is_empty());
+    assert_eq!(tasks.leases_for(&a.id, None).await.unwrap().len(), 1);
+    assert_eq!(tasks.leases_for(&c.id, None).await.unwrap().len(), 1);
+    // The remaining members are still one batch: a second batch cannot take c.
+    let refusal = refused(
+        tasks
+            .claim_batch(&ids(&[&c.id]), "%2", ClaimOptions::default())
+            .await
+            .unwrap(),
+    );
+    assert_eq!(refusal.reason, "batch_conflict");
+    assert_eq!(refusal.task_ids, vec![c.id.clone()]);
+    // b is no longer an earlier active member, so a and then c complete without it.
+    tasks.complete(&a.id).await.unwrap();
+    tasks.complete(&c.id).await.unwrap();
+    assert_eq!(tasks.get(&b.id).await.unwrap().status, "blocked");
+    assert!(all_inactive(&tasks, batch_id).await);
+}
+
+/// The batch-identity caveat: members can leave one at a time, so a batch can lose a member and
+/// keep the rest. The rest must still be freed together under release, never split.
+#[tokio::test]
+async fn a_batch_that_lost_a_member_is_still_freed_as_one_under_release() {
+    let tasks = store("split-release").await;
+    let a = tasks.add("global", "a", "").await.unwrap();
+    let b = tasks.add("global", "b", "").await.unwrap();
+    let c = tasks.add("global", "c", "").await.unwrap();
+    let batch_id = batch_of(
+        &tasks
+            .claim_batch(&ids(&[&a.id, &b.id, &c.id]), "%1", ClaimOptions::default())
+            .await
+            .unwrap(),
+    );
+    tasks.block(&b.id, "waiting").await.unwrap();
+    tasks.release(&a.id, "%1").await.unwrap();
+    for id in [&a.id, &c.id] {
+        assert_eq!(tasks.get(id).await.unwrap().status, "open", "{id} is freed");
+        assert!(tasks.leases_for(id, None).await.unwrap().is_empty());
     }
-    assert_eq!(tasks.get(&b.id).await.unwrap().status, "in_progress");
+    assert_eq!(tasks.get(&b.id).await.unwrap().status, "blocked");
+    assert!(all_inactive(&tasks, batch_id).await);
+}
+
+/// The same caveat under expiry: a member that left earlier is not requeued with the rest, and
+/// the rest lapse together.
+#[tokio::test]
+async fn an_expiry_after_a_member_left_reaps_only_the_rest() {
+    let tasks = store("split-expiry").await;
+    let a = tasks.add("global", "a", "").await.unwrap();
+    let b = tasks.add("global", "b", "").await.unwrap();
+    let c = tasks.add("global", "c", "").await.unwrap();
+    tasks
+        .claim_batch(
+            &ids(&[&a.id, &b.id, &c.id]),
+            "%1",
+            ClaimOptions {
+                lease_seconds: Some(0.5),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    tasks
+        .set_status(&b.id, "cancelled", None, None)
+        .await
+        .unwrap();
+    let later = crate::clock::now_s() + 3600.0;
+    let requeued = tasks.reap(None, None, Some(later), None).await.unwrap();
+    let mut reaped: Vec<String> = requeued.iter().map(|r| r.task_id.clone()).collect();
+    reaped.sort();
+    let mut expected = vec![a.id.clone(), c.id.clone()];
+    expected.sort();
+    assert_eq!(reaped, expected, "the cancelled member is not requeued");
+    assert_eq!(tasks.get(&b.id).await.unwrap().status, "cancelled");
+}
+
+/// Caveat 2: a dependency cycle among the members (a needs b, b needs a) is refused at claim, with
+/// no write. In batch order a may depend only on earlier members, so the later edge is the cycle.
+#[tokio::test]
+async fn a_dependency_cycle_among_members_is_refused() {
+    let tasks = store("cycle").await;
+    let a = tasks.add("global", "a", "").await.unwrap();
+    let b = tasks.add("global", "b", "").await.unwrap();
+    tasks
+        .update(
+            &a.id,
+            crate::tasks::FieldEdit {
+                depends_on: Some(vec![b.id.clone()]),
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    tasks
+        .update(
+            &b.id,
+            crate::tasks::FieldEdit {
+                depends_on: Some(vec![a.id.clone()]),
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    let refusal = refused(
+        tasks
+            .claim_batch(&ids(&[&a.id, &b.id]), "%1", ClaimOptions::default())
+            .await
+            .unwrap(),
+    );
+    assert_eq!(refusal.reason, "order_conflict");
+    assert_eq!(refusal.task_ids, vec![a.id.clone()], "a needs the later b");
+    for id in [&a.id, &b.id] {
+        assert_eq!(tasks.get(id).await.unwrap().status, "open");
+        assert!(tasks.leases_for(id, None).await.unwrap().is_empty());
+    }
+}
+
+/// A member that depends on a LATER member (not in a cycle, so no edge comes back) is refused:
+/// the earlier member would wait for work that starts after it. The store already refuses a task
+/// that depends on itself, so that case never reaches the batch.
+#[tokio::test]
+async fn a_dependency_on_a_later_member_is_refused() {
+    let tasks = store("forward").await;
+    let a = tasks.add("global", "a", "").await.unwrap();
+    let b = tasks.add("global", "b", "").await.unwrap();
+    let c = tasks.add("global", "c", "").await.unwrap();
+    tasks
+        .update(
+            &a.id,
+            crate::tasks::FieldEdit {
+                depends_on: Some(vec![c.id.clone()]),
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    let refusal = refused(
+        tasks
+            .claim_batch(&ids(&[&a.id, &b.id, &c.id]), "%1", ClaimOptions::default())
+            .await
+            .unwrap(),
+    );
+    assert_eq!(refusal.reason, "order_conflict");
+    assert_eq!(
+        refusal.task_ids,
+        vec![a.id.clone()],
+        "a waits on the later c"
+    );
+    for id in [&a.id, &b.id, &c.id] {
+        assert_eq!(tasks.get(id).await.unwrap().status, "open");
+    }
 }

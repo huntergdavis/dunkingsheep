@@ -42,7 +42,7 @@ pub use claim::{
     claimable, refusal, CallerAlive, Candidate, ClaimOptions, ClaimOutcome, Refusal, Requeued,
 };
 pub use claim_batch::ClaimBatchOutcome;
-use claim_batch::{active_batch_of, batch_settled, end_batch, unfinished_earlier_member};
+use claim_batch::{active_batch_of, retire_member, unfinished_earlier_member};
 
 /// `DEFAULT_LEASE_S`: how long a claim stays valid without a heartbeat. The Python reads
 /// `DUNKINGSHEEP_LEASE_S` once at import; this reads it per call.
@@ -633,13 +633,13 @@ impl Tasks {
                 }
                 // t1218 A: the event path. Completing a task unblocks what it blocks, in
                 // the same writer call as the completion, so no lane runs `task unblock`.
+                // t3582: a member that leaves the work (done, cancelled or blocked) ends its own
+                // membership only; the rest of its batch goes on. The batch ends when its last
+                // active member leaves.
+                if matches!(status.as_str(), "done" | "cancelled" | "blocked") && current != status {
+                    retire_member(conn, &id)?;
+                }
                 if status == "done" && current != "done" {
-                    // t3582: the batch ends when its last member is done.
-                    if let Some(batch) = active_batch_of(conn, &id)? {
-                        if batch_settled(conn, batch)? {
-                            end_batch(conn, batch)?;
-                        }
-                    }
                     auto_unblock(conn, now, Some(&id))?;
                 }
                 Ok(())

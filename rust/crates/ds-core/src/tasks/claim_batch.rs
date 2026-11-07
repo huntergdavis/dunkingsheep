@@ -11,7 +11,7 @@
 //! is still outstanding. A prerequisite that is itself a member does not hold its dependant
 //! back, because the members are claimed together and their order is the work order (child B).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::json;
@@ -46,6 +46,8 @@ struct Member {
     created_at: f64,
     kind: String,
     author: Option<String>,
+    /// The task's own `depends_on`, for the order check among members.
+    depends_on: Vec<String>,
 }
 
 fn plain(reason: &'static str, task_ids: Vec<String>) -> Refusal {
@@ -162,10 +164,11 @@ fn validate(
     for id in wanted {
         let found = tx
             .query_row(
-                "SELECT scope, priority, created_at, status, kind, author, assignees, multi_assignee FROM tasks WHERE id = ?",
+                "SELECT scope, priority, created_at, status, kind, author, assignees, multi_assignee, depends_on FROM tasks WHERE id = ?",
                 params![id],
                 |row| {
                     let assignees: Option<String> = row.get(6)?;
+                    let depends_on: Option<String> = row.get(8)?;
                     Ok(Member {
                         candidate: Candidate {
                             id: id.clone(),
@@ -179,6 +182,7 @@ fn validate(
                         created_at: row.get(2)?,
                         kind: row.get(4)?,
                         author: row.get(5)?,
+                        depends_on: decode_list(depends_on.as_deref()),
                     })
                 },
             )
@@ -200,6 +204,29 @@ fn validate(
         .collect();
     if !foreign.is_empty() {
         return Ok(Err(plain("scope", foreign)));
+    }
+    // The batch's order is its execution order: a member may depend only on members EARLIER in
+    // it. A dependency on a later member, or on itself, closes a cycle among the members, and the
+    // batch would wait on itself (t3582). Refused before any write.
+    let position: HashMap<&str, usize> = members
+        .iter()
+        .enumerate()
+        .map(|(index, member)| (member.candidate.id.as_str(), index))
+        .collect();
+    let closes_cycle: Vec<String> = members
+        .iter()
+        .enumerate()
+        .filter(|(index, member)| {
+            member.depends_on.iter().any(|dep| {
+                position
+                    .get(dep.as_str())
+                    .is_some_and(|later_or_same| *later_or_same >= *index)
+            })
+        })
+        .map(|(_, member)| member.candidate.id.clone())
+        .collect();
+    if !closes_cycle.is_empty() {
+        return Ok(Err(plain("order_conflict", closes_cycle)));
     }
     // A member already in an active batch belongs to that batch's claim, not to this one.
     let mut conflicting = Vec::new();
@@ -438,16 +465,19 @@ pub(super) fn end_batch(conn: &Connection, batch_id: i64) -> Result<(), DunkErro
     Ok(())
 }
 
-/// The first earlier member of `task_id`'s batch that is not done, if any. An internal
-/// prerequisite is satisfied only by its completion: cancelling it does not satisfy it.
+/// The first earlier member of `task_id`'s batch that is still active, if any. A member leaves the
+/// active set when it is done, cancelled or blocked (`retire_member`), so an earlier member holds
+/// its dependants back only while it is still work. Cancelling a prerequisite satisfies it: the
+/// same rule as the live dependency check (t530), and a cancelled member must not hold back the
+/// rest of the batch.
 pub(super) fn unfinished_earlier_member(
     conn: &Connection,
     batch_id: i64,
     task_id: &str,
 ) -> Result<Option<String>, DunkError> {
     conn.query_row(
-        "SELECT m.task_id FROM task_batch_members AS m JOIN tasks AS t ON t.id = m.task_id \
-         WHERE m.batch_id = ?1 AND m.active = 1 AND t.status != 'done' \
+        "SELECT m.task_id FROM task_batch_members AS m \
+         WHERE m.batch_id = ?1 AND m.active = 1 \
          AND m.position < (SELECT position FROM task_batch_members WHERE batch_id = ?1 AND task_id = ?2) \
          ORDER BY m.position LIMIT 1",
         params![batch_id, task_id],
@@ -457,17 +487,33 @@ pub(super) fn unfinished_earlier_member(
     .map_err(db::map_sqlite)
 }
 
-/// Whether every active member of the batch is done, so the batch has finished.
-pub(super) fn batch_settled(conn: &Connection, batch_id: i64) -> Result<bool, DunkError> {
-    let open: i64 = conn
+/// A member leaves its batch when it is done, cancelled or blocked: only that member ends, and
+/// the batch goes on with the rest (t3582). When no active member is left, the batch has ended;
+/// its rows stay as the record.
+pub(super) fn retire_member(conn: &Connection, task_id: &str) -> Result<(), DunkError> {
+    let Some(batch_id) = active_batch_of(conn, task_id)? else {
+        return Ok(());
+    };
+    conn.execute(
+        "UPDATE task_batch_members SET active = 0 WHERE batch_id = ? AND task_id = ? AND active = 1",
+        params![batch_id, task_id],
+    )
+    .map_err(db::map_sqlite)?;
+    let remaining: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM task_batch_members AS m JOIN tasks AS t ON t.id = m.task_id \
-             WHERE m.batch_id = ? AND m.active = 1 AND t.status != 'done'",
+            "SELECT COUNT(*) FROM task_batch_members WHERE batch_id = ? AND active = 1",
             params![batch_id],
             |row| row.get(0),
         )
         .map_err(db::map_sqlite)?;
-    Ok(open == 0)
+    if remaining == 0 {
+        conn.execute(
+            "UPDATE task_batches SET state = 'ended' WHERE batch_id = ?",
+            params![batch_id],
+        )
+        .map_err(db::map_sqlite)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
