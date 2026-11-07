@@ -70,13 +70,22 @@ fn a_lane_send_to_the_owner_lane_mailbox_shows_in_the_owner_conversation() {
     let (_dir, flock, store) = fixture("owner-lane-mailbox");
     // The coordinator's send to the Codex owner's lane name: recorded under that name, with the
     // owner pane's id, exactly as `resolve_mailbox` files it.
-    store
+    let lane_id = store
         .send(&Outgoing {
             mailbox: OWNER_LANE_MAILBOX,
             body: Some("coordinator says hi"),
             mailbox_label: Some(OWNER_LANE_MAILBOX),
             pane_id: Some(OWNER),
             sender: Some(WORKER),
+            ..Outgoing::default()
+        })
+        .unwrap();
+    // An ordinary owner question: unread, unanswered, so it IS waiting for the desk.
+    let question_id = store
+        .send(&Outgoing {
+            mailbox: OWNER_MAILBOX,
+            body: Some("owner question"),
+            mailbox_label: Some(OWNER_MAILBOX),
             ..Outgoing::default()
         })
         .unwrap();
@@ -106,4 +115,14 @@ fn a_lane_send_to_the_owner_lane_mailbox_shows_in_the_owner_conversation() {
         .messages
         .iter()
         .all(|row| row.get("body").and_then(Value::as_str) != Some("private to a worker")));
+    // The desk's waiting list is owner questions only: a lane's unread mail is in the window
+    // but `reply()` could never answer it, so it must not be listed (t3535 review).
+    assert!(
+        !conversation.waiting.contains(&lane_id),
+        "a lane message is not a question waiting for the desk"
+    );
+    assert!(
+        conversation.waiting.contains(&question_id),
+        "an ordinary owner question still waits for the desk"
+    );
 }

@@ -154,10 +154,16 @@ impl<'a> OwnerConversations<'a> {
         let limit = limit.filter(|limit| *limit != 0).unwrap_or(50);
         let mailboxes = self.conversation_mailboxes(&store)?;
         let mut messages = store.conversation_across(&mailboxes, Some(limit), before)?;
+        // `waiting` is the desk's list of owner questions. The window now also carries lane
+        // mailboxes (t3535), but `reply()` only answers rows in the owner mailbox, so a lane's
+        // unread mail must not be listed here: the same predicate `reply()` enforces.
         let waiting = messages
             .iter()
             .filter(|row| {
-                row.get("state").and_then(Value::as_str) == Some("queued")
+                row.get("mailbox")
+                    .and_then(Value::as_str)
+                    .is_some_and(|mailbox| normalise_mailbox(mailbox) == OWNER_MAILBOX)
+                    && row.get("state").and_then(Value::as_str) == Some("queued")
                     && row.get("answered").and_then(Value::as_bool) != Some(true)
                     && !row.get("reply_to").is_some_and(value_truthy)
             })
