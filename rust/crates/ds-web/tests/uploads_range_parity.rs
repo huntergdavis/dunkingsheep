@@ -1,7 +1,8 @@
 //! t1702 route-parity leaf: GET and HEAD /api/uploads/{id} against the Python desk.
 //!
 //! The oracle is `fixtures/uploads_range_oracle.json`, captured from the Python desk's
-//! `download` route on the pinned FastAPI/Starlette (see `fixtures/generate_uploads_range_oracle.py`).
+//! `download` route on the served desk's FastAPI 0.162.0 / Starlette 1.10.0 / Pydantic 2.14.2
+//! (see `fixtures/generate_uploads_range_oracle.py`).
 //! This test drives the Rust `search_attachments` router over the production
 //! `MessagesBackend` (a temporary on-disk uploads folder), with the stored file's mtime
 //! pinned to the fixture's, and compares status, the kept headers and the body of every

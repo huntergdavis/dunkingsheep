@@ -223,10 +223,10 @@
     "size": 20
   },
   "oracle": {
-    "fastapi": "0.143.0",
+    "fastapi": "0.162.0",
     "interpreter": "3.14.4",
-    "pydantic": "2.14.0",
-    "revision": "3bb3c484023df592d6762202ec779a905cfb73ce",
-    "starlette": "1.7.0"
+    "pydantic": "2.14.2",
+    "revision": "1c55325df65314ef7aeedbc529fb9d7b8fd87bf0",
+    "starlette": "1.10.0"
   }
 }

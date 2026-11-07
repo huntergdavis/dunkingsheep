@@ -1,7 +1,9 @@
 """Capture the Python desk's GET /api/uploads/{id} behaviour as the parity oracle (t1702).
 
-Run with the oracle interpreter (FastAPI and Starlette as served on this host), from the
-repository root, with a scratch data dir so no live desk state is touched:
+Run with the SERVED desk interpreter (releases/web-9c8f919-client499-fd1d498/.venv: FastAPI
+0.162.0, Starlette 1.10.0, Pydantic 2.14.2, Python 3.14.4), from the repository root, with a
+scratch data dir so no live desk state is touched. httpx2 is not in that venv; put a scratch
+directory that holds only httpx2 and httpcore2 (installed with --no-deps) on PYTHONPATH:
 
     VP_DATA_DIR=<scratch> PYTHONPATH=<scratch-pylib-with-httpx2> \
         <oracle-python> rust/crates/ds-web/tests/fixtures/generate_uploads_range_oracle.py
