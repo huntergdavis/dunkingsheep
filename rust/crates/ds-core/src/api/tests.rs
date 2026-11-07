@@ -15,6 +15,9 @@ mod owner_page_tests;
 
 #[path = "task_batch_tests.rs"]
 mod task_batch_tests;
+// t665 piece 2: the watchdog's confirmation read and the page number (its own file).
+#[path = "owner_page_confirm_tests.rs"]
+mod owner_page_confirm_tests;
 
 use crate::config::Env;
 use crate::flock::commands_inbox::{InboxEnv, Nudge, RouteEntry};

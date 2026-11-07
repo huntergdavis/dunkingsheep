@@ -39,7 +39,7 @@ pub struct Group {
     pub actions: &'static [(&'static str, &'static str)],
 }
 
-/// Every command the daemon serves (128 at generation time).
+/// Every command the daemon serves (129 at generation time).
 pub static COMMANDS: &[Command] = &[
     Command {
         name: "add_dunk",
@@ -627,6 +627,16 @@ pub static COMMANDS: &[Command] = &[
         params: &[Param { name: "body", schema: "{\"type\":\"string\",\"description\":\"The page text (the watchdog's PAGE OWNER digest).\"}" }, Param { name: "external_id", schema: "{\"type\":\"string\",\"description\":\"The producer's dedupe key; a repeat returns the row already recorded.\"}" }],
         dispatch_required: &["body"],
         required: &["body"],
+        mcp: false,
+        owner_only: false,
+        roles: &["owner", "system"],
+    },
+    Command {
+        name: "owner_page_confirmed",
+        description: "The highest owner page the telegram transport has delivered (t665), as the watchdog compares it: {through: n | null, transport: telegram}. A page is confirmed once this reaches its own number. Owner and system only.",
+        params: &[],
+        dispatch_required: &[],
+        required: &[],
         mcp: false,
         owner_only: false,
         roles: &["owner", "system"],
