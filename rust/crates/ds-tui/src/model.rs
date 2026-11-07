@@ -1074,18 +1074,7 @@ impl<C: RpcClient> TuiModel<C> {
         let plain_or_shift =
             key.modifiers.is_empty() || key.modifiers == crossterm::event::KeyModifiers::SHIFT;
         if key.code == KeyCode::Char('v') && plain_or_shift {
-            self.view = match self.view {
-                View::Dunks => View::Tasks,
-                View::Tasks => View::Dunks,
-            };
-            self.flash(
-                match self.view {
-                    View::Dunks => "Dunks view",
-                    View::Tasks => "Tasks view",
-                },
-                now,
-                4.0,
-            );
+            self.toggle_view(now);
             self.refresh(now);
             return KeyDispatch::Handled;
         }
@@ -1324,6 +1313,24 @@ impl<C: RpcClient> TuiModel<C> {
     pub fn flash(&mut self, text: impl Into<String>, now: f64, seconds: f64) {
         self.message = text.into();
         self.message_until = now + seconds;
+    }
+
+    /// Switch between the dunk and task views and flash the new view's name, as the
+    /// Python TUI does on `v`. Shared by the key handler and the run loop, which
+    /// consumes `v` before forwarding keys.
+    pub fn toggle_view(&mut self, now: f64) {
+        self.view = match self.view {
+            View::Dunks => View::Tasks,
+            View::Tasks => View::Dunks,
+        };
+        self.flash(
+            match self.view {
+                View::Dunks => "Dunks view",
+                View::Tasks => "Tasks view",
+            },
+            now,
+            4.0,
+        );
     }
 
     /// Stop daemon-owned dunks only for the explicit uppercase-Q action.
