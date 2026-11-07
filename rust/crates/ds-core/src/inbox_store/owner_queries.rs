@@ -111,7 +111,29 @@ impl Store {
         limit: Option<i64>,
         before: Option<f64>,
     ) -> Result<Vec<Value>, DunkError> {
-        let (condition, box_params) = mailbox_where(mailbox, "mailbox");
+        self.conversation_across(&[mailbox.to_string()], limit, before)
+    }
+
+    /// One conversation window over several mailboxes (t3535: the owner mailbox and the owner
+    /// lane's own mailbox name), oldest first, with answered flags.
+    pub fn conversation_across(
+        &self,
+        mailboxes: &[String],
+        limit: Option<i64>,
+        before: Option<f64>,
+    ) -> Result<Vec<Value>, DunkError> {
+        let mut conditions = Vec::with_capacity(mailboxes.len());
+        let mut box_params: Vec<String> = Vec::new();
+        for mailbox in mailboxes {
+            let (condition, params) = mailbox_where(mailbox, "mailbox");
+            conditions.push(condition);
+            box_params.extend(params);
+        }
+        let condition = if conditions.is_empty() {
+            "0".to_string()
+        } else {
+            format!("({})", conditions.join(" OR "))
+        };
         let mut sql = format!("SELECT * FROM messages WHERE {condition} AND state != 'cancelled'");
         let mut values: Vec<SqlValue> = box_params.into_iter().map(SqlValue::Text).collect();
         if let Some(before) = before {

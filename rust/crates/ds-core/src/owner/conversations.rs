@@ -116,6 +116,33 @@ impl<'a> OwnerConversations<'a> {
             .ok_or_else(|| DunkError::Refused("the owner inbox store is not attached".to_string()))
     }
 
+    /// The owner mailbox plus the mailbox of every owner-role lane (t3535). A lane's send to its
+    /// own name (for example `codex-rust-owner`) is recorded under that name, with the owner
+    /// pane's id, so the conversation must read it too or lane messages never reach the desk.
+    fn conversation_mailboxes(&self, store: &Store) -> Result<Vec<String>, DunkError> {
+        let described = self.flock.with_roles(|roles, _| roles.describe())?;
+        let owner_panes: Vec<String> = described
+            .get("lanes")
+            .and_then(Value::as_object)
+            .map(|lanes| {
+                lanes
+                    .iter()
+                    .filter(|(_, entry)| entry.get("role").and_then(Value::as_str) == Some("owner"))
+                    .map(|(pane, _)| pane.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut mailboxes = vec![OWNER_MAILBOX.to_string()];
+        for pane in owner_panes {
+            for mailbox in crate::inbox::mailboxes_for_pane(store.read_pool(), &pane)? {
+                if !mailboxes.contains(&mailbox) {
+                    mailboxes.push(mailbox);
+                }
+            }
+        }
+        Ok(mailboxes)
+    }
+
     /// Read one owner conversation window without consuming or acknowledging rows.
     pub fn conversation(
         &self,
@@ -125,7 +152,8 @@ impl<'a> OwnerConversations<'a> {
     ) -> Result<Conversation, DunkError> {
         let store = self.authorised_store(self_pane_id)?;
         let limit = limit.filter(|limit| *limit != 0).unwrap_or(50);
-        let mut messages = store.conversation(OWNER_MAILBOX, Some(limit), before)?;
+        let mailboxes = self.conversation_mailboxes(&store)?;
+        let mut messages = store.conversation_across(&mailboxes, Some(limit), before)?;
         let waiting = messages
             .iter()
             .filter(|row| {
@@ -1224,3 +1252,7 @@ mod tests {
         assert_eq!("2", view_version());
     }
 }
+
+#[cfg(test)]
+#[path = "conversation_mailboxes_tests.rs"]
+mod conversation_mailboxes_tests;
