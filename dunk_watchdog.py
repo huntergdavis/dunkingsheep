@@ -253,7 +253,7 @@ TOP = {
     "panes": {"source": _enum("herdr", "daemon", "none"), "pane_id_pattern": _regex},
     "escalation": {
         "vp": {"mailbox": _str, "min_severity": _enum(*SEVERITIES)},
-        "owner": {"enabled": _bool, "channel": _enum("desk-brief"),
+        "owner": {"enabled": _bool, "channel": _enum("desk-brief", "owner-mailbox"),
                   "classes": _enum_list(*OWNER_CLASSES), "min_severity": _enum(*SEVERITIES),
                   "approved_by": _opt_str, "max_pages_per_hour": POSITIVE_INT,
                   "confirm_within_minutes": POSITIVE, "confirm_path": _str},
@@ -1741,6 +1741,48 @@ class DeskBriefChannel:
         return value
 
 
+OWNER_MAILBOX = "owner"  # the owner's mailbox: the Front Desk thread
+OWNER_MAILBOX_SUBJECT = "Watchdog escalation"
+
+
+def owner_mailbox_send(body, subject=OWNER_MAILBOX_SUBJECT):
+    """One owner escalation into the owner mailbox, as the `watchdog` system sender.
+
+    The daemon stores it as a plain mailbox row: no owner-page sender and no telegram
+    transport, so the Telegram outbox never carries it. Nothing here pages the phone.
+    Never starts the daemon: if it is down, the run fails and the dead-man check reports it.
+    """
+    from dunk_client import FlockClient
+    return FlockClient(self_pane_id=None).call("inbox_send", to=OWNER_MAILBOX, subject=subject,
+                                               body=body, system_sender=SYSTEM_SENDER)
+
+
+class OwnerMailboxChannel:
+    """The owner escalation channel for `channel: owner-mailbox` (t3624).
+
+    The mailbox write is the delivery: once the daemon accepts the row the owner has it
+    in the owner thread, so the page is confirmed on post and needs no forwarder to
+    confirm it. Telegram is never written here.
+    """
+
+    confirms_on_post = True
+
+    def __init__(self, send=None):
+        self.send = send or owner_mailbox_send
+
+    @property
+    def desk_channel(self):
+        return "owner-mailbox"
+
+    def post(self, body):
+        answer = self.send(body)
+        message_id = answer.get("message_id") if isinstance(answer, dict) else None
+        return str(message_id) if message_id else "owner-mailbox"
+
+    def confirmed_through(self):
+        return None
+
+
 def _confirm_pending(config, state, owner_channel, now, problems):
     """Mark pending owner pages confirmed when the forwarder has passed them;
     report pages that stay unconfirmed past confirm_within_minutes."""
@@ -1779,7 +1821,10 @@ def run(config, now, dry_run_flag=False, send=None, owner_channel=None, panes_pr
     no --dry-run flag. Never raises for rule, state or owner-transport errors."""
     live = config["enabled"] and not config["dry_run"] and not dry_run_flag
     mode = "live" if live else "dry-run"
-    owner_channel = owner_channel or DeskBriefChannel(_expand(config["escalation"]["owner"]["confirm_path"]))
+    owner_cfg = config["escalation"]["owner"]
+    owner_channel = owner_channel or (
+        OwnerMailboxChannel() if owner_cfg["channel"] == "owner-mailbox"
+        else DeskBriefChannel(_expand(owner_cfg["confirm_path"])))
     state_path = _expand(config["state_path"])
     state, state_problem = load_state(state_path)
     result = evaluate(config, now, panes_provider, host_sampler)
@@ -1835,7 +1880,11 @@ def run(config, now, dry_run_flag=False, send=None, owner_channel=None, panes_pr
     page_lines = []
     for decision in owner_send:
         item = decision["finding"]
-        body = digest("OWNER page", [line("PAGE OWNER", item, "no")])
+        # The owner-mailbox escalation is not a page: its text never carries the page marker
+        # the desk-store page reader looks for, so no reader can mistake it for a phone page.
+        confirms = getattr(owner_channel, "confirms_on_post", False)
+        body = digest("OWNER escalation" if confirms else "OWNER page",
+                      [line("ESCALATION" if confirms else "PAGE OWNER", item, "no")])
         try:
             brief_id = owner_channel.post(body)
         except Exception as error:  # noqa: BLE001 - never recorded as sent
@@ -1843,10 +1892,12 @@ def run(config, now, dry_run_flag=False, send=None, owner_channel=None, panes_pr
                             "recorded as UNDELIVERED")
             decision["owner"] = "transport-error"
             continue
-        state["owner_pages"][dedupe_key(item)] = {"brief_id": brief_id, "posted_at": now, "confirmed_at": None,
+        state["owner_pages"][dedupe_key(item)] = {"brief_id": brief_id, "posted_at": now,
+                                                  "confirmed_at": now if confirms else None,
                                                   "desk_channel": getattr(owner_channel, "desk_channel", "vp")}
         state["owner_page_times"].append(now)
-        page_lines.append(line("PAGE OWNER (pending confirmation)", item, "no"))
+        page_lines.append(line("ESCALATION (owner mailbox)" if confirms else "PAGE OWNER (pending confirmation)",
+                               item, "no"))
     for key in recovered["owner"]:
         try:
             owner_channel.post(digest("OWNER resolved", [f"RESOLVED {key}"]))
