@@ -198,6 +198,11 @@ fn native_pane(files: &NativeFiles) -> Pane {
 
 /// A persisted Flock in `state_dir` holding the failed, typed candidate for `%1`. Its attempt
 /// generation is read from `env`, as the observer's currency check reads it.
+///
+/// The typing step binds the native session before any test mutation (Python's `failed()` types
+/// the fixture, and `persist_typed_attempt` stores `entry["native_binding"]` there, dunk_core.py
+/// around line 6240). The binding is taken here the same way, so a later change to the native
+/// state is judged against the bound session, not a candidate that never had one.
 fn candidate_flock(state_dir: &std::path::Path, env: &Pane) -> Flock {
     let flock = persistent_recovery_flock(state_dir, &state_dir.join("state.json"));
     let mut message = Message::new("m1", "%1", "writer", TEXT, "send_text");
@@ -206,6 +211,19 @@ fn candidate_flock(state_dir: &std::path::Path, env: &Pane) -> Flock {
     message.typed_at = Some(100.0);
     message.attempt_generation = pane_generation(env, "%1");
     flock.note_stuck_candidate(&message);
+    let Ok(binding) = crate::recovery_native::resolve_prompt_session(&env.panes[0]) else {
+        panic!("the bound pane must resolve to its native session at typing");
+    };
+    assert!(
+        flock.bind_native_candidate(
+            "%1",
+            "m1",
+            100.0,
+            pane_generation(env, "%1").as_deref(),
+            &binding,
+        ),
+        "the typed candidate takes the native binding"
+    );
     flock
 }
 
