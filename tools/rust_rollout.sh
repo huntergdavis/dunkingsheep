@@ -9,17 +9,18 @@
 #
 #   tools/rust_rollout.sh plan      --sha SHA            the whole sequence, no changes
 #   tools/rust_rollout.sh stage     --sha SHA [--apply]  build the pinned revision, install the binary, no restart
-#   tools/rust_rollout.sh activate  --sha SHA [--apply]  stop timers, backup state, drop-in, launcher, restart
+#   tools/rust_rollout.sh activate  --sha SHA [--apply]  stop timers, backup, record state, drop-in, launcher, restart
 #   tools/rust_rollout.sh verify    [--apply]            read-only checks; with --apply also start the timers and tick each once
-#   tools/rust_rollout.sh rollback  [--apply]            reverse the activation that activate recorded
+#   tools/rust_rollout.sh rollback  [--apply]            reverse the activation, from the state record it wrote
 #
 # Stage and activate are separate on purpose. Stage is reversible and silent. Activate restarts the
 # daemon, which interrupts queued deliveries for a few seconds, so the operator schedules it.
-# Rollback takes no --sha: it reverses the state that activate recorded in $STATE.
+# Rollback takes no --sha. It works from the state record that activate writes before its first switch
+# step, so it also works after an activate that died part way through.
 #
 # Environment (tests and non-default hosts; the defaults are the live host's):
 #   RUST_REPO      the checkout the pinned sha lives in         (default: this script's repo)
-#   RUST_WORKTREE  the detached build worktree                   (default: <repo parent>/.dunk-port-work/owner-release-wt)
+#   RUST_WORKTREE  the detached build worktree                   (default: <workspace>/.dunk-port-work/owner-release-wt)
 #   RUST_RELEASES  the immutable release trees                   (default: $HOME/.local/share/dunkingsheep/releases)
 #   RUST_CARGO     the cargo to build with                       (default: cargo)
 #   RUST_OWNER     the owner's mailbox for the inbox check       (default: %1)
@@ -120,7 +121,9 @@ stage() {
 }
 
 # Runbook 8.3: the backup is taken while the python daemon still serves, from a copy that holds a
-# consistent snapshot of each sqlite database, so the live WAL files are never copied.
+# consistent snapshot of each sqlite database, so the live WAL files are never copied. The config holds
+# tokens (github-tokens.json is written 0600 by the daemon), so the archive and its directory are private
+# whatever umask the caller has.
 backup() {
   ts=$1
   target=$BACKUPS/pre-rust-$ts.tar
@@ -131,6 +134,9 @@ backup() {
   done
   run mkdir -p "$BACKUPS"
   if [ "$APPLY" = 1 ]; then
+    old_umask=$(umask)
+    umask 077
+    chmod 0700 "$BACKUPS"
     mkdir "$work"
     # shellcheck disable=SC2086
     tar -C "$CONFIG_DIR" $excludes -cf - . | tar -C "$work" -xf -
@@ -142,18 +148,21 @@ backup() {
       fi
     done
     tar -cf "$target" -C "$work" .
+    chmod 0600 "$target"
     tar -tf "$target" >/dev/null
     rm -rf "$work"
+    umask "$old_umask"
   else
+    echo "DRY-RUN: umask 077; chmod 0700 $BACKUPS"
     echo "DRY-RUN: tar -C $CONFIG_DIR (all but $SQLITE_FILES and their -wal/-shm) | tar -C $work -xf -"
     echo "DRY-RUN: sqlite3 <db> \".backup '$work/<db>'\" and PRAGMA integrity_check, for each of: $SQLITE_FILES"
-    echo "DRY-RUN: tar -cf $target -C $work ."
+    echo "DRY-RUN: tar -cf $target -C $work . ; chmod 0600 $target"
   fi
   echo "backup: $target"
 }
 
-# A failure after the timers stop and before the switch leaves the python daemon serving, so the
-# timers go back on. The trap is cleared when the switch starts.
+# A failure after the timers stop and before the state record leaves the python daemon serving, so the
+# timers go back on. The trap is replaced once the record exists.
 restart_timers_on_failure() {
   echo "activate FAILED before the switch; the python daemon still serves; restarting the timers" >&2
   if [ "$APPLY" = 1 ]; then systemctl --user start 'dunkingsheep-*.timer' || true; fi
@@ -175,10 +184,27 @@ activate() {
   run systemctl --user stop 'dunkingsheep-*.timer'
   trap restart_timers_on_failure EXIT
   backup "$ts"
-  # 2. The switch (runbook 8.4): the only interrupting step. The trap names the remedy if it fails
-  #    after the drop-in is written.
+  # 2. Record before the first switch step, so every later step is reversible from this record even if
+  #    activate dies part way through. The drop-in that is about to be replaced is copied first.
+  dropin_before=absent
+  if [ -f "$DROPIN" ]; then
+    dropin_before=$BACKUPS/dropin-before-$ts.conf
+    run cp -p "$DROPIN" "$dropin_before"
+  fi
+  put "$STATE" <<EOF
+sha=$SHA
+ts=$ts
+status=switching
+binary=$bin
+launcher=$LAUNCHER
+launcher_backup=$LAUNCHER.python-$ts
+dropin=$DROPIN
+dropin_before=$dropin_before
+backup=$BACKUPS/pre-rust-$ts.tar
+EOF
+  # 3. The switch. A failure from here on names the rollback, which works from the record above.
+  trap 'echo "activate FAILED during the switch; run: $0 rollback --apply (it works from $STATE)" >&2' EXIT
   run mkdir -p "$DROPIN_DIR"
-  trap 'echo "activate FAILED after the switch started; run: $0 rollback --apply" >&2' EXIT
   put "$DROPIN" <<EOF
 [Service]
 # t3471 Rust cutover (runbook section 8 step 4). A later drop-in overrides ExecStart.
@@ -193,15 +219,20 @@ EOF
 exec $bin "\$@"
 EOF
   run chmod 0755 "$LAUNCHER"
+  run systemctl --user daemon-reload
+  run systemctl --user restart dunkingsheep.service
+  # 4. Done: the record says so.
   put "$STATE" <<EOF
 sha=$SHA
 ts=$ts
+status=active
 binary=$bin
+launcher=$LAUNCHER
 launcher_backup=$LAUNCHER.python-$ts
+dropin=$DROPIN
+dropin_before=$dropin_before
 backup=$BACKUPS/pre-rust-$ts.tar
 EOF
-  run systemctl --user daemon-reload
-  run systemctl --user restart dunkingsheep.service
   trap - EXIT
   echo "activated $SHA; now run: $0 verify   (then verify --apply to start the timers)"
 }
@@ -230,31 +261,51 @@ verify() {
   fi
 }
 
-# Runbook 9. The state is not restored here (9.4): the operator checks the python release first.
+# Runbook 9, worked from the state record. The record exists from before the first switch step, so this
+# also undoes an activate that died part way. The state is not restored here (9.4): the operator checks
+# the python release first.
 rollback() {
   if [ "$APPLY" = 1 ]; then
     [ -f "$STATE" ] || { echo "no cutover recorded at $STATE; nothing to roll back" >&2; exit 1; }
   fi
   if [ -f "$STATE" ]; then
     rb_sha=$(state_value sha)
-    rb_launcher=$(state_value launcher_backup)
+    rb_status=$(state_value status)
+    rb_launcher=$(state_value launcher)
+    rb_launcher_backup=$(state_value launcher_backup)
+    rb_dropin=$(state_value dropin)
+    rb_dropin_before=$(state_value dropin_before)
     rb_backup=$(state_value backup)
   else
     rb_sha="<sha recorded at activate>"
-    rb_launcher="<launcher backup recorded at activate>"
+    rb_status="<status recorded at activate>"
+    rb_launcher="<launcher recorded at activate>"
+    rb_launcher_backup="<launcher backup recorded at activate>"
+    rb_dropin="<drop-in recorded at activate>"
+    rb_dropin_before="<drop-in backup recorded at activate>"
     rb_backup="<backup recorded at activate>"
   fi
+  echo "cutover $rb_sha, recorded status: $rb_status"
   # 1. Stop the timers and the daemon.
   run systemctl --user stop 'dunkingsheep-*.timer' dunkingsheep.service
-  # 2. Remove the drop-in: ExecStart falls back to the python release.
-  run rm -f "$DROPIN"
-  # 3. Restore the python launcher.
-  run cp -p "$rb_launcher" "$LAUNCHER"
+  # 2. The drop-in goes back to what it was before activate: removed if there was none, restored if there was.
+  if [ "$rb_dropin_before" = absent ]; then
+    run rm -f "$rb_dropin"
+  else
+    run cp -p "$rb_dropin_before" "$rb_dropin"
+  fi
+  # 3. The launcher: restore the python copy if activate made it. If activate died before that copy,
+  #    the launcher was never changed, so there is nothing to restore.
+  if [ "$APPLY" = 1 ] && [ ! -f "$rb_launcher_backup" ]; then
+    echo "no python copy at $rb_launcher_backup: the launcher was not changed by this cutover"
+  else
+    run cp -p "$rb_launcher_backup" "$rb_launcher"
+  fi
   # 4. The state is not restored here. Check first; restore only if the python release cannot read it.
   echo "state: not restored automatically. Check first:"
   echo "  python3 <python release>/dunkingsheep --no-start-daemon status"
   echo "  restore from $rb_backup only if that check fails"
-  # 5. Reload, restart the daemon, start the timers.
+  # 5. Reload, restart the daemon, start the timers, and close the record.
   run systemctl --user daemon-reload
   run systemctl --user restart dunkingsheep.service
   run systemctl --user start 'dunkingsheep-*.timer'
@@ -268,11 +319,12 @@ plan() {
   echo "pinned revision: $SHA"
   echo "binary:          $dest/dunkingsheep (0555, SHA256SUM recorded at stage)"
   echo "1. stage:    $0 stage --sha $SHA --apply      build in $WORKTREE, install the binary, no restart"
-  echo "2. activate: $0 activate --sha $SHA --apply   stop timers, backup state to $BACKUPS, drop-in 50-rust-cutover.conf,"
+  echo "2. activate: $0 activate --sha $SHA --apply   stop timers, backup state to $BACKUPS (private),"
+  echo "                                              record the state, drop-in 50-rust-cutover.conf,"
   echo "                                              launcher exec, daemon-reload, restart (interrupts deliveries for seconds)"
   echo "3. verify:   $0 verify                        read-only checks"
   echo "             $0 verify --apply                start the timers, then one tick of each and its journal"
-  echo "4. rollback: $0 rollback --apply              stop, drop-in removed, python launcher restored, restart, timers"
+  echo "4. rollback: $0 rollback --apply              stop, drop-in restored, python launcher restored, restart, timers"
   echo "Dry-run by default: nothing above changes anything without --apply. Operator only."
 }
 

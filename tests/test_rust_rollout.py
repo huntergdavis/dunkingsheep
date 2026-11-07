@@ -22,6 +22,7 @@ STUBS = {
     "systemctl": r'''#!/bin/sh
 echo "systemctl $*" >> "$FAKE_LOG"
 case "$*" in
+  *daemon-reload*) if [ -n "$FAKE_RELOAD_FAIL" ]; then exit 1; fi ;;
   *list-unit-files*) printf 'dunkingsheep-dispatch.timer enabled enabled\ndunkingsheep-health.timer enabled enabled\n' ;;
   *is-active*) echo active ;;
 esac
@@ -92,6 +93,8 @@ class RustRolloutTests(unittest.TestCase):
         for name in DB_FILES:
             write(os.path.join(self.home, ".config", "dunkingsheep", name), "live sqlite stand-in\n")
         write(os.path.join(self.home, ".config", "dunkingsheep", "dunks.json"), "{}\n")
+        # The daemon writes its token file 0600; the backup must keep it private.
+        write(os.path.join(self.home, ".config", "dunkingsheep", "github-tokens.json"), "{}\n", mode=0o600)
         write(self.launcher, OLD_LAUNCHER, mode=0o755)
         self.old_launcher = read(self.launcher)
         self.bindir = os.path.join(self.tmp, "bin")
@@ -129,11 +132,16 @@ class RustRolloutTests(unittest.TestCase):
                 os.chmod(os.path.join(root, name), 0o755)
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def run_script(self, *args, apply=False):
-        cmd = ["sh", SCRIPT, *args]
+    def run_script(self, *args, apply=False, umask=None):
+        script_argv = [SCRIPT, *args]
         if apply:
-            cmd.append("--apply")
-        return subprocess.run(cmd, env=self.env, capture_output=True, text=True, cwd=self.tmp, timeout=120)
+            script_argv.append("--apply")
+        if umask is None:
+            argv = ["sh", *script_argv]
+        else:
+            # A permissive caller umask, to prove the script's own privacy does not depend on it.
+            argv = ["sh", "-c", 'umask ' + umask + '; exec sh "$@"', "sh", *script_argv]
+        return subprocess.run(argv, env=self.env, capture_output=True, text=True, cwd=self.tmp, timeout=120)
 
     def log_lines(self):
         if not os.path.exists(self.log):
@@ -259,6 +267,62 @@ class RustRolloutTests(unittest.TestCase):
         self.assertNotIn("systemctl --user restart dunkingsheep.service", lines)
         self.assertEqual(OLD_LAUNCHER, read(self.launcher))
         self.assertFalse(os.path.exists(self.dropin))
+        self.assertFalse(os.path.exists(self.state))
+
+    def test_backup_archive_and_directory_are_private_under_a_permissive_umask(self):
+        # A permissive umask (022) must not make the backup readable: github-tokens.json is in it.
+        self.stage()
+        proc = self.run_script("activate", "--sha", self.sha, apply=True, umask="022")
+        self.assertEqual(0, proc.returncode, proc.stderr + proc.stdout)
+        backups = os.path.join(self.home, ".local", "share", "dunkingsheep", "backups")
+        self.assertEqual(0o700, mode_of(backups))
+        archives = [name for name in os.listdir(backups) if name.startswith("pre-rust-")]
+        self.assertEqual(1, len(archives))
+        archive = os.path.join(backups, archives[0])
+        self.assertEqual(0o600, mode_of(archive))
+        listing = subprocess.run(["tar", "-tf", archive], check=True, capture_output=True,
+                                 text=True).stdout.split()
+        self.assertIn("./github-tokens.json", listing)
+
+    def test_a_failure_during_the_switch_rolls_back_from_the_record(self):
+        # activate dies after the switch has started (the reload fails): the record already exists,
+        # so rollback restores the python launcher and removes the drop-in.
+        self.stage()
+        self.env["FAKE_RELOAD_FAIL"] = "1"
+        proc = self.run_script("activate", "--sha", self.sha, apply=True)
+        self.assertNotEqual(0, proc.returncode)
+        self.assertIn("activate FAILED during the switch", proc.stderr)
+        self.assertIn("status=switching", read(self.state))
+        self.assertTrue(os.path.exists(self.dropin))
+        self.assertIn("exec " + self.bin, read(self.launcher))
+        del self.env["FAKE_RELOAD_FAIL"]
+        proc = self.run_script("rollback", apply=True)
+        self.assertEqual(0, proc.returncode, proc.stderr + proc.stdout)
+        self.assertFalse(os.path.exists(self.dropin))
+        self.assertEqual(OLD_LAUNCHER, read(self.launcher))
+        self.assertFalse(os.path.exists(self.state))
+        self.assertIn("systemctl --user start dunkingsheep-*.timer", self.log_lines())
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0,
+                     "root ignores the directory permissions this test relies on")
+    def test_a_failure_at_the_first_switch_step_rolls_back_from_the_record(self):
+        # activate dies on its first switch step (the drop-in cannot be written): the record is already
+        # there, the launcher was never touched, and rollback still closes the cutover cleanly.
+        self.stage()
+        dropin_dir = os.path.dirname(self.dropin)
+        os.makedirs(dropin_dir, exist_ok=True)
+        os.chmod(dropin_dir, 0o500)
+        proc = self.run_script("activate", "--sha", self.sha, apply=True)
+        self.assertNotEqual(0, proc.returncode)
+        self.assertIn("activate FAILED during the switch", proc.stderr)
+        self.assertIn("status=switching", read(self.state))
+        self.assertEqual(OLD_LAUNCHER, read(self.launcher))
+        self.assertFalse(os.path.exists(self.dropin))
+        os.chmod(dropin_dir, 0o755)
+        proc = self.run_script("rollback", apply=True)
+        self.assertEqual(0, proc.returncode, proc.stderr + proc.stdout)
+        self.assertIn("no python copy", proc.stdout)
+        self.assertEqual(OLD_LAUNCHER, read(self.launcher))
         self.assertFalse(os.path.exists(self.state))
 
     def test_activate_twice_is_refused(self):
