@@ -932,8 +932,9 @@ mod loops_tests;
 #[cfg(test)]
 mod mailbox_tests;
 #[cfg(test)]
-mod pane_root_tests;
 mod outbox_restart_keys_tests;
+#[cfg(test)]
+mod pane_root_tests;
 #[cfg(test)]
 mod panes_tests;
 #[cfg(test)]
