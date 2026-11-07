@@ -8,6 +8,9 @@
 //! applies: the composer shows the pending text from the start (the double cannot change its
 //! screen on a typed send), no native Codex binding is attached (the pane record carries only the
 //! pid), and the crash is a panic at the Enter key rather than an exception from `send_keys`.
+//! The composer frame follows the row-38 fixture (`scheduled_candidate_fixture`). The observer
+//! panes report the pane idle: without an idle status the stuck status is "unknown" and the
+//! press is refused before any key.
 
 use super::*;
 use crate::flock::loops_stuck::strict_stuck_observer_scan;
@@ -33,13 +36,13 @@ fn pane_record() -> serde_json::Value {
 /// A Codex composer holding `text`: the frame the strict observer reads as the owned box.
 fn composer_frame(text: &str) -> String {
     format!(
-        "  >_ OpenAI Codex (v0.165.0)\n\n\x1b[1m\u{203a} {text}\x1b[0m\n\n  GPT-6-Astra high \u{b7} ~/workspace/x\n  ? for shortcuts\n"
+        "Previous response.\n\n\u{203a} {text}\n  GPT-6-Astra high \u{b7} ~/workspace \u{b7} task\n"
     )
 }
 
 /// The same composer after a successful key: the placeholder, so the box reads as empty.
 fn submitted_frame() -> String {
-    composer_frame("Ask Codex to do anything")
+    composer_frame("")
 }
 
 // Python row 20 (test_real_submit_persists_typed_receipt_before_enter_then_observer_recovers):
@@ -109,6 +112,7 @@ fn wiring_20_real_submit_persists_typed_receipt_before_enter_then_observer_recov
 
     // The observer's first tick only starts the clock; the second, 120 s later, presses Enter once.
     let before = pane.keys.len();
+    pane.statuses.insert(P.to_string(), "idle".to_string());
     pane.after_key_screen = Some(submitted_frame());
     assert_eq!(
         0,
@@ -176,6 +180,7 @@ fn wiring_21_crash_after_typing_before_enter_restores_the_bound_attempt() {
     let mut observer = Pane {
         screens: std::collections::BTreeMap::from([(P.to_string(), composer_frame(TEXT))]),
         panes: vec![pane_record()],
+        statuses: std::collections::BTreeMap::from([(P.to_string(), "idle".to_string())]),
         after_key_screen: Some(submitted_frame()),
         ..Pane::default()
     };
