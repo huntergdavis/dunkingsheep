@@ -43,7 +43,7 @@ pub fn h_close(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkEr
         if !force && own.as_ref().is_some_and(|p| equal(p.get(&key).unwrap_or(&Value::Null), id)) {
             return Err(refusal(format!("refusing to close the {kind} this caller runs in ({}); pass --force only if you intend to kill your own pane/tab/workspace", string(id))));
         }
-        let doomed: Vec<Value> = backend.list_panes().iter()
+        let doomed: Vec<Value> = backend.try_list_panes()?.iter()
             .filter(|p| equal(p.get(&key).unwrap_or(&Value::Null), id))
             .map(|p| p.get("pane_id").cloned().ok_or_else(|| refusal("'pane_id'")))
             .collect::<Result<_,_>>()?;

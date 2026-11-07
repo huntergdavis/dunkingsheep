@@ -10,6 +10,8 @@ struct FakeLayout {
     workspaces: Vec<Value>,
     layout_calls: Vec<Vec<Value>>,
     fail_layout: Option<String>,
+    /// When set, the backend refuses its pane listing with this message (t3415).
+    refuse_listing: Option<String>,
     counter: i64,
 }
 
@@ -86,6 +88,7 @@ impl FakeLayout {
             ],
             layout_calls: vec![],
             fail_layout: None,
+            refuse_listing: None,
             counter: 100,
         }
     }
@@ -142,6 +145,12 @@ impl LayoutBackend for FakeLayout {
             )
         });
         panes
+    }
+    fn try_list_panes(&self) -> Result<Vec<Value>, DunkError> {
+        match &self.refuse_listing {
+            Some(message) => Err(DunkError::Refused(message.clone())),
+            None => Ok(self.list_panes()),
+        }
     }
     fn list_tabs(&self) -> Vec<Value> {
         self.tabs.clone()
@@ -473,6 +482,34 @@ fn test_split_pane_validates_direction() {
     .unwrap_err()
     .to_string();
     assert!(error.contains("direction"), "{error}");
+}
+
+/// t3415: a refused pane listing is the refusal's own error. Read as an empty listing, the target
+/// "Sheep" would be reported as an unknown target, which hides the backend failure.
+#[test]
+fn a_refused_pane_listing_is_the_refusal_not_an_unknown_target() {
+    let mut herdr = FakeLayout::new();
+    herdr.refuse_listing = Some("cannot list panes: offline".into());
+    let mut submit = |_: &str, _: &str| (true, String::new());
+    let error = split_pane(
+        &mut herdr,
+        "Sheep",
+        Some("right"),
+        None,
+        None,
+        false,
+        None,
+        &mut submit,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&error, DunkError::Refused(message) if message == "cannot list panes: offline"),
+        "{error}"
+    );
+    assert!(
+        herdr.layout_calls.is_empty(),
+        "no split is attempted on a refused listing"
+    );
 }
 
 #[test]

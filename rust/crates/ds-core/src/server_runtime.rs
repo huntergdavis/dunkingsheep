@@ -395,6 +395,11 @@ impl crate::flock::commands_layout::LayoutBackend for RequestRuntimeAdapter<'_> 
         self.helper_layoutbackend_list_panes()
     }
 
+    /// The grouped listing with a refusal kept as an error (t3415).
+    fn try_list_panes(&self) -> Result<Vec<Value>, DunkError> {
+        MailboxEnv::try_list_panes_grouped(&self.terminal)
+    }
+
     fn list_tabs(&self) -> Vec<Value> {
         self.helper_layoutbackend_list_tabs()
     }
@@ -505,6 +510,10 @@ impl PaneInfoEnv for TerminalCallAdapter<'_> {
 impl MailboxEnv for TerminalCallAdapter<'_> {
     fn list_panes(&self) -> Vec<Value> {
         self.with_env(|env| MailboxEnv::list_panes(env))
+    }
+
+    fn try_list_panes(&self) -> Result<Vec<Value>, DunkError> {
+        self.with_env(|env| MailboxEnv::try_list_panes(env))
     }
 
     fn list_panes_grouped(&self) -> Vec<Value> {

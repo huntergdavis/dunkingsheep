@@ -87,6 +87,16 @@ impl MailboxEnv for TerminalEnv<'_> {
     fn list_panes_grouped(&self) -> Vec<Value> {
         finish_grouped_panes(self.list_panes())
     }
+    fn try_list_panes(&self) -> Result<Vec<Value>, DunkError> {
+        let panes = self
+            .terminal
+            .try_list_panes_with_status()
+            .map_err(|error| DunkError::Refused(error.to_string()))?;
+        Ok(panes
+            .iter()
+            .map(|(pane, status)| pane_to_json(pane, status.as_deref()))
+            .collect())
+    }
     fn try_list_panes_grouped(&self) -> Result<Vec<Value>, DunkError> {
         let panes = self
             .terminal
