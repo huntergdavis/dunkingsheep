@@ -33,6 +33,12 @@ pub trait MailboxEnv {
     fn try_list_panes_grouped(&self) -> Result<Vec<Value>, DunkError> {
         Ok(self.list_panes_grouped())
     }
+    /// Fallible ungrouped listing (t3415): the recovery producers must report a refused backend
+    /// listing as a refusal. An empty `Vec` here reads as "every running dunk is pane-missing".
+    /// Existing implementations keep their legacy behavior by default.
+    fn try_list_panes(&self) -> Result<Vec<Value>, DunkError> {
+        Ok(self.list_panes())
+    }
     /// `_registered_pane`: `(registered, process_alive, pid)` from the role registry; no
     /// backend call.
     fn registered_pane(&self, pane_id: &str) -> (bool, bool, Option<String>);

@@ -57,7 +57,7 @@ pub(super) fn target(
                     return Err(DunkError::Refused("target dict has no pane_id".into()));
                 }
                 return Ok(backend
-                    .list_panes()
+                    .try_list_panes()?
                     .into_iter()
                     .find(|p| p.get("pane_id").is_some_and(|v| equal(v, id)))
                     .unwrap_or_else(|| target.clone()));
@@ -71,7 +71,7 @@ pub(super) fn target(
             {
                 vec![]
             } else {
-                backend.list_panes()
+                backend.try_list_panes()?
             };
             Ok(resolve::resolve_target(&rows, &spec, own, &backend.server_error_hint())?.clone())
         }

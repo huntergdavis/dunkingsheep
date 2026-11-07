@@ -14,9 +14,10 @@ use serde_json::{json, Map, Value};
 
 use crate::api::CommandEnv;
 use crate::config::Env;
+use crate::error::DunkError;
 use crate::flock::loop_env::LoopTerminalFactory;
 use crate::flock::panes::Stores;
-use crate::flock::recovery_commands::RecoverEnv;
+use crate::flock::recovery_commands::{RecoverEnv, RecoveryCommandError};
 use crate::roles::Roles;
 use crate::server::RequestCtx;
 use crate::server_runtime::services::{
@@ -432,6 +433,68 @@ fn doctor_through_the_production_dispatcher_matches_python() {
         doctor["result"]["surfaces"]["guard"],
         json!({"error": "'utf-8' codec can't decode byte 0xe9 in position 15: invalid continuation byte"})
     );
+}
+
+/// Borrow the production adapter over a terminal whose pane listing is refused (t3415).
+fn with_refused_listing<T>(
+    fixture: &Fixture,
+    call: impl FnOnce(&RequestRuntimeAdapter<'_>) -> T,
+) -> T {
+    let mut refused = FakeTerminal::new();
+    refused.fail_grouped_panes = Some(crate::terminal::TerminalError::refused("offline"));
+    let terminal: Box<dyn crate::terminal::Terminal> = Box::new(refused);
+    let terminal = Mutex::new(terminal);
+    let request = request();
+    let adapter = RequestRuntimeAdapter::new(
+        fixture.services.flock.as_ref(),
+        &request,
+        fixture.services.runtime.handle(),
+        &terminal,
+    )
+    .with_dunk_runtime(&fixture.services)
+    .unwrap();
+    call(&adapter)
+}
+
+/// t3415: a refused listing used to read as an empty one, so every running dunk was reported
+/// pane-missing. The adapter and both producers must return the refusal instead.
+#[test]
+fn a_refused_pane_listing_fails_recover_and_doctor_instead_of_reporting_pane_missing() {
+    // The refused terminal below is the one the adapter reads; the factory terminal is unused.
+    let fixture = build(
+        "recovery-env-refused-listing",
+        Vec::new(),
+        &json!({}),
+        false,
+    );
+    with_refused_listing(&fixture, |adapter| {
+        let listing = RecoverEnv::list_panes(adapter).unwrap_err();
+        assert!(
+            matches!(&listing, RecoveryCommandError::Backend(DunkError::Refused(message))
+                if message.contains("offline")),
+            "{listing}"
+        );
+        let recover = fixture
+            .services
+            .flock
+            .recover(adapter, false, false)
+            .unwrap_err();
+        assert!(
+            matches!(
+                &recover,
+                RecoveryCommandError::Backend(DunkError::Refused(_))
+            ),
+            "{recover}"
+        );
+        let doctor = fixture.services.flock.doctor(adapter).unwrap_err();
+        assert!(
+            matches!(
+                &doctor,
+                RecoveryCommandError::Backend(DunkError::Refused(_))
+            ),
+            "{doctor}"
+        );
+    });
 }
 
 #[test]

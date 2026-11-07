@@ -34,6 +34,11 @@ pub trait LayoutBackend {
     /// The panes ANNOTATED with `tab_label` / `workspace_label` (+ numbers), i.e.
     /// `herdr.list_panes_grouped()`: `resolve_target` matches on those labels.
     fn list_panes(&self) -> Vec<Value>;
+    /// The fallible form of `list_panes` (t3415): a refused backend listing is an error, never an
+    /// empty list, so target resolution cannot read it as "no such pane".
+    fn try_list_panes(&self) -> Result<Vec<Value>, DunkError> {
+        Ok(self.list_panes())
+    }
     fn list_tabs(&self) -> Vec<Value>;
     fn list_workspaces(&self) -> Vec<Value>;
     fn get_pane(&self, pane_id: &str) -> Option<Value>;
@@ -355,7 +360,7 @@ pub fn split_pane(
     if direction != "right" && direction != "down" {
         return refused("direction must be 'right' or 'down'".into());
     }
-    let panes = backend.list_panes();
+    let panes = backend.try_list_panes()?;
     let hint = backend.server_error_hint();
     let pane_id = text(
         resolve_target(&panes, target, self_pane_id, &hint)?,
@@ -421,7 +426,7 @@ pub fn resolve_kind(
             Ok((kind, text(item, "tab_id"), item.clone()))
         }
         "pane" => {
-            let items = backend.list_panes();
+            let items = backend.try_list_panes()?;
             let item = resolve_target(&items, target, self_pane_id, &hint)?;
             Ok((kind, text(item, "pane_id"), item.clone()))
         }
@@ -687,7 +692,7 @@ pub fn close_target(
         ));
     }
     let doomed: Vec<String> = backend
-        .list_panes()
+        .try_list_panes()?
         .iter()
         .filter(|p| text(p, key) == target_id)
         .map(|p| text(p, "pane_id"))
