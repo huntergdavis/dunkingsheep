@@ -77,6 +77,13 @@ fn contiguous_frame() -> String {
     format!("Previous response.\n\n\u{203a} {TEXT}\n{FOOTER}")
 }
 
+/// The composer after the Enter clears: the placeholder row with one blank row before the footer,
+/// as Python's fake shows it after a submit. Without this the post-press read is "unchanged" and
+/// the observer counts no recovery, even though the key was sent.
+fn cleared_frame() -> String {
+    format!("Previous response.\n\n\u{203a} \n\n{FOOTER}")
+}
+
 /// Python `_new_message` plus `_remember` for the echo this flock sent before the schedule.
 fn remember_sent_echo(flock: &Flock, env: &Pane, created: f64) {
     let mut echo = Message::new("m-echo", P, "Codex", ECHO, "send_text");
@@ -169,9 +176,10 @@ fn candidate_outcome(flock: &Flock) -> String {
     }
 }
 
-/// One scenario: the setup, an optional restart, then the observer ticks at 1000 and 1120.
-/// Returns both tick results and a report for a failure message.
-fn scenario(setup: Setup, screen: &str) -> (usize, usize, String) {
+/// One scenario: the setup, an optional restart, then the observer ticks at 1000 and 1120. The
+/// composer clears after the Enter, so a recorded press is counted as a recovery, as in Python.
+/// Returns both tick results, the keys sent, and a report for a failure message.
+fn scenario(setup: Setup, screen: &str) -> (usize, usize, usize, String) {
     let base = crate::clock::now_s();
     let dir = tempfile::tempdir().unwrap();
     let state = dir.path().join("state.json");
@@ -190,10 +198,12 @@ fn scenario(setup: Setup, screen: &str) -> (usize, usize, String) {
     let mut observer = idle_pane(screen);
     let first = strict_stuck_observer_scan(&flock, &mut observer, base + 1000.0).unwrap();
     let gates = gate_report(&flock, &observer, screen);
+    observer.after_key_screen = Some(cleared_frame());
     let second = strict_stuck_observer_scan(&flock, &mut observer, base + 1120.0).unwrap();
     (
         first,
         second,
+        observer.keys.len(),
         format!("{gates} | after 1120: {}", candidate_outcome(&flock)),
     )
 }
@@ -208,8 +218,8 @@ fn scheduled_40_a_oracle_styled_echo_restart_presses_once() {
         full_dunk: false,
         restart: true,
     };
-    let (first, second, report) = scenario(setup, &echo_screen());
-    assert_eq!((0, 1), (first, second), "{report}");
+    let (first, second, keys, report) = scenario(setup, &echo_screen());
+    assert_eq!((0, 1, 1), (first, second, keys), "{report}");
 }
 
 /// B: Python's restart frame (test_restart_uses_saved_schedule_and_budget_without_new_send), no echo.
@@ -222,8 +232,8 @@ fn scheduled_40_b_python_frame_restart_presses_once() {
         full_dunk: false,
         restart: true,
     };
-    let (first, second, report) = scenario(setup, &python_frame());
-    assert_eq!((0, 1), (first, second), "{report}");
+    let (first, second, keys, report) = scenario(setup, &python_frame());
+    assert_eq!((0, 1, 1), (first, second, keys), "{report}");
 }
 
 /// C: the contiguous frame, restart on, no echo.
@@ -236,8 +246,8 @@ fn scheduled_40_c_contiguous_frame_restart_presses_once() {
         full_dunk: false,
         restart: true,
     };
-    let (first, second, report) = scenario(setup, &contiguous_frame());
-    assert_eq!((0, 1), (first, second), "{report}");
+    let (first, second, keys, report) = scenario(setup, &contiguous_frame());
+    assert_eq!((0, 1, 1), (first, second, keys), "{report}");
 }
 
 /// D: Python's frame with no restart.
@@ -250,8 +260,8 @@ fn scheduled_40_d_python_frame_without_restart_presses_once() {
         full_dunk: false,
         restart: false,
     };
-    let (first, second, report) = scenario(setup, &python_frame());
-    assert_eq!((0, 1), (first, second), "{report}");
+    let (first, second, keys, report) = scenario(setup, &python_frame());
+    assert_eq!((0, 1, 1), (first, second, keys), "{report}");
 }
 
 /// V1: the row-38 fixture shape, which presses in CI: `note` without typed_at, a full dunk row,
@@ -265,8 +275,8 @@ fn scheduled_40_v1_row38_fixture_shape_restart_presses_once() {
         full_dunk: true,
         restart: true,
     };
-    let (first, second, report) = scenario(setup, &contiguous_frame());
-    assert_eq!((0, 1), (first, second), "{report}");
+    let (first, second, keys, report) = scenario(setup, &contiguous_frame());
+    assert_eq!((0, 1, 1), (first, second, keys), "{report}");
 }
 
 /// V2: V1 plus typed_at on the failed schedule, which the real typed transport sets.
@@ -279,8 +289,8 @@ fn scheduled_40_v2_row38_shape_with_typed_at_restart_presses_once() {
         full_dunk: true,
         restart: true,
     };
-    let (first, second, report) = scenario(setup, &contiguous_frame());
-    assert_eq!((0, 1), (first, second), "{report}");
+    let (first, second, keys, report) = scenario(setup, &contiguous_frame());
+    assert_eq!((0, 1, 1), (first, second, keys), "{report}");
 }
 
 /// V3: V1 but recorded through `remember` (history and verdict), without typed_at.
@@ -293,6 +303,6 @@ fn scheduled_40_v3_row38_shape_with_remember_restart_presses_once() {
         full_dunk: true,
         restart: true,
     };
-    let (first, second, report) = scenario(setup, &contiguous_frame());
-    assert_eq!((0, 1), (first, second), "{report}");
+    let (first, second, keys, report) = scenario(setup, &contiguous_frame());
+    assert_eq!((0, 1, 1), (first, second, keys), "{report}");
 }
