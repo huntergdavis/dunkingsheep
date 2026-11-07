@@ -1,0 +1,243 @@
+{
+  "cadence_minutes": 10,
+  "dry_run": true,
+  "enabled": false,
+  "escalation": {
+    "owner": {
+      "approved_by": null,
+      "channel": "desk-brief",
+      "classes": [
+        "security",
+        "outage",
+        "money"
+      ],
+      "confirm_path": "~/workspace/vp-of-agentry/data/telegram-status.json",
+      "confirm_within_minutes": 15,
+      "enabled": false,
+      "max_pages_per_hour": 3,
+      "min_severity": "critical"
+    },
+    "vp": {
+      "mailbox": "vp of agentry",
+      "min_severity": "warning"
+    }
+  },
+  "heartbeat_path": "@STATE@/watchdog.heartbeat",
+  "max_alerts_per_run": 20,
+  "min_run_spacing_seconds": 60,
+  "panes": {
+    "pane_id_pattern": "^w[0-9A-Za-z]+:p[0-9A-Za-z]+$",
+    "source": "none"
+  },
+  "rules": {
+    "dunk.overdue": {
+      "class": "ops",
+      "cooldown_minutes": 240,
+      "enabled": true,
+      "missed_intervals": 3,
+      "must_hold_runs": 1,
+      "severity": "warning"
+    },
+    "dunk.skip_loop": {
+      "class": "ops",
+      "consecutive_skips": 10,
+      "cooldown_minutes": 1440,
+      "enabled": true,
+      "fresh_minutes": 120,
+      "lookback_hours": 168,
+      "must_hold_runs": 1,
+      "severity": "warning"
+    },
+    "health.failed": {
+      "class": "ops",
+      "cooldown_minutes": 60,
+      "enabled": true,
+      "must_hold_runs": 1,
+      "severity": "critical",
+      "stale_minutes": 30
+    },
+    "host.disk_full": {
+      "class": "outage",
+      "cooldown_minutes": 30,
+      "enabled": true,
+      "max_used_fraction": 0.98,
+      "must_hold_runs": 2,
+      "paths": [
+        "/tmp",
+        "/"
+      ],
+      "severity": "critical"
+    },
+    "host.heavy_slot_stale": {
+      "class": "ops",
+      "cooldown_minutes": 60,
+      "directory": "/tmp",
+      "enabled": true,
+      "max_age_minutes": 30,
+      "must_hold_runs": 1,
+      "prefix": "poolrad-heavy.",
+      "severity": "warning"
+    },
+    "host.load": {
+      "class": "ops",
+      "cooldown_minutes": 30,
+      "critical_hold_runs": 3,
+      "critical_load1_per_cpu": 3.5,
+      "enabled": true,
+      "load1_per_cpu": 3.0,
+      "must_hold_runs": 3,
+      "severity": "warning"
+    },
+    "host.tmp": {
+      "class": "ops",
+      "cooldown_minutes": 60,
+      "critical_used_fraction": 0.9,
+      "enabled": true,
+      "max_inode_fraction": 0.9,
+      "max_used_fraction": 0.7,
+      "min_free_bytes": 1073741824,
+      "must_hold_runs": 1,
+      "path": "/tmp",
+      "severity": "warning"
+    },
+    "inbox.ambiguous_sender": {
+      "class": "ops",
+      "cooldown_minutes": 10080,
+      "enabled": true,
+      "lookback_hours": 168,
+      "must_hold_runs": 1,
+      "require_live_pane": true,
+      "sample_ids": 30,
+      "severity": "info"
+    },
+    "inbox.undeliverable": {
+      "class": "ops",
+      "cooldown_minutes": 1440,
+      "enabled": true,
+      "min_age_hours": 26,
+      "min_messages": 1,
+      "must_hold_runs": 1,
+      "severity": "warning"
+    },
+    "inbox.unread_dead": {
+      "class": "ops",
+      "cooldown_minutes": 1440,
+      "enabled": true,
+      "min_age_minutes": 10,
+      "min_messages": 1,
+      "must_hold_runs": 1,
+      "severity": "warning"
+    },
+    "inbox.unread_live": {
+      "age_minutes": 240,
+      "class": "ops",
+      "cooldown_minutes": 240,
+      "enabled": true,
+      "idle_statuses": [
+        "idle",
+        "done"
+      ],
+      "min_messages": 1,
+      "must_hold_runs": 1,
+      "severity": "warning"
+    },
+    "lane.idle_holding_task": {
+      "class": "ops",
+      "cooldown_minutes": 240,
+      "enabled": true,
+      "holding_statuses": [
+        "in_progress"
+      ],
+      "idle_statuses": [
+        "idle"
+      ],
+      "must_hold_runs": 1,
+      "quiet_minutes": 60,
+      "severity": "warning"
+    },
+    "lane.working_without_task": {
+      "class": "ops",
+      "cooldown_minutes": 1440,
+      "enabled": true,
+      "must_hold_runs": 1,
+      "quiet_minutes": 120,
+      "severity": "info"
+    },
+    "money.spend_projection": {
+      "cap": null,
+      "class": "money",
+      "cooldown_minutes": 1440,
+      "enabled": false,
+      "must_hold_runs": 2,
+      "severity": "critical",
+      "source": null
+    },
+    "pane.retired": {
+      "class": "ops",
+      "cooldown_minutes": 720,
+      "enabled": true,
+      "must_hold_runs": 1,
+      "severity": "info"
+    },
+    "resource.would_kill": {
+      "class": "ops",
+      "cooldown_minutes": 240,
+      "enabled": true,
+      "must_hold_runs": 1,
+      "policies_path": "/etc/dunkingsheep/load-policies.json",
+      "require_task": true,
+      "severity": "info",
+      "state_path": "/var/lib/dunkingsheep/would-kill-state.json"
+    },
+    "security.secret_text": {
+      "allowlist_sha256": [],
+      "class": "security",
+      "cooldown_minutes": 525600,
+      "enabled": true,
+      "lookback_hours": 168,
+      "must_hold_runs": 1,
+      "patterns": [
+        "ghp_[A-Za-z0-9]{36}",
+        "github_pat_[A-Za-z0-9_]{60,}",
+        "sk-ant-[A-Za-z0-9_-]{20,}",
+        "\\bsk-[A-Za-z0-9]{32,}\\b",
+        "\\bAKIA[0-9A-Z]{16}\\b",
+        "\\bxox[abprs]-[A-Za-z0-9-]{10,}",
+        "\\b[0-9]{8,10}:[A-Za-z0-9_-]{35}\\b",
+        "-----BEGIN [A-Z ]*PRIVATE KEY-----"
+      ],
+      "severity": "critical"
+    },
+    "task.blocked_stale": {
+      "class": "ops",
+      "cooldown_minutes": 1440,
+      "enabled": true,
+      "must_hold_runs": 1,
+      "severity": "warning",
+      "threshold_minutes": 1440
+    },
+    "task.lease_stale": {
+      "class": "ops",
+      "cooldown_minutes": 240,
+      "enabled": true,
+      "fresh_minutes": 60,
+      "lookback_minutes": 1440,
+      "must_hold_runs": 1,
+      "never_renewed_minutes": 30,
+      "severity": "warning"
+    }
+  },
+  "schema": "dunkingsheep-watchdog/2",
+  "state_path": "@STATE@/watchdog_state.json",
+  "state_retention_days": 14,
+  "stores": {
+    "config_dir": "@STATE@"
+  },
+  "stuck_recovery": {
+    "cooldown_s": 60,
+    "enabled": true,
+    "max_attempts": 2,
+    "observation_interval_s": 20,
+    "threshold_s": 120
+  }
+}

@@ -196,3 +196,6 @@ impl TaskData {
 #[cfg(test)]
 #[path = "rules_tests.rs"]
 mod rules_tests;
+
+#[cfg(test)]
+mod golden_tests;
