@@ -23,6 +23,7 @@ fn every_python_command_is_present_and_no_extra_ones_are() {
         "task_owner_question",
         "owner_page",
         "task_batch_claim",
+        "owner_page_confirmed",
     ];
     let extra: Vec<_> = rust
         .iter()

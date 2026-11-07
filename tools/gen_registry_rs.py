@@ -21,7 +21,8 @@ FIXTURE = ROOT / "rust/crates/ds-core/tests/registry_expected.json"
 # Rust-only verbs that are emitted into registry.rs but kept OUT of the Python-registry
 # fixture (see registry_parity.rs, rust_only). owner_page is t665; the two task_owner verbs
 # were hand-added before this generator knew them.
-RUST_ONLY_OUTSIDE_FIXTURE = frozenset({"owner_page", "task_owner_question", "task_owner_answer"})
+RUST_ONLY_OUTSIDE_FIXTURE = frozenset({"owner_page", "owner_page_confirmed", "task_owner_question",
+                                       "task_owner_answer"})
 
 
 def _close(text, i, opening, closing):
@@ -204,6 +205,26 @@ def build():
 
     commands.append(RustOnlyOwnerPage())
 
+    # owner_page_confirmed (t665 piece 2): the watchdog's confirmation read. Rust-only, like
+    # owner_page, so it is not in dunk_api.COMMANDS either.
+    owner_page_confirmed_schema = {"type": "object", "properties": {}, "required": [],
+                                   "additionalProperties": False}
+
+    class RustOnlyOwnerPageConfirmed:
+        name = "owner_page_confirmed"
+        description = ("The highest owner page the telegram transport has delivered (t665), as the "
+                       "watchdog compares it: {through: n | null, transport: telegram}. A page is "
+                       "confirmed once this reaches its own number. Owner and system only.")
+        params = owner_page_confirmed_schema["properties"]
+        required = []
+        mcp_required = []
+        mcp = False
+
+        def input_schema(self):
+            return owner_page_confirmed_schema
+
+    commands.append(RustOnlyOwnerPageConfirmed())
+
     # The two versioned owner-question verbs are Rust-only (no Python dunk_api entry). They
     # were hand-added to registry.rs, so a regeneration would silently drop them and break
     # the Rust callers (api.rs, registrations.rs, ds-web ops_board). Keep them here.
@@ -287,7 +308,7 @@ def build():
             % (json.dumps(k), json.dumps(json.dumps(v, separators=(",", ":")), ensure_ascii=False))
             for k, v in c.params.items())
         allowed = (["owner", "desk"] if c.name == "project_spawn"
-                   else ["owner", "system"] if c.name == "owner_page"
+                   else ["owner", "system"] if c.name in ("owner_page", "owner_page_confirmed")
                    else ["owner", "web"] if c.name.startswith("task_owner_")
                    else [r for r in roles if permitted(r, c.name)])
         lines.append("    Command {")

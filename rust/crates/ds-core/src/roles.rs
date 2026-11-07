@@ -98,7 +98,7 @@ pub const WORKER_EXTRA: [&str; 28] = [
 pub const WORKER_ONLY: [&str; 1] = ["task_batch_claim"];
 
 /// `ALLOW["system"]` minus `READ_ONLY`.
-pub const SYSTEM_EXTRA: [&str; 31] = [
+pub const SYSTEM_EXTRA: [&str; 32] = [
     "context_add",
     "flush_box",
     "gh_token",
@@ -110,6 +110,7 @@ pub const SYSTEM_EXTRA: [&str; 31] = [
     "owner_ingest",
     "owner_outbox",
     "owner_page",
+    "owner_page_confirmed",
     "owner_poll",
     "owner_push",
     "owner_reply",

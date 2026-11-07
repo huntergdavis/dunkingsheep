@@ -3546,28 +3546,51 @@ fn watchdog_text(report: &Value) -> String {
     format!("{}\n", lines.join("\n"))
 }
 
-/// The Rust CLI has no owner-channel route resolver. Keep this missing integration explicit and
-/// fail closed instead of injecting a closure that looks like a production route reader.
-struct WatchdogOwnerRouteUnconfigured;
+/// The watchdog's owner route (t665 piece 2). A page is a row in the one owner mailbox: the
+/// daemon records it over the socket, and the Telegram transport delivers it. The watchdog
+/// confirms a page from the mailbox's own delivery receipt, not from a status file beside the
+/// bridge. Owner paging stays off until the config enables it (escalation.owner.enabled).
+struct WatchdogOwnerMailbox<'a> {
+    ns: &'a Map<String, Value>,
+}
 
-impl ds_core::watchdog::run::OwnerTransport for WatchdogOwnerRouteUnconfigured {
+impl ds_core::watchdog::run::OwnerTransport for WatchdogOwnerMailbox<'_> {
     fn desk_channel(&self) -> Result<String, ds_core::error::DunkError> {
-        Err(ds_core::error::DunkError::Unavailable(
-            "watchdog owner route is not configured in the Rust CLI".into(),
-        ))
+        Ok(ds_core::owner::conversations::OWNER_PAGE_TRANSPORT.into())
     }
 
-    fn post(&self, _body: &str) -> Result<i64, ds_core::watchdog::run::SendError> {
-        Err(ds_core::watchdog::run::SendError {
-            kind: "OwnerChannelUnavailable".into(),
-            message: "watchdog owner route is not configured in the Rust CLI".into(),
+    fn post(&self, body: &str) -> Result<i64, ds_core::watchdog::run::SendError> {
+        let send_error = |kind: &str, message: String| ds_core::watchdog::run::SendError {
+            kind: kind.into(),
+            message,
+        };
+        let mut client = crate::daemon_cmd::raw_client(self.ns)
+            .map_err(|error| send_error("DaemonUnavailable", error.to_string()))?;
+        let mut args = Map::new();
+        args.insert("body".into(), Value::String(body.to_owned()));
+        let reply = client
+            .call("owner_page", args)
+            .map_err(|error| send_error("ClientError", error.to_string()))?;
+        let message_id = reply["message"]["message_id"]
+            .as_str()
+            .ok_or_else(|| send_error("BadReply", "owner_page returned no message id".into()))?;
+        ds_core::owner::conversations::owner_page_number(message_id).ok_or_else(|| {
+            send_error(
+                "BadReply",
+                format!("owner_page returned an unusable message id {message_id:?}"),
+            )
         })
     }
 
     fn confirmed_through(&self) -> Result<Option<Value>, ds_core::error::DunkError> {
-        Err(ds_core::error::DunkError::Unavailable(
-            "watchdog owner route is not configured in the Rust CLI".into(),
-        ))
+        let mut client = crate::daemon_cmd::raw_client(self.ns)?;
+        let reply = client
+            .call("owner_page_confirmed", Map::new())
+            .map_err(|error| ds_core::error::DunkError::Unavailable(error.to_string()))?;
+        Ok(reply
+            .get("through")
+            .filter(|value| !value.is_null())
+            .cloned())
     }
 }
 
@@ -3709,7 +3732,7 @@ fn watchdog(ns: &Map<String, Value>) -> Outcome {
             message: error.to_string(),
         })
     };
-    let channel = WatchdogOwnerRouteUnconfigured;
+    let channel = WatchdogOwnerMailbox { ns };
     match run::run(&config, now, dry_run, &mut send, &channel, None, None) {
         Ok(report) => Outcome {
             stdout: if matches!(ns.get("json"), Some(Value::Bool(true))) {
