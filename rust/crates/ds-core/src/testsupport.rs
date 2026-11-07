@@ -19,15 +19,6 @@ pub fn dir(tag: &str) -> tempfile::TempDir {
         .expect("create a scratch directory")
 }
 
-/// Sync a fake executable to disk and close it, before anything execs it. A forked child keeps a
-/// copy of any descriptor open for writing until it execs, so an exec of the file in that window
-/// fails with ETXTBSY (`ExecutableFileBusy`); [`exec_retrying_busy`] covers the rest.
-pub fn sync_closed(path: &Path) {
-    std::fs::File::open(path)
-        .and_then(|file| file.sync_all())
-        .expect("sync the fake executable");
-}
-
 /// Run `exec` again while the kernel reports the executable busy (ETXTBSY), for up to two
 /// seconds. Once the writer's descriptor is closed, a fork can no longer inherit it, so the retry
 /// only waits out children forked before that close.
