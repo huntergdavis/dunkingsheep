@@ -20,6 +20,10 @@ use std::collections::{BTreeMap, VecDeque};
 /// t3355 group D rows (t820 proof D): child module with its own file, see sends_tests/group_d.rs.
 #[cfg(test)]
 mod group_d;
+/// t3355 wiring row 13 (t820 proof D): child module with its own file, see sends_tests/wiring_13.rs.
+#[cfg(test)]
+mod wiring_13;
+
 /// t3355 wiring rows 12 and 22 (t820 proof D): child module with its own file, see
 /// sends_tests/wiring_12_22.rs.
 #[cfg(test)]
@@ -34,6 +38,10 @@ mod group_d_wiring_20_21;
 /// sends_tests/group_d_scheduled_40.rs.
 #[cfg(test)]
 mod group_d_scheduled_40;
+
+/// t3483 (t3355 group D remainder): wiring rows 15 and 17, see sends_tests/group_d_wiring_15_17.rs.
+#[cfg(test)]
+mod group_d_wiring_15_17;
 
 #[derive(Default)]
 struct Pane {
