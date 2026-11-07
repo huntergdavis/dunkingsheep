@@ -794,6 +794,7 @@ os.rename(out_path + ".tmp", out_path)
             "task_unblock",
             "task_cancel",
             "task_next",
+            "task_batch_claim",
             "task_heartbeat",
             "task_release",
             "task_stats",

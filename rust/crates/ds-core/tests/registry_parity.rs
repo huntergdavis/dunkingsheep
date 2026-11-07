@@ -16,7 +16,14 @@ fn every_python_command_is_present_and_no_extra_ones_are() {
     let python: Vec<&str> = commands.keys().map(String::as_str).collect();
     // These commands are Rust-only additions; Python remains frozen. owner_page (t665) is
     // recorded by the Rust daemon for the Telegram outbox and has no Python dunk_api entry.
-    let rust_only = ["task_owner_answer", "task_owner_question", "owner_page"];
+    // task_batch_claim (t3583) is the guarded batch claim, API only: the owner keeps it out of
+    // the public CLI help, which must match Python.
+    let rust_only = [
+        "task_owner_answer",
+        "task_owner_question",
+        "owner_page",
+        "task_batch_claim",
+    ];
     let extra: Vec<_> = rust
         .iter()
         .copied()

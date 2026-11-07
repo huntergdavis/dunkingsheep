@@ -1152,6 +1152,16 @@ pub static COMMANDS: &[Command] = &[
         roles: &["owner", "web", "worker", "reviewer"],
     },
     Command {
+        name: "task_batch_claim",
+        description: "ATOMIC BATCH CLAIM: take an explicit, ordered list of tasks for the caller, all or nothing, in one transaction. Every member must be claimable by you under the same rules as task_next (no lease held by another pane, not blocked by a prerequisite outside the batch, not already in another active batch, kind and author filters for your role). One failing member claims none: refused.reason names the cause (batch_conflict, leased, owned_elsewhere, blocked, not_claimable, busy, missing, duplicate, scope, empty) and refused.task_ids the members at fault. Members run in the order given and share one lease: a heartbeat or release on any of them covers all. Workers and the owner only.",
+        params: &[Param { name: "ids", schema: "{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Task ids, in execution order.\"}" }, Param { name: "lease_seconds", schema: "{\"type\":\"number\",\"minimum\":1,\"description\":\"Lease length in seconds (default 1800).\"}" }, Param { name: "allow_busy", schema: "{\"type\":\"boolean\",\"description\":\"Take a batch while already holding in-progress work.\"}" }],
+        dispatch_required: &["ids"],
+        required: &["ids"],
+        mcp: false,
+        owner_only: false,
+        roles: &["owner", "worker"],
+    },
+    Command {
         name: "task_note",
         description: "Append an explanatory event to a task's history, including after the task row was deleted; the board's history explains its own gaps.",
         params: &[Param { name: "id", schema: "{\"type\":\"string\",\"description\":\"Task id, e.g. t12.\"}" }, Param { name: "event", schema: "{\"type\":\"string\",\"description\":\"Event name (default 'note').\"}" }, Param { name: "reason", schema: "{\"type\":\"string\",\"description\":\"Human rationale stored in meta.reason.\"}" }],
