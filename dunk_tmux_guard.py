@@ -22,6 +22,7 @@ fallback to the real tmux for a destructive command.
 """
 import json
 import os
+import secrets
 import subprocess
 import sys
 
@@ -89,12 +90,20 @@ def load_managed(path=None):
     return set((data.get("panes") or {}).keys())
 
 
+# The guard reads pane ids with a separator that tmux 3.4 cannot escape (t1605). tmux 3.4 writes a
+# control character in format output as a backslash escape, so a tab would come back as \011, the
+# guard would parse no panes, and every close would be refused. The token is printable ASCII and is
+# drawn per process: the format and the split always come from the same process. The fields are
+# tmux ids, so the token cannot collide with free text.
+PANE_SEP = "@@dg" + secrets.token_hex(4) + "@@"
+
+
 def tmux_panes(globals_=()):
     """Read-only pane inventory for the policy inputs (never a mutation)."""
     try:
         proc = subprocess.run(
             [real_tmux(), *globals_, "list-panes", "-a", "-F",
-             "#{pane_id}\t#{session_id}\t#{window_id}"],
+             PANE_SEP.join(["#{pane_id}", "#{session_id}", "#{window_id}"])],
             capture_output=True, text=True, timeout=5)
     except (OSError, subprocess.SubprocessError):
         return []
@@ -102,7 +111,7 @@ def tmux_panes(globals_=()):
         return []
     panes = []
     for line in proc.stdout.splitlines():
-        fields = line.split("\t")
+        fields = line.split(PANE_SEP)
         if len(fields) >= 3:
             panes.append({"pane_id": fields[0], "workspace_id": fields[1],
                           "tab_id": fields[2]})
