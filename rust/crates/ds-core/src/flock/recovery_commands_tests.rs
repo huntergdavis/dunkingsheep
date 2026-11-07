@@ -862,6 +862,8 @@ fn recover_plan_distinguishes_live_bare_and_unknown_panes() {
     assert_eq!(plan["w1:p4"]["command"], "cd /w/pi2 && pi --session p2");
     assert_eq!(plan["w1:p4"]["source"], "memory-latest");
     assert_eq!(actual["outcome"]["result"]["ok"], false);
+    // t3501 recover row 7: the backend version echoed in the plan result (Python: result["herdr"]).
+    assert_eq!(actual["outcome"]["result"]["herdr"], "herdr fixture");
 }
 
 #[test]
