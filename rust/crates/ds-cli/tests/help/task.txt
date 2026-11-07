@@ -18,6 +18,7 @@ positional arguments:
     delete      delete a task
     note        append an event to a task's history
     next        atomically claim the next task
+    batch       claim an ordered list of tasks, all or nothing
     heartbeat   extend the lease on a claimed task
     release     give a claimed task back
     follow      receive pushed tasks when idle
