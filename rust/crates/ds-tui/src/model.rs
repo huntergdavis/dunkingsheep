@@ -497,24 +497,39 @@ impl TargetPicker {
         }
         frame.render_widget(Clear, area);
         frame.render_widget(Block::default().borders(Borders::ALL), area);
-        draw_modal_line(frame, area, 1, "Select target pane", true);
-        draw_modal_line(
+        // Python: text at column 2 clipped to w - 4; tab rows at column 2 + indent clipped
+        // to w - 4 - indent. Titles and headers are bold; the selected pane is reversed.
+        let bold = Style::default().add_modifier(Modifier::BOLD);
+        let text_width = area.width.saturating_sub(4);
+        let row_column = MODAL_COLUMN + TARGET_INDENT;
+        let row_width = area.width.saturating_sub(4 + TARGET_INDENT);
+        draw_modal_cells(
+            frame,
+            area,
+            1,
+            MODAL_COLUMN,
+            text_width,
+            "Select target pane",
+            bold,
+        );
+        draw_modal_cells(
             frame,
             area,
             2,
+            MODAL_COLUMN,
+            text_width,
             "j/k or arrows move, Enter selects, Esc cancels",
-            false,
+            Style::default(),
         );
-        let indent = 4_u16;
         let header = crate::rows::format_target_row(
             "Tab",
             "Agent",
             "Status",
             "Directory",
             i64::from(area.width),
-            i64::from(indent),
+            i64::from(TARGET_INDENT),
         );
-        draw_modal_line_at(frame, area, 3, indent.saturating_add(1), &header, true);
+        draw_modal_cells(frame, area, 3, row_column, row_width, &header, bold);
 
         let list_top = 5_usize;
         let visible = usize::from(area.height.saturating_sub(7)).max(1);
@@ -527,7 +542,15 @@ impl TargetPicker {
         for (screen_index, row) in display.iter().skip(start).take(visible).enumerate() {
             let y = list_top + screen_index;
             match row {
-                TargetDisplayRow::Workspace(name) => draw_modal_line(frame, area, y, name, true),
+                TargetDisplayRow::Workspace(name) => draw_modal_cells(
+                    frame,
+                    area,
+                    usize_to_u16(y),
+                    MODAL_COLUMN,
+                    text_width,
+                    name,
+                    bold,
+                ),
                 TargetDisplayRow::Pane(index) => {
                     let pane = &self.panes[*index];
                     let tab = pane
@@ -547,15 +570,21 @@ impl TargetPicker {
                         &target_string(pane.get("agent_status")),
                         &target_string(pane.get("cwd")),
                         i64::from(area.width),
-                        i64::from(indent),
+                        i64::from(TARGET_INDENT),
                     );
-                    draw_modal_line_at(
+                    let style = if *index == self.selected {
+                        Style::default().add_modifier(Modifier::REVERSED)
+                    } else {
+                        Style::default()
+                    };
+                    draw_modal_cells(
                         frame,
                         area,
-                        y,
-                        indent.saturating_add(1),
+                        usize_to_u16(y),
+                        row_column,
+                        row_width,
                         &row,
-                        *index == self.selected,
+                        style,
                     );
                 }
             }
@@ -595,30 +624,43 @@ fn target_string(value: Option<&Value>) -> String {
         .unwrap_or_else(|| "-".to_owned())
 }
 
-fn draw_modal_line(frame: &mut Frame<'_>, area: Rect, row: usize, text: &str, bold: bool) {
-    draw_modal_line_at(frame, area, row, 1, text, bold);
-}
+/// Column where the Python modal text starts: the border is column 0 and `safe_addstr`
+/// is called with x = 2.
+const MODAL_COLUMN: u16 = 2;
 
-fn draw_modal_line_at(
+/// Indent of the target-picker tab rows beneath the text column (Python `TARGET_INDENT`).
+const TARGET_INDENT: u16 = 4;
+
+/// Draw one modal line the way Python's `safe_addstr` does: at `(row, column)`, at most
+/// `width` cells, `...` when the text overflows, and the style covers the whole width
+/// (Python pads the line with spaces, so reverse video spans the row).
+fn draw_modal_cells(
     frame: &mut Frame<'_>,
     area: Rect,
-    row: usize,
-    indent: u16,
+    row: u16,
+    column: u16,
+    width: u16,
     text: &str,
-    bold: bool,
+    style: Style,
 ) {
-    let y = area.y.saturating_add(usize_to_u16(row));
-    if y >= area.y.saturating_add(area.height) {
+    if row >= area.height {
         return;
     }
-    let x = area.x.saturating_add(indent);
-    let width = area.x.saturating_add(area.width).saturating_sub(x);
-    let style = if bold {
-        Style::default().add_modifier(Modifier::BOLD)
-    } else {
-        Style::default()
-    };
-    frame.render_widget(Paragraph::new(text).style(style), Rect::new(x, y, width, 1));
+    let x = area.x.saturating_add(column);
+    let right = area.x.saturating_add(area.width);
+    if x >= right {
+        return;
+    }
+    // Python caps the usable width at max_x - x - 1, keeping the last column free.
+    let width = width.min(right.saturating_sub(x).saturating_sub(1));
+    if width == 0 {
+        return;
+    }
+    let text = crate::rows::clip(text, i64::from(width));
+    frame.render_widget(
+        Paragraph::new(text).style(style),
+        Rect::new(x, area.y.saturating_add(row), width, 1),
+    );
 }
 
 fn usize_to_u16(value: usize) -> u16 {
