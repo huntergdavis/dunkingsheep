@@ -24,6 +24,20 @@ mod group_d;
 #[cfg(test)]
 mod wiring_13;
 
+/// t3355 wiring rows 12 and 22 (t820 proof D): child module with its own file, see
+/// sends_tests/wiring_12_22.rs.
+#[cfg(test)]
+mod wiring_12_22;
+
+/// t3484 (T55 group D wiring rows 20 and 21, t820 proof D): child module with its own file, see
+/// sends_tests/group_d_wiring_20_21.rs.
+#[cfg(test)]
+mod group_d_wiring_20_21;
+
+/// t3483 (t3355 group D remainder): wiring rows 15 and 17, see sends_tests/group_d_wiring_15_17.rs.
+#[cfg(test)]
+mod group_d_wiring_15_17;
+
 #[derive(Default)]
 struct Pane {
     screens: BTreeMap<String, String>,
@@ -6745,9 +6759,9 @@ mod stuck_gap_tests {
     }
 }
 
-// T55 rows 33, 34 and 35 (t3344 proof C): the first-sighting evidence line, once per record, built
+// T55 rows 32 to 35 (t3344 proof C): the first-sighting evidence line, once per record, built
 // from the stored record and carrying no composer text. Python oracle: tests/test_dunk_stuck_recovery.py
-// at 79bc92fa, FirstObservationEvidenceTests (lines 752-769).
+// at 79bc92fa, FirstObservationEvidenceTests (lines 695-778; row 32 is lines 738-751).
 mod t3379_first_sighting {
     use super::*;
 
@@ -6868,6 +6882,74 @@ mod t3379_first_sighting {
             1,
             evidence_lines(&flock).len(),
             "one line per record, not per tick"
+        );
+    }
+
+    /// Row 32, Python's first case: the first observation logs one evidence line before any press,
+    /// and the line names the pane, the stored message id, generation and fingerprint, and the
+    /// 600 s threshold.
+    #[test]
+    fn the_first_observation_emits_one_evidence_line_before_any_press() {
+        let dir = tempfile::tempdir().unwrap();
+        let (flock, mut env, message) = stuck_flock(dir.path());
+        // The Python observe(): a 30 s-old sighting under a 600 s threshold cannot act.
+        assert!(!flock.unwedge(
+            &mut env,
+            PANE,
+            OUR_TEXT,
+            Some(70.0),
+            Some(&message),
+            100.0,
+            None,
+            false
+        ));
+        let lines = evidence_lines(&flock);
+        assert_eq!(
+            1,
+            lines.len(),
+            "one evidence line for the first sighting: {lines:?}"
+        );
+        let line = &lines[0];
+        let record = flock.stuck_tracker.lock().unwrap().records[PANE].clone();
+        let message_id = record
+            .message_id
+            .as_deref()
+            .expect("the record names its message");
+        let generation = record
+            .generation
+            .as_deref()
+            .expect("the record binds the pane generation");
+        let fingerprint = record
+            .fingerprint
+            .as_deref()
+            .expect("the record carries the composer fingerprint");
+        let first_seen = record
+            .first_seen
+            .expect("the record carries its clock start");
+        assert!(
+            line.starts_with(&format!("{PANE}: ")),
+            "the pane leads: {line}"
+        );
+        assert!(line.contains(&format!(" message={message_id} ")), "{line}");
+        assert!(
+            line.contains(&format!(" generation={generation} ")),
+            "{line}"
+        );
+        assert!(
+            line.contains(&format!(" fingerprint={fingerprint} ")),
+            "{line}"
+        );
+        assert!(line.contains("threshold=600s"), "{line}");
+        assert!(
+            line.contains(&format!("first_seen={first_seen:.3}")),
+            "{line}"
+        );
+        assert!(line.contains("observed=100.000"), "{line}");
+        assert!(
+            env.keys.is_empty() && env.typed.is_empty(),
+            "evidence, and no action: keys {:?}, typed {:?}",
+            env.keys,
+            env.typed
         );
     }
 }
