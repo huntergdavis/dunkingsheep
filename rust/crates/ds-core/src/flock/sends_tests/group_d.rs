@@ -165,6 +165,48 @@ fn wiring_24_hook_record_binds_the_root_pid_start_and_pane() {
     );
 }
 
+/// The WARN events `run` emits on this thread, as their `message` text. This is the Python oracle's
+/// `assertLogs(level='WARNING')`. Test-only: a minimal subscriber built on `tracing`, so no logging
+/// dependency is added (t3501 wiring row 25).
+fn capture_warnings(run: impl FnOnce()) -> Vec<String> {
+    use std::sync::{Arc, Mutex};
+    use tracing::field::{Field, Visit};
+    use tracing::{span, Event, Level, Metadata, Subscriber};
+
+    struct Warnings(Arc<Mutex<Vec<String>>>);
+    struct Message(Option<String>);
+    impl Visit for Message {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message" {
+                self.0 = Some(format!("{value:?}"));
+            }
+        }
+    }
+    impl Subscriber for Warnings {
+        fn enabled(&self, _: &Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &span::Attributes<'_>) -> span::Id {
+            span::Id::from_u64(1)
+        }
+        fn record(&self, _: &span::Id, _: &span::Record<'_>) {}
+        fn record_follows_from(&self, _: &span::Id, _: &span::Id) {}
+        fn event(&self, event: &Event<'_>) {
+            if *event.metadata().level() == Level::WARN {
+                let mut message = Message(None);
+                event.record(&mut message);
+                self.0.lock().unwrap().push(message.0.unwrap_or_default());
+            }
+        }
+        fn enter(&self, _: &span::Id) {}
+        fn exit(&self, _: &span::Id) {}
+    }
+    let warnings = Arc::new(Mutex::new(Vec::new()));
+    tracing::subscriber::with_default(Warnings(warnings.clone()), run);
+    let captured = warnings.lock().unwrap().clone();
+    captured
+}
+
 /// Oracle test_missing_native_binding_has_one_named_diagnostic (wiring row 26): with no native
 /// binding and no state directory (the Python fixture's empty environment), the observer presses
 /// nothing, and the named refusal is recorded once.
@@ -230,8 +272,19 @@ fn wiring_25_unbound_failure_has_one_named_diagnostic_and_never_recovers() {
     message.created_at = 100.0;
     message.status = "failed".into();
     message.attempt_generation = None;
-    flock.note_stuck_candidate(&message);
-    flock.note_stuck_candidate(&message);
+    let warnings = capture_warnings(|| {
+        flock.note_stuck_candidate(&message);
+        flock.note_stuck_candidate(&message);
+    });
+    assert_eq!(
+        1,
+        warnings.len(),
+        "exactly one diagnostic is logged across two notes: {warnings:?}"
+    );
+    assert!(
+        warnings[0].contains("attempt generation unknown"),
+        "the diagnostic names the unknown generation: {warnings:?}"
+    );
     assert_eq!(
         Some(true),
         flock.stuck_candidates.lock().unwrap()["%1"].unobservable_logged,
