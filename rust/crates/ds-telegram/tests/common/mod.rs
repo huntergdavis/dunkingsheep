@@ -22,8 +22,12 @@ pub struct BotState {
     pub fail_on: Option<String>,
     /// Queued answers for the next getUpdates.
     pub updates: Vec<Value>,
+    /// Scripted getUpdates answers, one batch per call (the oracle replay uses these).
+    pub batches: std::collections::VecDeque<Vec<Value>>,
     /// Every method called, in order.
     pub calls: Vec<String>,
+    /// Every call with its payload, in order: the oracle replay compares these.
+    pub log: Vec<(String, Map<String, Value>)>,
     /// The `payload` of every getUpdates call.
     pub poll_payloads: Vec<Map<String, Value>>,
     pub webhook_url: String,
@@ -51,6 +55,7 @@ impl Bot for FakeBot {
     fn call(&self, method: &str, payload: Map<String, Value>) -> Result<Value, BridgeError> {
         let mut state = self.0.borrow_mut();
         state.calls.push(method.to_string());
+        state.log.push((method.to_string(), payload.clone()));
         match method {
             "sendMessage" => {
                 let text = payload
@@ -69,6 +74,9 @@ impl Bot for FakeBot {
             }
             "getUpdates" => {
                 state.poll_payloads.push(payload);
+                if let Some(batch) = state.batches.pop_front() {
+                    return Ok(Value::Array(batch));
+                }
                 Ok(Value::Array(std::mem::take(&mut state.updates)))
             }
             "getWebhookInfo" => Ok(json!({"url": state.webhook_url.clone()})),

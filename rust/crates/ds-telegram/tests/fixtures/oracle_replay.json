@@ -1,0 +1,3182 @@
+{
+  "now": 10000,
+  "scenarios": [
+    {
+      "expected": {
+        "bot_log": [
+          [
+            "sendMessage",
+            {
+              "chat_id": 42.0,
+              "text": "Chief of Staff connected. Send text, a photo, or a file. Replies will appear here. /status checks your last send."
+            }
+          ]
+        ],
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42.0,
+          "last_brief_id": 0.0,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon_log": [],
+        "status": null,
+        "steps": [
+          {
+            "error": null,
+            "op": "process_update"
+          }
+        ]
+      },
+      "input": {
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": null,
+          "last_brief_id": null,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon": {},
+        "desk_rows": [],
+        "name": "pair_with_the_code",
+        "registry": [
+          {
+            "id": "vp",
+            "name": "VP"
+          },
+          {
+            "id": "cos",
+            "name": "Chief of Staff"
+          }
+        ],
+        "routing": null,
+        "steps": [
+          {
+            "op": "process_update",
+            "update": {
+              "message": {
+                "chat": {
+                  "id": 42,
+                  "type": "private"
+                },
+                "text": "/pair PAIRCODE"
+              },
+              "update_id": 1
+            }
+          }
+        ]
+      },
+      "name": "pair_with_the_code"
+    },
+    {
+      "expected": {
+        "bot_log": [],
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": null,
+          "last_brief_id": null,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon_log": [],
+        "status": null,
+        "steps": [
+          {
+            "error": null,
+            "op": "process_update"
+          }
+        ]
+      },
+      "input": {
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": null,
+          "last_brief_id": null,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon": {},
+        "desk_rows": [],
+        "name": "pair_with_a_wrong_code",
+        "registry": [
+          {
+            "id": "vp",
+            "name": "VP"
+          },
+          {
+            "id": "cos",
+            "name": "Chief of Staff"
+          }
+        ],
+        "routing": null,
+        "steps": [
+          {
+            "op": "process_update",
+            "update": {
+              "message": {
+                "chat": {
+                  "id": 42,
+                  "type": "private"
+                },
+                "text": "/pair NOPE"
+              },
+              "update_id": 1
+            }
+          }
+        ]
+      },
+      "name": "pair_with_a_wrong_code"
+    },
+    {
+      "expected": {
+        "bot_log": [],
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": null,
+          "last_brief_id": null,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon_log": [],
+        "status": null,
+        "steps": [
+          {
+            "error": null,
+            "op": "process_update"
+          }
+        ]
+      },
+      "input": {
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": null,
+          "last_brief_id": null,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon": {},
+        "desk_rows": [],
+        "name": "pair_ignores_an_unpaired_plain_message",
+        "registry": [
+          {
+            "id": "vp",
+            "name": "VP"
+          },
+          {
+            "id": "cos",
+            "name": "Chief of Staff"
+          }
+        ],
+        "routing": null,
+        "steps": [
+          {
+            "op": "process_update",
+            "update": {
+              "message": {
+                "chat": {
+                  "id": 42,
+                  "type": "private"
+                },
+                "text": "hello there"
+              },
+              "update_id": 1
+            }
+          }
+        ]
+      },
+      "name": "pair_ignores_an_unpaired_plain_message"
+    },
+    {
+      "expected": {
+        "bot_log": [],
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42.0,
+          "last_brief_id": null,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon_log": [],
+        "status": null,
+        "steps": [
+          {
+            "error": null,
+            "op": "process_update"
+          },
+          {
+            "error": null,
+            "op": "process_update"
+          }
+        ]
+      },
+      "input": {
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42,
+          "last_brief_id": null,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon": {
+          "ingest": {
+            "duplicate": false,
+            "message": {
+              "message_id": "i7"
+            }
+          }
+        },
+        "desk_rows": [],
+        "name": "group_chat_and_other_chat_are_ignored",
+        "registry": [
+          {
+            "id": "vp",
+            "name": "VP"
+          },
+          {
+            "id": "cos",
+            "name": "Chief of Staff"
+          }
+        ],
+        "routing": null,
+        "steps": [
+          {
+            "op": "process_update",
+            "update": {
+              "message": {
+                "chat": {
+                  "id": 42,
+                  "type": "group"
+                },
+                "text": "hi"
+              },
+              "update_id": 1
+            }
+          },
+          {
+            "op": "process_update",
+            "update": {
+              "message": {
+                "chat": {
+                  "id": 99,
+                  "type": "private"
+                },
+                "text": "hi"
+              },
+              "update_id": 2
+            }
+          }
+        ]
+      },
+      "name": "group_chat_and_other_chat_are_ignored"
+    },
+    {
+      "expected": {
+        "bot_log": [
+          [
+            "sendMessage",
+            {
+              "chat_id": 42.0,
+              "text": "Chief of Staff message #i7. I'll reply here when ready."
+            }
+          ]
+        ],
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42.0,
+          "last_brief_id": null,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon_log": [
+          [
+            "owner_ingest",
+            {
+              "body": "is the desk up?",
+              "external_id": "telegram:7",
+              "subject": null,
+              "transport": "telegram"
+            }
+          ]
+        ],
+        "status": null,
+        "steps": [
+          {
+            "error": null,
+            "op": "process_update"
+          }
+        ]
+      },
+      "input": {
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42,
+          "last_brief_id": null,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon": {
+          "ingest": {
+            "duplicate": false,
+            "message": {
+              "message_id": "i7"
+            }
+          }
+        },
+        "desk_rows": [],
+        "name": "text_question_is_recorded_and_acknowledged",
+        "registry": [
+          {
+            "id": "vp",
+            "name": "VP"
+          },
+          {
+            "id": "cos",
+            "name": "Chief of Staff"
+          }
+        ],
+        "routing": null,
+        "steps": [
+          {
+            "op": "process_update",
+            "update": {
+              "message": {
+                "chat": {
+                  "id": 42,
+                  "type": "private"
+                },
+                "text": "is the desk up?"
+              },
+              "update_id": 7
+            }
+          }
+        ]
+      },
+      "name": "text_question_is_recorded_and_acknowledged"
+    },
+    {
+      "expected": {
+        "bot_log": [
+          [
+            "sendMessage",
+            {
+              "chat_id": 42.0,
+              "text": "Chief of Staff message #i7 (already recorded). I'll reply here when ready."
+            }
+          ]
+        ],
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42.0,
+          "last_brief_id": null,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon_log": [
+          [
+            "owner_ingest",
+            {
+              "body": "again",
+              "external_id": "telegram:7",
+              "subject": null,
+              "transport": "telegram"
+            }
+          ]
+        ],
+        "status": null,
+        "steps": [
+          {
+            "error": null,
+            "op": "process_update"
+          }
+        ]
+      },
+      "input": {
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42,
+          "last_brief_id": null,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon": {
+          "ingest": {
+            "duplicate": true,
+            "message": {
+              "message_id": "i7"
+            }
+          }
+        },
+        "desk_rows": [],
+        "name": "redelivered_question_says_already_recorded",
+        "registry": [
+          {
+            "id": "vp",
+            "name": "VP"
+          },
+          {
+            "id": "cos",
+            "name": "Chief of Staff"
+          }
+        ],
+        "routing": null,
+        "steps": [
+          {
+            "op": "process_update",
+            "update": {
+              "message": {
+                "chat": {
+                  "id": 42,
+                  "type": "private"
+                },
+                "text": "again"
+              },
+              "update_id": 7
+            }
+          }
+        ]
+      },
+      "name": "redelivered_question_says_already_recorded"
+    },
+    {
+      "expected": {
+        "bot_log": [
+          [
+            "sendMessage",
+            {
+              "chat_id": 42.0,
+              "text": "Send a message, photo, or file directly to Chief of Staff. /status checks your last send. Files over 20 MB use the web desk."
+            }
+          ],
+          [
+            "sendMessage",
+            {
+              "chat_id": 42.0,
+              "text": "Send a message, photo, or file directly to Chief of Staff. /status checks your last send. Files over 20 MB use the web desk."
+            }
+          ]
+        ],
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42.0,
+          "last_brief_id": null,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon_log": [],
+        "status": null,
+        "steps": [
+          {
+            "error": null,
+            "op": "process_update"
+          },
+          {
+            "error": null,
+            "op": "process_update"
+          }
+        ]
+      },
+      "input": {
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42,
+          "last_brief_id": null,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon": {},
+        "desk_rows": [],
+        "name": "start_and_help_get_the_help_text",
+        "registry": [
+          {
+            "id": "vp",
+            "name": "VP"
+          },
+          {
+            "id": "cos",
+            "name": "Chief of Staff"
+          }
+        ],
+        "routing": null,
+        "steps": [
+          {
+            "op": "process_update",
+            "update": {
+              "message": {
+                "chat": {
+                  "id": 42,
+                  "type": "private"
+                },
+                "text": "/start"
+              },
+              "update_id": 3
+            }
+          },
+          {
+            "op": "process_update",
+            "update": {
+              "message": {
+                "chat": {
+                  "id": 42,
+                  "type": "private"
+                },
+                "text": " /help "
+              },
+              "update_id": 4
+            }
+          }
+        ]
+      },
+      "name": "start_and_help_get_the_help_text"
+    },
+    {
+      "expected": {
+        "bot_log": [
+          [
+            "sendMessage",
+            {
+              "chat_id": 42.0,
+              "text": "I can receive text, photos, and files. Other Telegram items need the web desk."
+            }
+          ]
+        ],
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42.0,
+          "last_brief_id": null,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon_log": [],
+        "status": null,
+        "steps": [
+          {
+            "error": null,
+            "op": "process_update"
+          }
+        ]
+      },
+      "input": {
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42,
+          "last_brief_id": null,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon": {},
+        "desk_rows": [],
+        "name": "an_empty_message_gets_the_other_items_reply",
+        "registry": [
+          {
+            "id": "vp",
+            "name": "VP"
+          },
+          {
+            "id": "cos",
+            "name": "Chief of Staff"
+          }
+        ],
+        "routing": null,
+        "steps": [
+          {
+            "op": "process_update",
+            "update": {
+              "message": {
+                "chat": {
+                  "id": 42,
+                  "type": "private"
+                },
+                "sticker": {}
+              },
+              "update_id": 5
+            }
+          }
+        ]
+      },
+      "name": "an_empty_message_gets_the_other_items_reply"
+    },
+    {
+      "expected": {
+        "bot_log": [
+          [
+            "sendMessage",
+            {
+              "chat_id": 42.0,
+              "text": "VP message #i7. I'll reply here when ready."
+            }
+          ]
+        ],
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "vp",
+          "chat_id": 42.0,
+          "last_brief_id": 0.0,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon_log": [
+          [
+            "owner_ingest",
+            {
+              "body": "hello",
+              "external_id": "telegram:8",
+              "subject": null,
+              "transport": "telegram"
+            }
+          ]
+        ],
+        "status": null,
+        "steps": [
+          {
+            "error": null,
+            "op": "process_update"
+          }
+        ]
+      },
+      "input": {
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42,
+          "last_brief_id": null,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon": {
+          "ingest": {
+            "duplicate": false,
+            "message": {
+              "message_id": "i7"
+            }
+          }
+        },
+        "desk_rows": [],
+        "name": "routing_file_names_the_desk",
+        "registry": [
+          {
+            "id": "vp",
+            "name": "VP"
+          },
+          {
+            "id": "cos",
+            "name": "Chief of Staff"
+          }
+        ],
+        "routing": {
+          "channel": "vp"
+        },
+        "steps": [
+          {
+            "op": "process_update",
+            "update": {
+              "message": {
+                "chat": {
+                  "id": 42,
+                  "type": "private"
+                },
+                "text": "hello"
+              },
+              "update_id": 8
+            }
+          }
+        ]
+      },
+      "name": "routing_file_names_the_desk"
+    },
+    {
+      "expected": {
+        "bot_log": [],
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42.0,
+          "last_brief_id": null,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon_log": [],
+        "status": null,
+        "steps": [
+          {
+            "error": [
+              "ValueError",
+              "Telegram routing config must contain only channel"
+            ],
+            "op": "process_update"
+          }
+        ]
+      },
+      "input": {
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42,
+          "last_brief_id": null,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon": {},
+        "desk_rows": [],
+        "name": "routing_file_with_an_extra_key_is_refused",
+        "registry": [
+          {
+            "id": "vp",
+            "name": "VP"
+          },
+          {
+            "id": "cos",
+            "name": "Chief of Staff"
+          }
+        ],
+        "routing": {
+          "channel": "cos",
+          "extra": 1
+        },
+        "steps": [
+          {
+            "op": "process_update",
+            "update": {
+              "message": {
+                "chat": {
+                  "id": 42,
+                  "type": "private"
+                },
+                "text": "hi"
+              },
+              "update_id": 1
+            }
+          }
+        ]
+      },
+      "name": "routing_file_with_an_extra_key_is_refused"
+    },
+    {
+      "expected": {
+        "bot_log": [],
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42.0,
+          "last_brief_id": null,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon_log": [],
+        "status": null,
+        "steps": [
+          {
+            "error": [
+              "ValueError",
+              "Telegram channel must name a configured desk channel"
+            ],
+            "op": "process_update"
+          }
+        ]
+      },
+      "input": {
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42,
+          "last_brief_id": null,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon": {},
+        "desk_rows": [],
+        "name": "routing_channel_missing_from_registry_is_refused",
+        "registry": [
+          {
+            "id": "vp",
+            "name": "VP"
+          },
+          {
+            "id": "cos",
+            "name": "Chief of Staff"
+          }
+        ],
+        "routing": {
+          "channel": "nope"
+        },
+        "steps": [
+          {
+            "op": "process_update",
+            "update": {
+              "message": {
+                "chat": {
+                  "id": 42,
+                  "type": "private"
+                },
+                "text": "hi"
+              },
+              "update_id": 1
+            }
+          }
+        ]
+      },
+      "name": "routing_channel_missing_from_registry_is_refused"
+    },
+    {
+      "expected": {
+        "bot_log": [],
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "channel": "vp",
+          "chat_id": 42.0,
+          "last_brief_id": null,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon_log": [],
+        "status": null,
+        "steps": [
+          {
+            "error": [
+              "ValueError",
+              "Move Telegram channel from credential config to telegram-routing.json"
+            ],
+            "op": "process_update"
+          }
+        ]
+      },
+      "input": {
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "channel": "vp",
+          "chat_id": 42,
+          "last_brief_id": null,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon": {},
+        "desk_rows": [],
+        "name": "config_that_still_names_a_channel_is_refused",
+        "registry": [
+          {
+            "id": "vp",
+            "name": "VP"
+          },
+          {
+            "id": "cos",
+            "name": "Chief of Staff"
+          }
+        ],
+        "routing": null,
+        "steps": [
+          {
+            "op": "process_update",
+            "update": {
+              "message": {
+                "chat": {
+                  "id": 42,
+                  "type": "private"
+                },
+                "text": "hi"
+              },
+              "update_id": 1
+            }
+          }
+        ]
+      },
+      "name": "config_that_still_names_a_channel_is_refused"
+    },
+    {
+      "expected": {
+        "bot_log": [],
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42.0,
+          "last_brief_id": null,
+          "last_page_id": 5.0,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon_log": [
+          [
+            "owner_outbox",
+            {
+              "transport": "telegram"
+            }
+          ]
+        ],
+        "status": null,
+        "steps": [
+          {
+            "error": null,
+            "op": "send_owner_outbox",
+            "sent": []
+          }
+        ]
+      },
+      "input": {
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42,
+          "last_brief_id": null,
+          "last_page_id": 5,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon": {
+          "outbox": []
+        },
+        "desk_rows": [],
+        "name": "a_web_question_produces_nothing_for_telegram",
+        "registry": [
+          {
+            "id": "vp",
+            "name": "VP"
+          },
+          {
+            "id": "cos",
+            "name": "Chief of Staff"
+          }
+        ],
+        "routing": null,
+        "steps": [
+          {
+            "op": "send_owner_outbox"
+          }
+        ]
+      },
+      "name": "a_web_question_produces_nothing_for_telegram"
+    },
+    {
+      "expected": {
+        "bot_log": [
+          [
+            "sendMessage",
+            {
+              "chat_id": 42.0,
+              "text": "the answer"
+            }
+          ]
+        ],
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42.0,
+          "last_brief_id": null,
+          "last_page_id": 5.0,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon_log": [
+          [
+            "owner_outbox",
+            {
+              "transport": "telegram"
+            }
+          ],
+          [
+            "owner_delivered",
+            {
+              "message_id": "m9",
+              "transport": "telegram"
+            }
+          ]
+        ],
+        "status": null,
+        "steps": [
+          {
+            "error": null,
+            "op": "send_owner_outbox",
+            "sent": [
+              {
+                "kind": "reply",
+                "message_id": "m9",
+                "reason": "reply on its own transport"
+              }
+            ]
+          }
+        ]
+      },
+      "input": {
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42,
+          "last_brief_id": null,
+          "last_page_id": 5,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon": {
+          "outbox": [
+            {
+              "body": "the answer",
+              "message_id": "m9",
+              "reply_to": "q1",
+              "sender": null,
+              "transport": "telegram"
+            }
+          ]
+        },
+        "desk_rows": [],
+        "name": "a_telegram_reply_is_sent_and_receipted",
+        "registry": [
+          {
+            "id": "vp",
+            "name": "VP"
+          },
+          {
+            "id": "cos",
+            "name": "Chief of Staff"
+          }
+        ],
+        "routing": null,
+        "steps": [
+          {
+            "op": "send_owner_outbox"
+          }
+        ]
+      },
+      "name": "a_telegram_reply_is_sent_and_receipted"
+    },
+    {
+      "expected": {
+        "bot_log": [
+          [
+            "sendMessage",
+            {
+              "chat_id": 42.0,
+              "text": "PAGE OWNER security: token exposed"
+            }
+          ]
+        ],
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42.0,
+          "last_brief_id": null,
+          "last_page_id": 5.0,
+          "page_sent_at": [
+            10000.0
+          ],
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon_log": [
+          [
+            "owner_outbox",
+            {
+              "transport": "telegram"
+            }
+          ],
+          [
+            "owner_delivered",
+            {
+              "message_id": "i90",
+              "transport": "telegram"
+            }
+          ]
+        ],
+        "status": {
+          "channel": "cos",
+          "last_brief_id": 5.0
+        },
+        "steps": [
+          {
+            "error": null,
+            "op": "send_owner_outbox",
+            "sent": [
+              {
+                "kind": "mailbox-page",
+                "message_id": "i90",
+                "reason": "page (security)"
+              }
+            ]
+          }
+        ]
+      },
+      "input": {
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42,
+          "last_brief_id": null,
+          "last_page_id": 5,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon": {
+          "outbox": [
+            {
+              "body": "PAGE OWNER security: token exposed",
+              "message_id": "i90",
+              "reply_to": null,
+              "sender": "owner-page",
+              "transport": "telegram"
+            }
+          ]
+        },
+        "desk_rows": [],
+        "name": "mailbox_page_is_sent_once_and_receipted",
+        "registry": [
+          {
+            "id": "vp",
+            "name": "VP"
+          },
+          {
+            "id": "cos",
+            "name": "Chief of Staff"
+          }
+        ],
+        "routing": null,
+        "steps": [
+          {
+            "op": "send_owner_outbox"
+          }
+        ]
+      },
+      "name": "mailbox_page_is_sent_once_and_receipted"
+    },
+    {
+      "expected": {
+        "bot_log": [
+          [
+            "sendMessage",
+            {
+              "chat_id": 42.0,
+              "text": "PAGE OWNER outage: incident 1"
+            }
+          ],
+          [
+            "sendMessage",
+            {
+              "chat_id": 42.0,
+              "text": "PAGE OWNER outage: incident 2"
+            }
+          ],
+          [
+            "sendMessage",
+            {
+              "chat_id": 42.0,
+              "text": "PAGE OWNER outage: incident 3"
+            }
+          ]
+        ],
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42.0,
+          "last_brief_id": null,
+          "last_page_id": 5.0,
+          "page_sent_at": [
+            10000.0,
+            10000.0,
+            10000.0
+          ],
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon_log": [
+          [
+            "owner_outbox",
+            {
+              "transport": "telegram"
+            }
+          ],
+          [
+            "owner_delivered",
+            {
+              "message_id": "i1",
+              "transport": "telegram"
+            }
+          ],
+          [
+            "owner_delivered",
+            {
+              "message_id": "i2",
+              "transport": "telegram"
+            }
+          ],
+          [
+            "owner_delivered",
+            {
+              "message_id": "i3",
+              "transport": "telegram"
+            }
+          ]
+        ],
+        "status": {
+          "channel": "cos",
+          "last_brief_id": 5.0
+        },
+        "steps": [
+          {
+            "error": null,
+            "op": "send_owner_outbox",
+            "sent": [
+              {
+                "kind": "mailbox-page",
+                "message_id": "i1",
+                "reason": "page (outage)"
+              },
+              {
+                "kind": "mailbox-page",
+                "message_id": "i2",
+                "reason": "page (outage)"
+              },
+              {
+                "kind": "mailbox-page",
+                "message_id": "i3",
+                "reason": "page (outage)"
+              }
+            ]
+          }
+        ]
+      },
+      "input": {
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42,
+          "last_brief_id": null,
+          "last_page_id": 5,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon": {
+          "outbox": [
+            {
+              "body": "PAGE OWNER outage: incident 1",
+              "message_id": "i1",
+              "reply_to": null,
+              "sender": "owner-page",
+              "transport": "telegram"
+            },
+            {
+              "body": "PAGE OWNER outage: incident 2",
+              "message_id": "i2",
+              "reply_to": null,
+              "sender": "owner-page",
+              "transport": "telegram"
+            },
+            {
+              "body": "PAGE OWNER outage: incident 3",
+              "message_id": "i3",
+              "reply_to": null,
+              "sender": "owner-page",
+              "transport": "telegram"
+            },
+            {
+              "body": "PAGE OWNER outage: incident 4",
+              "message_id": "i4",
+              "reply_to": null,
+              "sender": "owner-page",
+              "transport": "telegram"
+            }
+          ]
+        },
+        "desk_rows": [],
+        "name": "mailbox_pages_share_the_budget",
+        "registry": [
+          {
+            "id": "vp",
+            "name": "VP"
+          },
+          {
+            "id": "cos",
+            "name": "Chief of Staff"
+          }
+        ],
+        "routing": null,
+        "steps": [
+          {
+            "op": "send_owner_outbox"
+          }
+        ]
+      },
+      "name": "mailbox_pages_share_the_budget"
+    },
+    {
+      "expected": {
+        "bot_log": [
+          [
+            "sendMessage",
+            {
+              "chat_id": 42.0,
+              "text": "PAGE OWNER money: spend cap"
+            }
+          ]
+        ],
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42.0,
+          "last_brief_id": null,
+          "last_page_id": 5.0,
+          "page_sent_at": [
+            10000.0
+          ],
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon_log": [
+          [
+            "owner_outbox",
+            {
+              "transport": "telegram"
+            }
+          ],
+          [
+            "owner_delivered",
+            {
+              "message_id": "i90",
+              "transport": "telegram"
+            }
+          ]
+        ],
+        "status": {
+          "channel": "cos",
+          "last_brief_id": 5.0
+        },
+        "steps": [
+          {
+            "error": null,
+            "op": "send_owner_outbox",
+            "sent": [
+              {
+                "kind": "mailbox-page",
+                "message_id": "i90",
+                "reason": "page (money)"
+              }
+            ]
+          }
+        ]
+      },
+      "input": {
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42,
+          "last_brief_id": null,
+          "last_page_id": 5,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon": {
+          "outbox": [
+            {
+              "body": "PAGE OWNER money: spend cap",
+              "message_id": "i90",
+              "reply_to": null,
+              "sender": "owner-page",
+              "transport": "telegram"
+            }
+          ]
+        },
+        "desk_rows": [],
+        "name": "mailbox_page_does_not_move_the_legacy_watermark",
+        "registry": [
+          {
+            "id": "vp",
+            "name": "VP"
+          },
+          {
+            "id": "cos",
+            "name": "Chief of Staff"
+          }
+        ],
+        "routing": null,
+        "steps": [
+          {
+            "op": "send_owner_outbox"
+          }
+        ]
+      },
+      "name": "mailbox_page_does_not_move_the_legacy_watermark"
+    },
+    {
+      "expected": {
+        "bot_log": [],
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": null,
+          "last_brief_id": null,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon_log": [],
+        "status": null,
+        "steps": [
+          {
+            "error": null,
+            "op": "send_owner_outbox",
+            "sent": []
+          }
+        ]
+      },
+      "input": {
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": null,
+          "last_brief_id": null,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon": {
+          "outbox": [
+            {
+              "body": "answer",
+              "message_id": "i1",
+              "reply_to": "q",
+              "sender": null,
+              "transport": "telegram"
+            }
+          ]
+        },
+        "desk_rows": [],
+        "name": "unpaired_bridge_sends_nothing",
+        "registry": [
+          {
+            "id": "vp",
+            "name": "VP"
+          },
+          {
+            "id": "cos",
+            "name": "Chief of Staff"
+          }
+        ],
+        "routing": null,
+        "steps": [
+          {
+            "op": "send_owner_outbox"
+          }
+        ]
+      },
+      "name": "unpaired_bridge_sends_nothing"
+    },
+    {
+      "expected": {
+        "bot_log": [
+          [
+            "sendMessage",
+            {
+              "chat_id": 42.0,
+              "text": "PAGE OWNER outage: web desk down"
+            }
+          ],
+          [
+            "sendMessage",
+            {
+              "chat_id": 42.0,
+              "text": "PAGE OWNER money: provider cap hit"
+            }
+          ],
+          [
+            "sendMessage",
+            {
+              "chat_id": 42.0,
+              "text": "PAGE OWNER security: token exposed"
+            }
+          ]
+        ],
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42.0,
+          "last_brief_id": null,
+          "last_page_id": 14.0,
+          "page_sent_at": [
+            10000.0,
+            10000.0,
+            10000.0
+          ],
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon_log": [
+          [
+            "owner_outbox",
+            {
+              "transport": "telegram"
+            }
+          ],
+          [
+            "owner_outbox",
+            {
+              "transport": "telegram"
+            }
+          ]
+        ],
+        "status": {
+          "channel": "cos",
+          "last_brief_id": 14.0
+        },
+        "steps": [
+          {
+            "error": null,
+            "op": "send_owner_outbox",
+            "sent": []
+          },
+          {
+            "error": null,
+            "op": "write_config"
+          },
+          {
+            "error": null,
+            "op": "send_owner_outbox",
+            "sent": [
+              {
+                "kind": "page",
+                "message_id": "page-11",
+                "reason": "page (outage)"
+              },
+              {
+                "kind": "page",
+                "message_id": "page-12",
+                "reason": "page (money)"
+              },
+              {
+                "kind": "page",
+                "message_id": "page-14",
+                "reason": "page (security)"
+              }
+            ]
+          }
+        ]
+      },
+      "input": {
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42,
+          "last_brief_id": null,
+          "last_page_id": 10,
+          "page_sent_at": [
+            10000,
+            10000,
+            10000
+          ],
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon": {},
+        "desk_rows": [
+          [
+            11,
+            "cos",
+            "agent",
+            "PAGE OWNER outage: web desk down"
+          ],
+          [
+            12,
+            "cos",
+            "agent",
+            "PAGE OWNER money: provider cap hit"
+          ],
+          [
+            13,
+            "cos",
+            "agent",
+            "an ordinary agent row, not a page"
+          ],
+          [
+            14,
+            "cos",
+            "agent",
+            "PAGE OWNER security: token exposed"
+          ]
+        ],
+        "name": "held_page_is_selected_again",
+        "registry": [
+          {
+            "id": "vp",
+            "name": "VP"
+          },
+          {
+            "id": "cos",
+            "name": "Chief of Staff"
+          }
+        ],
+        "routing": null,
+        "steps": [
+          {
+            "op": "send_owner_outbox"
+          },
+          {
+            "config": {
+              "bot_token": "123:TEST-TOKEN-NOT-REAL",
+              "brief_channel": "cos",
+              "chat_id": 42,
+              "last_brief_id": null,
+              "last_page_id": 10,
+              "page_sent_at": [],
+              "pair_code": "PAIRCODE",
+              "update_offset": null
+            },
+            "op": "write_config"
+          },
+          {
+            "op": "send_owner_outbox"
+          }
+        ]
+      },
+      "name": "held_page_is_selected_again"
+    },
+    {
+      "expected": {
+        "bot_log": [
+          [
+            "sendMessage",
+            {
+              "chat_id": 42.0,
+              "text": "PAGE OWNER outage: web desk down"
+            }
+          ],
+          [
+            "sendMessage",
+            {
+              "chat_id": 42.0,
+              "text": "PAGE OWNER money: provider cap hit"
+            }
+          ],
+          [
+            "sendMessage",
+            {
+              "chat_id": 42.0,
+              "text": "PAGE OWNER security: token exposed"
+            }
+          ]
+        ],
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42.0,
+          "last_brief_id": null,
+          "last_page_id": 14.0,
+          "page_sent_at": [
+            10000.0,
+            10000.0,
+            10000.0
+          ],
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon_log": [
+          [
+            "owner_outbox",
+            {
+              "transport": "telegram"
+            }
+          ],
+          [
+            "owner_outbox",
+            {
+              "transport": "telegram"
+            }
+          ]
+        ],
+        "status": {
+          "channel": "cos",
+          "last_brief_id": 14.0
+        },
+        "steps": [
+          {
+            "error": null,
+            "op": "send_owner_outbox",
+            "sent": [
+              {
+                "kind": "page",
+                "message_id": "page-11",
+                "reason": "page (outage)"
+              },
+              {
+                "kind": "page",
+                "message_id": "page-12",
+                "reason": "page (money)"
+              },
+              {
+                "kind": "page",
+                "message_id": "page-14",
+                "reason": "page (security)"
+              }
+            ]
+          },
+          {
+            "error": null,
+            "op": "send_owner_outbox",
+            "sent": []
+          }
+        ]
+      },
+      "input": {
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42,
+          "last_brief_id": null,
+          "last_page_id": 10,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon": {},
+        "desk_rows": [
+          [
+            11,
+            "cos",
+            "agent",
+            "PAGE OWNER outage: web desk down"
+          ],
+          [
+            12,
+            "cos",
+            "agent",
+            "PAGE OWNER money: provider cap hit"
+          ],
+          [
+            13,
+            "cos",
+            "agent",
+            "an ordinary agent row, not a page"
+          ],
+          [
+            14,
+            "cos",
+            "agent",
+            "PAGE OWNER security: token exposed"
+          ]
+        ],
+        "name": "delivered_pages_move_the_watermark",
+        "registry": [
+          {
+            "id": "vp",
+            "name": "VP"
+          },
+          {
+            "id": "cos",
+            "name": "Chief of Staff"
+          }
+        ],
+        "routing": null,
+        "steps": [
+          {
+            "op": "send_owner_outbox"
+          },
+          {
+            "op": "send_owner_outbox"
+          }
+        ]
+      },
+      "name": "delivered_pages_move_the_watermark"
+    },
+    {
+      "expected": {
+        "bot_log": [
+          [
+            "sendMessage",
+            {
+              "chat_id": 42.0,
+              "text": "PAGE OWNER outage: web desk down"
+            }
+          ],
+          [
+            "sendMessage",
+            {
+              "chat_id": 42.0,
+              "text": "PAGE OWNER money: provider cap hit"
+            }
+          ],
+          [
+            "sendMessage",
+            {
+              "chat_id": 42.0,
+              "text": "PAGE OWNER money: provider cap hit"
+            }
+          ],
+          [
+            "sendMessage",
+            {
+              "chat_id": 42.0,
+              "text": "PAGE OWNER security: token exposed"
+            }
+          ]
+        ],
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42.0,
+          "last_brief_id": null,
+          "last_page_id": 14.0,
+          "page_sent_at": [
+            10000.0,
+            10000.0,
+            10000.0
+          ],
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon_log": [
+          [
+            "owner_outbox",
+            {
+              "transport": "telegram"
+            }
+          ],
+          [
+            "owner_outbox",
+            {
+              "transport": "telegram"
+            }
+          ]
+        ],
+        "status": {
+          "channel": "cos",
+          "last_brief_id": 14.0
+        },
+        "steps": [
+          {
+            "error": [
+              "RuntimeError",
+              "Telegram sendMessage: 502"
+            ],
+            "op": "send_owner_outbox"
+          },
+          {
+            "error": null,
+            "op": "set_fail_on"
+          },
+          {
+            "error": null,
+            "op": "send_owner_outbox",
+            "sent": [
+              {
+                "kind": "page",
+                "message_id": "page-12",
+                "reason": "page (money)"
+              },
+              {
+                "kind": "page",
+                "message_id": "page-14",
+                "reason": "page (security)"
+              }
+            ]
+          }
+        ]
+      },
+      "input": {
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42,
+          "last_brief_id": null,
+          "last_page_id": 10,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon": {},
+        "desk_rows": [
+          [
+            11,
+            "cos",
+            "agent",
+            "PAGE OWNER outage: web desk down"
+          ],
+          [
+            12,
+            "cos",
+            "agent",
+            "PAGE OWNER money: provider cap hit"
+          ],
+          [
+            13,
+            "cos",
+            "agent",
+            "an ordinary agent row, not a page"
+          ],
+          [
+            14,
+            "cos",
+            "agent",
+            "PAGE OWNER security: token exposed"
+          ]
+        ],
+        "fail_on": "money",
+        "name": "failed_send_does_not_advance_past_the_failed_page",
+        "registry": [
+          {
+            "id": "vp",
+            "name": "VP"
+          },
+          {
+            "id": "cos",
+            "name": "Chief of Staff"
+          }
+        ],
+        "routing": null,
+        "steps": [
+          {
+            "op": "send_owner_outbox"
+          },
+          {
+            "op": "set_fail_on",
+            "value": null
+          },
+          {
+            "op": "send_owner_outbox"
+          }
+        ]
+      },
+      "name": "failed_send_does_not_advance_past_the_failed_page"
+    },
+    {
+      "expected": {
+        "bot_log": [
+          [
+            "sendMessage",
+            {
+              "chat_id": 42.0,
+              "text": "PAGE OWNER outage: web desk down"
+            }
+          ],
+          [
+            "sendMessage",
+            {
+              "chat_id": 42.0,
+              "text": "PAGE OWNER money: provider cap hit"
+            }
+          ],
+          [
+            "sendMessage",
+            {
+              "chat_id": 42.0,
+              "text": "PAGE OWNER security: token exposed"
+            }
+          ]
+        ],
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42.0,
+          "last_brief_id": null,
+          "last_page_id": 14.0,
+          "page_sent_at": [
+            10000.0,
+            10000.0,
+            10000.0
+          ],
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon_log": [
+          [
+            "owner_outbox",
+            {
+              "transport": "telegram"
+            }
+          ],
+          [
+            "owner_outbox",
+            {
+              "transport": "telegram"
+            }
+          ]
+        ],
+        "status": {
+          "channel": "cos",
+          "last_brief_id": 14.0
+        },
+        "steps": [
+          {
+            "error": null,
+            "op": "send_owner_outbox",
+            "sent": [
+              {
+                "kind": "page",
+                "message_id": "page-11",
+                "reason": "page (outage)"
+              },
+              {
+                "kind": "page",
+                "message_id": "page-12",
+                "reason": "page (money)"
+              },
+              {
+                "kind": "page",
+                "message_id": "page-14",
+                "reason": "page (security)"
+              }
+            ]
+          },
+          {
+            "error": null,
+            "op": "send_owner_outbox",
+            "sent": []
+          }
+        ]
+      },
+      "input": {
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42,
+          "last_brief_id": null,
+          "last_page_id": 10,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon": {},
+        "desk_rows": [
+          [
+            11,
+            "cos",
+            "agent",
+            "PAGE OWNER outage: web desk down"
+          ],
+          [
+            12,
+            "cos",
+            "agent",
+            "PAGE OWNER money: provider cap hit"
+          ],
+          [
+            13,
+            "cos",
+            "agent",
+            "an ordinary agent row, not a page"
+          ],
+          [
+            14,
+            "cos",
+            "agent",
+            "PAGE OWNER security: token exposed"
+          ],
+          [
+            15,
+            "cos",
+            "agent",
+            "PAGE OWNER outage: a fourth page"
+          ],
+          [
+            16,
+            "cos",
+            "agent",
+            "PAGE OWNER money: a fifth page"
+          ]
+        ],
+        "name": "pages_in_one_tick_each_spend_the_budget",
+        "registry": [
+          {
+            "id": "vp",
+            "name": "VP"
+          },
+          {
+            "id": "cos",
+            "name": "Chief of Staff"
+          }
+        ],
+        "routing": null,
+        "steps": [
+          {
+            "op": "send_owner_outbox"
+          },
+          {
+            "op": "send_owner_outbox"
+          }
+        ]
+      },
+      "name": "pages_in_one_tick_each_spend_the_budget"
+    },
+    {
+      "expected": {
+        "bot_log": [
+          [
+            "sendMessage",
+            {
+              "chat_id": 42.0,
+              "text": "PAGE OWNER outage: web desk down"
+            }
+          ],
+          [
+            "sendMessage",
+            {
+              "chat_id": 42.0,
+              "text": "PAGE OWNER money: provider cap hit"
+            }
+          ],
+          [
+            "sendMessage",
+            {
+              "chat_id": 42.0,
+              "text": "PAGE OWNER security: token exposed"
+            }
+          ]
+        ],
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42.0,
+          "last_brief_id": null,
+          "last_page_id": 14.0,
+          "page_sent_at": [
+            10000.0,
+            10000.0,
+            10000.0
+          ],
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon_log": [
+          [
+            "owner_outbox",
+            {
+              "transport": "telegram"
+            }
+          ]
+        ],
+        "status": {
+          "channel": "cos",
+          "last_brief_id": 14.0
+        },
+        "steps": [
+          {
+            "error": null,
+            "op": "send_owner_outbox",
+            "sent": [
+              {
+                "kind": "page",
+                "message_id": "page-11",
+                "reason": "page (outage)"
+              },
+              {
+                "kind": "page",
+                "message_id": "page-12",
+                "reason": "page (money)"
+              },
+              {
+                "kind": "page",
+                "message_id": "page-14",
+                "reason": "page (security)"
+              }
+            ]
+          }
+        ]
+      },
+      "input": {
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42,
+          "last_brief_id": null,
+          "last_page_id": 10,
+          "page_sent_at": [
+            2800,
+            2800
+          ],
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon": {},
+        "desk_rows": [
+          [
+            11,
+            "cos",
+            "agent",
+            "PAGE OWNER outage: web desk down"
+          ],
+          [
+            12,
+            "cos",
+            "agent",
+            "PAGE OWNER money: provider cap hit"
+          ],
+          [
+            13,
+            "cos",
+            "agent",
+            "an ordinary agent row, not a page"
+          ],
+          [
+            14,
+            "cos",
+            "agent",
+            "PAGE OWNER security: token exposed"
+          ]
+        ],
+        "name": "page_older_than_the_window_does_not_count",
+        "registry": [
+          {
+            "id": "vp",
+            "name": "VP"
+          },
+          {
+            "id": "cos",
+            "name": "Chief of Staff"
+          }
+        ],
+        "routing": null,
+        "steps": [
+          {
+            "op": "send_owner_outbox"
+          }
+        ]
+      },
+      "name": "page_older_than_the_window_does_not_count"
+    },
+    {
+      "expected": {
+        "bot_log": [
+          [
+            "sendMessage",
+            {
+              "chat_id": 42.0,
+              "text": "PAGE OWNER security: token exposed"
+            }
+          ]
+        ],
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42.0,
+          "last_brief_id": 13.0,
+          "last_page_id": 14.0,
+          "page_sent_at": [
+            10000.0
+          ],
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon_log": [
+          [
+            "owner_outbox",
+            {
+              "transport": "telegram"
+            }
+          ]
+        ],
+        "status": {
+          "channel": "cos",
+          "last_brief_id": 14.0
+        },
+        "steps": [
+          {
+            "error": null,
+            "op": "send_owner_outbox",
+            "sent": [
+              {
+                "kind": "page",
+                "message_id": "page-14",
+                "reason": "page (security)"
+              }
+            ]
+          }
+        ]
+      },
+      "input": {
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42,
+          "last_brief_id": 13,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon": {},
+        "desk_rows": [
+          [
+            11,
+            "cos",
+            "agent",
+            "PAGE OWNER outage: web desk down"
+          ],
+          [
+            12,
+            "cos",
+            "agent",
+            "PAGE OWNER money: provider cap hit"
+          ],
+          [
+            13,
+            "cos",
+            "agent",
+            "an ordinary agent row, not a page"
+          ],
+          [
+            14,
+            "cos",
+            "agent",
+            "PAGE OWNER security: token exposed"
+          ]
+        ],
+        "name": "first_run_carries_the_old_watermark_over",
+        "registry": [
+          {
+            "id": "vp",
+            "name": "VP"
+          },
+          {
+            "id": "cos",
+            "name": "Chief of Staff"
+          }
+        ],
+        "routing": null,
+        "steps": [
+          {
+            "op": "send_owner_outbox"
+          }
+        ]
+      },
+      "name": "first_run_carries_the_old_watermark_over"
+    },
+    {
+      "expected": {
+        "bot_log": [],
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42.0,
+          "last_brief_id": null,
+          "last_page_id": 14.0,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon_log": [
+          [
+            "owner_outbox",
+            {
+              "transport": "telegram"
+            }
+          ]
+        ],
+        "status": null,
+        "steps": [
+          {
+            "error": null,
+            "op": "send_owner_outbox",
+            "sent": []
+          }
+        ]
+      },
+      "input": {
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42,
+          "last_brief_id": null,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon": {},
+        "desk_rows": [
+          [
+            11,
+            "cos",
+            "agent",
+            "PAGE OWNER outage: web desk down"
+          ],
+          [
+            12,
+            "cos",
+            "agent",
+            "PAGE OWNER money: provider cap hit"
+          ],
+          [
+            13,
+            "cos",
+            "agent",
+            "an ordinary agent row, not a page"
+          ],
+          [
+            14,
+            "cos",
+            "agent",
+            "PAGE OWNER security: token exposed"
+          ]
+        ],
+        "name": "first_run_with_no_marker_starts_from_now",
+        "registry": [
+          {
+            "id": "vp",
+            "name": "VP"
+          },
+          {
+            "id": "cos",
+            "name": "Chief of Staff"
+          }
+        ],
+        "routing": null,
+        "steps": [
+          {
+            "op": "send_owner_outbox"
+          }
+        ]
+      },
+      "name": "first_run_with_no_marker_starts_from_now"
+    },
+    {
+      "expected": {
+        "bot_log": [
+          [
+            "sendMessage",
+            {
+              "chat_id": 42.0,
+              "text": "PAGE OWNER security: token exposed"
+            }
+          ]
+        ],
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42.0,
+          "last_brief_id": null,
+          "last_page_id": 200.0,
+          "page_sent_at": [
+            10000.0
+          ],
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon_log": [
+          [
+            "owner_outbox",
+            {
+              "transport": "telegram"
+            }
+          ]
+        ],
+        "status": {
+          "channel": "cos",
+          "last_brief_id": 200.0
+        },
+        "steps": [
+          {
+            "error": null,
+            "op": "send_owner_outbox",
+            "sent": [
+              {
+                "kind": "page",
+                "message_id": "page-200",
+                "reason": "page (security)"
+              }
+            ]
+          }
+        ]
+      },
+      "input": {
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42,
+          "last_brief_id": null,
+          "last_page_id": 10,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon": {},
+        "desk_rows": [
+          [
+            100,
+            "cos",
+            "agent",
+            "an ordinary agent row 0"
+          ],
+          [
+            101,
+            "cos",
+            "agent",
+            "an ordinary agent row 1"
+          ],
+          [
+            102,
+            "cos",
+            "agent",
+            "an ordinary agent row 2"
+          ],
+          [
+            103,
+            "cos",
+            "agent",
+            "an ordinary agent row 3"
+          ],
+          [
+            104,
+            "cos",
+            "agent",
+            "an ordinary agent row 4"
+          ],
+          [
+            105,
+            "cos",
+            "agent",
+            "an ordinary agent row 5"
+          ],
+          [
+            106,
+            "cos",
+            "agent",
+            "an ordinary agent row 6"
+          ],
+          [
+            107,
+            "cos",
+            "agent",
+            "an ordinary agent row 7"
+          ],
+          [
+            108,
+            "cos",
+            "agent",
+            "an ordinary agent row 8"
+          ],
+          [
+            109,
+            "cos",
+            "agent",
+            "an ordinary agent row 9"
+          ],
+          [
+            110,
+            "cos",
+            "agent",
+            "an ordinary agent row 10"
+          ],
+          [
+            111,
+            "cos",
+            "agent",
+            "an ordinary agent row 11"
+          ],
+          [
+            112,
+            "cos",
+            "agent",
+            "an ordinary agent row 12"
+          ],
+          [
+            113,
+            "cos",
+            "agent",
+            "an ordinary agent row 13"
+          ],
+          [
+            114,
+            "cos",
+            "agent",
+            "an ordinary agent row 14"
+          ],
+          [
+            115,
+            "cos",
+            "agent",
+            "an ordinary agent row 15"
+          ],
+          [
+            116,
+            "cos",
+            "agent",
+            "an ordinary agent row 16"
+          ],
+          [
+            117,
+            "cos",
+            "agent",
+            "an ordinary agent row 17"
+          ],
+          [
+            118,
+            "cos",
+            "agent",
+            "an ordinary agent row 18"
+          ],
+          [
+            119,
+            "cos",
+            "agent",
+            "an ordinary agent row 19"
+          ],
+          [
+            120,
+            "cos",
+            "agent",
+            "an ordinary agent row 20"
+          ],
+          [
+            121,
+            "cos",
+            "agent",
+            "an ordinary agent row 21"
+          ],
+          [
+            122,
+            "cos",
+            "agent",
+            "an ordinary agent row 22"
+          ],
+          [
+            123,
+            "cos",
+            "agent",
+            "an ordinary agent row 23"
+          ],
+          [
+            124,
+            "cos",
+            "agent",
+            "an ordinary agent row 24"
+          ],
+          [
+            200,
+            "cos",
+            "agent",
+            "PAGE OWNER security: token exposed"
+          ]
+        ],
+        "name": "ordinary_rows_do_not_starve_a_page",
+        "registry": [
+          {
+            "id": "vp",
+            "name": "VP"
+          },
+          {
+            "id": "cos",
+            "name": "Chief of Staff"
+          }
+        ],
+        "routing": null,
+        "steps": [
+          {
+            "op": "send_owner_outbox"
+          }
+        ]
+      },
+      "name": "ordinary_rows_do_not_starve_a_page"
+    },
+    {
+      "expected": {
+        "bot_log": [
+          [
+            "sendMessage",
+            {
+              "chat_id": 42.0,
+              "text": "PAGE OWNER outage: desk down"
+            }
+          ]
+        ],
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42.0,
+          "last_brief_id": null,
+          "last_page_id": 32.0,
+          "page_sent_at": [
+            10000.0
+          ],
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon_log": [
+          [
+            "owner_outbox",
+            {
+              "transport": "telegram"
+            }
+          ]
+        ],
+        "status": {
+          "channel": "cos",
+          "last_brief_id": 32.0
+        },
+        "steps": [
+          {
+            "error": null,
+            "op": "send_owner_outbox",
+            "sent": [
+              {
+                "kind": "page",
+                "message_id": "page-32",
+                "reason": "page (outage)"
+              }
+            ]
+          }
+        ]
+      },
+      "input": {
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42,
+          "last_brief_id": null,
+          "last_page_id": 10,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon": {},
+        "desk_rows": [
+          [
+            30,
+            "cos",
+            "agent",
+            "a report"
+          ],
+          [
+            31,
+            "cos",
+            "agent",
+            "a web echo"
+          ],
+          [
+            32,
+            "cos",
+            "agent",
+            "PAGE OWNER outage: desk down"
+          ]
+        ],
+        "name": "ordinary_rows_never_move_the_watermark",
+        "registry": [
+          {
+            "id": "vp",
+            "name": "VP"
+          },
+          {
+            "id": "cos",
+            "name": "Chief of Staff"
+          }
+        ],
+        "routing": null,
+        "steps": [
+          {
+            "op": "send_owner_outbox"
+          }
+        ]
+      },
+      "name": "ordinary_rows_never_move_the_watermark"
+    },
+    {
+      "expected": {
+        "bot_log": [
+          [
+            "getWebhookInfo",
+            {}
+          ],
+          [
+            "getUpdates",
+            {
+              "allowed_updates": [
+                "message"
+              ],
+              "offset": 7.0,
+              "timeout": 10.0
+            }
+          ],
+          [
+            "sendMessage",
+            {
+              "chat_id": 42.0,
+              "text": "Chief of Staff message #i7. I'll reply here when ready."
+            }
+          ],
+          [
+            "sendMessage",
+            {
+              "chat_id": 42.0,
+              "text": "Chief of Staff message #i7. I'll reply here when ready."
+            }
+          ],
+          [
+            "getUpdates",
+            {
+              "allowed_updates": [
+                "message"
+              ],
+              "offset": 9.0,
+              "timeout": 10.0
+            }
+          ],
+          [
+            "getUpdates",
+            {
+              "allowed_updates": [
+                "message"
+              ],
+              "offset": 9.0,
+              "timeout": 10.0
+            }
+          ]
+        ],
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42.0,
+          "last_brief_id": null,
+          "last_page_id": 0.0,
+          "pair_code": "PAIRCODE",
+          "update_offset": 9.0
+        },
+        "daemon_log": [
+          [
+            "owner_ingest",
+            {
+              "body": "one",
+              "external_id": "telegram:7",
+              "subject": null,
+              "transport": "telegram"
+            }
+          ],
+          [
+            "owner_ingest",
+            {
+              "body": "two",
+              "external_id": "telegram:8",
+              "subject": null,
+              "transport": "telegram"
+            }
+          ],
+          [
+            "owner_outbox",
+            {
+              "transport": "telegram"
+            }
+          ],
+          [
+            "owner_outbox",
+            {
+              "transport": "telegram"
+            }
+          ]
+        ],
+        "status": null,
+        "steps": [
+          {
+            "error": null,
+            "op": "run",
+            "stopped": true
+          }
+        ]
+      },
+      "input": {
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42,
+          "last_brief_id": null,
+          "pair_code": "PAIRCODE",
+          "update_offset": 7
+        },
+        "daemon": {
+          "ingest": {
+            "duplicate": false,
+            "message": {
+              "message_id": "i7"
+            }
+          },
+          "outbox": []
+        },
+        "desk_rows": [],
+        "name": "poll_loop_processes_updates_in_order_and_saves_the_offset",
+        "registry": [
+          {
+            "id": "vp",
+            "name": "VP"
+          },
+          {
+            "id": "cos",
+            "name": "Chief of Staff"
+          }
+        ],
+        "routing": null,
+        "steps": [
+          {
+            "batches": [
+              [
+                {
+                  "message": {
+                    "chat": {
+                      "id": 42,
+                      "type": "private"
+                    },
+                    "text": "one"
+                  },
+                  "update_id": 7
+                },
+                {
+                  "message": {
+                    "chat": {
+                      "id": 42,
+                      "type": "private"
+                    },
+                    "text": "two"
+                  },
+                  "update_id": 8
+                }
+              ],
+              []
+            ],
+            "op": "run"
+          }
+        ]
+      },
+      "name": "poll_loop_processes_updates_in_order_and_saves_the_offset"
+    },
+    {
+      "expected": {
+        "bot_log": [
+          [
+            "getWebhookInfo",
+            {}
+          ],
+          [
+            "getUpdates",
+            {
+              "allowed_updates": [
+                "message"
+              ],
+              "timeout": 10.0
+            }
+          ],
+          [
+            "sendMessage",
+            {
+              "chat_id": 42.0,
+              "text": "Chief of Staff message #i7. I'll reply here when ready."
+            }
+          ],
+          [
+            "sendMessage",
+            {
+              "chat_id": 42.0,
+              "text": "answer"
+            }
+          ],
+          [
+            "getUpdates",
+            {
+              "allowed_updates": [
+                "message"
+              ],
+              "offset": 4.0,
+              "timeout": 10.0
+            }
+          ]
+        ],
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42.0,
+          "last_brief_id": null,
+          "last_page_id": 5.0,
+          "pair_code": "PAIRCODE",
+          "update_offset": 4.0
+        },
+        "daemon_log": [
+          [
+            "owner_ingest",
+            {
+              "body": "question",
+              "external_id": "telegram:3",
+              "subject": null,
+              "transport": "telegram"
+            }
+          ],
+          [
+            "owner_outbox",
+            {
+              "transport": "telegram"
+            }
+          ],
+          [
+            "owner_delivered",
+            {
+              "message_id": "m2",
+              "transport": "telegram"
+            }
+          ]
+        ],
+        "status": null,
+        "steps": [
+          {
+            "error": null,
+            "op": "run",
+            "stopped": true
+          }
+        ]
+      },
+      "input": {
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42,
+          "last_brief_id": null,
+          "last_page_id": 5,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon": {
+          "ingest": {
+            "duplicate": false,
+            "message": {
+              "message_id": "i7"
+            }
+          },
+          "outbox": [
+            {
+              "body": "answer",
+              "message_id": "m2",
+              "reply_to": "q",
+              "sender": null,
+              "transport": "telegram"
+            }
+          ]
+        },
+        "desk_rows": [],
+        "name": "poll_loop_sends_replies_after_each_batch",
+        "registry": [
+          {
+            "id": "vp",
+            "name": "VP"
+          },
+          {
+            "id": "cos",
+            "name": "Chief of Staff"
+          }
+        ],
+        "routing": null,
+        "steps": [
+          {
+            "batches": [
+              [
+                {
+                  "message": {
+                    "chat": {
+                      "id": 42,
+                      "type": "private"
+                    },
+                    "text": "question"
+                  },
+                  "update_id": 3
+                }
+              ]
+            ],
+            "op": "run"
+          }
+        ]
+      },
+      "name": "poll_loop_sends_replies_after_each_batch"
+    },
+    {
+      "expected": {
+        "bot_log": [],
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "chat_id": null,
+          "pair_code": "PAIRCODE"
+        },
+        "daemon_log": [],
+        "status": null,
+        "steps": [
+          {
+            "error": null,
+            "op": "status",
+            "stderr": "",
+            "stdout": "channel=cos; brief_channel=vp; paired=no; last_brief_id=None; update_offset=None\n"
+          }
+        ]
+      },
+      "input": {
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "chat_id": null,
+          "pair_code": "PAIRCODE"
+        },
+        "daemon": {},
+        "desk_rows": [],
+        "name": "status_of_a_fresh_config",
+        "registry": [
+          {
+            "id": "vp",
+            "name": "VP"
+          },
+          {
+            "id": "cos",
+            "name": "Chief of Staff"
+          }
+        ],
+        "routing": null,
+        "steps": [
+          {
+            "op": "status"
+          }
+        ]
+      },
+      "name": "status_of_a_fresh_config"
+    },
+    {
+      "expected": {
+        "bot_log": [],
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42.0,
+          "last_brief_id": 13.0,
+          "pair_code": "PAIRCODE",
+          "update_offset": 900.0
+        },
+        "daemon_log": [],
+        "status": null,
+        "steps": [
+          {
+            "error": null,
+            "op": "status",
+            "stderr": "",
+            "stdout": "channel=vp; brief_channel=cos; paired=yes; last_brief_id=13; update_offset=900\n"
+          }
+        ]
+      },
+      "input": {
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42,
+          "last_brief_id": 13,
+          "pair_code": "PAIRCODE",
+          "update_offset": 900
+        },
+        "daemon": {},
+        "desk_rows": [],
+        "name": "status_reports_routing_and_pairing",
+        "registry": [
+          {
+            "id": "vp",
+            "name": "VP"
+          },
+          {
+            "id": "cos",
+            "name": "Chief of Staff"
+          }
+        ],
+        "routing": {
+          "channel": "vp"
+        },
+        "steps": [
+          {
+            "op": "status"
+          }
+        ]
+      },
+      "name": "status_reports_routing_and_pairing"
+    }
+  ]
+}
