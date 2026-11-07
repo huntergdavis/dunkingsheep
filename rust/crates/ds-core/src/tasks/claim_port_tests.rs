@@ -209,6 +209,20 @@ async fn test_an_open_dependency_still_blocks() {
         ClaimOutcome::Claimed { task, .. } => assert_eq!(pre.id, task.id),
         other => panic!("only the prerequisite may be claimed, got {other:?}"),
     }
+    // Proof that the dependent is ineligible while its prerequisite is outstanding: the
+    // prerequisite is now leased by PANE, so a second pane must not be handed the dependent
+    // (or the prerequisite) and gets a refusal instead.
+    match store
+        .claim_next("global", "w2:p3", ClaimOptions::default())
+        .await
+        .unwrap()
+    {
+        ClaimOutcome::Refused { .. } => {}
+        ClaimOutcome::Claimed { task, .. } => panic!(
+            "a second pane was handed {} while its prerequisite is leased",
+            task.id
+        ),
+    }
 }
 
 #[tokio::test]
