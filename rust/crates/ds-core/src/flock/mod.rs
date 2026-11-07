@@ -932,6 +932,8 @@ mod loops_tests;
 #[cfg(test)]
 mod mailbox_tests;
 #[cfg(test)]
+mod outbox_restart_keys_tests;
+#[cfg(test)]
 mod panes_tests;
 #[cfg(test)]
 mod populated_state_file_tests;
