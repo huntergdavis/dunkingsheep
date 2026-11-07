@@ -983,6 +983,7 @@ impl Dispatcher {
     pub fn register_owner_delivered_message_state_reply_stats(&mut self) {
         self.register("owner_delivered", h_owner_delivered);
         self.register("owner_page", h_owner_page);
+        self.register("owner_page_confirmed", h_owner_page_confirmed);
         self.register("message_state", h_message_state);
         self.register("reply_stats", h_reply_stats);
     }
@@ -2104,6 +2105,20 @@ pub fn h_owner_page(context: &HandlerContext<'_>, args: Args) -> Result<Value, D
         "message": owner_message_value(&paged.message),
         "duplicate": paged.duplicate,
         "transport": paged.transport,
+    }))
+}
+
+/// `owner_page_confirmed` (t665): the highest owner page the Telegram transport has delivered,
+/// as the watchdog compares it. Owner and system only.
+pub fn h_owner_page_confirmed(
+    context: &HandlerContext<'_>,
+    _args: Args,
+) -> Result<Value, DunkError> {
+    let through = crate::owner::OwnerConversations::new(context.flock, context.env)
+        .page_confirmed_through(context.self_pane_id())?;
+    Ok(json!({
+        "through": through,
+        "transport": crate::owner::conversations::OWNER_PAGE_TRANSPORT,
     }))
 }
 

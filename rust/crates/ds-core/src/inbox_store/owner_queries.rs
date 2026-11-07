@@ -198,6 +198,31 @@ impl Store {
         })
     }
 
+    /// The highest owner page the telegram transport has delivered, by its mailbox number (t665).
+    /// Only delivered owner-page rows count, so a page that is still waiting never confirms.
+    pub fn owner_page_delivered_through(&self) -> Result<Option<i64>, DunkError> {
+        let values = [
+            SqlValue::Text(OWNER_MAILBOX.to_string()),
+            SqlValue::Text("telegram".to_string()),
+        ];
+        let pages = self.readers.with(|connection| {
+            full_messages(
+                connection,
+                &format!(
+                    "SELECT {FULL_COLUMNS} FROM messages WHERE mailbox = ? AND transport = ? \
+                     AND sender = 'owner-page' AND delivered_at IS NOT NULL"
+                ),
+                &values,
+            )
+        })?;
+        Ok(pages
+            .iter()
+            .filter_map(|page| {
+                crate::owner::conversations::owner_page_number(&page.summary.message_id)
+            })
+            .max())
+    }
+
     /// Owner-mailbox rows waiting for delivery by this transport: replies (reply_to set) and
     /// owner pages (sender `owner-page`, t665). Nothing else, so a human question or a web
     /// echo never reaches the phone.
