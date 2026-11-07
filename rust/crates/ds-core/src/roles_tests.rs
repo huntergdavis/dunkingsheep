@@ -87,7 +87,7 @@ fn the_tables_have_the_pythons_sizes() {
     // one-sided edit to either language changes a count here or fails a Python test.
     assert_eq!(47, READ_ONLY.len());
     assert_eq!(28, WORKER_EXTRA.len());
-    assert_eq!(30, SYSTEM_EXTRA.len());
+    assert_eq!(31, SYSTEM_EXTRA.len());
     assert_eq!(16, DESK_EXTRA.len());
     assert_eq!(3, PLANNER_EXTRA.len());
     assert_eq!(30, WEB_DENIED.len());

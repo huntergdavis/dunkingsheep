@@ -777,6 +777,7 @@ os.rename(out_path + ".tmp", out_path)
             "owner_ingest",
             "owner_outbox",
             "owner_delivered",
+            "owner_page",
             "pm_digest",
             "pm_routing",
             "task_add",

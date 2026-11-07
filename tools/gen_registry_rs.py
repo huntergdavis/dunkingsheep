@@ -172,6 +172,58 @@ def build():
 
     commands.append(RustOnlyCommand())
 
+    # owner_page (t665, FLAT_FLEET 7.2): a producer records one owner page for the Telegram
+    # outbox. Rust-only: the Python daemon never serves it, so it is not in dunk_api.COMMANDS.
+    owner_page_schema = {
+        "type": "object",
+        "properties": {
+            "body": {"type": "string", "description": "The page text (the watchdog's PAGE OWNER digest)."},
+            "external_id": {"type": "string", "description": "The producer's dedupe key; a repeat returns the row already recorded."},
+        },
+        "required": ["body"],
+        "additionalProperties": False,
+    }
+
+    class RustOnlyOwnerPage:
+        name = "owner_page"
+        description = ("Record one owner page for the Telegram outbox (t665, FLAT_FLEET.md 7.2). "
+                       "A page is a notice, not a question: it has no reply_to, so no desk answers it, "
+                       "and owner_outbox returns it to the telegram transport only. external_id is the "
+                       "producer's dedupe key. Owner and system only.")
+        params = owner_page_schema["properties"]
+        required = ["body"]
+        mcp_required = ["body"]
+        mcp = False
+
+        def input_schema(self):
+            return owner_page_schema
+
+    commands.append(RustOnlyOwnerPage())
+
+    # The two versioned owner-question verbs are Rust-only (no Python dunk_api entry). They
+    # were hand-added to registry.rs, so a regeneration would silently drop them and break
+    # the Rust callers (api.rs, registrations.rs, ds-web ops_board). Keep them here.
+    class RustOnlyTaskOwner:
+        owner_only = True  # superuser-only in the committed registry (see the owner_only line below)
+
+        def __init__(self, name, description, params, required):
+            self.name, self.description, self.params = name, description, params
+            self.required, self.mcp_required, self.mcp = required, required, False
+            self._schema = {"type": "object", "properties": params,
+                            "required": list(required), "additionalProperties": False}
+
+        def input_schema(self):
+            return self._schema
+
+    commands.append(RustOnlyTaskOwner(
+        "task_owner_question", "Read an owner question with its current generation.",
+        {"id": {"type": "string"}}, ["id"]))
+    commands.append(RustOnlyTaskOwner(
+        "task_owner_answer", "Atomically answer one versioned owner question.",
+        {"id": {"type": "string"}, "version": {"type": "string"},
+         "option_number": {"type": "integer"}, "reply": {"type": "string"}},
+        ["id", "version"]))
+
     def permitted(role, name):
         if role == "web" and name in web_denied:
             return False
@@ -231,6 +283,8 @@ def build():
             % (json.dumps(k), json.dumps(json.dumps(v, separators=(",", ":")), ensure_ascii=False))
             for k, v in c.params.items())
         allowed = (["owner", "desk"] if c.name == "project_spawn"
+                   else ["owner", "system"] if c.name == "owner_page"
+                   else ["owner", "web"] if c.name.startswith("task_owner_")
                    else [r for r in roles if permitted(r, c.name)])
         lines.append("    Command {")
         lines.append(f"        name: {json.dumps(c.name)},")
@@ -239,7 +293,8 @@ def build():
         lines.append("        dispatch_required: &[%s]," % ", ".join(json.dumps(r) for r in c.required))
         lines.append("        required: &[%s]," % ", ".join(json.dumps(r) for r in c.mcp_required))
         lines.append(f"        mcp: {'true' if c.mcp else 'false'},")
-        lines.append(f"        owner_only: {'true' if c.name in superuser_only else 'false'},")
+        is_owner_only = c.name in superuser_only or getattr(c, "owner_only", False)
+        lines.append(f"        owner_only: {'true' if is_owner_only else 'false'},")
         lines.append("        roles: &[%s]," % ", ".join(json.dumps(r) for r in allowed))
         lines.append("    },")
         expected[c.name] = c.input_schema()

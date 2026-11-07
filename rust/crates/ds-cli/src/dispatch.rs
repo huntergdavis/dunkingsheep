@@ -71,6 +71,7 @@ const PYTHON_COMMAND_ORDER: &[&str] = &[
     "owner_ingest",
     "owner_outbox",
     "owner_delivered",
+    "owner_page",
     "inbox_send",
     "inbox_count",
     "pm_digest",

@@ -982,6 +982,7 @@ impl Dispatcher {
     /// Register the T39 owner delivery and mailbox view handlers.
     pub fn register_owner_delivered_message_state_reply_stats(&mut self) {
         self.register("owner_delivered", h_owner_delivered);
+        self.register("owner_page", h_owner_page);
         self.register("message_state", h_message_state);
         self.register("reply_stats", h_reply_stats);
     }
@@ -2090,6 +2091,20 @@ fn owner_message_value(message: &crate::inbox_store::Message) -> Value {
         "body": message.body,
         "read_at": message.read_at,
     })
+}
+
+/// `owner_page` (t665): record one owner page for the Telegram outbox. Owner and system only.
+pub fn h_owner_page(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let paged = crate::owner::OwnerConversations::new(context.flock, context.env).page(
+        args.get("body"),
+        args.get("external_id"),
+        context.self_pane_id(),
+    )?;
+    Ok(json!({
+        "message": owner_message_value(&paged.message),
+        "duplicate": paged.duplicate,
+        "transport": paged.transport,
+    }))
 }
 
 /// `dunk_api.h_owner_ingest`.

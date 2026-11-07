@@ -39,6 +39,13 @@ pub struct Conversation {
     pub waiting: Vec<String>,
 }
 
+/// A page is an outbound notice for the owner's phone (t665, FLAT_FLEET 7.2), not a question:
+/// it carries this sender and subject and no reply_to, so no desk answers it, and owner_outbox
+/// returns it to the telegram transport only.
+pub const OWNER_PAGE_SENDER: &str = "owner-page";
+pub const OWNER_PAGE_SUBJECT: &str = "PAGE OWNER";
+pub const OWNER_PAGE_TRANSPORT: &str = "telegram";
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Ingested {
     pub message: Message,
@@ -230,6 +237,65 @@ impl<'a> OwnerConversations<'a> {
             message,
             duplicate: false,
             transport,
+        })
+    }
+
+    /// Record one owner page for the Telegram outbox (t665). Only the owner and the system may
+    /// record one. `external_id` is the producer's dedupe key: a repeat returns the row it
+    /// already made, so a re-raised page never reaches the phone twice.
+    pub fn page(
+        &self,
+        body: Option<&Value>,
+        external_id: Option<&Value>,
+        self_pane_id: Option<&str>,
+    ) -> Result<Ingested, DunkError> {
+        let role = match self_pane_id.filter(|pane| !pane.is_empty()) {
+            Some(pane) => self.flock.caller_role(Some(pane), self.pane_env)?,
+            None => "owner".to_string(),
+        };
+        if !matches!(role.as_str(), "owner" | "system") {
+            return Err(DunkError::Refused(format!(
+                "only the owner and the system may record an owner page; role {} may not",
+                python_repr(&role)
+            )));
+        }
+        let body = body.map(python_str).unwrap_or_default();
+        if body.trim().is_empty() {
+            return Err(DunkError::Refused("an owner page needs a body".to_string()));
+        }
+        let external_id = external_id
+            .filter(|value| value_truthy(value))
+            .map(python_str)
+            .filter(|id| !id.is_empty());
+        let store = self.inbox_store()?;
+        if let Some(id) = external_id.as_deref() {
+            if let Some(message) = store.find_by_external_id(OWNER_MAILBOX, Some(id))? {
+                return Ok(Ingested {
+                    message,
+                    duplicate: true,
+                    transport: OWNER_PAGE_TRANSPORT.to_string(),
+                });
+            }
+        }
+        let outgoing = Outgoing {
+            mailbox: OWNER_MAILBOX,
+            body: Some(&body),
+            subject: Some(OWNER_PAGE_SUBJECT),
+            sender: Some(OWNER_PAGE_SENDER),
+            mailbox_label: Some(OWNER_MAILBOX),
+            pane_id: None,
+            attachments: &[],
+            transport: Some(OWNER_PAGE_TRANSPORT),
+            reply_to: None,
+            external_id: external_id.as_deref(),
+        };
+        let message_id = store.send(&outgoing)?;
+        let message = store.get_message(&message_id)?;
+        self.flock.invalidate_view();
+        Ok(Ingested {
+            message,
+            duplicate: false,
+            transport: OWNER_PAGE_TRANSPORT.to_string(),
         })
     }
 

@@ -15,7 +15,7 @@ use serde_json::{json, Map, Value};
 #[derive(Debug, Clone, Copy)]
 pub struct Param {
     pub name: &'static str,
-    pub schema: &'static str, // compact JSON, exactly the Python's param dict
+    pub schema: &'static str,   // compact JSON, exactly the Python's param dict
 }
 
 /// One command: everything the three surfaces need to describe it.
@@ -39,7 +39,7 @@ pub struct Group {
     pub actions: &'static [(&'static str, &'static str)],
 }
 
-/// Every command the daemon serves (125 at generation time).
+/// Every command the daemon serves (128 at generation time).
 pub static COMMANDS: &[Command] = &[
     Command {
         name: "add_dunk",
@@ -622,6 +622,16 @@ pub static COMMANDS: &[Command] = &[
         roles: &["owner", "system", "web", "desk"],
     },
     Command {
+        name: "owner_page",
+        description: "Record one owner page for the Telegram outbox (t665, FLAT_FLEET.md 7.2). A page is a notice, not a question: it has no reply_to, so no desk answers it, and owner_outbox returns it to the telegram transport only. external_id is the producer's dedupe key. Owner and system only.",
+        params: &[Param { name: "body", schema: "{\"type\":\"string\",\"description\":\"The page text (the watchdog's PAGE OWNER digest).\"}" }, Param { name: "external_id", schema: "{\"type\":\"string\",\"description\":\"The producer's dedupe key; a repeat returns the row already recorded.\"}" }],
+        dispatch_required: &["body"],
+        required: &["body"],
+        mcp: false,
+        owner_only: false,
+        roles: &["owner", "system"],
+    },
+    Command {
         name: "owner_poll",
         description: "Record a drain heartbeat: the lane's harness polls for owner messages (even when the queue is empty). This, and only this, is what delivery_capability reads to decide a lane drains - a manual owner take must not confer capability.",
         params: &[Param { name: "pane_id", schema: "{\"type\":\"string\",\"description\":\"the pane that polled\"}" }, Param { name: "by", schema: "{\"type\":\"string\",\"description\":\"who polled, e.g. pi-extension\"}" }],
@@ -1142,20 +1152,6 @@ pub static COMMANDS: &[Command] = &[
         roles: &["owner", "web", "worker", "reviewer"],
     },
     Command {
-        name: "task_owner_question",
-        description: "Read an owner question with its current generation.",
-        params: &[Param { name: "id", schema: "{\"type\":\"string\"}" }],
-        dispatch_required: &["id"], required: &["id"], mcp: false, owner_only: true,
-        roles: &["owner", "web"],
-    },
-    Command {
-        name: "task_owner_answer",
-        description: "Atomically answer one versioned owner question.",
-        params: &[Param { name: "id", schema: "{\"type\":\"string\"}" }, Param { name: "version", schema: "{\"type\":\"string\"}" }, Param { name: "option_number", schema: "{\"type\":\"integer\"}" }, Param { name: "reply", schema: "{\"type\":\"string\"}" }],
-        dispatch_required: &["id", "version"], required: &["id", "version"], mcp: false, owner_only: true,
-        roles: &["owner", "web"],
-    },
-    Command {
         name: "task_note",
         description: "Append an explanatory event to a task's history, including after the task row was deleted; the board's history explains its own gaps.",
         params: &[Param { name: "id", schema: "{\"type\":\"string\",\"description\":\"Task id, e.g. t12.\"}" }, Param { name: "event", schema: "{\"type\":\"string\",\"description\":\"Event name (default 'note').\"}" }, Param { name: "reason", schema: "{\"type\":\"string\",\"description\":\"Human rationale stored in meta.reason.\"}" }],
@@ -1164,6 +1160,26 @@ pub static COMMANDS: &[Command] = &[
         mcp: true,
         owner_only: false,
         roles: &["owner", "system", "web", "desk", "planner", "worker", "reviewer"],
+    },
+    Command {
+        name: "task_owner_answer",
+        description: "Atomically answer one versioned owner question.",
+        params: &[Param { name: "id", schema: "{\"type\":\"string\"}" }, Param { name: "version", schema: "{\"type\":\"string\"}" }, Param { name: "option_number", schema: "{\"type\":\"integer\"}" }, Param { name: "reply", schema: "{\"type\":\"string\"}" }],
+        dispatch_required: &["id", "version"],
+        required: &["id", "version"],
+        mcp: false,
+        owner_only: true,
+        roles: &["owner", "web"],
+    },
+    Command {
+        name: "task_owner_question",
+        description: "Read an owner question with its current generation.",
+        params: &[Param { name: "id", schema: "{\"type\":\"string\"}" }],
+        dispatch_required: &["id"],
+        required: &["id"],
+        mcp: false,
+        owner_only: true,
+        roles: &["owner", "web"],
     },
     Command {
         name: "task_read",
@@ -1385,23 +1401,16 @@ pub fn input_schema(name: &str) -> Option<Value> {
     let command = command(name)?;
     let mut properties = Map::new();
     for param in command.params {
-        let schema: Value =
-            serde_json::from_str(param.schema).expect("generated param schema is valid JSON");
+        let schema: Value = serde_json::from_str(param.schema)
+            .expect("generated param schema is valid JSON");
         properties.insert(param.name.to_string(), schema);
     }
     let mut schema = Map::new();
     schema.insert("type".into(), Value::from("object"));
     schema.insert("properties".into(), Value::Object(properties));
-    schema.insert(
-        "required".into(),
-        Value::Array(
-            command
-                .required
-                .iter()
-                .map(|name| Value::from(*name))
-                .collect(),
-        ),
-    );
+    schema.insert("required".into(),
+                  Value::Array(command.required.iter()
+                      .map(|name| Value::from(*name)).collect()));
     schema.insert("additionalProperties".into(), Value::Bool(false));
     Some(Value::Object(schema))
 }
@@ -1413,14 +1422,11 @@ pub fn input_schema(name: &str) -> Option<Value> {
 pub fn grouped_input_schema(name: &str) -> Option<Value> {
     let group = GROUPS.iter().find(|group| group.name == name)?;
     let mut properties = Map::new();
-    properties.insert(
-        "action".to_string(),
-        json!({
-            "type": "string",
-            "enum": group.actions.iter().map(|(action, _)| *action).collect::<Vec<_>>(),
-            "description": "Which operation to run.",
-        }),
-    );
+    properties.insert("action".to_string(), json!({
+        "type": "string",
+        "enum": group.actions.iter().map(|(action, _)| *action).collect::<Vec<_>>(),
+        "description": "Which operation to run.",
+    }));
     for (action, command_name) in group.actions {
         let _ = action;
         if let Some(command) = command(command_name) {
@@ -1444,8 +1450,5 @@ pub fn grouped_input_schema(name: &str) -> Option<Value> {
 
 /// The group of `action -> command` pairs, for the CLI's `mcp-map`.
 pub fn group_map() -> BTreeMap<&'static str, &'static [(&'static str, &'static str)]> {
-    GROUPS
-        .iter()
-        .map(|group| (group.name, group.actions))
-        .collect()
+    GROUPS.iter().map(|group| (group.name, group.actions)).collect()
 }

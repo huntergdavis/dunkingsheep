@@ -94,7 +94,7 @@ pub const WORKER_EXTRA: [&str; 28] = [
 ];
 
 /// `ALLOW["system"]` minus `READ_ONLY`.
-pub const SYSTEM_EXTRA: [&str; 30] = [
+pub const SYSTEM_EXTRA: [&str; 31] = [
     "context_add",
     "flush_box",
     "gh_token",
@@ -105,6 +105,7 @@ pub const SYSTEM_EXTRA: [&str; 30] = [
     "owner_delivered",
     "owner_ingest",
     "owner_outbox",
+    "owner_page",
     "owner_poll",
     "owner_push",
     "owner_reply",
