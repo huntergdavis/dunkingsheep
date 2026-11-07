@@ -624,8 +624,19 @@ pub fn bind_identity(
             );
             return None;
         }
-        // A backend that cannot answer does not contradict the claim.
-        Err(_) => PaneInfo::default(),
+        // The pane listing could not be read (t3368): nothing checks the claim, so it is refused,
+        // like a listing that answers without the pane. The deliberate no-backend trial is the one
+        // exception, and the dispatcher turns it into a pane with no pid before it gets here.
+        Err(error) => {
+            ctx.identity_bound = Some(false);
+            ctx.identity_note = Some(format!(
+                "claim {claimed} refused: pane listing failed: {error}; running anonymous"
+            ));
+            tracing::warn!(
+                "identity mismatch cmd={command} claimed={claimed:?} reason=listing_failed caller_pid={caller_pid:?}"
+            );
+            return None;
+        }
     };
     let Some(pane_pid) = pane.pane_pid else {
         ctx.identity_note = Some("pane has no root pid; claim stands".into());

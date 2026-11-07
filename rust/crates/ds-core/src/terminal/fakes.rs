@@ -276,6 +276,18 @@ impl Terminal for FakeTerminal {
         Ok(self.list_panes_grouped())
     }
 
+    /// The caller-binding read fails with the same fixture failure as the grouped listing (t3368).
+    fn try_pane_root_pid(&self, pane_id: &str) -> Result<Option<Option<i64>>, TerminalError> {
+        if let Some(error) = &self.fail_grouped_panes {
+            return Err(error.clone());
+        }
+        Ok(self
+            .list_panes()
+            .into_iter()
+            .find(|pane| pane.pane_id == pane_id)
+            .map(|pane| pane.pane_pid))
+    }
+
     fn agent_child_pids(&self, pane_pid: i64) -> Result<Vec<i64>, TerminalError> {
         Ok(self.children.get(&pane_pid).cloned().unwrap_or_default())
     }
