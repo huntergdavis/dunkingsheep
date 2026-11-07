@@ -42,7 +42,10 @@ pub use claim::{
     claimable, refusal, CallerAlive, Candidate, ClaimOptions, ClaimOutcome, Refusal, Requeued,
 };
 pub use claim_batch::ClaimBatchOutcome;
-use claim_batch::{active_batch_of, retire_member, unfinished_earlier_member};
+use claim_batch::{
+    active_batch_of, guard_completion, leave_batch_on_status, retire_member,
+    unfinished_earlier_member,
+};
 
 /// `DEFAULT_LEASE_S`: how long a claim stays valid without a heartbeat. The Python reads
 /// `DUNKINGSHEEP_LEASE_S` once at import; this reads it per call.
@@ -693,6 +696,9 @@ impl Tasks {
                     params![reason, json!(deps).to_string(), now, id],
                 )
                 .map_err(db::map_sqlite)?;
+                // t3582: blocking a member ends its own membership; the batch goes on (block_by
+                // is a status path too, and it had no retirement).
+                retire_member(conn, &id)?;
                 // The `blocked` event carries scope and priority like every other writer
                 // (Python `_record`): a scoped metrics query keys on scope and drops a NULL one.
                 conn.execute(
@@ -1109,6 +1115,9 @@ impl Tasks {
                     return Err(DunkError::Refused(format!(
                         "task {id} has {children} child task(s); delete or re-parent them first")));
                 }
+                // t3582: a deleted member ends its membership, so it cannot hold later members back
+                // as a row nobody will ever finish (the review of #807 found it did).
+                retire_member(&tx, &id)?;
                 let mut dependents = Vec::new();
                 {
                     let mut stmt = tx
@@ -1296,6 +1305,10 @@ impl Tasks {
                     }
                 }
                 if let Some(status) = &status_after {
+                    // t3582: the batch order guard and the membership retirement apply on every
+                    // status path. This one had neither (the review of #807 found it).
+                    guard_completion(&tx, &id, &old_status, status)?;
+                    leave_batch_on_status(&tx, &id, &old_status, status)?;
                     let status_rows = match status.as_str() {
                         "done" => {
                             tx.execute(

@@ -516,6 +516,42 @@ pub(super) fn retire_member(conn: &Connection, task_id: &str) -> Result<(), Dunk
     Ok(())
 }
 
+/// The order guard for a status change to done (t3582), for every status write path: `set_status`,
+/// the generic update, `advance`'s completion. A member completes only after every EARLIER member
+/// has left the batch. Refused before the write.
+pub(super) fn guard_completion(
+    conn: &Connection,
+    task_id: &str,
+    from: &str,
+    to: &str,
+) -> Result<(), DunkError> {
+    if to != "done" || from == "done" {
+        return Ok(());
+    }
+    if let Some(batch) = active_batch_of(conn, task_id)? {
+        if let Some(earlier) = unfinished_earlier_member(conn, batch, task_id)? {
+            return Err(DunkError::Refused(format!(
+                "task {task_id} is in batch {batch}; its earlier member {earlier} must complete first (t3582)"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// A member that leaves the work (done, cancelled or blocked) ends its own membership, on every
+/// status write path (t3582). The rest of the batch goes on.
+pub(super) fn leave_batch_on_status(
+    conn: &Connection,
+    task_id: &str,
+    from: &str,
+    to: &str,
+) -> Result<(), DunkError> {
+    if from != to && matches!(to, "done" | "cancelled" | "blocked") {
+        retire_member(conn, task_id)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 #[path = "claim_batch_tests.rs"]
 mod claim_batch_tests;
@@ -523,3 +559,7 @@ mod claim_batch_tests;
 #[cfg(test)]
 #[path = "claim_batch_lifecycle_tests.rs"]
 mod claim_batch_lifecycle_tests;
+
+#[cfg(test)]
+#[path = "claim_batch_status_tests.rs"]
+mod claim_batch_status_tests;
