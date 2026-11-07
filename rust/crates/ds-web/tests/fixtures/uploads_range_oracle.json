@@ -1,0 +1,232 @@
+{
+  "cases": [
+    {
+      "body_base64": "MDEyMzQ1Njc4OUFCQ0RFRkdISUo=",
+      "headers": {
+        "accept-ranges": "bytes",
+        "content-disposition": "attachment; filename=\"notes.txt\"",
+        "content-length": "20",
+        "content-type": "text/plain; charset=utf-8",
+        "etag": "\"774e28ab81fe9645100baa188188d827\"",
+        "last-modified": "Tue, 14 Nov 2023 22:13:20 GMT",
+        "x-content-type-options": "nosniff"
+      },
+      "method": "GET",
+      "multipart": false,
+      "name": "base",
+      "request_headers": {},
+      "status": 200
+    },
+    {
+      "body_base64": "MjM0NQ==",
+      "headers": {
+        "accept-ranges": "bytes",
+        "content-disposition": "attachment; filename=\"notes.txt\"",
+        "content-length": "4",
+        "content-range": "bytes 2-5/20",
+        "content-type": "text/plain; charset=utf-8",
+        "etag": "\"774e28ab81fe9645100baa188188d827\"",
+        "last-modified": "Tue, 14 Nov 2023 22:13:20 GMT",
+        "x-content-type-options": "nosniff"
+      },
+      "method": "GET",
+      "multipart": false,
+      "name": "single_range",
+      "request_headers": {
+        "Range": "bytes=2-5"
+      },
+      "status": 206
+    },
+    {
+      "body_base64": "R0hJSg==",
+      "headers": {
+        "accept-ranges": "bytes",
+        "content-disposition": "attachment; filename=\"notes.txt\"",
+        "content-length": "4",
+        "content-range": "bytes 16-19/20",
+        "content-type": "text/plain; charset=utf-8",
+        "etag": "\"774e28ab81fe9645100baa188188d827\"",
+        "last-modified": "Tue, 14 Nov 2023 22:13:20 GMT",
+        "x-content-type-options": "nosniff"
+      },
+      "method": "GET",
+      "multipart": false,
+      "name": "suffix_range",
+      "request_headers": {
+        "Range": "bytes=-4"
+      },
+      "status": 206
+    },
+    {
+      "body_base64": "SElK",
+      "headers": {
+        "accept-ranges": "bytes",
+        "content-disposition": "attachment; filename=\"notes.txt\"",
+        "content-length": "3",
+        "content-range": "bytes 17-19/20",
+        "content-type": "text/plain; charset=utf-8",
+        "etag": "\"774e28ab81fe9645100baa188188d827\"",
+        "last-modified": "Tue, 14 Nov 2023 22:13:20 GMT",
+        "x-content-type-options": "nosniff"
+      },
+      "method": "GET",
+      "multipart": false,
+      "name": "open_range",
+      "request_headers": {
+        "Range": "bytes=17-"
+      },
+      "status": 206
+    },
+    {
+      "body_base64": "T25seSBzdXBwb3J0IGJ5dGVzIHJhbmdl",
+      "headers": {
+        "content-length": "24",
+        "content-type": "text/plain; charset=utf-8"
+      },
+      "method": "GET",
+      "multipart": false,
+      "name": "malformed_unit",
+      "request_headers": {
+        "Range": "items=0-3"
+      },
+      "status": 400
+    },
+    {
+      "body_base64": "UmFuZ2UgaGVhZGVyOiByYW5nZSBtdXN0IGJlIHJlcXVlc3RlZA==",
+      "headers": {
+        "content-length": "37",
+        "content-type": "text/plain; charset=utf-8"
+      },
+      "method": "GET",
+      "multipart": false,
+      "name": "malformed_garbage",
+      "request_headers": {
+        "Range": "bytes=abc"
+      },
+      "status": 400
+    },
+    {
+      "body_base64": "",
+      "headers": {
+        "content-length": "0",
+        "content-range": "bytes */20",
+        "content-type": "text/plain; charset=utf-8"
+      },
+      "method": "GET",
+      "multipart": false,
+      "name": "unsatisfiable",
+      "request_headers": {
+        "Range": "bytes=100-200"
+      },
+      "status": 416
+    },
+    {
+      "body_base64": "MjM0NQ==",
+      "headers": {
+        "accept-ranges": "bytes",
+        "content-disposition": "attachment; filename=\"notes.txt\"",
+        "content-length": "4",
+        "content-range": "bytes 2-5/20",
+        "content-type": "text/plain; charset=utf-8",
+        "etag": "\"774e28ab81fe9645100baa188188d827\"",
+        "last-modified": "Tue, 14 Nov 2023 22:13:20 GMT",
+        "x-content-type-options": "nosniff"
+      },
+      "method": "GET",
+      "multipart": false,
+      "name": "if_range_etag_matches",
+      "request_headers": {
+        "If-Range": "\"774e28ab81fe9645100baa188188d827\"",
+        "Range": "bytes=2-5"
+      },
+      "status": 206
+    },
+    {
+      "body_base64": "MDEyMzQ1Njc4OUFCQ0RFRkdISUo=",
+      "headers": {
+        "accept-ranges": "bytes",
+        "content-disposition": "attachment; filename=\"notes.txt\"",
+        "content-length": "20",
+        "content-type": "text/plain; charset=utf-8",
+        "etag": "\"774e28ab81fe9645100baa188188d827\"",
+        "last-modified": "Tue, 14 Nov 2023 22:13:20 GMT",
+        "x-content-type-options": "nosniff"
+      },
+      "method": "GET",
+      "multipart": false,
+      "name": "if_range_stale",
+      "request_headers": {
+        "If-Range": "\"stale-validator\"",
+        "Range": "bytes=2-5"
+      },
+      "status": 200
+    },
+    {
+      "body_base64": "MDEyMzQ1Ng==",
+      "headers": {
+        "accept-ranges": "bytes",
+        "content-disposition": "attachment; filename=\"notes.txt\"",
+        "content-length": "7",
+        "content-range": "bytes 0-6/20",
+        "content-type": "text/plain; charset=utf-8",
+        "etag": "\"774e28ab81fe9645100baa188188d827\"",
+        "last-modified": "Tue, 14 Nov 2023 22:13:20 GMT",
+        "x-content-type-options": "nosniff"
+      },
+      "method": "GET",
+      "multipart": false,
+      "name": "overlapping_merged",
+      "request_headers": {
+        "Range": "bytes=0-3,2-6"
+      },
+      "status": 206
+    },
+    {
+      "body_base64": "LS1CT1VOREFSWQ0KQ29udGVudC1UeXBlOiB0ZXh0L3BsYWluOyBjaGFyc2V0PXV0Zi04DQpDb250ZW50LVJhbmdlOiBieXRlcyAwLTEvMjANCg0KMDENCi0tQk9VTkRBUlkNCkNvbnRlbnQtVHlwZTogdGV4dC9wbGFpbjsgY2hhcnNldD11dGYtOA0KQ29udGVudC1SYW5nZTogYnl0ZXMgNS02LzIwDQoNCjU2DQotLUJPVU5EQVJZLS0=",
+      "headers": {
+        "accept-ranges": "bytes",
+        "content-disposition": "attachment; filename=\"notes.txt\"",
+        "content-length": "242",
+        "content-type": "multipart/byteranges; boundary=BOUNDARY",
+        "etag": "\"774e28ab81fe9645100baa188188d827\"",
+        "last-modified": "Tue, 14 Nov 2023 22:13:20 GMT",
+        "x-content-type-options": "nosniff"
+      },
+      "method": "GET",
+      "multipart": true,
+      "name": "disjoint_multipart",
+      "request_headers": {
+        "Range": "bytes=0-1,5-6"
+      },
+      "status": 206
+    },
+    {
+      "body_base64": "",
+      "headers": {
+        "allow": "GET",
+        "content-length": "31",
+        "content-type": "application/json"
+      },
+      "method": "HEAD",
+      "multipart": false,
+      "name": "head_not_allowed",
+      "request_headers": {},
+      "status": 405
+    }
+  ],
+  "file": {
+    "content_base64": "MDEyMzQ1Njc4OUFCQ0RFRkdISUo=",
+    "filename": "notes.txt",
+    "id": "oracle0000000000000000000000000001",
+    "mime": "text/plain",
+    "mtime": 1700000000,
+    "size": 20
+  },
+  "oracle": {
+    "fastapi": "0.143.0",
+    "interpreter": "3.14.4",
+    "pydantic": "2.14.0",
+    "revision": "3bb3c484023df592d6762202ec779a905cfb73ce",
+    "starlette": "1.7.0"
+  }
+}
