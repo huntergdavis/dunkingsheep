@@ -42,6 +42,7 @@ pub use claim::{
     claimable, refusal, CallerAlive, Candidate, ClaimOptions, ClaimOutcome, Refusal, Requeued,
 };
 pub use claim_batch::ClaimBatchOutcome;
+use claim_batch::{active_batch_of, batch_settled, end_batch, unfinished_earlier_member};
 
 /// `DEFAULT_LEASE_S`: how long a claim stays valid without a heartbeat. The Python reads
 /// `DUNKINGSHEEP_LEASE_S` once at import; this reads it per call.
@@ -544,6 +545,15 @@ impl Tasks {
                     return Err(DunkError::Refused(format!(
                         "task {id} is {current}; a finished task is not reopened by an edit (t854)")));
                 }
+                // t3582: a batch member completes only after its earlier internal members have.
+                if status == "done" && current != "done" {
+                    if let Some(batch) = active_batch_of(conn, &id)? {
+                        if let Some(earlier) = unfinished_earlier_member(conn, batch, &id)? {
+                            return Err(DunkError::Refused(format!(
+                                "task {id} is in batch {batch}; its earlier member {earlier} must complete first (t3582)")));
+                        }
+                    }
+                }
                 // SQLite's attempted binding happens only after visibility and terminal-state
                 // checks, as in Python. The rejected composite value therefore cannot hide a
                 // refusal or partially change status, leases, or events.
@@ -624,6 +634,12 @@ impl Tasks {
                 // t1218 A: the event path. Completing a task unblocks what it blocks, in
                 // the same writer call as the completion, so no lane runs `task unblock`.
                 if status == "done" && current != "done" {
+                    // t3582: the batch ends when its last member is done.
+                    if let Some(batch) = active_batch_of(conn, &id)? {
+                        if batch_settled(conn, batch)? {
+                            end_batch(conn, batch)?;
+                        }
+                    }
                     auto_unblock(conn, now, Some(&id))?;
                 }
                 Ok(())
@@ -2061,6 +2077,12 @@ fn migrate(conn: &Connection) -> Result<(), DunkError> {
         // fix); without it the port would fall back to the SELECT-then-INSERT the Python
         // comment names as the bug.
         "CREATE TABLE IF NOT EXISTS counters (name TEXT PRIMARY KEY, value INTEGER NOT NULL)",
+        // t3582: a batch's recorded membership and order. `active` stays 1 while the member
+        // belongs to a live batch; the partial unique index keeps a task in one active batch.
+        "CREATE TABLE IF NOT EXISTS task_batches (batch_id INTEGER PRIMARY KEY, pane_id TEXT NOT NULL, created_at REAL NOT NULL, state TEXT NOT NULL DEFAULT 'active')",
+        "CREATE TABLE IF NOT EXISTS task_batch_members (batch_id INTEGER NOT NULL, position INTEGER NOT NULL, task_id TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1, PRIMARY KEY (batch_id, position))",
+        "CREATE UNIQUE INDEX IF NOT EXISTS batch_members_one_active ON task_batch_members (task_id) WHERE active = 1",
+        "CREATE INDEX IF NOT EXISTS batch_members_by_task ON task_batch_members (task_id, active)",
     ] {
         conn.execute(statement, []).map_err(db::map_sqlite)?;
     }
