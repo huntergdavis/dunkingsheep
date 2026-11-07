@@ -203,7 +203,8 @@ dropin_before=$dropin_before
 backup=$BACKUPS/pre-rust-$ts.tar
 EOF
   # 3. The switch. A failure from here on names the rollback, which works from the record above.
-  trap 'echo "activate FAILED during the switch; run: $0 rollback --apply (it works from $STATE)" >&2' EXIT
+  copy_tmp=$LAUNCHER.python-$ts.tmp
+  trap 'rm -f "$copy_tmp"; echo "activate FAILED during the switch; run: $0 rollback --apply (it works from $STATE)" >&2' EXIT
   run mkdir -p "$DROPIN_DIR"
   put "$DROPIN" <<EOF
 [Service]
@@ -211,8 +212,12 @@ EOF
 ExecStart=
 ExecStart=$bin serve
 EOF
-  # The python launcher is kept as dunkingsheep.python-<ts>; the new launcher execs the Rust binary.
-  run cp -p "$LAUNCHER" "$LAUNCHER.python-$ts"
+  # The python launcher is kept as dunkingsheep.python-<ts>. It is copied under a temporary name and moved
+  # into place only when the copy equals the original, so a copy that fails midway never sits under the
+  # name that rollback restores from. The new launcher then execs the Rust binary.
+  run cp -p "$LAUNCHER" "$copy_tmp"
+  run cmp "$LAUNCHER" "$copy_tmp"
+  run mv "$copy_tmp" "$LAUNCHER.python-$ts"
   put "$LAUNCHER" <<EOF
 #!/bin/sh
 # t3471: this launcher execs the Rust daemon release $SHA. The python launcher is $LAUNCHER.python-$ts
@@ -234,7 +239,8 @@ dropin_before=$dropin_before
 backup=$BACKUPS/pre-rust-$ts.tar
 EOF
   trap - EXIT
-  echo "activated $SHA; now run: $0 verify   (then verify --apply to start the timers)"
+  echo "activated $SHA. The timers stay stopped until: $0 verify --apply (nothing ticks before that)."
+  echo "Run $0 verify first."
 }
 
 verify() {
@@ -301,10 +307,11 @@ rollback() {
   else
     run cp -p "$rb_launcher_backup" "$rb_launcher"
   fi
-  # 4. The state is not restored here. Check first; restore only if the python release cannot read it.
-  echo "state: not restored automatically. Check first:"
-  echo "  python3 <python release>/dunkingsheep --no-start-daemon status"
-  echo "  restore from $rb_backup only if that check fails"
+  # 4. The state is not restored here. This run restarts the daemon and starts the timers in one go, so the
+  #    check has to come BEFORE --apply. Restore only if the python release cannot read the state.
+  echo "state: not restored automatically. Check BEFORE --apply, because this run restarts the daemon and"
+  echo "  starts the timers in one go:  python3 <python release>/dunkingsheep --no-start-daemon status"
+  echo "  if the python release cannot read the state, restore it from $rb_backup by hand, then --apply"
   # 5. Reload, restart the daemon, start the timers, and close the record.
   run systemctl --user daemon-reload
   run systemctl --user restart dunkingsheep.service
@@ -325,6 +332,7 @@ plan() {
   echo "3. verify:   $0 verify                        read-only checks"
   echo "             $0 verify --apply                start the timers, then one tick of each and its journal"
   echo "4. rollback: $0 rollback --apply              stop, drop-in restored, python launcher restored, restart, timers"
+  echo "             (check the python release can read the state BEFORE --apply: its dry-run output says how)"
   echo "Dry-run by default: nothing above changes anything without --apply. Operator only."
 }
 

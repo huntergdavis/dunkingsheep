@@ -54,6 +54,20 @@ exit 0
 echo "dunkingsheep $*" >> "$FAKE_LOG"
 echo "fake $1 ok"
 ''',
+    # Real cp, except that a copy of the python launcher (the backup) can be made to fail midway, leaving
+    # a partial file behind, as a full disk would.
+    "cp": r'''#!/bin/sh
+for arg; do dest=$arg; done
+case "$dest" in
+  *.python-*)
+    if [ -n "$FAKE_CP_FAIL" ]; then
+      printf 'partial' > "$dest"
+      exit 1
+    fi
+    ;;
+esac
+exec /bin/cp "$@"
+''',
 }
 
 OLD_LAUNCHER = '#!/bin/sh\nexec /usr/bin/python3 /old/release/dunkingsheep "$@"\n'
@@ -324,6 +338,23 @@ class RustRolloutTests(unittest.TestCase):
         self.assertIn("no python copy", proc.stdout)
         self.assertEqual(OLD_LAUNCHER, read(self.launcher))
         self.assertFalse(os.path.exists(self.state))
+
+    def test_a_launcher_copy_that_fails_midway_leaves_no_backup_and_rollback_keeps_the_launcher(self):
+        # The copy of the python launcher fails part way (a full disk, say). The partial file must not sit
+        # under the backup name, and rollback must leave the intact original launcher alone.
+        self.stage()
+        self.env["FAKE_CP_FAIL"] = "1"
+        proc = self.run_script("activate", "--sha", self.sha, apply=True)
+        self.assertNotEqual(0, proc.returncode)
+        leftovers = [name for name in os.listdir(os.path.dirname(self.launcher))
+                     if name.startswith("dunkingsheep.python-")]
+        self.assertEqual([], leftovers, "no partial backup, not even the temporary copy")
+        self.assertEqual(OLD_LAUNCHER, read(self.launcher))
+        del self.env["FAKE_CP_FAIL"]
+        proc = self.run_script("rollback", apply=True)
+        self.assertEqual(0, proc.returncode, proc.stderr + proc.stdout)
+        self.assertIn("no python copy", proc.stdout)
+        self.assertEqual(OLD_LAUNCHER, read(self.launcher))
 
     def test_activate_twice_is_refused(self):
         self.stage()
