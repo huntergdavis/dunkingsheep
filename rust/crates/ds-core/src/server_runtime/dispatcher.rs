@@ -13,6 +13,22 @@ use crate::api;
 use crate::error::DunkError;
 use crate::metrics::Event;
 use crate::server::{Dispatcher, PaneInfo, RequestCtx};
+/// The deliberate no-backend trial: `DUNKINGSHEEP_ALLOW_EMPTY_BACKEND=1`, the switch the serve
+/// path honours (server.rs). Only this trial lets an unreadable pane listing leave a claim standing.
+fn no_backend_trial() -> bool {
+    std::env::var("DUNKINGSHEEP_ALLOW_EMPTY_BACKEND").as_deref() == Ok("1")
+}
+
+/// What a failed identity read means for the claim (t3368): the error, so the binding refuses,
+/// except in the no-backend trial, where the pane is listed with no pid and the claim stands.
+fn failed_read_root(error: DunkError, trial: bool) -> Result<Option<Option<i64>>, DunkError> {
+    if trial {
+        Ok(Some(None))
+    } else {
+        Err(error)
+    }
+}
+
 /// Shared server dispatcher; terminal instances stay local to each method call.
 pub(crate) struct RuntimeDispatcher {
     services: Arc<RuntimeServices>,
@@ -54,10 +70,12 @@ impl Dispatcher for RuntimeDispatcher {
             return Ok(None);
         }
         // Caller binding reads the root pid from the identity listing, which carries no free text
-        // (t3368). A pane that listing does not show, or a listing that cannot be read, is an
-        // error here, and the binding refuses the claim: no grace window stands in for it.
+        // (t3368). Fail closed: a listing that answers without the pane, and a listing that cannot
+        // be read, are both refused by the binding (no grace window stands in for either). The one
+        // exception is the deliberate no-backend trial (DUNKINGSHEEP_ALLOW_EMPTY_BACKEND=1), which
+        // runs with no tmux at all: there nothing can check a claim, and the trial stands on that.
         let terminal = Mutex::new((self.services.terminal_factory)());
-        let root = self
+        let read = self
             .services
             .flock
             .pane_root_pid(pane_id, crate::clock::now_s(), || {
@@ -67,7 +85,11 @@ impl Dispatcher for RuntimeDispatcher {
                 terminal
                     .try_pane_root_pid(pane_id)
                     .map_err(|error| DunkError::Refused(error.message))
-            })?;
+            });
+        let root = match read {
+            Ok(root) => root,
+            Err(error) => failed_read_root(error, no_backend_trial())?,
+        };
         Ok(root.map(|pane_pid| PaneInfo { pane_pid }))
     }
 
@@ -87,3 +109,7 @@ impl Dispatcher for RuntimeDispatcher {
 #[cfg(test)]
 #[path = "dispatcher/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "dispatcher/identity_read_tests.rs"]
+mod identity_read_tests;

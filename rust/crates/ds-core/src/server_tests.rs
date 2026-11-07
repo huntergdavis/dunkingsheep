@@ -522,17 +522,24 @@ impl Dispatcher for ListingFails {
     }
 }
 
-/// A backend that cannot answer does not contradict the claim: the deliberate no-backend trial
-/// relies on it (the serve test). Only a listing that answers without the pane refuses (t3368).
+/// t3368, fail closed: a listing that cannot be read refuses the claim, as one that answers
+/// without the pane does. The deliberate no-backend trial is the one exception, pinned by the
+/// serve test (ds-cli/tests/serve_cmd.rs), which runs with DUNKINGSHEEP_ALLOW_EMPTY_BACKEND=1.
 #[test]
-fn a_backend_that_cannot_answer_does_not_contradict_the_claim() {
+fn a_pane_listing_that_cannot_be_read_refuses_the_claim() {
     let me = i64::from(std::process::id());
     let (reply, _) = handle_line(
         &ListingFails,
         r#"{"id":1,"cmd":"x","self_pane_id":"w1:p2"}"#,
         Some(me),
     );
-    assert_eq!(reply.result.unwrap()["pane"], json!("w1:p2"));
+    let result = reply.result.unwrap();
+    assert_eq!(result["pane"], Value::Null);
+    assert_eq!(result["bound"], json!(false));
+    assert!(result["note"]
+        .as_str()
+        .unwrap()
+        .contains("pane listing failed"));
 }
 
 #[test]
