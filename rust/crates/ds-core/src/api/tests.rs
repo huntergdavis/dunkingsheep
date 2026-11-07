@@ -13,6 +13,9 @@ use std::sync::Mutex;
 #[path = "owner_page_tests.rs"]
 mod owner_page_tests;
 
+#[path = "task_batch_tests.rs"]
+mod task_batch_tests;
+
 use crate::config::Env;
 use crate::flock::commands_inbox::{InboxEnv, Nudge, RouteEntry};
 use crate::flock::commands_turns::{TurnHooks, TurnState};

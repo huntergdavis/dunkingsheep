@@ -1030,6 +1030,7 @@ impl Dispatcher {
         self.register("task_unblock", h_task_unblock);
         self.register("task_cancel", h_task_cancel);
         self.register("task_next", h_task_next);
+        self.register("task_batch_claim", h_task_batch_claim);
         self.register("task_heartbeat", h_task_heartbeat);
         self.register("task_release", h_task_release);
     }
@@ -3293,6 +3294,38 @@ pub fn h_task_next(context: &HandlerContext<'_>, args: Args) -> Result<Value, Du
         caller,
         pane,
     ))?
+}
+
+/// `dunk_api.h_task_batch_claim` (t3583): claim an explicit, ordered list of tasks, all or none.
+pub fn h_task_batch_claim(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let pane = context.self_pane_id();
+    let ids = batch_ids_arg(&args)?;
+    let lease_seconds = python_lease_seconds(&args)?;
+    // `current_caller` is request-thread state; capture it before this future may hop workers.
+    let caller = context.flock.caller_identity();
+    context.block_on(context.flock.task_batch_claim_wire(
+        context.env,
+        &ids,
+        lease_seconds,
+        python_bool_arg(&args, "allow_busy", false),
+        caller,
+        pane,
+    ))?
+}
+
+/// The `ids` argument: a list of task ids, kept in the order given.
+fn batch_ids_arg(args: &Args) -> Result<Vec<String>, DunkError> {
+    match args.get("ids") {
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|item| item.as_str().map(str::to_owned).ok_or_else(ids_refusal))
+            .collect(),
+        _ => Err(ids_refusal()),
+    }
+}
+
+fn ids_refusal() -> DunkError {
+    DunkError::Refused("ids must be a list of task ids".into())
 }
 
 /// `dunk_api.h_task_heartbeat`.

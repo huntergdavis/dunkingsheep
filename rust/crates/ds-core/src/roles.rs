@@ -93,6 +93,10 @@ pub const WORKER_EXTRA: [&str; 28] = [
     "task_update",
 ];
 
+/// Commands only a WORKER may call on top of `WORKER_EXTRA` (t3583). The reviewer lane shares
+/// `WORKER_EXTRA` and never takes work through the batch claim, so this set is not in it.
+pub const WORKER_ONLY: [&str; 1] = ["task_batch_claim"];
+
 /// `ALLOW["system"]` minus `READ_ONLY`.
 pub const SYSTEM_EXTRA: [&str; 31] = [
     "context_add",
@@ -203,10 +207,17 @@ pub const WEB_DENIED: [&str; 30] = [
 pub fn allowed(role: &str, command: &str) -> bool {
     let extra: &[&str] = match role {
         "owner" => return true,
-        "web" => return !WEB_DENIED.contains(&command) && command != "project_spawn",
+        // The batch claim is for workers and the owner only (t3583), like the Rust-only
+        // `project_spawn` the web role is also denied.
+        "web" => {
+            return !WEB_DENIED.contains(&command)
+                && command != "project_spawn"
+                && command != "task_batch_claim"
+        }
         "system" => &SYSTEM_EXTRA,
         "desk" => &DESK_EXTRA,
         "planner" => &PLANNER_EXTRA,
+        "worker" if WORKER_ONLY.contains(&command) => return true,
         "worker" | "reviewer" => &WORKER_EXTRA,
         _ => &[],
     };
