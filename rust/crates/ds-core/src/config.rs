@@ -622,4 +622,18 @@ mod tests {
             stuck_config_source(&env)
         );
     }
+
+    #[test]
+    fn max_attempts_keeps_the_full_integer_like_the_python() {
+        let env = Env::from_pairs(&[(
+            "DUNKINGSHEEP_STUCK_CONFIG",
+            r#"{"max_attempts": 4294967297}"#,
+        )]);
+        let raw = stuck_config_source(&env).unwrap().unwrap();
+        assert_eq!(Some(4_294_967_297), raw.max_attempts);
+        assert_eq!(
+            4_294_967_297,
+            crate::stuck::Config::from_raw(&raw).unwrap().max_attempts
+        );
+    }
 }

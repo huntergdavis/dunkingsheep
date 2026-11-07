@@ -90,7 +90,7 @@ fn positive(raw: Option<f64>, default: f64, what: &str) -> Result<f64, String> {
 pub struct Config {
     pub enabled: bool,
     pub threshold_s: f64,
-    pub max_attempts: u32,
+    pub max_attempts: u64,
     pub cooldown_s: f64,
     pub observation_interval_s: f64,
 }
@@ -100,11 +100,17 @@ impl Default for Config {
         Config {
             enabled: true,
             threshold_s: DEFAULT_THRESHOLD_S,
-            max_attempts: DEFAULT_MAX_ATTEMPTS,
+            max_attempts: u64::from(DEFAULT_MAX_ATTEMPTS),
             cooldown_s: DEFAULT_COOLDOWN_S,
             observation_interval_s: DEFAULT_OBSERVATION_INTERVAL_S,
         }
     }
+}
+
+/// Whether `attempts` has used up `limit`. `u32::MAX` is the marker a legacy-bound attempt is given,
+/// and it has used up every limit, as it did when the limit was a `u32`.
+fn exhausted(attempts: u32, limit: u64) -> bool {
+    attempts == u32::MAX || u64::from(attempts) >= limit
 }
 
 /// The raw knobs a config file may set, all optional so a partial file works.
@@ -135,8 +141,9 @@ impl Config {
             );
         }
         let attempts = match raw.max_attempts {
-            None => DEFAULT_MAX_ATTEMPTS,
-            Some(value) if value >= 1 => value as u32,
+            None => u64::from(DEFAULT_MAX_ATTEMPTS),
+            // Kept whole, as the Python keeps the integer: a value above u32::MAX is not wrapped.
+            Some(value) if value >= 1 => value as u64,
             Some(_) => {
                 return Err("max_attempts must be at least 1 (0 would disable the \
                                    action)"
@@ -594,7 +601,7 @@ impl Tracker {
             decision.stale_for = stale_for;
             return decision;
         }
-        if record.attempts >= config.max_attempts {
+        if exhausted(record.attempts, config.max_attempts) {
             let terminal = format!(
                 "{} recovery attempt(s) did not submit the text",
                 record.attempts
