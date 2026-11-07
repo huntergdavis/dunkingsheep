@@ -32,7 +32,8 @@
     "history",
     "oldest_unread_s",
     "since_s",
-    "wait_s"
+    "wait_s",
+    "disk_free_bytes"
   ],
   "epoch_keys": [
     "created_at",

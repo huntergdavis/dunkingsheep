@@ -513,20 +513,27 @@ mod tests {
         let traffic = dir.path().join("health-state.jsonl");
         // Real Python entry points create the expectations in an isolated configuration.
         let oracle = Command::new("python3").arg("-c").arg(r#"
-import ast,json,pathlib,sys,types
+import ast,json,os,pathlib,sys,types
 root,traffic=sys.argv[1:]
 sys.path.insert(0,root)
-import dunk_health,dunk_state
+import dunk_core,dunk_health,dunk_roles,dunk_state,dunk_tasks
 ns={}
 module=ast.parse(pathlib.Path(root,'dunk_api.py').read_text())
 for node in module.body:
     if isinstance(node,ast.FunctionDef) and node.name in ('h_state_capture','h_state_latest','h_health','_opt'):
         exec(compile(ast.Module(body=[node],type_ignores=[]),'dunk_api.py','exec'),ns)
-flock=types.SimpleNamespace(memory=None,resolve_lanes=lambda:[])
+store_dir=os.path.join(os.path.dirname(traffic),'oracle-stores')
+os.makedirs(store_dir,exist_ok=True)
+roles=dunk_roles.Roles(path=os.path.join(store_dir,'roles.json'),tokens_path=os.path.join(store_dir,'tokens.json'))
+roles.register('w1:p1','worker',provider='codex')
+tasks=dunk_tasks.Tasks(path=os.path.join(store_dir,'tasks.db'))
+shim=types.SimpleNamespace(herdr=types.SimpleNamespace(list_panes=lambda:[]),roles=roles)
+flock=types.SimpleNamespace(memory=None,resolve_lanes=lambda:[],roles=roles,tasks=tasks)
+flock.registry_pane_gap=lambda:dunk_core.Flock.registry_pane_gap(shim)
 flock.health=lambda **kw:dunk_health.run_health(flock,**kw)
 dunk_state._proc_snapshot=lambda:({}, {})
 with open(traffic,'w') as out:
-    for cmd,args in [('health',{}),('state_capture',{'source':[1]}),('state_latest',{'limit':0}),('state_latest',{'limit':5}),('state_latest',{'pane_id':'w1:p1'}),('state_latest',{'project':'proj'})]:
+    for cmd,args in [('health',{}),('state_capture',{'source':[1]}),('state_latest',{'limit':0}),('health',{'deep':True}),('health',{'repair':True}),('state_latest',{'limit':5}),('state_latest',{'pane_id':'w1:p1'}),('state_latest',{'project':'proj'})]:
         try: response={'ok':True,'result':ns['h_'+cmd](flock,args,None)}
         except Exception as e: response={'ok':False,'error':'internal error: '+str(e)}
         out.write(json.dumps({'cmd':cmd,'args':args,'response':response})+'\n')
@@ -545,7 +552,7 @@ with open(traffic,'w') as out:
         let dispatcher = services.production_dispatcher();
         let thread = std::thread::spawn(move || {
             let mut seen = Vec::new();
-            for _ in 0..6 {
+            for _ in 0..8 {
                 let deadline = std::time::Instant::now() + Duration::from_secs(30);
                 let (mut stream, _) = loop {
                     match listener.accept() {
@@ -586,17 +593,20 @@ with open(traffic,'w') as out:
             .output()
             .unwrap();
         let seen = thread.join().unwrap();
-        // Python order: the three original requests, then state_latest with a positive limit,
-        // a pane filter and a project filter (t3571). Filters run over an empty snapshot here,
-        // so they prove argument handling and ordering, not row selection. Health deep and
-        // repair are NOT replayed: the Python oracle's fake flock has no tasks (recorded
-        // "task stats failed"), so those two diff for oracle-setup reasons (t3571 blocker).
+        // Python order: quick health, state_capture, state_latest limit 0, deep health, repair
+        // health, then state_latest with a positive limit, a pane filter and a project filter
+        // (t3571). The Python oracle runs a real roles registry and task store (the same lane and
+        // empty task store the Rust services hold), and the real Flock.registry_pane_gap over an
+        // empty pane list. Filters run over an empty snapshot, so they prove argument handling
+        // and ordering, not row selection.
         assert_eq!(
             seen,
             [
                 "health",
                 "state_capture",
                 "state_latest",
+                "health",
+                "health",
                 "state_latest",
                 "state_latest",
                 "state_latest"
@@ -609,7 +619,7 @@ with open(traffic,'w') as out:
             String::from_utf8_lossy(&result.stderr)
         );
         assert!(String::from_utf8_lossy(&result.stdout)
-            .contains("replayed 6 request(s): 0 diff(s), 0 error(s)"));
+            .contains("replayed 8 request(s): 0 diff(s), 0 error(s)"));
     }
     #[test]
     fn health_state_core_capture_uses_real_tasks_and_one_fake_process_snapshot() {
