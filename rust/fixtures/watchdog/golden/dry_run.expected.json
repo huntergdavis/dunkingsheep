@@ -1,0 +1,168 @@
+{
+  "carried_failure": null,
+  "counts": {
+    "findings": 3,
+    "needs_attention": 3,
+    "owner": 0,
+    "vp": 3
+  },
+  "decisions": [
+    {
+      "finding": {
+        "class": "ops",
+        "evidence": {
+          "problems": []
+        },
+        "key": "problems",
+        "measured": "ok=None, 0 problem(s)",
+        "rule": "health.failed",
+        "severity": "critical",
+        "source": "watchdog-rule",
+        "summary": "health check reports problems",
+        "threshold": "ok=true and no problems",
+        "window": "last check"
+      },
+      "owner": null,
+      "streak": 1,
+      "vp": "no"
+    },
+    {
+      "finding": {
+        "class": "ops",
+        "evidence": {},
+        "key": "stale",
+        "measured": "29890800.0min",
+        "rule": "health.failed",
+        "severity": "critical",
+        "source": "watchdog-rule",
+        "summary": "health.json is not being refreshed",
+        "threshold": "30min",
+        "window": "since last check"
+      },
+      "owner": null,
+      "streak": 1,
+      "vp": "no"
+    },
+    {
+      "finding": {
+        "class": "ops",
+        "evidence": {
+          "mailbox": "golden-worker",
+          "newest_hours_ago": 28.7,
+          "oldest_hours_ago": 28.7,
+          "pane_liveness": "unknown (pane source disabled)",
+          "pane_state": "unknown (pane source disabled)",
+          "reasons": {
+            "-": 1
+          },
+          "sample_ids": [
+            "i1"
+          ]
+        },
+        "key": "golden-worker",
+        "measured": "1 msgs",
+        "rule": "inbox.unread_live",
+        "severity": "warning",
+        "source": "watchdog-rule",
+        "summary": "unread mail in golden-worker",
+        "threshold": "1 msgs older than 240min",
+        "window": "current"
+      },
+      "owner": null,
+      "streak": 1,
+      "vp": "no"
+    }
+  ],
+  "delivery_error": null,
+  "delivery_failure_count": 0,
+  "findings": [
+    {
+      "class": "ops",
+      "evidence": {
+        "problems": []
+      },
+      "key": "problems",
+      "measured": "ok=None, 0 problem(s)",
+      "rule": "health.failed",
+      "severity": "critical",
+      "source": "watchdog-rule",
+      "summary": "health check reports problems",
+      "threshold": "ok=true and no problems",
+      "window": "last check"
+    },
+    {
+      "class": "ops",
+      "evidence": {},
+      "key": "stale",
+      "measured": "29890800.0min",
+      "rule": "health.failed",
+      "severity": "critical",
+      "source": "watchdog-rule",
+      "summary": "health.json is not being refreshed",
+      "threshold": "30min",
+      "window": "since last check"
+    },
+    {
+      "class": "ops",
+      "evidence": {
+        "mailbox": "golden-worker",
+        "newest_hours_ago": 28.7,
+        "oldest_hours_ago": 28.7,
+        "pane_liveness": "unknown (pane source disabled)",
+        "pane_state": "unknown (pane source disabled)",
+        "reasons": {
+          "-": 1
+        },
+        "sample_ids": [
+          "i1"
+        ]
+      },
+      "key": "golden-worker",
+      "measured": "1 msgs",
+      "rule": "inbox.unread_live",
+      "severity": "warning",
+      "source": "watchdog-rule",
+      "summary": "unread mail in golden-worker",
+      "threshold": "1 msgs older than 240min",
+      "window": "current"
+    }
+  ],
+  "lines": [
+    "WOULD-NOTIFY VP rule=health.failed class=ops severity=critical source=watchdog-rule threshold=ok=true and no problems measured=ok=None, 0 problem(s) window=last check dedupe=health.failed|problems suppressed=no evidence={\"problems\":[]}",
+    "WOULD-NOTIFY VP rule=health.failed class=ops severity=critical source=watchdog-rule threshold=30min measured=29890800.0min window=since last check dedupe=health.failed|stale suppressed=no evidence={}",
+    "WOULD-NOTIFY VP rule=inbox.unread_live class=ops severity=warning source=watchdog-rule threshold=1 msgs older than 240min measured=1 msgs window=current dedupe=inbox.unread_live|golden-worker suppressed=no evidence={\"mailbox\":\"golden-worker\",\"newest_hours_ago\":28.7,\"oldest_hours_ago\":28.7,\"pane_liveness\":\"unknown (pane source disabled)\",\"pane_state\":\"unknown (pane source disabled)\",\"reasons\":{\"-\":1},\"sample_ids\":[\"i1\"]}",
+    "SKIPPED rule=inbox.unread_dead error=pane source disabled (panes.source=none)",
+    "SKIPPED rule=lane.idle_holding_task error=pane source disabled (panes.source=none)",
+    "SKIPPED rule=lane.working_without_task error=pane source disabled (panes.source=none)",
+    "SKIPPED rule=money.spend_projection error=no metering source"
+  ],
+  "mode": "dry-run",
+  "now": 1793448000.0,
+  "problems": [
+    "state @STATE@/watchdog_state.json: missing (first run, or the dedupe store was lost) - owner pages suppressed this run"
+  ],
+  "recovered": {
+    "owner": [],
+    "vp": []
+  },
+  "sent": [],
+  "skipped": [
+    {
+      "error": "pane source disabled (panes.source=none)",
+      "rule": "inbox.unread_dead"
+    },
+    {
+      "error": "pane source disabled (panes.source=none)",
+      "rule": "lane.idle_holding_task"
+    },
+    {
+      "error": "pane source disabled (panes.source=none)",
+      "rule": "lane.working_without_task"
+    },
+    {
+      "error": "no metering source",
+      "rule": "money.spend_projection"
+    }
+  ],
+  "why_not_live": "--dry-run flag"
+}
