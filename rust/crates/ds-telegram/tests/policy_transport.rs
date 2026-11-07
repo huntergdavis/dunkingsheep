@@ -2,7 +2,7 @@
 //! Pure: no network, no token, no desk.
 
 use ds_telegram::policy::{
-    chunks, deliver, is_page, outbox_items, page_class, pages_allowed, Item, Row,
+    chunks, deliver, is_page, outbox_items, page_class, pages_allowed, Item, Row, Sent,
     KIND_MAILBOX_PAGE, KIND_PAGE, KIND_REPLY, PAGE_MAX_PER_HOUR, PAGE_WINDOW_S,
 };
 use ds_telegram::BridgeError;
@@ -29,15 +29,15 @@ fn items_for(replies: &[Row], pages: &[Row], sent_at: &[f64], now: f64) -> Vec<I
     )
 }
 
-/// Deliver with a sender that records bodies and a receipt log.
-fn run(
-    items: &[Item],
-    fail_first: bool,
-) -> (
-    Result<Vec<ds_telegram::policy::Sent>, BridgeError>,
+/// What `run` returns: the delivery result, the bodies sent, and the `(message_id, kind)` receipts.
+type Outcome = (
+    Result<Vec<Sent>, BridgeError>,
     Vec<String>,
     Vec<(String, String)>,
-) {
+);
+
+/// Deliver with a sender that records bodies and a receipt log.
+fn run(items: &[Item], fail_first: bool) -> Outcome {
     let mut bodies = Vec::new();
     let mut receipts = Vec::new();
     let mut failed = fail_first;
