@@ -793,3 +793,149 @@ fn recovery_metadata_equality_matches_python_numeric_boundaries_without_rewritin
         .is_nan());
     assert!(!python_metadata_equal(&Value::Null, &json!(0)));
 }
+
+// t3355 (t820 proof D) gap rows 7-10: test_recover.py, oracle commit 79bc92fa.
+// Fixture mirrors RecoverTests.setUp: four panes, one dunk per pane, and one
+// recorded launch for w1:p2. Every expected value is written out, not compared
+// with the Python oracle, so these pin the condition by name.
+fn gap_pane(
+    id: &str,
+    cwd: &str,
+    agent: Option<&str>,
+    session: Option<&str>,
+    status: &str,
+) -> Value {
+    let mut pane = json!({
+        "pane_id": id,
+        "cwd": cwd,
+        "agent_status": status,
+        "terminal_title_stripped": format!("hunter@cell: {cwd}"),
+    });
+    if let Some(agent) = agent {
+        pane["agent"] = json!(agent);
+        if let Some(session) = session {
+            pane["agent_session"] = json!({"agent": agent, "kind": "id", "value": session});
+        }
+    }
+    pane
+}
+fn gap_four_panes() -> Value {
+    json!({
+        "panes": [
+            gap_pane("w1:p1", "/w/pi", Some("pi"), Some("live-session"), "working"),
+            gap_pane("w1:p2", "/w/codex", None, None, "unknown"),
+            gap_pane("w1:p3", "/w/x", None, None, "unknown"),
+            gap_pane("w1:p4", "/w/pi2", None, None, "unknown"),
+        ],
+        "dunks": [
+            {"id": "d1", "running": true, "target_pane_id": "w1:p1", "target_agent": "pi", "target_cwd": "/w/pi"},
+            {"id": "d2", "running": true, "target_pane_id": "w1:p2", "target_agent": "codex", "target_cwd": "/w/codex"},
+            {"id": "d3", "running": true, "target_pane_id": "w1:p3", "target_agent": "opencode", "target_cwd": "/w/x"},
+            {"id": "d4", "running": true, "target_pane_id": "w1:p4", "target_agent": "pi", "target_cwd": "/w/pi2"},
+        ],
+        "launches": {"w1:p2": {"agent": "codex", "session": "abc", "cwd": "/w/codex"}},
+        "memory": [["pi", "/w/pi2", {"id": "p2"}]],
+    })
+}
+fn gap_plan_by_pane(actual: &Value) -> std::collections::HashMap<String, Value> {
+    actual["outcome"]["result"]["plan"]
+        .as_array()
+        .expect("plan array")
+        .iter()
+        .map(|item| {
+            let id = item["pane_id"].as_str().expect("pane id").to_owned();
+            (id, item.clone())
+        })
+        .collect()
+}
+
+#[test]
+fn recover_plan_distinguishes_live_bare_and_unknown_panes() {
+    let actual = run_rust(&gap_four_panes());
+    let plan = gap_plan_by_pane(&actual);
+    assert_eq!(plan["w1:p1"]["action"], "already-running");
+    assert_eq!(plan["w1:p2"]["action"], "launch");
+    assert_eq!(plan["w1:p2"]["command"], "cd /w/codex && codex resume abc");
+    assert_eq!(plan["w1:p2"]["source"], "recorded-session");
+    assert_eq!(plan["w1:p3"]["action"], "no-session");
+    assert_eq!(plan["w1:p4"]["action"], "launch");
+    assert_eq!(plan["w1:p4"]["command"], "cd /w/pi2 && pi --session p2");
+    assert_eq!(plan["w1:p4"]["source"], "memory-latest");
+    assert_eq!(actual["outcome"]["result"]["ok"], false);
+}
+
+#[test]
+fn recover_apply_types_only_into_empty_shells() {
+    let mut config = gap_four_panes();
+    config["apply"] = json!(true);
+    let actual = run_rust(&config);
+    let mut applied: Vec<&str> = actual["outcome"]["result"]["applied"]
+        .as_array()
+        .expect("applied array")
+        .iter()
+        .map(|id| id.as_str().expect("pane id"))
+        .collect();
+    applied.sort_unstable();
+    assert_eq!(applied, ["w1:p2", "w1:p4"]);
+    let mut submits: Vec<(&str, &str)> = actual["calls"]
+        .as_array()
+        .expect("calls array")
+        .iter()
+        .filter(|call| call[0] == "submit")
+        .map(|call| {
+            (
+                call[1][0].as_str().expect("submit pane id"),
+                call[1][1].as_str().expect("submit command"),
+            )
+        })
+        .collect();
+    submits.sort_unstable();
+    assert_eq!(
+        submits,
+        [
+            ("w1:p2", "cd /w/codex && codex resume abc"),
+            ("w1:p4", "cd /w/pi2 && pi --session p2"),
+        ],
+        "the live pane w1:p1 and the no-session pane w1:p3 must never be typed into"
+    );
+    assert_eq!(actual["launches"]["w1:p2"]["source"], "recover");
+}
+
+#[test]
+fn doctor_flags_stale_target_metadata_as_agent_and_cwd_mismatch() {
+    let mut config = gap_four_panes();
+    config["doctor"] = json!(true);
+    config["guard"] = json!({"installed": true, "shadowing_herdr": true});
+    config["panes"][0]["cwd"] = json!("/w/real");
+    config["dunks"]
+        .as_array_mut()
+        .expect("dunks array")
+        .push(json!({"id": "d52", "running": true, "target_pane_id": "w1:p1", "target_agent": "opencode", "target_cwd": "/w/old"}));
+    let actual = run_rust(&config);
+    let result = &actual["outcome"]["result"];
+    let kinds: Vec<&str> = result["warnings"]
+        .as_array()
+        .expect("warnings array")
+        .iter()
+        .map(|warning| warning["kind"].as_str().expect("warning kind"))
+        .collect();
+    assert!(kinds.contains(&"agent-mismatch"), "{kinds:?}");
+    assert!(kinds.contains(&"cwd-mismatch"), "{kinds:?}");
+    assert_eq!(result["ok"], false);
+    assert_eq!(result["surfaces"]["read_visible"], true);
+    assert_eq!(result["herdr_version"], "herdr fixture");
+}
+
+#[test]
+fn doctor_is_ok_when_the_only_dunk_matches_its_pane() {
+    let mut config = gap_four_panes();
+    config["doctor"] = json!(true);
+    config["guard"] = json!({"installed": true, "shadowing_herdr": true});
+    config["dunks"] = json!([
+        {"id": "d1", "running": true, "target_pane_id": "w1:p1", "target_agent": "pi", "target_cwd": "/w/pi"},
+    ]);
+    let actual = run_rust(&config);
+    let result = &actual["outcome"]["result"];
+    assert_eq!(result["warnings"], json!([]));
+    assert_eq!(result["ok"], true);
+}

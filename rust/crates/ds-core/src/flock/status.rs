@@ -237,23 +237,25 @@ pub fn h_status(
     Ok(Value::Object(result))
 }
 
-// -- code identity (the Rust meaning of `code_status`, decided by the leader on t1397) -----
+// -- code identity (the Rust meaning of `code_status`; t1397, revised by t3463) ----------
 
-/// The identity of the running binary, frozen once at start (the Python freezes
+/// The identity of the running build, frozen once at start (the Python freezes
 /// `CODE_IDENTITY` before importing application code).
 ///
-/// Decision (leader, t1397): `code_hash` is the first 12 hex of sha256 over the binary's BYTES
-/// read once at start (a rebuild with the same git sha and different bytes must read as
-/// different); `code_mtime` is the binary's mtime at start; `code_stale` compares
-/// `(mtime, size, inode)` of the file now with the start values (one stat, no re-hash); when
-/// stale, `code_changed_modules` is `[<file name>]` so a stale daemon says WHAT changed;
-/// `code_identity_errors` lists read failures. As in the Python, a read failure at start
-/// leaves `code_hash` null and `code_stale` null (unknown, not false).
+/// `code_hash` is the generated release identity (`release_identity::CODE_HASH`, the hash the
+/// CLI's `--version` prints), not a digest of the binary: the owner's contract (t3463) is that
+/// `status` and `--version` agree, and reading the whole executable at start cost a debug
+/// daemon a minute on a slow host. The binary is only stat'ed: `code_mtime` is its mtime at
+/// start; `code_stale` compares `(mtime, size, inode)` of the file now with the start values
+/// (one stat, no read); when stale, `code_changed_modules` is `[<file name>]` so a stale daemon
+/// says WHAT changed; `code_identity_errors` lists stat failures. A binary that cannot be
+/// stat'ed at start leaves `code_stale` null (unknown, not false); the hash is the build's, so
+/// it is never null.
 #[derive(Debug, Clone)]
 pub struct CodeIdentity {
     exe: std::path::PathBuf,
     name: String,
-    hash: Option<String>,
+    hash: String,
     mtime: Option<f64>,
     stamp: Option<(i128, u64, u64)>,
     errors: Vec<String>,
@@ -268,9 +270,8 @@ fn stamp_of(path: &std::path::Path) -> std::io::Result<(i128, u64, u64)> {
 }
 
 impl CodeIdentity {
-    /// Read `exe` once: hash its bytes and record its stat stamp.
+    /// Stat `exe` once for the staleness stamp; the identity itself is the build's.
     pub fn at_start(exe: impl Into<std::path::PathBuf>) -> CodeIdentity {
-        use sha2::{Digest, Sha256};
         let exe = exe.into();
         let name = exe
             .file_name()
@@ -278,24 +279,14 @@ impl CodeIdentity {
             .unwrap_or_else(|| "<binary>".to_string());
         let mut errors = Vec::new();
         let stamp = stamp_of(&exe).ok();
-        let hash = match std::fs::read(&exe) {
-            Ok(bytes) if stamp.is_some() => Some(
-                Sha256::digest(&bytes)
-                    .iter()
-                    .map(|b| format!("{b:02x}"))
-                    .collect::<String>()[..12]
-                    .to_string(),
-            ),
-            _ => {
-                errors.push(name.clone());
-                None
-            }
-        };
+        if stamp.is_none() {
+            errors.push(name.clone());
+        }
         let mtime = stamp.map(|(nanos, _, _)| nanos as f64 / 1e9);
         CodeIdentity {
             exe,
             name,
-            hash,
+            hash: crate::release_identity::CODE_HASH.to_string(),
             mtime,
             stamp,
             errors,
@@ -311,8 +302,8 @@ impl CodeIdentity {
         }
         errors.sort();
         errors.dedup();
-        let stale = match (&self.hash, &self.stamp, &now) {
-            (Some(_), Some(start), Ok(current)) => Some(start != current),
+        let stale = match (&self.stamp, &now) {
+            (Some(start), Ok(current)) => Some(start != current),
             _ => None,
         };
         let changed: Vec<&str> = if stale == Some(true) && !errors.contains(&self.name) {

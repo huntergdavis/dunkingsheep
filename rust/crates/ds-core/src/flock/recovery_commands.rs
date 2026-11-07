@@ -38,7 +38,7 @@ fn python_error(kind: &'static str, message: impl Into<String>) -> RecoveryComma
         message: message.into(),
     }
 }
-fn type_name(value: &Value) -> &'static str {
+pub(crate) fn type_name(value: &Value) -> &'static str {
     match value {
         Value::Null => "NoneType",
         Value::Bool(_) => "bool",

@@ -273,9 +273,11 @@ impl ManualFireOwner {
             .unwrap_or_else(|error| error.into_inner())
             .clone();
         let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let log = crate::daemon_log::ThreadLog::capture();
         let worker = thread::Builder::new()
             .name(format!("manual-dunk-fire-{dunk_id}"))
             .spawn(move || {
+                log.adopt();
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     run_fire(WorkerFire {
                         flock: worker_flock.clone(),

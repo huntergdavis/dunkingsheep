@@ -1,6 +1,7 @@
-//! Assembly of the real handlers available to the staged runtime.
+//! Assembly of the real handlers for the production runtime: every registry command, which
+//! `production_handlers_register_every_registry_command` enforces (t1605 / t3385).
 //!
-//! Remaining handlers and production daemon startup are tracked by t1605.
+//! Production daemon startup is tracked by t1605.
 //! Tests reject duplicate attempts in this fixed assembly; the underlying dispatcher
 //! retains its existing replacement behavior at runtime.
 use super::services::RuntimeServices;
@@ -41,6 +42,7 @@ pub(crate) fn production_handlers() -> Dispatcher {
     handlers.register_task_mutation_leases();
     handlers.register_task_statistics();
     handlers.register_metrics();
+    handlers.register_doctor_recover();
     handlers.register_project_summary();
     handlers.register_project_spawn();
     handlers.register_dunk_mutations();
@@ -696,6 +698,23 @@ os.rename(out_path + ".tmp", out_path)
             .view(&status, request.self_pane_id.as_deref(), false, 3_600.0)
     }
 
+    /// Every registry command has a production handler, so `api::Dispatcher::dispatch` never
+    /// reaches its missing-handler refusal in the daemon (t3385: no not-ported fallback).
+    #[test]
+    fn production_handlers_register_every_registry_command() {
+        let handlers = production_handlers();
+        assert_eq!(
+            handlers.missing_handlers(),
+            Vec::<&str>::new(),
+            "registry commands without a production handler"
+        );
+        assert_eq!(
+            handlers.registration_attempts().len(),
+            crate::registry::COMMANDS.len(),
+            "one registration per registry command"
+        );
+    }
+
     #[test]
     fn production_registration_inventory_is_exact_and_has_no_duplicates() {
         let handlers = production_handlers();
@@ -780,6 +799,8 @@ os.rename(out_path + ".tmp", out_path)
             "task_metrics",
             "task_reap",
             "metrics",
+            "doctor",
+            "recover",
             "project_summary",
             "project_spawn",
             "add_dunk",

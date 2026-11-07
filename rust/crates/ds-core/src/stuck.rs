@@ -1088,4 +1088,209 @@ mod tests {
         assert_eq!(None, restored.records["w1:p3"].generation);
         assert_eq!(1, restored.records["w1:p3"].attempts);
     }
+
+    /// t3355 (t820 proof D) scheduled row 33: test_dunk_scheduled_recovery.py::
+    /// test_unreadable_then_owned_requires_fresh_stability_window (oracle 79bc92fa). The Python
+    /// steps are owned at 1000, unreadable at 1060, owned again at 1120 (no key), and a key at
+    /// 1240, one 120 s threshold after the second window opened. Tracker layer: an unreadable
+    /// read is observed with no text and not owned, which is how sends::stuck_text_is_ours
+    /// reports it, and the reset must restart first_seen rather than resume the old clock.
+    #[test]
+    fn unreadable_then_owned_requires_a_fresh_stability_window() {
+        let config = Config {
+            threshold_s: 120.0,
+            max_attempts: 1,
+            cooldown_s: 60.0,
+            observation_interval_s: 20.0,
+            ..Config::default()
+        };
+        let owned = observation("scheduled text");
+        let mut unreadable = owned.clone();
+        unreadable.text = None;
+        unreadable.owned = false;
+        let mut tracker = Tracker::default();
+        assert_eq!("wait", tracker.decide(&owned, &config, 1000.0).action);
+        assert_eq!("reset", tracker.decide(&unreadable, &config, 1060.0).action);
+        assert_eq!("wait", tracker.decide(&owned, &config, 1120.0).action);
+        assert!(!tracker.decide(&owned, &config, 1239.0).recovers());
+        assert!(tracker.decide(&owned, &config, 1240.0).recovers());
+    }
+
+    /// t3355 (t820 proof D) wiring row 27: test_dunk_recovery_wiring.py::
+    /// test_native_proof_cannot_downgrade_to_legacy_after_spending (oracle 79bc92fa). Native
+    /// evidence spends the single key at 1120. The rollout then disappears, the frame becomes a
+    /// legacy single-sigil frame, and ticks at 1300, 1420 and 1600 must press nothing. Tracker
+    /// layer: the observation loses its pane generation, but not its message or its text.
+    #[test]
+    fn native_proof_cannot_downgrade_to_legacy_after_spending() {
+        let config = Config {
+            threshold_s: 120.0,
+            max_attempts: 1,
+            cooldown_s: 60.0,
+            observation_interval_s: 20.0,
+            ..Config::default()
+        };
+        let native = observation("wiring text");
+        let mut legacy = native.clone();
+        legacy.generation = None;
+        let mut tracker = Tracker::default();
+        assert_eq!("wait", tracker.decide(&native, &config, 1000.0).action);
+        assert!(tracker.decide(&native, &config, 1120.0).recovers());
+        for now in [1300.0, 1420.0, 1600.0] {
+            assert!(
+                !tracker.decide(&legacy, &config, now).recovers(),
+                "a legacy observation recovered at {now}"
+            );
+        }
+    }
+
+    /// t3355 (t820 proof D) scheduled rows 32 and 35: test_dunk_scheduled_recovery.py::
+    /// test_busy_turn_does_not_submit_owned_prompt and test_unknown_native_status_stays_unknown
+    /// (oracle 79bc92fa). A working or unknown status never recovers over two ticks and keeps no
+    /// clock. Tracker layer; the observer tick path is not reproduced.
+    #[test]
+    fn busy_or_unknown_status_never_recovers_over_two_ticks() {
+        let config = Config {
+            threshold_s: 120.0,
+            max_attempts: 1,
+            cooldown_s: 60.0,
+            observation_interval_s: 20.0,
+            ..Config::default()
+        };
+        for status in ["working", "unknown"] {
+            let mut blocked = observation("scheduled text");
+            blocked.status = status.into();
+            let mut tracker = Tracker::default();
+            assert!(
+                !tracker.decide(&blocked, &config, 1000.0).recovers(),
+                "{status}"
+            );
+            assert!(
+                !tracker.decide(&blocked, &config, 1120.0).recovers(),
+                "{status}"
+            );
+            assert!(tracker.records.is_empty(), "{status} keeps no clock");
+        }
+    }
+
+    /// t3355 (t820 proof D) scheduled row 31: test_dunk_scheduled_recovery.py::
+    /// test_added_human_continuation_never_submits (oracle 79bc92fa). A human addition makes the
+    /// composer text not provably ours, so the tracker resets, keeps no record, and presses
+    /// nothing at the threshold. Tracker layer.
+    #[test]
+    fn a_human_addition_resets_the_clock_and_never_recovers() {
+        let config = Config {
+            threshold_s: 120.0,
+            max_attempts: 1,
+            cooldown_s: 60.0,
+            observation_interval_s: 20.0,
+            ..Config::default()
+        };
+        let owned = observation("scheduled text");
+        let mut added = owned.clone();
+        added.text = Some("scheduled text plus a human line".into());
+        added.owned = false;
+        let mut tracker = Tracker::default();
+        assert_eq!("wait", tracker.decide(&owned, &config, 1000.0).action);
+        assert_eq!("reset", tracker.decide(&added, &config, 1060.0).action);
+        assert!(tracker.records.is_empty());
+        assert!(!tracker.decide(&added, &config, 1240.0).recovers());
+    }
+
+    /// t3355 (t820 proof D) scheduled row 39 and wiring row 19 (decision layer only):
+    /// test_dunk_scheduled_recovery.py::test_schedule_records_pre_send_generation_not_replacement
+    /// and test_dunk_recovery_wiring.py::test_different_native_process_binding_not_adopted (oracle
+    /// 79bc92fa). The tracker keys its clock on the pane generation, so a replaced generation
+    /// resets the clock and the next ticks start a new one. The binding table in
+    /// recovery_native is not exercised here.
+    #[test]
+    fn a_replaced_pane_generation_never_recovers_on_the_old_clock() {
+        let config = Config {
+            threshold_s: 120.0,
+            max_attempts: 1,
+            cooldown_s: 60.0,
+            observation_interval_s: 20.0,
+            ..Config::default()
+        };
+        let before = observation("scheduled text");
+        let mut after = before.clone();
+        after.generation = Some("pid:13:start:999".into());
+        let mut tracker = Tracker::default();
+        assert_eq!("wait", tracker.decide(&before, &config, 1000.0).action);
+        assert_eq!("reset", tracker.decide(&after, &config, 1120.0).action);
+        assert!(!tracker.decide(&after, &config, 1240.0).recovers());
+    }
+
+    /// t3355 (t820 proof D) wiring row 28, plain message-id form: test_dunk_recovery_wiring.py::
+    /// test_native_upgrade_does_not_refund_an_existing_legacy_key (oracle 79bc92fa). The Python test
+    /// spends the canonical key (message identity, native pane generation, canonical fingerprint),
+    /// then ticks under native evidence. A trace of the oracle shows max_attempts 1. The first
+    /// sighting takes the spent count, and the threshold tick goes terminal instead of pressing.
+    /// sends_tests asserts the native-proof form only for the identity m1@100, so this is the plain
+    /// message-id form. Tracker layer.
+    #[test]
+    fn native_upgrade_does_not_refund_a_spent_canonical_key_for_a_plain_message_id() {
+        let config = Config {
+            threshold_s: 120.0,
+            max_attempts: 1,
+            cooldown_s: 60.0,
+            observation_interval_s: 20.0,
+            ..Config::default()
+        };
+        let native = observation("wiring text");
+        let canonical = fingerprint("wiring text");
+        let mut spent = Tracker::default();
+        spent.spent.insert(
+            ledger_key(
+                &native.pane_id,
+                "m1",
+                native.generation.as_deref(),
+                &canonical,
+            ),
+            1,
+        );
+        assert_eq!("wait", spent.decide(&native, &config, 1000.0).action);
+        let terminal = spent.decide(&native, &config, 1120.0);
+        assert_eq!("terminal", terminal.action);
+        assert!(!terminal.recovers());
+        assert!(
+            spent.reserved(
+                &native.pane_id,
+                "m1",
+                native.generation.as_deref(),
+                &canonical
+            ) >= 1,
+            "the spent canonical key must not be refunded"
+        );
+
+        // Positive control: with no spent canonical key, the same two ticks recover once.
+        let mut fresh = Tracker::default();
+        assert_eq!("wait", fresh.decide(&native, &config, 1000.0).action);
+        assert!(fresh.decide(&native, &config, 1120.0).recovers());
+    }
+
+    /// t3355 (t820 proof D) scheduled row 43: test_dunk_scheduled_recovery.py::
+    /// test_reported_sent_but_bright_pending_schedule_recovers (oracle 79bc92fa). A schedule reported
+    /// sent, with native text still pending, recovers once at the 120 s threshold. The recovery
+    /// records and spends its single attempt, so later ticks go terminal and press nothing more.
+    /// Tracker layer; the observer tick path is not reproduced.
+    #[test]
+    fn a_reported_sent_schedule_recovers_once_at_the_threshold() {
+        let config = Config {
+            threshold_s: 120.0,
+            max_attempts: 1,
+            cooldown_s: 60.0,
+            observation_interval_s: 20.0,
+            ..Config::default()
+        };
+        let pending = observation("scheduled text");
+        let mut tracker = Tracker::default();
+        assert_eq!("wait", tracker.decide(&pending, &config, 1000.0).action);
+        assert!(tracker.decide(&pending, &config, 1120.0).recovers());
+        for now in [1240.0, 1360.0] {
+            let later = tracker.decide(&pending, &config, now);
+            assert!(!later.recovers(), "a second key at {now}");
+            assert_eq!("terminal", later.action, "at {now}");
+        }
+    }
 }

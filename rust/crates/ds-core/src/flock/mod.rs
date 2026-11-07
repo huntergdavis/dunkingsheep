@@ -841,7 +841,7 @@ impl Flock {
 }
 
 /// Python truthiness for the JSON values a registry row can hold.
-fn truthy(value: &Value) -> bool {
+pub(crate) fn truthy(value: &Value) -> bool {
     match value {
         Value::Null => false,
         Value::Bool(b) => *b,
