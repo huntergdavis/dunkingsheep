@@ -86,6 +86,10 @@ fn make_services_with_env(
     roles
         .register("w2:p2", "owner", None, None, None, None, None, None)
         .unwrap();
+    // A desk pane, for the desk clamp path (t3539): its inbox read is clamped by the dispatcher.
+    roles
+        .register("w3:p3", "desk", None, None, None, None, None, None)
+        .unwrap();
     let executable = dir.path().join(format!("{tag}-daemon"));
     std::fs::write(&executable, b"test daemon identity").unwrap();
     let stores = Stores {
@@ -690,6 +694,100 @@ fn inbox_read_task_failure_precedes_mark_and_receipt() {
         )
         .unwrap();
     assert_eq!(read["marked_read"], 1);
+    dispatcher.close();
+}
+
+#[test]
+fn a_desk_inbox_read_never_marks_a_message_its_response_leaves_out() {
+    // t3539 review (PR #826): the dispatcher clamps a desk response again, so the response must fit as
+    // sent, and every message it carries (and only those) must be read. Sweep the last message's size
+    // across the cap, with and without a task queue large enough to take the cap.
+    use crate::roles::{py_dumps, DESK_RESULT_BYTES};
+    let (_dir, services) = make_services("desk-sweep", factory(None), None);
+    let stores = services.flock().stores();
+    let inbox = stores.inbox.clone().unwrap();
+    let tasks = stores.tasks.clone().unwrap();
+    let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+    let dispatcher = services.dispatcher(handlers());
+    let ctx = request("w3:p3");
+    for with_queues in [false, true] {
+        if with_queues {
+            for k in 0..40 {
+                runtime
+                    .block_on(tasks.add(
+                        "global",
+                        &format!("queued work {k} {}", "q".repeat(120)),
+                        "",
+                    ))
+                    .unwrap();
+            }
+        }
+        for last in (3400..=4300).step_by(12) {
+            let mut sent = Vec::new();
+            for body in [300, 300, last] {
+                let id = inbox
+                    .send(&crate::inbox_store::Outgoing {
+                        mailbox: "w3:p3",
+                        body: Some("x".repeat(body).as_str()),
+                        ..Default::default()
+                    })
+                    .unwrap();
+                sent.push(id);
+            }
+            let read = dispatcher.dispatch("inbox_read", &json!({}), &ctx).unwrap();
+            let size = py_dumps(&read).len();
+            let carried: Vec<String> = read
+                .get("messages")
+                .and_then(|rows| rows.as_array())
+                .map(|rows| {
+                    rows.iter()
+                        .map(|row| row["message_id"].as_str().unwrap().to_owned())
+                        .collect()
+                })
+                .unwrap_or_default();
+            // A response that carries messages is within the cap as sent. When nothing fits, the
+            // capped `head` shape goes out instead (its head is cap-length by design, so it is larger);
+            // then no message may be marked read.
+            if !carried.is_empty() {
+                assert!(
+                    size <= DESK_RESULT_BYTES,
+                    "queues={with_queues} last={last}: {size} bytes as sent, carrying {carried:?}"
+                );
+            }
+            // What the response says about a message it carries matches the store: read, with a read time.
+            for row in read
+                .get("messages")
+                .and_then(|rows| rows.as_array())
+                .into_iter()
+                .flatten()
+            {
+                assert_eq!(
+                    json!("read"),
+                    row["state"],
+                    "carried rows show the read state"
+                );
+                assert!(!row["read_at"].is_null(), "carried rows show the read time");
+            }
+            // The capped shape has no marked_read key: nothing was carried, so nothing was marked.
+            let reported = read.get("marked_read").cloned().unwrap_or(json!(0));
+            assert_eq!(
+                json!(carried.len()),
+                reported,
+                "queues={with_queues} last={last}: the count reported is the count carried"
+            );
+            for id in &sent {
+                let row = inbox.get_message(id).unwrap();
+                if carried.contains(id) {
+                    assert!(row.read_at.is_some(), "carried {id} must be read");
+                } else {
+                    assert!(
+                        row.read_at.is_none(),
+                        "{id} is not in the response, so it must stay unread (queues={with_queues} last={last})"
+                    );
+                }
+            }
+        }
+    }
     dispatcher.close();
 }
 

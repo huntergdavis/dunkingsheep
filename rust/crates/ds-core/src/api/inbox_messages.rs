@@ -128,7 +128,7 @@ pub fn h_inbox_read(c: &HandlerContext<'_>, args: Args) -> Result<Value, DunkErr
         c.flock
             .mailbox_or_self(env, m.as_deref(), c.self_pane_id(), false, true)?;
         if desk_clamp && !peek {
-            let full = c.flock.inbox_read_signed(
+            let mut full = c.flock.inbox_read_signed(
                 env,
                 m.as_deref(),
                 bound_limit(&n)?,
@@ -136,27 +136,52 @@ pub fn h_inbox_read(c: &HandlerContext<'_>, args: Args) -> Result<Value, DunkErr
                 include_tasks,
                 c.self_pane_id(),
             )?;
-            let full_out = inbox_read_out(&full);
-            let bare = if full.tasks.is_some() {
-                let bare = c.flock.inbox_read_signed(
+            let mut bare = if full.tasks.is_some() {
+                Some(c.flock.inbox_read_signed(
                     env,
                     m.as_deref(),
                     bound_limit(&n)?,
                     true,
                     false,
                     c.self_pane_id(),
-                )?;
-                Some(inbox_read_out(&bare))
+                )?)
             } else {
                 None
             };
-            let (mut out, ids) = crate::roles::desk_inbox_read(&full_out, bare.as_ref());
+            // The response shows each message it carries as read, with its read time, so it is sized
+            // that way here. The messages it carries are marked read below (t3539 review, PR #826).
+            let now = env.now();
+            for read in std::iter::once(&mut full).chain(bare.as_mut()) {
+                for message in &mut read.messages {
+                    message.summary.state = "read".to_string();
+                    message.read_at = Some(now);
+                }
+            }
+            // Every message in the batch is the most that can be marked, so that count is sized in.
+            let total = full.messages.len();
+            let full_out = inbox_read_out(&full);
+            let bare_out = bare.as_ref().map(inbox_read_out);
+            let (mut out, ids) = crate::roles::desk_inbox_read(&full_out, bare_out.as_ref(), total);
             let marked = if ids.is_empty() {
                 0
             } else {
                 c.flock.inbox_mark_read_ids(env, &full.mailbox, &ids)?
             };
             out["marked_read"] = json!(marked);
+            for message in full
+                .messages
+                .iter()
+                .filter(|message| ids.contains(&message.summary.message_id))
+            {
+                env.record_metric(
+                    "inbox.read",
+                    message.pane_id.as_deref(),
+                    &full.mailbox,
+                    message.summary.sender.as_deref(),
+                    Some(((now - message.summary.created_at) * 1000.0) as i64),
+                    Some(message.summary.body_bytes),
+                );
+            }
             return Ok(out);
         }
         let r = c.flock.inbox_read_signed(
