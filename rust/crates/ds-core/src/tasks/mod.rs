@@ -2368,7 +2368,9 @@ fn leases_for_conn(conn: &Connection, id: &str, now: f64) -> Result<Vec<Lease>, 
 
 /// `_claimable`: whether `pane_id` may take this task right now.
 fn claimable_for(d: &Decorated, pane_id: &str) -> bool {
-    if d.allocation_waiting {
+    // Same rule as `claim::claimable` (t3617): an assignee may take a task its waiting offer names.
+    let mine = !pane_id.is_empty() && d.assignees.iter().any(|a| a == pane_id);
+    if d.allocation_waiting && !mine {
         return false;
     }
     if !pane_id.is_empty() && d.leases.iter().any(|l| l.pane_id == pane_id) {
@@ -2377,7 +2379,6 @@ fn claimable_for(d: &Decorated, pane_id: &str) -> bool {
     if !d.leases.is_empty() {
         return d.multi_assignee;
     }
-    let mine = !pane_id.is_empty() && d.assignees.iter().any(|a| a == pane_id);
     match d.task.status.as_str() {
         // F2: a named assignee can pull its own task.
         "open" => d.assignees.is_empty() || d.multi_assignee || mine,

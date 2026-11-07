@@ -35,7 +35,11 @@ pub struct Candidate {
 
 /// `_claimable`: whether `pane_id` may take this task right now.
 pub fn claimable(task: &Candidate, pane_id: Option<&str>) -> bool {
-    if task.allocation_waiting {
+    let assigned_to_me = pane_id.is_some_and(|pane| task.assignees.iter().any(|a| a == pane));
+    // A ready offer whose owners are exactly the assignees is waiting on its allocation. The
+    // allocator skips such a task, so only its assignee may take it (t3617): refusing the assignee
+    // too left it unclaimable with no way forward.
+    if task.allocation_waiting && !assigned_to_me {
         return false;
     }
     if let Some(pane) = pane_id {
@@ -46,7 +50,6 @@ pub fn claimable(task: &Candidate, pane_id: Option<&str>) -> bool {
     if !task.leased_by.is_empty() {
         return task.multi_assignee;
     }
-    let assigned_to_me = pane_id.is_some_and(|pane| task.assignees.iter().any(|a| a == pane));
     match task.status.as_str() {
         // F2: a named assignee can pull its own task.
         "open" => task.assignees.is_empty() || task.multi_assignee || assigned_to_me,
@@ -420,6 +423,14 @@ impl Tasks {
                     "UPDATE tasks SET status = 'in_progress', assignees = ?, attempts = attempts + 1, updated_at = ?, block_reason = NULL WHERE id = ?",
                     params![json!(assignees).to_string(), now, chosen.candidate.id],
                 ).map_err(db::map_sqlite)?;
+                if chosen.candidate.allocation_waiting {
+                    // The assignee took the task its ready offer named, so the allocation is done;
+                    // close the offer as `allocate` does (t3617).
+                    tx.execute(
+                        "UPDATE allocation_offers SET state='assigned' WHERE task_id=? AND state='ready'",
+                        params![chosen.candidate.id],
+                    ).map_err(db::map_sqlite)?;
+                }
                 tx.execute(
                     "INSERT INTO task_events (task_id, event, at, actor, scope, priority, status_from, status_to, duration_ms, meta) VALUES (?,?,?,?,?,?,?,?,?,?)",
                     params![chosen.candidate.id, "claimed", now, pane, chosen.scope, chosen.priority,
@@ -687,3 +698,7 @@ impl Tasks {
 #[cfg(test)]
 #[path = "claim_tests.rs"]
 mod claim_tests;
+
+#[cfg(test)]
+#[path = "claim_assigned_offer_tests.rs"]
+mod claim_assigned_offer_tests;
