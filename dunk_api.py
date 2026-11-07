@@ -926,7 +926,7 @@ def h_task_update(flock, args, self_pane_id):
 
 def h_task_assign(flock, args, self_pane_id):
     role = flock.caller_role(self_pane_id)
-    if role not in ("owner", "system", "web"):
+    if role not in ("owner", "system", "web", "planner"):
         raise DunkError(f"task assign requires the owner role (caller is {role}); "
                         "lanes pull work with task next, they are not handed it")
     return flock.task_assign(args["id"], _task_values(args["assignees"]),

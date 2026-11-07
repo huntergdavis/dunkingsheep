@@ -3123,7 +3123,7 @@ pub fn h_task_update(context: &HandlerContext<'_>, args: Args) -> Result<Value, 
 pub fn h_task_assign(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
     let pane = context.self_pane_id();
     let role = context.flock.caller_role(pane, context.env)?;
-    if !matches!(role.as_str(), "owner" | "system" | "web") {
+    if !matches!(role.as_str(), "owner" | "system" | "web" | "planner") {
         return Err(DunkError::Refused(format!(
             "task assign requires the owner role (caller is {role}); lanes pull work with task next, they are not handed it"
         )));
