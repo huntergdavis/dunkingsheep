@@ -926,6 +926,7 @@ impl NextJobs {
                         hold_while_typing: true,
                         allow_modal: false,
                         preserve_draft: true,
+                        inconclusive_fallback: false,
                     };
                     let pane_for_permission = pane_for_send.clone();
                     let permission = move || {
