@@ -4468,3 +4468,6 @@ mod tests {
 
 #[cfg(test)]
 mod block_by_scope_tests;
+
+#[cfg(test)]
+mod claim_port_tests;
