@@ -30,6 +30,15 @@
     "source": "none"
   },
   "rules": {
+    "delivery.ambiguous_queued": {
+      "class": "ops",
+      "cooldown_minutes": 240,
+      "enabled": true,
+      "min_age_minutes": 20,
+      "min_holds": 10,
+      "must_hold_runs": 1,
+      "severity": "warning"
+    },
     "dunk.overdue": {
       "class": "ops",
       "cooldown_minutes": 240,
@@ -47,6 +56,21 @@
       "lookback_hours": 168,
       "must_hold_runs": 1,
       "severity": "warning"
+    },
+    "fleet.assignment_starvation": {
+      "class": "ops",
+      "cooldown_minutes": 60,
+      "enabled": false,
+      "min_empty_workers": 2,
+      "must_hold_runs": 2,
+      "quiet_minutes": 10,
+      "severity": "warning",
+      "superuser_panes": [
+        "configure-superuser-pane"
+      ],
+      "worker_panes": [
+        "configure-worker-pane"
+      ]
     },
     "health.failed": {
       "class": "ops",
