@@ -12,6 +12,7 @@ members = [
     "crates/ds-mcp",
     "crates/ds-tui",
     "crates/ds-web",
+    "crates/ds-telegram",
 ]
 
 [workspace.package]
