@@ -48,6 +48,11 @@ mod group_d_wiring_15_17;
 #[cfg(test)]
 mod max_hold_fallback;
 
+/// t3661: the outbox's pre-send check (send_blocker, clear_to_send) on the constructed idle hint
+/// frames, and the max-hold fallback on that path. See sends_tests/idle_hint_precheck.rs.
+#[cfg(test)]
+mod idle_hint_precheck;
+
 #[derive(Default)]
 struct Pane {
     screens: BTreeMap<String, String>,
