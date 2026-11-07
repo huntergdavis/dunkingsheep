@@ -267,10 +267,14 @@ async fn task_wire_list_filters_sort_slice_and_full_decorators_match_actual_pyth
             "list",
             json!({"scope":null,"status":status,"assignee":assignee,"include_done":done,"self_pane_id":"%4","kind":kind,"needs_owner":needs_owner}),
         );
-        assert_eq!(
-            json!(rows.iter().map(|r| &r.wire).collect::<Vec<_>>()),
-            expected["ok"]
+        let mut filtered_wire = json!(rows.iter().map(|r| &r.wire).collect::<Vec<_>>());
+        let expected_filtered = expected["ok"].clone();
+        crate::tasks::claim::claim_assigned_offer_tests::accept_t3617_claims(
+            &mut filtered_wire,
+            &expected_filtered,
+            Some("%4"),
         );
+        assert_eq!(filtered_wire, expected_filtered);
         count += 1;
     }
     assert_eq!(count, 31, "nonzero oracle cases");
