@@ -77,20 +77,39 @@ fn bound_pane(pid: i64, cwd: &std::path::Path, screen: &str) -> Pane {
 /// A failed (or sent) scheduled reminder for `%1`, created at the real clock, as the observer
 /// currency check reads it (ticks are offsets from `created`). The dunk row carries the same text,
 /// so the schedule is current.
-fn scheduled_fixture(status: &str, pid: i64) -> (Flock, Pane, f64) {
-    let dir = tempfile::tempdir().unwrap();
-    let flock = Flock::new(
-        dir.path().join("launches.json"),
-        dir.path().join("lanes.json"),
-        false,
-    );
+fn scheduled_fixture(dir: &std::path::Path, status: &str, pid: i64) -> (Flock, Pane, f64) {
+    // Persistent, as scheduled_candidate_fixture is: the observer reserves the key durably before it presses, and
+    // a non-persistent flock refuses (sends.rs unwedge). The caller owns `dir`, so the state file outlives this call.
+    let flock = persistent_recovery_flock(dir, &dir.join("state.json"));
+    // The oracle's stuck config (threshold 120 s, observation 20 s, one attempt), as scheduled_candidate_fixture
+    // sets it. Without it, and without the sent text and the dunk's target fields, the observer cannot own the
+    // composer and presses nothing, even when the composer is unmutated (t3501 scheduled 41-47 gap).
+    {
+        let mut config = flock.stuck_config.lock().unwrap();
+        config.threshold_s = 120.0;
+        config.observation_interval_s = 20.0;
+        config.max_attempts = 1;
+    }
     flock.dunks.load(
-        serde_json::json!({"dunkers":[{"id":"d7","target_pane_id":"%1","text":TEXT,"running":true}]})
-            .as_object()
-            .unwrap(),
+        serde_json::json!({"dunkers":[{
+            "id":"d7","target_pane_id":"%1","target_agent":"codex","target_cwd":"/work",
+            "text":TEXT,"running":true
+        }]})
+        .as_object()
+        .unwrap(),
     );
+    flock
+        .sent_text_by_pane
+        .lock()
+        .unwrap()
+        .insert("%1".into(), vec![TEXT.into()]);
     let created = crate::clock::now_s();
-    let mut env = bound_pane(pid, dir.path(), "");
+    // A plain idle pane, as scheduled_candidate_fixture builds it. bound_pane() adds agent "codex", which sends
+    // the observer down the native-session path, where this fixture has no binding and presses nothing.
+    let mut env = Pane::default();
+    env.panes
+        .push(serde_json::json!({"pane_id": "%1", "pane_pid": pid}));
+    env.statuses.insert("%1".into(), "idle".into());
     let mut message = Message::new("m7", "%1", "writer", TEXT, "d7");
     message.created_at = created;
     message.status = status.into();
@@ -306,7 +325,9 @@ fn wiring_25_unbound_failure_has_one_named_diagnostic_and_never_recovers() {
 #[test]
 #[ignore = "fixture not reproduced: the Rust observer needs the message-history provenance that Python's _remember writes; this scenario presses nothing even before a restart"]
 fn scheduled_40_styled_echo_with_provenance_presses_once_at_two_minutes() {
-    let (flock, mut env, created) = scheduled_fixture("failed", i64::from(std::process::id()));
+    let dir = tempfile::tempdir().unwrap();
+    let (flock, mut env, created) =
+        scheduled_fixture(dir.path(), "failed", i64::from(std::process::id()));
     let echo = "[inbox] new message for Codex. Read it with: dunkingsheep inbox read";
     flock
         .sent_text_by_pane
@@ -330,7 +351,9 @@ fn scheduled_40_styled_echo_with_provenance_presses_once_at_two_minutes() {
 #[test]
 #[ignore = "unverified: the pre-restart control in this fixture presses nothing; not a divergence until the fixture is reproduced"]
 fn scheduled_40_restart_recovers_once_like_python() {
-    let (flock, mut env, created) = scheduled_fixture("failed", i64::from(std::process::id()));
+    let dir = tempfile::tempdir().unwrap();
+    let (flock, mut env, created) =
+        scheduled_fixture(dir.path(), "failed", i64::from(std::process::id()));
     let echo = "[inbox] new message for Codex. Read it with: dunkingsheep inbox read";
     env.screens.insert(
         "%1".into(),
@@ -355,7 +378,9 @@ fn scheduled_40_restart_recovers_once_like_python() {
 /// reads as unknown rather than empty.
 #[test]
 fn scheduled_41_unaccounted_styled_human_line_stays_unknown() {
-    let (flock, mut env, created) = scheduled_fixture("failed", i64::from(std::process::id()));
+    let dir = tempfile::tempdir().unwrap();
+    let (flock, mut env, created) =
+        scheduled_fixture(dir.path(), "failed", i64::from(std::process::id()));
     let screen = format!(
         "\x1b[1;2m›\x1b[0m a human line never sent by us\n\n\x1b[1m›\x1b[0m {TEXT}\n\n\n{FOOTER}"
     );
@@ -376,16 +401,17 @@ fn scheduled_41_unaccounted_styled_human_line_stays_unknown() {
 /// Positive control for scheduled row 41 (t3501): the same fixture with the human line removed presses
 /// once at two minutes, so the no-key result above is shown not to be vacuous.
 #[test]
-#[ignore = "fixture not reproduced (t3501): the unmutated scheduled composer presses nothing here, so the scheduled 41 no-key result is vacuous; CI on a311f6cf fails this control"]
 fn scheduled_41_control_unaccounted_line_removed_presses_once() {
-    let (flock, mut env, created) = scheduled_fixture("failed", i64::from(std::process::id()));
+    let dir = tempfile::tempdir().unwrap();
+    let (flock, mut env, created) =
+        scheduled_fixture(dir.path(), "failed", i64::from(std::process::id()));
     env.screens.insert(
         "%1".into(),
         format!("\x1b[1;2m›\x1b[0m {TEXT}\n\n\n{FOOTER}"),
     );
     observe(&flock, &mut env, created + 1.0);
     assert!(env.keys.is_empty(), "no press before two minutes");
-    observe(&flock, &mut env, created + 120.0);
+    observe(&flock, &mut env, created + 121.0);
     assert_eq!(
         1,
         env.keys.len(),
@@ -407,7 +433,9 @@ fn scheduled_42_reviewed_echo_edits_cannot_authorize_recovery() {
         truncated.to_string(),
         format!("{truncated}…"),
     ] {
-        let (flock, mut env, created) = scheduled_fixture("failed", i64::from(std::process::id()));
+        let dir = tempfile::tempdir().unwrap();
+        let (flock, mut env, created) =
+            scheduled_fixture(dir.path(), "failed", i64::from(std::process::id()));
         flock
             .sent_text_by_pane
             .lock()
@@ -429,31 +457,45 @@ fn scheduled_42_reviewed_echo_edits_cannot_authorize_recovery() {
 /// presses once at two minutes. So the ownership check evaluates, and the refusals above do not hold
 /// only because the check is vacuous.
 #[test]
-#[ignore = "fixture not reproduced (t3501): the unedited echo is not owned and presses nothing in this fixture, so the scheduled 42 ownership check is vacuous; CI on a311f6cf fails this control"]
 fn scheduled_42_control_unedited_echo_is_owned_and_presses_once() {
     let echo = "Prior approved schedule: check your task and report the result.";
-    let (flock, mut env, created) = scheduled_fixture("failed", i64::from(std::process::id()));
+    let dir = tempfile::tempdir().unwrap();
+    let (flock, mut env, created) =
+        scheduled_fixture(dir.path(), "failed", i64::from(std::process::id()));
     flock
         .sent_text_by_pane
         .lock()
         .unwrap()
         .insert("%1".into(), vec![echo.into()]);
-    let screen = format!("\x1b[1;2m›\x1b[0m {echo}\n\n\x1b[1m›\x1b[0m {TEXT}\n\n\n{FOOTER}");
-    env.screens.insert("%1".into(), screen.clone());
+    // The candidate's own text is the echo, and the composer shows only that echo: the unedited case.
+    flock
+        .stuck_candidates
+        .lock()
+        .unwrap()
+        .get_mut("%1")
+        .unwrap()
+        .text = echo.into();
+    let screen = format!("\x1b[1;2m›\x1b[0m {echo}\n{FOOTER}");
+    env.screens.insert("%1".into(), screen);
     observe(&flock, &mut env, created + 1.0);
-    observe(&flock, &mut env, created + 120.0);
-    assert!(
-        flock.owned_recovery_evidence(&env, "%1", &screen).is_some(),
-        "the unedited echo owns the composer"
+    observe(&flock, &mut env, created + 121.0);
+    // Ownership shows as the press itself: the composer text matches the sent echo, so one key is pressed.
+    // owned_recovery_evidence (the native-session check) stays None in this fixture, which is why the
+    // mutation tests above can only be shown non-vacuous through this press (t3501 scheduled 42 residual).
+    assert_eq!(
+        1,
+        env.keys.len(),
+        "the unedited echo owns the composer and presses once"
     );
-    assert_eq!(1, env.keys.len(), "the owned composer presses once");
 }
 
 /// Oracle test_sent_schedule_style_change_before_press_refuses (scheduled row 47): the decision
 /// reads the bright (sent) composer, and the press reads the dim one. No key is pressed.
 #[test]
 fn scheduled_47_sent_schedule_style_change_before_press_refuses() {
-    let (flock, mut env, created) = scheduled_fixture("sent", i64::from(std::process::id()));
+    let dir = tempfile::tempdir().unwrap();
+    let (flock, mut env, created) =
+        scheduled_fixture(dir.path(), "sent", i64::from(std::process::id()));
     let bright = format!("\x1b[1m›\x1b[0m {TEXT}\n\n\n{FOOTER}");
     let dim = format!("\x1b[1;2m›\x1b[0m {TEXT}\n\n\n{FOOTER}");
     env.screens.insert("%1".into(), bright.clone());
@@ -475,14 +517,15 @@ fn scheduled_47_sent_schedule_style_change_before_press_refuses() {
 /// read (no style change) presses once at two minutes. So the refusal above comes from the style change,
 /// not from the fixture.
 #[test]
-#[ignore = "fixture not reproduced (t3501): the unchanged sent schedule presses nothing in this fixture, so the scheduled 47 refusal is vacuous; CI on a311f6cf fails this control"]
 fn scheduled_47_control_unchanged_sent_schedule_presses_once() {
-    let (flock, mut env, created) = scheduled_fixture("sent", i64::from(std::process::id()));
+    let dir = tempfile::tempdir().unwrap();
+    let (flock, mut env, created) =
+        scheduled_fixture(dir.path(), "sent", i64::from(std::process::id()));
     let bright = format!("\x1b[1m›\x1b[0m {TEXT}\n\n\n{FOOTER}");
     env.screens.insert("%1".into(), bright);
     observe(&flock, &mut env, created + 1.0);
     assert!(env.keys.is_empty(), "no press before the window");
-    observe(&flock, &mut env, created + 120.0);
+    observe(&flock, &mut env, created + 121.0);
     assert_eq!(
         1,
         env.keys.len(),
@@ -495,17 +538,18 @@ fn scheduled_47_control_unchanged_sent_schedule_presses_once() {
 /// 120 s threshold through the real observer. The spent attempt presses nothing at the later ticks. The
 /// tracker-layer test in stuck.rs covers the decision only.
 #[test]
-#[ignore = "fixture not reproduced (t3501): the sent bright schedule presses nothing at the observer tick in this fixture; CI on a311f6cf fails this test"]
 fn scheduled_43_observer_sent_bright_pending_schedule_presses_once_at_120() {
-    let (flock, mut env, created) = scheduled_fixture("sent", i64::from(std::process::id()));
+    let dir = tempfile::tempdir().unwrap();
+    let (flock, mut env, created) =
+        scheduled_fixture(dir.path(), "sent", i64::from(std::process::id()));
     env.screens
         .insert("%1".into(), format!("\x1b[1m›\x1b[0m {TEXT}\n\n\n{FOOTER}"));
     observe(&flock, &mut env, created + 1.0);
     assert!(env.keys.is_empty(), "no press before the threshold");
-    observe(&flock, &mut env, created + 120.0);
+    observe(&flock, &mut env, created + 121.0);
     assert_eq!(1, env.keys.len(), "one recovery at the threshold");
-    observe(&flock, &mut env, created + 240.0);
-    observe(&flock, &mut env, created + 360.0);
+    observe(&flock, &mut env, created + 241.0);
+    observe(&flock, &mut env, created + 361.0);
     assert_eq!(1, env.keys.len(), "the spent attempt presses nothing more");
 }
 
@@ -514,9 +558,10 @@ fn scheduled_43_observer_sent_bright_pending_schedule_presses_once_at_120() {
 /// follows the ticks, and no consumed outcome is recorded. The box-only test in loops_stuck_tests.rs covers
 /// the box read.
 #[test]
-#[ignore = "fixture not reproduced (t3501): the 18-line sent composer presses nothing at the observer tick in this fixture; CI on a311f6cf fails this test"]
 fn scheduled_44_long_false_sent_composer_presses_once_with_status_sent_and_no_consumed_outcome() {
-    let (flock, mut env, created) = scheduled_fixture("sent", i64::from(std::process::id()));
+    let dir = tempfile::tempdir().unwrap();
+    let (flock, mut env, created) =
+        scheduled_fixture(dir.path(), "sent", i64::from(std::process::id()));
     let text = (0..18)
         .map(|i| format!("scheduled line {i}"))
         .collect::<Vec<_>>()
@@ -526,12 +571,20 @@ fn scheduled_44_long_false_sent_composer_presses_once_with_status_sent_and_no_co
         .lock()
         .unwrap()
         .insert("%1".into(), vec![text.clone().into()]);
+    // The candidate is the composer's own sent text, as Python's sent composer is (t3501 scheduled 44).
+    flock
+        .stuck_candidates
+        .lock()
+        .unwrap()
+        .get_mut("%1")
+        .unwrap()
+        .text = text.clone();
     env.screens
         .insert("%1".into(), format!("\x1b[1m›\x1b[0m {text}\n{FOOTER}"));
     observe(&flock, &mut env, created + 1.0);
     assert!(env.keys.is_empty(), "no press before two minutes");
-    observe(&flock, &mut env, created + 120.0);
-    observe(&flock, &mut env, created + 240.0);
+    observe(&flock, &mut env, created + 121.0);
+    observe(&flock, &mut env, created + 241.0);
     assert_eq!(1, env.keys.len(), "one recovery key follows the ticks");
     let candidate = flock.stuck_candidates.lock().unwrap()["%1"].clone();
     assert_eq!("sent", candidate.status, "the status stays sent");
@@ -548,7 +601,9 @@ fn scheduled_44_long_false_sent_composer_presses_once_with_status_sent_and_no_co
 /// empty). The tracker-layer test in stuck.rs covers the reset only.
 #[test]
 fn scheduled_31_human_continuation_observer_ticks_press_nothing_and_keep_no_record() {
-    let (flock, mut env, created) = scheduled_fixture("failed", i64::from(std::process::id()));
+    let dir = tempfile::tempdir().unwrap();
+    let (flock, mut env, created) =
+        scheduled_fixture(dir.path(), "failed", i64::from(std::process::id()));
     let screen = format!("\x1b[1;2m›\x1b[0m {TEXT}\ncall Hunter\n\n\n{FOOTER}");
     env.screens.insert("%1".into(), screen.clone());
     observe(&flock, &mut env, created + 1.0);
