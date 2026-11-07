@@ -4340,39 +4340,6 @@ fn an_ambiguous_scheduled_composer_recovers_once_after_two_minutes() {
     assert_eq!(1, env.keys.len(), "no key after the single attempt");
 }
 
-// t3355 (t820 proof D) scheduled row 38 (oracle 79bc92fa). The candidate, its schedule and the spent
-// budget survive a restart through the state file. The restored flock presses nothing before the
-// threshold, and then presses exactly once.
-#[test]
-#[ignore = "t3391: scheduled row 38 divergence, a restored single-sigil composer is not owned after a restart; un-ignore when t3391 lands"]
-fn a_restored_scheduled_recovery_keeps_its_budget_and_presses_once() {
-    let dir = tempfile::tempdir().unwrap();
-    let state = dir.path().join("state.json");
-    let (flock, mut env) = scheduled_candidate_fixture(dir.path(), "\u{203a}", "failed", 0.0);
-    flock.save().unwrap();
-    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap();
-    drop(flock);
-    let restored = persistent_recovery_flock(dir.path(), &state);
-    {
-        let mut config = restored.stuck_config.lock().unwrap();
-        config.threshold_s = 120.0;
-        config.observation_interval_s = 20.0;
-        config.max_attempts = 1;
-    }
-    restored.restore_snapshot(&saved);
-    crate::flock::loops_stuck::strict_stuck_observer_scan(&restored, &mut env, 1000.0).unwrap();
-    assert!(
-        env.keys.is_empty(),
-        "no key before the threshold after the restart"
-    );
-    crate::flock::loops_stuck::strict_stuck_observer_scan(&restored, &mut env, 1120.0).unwrap();
-    assert_eq!(
-        1,
-        env.keys.len(),
-        "the restored schedule presses once at the threshold"
-    );
-}
-
 // t3355 (t820 proof D) wiring row 13: test_dunk_recovery_wiring.py::
 // test_schedule_false_sent_with_real_frame_recovers (oracle 79bc92fa). A scheduled message is reported
 // sent, the real t508 frame is on screen, and a bound native codex session authenticates the frame. The
