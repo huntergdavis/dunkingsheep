@@ -1060,16 +1060,19 @@ fn the_same_generation_after_a_restart_still_presses_once() {
 }
 
 // DaemonStateFileTests.test_a_declared_config_wins_over_the_saved_one (row 24)
-// DIVERGENCE: Python lets the declared config win over the saved state file; Rust restore
-// overwrites the declared config with the saved one (flock/mod.rs restore_snapshot).
+// Python keeps a declared stuck config (argument or env) on restart and adopts the state file
+// only when nothing was declared (dunk_core `_stuck_config_declared`). restore_snapshot now
+// honours the same flag (flock/mod.rs).
 #[test]
-#[ignore = "t3354 row 24: restore overwrites a declared stuck config with the saved one; owner ruling pending"]
 fn a_declared_config_wins_over_the_saved_one() {
     let dir = tempfile::tempdir().unwrap();
     let saved = in_memory_flock(&dir);
     let payload = saved.snapshot();
     let declared = in_memory_flock(&dir);
-    declared.stuck_config.lock().unwrap().enabled = false;
+    declared.declare_stuck_config(crate::stuck::Config {
+        enabled: false,
+        ..crate::stuck::Config::default()
+    });
     declared.restore_snapshot(&payload);
     assert!(
         !declared.stuck_config.lock().unwrap().enabled,
@@ -1552,5 +1555,216 @@ fn federated_watchdog_presses_once_and_never_queues_the_candidate_text() {
     assert!(
         flock.outbox.lock().unwrap().is_empty(),
         "the watchdog must not queue the candidate text"
+    );
+}
+
+// RestartRecoveryTests.test_a_human_continuation_is_refused_after_a_restart_by_the_real_matcher (row 52)
+// Python's case 52 is the legacy real-matcher refusal, a different path. This test covers the
+// federated native frame: Python's federated step submits the composer once and replays nothing,
+// and the owner ruled that stays (i45030). The test pins that observed behaviour.
+#[test]
+fn a_restarted_federated_composer_is_submitted_once_without_replay() {
+    let dir = tempfile::tempdir().unwrap();
+    let before = in_memory_flock(&dir);
+    let mut probe = federated_probe();
+    before.note_stuck_candidate(&observed_candidate(&probe, "m1", "failed", true, 10.0));
+    let after = persisted_flock(&dir);
+    after.restore_snapshot(&before.snapshot());
+    // The restarted worker runs the Python test's explicit config: one attempt, 120 s threshold.
+    after.declare_stuck_config(crate::stuck::Config {
+        enabled: true,
+        threshold_s: 120.0,
+        max_attempts: 1,
+        cooldown_s: 60.0,
+        observation_interval_s: 5.0,
+    });
+    // After the restart the composer holds our text and a line the person typed below it.
+    // Enter leaves that composer in place (Python: "receipt unverified"), so the attempt budget
+    // alone must stop a second press.
+    let frame = "  >_ OpenAI Codex (v0.165.0)\n\n\x1b[1m\u{203a} pending text\x1b[0m\n  and one more thing I was typing\n\n  GPT-6-Astra high \u{b7} ~/workspace/x\n  ? for shortcuts\n".to_string();
+    *probe.screen.lock().unwrap() = frame.clone();
+    probe.after_enter = frame;
+    assert_eq!(
+        0,
+        federated_recovery_step(&after, &mut probe, 100.0, &|_| {}).unwrap()
+    );
+    assert!(
+        probe.keys.lock().unwrap().is_empty(),
+        "no key before the threshold"
+    );
+    assert_eq!(
+        1,
+        federated_recovery_step(&after, &mut probe, 221.0, &|_| {}).unwrap()
+    );
+    assert_eq!(vec!["Enter".to_string()], *probe.keys.lock().unwrap());
+    assert_eq!(
+        0,
+        federated_recovery_step(&after, &mut probe, 341.0, &|_| {}).unwrap()
+    );
+    assert_eq!(
+        vec!["Enter".to_string()],
+        *probe.keys.lock().unwrap(),
+        "one Enter and no replay: SendEnv has no text method, so a replay would show as a key"
+    );
+}
+
+// RestartRecoveryTests.test_a_human_continuation_is_refused_after_a_restart_by_the_real_matcher (row 52)
+// Python's case 52 is the non-federated real-matcher refusal, which the legacy strict scan reaches.
+// The fixture binds a real native codex session as the daemon does. After the restart the exact
+// text is pressed once, which is the positive control that makes the refusal meaningful. A
+// composer holding a human continuation below our text gets no key at all.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_human_continuation_is_refused_after_a_restart() {
+    struct ChildGuard(std::process::Child);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    struct NativeCodexPane {
+        pane_pid: i64,
+        cwd: String,
+        screen: Mutex<String>,
+        after_enter: String,
+        keys: Mutex<Vec<String>>,
+    }
+    impl SendEnv for NativeCodexPane {
+        fn read_pane(&self, _: &str, _: i64, _: bool) -> Option<String> {
+            Some(self.screen.lock().unwrap().clone())
+        }
+        fn pane_harness(&self, _: &str) -> Option<String> {
+            Some("codex".into())
+        }
+        fn session_process_gone(&self, _: &str) -> bool {
+            false
+        }
+        fn read_status(&self, _: &str) -> Option<String> {
+            Some("idle".into())
+        }
+        fn send_key(&mut self, _: &str, key: &str) -> (bool, String) {
+            self.keys.lock().unwrap().push(key.into());
+            if key == "Enter" {
+                *self.screen.lock().unwrap() = self.after_enter.clone();
+            }
+            (true, "sent".into())
+        }
+        fn federated_input(&self) -> bool {
+            false
+        }
+    }
+    impl PaneInfoEnv for NativeCodexPane {
+        fn list_panes_grouped(&self) -> Vec<Value> {
+            vec![self.get_pane("%1").unwrap()]
+        }
+        fn get_pane(&self, pane_id: &str) -> Option<Value> {
+            (pane_id == "%1").then(|| {
+                json!({"pane_id": "%1", "pane_pid": self.pane_pid, "agent": "codex", "cwd": self.cwd})
+            })
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let hooks = dir.path().join("hooks");
+    let cwd = dir.path().join("cwd");
+    for path in [&home, &hooks, &cwd] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+    let binary = dir.path().join("codex");
+    std::fs::copy("/bin/sleep", &binary).unwrap();
+    let child = ChildGuard(
+        std::process::Command::new(binary)
+            .arg("300")
+            .env("CODEX_HOME", &home)
+            .env("DUNKINGSHEEP_CODEX_STATE_DIR", &hooks)
+            .spawn()
+            .unwrap(),
+    );
+    let pid = i64::from(child.0.id());
+    let start = crate::proc::process_start(pid).unwrap();
+    let session = "01a173ee-beed-7461-a560-e5f6c1f666a7";
+    let rollout = home.join(format!("rollout-{session}.jsonl"));
+    std::fs::write(
+        &rollout,
+        format!(
+            "{}\n",
+            json!({"type": "session_meta", "payload": {"session_id": session, "cwd": cwd}})
+        ),
+    )
+    .unwrap();
+    let db = rusqlite::Connection::open(home.join("state_5.sqlite")).unwrap();
+    db.execute(
+        "create table threads (id text primary key, rollout_path text, cwd text)",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "insert into threads values (?,?,?)",
+        (session, rollout.to_str().unwrap(), cwd.to_str().unwrap()),
+    )
+    .unwrap();
+    std::fs::write(
+        hooks.join("bound.json"),
+        json!({"session_id": session, "pane_id": "%1", "root_pid": pid, "root_start": start, "cwd": cwd})
+            .to_string(),
+    )
+    .unwrap();
+
+    let pane_cwd = cwd.display().to_string();
+    let generation_probe = NativeCodexPane {
+        pane_pid: pid,
+        cwd: pane_cwd.clone(),
+        screen: Mutex::default(),
+        after_enter: String::new(),
+        keys: Mutex::default(),
+    };
+    let mut message = Message::new("m1", "%1", "lane", "pending text", "send_text");
+    message.status = "failed".into();
+    message.press_enter = true;
+    message.created_at = 10.0;
+    message.typed_at = Some(100.0);
+    message.attempt_generation = crate::flock::sends::pane_generation(&generation_probe, "%1");
+    let before = in_memory_flock(&dir);
+    before.note_stuck_candidate(&message);
+
+    // Each screen gets its own restart, all from the same persisted snapshot.
+    let restart_and_scan = |screen: &str| -> Vec<String> {
+        let after = persisted_flock(&dir);
+        after.restore_snapshot(&before.snapshot());
+        // The restarted worker runs the Python test's explicit config: one attempt, 120 s threshold.
+        after.declare_stuck_config(crate::stuck::Config {
+            enabled: true,
+            threshold_s: 120.0,
+            max_attempts: 1,
+            cooldown_s: 60.0,
+            observation_interval_s: 5.0,
+        });
+        // Enter leaves the composer as it was (Python: "receipt unverified"), so only the
+        // attempt budget can stop a second press.
+        let mut env = NativeCodexPane {
+            pane_pid: pid,
+            cwd: pane_cwd.clone(),
+            screen: Mutex::new(screen.into()),
+            after_enter: screen.into(),
+            keys: Mutex::default(),
+        };
+        for now in [100.0, 221.0, 341.0] {
+            strict_stuck_observer_scan(&after, &mut env, now).unwrap();
+        }
+        env.keys.into_inner().unwrap()
+    };
+    assert_eq!(
+        vec!["Enter".to_string()],
+        restart_and_scan("› pending text\n\n  model · /tmp/test\n"),
+        "the exact text is recovered once after a restart"
+    );
+    assert!(
+        restart_and_scan(
+            "› pending text\n  and one more thing I was typing\n\n  model · /tmp/test\n"
+        )
+        .is_empty(),
+        "the real matcher refuses a human continuation after a restart, with no key"
     );
 }
