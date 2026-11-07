@@ -3316,10 +3316,11 @@ pub(crate) fn candidate_from_snapshot(value: &Value) -> Option<StuckCandidate> {
     })
 }
 
-/// One queued outbox row, in exactly the layout Python's `dunk_core._save` writes: these 13 keys, in
-/// this order. Python writes no press_enter, attempt_generation, scheduled, schedule_template, detail,
-/// finished_at or typed_at for an outbox row, so this writer writes none of them either. A restart
-/// restores those fields to Python's defaults (the post-cutover bug, t3370).
+/// One queued outbox row, in the layout Python's `dunk_core._save` writes: the 13 keys of the
+/// original layout, then the seven that a restart needs (t3370): press_enter, scheduled,
+/// schedule_template, attempt_generation, typed_at, detail, finished_at. Before t3370 neither
+/// writer wrote those seven, so a restart restored a no-Enter send as one that submits with Enter
+/// and dropped a scheduled template. Python's writer and restore carry the same seven keys.
 pub(crate) fn message_snapshot(message: &Message) -> Value {
     json!({
         "id": message.id,
@@ -3337,6 +3338,13 @@ pub(crate) fn message_snapshot(message: &Message) -> Value {
             json!([message.hold_signature_kind.as_deref().unwrap_or("box"), text])
         }),
         "created_at": message.created_at,
+        "press_enter": message.press_enter,
+        "scheduled": message.scheduled,
+        "schedule_template": message.schedule_template,
+        "attempt_generation": message.attempt_generation,
+        "typed_at": message.typed_at,
+        "detail": message.detail,
+        "finished_at": message.finished_at,
     })
 }
 

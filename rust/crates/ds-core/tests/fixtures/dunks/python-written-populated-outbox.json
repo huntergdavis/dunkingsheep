@@ -29,7 +29,14 @@
       "holds": 0,
       "next_attempt_at": null,
       "hold_signature": null,
-      "created_at": 1793000500.5
+      "created_at": 1793000500.5,
+      "press_enter": true,
+      "scheduled": false,
+      "schedule_template": null,
+      "attempt_generation": null,
+      "typed_at": null,
+      "detail": null,
+      "finished_at": null
     },
     {
       "id": "m6",
@@ -50,7 +57,14 @@
         "box",
         "> draft left in the box"
       ],
-      "created_at": 1793000510.0
+      "created_at": 1793000510.0,
+      "press_enter": true,
+      "scheduled": false,
+      "schedule_template": null,
+      "attempt_generation": null,
+      "typed_at": null,
+      "detail": null,
+      "finished_at": null
     },
     {
       "id": "m7",
@@ -68,7 +82,14 @@
         "modal",
         "Save changes? [y/N]"
       ],
-      "created_at": 1793000520.75
+      "created_at": 1793000520.75,
+      "press_enter": true,
+      "scheduled": false,
+      "schedule_template": null,
+      "attempt_generation": null,
+      "typed_at": null,
+      "detail": null,
+      "finished_at": null
     }
   ],
   "decided": {
