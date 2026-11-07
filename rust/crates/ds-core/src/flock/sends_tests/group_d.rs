@@ -209,12 +209,10 @@ fn wiring_26_missing_native_binding_records_one_named_refusal_and_presses_nothin
 }
 
 /// Oracle test_unbound_failure_has_one_named_diagnostic_and_never_recovers (wiring row 25).
-/// Divergence: Python sets `unobservable_logged` and logs "attempt generation unknown" once when
-/// the candidate is noted (dunk_core.py:6203-6206). Rust never sets `unobservable_logged`
-/// (sends.rs:2833; the only copy is sends.rs:4525), so no diagnostic is recorded. Ignored until the
-/// owner rules on the divergence; no production code is changed here.
+/// Python sets `unobservable_logged` and logs "attempt generation unknown" once when the
+/// candidate is noted (dunk_core.py:6203-6206). Rust ports that in `note_stuck_candidate`
+/// (t3468), so the flag is set once and no key is sent.
 #[test]
-#[ignore = "divergence tracked by t3468: Python logs 'attempt generation unknown' once; Rust never sets unobservable_logged"]
 fn wiring_25_unbound_failure_has_one_named_diagnostic_and_never_recovers() {
     let mut env = Pane::default();
     env.panes
