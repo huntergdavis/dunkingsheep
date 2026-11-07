@@ -281,7 +281,7 @@ impl serde_json::ser::Formatter for PyFormatter {
     }
 }
 
-fn py_dumps(value: &serde_json::Value) -> String {
+pub(crate) fn py_dumps(value: &serde_json::Value) -> String {
     use serde::Serialize;
     let mut out = Vec::new();
     let mut ser = serde_json::Serializer::with_formatter(&mut out, PyFormatter);
@@ -350,6 +350,62 @@ pub fn clamp_desk_result(result: &serde_json::Value) -> serde_json::Value {
     })
 }
 
+/// The desk inbox read decision (t3539). `full` is the whole read: messages and the caller's task
+/// queues. `without_tasks` is the same read without the task queues, when the caller asked for them.
+/// Returns the response to send and the ids of the messages it carries. Only those may be marked
+/// read, so a message the response leaves out stays unread for the next read.
+///
+/// The task queues can take the whole cap. Then no message fits beside them, and the capped `head`
+/// would cut a message mid-body (and the batch would be marked read). In that case the messages go
+/// out without the queues, and the response says so.
+///
+/// `marked_read` is the count the response will report. The fields are sized before the clamp, so
+/// the response that is sent is the one that was measured: the dispatcher's own clamp then changes
+/// nothing (t3539 review, PR #826).
+pub fn desk_inbox_read(
+    full: &serde_json::Value,
+    without_tasks: Option<&serde_json::Value>,
+    marked_read: usize,
+) -> (serde_json::Value, Vec<String>) {
+    let carries = |value: &serde_json::Value| {
+        value
+            .get("messages")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|rows| !rows.is_empty())
+    };
+    // The fields are part of the response, so they count against the cap before the clamp (see above).
+    let with_fields = |mut value: serde_json::Value, left_out: bool| {
+        if let Some(object) = value.as_object_mut() {
+            object.insert("marked_read".into(), serde_json::json!(marked_read));
+            if left_out {
+                object.insert("tasks_left_out".into(), serde_json::json!(true));
+            }
+        }
+        value
+    };
+    let full = with_fields(full.clone(), false);
+    let clamped = clamp_desk_result(&full);
+    let fallback = match without_tasks {
+        Some(bare) if !carries(&clamped) && carries(&full) => {
+            let bare = clamp_desk_result(&with_fields(bare.clone(), true));
+            carries(&bare).then_some(bare)
+        }
+        _ => None,
+    };
+    let chosen = fallback.unwrap_or(clamped);
+    let ids = chosen
+        .get("messages")
+        .and_then(serde_json::Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| row.get("message_id").and_then(serde_json::Value::as_str))
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    (chosen, ids)
+}
+
 /// What the CLI's `print_inbox_read` / `print_inbox_list` / `print_inbox_recover` show for
 /// a result with no `messages` key (the capped shape). Exit status stays 0.
 pub fn capped_result_text(result: &serde_json::Value) -> String {
@@ -378,3 +434,8 @@ pub use store::{
 #[cfg(test)]
 #[path = "roles_tests.rs"]
 mod roles_tests;
+
+/// t3539: the desk inbox read marks only the messages its response carries.
+#[cfg(test)]
+#[path = "roles_desk_read_tests.rs"]
+mod roles_desk_read_tests;

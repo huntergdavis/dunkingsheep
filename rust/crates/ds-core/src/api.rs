@@ -1173,6 +1173,12 @@ impl Dispatcher {
                 command.name
             ))
         })?;
+        if name == "inbox_read" {
+            // The desk clamp runs after the handler returns, so the handler must know whether to mark
+            // only the messages the clamp keeps (t3539). Set here from the resolved role, never taken from
+            // the caller.
+            args.insert("desk_clamp".into(), json!(role == "desk"));
+        }
         let result = handler(context, args)?;
         Ok(if role == "desk" {
             roles::clamp_desk_result(&result)

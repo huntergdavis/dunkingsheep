@@ -107,15 +107,95 @@ pub fn h_inbox_list(c: &HandlerContext<'_>, args: Args) -> Result<Value, DunkErr
         Ok(json!({"mailbox":key,"messages":messages}))
     })
 }
+/// The wire shape of one read: messages, and the caller's task queues when they were composed.
+fn inbox_read_out(r: &crate::flock::commands_inbox::ReadResult) -> Value {
+    let mut out = json!({"mailbox": r.mailbox, "messages": r.messages.iter().map(owner_message_value).collect::<Vec<_>>()});
+    if let Some(tasks) = &r.tasks {
+        out["tasks"] = tasks.clone();
+    }
+    out
+}
+
 pub fn h_inbox_read(c: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
     let m = mailbox(&args);
     let n = limit(&args, 10)?;
+    let peek = python_bool_arg(&args, "peek", false);
+    let include_tasks = python_bool_arg(&args, "include_tasks", true);
+    // Set by the dispatcher for the desk role only (api.rs). The desk response is clamped after this
+    // handler returns, so the messages must be chosen before anything is marked read (t3539).
+    let desk_clamp = python_bool_arg(&args, "desk_clamp", false);
     c.env.with_inbox_env(&mut |env| {
-        c.flock.mailbox_or_self(env,m.as_deref(),c.self_pane_id(),false,true)?;
-        let r=c.flock.inbox_read_signed(env,m.as_deref(),bound_limit(&n)?,python_bool_arg(&args,"peek",false),python_bool_arg(&args,"include_tasks",true),c.self_pane_id())?;
-        let mut out=json!({"mailbox":r.mailbox,"messages":r.messages.iter().map(owner_message_value).collect::<Vec<_>>()});
-        if let Some(tasks)=r.tasks {out["tasks"]=tasks;}
-        if let Some(marked)=r.marked_read {out["marked_read"]=json!(marked);}
+        c.flock
+            .mailbox_or_self(env, m.as_deref(), c.self_pane_id(), false, true)?;
+        if desk_clamp && !peek {
+            let mut full = c.flock.inbox_read_signed(
+                env,
+                m.as_deref(),
+                bound_limit(&n)?,
+                true,
+                include_tasks,
+                c.self_pane_id(),
+            )?;
+            let mut bare = if full.tasks.is_some() {
+                Some(c.flock.inbox_read_signed(
+                    env,
+                    m.as_deref(),
+                    bound_limit(&n)?,
+                    true,
+                    false,
+                    c.self_pane_id(),
+                )?)
+            } else {
+                None
+            };
+            // The response shows each message it carries as read, with its read time, so it is sized
+            // that way here. The messages it carries are marked read below (t3539 review, PR #826).
+            let now = env.now();
+            for read in std::iter::once(&mut full).chain(bare.as_mut()) {
+                for message in &mut read.messages {
+                    message.summary.state = "read".to_string();
+                    message.read_at = Some(now);
+                }
+            }
+            // Every message in the batch is the most that can be marked, so that count is sized in.
+            let total = full.messages.len();
+            let full_out = inbox_read_out(&full);
+            let bare_out = bare.as_ref().map(inbox_read_out);
+            let (mut out, ids) = crate::roles::desk_inbox_read(&full_out, bare_out.as_ref(), total);
+            let marked = if ids.is_empty() {
+                0
+            } else {
+                c.flock.inbox_mark_read_ids(env, &full.mailbox, &ids)?
+            };
+            out["marked_read"] = json!(marked);
+            for message in full
+                .messages
+                .iter()
+                .filter(|message| ids.contains(&message.summary.message_id))
+            {
+                env.record_metric(
+                    "inbox.read",
+                    message.pane_id.as_deref(),
+                    &full.mailbox,
+                    message.summary.sender.as_deref(),
+                    Some(((now - message.summary.created_at) * 1000.0) as i64),
+                    Some(message.summary.body_bytes),
+                );
+            }
+            return Ok(out);
+        }
+        let r = c.flock.inbox_read_signed(
+            env,
+            m.as_deref(),
+            bound_limit(&n)?,
+            peek,
+            include_tasks,
+            c.self_pane_id(),
+        )?;
+        let mut out = inbox_read_out(&r);
+        if let Some(marked) = r.marked_read {
+            out["marked_read"] = json!(marked);
+        }
         Ok(out)
     })
 }
