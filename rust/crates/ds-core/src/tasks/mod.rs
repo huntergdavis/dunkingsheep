@@ -647,16 +647,17 @@ impl Tasks {
         let now = crate::clock::now_s();
         self.writer
             .call(move |conn| {
-                let exists = |t: &str| -> Result<Option<(String, Option<String>)>, DunkError> {
+                type TaskRow = (String, Option<String>, Option<String>, Option<String>);
+                let exists = |t: &str| -> Result<Option<TaskRow>, DunkError> {
                     conn.query_row(
-                        "SELECT status, depends_on FROM tasks WHERE id = ?",
+                        "SELECT status, depends_on, scope, priority FROM tasks WHERE id = ?",
                         params![t],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
                     )
                     .optional()
                     .map_err(db::map_sqlite)
                 };
-                let (current, raw) = exists(&id)?
+                let (current, raw, scope, priority) = exists(&id)?
                     .ok_or_else(|| DunkError::Refused(format!("no task with id {id:?}")))?;
                 exists(&by)?
                     .ok_or_else(|| DunkError::Refused(format!("no task with id {by:?}")))?;
@@ -674,9 +675,11 @@ impl Tasks {
                     params![reason, json!(deps).to_string(), now, id],
                 )
                 .map_err(db::map_sqlite)?;
+                // The `blocked` event carries scope and priority like every other writer
+                // (Python `_record`): a scoped metrics query keys on scope and drops a NULL one.
                 conn.execute(
-                    "INSERT INTO task_events (task_id, event, at, status_from, status_to, meta) VALUES (?,?,?,?,?,?)",
-                    params![id, "blocked", now, current, "blocked",
+                    "INSERT INTO task_events (task_id, event, at, scope, priority, status_from, status_to, meta) VALUES (?,?,?,?,?,?,?,?)",
+                    params![id, "blocked", now, scope, priority, current, "blocked",
                             json!({"reason": reason}).to_string()],
                 )
                 .map_err(db::map_sqlite)?;
@@ -2500,17 +2503,26 @@ fn auto_unblock(
     now: f64,
     completed: Option<&str>,
 ) -> Result<Vec<String>, DunkError> {
-    let candidates: Vec<(String, Option<String>, Option<String>)> = {
+    type Candidate = (
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    );
+    let candidates: Vec<Candidate> = {
         let mut stmt = conn
-            .prepare("SELECT id, depends_on, block_reason FROM tasks WHERE status = 'blocked' ORDER BY created_at, id")
+            .prepare("SELECT id, depends_on, block_reason, scope, priority FROM tasks WHERE status = 'blocked' ORDER BY created_at, id")
             .map_err(db::map_sqlite)?;
         let rows = stmt
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })
             .map_err(db::map_sqlite)?;
         rows.collect::<Result<_, _>>().map_err(db::map_sqlite)?
     };
     let mut opened = Vec::new();
-    for (id, raw, reason) in candidates {
+    for (id, raw, reason, scope, priority) in candidates {
         let reason_text = reason.as_deref().unwrap_or("").trim();
         if !(reason_text.is_empty() || reason_text.starts_with("blocked-by:")) {
             continue;
@@ -2550,9 +2562,11 @@ fn auto_unblock(
             Some(c) => format!("auto: {c} completed"),
             None => "auto: dependencies satisfied (sweep)".to_string(),
         };
+        // The `unblocked` event carries scope and priority (t1225 addendum): a scoped metrics
+        // query drops a NULL-scope event.
         conn.execute(
-            "INSERT INTO task_events (task_id, event, at, actor, status_from, status_to, meta) VALUES (?,?,?,?,?,?,?)",
-            params![id, "unblocked", now, "system", "blocked", "open",
+            "INSERT INTO task_events (task_id, event, at, actor, scope, priority, status_from, status_to, meta) VALUES (?,?,?,?,?,?,?,?,?)",
+            params![id, "unblocked", now, "system", scope, priority, "blocked", "open",
                     json!({"reason": why}).to_string()],
         )
         .map_err(db::map_sqlite)?;
@@ -4451,3 +4465,6 @@ mod tests {
         assert_eq!(Some("head-later"), review_rows[1].head.as_deref());
     }
 }
+
+#[cfg(test)]
+mod block_by_scope_tests;
