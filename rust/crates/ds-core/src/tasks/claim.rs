@@ -705,4 +705,4 @@ mod claim_tests;
 
 #[cfg(test)]
 #[path = "claim_assigned_offer_tests.rs"]
-mod claim_assigned_offer_tests;
+pub(crate) mod claim_assigned_offer_tests;

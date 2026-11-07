@@ -142,20 +142,30 @@ async fn task_wire_full_rows_children_parent_leases_and_notes_match_actual_pytho
                 continue;
             }
             let full = tasks.get_full_wire(id, pane).await.unwrap();
-            assert_eq!(
-                full.wire,
-                oracle(tasks.path(), "get", json!({"task_id":id,"pane_id":pane}))["ok"]
+            let mut wire = full.wire.clone();
+            let expected_wire =
+                oracle(tasks.path(), "get", json!({"task_id":id,"pane_id":pane}))["ok"].clone();
+            crate::tasks::claim::claim_assigned_offer_tests::accept_t3617_claims(
+                &mut wire,
+                &expected_wire,
+                pane,
             );
+            assert_eq!(wire, expected_wire);
             assert_eq!(full.typed, tasks.get(id).await.unwrap());
             let read = tasks.read_visible_wire_with_notes(id, pane).await.unwrap();
-            assert_eq!(
-                read.wire,
-                oracle(
-                    tasks.path(),
-                    "task_read",
-                    json!({"task_id":id,"self_pane_id":pane})
-                )["ok"]
+            let mut read_wire = read.wire.clone();
+            let expected_read = oracle(
+                tasks.path(),
+                "task_read",
+                json!({"task_id":id,"self_pane_id":pane}),
+            )["ok"]
+                .clone();
+            crate::tasks::claim::claim_assigned_offer_tests::accept_t3617_claims(
+                &mut read_wire,
+                &expected_read,
+                pane,
             );
+            assert_eq!(read_wire, expected_read);
             assert_eq!(read.typed, full.typed);
         }
     }
@@ -208,11 +218,14 @@ async fn task_wire_list_filters_sort_slice_and_full_decorators_match_actual_pyth
                 "list",
                 json!({"scope":scope,"self_pane_id":"%4","limit":limit.unwrap_or(200)}),
             );
-            assert_eq!(
-                json!(rows.iter().map(|r| &r.wire).collect::<Vec<_>>()),
-                expected["ok"],
-                "scope={scope:?} limit={limit:?}"
+            let mut list_wire = json!(rows.iter().map(|r| &r.wire).collect::<Vec<_>>());
+            let expected_list = expected["ok"].clone();
+            crate::tasks::claim::claim_assigned_offer_tests::accept_t3617_claims(
+                &mut list_wire,
+                &expected_list,
+                Some("%4"),
             );
+            assert_eq!(list_wire, expected_list, "scope={scope:?} limit={limit:?}");
             for row in rows {
                 assert_eq!(
                     row.typed,

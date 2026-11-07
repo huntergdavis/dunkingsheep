@@ -36,6 +36,46 @@ async fn assigned_offer(store: &Tasks, title: &str) -> String {
     task.id
 }
 
+/// The Python-oracle parity tests (t3617) accept exactly one divergence. A task whose ready offer
+/// waits on its assignee is claimable by that assignee, so the Rust view says `claimable` and
+/// `eligible` are true where the Python oracle says false. Where the Rust row differs from the oracle
+/// in only that way, take the oracle's `claimable` and `eligible` and keep comparing every other field.
+/// Any other difference still fails the caller's assertion.
+pub(crate) fn accept_t3617_claims(actual: &mut Value, expected: &Value, viewer: Option<&str>) {
+    let Some(viewer) = viewer else { return };
+    match (actual, expected) {
+        (Value::Array(rows), Value::Array(expected_rows)) if rows.len() == expected_rows.len() => {
+            for (row, want) in rows.iter_mut().zip(expected_rows) {
+                accept_t3617_claims(row, want, Some(viewer));
+            }
+        }
+        (Value::Object(row), Value::Object(want)) => {
+            let assigned = row
+                .get("assignees")
+                .and_then(Value::as_array)
+                .is_some_and(|names| names.iter().any(|name| name.as_str() == Some(viewer)));
+            let waiting = row.get("allocation_waiting") == Some(&Value::Bool(true));
+            let divergent = waiting
+                && assigned
+                && row.get("claimable") == Some(&Value::Bool(true))
+                && want.get("claimable") == Some(&Value::Bool(false));
+            if divergent {
+                for key in ["claimable", "eligible"] {
+                    if let Some(value) = want.get(key) {
+                        row.insert(key.to_owned(), value.clone());
+                    }
+                }
+            }
+            for (key, value) in row.iter_mut() {
+                if let Some(expected_value) = want.get(key) {
+                    accept_t3617_claims(value, expected_value, Some(viewer));
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 fn offer_state(status: &Value, task_id: &str) -> String {
     status["offers"]
         .as_array()
