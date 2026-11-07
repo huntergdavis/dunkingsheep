@@ -14,7 +14,7 @@ mod outbox_api;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use regex::Regex;
@@ -130,6 +130,8 @@ pub struct Flock {
     /// pane_id -> the latest delivery intent used by the stuck observer.
     #[allow(dead_code)] // The stuck-recovery integration caller is owned by a later leaf.
     pub(crate) stuck_candidates: Mutex<OrderedMap<sends::StuckCandidate>>,
+    /// The first-sighting evidence lines, oldest first and bounded (see `record_clock_start`).
+    pub(crate) stuck_clock_log: Mutex<VecDeque<String>>,
     /// Bounded recently decided messages, used by the message-list view.
     #[allow(dead_code)] // The list consumer is owned by a dependent T33 integration slice.
     pub(crate) message_history: Mutex<VecDeque<sends::Message>>,
@@ -140,6 +142,9 @@ pub struct Flock {
     pub(crate) stuck_tracker: Mutex<crate::stuck::Tracker>,
     /// Recovery policy persisted alongside the attempt ledger.
     pub(crate) stuck_config: Mutex<crate::stuck::Config>,
+    /// Set once the policy was declared (Python `_stuck_config_declared`): a declared policy is
+    /// kept by `restore_snapshot` instead of the saved one.
+    pub(crate) stuck_config_declared: AtomicBool,
     /// Volatile per-pane observation throttling; the spent ledger is persisted separately.
     pub(crate) stuck_last_check: Mutex<BTreeMap<String, f64>>,
     /// pane_id -> the bounded recent text this flock typed into its composer.
@@ -200,10 +205,12 @@ impl Flock {
             dunks: dunks::DunkList::new(),
             outbox: Mutex::new(sends::Outbox::default()),
             stuck_candidates: Mutex::new(OrderedMap::new()),
+            stuck_clock_log: Mutex::new(VecDeque::new()),
             message_history: Mutex::new(VecDeque::new()),
             decided: Mutex::new(sends::DecidedMessages::default()),
             stuck_tracker: Mutex::new(crate::stuck::Tracker::default()),
             stuck_config: Mutex::new(crate::stuck::Config::default()),
+            stuck_config_declared: AtomicBool::new(false),
             stuck_last_check: Mutex::new(BTreeMap::new()),
             sent_text_by_pane: Mutex::new(BTreeMap::new()),
             next_message_id: AtomicU64::new(1),
@@ -422,6 +429,17 @@ impl Flock {
         *sends::outbox_lock(&self.outbox) = restored;
     }
 
+    /// Declare the recovery policy the way Python's explicit `stuck_config` argument does: it is
+    /// set now, and `restore_snapshot` keeps it instead of the saved one.
+    #[allow(dead_code)] // The declared-policy producer is a separate, unported slice.
+    pub(crate) fn declare_stuck_config(&self, config: crate::stuck::Config) {
+        *self
+            .stuck_config
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = config;
+        self.stuck_config_declared.store(true, Ordering::Relaxed);
+    }
+
     /// Restore every field owned by the snapshot leaf after the file is decoded.
     #[allow(dead_code)] // Startup restore wiring is in the dependent runtime task.
     pub(crate) fn restore_snapshot(&self, payload: &Value) {
@@ -452,7 +470,13 @@ impl Flock {
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = tracker;
             }
         }
-        if let Some(config) = root.get("stuck_config").and_then(Value::as_object) {
+        // A declared policy wins over the saved one (Python `_stuck_config_declared`): only an
+        // undeclared flock adopts the state file's policy.
+        if let Some(config) = root
+            .get("stuck_config")
+            .and_then(Value::as_object)
+            .filter(|_| !self.stuck_config_declared.load(Ordering::Relaxed))
+        {
             let raw = crate::stuck::RawConfig {
                 enabled: config.get("enabled").and_then(Value::as_bool),
                 threshold_s: config.get("threshold_s").and_then(Value::as_f64),

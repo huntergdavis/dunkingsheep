@@ -229,6 +229,25 @@ pub struct Record {
     pub terminal: Option<String>,
 }
 
+/// The first-sighting evidence line, built from the stored record and never from composer text: the
+/// clock start is `first_seen` as stored, and `observed` is the tick that logged it (Python's
+/// `_unwedge` line, `stuck recovery clock starts`). The fingerprint is a hash, not the text.
+pub fn first_sighting_line(
+    pane_id: &str,
+    record: &Record,
+    observed: f64,
+    threshold_s: f64,
+) -> String {
+    format!(
+        "{pane_id}: stuck recovery clock starts: message={} generation={} fingerprint={} \
+         first_seen={:.3} observed={observed:.3} threshold={threshold_s:.0}s",
+        record.message_id.as_deref().unwrap_or("None"),
+        record.generation.as_deref().unwrap_or("None"),
+        record.fingerprint.as_deref().unwrap_or("None"),
+        record.first_seen.unwrap_or(0.0),
+    )
+}
+
 /// Per-pane tracker with the durable budget ledger (`spent`).
 ///
 /// `spent` is keyed by message identity: a reset or a consumption FORGETS the
