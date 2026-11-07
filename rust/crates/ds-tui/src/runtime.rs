@@ -163,9 +163,10 @@ impl TextModalProvider for TerminalModals {
     fn text_modal(&mut self, initial_text: &str) -> Option<String> {
         let mut modal = TextModal::new(initial_text);
         loop {
+            // PageUp and PageDown step by the editor's visible text rows, as in Python.
             let mut viewport_height = 1;
             if let Err(error) = self.draw_modal(|frame, area| {
-                viewport_height = usize::from(area.height);
+                viewport_height = TextModal::text_rows(area.height);
                 modal.render(frame, area);
             }) {
                 self.io_error = Some(error);

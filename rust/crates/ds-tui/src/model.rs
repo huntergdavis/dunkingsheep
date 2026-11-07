@@ -10,7 +10,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::Rect;
 use ratatui::prelude::{Frame, Line, Text};
 use ratatui::style::{Modifier, Style};
-use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use serde_json::Value;
 
 use crate::text_editor::TextEditorBuffer;
@@ -225,31 +225,55 @@ impl LineModal {
         );
 
         frame.render_widget(Clear, modal);
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .padding(Padding::horizontal(1));
-        let inner = block.inner(modal);
-        frame.render_widget(block, modal);
-        if inner.width == 0 || inner.height == 0 {
-            return;
-        }
+        frame.render_widget(Block::default().borders(Borders::ALL), modal);
 
-        let input_width = usize::from(inner.width);
+        // Python: each line is safe_addstr(win, row, 2, text, box_w - 4); the label is bold.
+        let text_width = modal.width.saturating_sub(4);
+        let input_width = usize::from(text_width);
+        draw_modal_cells(
+            frame,
+            modal,
+            1,
+            MODAL_COLUMN,
+            text_width,
+            &self.label,
+            Style::default().add_modifier(Modifier::BOLD),
+        );
+        draw_modal_cells(
+            frame,
+            modal,
+            2,
+            MODAL_COLUMN,
+            text_width,
+            &format!("Current: {}", self.default),
+            Style::default(),
+        );
+        draw_modal_cells(
+            frame,
+            modal,
+            3,
+            MODAL_COLUMN,
+            text_width,
+            "Enter keeps current, Esc cancels",
+            Style::default(),
+        );
         let visible = self.visible_input(input_width);
-        let lines = Text::from(vec![
-            Line::from(self.label.as_str()),
-            Line::from(format!("Current: {}", self.default)),
-            Line::from("Enter keeps current, Esc cancels"),
-            Line::from(""),
-            Line::from(visible),
-        ]);
-        frame.render_widget(Paragraph::new(lines), inner);
+        draw_modal_cells(
+            frame,
+            modal,
+            5,
+            MODAL_COLUMN,
+            text_width,
+            &visible,
+            Style::default(),
+        );
 
-        if inner.height >= 5 && inner.width > 0 {
-            let cursor_offset =
-                u16::try_from(self.cursor.min(input_width.saturating_sub(1))).unwrap_or(u16::MAX);
-            let cursor_x = inner.x + cursor_offset;
-            frame.set_cursor_position((cursor_x, inner.y + 4));
+        // Python: win.move(5, 2 + min(cursor, input_w - 1)).
+        if modal.height >= 6 && input_width > 0 {
+            let offset = self.cursor.min(input_width - 1);
+            let offset = u16::try_from(offset).unwrap_or(u16::MAX);
+            let cursor_x = modal.x.saturating_add(MODAL_COLUMN).saturating_add(offset);
+            frame.set_cursor_position((cursor_x, modal.y.saturating_add(5)));
         }
     }
 
@@ -380,6 +404,13 @@ impl TextModal {
         }
     }
 
+    /// Logical text rows the Python editor shows on a screen of `screen_height`:
+    /// `max(1, h - 5)`, between the title and location lines and the bottom border.
+    /// PageUp and PageDown step by this count.
+    pub fn text_rows(screen_height: u16) -> usize {
+        usize::from(screen_height.saturating_sub(5)).max(1)
+    }
+
     /// Render the editor in a bounded full-screen frame. Logical text lines never
     /// wrap or truncate; scrolling only changes which cells are visible.
     pub fn render(&mut self, frame: &mut Frame<'_>, area: Rect) {
@@ -388,17 +419,10 @@ impl TextModal {
         }
         frame.render_widget(Clear, area);
         frame.render_widget(Block::default().borders(Borders::ALL), area);
-        let inner = Rect::new(
-            area.x.saturating_add(1),
-            area.y.saturating_add(1),
-            area.width.saturating_sub(2),
-            area.height.saturating_sub(2),
-        );
-        if inner.width == 0 || inner.height == 0 {
-            return;
-        }
-        let text_height = usize::from(inner.height.saturating_sub(2)).max(1);
-        let text_width = usize::from(inner.width.saturating_sub(2)).max(1);
+        let text_height = Self::text_rows(area.height);
+        // Python: the edit window is `w - 4` columns wide at column 2, starting at row 3.
+        let cell_width = area.width.saturating_sub(4);
+        let text_width = usize::from(cell_width).max(1);
         let visible_width = text_width.saturating_sub(1).max(1);
         if self.editor.row < self.top_row {
             self.top_row = self.editor.row;
@@ -417,7 +441,26 @@ impl TextModal {
             self.editor.lines.len(),
             self.editor.col + 1
         );
-        let mut lines = vec![Line::from("Edit text to send"), Line::from(location)];
+        let bold = Style::default().add_modifier(Modifier::BOLD);
+        draw_modal_cells(
+            frame,
+            area,
+            1,
+            MODAL_COLUMN,
+            cell_width,
+            "Edit text to send",
+            bold,
+        );
+        draw_modal_cells(
+            frame,
+            area,
+            2,
+            MODAL_COLUMN,
+            cell_width,
+            &location,
+            Style::default(),
+        );
+        let mut lines = Vec::with_capacity(text_height);
         for row in self.top_row..self.top_row.saturating_add(text_height) {
             let line = self.editor.lines.get(row).map_or("", String::as_str);
             let visible = line
@@ -428,24 +471,29 @@ impl TextModal {
                 .collect::<String>();
             lines.push(Line::from(visible));
         }
-        let paragraph_area = Rect::new(
-            inner.x.saturating_add(1),
-            inner.y,
-            inner.width.saturating_sub(2),
-            inner.height,
+        let text_area = Rect::new(
+            area.x.saturating_add(MODAL_COLUMN),
+            area.y.saturating_add(3),
+            cell_width,
+            usize_to_u16(text_height).min(area.height.saturating_sub(3)),
         );
-        frame.render_widget(Paragraph::new(Text::from(lines)), paragraph_area);
-        let cursor_x = inner.x.saturating_add(usize_to_u16(
-            1 + self.editor.col.saturating_sub(self.left_col),
-        ));
-        let cursor_y = inner
+        frame.render_widget(Paragraph::new(Text::from(lines)), text_area);
+        // Python: edit.move(row - top, min(col - left, visible_width - 1)) in the window
+        // at (3, 2).
+        let offset = self
+            .editor
+            .col
+            .saturating_sub(self.left_col)
+            .min(visible_width - 1);
+        let cursor_x = text_area
+            .x
+            .saturating_add(usize_to_u16(offset))
+            .min(area.x.saturating_add(area.width.saturating_sub(1)));
+        let cursor_y = text_area
             .y
-            .saturating_add(2 + usize_to_u16(self.editor.row.saturating_sub(self.top_row)));
+            .saturating_add(usize_to_u16(self.editor.row.saturating_sub(self.top_row)));
         if cursor_y < area.y.saturating_add(area.height) {
-            frame.set_cursor_position((
-                cursor_x.min(area.x.saturating_add(area.width.saturating_sub(1))),
-                cursor_y,
-            ));
+            frame.set_cursor_position((cursor_x, cursor_y));
         }
     }
 }
@@ -2469,7 +2517,7 @@ mod tests {
                 format!("  ┌{}┐", "─".repeat(30)),
                 bordered_line("Name", 28),
                 bordered_line("Current: current", 28),
-                bordered_line("Enter keeps current, Esc can", 28),
+                bordered_line("Enter keeps current, Esc ...", 28),
                 bordered_line("", 28),
                 bordered_line("", 28),
                 format!("  └{}┘", "─".repeat(30)),
@@ -2516,9 +2564,9 @@ mod tests {
             modal_snapshot(&modal, 12, 5),
             vec![
                 format!("┌{}┐", "─".repeat(10)),
-                "│ Very Lon │".into(),
-                "│ Current: │".into(),
-                "│ Enter ke │".into(),
+                "│ Very ... │".into(),
+                "│ Curre... │".into(),
+                "│ Enter... │".into(),
                 format!("└{}┘", "─".repeat(10)),
             ]
         );

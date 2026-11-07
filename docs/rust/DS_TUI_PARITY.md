@@ -33,9 +33,9 @@ but a known render or key difference is open (the PR that fixes it is named);
 
 | Python | Rust | Status |
 |---|---|---|
-| `line_modal` | `model.rs` `LineModal`, `runtime.rs` `TerminalModals::line_modal` | key map ported; label bold and `...` clipping in PR 3 |
+| `line_modal` | `model.rs` `LineModal`, `runtime.rs` `TerminalModals::line_modal` | ported; bold label, `...` clipping and cursor position fixed in PR 3 (`modal_text_line_oracle_tests.rs`) |
 | `target_modal` | `model.rs` `TargetPicker` | ported; columns, bold headers, reverse-video selection and `...` clipping fixed in PR 2 (`target_picker_oracle_tests.rs`) |
-| `text_modal` | `model.rs` `TextModal` | key map ported; viewport height (`h - 5` rows) and bold title in PR 3 |
+| `text_modal` | `model.rs` `TextModal`, `runtime.rs` `TerminalModals::text_modal` | ported; `h - 5` text rows, PageUp/PageDown step by those rows, bold title and `...` location line fixed in PR 3 (`modal_text_line_oracle_tests.rs`) |
 | `text_editor.py` `TextEditorBuffer` (all methods) | `text_editor.rs` | ported, tested |
 
 ## Not ported
