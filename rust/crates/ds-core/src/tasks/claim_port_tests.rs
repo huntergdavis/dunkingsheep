@@ -10,6 +10,7 @@
 //!   - test_cancel_names_the_dependents_it_strands (lines 127 and 185)
 //!   - test_a_done_dependency_is_not_dead (lines 146 and 203)
 //!   - test_repointing_the_edge_frees_the_row_without_cancelling_it (line 190)
+//!
 //! Live Python originals: test_a_cancelled_dependency_is_satisfied, test_a_done_dependency_is_satisfied,
 //! test_an_open_dependency_still_blocks (the class at line 1444), and the four lease tests
 //! test_completing_releases_the_lease, test_cancelling_releases_the_lease, test_blocking_releases_the_lease
