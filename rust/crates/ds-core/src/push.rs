@@ -149,3 +149,7 @@ pub fn push_targets(
 #[cfg(test)]
 #[path = "push_tests.rs"]
 mod push_tests;
+
+#[cfg(test)]
+#[path = "push_parity_tests.rs"]
+mod push_parity_tests;

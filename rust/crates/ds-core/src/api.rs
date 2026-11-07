@@ -3413,4 +3413,7 @@ fn py_repr(text: &str) -> String {
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod landed_parity_tests;
+
 mod task_statistics;
