@@ -74,22 +74,35 @@ fn bound_pane(pid: i64, cwd: &std::path::Path, screen: &str) -> Pane {
     env
 }
 
+/// The oracle's stuck config: threshold 120 s, observation 20 s, one attempt (scheduled_candidate_fixture).
+fn declare_oracle_stuck_config(flock: &Flock) {
+    let mut config = flock.stuck_config.lock().unwrap();
+    config.threshold_s = 120.0;
+    config.observation_interval_s = 20.0;
+    config.max_attempts = 1;
+}
+
 /// A failed (or sent) scheduled reminder for `%1`, created at the real clock, as the observer
 /// currency check reads it (ticks are offsets from `created`). The dunk row carries the same text,
 /// so the schedule is current.
 fn scheduled_fixture(dir: &std::path::Path, status: &str, pid: i64) -> (Flock, Pane, f64) {
+    scheduled_fixture_after(dir, status, pid, None)
+}
+
+/// [`scheduled_fixture`] with `echo` remembered as a `sent` message first. Python's `_remember(previous)`
+/// runs before `failed_schedule()` in the oracle, so the echo is retained provenance for the observer.
+fn scheduled_fixture_after(
+    dir: &std::path::Path,
+    status: &str,
+    pid: i64,
+    echo: Option<&str>,
+) -> (Flock, Pane, f64) {
     // Persistent, as scheduled_candidate_fixture is: the observer reserves the key durably before it presses, and
     // a non-persistent flock refuses (sends.rs unwedge). The caller owns `dir`, so the state file outlives this call.
     let flock = persistent_recovery_flock(dir, &dir.join("state.json"));
-    // The oracle's stuck config (threshold 120 s, observation 20 s, one attempt), as scheduled_candidate_fixture
-    // sets it. Without it, and without the sent text and the dunk's target fields, the observer cannot own the
-    // composer and presses nothing, even when the composer is unmutated (t3501 scheduled 41-47 gap).
-    {
-        let mut config = flock.stuck_config.lock().unwrap();
-        config.threshold_s = 120.0;
-        config.observation_interval_s = 20.0;
-        config.max_attempts = 1;
-    }
+    // Without the oracle's stuck config, and without the sent text and the dunk's target fields, the observer
+    // cannot own the composer and presses nothing, even when the composer is unmutated (t3501 scheduled 41-47 gap).
+    declare_oracle_stuck_config(&flock);
     flock.dunks.load(
         serde_json::json!({"dunkers":[{
             "id":"d7","target_pane_id":"%1","target_agent":"codex","target_cwd":"/work",
@@ -117,6 +130,19 @@ fn scheduled_fixture(dir: &std::path::Path, status: &str, pid: i64) -> (Flock, P
     message.schedule_template = Some(TEXT.into());
     message.attempt_generation = pane_generation(&env, "%1");
     message.typed_at = Some(created);
+    // Python's failed schedule submits the reminder, so the recorded message carries press_enter.
+    message.press_enter = true;
+    if let Some(echo) = echo {
+        // The oracle's previous message: a `sent` row of this pane, remembered before the schedule.
+        let mut previous = Message::new("m6", "%1", "Codex", echo, "send_text");
+        previous.created_at = created;
+        previous.press_enter = true;
+        previous.status = "sent".into();
+        previous.attempt_generation = pane_generation(&env, "%1");
+        flock.remember(&previous);
+    }
+    // Python `failed_schedule` types the reminder before it is recorded (`remember_typed`).
+    flock.remember_typed("%1", TEXT);
     flock.note_stuck_candidate(&message);
     env.screens.remove("%1");
     (flock, env, created)
@@ -323,53 +349,55 @@ fn wiring_25_unbound_failure_has_one_named_diagnostic_and_never_recovers() {
 /// pre-restart half: an echo of an earlier message in this pane's sent provenance, above a bright
 /// schedule, presses exactly once at two minutes and not before.
 #[test]
-#[ignore = "fixture not reproduced: the Rust observer needs the message-history provenance that Python's _remember writes; this scenario presses nothing even before a restart"]
 fn scheduled_40_styled_echo_with_provenance_presses_once_at_two_minutes() {
     let dir = tempfile::tempdir().unwrap();
-    let (flock, mut env, created) =
-        scheduled_fixture(dir.path(), "failed", i64::from(std::process::id()));
     let echo = "[inbox] new message for Codex. Read it with: dunkingsheep inbox read";
-    flock
-        .sent_text_by_pane
-        .lock()
-        .unwrap()
-        .insert("%1".into(), vec![echo.into()]);
+    let (flock, mut env, created) = scheduled_fixture_after(
+        dir.path(),
+        "failed",
+        i64::from(std::process::id()),
+        Some(echo),
+    );
     env.screens.insert(
         "%1".into(),
         format!("\x1b[1;2m›\x1b[0m {echo}\n\n\x1b[1m›\x1b[0m {TEXT}\n\n\n{FOOTER}"),
     );
-    observe(&flock, &mut env, created + 1.0);
+    // The oracle's clock: the first tick (1000 s) starts the threshold, and the press is due 120 s later.
+    observe(&flock, &mut env, created + 1000.0);
     assert!(env.keys.is_empty(), "no press before two minutes");
-    observe(&flock, &mut env, created + 120.0);
+    observe(&flock, &mut env, created + 1120.0);
     assert_eq!(1, env.keys.len(), "one recovery at two minutes");
 }
 
 /// Oracle test_styled_schedule_survives_restart_with_provenance_for_echo (scheduled row 40), the
-/// restart half. Unverified, ignored: the pre-restart control in this fixture presses nothing, so
-/// this test cannot show a divergence. The snapshot carries no sent_text_by_pane
-/// (flock/mod.rs:249-330). No production code is changed here.
+/// restart half: the echo is remembered before the schedule, the flock is snapshotted and restored,
+/// and the restored observer presses once at 1120 s and not before. No production code is changed.
 #[test]
-#[ignore = "unverified: the pre-restart control in this fixture presses nothing; not a divergence until the fixture is reproduced"]
 fn scheduled_40_restart_recovers_once_like_python() {
     let dir = tempfile::tempdir().unwrap();
-    let (flock, mut env, created) =
-        scheduled_fixture(dir.path(), "failed", i64::from(std::process::id()));
     let echo = "[inbox] new message for Codex. Read it with: dunkingsheep inbox read";
+    let (flock, mut env, created) = scheduled_fixture_after(
+        dir.path(),
+        "failed",
+        i64::from(std::process::id()),
+        Some(echo),
+    );
     env.screens.insert(
         "%1".into(),
         format!("\x1b[1;2m›\x1b[0m {echo}\n\n\x1b[1m›\x1b[0m {TEXT}\n\n\n{FOOTER}"),
     );
-    let payload = flock.snapshot();
+    // Save and restore through the state file, as the oracle's Flock(persist=True, restore=True) does. The
+    // restored flock must be persistent: a non-persistent one refuses every press (the key is not durable).
+    let state = dir.path().join("state.json");
+    flock.save().unwrap();
     drop(flock);
-    let restarted = Flock::new(
-        std::path::PathBuf::from("/nonexistent/launches.json"),
-        std::path::PathBuf::from("/nonexistent/lanes.json"),
-        false,
-    );
-    restarted.restore_snapshot(&payload);
-    observe(&restarted, &mut env, created + 1.0);
+    let restarted = persistent_recovery_flock(dir.path(), &state);
+    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap();
+    restarted.restore_snapshot(&saved);
+    declare_oracle_stuck_config(&restarted);
+    observe(&restarted, &mut env, created + 1000.0);
     assert!(env.keys.is_empty(), "no press before two minutes");
-    observe(&restarted, &mut env, created + 120.0);
+    observe(&restarted, &mut env, created + 1120.0);
     assert_eq!(1, env.keys.len(), "one recovery after the restart");
 }
 
