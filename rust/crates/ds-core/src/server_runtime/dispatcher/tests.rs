@@ -678,3 +678,138 @@ fn pane_lookup_uses_last_good_role_record_after_empty_backend_answer() {
     let held = dispatcher.pane_info("w1:p1").unwrap().unwrap();
     assert_eq!(held.pane_pid, Some(1101));
 }
+
+/// A `tmux` that cannot reach a server: tmux 3.x's wording for a named socket that does not
+/// exist. Both sides of the t3464 parity test run their real `TmuxBackend` over this script.
+fn unreachable_tmux(dir: &std::path::Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let fake = dir.join("tmux");
+    std::fs::write(
+        &fake,
+        "#!/bin/sh\necho 'error connecting to /tmp/tmux-1000/no-such-server (No such file or directory)' >&2\nexit 1\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::create_dir_all(dir.join("no-guard")).unwrap();
+    fake
+}
+
+/// `dunk_views.roster` and `Flock.resolve_lanes` from the actual Python over the same fake tmux.
+fn python_roster_over(fake_tmux: &std::path::Path, scratch: &std::path::Path) -> serde_json::Value {
+    use std::process::{Command, Stdio};
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    // The Python modules derive their store paths from DUNKINGSHEEP_DIR at import time.
+    std::fs::create_dir_all(scratch.join("py-config")).unwrap();
+    let output = Command::new("python3")
+        .arg("-I")
+        .arg("-c")
+        .arg(include_str!("roster_unreachable_oracle.py"))
+        .arg(fake_tmux)
+        .current_dir(root)
+        .env("DUNKINGSHEEP_DIR", scratch.join("py-config"))
+        .env("DUNKINGSHEEP_SOCKET", scratch.join("py.sock"))
+        .env("HOME", scratch)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("run the Python oracle");
+    assert!(
+        output.status.success(),
+        "oracle failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("oracle JSON")
+}
+
+/// `%Y-%m-%dT%H:%M:%SZ`, the Python `dunk_views._iso` stamp both sides print for `as_of`.
+fn is_view_stamp(value: &serde_json::Value) -> bool {
+    let Some(text) = value.as_str() else {
+        return false;
+    };
+    let bytes = text.as_bytes();
+    bytes.len() == 20
+        && bytes[19] == b'Z'
+        && bytes[..19]
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| match index {
+                4 | 7 => *byte == b'-',
+                10 => *byte == b'T',
+                13 | 16 => *byte == b':',
+                _ => byte.is_ascii_digit(),
+            })
+}
+
+/// t3464: with tmux unreachable the Python backend lists no panes, `resolve_lanes` is `[]`
+/// and the roster is `{as_of, lanes: []}`; the Rust production dispatcher over its real
+/// `TmuxBackend` must answer the same, not refuse with "cannot list panes". `as_of` is each
+/// side's call time, so it is checked for shape; everything else is compared verbatim.
+#[test]
+fn roster_over_an_unreachable_tmux_answers_empty_lanes_like_python() {
+    let scratch = tempfile::tempdir().unwrap();
+    let fake = unreachable_tmux(scratch.path());
+    let expected = python_roster_over(&fake, scratch.path());
+    assert_eq!(json!([]), expected["list_panes"], "{expected}");
+    assert_eq!(json!([]), expected["lanes"], "{expected}");
+    assert_eq!(json!([]), expected["roster"]["lanes"], "{expected}");
+    assert!(is_view_stamp(&expected["roster"]["as_of"]), "{expected}");
+
+    let registry = scratch.path().join("rust-tmux-panes.json");
+    let factory: LoopTerminalFactory = Arc::new(move || {
+        Box::new(crate::terminal::tmux::TmuxBackend::with_registry(
+            fake.clone(),
+            registry.clone(),
+        ))
+    });
+    let (_dir, services) = make_services("roster-unreachable", factory, None);
+    let mut handlers = api::Dispatcher::new();
+    handlers.register_turn_end_poll_roster();
+    handlers.register_project_summary();
+    let dispatcher = services.dispatcher(handlers);
+
+    let roster = dispatcher
+        .dispatch("roster", &json!({}), &request("w2:p2"))
+        .expect("the roster answers instead of refusing");
+    let mut rust_view = roster.clone();
+    let mut python_view = expected["roster"].clone();
+    assert!(is_view_stamp(&rust_view["as_of"]), "{roster}");
+    rust_view["as_of"] = serde_json::Value::Null;
+    python_view["as_of"] = serde_json::Value::Null;
+    assert_eq!(
+        python_view, rust_view,
+        "roster differs from the Python oracle"
+    );
+
+    // The sibling read view that also resolves lanes answers with no agents, not an error.
+    let summary = dispatcher
+        .dispatch("project_summary", &json!({}), &request("w2:p2"))
+        .expect("the project summary answers instead of refusing");
+    assert_eq!(json!([]), summary["now"]["agents"], "{summary}");
+}
+
+/// The backend-level contract behind t3464: the fallible listing (the seam the dispatcher's
+/// lane resolution uses) treats tmux's "error connecting to" as an empty world, while the
+/// availability probe keeps the Python's own narrow wording and still says unavailable.
+#[test]
+fn unreachable_tmux_lists_no_panes_but_is_not_available() {
+    use crate::terminal::Terminal;
+    let scratch = tempfile::tempdir().unwrap();
+    let fake = unreachable_tmux(scratch.path());
+    let backend = crate::terminal::tmux::TmuxBackend::with_registry(
+        fake,
+        scratch.path().join("rust-tmux-panes.json"),
+    );
+    assert_eq!(
+        Vec::<String>::new(),
+        backend
+            .try_list_panes()
+            .unwrap()
+            .into_iter()
+            .map(|p| p.pane_id)
+            .collect::<Vec<_>>()
+    );
+    assert!(backend.try_list_panes_grouped().unwrap().is_empty());
+    assert!(backend.list_panes().is_empty());
+    assert!(!backend.is_available());
+}
