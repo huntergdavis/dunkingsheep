@@ -1174,23 +1174,6 @@
    ],
    "type": "object"
   },
-  "owner_page": {
-   "additionalProperties": false,
-   "properties": {
-    "body": {
-     "description": "The page text (the watchdog's PAGE OWNER digest).",
-     "type": "string"
-    },
-    "external_id": {
-     "description": "The producer's dedupe key; a repeat returns the row already recorded.",
-     "type": "string"
-    }
-   },
-   "required": [
-    "body"
-   ],
-   "type": "object"
-  },
   "owner_poll": {
    "additionalProperties": false,
    "properties": {
@@ -2272,40 +2255,6 @@
    ],
    "type": "object"
   },
-  "task_owner_answer": {
-   "additionalProperties": false,
-   "properties": {
-    "id": {
-     "type": "string"
-    },
-    "option_number": {
-     "type": "integer"
-    },
-    "reply": {
-     "type": "string"
-    },
-    "version": {
-     "type": "string"
-    }
-   },
-   "required": [
-    "id",
-    "version"
-   ],
-   "type": "object"
-  },
-  "task_owner_question": {
-   "additionalProperties": false,
-   "properties": {
-    "id": {
-     "type": "string"
-    }
-   },
-   "required": [
-    "id"
-   ],
-   "type": "object"
-  },
   "task_read": {
    "additionalProperties": false,
    "properties": {
@@ -3141,14 +3090,6 @@
     "transport"
    ]
   },
-  "owner_page": {
-   "dispatch_required": [
-    "body"
-   ],
-   "mcp_required": [
-    "body"
-   ]
-  },
   "owner_poll": {
    "dispatch_required": [],
    "mcp_required": []
@@ -3478,24 +3419,6 @@
    "mcp_required": []
   },
   "task_note": {
-   "dispatch_required": [
-    "id"
-   ],
-   "mcp_required": [
-    "id"
-   ]
-  },
-  "task_owner_answer": {
-   "dispatch_required": [
-    "id",
-    "version"
-   ],
-   "mcp_required": [
-    "id",
-    "version"
-   ]
-  },
-  "task_owner_question": {
    "dispatch_required": [
     "id"
    ],

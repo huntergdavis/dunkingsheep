@@ -18,6 +18,10 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 REGISTRY = ROOT / "rust/crates/ds-core/src/registry.rs"
 FIXTURE = ROOT / "rust/crates/ds-core/tests/registry_expected.json"
+# Rust-only verbs that are emitted into registry.rs but kept OUT of the Python-registry
+# fixture (see registry_parity.rs, rust_only). owner_page is t665; the two task_owner verbs
+# were hand-added before this generator knew them.
+RUST_ONLY_OUTSIDE_FIXTURE = frozenset({"owner_page", "task_owner_question", "task_owner_answer"})
 
 
 def _close(text, i, opening, closing):
@@ -297,11 +301,14 @@ def build():
         lines.append(f"        owner_only: {'true' if is_owner_only else 'false'},")
         lines.append("        roles: &[%s]," % ", ".join(json.dumps(r) for r in allowed))
         lines.append("    },")
-        expected[c.name] = c.input_schema()
-        required_metadata[c.name] = {
-            "dispatch_required": list(c.required),
-            "mcp_required": list(c.mcp_required),
-        }
+        # The fixture is the PYTHON registry: a Rust-only verb is not in it, so the
+        # parity test (rust/crates/ds-core/tests/registry_parity.rs) counts it as an extra.
+        if c.name not in RUST_ONLY_OUTSIDE_FIXTURE:
+            expected[c.name] = c.input_schema()
+            required_metadata[c.name] = {
+                "dispatch_required": list(c.required),
+                "mcp_required": list(c.mcp_required),
+            }
     lines += [
         "];",
         "",
