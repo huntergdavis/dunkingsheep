@@ -1183,24 +1183,6 @@ pub static ROOT: Cmd = Cmd {
                     ],
                 },
                 Cmd {
-                    name: "batch", aliases: &[],
-                    help: Some("claim an ordered list of tasks, all or nothing"),
-                    raw: false,
-                    raw_text: false,
-                    about: None,
-                    epilog: None,
-                    args: &[
-                        Arg { id: "json", dest: "json", tri: false, default_int: false, flags: &["--json"], positional: false, kind: Kind::StoreTrue, ty: Ty::Str, nargs: Nargs::Zero, choices: &[], default: None, required: false, help: None, hidden: true, metavar: None, version: None },
-                        Arg { id: "ids", dest: "ids", tri: false, default_int: false, flags: &[], positional: true, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::Plus, choices: &[], default: None, required: true, help: Some("task ids, in execution order"), hidden: false, metavar: None, version: None },
-                        Arg { id: "lease", dest: "lease", tri: false, default_int: false, flags: &["--lease"], positional: false, kind: Kind::Store, ty: Ty::Float, nargs: Nargs::One, choices: &[], default: None, required: false, help: None, hidden: false, metavar: Some("SECONDS"), version: None },
-                        Arg { id: "allow_busy", dest: "allow_busy", tri: false, default_int: false, flags: &["--allow-busy"], positional: false, kind: Kind::StoreTrue, ty: Ty::Str, nargs: Nargs::Zero, choices: &[], default: None, required: false, help: Some("take a batch while already holding in-progress work"), hidden: false, metavar: None, version: None },
-                    ],
-                    groups: &[],
-                    sub_dest: None, sub_metavar: None, sub_required: false,
-                    subs: &[
-                    ],
-                },
-                Cmd {
                     name: "heartbeat", aliases: &[],
                     help: Some("extend the lease on a claimed task"),
                     raw: false,

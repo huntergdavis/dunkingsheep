@@ -4675,46 +4675,6 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
                     crate::render_print::render_task_next(result, &task_stamp)
                 })
             }
-            "batch" => {
-                let mut args = Map::new();
-                args.insert("ids".into(), ns.get("ids").cloned().unwrap_or(Value::Null));
-                args.insert(
-                    "lease_seconds".into(),
-                    ns.get("lease").cloned().unwrap_or(Value::Null),
-                );
-                args.insert(
-                    "allow_busy".into(),
-                    Value::Bool(matches!(ns.get("allow_busy"), Some(Value::Bool(true)))),
-                );
-                crate::daemon_cmd::run_command(ns, "task_batch_claim", args, |result| match result
-                    ["refused"]["reason"]
-                    .as_str()
-                {
-                    Some(reason) => {
-                        let ids: Vec<String> = result["refused"]["task_ids"]
-                            .as_array()
-                            .map(|ids| ids.iter().map(crate::render_fleet::py_str).collect())
-                            .unwrap_or_default();
-                        format!("refused ({reason}): {}\n", ids.join(" "))
-                    }
-                    None => {
-                        let ids: Vec<String> = result["tasks"]
-                            .as_array()
-                            .map(|tasks| {
-                                tasks
-                                    .iter()
-                                    .map(|task| crate::render_fleet::py_str(&task["id"]))
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        format!(
-                            "claimed batch {}: {}\n",
-                            crate::render_fleet::py_str(&result["batch_id"]),
-                            ids.join(" ")
-                        )
-                    }
-                })
-            }
             "heartbeat" => {
                 let mut args = Map::new();
                 args.insert("id".into(), ns.get("id").cloned().unwrap_or(Value::Null));

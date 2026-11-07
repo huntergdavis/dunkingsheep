@@ -196,7 +196,6 @@ fn the_table_accepts_exactly_the_subcommands_the_dispatcher_routes() {
             "delete",
             "note",
             "next",
-            "batch",
             "heartbeat",
             "release",
             "follow",
