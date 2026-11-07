@@ -31,7 +31,7 @@ fn expected() -> Value {
 /// A COPY of the committed tree with a ledger rebuilt from the `ledger` block: every entry is
 /// recorded with its text, except `unrecorded` ones (no row) and `modified` ones (a row for
 /// other text).
-fn fixture() -> (tempfile::TempDir, Store, Ledger, Value) {
+pub(super) fn fixture() -> (tempfile::TempDir, Store, Ledger, Value) {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join(".dunkingsheep");
     let source =
@@ -122,7 +122,7 @@ fn entry_value(entry: &super::store::Entry) -> Value {
     Value::Object(value)
 }
 
-fn fixed_clock(expect: &Value) -> super::store::ReadClockGuard {
+pub(super) fn fixed_clock(expect: &Value) -> super::store::ReadClockGuard {
     let local = chrono::NaiveDateTime::parse_from_str(
         expect["clock"]["local"]
             .as_str()
