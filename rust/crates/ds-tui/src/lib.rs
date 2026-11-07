@@ -15,3 +15,6 @@ mod main_screen_oracle_tests;
 
 #[cfg(test)]
 mod target_picker_oracle_tests;
+
+#[cfg(test)]
+mod modal_text_line_oracle_tests;
