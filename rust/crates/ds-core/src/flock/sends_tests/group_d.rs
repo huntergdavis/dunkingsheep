@@ -210,6 +210,11 @@ fn capture_warnings(run: impl FnOnce()) -> Vec<String> {
 /// Oracle test_missing_native_binding_has_one_named_diagnostic (wiring row 26): with no native
 /// binding and no state directory (the Python fixture's empty environment), the observer presses
 /// nothing, and the named refusal is recorded once.
+///
+/// RESIDUAL (t3501 wiring 26, owner decision): Python logs the named refusal once. Rust stores it on
+/// the candidate and never logs it, so "exactly one logged diagnostic" cannot be asserted here. This test
+/// asserts the stored refusal, its text, and that it does not change across ticks. The missing production
+/// log is a divergence filed as a separate follow-up; production is not changed in t3501.
 #[test]
 fn wiring_26_missing_native_binding_records_one_named_refusal_and_presses_nothing() {
     let dir = tempfile::tempdir().unwrap();
@@ -368,6 +373,25 @@ fn scheduled_41_unaccounted_styled_human_line_stays_unknown() {
     );
 }
 
+/// Positive control for scheduled row 41 (t3501): the same fixture with the human line removed presses
+/// once at two minutes, so the no-key result above is shown not to be vacuous.
+#[test]
+fn scheduled_41_control_unaccounted_line_removed_presses_once() {
+    let (flock, mut env, created) = scheduled_fixture("failed", i64::from(std::process::id()));
+    env.screens.insert(
+        "%1".into(),
+        format!("\x1b[1;2m›\x1b[0m {TEXT}\n\n\n{FOOTER}"),
+    );
+    observe(&flock, &mut env, created + 1.0);
+    assert!(env.keys.is_empty(), "no press before two minutes");
+    observe(&flock, &mut env, created + 120.0);
+    assert_eq!(
+        1,
+        env.keys.len(),
+        "the unmutated composer presses once, so the no-key result above is not vacuous"
+    );
+}
+
 /// Oracle test_reviewed_echo_edits_cannot_authorize_recovery (scheduled row 42): each edit of an
 /// approved echo, appended human text, a continuation, a truncated echo, or an ellipsis, leaves the
 /// composer not owned, and no key is pressed over two ticks.
@@ -400,6 +424,29 @@ fn scheduled_42_reviewed_echo_edits_cannot_authorize_recovery() {
     }
 }
 
+/// Positive control for scheduled row 42 (t3501): the unedited approved echo owns the composer and
+/// presses once at two minutes. So the ownership check evaluates, and the refusals above do not hold
+/// only because the check is vacuous.
+#[test]
+fn scheduled_42_control_unedited_echo_is_owned_and_presses_once() {
+    let echo = "Prior approved schedule: check your task and report the result.";
+    let (flock, mut env, created) = scheduled_fixture("failed", i64::from(std::process::id()));
+    flock
+        .sent_text_by_pane
+        .lock()
+        .unwrap()
+        .insert("%1".into(), vec![echo.into()]);
+    let screen = format!("\x1b[1;2m›\x1b[0m {echo}\n\n\x1b[1m›\x1b[0m {TEXT}\n\n\n{FOOTER}");
+    env.screens.insert("%1".into(), screen.clone());
+    observe(&flock, &mut env, created + 1.0);
+    observe(&flock, &mut env, created + 120.0);
+    assert!(
+        flock.owned_recovery_evidence(&env, "%1", &screen).is_some(),
+        "the unedited echo owns the composer"
+    );
+    assert_eq!(1, env.keys.len(), "the owned composer presses once");
+}
+
 /// Oracle test_sent_schedule_style_change_before_press_refuses (scheduled row 47): the decision
 /// reads the bright (sent) composer, and the press reads the dim one. No key is pressed.
 #[test]
@@ -419,5 +466,23 @@ fn scheduled_47_sent_schedule_style_change_before_press_refuses() {
     assert!(
         env.keys.is_empty(),
         "a style change before the press refuses the press"
+    );
+}
+
+/// Positive control for scheduled row 47 (t3501): the same sent schedule with a bright composer on every
+/// read (no style change) presses once at two minutes. So the refusal above comes from the style change,
+/// not from the fixture.
+#[test]
+fn scheduled_47_control_unchanged_sent_schedule_presses_once() {
+    let (flock, mut env, created) = scheduled_fixture("sent", i64::from(std::process::id()));
+    let bright = format!("\x1b[1m›\x1b[0m {TEXT}\n\n\n{FOOTER}");
+    env.screens.insert("%1".into(), bright);
+    observe(&flock, &mut env, created + 1.0);
+    assert!(env.keys.is_empty(), "no press before the window");
+    observe(&flock, &mut env, created + 120.0);
+    assert_eq!(
+        1,
+        env.keys.len(),
+        "the unchanged sent schedule presses once"
     );
 }
