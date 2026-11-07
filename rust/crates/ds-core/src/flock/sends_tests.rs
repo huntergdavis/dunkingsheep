@@ -21,6 +21,11 @@ use std::collections::{BTreeMap, VecDeque};
 #[cfg(test)]
 mod group_d;
 
+/// t3484 (T55 group D wiring rows 20 and 21, t820 proof D): child module with its own file, see
+/// sends_tests/group_d_wiring_20_21.rs.
+#[cfg(test)]
+mod group_d_wiring_20_21;
+
 #[derive(Default)]
 struct Pane {
     screens: BTreeMap<String, String>,
