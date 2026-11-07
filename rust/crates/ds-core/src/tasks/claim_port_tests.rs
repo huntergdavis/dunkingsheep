@@ -217,3 +217,27 @@ async fn test_another_panes_lease_is_untouched() {
         "another lane's live claim was removed by my completion"
     );
 }
+
+/// The Python test of this name asserted that a cancelled dependency BLOCKS the row. Owner
+/// ruling on t1270: a cancelled dependency counts as satisfied (the live rule, t530). The name
+/// is kept for the 1:1 mapping; the assertions follow the ruling.
+#[tokio::test]
+async fn test_a_cancelled_dependency_is_named_and_blocks_the_row() {
+    let store = store("cancelled-named-satisfied").await;
+    let (dep, row) = pair(&store).await;
+    store.cancel(&dep.id, "duplicate").await.unwrap();
+    let state = store.dependency_state(&row.id).await.unwrap();
+    assert_eq!(vec![dep.id.clone()], state.dead_dependencies);
+    assert!(
+        !state.blocked_by.contains(&dep.id),
+        "owner ruling (t1270): a cancelled dependency is satisfied (t530), not blocking"
+    );
+    match store
+        .claim_next("global", PANE, ClaimOptions::default())
+        .await
+        .unwrap()
+    {
+        ClaimOutcome::Claimed { task, .. } => assert_eq!(row.id, task.id),
+        other => panic!("the row is claimable under the satisfied rule, got {other:?}"),
+    }
+}
