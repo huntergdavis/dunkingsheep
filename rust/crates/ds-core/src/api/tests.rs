@@ -3040,7 +3040,10 @@ fn test_every_command_runs_or_refuses_but_never_crashes() {
             command.name
         );
         if command.dispatch_required.is_empty() {
-            assert_eq!(text, format!("command {} is not ported yet", command.name));
+            assert_eq!(
+                text,
+                format!("internal error: no handler registered for {}", command.name)
+            );
         }
     }
 }
@@ -3138,7 +3141,10 @@ fn test_owner_only_commands_go_through_the_superuser_gate() {
         None,
         None,
     ));
-    assert_eq!(text, format!("command {} is not ported yet", open.name));
+    assert_eq!(
+        text,
+        format!("internal error: no handler registered for {}", open.name)
+    );
 }
 
 #[test]
@@ -3237,7 +3243,7 @@ fn test_required_then_unknown_argument_checks() {
         args(json!({"id": 0})),
         None,
     ));
-    assert_eq!(text, "command get_dunk is not ported yet");
+    assert_eq!(text, "internal error: no handler registered for get_dunk");
 }
 
 #[test]

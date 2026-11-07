@@ -21,7 +21,8 @@ use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use super::parse::{parse_panes, parse_tabs, parse_workspaces, safe_name, PANE_SEP};
+pub use super::parse::pane_separator;
+use super::parse::{parse_panes, parse_tabs, parse_workspaces, safe_name};
 use super::{
     AgentSpec, Pane, Resize, ResizedPane, Tab, Terminal, TerminalError, Workspace, RESIZE_MAX,
     RESIZE_MIN,
@@ -60,11 +61,58 @@ pub const SEND_TEXT_CHUNK_DELAY_S: f64 = 0.05;
 /// in the composer before the submission arrives.
 pub const SEND_TEXT_SETTLE_DELAY_S: f64 = 0.2;
 
-/// The tmux field format, verbatim from `TmuxBackend.PANE_FORMAT`.
-pub const PANE_FORMAT: &str = "#{pane_id}\x1f#{session_id}\x1f#{window_id}\x1f#{pane_current_path}\x1f#{pane_current_command}\x1f#{pane_title}\x1f#{pane_active}\x1f#{session_name}\x1f#{window_name}\x1f#{window_index}\x1f#{session_index}\x1f#{pane_pid}\x1f#{pane_width}\x1f#{pane_height}";
-pub const TAB_FORMAT: &str =
-    "#{window_id}\x1f#{session_id}\x1f#{window_name}\x1f#{window_index}\x1f#{window_active}";
-pub const WORKSPACE_FORMAT: &str = "#{session_id}\x1f#{session_name}\x1f#{session_index}";
+/// The fourteen pane fields, in the Python's `TmuxBackend.PANE_FORMAT` order.
+const PANE_FORMAT_FIELDS: [&str; 14] = [
+    "#{pane_id}",
+    "#{session_id}",
+    "#{window_id}",
+    "#{pane_current_path}",
+    "#{pane_current_command}",
+    "#{pane_title}",
+    "#{pane_active}",
+    "#{session_name}",
+    "#{window_name}",
+    "#{window_index}",
+    "#{session_index}",
+    "#{pane_pid}",
+    "#{pane_width}",
+    "#{pane_height}",
+];
+
+/// `list-panes -F` format: the pane fields joined by [`pane_separator`], built once per process.
+pub fn pane_format() -> &'static str {
+    static FORMAT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    FORMAT
+        .get_or_init(|| PANE_FORMAT_FIELDS.join(pane_separator()))
+        .as_str()
+}
+
+/// `list-windows -F` format: window id, session id, name, index, active.
+pub fn tab_format() -> &'static str {
+    static FORMAT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    FORMAT
+        .get_or_init(|| {
+            [
+                "#{window_id}",
+                "#{session_id}",
+                "#{window_name}",
+                "#{window_index}",
+                "#{window_active}",
+            ]
+            .join(pane_separator())
+        })
+        .as_str()
+}
+
+/// `list-sessions -F` format: session id, name, index.
+pub fn workspace_format() -> &'static str {
+    static FORMAT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    FORMAT
+        .get_or_init(|| {
+            ["#{session_id}", "#{session_name}", "#{session_index}"].join(pane_separator())
+        })
+        .as_str()
+}
 
 /// What one tmux invocation returned.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,6 +140,16 @@ impl CommandResult {
     pub fn is_no_server(&self) -> bool {
         let blob = format!("{}{}", self.stdout, self.stderr).to_lowercase();
         blob.contains("no server running") || blob.contains("no sessions")
+    }
+
+    /// tmux's other wording for a server that is not there: "error connecting to <socket>
+    /// (No such file or directory)" (tmux 3.x with a named socket) and "failed to connect to
+    /// server". The Python `list_panes` swallows every non-zero exit, so an unreachable server
+    /// lists as no panes there (t3464: the roster answers `lanes: []`, not "cannot list
+    /// panes"). `is_available` keeps the narrow wording the Python's own check uses.
+    pub fn is_unreachable(&self) -> bool {
+        let blob = format!("{}{}", self.stdout, self.stderr).to_lowercase();
+        blob.contains("error connecting to") || blob.contains("failed to connect to server")
     }
 }
 
@@ -162,7 +220,8 @@ impl TmuxBackend {
     }
     fn parsed_panes(&self, output: &str) -> Result<Vec<Pane>, TerminalError> {
         let labels = self.registry.labels()?;
-        let mut panes = parse_panes(output, &|id| labels.get(id).cloned());
+        let mut panes = parse_panes(output, &|id| labels.get(id).cloned())
+            .map_err(|error| TerminalError::refused(error.to_string()))?;
         for pane in &mut panes {
             if let Some(name) = labels.get(&pane.pane_id) {
                 pane.label = name.clone();
@@ -171,11 +230,14 @@ impl TmuxBackend {
         Ok(panes)
     }
     fn list_panes_raw(&self) -> Result<Vec<Pane>, super::tmux_registry::RegistryError> {
-        let result = match self.run(&["list-panes", "-a", "-F", PANE_FORMAT]) {
+        let result = match self.run(&["list-panes", "-a", "-F", pane_format()]) {
             Ok(result) if result.code == 0 => result,
             _ => return Ok(Vec::new()),
         };
-        let mut panes = parse_panes(&result.stdout, &|_| None);
+        let mut panes = match parse_panes(&result.stdout, &|_| None) {
+            Ok(panes) => panes,
+            Err(_) => return Ok(Vec::new()),
+        };
         let labels = self.registry.pane_labels_raw(&panes)?;
         for pane in &mut panes {
             if let Some(label) = labels.get(&pane.pane_id) {
@@ -237,7 +299,7 @@ impl Terminal for TmuxBackend {
     }
 
     fn list_panes(&self) -> Vec<Pane> {
-        match self.run(&["list-panes", "-a", "-F", PANE_FORMAT]) {
+        match self.run(&["list-panes", "-a", "-F", pane_format()]) {
             Ok(result) if result.code == 0 => self.parsed_panes(&result.stdout).unwrap_or_default(),
             // No server, no sessions, or a non-zero exit the Python also swallows:
             // an unreachable world is an empty one.
@@ -246,9 +308,9 @@ impl Terminal for TmuxBackend {
     }
 
     fn try_list_panes(&self) -> Result<Vec<Pane>, TerminalError> {
-        match self.run(&["list-panes", "-a", "-F", PANE_FORMAT]) {
+        match self.run(&["list-panes", "-a", "-F", pane_format()]) {
             Ok(result) if result.code == 0 => self.parsed_panes(&result.stdout),
-            Ok(result) if result.is_no_server() => Ok(Vec::new()),
+            Ok(result) if result.is_no_server() || result.is_unreachable() => Ok(Vec::new()),
             Ok(result) => Err(TerminalError::refused(
                 result.message("tmux list-panes failed"),
             )),
@@ -263,15 +325,15 @@ impl Terminal for TmuxBackend {
     }
 
     fn list_tabs(&self) -> Vec<Tab> {
-        match self.run(&["list-windows", "-a", "-F", TAB_FORMAT]) {
-            Ok(result) if result.code == 0 => parse_tabs(&result.stdout),
+        match self.run(&["list-windows", "-a", "-F", tab_format()]) {
+            Ok(result) if result.code == 0 => parse_tabs(&result.stdout).unwrap_or_default(),
             _ => Vec::new(),
         }
     }
 
     fn list_workspaces(&self) -> Vec<Workspace> {
-        match self.run(&["list-sessions", "-F", WORKSPACE_FORMAT]) {
-            Ok(result) if result.code == 0 => parse_workspaces(&result.stdout),
+        match self.run(&["list-sessions", "-F", workspace_format()]) {
+            Ok(result) if result.code == 0 => parse_workspaces(&result.stdout).unwrap_or_default(),
             _ => Vec::new(),
         }
     }
@@ -423,7 +485,7 @@ impl Terminal for TmuxBackend {
         focus: bool,
     ) -> Result<Tab, TerminalError> {
         let name = safe_name(label.unwrap_or("tab"), "tab");
-        let format = format!("#{{window_id}}{PANE_SEP}#{{pane_id}}");
+        let format = format!("#{{window_id}}{}#{{pane_id}}", pane_separator());
         let mut args = vec!["new-window", "-d", "-P", "-F", &format];
         if let Some(workspace_id) = workspace_id {
             args.extend(["-t", workspace_id]);
@@ -438,7 +500,7 @@ impl Terminal for TmuxBackend {
                 result.message("tmux new-window failed"),
             ));
         }
-        let mut fields = result.stdout.trim().split(PANE_SEP);
+        let mut fields = result.stdout.trim().split(pane_separator());
         let tab_id = fields.next().unwrap_or_default().to_owned();
         let pane = fields
             .next()
@@ -497,7 +559,7 @@ impl Terminal for TmuxBackend {
             let label_text = super::raw::optional(label);
             let cwd_text = super::raw::optional(cwd);
             let name = safe_name(label_text.as_deref().unwrap_or("tab"), "dunkingsheep");
-            let format = format!("#{{window_id}}{PANE_SEP}#{{pane_id}}");
+            let format = format!("#{{window_id}}{}#{{pane_id}}", pane_separator());
             let mut args = vec!["new-window", "-d", "-P", "-F", &format];
             args.extend(["-t", &target]);
             args.extend(["-n", name.as_str()]);
@@ -510,7 +572,7 @@ impl Terminal for TmuxBackend {
                     TerminalError::refused(result.message("tmux new-window failed")).into(),
                 );
             }
-            let mut fields = result.stdout.trim().split(PANE_SEP);
+            let mut fields = result.stdout.trim().split(pane_separator());
             let tab_id = fields.next().unwrap_or_default().to_owned();
             let pane_id = fields.next().unwrap_or_default();
             let tab = self
@@ -1014,9 +1076,14 @@ impl Terminal for TmuxBackend {
             let item = if kind == "pane" {
                 // Python _parse_panes reads one registry snapshot for both labels
                 // and managed flags, after the title mutation and before remember.
-                match self.run(&["list-panes", "-a", "-F", PANE_FORMAT]) {
+                match self.run(&["list-panes", "-a", "-F", pane_format()]) {
                     Ok(output) if output.code == 0 => {
-                        let mut panes = parse_panes(&output.stdout, &|_| None);
+                        let mut panes = match parse_panes(&output.stdout, &|_| None) {
+                            Ok(panes) => panes,
+                            Err(error) => {
+                                return Err(TerminalError::refused(error.to_string()).into())
+                            }
+                        };
                         let data = self.registry.load_raw()?;
                         let labels = Registry::pane_labels_from_raw(&data, &panes)?;
                         for pane in &mut panes {
@@ -1053,7 +1120,7 @@ impl Terminal for TmuxBackend {
 
     fn close(&mut self, kind: &str, target_id: &str) -> Result<(), TerminalError> {
         let panes = if matches!(kind, "tab" | "workspace") {
-            let result = self.run(&["list-panes", "-a", "-F", PANE_FORMAT])?;
+            let result = self.run(&["list-panes", "-a", "-F", pane_format()])?;
             if result.code != 0 {
                 return Err(TerminalError::refused(
                     result.message("tmux list-panes failed"),
@@ -1062,7 +1129,7 @@ impl Terminal for TmuxBackend {
             // The display parser deliberately skips malformed rows. Destructive
             // parent operations must not silently omit an unowned child.
             for row in result.stdout.lines() {
-                let fields: Vec<_> = row.split(PANE_SEP).collect();
+                let fields: Vec<_> = row.split(pane_separator()).collect();
                 if fields.len() != 14 || fields[..3].iter().any(|id| id.is_empty()) {
                     return Err(TerminalError::refused("incomplete tmux pane inventory"));
                 }
@@ -1094,7 +1161,7 @@ impl Terminal for TmuxBackend {
     fn close_raw(&mut self, kind: &str, target_id: &str) -> super::RawCreateResult<()> {
         raw_create_result(|| {
             let panes = if matches!(kind, "tab" | "workspace") {
-                let result = self.run(&["list-panes", "-a", "-F", PANE_FORMAT])?;
+                let result = self.run(&["list-panes", "-a", "-F", pane_format()])?;
                 if result.code != 0 {
                     return Err(
                         TerminalError::refused(result.message("tmux list-panes failed")).into(),
@@ -1103,13 +1170,16 @@ impl Terminal for TmuxBackend {
                 // The display parser deliberately skips malformed rows. Destructive
                 // parent operations must not silently omit an unowned child.
                 for row in result.stdout.lines() {
-                    let fields: Vec<_> = row.split(PANE_SEP).collect();
+                    let fields: Vec<_> = row.split(pane_separator()).collect();
                     if fields.len() != 14 || fields[..3].iter().any(|id| id.is_empty()) {
                         return Err(TerminalError::refused("incomplete tmux pane inventory").into());
                     }
                 }
                 {
-                    let mut panes = parse_panes(&result.stdout, &|_| None);
+                    let mut panes = match parse_panes(&result.stdout, &|_| None) {
+                        Ok(panes) => panes,
+                        Err(error) => return Err(TerminalError::refused(error.to_string()).into()),
+                    };
                     let labels = self.registry.pane_labels_raw(&panes)?;
                     for pane in &mut panes {
                         if let Some(label) = labels.get(&pane.pane_id) {
@@ -1491,11 +1561,6 @@ pub fn shell_join(argv: &[&str]) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-/// The separator the parsed formats use (exported for tests and callers).
-pub fn pane_separator() -> char {
-    PANE_SEP
 }
 
 /// A convenience for a caller that wants `capture-pane` without the trait.

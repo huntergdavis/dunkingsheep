@@ -466,7 +466,6 @@ impl Flock {
                 || !matches!(entry.status.as_str(), "failed" | "sent" | "typed")
                 || crate::stuck::collapse(&entry.text) != crate::stuck::collapse(&content)
                 || (entry.scheduled
-                    && entry.status == "sent"
                     && !self.scheduled_recovery_current(pane_id, entry, clock::now_s()))
             {
                 return (false, "intent no longer authorizes the press".into());
@@ -598,6 +597,44 @@ impl Flock {
                 .forget(pane_id);
             return false;
         };
+        // Python rehydrates an eligible restored candidate's exact text and its transcript texts
+        // once the candidate is bound to this pane generation. Ineligible or unbound text is never
+        // injected as ownership evidence. The composer must still show exactly that text before
+        // anything is pressed.
+        let bound_texts = self
+            .stuck_candidates
+            .lock()
+            .ok()
+            .and_then(|c| c.get(pane_id).cloned())
+            .filter(|entry| {
+                entry.eligible && entry.generation.as_deref() == Some(generation.as_str())
+            })
+            .map(|entry| {
+                // Python appends the transcript texts first, then the candidate's own text, and
+                // keeps the last REMEMBERED_SENDS. Appends skip texts already remembered, so the
+                // candidate's text is last only when it was not already present.
+                entry
+                    .transcript_texts
+                    .into_iter()
+                    .chain(std::iter::once(entry.text))
+                    .filter(|text| !text.is_empty())
+                    .collect::<Vec<String>>()
+            })
+            .unwrap_or_default();
+        if !bound_texts.is_empty() {
+            let mut sent = self
+                .sent_text_by_pane
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let rows = sent.entry(pane_id.to_owned()).or_default();
+            for text in bound_texts {
+                if !rows.iter().any(|row| row.as_str() == Some(text.as_str())) {
+                    rows.push(serde_json::Value::String(text));
+                }
+            }
+            let excess = rows.len().saturating_sub(REMEMBERED_SENDS);
+            rows.drain(..excess);
+        }
         let native = read_screen(env, pane_id, None, true)
             .and_then(|screen| self.owned_recovery_evidence(env, pane_id, &screen));
         let authority = self
@@ -3614,9 +3651,11 @@ impl OutboxWorkerPool {
         let worker_pane = pane_id.to_owned();
         let worker_key = key.clone();
         let (start_tx, start_rx) = std::sync::mpsc::sync_channel::<()>(0);
+        let log = crate::daemon_log::ThreadLog::capture();
         let handle = thread::Builder::new()
             .name(format!("outbox-{pane_id}"))
             .spawn(move || {
+                log.adopt();
                 if start_rx.recv().is_err() {
                     return;
                 }
@@ -4508,6 +4547,7 @@ impl Flock {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(existing) = candidates.get(&message.pane_id) else {
+            Self::mark_unobservable_once(&message.pane_id, &mut candidate);
             candidates.insert(message.pane_id.clone(), candidate);
             return;
         };
@@ -4566,7 +4606,29 @@ impl Flock {
                 .rev()
                 .collect();
         }
+        Self::mark_unobservable_once(&message.pane_id, &mut candidate);
         candidates.insert(message.pane_id.clone(), candidate);
+    }
+
+    /// Python logs once, when a failed or typed text candidate has no attempt generation, that
+    /// its recovery cannot be observed, and sets `unobservable_logged` (dunk_core.py 6203-6206).
+    fn mark_unobservable_once(pane_id: &str, candidate: &mut StuckCandidate) {
+        let unknown_generation = candidate.generation.as_deref().is_none_or(str::is_empty);
+        if !matches!(candidate.status.as_str(), "typed" | "failed")
+            || !candidate.press_enter
+            || candidate.kind != "text"
+            || !unknown_generation
+            || candidate.unobservable_logged == Some(true)
+        {
+            return;
+        }
+        candidate.unobservable_logged = Some(true);
+        tracing::warn!(
+            pane_id,
+            message_id = %candidate.message_id,
+            created_at = candidate.created_at,
+            "recovery not observable: attempt generation unknown"
+        );
     }
 
     /// Apply an observer result only to the candidate identity that produced it.
@@ -4889,6 +4951,40 @@ impl Flock {
         if recent.len() > REMEMBERED_SENDS {
             let excess = recent.len() - REMEMBERED_SENDS;
             recent.drain(..excess);
+        }
+    }
+
+    /// Python's bound ownership evidence (`_stuck_observer_step`, CoS i31802 #1). Once the observer
+    /// has bound a candidate to the live pane generation, its exact text and transcript texts become
+    /// remembered-send evidence for that pane. Restore does not do this: the persisted text is not
+    /// ownership evidence until the bind, so an unbound restore stays unowned. Append only absent
+    /// texts, then keep the last REMEMBERED_SENDS, as Python does.
+    pub(crate) fn bind_candidate_ownership(&self, pane_id: &str, entry: &StuckCandidate) {
+        let mut history = self
+            .sent_text_by_pane
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let remembered = history.entry(pane_id.to_string()).or_default();
+        for owned in entry
+            .transcript_texts
+            .iter()
+            .map(String::as_str)
+            .chain(std::iter::once(entry.text.as_str()))
+        {
+            if owned.is_empty() {
+                continue;
+            }
+            let value = serde_json::Value::String(owned.to_string());
+            if !remembered
+                .iter()
+                .any(|known| crate::terminal::raw::equal(known, &value))
+            {
+                remembered.push(value);
+            }
+        }
+        if remembered.len() > REMEMBERED_SENDS {
+            let excess = remembered.len() - REMEMBERED_SENDS;
+            remembered.drain(..excess);
         }
     }
 

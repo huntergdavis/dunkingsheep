@@ -841,6 +841,242 @@ fn federated_recovery_refuses_no_enter_intent_and_queued_panes() {
     assert!(probe.keys.lock().unwrap().is_empty());
 }
 
+/// A failed-or-otherwise candidate for `%1` with the probe's attempt generation.
+fn observed_candidate(
+    probe: &RecoveryProbe,
+    id: &str,
+    status: &str,
+    press_enter: bool,
+    created_at: f64,
+) -> Message {
+    let mut message = failed_federated_candidate(probe);
+    message.id = id.into();
+    message.status = status.into();
+    message.press_enter = press_enter;
+    message.created_at = created_at;
+    message
+}
+
+/// Runs the federated observer at each time and asserts that none of them acts.
+fn federated_steps_without_acting(flock: &Flock, probe: &mut RecoveryProbe, times: &[f64]) {
+    for now in times {
+        assert_eq!(
+            0,
+            federated_recovery_step(flock, probe, *now, &|_| {}).unwrap(),
+            "no action at t={now}"
+        );
+    }
+}
+
+// StandaloneObserverTests.test_exactly_one_action_at_the_threshold_and_no_second_message (row 38)
+#[test]
+fn federated_recovery_at_the_threshold_acts_once_and_creates_no_second_message() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = persisted_flock(&dir);
+    let mut probe = federated_probe();
+    flock.note_stuck_candidate(&failed_federated_candidate(&probe));
+    federated_steps_without_acting(&flock, &mut probe, &[100.0]);
+    let messages_before = flock.message_history.lock().unwrap().len();
+    assert_eq!(
+        1,
+        federated_recovery_step(&flock, &mut probe, 221.0, &|_| {}).unwrap()
+    );
+    assert_eq!(vec!["Enter".to_string()], *probe.keys.lock().unwrap());
+    assert_eq!(
+        messages_before,
+        flock.message_history.lock().unwrap().len(),
+        "recovery must not create or send a second message"
+    );
+}
+
+// ObserverBoundaryTests.test_a_newer_sent_delivery_also_supersedes (row 46)
+#[test]
+fn a_newer_sent_delivery_with_enter_supersedes_an_older_failed_candidate() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = persisted_flock(&dir);
+    let mut probe = federated_probe();
+    flock.note_stuck_candidate(&observed_candidate(&probe, "m1", "failed", true, 10.0));
+    flock.note_stuck_candidate(&observed_candidate(&probe, "m2", "sent", true, 11.0));
+    federated_steps_without_acting(&flock, &mut probe, &[100.0, 221.0, 821.0]);
+    assert!(
+        probe.keys.lock().unwrap().is_empty(),
+        "the pane's latest intent is a clean send"
+    );
+}
+
+// IntentOrderingTests.test_a_late_older_failure_cannot_undo_a_newer_clean_send (row 54)
+#[test]
+fn a_late_older_failure_cannot_undo_a_newer_clean_send() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = persisted_flock(&dir);
+    let mut probe = federated_probe();
+    flock.note_stuck_candidate(&observed_candidate(&probe, "m2", "sent", true, 20.0));
+    flock.note_stuck_candidate(&observed_candidate(&probe, "m1", "failed", true, 10.0));
+    federated_steps_without_acting(&flock, &mut probe, &[100.0, 221.0]);
+    assert!(probe.keys.lock().unwrap().is_empty());
+}
+
+// IntentOrderingTests.test_a_late_older_failure_cannot_undo_a_newer_cancellation (row 55)
+#[test]
+fn a_late_older_failure_cannot_undo_a_newer_cancellation() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = persisted_flock(&dir);
+    let mut probe = federated_probe();
+    flock.note_stuck_candidate(&observed_candidate(&probe, "m2", "cancelled", true, 20.0));
+    flock.note_stuck_candidate(&observed_candidate(&probe, "m1", "failed", true, 10.0));
+    federated_steps_without_acting(&flock, &mut probe, &[100.0, 221.0]);
+    assert!(probe.keys.lock().unwrap().is_empty());
+}
+
+// SameTimestampOrderTests.test_same_timestamp_uses_message_sequence_not_lexical_order (row 59)
+#[test]
+fn same_timestamp_uses_message_sequence_not_lexical_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = persisted_flock(&dir);
+    let mut probe = federated_probe();
+    // m10 is the newer message by sequence; the older-by-string m9 FAILED arrives later.
+    flock.note_stuck_candidate(&observed_candidate(&probe, "m10", "sent", false, 50.0));
+    flock.note_stuck_candidate(&observed_candidate(&probe, "m9", "failed", true, 50.0));
+    federated_steps_without_acting(&flock, &mut probe, &[100.0, 221.0, 821.0]);
+    assert!(
+        probe.keys.lock().unwrap().is_empty(),
+        "'m10' must outrank 'm9' by sequence, not by string order"
+    );
+}
+
+// SameTimestampOrderTests.test_consumption_keeps_the_watermark (row 60)
+#[test]
+fn consumption_keeps_the_watermark_against_a_late_older_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = persisted_flock(&dir);
+    let mut probe = federated_probe();
+    probe.federated = false;
+    let empty_frame = format!(
+        "  >_ OpenAI Codex (v0.165.0)\n     ~/workspace/fixture\n  permissions: YOLO mode\n{}\u{203a} Ask Codex to do anything\n\n  GPT-6-Astra high \u{b7} ~/workspace/fixture\n  ? for shortcuts                                      \u{26a0} 1 warning \u{b7} f2 to view",
+        "\n".repeat(16)
+    );
+    *probe.screen.lock().unwrap() = empty_frame;
+    flock.note_stuck_candidate(&observed_candidate(&probe, "m2", "failed", true, 10.0));
+    assert_eq!(
+        0,
+        strict_stuck_observer_scan(&flock, &mut probe, 221.0).unwrap()
+    );
+    assert_eq!(
+        "consumed",
+        flock.stuck_candidates.lock().unwrap()["%1"].status
+    );
+    // A late, older FAILED decision must not resurrect the work.
+    flock.note_stuck_candidate(&observed_candidate(&probe, "m1", "failed", true, 9.0));
+    *probe.screen.lock().unwrap() = federated_probe().screen.lock().unwrap().clone();
+    for now in [231.0, 341.0, 701.0] {
+        assert_eq!(
+            0,
+            strict_stuck_observer_scan(&flock, &mut probe, now).unwrap(),
+            "no action at t={now}"
+        );
+    }
+    assert!(
+        probe.keys.lock().unwrap().is_empty(),
+        "the watermark must survive consumption"
+    );
+    let candidates = flock.stuck_candidates.lock().unwrap();
+    assert_eq!("m2", candidates["%1"].message_id);
+    assert_eq!("consumed", candidates["%1"].status);
+}
+
+/// A flock with persistence off: a restart is modelled by restoring a snapshot.
+fn in_memory_flock(dir: &tempfile::TempDir) -> Flock {
+    Flock::new(
+        dir.path().join("launches.json"),
+        dir.path().join("lanes.json"),
+        false,
+    )
+}
+
+// ObserverBoundaryTests.test_the_candidate_survives_a_restart (row 49)
+#[test]
+fn the_candidate_survives_a_restart_with_its_enter_and_message_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let before = in_memory_flock(&dir);
+    let probe = federated_probe();
+    before.note_stuck_candidate(&observed_candidate(&probe, "m1", "failed", true, 10.0));
+    let after = in_memory_flock(&dir);
+    after.restore_snapshot(&before.snapshot());
+    let candidates = after.stuck_candidates.lock().unwrap();
+    assert_eq!("m1", candidates["%1"].message_id);
+    assert!(
+        candidates["%1"].press_enter,
+        "the restored candidate keeps its Enter intent"
+    );
+}
+
+// Federated analogue, accepted parity and NOT row 51 coverage. The Python row 51 case is strict
+// and runs through the real matcher; its Rust counterpart is sends_tests.rs stuck_gap_tests
+// (ignored until the rehydration PR lands). This test only shows the federated press after restart.
+#[test]
+fn the_restarted_worker_recovers_the_persisted_candidate() {
+    let dir = tempfile::tempdir().unwrap();
+    let before = in_memory_flock(&dir);
+    let mut probe = federated_probe();
+    before.note_stuck_candidate(&observed_candidate(&probe, "m1", "failed", true, 10.0));
+    // The federated press is durable: it needs persistence on, as the daemon has.
+    let after = persisted_flock(&dir);
+    after.restore_snapshot(&before.snapshot());
+    federated_steps_without_acting(&after, &mut probe, &[100.0]);
+    assert!(
+        probe.keys.lock().unwrap().is_empty(),
+        "the first step after a restart is only evidence"
+    );
+    assert_eq!(
+        1,
+        federated_recovery_step(&after, &mut probe, 221.0, &|_| {}).unwrap()
+    );
+    assert_eq!(vec!["Enter".to_string()], *probe.keys.lock().unwrap());
+}
+
+// Federated analogue, accepted parity and NOT row 62 coverage. The Python row 62 case is strict
+// and runs through the real matcher; its Rust counterpart is sends_tests.rs stuck_gap_tests
+// (ignored until the rehydration PR lands). This test only shows the federated press after restart.
+#[test]
+fn the_same_generation_after_a_restart_still_presses_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let before = in_memory_flock(&dir);
+    let mut probe = federated_probe();
+    before.note_stuck_candidate(&observed_candidate(&probe, "m1", "failed", true, 10.0));
+    // The federated press is durable: it needs persistence on, as the daemon has.
+    let after = persisted_flock(&dir);
+    after.restore_snapshot(&before.snapshot());
+    assert_eq!(
+        Some(probe.generation.clone()),
+        after.stuck_candidates.lock().unwrap()["%1"].generation,
+        "the persisted attempt generation survives the restart"
+    );
+    federated_steps_without_acting(&after, &mut probe, &[100.0]);
+    assert_eq!(
+        1,
+        federated_recovery_step(&after, &mut probe, 221.0, &|_| {}).unwrap()
+    );
+    assert_eq!(1, probe.keys.lock().unwrap().len());
+}
+
+// DaemonStateFileTests.test_a_declared_config_wins_over_the_saved_one (row 24)
+// DIVERGENCE: Python lets the declared config win over the saved state file; Rust restore
+// overwrites the declared config with the saved one (flock/mod.rs restore_snapshot).
+#[test]
+#[ignore = "t3354 row 24: restore overwrites a declared stuck config with the saved one; owner ruling pending"]
+fn a_declared_config_wins_over_the_saved_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let saved = in_memory_flock(&dir);
+    let payload = saved.snapshot();
+    let declared = in_memory_flock(&dir);
+    declared.stuck_config.lock().unwrap().enabled = false;
+    declared.restore_snapshot(&payload);
+    assert!(
+        !declared.stuck_config.lock().unwrap().enabled,
+        "a declared config must not be overwritten by the state file"
+    );
+}
+
 // t3371 (t820 proof D, row 44): test_long_false_sent_composer_stays_observable (oracle 79bc92fa).
 // This covers the box condition only: an 18-line composer this flock sent keeps its full collapsed
 // text in the box read. The Python case also asserts that the status stays `sent`, that one recovery
@@ -882,5 +1118,439 @@ fn long_false_sent_composer_keeps_its_full_collapsed_text_in_the_box() {
     assert_eq!(
         Some(crate::terminal::screen::collapse(&text)),
         shown.map(|read| crate::terminal::screen::collapse(&read))
+    );
+}
+// t3355 (t820 proof D) federated gap and partial rows: test_dunk_federated_recovery.py,
+// oracle commit 79bc92fa. ScriptedProbe replays a script: read_pane call n returns
+// screens[min(n, last)] and get_pane call n reports pids[min(n, last)]. A federated step reads
+// the screen for its decision, reads again for dead_session, and then re-reads the composer at
+// key time. A script therefore changes exactly the read it names. Each refusal is paired with a
+// control that presses once, so a refusal cannot pass only because the candidate was never read.
+
+struct ScriptedProbe {
+    screens: Vec<String>,
+    pids: Vec<u32>,
+    reads: Mutex<usize>,
+    lookups: Mutex<usize>,
+    keys: Mutex<Vec<String>>,
+}
+
+impl SendEnv for ScriptedProbe {
+    fn read_pane(&self, _: &str, _: i64, _: bool) -> Option<String> {
+        let mut reads = self.reads.lock().unwrap();
+        let index = (*reads).min(self.screens.len() - 1);
+        *reads += 1;
+        Some(self.screens[index].clone())
+    }
+    fn pane_harness(&self, _: &str) -> Option<String> {
+        Some("codex".into())
+    }
+    fn session_process_gone(&self, _: &str) -> bool {
+        false
+    }
+    fn read_status(&self, _: &str) -> Option<String> {
+        Some("idle".into())
+    }
+    fn send_key(&mut self, _: &str, key: &str) -> (bool, String) {
+        self.keys.lock().unwrap().push(key.into());
+        (true, "sent".into())
+    }
+    fn federated_input(&self) -> bool {
+        true
+    }
+}
+
+impl PaneInfoEnv for ScriptedProbe {
+    fn list_panes_grouped(&self) -> Vec<Value> {
+        vec![self.get_pane("%1").unwrap()]
+    }
+    fn get_pane(&self, pane_id: &str) -> Option<Value> {
+        let mut lookups = self.lookups.lock().unwrap();
+        let index = (*lookups).min(self.pids.len() - 1);
+        *lookups += 1;
+        (pane_id == "%1")
+            .then(|| json!({"pane_id": "%1", "pane_pid": self.pids[index], "agent": "codex"}))
+    }
+}
+
+fn scripted_probe(screens: Vec<String>, pids: Vec<u32>) -> ScriptedProbe {
+    ScriptedProbe {
+        screens,
+        pids,
+        reads: Mutex::default(),
+        lookups: Mutex::default(),
+        keys: Mutex::default(),
+    }
+}
+
+fn scripted_frame(pending: &str) -> String {
+    format!(
+        "  >_ OpenAI Codex (v0.165.0)\n\n\x1b[1m\u{203a} {pending}\x1b[0m\n\n  GPT-6-Astra high \u{b7} ~/workspace/x\n  ? for shortcuts\n"
+    )
+}
+
+/// A persisted flock holding the failed federated candidate for the scripted pane.
+fn scripted_candidate(dir: &tempfile::TempDir) -> Flock {
+    let flock = persisted_flock(dir);
+    flock.note_stuck_candidate(&failed_federated_candidate(&federated_probe()));
+    flock
+}
+
+#[test]
+fn federated_edit_between_steps_resets_the_stable_timer() {
+    let frame = scripted_frame("pending text");
+    let dir = tempfile::tempdir().unwrap();
+    let flock = scripted_candidate(&dir);
+    // Reads 0 and 1 belong to the step at 100; read 2 is the decision read of the step at 221.
+    let mut probe = scripted_probe(
+        vec![
+            frame.clone(),
+            frame.clone(),
+            scripted_frame("pending text edited"),
+        ],
+        vec![std::process::id()],
+    );
+    assert_eq!(
+        0,
+        federated_recovery_step(&flock, &mut probe, 100.0, &|_| {}).unwrap()
+    );
+    assert_eq!(
+        0,
+        federated_recovery_step(&flock, &mut probe, 221.0, &|_| {}).unwrap(),
+        "an edited composer restarts the stable timer"
+    );
+    assert!(probe.keys.lock().unwrap().is_empty());
+
+    let control_dir = tempfile::tempdir().unwrap();
+    let control_flock = scripted_candidate(&control_dir);
+    let mut control = scripted_probe(vec![frame], vec![std::process::id()]);
+    federated_recovery_step(&control_flock, &mut control, 100.0, &|_| {}).unwrap();
+    assert_eq!(
+        1,
+        federated_recovery_step(&control_flock, &mut control, 221.0, &|_| {}).unwrap()
+    );
+    assert_eq!(vec!["Enter".to_string()], *control.keys.lock().unwrap());
+}
+
+#[test]
+fn federated_changed_content_at_key_time_refuses() {
+    let frame = scripted_frame("pending text");
+    let changed = scripted_frame("pending text, changed by a human");
+    assert_ne!(
+        crate::terminal::composer::federated_composer(true, &frame),
+        crate::terminal::composer::federated_composer(true, &changed),
+        "precondition: the changed screen must hold different composer text"
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let flock = scripted_candidate(&dir);
+    // Reads 0-1 are the step at 100 and reads 2-3 the decision of the step at 221; read 4 is
+    // the composer re-read at key time.
+    let mut probe = scripted_probe(
+        vec![
+            frame.clone(),
+            frame.clone(),
+            frame.clone(),
+            frame.clone(),
+            changed,
+        ],
+        vec![std::process::id()],
+    );
+    federated_recovery_step(&flock, &mut probe, 100.0, &|_| {}).unwrap();
+    assert_eq!(
+        0,
+        federated_recovery_step(&flock, &mut probe, 221.0, &|_| {}).unwrap()
+    );
+    assert!(probe.keys.lock().unwrap().is_empty());
+
+    let control_dir = tempfile::tempdir().unwrap();
+    let control_flock = scripted_candidate(&control_dir);
+    let mut control = scripted_probe(vec![frame], vec![std::process::id()]);
+    federated_recovery_step(&control_flock, &mut control, 100.0, &|_| {}).unwrap();
+    assert_eq!(
+        1,
+        federated_recovery_step(&control_flock, &mut control, 221.0, &|_| {}).unwrap()
+    );
+}
+
+#[test]
+fn federated_changed_generation_at_key_time_refuses() {
+    let frame = scripted_frame("pending text");
+    let dir = tempfile::tempdir().unwrap();
+    let flock = scripted_candidate(&dir);
+    // Pane lookups 0 and 1 are the decision generations of the steps at 100 and 221. Lookup 2
+    // is the generation re-read at key time, reported as pid 1, which no longer matches.
+    let me = std::process::id();
+    let mut probe = scripted_probe(vec![frame.clone()], vec![me, me, 1]);
+    federated_recovery_step(&flock, &mut probe, 100.0, &|_| {}).unwrap();
+    assert_eq!(
+        0,
+        federated_recovery_step(&flock, &mut probe, 221.0, &|_| {}).unwrap()
+    );
+    assert!(probe.keys.lock().unwrap().is_empty());
+
+    let control_dir = tempfile::tempdir().unwrap();
+    let control_flock = scripted_candidate(&control_dir);
+    let mut control = scripted_probe(vec![frame], vec![me]);
+    federated_recovery_step(&control_flock, &mut control, 100.0, &|_| {}).unwrap();
+    assert_eq!(
+        1,
+        federated_recovery_step(&control_flock, &mut control, 221.0, &|_| {}).unwrap()
+    );
+}
+
+#[test]
+fn federated_new_dialog_at_key_time_refuses() {
+    let frame = scripted_frame("pending text");
+    let dialog = format!("{frame}{MODAL}");
+    assert!(
+        !crate::terminal::screen::modal_open(&frame),
+        "precondition: the composer frame is not a dialog"
+    );
+    assert!(
+        crate::terminal::screen::modal_open(&dialog),
+        "precondition: the dialog frame is a dialog"
+    );
+    // A modal on screen is never a federated frame (composer_tests), so the key-time composer
+    // re-read refuses it. The modal branch of the key-time check is therefore not isolated here.
+    assert_eq!(
+        None,
+        crate::terminal::composer::federated_composer(true, &dialog),
+        "precondition: a dialog is never a federated composer"
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let flock = scripted_candidate(&dir);
+    // The decision reads (2-3) see the composer; the key-time composer re-read (4) sees the dialog.
+    let mut probe = scripted_probe(
+        vec![
+            frame.clone(),
+            frame.clone(),
+            frame.clone(),
+            frame.clone(),
+            dialog,
+        ],
+        vec![std::process::id()],
+    );
+    federated_recovery_step(&flock, &mut probe, 100.0, &|_| {}).unwrap();
+    assert_eq!(
+        0,
+        federated_recovery_step(&flock, &mut probe, 221.0, &|_| {}).unwrap()
+    );
+    assert!(probe.keys.lock().unwrap().is_empty());
+
+    let control_dir = tempfile::tempdir().unwrap();
+    let control_flock = scripted_candidate(&control_dir);
+    let mut control = scripted_probe(vec![frame], vec![std::process::id()]);
+    federated_recovery_step(&control_flock, &mut control, 100.0, &|_| {}).unwrap();
+    assert_eq!(
+        1,
+        federated_recovery_step(&control_flock, &mut control, 221.0, &|_| {}).unwrap()
+    );
+}
+
+#[test]
+fn federated_dialog_held_across_steps_never_authorizes_keys() {
+    let dialog = format!("{}{MODAL}", scripted_frame("pending text"));
+    assert!(
+        crate::terminal::screen::modal_open(&dialog),
+        "precondition: the dialog frame is a dialog"
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let flock = scripted_candidate(&dir);
+    let mut probe = scripted_probe(vec![dialog], vec![std::process::id()]);
+    assert_eq!(
+        0,
+        federated_recovery_step(&flock, &mut probe, 100.0, &|_| {}).unwrap()
+    );
+    assert_eq!(
+        0,
+        federated_recovery_step(&flock, &mut probe, 221.0, &|_| {}).unwrap()
+    );
+    assert!(probe.keys.lock().unwrap().is_empty());
+}
+
+#[test]
+fn federated_failed_durable_reservation_never_presses() {
+    let frame = scripted_frame("pending text");
+    let dir = tempfile::tempdir().unwrap();
+    let flock = scripted_candidate(&dir);
+    let mut probe = scripted_probe(vec![frame.clone()], vec![std::process::id()]);
+    assert_eq!(
+        0,
+        federated_recovery_step(&flock, &mut probe, 100.0, &|_| {}).unwrap()
+    );
+    // A directory where the state file belongs makes the durable reservation save fail. (Removing
+    // the directory does not: the save recreates it.)
+    let state_file = dir.path().join("state.json");
+    let _ = std::fs::remove_file(&state_file);
+    std::fs::create_dir(&state_file).unwrap();
+    assert!(
+        flock.save().is_err(),
+        "precondition: the reservation save must fail"
+    );
+    // The step decides not to press, then its closing save reports the failure as an error.
+    let error = federated_recovery_step(&flock, &mut probe, 221.0, &|_| {})
+        .expect_err("the failed reservation save is reported, not hidden");
+    assert!(error.to_string().contains("state.json"), "{error}");
+    assert!(probe.keys.lock().unwrap().is_empty());
+
+    let control_dir = tempfile::tempdir().unwrap();
+    let control_flock = scripted_candidate(&control_dir);
+    let mut control = scripted_probe(vec![frame], vec![std::process::id()]);
+    federated_recovery_step(&control_flock, &mut control, 100.0, &|_| {}).unwrap();
+    assert_eq!(
+        1,
+        federated_recovery_step(&control_flock, &mut control, 221.0, &|_| {}).unwrap()
+    );
+}
+
+#[test]
+fn federated_cancelled_or_replaced_candidates_never_press() {
+    let frame = scripted_frame("pending text");
+    // Control: the unchanged candidate presses once, so the refusals below test the change.
+    let control_dir = tempfile::tempdir().unwrap();
+    let control_flock = scripted_candidate(&control_dir);
+    let mut control = scripted_probe(vec![frame.clone()], vec![std::process::id()]);
+    federated_recovery_step(&control_flock, &mut control, 100.0, &|_| {}).unwrap();
+    assert_eq!(
+        1,
+        federated_recovery_step(&control_flock, &mut control, 221.0, &|_| {}).unwrap()
+    );
+
+    for change in ["cancelled", "replaced"] {
+        let dir = tempfile::tempdir().unwrap();
+        let flock = persisted_flock(&dir);
+        let mut candidate = failed_federated_candidate(&federated_probe());
+        if change == "cancelled" {
+            candidate.status = "cancelled".into();
+        } else {
+            candidate.attempt_generation = Some("replacement-generation".into());
+        }
+        flock.note_stuck_candidate(&candidate);
+        let mut probe = scripted_probe(vec![frame.clone()], vec![std::process::id()]);
+        federated_recovery_step(&flock, &mut probe, 100.0, &|_| {}).unwrap();
+        assert_eq!(
+            0,
+            federated_recovery_step(&flock, &mut probe, 221.0, &|_| {}).unwrap(),
+            "{change} candidate"
+        );
+        assert!(
+            probe.keys.lock().unwrap().is_empty(),
+            "{change} candidate pressed"
+        );
+    }
+}
+
+// t3355 (t820 proof D) scheduled row 29: test_dunk_scheduled_recovery.py::
+// test_scheduled_failure_is_persisted_with_exact_expanded_text_and_generation (oracle 79bc92fa).
+// A scheduled failure is an eligible candidate that holds the expanded text and the pane
+// generation, and the state file holds the same entry as the in-memory candidate.
+#[test]
+fn scheduled_failure_is_persisted_with_expanded_text_and_generation() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = persisted_flock(&dir);
+    let generation = federated_probe().generation;
+    let expanded = "Scheduled check d7: read your inbox and finish the assigned work.";
+    let mut message = Message::new("m1", "%1", "lane", expanded, "send_text");
+    message.scheduled = true;
+    message.status = "sent".into();
+    message.attempt_generation = Some(generation.clone());
+    message.schedule_template =
+        Some("Scheduled check {id}: read your inbox and finish the assigned work.".into());
+    flock.note_stuck_candidate(&message);
+    let entry = flock
+        .stuck_candidates
+        .lock()
+        .unwrap()
+        .get("%1")
+        .cloned()
+        .expect("a scheduled failure is a stuck candidate");
+    let snapshot = crate::flock::sends::candidate_snapshot("%1", &entry);
+    assert_eq!(json!(true), snapshot["eligible"]);
+    assert_eq!(json!(expanded), snapshot["text"]);
+    assert_eq!(json!(generation), snapshot["generation"]);
+    flock.save().unwrap();
+    let saved: Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.path().join("state.json")).unwrap())
+            .unwrap();
+    assert_eq!(snapshot, saved["stuck_candidates"]["%1"]);
+}
+
+// t3355 (t820 proof D) wiring row 14, candidate half: test_dunk_recovery_wiring.py::
+// test_failure_candidate_and_spent_budget_survive_restart (oracle 79bc92fa). The spent budget
+// half is stuck.rs's spent_ledger_survives_restart_and_a_consumed_message_does_not_regain_budget.
+// This test covers the failed candidate: after a save and a restore into a fresh flock, the
+// candidate holds the same persisted fields. The comparison is on candidate_snapshot, the form
+// the state file stores.
+#[test]
+fn failed_candidate_survives_a_restart_through_the_state_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = scripted_candidate(&dir);
+    flock.save().unwrap();
+    let saved: Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.path().join("state.json")).unwrap())
+            .unwrap();
+    let restarted_dir = tempfile::tempdir().unwrap();
+    let restarted = persisted_flock(&restarted_dir);
+    restarted.restore_snapshot(&saved);
+    let before = flock.stuck_candidates.lock().unwrap().clone();
+    let after = restarted.stuck_candidates.lock().unwrap().clone();
+    assert_eq!(1, before.len());
+    assert!(
+        after.contains_key("%1"),
+        "the candidate survives the restart"
+    );
+    assert_eq!(
+        crate::flock::sends::candidate_snapshot("%1", &before["%1"]),
+        crate::flock::sends::candidate_snapshot("%1", &after["%1"])
+    );
+    assert!(
+        after["%1"].eligible,
+        "the restored candidate stays eligible"
+    );
+}
+
+// t3355 (t820 proof D) federated row 6, key level: test_dunk_federated_recovery.py::
+// test_watchdog_waits_then_presses_once_without_replaying_text (oracle 79bc92fa). The Python test
+// asserts one Enter after the threshold and no text sent. SendEnv has no text channel, and the
+// federated step's only input call is send_key(Enter) (loops_stuck.rs federated_recovery_step).
+// This test pins the key sequence across later steps, and that the watchdog never queues the
+// candidate text into the outbox. The no-text property is structural in the Rust seam.
+#[test]
+fn federated_watchdog_presses_once_and_never_queues_the_candidate_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = scripted_candidate(&dir);
+    *flock.stuck_config.lock().unwrap() = crate::stuck::Config {
+        max_attempts: 1,
+        cooldown_s: 1.0,
+        ..crate::stuck::Config::default()
+    };
+    let mut probe = scripted_probe(
+        vec![scripted_frame("pending text")],
+        vec![std::process::id()],
+    );
+    assert_eq!(
+        0,
+        federated_recovery_step(&flock, &mut probe, 100.0, &|_| {}).unwrap()
+    );
+    assert!(
+        probe.keys.lock().unwrap().is_empty(),
+        "the threshold has not elapsed"
+    );
+    assert_eq!(
+        1,
+        federated_recovery_step(&flock, &mut probe, 221.0, &|_| {}).unwrap()
+    );
+    // The composer still shows the pending text, but the spent budget keeps later steps silent.
+    for now in [240.0, 300.0] {
+        assert_eq!(
+            0,
+            federated_recovery_step(&flock, &mut probe, now, &|_| {}).unwrap(),
+            "at {now}"
+        );
+    }
+    assert_eq!(vec!["Enter".to_string()], *probe.keys.lock().unwrap());
+    assert!(
+        flock.outbox.lock().unwrap().is_empty(),
+        "the watchdog must not queue the candidate text"
     );
 }

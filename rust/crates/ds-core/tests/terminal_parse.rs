@@ -2,18 +2,25 @@
 //!
 //! The fixtures are the shapes a live tmux emits, including the two that broke the
 //! Python: a BLANK session_index (tmux leaves it empty when the session has no index
-//! set) and a 12-field line from an older capture with no geometry.
+//! set) and a 12-field line from an older capture with no geometry. A line whose field
+//! count is wrong refuses the whole listing; it is never read with shifted fields.
 
 use ds_core::terminal::parse::{
-    agent_kind, parse_panes, parse_tabs, parse_workspaces, safe_name, PANE_SEP,
+    agent_kind, pane_separator, parse_panes, parse_tabs, parse_workspaces, safe_name,
 };
+use ds_core::terminal::Pane;
 
 fn line(fields: &[&str]) -> String {
-    fields.join(&PANE_SEP.to_string())
+    fields.join(pane_separator())
 }
 
 fn no_registry(_pane: &str) -> Option<String> {
     None
+}
+
+/// A listing that must parse. The refusals are asserted on the `Err` directly.
+fn parsed(output: &str, label_of: &dyn Fn(&str) -> Option<String>) -> Vec<Pane> {
+    parse_panes(output, label_of).expect("the listing parses")
 }
 
 /// A full 14-field pane line, as tmux emits it with PANE_FORMAT.
@@ -47,7 +54,7 @@ fn full_line(
 #[test]
 fn a_full_line_parses_every_field() {
     let output = full_line("%2", "$2", "@2", "claude", "pi - review", "1", "2202");
-    let panes = parse_panes(&output, &no_registry);
+    let panes = parsed(&output, &no_registry);
     assert_eq!(1, panes.len());
     let pane = &panes[0];
     assert_eq!("%2", pane.pane_id);
@@ -79,7 +86,7 @@ fn a_blank_session_index_does_not_null_the_pane_pid() {
     // The 2026-10-24 defect: one try/except around every int() meant a blank
     // session_index raised first and pane_pid was nulled with it.
     let output = full_line("%2", "$2", "@2", "bash", "shell", "", "2202");
-    let pane = &parse_panes(&output, &no_registry)[0];
+    let pane = &parsed(&output, &no_registry)[0];
     assert_eq!(
         0, pane.workspace_index,
         "a blank index is 0, its own absence"
@@ -88,33 +95,72 @@ fn a_blank_session_index_does_not_null_the_pane_pid() {
 }
 
 #[test]
-fn a_twelve_field_line_parses_with_no_geometry() {
+fn a_twelve_field_line_refuses_the_listing() {
+    // The format has fourteen fields. A twelve-field line is an older capture: refused, not
+    // guessed at, so no pane is read with a size or a pid taken from another field.
     let output = line(&[
         "%1", "$1", "@1", "/tmp", "bash", "t", "0", "work", "1", "1", "1", "1101",
     ]);
-    let pane = &parse_panes(&output, &no_registry)[0];
-    assert_eq!(
-        (0, 0),
-        (pane.width, pane.height),
-        "no size is not size zero-by-guess"
-    );
-    // The route reads these: an absent size is not known, so it is null there, never 0.
-    assert_eq!(None, pane.known_width());
-    assert_eq!(None, pane.known_height());
-    assert!(!pane.active);
-    assert_eq!(Some(1101), pane.pane_pid);
+    let error = parse_panes(&output, &no_registry).expect_err("a twelve-field line is refused");
+    assert_eq!((1, 12, 14), (error.line, error.fields, error.expected));
 }
 
 #[test]
-fn a_short_line_is_skipped_not_guessed() {
+fn a_short_line_refuses_the_listing() {
     let output = line(&["%1", "$1", "@1", "/tmp", "bash"]);
-    assert!(parse_panes(&output, &no_registry).is_empty());
+    let error = parse_panes(&output, &no_registry).expect_err("a short line is refused");
+    assert_eq!((1, 5), (error.line, error.fields));
 }
 
 #[test]
-fn an_empty_or_failed_listing_is_empty() {
-    assert!(parse_panes("", &no_registry).is_empty());
-    assert!(parse_panes("\n", &no_registry).is_empty());
+fn an_empty_listing_is_empty() {
+    assert!(parsed("", &no_registry).is_empty());
+    assert!(parsed("\n", &no_registry).is_empty());
+}
+
+#[test]
+fn a_blank_line_between_panes_is_skipped() {
+    let output = [
+        full_line("%1", "$1", "@1", "bash", "one", "1", "1101"),
+        String::new(),
+        full_line("%2", "$2", "@2", "bash", "two", "1", "1102"),
+    ]
+    .join("\n");
+    assert_eq!(2, parsed(&output, &no_registry).len());
+}
+
+#[test]
+fn a_title_that_carries_the_separator_refuses_the_whole_listing() {
+    // A title with the token adds a field. The line after it cannot be trusted, and neither
+    // can the good line before it, so the listing is refused whole, not half read.
+    let carrying = format!("pi{}review", pane_separator());
+    let output = [
+        full_line("%1", "$1", "@1", "bash", "one", "1", "1101"),
+        full_line("%2", "$2", "@2", "claude", &carrying, "1", "2202"),
+    ]
+    .join("\n");
+    let error = parse_panes(&output, &no_registry).expect_err("a carrying title is refused");
+    assert_eq!((2, 15, 14), (error.line, error.fields, error.expected));
+}
+
+#[test]
+fn a_raw_unit_separator_is_never_a_separator() {
+    // tmux 3.4 escapes a control character in format output, so the old raw 0x1f can arrive
+    // as the text `\037` and split nothing. The token is what splits; a 0x1f line is one field.
+    let raw = [
+        "%1", "$1", "@1", "/tmp", "bash", "t", "0", "work", "1", "1", "1", "1101", "120", "40",
+    ]
+    .join("\u{1f}");
+    let error = parse_panes(&raw, &no_registry).expect_err("a raw 0x1f line is refused");
+    assert_eq!((1, 1, 14), (error.line, error.fields, error.expected));
+}
+
+#[test]
+fn the_separator_is_printable_and_stable_within_a_process() {
+    let separator = pane_separator();
+    assert_eq!(24, separator.len());
+    assert!(separator.bytes().all(|byte| byte.is_ascii_alphanumeric()));
+    assert_eq!(separator, pane_separator());
 }
 
 #[test]
@@ -127,7 +173,7 @@ fn the_registry_label_wins_over_the_title() {
             None
         }
     };
-    let pane = &parse_panes(&output, &label)[0];
+    let pane = &parsed(&output, &label)[0];
     assert_eq!(
         "worker-4", pane.label,
         "the recorded start_agent name is the stable label"
@@ -156,17 +202,35 @@ fn safe_name_strips_what_tmux_cannot_hold() {
 
 #[test]
 fn tabs_and_workspaces_parse_from_their_own_formats() {
-    let tabs = parse_tabs(&line(&["@2", "$2", "review", "2", "1"]));
+    let tabs = parse_tabs(&line(&["@2", "$2", "review", "2", "1"])).expect("tabs parse");
     assert_eq!(1, tabs.len());
     assert_eq!("@2", tabs[0].tab_id);
     assert_eq!("review", tabs[0].label);
     assert_eq!(2, tabs[0].index);
     assert!(tabs[0].active);
 
-    let workspaces = parse_workspaces(&line(&["$2", "work", "1"]));
+    let workspaces = parse_workspaces(&line(&["$2", "work", "1"])).expect("workspaces parse");
     assert_eq!(1, workspaces.len());
     assert_eq!("work", workspaces[0].label);
     assert_eq!(1, workspaces[0].index);
+}
+
+#[test]
+fn a_short_tab_or_workspace_line_refuses_its_listing() {
+    let tab_error = parse_tabs(&line(&["@2", "$2", "review", "2"])).expect_err("refused");
+    assert_eq!(
+        (1, 4, 5),
+        (tab_error.line, tab_error.fields, tab_error.expected)
+    );
+    let workspace_error = parse_workspaces(&line(&["$2", "work"])).expect_err("refused");
+    assert_eq!(
+        (1, 2, 3),
+        (
+            workspace_error.line,
+            workspace_error.fields,
+            workspace_error.expected
+        )
+    );
 }
 
 #[test]
@@ -176,7 +240,7 @@ fn multiple_lines_are_parsed_independently() {
         full_line("%2", "$2", "@2", "claude", "two", "", ""),
     ]
     .join("\n");
-    let panes = parse_panes(&output, &no_registry);
+    let panes = parsed(&output, &no_registry);
     assert_eq!(2, panes.len());
     assert_eq!(Some(1101), panes[0].pane_pid);
     assert_eq!(None, panes[1].pane_pid, "an empty pid is None, not 0");

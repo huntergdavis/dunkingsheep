@@ -392,6 +392,23 @@ fn not_ported(command: &str) -> Outcome {
     }
 }
 
+/// A bare `report` or `state` is an uncaught exception in the Python CLI: their subparser
+/// groups are not `required`, so argparse accepts the bare command and the body then fails.
+/// Python prints a traceback and exits 1; the frames are Python's own, the last line is
+/// reproduced. A Python bug, fixed after cutover, not now.
+fn python_uncaught(ns: &Map<String, Value>, last_line: &str) -> Outcome {
+    // Python's main() builds and probes the client before run_client_command raises, so an
+    // unreachable daemon is still that refusal, not the traceback.
+    if let Err(outcome) = crate::daemon_cmd::connect(ns) {
+        return outcome;
+    }
+    Outcome {
+        stdout: String::new(),
+        stderr: format!("Traceback (most recent call last):\n{last_line}\n"),
+        code: 1,
+    }
+}
+
 fn serve(ns: &Map<String, Value>) -> Outcome {
     let options = ds_core::server_runtime::DaemonOptions {
         socket_path: text(ns, "socket")
@@ -1134,6 +1151,48 @@ fn context_local(ns: &Map<String, Value>, json: bool) -> Option<Outcome> {
             value.insert("stores".into(), Value::Object(snapshots));
             let value = Value::Object(value);
             Some(outcome(value.clone(), ordered_json(&value) + "\n"))
+        }
+        "ledger" if text(ns, "action") == Some("status") => {
+            // `context ledger status`: every live entry's ledger state, then the row count.
+            // Reading the ledger connects to it, so the first status creates the file, as
+            // the Python does.
+            let store = Store::new(path.as_deref(), global);
+            let mut ledger = Ledger::new(None);
+            let mut rows = Vec::new();
+            for entry in store.live_entries() {
+                let content = match std::fs::read_to_string(&entry.path) {
+                    Ok(content) => content,
+                    Err(error) => return Some(failed(error.to_string())),
+                };
+                let state = match ledger.status(&store.root, &entry.slug, &content) {
+                    Ok(state) => state.as_str(),
+                    Err(error) => return Some(failed(error.to_string())),
+                };
+                rows.push(serde_json::json!({
+                    "slug": entry.slug,
+                    "class": entry.get("class"),
+                    "state": state,
+                }));
+            }
+            let count = match ledger.count() {
+                Ok(count) => count,
+                Err(error) => return Some(failed(error.to_string())),
+            };
+            let listing = rows
+                .iter()
+                .map(|row| {
+                    format!(
+                        "{:<11} {:<13} {}\n",
+                        row["state"].as_str().unwrap_or(""),
+                        row["class"].as_str().unwrap_or("None"),
+                        row["slug"].as_str().unwrap_or("")
+                    )
+                })
+                .collect::<String>();
+            Some(outcome(
+                serde_json::json!({"entries": rows, "count": count}),
+                listing,
+            ))
         }
         "ledger" if text(ns, "action") == Some("adopt") => {
             if std::env::var("DUNKINGSHEEP_SUPERUSER").ok().as_deref() != Some("1") {
@@ -2018,44 +2077,10 @@ fn guard_install(no_shadow: bool) -> Result<Value, String> {
     Ok(value)
 }
 
-fn guard_status() -> Value {
-    let dir = guard_config_dir();
-    let guard_dir = dir.join("bin");
-    let target = guard_dir.join("herdr");
-    let installed = target.exists();
-    let path = std::env::var_os("PATH").unwrap_or_default();
-    let resolved = find_executable("herdr", &path.to_string_lossy());
-    let active = resolved.as_ref().is_some_and(|path| {
-        path.parent()
-            .is_some_and(|parent| real_path(parent) == real_path(&guard_dir))
-    });
-    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
-    let bashrc = home.join(".bashrc");
-    let shell_configured = std::fs::read_to_string(bashrc)
-        .map(|contents| contents.contains("# dunkingsheep herdr guard"))
-        .unwrap_or(false);
-    let (herdr, real_herdr) = resolve_real_herdr(&guard_dir, &home);
-    let shadowing = file_has_marker(&herdr, b"dunkingsheep-herdr-guard") && real_herdr.exists();
-    let tmux_dir = dir.join("tmux-guard");
-    let tmux_wrapper = tmux_dir.join("tmux");
-    let tmux_real = tmux_dir.join("tmux-real");
-    serde_json::json!({
-        "installed": installed,
-        "wrapper": if installed { Some(target) } else { None::<PathBuf> },
-        "shell_configured": shell_configured,
-        "active_in_this_shell": active,
-        "shadowing_herdr": shadowing,
-        "covers_agents_started_by_herdr": shadowing,
-        "herdr_resolves_to": resolved,
-        "real_herdr": if shadowing { real_herdr } else { herdr },
-        "guarded_commands": ["pane run", "pane send-text", "pane send-keys", "agent send", "pane close", "pane kill", "tab close", "workspace close", "pane split/rename/focus", "tab create/rename/focus", "workspace create/rename/focus", "agent start"],
-        "tmux_guard": {
-            "installed": tmux_wrapper.exists(),
-            "wrapper": if tmux_wrapper.exists() { Some(tmux_wrapper) } else { None::<PathBuf> },
-            "real_tmux": if tmux_real.exists() { Some(tmux_real) } else { None::<PathBuf> },
-            "covers": "agent panes started by TmuxBackend (PATH prefix); user shells untouched"
-        }
-    })
+/// `dunk_guard.status()`: the one producer lives in ds-core, where the daemon's `doctor` reads
+/// it too. `Err` is the exception text (an unreadable `~/.bashrc`), which Python lets escape.
+fn guard_status() -> Result<Value, String> {
+    ds_core::guard::status(&ds_core::guard::GuardPaths::from_process())
 }
 
 fn guard_unshadow() -> Result<Value, String> {
@@ -2068,7 +2093,7 @@ fn guard_unshadow() -> Result<Value, String> {
     } else {
         false
     };
-    let mut value = guard_status();
+    let mut value = guard_status()?;
     value["restored"] = Value::Bool(restored);
     value["herdr"] = serde_json::to_value(herdr).unwrap();
     Ok(value)
@@ -2104,7 +2129,7 @@ fn guard_shadow() -> Result<Value, String> {
         std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o755))
             .map_err(|error| error.to_string())?;
     }
-    let mut value = guard_status();
+    let mut value = guard_status()?;
     value["shadowed"] = Value::Bool(true);
     Ok(value)
 }
@@ -2148,7 +2173,7 @@ fn guard_uninstall() -> Result<Value, String> {
             std::fs::write(bashrc, cleaned).map_err(|error| error.to_string())?;
         }
     }
-    let mut value = guard_status();
+    let mut value = guard_status()?;
     value["wrapper_removed"] = Value::Bool(wrapper_removed);
     value["bashrc_cleaned"] = Value::Bool(bashrc_cleaned);
     Ok(value)
@@ -2729,7 +2754,7 @@ fn pm(ns: &Map<String, Value>) -> Outcome {
 fn guard(ns: &Map<String, Value>) -> Outcome {
     let action = text(ns, "action").unwrap_or("status");
     let result = match action {
-        "status" => Ok(guard_status()),
+        "status" => guard_status(),
         "install" => guard_install(matches!(ns.get("no_shadow"), Some(Value::Bool(true)))),
         "install-tmux" => guard_install_tmux(),
         "check" => guard_check(),
@@ -2809,9 +2834,8 @@ fn owner_outbox(ns: &Map<String, Value>) -> Outcome {
 }
 
 fn state(ns: &Map<String, Value>) -> Outcome {
-    let command = text(ns, "state_command").unwrap_or("");
-    let (rpc, args) = match command {
-        "capture" => {
+    let (rpc, args) = match text(ns, "state_command") {
+        Some("capture") => {
             let mut args = Map::new();
             args.insert(
                 "source".into(),
@@ -2821,7 +2845,7 @@ fn state(ns: &Map<String, Value>) -> Outcome {
             );
             ("state_capture", args)
         }
-        "latest" => {
+        Some("latest") => {
             let mut args = Map::new();
             for (source, target) in [
                 ("pane", "pane_id"),
@@ -2834,7 +2858,9 @@ fn state(ns: &Map<String, Value>) -> Outcome {
             }
             ("state_latest", args)
         }
-        other => return not_ported(&format!("state {other}")),
+        // Bare `state` indexes `{"capture": ..., "latest": ...}[None]` in Python.
+        None => return python_uncaught(ns, "KeyError: None"),
+        Some(other) => return not_ported(&format!("state {other}")),
     };
     crate::daemon_cmd::run_command(ns, rpc, args, crate::render_print::render_view)
 }
@@ -3211,7 +3237,12 @@ fn report(ns: &Map<String, Value>) -> Outcome {
             })
         }
         Some(other) => not_ported(&format!("report {other}")),
-        None => not_ported("report"),
+        // Bare `report` falls into `report run` in Python and reads `args.prose`, which only
+        // the `run` subparser defines.
+        None => python_uncaught(
+            ns,
+            "AttributeError: 'Namespace' object has no attribute 'prose'",
+        ),
     }
 }
 

@@ -365,10 +365,11 @@ fn h_status_takes_the_cached_view_by_default_the_full_path_with_full_and_probes_
     );
 }
 
-// ---- CodeIdentity (leader's decision on t1397) -------------------------------------------
+// ---- CodeIdentity (t1397, revised by t3463: the build's identity, a stat for staleness) ----
 
 mod code_identity {
     use super::super::status::CodeIdentity;
+    use crate::release_identity::CODE_HASH;
     use serde_json::json;
 
     fn fake_exe(dir: &tempfile::TempDir, bytes: &[u8]) -> std::path::PathBuf {
@@ -378,11 +379,16 @@ mod code_identity {
     }
 
     #[test]
-    fn the_hash_is_twelve_hex_of_sha256_over_the_bytes_and_an_untouched_binary_is_not_stale() {
+    fn the_hash_is_the_generated_release_identity_and_an_untouched_binary_is_not_stale() {
         let dir = tempfile::tempdir().unwrap();
         let identity = CodeIdentity::at_start(fake_exe(&dir, b"abc"));
         let status = identity.code_status();
-        assert_eq!(json!("ba7816bf8f01"), status["code_hash"]);
+        assert_eq!(json!(CODE_HASH), status["code_hash"]);
+        // The identity is the build's, never a digest of the bytes on disk.
+        assert_eq!(
+            status["code_hash"],
+            CodeIdentity::at_start(fake_exe(&dir, b"other bytes")).code_status()["code_hash"]
+        );
         assert_eq!(json!(false), status["code_stale"]);
         assert_eq!(json!([]), status["code_changed_modules"]);
         assert_eq!(json!([]), status["code_identity_errors"]);
@@ -433,11 +439,11 @@ mod code_identity {
     }
 
     #[test]
-    fn an_unreadable_binary_has_no_hash_an_unknown_staleness_and_names_the_error() {
+    fn a_binary_that_cannot_be_stated_keeps_the_identity_with_unknown_staleness() {
         let dir = tempfile::tempdir().unwrap();
         let identity = CodeIdentity::at_start(dir.path().join("missing"));
         let status = identity.code_status();
-        assert_eq!(serde_json::Value::Null, status["code_hash"]);
+        assert_eq!(json!(CODE_HASH), status["code_hash"]);
         assert_eq!(
             serde_json::Value::Null,
             status["code_stale"],

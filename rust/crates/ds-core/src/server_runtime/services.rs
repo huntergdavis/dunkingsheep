@@ -122,6 +122,8 @@ pub struct RuntimeServices {
     shutdown_lock: Mutex<()>,
     shutdown_failure: Mutex<Option<String>>,
     memory: Option<Arc<MemoryService>>,
+    /// `dunk_guard`'s import-time paths from the captured startup environment (`doctor`).
+    pub(super) guard_paths: crate::guard::GuardPaths,
 }
 
 impl RuntimeServices {
@@ -321,6 +323,7 @@ impl RuntimeServices {
         // A narrow construction seam lets rollback tests fail after the first worker starts.
         after_memory_start(&flock, &starting_memory.0)?;
 
+        let guard_paths = crate::guard::GuardPaths::from_env(&inputs.env);
         let terminal_factory = inputs.terminal_factory;
         let control_config_dir = inputs
             .launches_file
@@ -364,6 +367,7 @@ impl RuntimeServices {
             shutdown_lock: Mutex::new(()),
             shutdown_failure: Mutex::new(None),
             memory: starting_memory.0.take(),
+            guard_paths,
         }))
     }
 

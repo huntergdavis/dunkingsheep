@@ -19,6 +19,7 @@ pub mod client;
 pub mod clock;
 pub mod config;
 pub mod context;
+pub mod daemon_log;
 pub mod db;
 pub mod dialog_alerts;
 pub mod dispatch;
@@ -26,6 +27,7 @@ pub mod error;
 pub mod fallback;
 pub mod flock;
 pub mod github;
+pub mod guard;
 pub mod health;
 pub mod help;
 pub mod http;
@@ -54,6 +56,7 @@ pub mod report;
 // rustfmt must not rewrite it: formatting it makes the generator's --check fail.
 #[rustfmt::skip]
 pub mod registry;
+pub mod release_identity;
 pub mod retry;
 pub mod review;
 pub mod roles;

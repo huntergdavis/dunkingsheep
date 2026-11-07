@@ -3,9 +3,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use std::{fs::OpenOptions, io::Write};
 
 use crate::config::{CapturedPythonHome, Env};
+use crate::daemon_log::DaemonLog;
 use crate::error::{refusal, DunkError};
 use crate::flock::loop_env::{configured_loop_terminal_factory_from, LoopTerminalFactory};
 use crate::flock::loops::{LoopIntervals, LoopSet};
@@ -55,10 +55,11 @@ pub fn run_daemon(options: DaemonOptions) -> Result<i32, DunkError> {
             "could not resolve daemon executable identity: {error}"
         ))
     })?;
+    // `status.version` is the release the CLI's `--version` prints (`dunk_core.VERSION`), not
+    // the crate version (t3463); DUNKINGSHEEP_VERSION stays a test-only override.
     let release_version = env
         .get("DUNKINGSHEEP_VERSION")
-        .or(option_env!("CARGO_PKG_VERSION"))
-        .unwrap_or("unknown")
+        .unwrap_or(crate::release_identity::VERSION)
         .to_owned();
     run_daemon_captured(
         options,
@@ -86,7 +87,8 @@ pub fn run_daemon_captured(
 ) -> Result<i32, DunkError> {
     let env = &startup.env;
     let config_dir = common_config_dir(env, &startup.home)?;
-    let mut log = DaemonLog::configure(&config_dir, options.no_log_file);
+    let log = DaemonLog::configure(&config_dir, options.no_log_file);
+    let release_version = startup.release_version.clone();
     let default_socket = config_dir.join("dunkingsheep.sock");
     let socket_path = options
         .socket_path
@@ -171,8 +173,11 @@ pub fn run_daemon_captured(
     let fallback_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let stop = stop.unwrap_or(fallback_stop);
 
+    // Runtime threads log to this daemon's log, like the threads the server spawns.
+    let runtime_log = log.thread_log();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
+        .on_thread_start(move || runtime_log.adopt())
         .build()
         .map_err(|error| refusal(format!("could not create daemon runtime: {error}")))?;
     let tasks = Arc::new(runtime.block_on(Tasks::open(config_dir.join("tasks.db")))?);
@@ -258,7 +263,8 @@ pub fn run_daemon_captured(
             None => None,
         };
     let mut server =
-        FlockServer::new_with_stop(services.production_dispatcher(), socket_path, stop);
+        FlockServer::new_with_stop(services.production_dispatcher(), socket_path, stop)
+            .with_version(release_version);
     if let Err(error) = server.bind() {
         let loop_result = services.runtime_handle().block_on(loops.stop());
         let shutdown = services.shutdown_checked();
@@ -338,36 +344,6 @@ pub fn run_daemon_captured(
         return Err(refusal(failures.join("; ")));
     }
     Ok(0)
-}
-
-struct DaemonLog(Option<std::fs::File>);
-
-impl DaemonLog {
-    fn configure(config_dir: &Path, no_log_file: bool) -> Self {
-        if no_log_file {
-            return Self(None);
-        }
-        use std::os::unix::fs::OpenOptionsExt;
-        let path = config_dir.join("daemon.log");
-        let file = std::fs::create_dir_all(config_dir)
-            .and_then(|()| {
-                OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .mode(0o600)
-                    .open(&path)
-            })
-            .ok();
-        Self(file)
-    }
-
-    fn error(&mut self, message: &str) {
-        if let Some(file) = &mut self.0 {
-            let _ = writeln!(file, "ERROR {message}");
-        } else {
-            eprintln!("{message}");
-        }
-    }
 }
 
 fn common_config_dir(env: &Env, home: &CapturedPythonHome) -> Result<PathBuf, DunkError> {
@@ -456,6 +432,10 @@ fn captured_loop_intervals(env: &Env) -> Result<LoopIntervals, DunkError> {
 }
 
 #[cfg(test)]
+#[path = "daemon_socket_tests.rs"]
+mod socket_tests;
+
+#[cfg(test)]
 mod tests {
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::Shutdown;
@@ -463,6 +443,7 @@ mod tests {
     use std::sync::mpsc;
 
     use super::*;
+    use crate::daemon_log::has_python_timestamp;
 
     fn daemon_call(
         socket: &Path,
@@ -1003,6 +984,19 @@ mod tests {
         );
         assert!(!config.join("tasks.db").exists());
         assert!(!config.join("inbox.db").exists());
+        // `log.error(...)` before `return 3`, in the configured log file and format.
+        let text = std::fs::read_to_string(config.join("daemon.log")).expect("daemon.log");
+        assert!(
+            text.lines().any(|line| {
+                has_python_timestamp(line)
+                    && line.ends_with(
+                        " ERROR dunkingsheep.server: dunkingsheep.service supervises this daemon; \
+                         refusing an unsupervised start. Run: systemctl --user start \
+                         dunkingsheep.service",
+                    )
+            }),
+            "{text}"
+        );
     }
 
     #[test]

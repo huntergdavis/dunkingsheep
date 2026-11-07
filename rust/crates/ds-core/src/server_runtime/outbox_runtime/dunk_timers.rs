@@ -153,7 +153,9 @@ impl DunkTimerOwner {
         let factory = Arc::clone(&self.factory);
         let pool = self.pool.clone();
         let reporter = self.reporter.clone();
+        let log = crate::daemon_log::ThreadLog::capture();
         let join = thread::Builder::new().name(thread_name).spawn(move || {
+            log.adopt();
             let failed_handle = Arc::clone(&handle);
             let failed_flock = flock.clone();
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
