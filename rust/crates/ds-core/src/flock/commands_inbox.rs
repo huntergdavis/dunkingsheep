@@ -859,6 +859,20 @@ impl Flock {
             marked_read: Some(marked),
         })
     }
+
+    /// Mark exactly these messages read and record the delivery for recovery (t3539). The desk read
+    /// marks only the messages its clamped response carries, so a message the response leaves out
+    /// stays unread for the next read.
+    pub fn inbox_mark_read_ids(
+        &self,
+        env: &dyn InboxEnv,
+        mailbox: &str,
+        ids: &[String],
+    ) -> Result<usize, DunkError> {
+        let marked = env.store().mark_read(ids, None)?;
+        env.store().record_delivery(mailbox, ids, None)?;
+        Ok(marked)
+    }
 }
 
 /// Python's `repr()` of a str, as the refusal text uses `{spec!r}`.
