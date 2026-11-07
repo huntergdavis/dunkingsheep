@@ -1,0 +1,475 @@
+{
+  "cases": [
+    {
+      "body": {
+        "answer_id": null,
+        "answered_at": null,
+        "attachments": [],
+        "body": "reply",
+        "channel": "cos",
+        "created_at": "2026-11-07T23:35:58.017Z",
+        "delivered_at": null,
+        "delivery": "posted",
+        "delivery_detail": "",
+        "delivery_latency_s": null,
+        "external_id": null,
+        "id": 2,
+        "role": "agent",
+        "transport_attempt_at": 0.0,
+        "transport_attempts": 0,
+        "transport_id": null
+      },
+      "db_after": {
+        "answered": 0,
+        "attachments": 0,
+        "messages": 2,
+        "newest_id": 2
+      },
+      "db_before": {
+        "answered": 0,
+        "attachments": 0,
+        "messages": 1,
+        "newest_id": 1
+      },
+      "identity": "api",
+      "method": "POST",
+      "name": "brief_base",
+      "payload": {
+        "answers": [],
+        "body": "reply",
+        "channel": "cos"
+      },
+      "status": 200,
+      "url": "/api/brief"
+    },
+    {
+      "body": {
+        "answer_id": null,
+        "answered_at": null,
+        "attachments": [],
+        "body": "answer",
+        "channel": "cos",
+        "created_at": "2026-11-07T23:35:58.053Z",
+        "delivered_at": null,
+        "delivery": "posted",
+        "delivery_detail": "",
+        "delivery_latency_s": null,
+        "external_id": null,
+        "id": 3,
+        "role": "agent",
+        "transport_attempt_at": 0.0,
+        "transport_attempts": 0,
+        "transport_id": null
+      },
+      "db_after": {
+        "answered": 1,
+        "attachments": 0,
+        "messages": 3,
+        "newest_id": 3
+      },
+      "db_before": {
+        "answered": 0,
+        "attachments": 0,
+        "messages": 2,
+        "newest_id": 2
+      },
+      "identity": "api",
+      "method": "POST",
+      "name": "brief_answers_owner_question",
+      "payload": {
+        "answers": [
+          1
+        ],
+        "body": "answer",
+        "channel": "cos"
+      },
+      "status": 200,
+      "url": "/api/brief"
+    },
+    {
+      "body": {
+        "text": "Internal Server Error"
+      },
+      "db_after": {
+        "answered": 1,
+        "attachments": 0,
+        "messages": 3,
+        "newest_id": 3
+      },
+      "db_before": {
+        "answered": 1,
+        "attachments": 0,
+        "messages": 3,
+        "newest_id": 3
+      },
+      "identity": "api",
+      "method": "POST",
+      "name": "brief_answer_too_large",
+      "payload": {
+        "answers": [
+          1267650600228229401496703205376
+        ],
+        "body": "huge",
+        "channel": "cos"
+      },
+      "status": 500,
+      "url": "/api/brief"
+    },
+    {
+      "body": {
+        "text": "Internal Server Error"
+      },
+      "db_after": {
+        "answered": 1,
+        "attachments": 0,
+        "messages": 3,
+        "newest_id": 3
+      },
+      "db_before": {
+        "answered": 1,
+        "attachments": 0,
+        "messages": 3,
+        "newest_id": 3
+      },
+      "identity": "api",
+      "method": "POST",
+      "name": "brief_answer_overflow_64bit",
+      "payload": {
+        "answers": [
+          9223372036854775808
+        ],
+        "body": "huge64",
+        "channel": "cos"
+      },
+      "status": 500,
+      "url": "/api/brief"
+    },
+    {
+      "body": {
+        "detail": [
+          {
+            "ctx": {
+              "gt": 0
+            },
+            "input": 0,
+            "loc": [
+              "body",
+              "answers",
+              0
+            ],
+            "msg": "Input should be greater than 0",
+            "type": "greater_than"
+          }
+        ]
+      },
+      "db_after": {
+        "answered": 1,
+        "attachments": 0,
+        "messages": 3,
+        "newest_id": 3
+      },
+      "db_before": {
+        "answered": 1,
+        "attachments": 0,
+        "messages": 3,
+        "newest_id": 3
+      },
+      "identity": "api",
+      "method": "POST",
+      "name": "brief_answer_zero",
+      "payload": {
+        "answers": [
+          0
+        ],
+        "body": "zero",
+        "channel": "cos"
+      },
+      "status": 422,
+      "url": "/api/brief"
+    },
+    {
+      "body": {
+        "detail": [
+          {
+            "input": true,
+            "loc": [
+              "body",
+              "answers",
+              0
+            ],
+            "msg": "Input should be a valid integer",
+            "type": "int_type"
+          }
+        ]
+      },
+      "db_after": {
+        "answered": 1,
+        "attachments": 0,
+        "messages": 3,
+        "newest_id": 3
+      },
+      "db_before": {
+        "answered": 1,
+        "attachments": 0,
+        "messages": 3,
+        "newest_id": 3
+      },
+      "identity": "api",
+      "method": "POST",
+      "name": "brief_answer_bool",
+      "payload": {
+        "answers": [
+          true
+        ],
+        "body": "bool",
+        "channel": "cos"
+      },
+      "status": 422,
+      "url": "/api/brief"
+    },
+    {
+      "body": {
+        "detail": [
+          {
+            "input": 1.0,
+            "loc": [
+              "body",
+              "answers",
+              0
+            ],
+            "msg": "Input should be a valid integer",
+            "type": "int_type"
+          }
+        ]
+      },
+      "db_after": {
+        "answered": 1,
+        "attachments": 0,
+        "messages": 3,
+        "newest_id": 3
+      },
+      "db_before": {
+        "answered": 1,
+        "attachments": 0,
+        "messages": 3,
+        "newest_id": 3
+      },
+      "identity": "api",
+      "method": "POST",
+      "name": "brief_answer_float",
+      "payload": {
+        "answers": [
+          1.0
+        ],
+        "body": "float",
+        "channel": "cos"
+      },
+      "status": 422,
+      "url": "/api/brief"
+    },
+    {
+      "body": {
+        "detail": [
+          {
+            "ctx": {
+              "min_length": 1
+            },
+            "input": "",
+            "loc": [
+              "body",
+              "body"
+            ],
+            "msg": "String should have at least 1 character",
+            "type": "string_too_short"
+          }
+        ]
+      },
+      "db_after": {
+        "answered": 1,
+        "attachments": 0,
+        "messages": 3,
+        "newest_id": 3
+      },
+      "db_before": {
+        "answered": 1,
+        "attachments": 0,
+        "messages": 3,
+        "newest_id": 3
+      },
+      "identity": "api",
+      "method": "POST",
+      "name": "brief_empty_body",
+      "payload": {
+        "answers": [],
+        "body": "",
+        "channel": "cos"
+      },
+      "status": 422,
+      "url": "/api/brief"
+    },
+    {
+      "body": {
+        "detail": "Unknown channel"
+      },
+      "db_after": {
+        "answered": 1,
+        "attachments": 0,
+        "messages": 3,
+        "newest_id": 3
+      },
+      "db_before": {
+        "answered": 1,
+        "attachments": 0,
+        "messages": 3,
+        "newest_id": 3
+      },
+      "identity": "api",
+      "method": "POST",
+      "name": "brief_unknown_channel",
+      "payload": {
+        "answers": [],
+        "body": "x",
+        "channel": "nope"
+      },
+      "status": 404,
+      "url": "/api/brief"
+    },
+    {
+      "body": {
+        "detail": "Attachment missing is unavailable"
+      },
+      "db_after": {
+        "answered": 1,
+        "attachments": 0,
+        "messages": 3,
+        "newest_id": 3
+      },
+      "db_before": {
+        "answered": 1,
+        "attachments": 0,
+        "messages": 3,
+        "newest_id": 3
+      },
+      "identity": "api",
+      "method": "POST",
+      "name": "brief_missing_attachment",
+      "payload": {
+        "answers": [],
+        "attachment_ids": [
+          "missing"
+        ],
+        "body": "x",
+        "channel": "cos"
+      },
+      "status": 422,
+      "url": "/api/brief"
+    },
+    {
+      "body": {
+        "detail": "API token required"
+      },
+      "db_after": {
+        "answered": 1,
+        "attachments": 0,
+        "messages": 3,
+        "newest_id": 3
+      },
+      "db_before": {
+        "answered": 1,
+        "attachments": 0,
+        "messages": 3,
+        "newest_id": 3
+      },
+      "identity": "owner",
+      "method": "POST",
+      "name": "brief_owner_identity_refused",
+      "payload": {
+        "answers": [],
+        "body": "x",
+        "channel": "cos"
+      },
+      "status": 403,
+      "url": "/api/brief"
+    },
+    {
+      "body": {
+        "detail": "Message not found"
+      },
+      "db_after": {
+        "answered": 1,
+        "attachments": 0,
+        "messages": 3,
+        "newest_id": 3
+      },
+      "db_before": {
+        "answered": 1,
+        "attachments": 0,
+        "messages": 3,
+        "newest_id": 3
+      },
+      "identity": "owner",
+      "method": "POST",
+      "name": "send_now_owner_not_found",
+      "payload": null,
+      "status": 404,
+      "url": "/api/messages/999/send-now"
+    },
+    {
+      "body": {
+        "detail": "Owner sign-in required"
+      },
+      "db_after": {
+        "answered": 1,
+        "attachments": 0,
+        "messages": 3,
+        "newest_id": 3
+      },
+      "db_before": {
+        "answered": 1,
+        "attachments": 0,
+        "messages": 3,
+        "newest_id": 3
+      },
+      "identity": "api",
+      "method": "POST",
+      "name": "send_now_api_refused",
+      "payload": null,
+      "status": 403,
+      "url": "/api/messages/999/send-now"
+    },
+    {
+      "body": {
+        "text": "Internal Server Error"
+      },
+      "db_after": {
+        "answered": 1,
+        "attachments": 0,
+        "messages": 3,
+        "newest_id": 3
+      },
+      "db_before": {
+        "answered": 1,
+        "attachments": 0,
+        "messages": 3,
+        "newest_id": 3
+      },
+      "identity": "owner",
+      "method": "POST",
+      "name": "send_now_huge_id",
+      "payload": null,
+      "status": 500,
+      "url": "/api/messages/1267650600228229401496703205376/send-now"
+    }
+  ],
+  "oracle": {
+    "fastapi": "0.162.0",
+    "interpreter": "3.14.4",
+    "pydantic": "2.14.2",
+    "revision": "cdbef7f950aaa20d9c78ea96872e7fef1c6da810",
+    "starlette": "1.10.0"
+  },
+  "seed": {
+    "huge": "1267650600228229401496703205376",
+    "owner_question_id": 1
+  }
+}
