@@ -983,6 +983,7 @@ impl Dispatcher {
     pub fn register_owner_delivered_message_state_reply_stats(&mut self) {
         self.register("owner_delivered", h_owner_delivered);
         self.register("owner_page", h_owner_page);
+        self.register("owner_page_confirmed", h_owner_page_confirmed);
         self.register("message_state", h_message_state);
         self.register("reply_stats", h_reply_stats);
     }
@@ -1030,6 +1031,7 @@ impl Dispatcher {
         self.register("task_unblock", h_task_unblock);
         self.register("task_cancel", h_task_cancel);
         self.register("task_next", h_task_next);
+        self.register("task_batch_claim", h_task_batch_claim);
         self.register("task_heartbeat", h_task_heartbeat);
         self.register("task_release", h_task_release);
     }
@@ -2107,6 +2109,20 @@ pub fn h_owner_page(context: &HandlerContext<'_>, args: Args) -> Result<Value, D
     }))
 }
 
+/// `owner_page_confirmed` (t665): the highest owner page the Telegram transport has delivered,
+/// as the watchdog compares it. Owner and system only.
+pub fn h_owner_page_confirmed(
+    context: &HandlerContext<'_>,
+    _args: Args,
+) -> Result<Value, DunkError> {
+    let through = crate::owner::OwnerConversations::new(context.flock, context.env)
+        .page_confirmed_through(context.self_pane_id())?;
+    Ok(json!({
+        "through": through,
+        "transport": crate::owner::conversations::OWNER_PAGE_TRANSPORT,
+    }))
+}
+
 /// `dunk_api.h_owner_ingest`.
 pub fn h_owner_ingest(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
     let ingested = crate::owner::OwnerConversations::new(context.flock, context.env).ingest_wire(
@@ -2119,11 +2135,49 @@ pub fn h_owner_ingest(context: &HandlerContext<'_>, args: Args) -> Result<Value,
         },
         context.self_pane_id(),
     )?;
+    // t1613: a new Telegram question nudges the desk once. Web is nudged by its own route, and a
+    // redelivery was nudged when it first arrived, so neither is nudged here.
+    if !ingested.duplicate && ingested.transport == "telegram" {
+        nudge_desk_for_telegram(context, &ingested.message);
+    }
     Ok(json!({
         "message": owner_message_value(&ingested.message),
         "duplicate": ingested.duplicate,
         "transport": ingested.transport,
     }))
+}
+
+/// Best effort: a missing desk or a refused write never fails the ingest, because the mailbox row is
+/// already the record. The write is the one the web route makes (no pane, no system sender, notify
+/// on), so the desk gets one inbox line and nothing is typed into a pane.
+fn nudge_desk_for_telegram(context: &HandlerContext<'_>, message: &crate::inbox_store::Message) {
+    let panes = context.env.list_panes_grouped();
+    let Some(desk) = desk_nudge::desk_pane_for(&panes) else {
+        return;
+    };
+    let Some(pane_id) = desk.get("pane_id").and_then(Value::as_str) else {
+        return;
+    };
+    let message_id = message.summary.message_id.clone();
+    let body = desk_nudge::nudge_body(&message_id, "telegram", &message.body);
+    let subject = desk_nudge::nudge_subject(&message_id);
+    let _ = context.env.with_inbox_env(&mut |env| {
+        context.flock.inbox_send_wire(
+            env,
+            &crate::flock::commands_inbox::SendArgs {
+                to: pane_id,
+                body: &body,
+                subject: Some(&subject),
+                attach: &[],
+                notify: true,
+                self_pane_id: None,
+                system_sender: None,
+            },
+            None,
+            None,
+        )?;
+        Ok(Value::Null)
+    });
 }
 
 /// `dunk_api.h_owner_outbox`.
@@ -3295,6 +3349,38 @@ pub fn h_task_next(context: &HandlerContext<'_>, args: Args) -> Result<Value, Du
     ))?
 }
 
+/// `dunk_api.h_task_batch_claim` (t3583): claim an explicit, ordered list of tasks, all or none.
+pub fn h_task_batch_claim(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let pane = context.self_pane_id();
+    let ids = batch_ids_arg(&args)?;
+    let lease_seconds = python_lease_seconds(&args)?;
+    // `current_caller` is request-thread state; capture it before this future may hop workers.
+    let caller = context.flock.caller_identity();
+    context.block_on(context.flock.task_batch_claim_wire(
+        context.env,
+        &ids,
+        lease_seconds,
+        python_bool_arg(&args, "allow_busy", false),
+        caller,
+        pane,
+    ))?
+}
+
+/// The `ids` argument: a list of task ids, kept in the order given.
+fn batch_ids_arg(args: &Args) -> Result<Vec<String>, DunkError> {
+    match args.get("ids") {
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|item| item.as_str().map(str::to_owned).ok_or_else(ids_refusal))
+            .collect(),
+        _ => Err(ids_refusal()),
+    }
+}
+
+fn ids_refusal() -> DunkError {
+    DunkError::Refused("ids must be a list of task ids".into())
+}
+
 /// `dunk_api.h_task_heartbeat`.
 pub fn h_task_heartbeat(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
     let pane = context.self_pane_id();
@@ -3427,6 +3513,12 @@ fn py_repr(text: &str) -> String {
 
 #[cfg(test)]
 mod tests;
+
+mod desk_nudge;
+
+#[cfg(test)]
+#[path = "api/owner_ingest_nudge_tests.rs"]
+mod owner_ingest_nudge_tests;
 
 #[cfg(test)]
 mod landed_parity_tests;

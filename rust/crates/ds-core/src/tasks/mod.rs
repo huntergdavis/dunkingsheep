@@ -42,6 +42,7 @@ pub use claim::{
     claimable, refusal, CallerAlive, Candidate, ClaimOptions, ClaimOutcome, Refusal, Requeued,
 };
 pub use claim_batch::ClaimBatchOutcome;
+use claim_batch::{guard_completion, leave_batch_on_status, retire_member};
 
 /// `DEFAULT_LEASE_S`: how long a claim stays valid without a heartbeat. The Python reads
 /// `DUNKINGSHEEP_LEASE_S` once at import; this reads it per call.
@@ -544,6 +545,10 @@ impl Tasks {
                     return Err(DunkError::Refused(format!(
                         "task {id} is {current}; a finished task is not reopened by an edit (t854)")));
                 }
+                // t3582: a batch member completes only after its earlier members have left, and
+                // its in-batch prerequisites are done or cancelled. The same guard as every other
+                // status path (guard_completion), so no path can differ from another.
+                guard_completion(conn, &id, &current, &status)?;
                 // SQLite's attempted binding happens only after visibility and terminal-state
                 // checks, as in Python. The rejected composite value therefore cannot hide a
                 // refusal or partially change status, leases, or events.
@@ -623,6 +628,10 @@ impl Tasks {
                 }
                 // t1218 A: the event path. Completing a task unblocks what it blocks, in
                 // the same writer call as the completion, so no lane runs `task unblock`.
+                // t3582: a member that leaves the work (done, cancelled or blocked) ends its own
+                // membership only; the rest of its batch goes on. The batch ends when its last
+                // active member leaves.
+                leave_batch_on_status(conn, &id, &current, &status)?;
                 if status == "done" && current != "done" {
                     auto_unblock(conn, now, Some(&id))?;
                 }
@@ -677,6 +686,9 @@ impl Tasks {
                     params![reason, json!(deps).to_string(), now, id],
                 )
                 .map_err(db::map_sqlite)?;
+                // t3582: blocking a member ends its own membership; the batch goes on (block_by
+                // is a status path too, and it had no retirement).
+                retire_member(conn, &id)?;
                 // The `blocked` event carries scope and priority like every other writer
                 // (Python `_record`): a scoped metrics query keys on scope and drops a NULL one.
                 conn.execute(
@@ -1093,6 +1105,9 @@ impl Tasks {
                     return Err(DunkError::Refused(format!(
                         "task {id} has {children} child task(s); delete or re-parent them first")));
                 }
+                // t3582: a deleted member ends its membership, so it cannot hold later members back
+                // as a row nobody will ever finish (the review of #807 found it did).
+                retire_member(&tx, &id)?;
                 let mut dependents = Vec::new();
                 {
                     let mut stmt = tx
@@ -1280,6 +1295,10 @@ impl Tasks {
                     }
                 }
                 if let Some(status) = &status_after {
+                    // t3582: the batch order guard and the membership retirement apply on every
+                    // status path. This one had neither (the review of #807 found it).
+                    guard_completion(&tx, &id, &old_status, status)?;
+                    leave_batch_on_status(&tx, &id, &old_status, status)?;
                     let status_rows = match status.as_str() {
                         "done" => {
                             tx.execute(
@@ -2061,6 +2080,12 @@ fn migrate(conn: &Connection) -> Result<(), DunkError> {
         // fix); without it the port would fall back to the SELECT-then-INSERT the Python
         // comment names as the bug.
         "CREATE TABLE IF NOT EXISTS counters (name TEXT PRIMARY KEY, value INTEGER NOT NULL)",
+        // t3582: a batch's recorded membership and order. `active` stays 1 while the member
+        // belongs to a live batch; the partial unique index keeps a task in one active batch.
+        "CREATE TABLE IF NOT EXISTS task_batches (batch_id INTEGER PRIMARY KEY, pane_id TEXT NOT NULL, created_at REAL NOT NULL, state TEXT NOT NULL DEFAULT 'active')",
+        "CREATE TABLE IF NOT EXISTS task_batch_members (batch_id INTEGER NOT NULL, position INTEGER NOT NULL, task_id TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1, PRIMARY KEY (batch_id, position))",
+        "CREATE UNIQUE INDEX IF NOT EXISTS batch_members_one_active ON task_batch_members (task_id) WHERE active = 1",
+        "CREATE INDEX IF NOT EXISTS batch_members_by_task ON task_batch_members (task_id, active)",
     ] {
         conn.execute(statement, []).map_err(db::map_sqlite)?;
     }
@@ -2277,6 +2302,8 @@ pub struct Decorated {
     pub depends_on: Vec<String>,
     /// An allocation offer is ready for exactly this assignee set.
     pub allocation_waiting: bool,
+    /// The pane that routed the ready offer (`allocation_offers.offered_by`), if one is ready.
+    pub offered_by: Option<String>,
     pub multi_assignee: bool,
     pub is_global: bool,
     pub leases: Vec<Lease>,
@@ -2343,7 +2370,11 @@ fn leases_for_conn(conn: &Connection, id: &str, now: f64) -> Result<Vec<Lease>, 
 
 /// `_claimable`: whether `pane_id` may take this task right now.
 fn claimable_for(d: &Decorated, pane_id: &str) -> bool {
-    if d.allocation_waiting {
+    // Same rule as `claim::claimable` (t3617): an assignee may take a task its waiting offer names,
+    // unless that pane routed the offer itself.
+    let mine = !pane_id.is_empty() && d.assignees.iter().any(|a| a == pane_id);
+    let routed_by_me = !pane_id.is_empty() && d.offered_by.as_deref() == Some(pane_id);
+    if d.allocation_waiting && !(mine && !routed_by_me) {
         return false;
     }
     if !pane_id.is_empty() && d.leases.iter().any(|l| l.pane_id == pane_id) {
@@ -2352,7 +2383,6 @@ fn claimable_for(d: &Decorated, pane_id: &str) -> bool {
     if !d.leases.is_empty() {
         return d.multi_assignee;
     }
-    let mine = !pane_id.is_empty() && d.assignees.iter().any(|a| a == pane_id);
     match d.task.status.as_str() {
         // F2: a named assignee can pull its own task.
         "open" => d.assignees.is_empty() || d.multi_assignee || mine,
@@ -2378,11 +2408,11 @@ fn decorate_conn(
     let assignees = decode_list(Some(&task.assignees));
     let depends_on = decode_list(Some(&task.depends_on));
     // A missing allocation_offers table is "no offer", not an error.
-    let owners: Option<String> = match conn
+    let offer: Option<(String, String)> = match conn
         .query_row(
-            "SELECT owners FROM allocation_offers WHERE task_id=? AND state='ready'",
+            "SELECT owners, offered_by FROM allocation_offers WHERE task_id=? AND state='ready'",
             params![id],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()
     {
@@ -2392,7 +2422,10 @@ fn decorate_conn(
     };
     let mut sorted = assignees.clone();
     sorted.sort();
-    let allocation_waiting = owners.is_some_and(|raw| sorted == decode_list(Some(&raw)));
+    let (allocation_waiting, offered_by) = match offer {
+        Some((owners, offered_by)) => (sorted == decode_list(Some(&owners)), Some(offered_by)),
+        None => (false, None),
+    };
     let leases = leases_for_conn(conn, id, now)?;
     let mut d = Decorated {
         is_global: task.scope == "global",
@@ -2400,6 +2433,7 @@ fn decorate_conn(
         lease_expires_at: leases.iter().map(|l| l.expires_at).reduce(f64::min),
         multi_assignee: multi != 0,
         allocation_waiting,
+        offered_by,
         leases,
         assignees,
         depends_on,

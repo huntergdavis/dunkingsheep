@@ -1026,6 +1026,17 @@ pub struct SendGuardOptions {
     pub hold_while_typing: bool,
     pub allow_modal: bool,
     pub preserve_draft: bool,
+    /// t3477 max-hold fallback: set once a send has been held for `HOLD_ATTEMPT_LIMIT` attempts.
+    /// Only an inconclusive read may then be typed into; see [`fallback_overrides_hold`].
+    pub inconclusive_fallback: bool,
+}
+
+/// The max-hold fallback (t3477, owner-approved). With the fallback on, an INCONCLUSIVE composer
+/// read (`ambiguous-composer`) may be typed into. Every other refusal stays a hold, including a
+/// pending foreign draft (`human_draft`, `foreign-text-will-not-submit`) and a dialog, so the
+/// fallback never types over text that is genuinely there.
+pub(crate) fn fallback_overrides_hold(reason: &str, inconclusive_fallback: bool) -> bool {
+    inconclusive_fallback && reason == "ambiguous-composer"
 }
 
 impl Default for SendGuardOptions {
@@ -1034,6 +1045,7 @@ impl Default for SendGuardOptions {
             hold_while_typing: true,
             allow_modal: false,
             preserve_draft: false,
+            inconclusive_fallback: false,
         }
     }
 }
@@ -1535,6 +1547,7 @@ fn send_guarded_with_reason(
             &typing_guard,
         ) {
             Ok(()) => {}
+            Err(reason) if fallback_overrides_hold(reason, options.inconclusive_fallback) => {}
             Err(reason) => {
                 return (
                     false,
@@ -1633,6 +1646,7 @@ pub(super) fn send_dunk_now(
             hold_while_typing: dunk.hold_while_typing,
             allow_modal: false,
             preserve_draft: false,
+            inconclusive_fallback: false,
         },
         permission,
         |env, guard| {
@@ -2371,6 +2385,18 @@ pub fn dead_session(env: &dyn SendEnv, pane_id: &str) -> Option<String> {
 /// `send_blocker`: why a send cannot go now, as `(state, reason)`, or `None` if it can. ONE
 /// function, so `delivery`, the queue worker and `send_text` cannot disagree.
 pub fn send_blocker(env: &dyn SendEnv, pane_id: &str) -> Option<(&'static str, String)> {
+    send_blocker_with_fallback(env, pane_id, false)
+}
+
+/// [`send_blocker`] with the t3477 max-hold fallback. The outbox's pre-send check is where a
+/// typed nudge is held, before `send_guarded` runs, so the fallback has to reach it. Once a message
+/// has been held for `HOLD_ATTEMPT_LIMIT` attempts, an INCONCLUSIVE composer read no longer
+/// blocks, and the send's own guard decides. A dead session, a dialog and a working pane still block.
+pub(crate) fn send_blocker_with_fallback(
+    env: &dyn SendEnv,
+    pane_id: &str,
+    inconclusive_fallback: bool,
+) -> Option<(&'static str, String)> {
     if let Some(marker) = dead_session(env, pane_id) {
         return Some(("dead", format!("dead session ({marker})")));
     }
@@ -2384,6 +2410,7 @@ pub fn send_blocker(env: &dyn SendEnv, pane_id: &str) -> Option<(&'static str, S
     }
     if detail.starts_with(AMBIGUOUS_COMPOSER)
         && federated_composer(env.federated_input(), screen.as_deref().unwrap_or("")).is_none()
+        && !fallback_overrides_hold("ambiguous-composer", inconclusive_fallback)
     {
         return Some(("unknown", detail));
     }
@@ -2410,7 +2437,17 @@ pub fn send_blocker(env: &dyn SendEnv, pane_id: &str) -> Option<(&'static str, S
 /// `wait(seconds)` is the settle wait and returns `true` when it was INTERRUPTED (the Python's
 /// `stop_event.wait`), which makes this false; production passes a sleep that returns false.
 pub fn clear_to_send(env: &dyn SendEnv, pane_id: &str, wait: &dyn Fn(f64) -> bool) -> bool {
-    if send_blocker(env, pane_id).is_some() {
+    clear_to_send_with_fallback(env, pane_id, wait, false)
+}
+
+/// [`clear_to_send`] with the t3477 max-hold fallback, see [`send_blocker_with_fallback`].
+pub(crate) fn clear_to_send_with_fallback(
+    env: &dyn SendEnv,
+    pane_id: &str,
+    wait: &dyn Fn(f64) -> bool,
+    inconclusive_fallback: bool,
+) -> bool {
+    if send_blocker_with_fallback(env, pane_id, inconclusive_fallback).is_some() {
         return false;
     }
     if wait(TYPING_SETTLE_S) {
@@ -3316,10 +3353,11 @@ pub(crate) fn candidate_from_snapshot(value: &Value) -> Option<StuckCandidate> {
     })
 }
 
-/// One queued outbox row, in exactly the layout Python's `dunk_core._save` writes: these 13 keys, in
-/// this order. Python writes no press_enter, attempt_generation, scheduled, schedule_template, detail,
-/// finished_at or typed_at for an outbox row, so this writer writes none of them either. A restart
-/// restores those fields to Python's defaults (the post-cutover bug, t3370).
+/// One queued outbox row, in the layout Python's `dunk_core._save` writes: the 13 keys of the
+/// original layout, then the seven that a restart needs (t3370): press_enter, scheduled,
+/// schedule_template, attempt_generation, typed_at, detail, finished_at. Before t3370 neither
+/// writer wrote those seven, so a restart restored a no-Enter send as one that submits with Enter
+/// and dropped a scheduled template. Python's writer and restore carry the same seven keys.
 pub(crate) fn message_snapshot(message: &Message) -> Value {
     json!({
         "id": message.id,
@@ -3337,6 +3375,13 @@ pub(crate) fn message_snapshot(message: &Message) -> Value {
             json!([message.hold_signature_kind.as_deref().unwrap_or("box"), text])
         }),
         "created_at": message.created_at,
+        "press_enter": message.press_enter,
+        "scheduled": message.scheduled,
+        "schedule_template": message.schedule_template,
+        "attempt_generation": message.attempt_generation,
+        "typed_at": message.typed_at,
+        "detail": message.detail,
+        "finished_at": message.finished_at,
     })
 }
 
@@ -3856,11 +3901,16 @@ pub(crate) fn outbox_step<E: SendPreparationEnv + PaneInfoEnv>(
 
     let interrupted = std::cell::Cell::new(false);
     let clear = if head.hold_while_typing {
-        clear_to_send(env, pane_id, &|seconds| {
-            let was_interrupted = wait(seconds);
-            interrupted.set(was_interrupted);
-            was_interrupted
-        })
+        clear_to_send_with_fallback(
+            env,
+            pane_id,
+            &|seconds| {
+                let was_interrupted = wait(seconds);
+                interrupted.set(was_interrupted);
+                was_interrupted
+            },
+            head.holds >= HOLD_ATTEMPT_LIMIT,
+        )
     } else {
         true
     };
@@ -3871,7 +3921,9 @@ pub(crate) fn outbox_step<E: SendPreparationEnv + PaneInfoEnv>(
         return OutboxStep::Stopped;
     }
     if !clear {
-        let (kind, reason) = send_blocker(env, pane_id).unwrap_or(("unknown", "unknown".into()));
+        let (kind, reason) =
+            send_blocker_with_fallback(env, pane_id, head.holds >= HOLD_ATTEMPT_LIMIT)
+                .unwrap_or(("unknown", "unknown".into()));
         if kind != "dead" {
             let signature = hold_signature(flock, env, pane_id);
             return match flock.record_outbox_hold(OutboxHold {
@@ -4321,6 +4373,7 @@ impl Flock {
             hold_while_typing: message.hold_while_typing,
             allow_modal: message.kind == "keys",
             preserve_draft: false,
+            inconclusive_fallback: message.holds >= HOLD_ATTEMPT_LIMIT,
         };
         let is_keys = message.kind == "keys";
         let press_enter = message.press_enter;
@@ -5340,6 +5393,7 @@ impl Flock {
             hold_while_typing: false,
             allow_modal: message.kind == "keys",
             preserve_draft: false,
+            inconclusive_fallback: false,
         };
         let is_keys = message.kind == "keys";
         let key_arguments = message.key_arguments.clone();

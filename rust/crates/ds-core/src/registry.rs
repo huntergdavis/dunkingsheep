@@ -39,7 +39,7 @@ pub struct Group {
     pub actions: &'static [(&'static str, &'static str)],
 }
 
-/// Every command the daemon serves (128 at generation time).
+/// Every command the daemon serves (129 at generation time).
 pub static COMMANDS: &[Command] = &[
     Command {
         name: "add_dunk",
@@ -632,6 +632,16 @@ pub static COMMANDS: &[Command] = &[
         roles: &["owner", "system"],
     },
     Command {
+        name: "owner_page_confirmed",
+        description: "The highest owner page the telegram transport has delivered (t665), as the watchdog compares it: {through: n | null, transport: telegram}. A page is confirmed once this reaches its own number. Owner and system only.",
+        params: &[],
+        dispatch_required: &[],
+        required: &[],
+        mcp: false,
+        owner_only: false,
+        roles: &["owner", "system"],
+    },
+    Command {
         name: "owner_poll",
         description: "Record a drain heartbeat: the lane's harness polls for owner messages (even when the queue is empty). This, and only this, is what delivery_capability reads to decide a lane drains - a manual owner take must not confer capability.",
         params: &[Param { name: "pane_id", schema: "{\"type\":\"string\",\"description\":\"the pane that polled\"}" }, Param { name: "by", schema: "{\"type\":\"string\",\"description\":\"who polled, e.g. pi-extension\"}" }],
@@ -1150,6 +1160,16 @@ pub static COMMANDS: &[Command] = &[
         mcp: true,
         owner_only: false,
         roles: &["owner", "web", "worker", "reviewer"],
+    },
+    Command {
+        name: "task_batch_claim",
+        description: "ATOMIC BATCH CLAIM: take an explicit, ordered list of tasks for the caller, all or nothing, in one transaction. Every member must be claimable by you under the same rules as task_next (no lease held by another pane, not blocked by a prerequisite outside the batch, not already in another active batch, kind and author filters for your role). One failing member claims none: refused.reason names the cause (batch_conflict, leased, owned_elsewhere, blocked, not_claimable, busy, missing, duplicate, scope, empty) and refused.task_ids the members at fault. Members run in the order given and share one lease: a heartbeat or release on any of them covers all. Workers and the owner only.",
+        params: &[Param { name: "ids", schema: "{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Task ids, in execution order.\"}" }, Param { name: "lease_seconds", schema: "{\"type\":\"number\",\"minimum\":1,\"description\":\"Lease length in seconds (default 1800).\"}" }, Param { name: "allow_busy", schema: "{\"type\":\"boolean\",\"description\":\"Take a batch while already holding in-progress work.\"}" }],
+        dispatch_required: &["ids"],
+        required: &["ids"],
+        mcp: false,
+        owner_only: false,
+        roles: &["owner", "worker"],
     },
     Command {
         name: "task_note",

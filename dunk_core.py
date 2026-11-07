@@ -992,7 +992,17 @@ class Flock:
                      "next_attempt_at": message.next_attempt_at,
                      "hold_signature": (list(message.hold_signature)
                                         if message.hold_signature else None),
-                     "created_at": message.created_at}
+                     "created_at": message.created_at,
+                     # t3370: the fields a restart used to drop. A restored row defaulted
+                     # press_enter to True, so a `send --no-enter` submitted with Enter after a
+                     # restart, and a scheduled template lost its template.
+                     "press_enter": bool(getattr(message, "press_enter", True)),
+                     "scheduled": bool(getattr(message, "scheduled", False)),
+                     "schedule_template": getattr(message, "schedule_template", None),
+                     "attempt_generation": getattr(message, "attempt_generation", None),
+                     "typed_at": getattr(message, "typed_at", None),
+                     "detail": getattr(message, "detail", None),
+                     "finished_at": getattr(message, "finished_at", None)}
                     for queue in self.outbox.values() for message in queue
                     if message.status == "queued"],
                 # The verdicts, so the NEXT process can tell a stale snapshot row from a held one.
@@ -1156,11 +1166,15 @@ class Flock:
                 pane_id = row["pane_id"]
                 text = row.get("text") or ""
                 kind = row.get("kind") or "text"
+                # t3370: the delivery honours the row's press_enter. The default was True, so a
+                # restored `send --no-enter` was typed and SUBMITTED after a restart.
+                press_enter = bool(row.get("press_enter", True))
                 if kind == "keys":
                     keys = text.split()
                     deliver = (lambda p=pane_id, k=keys: self.press_keys(p, k))
                 else:
-                    deliver = (lambda p=pane_id, t=text: self.submit_text(p, t))
+                    deliver = (lambda p=pane_id, t=text, e=press_enter:
+                               self.submit_text(p, t, press_enter=e))
                 message = self._new_message(pane_id, row.get("target_label") or pane_id,
                                             text, row.get("source") or "restored", deliver)
                 message.id = row.get("id") or message.id
@@ -1169,6 +1183,15 @@ class Flock:
                 message.is_notice = bool(row.get("is_notice"))
                 message.notify_for = list(row.get("notify_for") or [])
                 message.created_at = float(row.get("created_at") or time.time())
+                # t3370: the fields the save writes. A row from before that change has none of
+                # them and keeps the constructor defaults (the old behaviour, exactly).
+                message.press_enter = bool(row.get("press_enter", True))
+                message.scheduled = bool(row.get("scheduled", False))
+                message.schedule_template = row.get("schedule_template")
+                message.attempt_generation = row.get("attempt_generation")
+                message.typed_at = row.get("typed_at")
+                message.detail = row.get("detail")
+                message.finished_at = row.get("finished_at")
                 message.holds = int(row.get("holds") or 0)
                 message.next_attempt_at = (float(row["next_attempt_at"])
                                            if row.get("next_attempt_at") else None)

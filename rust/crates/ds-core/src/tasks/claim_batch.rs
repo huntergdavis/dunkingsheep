@@ -11,9 +11,9 @@
 //! is still outstanding. A prerequisite that is itself a member does not hold its dependant
 //! back, because the members are claimed together and their order is the work order (child B).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::json;
 
 use super::{
@@ -27,6 +27,8 @@ use crate::error::DunkError;
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClaimBatchOutcome {
     Claimed {
+        /// The recorded batch (`task_batches.batch_id`).
+        batch_id: i64,
         tasks: Vec<Task>,
         lease_seconds: f64,
         expires_at: f64,
@@ -44,6 +46,8 @@ struct Member {
     created_at: f64,
     kind: String,
     author: Option<String>,
+    /// The task's own `depends_on`, for the order check among members.
+    depends_on: Vec<String>,
 }
 
 fn plain(reason: &'static str, task_ids: Vec<String>) -> Refusal {
@@ -82,6 +86,18 @@ impl Tasks {
         let wanted: Vec<String> = ids.to_vec();
         let pane = pane_id.to_string();
         let now = crate::clock::now_s();
+        // An expired batch releases its members at expiry, without waiting for reap (the owner's
+        // ruling on #807). Its own transaction, so a claim this call then refuses keeps the release.
+        self.writer
+            .call(move |conn| {
+                let tx = conn
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .map_err(db::map_sqlite)?;
+                release_expired_batches(&tx, now)?;
+                tx.commit().map_err(db::map_sqlite)?;
+                Ok(())
+            })
+            .await?;
         let claimed = self
             .writer
             .call(move |conn| {
@@ -108,17 +124,20 @@ impl Tasks {
                     write_claim(&tx, member, &pane, lease_s, options.caller.as_ref(), now)?;
                 }
                 let claimed: Vec<String> = members.iter().map(|m| m.candidate.id.clone()).collect();
+                // The membership and its order are recorded in the same transaction as the claim.
+                let batch_id = record_batch(&tx, &pane, &claimed, now)?;
                 tx.commit().map_err(db::map_sqlite)?;
-                Ok(Ok(claimed))
+                Ok(Ok((batch_id, claimed)))
             })
             .await?;
         match claimed {
-            Ok(ids) => {
+            Ok((batch_id, ids)) => {
                 let mut tasks = Vec::with_capacity(ids.len());
                 for id in &ids {
                     tasks.push(self.get(id).await?);
                 }
                 Ok(ClaimBatchOutcome::Claimed {
+                    batch_id,
                     tasks,
                     lease_seconds: lease_s,
                     expires_at: now + lease_s,
@@ -157,10 +176,11 @@ fn validate(
     for id in wanted {
         let found = tx
             .query_row(
-                "SELECT scope, priority, created_at, status, kind, author, assignees, multi_assignee FROM tasks WHERE id = ?",
+                "SELECT scope, priority, created_at, status, kind, author, assignees, multi_assignee, depends_on FROM tasks WHERE id = ?",
                 params![id],
                 |row| {
                     let assignees: Option<String> = row.get(6)?;
+                    let depends_on: Option<String> = row.get(8)?;
                     Ok(Member {
                         candidate: Candidate {
                             id: id.clone(),
@@ -174,6 +194,7 @@ fn validate(
                         created_at: row.get(2)?,
                         kind: row.get(4)?,
                         author: row.get(5)?,
+                        depends_on: decode_list(depends_on.as_deref()),
                     })
                 },
             )
@@ -195,6 +216,39 @@ fn validate(
         .collect();
     if !foreign.is_empty() {
         return Ok(Err(plain("scope", foreign)));
+    }
+    // The batch's order is its execution order: a member may depend only on members EARLIER in
+    // it. A dependency on a later member, or on itself, closes a cycle among the members, and the
+    // batch would wait on itself (t3582). Refused before any write.
+    let position: HashMap<&str, usize> = members
+        .iter()
+        .enumerate()
+        .map(|(index, member)| (member.candidate.id.as_str(), index))
+        .collect();
+    let closes_cycle: Vec<String> = members
+        .iter()
+        .enumerate()
+        .filter(|(index, member)| {
+            member.depends_on.iter().any(|dep| {
+                position
+                    .get(dep.as_str())
+                    .is_some_and(|later_or_same| *later_or_same >= *index)
+            })
+        })
+        .map(|(_, member)| member.candidate.id.clone())
+        .collect();
+    if !closes_cycle.is_empty() {
+        return Ok(Err(plain("order_conflict", closes_cycle)));
+    }
+    // A member already in an active batch belongs to that batch's claim, not to this one.
+    let mut conflicting = Vec::new();
+    for member in &members {
+        if active_batch_of(tx, &member.candidate.id)?.is_some() {
+            conflicting.push(member.candidate.id.clone());
+        }
+    }
+    if !conflicting.is_empty() {
+        return Ok(Err(plain("batch_conflict", conflicting)));
     }
     if !options.allow_busy {
         let mut stmt = tx
@@ -229,8 +283,9 @@ fn validate(
             .into_iter()
             .filter(|dep| !member_ids.contains(dep))
             .collect();
-        member.candidate.allocation_waiting =
-            allocation_waiting(tx, &id, &member.candidate.assignees)?;
+        let (waiting, offered_by) = allocation_waiting(tx, &id, &member.candidate.assignees)?;
+        member.candidate.allocation_waiting = waiting;
+        member.candidate.offered_by = offered_by;
     }
     let failing: Vec<Candidate> = members
         .iter()
@@ -249,7 +304,12 @@ fn eligible(member: &Member, pane: &str, options: &ClaimOptions) -> bool {
         && options
             .kinds
             .as_ref()
-            .is_none_or(|kinds| kinds.is_empty() || kinds.contains(&member.kind))
+            // t3617: an explicitly assigned member is claimable by its assignee whatever its kind.
+            .is_none_or(|kinds| {
+                kinds.is_empty()
+                    || kinds.contains(&member.kind)
+                    || member.candidate.assignees.iter().any(|a| a == pane)
+            })
         && !options
             .exclude_author
             .as_ref()
@@ -257,18 +317,19 @@ fn eligible(member: &Member, pane: &str, options: &ClaimOptions) -> bool {
         && claimable(&member.candidate, Some(pane))
 }
 
-/// Whether the member's ready allocation offer is still waiting on its current assignees. The
-/// allocation table may not exist yet (the Python tolerates that), so a missing table is `false`.
+/// Whether the member's ready allocation offer is still waiting on its current assignees, and which
+/// pane routed it. The allocation table may not exist yet (the Python tolerates that), so a missing
+/// table is "not waiting".
 fn allocation_waiting(
     tx: &rusqlite::Transaction<'_>,
     id: &str,
     assignees: &[String],
-) -> Result<bool, DunkError> {
-    let offer: Option<String> = match tx
+) -> Result<(bool, Option<String>), DunkError> {
+    let offer: Option<(String, String)> = match tx
         .query_row(
-            "SELECT owners FROM allocation_offers WHERE task_id = ? AND state = 'ready'",
+            "SELECT owners, offered_by FROM allocation_offers WHERE task_id = ? AND state = 'ready'",
             params![id],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()
     {
@@ -277,12 +338,12 @@ fn allocation_waiting(
         Err(error) => return Err(db::map_sqlite(error)),
     };
     Ok(match offer {
-        Some(owners) => {
+        Some((owners, offered_by)) => {
             let mut mine = assignees.to_vec();
             mine.sort();
-            mine == decode_list(Some(&owners))
+            (mine == decode_list(Some(&owners)), Some(offered_by))
         }
-        None => false,
+        None => (false, None),
     })
 }
 
@@ -341,6 +402,335 @@ fn write_claim(
     Ok(())
 }
 
+/// Record the batch and its ordered members (t3582). Runs inside the claim's transaction, so a
+/// refused batch records nothing and a claimed batch is always recorded.
+fn record_batch(
+    tx: &rusqlite::Transaction<'_>,
+    pane: &str,
+    members: &[String],
+    now: f64,
+) -> Result<i64, DunkError> {
+    tx.execute(
+        "INSERT INTO task_batches (pane_id, created_at, state) VALUES (?, ?, 'active')",
+        params![pane, now],
+    )
+    .map_err(db::map_sqlite)?;
+    let batch_id = tx.last_insert_rowid();
+    for (position, id) in members.iter().enumerate() {
+        tx.execute(
+            "INSERT INTO task_batch_members (batch_id, position, task_id, active) VALUES (?, ?, ?, 1)",
+            params![batch_id, position as i64, id],
+        )
+        .map_err(db::map_sqlite)?;
+    }
+    Ok(batch_id)
+}
+
+/// The active batch a task belongs to, if any.
+pub(super) fn active_batch_of(conn: &Connection, task_id: &str) -> Result<Option<i64>, DunkError> {
+    conn.query_row(
+        "SELECT batch_id FROM task_batch_members WHERE task_id = ? AND active = 1",
+        params![task_id],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(db::map_sqlite)
+}
+
+/// The active members of `batch_id` that `pane` holds a live lease on, in batch order.
+pub(super) fn batch_members_held_by(
+    conn: &Connection,
+    batch_id: i64,
+    pane: &str,
+) -> Result<Vec<String>, DunkError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT m.task_id FROM task_batch_members AS m \
+             JOIN task_leases AS l ON l.task_id = m.task_id AND l.pane_id = ? \
+             WHERE m.batch_id = ? AND m.active = 1 ORDER BY m.position",
+        )
+        .map_err(db::map_sqlite)?;
+    let rows = stmt
+        .query_map(params![pane, batch_id], |row| row.get::<_, String>(0))
+        .map_err(db::map_sqlite)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(db::map_sqlite)
+}
+
+/// The tasks whose leases a heartbeat on `id` extends: every member of its active batch that
+/// `pane` holds, or `id` alone when it is not in a batch (t3582: one deadline per batch).
+pub(super) fn heartbeat_targets(
+    conn: &Connection,
+    id: &str,
+    pane: &str,
+) -> Result<Vec<String>, DunkError> {
+    match active_batch_of(conn, id)? {
+        Some(batch) => batch_members_held_by(conn, batch, pane),
+        None => Ok(vec![id.to_string()]),
+    }
+}
+
+/// End a batch. Its rows stay as the record; its members are free to be claimed again.
+pub(super) fn end_batch(conn: &Connection, batch_id: i64) -> Result<(), DunkError> {
+    conn.execute(
+        "UPDATE task_batches SET state = 'ended' WHERE batch_id = ?",
+        params![batch_id],
+    )
+    .map_err(db::map_sqlite)?;
+    conn.execute(
+        "UPDATE task_batch_members SET active = 0 WHERE batch_id = ?",
+        params![batch_id],
+    )
+    .map_err(db::map_sqlite)?;
+    Ok(())
+}
+
+/// The first earlier member of `task_id`'s batch that is still active, if any. A member leaves the
+/// active set when it is done, cancelled or blocked (`retire_member`), so an earlier member holds
+/// its dependants back only while it is still work. Cancelling a prerequisite satisfies it: the
+/// same rule as the live dependency check (t530), and a cancelled member must not hold back the
+/// rest of the batch.
+pub(super) fn unfinished_earlier_member(
+    conn: &Connection,
+    batch_id: i64,
+    task_id: &str,
+) -> Result<Option<String>, DunkError> {
+    conn.query_row(
+        "SELECT m.task_id FROM task_batch_members AS m \
+         WHERE m.batch_id = ?1 AND m.active = 1 \
+         AND m.position < (SELECT position FROM task_batch_members WHERE batch_id = ?1 AND task_id = ?2) \
+         ORDER BY m.position LIMIT 1",
+        params![batch_id, task_id],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(db::map_sqlite)
+}
+
+/// A member leaves its batch when it is done, cancelled or blocked: only that member ends, and
+/// the batch goes on with the rest (t3582). When no active member is left, the batch has ended;
+/// its rows stay as the record.
+pub(super) fn retire_member(conn: &Connection, task_id: &str) -> Result<(), DunkError> {
+    let Some(batch_id) = active_batch_of(conn, task_id)? else {
+        return Ok(());
+    };
+    conn.execute(
+        "UPDATE task_batch_members SET active = 0 WHERE batch_id = ? AND task_id = ? AND active = 1",
+        params![batch_id, task_id],
+    )
+    .map_err(db::map_sqlite)?;
+    let remaining: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM task_batch_members WHERE batch_id = ? AND active = 1",
+            params![batch_id],
+            |row| row.get(0),
+        )
+        .map_err(db::map_sqlite)?;
+    if remaining == 0 {
+        conn.execute(
+            "UPDATE task_batches SET state = 'ended' WHERE batch_id = ?",
+            params![batch_id],
+        )
+        .map_err(db::map_sqlite)?;
+    }
+    Ok(())
+}
+
+/// The order guard for a status change to done (t3582), for every status write path: `set_status`,
+/// the generic update, `advance`'s completion. A member completes only after every EARLIER member
+/// has left the batch. Refused before the write.
+pub(super) fn guard_completion(
+    conn: &Connection,
+    task_id: &str,
+    from: &str,
+    to: &str,
+) -> Result<(), DunkError> {
+    if to != "done" || from == "done" {
+        return Ok(());
+    }
+    if let Some(batch) = active_batch_of(conn, task_id)? {
+        if let Some(earlier) = unfinished_earlier_member(conn, batch, task_id)? {
+            return Err(DunkError::Refused(format!(
+                "task {task_id} is in batch {batch}; its earlier member {earlier} must complete first (t3582)"
+            )));
+        }
+        // A dependant waits for its in-batch prerequisites (the owner's ruling on #807): only a
+        // done or cancelled prerequisite is satisfied. A blocked or open one holds the dependant,
+        // as the live dependency rule does for any blocked prerequisite.
+        if let Some((prerequisite, status)) = unmet_in_batch_prerequisite(conn, batch, task_id)? {
+            return Err(DunkError::Refused(format!(
+                "task {task_id} is in batch {batch}; its prerequisite {prerequisite} is {status}, not done or cancelled (t3582)"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// The first in-batch prerequisite of `task_id` that is neither done nor cancelled, with its status.
+/// Only the task's batch members count here: an outside prerequisite is the claim-time rule.
+fn unmet_in_batch_prerequisite(
+    conn: &Connection,
+    batch_id: i64,
+    task_id: &str,
+) -> Result<Option<(String, String)>, DunkError> {
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT depends_on FROM tasks WHERE id = ?",
+            params![task_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(db::map_sqlite)?;
+    for prerequisite in decode_list(raw.as_deref()) {
+        let member: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM task_batch_members WHERE batch_id = ? AND task_id = ?",
+                params![batch_id, prerequisite],
+                |row| row.get(0),
+            )
+            .map_err(db::map_sqlite)?;
+        if member == 0 {
+            continue;
+        }
+        let status: Option<String> = conn
+            .query_row(
+                "SELECT status FROM tasks WHERE id = ?",
+                params![prerequisite],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(db::map_sqlite)?;
+        if let Some(status) = status {
+            if status != "done" && status != "cancelled" {
+                return Ok(Some((prerequisite, status)));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Release the batches whose leases have all lapsed (the owner's ruling on #807). A batch is expired
+/// when it holds leases and none of them is live any more. Each of its active members is freed the
+/// way reap frees a lapsed claim: the lease goes, the status goes back to open when nothing else
+/// holds it, the event records the reason, and the batch ends. Reap is not needed for this.
+pub(super) fn release_expired_batches(
+    tx: &rusqlite::Transaction<'_>,
+    now: f64,
+) -> Result<(), DunkError> {
+    let batches: Vec<i64> = {
+        let mut stmt = tx
+            .prepare("SELECT DISTINCT batch_id FROM task_batch_members WHERE active = 1")
+            .map_err(db::map_sqlite)?;
+        let rows = stmt
+            .query_map([], |row| row.get(0))
+            .map_err(db::map_sqlite)?;
+        rows.collect::<Result<_, _>>().map_err(db::map_sqlite)?
+    };
+    for batch_id in batches {
+        let (leases, live): (i64, i64) = tx
+            .query_row(
+                "SELECT COUNT(l.task_id), COALESCE(SUM(CASE WHEN l.expires_at > ? THEN 1 ELSE 0 END), 0) \
+                 FROM task_batch_members AS m JOIN task_leases AS l ON l.task_id = m.task_id \
+                 WHERE m.batch_id = ? AND m.active = 1",
+                params![now, batch_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(db::map_sqlite)?;
+        if leases == 0 || live > 0 {
+            continue;
+        }
+        let pane: String = tx
+            .query_row(
+                "SELECT pane_id FROM task_batches WHERE batch_id = ?",
+                params![batch_id],
+                |row| row.get(0),
+            )
+            .map_err(db::map_sqlite)?;
+        let members: Vec<String> = {
+            let mut stmt = tx
+                .prepare(
+                    "SELECT task_id FROM task_batch_members WHERE batch_id = ? AND active = 1 ORDER BY position",
+                )
+                .map_err(db::map_sqlite)?;
+            let rows = stmt
+                .query_map(params![batch_id], |row| row.get(0))
+                .map_err(db::map_sqlite)?;
+            rows.collect::<Result<_, _>>().map_err(db::map_sqlite)?
+        };
+        for member in members {
+            let removed = tx
+                .execute(
+                    "DELETE FROM task_leases WHERE task_id = ? AND pane_id = ?",
+                    params![member, pane],
+                )
+                .map_err(db::map_sqlite)?;
+            if removed == 0 {
+                continue;
+            }
+            let (scope, priority, status, raw): (String, String, String, Option<String>) = tx
+                .query_row(
+                    "SELECT scope, priority, status, assignees FROM tasks WHERE id = ?",
+                    params![member],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .map_err(db::map_sqlite)?;
+            let owners = decode_list(raw.as_deref());
+            let resulting = super::claim::after_lease_change(tx, &member, &owners, now)?;
+            let event = if resulting == "open" {
+                "requeued"
+            } else {
+                "released"
+            };
+            tx.execute(
+                "INSERT INTO task_events (task_id, event, at, actor, scope, priority, status_from, status_to, meta) VALUES (?,?,?,?,?,?,?,?,?)",
+                params![
+                    member,
+                    event,
+                    now,
+                    pane,
+                    scope,
+                    priority,
+                    status,
+                    resulting,
+                    json!({"reason": "expired", "pane_gone": false}).to_string()
+                ],
+            )
+            .map_err(db::map_sqlite)?;
+        }
+        end_batch(tx, batch_id)?;
+    }
+    Ok(())
+}
+
+/// A member that leaves the work (done, cancelled or blocked) ends its own membership, on every
+/// status write path (t3582). The rest of the batch goes on.
+pub(super) fn leave_batch_on_status(
+    conn: &Connection,
+    task_id: &str,
+    from: &str,
+    to: &str,
+) -> Result<(), DunkError> {
+    if from != to && matches!(to, "done" | "cancelled" | "blocked") {
+        retire_member(conn, task_id)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 #[path = "claim_batch_tests.rs"]
 mod claim_batch_tests;
+
+#[cfg(test)]
+#[path = "claim_batch_lifecycle_tests.rs"]
+mod claim_batch_lifecycle_tests;
+
+#[cfg(test)]
+#[path = "claim_batch_status_tests.rs"]
+mod claim_batch_status_tests;
+
+#[cfg(test)]
+#[path = "claim_batch_hold_tests.rs"]
+mod claim_batch_hold_tests;
+
+#[cfg(test)]
+#[path = "claim_batch_expiry_tests.rs"]
+mod claim_batch_expiry_tests;

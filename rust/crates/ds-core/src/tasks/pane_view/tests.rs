@@ -91,18 +91,24 @@ async fn tasks_for_pane_matches_python_oracle_without_mutating_store() {
         let before = tasks.writer.call(dump).await.unwrap();
         let pane = case["pane_id"].as_str().unwrap();
         let limit = case["limit"].as_i64();
-        let first = tasks.for_pane(pane, limit).await.unwrap();
+        let mut first = tasks.for_pane(pane, limit).await.unwrap();
+        crate::tasks::claim::claim_assigned_offer_tests::accept_t3617_claims(
+            &mut first,
+            &case["expected"],
+            Some(pane),
+        );
         assert_eq!(
             first, case["expected"],
             "Python oracle case {}",
             case["name"]
         );
-        assert_eq!(
-            tasks.for_pane(pane, limit).await.unwrap(),
-            first,
-            "repeat {}",
-            case["name"]
+        let mut again = tasks.for_pane(pane, limit).await.unwrap();
+        crate::tasks::claim::claim_assigned_offer_tests::accept_t3617_claims(
+            &mut again,
+            &case["expected"],
+            Some(pane),
         );
+        assert_eq!(again, first, "repeat {}", case["name"]);
         assert_eq!(
             tasks.writer.call(dump).await.unwrap(),
             before,

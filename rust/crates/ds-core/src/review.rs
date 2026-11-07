@@ -493,9 +493,24 @@ impl ReviewPolicy for ConfiguredReviewPolicy {
     }
 }
 
+/// The repos the review engine sweeps: the configured list, plus every fleet repo the list omits
+/// (t3600). A github-repos.json that names only dunkingsheep used to exempt poolrad-decomp PRs from
+/// review, so they never got a `dunkingsheep/review` status. Configuration can add repos; dropping a
+/// fleet repo takes a change to the fleet list in code.
+pub(crate) fn with_fleet_repos(mut configured: Vec<String>) -> Vec<String> {
+    for fleet in crate::github::DEFAULT_REPOS {
+        if !configured.iter().any(|repo| repo == fleet) {
+            configured.push(fleet.to_owned());
+        }
+    }
+    configured
+}
+
 impl ReviewRepoConfig for ConfiguredReviewPolicy {
     fn repos(&self) -> Result<Vec<String>, String> {
-        Ok(crate::github::repos_config(&self.config_dir))
+        Ok(with_fleet_repos(crate::github::repos_config(
+            &self.config_dir,
+        )))
     }
 
     fn author_from_mints(&self, since: f64) -> Result<Option<String>, String> {
@@ -3145,3 +3160,7 @@ pub fn kind_gate(ident: &str, kind_table: &str, kind_text: Option<&str>) -> Opti
 #[cfg(test)]
 #[path = "review_tests.rs"]
 mod review_tests;
+
+#[cfg(test)]
+#[path = "review_fleet_repos_tests.rs"]
+mod review_fleet_repos_tests;

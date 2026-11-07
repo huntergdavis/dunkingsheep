@@ -96,9 +96,9 @@ fn whole_flock_snapshot_restores_queued_and_recovery_state() {
     let queue = restored.outbox_snapshot();
     let message = &queue["%1"][0];
     assert_eq!("held text", message.text);
-    // A queued outbox row carries no schedule_template in Python's layout, so the restore does not
-    // keep it. That loss is the post-cutover bug t3370, accepted by the owner (ruling i44973).
-    assert_eq!(None, message.schedule_template.as_deref());
+    // The schedule template of a queued row survives a restart (t3370: the owner ruled that loss a
+    // bug to fix, after it had been accepted as the Python layout).
+    assert_eq!(Some("daily {date}"), message.schedule_template.as_deref());
     assert_eq!(3, message.holds);
     assert_eq!(Some(80.0), message.next_attempt_at);
     assert_eq!(

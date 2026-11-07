@@ -12,6 +12,7 @@
 use rusqlite::{params, OptionalExtension};
 use serde_json::json;
 
+use super::claim_batch::{active_batch_of, batch_members_held_by, end_batch, heartbeat_targets};
 use super::{
     decode_list, default_lease_s, dependency_state_conn, order_key, validate_scope, Lease, Task,
     Tasks,
@@ -27,6 +28,8 @@ pub struct Candidate {
     pub assignees: Vec<String>,
     pub multi_assignee: bool,
     pub allocation_waiting: bool,
+    /// The pane that routed the ready offer, when one is waiting (`allocation_offers.offered_by`).
+    pub offered_by: Option<String>,
     /// Panes holding a live lease.
     pub leased_by: Vec<String>,
     pub blocked_by: Vec<String>,
@@ -34,7 +37,12 @@ pub struct Candidate {
 
 /// `_claimable`: whether `pane_id` may take this task right now.
 pub fn claimable(task: &Candidate, pane_id: Option<&str>) -> bool {
-    if task.allocation_waiting {
+    let assigned_to_me = pane_id.is_some_and(|pane| task.assignees.iter().any(|a| a == pane));
+    let routed_by_me = pane_id.is_some_and(|pane| task.offered_by.as_deref() == Some(pane));
+    // A ready offer whose owners are exactly the assignees is waiting on its allocation. Only its
+    // assignee may take it (t3617), and only when that pane did not route the offer itself: a review
+    // routed by its author is offered by the author, and the author must not take it back.
+    if task.allocation_waiting && !(assigned_to_me && !routed_by_me) {
         return false;
     }
     if let Some(pane) = pane_id {
@@ -45,7 +53,6 @@ pub fn claimable(task: &Candidate, pane_id: Option<&str>) -> bool {
     if !task.leased_by.is_empty() {
         return task.multi_assignee;
     }
-    let assigned_to_me = pane_id.is_some_and(|pane| task.assignees.iter().any(|a| a == pane));
     match task.status.as_str() {
         // F2: a named assignee can pull its own task.
         "open" => task.assignees.is_empty() || task.multi_assignee || assigned_to_me,
@@ -189,18 +196,33 @@ impl Tasks {
             .writer
             .call({
                 let (id, pane) = (id.clone(), pane.clone());
-                move |conn| match caller {
-                    Some((pid, start, name)) => conn.execute(
-                        "UPDATE task_leases SET heartbeat_at = ?, expires_at = ?, caller_pid = ?, \
-                         caller_start = ?, caller_name = ? WHERE task_id = ? AND pane_id = ?",
-                        params![now, now + lease_s, pid, start, name, id, pane],
-                    ),
-                    None => conn.execute(
-                        "UPDATE task_leases SET heartbeat_at = ?, expires_at = ? WHERE task_id = ? AND pane_id = ?",
-                        params![now, now + lease_s, id, pane],
-                    ),
+                move |conn| {
+                    // t3582: the members of a batch share one deadline, so a heartbeat on any
+                    // of them extends every member the pane holds. The targets are read inside the
+                    // same immediate transaction as the writes (the review of #807 found they were
+                    // read on the connection first).
+                    let tx = conn
+                        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                        .map_err(db::map_sqlite)?;
+                    let targets = heartbeat_targets(&tx, &id, &pane)?;
+                    let mut changed = 0;
+                    for target in &targets {
+                        let affected = match &caller {
+                            Some((pid, start, name)) => tx.execute(
+                                "UPDATE task_leases SET heartbeat_at = ?, expires_at = ?, caller_pid = ?, \
+                                 caller_start = ?, caller_name = ? WHERE task_id = ? AND pane_id = ?",
+                                params![now, now + lease_s, pid, start, name, target, pane],
+                            ),
+                            None => tx.execute(
+                                "UPDATE task_leases SET heartbeat_at = ?, expires_at = ? WHERE task_id = ? AND pane_id = ?",
+                                params![now, now + lease_s, target, pane],
+                            ),
+                        };
+                        changed += affected.map_err(db::map_sqlite)?;
+                    }
+                    tx.commit().map_err(db::map_sqlite)?;
+                    Ok(changed)
                 }
-                .map_err(db::map_sqlite)
             })
             .await?;
         if changed == 0 {
@@ -337,19 +359,20 @@ impl Tasks {
                         .map_err(db::map_sqlite)?;
                     row.candidate.blocked_by = dependency_state_conn(&tx, &id)?.1.blocked_by;
                     // The allocation table may not exist yet (the Python tolerates that).
-                    let offer: Option<String> = match tx
-                        .query_row("SELECT owners FROM allocation_offers WHERE task_id = ? AND state = 'ready'",
-                                   params![id], |r| r.get(0))
+                    let offer: Option<(String, String)> = match tx
+                        .query_row("SELECT owners, offered_by FROM allocation_offers WHERE task_id = ? AND state = 'ready'",
+                                   params![id], |r| Ok((r.get(0)?, r.get(1)?)))
                         .optional()
                     {
                         Ok(found) => found,
                         Err(error) if error.to_string().contains("no such table") => None,
                         Err(error) => return Err(db::map_sqlite(error)),
                     };
-                    if let Some(owners) = offer {
+                    if let Some((owners, offered_by)) = offer {
                         let mut mine = row.candidate.assignees.clone();
                         mine.sort();
                         row.candidate.allocation_waiting = mine == decode_list(Some(&owners));
+                        row.candidate.offered_by = Some(offered_by);
                     }
                 }
                 rows.sort_by_key(|row| order_key(&row.priority, row.created_at, &row.candidate.id));
@@ -378,7 +401,13 @@ impl Tasks {
                         && options
                             .kinds
                             .as_ref()
-                            .is_none_or(|kinds| kinds.is_empty() || kinds.contains(&row.kind))
+                            // t3617: an explicitly assigned task is claimable by its assignee whatever its
+                            // kind; unassigned work keeps the role's kind filter.
+                            .is_none_or(|kinds| {
+                                kinds.is_empty()
+                                    || kinds.contains(&row.kind)
+                                    || row.candidate.assignees.contains(&pane)
+                            })
                         && !options.exclude_author.as_ref().is_some_and(|who| row.author.as_ref() == Some(who))
                         && claimable(&row.candidate, Some(&pane))
                 });
@@ -404,6 +433,14 @@ impl Tasks {
                     "UPDATE tasks SET status = 'in_progress', assignees = ?, attempts = attempts + 1, updated_at = ?, block_reason = NULL WHERE id = ?",
                     params![json!(assignees).to_string(), now, chosen.candidate.id],
                 ).map_err(db::map_sqlite)?;
+                if chosen.candidate.allocation_waiting {
+                    // The assignee took the task its ready offer named, so the allocation is done;
+                    // close the offer as `allocate` does (t3617).
+                    tx.execute(
+                        "UPDATE allocation_offers SET state='assigned' WHERE task_id=? AND state='ready'",
+                        params![chosen.candidate.id],
+                    ).map_err(db::map_sqlite)?;
+                }
                 tx.execute(
                     "INSERT INTO task_events (task_id, event, at, actor, scope, priority, status_from, status_to, duration_ms, meta) VALUES (?,?,?,?,?,?,?,?,?,?)",
                     params![chosen.candidate.id, "claimed", now, pane, chosen.scope, chosen.priority,
@@ -450,7 +487,7 @@ pub type CallerAlive = Box<dyn Fn(i64, Option<&str>) -> bool + Send>;
 /// A lease is activity: expiry, release and a reaped claim end the claim, not the
 /// assignment (t145), so the assignee list is written back as it was given. Returns the
 /// resulting status (F3: a task with another live lease stays in_progress).
-fn after_lease_change(
+pub(super) fn after_lease_change(
     tx: &rusqlite::Transaction<'_>,
     id: &str,
     assignees: &[String],
@@ -483,6 +520,49 @@ fn after_lease_change(
     Ok(status)
 }
 
+/// Give one lease back: the per-task half of `release`, also run for each batch member.
+fn release_lease(
+    tx: &rusqlite::Transaction<'_>,
+    id: &str,
+    pane: &str,
+    now: f64,
+) -> Result<(), DunkError> {
+    let (scope, priority, status, raw): (String, String, String, Option<String>) = tx
+        .query_row(
+            "SELECT scope, priority, status, assignees FROM tasks WHERE id = ?",
+            params![id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()
+        .map_err(db::map_sqlite)?
+        .ok_or_else(|| DunkError::Refused(format!("no task with id {id:?}")))?;
+    let added = tx
+        .query_row(
+            "SELECT assignee_added FROM task_leases WHERE task_id = ? AND pane_id = ?",
+            params![id, pane],
+            |r| r.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(db::map_sqlite)?
+        .is_some_and(|v| v != 0);
+    tx.execute(
+        "DELETE FROM task_leases WHERE task_id = ? AND pane_id = ?",
+        params![id, pane],
+    )
+    .map_err(db::map_sqlite)?;
+    let mut assignees = decode_list(raw.as_deref());
+    if added {
+        assignees.retain(|a| a.as_str() != pane);
+    }
+    let resulting = after_lease_change(tx, id, &assignees, now)?;
+    tx.execute(
+        "INSERT INTO task_events (task_id, event, at, actor, scope, priority, status_from, status_to) VALUES (?,?,?,?,?,?,?,?)",
+        params![id, "released", now, pane, scope, priority, status, resulting],
+    )
+    .map_err(db::map_sqlite)?;
+    Ok(())
+}
+
 impl Tasks {
     /// Give a claim back without completing it (`release`).
     ///
@@ -499,36 +579,22 @@ impl Tasks {
                 let tx = conn
                     .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                     .map_err(db::map_sqlite)?;
-                let (scope, priority, status, raw): (String, String, String, Option<String>) = tx
-                    .query_row(
-                        "SELECT scope, priority, status, assignees FROM tasks WHERE id = ?",
-                        params![wanted],
-                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-                    )
-                    .optional()
-                    .map_err(db::map_sqlite)?
-                    .ok_or_else(|| DunkError::Refused(format!("no task with id {wanted:?}")))?;
-                let added = tx
-                    .query_row(
-                        "SELECT assignee_added FROM task_leases WHERE task_id = ? AND pane_id = ?",
-                        params![wanted, pane],
-                        |r| r.get::<_, i64>(0),
-                    )
-                    .optional()
-                    .map_err(db::map_sqlite)?
-                    .is_some_and(|v| v != 0);
-                tx.execute("DELETE FROM task_leases WHERE task_id = ? AND pane_id = ?", params![wanted, pane])
-                    .map_err(db::map_sqlite)?;
-                let mut assignees = decode_list(raw.as_deref());
-                if added {
-                    assignees.retain(|a| *a != pane);
+                // t3582: a batch is released as one. Every member the pane holds is freed,
+                // and the batch ends, so its members can be claimed again.
+                let (batch, held) = match active_batch_of(&tx, &wanted)? {
+                    Some(batch) => (Some(batch), batch_members_held_by(&tx, batch, &pane)?),
+                    None => (None, Vec::new()),
+                };
+                if held.is_empty() {
+                    release_lease(&tx, &wanted, &pane, now)?;
+                } else {
+                    for member in &held {
+                        release_lease(&tx, member, &pane, now)?;
+                    }
+                    if let Some(batch) = batch {
+                        end_batch(&tx, batch)?;
+                    }
                 }
-                let resulting = after_lease_change(&tx, &wanted, &assignees, now)?;
-                tx.execute(
-                    "INSERT INTO task_events (task_id, event, at, actor, scope, priority, status_from, status_to) VALUES (?,?,?,?,?,?,?,?)",
-                    params![wanted, "released", now, pane, scope, priority, status, resulting],
-                )
-                .map_err(db::map_sqlite)?;
                 tx.commit().map_err(db::map_sqlite)?;
                 Ok(wanted)
             })
@@ -586,33 +652,50 @@ impl Tasks {
                         continue;
                     }
                     let reason = if dead_caller { "caller_dead" } else { "expired" };
-                    tx.execute("DELETE FROM task_leases WHERE task_id = ? AND pane_id = ?", params![task_id, pane_id])
-                        .map_err(db::map_sqlite)?;
-                    let row: Option<(String, String, String, Option<String>)> = tx
-                        .query_row(
-                            "SELECT scope, priority, status, assignees FROM tasks WHERE id = ?",
-                            params![task_id],
-                            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-                        )
-                        .optional()
-                        .map_err(db::map_sqlite)?;
-                    let Some((scope, priority, status, raw)) = row else { continue };
-                    let owners = decode_list(raw.as_deref());
-                    let resulting = after_lease_change(&tx, &task_id, &owners, now)?;
-                    let event = if resulting == "open" { "requeued" } else { "released" };
-                    tx.execute(
-                        "INSERT INTO task_events (task_id, event, at, actor, scope, priority, status_from, status_to, meta) VALUES (?,?,?,?,?,?,?,?,?)",
-                        params![task_id, event, now, pane_id, scope, priority, status, resulting,
-                                json!({ "reason": reason, "pane_gone": gone, "caller_pid": pid, "caller_name": name }).to_string()],
-                    )
-                    .map_err(db::map_sqlite)?;
-                    if resulting == "open" {
-                        if alive_panes.as_ref().is_some_and(|alive| !owners.is_empty() && !owners.iter().any(|o| alive.contains(o))) {
-                            // Advisory only: ownership is durable, so a dead owner needs an
-                            // explicit reassignment, not a lease side effect.
-                            eprintln!("task {task_id} reopened while owned by a pane that is not live: owners={}", owners.join(","));
+                    // t3582: a batch lapses as one, so the due lease takes every member the pane
+                    // holds with it. The batch then ends and its members are free again.
+                    let batch = active_batch_of(&tx, &task_id)?;
+                    let victims = match batch {
+                        Some(batch) => batch_members_held_by(&tx, batch, &pane_id)?,
+                        None => vec![task_id.clone()],
+                    };
+                    for task_id in victims {
+                        let removed = tx
+                            .execute("DELETE FROM task_leases WHERE task_id = ? AND pane_id = ?", params![task_id, pane_id])
+                            .map_err(db::map_sqlite)?;
+                        // Already released with its batch earlier in this pass: nothing to reap.
+                        if removed == 0 {
+                            continue;
                         }
-                        requeued.push(Requeued { task_id, pane_id, reason });
+                        let row: Option<(String, String, String, Option<String>)> = tx
+                            .query_row(
+                                "SELECT scope, priority, status, assignees FROM tasks WHERE id = ?",
+                                params![task_id],
+                                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                            )
+                            .optional()
+                            .map_err(db::map_sqlite)?;
+                        let Some((scope, priority, status, raw)) = row else { continue };
+                        let owners = decode_list(raw.as_deref());
+                        let resulting = after_lease_change(&tx, &task_id, &owners, now)?;
+                        let event = if resulting == "open" { "requeued" } else { "released" };
+                        tx.execute(
+                            "INSERT INTO task_events (task_id, event, at, actor, scope, priority, status_from, status_to, meta) VALUES (?,?,?,?,?,?,?,?,?)",
+                            params![task_id, event, now, pane_id, scope, priority, status, resulting,
+                                    json!({ "reason": reason, "pane_gone": gone, "caller_pid": pid, "caller_name": name }).to_string()],
+                        )
+                        .map_err(db::map_sqlite)?;
+                        if resulting == "open" {
+                            if alive_panes.as_ref().is_some_and(|alive| !owners.is_empty() && !owners.iter().any(|o| alive.contains(o))) {
+                                // Advisory only: ownership is durable, so a dead owner needs an
+                                // explicit reassignment, not a lease side effect.
+                                eprintln!("task {task_id} reopened while owned by a pane that is not live: owners={}", owners.join(","));
+                            }
+                            requeued.push(Requeued { task_id, pane_id: pane_id.clone(), reason });
+                        }
+                    }
+                    if let Some(batch) = batch {
+                        end_batch(&tx, batch)?;
                     }
                 }
                 tx.commit().map_err(db::map_sqlite)?;
@@ -625,3 +708,11 @@ impl Tasks {
 #[cfg(test)]
 #[path = "claim_tests.rs"]
 mod claim_tests;
+
+#[cfg(test)]
+#[path = "claim_kind_filter_tests.rs"]
+mod claim_kind_filter_tests;
+
+#[cfg(test)]
+#[path = "claim_assigned_offer_tests.rs"]
+pub(crate) mod claim_assigned_offer_tests;

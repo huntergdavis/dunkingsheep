@@ -15,7 +15,10 @@ use serde_json::{Map, Value};
 
 use super::GitHubError;
 
-const DEFAULT_REPOS: [&str; 2] = ["huntergdavis/dunkingsheep", "huntergdavis/poolrad-decomp"];
+/// The repos the fleet reviews. `repos_config` falls back to these; the review engine also adds
+/// them to whatever the config lists (`review::with_fleet_repos`).
+pub(crate) const DEFAULT_REPOS: [&str; 2] =
+    ["huntergdavis/dunkingsheep", "huntergdavis/poolrad-decomp"];
 const AUTHOR_MINT_FILE: &str = "github-author-mints.json";
 const WINDOW: f64 = 1800.0;
 const KEEP: f64 = 86400.0;

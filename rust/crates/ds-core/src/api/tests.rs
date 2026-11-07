@@ -13,6 +13,12 @@ use std::sync::Mutex;
 #[path = "owner_page_tests.rs"]
 mod owner_page_tests;
 
+#[path = "task_batch_tests.rs"]
+mod task_batch_tests;
+// t665 piece 2: the watchdog's confirmation read and the page number (its own file).
+#[path = "owner_page_confirm_tests.rs"]
+mod owner_page_confirm_tests;
+
 use crate::config::Env;
 use crate::flock::commands_inbox::{InboxEnv, Nudge, RouteEntry};
 use crate::flock::commands_turns::{TurnHooks, TurnState};
@@ -435,6 +441,10 @@ fn h_review_sync_matches_python() {
             json!({"mergeable":true, "mergeable_state":"clean"}),
             json!({"state":"open", "body":""}),
             json!({}),
+            // t3600: the sweep also covers the fleet repos the config omits. Their pull listings
+            // are empty, so they answer [] after the configured repo's requests.
+            json!([]),
+            json!([]),
         ],
     );
     {
@@ -447,14 +457,22 @@ fn h_review_sync_matches_python() {
             .dispatch(&context, &FixedRole("owner", true), "review_sync", None)
             .unwrap();
 
-        assert_eq!(json!([{"repo":"o/r", "open":1}]), report["repos"]);
+        assert_eq!(
+            json!([
+                {"repo":"o/r", "open":1},
+                {"repo":"huntergdavis/dunkingsheep", "open":0},
+                {"repo":"huntergdavis/poolrad-decomp", "open":0}
+            ]),
+            report["repos"]
+        );
         assert_eq!(1, report["filed"].as_array().unwrap().len());
         assert!(report["errors"].as_array().unwrap().is_empty());
         let rows = runtime.block_on(tasks.list_review_rows_visible()).unwrap();
         assert_eq!(1, rows.len());
         assert_eq!("open", rows[0].status);
         let requests = env.transport.requests.lock().unwrap();
-        assert_eq!(4, requests.len());
+        // o/r: pulls, mergeable, pull detail, status; then one pulls listing per fleet repo.
+        assert_eq!(6, requests.len());
         assert!(requests
             .iter()
             .all(|request| request.url.starts_with("https://github.invalid/")));

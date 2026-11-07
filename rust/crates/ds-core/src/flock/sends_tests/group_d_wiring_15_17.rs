@@ -360,6 +360,68 @@ fn wiring_15_control_presses_once_at_the_threshold_when_nothing_is_wrong() {
     );
 }
 
+/// The stuck config of Python's `RecoveryWiringTests.make`: threshold 120 s, observation every 20 s,
+/// cooldown 60 s, and `max_attempts` 2. Both the pre-restart and the restored flock use it.
+fn oracle_wiring_config(flock: &Flock) {
+    let mut config = flock.stuck_config.lock().unwrap();
+    config.threshold_s = 120.0;
+    config.observation_interval_s = 20.0;
+    config.cooldown_s = 60.0;
+    config.max_attempts = 2;
+}
+
+/// t3501 wiring row 14 (Python `test_failure_candidate_and_spent_budget_survive_restart`): the
+/// candidate and its spent budget survive a restart that follows a key press. The one press before
+/// the restart is the whole budget, so the restored flock, with the same `max_attempts` 2 config,
+/// presses nothing at the later ticks. The earlier fixture used `max_attempts` 1 and never restarted,
+/// so it could not show this.
+#[test]
+fn wiring_14_spent_budget_survives_a_restart_after_a_key() {
+    let mut fx = native_fixture();
+    oracle_wiring_config(&fx.flock);
+    observe(&fx.flock, &mut fx.env, 1000.0);
+    observe(&fx.flock, &mut fx.env, 1120.0);
+    assert_eq!(
+        1,
+        fx.env.keys.len(),
+        "one press at the threshold before the restart"
+    );
+    let payload = fx.flock.snapshot();
+    let restored =
+        persistent_recovery_flock(fx._state.path(), &fx._state.path().join("state.json"));
+    restored.restore_snapshot(&payload);
+    oracle_wiring_config(&restored);
+    for at in [1300.0, 1420.0, 1600.0] {
+        observe(&restored, &mut fx.env, at);
+    }
+    assert_eq!(
+        1,
+        fx.env.keys.len(),
+        "the spent budget keeps the restored flock to one press (PR109 bound)"
+    );
+}
+
+/// t3501 wiring row 19, at the observer layer (Python test_different_native_process_binding_not_adopted): a
+/// stored native binding that names another process is stale. Observer ticks adopt nothing from it and press
+/// nothing, while the bound pane presses once (wiring_15_control shows that). The tracker-layer test in
+/// stuck.rs covers the decision only.
+#[test]
+fn wiring_19_stale_stored_binding_is_not_adopted_by_observer_ticks() {
+    let mut fx = native_fixture();
+    {
+        let mut candidates = fx.flock.stuck_candidates.lock().unwrap();
+        let candidate = candidates.get_mut("%1").unwrap();
+        candidate.native_binding =
+            Some((i64::MAX - 1, "stale-start".into(), "stale-session".into()));
+    }
+    observe(&fx.flock, &mut fx.env, 101.0);
+    observe(&fx.flock, &mut fx.env, 222.0);
+    assert!(
+        fx.env.keys.is_empty(),
+        "a stale stored binding presses nothing"
+    );
+}
+
 /// A `Pane` that counts its screen reads and, during one of them, replaces the rollout. That read
 /// is one the observer makes while deciding, so the native turn starts before the key. `key_reads`
 /// records the read count at each key press, which is how the race run finds its boundary.

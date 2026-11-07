@@ -238,6 +238,10 @@ fn advance_in(
                 owner_text(&owners)
             ));
         }
+        // t3582: the batch order guard and the membership retirement apply here too. A completion
+        // through advance is a status path, and the review of #807 found it had neither.
+        super::claim_batch::guard_completion(&tx, &id, &row.status, "done")?;
+        super::claim_batch::leave_batch_on_status(&tx, &id, &row.status, "done")?;
         tx.execute(
             "UPDATE tasks SET status='done', completed_at=?, completed_by=?, updated_at=?, cancelled_at=NULL, block_reason=NULL WHERE id=?",
             params![now, pane, now, id],

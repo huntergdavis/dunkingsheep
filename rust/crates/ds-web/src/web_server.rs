@@ -13,10 +13,11 @@
 //! `/api/health`. A request that a registered Python route claims for its method goes to that
 //! route. Every other request goes to the static mount, because Starlette's `/` mount takes any
 //! path the routes do not fully match. The mount answers GET and HEAD from the built UI directory:
-//! `..` normalises inside it, a directory without a trailing slash redirects, and a missing file
-//! serves the bundle's `404.html` or `{"detail": "Not Found"}`. Any other method gets a
-//! `{"detail": "Method Not Allowed"}` 405 whose `Allow` is `GET, HEAD`. The legacy shell middleware
-//! runs first, so a path the desk does not keep gets a 307 to `/dash/<view>`.
+//! `..` normalises inside it. A directory URL without a trailing slash redirects to the slashed
+//! URL only when that directory contains an `index.html`; any other directory URL is a missing
+//! file. A missing file serves the bundle's `404.html` or `{"detail": "Not Found"}`. Any other
+//! method gets a `{"detail": "Method Not Allowed"}` 405 whose `Allow` is `GET, HEAD`. The legacy
+//! shell middleware runs first, so a path the desk does not keep gets a 307 to `/dash/<view>`.
 //!
 //! Known gaps, reported rather than widened here:
 //! - The Python `vp-delivery-watch` loop (reconcile pending owner messages every 5 seconds) has no
@@ -29,9 +30,9 @@
 //!   headers are not replicated, and neither is the exact MIME table of Python's `mimetypes`.
 //! - Conditional GET and ranges are not implemented: no 304 for If-None-Match or If-Modified-Since,
 //!   no Accept-Ranges header, and no Range requests (206). Starlette's FileResponse answers them.
-//! - The 405 `Allow` is `GET, HEAD`, the value Starlette 1.10.0 sets in its StaticFiles method check,
-//!   the version in the release venv. `bridges/requirements.txt` pins ranges only, and the reviewer's
-//!   note that Starlette 0.46.x sent no Allow is not verified in this tree.
+//! - The 405 `Allow` is `GET, HEAD`, the value Starlette sets in its StaticFiles method check.
+//!   The Starlette version is pinned by range in this tree, so another release may send a
+//!   different `Allow`; that is not checked here.
 //! - The P1 game routes are not in the route table. Python answers them, but here a POST gets the
 //!   mount's 405 (Allow `GET, HEAD`) and a GET gets a 404. The 405 wrongly implies the path takes only
 //!   GET and HEAD. This is documented rather than fixed.
@@ -45,6 +46,10 @@
 //! - `GET /api/poolrad-dashboard/progress` is a P0 route (web/app.py:1953) mounted through
 //!   `routes::activity_poolrad`. The poolrad dashboard page, its reports, and its refresh are P1 and
 //!   not mounted here.
+//! - The character editor's five routes under `/api/character-editor` (sources, source by id,
+//!   imports, copies, and copy download) are P1 and deferred (t3217, t3218). web/app.py mounts them
+//!   through the APIRouter in web/character_editor.py. They are not in this route table, so they
+//!   fall through to the static mount like the other unmounted P1 routes.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -788,8 +793,9 @@ fn encode_path(decoded: &str) -> String {
 
 /// Starlette's `StaticFiles(html=True)` at `/`, as the app mounts it. GET and HEAD only. Any other
 /// method gets Starlette's 405 with `Allow: GET, HEAD`, rendered as FastAPI renders an
-/// HTTPException. A directory serves its `index.html`, and a directory URL without a trailing
-/// slash redirects to one. `..` segments normalise first, and a path that climbs above the bundle
+/// HTTPException. A directory serves its `index.html`. A directory URL without a trailing slash
+/// redirects to one only when that directory has an `index.html`; otherwise it is a missing file.
+/// `..` segments normalise first, and a path that climbs above the bundle
 /// is a 404. A missing file serves the bundle's `404.html` when there is one.
 async fn serve_static(root: &Path, request: Request) -> Response {
     let method = request.method().clone();

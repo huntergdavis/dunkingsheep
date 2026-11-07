@@ -905,6 +905,7 @@ pub mod send_keys;
 pub mod sends;
 pub mod status;
 pub mod status_runtime;
+pub mod task_batch;
 pub mod task_wire;
 pub mod views;
 
@@ -932,6 +933,7 @@ mod loops_tests;
 mod mailbox_tests;
 #[cfg(test)]
 mod pane_root_tests;
+mod outbox_restart_keys_tests;
 #[cfg(test)]
 mod panes_tests;
 #[cfg(test)]

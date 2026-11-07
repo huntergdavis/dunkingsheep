@@ -43,9 +43,10 @@ fn python_exception(kind: &'static str, message: String) -> RecoveryCommandError
 }
 
 impl RecoverEnv for RequestRuntimeAdapter<'_> {
-    /// `self.herdr.list_panes()`: the backend's pane dicts; a backend failure is an empty list.
+    /// `self.herdr.list_panes()`: the backend's pane dicts. A refused listing is a refusal (t3415):
+    /// read as an empty list it would report every running dunk as pane-missing.
     fn list_panes(&self) -> RecoveryResult<Vec<Value>> {
-        Ok(MailboxEnv::list_panes(&self.terminal))
+        Ok(MailboxEnv::try_list_panes(&self.terminal)?)
     }
 
     /// `self.herdr.get_pane(pane_id)`.

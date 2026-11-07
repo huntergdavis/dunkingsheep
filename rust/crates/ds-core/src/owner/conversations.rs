@@ -46,6 +46,12 @@ pub const OWNER_PAGE_SENDER: &str = "owner-page";
 pub const OWNER_PAGE_SUBJECT: &str = "PAGE OWNER";
 pub const OWNER_PAGE_TRANSPORT: &str = "telegram";
 
+/// The number the watchdog compares for an owner page: the digits of its mailbox id (`i47710`
+/// -> 47710). None for any id that is not one of ours, so a stranger row never confirms a page.
+pub fn owner_page_number(message_id: &str) -> Option<i64> {
+    message_id.strip_prefix('i')?.parse::<i64>().ok()
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Ingested {
     pub message: Message,
@@ -274,6 +280,32 @@ impl<'a> OwnerConversations<'a> {
         })
     }
 
+    /// Only the owner and the system may record or confirm an owner page (t665).
+    fn require_page_role(&self, self_pane_id: Option<&str>) -> Result<(), DunkError> {
+        let role = match self_pane_id.filter(|pane| !pane.is_empty()) {
+            Some(pane) => self.flock.caller_role(Some(pane), self.pane_env)?,
+            None => "owner".to_string(),
+        };
+        if !matches!(role.as_str(), "owner" | "system") {
+            return Err(DunkError::Refused(format!(
+                "only the owner and the system may record or confirm an owner page; role {} may not",
+                python_repr(&role)
+            )));
+        }
+        Ok(())
+    }
+
+    /// The highest owner page the Telegram transport has delivered, as a mailbox number (t665).
+    /// The watchdog confirms a page once this reaches the page's own number: pages leave the
+    /// outbox in id order, so the delivered ones are a prefix.
+    pub fn page_confirmed_through(
+        &self,
+        self_pane_id: Option<&str>,
+    ) -> Result<Option<i64>, DunkError> {
+        self.require_page_role(self_pane_id)?;
+        self.inbox_store()?.owner_page_delivered_through()
+    }
+
     /// Record one owner page for the Telegram outbox (t665). Only the owner and the system may
     /// record one. `external_id` is the producer's dedupe key: a repeat returns the row it
     /// already made, so a re-raised page never reaches the phone twice.
@@ -283,16 +315,7 @@ impl<'a> OwnerConversations<'a> {
         external_id: Option<&Value>,
         self_pane_id: Option<&str>,
     ) -> Result<Ingested, DunkError> {
-        let role = match self_pane_id.filter(|pane| !pane.is_empty()) {
-            Some(pane) => self.flock.caller_role(Some(pane), self.pane_env)?,
-            None => "owner".to_string(),
-        };
-        if !matches!(role.as_str(), "owner" | "system") {
-            return Err(DunkError::Refused(format!(
-                "only the owner and the system may record an owner page; role {} may not",
-                python_repr(&role)
-            )));
-        }
+        self.require_page_role(self_pane_id)?;
         let body = body.map(python_str).unwrap_or_default();
         if body.trim().is_empty() {
             return Err(DunkError::Refused("an owner page needs a body".to_string()));

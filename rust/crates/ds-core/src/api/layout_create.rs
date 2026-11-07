@@ -154,7 +154,7 @@ pub fn h_split_pane(context: &HandlerContext<'_>, args: Args) -> Result<Value, D
                     return Err(DunkError::Refused("target dict has no pane_id".into()));
                 }
                 backend
-                    .list_panes()
+                    .try_list_panes()?
                     .into_iter()
                     .find(|pane| {
                         pane.get("pane_id")
@@ -170,7 +170,7 @@ pub fn h_split_pane(context: &HandlerContext<'_>, args: Args) -> Result<Value, D
                 {
                     vec![]
                 } else {
-                    backend.list_panes()
+                    backend.try_list_panes()?
                 };
                 resolve::resolve_target(
                     &rows,

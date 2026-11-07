@@ -43,6 +43,16 @@ mod group_d_scheduled_40;
 #[cfg(test)]
 mod group_d_wiring_15_17;
 
+/// t3477 max-hold fallback (owner-approved): an inconclusive box types after the hold limit, a
+/// pending foreign draft stays held. See sends_tests/max_hold_fallback.rs.
+#[cfg(test)]
+mod max_hold_fallback;
+
+/// t3661: the outbox's pre-send check (send_blocker, clear_to_send) on the constructed idle hint
+/// frames, and the max-hold fallback on that path. See sends_tests/idle_hint_precheck.rs.
+#[cfg(test)]
+mod idle_hint_precheck;
+
 #[derive(Default)]
 struct Pane {
     screens: BTreeMap<String, String>,
@@ -2215,6 +2225,7 @@ mod guarded_preparation_tests {
                 hold_while_typing: true,
                 allow_modal: false,
                 preserve_draft: true,
+                inconclusive_fallback: false,
             },
             || None,
             |_, _| {
@@ -2257,6 +2268,7 @@ mod guarded_preparation_tests {
                 hold_while_typing: true,
                 allow_modal: false,
                 preserve_draft: false,
+                inconclusive_fallback: false,
             },
             || None,
             |env, guard| {
@@ -4335,6 +4347,12 @@ fn a_reported_sent_schedule_is_not_submitted_from_a_dim_or_unstyled_echo() {
 // t3355 (t820 proof D) scheduled row 30 (oracle 79bc92fa). A failed scheduled send whose plain
 // composer has two blank rows before the footer: no key before two minutes, exactly one key at
 // 120 s, and none afterwards.
+//
+// RESIDUAL (t3501 scheduled 30, owner decision): the oracle also asserts exactly one `stuck.recover` metric
+// with outcome `consumed`. In Rust that metric is recorded only by the federated watchdog path
+// (flock/loops_stuck.rs); the strict observer path this test drives records none. The key assertions below
+// are kept; the missing metric is a divergence named here and filed as a production follow-up, not changed in
+// t3501.
 #[test]
 fn an_ambiguous_scheduled_composer_recovers_once_after_two_minutes() {
     let dir = tempfile::tempdir().unwrap();
@@ -4372,7 +4390,6 @@ const T508_TEXT: &str = include_str!("testdata/t508-text.txt");
 const T508_PREFIX: &str = include_str!("testdata/t508-prefix.txt");
 
 #[test]
-#[ignore = "fixture unverified, see t3355 note: the native-evidence press is refused at the threshold; wiring row 13 stays open"]
 fn a_scheduled_false_sent_real_frame_recovers_once_through_native_evidence() {
     struct ChildGuard(std::process::Child);
     impl Drop for ChildGuard {
@@ -4423,7 +4440,8 @@ fn a_scheduled_false_sent_real_frame_recovers_once_through_native_evidence() {
     .unwrap();
 
     let base = crate::clock::now_s();
-    let flock = Flock::new(dir.path().join("launches"), dir.path().join("lanes"), false);
+    // Persistent: the observer reserves the key durably before it presses, and a non-persistent flock refuses.
+    let flock = persistent_recovery_flock(dir.path(), &dir.path().join("state.json"));
     {
         let mut config = flock.stuck_config.lock().unwrap();
         config.threshold_s = 120.0;
