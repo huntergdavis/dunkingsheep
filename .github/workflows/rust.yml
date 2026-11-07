@@ -37,7 +37,12 @@ jobs:
       - run: python3 tools/check_test_tempdirs.py
       # t3474: the generated CLI table, its help goldens and the release identity (VERSION and
       # CODE_HASH, which hash the root Python modules) must match the Python parser. A Python change
-      # that moves the code hash without `python3 tools/gen_cli_rs.py --write` fails here.
+      # that moves the code hash without `python3 tools/gen_cli_rs.py --write` fails here. The
+      # generator is pinned to 3.14, the interpreter the files were written with, because argparse
+      # output can differ between Python releases and the runner's default python3 is 3.12.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
       - run: python3 tools/gen_cli_rs.py --check
 
   build-and-test:
