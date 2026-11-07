@@ -298,7 +298,8 @@ fn negative_controls() -> [(&'static str, Mutation); 15] {
             rows.get_mut("%1").unwrap().generation = Some("pid:old:start:old".into());
         }),
         ("no durable attempt", |fx: &mut Native| {
-            fx.flock.stuck_candidates.lock().unwrap().clear();
+            // The fixture holds one candidate, so removing it is the oracle's dict clear.
+            fx.flock.stuck_candidates.lock().unwrap().remove("%1");
         }),
         ("untyped intent", |fx: &mut Native| {
             let mut rows = fx.flock.stuck_candidates.lock().unwrap();
