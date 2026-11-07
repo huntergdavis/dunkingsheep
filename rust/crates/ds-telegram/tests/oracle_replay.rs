@@ -1,0 +1,296 @@
+//! Golden replay against the Python bridge (t3231, the parity condition).
+//!
+//! `tests/fixtures/oracle_replay.json` was written by `tools/telegram_oracle_replay.py`, which ran the
+//! Python `bridges/telegram_bridge.py` on fakes (stub desk, fake Telegram, fake daemon, fixed clock).
+//! Each scenario holds the INPUTS and the OBSERVED outputs. This test replays the same inputs through
+//! the Rust port and requires the same outputs: every Telegram call with its payload, every daemon call
+//! with its arguments, each step's result or exception, and the final telegram.json and status file.
+//!
+//! Known, named differences are NOT in the fixture: attachments and `/status` (the port answers them
+//! with a visible reply; Python downloads or reconciles). Numbers are compared as floats, so an int in
+//! one language and a float in the other never decides a comparison.
+
+mod common;
+
+use std::path::Path;
+
+use common::{FakeBot, FakeDaemon, NOW};
+use ds_telegram::bridge::status_line;
+use ds_telegram::config::{load_config, Paths};
+use ds_telegram::pyval::{present, truthy};
+use ds_telegram::{Bot, Bridge, BridgeError, Config};
+use serde_json::{json, Map, Value};
+
+const FIXTURE: &str = "tests/fixtures/oracle_replay.json";
+
+/// Every number as an f64, the one spelling both sides are compared in.
+fn normalize(value: &Value) -> Value {
+    match value {
+        Value::Number(number) => json!(number.as_f64().unwrap_or(0.0)),
+        Value::Array(items) => Value::Array(items.iter().map(normalize).collect()),
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(key, item)| (key.clone(), normalize(item)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+fn error_record(error: &BridgeError) -> Value {
+    json!([error.python_type(), error.to_string()])
+}
+
+/// The scripted run loop, as the Python `run()` executes it: the webhook check, then one tick per
+/// scripted batch, then the getUpdates that finds no batch (recorded, then ends the loop).
+fn run_loop(
+    bridge: &mut Bridge<FakeDaemon, FakeBot>,
+    config: &mut Config,
+    bot: &FakeBot,
+    batches: Vec<Vec<Value>>,
+) -> Result<(), BridgeError> {
+    bot.0.borrow_mut().batches = batches.into_iter().collect();
+    bridge.prepare_route(config)?;
+    let webhook = bridge.bot.call("getWebhookInfo", Map::new())?;
+    if truthy(webhook.get("url")) {
+        return Err(BridgeError::Runtime(
+            "This bot has a webhook; remove it before using long polling".into(),
+        ));
+    }
+    loop {
+        let pending = bot.0.borrow().batches.len();
+        if pending == 0 {
+            let mut params = Map::new();
+            if let Some(offset) = present(config.get("update_offset")) {
+                params.insert("offset".into(), offset.clone());
+            }
+            params.insert("timeout".into(), json!(10));
+            params.insert("allowed_updates".into(), json!(["message"]));
+            // The Python call that raises StopLoop is still a call: it is in the log.
+            let _ = bridge.bot.call("getUpdates", params);
+            return Ok(());
+        }
+        // The Python loop prints a failed tick and retries; the step records nothing for it.
+        let _ = bridge.tick(config);
+    }
+}
+
+/// Replay one scenario and return its observed outputs, in the fixture's shape.
+fn replay(input: &Value) -> Value {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let data = dir.path().join("desk");
+    std::fs::create_dir_all(&data).expect("data dir");
+    let paths = Paths::new(&data);
+    let registry = dir.path().join("channels.json");
+    std::fs::write(&registry, input["registry"].to_string()).expect("registry");
+
+    if !input["routing"].is_null() {
+        std::fs::write(paths.routing(), input["routing"].to_string()).expect("routing");
+    }
+    if !input["config"].is_null() {
+        std::fs::write(paths.config(), input["config"].to_string()).expect("config");
+    }
+    {
+        // The desk store always has its table, as the real desk does.
+        let conn = rusqlite::Connection::open(paths.desk_db()).expect("desk db");
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY, channel TEXT, role TEXT, body TEXT);",
+        )
+        .expect("schema");
+        for row in input["desk_rows"].as_array().cloned().unwrap_or_default() {
+            conn.execute(
+                "INSERT INTO messages (id, channel, role, body) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![
+                    row[0].as_i64().unwrap(),
+                    row[1].as_str().unwrap(),
+                    row[2].as_str().unwrap(),
+                    row[3].as_str().unwrap()
+                ],
+            )
+            .expect("row");
+        }
+    }
+
+    let bot = FakeBot::default();
+    {
+        let mut state = bot.0.borrow_mut();
+        state.webhook_url = input["webhook_url"].as_str().unwrap_or("").to_string();
+        state.fail_on = input["fail_on"].as_str().map(str::to_string);
+    }
+    let daemon = FakeDaemon::default();
+    {
+        let mut state = daemon.0.borrow_mut();
+        state.outbox = input["daemon"]["outbox"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        state.ingest = input["daemon"]["ingest"].clone();
+    }
+    let mut bridge = Bridge {
+        paths: paths.clone(),
+        registry_path: registry.clone(),
+        env_channel: None,
+        daemon: daemon.clone(),
+        bot: bot.clone(),
+        clock: Box::new(|| NOW),
+    };
+    let mut config: Option<Config> = if input["config"].is_null() {
+        None
+    } else {
+        Some(load_config(&paths).expect("config"))
+    };
+
+    let mut steps = Vec::new();
+    for step in input["steps"].as_array().cloned().unwrap_or_default() {
+        let op = step["op"].as_str().unwrap_or("");
+        let mut record = Map::new();
+        record.insert("op".into(), json!(op));
+        record.insert("error".into(), Value::Null);
+        match op {
+            "process_update" => {
+                let cfg = config.as_mut().expect("a config for process_update");
+                if let Err(error) = bridge.process_update(&step["update"], cfg) {
+                    record.insert("error".into(), error_record(&error));
+                }
+            }
+            "send_owner_outbox" => {
+                let cfg = config.as_mut().expect("a config for send_owner_outbox");
+                match bridge.send_owner_outbox(cfg) {
+                    Ok(sent) => {
+                        let sent: Vec<Value> = sent
+                            .iter()
+                            .map(|item| {
+                                json!({"message_id": item.message_id, "kind": item.kind, "reason": item.reason})
+                            })
+                            .collect();
+                        record.insert("sent".into(), Value::Array(sent));
+                    }
+                    Err(error) => {
+                        record.insert("error".into(), error_record(&error));
+                    }
+                }
+            }
+            "run" => {
+                let cfg = config.as_mut().expect("a config for run");
+                let batches = step["batches"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|batch| batch.as_array().cloned().unwrap_or_default())
+                    .collect();
+                match run_loop(&mut bridge, cfg, &bot, batches) {
+                    Ok(()) => {
+                        record.insert("stopped".into(), json!(true));
+                    }
+                    Err(error) => {
+                        record.insert("error".into(), error_record(&error));
+                    }
+                }
+            }
+            "status" => {
+                let (stdout, stderr) = match status_line(&paths, &registry, None) {
+                    Ok(line) => (format!("{line}\n"), String::new()),
+                    Err(error) => (String::new(), format!("{error}\n")),
+                };
+                record.insert("stdout".into(), json!(stdout));
+                record.insert("stderr".into(), json!(stderr));
+            }
+            "write_config" => {
+                std::fs::write(paths.config(), step["config"].to_string()).expect("config");
+                config = Some(load_config(&paths).expect("config"));
+            }
+            "set_fail_on" => {
+                bot.0.borrow_mut().fail_on = step["value"].as_str().map(str::to_string);
+            }
+            other => panic!("unknown op in the fixture: {other}"),
+        }
+        steps.push(Value::Object(record));
+        // The config the next step sees is the one on disk, as the Python replay reloads it.
+        if matches!(op, "process_update" | "send_owner_outbox") && paths.config().exists() {
+            config = Some(load_config(&paths).expect("config"));
+        }
+    }
+
+    let bot_log: Vec<Value> = bot
+        .0
+        .borrow()
+        .log
+        .iter()
+        .map(|(method, payload)| json!([method, Value::Object(payload.clone())]))
+        .collect();
+    let daemon_log: Vec<Value> = daemon
+        .0
+        .borrow()
+        .calls
+        .iter()
+        .map(|(name, kwargs)| json!([name, Value::Object(kwargs.clone())]))
+        .collect();
+    let config_on_disk = std::fs::read_to_string(paths.config())
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .unwrap_or(Value::Null);
+    let status = std::fs::read_to_string(paths.status())
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .map(|mut value| {
+            if let Some(object) = value.as_object_mut() {
+                object.remove("updated_at");
+            }
+            value
+        })
+        .unwrap_or(Value::Null);
+    json!({
+        "steps": steps,
+        "bot_log": bot_log,
+        "daemon_log": daemon_log,
+        "config": config_on_disk,
+        "status": status,
+    })
+}
+
+#[test]
+fn every_scenario_matches_the_python_oracle() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(FIXTURE);
+    let text = std::fs::read_to_string(&path).expect("the oracle fixture");
+    let document: Value = serde_json::from_str(&text).expect("fixture JSON");
+    assert_eq!(
+        document["now"].as_f64(),
+        Some(NOW),
+        "the fixture was recorded at the pinned clock"
+    );
+    let scenarios = document["scenarios"].as_array().expect("scenarios");
+    assert!(
+        scenarios.len() >= 30,
+        "only {} scenarios in the fixture",
+        scenarios.len()
+    );
+
+    let mut failures = Vec::new();
+    for scenario in scenarios {
+        let name = scenario["name"].as_str().unwrap_or("?").to_string();
+        let expected = normalize(&scenario["expected"]);
+        let actual = normalize(&replay(&scenario["input"]));
+        if expected != actual {
+            let keys: Vec<&str> = ["steps", "bot_log", "daemon_log", "config", "status"]
+                .into_iter()
+                .filter(|key| expected[*key] != actual[*key])
+                .collect();
+            failures.push(format!("{name}: differs in {keys:?}"));
+            if failures.len() == 1 {
+                eprintln!(
+                    "first difference, {name}\nexpected: {}\nactual:   {}",
+                    serde_json::to_string_pretty(&expected).unwrap(),
+                    serde_json::to_string_pretty(&actual).unwrap()
+                );
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} of {} scenarios differ from the Python oracle:\n{}",
+        failures.len(),
+        scenarios.len(),
+        failures.join("\n")
+    );
+}
