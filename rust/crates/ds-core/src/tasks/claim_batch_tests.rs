@@ -105,8 +105,11 @@ async fn competing_claimers_on_one_batch_leave_exactly_one_whole_winner() {
         .into_iter()
         .find(|o| matches!(o, ClaimBatchOutcome::Refused { .. }))
         .unwrap();
-    // The loser runs after the winner's commit, so it sees the winner as the owner.
-    assert_eq!(refused(loser).reason, "owned_elsewhere");
+    // The loser runs after the winner's commit, so its members already belong to the
+    // winner's active batch (t3582): that conflict is the reason it is refused.
+    let refusal = refused(loser);
+    assert_eq!(refusal.reason, "batch_conflict");
+    assert_eq!(refusal.task_ids, batch);
 }
 
 #[tokio::test]
