@@ -307,6 +307,28 @@ impl Terminal for TmuxBackend {
         }
     }
 
+    fn try_pane_root_pid(&self, pane_id: &str) -> Result<Option<Option<i64>>, TerminalError> {
+        // The identity listing (t3368): the pane id and the root pid only, so a free-text window
+        // name cannot shift the pid. A missing server is an empty listing, as in try_list_panes.
+        let panes = match self.run(&["list-panes", "-a", "-F", super::identity::identity_format()])
+        {
+            Ok(result) if result.code == 0 => {
+                super::identity::parse_pane_identities(&result.stdout)?
+            }
+            Ok(result) if result.is_no_server() || result.is_unreachable() => Vec::new(),
+            Ok(result) => {
+                return Err(TerminalError::refused(
+                    result.message("tmux list-panes failed"),
+                ))
+            }
+            Err(error) => return Err(error),
+        };
+        Ok(panes
+            .into_iter()
+            .find(|(id, _)| id == pane_id)
+            .map(|(_, pid)| pid))
+    }
+
     fn try_list_panes(&self) -> Result<Vec<Pane>, TerminalError> {
         match self.run(&["list-panes", "-a", "-F", pane_format()]) {
             Ok(result) if result.code == 0 => self.parsed_panes(&result.stdout),

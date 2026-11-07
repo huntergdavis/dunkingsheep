@@ -931,6 +931,8 @@ mod loops_tests;
 #[cfg(test)]
 mod mailbox_tests;
 #[cfg(test)]
+mod pane_root_tests;
+#[cfg(test)]
 mod panes_tests;
 #[cfg(test)]
 mod populated_state_file_tests;

@@ -510,6 +510,36 @@ fn a_made_up_pane_is_anonymous() {
     assert!(result["note"].as_str().unwrap().contains("no such pane"));
 }
 
+struct ListingFails;
+impl Dispatcher for ListingFails {
+    fn dispatch(&self, _: &str, _: &Value, ctx: &RequestCtx) -> Result<Value, DunkError> {
+        Ok(
+            json!({"pane": ctx.self_pane_id, "bound": ctx.identity_bound, "note": ctx.identity_note}),
+        )
+    }
+    fn pane_info(&self, _: &str) -> Result<Option<PaneInfo>, DunkError> {
+        Err(DunkError::Refused("tmux listing refused".into()))
+    }
+}
+
+#[test]
+fn a_pane_listing_that_cannot_be_read_refuses_the_claim() {
+    // t3368: fail closed. A claim nothing can check is refused, not stood on.
+    let me = i64::from(std::process::id());
+    let (reply, _) = handle_line(
+        &ListingFails,
+        r#"{"id":1,"cmd":"x","self_pane_id":"w1:p2"}"#,
+        Some(me),
+    );
+    let result = reply.result.unwrap();
+    assert_eq!(result["pane"], Value::Null);
+    assert_eq!(result["bound"], json!(false));
+    assert!(result["note"]
+        .as_str()
+        .unwrap()
+        .contains("pane listing failed"));
+}
+
 #[test]
 fn without_peer_credentials_the_claim_stands_unchecked() {
     let (reply, _) = handle_line(

@@ -11,40 +11,12 @@ use serde_json::Value;
 use super::{services::RuntimeServices, RequestRuntimeAdapter};
 use crate::api;
 use crate::error::DunkError;
-use crate::flock::mailbox::MailboxEnv;
-use crate::flock::panes::PaneInfoEnv;
 use crate::metrics::Event;
 use crate::server::{Dispatcher, PaneInfo, RequestCtx};
-use crate::server_runtime::TerminalCallAdapter;
 /// Shared server dispatcher; terminal instances stay local to each method call.
 pub(crate) struct RuntimeDispatcher {
     services: Arc<RuntimeServices>,
     handlers: api::Dispatcher,
-}
-
-struct RolePaneQuery<'a> {
-    list_panes_grouped: &'a dyn Fn() -> Result<Vec<Value>, DunkError>,
-    get_pane: &'a dyn Fn(&str) -> Option<Value>,
-    list_error: Mutex<Option<DunkError>>,
-}
-
-impl PaneInfoEnv for RolePaneQuery<'_> {
-    fn list_panes_grouped(&self) -> Vec<Value> {
-        match (self.list_panes_grouped)() {
-            Ok(panes) => panes,
-            Err(error) => {
-                *self
-                    .list_error
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error);
-                Vec::new()
-            }
-        }
-    }
-
-    fn get_pane(&self, pane_id: &str) -> Option<Value> {
-        (self.get_pane)(pane_id)
-    }
 }
 
 impl RuntimeDispatcher {
@@ -81,39 +53,22 @@ impl Dispatcher for RuntimeDispatcher {
         if pane_id.is_empty() {
             return Ok(None);
         }
+        // Caller binding reads the root pid from the identity listing, which carries no free text
+        // (t3368). A pane that listing does not show, or a listing that cannot be read, is an
+        // error here, and the binding refuses the claim: no grace window stands in for it.
         let terminal = Mutex::new((self.services.terminal_factory)());
-        let terminal = TerminalCallAdapter {
-            flock: &self.services.flock,
-            terminal: &terminal,
-            runtime: self.services.runtime.handle(),
-        };
-        let list_panes_grouped = || terminal.try_list_panes_grouped();
-        let get_pane = |id: &str| PaneInfoEnv::get_pane(&terminal, id);
-        let query = RolePaneQuery {
-            list_panes_grouped: &list_panes_grouped,
-            get_pane: &get_pane,
-            list_error: Mutex::new(None),
-        };
-        let pane = self
+        let root = self
             .services
             .flock
-            .role_pane_info(&query, pane_id, crate::clock::now_s());
-        if pane.is_none() {
-            if let Some(error) = query
-                .list_error
-                .into_inner()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-            {
-                self.services.flock.forget_role_pane(pane_id);
-                return Err(error);
-            }
-        }
-        Ok(pane.map(|pane| PaneInfo {
-            pane_pid: pane.get("pane_pid").and_then(|pid| {
-                pid.as_i64()
-                    .or_else(|| pid.as_str().and_then(|text| text.parse().ok()))
-            }),
-        }))
+            .pane_root_pid(pane_id, crate::clock::now_s(), || {
+                let terminal = terminal
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                terminal
+                    .try_pane_root_pid(pane_id)
+                    .map_err(|error| DunkError::Refused(error.message))
+            })?;
+        Ok(root.map(|pane_pid| PaneInfo { pane_pid }))
     }
 
     fn record_identity_mismatch(&self, pane_id: &str, reason: &str) {
