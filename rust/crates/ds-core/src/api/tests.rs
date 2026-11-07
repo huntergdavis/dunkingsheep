@@ -9,6 +9,10 @@ use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
+// t665 piece 2 gate: the owner_page verb through the dispatcher (its own file).
+#[path = "owner_page_tests.rs"]
+mod owner_page_tests;
+
 use crate::config::Env;
 use crate::flock::commands_inbox::{InboxEnv, Nudge, RouteEntry};
 use crate::flock::commands_turns::{TurnHooks, TurnState};
