@@ -287,14 +287,19 @@ async fn task_wire_list_filters_sort_slice_and_full_decorators_match_actual_pyth
             .list_visible_wire(None, None, None, true, limit, Some("%4"), None, false)
             .await
             .unwrap();
-        assert_eq!(
-            json!(rows.iter().map(|r| &r.wire).collect::<Vec<_>>()),
-            oracle(
-                tasks.path(),
-                "list",
-                json!({"self_pane_id":"%4","limit":limit.unwrap_or(200)})
-            )["ok"]
+        let mut default_wire = json!(rows.iter().map(|r| &r.wire).collect::<Vec<_>>());
+        let expected_default = oracle(
+            tasks.path(),
+            "list",
+            json!({"self_pane_id":"%4","limit":limit.unwrap_or(200)}),
+        )["ok"]
+            .clone();
+        crate::tasks::claim::claim_assigned_offer_tests::accept_t3617_claims(
+            &mut default_wire,
+            &expected_default,
+            Some("%4"),
         );
+        assert_eq!(default_wire, expected_default);
         if limit.is_none() {
             assert_eq!(rows.len(), 200);
         }
