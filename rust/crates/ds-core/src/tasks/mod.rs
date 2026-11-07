@@ -2302,6 +2302,8 @@ pub struct Decorated {
     pub depends_on: Vec<String>,
     /// An allocation offer is ready for exactly this assignee set.
     pub allocation_waiting: bool,
+    /// The pane that routed the ready offer (`allocation_offers.offered_by`), if one is ready.
+    pub offered_by: Option<String>,
     pub multi_assignee: bool,
     pub is_global: bool,
     pub leases: Vec<Lease>,
@@ -2368,9 +2370,11 @@ fn leases_for_conn(conn: &Connection, id: &str, now: f64) -> Result<Vec<Lease>, 
 
 /// `_claimable`: whether `pane_id` may take this task right now.
 fn claimable_for(d: &Decorated, pane_id: &str) -> bool {
-    // Same rule as `claim::claimable` (t3617): an assignee may take a task its waiting offer names.
+    // Same rule as `claim::claimable` (t3617): an assignee may take a task its waiting offer names,
+    // unless that pane routed the offer itself.
     let mine = !pane_id.is_empty() && d.assignees.iter().any(|a| a == pane_id);
-    if d.allocation_waiting && !mine {
+    let routed_by_me = !pane_id.is_empty() && d.offered_by.as_deref() == Some(pane_id);
+    if d.allocation_waiting && !(mine && !routed_by_me) {
         return false;
     }
     if !pane_id.is_empty() && d.leases.iter().any(|l| l.pane_id == pane_id) {
@@ -2404,11 +2408,11 @@ fn decorate_conn(
     let assignees = decode_list(Some(&task.assignees));
     let depends_on = decode_list(Some(&task.depends_on));
     // A missing allocation_offers table is "no offer", not an error.
-    let owners: Option<String> = match conn
+    let offer: Option<(String, String)> = match conn
         .query_row(
-            "SELECT owners FROM allocation_offers WHERE task_id=? AND state='ready'",
+            "SELECT owners, offered_by FROM allocation_offers WHERE task_id=? AND state='ready'",
             params![id],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()
     {
@@ -2418,7 +2422,10 @@ fn decorate_conn(
     };
     let mut sorted = assignees.clone();
     sorted.sort();
-    let allocation_waiting = owners.is_some_and(|raw| sorted == decode_list(Some(&raw)));
+    let (allocation_waiting, offered_by) = match offer {
+        Some((owners, offered_by)) => (sorted == decode_list(Some(&owners)), Some(offered_by)),
+        None => (false, None),
+    };
     let leases = leases_for_conn(conn, id, now)?;
     let mut d = Decorated {
         is_global: task.scope == "global",
@@ -2426,6 +2433,7 @@ fn decorate_conn(
         lease_expires_at: leases.iter().map(|l| l.expires_at).reduce(f64::min),
         multi_assignee: multi != 0,
         allocation_waiting,
+        offered_by,
         leases,
         assignees,
         depends_on,

@@ -283,8 +283,9 @@ fn validate(
             .into_iter()
             .filter(|dep| !member_ids.contains(dep))
             .collect();
-        member.candidate.allocation_waiting =
-            allocation_waiting(tx, &id, &member.candidate.assignees)?;
+        let (waiting, offered_by) = allocation_waiting(tx, &id, &member.candidate.assignees)?;
+        member.candidate.allocation_waiting = waiting;
+        member.candidate.offered_by = offered_by;
     }
     let failing: Vec<Candidate> = members
         .iter()
@@ -311,18 +312,19 @@ fn eligible(member: &Member, pane: &str, options: &ClaimOptions) -> bool {
         && claimable(&member.candidate, Some(pane))
 }
 
-/// Whether the member's ready allocation offer is still waiting on its current assignees. The
-/// allocation table may not exist yet (the Python tolerates that), so a missing table is `false`.
+/// Whether the member's ready allocation offer is still waiting on its current assignees, and which
+/// pane routed it. The allocation table may not exist yet (the Python tolerates that), so a missing
+/// table is "not waiting".
 fn allocation_waiting(
     tx: &rusqlite::Transaction<'_>,
     id: &str,
     assignees: &[String],
-) -> Result<bool, DunkError> {
-    let offer: Option<String> = match tx
+) -> Result<(bool, Option<String>), DunkError> {
+    let offer: Option<(String, String)> = match tx
         .query_row(
-            "SELECT owners FROM allocation_offers WHERE task_id = ? AND state = 'ready'",
+            "SELECT owners, offered_by FROM allocation_offers WHERE task_id = ? AND state = 'ready'",
             params![id],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()
     {
@@ -331,12 +333,12 @@ fn allocation_waiting(
         Err(error) => return Err(db::map_sqlite(error)),
     };
     Ok(match offer {
-        Some(owners) => {
+        Some((owners, offered_by)) => {
             let mut mine = assignees.to_vec();
             mine.sort();
-            mine == decode_list(Some(&owners))
+            (mine == decode_list(Some(&owners)), Some(offered_by))
         }
-        None => false,
+        None => (false, None),
     })
 }
 

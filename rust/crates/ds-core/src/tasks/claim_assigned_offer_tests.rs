@@ -58,6 +58,11 @@ fn a_waiting_offer_admits_its_assignee_and_no_one_else() {
     assert!(claimable(&waiting, Some(REVIEWER)));
     assert!(!claimable(&waiting, Some(OTHER)));
     assert!(!claimable(&waiting, None));
+
+    // A review routed by its author is offered by the author, who must not take it back.
+    let mut routed_by_assignee = waiting.clone();
+    routed_by_assignee.offered_by = Some(REVIEWER.into());
+    assert!(!claimable(&routed_by_assignee, Some(REVIEWER)));
 }
 
 #[tokio::test]
