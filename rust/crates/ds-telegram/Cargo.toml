@@ -1,0 +1,30 @@
+[package]
+name = "ds-telegram"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Dunking Sheep Telegram bridge: Rust port of bridges/telegram_bridge.py, telegram_transport.py and dunk_telegram_routing.py (t3231)."
+
+[lib]
+name = "ds_telegram"
+path = "src/lib.rs"
+
+[[bin]]
+name = "dunkingsheep-telegram"
+path = "src/main.rs"
+
+[dependencies]
+ds-core = { path = "../ds-core" }
+serde_json.workspace = true
+# The Telegram Bot API client. reqwest (rustls, json) is already pinned for ds-core's GitHub App
+# client, so this adds no crate; the blocking bridge loop drives it through a current-thread runtime.
+reqwest.workspace = true
+tokio = { version = "=1.54.1", features = ["rt", "net", "time"] }
+# The legacy desk store (`messages.sqlite3`) is read for watchdog pages and the forwarding cursor.
+# Same declaration as ds-core: rusqlite 0.32 bundled, already in Cargo.lock.
+rusqlite = { version = "0.32", features = ["bundled"] }
+# Setup reads the BotFather token without echo, as Python's getpass does. Same nix 0.29 as ds-core.
+nix = { version = "0.29", features = ["term"] }
+
+[dev-dependencies]
+tempfile = "3"
