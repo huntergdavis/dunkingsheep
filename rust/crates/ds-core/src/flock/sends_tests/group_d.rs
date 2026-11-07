@@ -520,7 +520,7 @@ fn scheduled_44_long_false_sent_composer_presses_once_with_status_sent_and_no_co
         .sent_text_by_pane
         .lock()
         .unwrap()
-        .insert("%1".into(), vec![text.clone()]);
+        .insert("%1".into(), vec![text.clone().into()]);
     env.screens
         .insert("%1".into(), format!("\x1b[1m›\x1b[0m {text}\n{FOOTER}"));
     observe(&flock, &mut env, created + 1.0);
