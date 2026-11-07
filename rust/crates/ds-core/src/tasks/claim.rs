@@ -12,9 +12,7 @@
 use rusqlite::{params, OptionalExtension};
 use serde_json::json;
 
-use super::claim_batch::{
-    active_batch_of, batch_members_held_by, end_batch, heartbeat_targets,
-};
+use super::claim_batch::{active_batch_of, batch_members_held_by, end_batch, heartbeat_targets};
 use super::{
     decode_list, default_lease_s, dependency_state_conn, order_key, validate_scope, Lease, Task,
     Tasks,
