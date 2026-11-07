@@ -669,3 +669,7 @@ pub fn classify_delivery(
 #[cfg(test)]
 #[path = "screen_tests.rs"]
 mod screen_tests;
+
+#[cfg(test)]
+#[path = "hint_placeholder_tests.rs"]
+mod hint_placeholder_tests;

@@ -43,6 +43,11 @@ mod group_d_scheduled_40;
 #[cfg(test)]
 mod group_d_wiring_15_17;
 
+/// t3477 max-hold fallback (owner-approved): an inconclusive box types after the hold limit, a
+/// pending foreign draft stays held. See sends_tests/max_hold_fallback.rs.
+#[cfg(test)]
+mod max_hold_fallback;
+
 #[derive(Default)]
 struct Pane {
     screens: BTreeMap<String, String>,
@@ -2215,6 +2220,7 @@ mod guarded_preparation_tests {
                 hold_while_typing: true,
                 allow_modal: false,
                 preserve_draft: true,
+                inconclusive_fallback: false,
             },
             || None,
             |_, _| {
@@ -2257,6 +2263,7 @@ mod guarded_preparation_tests {
                 hold_while_typing: true,
                 allow_modal: false,
                 preserve_draft: false,
+                inconclusive_fallback: false,
             },
             || None,
             |env, guard| {

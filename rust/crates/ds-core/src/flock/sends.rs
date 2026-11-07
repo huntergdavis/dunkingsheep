@@ -1026,6 +1026,17 @@ pub struct SendGuardOptions {
     pub hold_while_typing: bool,
     pub allow_modal: bool,
     pub preserve_draft: bool,
+    /// t3477 max-hold fallback: set once a send has been held for `HOLD_ATTEMPT_LIMIT` attempts.
+    /// Only an inconclusive read may then be typed into; see [`fallback_overrides_hold`].
+    pub inconclusive_fallback: bool,
+}
+
+/// The max-hold fallback (t3477, owner-approved). With the fallback on, an INCONCLUSIVE composer
+/// read (`ambiguous-composer`) may be typed into. Every other refusal stays a hold, including a
+/// pending foreign draft (`human_draft`, `foreign-text-will-not-submit`) and a dialog, so the
+/// fallback never types over text that is genuinely there.
+pub(crate) fn fallback_overrides_hold(reason: &str, inconclusive_fallback: bool) -> bool {
+    inconclusive_fallback && reason == "ambiguous-composer"
 }
 
 impl Default for SendGuardOptions {
@@ -1034,6 +1045,7 @@ impl Default for SendGuardOptions {
             hold_while_typing: true,
             allow_modal: false,
             preserve_draft: false,
+            inconclusive_fallback: false,
         }
     }
 }
@@ -1535,6 +1547,7 @@ fn send_guarded_with_reason(
             &typing_guard,
         ) {
             Ok(()) => {}
+            Err(reason) if fallback_overrides_hold(reason, options.inconclusive_fallback) => {}
             Err(reason) => {
                 return (
                     false,
@@ -1633,6 +1646,7 @@ pub(super) fn send_dunk_now(
             hold_while_typing: dunk.hold_while_typing,
             allow_modal: false,
             preserve_draft: false,
+            inconclusive_fallback: false,
         },
         permission,
         |env, guard| {
@@ -4329,6 +4343,7 @@ impl Flock {
             hold_while_typing: message.hold_while_typing,
             allow_modal: message.kind == "keys",
             preserve_draft: false,
+            inconclusive_fallback: message.holds >= HOLD_ATTEMPT_LIMIT,
         };
         let is_keys = message.kind == "keys";
         let press_enter = message.press_enter;
@@ -5348,6 +5363,7 @@ impl Flock {
             hold_while_typing: false,
             allow_modal: message.kind == "keys",
             preserve_draft: false,
+            inconclusive_fallback: false,
         };
         let is_keys = message.kind == "keys";
         let key_arguments = message.key_arguments.clone();
