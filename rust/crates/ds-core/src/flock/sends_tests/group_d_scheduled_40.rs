@@ -1,17 +1,20 @@
 //! t3485 (T55 group D scheduled row 40, t820 proof D): the Rust counterpart of Python
 //! test_styled_schedule_survives_restart_with_provenance_for_echo (tests/test_dunk_scheduled_recovery.py
-//! at 79bc92fa, line 182). A child of `sends_tests`, so the parent's `Pane`, `persistent_recovery_flock`
-//! and `pane_generation` are shared.
+//! at 79bc92fa, line 182), with the frames that isolate its failure. A child of `sends_tests`, so the
+//! parent's `Pane`, `persistent_recovery_flock` and `pane_generation` are shared.
 //!
 //! The order follows Python: the sent echo is remembered first, the scheduled reminder fails to
-//! submit and is remembered as failed, the screen shows the styled echo above the bright schedule,
-//! and the flock restarts from its state file. The saved state carries the candidates and the
-//! verdicts only, as Python's `_save` does. `sent_text_by_pane` and the message history are not
-//! restored, so the echo's provenance has to come from the candidate's transcript texts.
+//! submit and is remembered as failed, the screen shows the frame, and the flock restarts from its
+//! state file. The saved state carries the candidates and the verdicts only, as Python's `_save`
+//! does. `sent_text_by_pane` and the message history are not restored.
 //!
 //! The flock is persisted. A non-persisted flock refuses every press ("reservation not durable"),
 //! so its threshold tick can only return 0. Timing matches Python: the tick at 1000 starts the
 //! clock, and the tick at 1120 presses once, with one attempt as the Python fixture sets.
+//!
+//! Cases: A is the oracle. B is Python's own restart frame (test_restart_uses_saved_schedule...),
+//! with no echo. C and D are controls: C uses the contiguous frame of the row-38 fixture, and D is
+//! B without a restart. A failure message carries the gate values the strict observer walks.
 
 use super::*;
 use crate::flock::loops_stuck::strict_stuck_observer_scan;
@@ -46,14 +49,19 @@ fn idle_pane(screen: &str) -> Pane {
     }
 }
 
-/// Python's screen: the styled echo above the bright schedule, two blank rows, then the footer.
+/// Python's oracle screen: the styled echo above the bright schedule, two blank rows, the footer.
 fn echo_screen() -> String {
     format!("\x1b[1;2m\u{203a}\x1b[0m {ECHO}\n\n\x1b[1m\u{203a}\x1b[0m {TEXT}\n\n\n{FOOTER}")
 }
 
-/// The same schedule with no echo line, for the control.
-fn schedule_only_screen() -> String {
-    format!("\x1b[1m\u{203a}\x1b[0m {TEXT}\n\n\n{FOOTER}")
+/// Python's FRAME from the scheduled fixture: plain text, two blank rows before the footer.
+fn python_frame() -> String {
+    format!("Previous response.\n\n\u{203a} {TEXT}\n\n\n{FOOTER}")
+}
+
+/// The contiguous shape the row-38 fixture uses: no blank row between the composer and the footer.
+fn contiguous_frame() -> String {
+    format!("Previous response.\n\n\u{203a} {TEXT}\n{FOOTER}")
 }
 
 /// Python `_new_message` plus `_remember` for the echo this flock sent before the schedule.
@@ -102,74 +110,78 @@ fn restart_from_state(flock: Flock, dir: &std::path::Path, state: &std::path::Pa
     restored
 }
 
-/// The restored candidate's fields that decide the press, for a failure message.
-fn candidate_summary(flock: &Flock) -> String {
-    match flock.stuck_candidates.lock().unwrap().get(P) {
-        Some(entry) => format!(
-            "status={} eligible={} generation={:?} transcript={:?} text_is_schedule={}",
-            entry.status,
-            entry.eligible,
-            entry.generation,
-            entry.transcript_texts,
-            entry.text == TEXT,
-        ),
-        None => "no candidate".to_string(),
-    }
+/// The gate values the strict observer walks for this pane and screen, for a failure message.
+fn gate_report(flock: &Flock, observer: &Pane, screen: &str) -> String {
+    let content = flock.recovery_box_text(observer, P, screen);
+    let status = flock.stuck_status(observer, P);
+    let region = crate::terminal::composer::composer_region_text(screen);
+    let (box_value, box_detail) = crate::terminal::screen::box_text(screen);
+    let candidate_generation = flock
+        .stuck_candidates
+        .lock()
+        .unwrap()
+        .get(P)
+        .map(|entry| entry.generation.clone());
+    let message = flock.stuck_candidate_message(P, observer).is_some();
+    let known = flock.sent_text_by_pane.lock().unwrap().get(P).cloned();
+    format!(
+        "recovery_box_text={content:?} stuck_status={status} composer_region={region:?} \
+         box_text={box_value:?} box_detail={box_detail:?} candidate_message={message} \
+         known={known:?} candidate_generation={candidate_generation:?} pane_generation={:?}",
+        pane_generation(observer, P)
+    )
 }
 
-/// Oracle test_styled_schedule_survives_restart_with_provenance_for_echo (scheduled row 40): after a
-/// restart, the styled echo above the bright schedule does not stop the one recovery press. The
-/// press comes at the second tick, 120 s after the first, and not at the first.
-#[test]
-fn scheduled_40_restart_with_styled_echo_presses_once_like_python() {
+/// One scenario: the setup, an optional restart, then the observer ticks at 1000 and 1120.
+/// Returns both tick results and the gate report taken after the first tick.
+fn scenario(with_echo: bool, restart: bool, screen: &str) -> (usize, usize, String) {
     let base = crate::clock::now_s();
     let dir = tempfile::tempdir().unwrap();
     let state = dir.path().join("state.json");
     let flock = persistent_recovery_flock(dir.path(), &state);
     flock.declare_stuck_config(oracle_policy());
     let setup = idle_pane("");
-    remember_sent_echo(&flock, &setup, base - 2.0);
+    if with_echo {
+        remember_sent_echo(&flock, &setup, base - 2.0);
+    }
     remember_failed_schedule(&flock, &setup, base);
-    let restored = restart_from_state(flock, dir.path(), &state);
-
-    let mut observer = idle_pane(&echo_screen());
-    assert_eq!(
-        0,
-        strict_stuck_observer_scan(&restored, &mut observer, base + 1000.0).unwrap(),
-        "no press at the first sighting"
-    );
-    assert!(observer.keys.is_empty(), "no key before 120 s");
-    assert_eq!(
-        1,
-        strict_stuck_observer_scan(&restored, &mut observer, base + 1120.0).unwrap(),
-        "one press 120 s after the first sighting; candidate: {}",
-        candidate_summary(&restored)
-    );
-    assert_eq!(vec![(P.to_string(), "Enter".to_string())], observer.keys);
+    let flock = if restart {
+        restart_from_state(flock, dir.path(), &state)
+    } else {
+        flock
+    };
+    let mut observer = idle_pane(screen);
+    let first = strict_stuck_observer_scan(&flock, &mut observer, base + 1000.0).unwrap();
+    let report = gate_report(&flock, &observer, screen);
+    let second = strict_stuck_observer_scan(&flock, &mut observer, base + 1120.0).unwrap();
+    (first, second, report)
 }
 
-/// Control, not an oracle case: the same restart with no echo line presses once at the same ticks.
-/// If this passes while the oracle-shaped test fails, the divergence is the echo's provenance.
+/// A: Python's oracle, test_styled_schedule_survives_restart_with_provenance_for_echo.
 #[test]
-fn scheduled_40_control_restart_without_echo_presses_once() {
-    let base = crate::clock::now_s();
-    let dir = tempfile::tempdir().unwrap();
-    let state = dir.path().join("state.json");
-    let flock = persistent_recovery_flock(dir.path(), &state);
-    flock.declare_stuck_config(oracle_policy());
-    remember_failed_schedule(&flock, &idle_pane(""), base);
-    let restored = restart_from_state(flock, dir.path(), &state);
+fn scheduled_40_a_oracle_styled_echo_restart_presses_once() {
+    let (first, second, report) = scenario(true, true, &echo_screen());
+    assert_eq!((0, 1), (first, second), "{report}");
+}
 
-    let mut observer = idle_pane(&schedule_only_screen());
-    assert_eq!(
-        0,
-        strict_stuck_observer_scan(&restored, &mut observer, base + 1000.0).unwrap()
-    );
-    assert_eq!(
-        1,
-        strict_stuck_observer_scan(&restored, &mut observer, base + 1120.0).unwrap(),
-        "candidate: {}",
-        candidate_summary(&restored)
-    );
-    assert_eq!(1, observer.keys.len(), "exactly one key");
+/// B: Python's restart frame, test_restart_uses_saved_schedule_and_budget_without_new_send, which
+/// presses once at 120 s with no echo.
+#[test]
+fn scheduled_40_b_python_frame_restart_presses_once() {
+    let (first, second, report) = scenario(false, true, &python_frame());
+    assert_eq!((0, 1), (first, second), "{report}");
+}
+
+/// C, control: the contiguous frame of the row-38 fixture, after a restart, with no echo.
+#[test]
+fn scheduled_40_c_contiguous_frame_restart_presses_once() {
+    let (first, second, report) = scenario(false, true, &contiguous_frame());
+    assert_eq!((0, 1), (first, second), "{report}");
+}
+
+/// D, control: Python's frame with no restart, which isolates the restart from the frame.
+#[test]
+fn scheduled_40_d_python_frame_without_restart_presses_once() {
+    let (first, second, report) = scenario(false, false, &python_frame());
+    assert_eq!((0, 1), (first, second), "{report}");
 }
