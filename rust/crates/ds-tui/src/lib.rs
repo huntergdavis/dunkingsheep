@@ -12,3 +12,6 @@ pub mod view;
 
 #[cfg(test)]
 mod main_screen_oracle_tests;
+
+#[cfg(test)]
+mod target_picker_oracle_tests;
