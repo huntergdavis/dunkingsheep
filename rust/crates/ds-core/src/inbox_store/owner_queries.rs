@@ -176,7 +176,9 @@ impl Store {
         })
     }
 
-    /// Owner-mailbox replies waiting for delivery by this transport.
+    /// Owner-mailbox rows waiting for delivery by this transport: replies (reply_to set) and
+    /// owner pages (sender `owner-page`, t665). Nothing else, so a human question or a web
+    /// echo never reaches the phone.
     pub fn owner_outbox(
         &self,
         transport: Option<&str>,
@@ -193,7 +195,7 @@ impl Store {
                 connection,
                 &format!(
                     "SELECT {FULL_COLUMNS} FROM messages WHERE mailbox = ? AND transport = ? \
-                     AND reply_to IS NOT NULL AND delivered_at IS NULL \
+                     AND (reply_to IS NOT NULL OR sender = 'owner-page') AND delivered_at IS NULL \
                      AND cancelled_at IS NULL ORDER BY created_at, id LIMIT ?"
                 ),
                 &values,
@@ -268,6 +270,9 @@ mod tests {
 
     use super::*;
     use crate::inbox_store::Outgoing;
+
+    // t665 owner pages: the outbox and receipt contract (kept out of this shared file's body).
+    mod page_tests;
 
     struct Fixture {
         dir: tempfile::TempDir,

@@ -14,8 +14,9 @@ fn every_python_command_is_present_and_no_extra_ones_are() {
     let commands = fixture["commands"].as_object().expect("commands");
     let rust: Vec<&str> = registry::COMMANDS.iter().map(|c| c.name).collect();
     let python: Vec<&str> = commands.keys().map(String::as_str).collect();
-    // These owner-decision commands are Rust-only additions; Python remains frozen.
-    let rust_only = ["task_owner_answer", "task_owner_question"];
+    // These commands are Rust-only additions; Python remains frozen. owner_page (t665) is
+    // recorded by the Rust daemon for the Telegram outbox and has no Python dunk_api entry.
+    let rust_only = ["task_owner_answer", "task_owner_question", "owner_page"];
     let extra: Vec<_> = rust
         .iter()
         .copied()

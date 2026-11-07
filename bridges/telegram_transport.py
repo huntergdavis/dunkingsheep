@@ -20,6 +20,9 @@ Pairing state stays where the bridge keeps it today; FLAT_FLEET 7.2 moves it
 from __future__ import annotations
 
 PAGE_MARKER = "PAGE OWNER"
+# The sender the daemon stamps on an owner page row in the owner mailbox (t665, the Rust
+# owner_page verb). It is what tells a mailbox page from a reply in the outbox.
+OWNER_PAGE_SENDER = "owner-page"
 PAGE_CLASSES = ("security", "outage", "money")
 PAGE_MAX_PER_HOUR = 3
 PAGE_WINDOW_S = 3600.0
@@ -73,7 +76,7 @@ def outbox_items(replies, pages, sent_page_times, now,
     for row in pages or []:
         if budget <= 0:
             items.append({"message_id": row["message_id"],
-                          "body": row.get("body") or "", "kind": "page",
+                          "body": row.get("body") or "", "kind": row.get("kind", "page"),
                           "reason": f"held: {page_limit} pages per hour already sent",
                           # Provenance: the store id this page came from, so the
                           # caller advances its watermark only for a page that was
@@ -83,7 +86,7 @@ def outbox_items(replies, pages, sent_page_times, now,
             continue
         budget -= 1
         items.append({"message_id": row["message_id"], "body": row.get("body") or "",
-                      "kind": "page", "id": row.get("id"),
+                      "kind": row.get("kind", "page"), "id": row.get("id"),
                       "reason": f"page ({page_class(row.get('body')) or 'unclassified'})",
                       "page_class": page_class(row.get("body"))})
     return items

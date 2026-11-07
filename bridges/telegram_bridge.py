@@ -268,8 +268,15 @@ def send_owner_outbox(config: dict, bot: Telegram, client=None):
         return []
     client = client or _daemon()
     channel = _prepare_route(config)
-    replies = (client.call("owner_outbox", transport="telegram") or {}).get("messages") or []
-    pages = _legacy_pages(config, channel)
+    rows = (client.call("owner_outbox", transport="telegram") or {}).get("messages") or []
+    # The outbox carries two kinds of row (t665): replies to Telegram questions, and owner
+    # pages the watchdog recorded in the owner mailbox. A mailbox page is a page: it spends
+    # the same hourly budget as a legacy page, and it is confirmed by the same receipt.
+    replies = [row for row in rows if row.get("sender") != telegram_transport.OWNER_PAGE_SENDER]
+    mailbox_pages = [{"message_id": row["message_id"], "body": row.get("body") or "",
+                      "kind": "mailbox-page"}
+                     for row in rows if row.get("sender") == telegram_transport.OWNER_PAGE_SENDER]
+    pages = _legacy_pages(config, channel) + mailbox_pages
     now = time.time()
     sent_page_times = [float(at) for at in (config.get("page_sent_at") or [])]
     items = telegram_transport.outbox_items(replies, pages, sent_page_times, now=now)
@@ -279,10 +286,12 @@ def send_owner_outbox(config: dict, bot: Telegram, client=None):
             bot.call("sendMessage", chat_id=chat_id, text=part)
 
     def mark_delivered(message_id, kind):
-        if kind == "reply":
-            # The receipt the watchdog and the desk read instead of a status file.
+        if kind in ("reply", "mailbox-page"):
+            # The receipt the watchdog and the desk read instead of a status file. A mailbox
+            # page gets it too, and then still spends the page budget below.
             client.call("owner_delivered", message_id=message_id, transport="telegram")
-            return
+            if kind == "reply":
+                return
         # Every delivered page spends the budget. sent_page_times is the live list, not
         # the tick-start snapshot: rebuilding from the snapshot recorded ONE timestamp
         # for N pages in a tick, so the next tick sent more than the hourly cap (t685).

@@ -109,6 +109,9 @@ ALLOW = {
         # delivery receipts. A lane may do none of the three.
         "owner_ingest", "owner_outbox", "owner_delivered",
         "owner_conversation", "owner_reply",
+        # t665: a watchdog page is recorded in the owner mailbox by the system role (the
+        # Rust-only owner_page verb; the Python daemon never serves it).
+        "owner_page",
     }),
     # The owner's transport (the web desk): everything but the
     # fleet-destructive verbs, which stay on a human in a terminal.
