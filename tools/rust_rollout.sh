@@ -40,7 +40,7 @@ STATE=$DATA/rust-cutover.state
 CONFIG_DIR=$HOME/.config/dunkingsheep
 LAUNCHER=$HOME/.local/bin/dunkingsheep
 DROPIN_DIR=$HOME/.config/systemd/user/dunkingsheep.service.d
-DROPIN=$DROPIN_DIR/50-rust-cutover.conf
+DROPIN=$DROPIN_DIR/99-rust-cutover.conf
 SQLITE_FILES="tasks.db inbox.db context-ledger.db dispatch.db agent-state.db"
 
 cmd=${1:-plan}; shift || true
@@ -150,7 +150,7 @@ backup() {
     tar -cf "$target" -C "$work" .
     chmod 0600 "$target"
     tar -tf "$target" >/dev/null
-    rm -rf "$work"
+    chmod -R u+w "$work" 2>/dev/null; rm -rf "$work"
     umask "$old_umask"
   else
     echo "DRY-RUN: umask 077; chmod 0700 $BACKUPS"
@@ -165,7 +165,7 @@ backup() {
 # timers go back on. The trap is replaced once the record exists.
 restart_timers_on_failure() {
   echo "activate FAILED before the switch; the python daemon still serves; restarting the timers" >&2
-  if [ "$APPLY" = 1 ]; then systemctl --user start 'dunkingsheep-*.timer' || true; fi
+  if [ "$APPLY" = 1 ]; then systemctl --user start dunkingsheep-deepcheck.timer dunkingsheep-dispatch.timer dunkingsheep-health.timer dunkingsheep-review.timer dunkingsheep-state.timer || true; fi
 }
 
 activate() {
@@ -255,7 +255,7 @@ verify() {
   echo "## timers"
   units=$(timer_units)
   if [ "$APPLY" = 1 ]; then
-    run systemctl --user start 'dunkingsheep-*.timer'
+    run systemctl --user start dunkingsheep-deepcheck.timer dunkingsheep-dispatch.timer dunkingsheep-health.timer dunkingsheep-review.timer dunkingsheep-state.timer
     for t in $units; do
       s=${t%.timer}.service
       run systemctl --user start "$s"
@@ -315,7 +315,7 @@ rollback() {
   # 5. Reload, restart the daemon, start the timers, and close the record.
   run systemctl --user daemon-reload
   run systemctl --user restart dunkingsheep.service
-  run systemctl --user start 'dunkingsheep-*.timer'
+  run systemctl --user start dunkingsheep-deepcheck.timer dunkingsheep-dispatch.timer dunkingsheep-health.timer dunkingsheep-review.timer dunkingsheep-state.timer
   run mv "$STATE" "$STATE.rolled-back-$(date -u +%Y%m%dT%H%M%SZ)"
   echo "rolled back from $rb_sha; now run: $0 verify   (dunkingsheep status must show the python version)"
 }
@@ -327,7 +327,7 @@ plan() {
   echo "binary:          $dest/dunkingsheep (0555, SHA256SUM recorded at stage)"
   echo "1. stage:    $0 stage --sha $SHA --apply      build in $WORKTREE, install the binary, no restart"
   echo "2. activate: $0 activate --sha $SHA --apply   stop timers, backup state to $BACKUPS (private),"
-  echo "                                              record the state, drop-in 50-rust-cutover.conf,"
+  echo "                                              record the state, drop-in 99-rust-cutover.conf,"
   echo "                                              launcher exec, daemon-reload, restart (interrupts deliveries for seconds)"
   echo "3. verify:   $0 verify                        read-only checks"
   echo "             $0 verify --apply                start the timers, then one tick of each and its journal"

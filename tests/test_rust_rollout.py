@@ -14,6 +14,10 @@ import sys
 import tempfile
 import unittest
 
+TIMERS_START = ("systemctl --user start dunkingsheep-deepcheck.timer "
+                "dunkingsheep-dispatch.timer dunkingsheep-health.timer "
+                "dunkingsheep-review.timer dunkingsheep-state.timer")
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 SCRIPT = os.path.join(ROOT, "tools", "rust_rollout.sh")
@@ -99,7 +103,7 @@ class RustRolloutTests(unittest.TestCase):
         self.releases = os.path.join(self.home, ".local", "share", "dunkingsheep", "releases")
         self.launcher = os.path.join(self.home, ".local", "bin", "dunkingsheep")
         self.dropin = os.path.join(self.home, ".config", "systemd", "user",
-                                   "dunkingsheep.service.d", "50-rust-cutover.conf")
+                                   "dunkingsheep.service.d", "99-rust-cutover.conf")
         self.state = os.path.join(self.home, ".local", "share", "dunkingsheep", "rust-cutover.state")
         self.backups = os.path.join(self.home, ".local", "share", "dunkingsheep", "backups")
         self.log = os.path.join(self.tmp, "fake.log")
@@ -277,7 +281,7 @@ class RustRolloutTests(unittest.TestCase):
         self.assertIn("activate FAILED before the switch", proc.stderr)
         lines = self.log_lines()
         stop = self.index_of("systemctl --user stop dunkingsheep-*.timer", lines)
-        self.assertIn("systemctl --user start dunkingsheep-*.timer", lines[stop:])
+        self.assertIn(TIMERS_START, lines[stop:])
         self.assertNotIn("systemctl --user restart dunkingsheep.service", lines)
         self.assertEqual(OLD_LAUNCHER, read(self.launcher))
         self.assertFalse(os.path.exists(self.dropin))
@@ -315,7 +319,7 @@ class RustRolloutTests(unittest.TestCase):
         self.assertFalse(os.path.exists(self.dropin))
         self.assertEqual(OLD_LAUNCHER, read(self.launcher))
         self.assertFalse(os.path.exists(self.state))
-        self.assertIn("systemctl --user start dunkingsheep-*.timer", self.log_lines())
+        self.assertIn(TIMERS_START, self.log_lines())
 
     @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0,
                      "root ignores the directory permissions this test relies on")
@@ -383,7 +387,7 @@ class RustRolloutTests(unittest.TestCase):
         rollback_steps = lines[stop:]
         reload_ = rollback_steps.index("systemctl --user daemon-reload")
         restart = rollback_steps.index("systemctl --user restart dunkingsheep.service")
-        start = rollback_steps.index("systemctl --user start dunkingsheep-*.timer")
+        start = rollback_steps.index(TIMERS_START)
         self.assertLess(reload_, restart)
         self.assertLess(restart, start)
 
@@ -414,7 +418,7 @@ class RustRolloutTests(unittest.TestCase):
         proc = self.run_script("verify", apply=True)
         self.assertEqual(0, proc.returncode, proc.stderr)
         lines = self.log_lines()
-        self.index_of("systemctl --user start dunkingsheep-*.timer", lines)
+        self.index_of(TIMERS_START, lines)
         for unit in ("dunkingsheep-dispatch", "dunkingsheep-health"):
             self.index_of("systemctl --user start " + unit + ".service", lines)
             self.index_of("journalctl --user -u " + unit + ".service -n 5 --no-pager", lines)
