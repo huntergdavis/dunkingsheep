@@ -19,6 +19,33 @@ pub fn dir(tag: &str) -> tempfile::TempDir {
         .expect("create a scratch directory")
 }
 
+/// Sync a fake executable to disk and close it, before anything execs it. A forked child keeps a
+/// copy of any descriptor open for writing until it execs, so an exec of the file in that window
+/// fails with ETXTBSY (`ExecutableFileBusy`); [`exec_retrying_busy`] covers the rest.
+pub fn sync_closed(path: &Path) {
+    std::fs::File::open(path)
+        .and_then(|file| file.sync_all())
+        .expect("sync the fake executable");
+}
+
+/// Run `exec` again while the kernel reports the executable busy (ETXTBSY), for up to two
+/// seconds. Once the writer's descriptor is closed, a fork can no longer inherit it, so the retry
+/// only waits out children forked before that close.
+pub fn exec_retrying_busy<T>(mut exec: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    let mut attempts = 0;
+    loop {
+        match exec() {
+            Err(error)
+                if error.kind() == std::io::ErrorKind::ExecutableFileBusy && attempts < 400 =>
+            {
+                attempts += 1;
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            other => return other,
+        }
+    }
+}
+
 /// A value together with the directory it lives in. The value is dropped FIRST (a store's
 /// connection closes before its files are removed), then the directory.
 pub struct Scratch<T> {

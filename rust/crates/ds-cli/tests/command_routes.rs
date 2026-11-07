@@ -17,6 +17,24 @@ fn ordered_result() -> Value {
     Value::Object(result)
 }
 
+/// Run `exec` again while the kernel reports the executable busy (ETXTBSY). A child forked while
+/// a copy of this file was still open for writing keeps that descriptor until it execs, so the
+/// first exec can race it; once our descriptor is closed the retry only waits that child out.
+fn exec_retrying_busy<T>(mut exec: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    let mut attempts = 0;
+    loop {
+        match exec() {
+            Err(error)
+                if error.kind() == std::io::ErrorKind::ExecutableFileBusy && attempts < 400 =>
+            {
+                attempts += 1;
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            other => return other,
+        }
+    }
+}
+
 fn run_cli(socket: &str, command: &[&str]) -> Output {
     run_cli_with_env(socket, command, &[])
 }
@@ -1477,17 +1495,24 @@ fn cli_route_56_mcp_setup() {
         std::fs::metadata(source_executable).unwrap().permissions(),
     )
     .unwrap();
+    // The copy is synced and closed before the first exec (see `exec_retrying_busy`).
+    std::fs::File::open(&quoted_executable)
+        .unwrap()
+        .sync_all()
+        .unwrap();
     let run_quoted = |harness: &str| {
-        Command::new(&quoted_executable)
-            .args(["mcp-setup", harness])
-            .env("HOME", &home)
-            .env("XDG_CONFIG_HOME", home.join("config"))
-            .env("DUNKINGSHEEP_DIR", home.join("dunkingsheep"))
-            .env_remove("DUNKINGSHEEP_SOCKET")
-            .env_remove("DUNKINGSHEEP_SERVICE_TOKEN")
-            .env_remove("DUNKINGSHEEP_SERVICE_TOKEN_FILE")
-            .output()
-            .unwrap()
+        exec_retrying_busy(|| {
+            Command::new(&quoted_executable)
+                .args(["mcp-setup", harness])
+                .env("HOME", &home)
+                .env("XDG_CONFIG_HOME", home.join("config"))
+                .env("DUNKINGSHEEP_DIR", home.join("dunkingsheep"))
+                .env_remove("DUNKINGSHEEP_SOCKET")
+                .env_remove("DUNKINGSHEEP_SERVICE_TOKEN")
+                .env_remove("DUNKINGSHEEP_SERVICE_TOKEN_FILE")
+                .output()
+        })
+        .unwrap()
     };
 
     let quoted_json = run_quoted("json");
