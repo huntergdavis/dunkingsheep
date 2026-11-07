@@ -304,7 +304,12 @@ fn eligible(member: &Member, pane: &str, options: &ClaimOptions) -> bool {
         && options
             .kinds
             .as_ref()
-            .is_none_or(|kinds| kinds.is_empty() || kinds.contains(&member.kind))
+            // t3617: an explicitly assigned member is claimable by its assignee whatever its kind.
+            .is_none_or(|kinds| {
+                kinds.is_empty()
+                    || kinds.contains(&member.kind)
+                    || member.candidate.assignees.iter().any(|a| a == pane)
+            })
         && !options
             .exclude_author
             .as_ref()
