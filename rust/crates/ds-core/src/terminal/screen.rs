@@ -672,4 +672,4 @@ mod screen_tests;
 
 #[cfg(test)]
 #[path = "hint_placeholder_tests.rs"]
-mod hint_placeholder_tests;
+pub(crate) mod hint_placeholder_tests;

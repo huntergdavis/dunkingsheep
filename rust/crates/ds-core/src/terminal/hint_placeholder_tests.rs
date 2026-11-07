@@ -9,7 +9,7 @@ const HINT: &str = "new task? /clear to save 497.4k tokens";
 const FOOTER: &str = "  GPT-6-Astra high \u{b7} ~/workspace \u{b7} task\n";
 
 /// The idle frames a Claude pane draws with the hint showing. Each is an empty composer.
-fn idle_hint_frames() -> Vec<(&'static str, String)> {
+pub(crate) fn idle_hint_frames() -> Vec<(&'static str, String)> {
     vec![
         (
             "bordered, hint on the prompt row (dim)",
