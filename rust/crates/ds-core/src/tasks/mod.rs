@@ -33,6 +33,7 @@ use crate::error::DunkError;
 pub mod advance;
 pub mod allocator;
 mod claim;
+mod claim_batch;
 pub mod next_job;
 pub mod next_job_runtime;
 mod pane_view;
@@ -40,6 +41,7 @@ pub mod wire;
 pub use claim::{
     claimable, refusal, CallerAlive, Candidate, ClaimOptions, ClaimOutcome, Refusal, Requeued,
 };
+pub use claim_batch::ClaimBatchOutcome;
 
 /// `DEFAULT_LEASE_S`: how long a claim stays valid without a heartbeat. The Python reads
 /// `DUNKINGSHEEP_LEASE_S` once at import; this reads it per call.
