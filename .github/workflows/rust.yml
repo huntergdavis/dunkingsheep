@@ -105,3 +105,19 @@ jobs:
         env:
           DS_BIN: ${{ github.workspace }}/rust/target/release/dunkingsheep
         run: bash tools/ci_production_replay.sh
+
+  # t3471: the cutover rollout tooling (tools/rust_rollout.sh). Its unit tests run under a fake HOME
+  # with stub systemctl, journalctl, cargo, sqlite3 and dunkingsheep, so this job touches no real
+  # service and no real state. The script is also checked for POSIX syntax.
+  rust-rollout-tests:
+    name: rollout tooling (fake HOME)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: script syntax
+        run: sh -n tools/rust_rollout.sh
+      - name: rollout unit tests (fake HOME, stub tools)
+        run: python3 -I -W error::ResourceWarning tests/test_rust_rollout.py
