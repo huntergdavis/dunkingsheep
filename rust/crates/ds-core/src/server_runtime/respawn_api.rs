@@ -162,11 +162,13 @@ mod tests {
         let agent = dir.path().join("claude");
         std::fs::copy("/bin/sleep", &agent).unwrap();
         std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::testsupport::sync_closed(&agent);
         let mut owned = OwnedAgents(Vec::new());
         for _ in 0..3 {
-            owned
-                .0
-                .push(Command::new(&agent).arg("300").spawn().unwrap());
+            owned.0.push(
+                crate::testsupport::exec_retrying_busy(|| Command::new(&agent).arg("300").spawn())
+                    .unwrap(),
+            );
         }
         let old_pid = i64::from(owned.0[0].id());
         let new_pid = i64::from(owned.0[1].id());
@@ -204,6 +206,11 @@ esac
         );
         std::fs::write(&script, body).unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::testsupport::sync_closed(&script);
+        // A no-op run (no subcommand matches) that waits out ETXTBSY, so the backend's own exec
+        // of the script later does not land in the window.
+        crate::testsupport::exec_retrying_busy(|| Command::new(&script).arg("warm-up").status())
+            .unwrap();
         let registry_path = dir.path().join("registry.json");
         TmuxBackend::with_registry(&script, &registry_path)
             .registry()
