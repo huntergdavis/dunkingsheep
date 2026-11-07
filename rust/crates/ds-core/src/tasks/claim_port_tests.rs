@@ -1,8 +1,35 @@
-//! t1270: the store-level claim, lease and dependency tests of tests/test_dunk_tasks.py, ported
-//! 1:1 by name. Each test keeps the Python name and asserts the same facts through the Rust
-//! store. Flock-level tests (task_next, task_release, task_followers, reap advisories) are not
-//! here: they need the Flock and roles layer (T31+). The list of what is not ported, and why, is
-//! in the PR body.
+//! t1270: store-level claim, lease and dependency tests ported from tests/test_dunk_tasks.py by name.
+//!
+//! PYTHON SHADOWING (reviewer finding, t3549): tests/test_dunk_tasks.py defines
+//! `class CancelledDependencyTests` three times (lines 94, 154 and 1444). A later class statement
+//! shadows the earlier ones, so only the class at line 1444 ever runs. The class at 94 (the t879
+//! version) and the class at 154 (the pre-t879 version, where a cancelled edge blocks) are dead.
+//!
+//! Names whose ONLY Python original is dead (ported from dead code, so no live Python run backs them):
+//!   - test_a_cancelled_dependency_is_named_and_the_row_stays_claimable (line 117)
+//!   - test_cancel_names_the_dependents_it_strands (lines 127 and 185)
+//!   - test_a_done_dependency_is_not_dead (lines 146 and 203)
+//!   - test_repointing_the_edge_frees_the_row_without_cancelling_it (line 190)
+//!
+//! Live Python originals: test_a_cancelled_dependency_is_satisfied, test_a_done_dependency_is_satisfied,
+//! test_an_open_dependency_still_blocks (the class at line 1444), and the four lease tests
+//! test_completing_releases_the_lease, test_cancelling_releases_the_lease, test_blocking_releases_the_lease
+//! and test_another_panes_lease_is_untouched (TerminalStatusReleasesTheLease).
+//!
+//! ELIGIBILITY: Python asserted `eligible` on the task view. The Rust store has no such field on
+//! DependencyState, so claimability is asserted through `claim_next`. That restores the check in
+//! test_a_cancelled_dependency_is_satisfied, test_repointing_the_edge_frees_the_row_without_cancelling_it
+//! and test_an_open_dependency_still_blocks. test_a_done_dependency_is_not_dead asserts only
+//! dead_dependencies (its Python original is dead, and it asserted `eligible`). The repoint test does
+//! not assert the Python pre-repoint `not eligible`: that belongs to the dead pre-t879 copy, and the
+//! owner ruling makes a cancelled edge satisfied.
+//!
+//! DROPPED: test_a_cancelled_dependency_is_named_and_blocks_the_row. Its Python original is dead and
+//! its name contradicted its assertions; the port duplicated the stays-claimable test. Dropped, not
+//! relabelled.
+//!
+//! Flock-level tests (task_next, task_release, task_followers, reap advisories) are not here: they
+//! need the Flock and roles layer (T31+). The full not-ported list is in the PR body.
 
 use super::*;
 
@@ -33,21 +60,29 @@ async fn pair(store: &Tasks) -> (Task, Task) {
 }
 
 /// A task claimed by `pane` through the store's own claim path; returns the claimed task's id.
+/// Guard (reviewer R1, t3549): exactly one live lease must exist before the caller's terminal
+/// action, so a lease test cannot pass vacuously when claim_next stops creating leases.
 async fn claimed(store: &Tasks, pane: &str, title: &str) -> String {
     store.add("global", title, "").await.unwrap();
-    match store
+    let id = match store
         .claim_next("global", pane, ClaimOptions::default())
         .await
         .unwrap()
     {
         ClaimOutcome::Claimed { task, .. } => task.id.clone(),
         other => panic!("expected a claim for {pane}, got {other:?}"),
-    }
+    };
+    assert_eq!(
+        1,
+        store.leases_for_pane(pane, None).await.unwrap().len(),
+        "the fixture must hold exactly one live lease before the terminal action"
+    );
+    id
 }
 
 #[tokio::test]
 async fn test_a_cancelled_dependency_is_named_and_the_row_stays_claimable() {
-    // t879 made cancelled SATISFIED; t878 keeps the fact visible, not blocking.
+    // DEAD ORIGINAL (see the module doc). t879 made cancelled SATISFIED; t878 keeps the fact visible.
     let store = store("cancelled-named").await;
     let (dep, row) = pair(&store).await;
     store.cancel(&dep.id, "duplicate").await.unwrap();
@@ -69,6 +104,7 @@ async fn test_a_cancelled_dependency_is_named_and_the_row_stays_claimable() {
 
 #[tokio::test]
 async fn test_cancel_names_the_dependents_it_strands() {
+    // DEAD ORIGINAL (see the module doc).
     let store = store("names-dependents").await;
     let (dep, row) = pair(&store).await;
     store.cancel(&dep.id, "duplicate").await.unwrap();
@@ -80,6 +116,7 @@ async fn test_cancel_names_the_dependents_it_strands() {
 
 #[tokio::test]
 async fn test_a_done_dependency_is_not_dead() {
+    // DEAD ORIGINAL (see the module doc). Asserts dead_dependencies only; the Python also asserted eligible.
     let store = store("done-not-dead").await;
     let (dep, row) = pair(&store).await;
     store.complete(&dep.id).await.unwrap();
@@ -89,6 +126,7 @@ async fn test_a_done_dependency_is_not_dead() {
 
 #[tokio::test]
 async fn test_a_cancelled_dependency_is_satisfied() {
+    // LIVE original: test_a_cancelled_dependency_is_satisfied (class at line 1444).
     let store = store("cancelled-satisfied").await;
     let pre = store.add("global", "prerequisite", "").await.unwrap();
     store.cancel(&pre.id, "superseded").await.unwrap();
@@ -109,10 +147,20 @@ async fn test_a_cancelled_dependency_is_satisfied() {
         state.blocked_by.is_empty(),
         "a cancelled prerequisite is not outstanding work"
     );
+    // The Python asserted `eligible`: the row must be claimable.
+    match store
+        .claim_next("global", PANE, ClaimOptions::default())
+        .await
+        .unwrap()
+    {
+        ClaimOutcome::Claimed { task, .. } => assert_eq!(after.id, task.id),
+        other => panic!("the dependent must be claimable, got {other:?}"),
+    }
 }
 
 #[tokio::test]
 async fn test_a_done_dependency_is_satisfied() {
+    // LIVE original: test_a_done_dependency_is_satisfied (class at line 1444).
     let store = store("done-satisfied").await;
     let pre = store.add("global", "prerequisite", "").await.unwrap();
     store.complete(&pre.id).await.unwrap();
@@ -133,8 +181,53 @@ async fn test_a_done_dependency_is_satisfied() {
 }
 
 #[tokio::test]
+async fn test_an_open_dependency_still_blocks() {
+    // LIVE original: test_an_open_dependency_still_blocks (class at line 1444): the Python asserts
+    // blocked_by == [pre] and eligible False on the dependent. The prerequisite itself is
+    // claimable, so the claim must return it and never the blocked dependent.
+    let store = store("open-still-blocks").await;
+    let pre = store.add("global", "prerequisite", "").await.unwrap();
+    let after = store
+        .add_with(
+            "global",
+            "dependent",
+            "",
+            AddOptions {
+                depends_on: vec![pre.id.clone()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let state = store.dependency_state(&after.id).await.unwrap();
+    assert_eq!(vec![pre.id.clone()], state.blocked_by);
+    match store
+        .claim_next("global", PANE, ClaimOptions::default())
+        .await
+        .unwrap()
+    {
+        ClaimOutcome::Claimed { task, .. } => assert_eq!(pre.id, task.id),
+        other => panic!("only the prerequisite may be claimed, got {other:?}"),
+    }
+    // Proof that the dependent is ineligible while its prerequisite is outstanding: the
+    // prerequisite is now leased by PANE, so a second pane must not be handed the dependent
+    // (or the prerequisite) and gets a refusal instead.
+    match store
+        .claim_next("global", "w2:p3", ClaimOptions::default())
+        .await
+        .unwrap()
+    {
+        ClaimOutcome::Refused { .. } => {}
+        ClaimOutcome::Claimed { task, .. } => panic!(
+            "a second pane was handed {} while its prerequisite is leased",
+            task.id
+        ),
+    }
+}
+
+#[tokio::test]
 async fn test_repointing_the_edge_frees_the_row_without_cancelling_it() {
-    // The repair path: depends_on REPLACES the list.
+    // DEAD ORIGINAL (see the module doc). The repair path: depends_on REPLACES the list.
     let store = store("repoint").await;
     let (dep, row) = pair(&store).await;
     store.cancel(&dep.id, "duplicate").await.unwrap();
@@ -174,10 +267,20 @@ async fn test_repointing_the_edge_frees_the_row_without_cancelling_it() {
         .unwrap()
         .dead_dependencies
         .is_empty());
+    // The Python asserted `eligible` after the repoint: the row must be claimable again.
+    match store
+        .claim_next("global", PANE, ClaimOptions::default())
+        .await
+        .unwrap()
+    {
+        ClaimOutcome::Claimed { task, .. } => assert_eq!(row.id, task.id),
+        other => panic!("a repointed row is claimable again, got {other:?}"),
+    }
 }
 
 #[tokio::test]
 async fn test_completing_releases_the_lease() {
+    // LIVE original: TerminalStatusReleasesTheLease.
     let store = store("complete-releases").await;
     let task = claimed(&store, PANE, "claimed work").await;
     store.complete(&task).await.unwrap();
@@ -190,6 +293,7 @@ async fn test_completing_releases_the_lease() {
 
 #[tokio::test]
 async fn test_cancelling_releases_the_lease() {
+    // LIVE original: TerminalStatusReleasesTheLease.
     let store = store("cancel-releases").await;
     let task = claimed(&store, PANE, "claimed work").await;
     store.cancel(&task, "withdrawn").await.unwrap();
@@ -198,6 +302,7 @@ async fn test_cancelling_releases_the_lease() {
 
 #[tokio::test]
 async fn test_blocking_releases_the_lease() {
+    // LIVE original: TerminalStatusReleasesTheLease.
     let store = store("block-releases").await;
     let task = claimed(&store, PANE, "claimed work").await;
     store.block(&task, "needs-owner: a question").await.unwrap();
@@ -206,6 +311,7 @@ async fn test_blocking_releases_the_lease() {
 
 #[tokio::test]
 async fn test_another_panes_lease_is_untouched() {
+    // LIVE original: TerminalStatusReleasesTheLease.
     let store = store("other-lease").await;
     let mine = claimed(&store, PANE, "mine").await;
     store.add("global", "theirs", "").await.unwrap();
@@ -220,28 +326,4 @@ async fn test_another_panes_lease_is_untouched() {
         store.leases_for_pane("w2:p3", None).await.unwrap().len(),
         "another lane's live claim was removed by my completion"
     );
-}
-
-/// The Python test of this name asserted that a cancelled dependency BLOCKS the row. Owner
-/// ruling on t1270: a cancelled dependency counts as satisfied (the live rule, t530). The name
-/// is kept for the 1:1 mapping; the assertions follow the ruling.
-#[tokio::test]
-async fn test_a_cancelled_dependency_is_named_and_blocks_the_row() {
-    let store = store("cancelled-named-satisfied").await;
-    let (dep, row) = pair(&store).await;
-    store.cancel(&dep.id, "duplicate").await.unwrap();
-    let state = store.dependency_state(&row.id).await.unwrap();
-    assert_eq!(vec![dep.id.clone()], state.dead_dependencies);
-    assert!(
-        !state.blocked_by.contains(&dep.id),
-        "owner ruling (t1270): a cancelled dependency is satisfied (t530), not blocking"
-    );
-    match store
-        .claim_next("global", PANE, ClaimOptions::default())
-        .await
-        .unwrap()
-    {
-        ClaimOutcome::Claimed { task, .. } => assert_eq!(row.id, task.id),
-        other => panic!("the row is claimable under the satisfied rule, got {other:?}"),
-    }
 }
