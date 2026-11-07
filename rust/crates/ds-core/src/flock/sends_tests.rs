@@ -21,6 +21,10 @@ use std::collections::{BTreeMap, VecDeque};
 #[cfg(test)]
 mod group_d;
 
+/// t3483 (t3355 group D remainder): wiring rows 15 and 17, see sends_tests/group_d_wiring_15_17.rs.
+#[cfg(test)]
+mod group_d_wiring_15_17;
+
 #[derive(Default)]
 struct Pane {
     screens: BTreeMap<String, String>,
