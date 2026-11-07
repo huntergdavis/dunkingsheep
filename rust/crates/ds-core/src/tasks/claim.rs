@@ -401,7 +401,13 @@ impl Tasks {
                         && options
                             .kinds
                             .as_ref()
-                            .is_none_or(|kinds| kinds.is_empty() || kinds.contains(&row.kind))
+                            // t3617: an explicitly assigned task is claimable by its assignee whatever its
+                            // kind; unassigned work keeps the role's kind filter.
+                            .is_none_or(|kinds| {
+                                kinds.is_empty()
+                                    || kinds.contains(&row.kind)
+                                    || row.candidate.assignees.contains(&pane)
+                            })
                         && !options.exclude_author.as_ref().is_some_and(|who| row.author.as_ref() == Some(who))
                         && claimable(&row.candidate, Some(&pane))
                 });
@@ -702,6 +708,10 @@ impl Tasks {
 #[cfg(test)]
 #[path = "claim_tests.rs"]
 mod claim_tests;
+
+#[cfg(test)]
+#[path = "claim_kind_filter_tests.rs"]
+mod claim_kind_filter_tests;
 
 #[cfg(test)]
 #[path = "claim_assigned_offer_tests.rs"]
