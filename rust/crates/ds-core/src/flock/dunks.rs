@@ -537,6 +537,11 @@ pub struct DunkList {
 /// queued fire work can therefore keep updating its original Dunker after removal.
 pub(crate) type DunkerHandle = Arc<std::sync::Mutex<Dunker>>;
 
+// t3504: the Python-parity phase fixture reads Dunker's private detector_fallback, so it lives here.
+#[cfg(test)]
+#[path = "dunk_phase_fixture_tests.rs"]
+mod dunk_phase_fixture_tests;
+
 pub(super) struct DunkSendSnapshot {
     pub id: String,
     pub pane_id: String,
