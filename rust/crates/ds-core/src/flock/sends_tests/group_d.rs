@@ -486,3 +486,82 @@ fn scheduled_47_control_unchanged_sent_schedule_presses_once() {
         "the unchanged sent schedule presses once"
     );
 }
+
+/// t3501 scheduled row 43, at the observer layer (Python test_reported_sent_but_bright_pending_schedule_
+/// recovers): a schedule reported sent, with its native text still pending (bright), presses once at the
+/// 120 s threshold through the real observer. The spent attempt presses nothing at the later ticks. The
+/// tracker-layer test in stuck.rs covers the decision only.
+#[test]
+fn scheduled_43_observer_sent_bright_pending_schedule_presses_once_at_120() {
+    let (flock, mut env, created) = scheduled_fixture("sent", i64::from(std::process::id()));
+    env.screens
+        .insert("%1".into(), format!("\x1b[1m›\x1b[0m {TEXT}\n\n\n{FOOTER}"));
+    observe(&flock, &mut env, created + 1.0);
+    assert!(env.keys.is_empty(), "no press before the threshold");
+    observe(&flock, &mut env, created + 120.0);
+    assert_eq!(1, env.keys.len(), "one recovery at the threshold");
+    observe(&flock, &mut env, created + 240.0);
+    observe(&flock, &mut env, created + 360.0);
+    assert_eq!(1, env.keys.len(), "the spent attempt presses nothing more");
+}
+
+/// t3501 scheduled row 44, at the observer layer (Python test_long_false_sent_composer_stays_observable): an
+/// 18-line composer this flock sent stays observable. The candidate's status stays `sent`, one recovery key
+/// follows the ticks, and no consumed outcome is recorded. The box-only test in loops_stuck_tests.rs covers
+/// the box read.
+#[test]
+fn scheduled_44_long_false_sent_composer_presses_once_with_status_sent_and_no_consumed_outcome() {
+    let (flock, mut env, created) = scheduled_fixture("sent", i64::from(std::process::id()));
+    let text = (0..18)
+        .map(|i| format!("scheduled line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    flock
+        .sent_text_by_pane
+        .lock()
+        .unwrap()
+        .insert("%1".into(), vec![text.clone()]);
+    env.screens
+        .insert("%1".into(), format!("\x1b[1m›\x1b[0m {text}\n{FOOTER}"));
+    observe(&flock, &mut env, created + 1.0);
+    assert!(env.keys.is_empty(), "no press before two minutes");
+    observe(&flock, &mut env, created + 120.0);
+    observe(&flock, &mut env, created + 240.0);
+    assert_eq!(1, env.keys.len(), "one recovery key follows the ticks");
+    let candidate = flock.stuck_candidates.lock().unwrap()["%1"].clone();
+    assert_eq!("sent", candidate.status, "the status stays sent");
+    assert_ne!(
+        Some("consumed".to_string()),
+        candidate.recovery_outcome,
+        "no consumed outcome is recorded"
+    );
+}
+
+/// t3501 scheduled row 31, at the observer layer (Python test_added_human_continuation_never_submits): a
+/// human line added after the scheduled prompt makes the composer not provably ours. The observer ticks
+/// press nothing at the threshold, keep no stuck record for the pane, and the box reads as unknown (not
+/// empty). The tracker-layer test in stuck.rs covers the reset only.
+#[test]
+fn scheduled_31_human_continuation_observer_ticks_press_nothing_and_keep_no_record() {
+    let (flock, mut env, created) = scheduled_fixture("failed", i64::from(std::process::id()));
+    let screen = format!("\x1b[1;2m›\x1b[0m {TEXT}\ncall Hunter\n\n\n{FOOTER}");
+    env.screens.insert("%1".into(), screen.clone());
+    observe(&flock, &mut env, created + 1.0);
+    observe(&flock, &mut env, created + 120.0);
+    observe(&flock, &mut env, created + 240.0);
+    assert!(env.keys.is_empty(), "a human continuation presses nothing");
+    assert!(
+        !flock
+            .stuck_tracker
+            .lock()
+            .unwrap()
+            .records
+            .contains_key("%1"),
+        "no stuck record is kept for the pane"
+    );
+    let (text, detail) = crate::terminal::screen::box_text(&screen);
+    assert!(
+        text.is_empty() && detail.starts_with(AMBIGUOUS_COMPOSER),
+        "the box is unknown, not empty: {text:?} {detail:?}"
+    );
+}

@@ -401,6 +401,27 @@ fn wiring_14_spent_budget_survives_a_restart_after_a_key() {
     );
 }
 
+/// t3501 wiring row 19, at the observer layer (Python test_different_native_process_binding_not_adopted): a
+/// stored native binding that names another process is stale. Observer ticks adopt nothing from it and press
+/// nothing, while the bound pane presses once (wiring_15_control shows that). The tracker-layer test in
+/// stuck.rs covers the decision only.
+#[test]
+fn wiring_19_stale_stored_binding_is_not_adopted_by_observer_ticks() {
+    let mut fx = native_fixture();
+    {
+        let mut candidates = fx.flock.stuck_candidates.lock().unwrap();
+        let candidate = candidates.get_mut("%1").unwrap();
+        candidate.native_binding =
+            Some((i64::MAX - 1, "stale-start".into(), "stale-session".into()));
+    }
+    observe(&fx.flock, &mut fx.env, 101.0);
+    observe(&fx.flock, &mut fx.env, 222.0);
+    assert!(
+        fx.env.keys.is_empty(),
+        "a stale stored binding presses nothing"
+    );
+}
+
 /// A `Pane` that counts its screen reads and, during one of them, replaces the rollout. That read
 /// is one the observer makes while deciding, so the native turn starts before the key. `key_reads`
 /// records the read count at each key press, which is how the race run finds its boundary.
