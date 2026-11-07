@@ -922,6 +922,8 @@ mod snapshot_tests;
 mod status_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod wiring_recovery_tests;
 
 pub mod respawn;
 
