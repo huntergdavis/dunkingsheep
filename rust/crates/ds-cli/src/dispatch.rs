@@ -3597,7 +3597,8 @@ impl ds_core::watchdog::run::OwnerTransport for WatchdogOwnerMailbox<'_> {
 fn watchdog(ns: &Map<String, Value>) -> Outcome {
     use ds_core::watchdog::{
         config::load_config,
-        run::{self, SendError},
+        owner_mailbox::OwnerMailbox,
+        run::{self, OwnerTransport, SendError},
     };
     use std::path::PathBuf;
 
@@ -3732,8 +3733,19 @@ fn watchdog(ns: &Map<String, Value>) -> Outcome {
             message: error.to_string(),
         })
     };
-    let channel = WatchdogOwnerMailbox { ns };
-    match run::run(&config, now, dry_run, &mut send, &channel, None, None) {
+    // Two owner routes (t665 piece 2 on main, t3624 here). The config's channel picks: owner-mailbox
+    // writes one inbox row to the owner, with no telegram transport (OwnerMailbox); any other value keeps
+    // main's owner_page route, which records the page for the telegram outbox.
+    let page_route = WatchdogOwnerMailbox { ns };
+    let mailbox_ns = ns.clone();
+    let mailbox = OwnerMailbox::new(move || crate::daemon_cmd::raw_client(&mailbox_ns));
+    let owner_route: &dyn OwnerTransport =
+        if config["escalation"]["owner"]["channel"].as_str() == Some("owner-mailbox") {
+            &mailbox
+        } else {
+            &page_route
+        };
+    match run::run(&config, now, dry_run, &mut send, owner_route, None, None) {
         Ok(report) => Outcome {
             stdout: if matches!(ns.get("json"), Some(Value::Bool(true))) {
                 format!("{}\n", sorted_json(&report))

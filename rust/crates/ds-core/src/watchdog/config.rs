@@ -552,7 +552,7 @@ fn top_spec() -> Vec<(String, Spec)> {
                     "owner",
                     vec![
                         leaf("enabled", boolean()),
-                        leaf("channel", enumeration(&["desk-brief"])),
+                        leaf("channel", enumeration(&["desk-brief", "owner-mailbox"])),
                         leaf("classes", enum_list(OWNER_CLASS_CHOICES, true)),
                         leaf("min_severity", enumeration(SEVERITY_CHOICES)),
                         leaf("approved_by", opt_string()),

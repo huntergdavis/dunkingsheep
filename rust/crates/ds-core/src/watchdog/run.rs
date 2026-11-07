@@ -239,6 +239,27 @@ pub trait OwnerTransport {
     fn desk_channel(&self) -> Result<String, DunkError>;
     fn post(&self, body: &str) -> Result<i64, SendError>;
     fn confirmed_through(&self) -> Result<Option<Value>, DunkError>;
+    /// True when an accepted post is the delivery itself (the owner-mailbox channel, t3624):
+    /// the page is confirmed on post. The desk brief waits for its forwarder and says false.
+    fn confirms_on_post(&self) -> bool {
+        false
+    }
+}
+
+/// The owner-page state entry written after an accepted post (t3624). Mirrors
+/// `dunk_watchdog.run`: a confirm-on-post channel stamps `confirmed_at` at once.
+pub fn owner_page_entry(
+    brief_id: i64,
+    now: f64,
+    desk_channel: &str,
+    confirms_on_post: bool,
+) -> Value {
+    json!({
+        "brief_id": brief_id,
+        "posted_at": now,
+        "confirmed_at": if confirms_on_post { json!(now) } else { Value::Null },
+        "desk_channel": desk_channel,
+    })
 }
 
 impl<R: Fn(&Path) -> Result<String, DunkError>> OwnerTransport for DeskBriefChannel<R> {
@@ -454,9 +475,21 @@ pub fn run(
     let mut page_lines = Vec::new();
     for decision in owner_pending {
         let item = &decision["finding"];
+        // An owner-mailbox escalation is not a page: its text never carries the page marker.
+        let confirms = owner_channel.confirms_on_post();
         let body = digest(
-            "OWNER page",
-            &[line("PAGE OWNER", item, &json!("no"), None, None)],
+            if confirms {
+                "OWNER escalation"
+            } else {
+                "OWNER page"
+            },
+            &[line(
+                if confirms { "ESCALATION" } else { "PAGE OWNER" },
+                item,
+                &json!("no"),
+                None,
+                None,
+            )],
         );
         let desk_channel = match owner_channel.desk_channel() {
             Ok(channel) => channel,
@@ -480,13 +513,18 @@ pub fn run(
                 set_decision(&mut report, item, "owner", "transport-error");
             }
             Ok(brief_id) => {
-                state["owner_pages"][dedupe_key(item)] = json!({"brief_id":brief_id,"posted_at":now,"confirmed_at":null,"desk_channel":desk_channel});
+                state["owner_pages"][dedupe_key(item)] =
+                    owner_page_entry(brief_id, now, &desk_channel, confirms);
                 state["owner_page_times"]
                     .as_array_mut()
                     .unwrap()
                     .push(json!(now));
                 page_lines.push(line(
-                    "PAGE OWNER (pending confirmation)",
+                    if confirms {
+                        "ESCALATION (owner mailbox)"
+                    } else {
+                        "PAGE OWNER (pending confirmation)"
+                    },
                     item,
                     &json!("no"),
                     None,
