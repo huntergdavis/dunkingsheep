@@ -10,6 +10,10 @@
 //! NOT covered here: the production daemon, the desk's auth, and the live desk on
 //! 127.0.0.1:8787. Those are separate gates.
 
+// messages_backend.rs is included by path and names `crate::roster` / `crate::routes`, which
+// messages_backend.rs (the test that includes it too) re-exports at the crate root.
+pub use ds_web::{roster, routes};
+
 #[allow(dead_code)]
 #[path = "../src/messages_backend.rs"]
 mod messages_backend;
