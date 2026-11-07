@@ -4,10 +4,18 @@
 //! delivery tests in `tests.rs`, so the role gate and the argument checks are the real ones.
 use super::*;
 
+/// The owner-page verb plus the outbox the gate reads back. `owner_view_dispatcher` has the
+/// page and receipt handlers only; `owner_outbox` is in the reply/ingest/outbox group.
+fn page_dispatcher() -> Dispatcher {
+    let mut dispatcher = owner_view_dispatcher();
+    dispatcher.register_owner_reply_ingest_outbox();
+    dispatcher
+}
+
 #[test]
 fn owner_page_records_a_telegram_page_and_repeats_idempotently() {
     let (_dir, flock, env) = owner_api_fixture("owner-page");
-    let dispatcher = owner_view_dispatcher();
+    let dispatcher = page_dispatcher();
     let page_args = || {
         args(json!({
             "body": "PAGE OWNER security: token exposed",
@@ -96,7 +104,7 @@ fn owner_page_records_a_telegram_page_and_repeats_idempotently() {
 #[test]
 fn owner_page_is_refused_for_a_worker_and_for_an_empty_body() {
     let (_dir, flock, env) = owner_api_fixture("owner-page-refuse");
-    let dispatcher = owner_view_dispatcher();
+    let dispatcher = page_dispatcher();
 
     assert!(matches!(
         dispatch_owner_api(
