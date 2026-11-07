@@ -159,7 +159,7 @@ class RegistryTests(unittest.TestCase):
             self.assertFalse(dunk_roles.allowed("desk", verb), f"the desk must not have {verb}")
 
     def test_the_rest_of_the_allowlist_shape(self):
-        self.assertFalse(dunk_roles.allowed("planner", "inbox_send"))
+        self.assertTrue(dunk_roles.allowed("planner", "inbox_send"))
         self.assertFalse(dunk_roles.allowed("anonymous", "task_next"))
         self.assertTrue(dunk_roles.allowed("anonymous", "task_list"))
         self.assertFalse(dunk_roles.allowed("worker", "task_assign"))

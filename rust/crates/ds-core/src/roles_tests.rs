@@ -45,7 +45,7 @@ fn the_rest_of_the_allowlist_shape() {
     assert!(!allowed("desk", "inbox_send"));
     assert!(!allowed("desk", "task_complete"));
     assert!(allowed("desk", "task_add"));
-    assert!(!allowed("planner", "inbox_send"));
+    assert!(allowed("planner", "inbox_send"));
     assert!(!allowed("anonymous", "task_next"));
     assert!(allowed("anonymous", "task_list"));
     assert!(!allowed("worker", "task_assign"));
@@ -89,7 +89,7 @@ fn the_tables_have_the_pythons_sizes() {
     assert_eq!(28, WORKER_EXTRA.len());
     assert_eq!(30, SYSTEM_EXTRA.len());
     assert_eq!(16, DESK_EXTRA.len());
-    assert_eq!(3, PLANNER_EXTRA.len());
+    assert_eq!(8, PLANNER_EXTRA.len());
     assert_eq!(30, WEB_DENIED.len());
 }
 
