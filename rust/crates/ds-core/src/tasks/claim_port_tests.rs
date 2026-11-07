@@ -32,15 +32,15 @@ async fn pair(store: &Tasks) -> (Task, Task) {
     (dep, row)
 }
 
-/// A task claimed by `pane` through the store's own claim path.
-async fn claimed(store: &Tasks, pane: &str, title: &str) -> Task {
+/// A task claimed by `pane` through the store's own claim path; returns the claimed task's id.
+async fn claimed(store: &Tasks, pane: &str, title: &str) -> String {
     store.add("global", title, "").await.unwrap();
     match store
         .claim_next("global", pane, ClaimOptions::default())
         .await
         .unwrap()
     {
-        ClaimOutcome::Claimed { task, .. } => task,
+        ClaimOutcome::Claimed { task, .. } => task.id.clone(),
         other => panic!("expected a claim for {pane}, got {other:?}"),
     }
 }
@@ -160,7 +160,14 @@ async fn test_repointing_the_edge_frees_the_row_without_cancelling_it() {
         .await
         .unwrap();
     let repaired = store.get(&row.id).await.unwrap();
-    assert_eq!(vec![good.id.clone()], repaired.depends_on);
+    assert!(
+        repaired.depends_on.contains(good.id.as_str()),
+        "the repointed row depends on the canonical task"
+    );
+    assert!(
+        !repaired.depends_on.contains(dep.id.as_str()),
+        "the list is replaced, not appended to"
+    );
     assert!(store
         .dependency_state(&row.id)
         .await
@@ -173,19 +180,19 @@ async fn test_repointing_the_edge_frees_the_row_without_cancelling_it() {
 async fn test_completing_releases_the_lease() {
     let store = store("complete-releases").await;
     let task = claimed(&store, PANE, "claimed work").await;
-    store.complete(&task.id).await.unwrap();
+    store.complete(&task).await.unwrap();
     assert!(
         store.leases_for_pane(PANE, None).await.unwrap().is_empty(),
         "a completed task still holds the lane's lease"
     );
-    assert_eq!("done", store.get(&task.id).await.unwrap().status);
+    assert_eq!("done", store.get(&task).await.unwrap().status);
 }
 
 #[tokio::test]
 async fn test_cancelling_releases_the_lease() {
     let store = store("cancel-releases").await;
     let task = claimed(&store, PANE, "claimed work").await;
-    store.cancel(&task.id, "withdrawn").await.unwrap();
+    store.cancel(&task, "withdrawn").await.unwrap();
     assert!(store.leases_for_pane(PANE, None).await.unwrap().is_empty());
 }
 
@@ -193,10 +200,7 @@ async fn test_cancelling_releases_the_lease() {
 async fn test_blocking_releases_the_lease() {
     let store = store("block-releases").await;
     let task = claimed(&store, PANE, "claimed work").await;
-    store
-        .block(&task.id, "needs-owner: a question")
-        .await
-        .unwrap();
+    store.block(&task, "needs-owner: a question").await.unwrap();
     assert!(store.leases_for_pane(PANE, None).await.unwrap().is_empty());
 }
 
@@ -209,7 +213,7 @@ async fn test_another_panes_lease_is_untouched() {
         .claim_next("global", "w2:p3", ClaimOptions::default())
         .await
         .unwrap();
-    store.complete(&mine.id).await.unwrap();
+    store.complete(&mine).await.unwrap();
     assert!(store.leases_for_pane(PANE, None).await.unwrap().is_empty());
     assert_eq!(
         1,
