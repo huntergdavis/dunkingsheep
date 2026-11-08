@@ -46,6 +46,8 @@ struct Member {
     created_at: f64,
     kind: String,
     author: Option<String>,
+    /// The task's repo, for the Poolrad review rule (t3641).
+    repo: Option<String>,
     /// The task's own `depends_on`, for the order check among members.
     depends_on: Vec<String>,
 }
@@ -176,7 +178,7 @@ fn validate(
     for id in wanted {
         let found = tx
             .query_row(
-                "SELECT scope, priority, created_at, status, kind, author, assignees, multi_assignee, depends_on FROM tasks WHERE id = ?",
+                "SELECT scope, priority, created_at, status, kind, author, assignees, multi_assignee, depends_on, repo FROM tasks WHERE id = ?",
                 params![id],
                 |row| {
                     let assignees: Option<String> = row.get(6)?;
@@ -195,6 +197,7 @@ fn validate(
                         kind: row.get(4)?,
                         author: row.get(5)?,
                         depends_on: decode_list(depends_on.as_deref()),
+                        repo: row.get(9)?,
                     })
                 },
             )
@@ -314,6 +317,12 @@ fn eligible(member: &Member, pane: &str, options: &ClaimOptions) -> bool {
             .exclude_author
             .as_ref()
             .is_some_and(|who| member.author.as_ref() == Some(who))
+        && super::claim::poolrad_review_ok(
+            member.repo.as_deref(),
+            &member.kind,
+            &member.candidate.assignees,
+            pane,
+        )
         && claimable(&member.candidate, Some(pane))
 }
 

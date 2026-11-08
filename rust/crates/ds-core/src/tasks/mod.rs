@@ -4507,3 +4507,7 @@ mod block_by_scope_tests;
 
 #[cfg(test)]
 mod claim_port_tests;
+
+/// t3641: the Poolrad review routing rule (a poolrad-decomp review with no designated reviewer).
+#[cfg(test)]
+mod poolrad_review_routing_tests;
