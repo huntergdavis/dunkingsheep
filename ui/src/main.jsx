@@ -523,6 +523,7 @@ function Fleet({ standalone = false }) {
   const [fleet, setFleet] = useState(null);
   const [error, setError] = useState('');
   const [selected, setSelected] = useState(null);
+  const [requestedPane] = useState(() => new URLSearchParams(window.location.search).get('pane'));
   const [paneText, setPaneText] = useState(null);
   const [draft, setDraft] = useState('');
   const [sent, setSent] = useState('');
@@ -539,6 +540,9 @@ function Fleet({ standalone = false }) {
         setFleet(null); setSelected(null); setError(`Fleet unavailable: ${data.error || 'unknown reason'}`);
       } else {
         setFleet(data); setError('');
+        if (requestedPane && data.rows?.some(row => row.pane_id === requestedPane)) {
+          setSelected(current => current || requestedPane);
+        }
       }
     } catch (e) { setFleet(null); setSelected(null); setError(`Fleet unavailable: ${e.message}`); }
   }
@@ -1146,7 +1150,10 @@ function ChannelStandalone({ channel }) {
       <div className="conversation" ref={messageScroll.ref} onScroll={messageScroll.onScroll}>
         <div className="conversation-inner">
           {!items.length && <div className="empty-state"><div className="empty-icon">✦</div><h2>Direct line to {selected?.name || 'the agent'}</h2></div>}
-          <MessageList autoScrollToBottom={false} autoScrollToBottomOnMount={false}>{items.map(item => <MessageCard key={item.id} item={item} onSendNow={() => {}} onInspect={() => {}} />)}</MessageList>
+          <MessageList autoScrollToBottom={false} autoScrollToBottomOnMount={false}>{items.map(item => <MessageCard key={item.id} item={item} onSendNow={() => {}} onInspect={() => {
+            const pane = selected?.pane_id;
+            window.location.assign(pane ? `/dash/fleet?pane=${encodeURIComponent(pane)}` : '/dash/fleet');
+          }} />)}</MessageList>
         </div>
       </div>
       {messageScroll.hasNew && <button className="chat-new-messages" onClick={messageScroll.jump}>New messages · Jump to latest</button>}
