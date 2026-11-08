@@ -385,16 +385,6 @@ fn decode_json_body(raw: &[u8]) -> Result<Value, Box<Response>> {
                 return Err(parse_error());
             }
             let little = encoding == BodyEncoding::Utf32Le;
-            let codes: Vec<u32> = quads
-                .iter()
-                .map(|quad| {
-                    if little {
-                        u32::from_le_bytes(*quad)
-                    } else {
-                        u32::from_be_bytes(*quad)
-                    }
-                })
-                .collect();
             let mut text = String::new();
             for quad in quads {
                 let code = if little {
