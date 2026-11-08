@@ -133,7 +133,13 @@ class FakeClient:
         if name == "owner_ingest":
             return self.ingest
         if name == "owner_conversation":
-            return {"messages": list(self.conversation), "count": len(self.conversation)}
+            # The daemon's contract: `created_at < before`, newest `limit` of those, oldest first.
+            limit = int(kwargs.get("limit") or 50)
+            before = kwargs.get("before")
+            rows = [dict(row) for row in self.conversation
+                    if before is None or float(row.get("created_at") or 0.0) < float(before)]
+            rows = rows[-limit:]
+            return {"messages": rows, "count": len(rows)}
         return {}
 
 
@@ -293,10 +299,13 @@ def outbox_row(message_id, sender, body, reply_to=None):
             "reply_to": reply_to, "body": body}
 
 
-def mailbox_row(row_id, transport, state, external_id=None, reply_to=None):
-    """One owner-mailbox row, as the daemon returns it in `owner_conversation`."""
+def mailbox_row(row_id, transport, state, external_id=None, reply_to=None, created_at=0.0):
+    """One owner-mailbox row, as the daemon returns it in `owner_conversation`.
+
+    `created_at` is the paging cursor; give rows distinct values when a page boundary matters.
+    """
     return {"id": row_id, "transport": transport, "state": state,
-            "external_id": external_id, "reply_to": reply_to}
+            "external_id": external_id, "reply_to": reply_to, "created_at": created_at}
 
 
 def status_reply(text):
@@ -418,7 +427,7 @@ def scenarios():
     # reads the legacy desk store. Each scenario below therefore carries `port`: the port's own
     # expected bot_log/daemon_log. Whatever Python observed stays in the fixture beside it, so the
     # difference is on the record instead of being normalised away.
-    status_call = [["owner_conversation", {"limit": 50}]]
+    status_call = [["owner_conversation", {"limit": 100}]]
     add("status_of_a_fresh_config", config={"bot_token": "123:TEST-TOKEN-NOT-REAL", "pair_code": PAIR,
         "chat_id": None}, steps=[{"op": "status"}])
     add("status_reports_routing_and_pairing", config=paired(last_brief_id=13, update_offset=900),
@@ -456,6 +465,17 @@ def scenarios():
         steps=[{"op": "process_update", "update": text(9, 42, "/status")}],
         port={"daemon_log": status_call,
               "bot_log": status_reply("VP message #i30: read")})
+    add("status_finds_a_question_older_than_unrelated_mailbox_traffic", config=paired(),
+        # Reviewer t3745: the conversation also carries owner-lane mail, so a fixed window can
+        # fill with unrelated rows. 130 newer rows than the question force a second page.
+        daemon={"conversation": [mailbox_row("i7", "telegram", "queued", "telegram:7",
+                                             created_at=1.0)]
+                + [mailbox_row(f"web-{n}", "web", "queued", f"web:{n}", created_at=10.0 + n)
+                   for n in range(130)]},
+        steps=[{"op": "process_update", "update": text(9, 42, "/status")}],
+        port={"daemon_log": status_call + [["owner_conversation",
+                                            {"limit": 100, "before": 40}]],
+              "bot_log": status_reply("Chief of Staff message #i7: queued")})
     return out
 
 

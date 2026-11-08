@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::{mailbox_row, paired_config, text_update, Fixture};
+use common::{mailbox_row, mailbox_row_at, paired_config, text_update, Fixture};
 use ds_telegram::{BridgeError, Config};
 use serde_json::{json, Value};
 
@@ -189,11 +189,127 @@ fn status_with_no_recorded_question_says_nothing_has_reached_the_desk() {
         fixture.bot.texts(),
         vec!["No Telegram message has reached Chief of Staff yet.".to_string()]
     );
-    // The mailbox is the only source: one bounded, read-only conversation read.
+    // The mailbox is the only source: one bounded, read-only conversation read, and the reply is a
+    // fact because an empty page ended the walk.
     assert_eq!(fixture.daemon.commands(), vec!["owner_conversation"]);
     assert_eq!(
         fixture.daemon.args_of("owner_conversation"),
-        vec![json!({"limit": 50}).as_object().unwrap().clone()]
+        vec![json!({"limit": 100}).as_object().unwrap().clone()]
+    );
+}
+
+#[test]
+fn status_finds_a_question_older_than_unrelated_mailbox_traffic() {
+    // Reviewer t3745: unrelated rows (owner lane mail, web questions, pages) must not make an
+    // existing Telegram question look absent. 250 unrelated rows is more than one page.
+    let fixture = Fixture::new();
+    fixture.daemon.0.borrow_mut().conversation = {
+        let mut rows = vec![mailbox_row_at(
+            "i7",
+            "telegram",
+            "queued",
+            Some("telegram:7"),
+            None,
+            1.0,
+        )];
+        for n in 0..250_i64 {
+            rows.push(mailbox_row_at(
+                &format!("web-{n}"),
+                "web",
+                "queued",
+                Some(&format!("web:{n}")),
+                None,
+                10.0 + n as f64,
+            ));
+        }
+        rows
+    };
+    let mut bridge = fixture.bridge();
+    let mut config = as_config(paired_config(42));
+    bridge
+        .process_update(&text_update(9, 42, "/status"), &mut config)
+        .unwrap();
+    assert_eq!(
+        fixture.bot.texts(),
+        vec!["Chief of Staff message #i7: queued".to_string()]
+    );
+    // Three pages: 100, 100, then the short page that holds the question.
+    assert_eq!(fixture.daemon.commands().len(), 3);
+    let calls = fixture.daemon.args_of("owner_conversation");
+    assert_eq!(calls[0]["limit"], json!(100));
+    assert!(
+        calls[0].get("before").is_none(),
+        "the first page has no cursor"
+    );
+    assert_eq!(calls[1]["before"], json!(160.0));
+    assert_eq!(calls[2]["before"], json!(60.0));
+}
+
+#[test]
+fn status_says_it_could_not_find_the_message_rather_than_claiming_absence() {
+    // A mailbox longer than the whole walk: the answer is uncertainty, never "has not reached".
+    let fixture = Fixture::new();
+    fixture.daemon.0.borrow_mut().conversation = (0..1500_i64)
+        .map(|n| {
+            mailbox_row_at(
+                &format!("web-{n}"),
+                "web",
+                "queued",
+                Some(&format!("web:{n}")),
+                None,
+                10.0 + n as f64,
+            )
+        })
+        .collect();
+    let mut bridge = fixture.bridge();
+    let mut config = as_config(paired_config(42));
+    bridge
+        .process_update(&text_update(9, 42, "/status"), &mut config)
+        .unwrap();
+    assert_eq!(
+        fixture.bot.texts(),
+        vec![
+            "Could not find a Telegram message for Chief of Staff in the 1000 most recent mailbox rows; check the web desk."
+                .to_string()
+        ]
+    );
+    assert_eq!(fixture.daemon.commands().len(), 10, "the walk is bounded");
+}
+
+#[test]
+fn status_reports_uncertainty_when_equal_timestamps_can_hide_rows() {
+    // The daemon's cursor is a strict `created_at < before` (ds-core inbox_store::conversation_rows),
+    // so a second page that comes back EMPTY after a full one cannot be told apart from "the rows at
+    // the cursor's timestamp did not fit". Report uncertainty; never claim absence.
+    let fixture = Fixture::new();
+    fixture.daemon.0.borrow_mut().conversation = (0..150_i64)
+        .map(|n| {
+            mailbox_row_at(
+                &format!("web-{n}"),
+                "web",
+                "queued",
+                Some(&format!("web:{n}")),
+                None,
+                5.0,
+            )
+        })
+        .collect();
+    let mut bridge = fixture.bridge();
+    let mut config = as_config(paired_config(42));
+    bridge
+        .process_update(&text_update(9, 42, "/status"), &mut config)
+        .unwrap();
+    assert_eq!(
+        fixture.bot.texts(),
+        vec![
+            "Could not find a Telegram message for Chief of Staff in the 1000 most recent mailbox rows; check the web desk."
+                .to_string()
+        ]
+    );
+    assert_eq!(
+        fixture.daemon.commands().len(),
+        2,
+        "a full page, then the ambiguous empty one"
     );
 }
 

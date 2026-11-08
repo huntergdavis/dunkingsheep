@@ -36,9 +36,11 @@ use crate::pyval::{as_int, display, present, truthy};
 pub const RETRY_DELAY: Duration = Duration::from_secs(5);
 /// The long-poll window for `getUpdates`, as the Python `timeout=10`.
 pub const POLL_TIMEOUT_S: i64 = 10;
-/// How many recent owner-mailbox rows `/status` reads before it stops looking (named bound: an
-/// answer further back than this is reported as absent, never guessed).
-pub const STATUS_WINDOW: i64 = 50;
+/// How many owner-mailbox rows `/status` reads per `owner_conversation` page.
+pub const STATUS_PAGE: i64 = 100;
+/// How many pages it walks back before it reports uncertainty instead of an answer. The walk stops
+/// early at the end of the mailbox, so this is a ceiling, not a cost per request.
+pub const STATUS_MAX_PAGES: usize = 10;
 
 /// Is this owner-mailbox row a question THIS bridge recorded?
 ///
@@ -173,30 +175,74 @@ impl<D: Daemon, B: Bot> Bridge<D, B> {
     /// - the reply is `"<desk name> message #<id>: <state>"` with the mailbox state the daemon
     ///   reports, or `"No Telegram message has reached <desk name> yet."` when there is none.
     ///
-    /// A reply is not a question, and a delivered page is not either, so both are skipped. The
-    /// conversation is read newest-first from a bounded window (`STATUS_WINDOW` rows): an answer
-    /// further back than that is reported as absent rather than guessed (named in the PR body).
+    /// A reply is not a question, and a delivered page is not either, so both are skipped.
+    ///
+    /// The mailbox is walked backwards in pages (`before` = the oldest `created_at` seen), because
+    /// the conversation also carries owner-role lane mailboxes and unrelated traffic can fill any
+    /// fixed window (t3535; reviewer t3745). Two outcomes are never confused:
+    ///
+    /// - a page shorter than `STATUS_PAGE` is the end of the mailbox, so "no Telegram message has
+    ///   reached … yet" is a fact;
+    /// - `STATUS_MAX_PAGES` full pages without a match, a cursor that will not advance, or an empty
+    ///   page after a full one is NOT a fact: the reply says the message could not be found and
+    ///   points at the web desk.
     fn message_status(&mut self, channel: &str) -> Result<String, BridgeError> {
         let name = self.channel_name(channel)?;
-        let answer = self
-            .daemon
-            .call("owner_conversation", args(json!({"limit": STATUS_WINDOW})))?;
-        let rows = answer
-            .get("messages")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        let latest = rows.iter().rev().find(|row| is_ingested_question(row));
-        Ok(match latest {
-            None => format!("No Telegram message has reached {name} yet."),
-            Some(row) => format!(
-                "{name} message #{}: {}",
-                row.get("id").map(display).unwrap_or_default(),
-                row.get("state")
-                    .map(display)
-                    .unwrap_or_else(|| "None".to_string())
-            ),
-        })
+        let mut before: Option<f64> = None;
+        let mut read_full_page = false;
+        for _ in 0..STATUS_MAX_PAGES {
+            let mut params = json!({"limit": STATUS_PAGE});
+            if let Some(cursor) = before {
+                params["before"] = json!(cursor);
+            }
+            let answer = self.daemon.call("owner_conversation", args(params))?;
+            let rows = answer
+                .get("messages")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            // Rows arrive oldest first, so the newest match is the last one that qualifies.
+            if let Some(row) = rows.iter().rev().find(|row| is_ingested_question(row)) {
+                return Ok(format!(
+                    "{name} message #{}: {}",
+                    row.get("id").map(display).unwrap_or_default(),
+                    row.get("state")
+                        .map(display)
+                        .unwrap_or_else(|| "None".to_string())
+                ));
+            }
+            if rows.is_empty() {
+                // An empty page after a full one is ambiguous: the mailbox may have ended here,
+                // or the rows at the cursor's own `created_at` may be hidden by the daemon's
+                // strict `created_at < before` (see the PR body). Only the first page can mean
+                // "empty mailbox".
+                if before.is_some() && read_full_page {
+                    break;
+                }
+                return Ok(format!("No Telegram message has reached {name} yet."));
+            }
+            // A short page ends the mailbox: its absence is a fact.
+            if rows.len() < STATUS_PAGE as usize {
+                return Ok(format!("No Telegram message has reached {name} yet."));
+            }
+            read_full_page = true;
+            let oldest = rows
+                .first()
+                .and_then(|row| row.get("created_at"))
+                .and_then(Value::as_f64);
+            // A cursor that does not move would re-read the same page forever.
+            match oldest {
+                Some(cursor) if before.is_none_or(|previous| cursor < previous) => {
+                    before = Some(cursor);
+                }
+                _ => break,
+            }
+        }
+        // The walk ran out of pages, or hit one of the ambiguities above: never claim absence.
+        Ok(format!(
+            "Could not find a Telegram message for {name} in the {} most recent mailbox rows; check the web desk.",
+            (STATUS_MAX_PAGES as i64) * STATUS_PAGE
+        ))
     }
 
     /// `_prepare_route`: scope the forwarding cursor to its channel. A switch starts at the

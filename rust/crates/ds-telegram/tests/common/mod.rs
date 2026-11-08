@@ -130,11 +130,36 @@ impl FakeDaemon {
 impl Daemon for FakeDaemon {
     fn call(&mut self, cmd: &str, args: Map<String, Value>) -> Result<Value, BridgeError> {
         let mut state = self.0.borrow_mut();
-        state.calls.push((cmd.to_string(), args));
+        state.calls.push((cmd.to_string(), args.clone()));
         match cmd {
             "owner_outbox" => Ok(json!({"messages": state.outbox.clone()})),
             "owner_ingest" => Ok(state.ingest.clone()),
-            "owner_conversation" => Ok(json!({"messages": state.conversation.clone()})),
+            "owner_conversation" => {
+                // The daemon's own contract: `created_at < before`, newest `limit` of those,
+                // returned oldest first (ds-core inbox_store::conversation_rows).
+                let limit = args
+                    .get("limit")
+                    .and_then(Value::as_f64)
+                    .map(|value| value as usize)
+                    .unwrap_or(50);
+                let before = args.get("before").and_then(Value::as_f64);
+                let mut rows: Vec<Value> = state
+                    .conversation
+                    .iter()
+                    .filter(
+                        |row| match (before, row.get("created_at").and_then(Value::as_f64)) {
+                            (Some(cursor), Some(created)) => created < cursor,
+                            _ => true,
+                        },
+                    )
+                    .cloned()
+                    .collect();
+                if rows.len() > limit {
+                    rows.drain(..rows.len() - limit);
+                }
+                let count = rows.len();
+                Ok(json!({"messages": rows, "count": count}))
+            }
             _ => Ok(json!({})),
         }
     }
@@ -258,13 +283,16 @@ pub fn outbox_row(
 }
 
 /// An owner-mailbox row as the daemon returns it in `owner_conversation` (oldest first).
-#[allow(clippy::too_many_arguments)]
-pub fn mailbox_row(
+///
+/// `created_at` is what the paging cursor is built from; give rows distinct values so a page
+/// boundary is well defined.
+pub fn mailbox_row_at(
     id: &str,
     transport: &str,
     state: &str,
     external_id: Option<&str>,
     reply_to: Option<&str>,
+    created_at: f64,
 ) -> Value {
     json!({
         "id": id,
@@ -272,8 +300,20 @@ pub fn mailbox_row(
         "state": state,
         "external_id": external_id,
         "reply_to": reply_to,
+        "created_at": created_at,
         "answered": reply_to.is_none() && state == "acked",
     })
+}
+
+/// `mailbox_row_at` with a `created_at` of 0, for tests that never cross a page boundary.
+pub fn mailbox_row(
+    id: &str,
+    transport: &str,
+    state: &str,
+    external_id: Option<&str>,
+    reply_to: Option<&str>,
+) -> Value {
+    mailbox_row_at(id, transport, state, external_id, reply_to, 0.0)
 }
 
 /// A config for a paired bridge with no prior cursor.
