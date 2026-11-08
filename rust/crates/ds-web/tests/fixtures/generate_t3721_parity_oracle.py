@@ -14,10 +14,21 @@ Safety: the generator refuses to run unless DUNKINGSHEEP_DIR and VP_DATA_DIR are
 and the daemon socket path that the desk's client would use is inside DUNKINGSHEEP_DIR. No live
 owner database, token, config or daemon socket is read or written.
 
-Secrets: the passwords are scratch-only values supplied by the environment and are never written
-to the oracle. The owner-credentials file and the API token are recorded only as presence
-booleans. Responses are recorded as the server sent them, except where a value is time-based or
-random (the session viewport timestamp, the pbkdf2 salt): those are recorded as presence only.
+Secrets: the initial and new passwords are scratch-only literals supplied by the environment. The
+initial password never appears in the oracle. The new password does: the pinned FastAPI 422 bodies
+echo the submitted body, so `password_missing_current` records the new scratch literal in its
+`input`. That echo is the pinned Python behaviour, recorded as the server sent it. The Rust port does
+not echo it: owner decision i50225 redacts submitted passwords from validation errors, and the Rust
+test records each redacted case as an intentional difference. The owner-credentials
+file and the API token are recorded only as presence booleans. Responses are recorded as the server
+sent them, except where a value is time-based or random (the session viewport timestamp, the pbkdf2
+salt): those are recorded as presence only.
+
+Daemon isolation (t3722, reviewer L2): with the scratch config the scratch socket path equals the
+default socket path, so the daemon client would ask systemd about the live unit
+(`systemctl --user is-active dunkingsheep.service`) and, for an inactive unit, start it. Both are
+replaced in-process by `isolate_daemon_client()`. The no-daemon answers then come from the client's
+own code, not from the host's service state, and no PATH or HOME trick is needed.
 """
 
 import importlib.metadata
@@ -43,6 +54,27 @@ from fastapi.testclient import TestClient  # noqa: E402
 import web.app as desk  # noqa: E402  (VP_DATA_DIR and DUNKINGSHEEP_DIR must already point at scratch)
 import dunk_client  # noqa: E402
 
+
+def isolate_daemon_client():
+    """Keep the desk's daemon client off the live systemd unit (t3722, reviewer L2).
+
+    `_service_owns_socket` queries `systemctl --user is-active` for the production unit, and
+    `start_daemon` runs `systemctl --user start` when the probe is absent. Both are the live
+    service, not the scratch config, so both are replaced: the query raises, which the client
+    reads as "not owned", and the autostart raises. The no-daemon result is then the client's own.
+    """
+
+    def systemctl_disabled(*args, **kwargs):
+        raise OSError("scratch oracle: systemd is not queried")
+
+    def autostart_disabled(self):
+        raise RuntimeError("scratch oracle: daemon autostart disabled")
+
+    dunk_client._systemctl = systemctl_disabled
+    dunk_client.FlockClient.start_daemon = autostart_disabled
+
+
+isolate_daemon_client()
 if not str(dunk_client.SOCKET_PATH).startswith(CONFIG_DIR):
     raise SystemExit(f"refusing: the daemon client would use {dunk_client.SOCKET_PATH}")
 
@@ -118,9 +150,47 @@ record("password_no_cookie", anon().post("/api/password", json={"current_passwor
 record("password_wrong_current", owner.post("/api/password", json={"current_password": "not-the-password", "new_password": NEW_PASSWORD}))
 record("password_short_new", owner.post("/api/password", json={"current_password": PASSWORD, "new_password": "short"}))
 record("password_missing_current", owner.post("/api/password", json={"new_password": NEW_PASSWORD}))
+# Ordering and shape cases (t3722). They change no state: the body is refused before the handler.
+record("password_no_cookie_invalid_body", anon().post("/api/password", json={"new_password": "short"}))
+record("password_wrong_current_short_new", owner.post("/api/password", json={"current_password": "not-the-password", "new_password": "short"}))
+record("password_missing_both", owner.post("/api/password", json={}))
+record("password_current_not_string", owner.post("/api/password", json={"current_password": 12345678901234, "new_password": NEW_PASSWORD}))
+record("password_new_too_long", owner.post("/api/password", json={"current_password": PASSWORD, "new_password": "x" * 201}))
+record("password_not_json", owner.post("/api/password", content=b"not json", headers={"content-type": "application/json"}))
+record("password_list_body", owner.post("/api/password", json=[1, 2]))
+# Empty body: FastAPI sees no body at all (a 'missing' error with input null, not a decode error).
+record("password_empty_body", owner.post("/api/password", content=b"", headers={"content-type": "application/json"}))
+# NaN in a JSON body: json.loads accepts it, and the pinned Python desk answers 500 (its 422 cannot
+# serialise the NaN input). Recorded as the server answered it; a decision is pending (t3722).
+record("password_nan_body", owner.post("/api/password", content=b'{"current_password": NaN, "new_password": "x"}', headers={"content-type": "application/json"}))
+
+# Content-type cases (t3722 R1). FastAPI decodes the body as JSON only for application/json or an
+# application/*+json type; any other type reaches the model as raw bytes. Every body here carries a
+# wrong current password, so none can change state even where the body is accepted.
+WRONG_BODY = json.dumps({"current_password": "not-the-password", "new_password": NEW_PASSWORD}).encode()
+record("ct_text_plain", owner.post("/api/password", content=WRONG_BODY, headers={"content-type": "text/plain"}))
+record("ct_no_content_type", owner.post("/api/password", content=WRONG_BODY))
+record("ct_form_urlencoded", owner.post("/api/password", content=WRONG_BODY, headers={"content-type": "application/x-www-form-urlencoded"}))
+record("ct_multipart", owner.post("/api/password", content=WRONG_BODY, headers={"content-type": "multipart/form-data; boundary=x"}))
+record("ct_json_charset", owner.post("/api/password", content=WRONG_BODY, headers={"content-type": "application/json; charset=utf-8"}))
+record("ct_vnd_json", owner.post("/api/password", content=WRONG_BODY, headers={"content-type": "application/vnd.api+json"}))
+record("ct_text_json", owner.post("/api/password", content=WRONG_BODY, headers={"content-type": "text/json"}))
+record("ct_empty_text_plain", owner.post("/api/password", content=b"", headers={"content-type": "text/plain"}))
+
+# Malformed-input matrix (t3722 R3): measured on the pinned Python desk, recorded as the server answered.
+JSON_HEADERS = {"content-type": "application/json"}
+record("rv_invalid_utf8", owner.post("/api/password", content=b'{"current_password": "\xff", "new_password": "' + NEW_PASSWORD.encode() + b'"}', headers=JSON_HEADERS))
+record("rv_huge_integer", owner.post("/api/password", content=('{"current_password": ' + "1" * 5000 + ', "new_password": "' + NEW_PASSWORD + '"}').encode(), headers=JSON_HEADERS))
+record("rv_bom", owner.post("/api/password", content=b"\xef\xbb\xbf" + WRONG_BODY, headers=JSON_HEADERS))
+record("rv_lone_surrogate", owner.post("/api/password", content=b'{"current_password": "\\ud800", "new_password": "' + NEW_PASSWORD.encode() + b'"}', headers=JSON_HEADERS))
+record("rv_infinity", owner.post("/api/password", content=b'{"current_password": Infinity, "new_password": "' + NEW_PASSWORD.encode() + b'"}', headers=JSON_HEADERS))
+record("rv_neg_infinity", owner.post("/api/password", content=b'{"current_password": -Infinity, "new_password": "' + NEW_PASSWORD.encode() + b'"}', headers=JSON_HEADERS))
+record("rv_deep_nesting", owner.post("/api/password", content=('{"a":' * 2000 + "1" + "}" * 2000).encode(), headers=JSON_HEADERS))
 
 api_token = desk._auth_record()["token"]  # scratch token, read in-process, never written to the oracle
-record("password_api_identity", anon().post("/api/password", json={"current_password": PASSWORD, "new_password": NEW_PASSWORD},
+record("password_api_identity_invalid_body", anon().post("/api/password", json={"current_password": PASSWORD, "new_password": "short"},
+                                                         headers={"authorization": f"Bearer {api_token}"}))
+record("password_api_identity",anon().post("/api/password", json={"current_password": PASSWORD, "new_password": NEW_PASSWORD},
                                             headers={"authorization": f"Bearer {api_token}"}))
 del api_token
 
@@ -153,7 +223,7 @@ record("answer_blank_task", board.post("/api/ops-board/answer", json={"task_id":
 record("answer_missing_reply", board.post("/api/ops-board/answer", json={"task_id": "t1"}))
 record("answer_blank_reply", board.post("/api/ops-board/answer", json={"task_id": "t1", "reply": "   "}))
 record("answer_no_daemon", board.post("/api/ops-board/answer", json={"task_id": "t1", "reply": "ok"}),
-       note="environment-dependent: scratch config, production unit state decides BUSY vs ABSENT")
+       note="deterministic: the daemon client is isolated (no systemd query, no autostart)")
 
 # --- ops-metrics refresh (auth gate only; the owner path calls gh and reads host state) ---------
 record("metrics_refresh_no_cookie", anon().post("/api/ops-metrics/refresh"))

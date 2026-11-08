@@ -5,6 +5,7 @@
 use std::{future::Future, pin::Pin, sync::Arc};
 
 use axum::{
+    body::Bytes,
     extract::{ConnectInfo, Extension, Json},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
@@ -12,7 +13,7 @@ use axum::{
     Router,
 };
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Map, Value};
 
 const SESSION_COOKIE: &str = "vp_session";
 const SESSION_MAX_AGE: u64 = 7 * 24 * 60 * 60;
@@ -173,32 +174,170 @@ async fn logout(
     }
 }
 
+/// The Pydantic v2 validation response FastAPI sends for `PasswordChange` (t3722): every error,
+/// in model order, under `detail`, with status 422.
+fn validation_detail(errors: Vec<Value>) -> Response {
+    (
+        StatusCode::UNPROCESSABLE_ENTITY,
+        Json(json!({"detail": errors})),
+    )
+        .into_response()
+}
+
+/// One string field of the password body, validated as Pydantic validates `str` (with the
+/// `new_password` length bounds). Pushes the error Pydantic would report; returns the value when valid.
+/// What a validation error shows in place of a submitted password (owner decision i50225: submitted
+/// passwords must not appear in validation error bodies). Pydantic would echo the value as `input`.
+const REDACTED: &str = "[redacted]";
+
+/// The `input` of a missing-field error. Pydantic echoes the whole submitted object, which can carry a
+/// password under any key (a typo such as `old_password` or `password` included), so the object is
+/// not echoed at all. An empty object carries nothing to redact and stays `{}` (owner i50225; t3724 R2).
+fn missing_input(body: &Value) -> Value {
+    match body.as_object() {
+        Some(object) if object.is_empty() => json!({}),
+        _ => json!(REDACTED),
+    }
+}
+
+/// FastAPI decodes a body as JSON only when its content type is `application/json` or an
+/// `application/*+json` subtype (parameters such as `charset` are ignored). Any other type, or none,
+/// reaches the model as raw bytes and fails model validation (t3722 R1).
+fn is_json_content(headers: &HeaderMap) -> bool {
+    let Some(value) = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return false;
+    };
+    let essence = value
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    match essence.split_once('/') {
+        Some(("application", subtype)) => subtype == "json" || subtype.ends_with("+json"),
+        _ => false,
+    }
+}
+
+fn password_field(
+    body: &Value,
+    object: &Map<String, Value>,
+    field: &str,
+    length: Option<(usize, usize)>,
+    errors: &mut Vec<Value>,
+) -> Option<String> {
+    let loc = json!(["body", field]);
+    match object.get(field) {
+        None => {
+            errors.push(json!({"input": missing_input(body), "loc": loc, "msg": "Field required", "type": "missing"}));
+            None
+        }
+        Some(Value::String(text)) => {
+            if let Some((min, max)) = length {
+                let chars = text.chars().count();
+                if chars < min {
+                    errors.push(json!({"ctx": {"min_length": min}, "input": REDACTED, "loc": loc,
+                        "msg": format!("String should have at least {min} characters"), "type": "string_too_short"}));
+                    return None;
+                }
+                if chars > max {
+                    errors.push(json!({"ctx": {"max_length": max}, "input": REDACTED, "loc": loc,
+                        "msg": format!("String should have at most {max} characters"), "type": "string_too_long"}));
+                    return None;
+                }
+            }
+            Some(text.clone())
+        }
+        Some(_) => {
+            errors.push(json!({"input": REDACTED, "loc": loc, "msg": "Input should be a valid string", "type": "string_type"}));
+            None
+        }
+    }
+}
+
+/// Parse and validate the password body in FastAPI's order: a JSON object, then `current_password`,
+/// then `new_password`. A body that is not JSON or not an object is refused the same way FastAPI
+/// refuses it (a JSON-decode error in one case; the decoder's own text is not reproduced).
+fn password_body(raw: &[u8], json_content: bool) -> Result<PasswordBody, Box<Response>> {
+    // An empty body is no body at all to FastAPI: a 'missing' error with input null, not a decode error.
+    if raw.is_empty() {
+        return Err(Box::new(validation_detail(vec![json!({
+            "input": null,
+            "loc": ["body"],
+            "msg": "Field required",
+            "type": "missing",
+        })])));
+    }
+    // A body that is not declared JSON is never parsed: FastAPI reports the raw bytes as a model error,
+    // and the bytes are redacted here (they carry the submitted passwords).
+    if !json_content {
+        return Err(Box::new(validation_detail(vec![json!({
+            "input": REDACTED,
+            "loc": ["body"],
+            "msg": "Input should be a valid dictionary or object to extract fields from",
+            "type": "model_attributes_type",
+        })])));
+    }
+    let value: Value = serde_json::from_slice(raw).map_err(|error| {
+        Box::new(validation_detail(vec![json!({
+            "ctx": {"error": error.to_string()},
+            "input": {},
+            "loc": ["body", 0],
+            "msg": "JSON decode error",
+            "type": "json_invalid",
+        })]))
+    })?;
+    let Some(object) = value.as_object() else {
+        return Err(Box::new(validation_detail(vec![json!({
+            "input": REDACTED,
+            "loc": ["body"],
+            "msg": "Input should be a valid dictionary or object to extract fields from",
+            "type": "model_attributes_type",
+        })])));
+    };
+    let mut errors = Vec::new();
+    let current = password_field(&value, object, "current_password", None, &mut errors);
+    let new = password_field(&value, object, "new_password", Some((12, 200)), &mut errors);
+    match (current, new) {
+        (Some(current_password), Some(new_password)) if errors.is_empty() => Ok(PasswordBody {
+            current_password,
+            new_password,
+        }),
+        _ => Err(Box::new(validation_detail(errors))),
+    }
+}
+
 async fn change_password(
     Extension(backend): Extension<Arc<dyn AuthBackend>>,
     Extension(scheme): Extension<RequestScheme>,
     headers: HeaderMap,
-    Json(body): Json<PasswordBody>,
+    raw: Bytes,
 ) -> Response {
     if let Some(response) = same_origin(&headers, scheme) {
         return response;
     }
-    if !(12..=200).contains(&body.new_password.chars().count()) {
-        return (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            Json(json!({"detail": "new_password must contain between 12 and 200 characters"})),
-        )
-            .into_response();
-    }
+    // FastAPI's order (t3722): same origin, then authentication, then body validation, then the
+    // owner check inside the handler. Validation never runs ahead of authentication.
     let cookie = cookie_value(&headers, SESSION_COOKIE);
     let bearer = bearer_value(&headers);
-    match backend.identity(bearer.as_deref(), cookie.as_deref()).await {
-        Err(error) => error.response(),
-        Ok(Identity::Api) => (
+    let identity = match backend.identity(bearer.as_deref(), cookie.as_deref()).await {
+        Err(error) => return error.response(),
+        Ok(identity) => identity,
+    };
+    let body = match password_body(&raw, is_json_content(&headers)) {
+        Ok(body) => body,
+        Err(response) => return *response,
+    };
+    match identity {
+        Identity::Api => (
             StatusCode::FORBIDDEN,
             Json(json!({"detail": "Owner sign-in required"})),
         )
             .into_response(),
-        Ok(Identity::Owner) => match backend
+        Identity::Owner => match backend
             .change_password(
                 &body.current_password,
                 &body.new_password,
@@ -372,6 +511,85 @@ mod tests {
                 Some((current.into(), new.into(), keep_cookie.map(str::to_owned)));
             Box::pin(async { Ok(()) })
         }
+    }
+
+    /// Owner decision i50225: a submitted password must not appear in a validation error body. Each
+    /// invalid shape below carries scratch sentinel passwords; none may come back in the response.
+    #[test]
+    fn password_validation_errors_never_echo_a_submitted_password() {
+        const CURRENT: &str = "SENTINEL-CURRENT-t3722";
+        const NEW_VALID: &str = "SENTINEL-NEW-t3722-valid";
+        const NEW_SHORT: &str = "SENT-SHORT";
+        let too_long = format!("{NEW_VALID}{}", "x".repeat(220));
+        let bodies = [
+            json!({"new_password": NEW_SHORT}),
+            json!({"current_password": CURRENT}),
+            json!({"current_password": CURRENT, "new_password": NEW_SHORT}),
+            json!({"current_password": CURRENT, "new_password": too_long}),
+            json!({"current_password": [CURRENT], "new_password": NEW_VALID}),
+            json!({"current_password": 12345, "new_password": NEW_VALID}),
+            // Under keys other than the two named fields (t3724 R2): a typo must not leak either.
+            json!({"old_password": CURRENT}),
+            json!({"password": CURRENT, "new_password": NEW_VALID}),
+            json!({CURRENT: "typed into a key", "new_password": NEW_VALID}),
+            json!([CURRENT, NEW_SHORT]),
+            json!(CURRENT),
+        ];
+        for body in bodies {
+            let raw = body.to_string();
+            let response = match password_body(raw.as_bytes(), true) {
+                Err(response) => *response,
+                Ok(_) => panic!("{raw} must be refused"),
+            };
+            let bytes = block_on(axum::body::to_bytes(response.into_body(), usize::MAX)).unwrap();
+            let text = String::from_utf8_lossy(&bytes);
+            for secret in [CURRENT, NEW_SHORT, NEW_VALID] {
+                assert!(!text.contains(secret), "{raw} echoes {secret} in {text}");
+            }
+        }
+    }
+
+    /// t3724 R1: a body that is not declared JSON is refused without being parsed, and its bytes (which
+    /// carry the passwords) are not echoed.
+    #[test]
+    fn password_body_refuses_a_non_json_content_type_without_echoing_the_body() {
+        const CURRENT: &str = "SENTINEL-CURRENT-t3722";
+        let raw = json!({"current_password": CURRENT, "new_password": "SENTINEL-NEW-t3722-valid"})
+            .to_string();
+        let response = match password_body(raw.as_bytes(), false) {
+            Err(response) => *response,
+            Ok(_) => panic!("a non-JSON body must not be parsed"),
+        };
+        let bytes = block_on(axum::body::to_bytes(response.into_body(), usize::MAX)).unwrap();
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(!text.contains(CURRENT), "the body is echoed: {text}");
+        assert_eq!(
+            serde_json::from_str::<Value>(&text).unwrap(),
+            json!({"detail": [{"input": "[redacted]", "loc": ["body"], "msg": "Input should be a valid dictionary or object to extract fields from", "type": "model_attributes_type"}]}),
+        );
+    }
+
+    #[test]
+    fn is_json_content_accepts_only_json_media_types() {
+        for (value, json) in [
+            ("application/json", true),
+            ("application/json; charset=utf-8", true),
+            ("Application/JSON", true),
+            ("application/vnd.api+json", true),
+            ("text/plain", false),
+            ("text/json", false),
+            ("application/x-www-form-urlencoded", false),
+            ("multipart/form-data; boundary=x", false),
+            ("", false),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::CONTENT_TYPE, HeaderValue::from_str(value).unwrap());
+            assert_eq!(is_json_content(&headers), json, "{value}");
+        }
+        assert!(
+            !is_json_content(&HeaderMap::new()),
+            "no content type is not JSON"
+        );
     }
 
     fn block_on<F: Future>(future: F) -> F::Output {
@@ -616,14 +834,17 @@ mod tests {
             header::COOKIE,
             HeaderValue::from_static("vp_session=owner-session"),
         );
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
         let response = block_on(change_password(
             Extension(backend),
             Extension(RequestScheme::Http),
             headers.clone(),
-            Json(PasswordBody {
-                current_password: "old".into(),
-                new_password: "a sufficiently long password".into(),
-            }),
+            Bytes::from_static(
+                br#"{"current_password":"old","new_password":"a sufficiently long password"}"#,
+            ),
         ));
         let (status, body, _) = body_json(response);
         assert_eq!(status, StatusCode::OK);
@@ -642,14 +863,17 @@ mod tests {
             ..FakeAuth::default()
         });
         let backend: Arc<dyn AuthBackend> = api.clone();
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
         let response = block_on(change_password(
             Extension(backend),
             Extension(RequestScheme::Http),
             headers,
-            Json(PasswordBody {
-                current_password: "old".into(),
-                new_password: "a sufficiently long password".into(),
-            }),
+            Bytes::from_static(
+                br#"{"current_password":"old","new_password":"a sufficiently long password"}"#,
+            ),
         ));
         let (status, body, _) = body_json(response);
         assert_eq!(status, StatusCode::FORBIDDEN);
