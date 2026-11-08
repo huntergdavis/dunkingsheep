@@ -228,6 +228,14 @@ record("answer_no_daemon", board.post("/api/ops-board/answer", json={"task_id": 
 # --- ops-metrics refresh (auth gate only; the owner path calls gh and reads host state) ---------
 record("metrics_refresh_no_cookie", anon().post("/api/ops-metrics/refresh"))
 
+# Correct-password BOM body (t3725, owner i50493). It changes the password, so it runs last. The current
+# password is NEW_PASSWORD, set by password_ok above; the probes after it show the change.
+BOM_NEW_PASSWORD = "t3721-bom-scratch"
+bom_body = b"\xef\xbb\xbf" + json.dumps({"current_password": NEW_PASSWORD, "new_password": BOM_NEW_PASSWORD}).encode()
+record("password_bom_correct_password", owner.post("/api/password", content=bom_body, headers=JSON_HEADERS))
+record("password_bom_login_new", anon().post("/api/login", json={"password": BOM_NEW_PASSWORD, "next": "/dash/cos"}))
+record("password_bom_login_previous", anon().post("/api/login", json={"password": NEW_PASSWORD, "next": "/dash/cos"}))
+
 versions = {package: importlib.metadata.version(package) for package in ("fastapi", "starlette", "pydantic")}
 payload = {
     "oracle": {"interpreter": sys.version.split()[0], **versions},
