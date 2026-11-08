@@ -194,6 +194,8 @@ impl Store {
                         .map_err(|e| captured.sqlite(e, &db_path, "inbox_schema"))?;
                 }
             }
+            connection.execute_batch("CREATE TABLE IF NOT EXISTS message_audiences (message_id TEXT PRIMARY KEY, audience TEXT NOT NULL CHECK(audience = 'agent'))")
+                .map_err(|e| captured.sqlite(e, &db_path, "inbox_schema"))?;
             Ok(())
         })?;
         let readers = ReadPool::open_context(path, DEFAULT_READ_POOL, context)?;
@@ -363,7 +365,13 @@ impl Store {
                 .map(|p| JsonValue::String(p.to_string_lossy().into_owned()))
                 .collect(),
         );
-        self.send_snapshot_wire_context(outgoing, subject.as_ref(), Some(&attachments), context)
+        self.send_snapshot_wire_context(
+            outgoing,
+            subject.as_ref(),
+            Some(&attachments),
+            context,
+            false,
+        )
     }
 
     pub fn send_snapshot_wire(
@@ -372,7 +380,28 @@ impl Store {
         subject: Option<&JsonValue>,
         attachments: Option<&JsonValue>,
     ) -> Result<Message, DunkError> {
-        self.send_snapshot_wire_context(outgoing, subject, attachments, ErrorContext::default())
+        self.send_snapshot_wire_context(
+            outgoing,
+            subject,
+            attachments,
+            ErrorContext::default(),
+            false,
+        )
+    }
+    pub(crate) fn send_snapshot_wire_agent_only(
+        &self,
+        outgoing: &Outgoing,
+        subject: Option<&JsonValue>,
+        attachments: Option<&JsonValue>,
+        agent_only: bool,
+    ) -> Result<Message, DunkError> {
+        self.send_snapshot_wire_context(
+            outgoing,
+            subject,
+            attachments,
+            ErrorContext::default(),
+            agent_only,
+        )
     }
     fn send_snapshot_wire_context(
         &self,
@@ -380,6 +409,7 @@ impl Store {
         subject: Option<&JsonValue>,
         attachments: Option<&JsonValue>,
         context: ErrorContext,
+        agent_only: bool,
     ) -> Result<Message, DunkError> {
         let mailbox = outgoing.mailbox.trim().to_string();
         if mailbox.is_empty() {
@@ -435,6 +465,14 @@ impl Store {
                     ],
                 )
                 .map_err(map_sqlite)?;
+            if agent_only {
+                transaction
+                    .execute(
+                        "INSERT INTO message_audiences (message_id, audience) VALUES (?, 'agent')",
+                        [&message_id],
+                    )
+                    .map_err(map_sqlite)?;
+            }
             for (index, blob) in stored.iter().enumerate() {
                 // The attachment ROW id is per message; the blob stays content-addressed
                 // and shared (re-attaching one file to another message must not collide).
@@ -996,6 +1034,8 @@ impl Store {
                 for id in &ids {
                     tx.execute("DELETE FROM attachments WHERE message_id = ?", [id])
                         .map_err(map_sqlite)?;
+                    tx.execute("DELETE FROM message_audiences WHERE message_id = ?", [id])
+                        .map_err(map_sqlite)?;
                     tx.execute("DELETE FROM messages WHERE id = ?", [id])
                         .map_err(map_sqlite)?;
                 }
@@ -1309,6 +1349,8 @@ impl Store {
             }
             for id in &doomed {
                 tx.execute("DELETE FROM attachments WHERE message_id = ?", [id])
+                    .map_err(map_sqlite)?;
+                tx.execute("DELETE FROM message_audiences WHERE message_id = ?", [id])
                     .map_err(map_sqlite)?;
                 tx.execute("DELETE FROM messages WHERE id = ?", [id])
                     .map_err(map_sqlite)?;

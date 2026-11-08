@@ -390,6 +390,17 @@ cannot pick up work.
 
 ### 7.2 Owner channel becomes a mailbox
 
+For coordination addressed to an owner-role agent lane, senders can use
+`dunkingsheep inbox send <lane> <message> --agent-only`. This atomically stores
+an explicit audience alongside the message and keeps it in the recipient's
+inbox while excluding it from the human owner conversation. The flag is opt-in:
+unmarked and historical messages retain their existing visibility. Human
+decisions should use the owner mailbox or an explicit `[owner-decision]` or
+`[owner-blocker]` subject; the CLI refuses to combine those markers with
+`--agent-only`. The flag does not retroactively reclassify earlier mail.
+The flag uses a distinct daemon command so an older daemon refuses it rather
+than silently accepting a message without its audience.
+
 `vp-of-agentry/data/messages.sqlite3` (role=owner/agent, `answered_at`) is a
 second inbox with its own schema. It becomes mailbox `owner` in `inbox.db`:
 an owner message is a row; a reply is an `ack` linked by `reply_to`; Telegram

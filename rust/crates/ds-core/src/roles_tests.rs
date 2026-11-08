@@ -86,10 +86,10 @@ fn the_tables_have_the_pythons_sizes() {
     // Sizes of the sets in dunk_roles.py when these tables were generated (t1170). A
     // one-sided edit to either language changes a count here or fails a Python test.
     assert_eq!(47, READ_ONLY.len());
-    assert_eq!(28, WORKER_EXTRA.len());
-    assert_eq!(32, SYSTEM_EXTRA.len());
+    assert_eq!(29, WORKER_EXTRA.len());
+    assert_eq!(33, SYSTEM_EXTRA.len());
     assert_eq!(16, DESK_EXTRA.len());
-    assert_eq!(8, PLANNER_EXTRA.len());
+    assert_eq!(9, PLANNER_EXTRA.len());
     assert_eq!(30, WEB_DENIED.len());
 }
 

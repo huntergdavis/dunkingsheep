@@ -39,7 +39,7 @@ pub struct Group {
     pub actions: &'static [(&'static str, &'static str)],
 }
 
-/// Every command the daemon serves (129 at generation time).
+/// Every command the daemon serves (131 at generation time).
 pub static COMMANDS: &[Command] = &[
     Command {
         name: "add_dunk",
@@ -389,7 +389,17 @@ pub static COMMANDS: &[Command] = &[
         required: &["to", "body"],
         mcp: true,
         owner_only: false,
-        roles: &["owner", "system", "web", "worker", "reviewer"],
+        roles: &["owner", "system", "web", "planner", "worker", "reviewer"],
+    },
+    Command {
+        name: "inbox_send_agent_only",
+        description: "Send agent coordination with an explicit audience, excluded from the human owner conversation.",
+        params: &[Param { name: "to", schema: "{\"type\":\"string\",\"description\":\"Whose inbox: an agent name, a pane id, a unique label substring, or 'self' for your own. Agent names are preferred because they survive a pane moving or restarting. A name that matches no live pane still works, so mail can be left for an agent that is not running.\"}" }, Param { name: "body", schema: "{\"type\":\"string\"}" }, Param { name: "subject", schema: "{\"type\":\"string\"}" }, Param { name: "attach", schema: "{\"type\":\"string\"}" }, Param { name: "notify", schema: "{\"type\":\"boolean\"}" }],
+        dispatch_required: &["to", "body"],
+        required: &["to", "body"],
+        mcp: true,
+        owner_only: false,
+        roles: &["owner", "system", "web", "planner", "worker", "reviewer"],
     },
     Command {
         name: "inbox_stats",
@@ -1059,7 +1069,17 @@ pub static COMMANDS: &[Command] = &[
         required: &["id", "assignees"],
         mcp: true,
         owner_only: false,
-        roles: &["owner", "system", "web"],
+        roles: &["owner", "system", "web", "planner"],
+    },
+    Command {
+        name: "task_batch_claim",
+        description: "ATOMIC BATCH CLAIM: take an explicit, ordered list of tasks for the caller, all or nothing, in one transaction. Every member must be claimable by you under the same rules as task_next (no lease held by another pane, not blocked by a prerequisite outside the batch, not already in another active batch, kind and author filters for your role). One failing member claims none: refused.reason names the cause (batch_conflict, leased, owned_elsewhere, blocked, not_claimable, busy, missing, duplicate, scope, empty) and refused.task_ids the members at fault. Members run in the order given and share one lease: a heartbeat or release on any of them covers all. Workers and the owner only.",
+        params: &[Param { name: "ids", schema: "{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Task ids, in execution order.\"}" }, Param { name: "lease_seconds", schema: "{\"type\":\"number\",\"minimum\":1,\"description\":\"Lease length in seconds (default 1800).\"}" }, Param { name: "allow_busy", schema: "{\"type\":\"boolean\",\"description\":\"Take a batch while already holding in-progress work.\"}" }],
+        dispatch_required: &["ids"],
+        required: &["ids"],
+        mcp: false,
+        owner_only: false,
+        roles: &["owner", "worker"],
     },
     Command {
         name: "task_block",
@@ -1069,7 +1089,7 @@ pub static COMMANDS: &[Command] = &[
         required: &["id"],
         mcp: true,
         owner_only: false,
-        roles: &["owner", "system", "web", "desk", "worker", "reviewer"],
+        roles: &["owner", "system", "web", "desk", "planner", "worker", "reviewer"],
     },
     Command {
         name: "task_cancel",
@@ -1162,16 +1182,6 @@ pub static COMMANDS: &[Command] = &[
         roles: &["owner", "web", "worker", "reviewer"],
     },
     Command {
-        name: "task_batch_claim",
-        description: "ATOMIC BATCH CLAIM: take an explicit, ordered list of tasks for the caller, all or nothing, in one transaction. Every member must be claimable by you under the same rules as task_next (no lease held by another pane, not blocked by a prerequisite outside the batch, not already in another active batch, kind and author filters for your role). One failing member claims none: refused.reason names the cause (batch_conflict, leased, owned_elsewhere, blocked, not_claimable, busy, missing, duplicate, scope, empty) and refused.task_ids the members at fault. Members run in the order given and share one lease: a heartbeat or release on any of them covers all. Workers and the owner only.",
-        params: &[Param { name: "ids", schema: "{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Task ids, in execution order.\"}" }, Param { name: "lease_seconds", schema: "{\"type\":\"number\",\"minimum\":1,\"description\":\"Lease length in seconds (default 1800).\"}" }, Param { name: "allow_busy", schema: "{\"type\":\"boolean\",\"description\":\"Take a batch while already holding in-progress work.\"}" }],
-        dispatch_required: &["ids"],
-        required: &["ids"],
-        mcp: false,
-        owner_only: false,
-        roles: &["owner", "worker"],
-    },
-    Command {
         name: "task_note",
         description: "Append an explanatory event to a task's history, including after the task row was deleted; the board's history explains its own gaps.",
         params: &[Param { name: "id", schema: "{\"type\":\"string\",\"description\":\"Task id, e.g. t12.\"}" }, Param { name: "event", schema: "{\"type\":\"string\",\"description\":\"Event name (default 'note').\"}" }, Param { name: "reason", schema: "{\"type\":\"string\",\"description\":\"Human rationale stored in meta.reason.\"}" }],
@@ -1249,7 +1259,7 @@ pub static COMMANDS: &[Command] = &[
         required: &["id"],
         mcp: true,
         owner_only: false,
-        roles: &["owner", "system", "web", "desk", "worker", "reviewer"],
+        roles: &["owner", "system", "web", "desk", "planner", "worker", "reviewer"],
     },
     Command {
         name: "task_unfollow",
@@ -1269,7 +1279,7 @@ pub static COMMANDS: &[Command] = &[
         required: &["id"],
         mcp: true,
         owner_only: false,
-        roles: &["owner", "system", "web", "desk", "worker", "reviewer"],
+        roles: &["owner", "system", "web", "desk", "planner", "worker", "reviewer"],
     },
     Command {
         name: "toggle_dunk",
@@ -1347,8 +1357,8 @@ pub static COMMANDS: &[Command] = &[
 pub static GROUPS: &[Group] = &[
     Group {
         name: "inbox",
-        description: "Agent-to-agent mailbox. action=send (preferred over typing), count, list, read (also returns your tasks), recover, status, ack, cancel, delete, stats, fetch. No size limit; a send nudges the recipient with one line. The owner's mailbox (FLAT_FLEET.md 7.2) is read with action=conversation, answered with action=reply, which keeps the question's transport and links the answer to it, and fed by a bridge with action=ingest (transport + external_id), drained with action=outbox and confirmed with action=delivered (desk and owner only).",
-        actions: &[("send", "inbox_send"), ("count", "inbox_count"), ("list", "inbox_list"), ("read", "inbox_read"), ("recover", "inbox_recover"), ("status", "inbox_status"), ("ack", "inbox_ack"), ("cancel", "inbox_cancel"), ("delete", "inbox_delete"), ("stats", "inbox_stats"), ("fetch", "inbox_fetch"), ("archive", "inbox_archive"), ("conversation", "owner_conversation"), ("reply", "owner_reply"), ("ingest", "owner_ingest"), ("outbox", "owner_outbox"), ("delivered", "owner_delivered")],
+        description: "Agent-to-agent mailbox. action=send or send_agent_only (preferred over typing), count, list, read (also returns your tasks), recover, status, ack, cancel, delete, stats, fetch. No size limit; a send nudges the recipient with one line. The owner's mailbox (FLAT_FLEET.md 7.2) is read with action=conversation, answered with action=reply, which keeps the question's transport and links the answer to it, and fed by a bridge with action=ingest (transport + external_id), drained with action=outbox and confirmed with action=delivered (desk and owner only).",
+        actions: &[("send", "inbox_send"), ("send_agent_only", "inbox_send_agent_only"), ("count", "inbox_count"), ("list", "inbox_list"), ("read", "inbox_read"), ("recover", "inbox_recover"), ("status", "inbox_status"), ("ack", "inbox_ack"), ("cancel", "inbox_cancel"), ("delete", "inbox_delete"), ("stats", "inbox_stats"), ("fetch", "inbox_fetch"), ("archive", "inbox_archive"), ("conversation", "owner_conversation"), ("reply", "owner_reply"), ("ingest", "owner_ingest"), ("outbox", "owner_outbox"), ("delivered", "owner_delivered")],
     },
     Group {
         name: "task",

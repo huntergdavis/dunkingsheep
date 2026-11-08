@@ -152,6 +152,7 @@ pub struct SendArgs<'a> {
     pub notify: bool,
     pub self_pane_id: Option<&'a str>,
     pub system_sender: Option<&'a str>,
+    pub agent_only: bool,
 }
 
 /// Project lifecycle reports use the daemon's existing inbox store and the reserved owner
@@ -646,7 +647,25 @@ impl Flock {
         } else {
             raw_subject
         };
-        let snapshot = env.store().send_snapshot_wire(
+        if args.agent_only
+            && (crate::inbox::normalise_mailbox(&mailbox) == "owner"
+                || subject
+                    .as_deref()
+                    .unwrap_or("")
+                    .trim_start()
+                    .starts_with("[owner-decision]")
+                || subject
+                    .as_deref()
+                    .unwrap_or("")
+                    .trim_start()
+                    .starts_with("[owner-blocker]"))
+        {
+            return Err(refused(
+                "agent-only cannot target the human owner mailbox or mark a human decision"
+                    .to_string(),
+            ));
+        }
+        let snapshot = env.store().send_snapshot_wire_agent_only(
             &Outgoing {
                 mailbox: &mailbox,
                 body: Some(&body),
@@ -659,6 +678,7 @@ impl Flock {
             },
             stored_subject,
             raw_attachments,
+            args.agent_only,
         )?;
         let message_id = snapshot.summary.message_id.clone();
         let mut notified = false;

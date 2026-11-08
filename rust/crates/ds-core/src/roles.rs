@@ -62,7 +62,7 @@ pub const READ_ONLY: [&str; 47] = [
 ];
 
 /// `_WORKER` minus `READ_ONLY`: what a worker or reviewer adds (both share one set).
-pub const WORKER_EXTRA: [&str; 28] = [
+pub const WORKER_EXTRA: [&str; 29] = [
     "context_add",
     "context_supersede",
     "flush_box",
@@ -76,6 +76,7 @@ pub const WORKER_EXTRA: [&str; 28] = [
     "inbox_read",
     "inbox_recover",
     "inbox_send",
+    "inbox_send_agent_only",
     "read_pane",
     "send_keys",
     "send_text",
@@ -98,13 +99,14 @@ pub const WORKER_EXTRA: [&str; 28] = [
 pub const WORKER_ONLY: [&str; 1] = ["task_batch_claim"];
 
 /// `ALLOW["system"]` minus `READ_ONLY`.
-pub const SYSTEM_EXTRA: [&str; 32] = [
+pub const SYSTEM_EXTRA: [&str; 33] = [
     "context_add",
     "flush_box",
     "gh_token",
     "inbox_fetch",
     "inbox_read",
     "inbox_send",
+    "inbox_send_agent_only",
     "owner_conversation",
     "owner_delivered",
     "owner_ingest",
@@ -154,9 +156,10 @@ pub const DESK_EXTRA: [&str; 16] = [
 ];
 
 /// `ALLOW["planner"]` minus `READ_ONLY`.
-pub const PLANNER_EXTRA: [&str; 8] = [
+pub const PLANNER_EXTRA: [&str; 9] = [
     "inbox_read",
     "inbox_send",
+    "inbox_send_agent_only",
     "task_add",
     "task_assign",
     "task_block",

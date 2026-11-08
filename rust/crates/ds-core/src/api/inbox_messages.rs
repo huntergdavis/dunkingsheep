@@ -7,6 +7,7 @@ impl Dispatcher {
     pub fn register_inbox_messages(&mut self) {
         for (name, handler) in [
             ("inbox_send", h_inbox_send as Handler),
+            ("inbox_send_agent_only", h_inbox_send_agent_only as Handler),
             ("inbox_count", h_inbox_count),
             ("inbox_list", h_inbox_list),
             ("inbox_read", h_inbox_read),
@@ -339,6 +340,11 @@ pub fn h_inbox_send(c: &HandlerContext<'_>, args: Args) -> Result<Value, DunkErr
                 notify: python_bool_arg(&args, "notify", true),
                 self_pane_id: c.self_pane_id(),
                 system_sender: system.as_deref(),
+                agent_only: match args.get("agent_only") {
+                    None | Some(Value::Null) | Some(Value::Bool(false)) => false,
+                    Some(Value::Bool(true)) => true,
+                    _ => return Err(DunkError::Refused("agent_only must be a boolean".into())),
+                },
             },
             args.get("subject"),
             args.get("attach"),
@@ -356,6 +362,10 @@ pub fn h_inbox_send(c: &HandlerContext<'_>, args: Args) -> Result<Value, DunkErr
         }
         Ok(out)
     })
+}
+pub fn h_inbox_send_agent_only(c: &HandlerContext<'_>, mut args: Args) -> Result<Value, DunkError> {
+    args.insert("agent_only".into(), Value::Bool(true));
+    h_inbox_send(c, args)
 }
 fn archive_before(v: Option<&Value>) -> Result<Option<f64>, DunkError> {
     let Some(v) = v.filter(|v| !v.is_null() && **v != json!("")) else {

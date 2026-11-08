@@ -238,6 +238,8 @@ def build_parser():
     q.add_argument("to")
     q.add_argument("body", nargs="*")   # may come from --body-file instead
     q.add_argument("--subject", "-s")
+    q.add_argument("--agent-only", action="store_true",
+                   help="mark this message as agent coordination, excluded from the human owner conversation")
     q.add_argument("--attach", "-a", action="append", metavar="PATH",
                    help="attach a local file (repeatable)")
     q.add_argument("--no-notify", action="store_true",
@@ -3068,8 +3070,13 @@ def run_client_command(client, args):
                 if args.body:
                     raise SystemExit("inbox send: pass a body or --body-file, not both")
                 body = sys.stdin.read() if args.body_file == "-" else open(args.body_file).read()
-            return client.call("inbox_send", to=args.to, body=body,
-                               subject=args.subject,
+            subject = args.subject
+            if getattr(args, "agent_only", False):
+                from dunk_inbox import normalise_mailbox
+                if normalise_mailbox(args.to).lower() == "owner" or (subject or "").lstrip().startswith(("[owner-decision]", "[owner-blocker]")):
+                    raise SystemExit("inbox send: --agent-only cannot target the human owner mailbox or mark a human decision")
+            return client.call("inbox_send_agent_only" if getattr(args, "agent_only", False) else "inbox_send", to=args.to, body=body,
+                               subject=subject,
                                attach=",".join(args.attach) if args.attach else None,
                                notify=not args.no_notify), print_inbox_sent
         if sub == "list":

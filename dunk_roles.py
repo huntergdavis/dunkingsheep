@@ -88,7 +88,7 @@ _WORKER = READ_ONLY | frozenset({
     "task_block", "task_unblock", "task_follow", "task_unfollow",
     "task_add",            # unassigned work for itself or the queue; see h_task_add
     "task_update",         # title/body/priority only; status and assignees are stripped
-    "inbox_read", "inbox_send", "inbox_ack", "inbox_archive", "inbox_fetch",
+    "inbox_read", "inbox_send", "inbox_send_agent_only", "inbox_ack", "inbox_archive", "inbox_fetch",
     "inbox_list", "inbox_delete", "inbox_cancel", "inbox_recover",
     "send_text", "send_keys", "flush_box",   # own pane only (require_send_self)
     "turn_start", "turn_end", "read_pane", "state_capture", "gh_token",
@@ -99,7 +99,7 @@ ALLOW = {
     "owner": None,   # everything
     "system": READ_ONLY | frozenset({
         "task_add", "task_assign", "task_cancel", "task_update", "task_note",
-        "task_block", "task_unblock", "task_reap", "inbox_send", "inbox_read",
+        "task_block", "task_unblock", "task_reap", "inbox_send", "inbox_send_agent_only", "inbox_read",
         "inbox_fetch", "respawn_pane", "send_keys", "flush_box", "read_pane",
         "owner_push", "owner_take", "owner_poll", "owner_receipts",
         "state_capture", "lane_register", "recover", "turn_start", "turn_end",
@@ -141,7 +141,7 @@ ALLOW = {
     }),
     "planner": READ_ONLY | frozenset({
         "task_add", "task_note", "inbox_read", "turn_start", "turn_end",
-        "inbox_send", "task_assign", "task_update", "task_block", "task_unblock",
+        "inbox_send", "inbox_send_agent_only", "task_assign", "task_update", "task_block", "task_unblock",
     }),
     "worker": _WORKER,
     "reviewer": _WORKER,

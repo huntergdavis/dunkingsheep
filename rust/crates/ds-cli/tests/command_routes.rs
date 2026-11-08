@@ -1049,6 +1049,53 @@ fn cli_route_06_inbox_read_a() {
 }
 
 #[test]
+fn inbox_agent_only_uses_explicit_rpc_and_rejects_human_decisions() {
+    let sent = run_daemon_cli(
+        &[
+            "inbox",
+            "send",
+            "%155",
+            "coordinate",
+            "--agent-only",
+            "-s",
+            "plan",
+        ],
+        "inbox_send_agent_only",
+        json!({"to":"%155", "body":"coordinate", "subject":"plan", "attach":null, "notify":true}),
+        json!({"message_id":"i1", "destination":"%155", "attachments":[], "notified":true}),
+    );
+    assert!(sent.status.success());
+    let without_subject = run_daemon_cli(
+        &["inbox", "send", "%155", "coordinate", "--agent-only"],
+        "inbox_send_agent_only",
+        json!({"to":"%155", "body":"coordinate", "subject":null, "attach":null, "notify":true}),
+        json!({"message_id":"i2", "destination":"%155", "attachments":[], "notified":true}),
+    );
+    assert!(without_subject.status.success());
+    for (destination, subject) in [
+        ("owner", "plan"),
+        ("owner (%1)", "plan"),
+        ("%155", "[owner-decision] choose"),
+        ("%155", "[owner-blocker] help"),
+    ] {
+        let denied = run_cli(
+            "/nonexistent-t3776.sock",
+            &[
+                "inbox",
+                "send",
+                destination,
+                "body",
+                "--agent-only",
+                "-s",
+                subject,
+            ],
+        );
+        assert_eq!(denied.status.code(), Some(2));
+        assert!(String::from_utf8_lossy(&denied.stderr).contains("--agent-only cannot"));
+    }
+}
+
+#[test]
 fn cli_route_14_pm_nonfinite_demo() {
     // Golden nonfinite/surrogate payloads from the Python CLI's json.loads/json.dumps path.
     for (raw, expected) in [

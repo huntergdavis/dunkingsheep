@@ -381,10 +381,10 @@ fn h_inbox_fetch_matches_python() {
 }
 
 #[test]
-fn inbox_registration_inventory_has_exactly_twelve_unique_handlers() {
+fn inbox_registration_inventory_has_exactly_thirteen_unique_handlers() {
     let h = handlers();
     let names = h.registration_attempts();
-    assert_eq!(names.len(), 12);
+    assert_eq!(names.len(), 13);
     let unique = names
         .iter()
         .copied()
@@ -393,6 +393,7 @@ fn inbox_registration_inventory_has_exactly_twelve_unique_handlers() {
         unique,
         std::collections::BTreeSet::from([
             "inbox_send",
+            "inbox_send_agent_only",
             "inbox_count",
             "inbox_list",
             "inbox_read",

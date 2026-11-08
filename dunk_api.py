@@ -687,13 +687,23 @@ def h_cancel_message(flock, args, self_pane_id):
 # -- inboxes ------------------------------------------------------------------
 
 def h_inbox_send(flock, args, self_pane_id):
+    agent_only = args.get("agent_only", False)
+    if agent_only is None:
+        agent_only = False
+    if not isinstance(agent_only, bool):
+        raise DunkError("agent_only must be a boolean")
     attach = args.get("attach")
     if isinstance(attach, str):
         attach = [p for p in attach.split(",") if p.strip()]
     return flock.inbox_send(args["to"], args["body"], subject=args.get("subject"),
                             attach=attach, notify=_bool(args.get("notify"), True),
                             self_pane_id=self_pane_id,
-                            system_sender=args.get("system_sender") or None)
+                            system_sender=args.get("system_sender") or None,
+                            **({"agent_only": True} if agent_only else {}))
+
+
+def h_inbox_send_agent_only(flock, args, self_pane_id):
+    return h_inbox_send(flock, {**args, "agent_only": True}, self_pane_id)
 
 
 def h_inbox_count(flock, args, self_pane_id):
@@ -1939,6 +1949,15 @@ COMMANDS = [
         required=["to", "body"],
     ),
     Command(
+        "inbox_send_agent_only",
+        "Send agent coordination with an explicit audience, excluded from the human owner conversation.",
+        h_inbox_send_agent_only,
+        params={"to": MAILBOX_PARAM, "body": {"type": "string"},
+                "subject": {"type": "string"}, "attach": {"type": "string"},
+                "notify": {"type": "boolean"}},
+        required=["to", "body"],
+    ),
+    Command(
         "inbox_count",
         "How many messages are waiting: unread, total, and how long the oldest "
         "unread has waited. Cheap enough to poll. Defaults to your own inbox.",
@@ -2779,7 +2798,7 @@ def mcp_commands():
 # command stays callable by name, and each is reachable through its group.
 MCP_GROUPS = (
     ("inbox",
-     "Agent-to-agent mailbox. action=send (preferred over typing), count, "
+     "Agent-to-agent mailbox. action=send or send_agent_only (preferred over typing), count, "
      "list, read (also returns your tasks), recover, status, ack, cancel, "
      "delete, stats, fetch. No size limit; a send nudges the recipient with "
      "one line. The owner's mailbox (FLAT_FLEET.md 7.2) is read with "
@@ -2787,7 +2806,7 @@ MCP_GROUPS = (
      "question's transport and links the answer to it, and fed by a bridge "
      "with action=ingest (transport + external_id), drained with "
      "action=outbox and confirmed with action=delivered (desk and owner only).",
-     (("send", "inbox_send"), ("count", "inbox_count"), ("list", "inbox_list"),
+     (("send", "inbox_send"), ("send_agent_only", "inbox_send_agent_only"), ("count", "inbox_count"), ("list", "inbox_list"),
       ("read", "inbox_read"), ("recover", "inbox_recover"),
       ("status", "inbox_status"), ("ack", "inbox_ack"),
       ("cancel", "inbox_cancel"), ("delete", "inbox_delete"),

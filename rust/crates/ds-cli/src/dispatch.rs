@@ -72,6 +72,7 @@ const PYTHON_COMMAND_ORDER: &[&str] = &[
     "owner_outbox",
     "owner_delivered",
     "inbox_send",
+    "inbox_send_agent_only",
     "inbox_count",
     "pm_digest",
     "pm_routing",
@@ -4284,6 +4285,20 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
                 let mut args = Map::new();
                 args.insert("to".into(), ns.get("to").cloned().unwrap_or(Value::Null));
                 args.insert("body".into(), Value::String(body));
+                let subject = ns.get("subject").and_then(Value::as_str).unwrap_or("");
+                let agent_only = matches!(ns.get("agent_only"), Some(Value::Bool(true)));
+                if agent_only
+                    && (ds_core::inbox::normalise_mailbox(text(ns, "to").unwrap_or(""))
+                        .eq_ignore_ascii_case("owner")
+                        || subject.trim_start().starts_with("[owner-decision]")
+                        || subject.trim_start().starts_with("[owner-blocker]"))
+                {
+                    return Outcome {
+                        stdout: String::new(),
+                        stderr: "inbox send: --agent-only cannot target the human owner mailbox or mark a human decision\n".into(),
+                        code: 2,
+                    };
+                }
                 args.insert(
                     "subject".into(),
                     ns.get("subject").cloned().unwrap_or(Value::Null),
@@ -4311,9 +4326,16 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
                     "notify".into(),
                     Value::Bool(!matches!(ns.get("no_notify"), Some(Value::Bool(true)))),
                 );
-                crate::daemon_cmd::run_command(ns, "inbox_send", args, |result| {
-                    crate::render_print::render_inbox_sent(result)
-                })
+                crate::daemon_cmd::run_command(
+                    ns,
+                    if agent_only {
+                        "inbox_send_agent_only"
+                    } else {
+                        "inbox_send"
+                    },
+                    args,
+                    crate::render_print::render_inbox_sent,
+                )
             }
             "list" => {
                 let mut args = Map::new();

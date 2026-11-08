@@ -2303,6 +2303,7 @@
    "x"
   ],
   "namespace": {
+   "agent_only": false,
    "attach": null,
    "body": [],
    "body_file": null,
@@ -2326,6 +2327,7 @@
    "--json"
   ],
   "namespace": {
+   "agent_only": false,
    "attach": null,
    "body": [],
    "body_file": null,
@@ -2349,6 +2351,7 @@
    "x"
   ],
   "namespace": {
+   "agent_only": false,
    "attach": null,
    "body": [],
    "body_file": null,
@@ -2373,6 +2376,7 @@
    "x"
   ],
   "namespace": {
+   "agent_only": false,
    "attach": null,
    "body": [],
    "body_file": null,
@@ -2393,10 +2397,35 @@
    "inbox",
    "send",
    "x",
+   "--agent-only"
+  ],
+  "namespace": {
+   "agent_only": true,
+   "attach": null,
+   "body": [],
+   "body_file": null,
+   "command": "inbox",
+   "inbox_command": "send",
+   "json": false,
+   "literal": false,
+   "no_notify": false,
+   "no_start_daemon": false,
+   "self_pane": null,
+   "socket": null,
+   "subject": null,
+   "to": "x"
+  }
+ },
+ {
+  "argv": [
+   "inbox",
+   "send",
+   "x",
    "--attach",
    "x"
   ],
   "namespace": {
+   "agent_only": false,
    "attach": [
     "x"
    ],
@@ -2422,6 +2451,7 @@
    "--no-notify"
   ],
   "namespace": {
+   "agent_only": false,
    "attach": null,
    "body": [],
    "body_file": null,
@@ -2445,6 +2475,7 @@
    "--literal"
   ],
   "namespace": {
+   "agent_only": false,
    "attach": null,
    "body": [],
    "body_file": null,
@@ -2469,6 +2500,7 @@
    "x"
   ],
   "namespace": {
+   "agent_only": false,
    "attach": null,
    "body": [],
    "body_file": "x",

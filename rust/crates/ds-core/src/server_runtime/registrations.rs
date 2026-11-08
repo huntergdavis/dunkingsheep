@@ -746,6 +746,7 @@ os.rename(out_path + ".tmp", out_path)
             "get_message",
             "cancel_message",
             "inbox_send",
+            "inbox_send_agent_only",
             "inbox_count",
             "inbox_list",
             "inbox_read",
