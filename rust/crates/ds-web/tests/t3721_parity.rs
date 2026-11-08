@@ -738,6 +738,13 @@ fn the_composed_desk_matches_the_python_desk_for_viewport_password_answer_and_re
             }
         }
 
+        // All former single-scalar placeholders appear in an ignored UTF-16 field.
+        let prefix = r#"{"current_password":"not-the-password","new_password":"t3721-changed-scratch","ignored":""#;
+        let units: Vec<u16> = prefix.encode_utf16().chain(0xE000..=0xF8FF).chain([0xD800]).chain(r#""}"#.encode_utf16()).collect();
+        let raw: Vec<u8> = units.iter().flat_map(|u| u.to_le_bytes()).collect();
+        let (b, body) = raw_password(Some(json_ct_name), raw);
+        check("ignored_marker_exhaustion", &send(&router, b, body).await);
+
         // The API token is the scratch record's token, read from the scratch data dir only.
         let auth: Value = serde_json::from_str(&std::fs::read_to_string(data_dir.join("auth.json")).expect("scratch auth record"))
             .expect("auth record JSON");

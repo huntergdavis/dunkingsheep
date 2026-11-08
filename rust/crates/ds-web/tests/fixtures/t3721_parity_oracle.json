@@ -794,6 +794,14 @@
     },
     {
       "body": {
+        "detail": "Current password is incorrect"
+      },
+      "content_type": "application/json",
+      "name": "ignored_marker_exhaustion",
+      "status": 403
+    },
+    {
+      "body": {
         "detail": [
           {
             "ctx": {

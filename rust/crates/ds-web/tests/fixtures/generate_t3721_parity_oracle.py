@@ -219,6 +219,11 @@ for kind, text in [
     for encoding in ("utf-16-le", "utf-16-be", "utf-32-le", "utf-32-be"):
         record(f"ignored_{kind}_{encoding}", owner.post("/api/password", content=text.encode(encoding, "surrogatepass"), headers=ENC_HEADERS))
 
+# t3750: all 6400 original marker candidates followed by a lone surrogate in an ignored value.
+all_private = "".join(chr(n) for n in range(0xE000, 0xF900))
+exhaustion = '{"current_password":"not-the-password","new_password":"' + NEW_PASSWORD + '","ignored":"' + all_private + "\ud800" + '"}'
+record("ignored_marker_exhaustion", owner.post("/api/password", content=exhaustion.encode("utf-16-le", "surrogatepass"), headers=ENC_HEADERS))
+
 api_token = desk._auth_record()["token"]  # scratch token, read in-process, never written to the oracle
 record("password_api_identity_invalid_body", anon().post("/api/password", json={"current_password": PASSWORD, "new_password": "short"},
                                                          headers={"authorization": f"Bearer {api_token}"}))
