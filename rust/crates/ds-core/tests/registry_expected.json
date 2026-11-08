@@ -2608,10 +2608,11 @@
     "recover": "inbox_recover",
     "reply": "owner_reply",
     "send": "inbox_send",
+    "send_agent_only": "inbox_send_agent_only",
     "stats": "inbox_stats",
     "status": "inbox_status"
    },
-   "description": "Agent-to-agent mailbox. action=send (preferred over typing), count, list, read (also returns your tasks), recover, status, ack, cancel, delete, stats, fetch. No size limit; a send nudges the recipient with one line. The owner's mailbox (FLAT_FLEET.md 7.2) is read with action=conversation, answered with action=reply, which keeps the question's transport and links the answer to it, and fed by a bridge with action=ingest (transport + external_id), drained with action=outbox and confirmed with action=delivered (desk and owner only)."
+   "description": "Agent-to-agent mailbox. action=send or send_agent_only (preferred over typing), count, list, read (also returns your tasks), recover, status, ack, cancel, delete, stats, fetch. No size limit; a send nudges the recipient with one line. The owner's mailbox (FLAT_FLEET.md 7.2) is read with action=conversation, answered with action=reply, which keeps the question's transport and links the answer to it, and fed by a bridge with action=ingest (transport + external_id), drained with action=outbox and confirmed with action=delivered (desk and owner only)."
   },
   "memory": {
    "actions": {
