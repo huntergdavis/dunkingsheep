@@ -788,6 +788,10 @@ fn a_desk_inbox_read_never_marks_a_message_its_response_leaves_out() {
             }
         }
     }
+    dispatcher.close();
+}
+
+#[test]
 fn an_inbox_read_leaves_an_unowned_global_task_unowned_and_still_lists_it() {
     // t3554: an inbox read never assigns a task, and the read still returns the task list.
     let (_dir, services) = make_services("read-no-claim", factory(None), None);
