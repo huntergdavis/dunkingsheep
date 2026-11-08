@@ -189,6 +189,7 @@ class Inbox:
         self.db.row_factory = sqlite3.Row
         with self._lock:
             self.db.executescript(SCHEMA)
+            self.db.execute("CREATE TABLE IF NOT EXISTS message_audiences (message_id TEXT PRIMARY KEY, audience TEXT NOT NULL CHECK(audience = 'agent'))")
             columns = {row[1] for row in self.db.execute("PRAGMA table_info(messages)")}
             if "archived_at" not in columns:
                 self.db.execute("ALTER TABLE messages ADD COLUMN archived_at REAL")
@@ -274,7 +275,7 @@ class Inbox:
 
     def send(self, mailbox, body, subject=None, sender=None, mailbox_label=None,
              pane_id=None, attachments=(), transport=None, reply_to=None,
-             external_id=None):
+             external_id=None, agent_only=False):
         """Put a message in a mailbox. Returns its row.
 
         `transport` records where an owner question arrived; `reply_to` links a
@@ -291,7 +292,7 @@ class Inbox:
         if not body.strip() and not attachments:
             raise InboxError("a message needs a body or an attachment")
         stored = [self._store_blob(path) for path in attachments or ()]
-        with self._lock:
+        with self._lock, self.db:
             message_id = self._next_id()
             self.db.execute(
                 "INSERT INTO messages (id, mailbox, mailbox_label, pane_id, sender, "
@@ -300,6 +301,8 @@ class Inbox:
                 (message_id, mailbox, mailbox_label or mailbox, pane_id, sender,
                  subject, body, _now(), transport, reply_to,
                  str(external_id) if external_id else None))
+            if agent_only:
+                self.db.execute("INSERT INTO message_audiences (message_id, audience) VALUES (?, 'agent')", (message_id,))
             for index, blob in enumerate(stored, 1):
                 # The attachment ROW id is per message; the blob itself stays
                 # content-addressed and shared. Re-attaching the same file to
@@ -310,7 +313,6 @@ class Inbox:
                     "size, sha256, created_at) VALUES (?,?,?,?,?,?,?)",
                     (attachment_id, message_id, blob["filename"], blob["media_type"],
                      blob["size"], blob["sha256"], _now()))
-            self.db.commit()
         return self.get(message_id)
 
     def upsert_digest(self, mailbox, digest_id, body, subject=None, sender=None,

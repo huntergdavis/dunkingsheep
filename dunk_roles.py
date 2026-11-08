@@ -171,6 +171,8 @@ class RoleError(RuntimeError):
 
 def allowed(role, command):
     """May `role` call `command`?"""
+    if command == "inbox_send_agent_only":
+        command = "inbox_send"
     if role == "web":
         return command not in WEB_DENIED
     permitted = ALLOW.get(role, READ_ONLY)

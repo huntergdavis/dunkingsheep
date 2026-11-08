@@ -66,8 +66,6 @@ pub fn owner_page_transport(class: Option<&str>) -> &'static str {
 /// stays in storage and in the task evidence, but is not listed in the owner conversation. `[owner-decision]`
 /// and `[owner-blocker]` are not listed here, so they stay visible, and so does unmarked legacy mail.
 pub const ROUTINE_SUBJECT_PREFIXES: [&str; 2] = ["[review-verdict]", "[review-note]"];
-/// An explicit sender-selected audience marker for agent mailbox coordination.
-pub const AGENT_COORDINATION_PREFIX: &str = "[agent-coordination]";
 
 /// Whether a stored mail row is routine and must not appear in the owner conversation. Only the subject
 /// prefix decides: contradictory words in the body never override the marker. Owner replies (a row with

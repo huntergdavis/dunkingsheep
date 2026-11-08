@@ -72,6 +72,7 @@ const PYTHON_COMMAND_ORDER: &[&str] = &[
     "owner_outbox",
     "owner_delivered",
     "inbox_send",
+    "inbox_send_agent_only",
     "inbox_count",
     "pm_digest",
     "pm_routing",
@@ -4298,16 +4299,10 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
                         code: 2,
                     };
                 }
-                let subject = if agent_only {
-                    Value::String(if subject.is_empty() {
-                        "[agent-coordination]".into()
-                    } else {
-                        format!("[agent-coordination] {subject}")
-                    })
-                } else {
-                    ns.get("subject").cloned().unwrap_or(Value::Null)
-                };
-                args.insert("subject".into(), subject);
+                args.insert(
+                    "subject".into(),
+                    ns.get("subject").cloned().unwrap_or(Value::Null),
+                );
                 let attachments = ns
                     .get("attach")
                     .and_then(Value::as_array)
@@ -4331,9 +4326,16 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
                     "notify".into(),
                     Value::Bool(!matches!(ns.get("no_notify"), Some(Value::Bool(true)))),
                 );
-                crate::daemon_cmd::run_command(ns, "inbox_send", args, |result| {
-                    crate::render_print::render_inbox_sent(result)
-                })
+                crate::daemon_cmd::run_command(
+                    ns,
+                    if agent_only {
+                        "inbox_send_agent_only"
+                    } else {
+                        "inbox_send"
+                    },
+                    args,
+                    |result| crate::render_print::render_inbox_sent(result),
+                )
             }
             "list" => {
                 let mut args = Map::new();

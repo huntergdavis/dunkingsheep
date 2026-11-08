@@ -120,7 +120,7 @@ def code_status():
             "code_identity_errors": errors}
 
 
-from dunk_inbox import Inbox, InboxError
+from dunk_inbox import Inbox, InboxError, normalise_mailbox
 from dunk_tasks import validate_verdict, Tasks, TaskError, GLOBAL as TASK_GLOBAL, validate_scope as validate_task_scope
 import dunk_stuck
 
@@ -2192,7 +2192,7 @@ class Flock:
 
     @_as_dunk_error
     def inbox_send(self, to, body, subject=None, attach=None, notify=True,
-                   self_pane_id=None, system_sender=None):
+                   self_pane_id=None, system_sender=None, agent_only=False):
         """Put a message in another agent's inbox. Nothing is typed into their
         terminal except, when `notify`, a short line telling them they have
         mail - which is the one send short enough to always submit. The optional
@@ -2261,9 +2261,13 @@ class Flock:
         except Exception:  # noqa: BLE001 - routing must never block a send
             redirected = None
         attachments = [attach] if isinstance(attach, str) else list(attach or ())
+        if agent_only and (normalise_mailbox(mailbox) == "owner" or
+                           (subject or "").lstrip().startswith(("[owner-decision]", "[owner-blocker]"))):
+            raise DunkError("agent-only cannot target the human owner mailbox or mark a human decision")
         message = self.inbox.send(mailbox, body, subject=subject, sender=sender,
                                   mailbox_label=label, pane_id=pane_id,
-                                  attachments=attachments)
+                                  attachments=attachments,
+                                  **({"agent_only": True} if agent_only else {}))
         if redirected:
             message["redirected"] = redirected
         message["notified"] = False

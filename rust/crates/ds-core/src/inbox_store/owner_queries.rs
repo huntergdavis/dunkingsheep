@@ -175,16 +175,13 @@ impl Store {
                     .iter()
                     .map(|prefix| SqlValue::Text((*prefix).to_string())),
             );
-            // The sender explicitly chose agent-only delivery. Do not hide a human mailbox
-            // row, even if its subject happens to contain the marker. Apply before LIMIT.
+            // Only a durable sender-selected audience excludes a lane message. Literal
+            // subjects and legacy rows without a classification remain visible.
             let (owner_mailbox, owner_params) = mailbox_where(OWNER_MAILBOX, "mailbox");
             sql.push_str(&format!(
-                " AND ({owner_mailbox} OR instr(ltrim(COALESCE(subject, ''), ' ' || char(9) || char(10) || char(13)), ?) != 1)"
+                " AND ({owner_mailbox} OR NOT EXISTS (SELECT 1 FROM message_audiences WHERE message_id = messages.id AND audience = 'agent'))"
             ));
             values.extend(owner_params.into_iter().map(SqlValue::Text));
-            values.push(SqlValue::Text(
-                crate::owner::conversations::AGENT_COORDINATION_PREFIX.into(),
-            ));
         }
         if let Some(before) = before {
             sql.push_str(" AND created_at < ?");

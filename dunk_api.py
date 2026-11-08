@@ -687,13 +687,23 @@ def h_cancel_message(flock, args, self_pane_id):
 # -- inboxes ------------------------------------------------------------------
 
 def h_inbox_send(flock, args, self_pane_id):
+    agent_only = args.get("agent_only", False)
+    if agent_only is None:
+        agent_only = False
+    if not isinstance(agent_only, bool):
+        raise DunkError("agent_only must be a boolean")
     attach = args.get("attach")
     if isinstance(attach, str):
         attach = [p for p in attach.split(",") if p.strip()]
     return flock.inbox_send(args["to"], args["body"], subject=args.get("subject"),
                             attach=attach, notify=_bool(args.get("notify"), True),
                             self_pane_id=self_pane_id,
-                            system_sender=args.get("system_sender") or None)
+                            system_sender=args.get("system_sender") or None,
+                            **({"agent_only": True} if agent_only else {}))
+
+
+def h_inbox_send_agent_only(flock, args, self_pane_id):
+    return h_inbox_send(flock, {**args, "agent_only": True}, self_pane_id)
 
 
 def h_inbox_count(flock, args, self_pane_id):
@@ -1936,6 +1946,15 @@ COMMANDS = [
             "notify": {"type": "boolean",
                        "description": "Nudge the recipient's pane that mail arrived (default true)."},
         },
+        required=["to", "body"],
+    ),
+    Command(
+        "inbox_send_agent_only",
+        "Send agent coordination with an explicit audience, excluded from the human owner conversation.",
+        h_inbox_send_agent_only,
+        params={"to": MAILBOX_PARAM, "body": {"type": "string"},
+                "subject": {"type": "string"}, "attach": {"type": "string"},
+                "notify": {"type": "boolean"}},
         required=["to", "body"],
     ),
     Command(

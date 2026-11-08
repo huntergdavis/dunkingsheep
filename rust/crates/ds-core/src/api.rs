@@ -2181,6 +2181,7 @@ fn nudge_desk_for_telegram(context: &HandlerContext<'_>, message: &crate::inbox_
                 notify: true,
                 self_pane_id: None,
                 system_sender: None,
+                agent_only: false,
             },
             None,
             None,

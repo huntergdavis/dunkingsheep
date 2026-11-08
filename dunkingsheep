@@ -3075,8 +3075,7 @@ def run_client_command(client, args):
                 from dunk_inbox import normalise_mailbox
                 if normalise_mailbox(args.to).lower() == "owner" or (subject or "").lstrip().startswith(("[owner-decision]", "[owner-blocker]")):
                     raise SystemExit("inbox send: --agent-only cannot target the human owner mailbox or mark a human decision")
-                subject = "[agent-coordination]" + (f" {subject}" if subject else "")
-            return client.call("inbox_send", to=args.to, body=body,
+            return client.call("inbox_send_agent_only" if getattr(args, "agent_only", False) else "inbox_send", to=args.to, body=body,
                                subject=subject,
                                attach=",".join(args.attach) if args.attach else None,
                                notify=not args.no_notify), print_inbox_sent

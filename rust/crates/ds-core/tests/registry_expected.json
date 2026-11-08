@@ -755,6 +755,32 @@
    ],
    "type": "object"
   },
+  "inbox_send_agent_only": {
+   "additionalProperties": false,
+   "properties": {
+    "attach": {
+     "type": "string"
+    },
+    "body": {
+     "type": "string"
+    },
+    "notify": {
+     "type": "boolean"
+    },
+    "subject": {
+     "type": "string"
+    },
+    "to": {
+     "description": "Whose inbox: an agent name, a pane id, a unique label substring, or 'self' for your own. Agent names are preferred because they survive a pane moving or restarting. A name that matches no live pane still works, so mail can be left for an agent that is not running.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "to",
+    "body"
+   ],
+   "type": "object"
+  },
   "inbox_stats": {
    "additionalProperties": false,
    "properties": {},
@@ -2941,6 +2967,16 @@
    "mcp_required": []
   },
   "inbox_send": {
+   "dispatch_required": [
+    "to",
+    "body"
+   ],
+   "mcp_required": [
+    "to",
+    "body"
+   ]
+  },
+  "inbox_send_agent_only": {
    "dispatch_required": [
     "to",
     "body"

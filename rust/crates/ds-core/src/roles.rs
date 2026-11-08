@@ -206,6 +206,11 @@ pub const WEB_DENIED: [&str; 30] = [
 /// get `READ_ONLY` plus their own extras; an UNKNOWN role gets `READ_ONLY` only (the
 /// Python's `ALLOW.get(role, READ_ONLY)`).
 pub fn allowed(role: &str, command: &str) -> bool {
+    let command = if command == "inbox_send_agent_only" {
+        "inbox_send"
+    } else {
+        command
+    };
     let extra: &[&str] = match role {
         "owner" => return true,
         // The batch claim is for workers and the owner only (t3583), like the Rust-only
