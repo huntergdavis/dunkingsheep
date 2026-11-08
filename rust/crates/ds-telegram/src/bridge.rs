@@ -6,8 +6,9 @@
 //! the legacy store's page rows and the forwarding cursor, read through `desk_store`.
 //!
 //! Not in this build (each is a visible reply or a named error, never a silent drop):
-//! attachments, `/status` (it needs the desk reconciliation), and the watchdog's own status file
-//! beyond the watermark write. See the PR body for the list.
+//! attachments and the watchdog's own status file beyond the watermark write. `/status` is
+//! answered from the desk store's delivery state (t3671); the reconciliation that moves a stuck
+//! delivery is a write path and is not ported. See the PR body for the list.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -134,6 +135,26 @@ impl<D: Daemon, B: Bot> Bridge<D, B> {
         channel_name(&registry, channel)
     }
 
+    /// `_message_status`: the delivery state of the last Telegram owner message on this channel.
+    ///
+    /// Python reconciles first (`desk._reconcile(channel)`), then reads the newest desk row with
+    /// `role='owner'` and an `external_id` of `telegram:*`. The read is ported; the reconciliation
+    /// pass is a write path and stays out (see the PR body), so the state reported is the one the
+    /// desk stored.
+    fn message_status(&self, channel: &str) -> Result<String, BridgeError> {
+        let name = self.channel_name(channel)?;
+        let row = desk_store::latest_telegram_owner_row(&self.paths.desk_db(), channel)?;
+        Ok(match row {
+            None => format!("No Telegram message has reached {name} yet."),
+            // `f"{name} message #{row['id']}: {row['delivery']}"`: a NULL delivery prints as
+            // `None`, the Python f-string's spelling of it, never as an empty string.
+            Some((id, delivery)) => format!(
+                "{name} message #{id}: {}",
+                delivery.unwrap_or_else(|| "None".to_string())
+            ),
+        })
+    }
+
     /// `_prepare_route`: scope the forwarding cursor to its channel. A switch starts at the
     /// destination's current tail, without replaying history or reusing a partial send.
     pub fn prepare_route(&mut self, config: &mut Config) -> Result<String, BridgeError> {
@@ -249,10 +270,8 @@ impl<D: Daemon, B: Bot> Bridge<D, B> {
             );
         }
         if stripped == "/status" {
-            return self.send_text(
-                &chat_id,
-                "/status is not in the Rust bridge yet. Check the web desk for your last send.",
-            );
+            let reply = self.message_status(&channel)?;
+            return self.send_text(&chat_id, &reply);
         }
         let external_id = format!(
             "telegram:{}",

@@ -41,6 +41,7 @@
         "daemon": {},
         "desk_rows": [],
         "name": "pair_with_the_code",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -102,6 +103,7 @@
         "daemon": {},
         "desk_rows": [],
         "name": "pair_with_a_wrong_code",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -163,6 +165,7 @@
         "daemon": {},
         "desk_rows": [],
         "name": "pair_ignores_an_unpaired_plain_message",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -235,6 +238,7 @@
         },
         "desk_rows": [],
         "name": "group_chat_and_other_chat_are_ignored",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -334,6 +338,7 @@
         },
         "desk_rows": [],
         "name": "text_question_is_recorded_and_acknowledged",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -420,6 +425,7 @@
         },
         "desk_rows": [],
         "name": "redelivered_question_says_already_recorded",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -500,6 +506,7 @@
         "daemon": {},
         "desk_rows": [],
         "name": "start_and_help_get_the_help_text",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -582,6 +589,7 @@
         "daemon": {},
         "desk_rows": [],
         "name": "an_empty_message_gets_the_other_items_reply",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -668,6 +676,7 @@
         },
         "desk_rows": [],
         "name": "routing_file_names_the_desk",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -734,6 +743,7 @@
         "daemon": {},
         "desk_rows": [],
         "name": "routing_file_with_an_extra_key_is_refused",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -801,6 +811,7 @@
         "daemon": {},
         "desk_rows": [],
         "name": "routing_channel_missing_from_registry_is_refused",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -869,6 +880,7 @@
         "daemon": {},
         "desk_rows": [],
         "name": "config_that_still_names_a_channel_is_refused",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -942,6 +954,7 @@
         },
         "desk_rows": [],
         "name": "a_web_question_produces_nothing_for_telegram",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -1034,6 +1047,7 @@
         },
         "desk_rows": [],
         "name": "a_telegram_reply_is_sent_and_receipted",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -1132,6 +1146,7 @@
         },
         "desk_rows": [],
         "name": "mailbox_page_is_sent_once_and_receipted",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -1291,6 +1306,7 @@
         },
         "desk_rows": [],
         "name": "mailbox_pages_share_the_budget",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -1389,6 +1405,7 @@
         },
         "desk_rows": [],
         "name": "mailbox_page_does_not_move_the_legacy_watermark",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -1451,6 +1468,7 @@
         },
         "desk_rows": [],
         "name": "unpaired_bridge_sends_nothing",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -1603,6 +1621,7 @@
           ]
         ],
         "name": "held_page_is_selected_again",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -1762,6 +1781,7 @@
           ]
         ],
         "name": "delivered_pages_move_the_watermark",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -1917,6 +1937,7 @@
         ],
         "fail_on": "money",
         "name": "failed_send_does_not_advance_past_the_failed_page",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -2079,6 +2100,7 @@
           ]
         ],
         "name": "pages_in_one_tick_each_spend_the_budget",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -2218,6 +2240,7 @@
           ]
         ],
         "name": "page_older_than_the_window_does_not_count",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -2323,6 +2346,7 @@
           ]
         ],
         "name": "first_run_carries_the_old_watermark_over",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -2408,6 +2432,7 @@
           ]
         ],
         "name": "first_run_with_no_marker_starts_from_now",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -2646,6 +2671,7 @@
           ]
         ],
         "name": "ordinary_rows_do_not_starve_a_page",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -2746,6 +2772,7 @@
           ]
         ],
         "name": "ordinary_rows_never_move_the_watermark",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -2887,6 +2914,7 @@
         },
         "desk_rows": [],
         "name": "poll_loop_processes_updates_in_order_and_saves_the_offset",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -3043,6 +3071,7 @@
         },
         "desk_rows": [],
         "name": "poll_loop_sends_replies_after_each_batch",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -3104,6 +3133,7 @@
         "daemon": {},
         "desk_rows": [],
         "name": "status_of_a_fresh_config",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -3157,6 +3187,7 @@
         "daemon": {},
         "desk_rows": [],
         "name": "status_reports_routing_and_pairing",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -3177,6 +3208,271 @@
         ]
       },
       "name": "status_reports_routing_and_pairing"
+    },
+    {
+      "expected": {
+        "bot_log": [
+          [
+            "sendMessage",
+            {
+              "chat_id": 42.0,
+              "text": "No Telegram message has reached Chief of Staff yet."
+            }
+          ]
+        ],
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42.0,
+          "last_brief_id": null,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon_log": [],
+        "status": null,
+        "steps": [
+          {
+            "error": null,
+            "op": "process_update"
+          }
+        ]
+      },
+      "input": {
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42,
+          "last_brief_id": null,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon": {},
+        "desk_rows": [],
+        "name": "status_with_no_telegram_message_says_nothing_has_reached_the_desk",
+        "owner_rows": [
+          [
+            11,
+            "cos",
+            "posted",
+            "web:1"
+          ]
+        ],
+        "registry": [
+          {
+            "id": "vp",
+            "name": "VP"
+          },
+          {
+            "id": "cos",
+            "name": "Chief of Staff"
+          }
+        ],
+        "routing": null,
+        "steps": [
+          {
+            "op": "process_update",
+            "update": {
+              "message": {
+                "chat": {
+                  "id": 42,
+                  "type": "private"
+                },
+                "text": "/status"
+              },
+              "update_id": 9
+            }
+          }
+        ]
+      },
+      "name": "status_with_no_telegram_message_says_nothing_has_reached_the_desk"
+    },
+    {
+      "expected": {
+        "bot_log": [
+          [
+            "sendMessage",
+            {
+              "chat_id": 42.0,
+              "text": "Chief of Staff message #12: inbox"
+            }
+          ]
+        ],
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42.0,
+          "last_brief_id": null,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon_log": [],
+        "status": null,
+        "steps": [
+          {
+            "error": null,
+            "op": "process_update"
+          }
+        ]
+      },
+      "input": {
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42,
+          "last_brief_id": null,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon": {},
+        "desk_rows": [
+          [
+            15,
+            "cos",
+            "agent",
+            "a lane row with a telegram id",
+            "telegram:5"
+          ]
+        ],
+        "name": "status_reports_the_newest_telegram_owner_row_on_this_channel",
+        "owner_rows": [
+          [
+            11,
+            "cos",
+            "sent",
+            "telegram:1"
+          ],
+          [
+            12,
+            "cos",
+            "inbox",
+            "telegram:2"
+          ],
+          [
+            13,
+            "cos",
+            "posted",
+            "web:9"
+          ],
+          [
+            14,
+            "vp",
+            "acked",
+            "telegram:3"
+          ]
+        ],
+        "registry": [
+          {
+            "id": "vp",
+            "name": "VP"
+          },
+          {
+            "id": "cos",
+            "name": "Chief of Staff"
+          }
+        ],
+        "routing": null,
+        "steps": [
+          {
+            "op": "process_update",
+            "update": {
+              "message": {
+                "chat": {
+                  "id": 42,
+                  "type": "private"
+                },
+                "text": " /status "
+              },
+              "update_id": 9
+            }
+          }
+        ]
+      },
+      "name": "status_reports_the_newest_telegram_owner_row_on_this_channel"
+    },
+    {
+      "expected": {
+        "bot_log": [
+          [
+            "sendMessage",
+            {
+              "chat_id": 42.0,
+              "text": "VP message #14: acked"
+            }
+          ]
+        ],
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "vp",
+          "chat_id": 42.0,
+          "last_brief_id": 0.0,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon_log": [],
+        "status": null,
+        "steps": [
+          {
+            "error": null,
+            "op": "process_update"
+          }
+        ]
+      },
+      "input": {
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42,
+          "last_brief_id": null,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon": {},
+        "desk_rows": [],
+        "name": "status_follows_the_routing_channel",
+        "owner_rows": [
+          [
+            12,
+            "cos",
+            "inbox",
+            "telegram:2"
+          ],
+          [
+            14,
+            "vp",
+            "acked",
+            "telegram:3"
+          ]
+        ],
+        "registry": [
+          {
+            "id": "vp",
+            "name": "VP"
+          },
+          {
+            "id": "cos",
+            "name": "Chief of Staff"
+          }
+        ],
+        "routing": {
+          "channel": "vp"
+        },
+        "steps": [
+          {
+            "op": "process_update",
+            "update": {
+              "message": {
+                "chat": {
+                  "id": 42,
+                  "type": "private"
+                },
+                "text": "/status"
+              },
+              "update_id": 9
+            }
+          }
+        ]
+      },
+      "name": "status_follows_the_routing_channel"
     }
   ]
 }

@@ -201,10 +201,7 @@ impl Fixture {
     /// A legacy desk store with a `messages` table and the given `(id, channel, role, body)` rows.
     pub fn desk_rows(&self, rows: &[(i64, &str, &str, &str)]) {
         let conn = rusqlite::Connection::open(self.paths.desk_db()).expect("desk db");
-        conn.execute_batch(
-            "CREATE TABLE messages (id INTEGER PRIMARY KEY, channel TEXT, role TEXT, body TEXT);",
-        )
-        .expect("schema");
+        conn.execute_batch(DESK_SCHEMA).expect("schema");
         for (id, channel, role, body) in rows {
             conn.execute(
                 "INSERT INTO messages (id, channel, role, body) VALUES (?1, ?2, ?3, ?4)",
@@ -213,7 +210,40 @@ impl Fixture {
             .expect("row");
         }
     }
+
+    /// Append one row of any role carrying a Telegram `external_id`, as the desk stores a
+    /// Telegram message it recorded itself. Used to prove `/status` filters on `role='owner'`.
+    pub fn desk_row_with_telegram_id(&self, id: i64, channel: &str, role: &str, telegram: &str) {
+        let conn = rusqlite::Connection::open(self.paths.desk_db()).expect("desk db");
+        conn.execute_batch(DESK_SCHEMA).expect("schema");
+        conn.execute(
+            "INSERT INTO messages (id, channel, role, body, external_id) VALUES (?1, ?2, ?3, '', ?4)",
+            rusqlite::params![id, channel, role, telegram],
+        )
+        .expect("row");
+    }
+
+    /// Owner rows as the desk stores them: `(id, channel, delivery, external_id)` with
+    /// `role='owner'`, which is what `/status` reads.
+    pub fn desk_owner_rows(&self, rows: &[(i64, &str, &str, &str)]) {
+        let conn = rusqlite::Connection::open(self.paths.desk_db()).expect("desk db");
+        conn.execute_batch(DESK_SCHEMA).expect("schema");
+        for (id, channel, delivery, external_id) in rows {
+            conn.execute(
+                "INSERT INTO messages (id, channel, role, body, delivery, external_id) \
+                 VALUES (?1, ?2, 'owner', '', ?3, ?4)",
+                rusqlite::params![id, channel, delivery, external_id],
+            )
+            .expect("row");
+        }
+    }
 }
+
+/// The desk's `messages` table, with the two columns `/status` reads. The real desk stores
+/// `delivery NOT NULL DEFAULT 'posted'`; the fixtures pass it explicitly.
+const DESK_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS messages (\
+     id INTEGER PRIMARY KEY, channel TEXT, role TEXT, body TEXT, \
+     delivery TEXT NOT NULL DEFAULT 'posted', external_id TEXT);";
 
 /// A paired private-chat text update.
 pub fn text_update(update_id: i64, chat_id: i64, text: &str) -> Value {

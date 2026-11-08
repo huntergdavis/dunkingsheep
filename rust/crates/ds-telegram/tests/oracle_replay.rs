@@ -6,9 +6,9 @@
 //! the Rust port and requires the same outputs: every Telegram call with its payload, every daemon call
 //! with its arguments, each step's result or exception, and the final telegram.json and status file.
 //!
-//! Known, named differences are NOT in the fixture: attachments and `/status` (the port answers them
-//! with a visible reply; Python downloads or reconciles). Numbers are compared as floats, so an int in
-//! one language and a float in the other never decides a comparison.
+//! Known, named differences are NOT in the fixture: attachments (the port answers with a visible
+//! reply; Python downloads). Numbers are compared as floats, so an int in one language and a float
+//! in the other never decides a comparison.
 
 mod common;
 
@@ -91,15 +91,33 @@ fn replay(input: &Value) -> Value {
         std::fs::write(paths.config(), input["config"].to_string()).expect("config");
     }
     {
-        // The desk store always has its table, as the real desk does.
+        // The desk store always has its table, as the real desk does. `delivery` and
+        // `external_id` are the two columns `/status` reads.
         let conn = rusqlite::Connection::open(paths.desk_db()).expect("desk db");
         conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY, channel TEXT, role TEXT, body TEXT);",
+            "CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY, channel TEXT, role TEXT, \
+             body TEXT, delivery TEXT NOT NULL DEFAULT 'posted', external_id TEXT);",
         )
         .expect("schema");
         for row in input["desk_rows"].as_array().cloned().unwrap_or_default() {
+            // `(id, channel, role, body[, external_id])`: a row of any role.
             conn.execute(
-                "INSERT INTO messages (id, channel, role, body) VALUES (?1, ?2, ?3, ?4)",
+                "INSERT INTO messages (id, channel, role, body, external_id) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    row[0].as_i64().unwrap(),
+                    row[1].as_str().unwrap(),
+                    row[2].as_str().unwrap(),
+                    row[3].as_str().unwrap(),
+                    row.get(4).and_then(Value::as_str)
+                ],
+            )
+            .expect("row");
+        }
+        for row in input["owner_rows"].as_array().cloned().unwrap_or_default() {
+            conn.execute(
+                "INSERT INTO messages (id, channel, role, body, delivery, external_id) \
+                 VALUES (?1, ?2, 'owner', '', ?3, ?4)",
                 rusqlite::params![
                     row[0].as_i64().unwrap(),
                     row[1].as_str().unwrap(),
@@ -107,7 +125,7 @@ fn replay(input: &Value) -> Value {
                     row[3].as_str().unwrap()
                 ],
             )
-            .expect("row");
+            .expect("owner row");
         }
     }
 

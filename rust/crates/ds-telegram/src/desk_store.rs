@@ -1,9 +1,10 @@
 //! Read-only access to the legacy desk store, `messages.sqlite3`.
 //!
-//! Two things still live there and the bridge must read them: the watchdog's owner pages (rows
-//! with the `PAGE OWNER` marker, in the desk's `messages` table) and the forwarding cursor's
-//! channel tail. Writes to that store (attachments, delivery reconciliation) are not ported yet.
-//! A missing database is an empty desk, not an error, so a fresh data directory works.
+//! Three things still live there and the bridge must read them: the watchdog's owner pages (rows
+//! with the `PAGE OWNER` marker, in the desk's `messages` table), the forwarding cursor's channel
+//! tail, and the delivery state of the desk's owner rows from Telegram that `/status` reports.
+//! Writes to that store (attachments, delivery reconciliation) are not ported yet. A missing
+//! database is an empty desk, not an error, so a fresh data directory works.
 
 use std::path::Path;
 
@@ -58,6 +59,32 @@ pub fn newest_row(path: &Path, channel: &str) -> Result<i64, BridgeError> {
         .optional()
         .map_err(store_error)?;
     Ok(newest.unwrap_or(0))
+}
+
+/// `_message_status`' read: the newest desk row that Telegram put on this channel, as
+/// `(id, delivery)`.
+///
+/// The Python selects `channel=? AND role='owner' AND external_id LIKE 'telegram:%' ORDER BY id
+/// DESC LIMIT 1` after `desk._reconcile(channel)`. This is that query and nothing else: the
+/// reconciliation pass that moves `pending`/`queued`/`failed`/`uncertain` rows is a write path and
+/// stays unported (the PR body names it), so the answer is the delivery the desk stored.
+///
+/// A missing store answers `None`, as it does for the other readers here.
+pub fn latest_telegram_owner_row(
+    path: &Path,
+    channel: &str,
+) -> Result<Option<(i64, Option<String>)>, BridgeError> {
+    let Some(conn) = open(path)? else {
+        return Ok(None);
+    };
+    conn.query_row(
+        "SELECT id,delivery FROM messages WHERE channel=? AND role='owner' \
+         AND external_id LIKE 'telegram:%' ORDER BY id DESC LIMIT 1",
+        [channel],
+        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
+    )
+    .optional()
+    .map_err(store_error)
 }
 
 /// `_legacy_pages`' SQL: agent rows after the watermark whose body carries the page marker, in

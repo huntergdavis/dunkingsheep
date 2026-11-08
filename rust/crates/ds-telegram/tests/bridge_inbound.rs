@@ -178,7 +178,7 @@ fn a_file_is_not_recorded_by_this_build_and_says_so() {
 }
 
 #[test]
-fn status_is_named_as_not_in_this_build() {
+fn status_with_no_telegram_row_says_nothing_has_reached_the_desk() {
     let fixture = Fixture::new();
     let mut bridge = fixture.bridge();
     let mut config = as_config(paired_config(42));
@@ -187,11 +187,33 @@ fn status_is_named_as_not_in_this_build() {
         .unwrap();
     assert_eq!(
         fixture.bot.texts(),
-        vec![
-            "/status is not in the Rust bridge yet. Check the web desk for your last send."
-                .to_string()
-        ]
+        vec!["No Telegram message has reached Chief of Staff yet.".to_string()]
     );
+    assert!(fixture.daemon.commands().is_empty());
+}
+
+#[test]
+fn status_reports_the_newest_telegram_owner_row_on_this_channel() {
+    // The Python oracle: role='owner', external_id LIKE 'telegram:%', newest id, this channel.
+    let fixture = Fixture::new();
+    fixture.desk_owner_rows(&[
+        (11, "cos", "sent", "telegram:1"),
+        (12, "cos", "inbox", "telegram:2"),
+        (13, "cos", "posted", "web:9"),
+        (14, "vp", "acked", "telegram:3"),
+    ]);
+    // Newer, but not an owner row: the Python filters role='owner', so it is not the answer.
+    fixture.desk_row_with_telegram_id(15, "cos", "agent", "telegram:5");
+    let mut bridge = fixture.bridge();
+    let mut config = as_config(paired_config(42));
+    bridge
+        .process_update(&text_update(9, 42, " /status "), &mut config)
+        .unwrap();
+    assert_eq!(
+        fixture.bot.texts(),
+        vec!["Chief of Staff message #12: inbox".to_string()]
+    );
+    assert!(fixture.daemon.commands().is_empty());
 }
 
 #[test]

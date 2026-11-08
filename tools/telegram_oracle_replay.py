@@ -151,13 +151,23 @@ def reset(work: Path, scenario: dict, desk):
     if scenario.get("routing") is not None:
         (work / "telegram-routing.json").write_text(json.dumps(scenario["routing"]), encoding="utf-8")
     # The desk store always has its table, as the real desk does (an absent table is not a state
-    # the desk ever leaves).
+    # the desk ever leaves). `delivery` and `external_id` are the two columns `/status` reads; they
+    # carry the desk's own defaults `delivery TEXT NOT NULL DEFAULT 'posted'` / NULL.
     conn = sqlite3.connect(work / "messages.sqlite3")
-    conn.execute("CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY, channel TEXT, role TEXT, body TEXT)")
+    conn.execute("CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY, channel TEXT, role TEXT, "
+                 "body TEXT, delivery TEXT NOT NULL DEFAULT 'posted', external_id TEXT)")
     conn.execute("DELETE FROM messages")
-    for row_id, channel, role, body in scenario.get("desk_rows", []):
-        conn.execute("INSERT INTO messages (id, channel, role, body) VALUES (?, ?, ?, ?)",
-                     (row_id, channel, role, body))
+    for row in scenario.get("desk_rows", []):
+        # (id, channel, role, body[, external_id]): an id-bearing row of any role.
+        row_id, channel, role, body = row[:4]
+        external_id = row[4] if len(row) > 4 else None
+        conn.execute("INSERT INTO messages (id, channel, role, body, external_id) "
+                     "VALUES (?, ?, ?, ?, ?)",
+                     (row_id, channel, role, body, external_id))
+    for row_id, channel, delivery, external_id in scenario.get("owner_rows", []):
+        conn.execute("INSERT INTO messages (id, channel, role, body, delivery, external_id) "
+                     "VALUES (?, ?, 'owner', '', ?, ?)",
+                     (row_id, channel, delivery, external_id))
     conn.commit()
     conn.close()
     if scenario.get("config") is not None:
@@ -285,7 +295,7 @@ def scenarios():
 
     def add(name, **kw):
         base = {"name": name, "registry": VP_COS, "routing": None, "desk_rows": [],
-                "config": None, "daemon": {}, "steps": []}
+                "owner_rows": [], "config": None, "daemon": {}, "steps": []}
         base.update(kw)
         out.append(base)
 
@@ -375,11 +385,24 @@ def scenarios():
         "ingest": ingest_ok, "outbox": [outbox_row("m2", None, "answer", "q")]},
         steps=[{"op": "run", "batches": [[text(3, 42, "question")]]}])
 
-    # ---- status ----
+    # ---- /status: the delivery state of the last Telegram owner row (t3671) ----
     add("status_of_a_fresh_config", config={"bot_token": "123:TEST-TOKEN-NOT-REAL", "pair_code": PAIR,
         "chat_id": None}, steps=[{"op": "status"}])
     add("status_reports_routing_and_pairing", config=paired(last_brief_id=13, update_offset=900),
         routing={"channel": "vp"}, steps=[{"op": "status"}])
+    add("status_with_no_telegram_message_says_nothing_has_reached_the_desk", config=paired(),
+        owner_rows=[[11, "cos", "posted", "web:1"]],
+        steps=[{"op": "process_update", "update": text(9, 42, "/status")}])
+    add("status_reports_the_newest_telegram_owner_row_on_this_channel", config=paired(),
+        owner_rows=[[11, "cos", "sent", "telegram:1"], [12, "cos", "inbox", "telegram:2"],
+                    [13, "cos", "posted", "web:9"], [14, "vp", "acked", "telegram:3"]],
+        # A newer agent row that also carries a telegram: id is NOT an owner message: the
+        # Python filters role='owner', so it must not be the row the status reports.
+        desk_rows=[[15, "cos", "agent", "a lane row with a telegram id", "telegram:5"]],
+        steps=[{"op": "process_update", "update": text(9, 42, " /status ")}])
+    add("status_follows_the_routing_channel", config=paired(), routing={"channel": "vp"},
+        owner_rows=[[12, "cos", "inbox", "telegram:2"], [14, "vp", "acked", "telegram:3"]],
+        steps=[{"op": "process_update", "update": text(9, 42, "/status")}])
     return out
 
 
