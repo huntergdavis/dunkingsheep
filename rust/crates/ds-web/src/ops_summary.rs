@@ -990,14 +990,21 @@ pub fn summary(
         }
         quotas[provider] = item;
     }
-    let quota = quotas
-        .as_object()
-        .and_then(|map| {
-            map.values()
-                .filter(|v| !v.is_null())
-                .max_by_key(|v| v["observed_at"].as_str().unwrap_or_default())
-                .cloned()
+    // Python iterates codex before claude and max() keeps the first equal key.
+    let quota = ["codex", "claude"]
+        .into_iter()
+        .filter_map(|provider| quotas.get(provider))
+        .filter(|item| !item.is_null())
+        .fold(None, |best: Option<&Value>, item| match best {
+            Some(current)
+                if current["observed_at"].as_str().unwrap_or_default()
+                    >= item["observed_at"].as_str().unwrap_or_default() =>
+            {
+                Some(current)
+            }
+            _ => Some(item),
         })
+        .cloned()
         .unwrap_or(Value::Null);
 
     let mut subscriptions=query_objects(conn,

@@ -374,3 +374,76 @@ fn summary_rejects_blob_in_a_returned_text_column_like_python_json_serialization
         ))
     ));
 }
+
+/// Python's dict order makes equal timestamps choose codex, while the newest
+/// row inside each provider is still selected by observed_at and then id.
+#[test]
+fn quota_selection_matches_pinned_python_for_ties_newer_and_missing_providers() {
+    let oracle: Value = serde_json::from_str(include_str!("fixtures/t3783_quota_python.json"))
+        .expect("pinned scratch Python quota oracle");
+    assert_eq!(oracle["python"], "3.14.4");
+    let directory = tempdir().unwrap();
+    let now = DateTime::parse_from_rfc3339("2026-11-08T12:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    for name in [
+        "equal",
+        "codex_newer",
+        "claude_newer",
+        "codex_only",
+        "claude_only",
+        "none",
+        "codex_same_provider_tie",
+        "claude_same_provider_tie",
+    ] {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(include_str!("../src/ops_schema.sql"))
+            .unwrap();
+        conn.execute_batch(include_str!("fixtures/t3783_quota_seed.sql"))
+            .unwrap();
+        match name {
+            "codex_newer" | "claude_newer" => {
+                let provider = name.strip_suffix("_newer").unwrap();
+                conn.execute("UPDATE quota_observations SET observed_at='2026-11-08T11:30:00Z' WHERE provider=?1 AND observed_at='2026-11-08T11:00:00Z'", [provider]).unwrap();
+            }
+            "codex_only" | "claude_only" => {
+                let provider = name.strip_suffix("_only").unwrap();
+                conn.execute(
+                    "DELETE FROM quota_observations WHERE provider != ?1",
+                    [provider],
+                )
+                .unwrap();
+            }
+            "none" => {
+                conn.execute("DELETE FROM quota_observations", []).unwrap();
+            }
+            "codex_same_provider_tie" | "claude_same_provider_tie" => {
+                let provider = name.strip_suffix("_same_provider_tie").unwrap();
+                let other = if provider == "codex" {
+                    "claude"
+                } else {
+                    "codex"
+                };
+                conn.execute("UPDATE quota_observations SET observed_at='2026-11-08T10:30:00Z' WHERE provider=?1 AND observed_at='2026-11-08T11:00:00Z'", [other]).unwrap();
+                conn.execute("INSERT INTO quota_observations(project,provider,cohort,pane_id,observed_at,precision,weekly_percent_left,reset_at,evidence_ref) VALUES('poolrad',?1,'weekly','%new','2026-11-08T11:00:00Z','second',33,'2026-11-15T00:00:00Z','fixture:tie:newest')", [provider]).unwrap();
+            }
+            "equal" => {}
+            _ => unreachable!(),
+        }
+        let result = ops_summary::summary(
+            &conn,
+            now,
+            &directory.path().join("absent-host"),
+            &directory.path().join("absent-opencode"),
+        )
+        .unwrap();
+        assert_eq!(
+            result["quota"], oracle["cases"][name]["quota"],
+            "quota case {name}"
+        );
+        assert_eq!(
+            result["quotas"], oracle["cases"][name]["quotas"],
+            "quotas case {name}"
+        );
+    }
+}

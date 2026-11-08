@@ -1,0 +1,271 @@
+{
+  "cases": {
+    "claude_newer": {
+      "quota": {
+        "age_s": 1800,
+        "burn_percentage_points_per_hour": 0.0,
+        "cohort": "weekly",
+        "evidence_ref": "fixture:quota:claude:2",
+        "observed_at": "2026-11-08T11:30:00Z",
+        "pane": "%202",
+        "precision": "minute",
+        "provider": "claude",
+        "reset_at": "2026-11-15T00:00:00Z",
+        "weekly_percent_left": 40.0
+      },
+      "quotas": {
+        "claude": {
+          "age_s": 1800,
+          "burn_percentage_points_per_hour": 0.0,
+          "cohort": "weekly",
+          "evidence_ref": "fixture:quota:claude:2",
+          "observed_at": "2026-11-08T11:30:00Z",
+          "pane": "%202",
+          "precision": "minute",
+          "provider": "claude",
+          "reset_at": "2026-11-15T00:00:00Z",
+          "weekly_percent_left": 40.0
+        },
+        "codex": {
+          "age_s": 3600,
+          "burn_percentage_points_per_hour": 2.0,
+          "cohort": "weekly",
+          "evidence_ref": "fixture:quota:codex:2",
+          "observed_at": "2026-11-08T11:00:00Z",
+          "pane": "%201",
+          "precision": "second",
+          "provider": "codex",
+          "reset_at": "2026-11-15T00:00:00Z",
+          "weekly_percent_left": 58.0
+        }
+      }
+    },
+    "claude_only": {
+      "quota": {
+        "age_s": 3600,
+        "burn_percentage_points_per_hour": 0.0,
+        "cohort": "weekly",
+        "evidence_ref": "fixture:quota:claude:2",
+        "observed_at": "2026-11-08T11:00:00Z",
+        "pane": "%202",
+        "precision": "minute",
+        "provider": "claude",
+        "reset_at": "2026-11-15T00:00:00Z",
+        "weekly_percent_left": 40.0
+      },
+      "quotas": {
+        "claude": {
+          "age_s": 3600,
+          "burn_percentage_points_per_hour": 0.0,
+          "cohort": "weekly",
+          "evidence_ref": "fixture:quota:claude:2",
+          "observed_at": "2026-11-08T11:00:00Z",
+          "pane": "%202",
+          "precision": "minute",
+          "provider": "claude",
+          "reset_at": "2026-11-15T00:00:00Z",
+          "weekly_percent_left": 40.0
+        },
+        "codex": null
+      }
+    },
+    "claude_same_provider_tie": {
+      "quota": {
+        "age_s": 3600,
+        "burn_percentage_points_per_hour": 7.0,
+        "cohort": "weekly",
+        "evidence_ref": "fixture:tie:newest",
+        "observed_at": "2026-11-08T11:00:00Z",
+        "pane": "%new",
+        "precision": "second",
+        "provider": "claude",
+        "reset_at": "2026-11-15T00:00:00Z",
+        "weekly_percent_left": 33.0
+      },
+      "quotas": {
+        "claude": {
+          "age_s": 3600,
+          "burn_percentage_points_per_hour": 7.0,
+          "cohort": "weekly",
+          "evidence_ref": "fixture:tie:newest",
+          "observed_at": "2026-11-08T11:00:00Z",
+          "pane": "%new",
+          "precision": "second",
+          "provider": "claude",
+          "reset_at": "2026-11-15T00:00:00Z",
+          "weekly_percent_left": 33.0
+        },
+        "codex": {
+          "age_s": 5400,
+          "burn_percentage_points_per_hour": 4.0,
+          "cohort": "weekly",
+          "evidence_ref": "fixture:quota:codex:2",
+          "observed_at": "2026-11-08T10:30:00Z",
+          "pane": "%201",
+          "precision": "second",
+          "provider": "codex",
+          "reset_at": "2026-11-15T00:00:00Z",
+          "weekly_percent_left": 58.0
+        }
+      }
+    },
+    "codex_newer": {
+      "quota": {
+        "age_s": 1800,
+        "burn_percentage_points_per_hour": 1.33,
+        "cohort": "weekly",
+        "evidence_ref": "fixture:quota:codex:2",
+        "observed_at": "2026-11-08T11:30:00Z",
+        "pane": "%201",
+        "precision": "second",
+        "provider": "codex",
+        "reset_at": "2026-11-15T00:00:00Z",
+        "weekly_percent_left": 58.0
+      },
+      "quotas": {
+        "claude": {
+          "age_s": 3600,
+          "burn_percentage_points_per_hour": 0.0,
+          "cohort": "weekly",
+          "evidence_ref": "fixture:quota:claude:2",
+          "observed_at": "2026-11-08T11:00:00Z",
+          "pane": "%202",
+          "precision": "minute",
+          "provider": "claude",
+          "reset_at": "2026-11-15T00:00:00Z",
+          "weekly_percent_left": 40.0
+        },
+        "codex": {
+          "age_s": 1800,
+          "burn_percentage_points_per_hour": 1.33,
+          "cohort": "weekly",
+          "evidence_ref": "fixture:quota:codex:2",
+          "observed_at": "2026-11-08T11:30:00Z",
+          "pane": "%201",
+          "precision": "second",
+          "provider": "codex",
+          "reset_at": "2026-11-15T00:00:00Z",
+          "weekly_percent_left": 58.0
+        }
+      }
+    },
+    "codex_only": {
+      "quota": {
+        "age_s": 3600,
+        "burn_percentage_points_per_hour": 2.0,
+        "cohort": "weekly",
+        "evidence_ref": "fixture:quota:codex:2",
+        "observed_at": "2026-11-08T11:00:00Z",
+        "pane": "%201",
+        "precision": "second",
+        "provider": "codex",
+        "reset_at": "2026-11-15T00:00:00Z",
+        "weekly_percent_left": 58.0
+      },
+      "quotas": {
+        "claude": null,
+        "codex": {
+          "age_s": 3600,
+          "burn_percentage_points_per_hour": 2.0,
+          "cohort": "weekly",
+          "evidence_ref": "fixture:quota:codex:2",
+          "observed_at": "2026-11-08T11:00:00Z",
+          "pane": "%201",
+          "precision": "second",
+          "provider": "codex",
+          "reset_at": "2026-11-15T00:00:00Z",
+          "weekly_percent_left": 58.0
+        }
+      }
+    },
+    "codex_same_provider_tie": {
+      "quota": {
+        "age_s": 3600,
+        "burn_percentage_points_per_hour": 27.0,
+        "cohort": "weekly",
+        "evidence_ref": "fixture:tie:newest",
+        "observed_at": "2026-11-08T11:00:00Z",
+        "pane": "%new",
+        "precision": "second",
+        "provider": "codex",
+        "reset_at": "2026-11-15T00:00:00Z",
+        "weekly_percent_left": 33.0
+      },
+      "quotas": {
+        "claude": {
+          "age_s": 5400,
+          "burn_percentage_points_per_hour": 0.0,
+          "cohort": "weekly",
+          "evidence_ref": "fixture:quota:claude:2",
+          "observed_at": "2026-11-08T10:30:00Z",
+          "pane": "%202",
+          "precision": "minute",
+          "provider": "claude",
+          "reset_at": "2026-11-15T00:00:00Z",
+          "weekly_percent_left": 40.0
+        },
+        "codex": {
+          "age_s": 3600,
+          "burn_percentage_points_per_hour": 27.0,
+          "cohort": "weekly",
+          "evidence_ref": "fixture:tie:newest",
+          "observed_at": "2026-11-08T11:00:00Z",
+          "pane": "%new",
+          "precision": "second",
+          "provider": "codex",
+          "reset_at": "2026-11-15T00:00:00Z",
+          "weekly_percent_left": 33.0
+        }
+      }
+    },
+    "equal": {
+      "quota": {
+        "age_s": 3600,
+        "burn_percentage_points_per_hour": 2.0,
+        "cohort": "weekly",
+        "evidence_ref": "fixture:quota:codex:2",
+        "observed_at": "2026-11-08T11:00:00Z",
+        "pane": "%201",
+        "precision": "second",
+        "provider": "codex",
+        "reset_at": "2026-11-15T00:00:00Z",
+        "weekly_percent_left": 58.0
+      },
+      "quotas": {
+        "claude": {
+          "age_s": 3600,
+          "burn_percentage_points_per_hour": 0.0,
+          "cohort": "weekly",
+          "evidence_ref": "fixture:quota:claude:2",
+          "observed_at": "2026-11-08T11:00:00Z",
+          "pane": "%202",
+          "precision": "minute",
+          "provider": "claude",
+          "reset_at": "2026-11-15T00:00:00Z",
+          "weekly_percent_left": 40.0
+        },
+        "codex": {
+          "age_s": 3600,
+          "burn_percentage_points_per_hour": 2.0,
+          "cohort": "weekly",
+          "evidence_ref": "fixture:quota:codex:2",
+          "observed_at": "2026-11-08T11:00:00Z",
+          "pane": "%201",
+          "precision": "second",
+          "provider": "codex",
+          "reset_at": "2026-11-15T00:00:00Z",
+          "weekly_percent_left": 58.0
+        }
+      }
+    },
+    "none": {
+      "quota": null,
+      "quotas": {
+        "claude": null,
+        "codex": null
+      }
+    }
+  },
+  "python": "3.14.4",
+  "reference_time": "2026-11-08T12:00:00+00:00"
+}
