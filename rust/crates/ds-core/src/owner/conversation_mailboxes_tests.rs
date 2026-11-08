@@ -207,3 +207,63 @@ fn agent_only_rows_stay_in_inbox_without_crowding_out_human_or_legacy_mail() {
         assert_eq!(store.get_message(&id).unwrap().summary.message_id, id);
     }
 }
+
+#[test]
+fn deleting_and_purging_mail_cleans_only_its_audience() {
+    let (_dir, _flock, store) = fixture("agent-only-retention");
+    let send = || {
+        store
+            .send_snapshot_wire_agent_only(
+                &Outgoing {
+                    mailbox: OWNER_LANE_MAILBOX,
+                    body: Some("private"),
+                    ..Outgoing::default()
+                },
+                None,
+                None,
+                true,
+            )
+            .unwrap()
+            .summary
+            .message_id
+    };
+    let deleted = send();
+    let purged = send();
+    let retained = send();
+    store.delete(std::slice::from_ref(&deleted)).unwrap();
+    store.ack(std::slice::from_ref(&purged), None).unwrap();
+    store.purge(Some(-1.0)).unwrap();
+    let db = rusqlite::Connection::open(store.path()).unwrap();
+    let mut stmt = db
+        .prepare("SELECT message_id FROM message_audiences")
+        .unwrap();
+    let ids: Vec<String> = stmt
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(ids, vec![retained]);
+}
+
+#[test]
+fn failed_audience_write_rolls_back_the_message() {
+    let (_dir, _flock, store) = fixture("agent-only-rollback");
+    let db = rusqlite::Connection::open(store.path()).unwrap();
+    db.execute_batch("CREATE TRIGGER fail_audience BEFORE INSERT ON message_audiences BEGIN SELECT RAISE(ABORT, 'test'); END;").unwrap();
+    assert!(store
+        .send_snapshot_wire_agent_only(
+            &Outgoing {
+                mailbox: OWNER_LANE_MAILBOX,
+                body: Some("private"),
+                ..Outgoing::default()
+            },
+            None,
+            None,
+            true,
+        )
+        .is_err());
+    let count: i64 = db
+        .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(count, 0);
+}

@@ -1034,6 +1034,8 @@ impl Store {
                 for id in &ids {
                     tx.execute("DELETE FROM attachments WHERE message_id = ?", [id])
                         .map_err(map_sqlite)?;
+                    tx.execute("DELETE FROM message_audiences WHERE message_id = ?", [id])
+                        .map_err(map_sqlite)?;
                     tx.execute("DELETE FROM messages WHERE id = ?", [id])
                         .map_err(map_sqlite)?;
                 }
@@ -1347,6 +1349,8 @@ impl Store {
             }
             for id in &doomed {
                 tx.execute("DELETE FROM attachments WHERE message_id = ?", [id])
+                    .map_err(map_sqlite)?;
+                tx.execute("DELETE FROM message_audiences WHERE message_id = ?", [id])
                     .map_err(map_sqlite)?;
                 tx.execute("DELETE FROM messages WHERE id = ?", [id])
                     .map_err(map_sqlite)?;

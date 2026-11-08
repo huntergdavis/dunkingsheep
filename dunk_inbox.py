@@ -896,7 +896,7 @@ class Inbox:
         if not ids:
             raise InboxError("at least one message id is required")
         changed, skipped = [], []
-        with self._lock:
+        with self._lock, self.db:
             for message_id in ids:
                 row = self.db.execute(
                     "SELECT state, mailbox FROM messages WHERE id = ?", (message_id,)).fetchone()
@@ -938,8 +938,9 @@ class Inbox:
                     raise InboxError(f"no message with id {message_id!r}")
             self.db.executemany("DELETE FROM attachments WHERE message_id = ?",
                                 [(i,) for i in ids])
+            self.db.executemany("DELETE FROM message_audiences WHERE message_id = ?",
+                                [(i,) for i in ids])
             self.db.executemany("DELETE FROM messages WHERE id = ?", [(i,) for i in ids])
-            self.db.commit()
         self._collect_blobs()
         return {"deleted": ids}
 
@@ -947,7 +948,7 @@ class Inbox:
         """Drop read, acknowledged and cancelled mail past its retention.
         Unread mail is never purged by age."""
         cutoff = _now() - (self.retention_s if older_than_s is None else older_than_s)
-        with self._lock:
+        with self._lock, self.db:
             rows = self.db.execute(
                 "SELECT id FROM messages WHERE state != 'queued' AND "
                 "COALESCE(acked_at, cancelled_at, read_at, archived_at, created_at) < ?",
@@ -956,9 +957,10 @@ class Inbox:
             if ids:
                 self.db.executemany("DELETE FROM attachments WHERE message_id = ?",
                                     [(i,) for i in ids])
+                self.db.executemany("DELETE FROM message_audiences WHERE message_id = ?",
+                                    [(i,) for i in ids])
                 self.db.executemany("DELETE FROM messages WHERE id = ?",
                                     [(i,) for i in ids])
-                self.db.commit()
         if ids:
             self._collect_blobs()
         return {"purged": len(ids)}

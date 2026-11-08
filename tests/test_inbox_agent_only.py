@@ -66,3 +66,18 @@ class AgentOnlyTests(unittest.TestCase):
         flock = Mock()
         dunk_api.h_inbox_send_agent_only(flock, {'to': 'lane', 'body': 'text', 'agent_only': False}, '%1')
         self.assertIs(flock.inbox_send.call_args.kwargs['agent_only'], True)
+
+    def test_delete_and_purge_remove_only_their_audience_rows(self):
+        from dunk_inbox import Inbox
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = Inbox(path=str(root / 'inbox.db'), blob_dir=str(root / 'blobs'))
+            deleted = store.send('agent', 'delete', agent_only=True)['message_id']
+            purged = store.send('agent', 'purge', agent_only=True)['message_id']
+            retained = store.send('agent', 'unread', agent_only=True)['message_id']
+            store.delete([deleted])
+            store.ack([purged])
+            store.purge(older_than_s=-1)
+            rows = store.db.execute('SELECT message_id FROM message_audiences').fetchall()
+            self.assertEqual([row[0] for row in rows], [retained])
+            store.db.close()
