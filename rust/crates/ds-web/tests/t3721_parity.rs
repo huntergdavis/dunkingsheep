@@ -43,7 +43,8 @@
 //!   correct-password chain of changes across the encodings runs last on scratch state (`chain_*`). Odd or
 //!   truncated units and out-of-range code points are 400 "There was an error parsing the body", as in Python.
 //!   Decoder-wording (`enc_utf16le_bom_only`) and redaction (`enc_text_plain_*`) differences are listed under
-//!   owner i50225. `PENDING_DISPOSITION` holds the two lone-surrogate cases (Python 500), undecided.
+//!   owner i50225. The two lone-surrogate and CESU cases (Python 500, a defect) are intentional differences
+//!   under owner decision i50662, each pinning Rust's clean 422 response. `PENDING_DISPOSITION` is empty.
 //!
 //! NOT covered here: the ops-board answer success path (it needs a live or scratch daemon with an
 //! owner-issued token), the ops-metrics refresh owner path (it calls `gh` and reads host state),
@@ -246,25 +247,24 @@ const INTENTIONAL_DIFFERENCES: &[Gap] = &[
         rust_status: 422,
         rust_body: r#"{"detail":[{"input":"[redacted]","loc":["body"],"msg":"Input should be a valid dictionary or object to extract fields from","type":"model_attributes_type"}]}"#,
     },
-];
-
-/// Measured differences with NO owner decision (t3724 R3). Visible, not accepted, not waived. Each pins
-/// the exact Rust response measured on the head, so a change in either direction fails the test. The
-/// coordinator routes them to policy; none is implemented here (no scanner, no copy of Python's 500).
-const PENDING_DISPOSITION: &[Gap] = &[
     Gap {
         name: "enc_utf16le_lone_surrogate",
-        reason: "measured (i50587 encoding fix), undecided: a lone UTF-16 surrogate code unit reaches Python's password comparison and Python answers 500 Internal Server Error. Rust cannot hold a lone surrogate in a string and answers 422 json_invalid. A 500 is not copied; the owner decides.",
+        reason: "owner decision i50662 (intentional difference): a UTF-16 body with a lone surrogate code unit. Python answers 500 Internal Server Error (its password comparison cannot encode the surrogate; the 500 is a defect). Rust answers a clean 422 application/json json_invalid (the surrogate is refused at decode). The 500 is not copied.",
         rust_status: 422,
         rust_body: r#"{"detail":[{"ctx":{"error":"lone surrogate in the body"},"input":{},"loc":["body",0],"msg":"JSON decode error","type":"json_invalid"}]}"#,
     },
     Gap {
         name: "enc_cesu_surrogate_utf8",
-        reason: "measured (i50587 encoding fix), undecided: CESU-style surrogate bytes (ED A0 80) in a UTF-8 body. Python decodes with surrogatepass and answers 500 Internal Server Error. Rust refuses invalid UTF-8 as json_invalid 422 (the accepted invalid-UTF-8 family); the 500 is not copied.",
+        reason: "owner decision i50662 (intentional difference): CESU-style surrogate bytes (ED A0 80) in a UTF-8 body. Python answers 500 Internal Server Error (surrogatepass decode, then the same comparison failure; a defect). Rust answers a clean 422 application/json json_invalid (invalid UTF-8, the accepted invalid-UTF-8 family). The 500 is not copied.",
         rust_status: 422,
         rust_body: r#"{"detail":[{"ctx":{"error":"invalid unicode code point at line 1 column 23"},"input":{},"loc":["body",0],"msg":"JSON decode error","type":"json_invalid"}]}"#,
     },
 ];
+
+/// Measured differences with NO owner decision (t3724 R3). Visible, not accepted, not waived. Each pins
+/// the exact Rust response measured on the head, so a change in either direction fails the test. The
+/// coordinator routes them to policy; none is implemented here (no scanner, no copy of Python's 500).
+const PENDING_DISPOSITION: &[Gap] = &[];
 
 fn open_operations_db(path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
