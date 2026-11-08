@@ -33,9 +33,12 @@
 //!   `ct_*` cases replay that matrix; `ct_empty_text_plain` matches Python's `missing`.
 //! - t3724 R2 (fixed): the missing-field error redacts the whole submitted object (any key), not only
 //!   the two named keys. The sentinel unit test covers unknown keys.
-//! - t3724 R3 (measured, NOT accepted): `PENDING_DISPOSITION` pins the exact Rust response for each
-//!   malformed-input case that differs from Python, with no owner decision. The BOM case is functional
-//!   (Python accepts it). None is waived; the coordinator routes them to policy.
+//! - t3724 R3 (owner i50493): six malformed-input cases (invalid UTF-8, a 5,000-digit integer, a lone
+//!   surrogate, +/-Infinity, 2,000-deep nesting) are recorded intentional differences with the owner's
+//!   provenance, each pinning the exact Rust response. The UTF-8 BOM was functional and is FIXED: Rust
+//!   drops the BOM before parsing, as Python does, and the correct-password BOM body changes the password
+//!   on scratch state (`password_bom_correct_password`, then the two login probes). `PENDING_DISPOSITION`
+//!   is empty.
 //!
 //! NOT covered here: the ops-board answer success path (it needs a live or scratch daemon with an
 //! owner-issued token), the ops-metrics refresh owner path (it calls `gh` and reads host state),
@@ -184,55 +187,48 @@ const INTENTIONAL_DIFFERENCES: &[Gap] = &[
         rust_status: 422,
         rust_body: r#"{"detail":[{"input":"[redacted]","loc":["body"],"msg":"Input should be a valid dictionary or object to extract fields from","type":"model_attributes_type"}]}"#,
     },
-];
-
-/// Measured differences with NO owner decision (t3724 R3). Visible, not accepted, not waived. Each pins
-/// the exact Rust response measured on the head, so a change in either direction fails the test. The
-/// coordinator routes them to policy; none is implemented here (no scanner, no copy of Python's 500).
-const PENDING_DISPOSITION: &[Gap] = &[
     Gap {
         name: "rv_invalid_utf8",
-        reason: "measured (t3724 R3), undecided: Python answers 400 'There was an error parsing the body' for a body that is not valid UTF-8. Rust answers 422 json_invalid (serde's text).",
+        reason: "owner decision i50493 (t3724 R3, accepted as a recorded intentional difference): a body that is not valid UTF-8 is refused by Rust as json_invalid (422). Python answers 400 'There was an error parsing the body'. status, content type and envelope of the decoder case are not claimed to match.",
         rust_status: 422,
         rust_body: r#"{"detail":[{"ctx":{"error":"invalid unicode code point at line 1 column 23"},"input":{},"loc":["body",0],"msg":"JSON decode error","type":"json_invalid"}]}"#,
     },
     Gap {
         name: "rv_huge_integer",
-        reason: "measured (t3724 R3), undecided: Python answers 400 'There was an error parsing the body' for a 5,000-digit integer (its digit limit). Rust parses it and answers 422 string_type with the value redacted.",
+        reason: "owner decision i50493 (t3724 R3, accepted as a recorded intentional difference): a 5,000-digit integer is parsed by Rust and refused as string_type with the value redacted (422). Python answers 400 'There was an error parsing the body' (its digit limit).",
         rust_status: 422,
         rust_body: r#"{"detail":[{"input":"[redacted]","loc":["body","current_password"],"msg":"Input should be a valid string","type":"string_type"}]}"#,
     },
     Gap {
-        name: "rv_bom",
-        reason: "measured (t3724 R3), undecided, FUNCTIONAL: Python parses a body with a UTF-8 BOM and reaches the password check (403 for a wrong password, so a correct one would be accepted). Rust refuses the BOM as json_invalid (422), so a BOM-prefixed body that Python accepts is refused by Rust.",
-        rust_status: 422,
-        rust_body: r#"{"detail":[{"ctx":{"error":"expected value at line 1 column 1"},"input":{},"loc":["body",0],"msg":"JSON decode error","type":"json_invalid"}]}"#,
-    },
-    Gap {
         name: "rv_lone_surrogate",
-        reason: "measured (t3724 R3), undecided: Python answers 500 Internal Server Error for a lone surrogate escape in the password. Rust answers 422 json_invalid (serde's text). A 500 is not copied.",
+        reason: "owner decision i50493 (t3724 R3, accepted as a recorded intentional difference): a lone surrogate escape is refused by Rust as json_invalid (422). Python answers 500 Internal Server Error; a 500 is not copied.",
         rust_status: 422,
         rust_body: r#"{"detail":[{"ctx":{"error":"unexpected end of hex escape at line 1 column 29"},"input":{},"loc":["body",0],"msg":"JSON decode error","type":"json_invalid"}]}"#,
     },
     Gap {
         name: "rv_infinity",
-        reason: "measured (t3724 R3), undecided: Python answers 500 for Infinity (json.loads accepts it, as with NaN). Rust answers 422 json_invalid, as for NaN.",
+        reason: "owner decision i50493 (t3724 R3, accepted as a recorded intentional difference): Rust refuses Infinity as json_invalid (422), as it does NaN. Python answers 500 Internal Server Error; a 500 is not copied.",
         rust_status: 422,
         rust_body: r#"{"detail":[{"ctx":{"error":"expected value at line 1 column 22"},"input":{},"loc":["body",0],"msg":"JSON decode error","type":"json_invalid"}]}"#,
     },
     Gap {
         name: "rv_neg_infinity",
-        reason: "measured (t3724 R3), undecided: Python answers 500 for -Infinity. Rust answers 422 json_invalid.",
+        reason: "owner decision i50493 (t3724 R3, accepted as a recorded intentional difference): Rust refuses -Infinity as json_invalid (422). Python answers 500 Internal Server Error; a 500 is not copied.",
         rust_status: 422,
         rust_body: r#"{"detail":[{"ctx":{"error":"invalid number at line 1 column 23"},"input":{},"loc":["body",0],"msg":"JSON decode error","type":"json_invalid"}]}"#,
     },
     Gap {
         name: "rv_deep_nesting",
-        reason: "measured (t3724 R3), undecided: Python answers 500 for 2,000 levels of nesting. Rust answers 422 json_invalid (serde's recursion limit).",
+        reason: "owner decision i50493 (t3724 R3, accepted as a recorded intentional difference): 2,000 levels of nesting are refused by Rust as json_invalid (422, serde's recursion limit). Python answers 500 Internal Server Error; a 500 is not copied.",
         rust_status: 422,
         rust_body: r#"{"detail":[{"ctx":{"error":"recursion limit exceeded at line 1 column 636"},"input":{},"loc":["body",0],"msg":"JSON decode error","type":"json_invalid"}]}"#,
     },
 ];
+
+/// Measured differences with NO owner decision (t3724 R3). Visible, not accepted, not waived. Each pins
+/// the exact Rust response measured on the head, so a change in either direction fails the test. The
+/// coordinator routes them to policy; none is implemented here (no scanner, no copy of Python's 500).
+const PENDING_DISPOSITION: &[Gap] = &[];
 
 fn open_operations_db(path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
@@ -702,6 +698,20 @@ fn the_composed_desk_matches_the_python_desk_for_viewport_password_answer_and_re
         // Ops-metrics refresh: the auth gate only (the owner path calls gh and reads host state).
         let refresh = send(&router, request(Method::POST, "/api/ops-metrics/refresh"), Body::empty()).await;
         check("metrics_refresh_no_cookie", &refresh);
+
+        // Correct-password BOM body (t3725, owner i50493). It changes the password, so it runs last; the
+        // two logins after it show the change on scratch state.
+        let bom_new = "t3721-bom-scratch";
+        let mut bom_body = vec![0xef, 0xbb, 0xbf];
+        bom_body.extend_from_slice(
+            json!({"current_password": NEW_PASSWORD, "new_password": bom_new})
+                .to_string()
+                .as_bytes(),
+        );
+        let (b, _) = change(json!({}), Some(&owner_cookie_header), None);
+        check("password_bom_correct_password", &send(&router, b, Body::from(bom_body)).await);
+        check("password_bom_login_new", &login(&router, bom_new).await);
+        check("password_bom_login_previous", &login(&router, NEW_PASSWORD).await);
 
         // Known gaps must be exactly the divergent cases, no more and no fewer.
         let mut expected: Vec<&str> = KNOWN_GAPS.iter().map(|gap| gap.name).collect();

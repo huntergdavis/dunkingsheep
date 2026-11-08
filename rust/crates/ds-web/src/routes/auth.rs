@@ -281,6 +281,10 @@ fn password_body(raw: &[u8], json_content: bool) -> Result<PasswordBody, Box<Res
             "type": "model_attributes_type",
         })])));
     }
+    // Python decodes a body that starts with a UTF-8 byte order mark as UTF-8 with the BOM dropped
+    // (t3725, owner i50493): the BOM is not part of the JSON.
+    const UTF8_BOM: &[u8] = &[0xef, 0xbb, 0xbf];
+    let raw = raw.strip_prefix(UTF8_BOM).unwrap_or(raw);
     let value: Value = serde_json::from_slice(raw).map_err(|error| {
         Box::new(validation_detail(vec![json!({
             "ctx": {"error": error.to_string()},
@@ -567,6 +571,25 @@ mod tests {
             serde_json::from_str::<Value>(&text).unwrap(),
             json!({"detail": [{"input": "[redacted]", "loc": ["body"], "msg": "Input should be a valid dictionary or object to extract fields from", "type": "model_attributes_type"}]}),
         );
+    }
+
+    /// t3725 (owner i50493): a UTF-8 BOM is dropped before the JSON is read, as Python does, so a
+    /// BOM-prefixed body parses to the same password fields as the same body without the BOM.
+    #[test]
+    fn password_body_accepts_a_utf8_bom_as_python_does() {
+        let plain = br#"{"current_password":"old-password-x","new_password":"a sufficiently long password"}"#;
+        let mut bom = vec![0xef, 0xbb, 0xbf];
+        bom.extend_from_slice(plain);
+        let with_bom = match password_body(&bom, true) {
+            Ok(body) => body,
+            Err(_) => panic!("a BOM-prefixed body must parse"),
+        };
+        let without = match password_body(plain, true) {
+            Ok(body) => body,
+            Err(_) => panic!("the plain body must parse"),
+        };
+        assert_eq!(with_bom.current_password, without.current_password);
+        assert_eq!(with_bom.new_password, without.new_password);
     }
 
     #[test]

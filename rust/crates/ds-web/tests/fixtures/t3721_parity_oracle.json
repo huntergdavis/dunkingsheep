@@ -709,6 +709,31 @@
       "content_type": "application/json",
       "name": "metrics_refresh_no_cookie",
       "status": 401
+    },
+    {
+      "body": {
+        "ok": true
+      },
+      "content_type": "application/json",
+      "name": "password_bom_correct_password",
+      "status": 200
+    },
+    {
+      "body": {
+        "next": "/dash/cos",
+        "ok": true
+      },
+      "content_type": "application/json",
+      "name": "password_bom_login_new",
+      "status": 200
+    },
+    {
+      "body": {
+        "detail": "Incorrect password"
+      },
+      "content_type": "application/json",
+      "name": "password_bom_login_previous",
+      "status": 401
     }
   ],
   "oracle": {
