@@ -153,6 +153,12 @@ async fn parity_pid_bound_pi_reviewer_is_fed_a_review_not_work() {
 
     let work = tasks.add("global", "ordinary work", "").await.unwrap();
     let review = file_review(&tasks, "review the pid-bound pi lane").await;
+    // Owner decision on t3554: only a subscriber is a target, so the lane subscribes first.
+    flock
+        .task_waiters
+        .lock()
+        .unwrap()
+        .insert("w2:p2".into(), "global".into());
     flock.push_tasks(&env).await;
 
     assert_eq!(

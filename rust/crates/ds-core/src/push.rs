@@ -6,7 +6,7 @@
 //! function over the values the method reads from `self` (inbox rows, the process
 //! table, the role registry). The Flock port wires these to the real stores.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 /// `BUSY_STATUSES`: an agent in one of these is never fed.
 pub const BUSY_STATUSES: [&str; 2] = ["working", "blocked"];
@@ -112,38 +112,19 @@ pub fn lane_agent_alive(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Via {
     Follower,
-    Registered,
 }
 
-/// `_push_targets`: pane id -> (scope, why): explicit followers plus registered lanes.
+/// `_push_targets`: pane id -> (scope, why): the explicit followers only.
 ///
-/// `followers` is `task_waiters` (pane -> scope). `lanes` is the registry's lane panes, or
-/// `None` when the registry is unavailable (followers only). `role_of` is `caller_role`:
-/// the RESOLVED role, not the registry string (t975: a reused pane id must not become a
-/// target). Only `worker` and `reviewer` pull work; a desk/planner/owner pane never does.
-pub fn push_targets(
-    followers: &BTreeMap<String, String>,
-    lanes: Option<&BTreeSet<String>>,
-    role_of: impl Fn(&str) -> String,
-) -> BTreeMap<String, (String, Via)> {
-    let mut targets: BTreeMap<String, (String, Via)> = followers
+/// A pane is fed when it subscribed (`task follow`, or an unclaimed `task next`) or when it
+/// claimed work (commands_tasks subscribes the claimant). A registered lane that did neither is
+/// never pushed, so reading mail never hands it a task. This replaces the Python rule that fed every
+/// registered worker and reviewer (owner decision on t3554, 2026-11-07).
+pub fn push_targets(followers: &BTreeMap<String, String>) -> BTreeMap<String, (String, Via)> {
+    followers
         .iter()
         .map(|(pane, scope)| (pane.clone(), (scope.clone(), Via::Follower)))
-        .collect();
-    let Some(lanes) = lanes else {
-        return targets;
-    };
-    for pane in lanes {
-        if targets.contains_key(pane) {
-            continue;
-        }
-        let role = role_of(pane);
-        if role != "worker" && role != "reviewer" {
-            continue;
-        }
-        targets.insert(pane.clone(), (TASK_GLOBAL.to_string(), Via::Registered));
-    }
-    targets
+        .collect()
 }
 
 #[cfg(test)]

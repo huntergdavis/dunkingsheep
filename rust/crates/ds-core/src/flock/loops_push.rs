@@ -112,41 +112,21 @@ impl Flock {
         self.push_wake.notify_one();
     }
 
-    /// `_push_targets`: pane id -> (scope, why): explicit followers plus registered lanes.
+    /// `_push_targets`: pane id -> (scope, why): the subscribers and the claimants (push_targets).
     pub async fn push_target_map(
         &self,
-        env: &dyn PushEnv,
+        _env: &dyn PushEnv,
     ) -> std::collections::BTreeMap<String, (String, Via)> {
-        let panes = env
-            .list_panes()
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|pane| {
-                let id = pane
-                    .get("pane_id")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)?;
-                Some((id, pane))
-            })
-            .collect();
-        self.push_target_map_with_panes(env, &panes)
+        self.push_target_map_with_panes()
     }
 
-    fn push_target_map_with_panes(
-        &self,
-        env: &dyn PushEnv,
-        panes: &std::collections::BTreeMap<String, Value>,
-    ) -> std::collections::BTreeMap<String, (String, Via)> {
+    fn push_target_map_with_panes(&self) -> std::collections::BTreeMap<String, (String, Via)> {
         let followers = self
             .task_waiters
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
-        let lanes = env.registered_lanes();
-        push_targets(&followers, lanes.as_ref(), |pane| {
-            env.caller_role(pane, panes.get(pane))
-        })
+        push_targets(&followers)
     }
 
     /// `_may_pull_everything`: true when this pane's role may pull any kind (the owner), or a
@@ -183,7 +163,7 @@ impl Flock {
                 return decisions;
             }
         };
-        let targets = self.push_target_map_with_panes(env, &panes);
+        let targets = self.push_target_map_with_panes();
         if targets.is_empty() {
             return decisions;
         }
@@ -202,7 +182,6 @@ impl Flock {
         for (pane_id, (scope, via)) in &targets {
             let why = match via {
                 Via::Follower => "follower",
-                Via::Registered => "registered",
             };
             let Some(pane) = panes.get(pane_id) else {
                 note(pane_id, "skip", "pane_gone".into());

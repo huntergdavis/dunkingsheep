@@ -646,9 +646,7 @@ mod tests {
             DEFAULT_ROLE
         );
         let followers = std::collections::BTreeMap::from([("%follow".into(), "global".into())]);
-        let targets = crate::push::push_targets(&followers, None, |_| {
-            panic!("unavailable registry must not discover registered lanes")
-        });
+        let targets = crate::push::push_targets(&followers);
         assert_eq!(targets.len(), 1);
         assert!(targets.contains_key("%follow"));
     }

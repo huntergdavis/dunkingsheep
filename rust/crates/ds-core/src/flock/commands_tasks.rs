@@ -532,6 +532,11 @@ impl Flock {
                 )
                 .await?;
             if matches!(local, ClaimOutcome::Claimed { .. }) {
+                // A claimant is subscribed (t3554): it is fed the next task when it is idle.
+                self.task_waiters
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .insert(pane.to_string(), pane.to_string());
                 return Ok((local, false));
             }
         }
@@ -557,6 +562,12 @@ impl Flock {
                     .insert(pane.to_string(), follow_scope);
                 following = true;
             }
+        } else if let Some(pane) = pane {
+            // A claimant is subscribed too (t3554): it is fed the next task when it is idle.
+            self.task_waiters
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(pane.to_string(), target.clone());
         }
         Ok((outcome, following))
     }
