@@ -164,6 +164,29 @@ record("password_empty_body", owner.post("/api/password", content=b"", headers={
 # serialise the NaN input). Recorded as the server answered it; a decision is pending (t3722).
 record("password_nan_body", owner.post("/api/password", content=b'{"current_password": NaN, "new_password": "x"}', headers={"content-type": "application/json"}))
 
+# Content-type cases (t3722 R1). FastAPI decodes the body as JSON only for application/json or an
+# application/*+json type; any other type reaches the model as raw bytes. Every body here carries a
+# wrong current password, so none can change state even where the body is accepted.
+WRONG_BODY = json.dumps({"current_password": "not-the-password", "new_password": NEW_PASSWORD}).encode()
+record("ct_text_plain", owner.post("/api/password", content=WRONG_BODY, headers={"content-type": "text/plain"}))
+record("ct_no_content_type", owner.post("/api/password", content=WRONG_BODY))
+record("ct_form_urlencoded", owner.post("/api/password", content=WRONG_BODY, headers={"content-type": "application/x-www-form-urlencoded"}))
+record("ct_multipart", owner.post("/api/password", content=WRONG_BODY, headers={"content-type": "multipart/form-data; boundary=x"}))
+record("ct_json_charset", owner.post("/api/password", content=WRONG_BODY, headers={"content-type": "application/json; charset=utf-8"}))
+record("ct_vnd_json", owner.post("/api/password", content=WRONG_BODY, headers={"content-type": "application/vnd.api+json"}))
+record("ct_text_json", owner.post("/api/password", content=WRONG_BODY, headers={"content-type": "text/json"}))
+record("ct_empty_text_plain", owner.post("/api/password", content=b"", headers={"content-type": "text/plain"}))
+
+# Malformed-input matrix (t3722 R3): measured on the pinned Python desk, recorded as the server answered.
+JSON_HEADERS = {"content-type": "application/json"}
+record("rv_invalid_utf8", owner.post("/api/password", content=b'{"current_password": "\xff", "new_password": "' + NEW_PASSWORD.encode() + b'"}', headers=JSON_HEADERS))
+record("rv_huge_integer", owner.post("/api/password", content=('{"current_password": ' + "1" * 5000 + ', "new_password": "' + NEW_PASSWORD + '"}').encode(), headers=JSON_HEADERS))
+record("rv_bom", owner.post("/api/password", content=b"\xef\xbb\xbf" + WRONG_BODY, headers=JSON_HEADERS))
+record("rv_lone_surrogate", owner.post("/api/password", content=b'{"current_password": "\\ud800", "new_password": "' + NEW_PASSWORD.encode() + b'"}', headers=JSON_HEADERS))
+record("rv_infinity", owner.post("/api/password", content=b'{"current_password": Infinity, "new_password": "' + NEW_PASSWORD.encode() + b'"}', headers=JSON_HEADERS))
+record("rv_neg_infinity", owner.post("/api/password", content=b'{"current_password": -Infinity, "new_password": "' + NEW_PASSWORD.encode() + b'"}', headers=JSON_HEADERS))
+record("rv_deep_nesting", owner.post("/api/password", content=('{"a":' * 2000 + "1" + "}" * 2000).encode(), headers=JSON_HEADERS))
+
 api_token = desk._auth_record()["token"]  # scratch token, read in-process, never written to the oracle
 record("password_api_identity_invalid_body", anon().post("/api/password", json={"current_password": PASSWORD, "new_password": "short"},
                                                          headers={"authorization": f"Bearer {api_token}"}))

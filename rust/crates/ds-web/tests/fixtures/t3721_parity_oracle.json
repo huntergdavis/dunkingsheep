@@ -383,6 +383,180 @@
       "body": {
         "detail": [
           {
+            "input": "{\"current_password\": \"not-the-password\", \"new_password\": \"t3721-changed-scratch\"}",
+            "loc": [
+              "body"
+            ],
+            "msg": "Input should be a valid dictionary or object to extract fields from",
+            "type": "model_attributes_type"
+          }
+        ]
+      },
+      "content_type": "application/json",
+      "name": "ct_text_plain",
+      "status": 422
+    },
+    {
+      "body": {
+        "detail": [
+          {
+            "input": "{\"current_password\": \"not-the-password\", \"new_password\": \"t3721-changed-scratch\"}",
+            "loc": [
+              "body"
+            ],
+            "msg": "Input should be a valid dictionary or object to extract fields from",
+            "type": "model_attributes_type"
+          }
+        ]
+      },
+      "content_type": "application/json",
+      "name": "ct_no_content_type",
+      "status": 422
+    },
+    {
+      "body": {
+        "detail": [
+          {
+            "input": "{\"current_password\": \"not-the-password\", \"new_password\": \"t3721-changed-scratch\"}",
+            "loc": [
+              "body"
+            ],
+            "msg": "Input should be a valid dictionary or object to extract fields from",
+            "type": "model_attributes_type"
+          }
+        ]
+      },
+      "content_type": "application/json",
+      "name": "ct_form_urlencoded",
+      "status": 422
+    },
+    {
+      "body": {
+        "detail": [
+          {
+            "input": "{\"current_password\": \"not-the-password\", \"new_password\": \"t3721-changed-scratch\"}",
+            "loc": [
+              "body"
+            ],
+            "msg": "Input should be a valid dictionary or object to extract fields from",
+            "type": "model_attributes_type"
+          }
+        ]
+      },
+      "content_type": "application/json",
+      "name": "ct_multipart",
+      "status": 422
+    },
+    {
+      "body": {
+        "detail": "Current password is incorrect"
+      },
+      "content_type": "application/json",
+      "name": "ct_json_charset",
+      "status": 403
+    },
+    {
+      "body": {
+        "detail": "Current password is incorrect"
+      },
+      "content_type": "application/json",
+      "name": "ct_vnd_json",
+      "status": 403
+    },
+    {
+      "body": {
+        "detail": [
+          {
+            "input": "{\"current_password\": \"not-the-password\", \"new_password\": \"t3721-changed-scratch\"}",
+            "loc": [
+              "body"
+            ],
+            "msg": "Input should be a valid dictionary or object to extract fields from",
+            "type": "model_attributes_type"
+          }
+        ]
+      },
+      "content_type": "application/json",
+      "name": "ct_text_json",
+      "status": 422
+    },
+    {
+      "body": {
+        "detail": [
+          {
+            "input": null,
+            "loc": [
+              "body"
+            ],
+            "msg": "Field required",
+            "type": "missing"
+          }
+        ]
+      },
+      "content_type": "application/json",
+      "name": "ct_empty_text_plain",
+      "status": 422
+    },
+    {
+      "body": {
+        "detail": "There was an error parsing the body"
+      },
+      "content_type": "application/json",
+      "name": "rv_invalid_utf8",
+      "status": 400
+    },
+    {
+      "body": {
+        "detail": "There was an error parsing the body"
+      },
+      "content_type": "application/json",
+      "name": "rv_huge_integer",
+      "status": 400
+    },
+    {
+      "body": {
+        "detail": "Current password is incorrect"
+      },
+      "content_type": "application/json",
+      "name": "rv_bom",
+      "status": 403
+    },
+    {
+      "body": {
+        "text": "Internal Server Error"
+      },
+      "content_type": "text/plain; charset=utf-8",
+      "name": "rv_lone_surrogate",
+      "status": 500
+    },
+    {
+      "body": {
+        "text": "Internal Server Error"
+      },
+      "content_type": "text/plain; charset=utf-8",
+      "name": "rv_infinity",
+      "status": 500
+    },
+    {
+      "body": {
+        "text": "Internal Server Error"
+      },
+      "content_type": "text/plain; charset=utf-8",
+      "name": "rv_neg_infinity",
+      "status": 500
+    },
+    {
+      "body": {
+        "text": "Internal Server Error"
+      },
+      "content_type": "text/plain; charset=utf-8",
+      "name": "rv_deep_nesting",
+      "status": 500
+    },
+    {
+      "body": {
+        "detail": [
+          {
             "ctx": {
               "min_length": 12
             },

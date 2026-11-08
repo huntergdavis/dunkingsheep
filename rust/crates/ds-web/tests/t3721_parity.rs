@@ -28,6 +28,14 @@
 //!   checks that scratch sentinel passwords never come back. i50225 also allows the decoder wording
 //!   difference (`password_not_json`) and the NaN 422 (`password_nan_body`) as intentional differences,
 //!   provided status, content type and envelope match. No scanner port and no copy of Python's 500.
+//! - t3724 R1 (fixed): FastAPI decodes a body as JSON only for `application/json` or `application/*+json`.
+//!   Any other content type, or none, is refused as a model error with the body redacted. The
+//!   `ct_*` cases replay that matrix; `ct_empty_text_plain` matches Python's `missing`.
+//! - t3724 R2 (fixed): the missing-field error redacts the whole submitted object (any key), not only
+//!   the two named keys. The sentinel unit test covers unknown keys.
+//! - t3724 R3 (measured, NOT accepted): `PENDING_DISPOSITION` pins the exact Rust response for each
+//!   malformed-input case that differs from Python, with no owner decision. The BOM case is functional
+//!   (Python accepts it). None is waived; the coordinator routes them to policy.
 //!
 //! NOT covered here: the ops-board answer success path (it needs a live or scratch daemon with an
 //! owner-issued token), the ops-metrics refresh owner path (it calls `gh` and reads host state),
@@ -118,9 +126,39 @@ const INTENTIONAL_DIFFERENCES: &[Gap] = &[
     },
     Gap {
         name: "password_missing_current",
-        reason: "owner decision i50225: the missing-field error redacts the submitted new password in `input` (Python echoes the whole body). Everything else matches the pinned Python 422.",
+        reason: "owner decision i50225 and t3724 R2: the missing-field error redacts the whole submitted object in `input` (Python echoes it, so a password under any key would show). Everything else matches the pinned Python 422.",
         rust_status: 422,
-        rust_body: r#"{"detail":[{"input":{"new_password":"[redacted]"},"loc":["body","current_password"],"msg":"Field required","type":"missing"}]}"#,
+        rust_body: r#"{"detail":[{"input":"[redacted]","loc":["body","current_password"],"msg":"Field required","type":"missing"}]}"#,
+    },
+    Gap {
+        name: "ct_text_plain",
+        reason: "t3724 R1 with owner decision i50225: a body that is not declared JSON is never parsed (Python 422 model_attributes_type); its `input` echoes the body, which Rust redacts. type, loc and msg match.",
+        rust_status: 422,
+        rust_body: r#"{"detail":[{"input":"[redacted]","loc":["body"],"msg":"Input should be a valid dictionary or object to extract fields from","type":"model_attributes_type"}]}"#,
+    },
+    Gap {
+        name: "ct_no_content_type",
+        reason: "t3724 R1 with owner decision i50225: no content type means the body is not parsed (Python 422 model_attributes_type); `input` is redacted in Rust. type, loc and msg match.",
+        rust_status: 422,
+        rust_body: r#"{"detail":[{"input":"[redacted]","loc":["body"],"msg":"Input should be a valid dictionary or object to extract fields from","type":"model_attributes_type"}]}"#,
+    },
+    Gap {
+        name: "ct_form_urlencoded",
+        reason: "t3724 R1 with owner decision i50225: a form content type is not parsed as JSON (Python 422 model_attributes_type); `input` is redacted in Rust. type, loc and msg match.",
+        rust_status: 422,
+        rust_body: r#"{"detail":[{"input":"[redacted]","loc":["body"],"msg":"Input should be a valid dictionary or object to extract fields from","type":"model_attributes_type"}]}"#,
+    },
+    Gap {
+        name: "ct_multipart",
+        reason: "t3724 R1 with owner decision i50225: a multipart content type is not parsed as JSON (Python 422 model_attributes_type); `input` is redacted in Rust. type, loc and msg match.",
+        rust_status: 422,
+        rust_body: r#"{"detail":[{"input":"[redacted]","loc":["body"],"msg":"Input should be a valid dictionary or object to extract fields from","type":"model_attributes_type"}]}"#,
+    },
+    Gap {
+        name: "ct_text_json",
+        reason: "t3724 R1 with owner decision i50225: `text/json` is not an application type, so the body is not parsed (Python 422 model_attributes_type); `input` is redacted in Rust. type, loc and msg match.",
+        rust_status: 422,
+        rust_body: r#"{"detail":[{"input":"[redacted]","loc":["body"],"msg":"Input should be a valid dictionary or object to extract fields from","type":"model_attributes_type"}]}"#,
     },
     Gap {
         name: "password_current_not_string",
@@ -145,6 +183,54 @@ const INTENTIONAL_DIFFERENCES: &[Gap] = &[
         reason: "owner decision i50225: a non-object body is redacted whole in `input`, because a string inside it could be a password. Python echoes the list. type, loc and msg match.",
         rust_status: 422,
         rust_body: r#"{"detail":[{"input":"[redacted]","loc":["body"],"msg":"Input should be a valid dictionary or object to extract fields from","type":"model_attributes_type"}]}"#,
+    },
+];
+
+/// Measured differences with NO owner decision (t3724 R3). Visible, not accepted, not waived. Each pins
+/// the exact Rust response measured on the head, so a change in either direction fails the test. The
+/// coordinator routes them to policy; none is implemented here (no scanner, no copy of Python's 500).
+const PENDING_DISPOSITION: &[Gap] = &[
+    Gap {
+        name: "rv_invalid_utf8",
+        reason: "measured (t3724 R3), undecided: Python answers 400 'There was an error parsing the body' for a body that is not valid UTF-8. Rust answers 422 json_invalid (serde's text).",
+        rust_status: 422,
+        rust_body: r#"{"detail":[{"ctx":{"error":"invalid unicode code point at line 1 column 23"},"input":{},"loc":["body",0],"msg":"JSON decode error","type":"json_invalid"}]}"#,
+    },
+    Gap {
+        name: "rv_huge_integer",
+        reason: "measured (t3724 R3), undecided: Python answers 400 'There was an error parsing the body' for a 5,000-digit integer (its digit limit). Rust parses it and answers 422 string_type with the value redacted.",
+        rust_status: 422,
+        rust_body: r#"{"detail":[{"input":"[redacted]","loc":["body","current_password"],"msg":"Input should be a valid string","type":"string_type"}]}"#,
+    },
+    Gap {
+        name: "rv_bom",
+        reason: "measured (t3724 R3), undecided, FUNCTIONAL: Python parses a body with a UTF-8 BOM and reaches the password check (403 for a wrong password, so a correct one would be accepted). Rust refuses the BOM as json_invalid (422), so a BOM-prefixed body that Python accepts is refused by Rust.",
+        rust_status: 422,
+        rust_body: r#"{"detail":[{"ctx":{"error":"expected value at line 1 column 1"},"input":{},"loc":["body",0],"msg":"JSON decode error","type":"json_invalid"}]}"#,
+    },
+    Gap {
+        name: "rv_lone_surrogate",
+        reason: "measured (t3724 R3), undecided: Python answers 500 Internal Server Error for a lone surrogate escape in the password. Rust answers 422 json_invalid (serde's text). A 500 is not copied.",
+        rust_status: 422,
+        rust_body: r#"{"detail":[{"ctx":{"error":"unexpected end of hex escape at line 1 column 29"},"input":{},"loc":["body",0],"msg":"JSON decode error","type":"json_invalid"}]}"#,
+    },
+    Gap {
+        name: "rv_infinity",
+        reason: "measured (t3724 R3), undecided: Python answers 500 for Infinity (json.loads accepts it, as with NaN). Rust answers 422 json_invalid, as for NaN.",
+        rust_status: 422,
+        rust_body: r#"{"detail":[{"ctx":{"error":"expected value at line 1 column 22"},"input":{},"loc":["body",0],"msg":"JSON decode error","type":"json_invalid"}]}"#,
+    },
+    Gap {
+        name: "rv_neg_infinity",
+        reason: "measured (t3724 R3), undecided: Python answers 500 for -Infinity. Rust answers 422 json_invalid.",
+        rust_status: 422,
+        rust_body: r#"{"detail":[{"ctx":{"error":"invalid number at line 1 column 23"},"input":{},"loc":["body",0],"msg":"JSON decode error","type":"json_invalid"}]}"#,
+    },
+    Gap {
+        name: "rv_deep_nesting",
+        reason: "measured (t3724 R3), undecided: Python answers 500 for 2,000 levels of nesting. Rust answers 422 json_invalid (serde's recursion limit).",
+        rust_status: 422,
+        rust_body: r#"{"detail":[{"ctx":{"error":"recursion limit exceeded at line 1 column 636"},"input":{},"loc":["body",0],"msg":"JSON decode error","type":"json_invalid"}]}"#,
     },
 ];
 
@@ -340,6 +426,8 @@ fn the_composed_desk_matches_the_python_desk_for_viewport_password_answer_and_re
         let mut probes: Vec<String> = Vec::new();
         // Owner-accepted differences, recorded separately from the open gaps.
         let mut accepted_diverged: Vec<String> = Vec::new();
+        // Measured differences with no owner decision (t3724 R3): visible, pinned, not accepted.
+        let mut pending_diverged: Vec<String> = Vec::new();
         let mut check = |name: &str, reply: &Reply| {
             replayed.push(name.to_owned());
             let differs = compare(name, reply, case(&oracle, name));
@@ -359,6 +447,14 @@ fn the_composed_desk_matches_the_python_desk_for_viewport_password_answer_and_re
                     failures.push(format!("{text} ({})", accepted.reason));
                 }
                 accepted_diverged.push(name.to_owned());
+            } else if let Some(pending) = PENDING_DISPOSITION.iter().find(|item| item.name == name) {
+                if differs.is_none() {
+                    failures.push(format!("{name}: now matches the Python oracle; remove it from PENDING_DISPOSITION"));
+                }
+                if let Some(text) = pinned_mismatch(name, reply, pending.rust_status, pending.rust_body) {
+                    failures.push(format!("{text} ({})", pending.reason));
+                }
+                pending_diverged.push(name.to_owned());
             } else if let Some(text) = differs {
                 failures.push(text);
             }
@@ -492,6 +588,57 @@ fn the_composed_desk_matches_the_python_desk_for_viewport_password_answer_and_re
             &send(&router, b, Body::from(r#"{"current_password": NaN, "new_password": "x"}"#)).await,
         );
 
+        // Content-type and malformed-input matrix (t3722 R1 and R3). Each body carries a wrong
+        // current password, so none can change state even where it is accepted.
+        let raw_password = |content_type: Option<&str>, body: Vec<u8>| {
+            let mut builder = request(Method::POST, "/api/password").header(header::COOKIE, owner_cookie_header.as_str());
+            if let Some(content_type) = content_type {
+                builder = builder.header(header::CONTENT_TYPE, content_type);
+            }
+            (builder, Body::from(body))
+        };
+        let wrong = json!({"current_password": "not-the-password", "new_password": NEW_PASSWORD}).to_string().into_bytes();
+        let json_ct = Some("application/json");
+        let (b, body) = raw_password(Some("text/plain"), wrong.clone());
+        check("ct_text_plain", &send(&router, b, body).await);
+        let (b, body) = raw_password(None, wrong.clone());
+        check("ct_no_content_type", &send(&router, b, body).await);
+        let (b, body) = raw_password(Some("application/x-www-form-urlencoded"), wrong.clone());
+        check("ct_form_urlencoded", &send(&router, b, body).await);
+        let (b, body) = raw_password(Some("multipart/form-data; boundary=x"), wrong.clone());
+        check("ct_multipart", &send(&router, b, body).await);
+        let (b, body) = raw_password(Some("application/json; charset=utf-8"), wrong.clone());
+        check("ct_json_charset", &send(&router, b, body).await);
+        let (b, body) = raw_password(Some("application/vnd.api+json"), wrong.clone());
+        check("ct_vnd_json", &send(&router, b, body).await);
+        let (b, body) = raw_password(Some("text/json"), wrong.clone());
+        check("ct_text_json", &send(&router, b, body).await);
+        let (b, body) = raw_password(Some("text/plain"), Vec::new());
+        check("ct_empty_text_plain", &send(&router, b, body).await);
+
+        let mut invalid_utf8 = b"{\"current_password\": \"".to_vec();
+        invalid_utf8.push(0xff);
+        invalid_utf8.extend_from_slice(format!("\", \"new_password\": \"{NEW_PASSWORD}\"}}").as_bytes());
+        let huge_integer = format!("{{\"current_password\": {}, \"new_password\": \"{NEW_PASSWORD}\"}}", "1".repeat(5000));
+        let mut bom = vec![0xef, 0xbb, 0xbf];
+        bom.extend_from_slice(&wrong);
+        let surrogate = format!("{{\"current_password\": \"\\ud800\", \"new_password\": \"{NEW_PASSWORD}\"}}");
+        let infinity = format!("{{\"current_password\": Infinity, \"new_password\": \"{NEW_PASSWORD}\"}}");
+        let neg_infinity = format!("{{\"current_password\": -Infinity, \"new_password\": \"{NEW_PASSWORD}\"}}");
+        let deep = format!("{}1{}", "{\"a\":".repeat(2000), "}".repeat(2000));
+        for (name, body) in [
+            ("rv_invalid_utf8", invalid_utf8),
+            ("rv_huge_integer", huge_integer.into_bytes()),
+            ("rv_bom", bom),
+            ("rv_lone_surrogate", surrogate.into_bytes()),
+            ("rv_infinity", infinity.into_bytes()),
+            ("rv_neg_infinity", neg_infinity.into_bytes()),
+            ("rv_deep_nesting", deep.into_bytes()),
+        ] {
+            let (b, body) = raw_password(json_ct, body);
+            check(name, &send(&router, b, body).await);
+        }
+
         // The API token is the scratch record's token, read from the scratch data dir only.
         let auth: Value = serde_json::from_str(&std::fs::read_to_string(data_dir.join("auth.json")).expect("scratch auth record"))
             .expect("auth record JSON");
@@ -587,6 +734,15 @@ fn the_composed_desk_matches_the_python_desk_for_viewport_password_answer_and_re
             accepted_diverged.iter().map(String::as_str).collect::<Vec<_>>(),
             accepted_expected,
             "the owner-accepted differences changed; they need a new owner decision"
+        );
+        // The measured, undecided differences must be exactly the pending set (t3724 R3).
+        let mut pending_expected: Vec<&str> = PENDING_DISPOSITION.iter().map(|item| item.name).collect();
+        pending_expected.sort_unstable();
+        pending_diverged.sort();
+        assert_eq!(
+            pending_diverged.iter().map(String::as_str).collect::<Vec<_>>(),
+            pending_expected,
+            "the undecided differences changed; route the change to the coordinator"
         );
     });
 }
