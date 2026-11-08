@@ -3246,17 +3246,31 @@
           "pair_code": "PAIRCODE",
           "update_offset": null
         },
-        "daemon": {},
+        "daemon": {
+          "conversation": []
+        },
         "desk_rows": [],
-        "name": "status_with_no_telegram_message_says_nothing_has_reached_the_desk",
-        "owner_rows": [
-          [
-            11,
-            "cos",
-            "posted",
-            "web:1"
+        "name": "status_with_no_recorded_question_says_nothing_has_reached_the_desk",
+        "owner_rows": [],
+        "port": {
+          "bot_log": [
+            [
+              "sendMessage",
+              {
+                "chat_id": 42,
+                "text": "No Telegram message has reached Chief of Staff yet."
+              }
+            ]
+          ],
+          "daemon_log": [
+            [
+              "owner_conversation",
+              {
+                "limit": 50
+              }
+            ]
           ]
-        ],
+        },
         "registry": [
           {
             "id": "vp",
@@ -3284,7 +3298,7 @@
           }
         ]
       },
-      "name": "status_with_no_telegram_message_says_nothing_has_reached_the_desk"
+      "name": "status_with_no_recorded_question_says_nothing_has_reached_the_desk"
     },
     {
       "expected": {
@@ -3293,7 +3307,7 @@
             "sendMessage",
             {
               "chat_id": 42.0,
-              "text": "Chief of Staff message #12: inbox"
+              "text": "No Telegram message has reached Chief of Staff yet."
             }
           ]
         ],
@@ -3323,43 +3337,166 @@
           "pair_code": "PAIRCODE",
           "update_offset": null
         },
-        "daemon": {},
-        "desk_rows": [
+        "daemon": {
+          "conversation": [
+            {
+              "external_id": "telegram:7",
+              "id": "i7",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "telegram"
+            }
+          ]
+        },
+        "desk_rows": [],
+        "name": "status_answers_from_the_mailbox_where_python_has_no_desk_row",
+        "owner_rows": [],
+        "port": {
+          "bot_log": [
+            [
+              "sendMessage",
+              {
+                "chat_id": 42,
+                "text": "Chief of Staff message #i7: queued"
+              }
+            ]
+          ],
+          "daemon_log": [
+            [
+              "owner_conversation",
+              {
+                "limit": 50
+              }
+            ]
+          ]
+        },
+        "registry": [
+          {
+            "id": "vp",
+            "name": "VP"
+          },
+          {
+            "id": "cos",
+            "name": "Chief of Staff"
+          }
+        ],
+        "routing": null,
+        "steps": [
+          {
+            "op": "process_update",
+            "update": {
+              "message": {
+                "chat": {
+                  "id": 42,
+                  "type": "private"
+                },
+                "text": "/status"
+              },
+              "update_id": 9
+            }
+          }
+        ]
+      },
+      "name": "status_answers_from_the_mailbox_where_python_has_no_desk_row"
+    },
+    {
+      "expected": {
+        "bot_log": [
           [
-            15,
-            "cos",
-            "agent",
-            "a lane row with a telegram id",
-            "telegram:5"
+            "sendMessage",
+            {
+              "chat_id": 42.0,
+              "text": "Chief of Staff message #12: sent"
+            }
           ]
         ],
-        "name": "status_reports_the_newest_telegram_owner_row_on_this_channel",
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42.0,
+          "last_brief_id": null,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon_log": [],
+        "status": null,
+        "steps": [
+          {
+            "error": null,
+            "op": "process_update"
+          }
+        ]
+      },
+      "input": {
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42,
+          "last_brief_id": null,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon": {
+          "conversation": [
+            {
+              "external_id": "telegram:2",
+              "id": "i12",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "telegram"
+            },
+            {
+              "external_id": "web:9",
+              "id": "i13",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "external_id": null,
+              "id": "i14",
+              "reply_to": "i12",
+              "state": "acked",
+              "transport": "telegram"
+            },
+            {
+              "external_id": "telegram:900",
+              "id": "i16",
+              "reply_to": "i12",
+              "state": "acked",
+              "transport": "telegram"
+            }
+          ]
+        },
+        "desk_rows": [],
+        "name": "status_reports_the_mailbox_state_not_the_desk_delivery",
         "owner_rows": [
-          [
-            11,
-            "cos",
-            "sent",
-            "telegram:1"
-          ],
           [
             12,
             "cos",
-            "inbox",
+            "sent",
             "telegram:2"
-          ],
-          [
-            13,
-            "cos",
-            "posted",
-            "web:9"
-          ],
-          [
-            14,
-            "vp",
-            "acked",
-            "telegram:3"
           ]
         ],
+        "port": {
+          "bot_log": [
+            [
+              "sendMessage",
+              {
+                "chat_id": 42,
+                "text": "Chief of Staff message #i12: queued"
+              }
+            ]
+          ],
+          "daemon_log": [
+            [
+              "owner_conversation",
+              {
+                "limit": 50
+              }
+            ]
+          ]
+        },
         "registry": [
           {
             "id": "vp",
@@ -3387,7 +3524,7 @@
           }
         ]
       },
-      "name": "status_reports_the_newest_telegram_owner_row_on_this_channel"
+      "name": "status_reports_the_mailbox_state_not_the_desk_delivery"
     },
     {
       "expected": {
@@ -3426,16 +3563,20 @@
           "pair_code": "PAIRCODE",
           "update_offset": null
         },
-        "daemon": {},
+        "daemon": {
+          "conversation": [
+            {
+              "external_id": "telegram:30",
+              "id": "i30",
+              "reply_to": null,
+              "state": "read",
+              "transport": "telegram"
+            }
+          ]
+        },
         "desk_rows": [],
-        "name": "status_follows_the_routing_channel",
+        "name": "status_names_the_routing_channel_and_ignores_another_desks_question",
         "owner_rows": [
-          [
-            12,
-            "cos",
-            "inbox",
-            "telegram:2"
-          ],
           [
             14,
             "vp",
@@ -3443,6 +3584,25 @@
             "telegram:3"
           ]
         ],
+        "port": {
+          "bot_log": [
+            [
+              "sendMessage",
+              {
+                "chat_id": 42,
+                "text": "VP message #i30: read"
+              }
+            ]
+          ],
+          "daemon_log": [
+            [
+              "owner_conversation",
+              {
+                "limit": 50
+              }
+            ]
+          ]
+        },
         "registry": [
           {
             "id": "vp",
@@ -3472,7 +3632,7 @@
           }
         ]
       },
-      "name": "status_follows_the_routing_channel"
+      "name": "status_names_the_routing_channel_and_ignores_another_desks_question"
     }
   ]
 }

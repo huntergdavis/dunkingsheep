@@ -2,9 +2,18 @@
 //!
 //! `tests/fixtures/oracle_replay.json` was written by `tools/telegram_oracle_replay.py`, which ran the
 //! Python `bridges/telegram_bridge.py` on fakes (stub desk, fake Telegram, fake daemon, fixed clock).
-//! Each scenario holds the INPUTS and the OBSERVED outputs. This test replays the same inputs through
-//! the Rust port and requires the same outputs: every Telegram call with its payload, every daemon call
-//! with its arguments, each step's result or exception, and the final telegram.json and status file.
+//! Each scenario holds the INPUTS and the OBSERVED Python outputs. This test replays the same inputs
+//! through the Rust port and requires the same outputs: every Telegram call with its payload, every
+//! daemon call with its arguments, each step's result or exception, and the final telegram.json and
+//! status file.
+//!
+//! ONE intentional difference, recorded in the fixture instead of normalised away: `/status`. Python
+//! answers it from the legacy desk store's `delivery` column; this port records its questions in the
+//! owner mailbox and answers from that mailbox's state, which the owner accepted on 2026-11-08
+//! (t3671/t3672, "b I want it to be useful"). A scenario recording that difference carries
+//! `input.port` with the port's own `bot_log`/`daemon_log`; those two keys replace the Python ones for
+//! that scenario and nothing else does, so the difference cannot widen unnoticed. The fixture keeps
+//! both answers side by side, so a reviewer reads the divergence instead of trusting a filter.
 //!
 //! Known, named differences are NOT in the fixture: attachments (the port answers with a visible
 //! reply; Python downloads). Numbers are compared as floats, so an int in one language and a float
@@ -22,6 +31,34 @@ use ds_telegram::{Bot, Bridge, BridgeError, Config};
 use serde_json::{json, Map, Value};
 
 const FIXTURE: &str = "tests/fixtures/oracle_replay.json";
+
+/// The outputs a scenario requires of the port.
+///
+/// By default that is exactly what the Python bridge did. A scenario with `input.port` records an
+/// intentional difference (`/status`, owner-accepted 2026-11-08): its `bot_log` and `daemon_log` are
+/// the port's, and they are the ONLY keys it may override. Everything else — steps, config, the
+/// status file — stays Python's, so the difference is as narrow as the fixture says it is.
+fn expected_outputs(scenario: &Value) -> Value {
+    let mut expected = scenario["expected"].clone();
+    let Some(port) = scenario["input"]
+        .get("port")
+        .filter(|value| value.is_object())
+    else {
+        return expected;
+    };
+    for key in ["bot_log", "daemon_log"] {
+        if let Some(value) = port.get(key) {
+            expected[key] = value.clone();
+        }
+    }
+    for key in ["steps", "config", "status"] {
+        assert!(
+            port.get(key).is_none(),
+            "{key} may not be overridden by a recorded difference"
+        );
+    }
+    expected
+}
 
 /// Every number as an f64, the one spelling both sides are compared in.
 fn normalize(value: &Value) -> Value {
@@ -143,6 +180,10 @@ fn replay(input: &Value) -> Value {
             .cloned()
             .unwrap_or_default();
         state.ingest = input["daemon"]["ingest"].clone();
+        state.conversation = input["daemon"]["conversation"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
     }
     let mut bridge = Bridge {
         paths: paths.clone(),
@@ -287,7 +328,7 @@ fn every_scenario_matches_the_python_oracle() {
     let mut failures = Vec::new();
     for scenario in scenarios {
         let name = scenario["name"].as_str().unwrap_or("?").to_string();
-        let expected = normalize(&scenario["expected"]);
+        let expected = normalize(&expected_outputs(scenario));
         let actual = normalize(&replay(&scenario["input"]));
         if expected != actual {
             let keys: Vec<&str> = ["steps", "bot_log", "daemon_log", "config", "status"]

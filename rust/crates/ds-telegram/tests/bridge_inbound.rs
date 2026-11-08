@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::{paired_config, text_update, Fixture};
+use common::{mailbox_row, paired_config, text_update, Fixture};
 use ds_telegram::{BridgeError, Config};
 use serde_json::{json, Value};
 
@@ -178,7 +178,7 @@ fn a_file_is_not_recorded_by_this_build_and_says_so() {
 }
 
 #[test]
-fn status_with_no_telegram_row_says_nothing_has_reached_the_desk() {
+fn status_with_no_recorded_question_says_nothing_has_reached_the_desk() {
     let fixture = Fixture::new();
     let mut bridge = fixture.bridge();
     let mut config = as_config(paired_config(42));
@@ -189,31 +189,72 @@ fn status_with_no_telegram_row_says_nothing_has_reached_the_desk() {
         fixture.bot.texts(),
         vec!["No Telegram message has reached Chief of Staff yet.".to_string()]
     );
-    assert!(fixture.daemon.commands().is_empty());
+    // The mailbox is the only source: one bounded, read-only conversation read.
+    assert_eq!(fixture.daemon.commands(), vec!["owner_conversation"]);
+    assert_eq!(
+        fixture.daemon.args_of("owner_conversation"),
+        vec![json!({"limit": 50}).as_object().unwrap().clone()]
+    );
 }
 
 #[test]
-fn status_reports_the_newest_telegram_owner_row_on_this_channel() {
-    // The Python oracle: role='owner', external_id LIKE 'telegram:%', newest id, this channel.
+fn status_reports_the_question_this_bridge_recorded() {
+    // The owner accepted this wording (t3672): the mailbox state of the row owner_ingest wrote,
+    // not the legacy desk store's delivery. A reply is not a question, a page is not either, and
+    // a web question is a different transport.
     let fixture = Fixture::new();
-    fixture.desk_owner_rows(&[
-        (11, "cos", "sent", "telegram:1"),
-        (12, "cos", "inbox", "telegram:2"),
-        (13, "cos", "posted", "web:9"),
-        (14, "vp", "acked", "telegram:3"),
-    ]);
-    // Newer, but not an owner row: the Python filters role='owner', so it is not the answer.
-    fixture.desk_row_with_telegram_id(15, "cos", "agent", "telegram:5");
     let mut bridge = fixture.bridge();
+    fixture.daemon.0.borrow_mut().conversation = vec![
+        mailbox_row("i11", "telegram", "acked", Some("telegram:1"), None),
+        mailbox_row("i12", "telegram", "queued", Some("telegram:2"), None),
+        mailbox_row("i13", "web", "queued", Some("web:9"), None),
+        mailbox_row("i14", "telegram", "acked", None, Some("i12")),
+        // A delivered reply whose own row carries the sent message's Telegram id: newer than the
+        // question, and still not a question. The Python bridge passes no external_id on a
+        // receipt, but the verb accepts one, so this row is realistic and pins the filter.
+        mailbox_row(
+            "i16",
+            "telegram",
+            "acked",
+            Some("telegram:900"),
+            Some("i12"),
+        ),
+        // A daemon-written row with no transport id at all, newest of all.
+        mailbox_row("i15", "telegram", "queued", None, None),
+    ];
     let mut config = as_config(paired_config(42));
     bridge
         .process_update(&text_update(9, 42, " /status "), &mut config)
         .unwrap();
     assert_eq!(
         fixture.bot.texts(),
-        vec!["Chief of Staff message #12: inbox".to_string()]
+        vec!["Chief of Staff message #i12: queued".to_string()]
     );
-    assert!(fixture.daemon.commands().is_empty());
+    assert!(fixture.daemon.args_of("owner_ingest").is_empty());
+}
+
+#[test]
+fn status_does_not_read_the_legacy_desk_store() {
+    // The deliberate difference from Python (owner 2026-11-08): a desk row that Python would report
+    // is ignored, and the mailbox row the bridge recorded is reported instead.
+    let fixture = Fixture::new();
+    fixture.desk_row_with_telegram_id(12, "cos", "owner", "telegram:2");
+    fixture.daemon.0.borrow_mut().conversation = vec![mailbox_row(
+        "i40",
+        "telegram",
+        "read",
+        Some("telegram:7"),
+        None,
+    )];
+    let mut bridge = fixture.bridge();
+    let mut config = as_config(paired_config(42));
+    bridge
+        .process_update(&text_update(9, 42, "/status"), &mut config)
+        .unwrap();
+    assert_eq!(
+        fixture.bot.texts(),
+        vec!["Chief of Staff message #i40: read".to_string()]
+    );
 }
 
 #[test]

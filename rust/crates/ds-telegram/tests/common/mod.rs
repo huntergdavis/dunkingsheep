@@ -94,6 +94,8 @@ pub struct DaemonState {
     pub outbox: Vec<Value>,
     /// What `owner_ingest` returns.
     pub ingest: Value,
+    /// What `owner_conversation` returns as `messages` (the owner mailbox, oldest first).
+    pub conversation: Vec<Value>,
 }
 
 #[derive(Clone, Default)]
@@ -132,6 +134,7 @@ impl Daemon for FakeDaemon {
         match cmd {
             "owner_outbox" => Ok(json!({"messages": state.outbox.clone()})),
             "owner_ingest" => Ok(state.ingest.clone()),
+            "owner_conversation" => Ok(json!({"messages": state.conversation.clone()})),
             _ => Ok(json!({})),
         }
     }
@@ -212,7 +215,7 @@ impl Fixture {
     }
 
     /// Append one row of any role carrying a Telegram `external_id`, as the desk stores a
-    /// Telegram message it recorded itself. Used to prove `/status` filters on `role='owner'`.
+    /// Telegram message it recorded itself. Used to prove `/status` does not read this store.
     pub fn desk_row_with_telegram_id(&self, id: i64, channel: &str, role: &str, telegram: &str) {
         let conn = rusqlite::Connection::open(self.paths.desk_db()).expect("desk db");
         conn.execute_batch(DESK_SCHEMA).expect("schema");
@@ -221,21 +224,6 @@ impl Fixture {
             rusqlite::params![id, channel, role, telegram],
         )
         .expect("row");
-    }
-
-    /// Owner rows as the desk stores them: `(id, channel, delivery, external_id)` with
-    /// `role='owner'`, which is what `/status` reads.
-    pub fn desk_owner_rows(&self, rows: &[(i64, &str, &str, &str)]) {
-        let conn = rusqlite::Connection::open(self.paths.desk_db()).expect("desk db");
-        conn.execute_batch(DESK_SCHEMA).expect("schema");
-        for (id, channel, delivery, external_id) in rows {
-            conn.execute(
-                "INSERT INTO messages (id, channel, role, body, delivery, external_id) \
-                 VALUES (?1, ?2, 'owner', '', ?3, ?4)",
-                rusqlite::params![id, channel, delivery, external_id],
-            )
-            .expect("row");
-        }
     }
 }
 
@@ -266,6 +254,25 @@ pub fn outbox_row(
         "transport": "telegram",
         "reply_to": reply_to,
         "body": body,
+    })
+}
+
+/// An owner-mailbox row as the daemon returns it in `owner_conversation` (oldest first).
+#[allow(clippy::too_many_arguments)]
+pub fn mailbox_row(
+    id: &str,
+    transport: &str,
+    state: &str,
+    external_id: Option<&str>,
+    reply_to: Option<&str>,
+) -> Value {
+    json!({
+        "id": id,
+        "transport": transport,
+        "state": state,
+        "external_id": external_id,
+        "reply_to": reply_to,
+        "answered": reply_to.is_none() && state == "acked",
     })
 }
 

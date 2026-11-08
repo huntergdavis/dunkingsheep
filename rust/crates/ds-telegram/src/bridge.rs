@@ -6,9 +6,12 @@
 //! the legacy store's page rows and the forwarding cursor, read through `desk_store`.
 //!
 //! Not in this build (each is a visible reply or a named error, never a silent drop):
-//! attachments and the watchdog's own status file beyond the watermark write. `/status` is
-//! answered from the desk store's delivery state (t3671); the reconciliation that moves a stuck
-//! delivery is a write path and is not ported. See the PR body for the list.
+//! attachments and the watchdog's own status file beyond the watermark write. See the PR body.
+//!
+//! `/status` is a deliberate, owner-accepted difference from Python: the Python bridge reads the
+//! legacy desk store's `delivery` column, while this bridge records its questions in the one owner
+//! mailbox (t594) and so answers from that mailbox's state (t3671/t3672, owner 2026-11-08:
+//! "b I want it to be useful"). See `message_status`.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -33,6 +36,28 @@ use crate::pyval::{as_int, display, present, truthy};
 pub const RETRY_DELAY: Duration = Duration::from_secs(5);
 /// The long-poll window for `getUpdates`, as the Python `timeout=10`.
 pub const POLL_TIMEOUT_S: i64 = 10;
+/// How many recent owner-mailbox rows `/status` reads before it stops looking (named bound: an
+/// answer further back than this is reported as absent, never guessed).
+pub const STATUS_WINDOW: i64 = 50;
+
+/// Is this owner-mailbox row a question THIS bridge recorded?
+///
+/// Two conditions, both load-bearing:
+///
+/// - `owner_ingest` writes the transport's own id, `telegram:<update_id>`, as the dedupe key. A
+///   daemon-written page or a lane message carries no such id, and a web question carries `web:*`.
+/// - a question is a row nothing answers. `owner_reply` writes `reply_to`, and `owner_delivered`
+///   MAY stamp the sent Telegram message's id onto that reply row as its `external_id` (the verb
+///   accepts one; this bridge passes none today), so the id alone is not enough to exclude a
+///   reply.
+fn is_ingested_question(row: &Value) -> bool {
+    if present(row.get("reply_to")).is_some() {
+        return false;
+    }
+    row.get("external_id")
+        .and_then(Value::as_str)
+        .is_some_and(|id| id.starts_with("telegram:"))
+}
 
 /// Where the bridge reads its channel registry and routing from, and how it talks to the world.
 pub struct Bridge<D: Daemon, B: Bot> {
@@ -135,22 +160,41 @@ impl<D: Daemon, B: Bot> Bridge<D, B> {
         channel_name(&registry, channel)
     }
 
-    /// `_message_status`: the delivery state of the last Telegram owner message on this channel.
+    /// `_message_status`, answered from the owner mailbox instead of the desk store.
     ///
-    /// Python reconciles first (`desk._reconcile(channel)`), then reads the newest desk row with
-    /// `role='owner'` and an `external_id` of `telegram:*`. The read is ported; the reconciliation
-    /// pass is a write path and stays out (see the PR body), so the state reported is the one the
-    /// desk stored.
-    fn message_status(&self, channel: &str) -> Result<String, BridgeError> {
+    /// Python reconciles the desk store and reports the newest `role='owner'` row whose
+    /// `external_id` is `telegram:*`; this bridge never writes such a row for a text question (t594
+    /// moved it into the one owner mailbox), so the honest answer is the mailbox row the bridge
+    /// itself recorded. The owner accepted that difference and its wording on 2026-11-08 (t3672
+    /// acceptance, "b I want it to be useful"):
+    ///
+    /// - a question this bridge ingested (the `telegram:<update_id>` `external_id` that
+    ///   `owner_ingest` deduplicates on, and no `reply_to`) is the row reported;
+    /// - the reply is `"<desk name> message #<id>: <state>"` with the mailbox state the daemon
+    ///   reports, or `"No Telegram message has reached <desk name> yet."` when there is none.
+    ///
+    /// A reply is not a question, and a delivered page is not either, so both are skipped. The
+    /// conversation is read newest-first from a bounded window (`STATUS_WINDOW` rows): an answer
+    /// further back than that is reported as absent rather than guessed (named in the PR body).
+    fn message_status(&mut self, channel: &str) -> Result<String, BridgeError> {
         let name = self.channel_name(channel)?;
-        let row = desk_store::latest_telegram_owner_row(&self.paths.desk_db(), channel)?;
-        Ok(match row {
+        let answer = self
+            .daemon
+            .call("owner_conversation", args(json!({"limit": STATUS_WINDOW})))?;
+        let rows = answer
+            .get("messages")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let latest = rows.iter().rev().find(|row| is_ingested_question(row));
+        Ok(match latest {
             None => format!("No Telegram message has reached {name} yet."),
-            // `f"{name} message #{row['id']}: {row['delivery']}"`: a NULL delivery prints as
-            // `None`, the Python f-string's spelling of it, never as an empty string.
-            Some((id, delivery)) => format!(
-                "{name} message #{id}: {}",
-                delivery.unwrap_or_else(|| "None".to_string())
+            Some(row) => format!(
+                "{name} message #{}: {}",
+                row.get("id").map(display).unwrap_or_default(),
+                row.get("state")
+                    .map(display)
+                    .unwrap_or_else(|| "None".to_string())
             ),
         })
     }
