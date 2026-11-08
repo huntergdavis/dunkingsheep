@@ -5,6 +5,7 @@
 use std::{future::Future, pin::Pin, sync::Arc};
 
 use axum::{
+    body::Bytes,
     extract::{ConnectInfo, Extension, Json},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
@@ -12,7 +13,7 @@ use axum::{
     Router,
 };
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Map, Value};
 
 const SESSION_COOKIE: &str = "vp_session";
 const SESSION_MAX_AGE: u64 = 7 * 24 * 60 * 60;
@@ -173,32 +174,117 @@ async fn logout(
     }
 }
 
+/// The Pydantic v2 validation response FastAPI sends for `PasswordChange` (t3722): every error,
+/// in model order, under `detail`, with status 422.
+fn validation_detail(errors: Vec<Value>) -> Response {
+    (
+        StatusCode::UNPROCESSABLE_ENTITY,
+        Json(json!({"detail": errors})),
+    )
+        .into_response()
+}
+
+/// One string field of the password body, validated as Pydantic validates `str` (with the
+/// `new_password` length bounds). Pushes the error Pydantic would report; returns the value when valid.
+fn password_field(
+    body: &Value,
+    object: &Map<String, Value>,
+    field: &str,
+    length: Option<(usize, usize)>,
+    errors: &mut Vec<Value>,
+) -> Option<String> {
+    let loc = json!(["body", field]);
+    match object.get(field) {
+        None => {
+            errors.push(
+                json!({"input": body, "loc": loc, "msg": "Field required", "type": "missing"}),
+            );
+            None
+        }
+        Some(Value::String(text)) => {
+            if let Some((min, max)) = length {
+                let chars = text.chars().count();
+                if chars < min {
+                    errors.push(json!({"ctx": {"min_length": min}, "input": text, "loc": loc,
+                        "msg": format!("String should have at least {min} characters"), "type": "string_too_short"}));
+                    return None;
+                }
+                if chars > max {
+                    errors.push(json!({"ctx": {"max_length": max}, "input": text, "loc": loc,
+                        "msg": format!("String should have at most {max} characters"), "type": "string_too_long"}));
+                    return None;
+                }
+            }
+            Some(text.clone())
+        }
+        Some(other) => {
+            errors.push(json!({"input": other, "loc": loc, "msg": "Input should be a valid string", "type": "string_type"}));
+            None
+        }
+    }
+}
+
+/// Parse and validate the password body in FastAPI's order: a JSON object, then `current_password`,
+/// then `new_password`. A body that is not JSON or not an object is refused the same way FastAPI
+/// refuses it (a JSON-decode error in one case; the decoder's own text is not reproduced).
+fn password_body(raw: &[u8]) -> Result<PasswordBody, Box<Response>> {
+    let value: Value = serde_json::from_slice(raw).map_err(|error| {
+        Box::new(validation_detail(vec![json!({
+            "ctx": {"error": error.to_string()},
+            "input": {},
+            "loc": ["body", 0],
+            "msg": "JSON decode error",
+            "type": "json_invalid",
+        })]))
+    })?;
+    let Some(object) = value.as_object() else {
+        return Err(Box::new(validation_detail(vec![json!({
+            "input": value,
+            "loc": ["body"],
+            "msg": "Input should be a valid dictionary or object to extract fields from",
+            "type": "model_attributes_type",
+        })])));
+    };
+    let mut errors = Vec::new();
+    let current = password_field(&value, object, "current_password", None, &mut errors);
+    let new = password_field(&value, object, "new_password", Some((12, 200)), &mut errors);
+    match (current, new) {
+        (Some(current_password), Some(new_password)) if errors.is_empty() => Ok(PasswordBody {
+            current_password,
+            new_password,
+        }),
+        _ => Err(Box::new(validation_detail(errors))),
+    }
+}
+
 async fn change_password(
     Extension(backend): Extension<Arc<dyn AuthBackend>>,
     Extension(scheme): Extension<RequestScheme>,
     headers: HeaderMap,
-    Json(body): Json<PasswordBody>,
+    raw: Bytes,
 ) -> Response {
     if let Some(response) = same_origin(&headers, scheme) {
         return response;
     }
-    if !(12..=200).contains(&body.new_password.chars().count()) {
-        return (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            Json(json!({"detail": "new_password must contain between 12 and 200 characters"})),
-        )
-            .into_response();
-    }
+    // FastAPI's order (t3722): same origin, then authentication, then body validation, then the
+    // owner check inside the handler. Validation never runs ahead of authentication.
     let cookie = cookie_value(&headers, SESSION_COOKIE);
     let bearer = bearer_value(&headers);
-    match backend.identity(bearer.as_deref(), cookie.as_deref()).await {
-        Err(error) => error.response(),
-        Ok(Identity::Api) => (
+    let identity = match backend.identity(bearer.as_deref(), cookie.as_deref()).await {
+        Err(error) => return error.response(),
+        Ok(identity) => identity,
+    };
+    let body = match password_body(&raw) {
+        Ok(body) => body,
+        Err(response) => return *response,
+    };
+    match identity {
+        Identity::Api => (
             StatusCode::FORBIDDEN,
             Json(json!({"detail": "Owner sign-in required"})),
         )
             .into_response(),
-        Ok(Identity::Owner) => match backend
+        Identity::Owner => match backend
             .change_password(
                 &body.current_password,
                 &body.new_password,
@@ -620,10 +706,9 @@ mod tests {
             Extension(backend),
             Extension(RequestScheme::Http),
             headers.clone(),
-            Json(PasswordBody {
-                current_password: "old".into(),
-                new_password: "a sufficiently long password".into(),
-            }),
+            Bytes::from_static(
+                br#"{"current_password":"old","new_password":"a sufficiently long password"}"#,
+            ),
         ));
         let (status, body, _) = body_json(response);
         assert_eq!(status, StatusCode::OK);
@@ -646,10 +731,9 @@ mod tests {
             Extension(backend),
             Extension(RequestScheme::Http),
             headers,
-            Json(PasswordBody {
-                current_password: "old".into(),
-                new_password: "a sufficiently long password".into(),
-            }),
+            Bytes::from_static(
+                br#"{"current_password":"old","new_password":"a sufficiently long password"}"#,
+            ),
         ));
         let (status, body, _) = body_json(response);
         assert_eq!(status, StatusCode::FORBIDDEN);

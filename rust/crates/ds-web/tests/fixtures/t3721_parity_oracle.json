@@ -220,6 +220,163 @@
     },
     {
       "body": {
+        "detail": "Sign in required"
+      },
+      "content_type": "application/json",
+      "name": "password_no_cookie_invalid_body",
+      "status": 401
+    },
+    {
+      "body": {
+        "detail": [
+          {
+            "ctx": {
+              "min_length": 12
+            },
+            "input": "short",
+            "loc": [
+              "body",
+              "new_password"
+            ],
+            "msg": "String should have at least 12 characters",
+            "type": "string_too_short"
+          }
+        ]
+      },
+      "content_type": "application/json",
+      "name": "password_wrong_current_short_new",
+      "status": 422
+    },
+    {
+      "body": {
+        "detail": [
+          {
+            "input": {},
+            "loc": [
+              "body",
+              "current_password"
+            ],
+            "msg": "Field required",
+            "type": "missing"
+          },
+          {
+            "input": {},
+            "loc": [
+              "body",
+              "new_password"
+            ],
+            "msg": "Field required",
+            "type": "missing"
+          }
+        ]
+      },
+      "content_type": "application/json",
+      "name": "password_missing_both",
+      "status": 422
+    },
+    {
+      "body": {
+        "detail": [
+          {
+            "input": 12345678901234,
+            "loc": [
+              "body",
+              "current_password"
+            ],
+            "msg": "Input should be a valid string",
+            "type": "string_type"
+          }
+        ]
+      },
+      "content_type": "application/json",
+      "name": "password_current_not_string",
+      "status": 422
+    },
+    {
+      "body": {
+        "detail": [
+          {
+            "ctx": {
+              "max_length": 200
+            },
+            "input": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "loc": [
+              "body",
+              "new_password"
+            ],
+            "msg": "String should have at most 200 characters",
+            "type": "string_too_long"
+          }
+        ]
+      },
+      "content_type": "application/json",
+      "name": "password_new_too_long",
+      "status": 422
+    },
+    {
+      "body": {
+        "detail": [
+          {
+            "ctx": {
+              "error": "Expecting value"
+            },
+            "input": {},
+            "loc": [
+              "body",
+              0
+            ],
+            "msg": "JSON decode error",
+            "type": "json_invalid"
+          }
+        ]
+      },
+      "content_type": "application/json",
+      "name": "password_not_json",
+      "status": 422
+    },
+    {
+      "body": {
+        "detail": [
+          {
+            "input": [
+              1,
+              2
+            ],
+            "loc": [
+              "body"
+            ],
+            "msg": "Input should be a valid dictionary or object to extract fields from",
+            "type": "model_attributes_type"
+          }
+        ]
+      },
+      "content_type": "application/json",
+      "name": "password_list_body",
+      "status": 422
+    },
+    {
+      "body": {
+        "detail": [
+          {
+            "ctx": {
+              "min_length": 12
+            },
+            "input": "short",
+            "loc": [
+              "body",
+              "new_password"
+            ],
+            "msg": "String should have at least 12 characters",
+            "type": "string_too_short"
+          }
+        ]
+      },
+      "content_type": "application/json",
+      "name": "password_api_identity_invalid_body",
+      "status": 422
+    },
+    {
+      "body": {
         "detail": "Owner sign-in required"
       },
       "content_type": "application/json",
@@ -339,11 +496,11 @@
     },
     {
       "body": {
-        "detail": "Could not unblock t1: DaemonBusy"
+        "detail": "Could not unblock t1: RuntimeError"
       },
       "content_type": "application/json",
       "name": "answer_no_daemon",
-      "note": "environment-dependent: scratch config, production unit state decides BUSY vs ABSENT",
+      "note": "deterministic: the daemon client is isolated (no systemd query, no autostart)",
       "status": 503
     },
     {

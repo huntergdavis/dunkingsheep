@@ -177,6 +177,10 @@ async fn owner_request(
     }
     let payload = match payload {
         Some(RequestPayload::Json(Value::Object(v))) => v,
+        // FastAPI echoes the rejected JSON value as the error input (t3722 oracle: a list body).
+        Some(RequestPayload::Json(other)) => {
+            return body_validation("dict_type", "Input should be a valid dictionary", other)
+        }
         _ => {
             return body_validation(
                 "dict_type",

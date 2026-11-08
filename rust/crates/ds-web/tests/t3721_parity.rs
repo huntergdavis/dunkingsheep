@@ -8,9 +8,18 @@
 //! case. Probes check the side effects: the stored viewport (through `/api/channels`), the session
 //! sweep after a password change, the rewritten owner-credentials file, and the login results.
 //!
-//! Known divergences are NOT hidden. Each one is listed in `KNOWN_GAPS` with the Python behaviour
-//! and the Rust behaviour, and the test fails if the set of divergent cases changes in either
-//! direction. A gap is closed only by a scoped follow-up that changes the Rust route.
+//! Known divergences are NOT hidden. Each one is listed in `KNOWN_GAPS` with the Python behaviour,
+//! and the exact Rust response is pinned (status and body). The test fails if a gap answers
+//! differently from its pin, if a gap starts to match the oracle, or if the set of divergent cases
+//! changes. A gap is closed only by a scoped follow-up that changes the Rust route.
+//!
+//! The replay inventory is checked too: every case in the oracle must be replayed here, and no
+//! other name may be recorded, so a regenerated oracle with new cases fails until the test names them.
+//!
+//! Security note (owner question, not a parity choice): the pinned Python 422 bodies echo the
+//! submitted body. `password_missing_current` therefore echoes the new password in its `input`, and
+//! this port matches that echo to stay faithful to the pinned route. Whether a password should be
+//! echoed in an error body is an owner decision; until it is made, the echo is pinned as Python's.
 //!
 //! NOT covered here: the ops-board answer success path (it needs a live or scratch daemon with an
 //! owner-issued token), the ops-metrics refresh owner path (it calls `gh` and reads host state),
@@ -36,33 +45,41 @@ const PASSWORD: &str = "t3721-initial-scratch";
 const NEW_PASSWORD: &str = "t3721-changed-scratch";
 const ORACLE: &str = include_str!("fixtures/t3721_parity_oracle.json");
 
-/// Cases where the Rust route is known to diverge from the pinned Python oracle, with the reason.
-/// Each entry is a follow-up for the owner's scoped ticket, not an accepted difference.
-const KNOWN_GAPS: &[(&str, &str)] = &[
-    (
-        "password_short_new",
-        "Python 422 is the Pydantic error list (loc/msg/type/ctx); Rust answers a string detail 'new_password must contain between 12 and 200 characters'",
-    ),
-    (
-        "password_missing_current",
-        "Python 422 is the Pydantic error list; Rust answers text/plain from the Axum JSON rejection",
-    ),
-    (
-        "answer_list_payload",
-        "Python 422 echoes the input list; Rust body_validation sends input null",
-    ),
-    (
-        "answer_missing_reply",
-        "Python answers 400 'a reply is required'; Rust requires 'version' first (one-click contract)",
-    ),
-    (
-        "answer_blank_reply",
-        "Python answers 400 'a reply is required'; Rust requires 'version' first (one-click contract)",
-    ),
-    (
-        "answer_no_daemon",
-        "Python 503 'Could not unblock t1: DaemonBusy'; Rust requires 'version' first and words the 503 'Could not answer'",
-    ),
+/// A divergence from the pinned Python oracle. The Rust response is pinned exactly, so a gap cannot
+/// drift to a different wrong answer unnoticed. Each entry is an owner-scoped follow-up, not an
+/// accepted difference.
+struct Gap {
+    name: &'static str,
+    reason: &'static str,
+    rust_status: u16,
+    rust_body: &'static str,
+}
+
+const KNOWN_GAPS: &[Gap] = &[
+    Gap {
+        name: "password_not_json",
+        reason: "Python's json_invalid ctx.error is the Python decoder's text ('Expecting value'); Rust carries the serde_json text. The shape matches.",
+        rust_status: 422,
+        rust_body: r#"{"detail":[{"ctx":{"error":"expected ident at line 1 column 2"},"input":{},"loc":["body",0],"msg":"JSON decode error","type":"json_invalid"}]}"#,
+    },
+    Gap {
+        name: "answer_missing_reply",
+        reason: "Python answers 400 'a reply is required'. Rust checks the version first: the one-click contract, owner decision pending.",
+        rust_status: 400,
+        rust_body: r#"{"detail":"question version is required"}"#,
+    },
+    Gap {
+        name: "answer_blank_reply",
+        reason: "Python answers 400 'a reply is required'. Rust checks the version first: the one-click contract, owner decision pending.",
+        rust_status: 400,
+        rust_body: r#"{"detail":"question version is required"}"#,
+    },
+    Gap {
+        name: "answer_no_daemon",
+        reason: "Python's no-daemon answer is 503 'Could not unblock t1: <exception>'. The oracle's exception is the isolated client's RuntimeError; the production exception type depends on the host and is not captured. Rust checks the version first.",
+        rust_status: 400,
+        rust_body: r#"{"detail":"question version is required"}"#,
+    },
 ];
 
 fn open_operations_db(path: &Path) -> rusqlite::Result<Connection> {
@@ -240,12 +257,31 @@ fn the_composed_desk_matches_the_python_desk_for_viewport_password_answer_and_re
         // Ad-hoc probe failures, merged into `failures` after the last `check` call.
         let mut extra: Vec<String> = Vec::new();
         let mut diverged: Vec<String> = Vec::new();
+        // Every replayed case is recorded here; the inventory is checked against the oracle at the end.
+        let mut replayed: Vec<String> = Vec::new();
+        // Probe names recorded outside `check` (their side effects are checked by hand below).
+        let mut probes: Vec<String> = Vec::new();
         let mut check = |name: &str, reply: &Reply| {
-            if let Some(text) = compare(name, reply, case(&oracle, name)) {
-                if KNOWN_GAPS.iter().any(|(gap, _)| *gap == name) {
+            replayed.push(name.to_owned());
+            let differs = compare(name, reply, case(&oracle, name));
+            match KNOWN_GAPS.iter().find(|gap| gap.name == name) {
+                None => {
+                    if let Some(text) = differs {
+                        failures.push(text);
+                    }
+                }
+                Some(gap) => {
+                    if differs.is_none() {
+                        failures.push(format!("{name}: now matches the Python oracle; remove it from KNOWN_GAPS"));
+                    }
+                    let pinned: Value = serde_json::from_str(gap.rust_body).expect("pinned gap body is JSON");
+                    if reply.status != gap.rust_status || reply.body != pinned {
+                        failures.push(format!(
+                            "{name}: Rust answered {} {} but the pinned gap is {} {} ({})",
+                            reply.status, reply.body, gap.rust_status, pinned, gap.reason
+                        ));
+                    }
                     diverged.push(name.to_owned());
-                } else {
-                    failures.push(text);
                 }
             }
         };
@@ -284,6 +320,7 @@ fn the_composed_desk_matches_the_python_desk_for_viewport_password_answer_and_re
             Body::empty(),
         )
         .await;
+        probes.push("viewport_ok_probe_channels".to_owned());
         let want_probe = case(&oracle, "viewport_ok_probe_channels");
         let rows = probe.body["viewports"].as_array().cloned().unwrap_or_default();
         let stored: Vec<Value> = rows
@@ -354,11 +391,28 @@ fn the_composed_desk_matches_the_python_desk_for_viewport_password_answer_and_re
         check("password_short_new", &send(&router, b, body).await);
         let (b, body) = change(json!({"new_password": NEW_PASSWORD}), Some(&owner_cookie_header), None);
         check("password_missing_current", &send(&router, b, body).await);
+        // Ordering and shape cases (t3722): none changes state.
+        let (b, body) = change(json!({"new_password": "short"}), None, None);
+        check("password_no_cookie_invalid_body", &send(&router, b, body).await);
+        let (b, body) = change(json!({"current_password": "not-the-password", "new_password": "short"}), Some(&owner_cookie_header), None);
+        check("password_wrong_current_short_new", &send(&router, b, body).await);
+        let (b, body) = change(json!({}), Some(&owner_cookie_header), None);
+        check("password_missing_both", &send(&router, b, body).await);
+        let (b, body) = change(json!({"current_password": 12345678901234u64, "new_password": NEW_PASSWORD}), Some(&owner_cookie_header), None);
+        check("password_current_not_string", &send(&router, b, body).await);
+        let (b, body) = change(json!({"current_password": PASSWORD, "new_password": "x".repeat(201)}), Some(&owner_cookie_header), None);
+        check("password_new_too_long", &send(&router, b, body).await);
+        let (b, _) = change(json!({}), Some(&owner_cookie_header), None);
+        check("password_not_json", &send(&router, b, Body::from("not json")).await);
+        let (b, body) = change(json!([1, 2]), Some(&owner_cookie_header), None);
+        check("password_list_body", &send(&router, b, body).await);
 
         // The API token is the scratch record's token, read from the scratch data dir only.
         let auth: Value = serde_json::from_str(&std::fs::read_to_string(data_dir.join("auth.json")).expect("scratch auth record"))
             .expect("auth record JSON");
         let api_token = auth["token"].as_str().expect("token").to_owned();
+        let (b, body) = change(json!({"current_password": PASSWORD, "new_password": "short"}), None, Some(&api_token));
+        check("password_api_identity_invalid_body", &send(&router, b, body).await);
         let (b, body) = change(json!({"current_password": PASSWORD, "new_password": NEW_PASSWORD}), None, Some(&api_token));
         check("password_api_identity", &send(&router, b, body).await);
 
@@ -371,6 +425,7 @@ fn the_composed_desk_matches_the_python_desk_for_viewport_password_answer_and_re
         check("password_ok", &send(&router, b, body).await);
 
         let credentials = std::fs::read_to_string(data_dir.join("owner-credentials")).expect("credentials file");
+        probes.push("password_ok_credentials_file".to_owned());
         let want_creds = case(&oracle, "password_ok_credentials_file");
         let lines: Vec<&str> = credentials.lines().collect();
         let got_creds = (
@@ -417,11 +472,22 @@ fn the_composed_desk_matches_the_python_desk_for_viewport_password_answer_and_re
         check("metrics_refresh_no_cookie", &refresh);
 
         // Known gaps must be exactly the divergent cases, no more and no fewer.
-        let mut expected: Vec<&str> = KNOWN_GAPS.iter().map(|(name, _)| *name).collect();
+        let mut expected: Vec<&str> = KNOWN_GAPS.iter().map(|gap| gap.name).collect();
         expected.sort_unstable();
         diverged.sort();
         diverged.dedup();
         failures.extend(extra);
+        // Replay inventory (reviewer L6): every oracle case is replayed exactly once, and nothing else.
+        replayed.extend(probes);
+        let mut replay_want: Vec<String> = oracle["cases"]
+            .as_array()
+            .expect("cases")
+            .iter()
+            .map(|case| case["name"].as_str().expect("case name").to_owned())
+            .collect();
+        replay_want.sort();
+        replayed.sort();
+        assert_eq!(replayed, replay_want, "the replayed cases must be exactly the oracle's cases");
         assert!(failures.is_empty(), "t3721 parity differs from the Python oracle:\n{}", failures.join("\n"));
         assert_eq!(
             diverged.iter().map(String::as_str).collect::<Vec<_>>(),
