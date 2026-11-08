@@ -214,6 +214,14 @@ async fn owner_request(
         backend.owner_question(id).await
     };
     match result {
+        // Keep the versioned, atomic daemon operation; expose the same successful
+        // response envelope as Python's answer_owner_question.
+        Ok(value) if answer => Json(json!({
+            "task_id": id,
+            "unblocked": true,
+            "task": value.get("task").cloned().unwrap_or(Value::Null),
+        }))
+        .into_response(),
         Ok(value) => Json(value).into_response(),
         Err(error) => detail_response(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -518,8 +526,13 @@ mod tests {
             args: Value,
         ) -> OpsBoardFuture<'a, Result<Value, OpsBoardError>> {
             Box::pin(async move {
-                self.answers.lock().unwrap().push(args);
-                Ok(json!({"changed":true}))
+                let mut answers = self.answers.lock().unwrap();
+                let repeated = !answers.is_empty();
+                let id = args["id"].clone();
+                answers.push(args);
+                Ok(json!({"task_id": id, "version":"42", "changed": !repeated,
+                          "unblocked":true, "task":{"id":id,"status":"open"},
+                          "answer":"scratch answer"}))
             })
         }
 
@@ -640,6 +653,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("daemon.sock");
         let listener = UnixListener::bind(&path).unwrap();
+        // Captured from the real pinned Python route and isolated daemon (t3721).
+        let oracle: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/t3721_answer_success_python.json"
+        ))
+        .unwrap();
+        let oracle_task = oracle["task"].clone();
         let (tx, rx) = std::sync::mpsc::channel();
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
@@ -653,7 +672,7 @@ mod tests {
             writeln!(
                 stream,
                 "{}",
-                json!({"id":request["id"],"ok":true,"result":{"changed":true}})
+                json!({"id":request["id"],"ok":true,"result":{"task_id":"t1","unblocked":true,"task":oracle_task,"changed":true,"version":"4","answer":"scratch answer"}})
             )
             .unwrap();
         });
@@ -679,7 +698,7 @@ mod tests {
             .header(header::HOST, "desk.test")
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(
-                r#"{"task_id":"t9","version":"42","option_number":1}"#,
+                r#"{"task_id":"t1","version":"4","reply":"scratch answer"}"#,
             ))
             .unwrap();
         let response = router(board, auth, RequestScheme::Http)
@@ -687,11 +706,16 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let result: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(result, oracle);
         assert_eq!(
             rx.recv_timeout(Duration::from_secs(2)).unwrap(),
             (
                 json!("task_owner_answer"),
-                json!({"id":"t9","version":"42","option_number":1,"reply":null})
+                json!({"id":"t1","version":"4","option_number":null,"reply":"scratch answer"})
             )
         );
         server.join().unwrap();
@@ -715,6 +739,31 @@ mod tests {
             *board.answers.lock().unwrap(),
             vec![json!({"id":"t9","version":"42","option_number":1,"reply":null})]
         );
+    }
+
+    #[test]
+    fn owner_answer_uses_python_success_envelope_for_first_and_repeated_answer() {
+        let board = Arc::new(FakeBoard::default());
+        for _ in 0..2 {
+            let request = Request::builder()
+                .method("POST")
+                .uri("/api/ops-board/answer")
+                .header(header::HOST, "desk.test")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"task_id":"t9","version":"42","reply":"scratch answer"}"#,
+                ))
+                .unwrap();
+            let response = block_on(app(board.clone()).oneshot(request)).unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = block_on(axum::body::to_bytes(response.into_body(), usize::MAX)).unwrap();
+            let value: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(
+                value,
+                json!({"task_id":"t9","unblocked":true,"task":{"id":"t9","status":"open"}})
+            );
+        }
+        assert_eq!(board.answers.lock().unwrap().len(), 2);
     }
 
     /// The stale-answer guard (owner decision i50091 keeps it): a versioned answer needs a positive
