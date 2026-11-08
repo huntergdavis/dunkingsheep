@@ -183,11 +183,8 @@ impl<'a> OwnerConversations<'a> {
         let mailboxes = self.conversation_mailboxes(&store)?;
         // Routine lane mail (review verdicts and notes, marked by subject) is kept in storage and listed nowhere
         // here (t3592). Owner decisions, owner blockers, owner replies and unmarked legacy mail stay listed.
-        let mut messages: Vec<Value> = store
-            .conversation_across(&mailboxes, Some(limit), before)?
-            .into_iter()
-            .filter(|row| !is_routine_mail(row))
-            .collect();
+        let mut messages: Vec<Value> =
+            store.conversation_across_visible(&mailboxes, Some(limit), before)?;
         // `waiting` is the desk's list of owner questions. The window now also carries lane
         // mailboxes (t3535), but `reply()` only answers rows in the owner mailbox, so a lane's
         // unread mail must not be listed here: the same predicate `reply()` enforces.

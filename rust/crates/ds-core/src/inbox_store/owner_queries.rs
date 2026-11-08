@@ -122,6 +122,29 @@ impl Store {
         limit: Option<i64>,
         before: Option<f64>,
     ) -> Result<Vec<Value>, DunkError> {
+        self.conversation_rows(mailboxes, limit, before, false)
+    }
+
+    /// The owner conversation window (t3592, repair for t3711/t3712): as `conversation_across`, but routine
+    /// lane mail is excluded in the query. A row is routine when its subject starts with a routine prefix
+    /// (ignoring leading whitespace) and it is not an owner reply (`reply_to`). Excluding it here, before
+    /// the limit, means routine rows cannot use up the window and hide older decisions.
+    pub fn conversation_across_visible(
+        &self,
+        mailboxes: &[String],
+        limit: Option<i64>,
+        before: Option<f64>,
+    ) -> Result<Vec<Value>, DunkError> {
+        self.conversation_rows(mailboxes, limit, before, true)
+    }
+
+    fn conversation_rows(
+        &self,
+        mailboxes: &[String],
+        limit: Option<i64>,
+        before: Option<f64>,
+        exclude_routine: bool,
+    ) -> Result<Vec<Value>, DunkError> {
         let mut conditions = Vec::with_capacity(mailboxes.len());
         let mut box_params: Vec<String> = Vec::new();
         for mailbox in mailboxes {
@@ -136,6 +159,23 @@ impl Store {
         };
         let mut sql = format!("SELECT * FROM messages WHERE {condition} AND state != 'cancelled'");
         let mut values: Vec<SqlValue> = box_params.into_iter().map(SqlValue::Text).collect();
+        if exclude_routine {
+            // Same rule as `is_routine_mail`: the subject, after leading whitespace, starts with a routine
+            // prefix, and the row is not an owner reply. The parameters bind in clause order.
+            let prefix_tests: Vec<&str> = crate::owner::conversations::ROUTINE_SUBJECT_PREFIXES
+                .iter()
+                .map(|_| "instr(ltrim(COALESCE(subject, ''), ' ' || char(9) || char(10) || char(13)), ?) = 1")
+                .collect();
+            sql.push_str(&format!(
+                " AND NOT (({}) AND (reply_to IS NULL OR reply_to = ''))",
+                prefix_tests.join(" OR ")
+            ));
+            values.extend(
+                crate::owner::conversations::ROUTINE_SUBJECT_PREFIXES
+                    .iter()
+                    .map(|prefix| SqlValue::Text((*prefix).to_string())),
+            );
+        }
         if let Some(before) = before {
             sql.push_str(" AND created_at < ?");
             values.push(SqlValue::Real(before));
@@ -320,6 +360,9 @@ mod tests {
 
     // t665 owner pages: the outbox and receipt contract (kept out of this shared file's body).
     mod page_tests;
+
+    // t3592 repair (t3711/t3712): routine mail is excluded in the query, before the limit and the boundary.
+    mod routine_window_tests;
 
     struct Fixture {
         dir: tempfile::TempDir,
