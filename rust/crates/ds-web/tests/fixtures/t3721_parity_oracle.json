@@ -555,6 +555,181 @@
     },
     {
       "body": {
+        "detail": "Current password is incorrect"
+      },
+      "content_type": "application/json",
+      "name": "enc_utf16le_bom",
+      "status": 403
+    },
+    {
+      "body": {
+        "detail": "Current password is incorrect"
+      },
+      "content_type": "application/json",
+      "name": "enc_utf16be_bom",
+      "status": 403
+    },
+    {
+      "body": {
+        "detail": "Current password is incorrect"
+      },
+      "content_type": "application/json",
+      "name": "enc_utf16le_nobom",
+      "status": 403
+    },
+    {
+      "body": {
+        "detail": "Current password is incorrect"
+      },
+      "content_type": "application/json",
+      "name": "enc_utf16be_nobom",
+      "status": 403
+    },
+    {
+      "body": {
+        "detail": "Current password is incorrect"
+      },
+      "content_type": "application/json",
+      "name": "enc_utf32le_bom",
+      "status": 403
+    },
+    {
+      "body": {
+        "detail": "Current password is incorrect"
+      },
+      "content_type": "application/json",
+      "name": "enc_utf32be_bom",
+      "status": 403
+    },
+    {
+      "body": {
+        "detail": "Current password is incorrect"
+      },
+      "content_type": "application/json",
+      "name": "enc_utf32le_nobom",
+      "status": 403
+    },
+    {
+      "body": {
+        "detail": "Current password is incorrect"
+      },
+      "content_type": "application/json",
+      "name": "enc_utf32be_nobom",
+      "status": 403
+    },
+    {
+      "body": {
+        "detail": "There was an error parsing the body"
+      },
+      "content_type": "application/json",
+      "name": "enc_utf16le_odd_length",
+      "status": 400
+    },
+    {
+      "body": {
+        "detail": "There was an error parsing the body"
+      },
+      "content_type": "application/json",
+      "name": "enc_utf32le_truncated",
+      "status": 400
+    },
+    {
+      "body": {
+        "detail": "There was an error parsing the body"
+      },
+      "content_type": "application/json",
+      "name": "enc_utf32le_bom_over_utf16le",
+      "status": 400
+    },
+    {
+      "body": {
+        "detail": "There was an error parsing the body"
+      },
+      "content_type": "application/json",
+      "name": "enc_utf32be_bom_codepoint_out_of_range",
+      "status": 400
+    },
+    {
+      "body": {
+        "detail": [
+          {
+            "ctx": {
+              "error": "Expecting value"
+            },
+            "input": {},
+            "loc": [
+              "body",
+              0
+            ],
+            "msg": "JSON decode error",
+            "type": "json_invalid"
+          }
+        ]
+      },
+      "content_type": "application/json",
+      "name": "enc_utf16le_bom_only",
+      "status": 422
+    },
+    {
+      "body": {
+        "detail": "Current password is incorrect"
+      },
+      "content_type": "application/json",
+      "name": "enc_utf16le_valid_surrogate_pair",
+      "status": 403
+    },
+    {
+      "body": {
+        "detail": [
+          {
+            "input": "{\u0000\"\u0000c\u0000u\u0000r\u0000r\u0000e\u0000n\u0000t\u0000_\u0000p\u0000a\u0000s\u0000s\u0000w\u0000o\u0000r\u0000d\u0000\"\u0000:\u0000 \u0000\"\u0000n\u0000o\u0000t\u0000-\u0000t\u0000h\u0000e\u0000-\u0000p\u0000a\u0000s\u0000s\u0000w\u0000o\u0000r\u0000d\u0000\"\u0000,\u0000 \u0000\"\u0000n\u0000e\u0000w\u0000_\u0000p\u0000a\u0000s\u0000s\u0000w\u0000o\u0000r\u0000d\u0000\"\u0000:\u0000 \u0000\"\u0000t\u00003\u00007\u00002\u00001\u0000-\u0000c\u0000h\u0000a\u0000n\u0000g\u0000e\u0000d\u0000-\u0000s\u0000c\u0000r\u0000a\u0000t\u0000c\u0000h\u0000\"\u0000}\u0000",
+            "loc": [
+              "body"
+            ],
+            "msg": "Input should be a valid dictionary or object to extract fields from",
+            "type": "model_attributes_type"
+          }
+        ]
+      },
+      "content_type": "application/json",
+      "name": "enc_text_plain_utf16le",
+      "status": 422
+    },
+    {
+      "body": {
+        "detail": [
+          {
+            "input": "{\u0000\"\u0000c\u0000u\u0000r\u0000r\u0000e\u0000n\u0000t\u0000_\u0000p\u0000a\u0000s\u0000s\u0000w\u0000o\u0000r\u0000d\u0000\"\u0000:\u0000 \u0000\"\u0000n\u0000o\u0000t\u0000-\u0000t\u0000h\u0000e\u0000-\u0000p\u0000a\u0000s\u0000s\u0000w\u0000o\u0000r\u0000d\u0000\"\u0000,\u0000 \u0000\"\u0000n\u0000e\u0000w\u0000_\u0000p\u0000a\u0000s\u0000s\u0000w\u0000o\u0000r\u0000d\u0000\"\u0000:\u0000 \u0000\"\u0000t\u00003\u00007\u00002\u00001\u0000-\u0000c\u0000h\u0000a\u0000n\u0000g\u0000e\u0000d\u0000-\u0000s\u0000c\u0000r\u0000a\u0000t\u0000c\u0000h\u0000\"\u0000}\u0000\u0000",
+            "loc": [
+              "body"
+            ],
+            "msg": "Input should be a valid dictionary or object to extract fields from",
+            "type": "model_attributes_type"
+          }
+        ]
+      },
+      "content_type": "application/json",
+      "name": "enc_text_plain_odd_utf16",
+      "status": 422
+    },
+    {
+      "body": {
+        "text": "Internal Server Error"
+      },
+      "content_type": "text/plain; charset=utf-8",
+      "name": "enc_utf16le_lone_surrogate",
+      "status": 500
+    },
+    {
+      "body": {
+        "text": "Internal Server Error"
+      },
+      "content_type": "text/plain; charset=utf-8",
+      "name": "enc_cesu_surrogate_utf8",
+      "status": 500
+    },
+    {
+      "body": {
         "detail": [
           {
             "ctx": {
@@ -733,6 +908,55 @@
       },
       "content_type": "application/json",
       "name": "password_bom_login_previous",
+      "status": 401
+    },
+    {
+      "body": {
+        "ok": true
+      },
+      "content_type": "application/json",
+      "name": "chain_utf16le_bom",
+      "status": 200
+    },
+    {
+      "body": {
+        "ok": true
+      },
+      "content_type": "application/json",
+      "name": "chain_utf16be_nobom",
+      "status": 200
+    },
+    {
+      "body": {
+        "ok": true
+      },
+      "content_type": "application/json",
+      "name": "chain_utf32le_bom",
+      "status": 200
+    },
+    {
+      "body": {
+        "ok": true
+      },
+      "content_type": "application/json",
+      "name": "chain_utf32be_nobom",
+      "status": 200
+    },
+    {
+      "body": {
+        "next": "/dash/cos",
+        "ok": true
+      },
+      "content_type": "application/json",
+      "name": "password_chain_login_final",
+      "status": 200
+    },
+    {
+      "body": {
+        "detail": "Incorrect password"
+      },
+      "content_type": "application/json",
+      "name": "password_chain_login_previous",
       "status": 401
     }
   ],

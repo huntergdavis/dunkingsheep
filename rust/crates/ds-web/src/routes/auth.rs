@@ -258,6 +258,140 @@ fn password_field(
     }
 }
 
+/// The encodings Python's `json.detect_encoding` can choose for a body (t3725 / owner i50587).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BodyEncoding {
+    Utf8,
+    Utf16Le,
+    Utf16Be,
+    Utf32Le,
+    Utf32Be,
+}
+
+/// `json.detect_encoding`: a BOM decides first (UTF-32, then UTF-16, then UTF-8), then the NUL pattern of
+/// the first bytes. Returns the encoding and the length of the BOM the decoder consumes.
+fn detect_body_encoding(raw: &[u8]) -> (BodyEncoding, usize) {
+    if raw.starts_with(&[0x00, 0x00, 0xfe, 0xff]) {
+        return (BodyEncoding::Utf32Be, 4);
+    }
+    if raw.starts_with(&[0xff, 0xfe, 0x00, 0x00]) {
+        return (BodyEncoding::Utf32Le, 4);
+    }
+    if raw.starts_with(&[0xfe, 0xff]) {
+        return (BodyEncoding::Utf16Be, 2);
+    }
+    if raw.starts_with(&[0xff, 0xfe]) {
+        return (BodyEncoding::Utf16Le, 2);
+    }
+    if raw.starts_with(&[0xef, 0xbb, 0xbf]) {
+        return (BodyEncoding::Utf8, 3);
+    }
+    if raw.len() >= 4 {
+        if raw[0] == 0 {
+            let encoding = if raw[1] != 0 {
+                BodyEncoding::Utf16Be
+            } else {
+                BodyEncoding::Utf32Be
+            };
+            return (encoding, 0);
+        }
+        if raw[1] == 0 {
+            let encoding = if raw[2] != 0 || raw[3] != 0 {
+                BodyEncoding::Utf16Le
+            } else {
+                BodyEncoding::Utf32Le
+            };
+            return (encoding, 0);
+        }
+    } else if raw.len() == 2 {
+        if raw[0] == 0 {
+            return (BodyEncoding::Utf16Be, 0);
+        }
+        if raw[1] == 0 {
+            return (BodyEncoding::Utf16Le, 0);
+        }
+    }
+    (BodyEncoding::Utf8, 0)
+}
+
+/// The JSON parse error FastAPI reports (`json_invalid`). The position is the one the pinned route uses for a
+/// body that cannot be decoded at all; the wording is the parser's own.
+fn json_decode_error(text: String) -> Response {
+    validation_detail(vec![json!({
+        "ctx": {"error": text},
+        "input": {},
+        "loc": ["body", 0],
+        "msg": "JSON decode error",
+        "type": "json_invalid",
+    })])
+}
+
+/// `json.loads(bytes)` (what FastAPI uses): detect the encoding, decode with `surrogatepass`, then parse.
+/// A decode failure (odd or truncated units, a code point past U+10FFFF, invalid UTF-8) is Python's
+/// UnicodeDecodeError, answered 400 with the generic body. A lone surrogate Python would carry on to a 500;
+/// it cannot be held in a Rust string, so it is refused as `json_invalid` and recorded as undecided.
+fn decode_json_body(raw: &[u8]) -> Result<Value, Box<Response>> {
+    let parse_error = || {
+        Box::new(
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"detail": "There was an error parsing the body"})),
+            )
+                .into_response(),
+        )
+    };
+    let lone_surrogate = || Box::new(json_decode_error("lone surrogate in the body".to_owned()));
+    let (encoding, skip) = detect_body_encoding(raw);
+    let body = &raw[skip..];
+    let text = match encoding {
+        BodyEncoding::Utf8 => {
+            // UTF-8 keeps the parser's own handling; invalid UTF-8 is the accepted difference recorded in the tests.
+            return serde_json::from_slice(body)
+                .map_err(|error| Box::new(json_decode_error(error.to_string())));
+        }
+        BodyEncoding::Utf16Le | BodyEncoding::Utf16Be => {
+            // An odd trailing byte is a truncated code unit: Python's UnicodeDecodeError.
+            let (pairs, rest) = body.as_chunks::<2>();
+            if !rest.is_empty() {
+                return Err(parse_error());
+            }
+            let little = encoding == BodyEncoding::Utf16Le;
+            let units: Vec<u16> = pairs
+                .iter()
+                .map(|pair| {
+                    if little {
+                        u16::from_le_bytes(*pair)
+                    } else {
+                        u16::from_be_bytes(*pair)
+                    }
+                })
+                .collect();
+            String::from_utf16(&units).map_err(|_| lone_surrogate())?
+        }
+        BodyEncoding::Utf32Le | BodyEncoding::Utf32Be => {
+            let (quads, rest) = body.as_chunks::<4>();
+            if !rest.is_empty() {
+                return Err(parse_error());
+            }
+            let little = encoding == BodyEncoding::Utf32Le;
+            let mut text = String::new();
+            for quad in quads {
+                let code = if little {
+                    u32::from_le_bytes(*quad)
+                } else {
+                    u32::from_be_bytes(*quad)
+                };
+                if code > 0x10FFFF {
+                    return Err(parse_error());
+                }
+                text.push(char::from_u32(code).ok_or_else(lone_surrogate)?);
+            }
+            text
+        }
+    };
+    serde_json::from_str(&text).map_err(|error| Box::new(json_decode_error(error.to_string())))
+}
+
 /// Parse and validate the password body in FastAPI's order: a JSON object, then `current_password`,
 /// then `new_password`. A body that is not JSON or not an object is refused the same way FastAPI
 /// refuses it (a JSON-decode error in one case; the decoder's own text is not reproduced).
@@ -281,19 +415,7 @@ fn password_body(raw: &[u8], json_content: bool) -> Result<PasswordBody, Box<Res
             "type": "model_attributes_type",
         })])));
     }
-    // Python decodes a body that starts with a UTF-8 byte order mark as UTF-8 with the BOM dropped
-    // (t3725, owner i50493): the BOM is not part of the JSON.
-    const UTF8_BOM: &[u8] = &[0xef, 0xbb, 0xbf];
-    let raw = raw.strip_prefix(UTF8_BOM).unwrap_or(raw);
-    let value: Value = serde_json::from_slice(raw).map_err(|error| {
-        Box::new(validation_detail(vec![json!({
-            "ctx": {"error": error.to_string()},
-            "input": {},
-            "loc": ["body", 0],
-            "msg": "JSON decode error",
-            "type": "json_invalid",
-        })]))
-    })?;
+    let value = decode_json_body(raw)?;
     let Some(object) = value.as_object() else {
         return Err(Box::new(validation_detail(vec![json!({
             "input": REDACTED,
@@ -590,6 +712,124 @@ mod tests {
         };
         assert_eq!(with_bom.current_password, without.current_password);
         assert_eq!(with_bom.new_password, without.new_password);
+    }
+
+    /// t3725 / owner i50587: the encodings match Python's `json.detect_encoding` and `json.loads` decoding.
+    #[test]
+    fn body_encoding_detection_matches_python() {
+        for (raw, expected, skip) in [
+            (
+                &[0x00u8, 0x00, 0xfe, 0xff, 0x00][..],
+                BodyEncoding::Utf32Be,
+                4,
+            ),
+            (
+                &[0xff, 0xfe, 0x00, 0x00, 0x7b][..],
+                BodyEncoding::Utf32Le,
+                4,
+            ),
+            (&[0xfe, 0xff, 0x00, 0x7b][..], BodyEncoding::Utf16Be, 2),
+            (&[0xff, 0xfe, 0x7b, 0x00][..], BodyEncoding::Utf16Le, 2),
+            (&[0xef, 0xbb, 0xbf, 0x7b][..], BodyEncoding::Utf8, 3),
+            (&[0x00, 0x7b, 0x00, 0x7d][..], BodyEncoding::Utf16Be, 0),
+            (&[0x7b, 0x00, 0x7d, 0x00][..], BodyEncoding::Utf16Le, 0),
+            (&[0x00, 0x00, 0x00, 0x7b][..], BodyEncoding::Utf32Be, 0),
+            (&[0x7b, 0x00, 0x00, 0x00][..], BodyEncoding::Utf32Le, 0),
+            (&[0x00, 0x7b][..], BodyEncoding::Utf16Be, 0),
+            (&[0x7b, 0x00][..], BodyEncoding::Utf16Le, 0),
+            (&b"{}"[..], BodyEncoding::Utf8, 0),
+            (&b"{\"a\":1}"[..], BodyEncoding::Utf8, 0),
+        ] {
+            assert_eq!(detect_body_encoding(raw), (expected, skip), "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn utf16_and_utf32_bodies_parse_to_the_same_fields_as_utf8() {
+        let text = r#"{"current_password":"old-password-x","new_password":"a sufficiently long password"}"#;
+        let utf8 = match password_body(text.as_bytes(), true) {
+            Ok(body) => body,
+            Err(_) => panic!("utf-8 parses"),
+        };
+        let utf16 = |be: bool| -> Vec<u8> {
+            text.encode_utf16()
+                .flat_map(|unit| {
+                    if be {
+                        unit.to_be_bytes()
+                    } else {
+                        unit.to_le_bytes()
+                    }
+                })
+                .collect()
+        };
+        let utf32 = |be: bool| -> Vec<u8> {
+            text.chars()
+                .flat_map(|c| {
+                    if be {
+                        (c as u32).to_be_bytes()
+                    } else {
+                        (c as u32).to_le_bytes()
+                    }
+                })
+                .collect()
+        };
+        let mut variants: Vec<Vec<u8>> = vec![utf16(false), utf16(true), utf32(false), utf32(true)];
+        variants.push([&[0xff, 0xfe][..], &utf16(false)].concat());
+        variants.push([&[0xfe, 0xff][..], &utf16(true)].concat());
+        variants.push([&[0xff, 0xfe, 0x00, 0x00][..], &utf32(false)].concat());
+        variants.push([&[0x00, 0x00, 0xfe, 0xff][..], &utf32(true)].concat());
+        for raw in variants {
+            let parsed = match password_body(&raw, true) {
+                Ok(body) => body,
+                Err(_) => panic!("a valid UTF-16/UTF-32 body parses"),
+            };
+            assert_eq!(parsed.current_password, utf8.current_password, "{raw:?}");
+            assert_eq!(parsed.new_password, utf8.new_password, "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn utf16_and_utf32_decode_errors_are_400_and_lone_surrogates_are_refused() {
+        let text = r#"{"current_password":"x","new_password":"a sufficiently long password"}"#;
+        let utf16le: Vec<u8> = text.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+        let utf32le: Vec<u8> = text
+            .chars()
+            .flat_map(|c| (c as u32).to_le_bytes())
+            .collect();
+        let status_of = |raw: &[u8]| match password_body(raw, true) {
+            Ok(_) => None,
+            Err(response) => Some(response.status()),
+        };
+        // Odd UTF-16 length, truncated UTF-32, a BOM over UTF-16 text (detected as UTF-32), and a code point past U+10FFFF.
+        assert_eq!(
+            status_of(&[utf16le.clone(), vec![0x00]].concat()),
+            Some(StatusCode::BAD_REQUEST)
+        );
+        assert_eq!(
+            status_of(&[utf32le.clone(), vec![0x00]].concat()),
+            Some(StatusCode::BAD_REQUEST)
+        );
+        assert_eq!(
+            status_of(&[&[0xff, 0xfe, 0x00, 0x00][..], &utf16le[..]].concat()),
+            Some(StatusCode::BAD_REQUEST)
+        );
+        assert_eq!(
+            status_of(
+                &[
+                    &[0x00, 0x00, 0xfe, 0xff][..],
+                    &[0x00, 0x11, 0x00, 0x00][..],
+                    &text.as_bytes()[..4]
+                ]
+                .concat()
+            ),
+            Some(StatusCode::BAD_REQUEST)
+        );
+        // A raw lone surrogate code unit (not a JSON escape): refused as json_invalid, not parsed (Python answers 500).
+        let mut units: Vec<u16> = r#"{"current_password":""#.encode_utf16().collect();
+        units.push(0xD800);
+        units.extend(r#""}"#.encode_utf16());
+        let lone: Vec<u8> = units.iter().flat_map(|u| u.to_le_bytes()).collect();
+        assert_eq!(status_of(&lone), Some(StatusCode::UNPROCESSABLE_ENTITY));
     }
 
     #[test]
