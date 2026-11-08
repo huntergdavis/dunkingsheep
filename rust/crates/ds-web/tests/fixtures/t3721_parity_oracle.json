@@ -1,0 +1,368 @@
+{
+  "cases": [
+    {
+      "body": {
+        "next": "/dash/cos",
+        "ok": true
+      },
+      "content_type": "application/json",
+      "name": "login_owner",
+      "status": 200
+    },
+    {
+      "body": {
+        "ok": true
+      },
+      "content_type": "application/json",
+      "name": "viewport_ok",
+      "status": 200
+    },
+    {
+      "name": "viewport_ok_probe_channels",
+      "status": 200,
+      "stored": [
+        {
+          "devicePixelRatio": 2.0,
+          "innerHeight": 800,
+          "innerWidth": 1280,
+          "screenHeight": 1080,
+          "screenWidth": 1920
+        }
+      ],
+      "viewport_at_present": [
+        true
+      ]
+    },
+    {
+      "body": {
+        "ok": true
+      },
+      "content_type": "application/json",
+      "name": "viewport_same_origin",
+      "status": 200
+    },
+    {
+      "body": {
+        "detail": "Cross-origin request refused"
+      },
+      "content_type": "application/json",
+      "name": "viewport_cross_origin",
+      "status": 403
+    },
+    {
+      "body": {
+        "detail": "Sign in required"
+      },
+      "content_type": "application/json",
+      "name": "viewport_no_cookie",
+      "status": 401
+    },
+    {
+      "body": {
+        "detail": "Sign in required"
+      },
+      "content_type": "application/json",
+      "name": "viewport_bogus_cookie",
+      "status": 401
+    },
+    {
+      "body": {
+        "detail": "Invalid viewport sample"
+      },
+      "content_type": "application/json",
+      "name": "viewport_extra_key",
+      "status": 422
+    },
+    {
+      "body": {
+        "detail": "Invalid viewport sample"
+      },
+      "content_type": "application/json",
+      "name": "viewport_missing_key",
+      "status": 422
+    },
+    {
+      "body": {
+        "detail": "Invalid viewport sample"
+      },
+      "content_type": "application/json",
+      "name": "viewport_string_int",
+      "status": 422
+    },
+    {
+      "body": {
+        "detail": "Invalid viewport sample"
+      },
+      "content_type": "application/json",
+      "name": "viewport_bool_int",
+      "status": 422
+    },
+    {
+      "body": {
+        "detail": "Invalid viewport sample"
+      },
+      "content_type": "application/json",
+      "name": "viewport_float_int",
+      "status": 422
+    },
+    {
+      "body": {
+        "detail": "Invalid viewport sample"
+      },
+      "content_type": "application/json",
+      "name": "viewport_zero_width",
+      "status": 422
+    },
+    {
+      "body": {
+        "detail": "Invalid viewport sample"
+      },
+      "content_type": "application/json",
+      "name": "viewport_width_over_max",
+      "status": 422
+    },
+    {
+      "body": {
+        "detail": "Invalid viewport sample"
+      },
+      "content_type": "application/json",
+      "name": "viewport_dpr_zero",
+      "status": 422
+    },
+    {
+      "body": {
+        "detail": "Invalid viewport sample"
+      },
+      "content_type": "application/json",
+      "name": "viewport_dpr_over_max",
+      "status": 422
+    },
+    {
+      "body": {
+        "ok": true
+      },
+      "content_type": "application/json",
+      "name": "viewport_dpr_int",
+      "status": 200
+    },
+    {
+      "body": {
+        "detail": "Invalid viewport sample"
+      },
+      "content_type": "application/json",
+      "name": "viewport_nan_dpr",
+      "status": 422
+    },
+    {
+      "body": {
+        "detail": "Invalid viewport sample"
+      },
+      "content_type": "application/json",
+      "name": "viewport_not_json",
+      "status": 422
+    },
+    {
+      "body": {
+        "detail": "Sign in required"
+      },
+      "content_type": "application/json",
+      "name": "password_no_cookie",
+      "status": 401
+    },
+    {
+      "body": {
+        "detail": "Current password is incorrect"
+      },
+      "content_type": "application/json",
+      "name": "password_wrong_current",
+      "status": 403
+    },
+    {
+      "body": {
+        "detail": [
+          {
+            "ctx": {
+              "min_length": 12
+            },
+            "input": "short",
+            "loc": [
+              "body",
+              "new_password"
+            ],
+            "msg": "String should have at least 12 characters",
+            "type": "string_too_short"
+          }
+        ]
+      },
+      "content_type": "application/json",
+      "name": "password_short_new",
+      "status": 422
+    },
+    {
+      "body": {
+        "detail": [
+          {
+            "input": {
+              "new_password": "t3721-changed-scratch"
+            },
+            "loc": [
+              "body",
+              "current_password"
+            ],
+            "msg": "Field required",
+            "type": "missing"
+          }
+        ]
+      },
+      "content_type": "application/json",
+      "name": "password_missing_current",
+      "status": 422
+    },
+    {
+      "body": {
+        "detail": "Owner sign-in required"
+      },
+      "content_type": "application/json",
+      "name": "password_api_identity",
+      "status": 403
+    },
+    {
+      "body": {
+        "next": "/dash/cos",
+        "ok": true
+      },
+      "content_type": "application/json",
+      "name": "login_second_session",
+      "status": 200
+    },
+    {
+      "body": {
+        "ok": true
+      },
+      "content_type": "application/json",
+      "name": "password_ok",
+      "status": 200
+    },
+    {
+      "first_line_is_new_password": true,
+      "has_api_token_line": true,
+      "name": "password_ok_credentials_file"
+    },
+    {
+      "name": "password_ok_probe_current_session",
+      "status": 200
+    },
+    {
+      "body": {
+        "detail": "Sign in required"
+      },
+      "content_type": "application/json",
+      "name": "password_ok_probe_other_session",
+      "status": 401
+    },
+    {
+      "body": {
+        "next": "/dash/cos",
+        "ok": true
+      },
+      "content_type": "application/json",
+      "name": "login_new_password",
+      "status": 200
+    },
+    {
+      "body": {
+        "detail": "Incorrect password"
+      },
+      "content_type": "application/json",
+      "name": "login_old_password",
+      "status": 401
+    },
+    {
+      "body": {
+        "detail": "Sign in required"
+      },
+      "content_type": "application/json",
+      "name": "answer_no_cookie",
+      "status": 401
+    },
+    {
+      "body": {
+        "detail": [
+          {
+            "input": [
+              1,
+              2
+            ],
+            "loc": [
+              "body"
+            ],
+            "msg": "Input should be a valid dictionary",
+            "type": "dict_type"
+          }
+        ]
+      },
+      "content_type": "application/json",
+      "name": "answer_list_payload",
+      "status": 422
+    },
+    {
+      "body": {
+        "detail": "task_id is required"
+      },
+      "content_type": "application/json",
+      "name": "answer_empty_payload",
+      "status": 400
+    },
+    {
+      "body": {
+        "detail": "task_id is required"
+      },
+      "content_type": "application/json",
+      "name": "answer_blank_task",
+      "status": 400
+    },
+    {
+      "body": {
+        "detail": "a reply is required"
+      },
+      "content_type": "application/json",
+      "name": "answer_missing_reply",
+      "status": 400
+    },
+    {
+      "body": {
+        "detail": "a reply is required"
+      },
+      "content_type": "application/json",
+      "name": "answer_blank_reply",
+      "status": 400
+    },
+    {
+      "body": {
+        "detail": "Could not unblock t1: DaemonBusy"
+      },
+      "content_type": "application/json",
+      "name": "answer_no_daemon",
+      "note": "environment-dependent: scratch config, production unit state decides BUSY vs ABSENT",
+      "status": 503
+    },
+    {
+      "body": {
+        "detail": "Sign in required"
+      },
+      "content_type": "application/json",
+      "name": "metrics_refresh_no_cookie",
+      "status": 401
+    }
+  ],
+  "oracle": {
+    "fastapi": "0.162.0",
+    "interpreter": "3.14.4",
+    "pydantic": "2.14.2",
+    "starlette": "1.10.0"
+  },
+  "scratch": {
+    "config_dir": "scratch",
+    "data_dir": "scratch"
+  }
+}
