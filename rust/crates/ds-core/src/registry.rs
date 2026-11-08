@@ -399,7 +399,7 @@ pub static COMMANDS: &[Command] = &[
         required: &["to", "body"],
         mcp: true,
         owner_only: false,
-        roles: &["owner", "web"],
+        roles: &["owner", "system", "web", "planner", "worker", "reviewer"],
     },
     Command {
         name: "inbox_stats",
