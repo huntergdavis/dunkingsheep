@@ -17,8 +17,9 @@ owner database, token, config or daemon socket is read or written.
 Secrets: the initial and new passwords are scratch-only literals supplied by the environment. The
 initial password never appears in the oracle. The new password does: the pinned FastAPI 422 bodies
 echo the submitted body, so `password_missing_current` records the new scratch literal in its
-`input`. That echo is the pinned Python behaviour, recorded as the server sent it, and it is kept
-as a known security question for the owner (see KNOWN_GAPS and the t3722 note). The owner-credentials
+`input`. That echo is the pinned Python behaviour, recorded as the server sent it. The Rust port does
+not echo it: owner decision i50225 redacts submitted passwords from validation errors, and the Rust
+test records each redacted case as an intentional difference. The owner-credentials
 file and the API token are recorded only as presence booleans. Responses are recorded as the server
 sent them, except where a value is time-based or random (the session viewport timestamp, the pbkdf2
 salt): those are recorded as presence only.

@@ -186,6 +186,32 @@ fn validation_detail(errors: Vec<Value>) -> Response {
 
 /// One string field of the password body, validated as Pydantic validates `str` (with the
 /// `new_password` length bounds). Pushes the error Pydantic would report; returns the value when valid.
+/// What a validation error shows in place of a submitted password (owner decision i50225: submitted
+/// passwords must not appear in validation error bodies). Pydantic would echo the value as `input`.
+const REDACTED: &str = "[redacted]";
+
+/// The `input` for a body-level error, with the password fields redacted. Pydantic echoes the whole
+/// submitted object, so a missing `current_password` would otherwise echo `new_password` (and the
+/// reverse). A non-object body is redacted whole, because a string inside it could be a password.
+fn redacted_body(body: &Value) -> Value {
+    match body.as_object() {
+        Some(object) => Value::Object(
+            object
+                .iter()
+                .map(|(key, value)| {
+                    let shown = if key == "current_password" || key == "new_password" {
+                        json!(REDACTED)
+                    } else {
+                        value.clone()
+                    };
+                    (key.clone(), shown)
+                })
+                .collect(),
+        ),
+        None => json!(REDACTED),
+    }
+}
+
 fn password_field(
     body: &Value,
     object: &Map<String, Value>,
@@ -196,29 +222,27 @@ fn password_field(
     let loc = json!(["body", field]);
     match object.get(field) {
         None => {
-            errors.push(
-                json!({"input": body, "loc": loc, "msg": "Field required", "type": "missing"}),
-            );
+            errors.push(json!({"input": redacted_body(body), "loc": loc, "msg": "Field required", "type": "missing"}));
             None
         }
         Some(Value::String(text)) => {
             if let Some((min, max)) = length {
                 let chars = text.chars().count();
                 if chars < min {
-                    errors.push(json!({"ctx": {"min_length": min}, "input": text, "loc": loc,
+                    errors.push(json!({"ctx": {"min_length": min}, "input": REDACTED, "loc": loc,
                         "msg": format!("String should have at least {min} characters"), "type": "string_too_short"}));
                     return None;
                 }
                 if chars > max {
-                    errors.push(json!({"ctx": {"max_length": max}, "input": text, "loc": loc,
+                    errors.push(json!({"ctx": {"max_length": max}, "input": REDACTED, "loc": loc,
                         "msg": format!("String should have at most {max} characters"), "type": "string_too_long"}));
                     return None;
                 }
             }
             Some(text.clone())
         }
-        Some(other) => {
-            errors.push(json!({"input": other, "loc": loc, "msg": "Input should be a valid string", "type": "string_type"}));
+        Some(_) => {
+            errors.push(json!({"input": REDACTED, "loc": loc, "msg": "Input should be a valid string", "type": "string_type"}));
             None
         }
     }
@@ -248,7 +272,7 @@ fn password_body(raw: &[u8]) -> Result<PasswordBody, Box<Response>> {
     })?;
     let Some(object) = value.as_object() else {
         return Err(Box::new(validation_detail(vec![json!({
-            "input": value,
+            "input": redacted_body(&value),
             "loc": ["body"],
             "msg": "Input should be a valid dictionary or object to extract fields from",
             "type": "model_attributes_type",
@@ -466,6 +490,38 @@ mod tests {
             *self.changed_password.lock().expect("password lock") =
                 Some((current.into(), new.into(), keep_cookie.map(str::to_owned)));
             Box::pin(async { Ok(()) })
+        }
+    }
+
+    /// Owner decision i50225: a submitted password must not appear in a validation error body. Each
+    /// invalid shape below carries scratch sentinel passwords; none may come back in the response.
+    #[test]
+    fn password_validation_errors_never_echo_a_submitted_password() {
+        const CURRENT: &str = "SENTINEL-CURRENT-t3722";
+        const NEW_VALID: &str = "SENTINEL-NEW-t3722-valid";
+        const NEW_SHORT: &str = "SENT-SHORT";
+        let too_long = format!("{NEW_VALID}{}", "x".repeat(220));
+        let bodies = [
+            json!({"new_password": NEW_SHORT}),
+            json!({"current_password": CURRENT}),
+            json!({"current_password": CURRENT, "new_password": NEW_SHORT}),
+            json!({"current_password": CURRENT, "new_password": too_long}),
+            json!({"current_password": [CURRENT], "new_password": NEW_VALID}),
+            json!({"current_password": 12345, "new_password": NEW_VALID}),
+            json!([CURRENT, NEW_SHORT]),
+            json!(CURRENT),
+        ];
+        for body in bodies {
+            let raw = body.to_string();
+            let response = match password_body(raw.as_bytes()) {
+                Err(response) => *response,
+                Ok(_) => panic!("{raw} must be refused"),
+            };
+            let bytes = block_on(axum::body::to_bytes(response.into_body(), usize::MAX)).unwrap();
+            let text = String::from_utf8_lossy(&bytes);
+            for secret in [CURRENT, NEW_SHORT, NEW_VALID] {
+                assert!(!text.contains(secret), "{raw} echoes {secret} in {text}");
+            }
         }
     }
 

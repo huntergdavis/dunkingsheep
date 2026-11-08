@@ -21,10 +21,13 @@
 //!   and option picks, an intentional compatibility difference. Its three cases are listed in
 //!   `INTENTIONAL_DIFFERENCES`, and the stale-answer guard (a missing or invalid `version` is refused
 //!   before any backend call) is covered by a unit test in `routes/ops_board.rs`.
-//! - i50069 (pending, not accepted): the pinned Python 422 bodies echo the submitted body. The
-//!   `password_missing_current` case therefore echoes the new password in its `input`, and this port
-//!   matches that echo so the route stays faithful. Whether a password may be echoed in an error body
-//!   is still open; until it is decided the echo stays pinned as Python's, and PR #843 stays a draft.
+//! - i50225 (decided): submitted passwords must not appear in validation error bodies. The pinned
+//!   Python 422 bodies echo the submitted value as `input`. This port shows `[redacted]` there and
+//!   keeps status, content type, `type`, `loc`, `msg` and `ctx` as Python sends them. Each redacted
+//!   case is listed in `INTENTIONAL_DIFFERENCES`, and a unit test (`password_validation_errors_never_echo_a_submitted_password`)
+//!   checks that scratch sentinel passwords never come back. i50225 also allows the decoder wording
+//!   difference (`password_not_json`) and the NaN 422 (`password_nan_body`) as intentional differences,
+//!   provided status, content type and envelope match. No scanner port and no copy of Python's 500.
 //!
 //! NOT covered here: the ops-board answer success path (it needs a live or scratch daemon with an
 //! owner-issued token), the ops-metrics refresh owner path (it calls `gh` and reads host state),
@@ -60,20 +63,9 @@ struct Gap {
     rust_body: &'static str,
 }
 
-const KNOWN_GAPS: &[Gap] = &[
-    Gap {
-        name: "password_not_json",
-        reason: "Python 422 json_invalid: ctx.error is the Python json decoder's message and loc is the character position (observed: 'Expecting value' at 0 for 'not json'; 'Expecting \\':\\' delimiter' at 20, 'Expecting \\',\\' delimiter' at 25, 'Unterminated string starting at' at 21, 'Extra data' at 26, 'Invalid control character at' at 23, 'Illegal trailing comma before end of object' at 24). Rust 422 json_invalid carries serde_json's text and line/column position. Same status, content type and envelope; the decoder wording and position differ. Matching them needs a CPython-compatible scanner: a decision, not a password-route correction.",
-        rust_status: 422,
-        rust_body: r#"{"detail":[{"ctx":{"error":"expected ident at line 1 column 2"},"input":{},"loc":["body",0],"msg":"JSON decode error","type":"json_invalid"}]}"#,
-    },
-    Gap {
-        name: "password_nan_body",
-        reason: "Python answers 500 Internal Server Error: json.loads accepts NaN, the NaN reaches the 422 body, and its serialisation fails. Rust answers 422 json_invalid. A 500 is a Python defect, not a contract to copy. Pending the owner's decision (t3722).",
-        rust_status: 422,
-        rust_body: r#"{"detail":[{"ctx":{"error":"expected value at line 1 column 22"},"input":{},"loc":["body",0],"msg":"JSON decode error","type":"json_invalid"}]}"#,
-    },
-];
+/// Open gaps: none. Every difference from the pinned Python oracle is now an owner-decided
+/// intentional difference (see `INTENTIONAL_DIFFERENCES`). The list stays so a new gap has a place.
+const KNOWN_GAPS: &[Gap] = &[];
 
 /// Intentional compatibility differences, accepted by the owner (decision i50091, relayed by the
 /// coordinator in i50094): the Rust ops-board answer is the atomic versioned answer, with an
@@ -99,6 +91,60 @@ const INTENTIONAL_DIFFERENCES: &[Gap] = &[
         reason: "owner decision i50091: the versioned answer reports a failure as 'Could not answer <id>: <kind>', not Python's 'Could not unblock <id>: <exception>'. This case has no version, so Rust refuses before the daemon. The Python exception in the oracle is the isolated client's RuntimeError; the production one depends on the host.",
         rust_status: 400,
         rust_body: r#"{"detail":"question version is required"}"#,
+    },
+    Gap {
+        name: "password_not_json",
+        reason: "owner decision i50225: the decoder wording and position may differ while status, content type and envelope match. Python's json_invalid ctx.error and loc come from the Python json decoder (observed in the t3722 commit and PR body); Rust's come from serde_json. This is not a scanner port.",
+        rust_status: 422,
+        rust_body: r#"{"detail":[{"ctx":{"error":"expected ident at line 1 column 2"},"input":{},"loc":["body",0],"msg":"JSON decode error","type":"json_invalid"}]}"#,
+    },
+    Gap {
+        name: "password_nan_body",
+        reason: "owner decision i50225: Rust answers 422 json_invalid for NaN. Python answers 500 Internal Server Error (json.loads accepts NaN and the 422 cannot serialise it). A 500 is a Python defect; it is not copied.",
+        rust_status: 422,
+        rust_body: r#"{"detail":[{"ctx":{"error":"expected value at line 1 column 22"},"input":{},"loc":["body",0],"msg":"JSON decode error","type":"json_invalid"}]}"#,
+    },
+    Gap {
+        name: "password_short_new",
+        reason: "owner decision i50225: submitted passwords are redacted from validation errors. Python echoes the submitted value as `input`; Rust shows '[redacted]'. status, content type, type, loc, msg and ctx match.",
+        rust_status: 422,
+        rust_body: r#"{"detail":[{"ctx":{"min_length":12},"input":"[redacted]","loc":["body","new_password"],"msg":"String should have at least 12 characters","type":"string_too_short"}]}"#,
+    },
+    Gap {
+        name: "password_wrong_current_short_new",
+        reason: "owner decision i50225: submitted passwords are redacted from validation errors (`input` shows '[redacted]'). Everything else matches the pinned Python 422.",
+        rust_status: 422,
+        rust_body: r#"{"detail":[{"ctx":{"min_length":12},"input":"[redacted]","loc":["body","new_password"],"msg":"String should have at least 12 characters","type":"string_too_short"}]}"#,
+    },
+    Gap {
+        name: "password_missing_current",
+        reason: "owner decision i50225: the missing-field error redacts the submitted new password in `input` (Python echoes the whole body). Everything else matches the pinned Python 422.",
+        rust_status: 422,
+        rust_body: r#"{"detail":[{"input":{"new_password":"[redacted]"},"loc":["body","current_password"],"msg":"Field required","type":"missing"}]}"#,
+    },
+    Gap {
+        name: "password_current_not_string",
+        reason: "owner decision i50225: the non-string password value is redacted from `input`. Everything else matches the pinned Python 422.",
+        rust_status: 422,
+        rust_body: r#"{"detail":[{"input":"[redacted]","loc":["body","current_password"],"msg":"Input should be a valid string","type":"string_type"}]}"#,
+    },
+    Gap {
+        name: "password_new_too_long",
+        reason: "owner decision i50225: the over-long submitted password is redacted from `input`. Everything else matches the pinned Python 422.",
+        rust_status: 422,
+        rust_body: r#"{"detail":[{"ctx":{"max_length":200},"input":"[redacted]","loc":["body","new_password"],"msg":"String should have at most 200 characters","type":"string_too_long"}]}"#,
+    },
+    Gap {
+        name: "password_api_identity_invalid_body",
+        reason: "owner decision i50225: the submitted password is redacted from `input` on the 422 that precedes the owner check. Everything else matches the pinned Python 422.",
+        rust_status: 422,
+        rust_body: r#"{"detail":[{"ctx":{"min_length":12},"input":"[redacted]","loc":["body","new_password"],"msg":"String should have at least 12 characters","type":"string_too_short"}]}"#,
+    },
+    Gap {
+        name: "password_list_body",
+        reason: "owner decision i50225: a non-object body is redacted whole in `input`, because a string inside it could be a password. Python echoes the list. type, loc and msg match.",
+        rust_status: 422,
+        rust_body: r#"{"detail":[{"input":"[redacted]","loc":["body"],"msg":"Input should be a valid dictionary or object to extract fields from","type":"model_attributes_type"}]}"#,
     },
 ];
 
