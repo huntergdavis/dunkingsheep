@@ -896,7 +896,7 @@ class Inbox:
         if not ids:
             raise InboxError("at least one message id is required")
         changed, skipped = [], []
-        with self._lock, self.db:
+        with self._lock:
             for message_id in ids:
                 row = self.db.execute(
                     "SELECT state, mailbox FROM messages WHERE id = ?", (message_id,)).fetchone()
@@ -930,7 +930,7 @@ class Inbox:
         ids = [str(i).strip() for i in ids if str(i).strip()]
         if not ids:
             raise InboxError("at least one message id is required")
-        with self._lock:
+        with self._lock, self.db:
             for message_id in ids:
                 row = self.db.execute(
                     "SELECT id FROM messages WHERE id = ?", (message_id,)).fetchone()

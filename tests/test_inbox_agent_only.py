@@ -2,6 +2,7 @@
 import unittest
 import tempfile
 import sqlite3
+from contextlib import closing
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
 from unittest.mock import Mock
@@ -41,7 +42,7 @@ class AgentOnlyTests(unittest.TestCase):
             store = Inbox(path=str(root / 'inbox.db'), blob_dir=str(root / 'blobs'))
             ordinary = store.send('agent', 'ordinary', subject='[agent-coordination] literal')
             marked = store.send('agent', 'private', subject='normal', agent_only=True)
-            with sqlite3.connect(root / 'inbox.db') as conn:
+            with closing(sqlite3.connect(root / 'inbox.db')) as conn:
                 rows = conn.execute('SELECT message_id, audience FROM message_audiences').fetchall()
                 self.assertEqual(rows, [(marked['message_id'], 'agent')])
                 self.assertEqual(conn.execute('SELECT subject FROM messages WHERE id=?', (marked['message_id'],)).fetchone()[0], 'normal')
@@ -76,8 +77,29 @@ class AgentOnlyTests(unittest.TestCase):
             purged = store.send('agent', 'purge', agent_only=True)['message_id']
             retained = store.send('agent', 'unread', agent_only=True)['message_id']
             store.delete([deleted])
+            with closing(sqlite3.connect(root / 'inbox.db')) as other:
+                self.assertEqual(other.execute('SELECT COUNT(*) FROM messages WHERE id=?', (deleted,)).fetchone()[0], 0)
+                self.assertEqual(other.execute('SELECT COUNT(*) FROM message_audiences WHERE message_id=?', (deleted,)).fetchone()[0], 0)
             store.ack([purged])
             store.purge(older_than_s=-1)
+            with closing(sqlite3.connect(root / 'inbox.db')) as other:
+                self.assertEqual(other.execute('SELECT COUNT(*) FROM messages WHERE id=?', (purged,)).fetchone()[0], 0)
+                self.assertEqual(other.execute('SELECT COUNT(*) FROM message_audiences WHERE message_id=?', (purged,)).fetchone()[0], 0)
             rows = store.db.execute('SELECT message_id FROM message_audiences').fetchall()
             self.assertEqual([row[0] for row in rows], [retained])
+            store.db.close()
+
+    def test_delete_failure_rolls_back_message_and_audience(self):
+        from dunk_inbox import Inbox
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = Inbox(path=str(root / 'inbox.db'), blob_dir=str(root / 'blobs'))
+            message = store.send('agent', 'private', agent_only=True)['message_id']
+            store.db.execute("CREATE TRIGGER fail_message_delete BEFORE DELETE ON messages BEGIN SELECT RAISE(ABORT, 'test'); END")
+            store.db.commit()
+            with self.assertRaises(sqlite3.IntegrityError):
+                store.delete([message])
+            with closing(sqlite3.connect(root / 'inbox.db')) as other:
+                self.assertEqual(other.execute('SELECT COUNT(*) FROM messages WHERE id=?', (message,)).fetchone()[0], 1)
+                self.assertEqual(other.execute('SELECT COUNT(*) FROM message_audiences WHERE message_id=?', (message,)).fetchone()[0], 1)
             store.db.close()
