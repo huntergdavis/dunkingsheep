@@ -647,7 +647,7 @@ mod owner_tests {
     }
 
     #[test]
-    fn loop_set_periodic_push_claims_registered_lane_without_follow_and_joins() {
+    fn loop_set_periodic_push_feeds_a_subscribed_lane_and_joins() {
         let fixture = Fixture::new();
         fixture.runtime.block_on(async {
             let task = fixture
@@ -657,7 +657,12 @@ mod owner_tests {
                 .unwrap();
             let env = Arc::new(fixture.services.push_loop_adapter().unwrap());
             let flock = Arc::clone(fixture.services.flock());
-            assert!(flock.task_waiters.lock().unwrap().is_empty());
+            // Owner decision on t3554: only a subscriber is fed, so the lane subscribes first.
+            flock
+                .task_waiters
+                .lock()
+                .unwrap()
+                .insert("w1:p1".into(), "global".into());
             let intervals = LoopIntervals {
                 push: Duration::from_millis(20),
                 stuck: Duration::from_millis(25),
@@ -713,6 +718,11 @@ mod owner_tests {
                 .unwrap();
             let env = Arc::new(fixture.services.push_loop_adapter().unwrap());
             let flock = Arc::clone(fixture.services.flock());
+            flock
+                .task_waiters
+                .lock()
+                .unwrap()
+                .insert("w1:p1".into(), "global".into());
             let mut loops = LoopSet::default();
             loops.start(
                 Arc::clone(&flock),

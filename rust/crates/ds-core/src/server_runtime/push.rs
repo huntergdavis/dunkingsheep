@@ -506,6 +506,11 @@ mod tests {
             pane_id: "w1:p1".into(),
             unread,
         };
+        flock
+            .task_waiters
+            .lock()
+            .unwrap()
+            .insert("w1:p1".into(), "global".into());
         let decisions = runtime.block_on(flock.push_tasks(&env));
         assert_eq!(
             runtime.block_on(tasks.get(&task.id)).unwrap().status,
