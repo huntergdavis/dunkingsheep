@@ -39,7 +39,7 @@ pub struct Group {
     pub actions: &'static [(&'static str, &'static str)],
 }
 
-/// Every command the daemon serves (130 at generation time).
+/// Every command the daemon serves (131 at generation time).
 pub static COMMANDS: &[Command] = &[
     Command {
         name: "add_dunk",
@@ -634,7 +634,7 @@ pub static COMMANDS: &[Command] = &[
     Command {
         name: "owner_page",
         description: "Record one owner page for the Telegram outbox (t665, FLAT_FLEET.md 7.2). A page is a notice, not a question: it has no reply_to, so no desk answers it, and owner_outbox returns it to the telegram transport only. external_id is the producer's dedupe key. Owner and system only.",
-        params: &[Param { name: "body", schema: "{\"type\":\"string\",\"description\":\"The page text (the watchdog's PAGE OWNER digest).\"}" }, Param { name: "external_id", schema: "{\"type\":\"string\",\"description\":\"The producer's dedupe key; a repeat returns the row already recorded.\"}" }],
+        params: &[Param { name: "body", schema: "{\"type\":\"string\",\"description\":\"The page text (the watchdog's PAGE OWNER digest).\"}" }, Param { name: "external_id", schema: "{\"type\":\"string\",\"description\":\"The producer's dedupe key; a repeat returns the row already recorded.\"}" }, Param { name: "class", schema: "{\"type\":\"string\",\"description\":\"The watchdog page class (t3700): security, outage or money marks a critical emergency page that may reach Telegram; any other value, or none, is recorded to the owner mailbox only.\"}" }],
         dispatch_required: &["body"],
         required: &["body"],
         mcp: false,
@@ -1070,6 +1070,16 @@ pub static COMMANDS: &[Command] = &[
         mcp: true,
         owner_only: false,
         roles: &["owner", "system", "web", "planner"],
+    },
+    Command {
+        name: "task_batch_claim",
+        description: "ATOMIC BATCH CLAIM: take an explicit, ordered list of tasks for the caller, all or nothing, in one transaction. Every member must be claimable by you under the same rules as task_next (no lease held by another pane, not blocked by a prerequisite outside the batch, not already in another active batch, kind and author filters for your role). One failing member claims none: refused.reason names the cause (batch_conflict, leased, owned_elsewhere, blocked, not_claimable, busy, missing, duplicate, scope, empty) and refused.task_ids the members at fault. Members run in the order given and share one lease: a heartbeat or release on any of them covers all. Workers and the owner only.",
+        params: &[Param { name: "ids", schema: "{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Task ids, in execution order.\"}" }, Param { name: "lease_seconds", schema: "{\"type\":\"number\",\"minimum\":1,\"description\":\"Lease length in seconds (default 1800).\"}" }, Param { name: "allow_busy", schema: "{\"type\":\"boolean\",\"description\":\"Take a batch while already holding in-progress work.\"}" }],
+        dispatch_required: &["ids"],
+        required: &["ids"],
+        mcp: false,
+        owner_only: false,
+        roles: &["owner", "worker"],
     },
     Command {
         name: "task_block",

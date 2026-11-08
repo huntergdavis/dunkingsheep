@@ -22,7 +22,7 @@ FIXTURE = ROOT / "rust/crates/ds-core/tests/registry_expected.json"
 # fixture (see registry_parity.rs, rust_only). owner_page is t665; the two task_owner verbs
 # were hand-added before this generator knew them.
 RUST_ONLY_OUTSIDE_FIXTURE = frozenset({"owner_page", "owner_page_confirmed", "task_owner_question",
-                                       "task_owner_answer"})
+                                       "task_owner_answer", "task_batch_claim"})
 
 
 def _close(text, i, opening, closing):
@@ -184,6 +184,7 @@ def build():
         "properties": {
             "body": {"type": "string", "description": "The page text (the watchdog's PAGE OWNER digest)."},
             "external_id": {"type": "string", "description": "The producer's dedupe key; a repeat returns the row already recorded."},
+            "class": {"type": "string", "description": "The watchdog page class (t3700): security, outage or money marks a critical emergency page that may reach Telegram; any other value, or none, is recorded to the owner mailbox only."},
         },
         "required": ["body"],
         "additionalProperties": False,
@@ -249,6 +250,21 @@ def build():
          "option_number": {"type": "integer"}, "reply": {"type": "string"}},
         ["id", "version"]))
 
+    class RustOnlyTaskBatchClaim:
+        name = "task_batch_claim"
+        description = ("ATOMIC BATCH CLAIM: take an explicit, ordered list of tasks for the caller, all or nothing, in one transaction. Every member must be claimable by you under the same rules as task_next (no lease held by another pane, not blocked by a prerequisite outside the batch, not already in another active batch, kind and author filters for your role). One failing member claims none: refused.reason names the cause (batch_conflict, leased, owned_elsewhere, blocked, not_claimable, busy, missing, duplicate, scope, empty) and refused.task_ids the members at fault. Members run in the order given and share one lease: a heartbeat or release on any of them covers all. Workers and the owner only.")
+        params = {"ids": {"type": "array", "items": {"type": "string"}, "description": "Task ids, in execution order."},
+                  "lease_seconds": {"type": "number", "minimum": 1, "description": "Lease length in seconds (default 1800)."},
+                  "allow_busy": {"type": "boolean", "description": "Take a batch while already holding in-progress work."}}
+        required = ["ids"]
+        mcp_required = ["ids"]
+        mcp = False
+
+        def input_schema(self):
+            return {"type": "object", "properties": self.params, "required": self.required, "additionalProperties": False}
+
+    commands.append(RustOnlyTaskBatchClaim())
+
     def permitted(role, name):
         if role == "web" and name in web_denied:
             return False
@@ -309,6 +325,7 @@ def build():
             for k, v in c.params.items())
         allowed = (["owner", "desk"] if c.name == "project_spawn"
                    else ["owner", "system"] if c.name in ("owner_page", "owner_page_confirmed")
+                   else ["owner", "worker"] if c.name == "task_batch_claim"
                    else ["owner", "web"] if c.name.startswith("task_owner_")
                    else [r for r in roles if permitted(r, c.name)])
         lines.append("    Command {")
