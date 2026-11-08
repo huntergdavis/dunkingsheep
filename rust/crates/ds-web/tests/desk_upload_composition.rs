@@ -9,12 +9,14 @@
 //! (the base case: the same 20-byte content and the same pinned mtime).
 
 use std::{
+    net::SocketAddr,
     path::Path,
     time::{Duration, UNIX_EPOCH},
 };
 
 use axum::{
     body::{to_bytes, Body},
+    extract::ConnectInfo,
     http::{header, Method, Request, StatusCode},
 };
 use ds_web::{
@@ -131,6 +133,11 @@ fn the_composed_desk_serves_an_upload_with_its_real_stat_metadata() {
                     .method(Method::POST)
                     .uri("/api/login")
                     .header(header::CONTENT_TYPE, "application/json")
+                    // The login route reads the peer address (rate limiting). A real server supplies
+                    // it; a oneshot request has none, so the extractor would answer 500 before the handler.
+                    .extension(ConnectInfo(
+                        "127.0.0.1:4000".parse::<SocketAddr>().expect("address"),
+                    ))
                     .body(Body::from(login))
                     .expect("login request"),
             )
