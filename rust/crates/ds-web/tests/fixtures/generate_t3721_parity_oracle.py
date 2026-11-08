@@ -157,6 +157,11 @@ record("password_current_not_string", owner.post("/api/password", json={"current
 record("password_new_too_long", owner.post("/api/password", json={"current_password": PASSWORD, "new_password": "x" * 201}))
 record("password_not_json", owner.post("/api/password", content=b"not json", headers={"content-type": "application/json"}))
 record("password_list_body", owner.post("/api/password", json=[1, 2]))
+# Empty body: FastAPI sees no body at all (a 'missing' error with input null, not a decode error).
+record("password_empty_body", owner.post("/api/password", content=b"", headers={"content-type": "application/json"}))
+# NaN in a JSON body: json.loads accepts it, and the pinned Python desk answers 500 (its 422 cannot
+# serialise the NaN input). Recorded as the server answered it; a decision is pending (t3722).
+record("password_nan_body", owner.post("/api/password", content=b'{"current_password": NaN, "new_password": "x"}', headers={"content-type": "application/json"}))
 
 api_token = desk._auth_record()["token"]  # scratch token, read in-process, never written to the oracle
 record("password_api_identity_invalid_body", anon().post("/api/password", json={"current_password": PASSWORD, "new_password": "short"},

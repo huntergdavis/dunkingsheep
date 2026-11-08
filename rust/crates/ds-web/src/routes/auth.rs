@@ -228,6 +228,15 @@ fn password_field(
 /// then `new_password`. A body that is not JSON or not an object is refused the same way FastAPI
 /// refuses it (a JSON-decode error in one case; the decoder's own text is not reproduced).
 fn password_body(raw: &[u8]) -> Result<PasswordBody, Box<Response>> {
+    // An empty body is no body at all to FastAPI: a 'missing' error with input null, not a decode error.
+    if raw.is_empty() {
+        return Err(Box::new(validation_detail(vec![json!({
+            "input": null,
+            "loc": ["body"],
+            "msg": "Field required",
+            "type": "missing",
+        })])));
+    }
     let value: Value = serde_json::from_slice(raw).map_err(|error| {
         Box::new(validation_detail(vec![json!({
             "ctx": {"error": error.to_string()},

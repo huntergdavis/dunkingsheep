@@ -358,6 +358,31 @@
       "body": {
         "detail": [
           {
+            "input": null,
+            "loc": [
+              "body"
+            ],
+            "msg": "Field required",
+            "type": "missing"
+          }
+        ]
+      },
+      "content_type": "application/json",
+      "name": "password_empty_body",
+      "status": 422
+    },
+    {
+      "body": {
+        "text": "Internal Server Error"
+      },
+      "content_type": "text/plain; charset=utf-8",
+      "name": "password_nan_body",
+      "status": 500
+    },
+    {
+      "body": {
+        "detail": [
+          {
             "ctx": {
               "min_length": 12
             },

@@ -63,9 +63,15 @@ struct Gap {
 const KNOWN_GAPS: &[Gap] = &[
     Gap {
         name: "password_not_json",
-        reason: "Python's json_invalid ctx.error is the Python decoder's text ('Expecting value'); Rust carries the serde_json text. The shape matches.",
+        reason: "Python 422 json_invalid: ctx.error is the Python json decoder's message and loc is the character position (observed: 'Expecting value' at 0 for 'not json'; 'Expecting \\':\\' delimiter' at 20, 'Expecting \\',\\' delimiter' at 25, 'Unterminated string starting at' at 21, 'Extra data' at 26, 'Invalid control character at' at 23, 'Illegal trailing comma before end of object' at 24). Rust 422 json_invalid carries serde_json's text and line/column position. Same status, content type and envelope; the decoder wording and position differ. Matching them needs a CPython-compatible scanner: a decision, not a password-route correction.",
         rust_status: 422,
         rust_body: r#"{"detail":[{"ctx":{"error":"expected ident at line 1 column 2"},"input":{},"loc":["body",0],"msg":"JSON decode error","type":"json_invalid"}]}"#,
+    },
+    Gap {
+        name: "password_nan_body",
+        reason: "Python answers 500 Internal Server Error: json.loads accepts NaN, the NaN reaches the 422 body, and its serialisation fails. Rust answers 422 json_invalid. A 500 is a Python defect, not a contract to copy. Pending the owner's decision (t3722).",
+        rust_status: 422,
+        rust_body: r#"{"detail":[{"ctx":{"error":"expected value at line 1 column 22"},"input":{},"loc":["body",0],"msg":"JSON decode error","type":"json_invalid"}]}"#,
     },
 ];
 
@@ -432,6 +438,13 @@ fn the_composed_desk_matches_the_python_desk_for_viewport_password_answer_and_re
         check("password_not_json", &send(&router, b, Body::from("not json")).await);
         let (b, body) = change(json!([1, 2]), Some(&owner_cookie_header), None);
         check("password_list_body", &send(&router, b, body).await);
+        let (b, _) = change(json!({}), Some(&owner_cookie_header), None);
+        check("password_empty_body", &send(&router, b, Body::empty()).await);
+        let (b, _) = change(json!({}), Some(&owner_cookie_header), None);
+        check(
+            "password_nan_body",
+            &send(&router, b, Body::from(r#"{"current_password": NaN, "new_password": "x"}"#)).await,
+        );
 
         // The API token is the scratch record's token, read from the scratch data dir only.
         let auth: Value = serde_json::from_str(&std::fs::read_to_string(data_dir.join("auth.json")).expect("scratch auth record"))
