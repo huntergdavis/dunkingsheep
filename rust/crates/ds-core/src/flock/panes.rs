@@ -30,11 +30,13 @@ pub const ROLE_PANE_GRACE_S: f64 = 180.0;
 /// Entries kept before expired ones are swept.
 const ROLE_PANE_CACHE_MAX: usize = 512;
 
-/// The two role-pane caches: `_role_pane_cache` (expiry, info) and `_role_pane_last`.
+/// The two role-pane caches: `_role_pane_cache` (expiry, info) and `_role_pane_last`, and the
+/// caller-binding root pids (t3368), which have no grace window.
 #[derive(Debug, Default)]
 pub struct RolePaneCache {
     cache: BTreeMap<String, (f64, Option<Value>)>,
     last: BTreeMap<String, (f64, Value)>,
+    roots: BTreeMap<String, (f64, Option<i64>)>,
 }
 
 /// The stores a `Flock` owns, attached after construction (their opening is async or
@@ -200,6 +202,42 @@ impl Flock {
             caches.cache.retain(|_, (expires, _)| *expires > now);
         }
         info
+    }
+
+    /// The root pid of a pane for caller binding (t3368), read with `read`. Fail closed: a listing
+    /// without the pane (`Ok(None)`) and a read that fails (`Err`) are returned as they are, and
+    /// the caller refuses the claim. There is no grace window here: an earlier sighting never
+    /// stands in for a missed listing. A found pane is cached for the same 2 s TTL as the role
+    /// panes; a miss or an error is not cached, so the next request asks again.
+    pub(crate) fn pane_root_pid(
+        &self,
+        pane_id: &str,
+        now: f64,
+        read: impl FnOnce() -> Result<Option<Option<i64>>, crate::error::DunkError>,
+    ) -> Result<Option<Option<i64>>, crate::error::DunkError> {
+        let cached = self
+            .role_panes
+            .lock()
+            .expect("role pane lock")
+            .roots
+            .get(pane_id)
+            .copied();
+        if let Some((expires, pid)) = cached {
+            if expires > now {
+                return Ok(Some(pid));
+            }
+        }
+        let answer = read()?;
+        if let Some(pid) = answer {
+            let mut caches = self.role_panes.lock().expect("role pane lock");
+            caches
+                .roots
+                .insert(pane_id.to_string(), (now + ROLE_PANE_TTL_S, pid));
+            if caches.roots.len() > ROLE_PANE_CACHE_MAX {
+                caches.roots.retain(|_, (expires, _)| *expires > now);
+            }
+        }
+        Ok(answer)
     }
 
     /// `self._role_pane_cache.pop(pane_id)`: a registration change must not be served stale.

@@ -657,8 +657,10 @@ fn pane_lookup_preserves_absence_and_backend_failure_and_metrics_are_best_effort
     no_metrics.record_identity_mismatch("w1:p1", "pane_not_in_ancestry");
 }
 
+/// t3368: the caller-binding read is fail closed. The earlier sighting no longer stands in for a
+/// listing that has stopped showing the pane (the role-pane 180 s grace is not used here).
 #[test]
-fn pane_lookup_uses_last_good_role_record_after_empty_backend_answer() {
+fn pane_lookup_refuses_a_missed_listing_with_no_grace_window() {
     let empty = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let factory_empty = Arc::clone(&empty);
     let terminal_factory: LoopTerminalFactory = Arc::new(move || {
@@ -675,8 +677,10 @@ fn pane_lookup_uses_last_good_role_record_after_empty_backend_answer() {
     assert_eq!(initial.pane_pid, Some(1101));
     std::thread::sleep(std::time::Duration::from_millis(2_100));
     empty.store(true, std::sync::atomic::Ordering::Relaxed);
-    let held = dispatcher.pane_info("w1:p1").unwrap().unwrap();
-    assert_eq!(held.pane_pid, Some(1101));
+    assert!(
+        dispatcher.pane_info("w1:p1").unwrap().is_none(),
+        "a listing without the pane refuses: no stale record is served"
+    );
 }
 
 /// A `tmux` that cannot reach a server: tmux 3.x's wording for a named socket that does not

@@ -16,6 +16,7 @@ use std::collections::BTreeMap;
 pub mod composer;
 pub mod control;
 pub mod fakes;
+pub mod identity;
 pub mod parse;
 pub(crate) mod raw;
 pub mod screen;
@@ -230,6 +231,17 @@ pub trait Terminal: std::fmt::Debug {
     /// unavailable listing.
     fn try_list_panes(&self) -> Result<Vec<Pane>, TerminalError> {
         Ok(self.list_panes())
+    }
+
+    /// The root pid of one pane, for caller binding (t3368). `Ok(None)`: the backend lists no
+    /// such pane. `Ok(Some(None))`: it lists the pane with no pid. `Err`: it cannot answer. A
+    /// backend overrides this with a listing that carries no free text (see `terminal::identity`).
+    fn try_pane_root_pid(&self, pane_id: &str) -> Result<Option<Option<i64>>, TerminalError> {
+        Ok(self
+            .try_list_panes()?
+            .into_iter()
+            .find(|pane| pane.pane_id == pane_id)
+            .map(|pane| pane.pane_pid))
     }
 
     /// List grouped panes through the additive fallible seam. Backends may override
