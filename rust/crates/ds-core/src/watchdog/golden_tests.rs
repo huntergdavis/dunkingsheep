@@ -5,11 +5,18 @@
 //! by `tools/watchdog_dry_run_golden.py`. This test runs `watchdog::run` over the same config and
 //! state (copied to a scratch directory, the Python path replaced by "@STATE@") and compares the
 //! parsed JSON. Dry-run sends nothing, so the owner route is a stub that refuses.
+//!
+//! t3580: the test reads only fixture inputs. The host probes are pinned to a healthy reading (the
+//! host the golden was recorded on) and the heavy-slot scan reads an empty scratch directory, so the
+//! result does not depend on this machine's /tmp, load or CPU count. `heavy_jobs` (evaluate.rs) still
+//! reads /tmp, but its count only reaches the output when `host.load` fires, which the pinned reading
+//! never does.
 
 use std::path::{Path, PathBuf};
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
+use super::rules_host::HostSample;
 use super::run::{run, OwnerTransport, SendError};
 use crate::error::DunkError;
 
@@ -72,6 +79,19 @@ fn normalize(value: &Value, state: &str) -> Value {
     }
 }
 
+/// A healthy host: `/tmp` and `/` well under every limit in the golden config, load at zero. The golden
+/// checks the rules over this reading, not over whichever machine runs the test.
+fn healthy_host(_path: &Path) -> Result<HostSample, DunkError> {
+    Ok(HostSample {
+        load1: 0.0,
+        load5: Some(0.0),
+        cpus: 4,
+        used_fraction: 0.5,
+        free_bytes: 50 * 1024 * 1024 * 1024,
+        inode_used_fraction: 0.1,
+    })
+}
+
 #[test]
 fn watchdog_dry_run_matches_the_python_golden() {
     let dir = tempfile::tempdir().unwrap();
@@ -81,9 +101,22 @@ fn watchdog_dry_run_matches_the_python_golden() {
         std::fs::read_to_string(fixtures().join("watchdog/golden/watchdog.golden.json"))
             .unwrap()
             .replace(PLACEHOLDER, &state_text);
-    let config: Value = serde_json::from_str(&config_text).unwrap();
+    let mut config: Value = serde_json::from_str(&config_text).unwrap();
+    // The heavy-slot scan reads an empty scratch directory, not the live /tmp.
+    let slots = dir.path().join("slots");
+    std::fs::create_dir_all(&slots).unwrap();
+    config["rules"]["host.heavy_slot_stale"]["directory"] = json!(slots.to_str().unwrap());
     let mut send = |_: &str, _: &str, _: &str| -> Result<(), SendError> { Ok(()) };
-    let report = run(&config, NOW, true, &mut send, &NoOwnerRoute, None, None).unwrap();
+    let report = run(
+        &config,
+        NOW,
+        true,
+        &mut send,
+        &NoOwnerRoute,
+        None,
+        Some(&healthy_host),
+    )
+    .unwrap();
     let got = normalize(&report, &state_text);
     let want: Value = serde_json::from_str(
         &std::fs::read_to_string(fixtures().join("watchdog/golden/dry_run.expected.json")).unwrap(),
