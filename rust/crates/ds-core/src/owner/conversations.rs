@@ -1315,3 +1315,8 @@ mod conversation_mailboxes_tests;
 #[cfg(test)]
 #[path = "routine_mail_tests.rs"]
 mod routine_mail_tests;
+
+/// t3714: the owner conversation through `OwnerConversations::conversation` (the t3711 requirement).
+#[cfg(test)]
+#[path = "conversation_routine_tests.rs"]
+mod conversation_routine_tests;
