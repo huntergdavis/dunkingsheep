@@ -106,6 +106,21 @@ fn watchdog_dry_run_matches_the_python_golden() {
     let slots = dir.path().join("slots");
     std::fs::create_dir_all(&slots).unwrap();
     config["rules"]["host.heavy_slot_stale"]["directory"] = json!(slots.to_str().unwrap());
+    // resource.would_kill: an absent policies file in scratch, so /etc is never read. The policy-present
+    // behaviour stays covered in rules_resource_tests. The state path is read only when callers exist,
+    // which the golden never has, but it is pinned to scratch too.
+    config["rules"]["resource.would_kill"]["policies_path"] = json!(dir
+        .path()
+        .join("policies")
+        .join("load-policies.json")
+        .to_str()
+        .unwrap());
+    config["rules"]["resource.would_kill"]["state_path"] =
+        json!(dir.path().join("would-kill-state.json").to_str().unwrap());
+    // The owner confirm path is read only when live (the dry run never reads it). Pinned anyway, so no
+    // ~ (HOME-relative) path remains in the golden config.
+    config["escalation"]["owner"]["confirm_path"] =
+        json!(dir.path().join("telegram-status.json").to_str().unwrap());
     // The heavy-job count is a fixed test provider, so the live /tmp is never read.
     let _heavy = evaluate::test_seam::fix_heavy_jobs(0);
     let mut send = |_: &str, _: &str, _: &str| -> Result<(), SendError> { Ok(()) };

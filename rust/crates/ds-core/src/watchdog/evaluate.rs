@@ -494,7 +494,7 @@ fn run_rule(rule_id: &str, rule: &Value, inputs: &Inputs<'_>) -> Result<Vec<Valu
         }
         "host.load" => {
             let host = inputs.host(Path::new("/"))?;
-            let heavy = heavy_jobs_tmp();
+            let heavy = heavy_jobs_in(Path::new("/tmp"));
             Ok(rules_host::rule_host_load(
                 &host,
                 inputs.panes()?,
@@ -640,16 +640,17 @@ pub fn self_error(problems: &[Value]) -> Value {
     })
 }
 
-/// The slot holders under /tmp, counted for the `host.load` rule. Under `cfg(test)` a fixed count
-/// installed through `test_seam` replaces the live read; production builds read /tmp exactly as before.
-fn heavy_jobs_tmp() -> i64 {
+/// The slot holders under `tmp`, counted for the `host.load` rule (production passes /tmp). Under
+/// `cfg(test)` a fixed count installed through `test_seam` replaces the read; production builds contain
+/// no override and call `rules_host::heavy_jobs` exactly as before.
+fn heavy_jobs_in(tmp: &Path) -> i64 {
     #[cfg(test)]
     {
         if let Some(fixed) = test_seam::heavy_override() {
             return fixed;
         }
     }
-    rules_host::heavy_jobs(Path::new("/tmp"))
+    rules_host::heavy_jobs(tmp)
 }
 
 /// t3580: a test-only provider for the heavy-job count. Nothing here is compiled into a production

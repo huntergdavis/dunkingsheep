@@ -1,6 +1,6 @@
 //! t3580: the heavy-job seam (`evaluate::test_seam`). The golden installs a fixed count so it never
-//! reads the host's /tmp. These tests show that the seam is on the `host.load` path, and that without
-//! a fixed count the path is the live read it always was.
+//! reads the host's /tmp. These tests show that the seam is on the `host.load` path, and that without a
+//! fixed count the live count is what it always was. They use fixture directories only; none reads /tmp.
 
 use super::*;
 
@@ -49,16 +49,29 @@ fn a_fixed_heavy_count_is_the_value_host_load_reports() {
     );
 }
 
+/// A scratch directory holding one live poolrad-heavy slot, held by this test process.
+fn one_live_holder() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let slot = dir.path().join("poolrad-heavy.live");
+    std::fs::create_dir(&slot).unwrap();
+    std::fs::write(slot.join("pid"), std::process::id().to_string()).unwrap();
+    dir
+}
+
 #[test]
-fn without_a_fixed_count_the_seam_is_the_live_slot_count() {
-    assert_eq!(rules_host::heavy_jobs(Path::new("/tmp")), heavy_jobs_tmp());
+fn without_a_fixed_count_the_seam_counts_the_live_holders() {
+    let holders = one_live_holder();
+    assert!(test_seam::heavy_override().is_none());
+    assert_eq!(1, heavy_jobs_in(holders.path()));
 }
 
 #[test]
 fn the_fixed_count_is_released_when_its_guard_drops() {
+    let holders = one_live_holder();
     {
         let _fixed = test_seam::fix_heavy_jobs(5);
-        assert_eq!(5, heavy_jobs_tmp());
+        assert_eq!(5, heavy_jobs_in(holders.path()));
     }
-    assert_eq!(rules_host::heavy_jobs(Path::new("/tmp")), heavy_jobs_tmp());
+    assert!(test_seam::heavy_override().is_none());
+    assert_eq!(1, heavy_jobs_in(holders.path()));
 }
