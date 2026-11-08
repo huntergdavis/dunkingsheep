@@ -7,15 +7,15 @@
 //! parsed JSON. Dry-run sends nothing, so the owner route is a stub that refuses.
 //!
 //! t3580: the test reads only fixture inputs. The host probes are pinned to a healthy reading (the
-//! host the golden was recorded on) and the heavy-slot scan reads an empty scratch directory, so the
-//! result does not depend on this machine's /tmp, load or CPU count. `heavy_jobs` (evaluate.rs) still
-//! reads /tmp, but its count only reaches the output when `host.load` fires, which the pinned reading
-//! never does.
+//! host the golden was recorded on), the heavy-job count comes from a fixed test provider
+//! (`evaluate::test_seam`), and the heavy-slot scan reads an empty scratch directory. The result does
+//! not depend on this machine's /tmp, load or CPU count, and the test checks that the provider was used.
 
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
+use super::evaluate;
 use super::rules_host::HostSample;
 use super::run::{run, OwnerTransport, SendError};
 use crate::error::DunkError;
@@ -106,6 +106,8 @@ fn watchdog_dry_run_matches_the_python_golden() {
     let slots = dir.path().join("slots");
     std::fs::create_dir_all(&slots).unwrap();
     config["rules"]["host.heavy_slot_stale"]["directory"] = json!(slots.to_str().unwrap());
+    // The heavy-job count is a fixed test provider, so the live /tmp is never read.
+    let _heavy = evaluate::test_seam::fix_heavy_jobs(0);
     let mut send = |_: &str, _: &str, _: &str| -> Result<(), SendError> { Ok(()) };
     let report = run(
         &config,
@@ -117,6 +119,10 @@ fn watchdog_dry_run_matches_the_python_golden() {
         Some(&healthy_host),
     )
     .unwrap();
+    assert!(
+        evaluate::test_seam::reads() >= 1,
+        "the golden did not consult the fixed heavy-job count"
+    );
     let got = normalize(&report, &state_text);
     let want: Value = serde_json::from_str(
         &std::fs::read_to_string(fixtures().join("watchdog/golden/dry_run.expected.json")).unwrap(),

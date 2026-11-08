@@ -494,7 +494,7 @@ fn run_rule(rule_id: &str, rule: &Value, inputs: &Inputs<'_>) -> Result<Vec<Valu
         }
         "host.load" => {
             let host = inputs.host(Path::new("/"))?;
-            let heavy = rules_host::heavy_jobs(Path::new("/tmp"));
+            let heavy = heavy_jobs_tmp();
             Ok(rules_host::rule_host_load(
                 &host,
                 inputs.panes()?,
@@ -640,6 +640,61 @@ pub fn self_error(problems: &[Value]) -> Value {
     })
 }
 
+/// The slot holders under /tmp, counted for the `host.load` rule. Under `cfg(test)` a fixed count
+/// installed through `test_seam` replaces the live read; production builds read /tmp exactly as before.
+fn heavy_jobs_tmp() -> i64 {
+    #[cfg(test)]
+    {
+        if let Some(fixed) = test_seam::heavy_override() {
+            return fixed;
+        }
+    }
+    rules_host::heavy_jobs(Path::new("/tmp"))
+}
+
+/// t3580: a test-only provider for the heavy-job count. Nothing here is compiled into a production
+/// build. The override is per thread, so parallel tests cannot see each other's value.
+#[cfg(test)]
+pub(crate) mod test_seam {
+    use std::cell::Cell;
+
+    thread_local! {
+        static FIXED: Cell<Option<i64>> = const { Cell::new(None) };
+        static READS: Cell<u32> = const { Cell::new(0) };
+    }
+
+    /// Consulted once per `host.load` evaluation; every consult is counted, so a test can show the
+    /// seam was on the path.
+    pub(crate) fn heavy_override() -> Option<i64> {
+        READS.with(|reads| reads.set(reads.get() + 1));
+        FIXED.with(Cell::get)
+    }
+
+    /// Install a fixed count until the returned guard drops (also on panic), and reset the counter.
+    pub(crate) fn fix_heavy_jobs(value: i64) -> FixedHeavy {
+        FIXED.with(|fixed| fixed.set(Some(value)));
+        READS.with(|reads| reads.set(0));
+        FixedHeavy
+    }
+
+    /// How many times the seam was consulted since the last `fix_heavy_jobs` on this thread.
+    pub(crate) fn reads() -> u32 {
+        READS.with(Cell::get)
+    }
+
+    pub(crate) struct FixedHeavy;
+
+    impl Drop for FixedHeavy {
+        fn drop(&mut self) {
+            FIXED.with(|fixed| fixed.set(None));
+        }
+    }
+}
+
 #[cfg(test)]
 #[path = "evaluate_tests.rs"]
 mod evaluate_tests;
+
+#[cfg(test)]
+#[path = "evaluate_heavy_seam_tests.rs"]
+mod evaluate_heavy_seam_tests;
