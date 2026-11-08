@@ -45,6 +45,22 @@ pub struct Conversation {
 pub const OWNER_PAGE_SENDER: &str = "owner-page";
 pub const OWNER_PAGE_SUBJECT: &str = "PAGE OWNER";
 pub const OWNER_PAGE_TRANSPORT: &str = "telegram";
+/// The transport of an owner page that is recorded to the owner mailbox only (t3700): it is never
+/// written to the Telegram outbox, because the outbox reads only the `telegram` transport.
+pub const OWNER_PAGE_MAILBOX_TRANSPORT: &str = "report";
+/// The watchdog's critical classes that may reach the phone (t3700, owner decision). Everything else
+/// is mailbox-only.
+pub const OWNER_PAGE_EMERGENCY_CLASSES: [&str; 3] = ["security", "outage", "money"];
+
+/// The transport an owner page is recorded on (t3700): `telegram` for a critical emergency page,
+/// `report` (mailbox only) for every other page, including a page with no class.
+pub fn owner_page_transport(class: Option<&str>) -> &'static str {
+    let class = class.map(|value| value.trim().to_ascii_lowercase());
+    match class.as_deref() {
+        Some(value) if OWNER_PAGE_EMERGENCY_CLASSES.contains(&value) => OWNER_PAGE_TRANSPORT,
+        _ => OWNER_PAGE_MAILBOX_TRANSPORT,
+    }
+}
 
 /// The number the watchdog compares for an owner page: the digits of its mailbox id (`i47710`
 /// -> 47710). None for any id that is not one of ours, so a stranger row never confirms a page.
@@ -314,6 +330,7 @@ impl<'a> OwnerConversations<'a> {
         body: Option<&Value>,
         external_id: Option<&Value>,
         self_pane_id: Option<&str>,
+        class: Option<&Value>,
     ) -> Result<Ingested, DunkError> {
         self.require_page_role(self_pane_id)?;
         let body = body.map(python_str).unwrap_or_default();
@@ -324,13 +341,22 @@ impl<'a> OwnerConversations<'a> {
             .filter(|value| value_truthy(value))
             .map(python_str)
             .filter(|id| !id.is_empty());
+        // t3700: only a critical emergency page reaches the phone; any other page is recorded to the
+        // owner mailbox on a transport the Telegram outbox does not read.
+        let class = class.filter(|value| value_truthy(value)).map(python_str);
+        let transport = owner_page_transport(class.as_deref());
         let store = self.inbox_store()?;
         if let Some(id) = external_id.as_deref() {
             if let Some(message) = store.find_by_external_id(OWNER_MAILBOX, Some(id))? {
+                let transport = message
+                    .summary
+                    .transport
+                    .clone()
+                    .unwrap_or_else(|| OWNER_PAGE_MAILBOX_TRANSPORT.to_string());
                 return Ok(Ingested {
                     message,
                     duplicate: true,
-                    transport: OWNER_PAGE_TRANSPORT.to_string(),
+                    transport,
                 });
             }
         }
@@ -342,7 +368,7 @@ impl<'a> OwnerConversations<'a> {
             mailbox_label: Some(OWNER_MAILBOX),
             pane_id: None,
             attachments: &[],
-            transport: Some(OWNER_PAGE_TRANSPORT),
+            transport: Some(transport),
             reply_to: None,
             external_id: external_id.as_deref(),
         };
@@ -352,7 +378,7 @@ impl<'a> OwnerConversations<'a> {
         Ok(Ingested {
             message,
             duplicate: false,
-            transport: OWNER_PAGE_TRANSPORT.to_string(),
+            transport: transport.to_string(),
         })
     }
 

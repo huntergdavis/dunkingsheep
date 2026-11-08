@@ -244,6 +244,17 @@ pub trait OwnerTransport {
     fn confirms_on_post(&self) -> bool {
         false
     }
+    /// Posts one owner page (t3700). `emergency` is true only for a critical security, outage or
+    /// money page: the channel may send that one to the phone. Any other page is mailbox-only. The
+    /// default is the plain post.
+    fn post_page(&self, _emergency: bool, _class: &str, body: &str) -> Result<i64, SendError> {
+        self.post(body)
+    }
+    /// Whether an accepted post of this page is its delivery (t3700): a mailbox-only page is confirmed
+    /// on post; an emergency page to the phone waits for the outbox receipt.
+    fn confirms_on_post_for(&self, _emergency: bool) -> bool {
+        self.confirms_on_post()
+    }
 }
 
 /// The owner-page state entry written after an accepted post (t3624). Mirrors
@@ -475,16 +486,24 @@ pub fn run(
     let mut page_lines = Vec::new();
     for decision in owner_pending {
         let item = &decision["finding"];
-        // An owner-mailbox escalation is not a page: its text never carries the page marker.
-        let confirms = owner_channel.confirms_on_post();
+        // t3700: an emergency page is a critical security, outage or money finding; it alone may reach
+        // the phone. Every other owner escalation is mailbox-only and carries no page marker.
+        let class = item["class"].as_str().unwrap_or("");
+        let emergency = crate::owner::conversations::OWNER_PAGE_EMERGENCY_CLASSES.contains(&class)
+            && item["severity"].as_str() == Some("critical");
+        let confirms = owner_channel.confirms_on_post_for(emergency);
         let body = digest(
-            if confirms {
-                "OWNER escalation"
-            } else {
+            if emergency {
                 "OWNER page"
+            } else {
+                "OWNER escalation"
             },
             &[line(
-                if confirms { "ESCALATION" } else { "PAGE OWNER" },
+                if emergency {
+                    "PAGE OWNER"
+                } else {
+                    "ESCALATION"
+                },
                 item,
                 &json!("no"),
                 None,
@@ -502,7 +521,7 @@ pub fn run(
                 continue;
             }
         };
-        match owner_channel.post(&body) {
+        match owner_channel.post_page(emergency, class, &body) {
             Err(error) => {
                 problems.push(format!(
                     "owner page {} not posted: {}: {}; recorded as UNDELIVERED",
