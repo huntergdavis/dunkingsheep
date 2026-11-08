@@ -1,12 +1,17 @@
 # Theme texture layer: options and recommendation
 
 Task t3702 (owner request #1980). Status: **proposal only**. This document adds no theme file,
-no CSS, no JavaScript and no shared-file change. It states what a texture would have to satisfy,
-the options for three effects (sand, glyph rain, grain), and a recommendation. Nothing here is
-implemented or verified in a browser.
+no CSS, no JavaScript, no image or data-URI asset, and no shared-file change. It states what a
+texture would have to satisfy, the options for three effects (sand, glyph rain, grain), and a
+recommendation. Nothing here is implemented or verified in a browser. Example values are
+descriptions, not code to paste.
 
 Base: origin/main at the branch point (3b2214c8). Every claim about the code is from reading
 `ui/src` at that commit. Contrast figures are computed from the base colour tokens only.
+
+Scope decision (coordinator, i49326): the baseline is static, CSS-generated textures through the
+existing token and overlay contract. Image or data-URI pipelines and shared animation are not in
+scope. They appear only in section 6, as separately scoped future work and tradeoffs.
 
 ## 1. What exists today
 
@@ -32,16 +37,16 @@ variant files.
 **Discrepancy to resolve first.** `themes/README.md` says the generic overlay, display-font and
 chat body-font consumers "are NOT implemented by this split: the existing effect selectors are
 CRT-only". That disagrees with `style.css` on origin/main. Until a browser check settles it, treat
-the README sentence as stale and `style.css` as the code. The proposal below assumes `style.css`
-is correct, and the implementation task must verify it.
+the README sentence as stale and `style.css` as the code. The proposal assumes `style.css` is
+correct, and the implementation task must verify it.
 
 **Motion.** The UI sources contain no `transition`, `animation` or `@keyframes`. Nothing in `ui/`
 or `web/` handles `prefers-reduced-motion`. Any moving effect would be the first motion in the
 desk, and it would need its own reduced-motion gate.
 
-**Contrast gate.** `bridges/tools/theme_contrast.py` checks the token pairs (ink/bg at least 7, muted/bg at
-least 4.5, accent/bg at least 3, accent-contrast/accent at least 4.5). It does not measure an
-overlay composited over text. The README says so directly.
+**Contrast gate.** `bridges/tools/theme_contrast.py` checks the token pairs (ink/bg at least 7,
+muted/bg at least 4.5, accent/bg at least 3, accent-contrast/accent at least 4.5). It does not
+measure an overlay composited over text. The README says so directly.
 
 **Base headroom.** Computed from the token values (WCAG relative luminance):
 
@@ -58,105 +63,102 @@ still clears 4.5:1 is not known until it is measured.
 
 ## 2. Constraints every texture must meet
 
-- **C1 Static by default.** A token-only theme can only add a static background through
-  `--overlay`. Anything that moves needs a shared mechanism (a keyframes block, or JavaScript)
-  that is outside the theme-pair rule. That is a decision for the owner or coordinator.
-- **C2 Readability.** The overlay sits above content (`z-index: 100`). It lowers the effective
+- **C1 Static, token-only.** In v1 a theme adds a static background only through `--overlay`,
+  built from CSS gradients. Nothing animates, and no keyframes are added.
+- **C2 Readability.** The overlay sits above content (`z-index: 100`) and lowers the effective
   contrast of every glyph under it. The token gate does not see this, so the implementation task
   must measure rendered text over the texture.
-- **C3 Reduced motion.** No motion exists today and no reduced-motion handling exists. A moving
-  effect must be off under `prefers-reduced-motion: reduce`, and it must offer an explicit off
-  switch that is not only the OS setting.
-- **C4 Cost.** The layer is one full-viewport fixed element. A static gradient is cheap. An SVG
-  `feTurbulence` filter is expected to cost more on each resize. A canvas or per-frame JavaScript
-  effect is expected to cost the most. These are expectations; nothing here is measured. Each option below states its cost.
+- **C3 Reduced motion.** Not relevant to v1, which has no motion. It becomes binding for any future
+  motion (section 6): off under `prefers-reduced-motion: reduce`, with an explicit off switch.
+- **C4 Cost.** The layer is one full-viewport fixed element. A static CSS gradient is expected to
+  be cheap. Costs are expectations, not measurements; each option states its own.
 - **C5 Print and forced colours.** The existing consumer removes the overlay under `print` and
   `forced-colors`. Keep that.
 - **C6 CRT fidelity.** `crt.css` is a fidelity exception with its own overlay. The proposal does
   not change it.
 
-## 3. Options per effect
+## 3. Options per effect (v1, CSS-only)
 
 ### 3.1 Sand (dune)
 
-- **A. Static dune dither (recommended).** A `--overlay` that is a very low-alpha dithered
-  gradient, roughly 0.03 to 0.06 alpha, in a warm tone. Mechanism: token only, existing consumer.
-  Motion: none. Cost: a static gradient, negligible. Readability: dune's base pairs leave about
-  13.5:1 for ink on surface, so a faint texture has room. Verify the composite. Limitation: a
-  static pattern can band and does not read as moving sand.
-- **B. Drifting sand.** Animated background position. Needs C1 (shared keyframes) and C3. Not
-  recommended until a shared motion mechanism exists.
+- **A. Static dune dither (recommended).** A very low-alpha dither built from layered repeating
+  gradients at two or three angles with small periods, in a warm tone, at roughly 0.03 to 0.06
+  alpha. Mechanism: token only, existing consumer, no image. Motion: none. Cost: expected to be
+  negligible. Readability: dune's base pairs leave about 13.5:1 for ink on surface, so a faint
+  texture has room; verify the composite. Limitation: a regular gradient pattern can band or moiré
+  and reads as grain, not as moving sand.
 
 ### 3.2 Glyph rain (blade-runner)
 
-- **C. Static glyph field (recommended for v1, if assets are allowed).** A pre-rendered tile of
-  sparse glyphs at low alpha, supplied as `--overlay` with `url()`. Mechanism: the README permits
-  bundled font assets in a theme-owned directory, but it does not say whether image assets are
-  allowed. That needs a decision. Motion: none. Cost: one image, decoded once. Readability: keep
-  glyph density low and alpha at or below about 0.05, and measure the composite.
-- **D. Animated columns (CSS keyframes).** Falling columns through a shared keyframes block. Needs
-  C1, C3 and a pause when the tab is hidden. Cost: expected to repaint every frame on a
-  full-viewport layer; not measured.
-  Not recommended for v1.
-- **E. Canvas rain (JavaScript).** The most faithful look. It needs a frame-rate cap, a pause when
-  hidden, reduced-motion handling, and a separate module. Cost: the highest of the options. Not
-  recommended.
+- **C. Static rain streaks (recommended for v1).** Sparse vertical linear gradients at very low
+  alpha, suggesting falling columns, with no glyphs. Mechanism: token only, existing consumer.
+  Motion: none. Cost: expected to be negligible. Readability: keep alpha at or below about 0.05 and
+  verify the composite. This does not look like glyph rain; it is a static suggestion of it.
+- **Glyph rain proper** (individual glyphs, falling or animated) needs an image or a shared
+  animation. Both are out of v1 scope. See section 6.
 
-Recommendation for glyph rain: ship option C only after the image-asset question is decided. If
-the answer is no, defer glyph rain until a shared motion mechanism exists, and do not fake it with
-a static glyph wall that hurts reading.
+### 3.3 Grain (metropolis)
 
-### 3.3 Grain (metropolis, wargames)
+- **F. Static grain (recommended for metropolis).** Several small-period repeating gradients at
+  different angles, combined at very low alpha, to approximate film grain. Mechanism: token only,
+  existing consumer, no data URI. Motion: none. Cost: expected to be negligible. Readability:
+  metropolis has about 16:1 for ink on surface, so grain at low alpha has room; verify the
+  composite. Limitation: a gradient approximation is less natural than a true noise texture and
+  may show moiré on some screens.
+- **G. Phosphor grain for wargames (not recommended).** Wargames already has a phosphor character,
+  and the shared `--scanline-strength` mechanism is the more faithful tool. Keep grain out of
+  wargames, or keep it well below the scanline strength.
 
-- **F. Static grain (recommended for metropolis).** Film grain as `--overlay`: either a small
-  `feTurbulence` SVG in a data URI, or a pre-rendered tile. Mechanism: token only if a data URI is
-  allowed, and the same asset question as C applies to a tile. Motion: none. Cost: an SVG filter is
-  expected to rasterise once per size and cost more on resize; the tile is expected to be cheaper.
-  Neither is measured.
-  Readability: grain at low alpha over metropolis's 16:1 base headroom is safe; verify the
-  composite. Metropolis is art-deco silver, and grain suits it.
-- **G. Phosphor grain for wargames.** Not recommended as a separate grain. Wargames already has a
-  phosphor character, and scanlines from the shared `--scanline-strength` mechanism would be more
-  faithful. Keep grain out of wargames, or keep it well below the scanline strength.
-
-## 4. Per-theme recommendation
+## 4. Per-theme recommendation (v1)
 
 | Theme | Effect | Option | Mechanism | Motion | Readability to verify |
 |---|---|---|---|---|---|
-| dune | sand | A | `--overlay` gradient | none | ink on surface 13.5:1 base; composite |
-| blade-runner | glyph rain | C (after asset decision) | `--overlay` tile | none in v1 | low glyph density; composite |
-| metropolis | grain | F | `--overlay` data URI or tile | none | 16:1 base; composite |
+| dune | sand | A static dither | `--overlay` gradients | none | ink on surface 13.5:1 base; composite |
+| blade-runner | rain | C static streaks | `--overlay` gradients | none | low alpha; composite |
+| metropolis | grain | F static grain | `--overlay` gradients | none | 16:1 base; composite |
 | wargames | (none) | G not recommended | scanlines already available | none | keep phosphor clear |
 
 ## 5. Recommendation
 
-1. Ship only static options in v1: A for dune, F for metropolis, and C for blade-runner if images
-   are allowed. All go through `--overlay` with no shared CSS change and no motion.
-2. Decide the shared-motion question separately, because D and E need it. If the owner approves a
-   shared animation mechanism, it must include a reduced-motion gate that is on by default, pause
-   when hidden, and a frame cap for any JavaScript effect.
-3. Before any implementation, resolve the README and `style.css` discrepancy in section 1.
-4. Add a composite-contrast check: render sample text over each texture and measure the result
+1. Ship the v1 options only: A for dune, C for blade-runner, and F for metropolis. Each uses
+   `--overlay` with CSS gradients only, no shared CSS change, no image, no data URI, and no motion.
+2. Before any implementation, resolve the README and `style.css` discrepancy in section 1.
+3. Add a composite-contrast check: render sample text over each texture and measure the result
    against 4.5:1. The current gate measures token pairs only.
-5. Add a reduced-motion test if any motion is approved.
+4. Do not build glyph rain proper, animated sand, or animated grain in v1.
 
-## 6. Verification plan (for the implementation task, not this proposal)
+## 6. Future work (separately scoped, not in v1)
+
+These are tradeoffs for later decisions. They are not in scope and need their own tasks.
+
+- **Repo-local licensed assets or data URIs.** A glyph tile for blade-runner, or an SVG
+  `feTurbulence` grain for metropolis, would be more faithful than gradients. Tradeoffs: the README
+  does not allow image assets today, so a theme-owned asset directory and licence files would
+  need a contract change. Assets must be repo-local, with no external fetch. A data URI keeps the
+  file count down but makes each theme's CSS heavier. An SVG filter is expected to rasterise once
+  per size and cost more on resize; a pre-rendered tile is expected to be cheaper. Nothing here is
+  measured.
+- **Shared reduced-motion-aware animation.** Drifting sand (B), animated rain columns (D), and
+  JavaScript canvas rain (E) all need a shared mechanism. Tradeoffs: this is the first motion in the
+  desk, so it needs a reduced-motion gate that is on by default, a pause when the tab is hidden,
+  and a frame cap for any JavaScript effect. Animated full-viewport layers are expected to repaint
+  often. Canvas rain is the most faithful and the most expensive.
+
+## 7. Verification plan (for the implementation task, not this proposal)
 
 - Browser capture of each theme with the overlay on and off, at the blocking widths in the README
   (1422, 1067, 960, 800, 700, 390), recording the CSS viewport and raw devicePixelRatio.
 - Measured contrast of sample text over the texture (composite), against 4.5:1 for body text.
 - Print and forced-colours emulation: the overlay must be absent.
-- Cost: paint timing on scroll and on resize with and without the texture, and a check that the
-  SVG filter (if used) is rasterised once.
-- Reduced motion emulation, if any motion is approved.
+- Cost: paint timing on scroll and on resize with and without the texture. These are not measured
+  here.
 
-## 7. Not verified and open questions
+## 8. Not verified and open questions
 
 - No browser run. Contrast figures are base token pairs only. Composite contrast is unknown.
 - The README and `style.css` disagree about the overlay consumers (section 1). Not resolved here.
-- Whether image assets or data URIs are allowed in a theme is not stated in the README. This
-  decides options C and F.
-- Whether the owner accepts a shared animation mechanism (options D and E). Not decided here.
-- Performance numbers are not measured. Costs above are qualitative.
+- Performance is not measured. Every cost statement is an expectation.
+- Image assets, data URIs, and shared animation are out of v1 scope (coordinator, i49326). Section 6
+  lists them as future work only.
 
 Questions for the coordinator go through the coordinator pane, not the owner mailbox.
