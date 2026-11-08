@@ -490,6 +490,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "ds-core",
+ "futures-util",
  "ring",
  "rusqlite",
  "serde",

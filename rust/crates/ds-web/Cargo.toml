@@ -15,9 +15,14 @@ subtle = "2"
 # std SystemTime has no local-time formatter, and UTC output would change log_message.
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 ds-core = { path = "../ds-core" }
+# Static file bodies stream as a `stream::unfold` over the open file (t3330). futures-util is already
+# locked through axum and default features stay off, so no crate is added to the lock. The boring
+# fallback is the whole-file read this replaces.
+futures-util = { version = "0.3", default-features = false }
 serde.workspace = true
 serde_json.workspace = true
-tokio = { version = "=1.54.1", features = ["rt-multi-thread", "net", "sync", "macros", "time"] }
+# fs and io-util let static bodies read through tokio::fs (t3330). Neither adds a crate to the lock.
+tokio = { version = "=1.54.1", features = ["rt-multi-thread", "net", "sync", "macros", "time", "fs", "io-util"] }
 # Dispatch framed requests into Axum without Hyper's incompatible framing layer.
 tower = { version = "=0.5.3", features = ["util"] }
 
