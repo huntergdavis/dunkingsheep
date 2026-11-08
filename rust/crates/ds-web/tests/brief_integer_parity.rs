@@ -150,11 +150,13 @@ async fn brief_matches_the_python_desk_on_every_recorded_case() {
         .layer(Extension(read));
 
     let mut failures = Vec::new();
+    let mut replayed = 0;
     for case in oracle["cases"].as_array().expect("cases") {
         let name = case["name"].as_str().expect("case name");
         if !name.starts_with("brief_") {
             continue; // send-now cases are recorded for a later slice
         }
+        replayed += 1;
         let token = match case["identity"].as_str().expect("identity") {
             "owner" => OWNER,
             _ => API,
@@ -219,6 +221,7 @@ async fn brief_matches_the_python_desk_on_every_recorded_case() {
             ));
         }
     }
+    assert_eq!(replayed, 11, "every recorded brief case must be replayed");
     assert!(
         failures.is_empty(),
         "brief differs from the Python desk:\n{}",
