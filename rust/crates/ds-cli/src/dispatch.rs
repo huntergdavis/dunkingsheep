@@ -3546,59 +3546,11 @@ fn watchdog_text(report: &Value) -> String {
     format!("{}\n", lines.join("\n"))
 }
 
-/// The watchdog's owner route (t665 piece 2). A page is a row in the one owner mailbox: the
-/// daemon records it over the socket, and the Telegram transport delivers it. The watchdog
-/// confirms a page from the mailbox's own delivery receipt, not from a status file beside the
-/// bridge. Owner paging stays off until the config enables it (escalation.owner.enabled).
-struct WatchdogOwnerMailbox<'a> {
-    ns: &'a Map<String, Value>,
-}
-
-impl ds_core::watchdog::run::OwnerTransport for WatchdogOwnerMailbox<'_> {
-    fn desk_channel(&self) -> Result<String, ds_core::error::DunkError> {
-        Ok(ds_core::owner::conversations::OWNER_PAGE_TRANSPORT.into())
-    }
-
-    fn post(&self, body: &str) -> Result<i64, ds_core::watchdog::run::SendError> {
-        let send_error = |kind: &str, message: String| ds_core::watchdog::run::SendError {
-            kind: kind.into(),
-            message,
-        };
-        let mut client = crate::daemon_cmd::raw_client(self.ns)
-            .map_err(|error| send_error("DaemonUnavailable", error.to_string()))?;
-        let mut args = Map::new();
-        args.insert("body".into(), Value::String(body.to_owned()));
-        let reply = client
-            .call("owner_page", args)
-            .map_err(|error| send_error("ClientError", error.to_string()))?;
-        let message_id = reply["message"]["message_id"]
-            .as_str()
-            .ok_or_else(|| send_error("BadReply", "owner_page returned no message id".into()))?;
-        ds_core::owner::conversations::owner_page_number(message_id).ok_or_else(|| {
-            send_error(
-                "BadReply",
-                format!("owner_page returned an unusable message id {message_id:?}"),
-            )
-        })
-    }
-
-    fn confirmed_through(&self) -> Result<Option<Value>, ds_core::error::DunkError> {
-        let mut client = crate::daemon_cmd::raw_client(self.ns)?;
-        let reply = client
-            .call("owner_page_confirmed", Map::new())
-            .map_err(|error| ds_core::error::DunkError::Unavailable(error.to_string()))?;
-        Ok(reply
-            .get("through")
-            .filter(|value| !value.is_null())
-            .cloned())
-    }
-}
-
 fn watchdog(ns: &Map<String, Value>) -> Outcome {
     use ds_core::watchdog::{
         config::load_config,
         owner_mailbox::OwnerMailbox,
-        run::{self, OwnerTransport, SendError},
+        run::{self, SendError},
     };
     use std::path::PathBuf;
 
@@ -3733,19 +3685,11 @@ fn watchdog(ns: &Map<String, Value>) -> Outcome {
             message: error.to_string(),
         })
     };
-    // Two owner routes (t665 piece 2 on main, t3624 here). The config's channel picks: owner-mailbox
-    // writes one inbox row to the owner, with no telegram transport (OwnerMailbox); any other value keeps
-    // main's owner_page route, which records the page for the telegram outbox.
-    let page_route = WatchdogOwnerMailbox { ns };
+    // Owner pages go to the owner mailbox only (owner decision, t3624/t3625): an inbox row with no
+    // telegram transport, so the Telegram outbox never carries an owner page and the phone is not paged.
     let mailbox_ns = ns.clone();
     let mailbox = OwnerMailbox::new(move || crate::daemon_cmd::raw_client(&mailbox_ns));
-    let owner_route: &dyn OwnerTransport =
-        if config["escalation"]["owner"]["channel"].as_str() == Some("owner-mailbox") {
-            &mailbox
-        } else {
-            &page_route
-        };
-    match run::run(&config, now, dry_run, &mut send, owner_route, None, None) {
+    match run::run(&config, now, dry_run, &mut send, &mailbox, None, None) {
         Ok(report) => Outcome {
             stdout: if matches!(ns.get("json"), Some(Value::Bool(true))) {
                 format!("{}\n", sorted_json(&report))
