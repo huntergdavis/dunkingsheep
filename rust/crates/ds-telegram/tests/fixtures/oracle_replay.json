@@ -4752,6 +4752,13 @@
             [
               "owner_conversation",
               {
+                "before": 40.00000000000001,
+                "limit": 100
+              }
+            ],
+            [
+              "owner_conversation",
+              {
                 "before": 40,
                 "limit": 100
               }

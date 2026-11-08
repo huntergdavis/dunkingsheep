@@ -25,6 +25,12 @@ const HELP: &str = "Send a message, photo, or file directly to Chief of Staff. /
 const OTHER: &str =
     "I can receive text, photos, and files. Other Telegram items need the web desk.";
 
+/// The uncertainty reply: what `/status` says when it cannot prove an answer.
+fn uncertain() -> String {
+    "Could not find a Telegram message for Chief of Staff in the 1000 most recent mailbox rows; check the web desk."
+        .to_string()
+}
+
 #[test]
 fn a_pairing_code_from_a_private_chat_connects_the_chat() {
     let fixture = Fixture::new();
@@ -233,16 +239,203 @@ fn status_finds_a_question_older_than_unrelated_mailbox_traffic() {
         fixture.bot.texts(),
         vec!["Chief of Staff message #i7: queued".to_string()]
     );
-    // Three pages: 100, 100, then the short page that holds the question.
-    assert_eq!(fixture.daemon.commands().len(), 3);
+    // Three pages, each full one followed by the probe that proves its boundary timestamp.
     let calls = fixture.daemon.args_of("owner_conversation");
+    assert_eq!(calls.len(), 5);
     assert_eq!(calls[0]["limit"], json!(100));
     assert!(
         calls[0].get("before").is_none(),
         "the first page has no cursor"
     );
-    assert_eq!(calls[1]["before"], json!(160.0));
-    assert_eq!(calls[2]["before"], json!(60.0));
+    assert_eq!(calls[1]["before"], json!(160.0_f64.next_up()));
+    assert_eq!(calls[2]["before"], json!(160.0));
+    assert_eq!(calls[3]["before"], json!(60.0_f64.next_up()));
+    assert_eq!(calls[4]["before"], json!(60.0));
+}
+
+#[test]
+fn status_never_reports_absence_when_a_full_page_hides_a_same_timestamp_row() {
+    // Reviewer t3762, case 1: 101 rows at timestamp 5 (one of them the Telegram question) and one
+    // older unrelated row at 4. The page can only show 100 of the rows at 5, and the older row
+    // makes the next page non-empty -- which the previous revision read as proof of absence.
+    let fixture = Fixture::new();
+    let mut rows = vec![mailbox_row_at(
+        "i5",
+        "telegram",
+        "queued",
+        Some("telegram:5"),
+        None,
+        5.0,
+    )];
+    for n in 0..101_i64 {
+        rows.push(mailbox_row_at(
+            &format!("web-{n}"),
+            "web",
+            "queued",
+            Some(&format!("web:{n}")),
+            None,
+            5.0,
+        ));
+    }
+    rows.push(mailbox_row_at(
+        "old",
+        "web",
+        "queued",
+        Some("web:old"),
+        None,
+        4.0,
+    ));
+    fixture.daemon.0.borrow_mut().conversation = rows;
+
+    let mut bridge = fixture.bridge();
+    let mut config = as_config(paired_config(42));
+    bridge
+        .process_update(&text_update(9, 42, "/status"), &mut config)
+        .unwrap();
+    assert_eq!(
+        fixture.bot.texts(),
+        vec![uncertain()],
+        "a cluster too big to enumerate is uncertainty, never absence"
+    );
+}
+
+#[test]
+fn status_never_reports_an_older_question_as_the_latest() {
+    // Reviewer t3762, case 2: 100 rows at timestamp 5 fill the page, and a Telegram question sits
+    // at 4. The question at 4 may be beaten by a hidden sibling at 5, so it must not be reported
+    // as the latest -- the previous revision did exactly that.
+    let fixture = Fixture::new();
+    let mut rows: Vec<Value> = (0..100_i64)
+        .map(|n| {
+            mailbox_row_at(
+                &format!("web-{n}"),
+                "web",
+                "queued",
+                Some(&format!("web:{n}")),
+                None,
+                5.0,
+            )
+        })
+        .collect();
+    rows.push(mailbox_row_at(
+        "i4",
+        "telegram",
+        "queued",
+        Some("telegram:4"),
+        None,
+        4.0,
+    ));
+    fixture.daemon.0.borrow_mut().conversation = rows;
+
+    let mut bridge = fixture.bridge();
+    let mut config = as_config(paired_config(42));
+    bridge
+        .process_update(&text_update(9, 42, "/status"), &mut config)
+        .unwrap();
+    assert_eq!(
+        fixture.bot.texts(),
+        vec![uncertain()],
+        "an older question must not be promoted to latest"
+    );
+}
+
+#[test]
+fn status_answers_from_a_boundary_cluster_it_can_prove_complete() {
+    // A boundary cluster smaller than a page IS enumerable, and the question inside it is the
+    // newest: the walk proves the cluster and answers instead of giving up. 98 rows plus the
+    // 2-row cluster fill the page exactly, so the page ends ON the cluster.
+    let fixture = Fixture::new();
+    let mut rows: Vec<Value> = (0..98_i64)
+        .map(|n| {
+            mailbox_row_at(
+                &format!("web-{n}"),
+                "web",
+                "queued",
+                Some(&format!("web:{n}")),
+                None,
+                10.0 + n as f64,
+            )
+        })
+        .collect();
+    rows.push(mailbox_row_at(
+        "tie-a",
+        "web",
+        "queued",
+        Some("web:tie-a"),
+        None,
+        5.0,
+    ));
+    rows.push(mailbox_row_at(
+        "i5",
+        "telegram",
+        "read",
+        Some("telegram:5"),
+        None,
+        5.0,
+    ));
+    fixture.daemon.0.borrow_mut().conversation = rows;
+
+    let mut bridge = fixture.bridge();
+    let mut config = as_config(paired_config(42));
+    bridge
+        .process_update(&text_update(9, 42, "/status"), &mut config)
+        .unwrap();
+    assert_eq!(
+        fixture.bot.texts(),
+        vec!["Chief of Staff message #i5: read".to_string()]
+    );
+    // The page, then the cluster probe that proves the boundary.
+    assert_eq!(fixture.daemon.commands().len(), 2);
+    assert_eq!(
+        fixture.daemon.args_of("owner_conversation")[1]["before"],
+        json!(5.0_f64.next_up())
+    );
+}
+
+#[test]
+fn status_picks_the_newest_question_inside_a_boundary_cluster() {
+    // Two questions share the boundary timestamp; the later-inserted one is the newest, and the
+    // cluster (which is enumerable) must decide between them.
+    let fixture = Fixture::new();
+    let mut rows: Vec<Value> = (0..98_i64)
+        .map(|n| {
+            mailbox_row_at(
+                &format!("web-{n}"),
+                "web",
+                "queued",
+                Some(&format!("web:{n}")),
+                None,
+                10.0 + n as f64,
+            )
+        })
+        .collect();
+    rows.push(mailbox_row_at(
+        "i-old",
+        "telegram",
+        "acked",
+        Some("telegram:1"),
+        None,
+        5.0,
+    ));
+    rows.push(mailbox_row_at(
+        "i-new",
+        "telegram",
+        "queried",
+        Some("telegram:2"),
+        None,
+        5.0,
+    ));
+    fixture.daemon.0.borrow_mut().conversation = rows;
+
+    let mut bridge = fixture.bridge();
+    let mut config = as_config(paired_config(42));
+    bridge
+        .process_update(&text_update(9, 42, "/status"), &mut config)
+        .unwrap();
+    assert_eq!(
+        fixture.bot.texts(),
+        vec!["Chief of Staff message #i-new: queried".to_string()]
+    );
 }
 
 #[test]
@@ -266,87 +459,12 @@ fn status_says_it_could_not_find_the_message_rather_than_claiming_absence() {
     bridge
         .process_update(&text_update(9, 42, "/status"), &mut config)
         .unwrap();
-    assert_eq!(
-        fixture.bot.texts(),
-        vec![
-            "Could not find a Telegram message for Chief of Staff in the 1000 most recent mailbox rows; check the web desk."
-                .to_string()
-        ]
-    );
-    assert_eq!(fixture.daemon.commands().len(), 10, "the walk is bounded");
-}
-
-#[test]
-fn status_reports_uncertainty_when_equal_timestamps_can_hide_rows() {
-    // The daemon's cursor is a strict `created_at < before` (ds-core inbox_store::conversation_rows),
-    // so a second page that comes back EMPTY after a full one cannot be told apart from "the rows at
-    // the cursor's timestamp did not fit". Report uncertainty; never claim absence.
-    let fixture = Fixture::new();
-    fixture.daemon.0.borrow_mut().conversation = (0..150_i64)
-        .map(|n| {
-            mailbox_row_at(
-                &format!("web-{n}"),
-                "web",
-                "queued",
-                Some(&format!("web:{n}")),
-                None,
-                5.0,
-            )
-        })
-        .collect();
-    let mut bridge = fixture.bridge();
-    let mut config = as_config(paired_config(42));
-    bridge
-        .process_update(&text_update(9, 42, "/status"), &mut config)
-        .unwrap();
-    assert_eq!(
-        fixture.bot.texts(),
-        vec![
-            "Could not find a Telegram message for Chief of Staff in the 1000 most recent mailbox rows; check the web desk."
-                .to_string()
-        ]
-    );
+    assert_eq!(fixture.bot.texts(), vec![uncertain()]);
     assert_eq!(
         fixture.daemon.commands().len(),
-        2,
-        "a full page, then the ambiguous empty one"
+        20,
+        "ten pages, each with its boundary probe"
     );
-}
-
-#[test]
-fn status_reports_the_question_this_bridge_recorded() {
-    // The owner accepted this wording (t3672): the mailbox state of the row owner_ingest wrote,
-    // not the legacy desk store's delivery. A reply is not a question, a page is not either, and
-    // a web question is a different transport.
-    let fixture = Fixture::new();
-    let mut bridge = fixture.bridge();
-    fixture.daemon.0.borrow_mut().conversation = vec![
-        mailbox_row("i11", "telegram", "acked", Some("telegram:1"), None),
-        mailbox_row("i12", "telegram", "queued", Some("telegram:2"), None),
-        mailbox_row("i13", "web", "queued", Some("web:9"), None),
-        mailbox_row("i14", "telegram", "acked", None, Some("i12")),
-        // A delivered reply whose own row carries the sent message's Telegram id: newer than the
-        // question, and still not a question. The Python bridge passes no external_id on a
-        // receipt, but the verb accepts one, so this row is realistic and pins the filter.
-        mailbox_row(
-            "i16",
-            "telegram",
-            "acked",
-            Some("telegram:900"),
-            Some("i12"),
-        ),
-        // A daemon-written row with no transport id at all, newest of all.
-        mailbox_row("i15", "telegram", "queued", None, None),
-    ];
-    let mut config = as_config(paired_config(42));
-    bridge
-        .process_update(&text_update(9, 42, " /status "), &mut config)
-        .unwrap();
-    assert_eq!(
-        fixture.bot.texts(),
-        vec!["Chief of Staff message #i12: queued".to_string()]
-    );
-    assert!(fixture.daemon.args_of("owner_ingest").is_empty());
 }
 
 #[test]

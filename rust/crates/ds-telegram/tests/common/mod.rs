@@ -143,17 +143,24 @@ impl Daemon for FakeDaemon {
                     .map(|value| value as usize)
                     .unwrap_or(50);
                 let before = args.get("before").and_then(Value::as_f64);
-                let mut rows: Vec<Value> = state
-                    .conversation
-                    .iter()
-                    .filter(
-                        |row| match (before, row.get("created_at").and_then(Value::as_f64)) {
-                            (Some(cursor), Some(created)) => created < cursor,
-                            _ => true,
-                        },
-                    )
-                    .cloned()
-                    .collect();
+                // The daemon orders by `created_at`; ties keep insertion order, which is as
+                // well defined as SQLite's own tie order and lets a test place a row inside a
+                // cluster.
+                let mut rows: Vec<Value> = state.conversation.clone();
+                rows.sort_by(|left, right| {
+                    let key = |row: &Value| {
+                        row.get("created_at")
+                            .and_then(Value::as_f64)
+                            .unwrap_or(f64::NEG_INFINITY)
+                    };
+                    key(left).total_cmp(&key(right))
+                });
+                rows.retain(
+                    |row| match (before, row.get("created_at").and_then(Value::as_f64)) {
+                        (Some(cursor), Some(created)) => created < cursor,
+                        _ => true,
+                    },
+                );
                 if rows.len() > limit {
                     rows.drain(..rows.len() - limit);
                 }

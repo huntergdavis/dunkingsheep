@@ -20,6 +20,7 @@ import argparse
 import contextlib
 import io
 import json
+import math
 import os
 import sqlite3
 import sys
@@ -466,15 +467,19 @@ def scenarios():
         port={"daemon_log": status_call,
               "bot_log": status_reply("VP message #i30: read")})
     add("status_finds_a_question_older_than_unrelated_mailbox_traffic", config=paired(),
-        # Reviewer t3745: the conversation also carries owner-lane mail, so a fixed window can
-        # fill with unrelated rows. 130 newer rows than the question force a second page.
+        # Reviewers t3745 and t3762: the conversation also carries owner-lane mail, so a fixed
+        # window can fill with unrelated rows. 130 newer rows than the question force a second
+        # page, and the first page's boundary timestamp is proved before the walk goes below it.
         daemon={"conversation": [mailbox_row("i7", "telegram", "queued", "telegram:7",
                                              created_at=1.0)]
                 + [mailbox_row(f"web-{n}", "web", "queued", f"web:{n}", created_at=10.0 + n)
                    for n in range(130)]},
         steps=[{"op": "process_update", "update": text(9, 42, "/status")}],
-        port={"daemon_log": status_call + [["owner_conversation",
-                                            {"limit": 100, "before": 40}]],
+        port={"daemon_log": status_call
+              # The cluster probe: `next_up(40.0)` is the smallest float above the page's oldest
+              # timestamp, so `created_at < that` shows every row at 40.0 (one here).
+              + [["owner_conversation", {"limit": 100, "before": math.nextafter(40.0, math.inf)}],
+                 ["owner_conversation", {"limit": 100, "before": 40}]],
               "bot_log": status_reply("Chief of Staff message #i7: queued")})
     return out
 

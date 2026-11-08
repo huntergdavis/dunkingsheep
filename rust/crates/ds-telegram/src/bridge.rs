@@ -61,6 +61,16 @@ fn is_ingested_question(row: &Value) -> bool {
         .is_some_and(|id| id.starts_with("telegram:"))
 }
 
+/// A row's `created_at`, the only field the daemon's page cursor reads.
+fn created_at(row: &Value) -> Option<f64> {
+    row.get("created_at").and_then(Value::as_f64)
+}
+
+/// The newest question in a page (the daemon returns rows oldest first).
+fn newest_question(rows: &[Value]) -> Option<&Value> {
+    rows.iter().rev().find(|row| is_ingested_question(row))
+}
+
 /// Where the bridge reads its channel registry and routing from, and how it talks to the world.
 pub struct Bridge<D: Daemon, B: Bot> {
     pub paths: Paths,
@@ -179,70 +189,100 @@ impl<D: Daemon, B: Bot> Bridge<D, B> {
     ///
     /// The mailbox is walked backwards in pages (`before` = the oldest `created_at` seen), because
     /// the conversation also carries owner-role lane mailboxes and unrelated traffic can fill any
-    /// fixed window (t3535; reviewer t3745). Two outcomes are never confused:
+    /// fixed window (t3535; reviewer t3745).
     ///
-    /// - a page shorter than `STATUS_PAGE` is the end of the mailbox, so "no Telegram message has
-    ///   reached … yet" is a fact;
-    /// - `STATUS_MAX_PAGES` full pages without a match, a cursor that will not advance, or an empty
-    ///   page after a full one is NOT a fact: the reply says the message could not be found and
-    ///   points at the web desk.
+    /// The strict cursor hides same-timestamp rows (reviewer t3762): `created_at < before` cannot
+    /// return the siblings of the row it stops at, so a page that ends on a timestamp shared by
+    /// more rows than fit leaves them invisible. That is not only a missing answer, it can make an
+    /// OLDER question look like the latest one. So each boundary is PROVED before the walk goes
+    /// below it (`boundary_cluster`), and two outcomes are never confused:
+    ///
+    /// - a page shorter than `STATUS_PAGE`, with every boundary above it proved, ends the mailbox:
+    ///   "No Telegram message has reached … yet" is then a fact;
+    /// - a boundary whose cluster will not fit in one page, `STATUS_MAX_PAGES` full pages, or a
+    ///   cursor that will not advance is NOT a fact: the reply says the message could not be found
+    ///   and points at the web desk.
     fn message_status(&mut self, channel: &str) -> Result<String, BridgeError> {
         let name = self.channel_name(channel)?;
         let mut before: Option<f64> = None;
-        let mut read_full_page = false;
         for _ in 0..STATUS_MAX_PAGES {
-            let mut params = json!({"limit": STATUS_PAGE});
-            if let Some(cursor) = before {
-                params["before"] = json!(cursor);
-            }
-            let answer = self.daemon.call("owner_conversation", args(params))?;
-            let rows = answer
-                .get("messages")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default();
-            // Rows arrive oldest first, so the newest match is the last one that qualifies.
-            if let Some(row) = rows.iter().rev().find(|row| is_ingested_question(row)) {
-                return Ok(format!(
-                    "{name} message #{}: {}",
-                    row.get("id").map(display).unwrap_or_default(),
-                    row.get("state")
-                        .map(display)
-                        .unwrap_or_else(|| "None".to_string())
+            let rows = self.mailbox_page(before)?;
+            let full = rows.len() >= STATUS_PAGE as usize;
+            let oldest = rows.first().and_then(created_at);
+            if let Some(row) = newest_question(&rows) {
+                // A question strictly newer than the page's oldest timestamp has no same-timestamp
+                // sibling above it, and every boundary above was already proved: it is the answer.
+                if !full || created_at(row) != oldest {
+                    return Ok(message_line(&name, row));
+                }
+                // A question ON the boundary may have newer siblings the cursor hid. The cluster
+                // decides, and if the cluster will not fit, the answer is uncertainty.
+                let Some(boundary) = oldest else {
+                    return Ok(uncertain_line(&name));
+                };
+                let Some(cluster) = self.boundary_cluster(boundary)? else {
+                    return Ok(uncertain_line(&name));
+                };
+                return Ok(message_line(
+                    &name,
+                    newest_question(&cluster).unwrap_or(row),
                 ));
             }
-            if rows.is_empty() {
-                // An empty page after a full one is ambiguous: the mailbox may have ended here,
-                // or the rows at the cursor's own `created_at` may be hidden by the daemon's
-                // strict `created_at < before` (see the PR body). Only the first page can mean
-                // "empty mailbox".
-                if before.is_some() && read_full_page {
-                    break;
-                }
+            if !full {
+                // Every boundary above was proved complete, so this short page is the end of the
+                // mailbox and the absence is real.
                 return Ok(format!("No Telegram message has reached {name} yet."));
             }
-            // A short page ends the mailbox: its absence is a fact.
-            if rows.len() < STATUS_PAGE as usize {
-                return Ok(format!("No Telegram message has reached {name} yet."));
+            let Some(boundary) = oldest else {
+                return Ok(uncertain_line(&name));
+            };
+            // Prove this boundary before looking below it, and scan the cluster too: a hidden
+            // sibling at the boundary may be the question the page could not show.
+            let Some(cluster) = self.boundary_cluster(boundary)? else {
+                return Ok(uncertain_line(&name));
+            };
+            if let Some(row) = newest_question(&cluster) {
+                return Ok(message_line(&name, row));
             }
-            read_full_page = true;
-            let oldest = rows
-                .first()
-                .and_then(|row| row.get("created_at"))
-                .and_then(Value::as_f64);
             // A cursor that does not move would re-read the same page forever.
-            match oldest {
-                Some(cursor) if before.is_none_or(|previous| cursor < previous) => {
-                    before = Some(cursor);
-                }
-                _ => break,
+            if before.is_some_and(|previous| boundary >= previous) {
+                return Ok(uncertain_line(&name));
             }
+            before = Some(boundary);
         }
-        // The walk ran out of pages, or hit one of the ambiguities above: never claim absence.
-        Ok(format!(
-            "Could not find a Telegram message for {name} in the {} most recent mailbox rows; check the web desk.",
-            (STATUS_MAX_PAGES as i64) * STATUS_PAGE
-        ))
+        // The walk ran out of pages: never claim absence.
+        Ok(uncertain_line(&name))
+    }
+
+    /// One `owner_conversation` page: at most `STATUS_PAGE` rows strictly older than `before`,
+    /// oldest first.
+    fn mailbox_page(&mut self, before: Option<f64>) -> Result<Vec<Value>, BridgeError> {
+        let mut params = json!({"limit": STATUS_PAGE});
+        if let Some(cursor) = before {
+            params["before"] = json!(cursor);
+        }
+        let answer = self.daemon.call("owner_conversation", args(params))?;
+        Ok(answer
+            .get("messages")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    /// Every row the daemon will show at `boundary`, or `None` when it cannot be proved complete.
+    ///
+    /// `created_at < next_up(boundary)` accepts exactly the rows at or below the boundary (no
+    /// representable float lies between), so asking for the newest page of those returns the whole
+    /// boundary cluster whenever the cluster is smaller than a page. A cluster that fills the page
+    /// may have more rows behind it that nothing can enumerate: that is `None`, and the caller says
+    /// so instead of guessing.
+    fn boundary_cluster(&mut self, boundary: f64) -> Result<Option<Vec<Value>>, BridgeError> {
+        let rows = self.mailbox_page(Some(boundary.next_up()))?;
+        let cluster: Vec<Value> = rows
+            .into_iter()
+            .filter(|row| created_at(row) == Some(boundary))
+            .collect();
+        Ok((cluster.len() < STATUS_PAGE as usize).then_some(cluster))
     }
 
     /// `_prepare_route`: scope the forwarding cursor to its channel. A switch starts at the
@@ -612,4 +652,23 @@ pub fn setup<B: Bot>(
     Ok(format!(
         "Bot @{username} saved in private local data.\nStart ./install-telegram-service.sh, then DM the bot: /pair {pair_code}"
     ))
+}
+
+/// `"<desk name> message #<id>: <state>"`: one answer from one mailbox row.
+fn message_line(name: &str, row: &Value) -> String {
+    format!(
+        "{name} message #{}: {}",
+        row.get("id").map(display).unwrap_or_default(),
+        row.get("state")
+            .map(display)
+            .unwrap_or_else(|| "None".to_string())
+    )
+}
+
+/// The reply when the walk stopped on an ambiguity: never a claim of absence.
+fn uncertain_line(name: &str) -> String {
+    format!(
+    "Could not find a Telegram message for {name} in the {} most recent mailbox rows; check the web desk.",
+    (STATUS_MAX_PAGES as i64) * STATUS_PAGE
+)
 }
