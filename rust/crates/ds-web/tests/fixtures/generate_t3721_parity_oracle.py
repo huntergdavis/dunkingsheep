@@ -187,6 +187,43 @@ record("rv_infinity", owner.post("/api/password", content=b'{"current_password":
 record("rv_neg_infinity", owner.post("/api/password", content=b'{"current_password": -Infinity, "new_password": "' + NEW_PASSWORD.encode() + b'"}', headers=JSON_HEADERS))
 record("rv_deep_nesting", owner.post("/api/password", content=('{"a":' * 2000 + "1" + "}" * 2000).encode(), headers=JSON_HEADERS))
 
+# UTF-16 and UTF-32 bodies (t3725 / owner i50587). json.loads detects the encoding from the first bytes
+# (json.detect_encoding) and decodes with 'surrogatepass'. Wrong current password throughout: no state change.
+TEXT = WRONG_BODY.decode("utf-8")
+ENC_HEADERS = JSON_HEADERS
+record("enc_utf16le_bom", owner.post("/api/password", content=b"\xff\xfe" + TEXT.encode("utf-16-le"), headers=ENC_HEADERS))
+record("enc_utf16be_bom", owner.post("/api/password", content=b"\xfe\xff" + TEXT.encode("utf-16-be"), headers=ENC_HEADERS))
+record("enc_utf16le_nobom", owner.post("/api/password", content=TEXT.encode("utf-16-le"), headers=ENC_HEADERS))
+record("enc_utf16be_nobom", owner.post("/api/password", content=TEXT.encode("utf-16-be"), headers=ENC_HEADERS))
+record("enc_utf32le_bom", owner.post("/api/password", content=b"\xff\xfe\x00\x00" + TEXT.encode("utf-32-le"), headers=ENC_HEADERS))
+record("enc_utf32be_bom", owner.post("/api/password", content=b"\x00\x00\xfe\xff" + TEXT.encode("utf-32-be"), headers=ENC_HEADERS))
+record("enc_utf32le_nobom", owner.post("/api/password", content=TEXT.encode("utf-32-le"), headers=ENC_HEADERS))
+record("enc_utf32be_nobom", owner.post("/api/password", content=TEXT.encode("utf-32-be"), headers=ENC_HEADERS))
+record("enc_utf16le_odd_length", owner.post("/api/password", content=TEXT.encode("utf-16-le") + b"\x00", headers=ENC_HEADERS))
+record("enc_utf32le_truncated", owner.post("/api/password", content=TEXT.encode("utf-32-le") + b"\x00", headers=ENC_HEADERS))
+record("enc_utf32le_bom_over_utf16le", owner.post("/api/password", content=b"\xff\xfe\x00\x00" + TEXT.encode("utf-16-le"), headers=ENC_HEADERS))
+record("enc_utf32be_bom_codepoint_out_of_range", owner.post("/api/password", content=b"\x00\x00\xfe\xff" + b"\x00\x11\x00\x00" + TEXT.encode("utf-32-be"), headers=ENC_HEADERS))
+record("enc_utf16le_bom_only", owner.post("/api/password", content=b"\xff\xfe", headers=ENC_HEADERS))
+record("enc_utf16le_valid_surrogate_pair", owner.post("/api/password", content=json.dumps({"current_password": "not-the-password", "new_password": NEW_PASSWORD + "\U0001F600"}).encode("utf-16-le"), headers=ENC_HEADERS))
+record("enc_text_plain_utf16le", owner.post("/api/password", content=TEXT.encode("utf-16-le"), headers={"content-type": "text/plain"}))
+record("enc_text_plain_odd_utf16", owner.post("/api/password", content=TEXT.encode("utf-16-le") + b"\x00", headers={"content-type": "text/plain"}))
+# Undecided (Python 500): a lone surrogate reaches the password comparison and cannot be encoded.
+record("enc_utf16le_lone_surrogate", owner.post("/api/password", content=('{"current_password": "\ud800", "new_password": "' + NEW_PASSWORD + '"}').encode("utf-16-le", "surrogatepass"), headers=ENC_HEADERS))
+record("enc_cesu_surrogate_utf8", owner.post("/api/password", content=b'{"current_password": "\xed\xa0\x80", "new_password": "' + NEW_PASSWORD.encode() + b'"}', headers=ENC_HEADERS))
+
+# t3746: surrogatepass in ignored fields must not prevent model validation.
+for kind, text in [
+    ("value", '{"current_password":"not-the-password","new_password":"' + NEW_PASSWORD + '","ignored":"\ud800"}'),
+    ("key", '{"current_password":"not-the-password","new_password":"' + NEW_PASSWORD + '","\ud800":"ok"}'),
+]:
+    for encoding in ("utf-16-le", "utf-16-be", "utf-32-le", "utf-32-be"):
+        record(f"ignored_{kind}_{encoding}", owner.post("/api/password", content=text.encode(encoding, "surrogatepass"), headers=ENC_HEADERS))
+
+# t3750: all 6400 original marker candidates followed by a lone surrogate in an ignored value.
+all_private = "".join(chr(n) for n in range(0xE000, 0xF900))
+exhaustion = '{"current_password":"not-the-password","new_password":"' + NEW_PASSWORD + '","ignored":"' + all_private + "\ud800" + '"}'
+record("ignored_marker_exhaustion", owner.post("/api/password", content=exhaustion.encode("utf-16-le", "surrogatepass"), headers=ENC_HEADERS))
+
 api_token = desk._auth_record()["token"]  # scratch token, read in-process, never written to the oracle
 record("password_api_identity_invalid_body", anon().post("/api/password", json={"current_password": PASSWORD, "new_password": "short"},
                                                          headers={"authorization": f"Bearer {api_token}"}))
@@ -235,6 +272,22 @@ bom_body = b"\xef\xbb\xbf" + json.dumps({"current_password": NEW_PASSWORD, "new_
 record("password_bom_correct_password", owner.post("/api/password", content=bom_body, headers=JSON_HEADERS))
 record("password_bom_login_new", anon().post("/api/login", json={"password": BOM_NEW_PASSWORD, "next": "/dash/cos"}))
 record("password_bom_login_previous", anon().post("/api/login", json={"password": NEW_PASSWORD, "next": "/dash/cos"}))
+
+# Correct-password chain (t3725 / owner i50587): each step changes the password to the next value, in another
+# encoding, on scratch state. It runs last, after the BOM step: the current password here is BOM_NEW_PASSWORD.
+CHAIN = [
+    ("chain_utf16le_bom", b"\xff\xfe", "utf-16-le", "t3721-chain-1"),
+    ("chain_utf16be_nobom", b"", "utf-16-be", "t3721-chain-2"),
+    ("chain_utf32le_bom", b"\xff\xfe\x00\x00", "utf-32-le", "t3721-chain-3"),
+    ("chain_utf32be_nobom", b"", "utf-32-be", "t3721-chain-4"),
+]
+current_password = BOM_NEW_PASSWORD
+for chain_name, bom, codec, next_password in CHAIN:
+    chain_body = json.dumps({"current_password": current_password, "new_password": next_password}).encode(codec)
+    record(chain_name, owner.post("/api/password", content=bom + chain_body, headers=JSON_HEADERS))
+    current_password = next_password
+record("password_chain_login_final", anon().post("/api/login", json={"password": current_password, "next": "/dash/cos"}))
+record("password_chain_login_previous", anon().post("/api/login", json={"password": BOM_NEW_PASSWORD, "next": "/dash/cos"}))
 
 versions = {package: importlib.metadata.version(package) for package in ("fastapi", "starlette", "pydantic")}
 payload = {

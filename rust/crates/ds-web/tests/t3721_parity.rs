@@ -37,8 +37,14 @@
 //!   surrogate, +/-Infinity, 2,000-deep nesting) are recorded intentional differences with the owner's
 //!   provenance, each pinning the exact Rust response. The UTF-8 BOM was functional and is FIXED: Rust
 //!   drops the BOM before parsing, as Python does, and the correct-password BOM body changes the password
-//!   on scratch state (`password_bom_correct_password`, then the two login probes). `PENDING_DISPOSITION`
-//!   is empty.
+//!   on scratch state (`password_bom_correct_password`, then the two login probes).
+//! - t3725 / owner i50587 (FIXED): UTF-16 and UTF-32 bodies, with or without a BOM, decode as Python's
+//!   `json.loads` does (`detect_encoding`, then `surrogatepass`). They parse (`enc_*` cases) and a
+//!   correct-password chain of changes across the encodings runs last on scratch state (`chain_*`). Odd or
+//!   truncated units and out-of-range code points are 400 "There was an error parsing the body", as in Python.
+//!   Decoder-wording (`enc_utf16le_bom_only`) and redaction (`enc_text_plain_*`) differences are listed under
+//!   owner i50225. The two lone-surrogate and CESU cases (Python 500, a defect) are intentional differences
+//!   under owner decision i50662, each pinning Rust's clean 422 response. `PENDING_DISPOSITION` is empty.
 //!
 //! NOT covered here: the ops-board answer success path (it needs a live or scratch daemon with an
 //! owner-issued token), the ops-metrics refresh owner path (it calls `gh` and reads host state),
@@ -222,6 +228,36 @@ const INTENTIONAL_DIFFERENCES: &[Gap] = &[
         reason: "owner decision i50493 (t3724 R3, accepted as a recorded intentional difference): 2,000 levels of nesting are refused by Rust as json_invalid (422, serde's recursion limit). Python answers 500 Internal Server Error; a 500 is not copied.",
         rust_status: 422,
         rust_body: r#"{"detail":[{"ctx":{"error":"recursion limit exceeded at line 1 column 636"},"input":{},"loc":["body",0],"msg":"JSON decode error","type":"json_invalid"}]}"#,
+    },
+    Gap {
+        name: "enc_utf16le_bom_only",
+        reason: "owner decision i50225 (decoder wording, status/content type/envelope match): a body that decodes to nothing (a UTF-16 BOM alone) is json_invalid 422 in both; Python's wording is 'Expecting value', serde's is 'EOF while parsing a value'.",
+        rust_status: 422,
+        rust_body: r#"{"detail":[{"ctx":{"error":"EOF while parsing a value at line 1 column 0"},"input":{},"loc":["body",0],"msg":"JSON decode error","type":"json_invalid"}]}"#,
+    },
+    Gap {
+        name: "enc_text_plain_utf16le",
+        reason: "owner decision i50225 (redaction): a UTF-16 body sent as text/plain is refused as model_attributes_type (never parsed, the content type decides first); Python's input echoes the raw body, Rust shows '[redacted]'. type, loc and msg match.",
+        rust_status: 422,
+        rust_body: r#"{"detail":[{"input":"[redacted]","loc":["body"],"msg":"Input should be a valid dictionary or object to extract fields from","type":"model_attributes_type"}]}"#,
+    },
+    Gap {
+        name: "enc_text_plain_odd_utf16",
+        reason: "owner decision i50225 (redaction): an odd-length UTF-16 body sent as text/plain is refused as model_attributes_type before any decoding (content type first, as Python); Python's input echoes the raw body, Rust shows '[redacted]'.",
+        rust_status: 422,
+        rust_body: r#"{"detail":[{"input":"[redacted]","loc":["body"],"msg":"Input should be a valid dictionary or object to extract fields from","type":"model_attributes_type"}]}"#,
+    },
+    Gap {
+        name: "enc_utf16le_lone_surrogate",
+        reason: "owner decision i50662 (intentional difference): a UTF-16 body with a lone surrogate code unit. Python answers 500 Internal Server Error (its password comparison cannot encode the surrogate; the 500 is a defect). Rust answers a clean 422 application/json json_invalid (the surrogate is refused at decode). The 500 is not copied.",
+        rust_status: 422,
+        rust_body: r#"{"detail":[{"ctx":{"error":"lone surrogate in the body"},"input":{},"loc":["body",0],"msg":"JSON decode error","type":"json_invalid"}]}"#,
+    },
+    Gap {
+        name: "enc_cesu_surrogate_utf8",
+        reason: "owner decision i50662 (intentional difference): CESU-style surrogate bytes (ED A0 80) in a UTF-8 body. Python answers 500 Internal Server Error (surrogatepass decode, then the same comparison failure; a defect). Rust answers a clean 422 application/json json_invalid (invalid UTF-8, the accepted invalid-UTF-8 family). The 500 is not copied.",
+        rust_status: 422,
+        rust_body: r#"{"detail":[{"ctx":{"error":"invalid unicode code point at line 1 column 23"},"input":{},"loc":["body",0],"msg":"JSON decode error","type":"json_invalid"}]}"#,
     },
 ];
 
@@ -635,6 +671,80 @@ fn the_composed_desk_matches_the_python_desk_for_viewport_password_answer_and_re
             check(name, &send(&router, b, body).await);
         }
 
+        // UTF-16 and UTF-32 bodies (t3725 / owner i50587): a wrong current password throughout (no state change).
+        let plain = r#"{"current_password": "not-the-password", "new_password": "t3721-changed-scratch"}"#;
+        let u16le = |s: &str| -> Vec<u8> { s.encode_utf16().flat_map(|u| u.to_le_bytes()).collect() };
+        let u16be = |s: &str| -> Vec<u8> { s.encode_utf16().flat_map(|u| u.to_be_bytes()).collect() };
+        let u32le = |s: &str| -> Vec<u8> { s.chars().flat_map(|c| (c as u32).to_le_bytes()).collect() };
+        let u32be = |s: &str| -> Vec<u8> { s.chars().flat_map(|c| (c as u32).to_be_bytes()).collect() };
+        let emoji = r#"{"current_password": "not-the-password", "new_password": "t3721-changed-scratch😀"}"#;
+        let mut lone_units: Vec<u16> = r#"{"current_password": ""#.encode_utf16().collect();
+        lone_units.push(0xD800);
+        lone_units.extend(r#"", "new_password": "t3721-changed-scratch"}"#.encode_utf16());
+        let lone: Vec<u8> = lone_units.iter().flat_map(|u| u.to_le_bytes()).collect();
+        let bom16le: [u8; 2] = [0xff, 0xfe];
+        let bom16be: [u8; 2] = [0xfe, 0xff];
+        let bom32le: [u8; 4] = [0xff, 0xfe, 0x00, 0x00];
+        let bom32be: [u8; 4] = [0x00, 0x00, 0xfe, 0xff];
+        let json_ct_name = "application/json";
+        let enc_cases: Vec<(&str, Vec<u8>, &str)> = vec![
+            ("enc_utf16le_bom", [&bom16le[..], &u16le(plain)].concat(), json_ct_name),
+            ("enc_utf16be_bom", [&bom16be[..], &u16be(plain)].concat(), json_ct_name),
+            ("enc_utf16le_nobom", u16le(plain), json_ct_name),
+            ("enc_utf16be_nobom", u16be(plain), json_ct_name),
+            ("enc_utf32le_bom", [&bom32le[..], &u32le(plain)].concat(), json_ct_name),
+            ("enc_utf32be_bom", [&bom32be[..], &u32be(plain)].concat(), json_ct_name),
+            ("enc_utf32le_nobom", u32le(plain), json_ct_name),
+            ("enc_utf32be_nobom", u32be(plain), json_ct_name),
+            ("enc_utf16le_odd_length", [u16le(plain), vec![0x00]].concat(), json_ct_name),
+            ("enc_utf32le_truncated", [u32le(plain), vec![0x00]].concat(), json_ct_name),
+            ("enc_utf32le_bom_over_utf16le", [&bom32le[..], &u16le(plain)].concat(), json_ct_name),
+            (
+                "enc_utf32be_bom_codepoint_out_of_range",
+                [&bom32be[..], &[0x00, 0x11, 0x00, 0x00][..], &u32be(plain)].concat(),
+                json_ct_name,
+            ),
+            ("enc_utf16le_bom_only", bom16le.to_vec(), json_ct_name),
+            ("enc_utf16le_valid_surrogate_pair", u16le(emoji), json_ct_name),
+            ("enc_text_plain_utf16le", u16le(plain), "text/plain"),
+            ("enc_text_plain_odd_utf16", [u16le(plain), vec![0x00]].concat(), "text/plain"),
+            ("enc_utf16le_lone_surrogate", lone, json_ct_name),
+            (
+                "enc_cesu_surrogate_utf8",
+                b"{\"current_password\": \"\xed\xa0\x80\", \"new_password\": \"t3721-changed-scratch\"}".to_vec(),
+                json_ct_name,
+            ),
+        ];
+        for (name, body, content_type) in enc_cases {
+            let (b, body) = raw_password(Some(content_type), body);
+            check(name, &send(&router, b, body).await);
+        }
+
+        // Pinned Python HTTP accepts unpaired surrogates in ignored values and keys.
+        for (kind, prefix, suffix) in [
+            ("value", r#"{"current_password":"not-the-password","new_password":"t3721-changed-scratch","ignored":""#, r#""}"#),
+            ("key", r#"{"current_password":"not-the-password","new_password":"t3721-changed-scratch",""#, r#"":"ok"}"#),
+        ] {
+            let units: Vec<u16> = prefix.encode_utf16().chain([0xD800]).chain(suffix.encode_utf16()).collect();
+            let codes: Vec<u32> = prefix.chars().map(u32::from).chain([0xD800]).chain(suffix.chars().map(u32::from)).collect();
+            for (encoding, raw) in [
+                ("utf-16-le", units.iter().flat_map(|u| u.to_le_bytes()).collect()),
+                ("utf-16-be", units.iter().flat_map(|u| u.to_be_bytes()).collect()),
+                ("utf-32-le", codes.iter().flat_map(|u| u.to_le_bytes()).collect()),
+                ("utf-32-be", codes.iter().flat_map(|u| u.to_be_bytes()).collect()),
+            ] {
+                let (b, body) = raw_password(Some(json_ct_name), raw);
+                check(&format!("ignored_{kind}_{encoding}"), &send(&router, b, body).await);
+            }
+        }
+
+        // All former single-scalar placeholders appear in an ignored UTF-16 field.
+        let prefix = r#"{"current_password":"not-the-password","new_password":"t3721-changed-scratch","ignored":""#;
+        let units: Vec<u16> = prefix.encode_utf16().chain(0xE000..=0xF8FF).chain([0xD800]).chain(r#""}"#.encode_utf16()).collect();
+        let raw: Vec<u8> = units.iter().flat_map(|u| u.to_le_bytes()).collect();
+        let (b, body) = raw_password(Some(json_ct_name), raw);
+        check("ignored_marker_exhaustion", &send(&router, b, body).await);
+
         // The API token is the scratch record's token, read from the scratch data dir only.
         let auth: Value = serde_json::from_str(&std::fs::read_to_string(data_dir.join("auth.json")).expect("scratch auth record"))
             .expect("auth record JSON");
@@ -712,6 +822,29 @@ fn the_composed_desk_matches_the_python_desk_for_viewport_password_answer_and_re
         check("password_bom_correct_password", &send(&router, b, Body::from(bom_body)).await);
         check("password_bom_login_new", &login(&router, bom_new).await);
         check("password_bom_login_previous", &login(&router, NEW_PASSWORD).await);
+
+        // Correct-password chain (t3725 / owner i50587): last, on scratch state. Each step changes the password
+        // to the next value, in another encoding, so the new password of one step is the current one of the next.
+        let mut current = bom_new.to_owned();
+        for (name, bom, encoding, next) in [
+            ("chain_utf16le_bom", bom16le.to_vec(), 0u8, "t3721-chain-1"),
+            ("chain_utf16be_nobom", Vec::new(), 1u8, "t3721-chain-2"),
+            ("chain_utf32le_bom", bom32le.to_vec(), 2u8, "t3721-chain-3"),
+            ("chain_utf32be_nobom", Vec::new(), 3u8, "t3721-chain-4"),
+        ] {
+            let text = format!("{{\"current_password\": \"{current}\", \"new_password\": \"{next}\"}}");
+            let encoded = match encoding {
+                0 => u16le(&text),
+                1 => u16be(&text),
+                2 => u32le(&text),
+                _ => u32be(&text),
+            };
+            let (b, body) = raw_password(Some(json_ct_name), [bom, encoded].concat());
+            check(name, &send(&router, b, body).await);
+            current = next.to_owned();
+        }
+        check("password_chain_login_final", &login(&router, &current).await);
+        check("password_chain_login_previous", &login(&router, bom_new).await);
 
         // Known gaps must be exactly the divergent cases, no more and no fewer.
         let mut expected: Vec<&str> = KNOWN_GAPS.iter().map(|gap| gap.name).collect();
