@@ -792,6 +792,49 @@ fn a_desk_inbox_read_never_marks_a_message_its_response_leaves_out() {
 }
 
 #[test]
+fn an_inbox_read_leaves_an_unowned_global_task_unowned_and_still_lists_it() {
+    // t3554: an inbox read never assigns a task, and the read still returns the task list.
+    let (_dir, services) = make_services("read-no-claim", factory(None), None);
+    let stores = services.flock().stores();
+    let inbox = stores.inbox.clone().unwrap();
+    inbox
+        .send(&crate::inbox_store::Outgoing {
+            mailbox: "w1:p1",
+            body: Some("mail for a lane"),
+            ..Default::default()
+        })
+        .unwrap();
+    let tasks = stores.tasks.clone().unwrap();
+    let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+    let task = runtime
+        .block_on(tasks.add(
+            "global",
+            "unowned work",
+            "a read of mail must not hand this to a lane",
+        ))
+        .unwrap();
+    let dispatcher = services.dispatcher(handlers());
+    let read = dispatcher
+        .dispatch("inbox_read", &json!({}), &request("w1:p1"))
+        .unwrap();
+    let listed = read["tasks"]["global"]
+        .as_array()
+        .expect("the read still returns the task list")
+        .iter()
+        .any(|row| row["id"] == task.id);
+    assert!(listed, "the unowned global task is listed: {read}");
+    let after = runtime.block_on(tasks.get(&task.id)).unwrap();
+    assert_eq!("open", after.status);
+    let assignees: Vec<String> = serde_json::from_str(&after.assignees).unwrap();
+    assert!(assignees.is_empty(), "the read assigned {assignees:?}");
+    assert!(runtime
+        .block_on(tasks.leases_for_pane("w1:p1", None))
+        .unwrap()
+        .is_empty());
+    dispatcher.close();
+}
+
+#[test]
 fn inbox_send_folds_actual_queued_notice_and_returns_pre_notify_snapshot() {
     use crate::flock::sends::outbox_lock;
     let (_dir, services) = make_services("fold", factory(None), None);

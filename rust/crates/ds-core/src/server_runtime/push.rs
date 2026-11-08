@@ -506,6 +506,11 @@ mod tests {
             pane_id: "w1:p1".into(),
             unread,
         };
+        flock
+            .task_waiters
+            .lock()
+            .unwrap()
+            .insert("w1:p1".into(), "global".into());
         let decisions = runtime.block_on(flock.push_tasks(&env));
         assert_eq!(
             runtime.block_on(tasks.get(&task.id)).unwrap().status,
@@ -646,9 +651,7 @@ mod tests {
             DEFAULT_ROLE
         );
         let followers = std::collections::BTreeMap::from([("%follow".into(), "global".into())]);
-        let targets = crate::push::push_targets(&followers, None, |_| {
-            panic!("unavailable registry must not discover registered lanes")
-        });
+        let targets = crate::push::push_targets(&followers);
         assert_eq!(targets.len(), 1);
         assert!(targets.contains_key("%follow"));
     }

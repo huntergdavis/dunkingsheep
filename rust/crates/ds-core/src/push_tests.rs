@@ -118,52 +118,31 @@ fn a_bare_shell_is_dead_and_an_unknown_table_or_failed_walk_is_not() {
     assert_eq!(None, lane_agent_alive(Some(&shell), || None));
 }
 
-fn lanes(panes: &[&str]) -> BTreeSet<String> {
-    panes.iter().map(|pane| pane.to_string()).collect()
-}
-
 #[test]
-fn followers_keep_their_scope_and_registered_workers_and_reviewers_join() {
+fn followers_are_the_only_targets_and_keep_their_scope() {
+    // Owner decision on t3554: a pane is fed only when it subscribed (task follow, or an unclaimed
+    // task next) or claimed work. The registry is no longer consulted, so no registered lane joins.
     let mut followers = BTreeMap::new();
     followers.insert("%1".to_string(), "%1".to_string());
-    let registry = lanes(&["%1", "%2", "%3", "%4", "%5"]);
-    let roles = |pane: &str| {
-        match pane {
-            "%1" => "worker",
-            "%2" => "worker",
-            "%3" => "reviewer",
-            "%4" => "desk",
-            _ => "anonymous",
-        }
-        .to_string()
-    };
-    let targets = push_targets(&followers, Some(&registry), roles);
+    followers.insert("%2".to_string(), TASK_GLOBAL.to_string());
+    let targets = push_targets(&followers);
     assert_eq!(
         Some(&("%1".to_string(), Via::Follower)),
         targets.get("%1"),
-        "a follower keeps its own scope even if also registered"
+        "a follower keeps its own scope"
     );
     assert_eq!(
-        Some(&(TASK_GLOBAL.to_string(), Via::Registered)),
+        Some(&(TASK_GLOBAL.to_string(), Via::Follower)),
         targets.get("%2")
     );
-    assert_eq!(
-        Some(&(TASK_GLOBAL.to_string(), Via::Registered)),
-        targets.get("%3")
-    );
-    assert!(!targets.contains_key("%4"), "a desk pane is never fed");
-    assert!(
-        !targets.contains_key("%5"),
-        "a demoted/reused pane id is never fed (t975)"
-    );
+    assert_eq!(2, targets.len());
 }
 
 #[test]
-fn an_unavailable_registry_leaves_followers_only() {
-    let mut followers = BTreeMap::new();
-    followers.insert("%1".to_string(), "global".to_string());
-    let targets = push_targets(&followers, None, |_| panic!("no registry, no role lookups"));
-    assert_eq!(1, targets.len());
+fn no_subscriber_means_no_target_so_a_registered_lane_is_never_fed() {
+    // Reading mail never claims or assigns (t3554): with no subscriber and no claimant, nothing is fed.
+    let targets = push_targets(&BTreeMap::new());
+    assert!(targets.is_empty());
 }
 
 #[test]

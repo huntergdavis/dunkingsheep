@@ -262,6 +262,12 @@ mod tests {
             adapter.helper_pushenv_lane_agent_alive("w1:p1"),
             Some(false)
         );
+        // Owner decision on t3554: only a subscriber is a target, so the lane subscribes first.
+        flock
+            .task_waiters
+            .lock()
+            .unwrap()
+            .insert("w1:p1".into(), "global".into());
         let decisions = flock.push_tasks(&env).await;
         assert_eq!(decisions.len(), 1);
         assert_eq!(decisions[0].action, "skip");
@@ -344,6 +350,11 @@ mod tests {
             Some(false),
             "old live registration must not conceal a dead current pane"
         );
+        flock
+            .task_waiters
+            .lock()
+            .unwrap()
+            .insert("w1:p1".into(), "global".into());
         let decisions = flock.push_tasks(env).await;
         assert!(decisions
             .iter()
