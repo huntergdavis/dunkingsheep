@@ -16,10 +16,15 @@
 //! The replay inventory is checked too: every case in the oracle must be replayed here, and no
 //! other name may be recorded, so a regenerated oracle with new cases fails until the test names them.
 //!
-//! Security note (owner question, not a parity choice): the pinned Python 422 bodies echo the
-//! submitted body. `password_missing_current` therefore echoes the new password in its `input`, and
-//! this port matches that echo to stay faithful to the pinned route. Whether a password should be
-//! echoed in an error body is an owner decision; until it is made, the echo is pinned as Python's.
+//! Owner decisions recorded here:
+//! - i50091 (accepted): the ops-board answer is the atomic versioned answer, with an optional reply
+//!   and option picks, an intentional compatibility difference. Its three cases are listed in
+//!   `INTENTIONAL_DIFFERENCES`, and the stale-answer guard (a missing or invalid `version` is refused
+//!   before any backend call) is covered by a unit test in `routes/ops_board.rs`.
+//! - i50069 (pending, not accepted): the pinned Python 422 bodies echo the submitted body. The
+//!   `password_missing_current` case therefore echoes the new password in its `input`, and this port
+//!   matches that echo so the route stays faithful. Whether a password may be echoed in an error body
+//!   is still open; until it is decided the echo stays pinned as Python's, and PR #843 stays a draft.
 //!
 //! NOT covered here: the ops-board answer success path (it needs a live or scratch daemon with an
 //! owner-issued token), the ops-metrics refresh owner path (it calls `gh` and reads host state),
@@ -62,21 +67,30 @@ const KNOWN_GAPS: &[Gap] = &[
         rust_status: 422,
         rust_body: r#"{"detail":[{"ctx":{"error":"expected ident at line 1 column 2"},"input":{},"loc":["body",0],"msg":"JSON decode error","type":"json_invalid"}]}"#,
     },
+];
+
+/// Intentional compatibility differences, accepted by the owner (decision i50091, relayed by the
+/// coordinator in i50094): the Rust ops-board answer is the atomic versioned answer, with an
+/// optional reply and option picks. It keeps the stale-answer guard: a request without a positive
+/// `version` is refused before any backend call (see `owner_answer_refuses_a_missing_or_invalid_version`
+/// in `routes/ops_board.rs`). Each entry pins the exact Rust response, so the accepted difference
+/// cannot silently change.
+const INTENTIONAL_DIFFERENCES: &[Gap] = &[
     Gap {
         name: "answer_missing_reply",
-        reason: "Python answers 400 'a reply is required'. Rust checks the version first: the one-click contract, owner decision pending.",
+        reason: "owner decision i50091: the versioned answer makes the reply optional (option picks). This case has no version, so Rust refuses on the version before the reply is considered; Python refuses 'a reply is required'.",
         rust_status: 400,
         rust_body: r#"{"detail":"question version is required"}"#,
     },
     Gap {
         name: "answer_blank_reply",
-        reason: "Python answers 400 'a reply is required'. Rust checks the version first: the one-click contract, owner decision pending.",
+        reason: "owner decision i50091: a blank reply is not refused by the versioned answer. This case has no version, so Rust refuses on the version first; with a version the daemon decides (not verified here). Python refuses 'a reply is required'.",
         rust_status: 400,
         rust_body: r#"{"detail":"question version is required"}"#,
     },
     Gap {
         name: "answer_no_daemon",
-        reason: "Python's no-daemon answer is 503 'Could not unblock t1: <exception>'. The oracle's exception is the isolated client's RuntimeError; the production exception type depends on the host and is not captured. Rust checks the version first.",
+        reason: "owner decision i50091: the versioned answer reports a failure as 'Could not answer <id>: <kind>', not Python's 'Could not unblock <id>: <exception>'. This case has no version, so Rust refuses before the daemon. The Python exception in the oracle is the isolated client's RuntimeError; the production one depends on the host.",
         rust_status: 400,
         rust_body: r#"{"detail":"question version is required"}"#,
     },
@@ -236,6 +250,17 @@ fn compare(name: &str, reply: &Reply, want: &Value) -> Option<String> {
     }
 }
 
+/// `Some(text)` when the Rust response differs from the pinned one (status or body).
+fn pinned_mismatch(name: &str, reply: &Reply, status: u16, body: &str) -> Option<String> {
+    let pinned: Value = serde_json::from_str(body).expect("pinned body is JSON");
+    (reply.status != status || reply.body != pinned).then(|| {
+        format!(
+            "{name}: Rust answered {} {} but the pinned response is {status} {pinned}",
+            reply.status, reply.body
+        )
+    })
+}
+
 fn viewport_payload() -> Value {
     json!({"innerWidth": 1280, "innerHeight": 800, "screenWidth": 1920, "screenHeight": 1080, "devicePixelRatio": 2.0})
 }
@@ -261,28 +286,29 @@ fn the_composed_desk_matches_the_python_desk_for_viewport_password_answer_and_re
         let mut replayed: Vec<String> = Vec::new();
         // Probe names recorded outside `check` (their side effects are checked by hand below).
         let mut probes: Vec<String> = Vec::new();
+        // Owner-accepted differences, recorded separately from the open gaps.
+        let mut accepted_diverged: Vec<String> = Vec::new();
         let mut check = |name: &str, reply: &Reply| {
             replayed.push(name.to_owned());
             let differs = compare(name, reply, case(&oracle, name));
-            match KNOWN_GAPS.iter().find(|gap| gap.name == name) {
-                None => {
-                    if let Some(text) = differs {
-                        failures.push(text);
-                    }
+            if let Some(gap) = KNOWN_GAPS.iter().find(|gap| gap.name == name) {
+                if differs.is_none() {
+                    failures.push(format!("{name}: now matches the Python oracle; remove it from KNOWN_GAPS"));
                 }
-                Some(gap) => {
-                    if differs.is_none() {
-                        failures.push(format!("{name}: now matches the Python oracle; remove it from KNOWN_GAPS"));
-                    }
-                    let pinned: Value = serde_json::from_str(gap.rust_body).expect("pinned gap body is JSON");
-                    if reply.status != gap.rust_status || reply.body != pinned {
-                        failures.push(format!(
-                            "{name}: Rust answered {} {} but the pinned gap is {} {} ({})",
-                            reply.status, reply.body, gap.rust_status, pinned, gap.reason
-                        ));
-                    }
-                    diverged.push(name.to_owned());
+                if let Some(text) = pinned_mismatch(name, reply, gap.rust_status, gap.rust_body) {
+                    failures.push(format!("{text} ({})", gap.reason));
                 }
+                diverged.push(name.to_owned());
+            } else if let Some(accepted) = INTENTIONAL_DIFFERENCES.iter().find(|item| item.name == name) {
+                if differs.is_none() {
+                    failures.push(format!("{name}: now matches the Python oracle; remove it from INTENTIONAL_DIFFERENCES"));
+                }
+                if let Some(text) = pinned_mismatch(name, reply, accepted.rust_status, accepted.rust_body) {
+                    failures.push(format!("{text} ({})", accepted.reason));
+                }
+                accepted_diverged.push(name.to_owned());
+            } else if let Some(text) = differs {
+                failures.push(text);
             }
         };
 
@@ -493,6 +519,15 @@ fn the_composed_desk_matches_the_python_desk_for_viewport_password_answer_and_re
             diverged.iter().map(String::as_str).collect::<Vec<_>>(),
             expected,
             "the divergent cases changed; update KNOWN_GAPS only with an owner-scoped follow-up"
+        );
+        // Owner-accepted differences must be exactly the accepted set (decision i50091).
+        let mut accepted_expected: Vec<&str> = INTENTIONAL_DIFFERENCES.iter().map(|item| item.name).collect();
+        accepted_expected.sort_unstable();
+        accepted_diverged.sort();
+        assert_eq!(
+            accepted_diverged.iter().map(String::as_str).collect::<Vec<_>>(),
+            accepted_expected,
+            "the owner-accepted differences changed; they need a new owner decision"
         );
     });
 }

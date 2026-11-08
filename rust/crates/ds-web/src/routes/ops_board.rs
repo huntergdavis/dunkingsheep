@@ -717,6 +717,33 @@ mod tests {
         );
     }
 
+    /// The stale-answer guard (owner decision i50091 keeps it): a versioned answer needs a positive
+    /// `version`. A missing, zero or non-numeric version is refused before any backend call, so an
+    /// answer can never reach a question generation the caller did not name.
+    #[test]
+    fn owner_answer_refuses_a_missing_or_invalid_version_before_any_backend_call() {
+        for body in [
+            r#"{"task_id":"t9","option_number":1}"#,
+            r#"{"task_id":"t9","version":"0","option_number":1}"#,
+            r#"{"task_id":"t9","version":"abc","option_number":1}"#,
+        ] {
+            let board = Arc::new(FakeBoard::default());
+            let request = Request::builder()
+                .method("POST")
+                .uri("/api/ops-board/answer")
+                .header(header::HOST, "desk.test")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap();
+            let response = block_on(app(board.clone()).oneshot(request)).unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{body}");
+            assert!(
+                board.answers.lock().unwrap().is_empty(),
+                "{body} must not reach the backend"
+            );
+        }
+    }
+
     #[test]
     fn routes_reject_cross_origin_and_unauthenticated_requests_before_backend_calls() {
         let board = Arc::new(FakeBoard::default());
