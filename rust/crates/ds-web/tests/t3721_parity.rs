@@ -720,6 +720,24 @@ fn the_composed_desk_matches_the_python_desk_for_viewport_password_answer_and_re
             check(name, &send(&router, b, body).await);
         }
 
+        // Pinned Python HTTP accepts unpaired surrogates in ignored values and keys.
+        for (kind, prefix, suffix) in [
+            ("value", r#"{"current_password":"not-the-password","new_password":"t3721-changed-scratch","ignored":""#, r#""}"#),
+            ("key", r#"{"current_password":"not-the-password","new_password":"t3721-changed-scratch",""#, r#"":"ok"}"#),
+        ] {
+            let units: Vec<u16> = prefix.encode_utf16().chain([0xD800]).chain(suffix.encode_utf16()).collect();
+            let codes: Vec<u32> = prefix.chars().map(u32::from).chain([0xD800]).chain(suffix.chars().map(u32::from)).collect();
+            for (encoding, raw) in [
+                ("utf-16-le", units.iter().flat_map(|u| u.to_le_bytes()).collect()),
+                ("utf-16-be", units.iter().flat_map(|u| u.to_be_bytes()).collect()),
+                ("utf-32-le", codes.iter().flat_map(|u| u.to_le_bytes()).collect()),
+                ("utf-32-be", codes.iter().flat_map(|u| u.to_be_bytes()).collect()),
+            ] {
+                let (b, body) = raw_password(Some(json_ct_name), raw);
+                check(&format!("ignored_{kind}_{encoding}"), &send(&router, b, body).await);
+            }
+        }
+
         // The API token is the scratch record's token, read from the scratch data dir only.
         let auth: Value = serde_json::from_str(&std::fs::read_to_string(data_dir.join("auth.json")).expect("scratch auth record"))
             .expect("auth record JSON");

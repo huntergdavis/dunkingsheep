@@ -211,6 +211,14 @@ record("enc_text_plain_odd_utf16", owner.post("/api/password", content=TEXT.enco
 record("enc_utf16le_lone_surrogate", owner.post("/api/password", content=('{"current_password": "\ud800", "new_password": "' + NEW_PASSWORD + '"}').encode("utf-16-le", "surrogatepass"), headers=ENC_HEADERS))
 record("enc_cesu_surrogate_utf8", owner.post("/api/password", content=b'{"current_password": "\xed\xa0\x80", "new_password": "' + NEW_PASSWORD.encode() + b'"}', headers=ENC_HEADERS))
 
+# t3746: surrogatepass in ignored fields must not prevent model validation.
+for kind, text in [
+    ("value", '{"current_password":"not-the-password","new_password":"' + NEW_PASSWORD + '","ignored":"\ud800"}'),
+    ("key", '{"current_password":"not-the-password","new_password":"' + NEW_PASSWORD + '","\ud800":"ok"}'),
+]:
+    for encoding in ("utf-16-le", "utf-16-be", "utf-32-le", "utf-32-be"):
+        record(f"ignored_{kind}_{encoding}", owner.post("/api/password", content=text.encode(encoding, "surrogatepass"), headers=ENC_HEADERS))
+
 api_token = desk._auth_record()["token"]  # scratch token, read in-process, never written to the oracle
 record("password_api_identity_invalid_body", anon().post("/api/password", json={"current_password": PASSWORD, "new_password": "short"},
                                                          headers={"authorization": f"Bearer {api_token}"}))

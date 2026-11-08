@@ -730,6 +730,70 @@
     },
     {
       "body": {
+        "detail": "Current password is incorrect"
+      },
+      "content_type": "application/json",
+      "name": "ignored_value_utf-16-le",
+      "status": 403
+    },
+    {
+      "body": {
+        "detail": "Current password is incorrect"
+      },
+      "content_type": "application/json",
+      "name": "ignored_value_utf-16-be",
+      "status": 403
+    },
+    {
+      "body": {
+        "detail": "Current password is incorrect"
+      },
+      "content_type": "application/json",
+      "name": "ignored_value_utf-32-le",
+      "status": 403
+    },
+    {
+      "body": {
+        "detail": "Current password is incorrect"
+      },
+      "content_type": "application/json",
+      "name": "ignored_value_utf-32-be",
+      "status": 403
+    },
+    {
+      "body": {
+        "detail": "Current password is incorrect"
+      },
+      "content_type": "application/json",
+      "name": "ignored_key_utf-16-le",
+      "status": 403
+    },
+    {
+      "body": {
+        "detail": "Current password is incorrect"
+      },
+      "content_type": "application/json",
+      "name": "ignored_key_utf-16-be",
+      "status": 403
+    },
+    {
+      "body": {
+        "detail": "Current password is incorrect"
+      },
+      "content_type": "application/json",
+      "name": "ignored_key_utf-32-le",
+      "status": 403
+    },
+    {
+      "body": {
+        "detail": "Current password is incorrect"
+      },
+      "content_type": "application/json",
+      "name": "ignored_key_utf-32-be",
+      "status": 403
+    },
+    {
+      "body": {
         "detail": [
           {
             "ctx": {

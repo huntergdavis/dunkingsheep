@@ -328,8 +328,8 @@ fn json_decode_error(text: String) -> Response {
 
 /// `json.loads(bytes)` (what FastAPI uses): detect the encoding, decode with `surrogatepass`, then parse.
 /// A decode failure (odd or truncated units, a code point past U+10FFFF, invalid UTF-8) is Python's
-/// UnicodeDecodeError, answered 400 with the generic body. A lone surrogate Python would carry on to a 500;
-/// it cannot be held in a Rust string, so it is refused as `json_invalid` and recorded as undecided.
+/// UnicodeDecodeError, answered 400 with the generic body. Surrogates in ignored fields are
+/// represented temporarily; password fields retain the owner-dispositioned refusal.
 fn decode_json_body(raw: &[u8]) -> Result<Value, Box<Response>> {
     let parse_error = || {
         Box::new(
@@ -343,6 +343,7 @@ fn decode_json_body(raw: &[u8]) -> Result<Value, Box<Response>> {
     let lone_surrogate = || Box::new(json_decode_error("lone surrogate in the body".to_owned()));
     let (encoding, skip) = detect_body_encoding(raw);
     let body = &raw[skip..];
+    let mut surrogate_marker = None;
     let text = match encoding {
         BodyEncoding::Utf8 => {
             // UTF-8 keeps the parser's own handling; invalid UTF-8 is the accepted difference recorded in the tests.
@@ -366,7 +367,29 @@ fn decode_json_body(raw: &[u8]) -> Result<Value, Box<Response>> {
                     }
                 })
                 .collect();
-            String::from_utf16(&units).map_err(|_| lone_surrogate())?
+            let escaped = String::from_utf16_lossy(&units).to_ascii_lowercase();
+            let marker = (0xE000..=0xF8FF)
+                .find(|code| {
+                    !units.contains(&(*code as u16)) && !escaped.contains(&format!("\\u{code:04x}"))
+                })
+                .and_then(char::from_u32)
+                .or_else(|| {
+                    char::decode_utf16(units.iter().copied())
+                        .all(|item| item.is_ok())
+                        .then_some('\u{e000}')
+                })
+                .ok_or_else(lone_surrogate)?;
+            let mut text = String::new();
+            for decoded in char::decode_utf16(units) {
+                match decoded {
+                    Ok(ch) => text.push(ch),
+                    Err(_) => {
+                        surrogate_marker = Some(marker);
+                        text.push(marker);
+                    }
+                }
+            }
+            text
         }
         BodyEncoding::Utf32Le | BodyEncoding::Utf32Be => {
             let (quads, rest) = body.as_chunks::<4>();
@@ -374,6 +397,31 @@ fn decode_json_body(raw: &[u8]) -> Result<Value, Box<Response>> {
                 return Err(parse_error());
             }
             let little = encoding == BodyEncoding::Utf32Le;
+            let codes: Vec<u32> = quads
+                .iter()
+                .map(|quad| {
+                    if little {
+                        u32::from_le_bytes(*quad)
+                    } else {
+                        u32::from_be_bytes(*quad)
+                    }
+                })
+                .collect();
+            let escaped: String = codes
+                .iter()
+                .map(|code| char::from_u32(*code).unwrap_or('\u{fffd}'))
+                .collect::<String>()
+                .to_ascii_lowercase();
+            let marker = (0xE000..=0xF8FF)
+                .find(|code| !codes.contains(code) && !escaped.contains(&format!("\\u{code:04x}")))
+                .and_then(char::from_u32)
+                .or_else(|| {
+                    codes
+                        .iter()
+                        .all(|code| !(0xD800..=0xDFFF).contains(code))
+                        .then_some('\u{e000}')
+                })
+                .ok_or_else(lone_surrogate)?;
             let mut text = String::new();
             for quad in quads {
                 let code = if little {
@@ -384,12 +432,31 @@ fn decode_json_body(raw: &[u8]) -> Result<Value, Box<Response>> {
                 if code > 0x10FFFF {
                     return Err(parse_error());
                 }
-                text.push(char::from_u32(code).ok_or_else(lone_surrogate)?);
+                if (0xD800..=0xDFFF).contains(&code) {
+                    surrogate_marker = Some(marker);
+                    text.push(marker);
+                } else {
+                    text.push(char::from_u32(code).ok_or_else(parse_error)?);
+                }
             }
             text
         }
     };
-    serde_json::from_str(&text).map_err(|error| Box::new(json_decode_error(error.to_string())))
+    let value: Value = serde_json::from_str(&text)
+        .map_err(|error| Box::new(json_decode_error(error.to_string())))?;
+    if let Some(marker) = surrogate_marker {
+        // The model ignores extra fields, but password fields must keep the existing
+        // owner-dispositioned refusal for an unpaired surrogate.
+        for field in ["current_password", "new_password"] {
+            if value
+                .get(field)
+                .is_some_and(|v| v.to_string().contains(marker))
+            {
+                return Err(lone_surrogate());
+            }
+        }
+    }
+    Ok(value)
 }
 
 /// Parse and validate the password body in FastAPI's order: a JSON object, then `current_password`,
@@ -785,6 +852,58 @@ mod tests {
             };
             assert_eq!(parsed.current_password, utf8.current_password, "{raw:?}");
             assert_eq!(parsed.new_password, utf8.new_password, "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn ignored_unpaired_surrogates_do_not_reject_valid_password_fields() {
+        // An escaped private-use scalar in a password is not the placeholder.
+        let collision =
+            r#"{"current_password":"\ue000","new_password":"long-enough-password","ignored":""#;
+        let units: Vec<u16> = collision
+            .encode_utf16()
+            .chain([0xD800])
+            .chain(r#""}"#.encode_utf16())
+            .collect();
+        let raw: Vec<u8> = units.iter().flat_map(|u| u.to_le_bytes()).collect();
+        assert!(password_body(&raw, true).is_ok());
+        for key in [false, true] {
+            let (prefix, suffix) = if key {
+                (
+                    r#"{"current_password":"wrong","new_password":"long-enough-password",""#,
+                    r#"":"ok"}"#,
+                )
+            } else {
+                (
+                    r#"{"current_password":"wrong","new_password":"long-enough-password","ignored":""#,
+                    r#""}"#,
+                )
+            };
+            let units: Vec<u16> = prefix
+                .encode_utf16()
+                .chain([0xD800])
+                .chain(suffix.encode_utf16())
+                .collect();
+            for be in [false, true] {
+                let raw: Vec<u8> = units
+                    .iter()
+                    .flat_map(|u| if be { u.to_be_bytes() } else { u.to_le_bytes() })
+                    .collect();
+                assert!(password_body(&raw, true).is_ok());
+            }
+            let codes: Vec<u32> = prefix
+                .chars()
+                .map(u32::from)
+                .chain([0xD800])
+                .chain(suffix.chars().map(u32::from))
+                .collect();
+            for be in [false, true] {
+                let raw: Vec<u8> = codes
+                    .iter()
+                    .flat_map(|u| if be { u.to_be_bytes() } else { u.to_le_bytes() })
+                    .collect();
+                assert!(password_body(&raw, true).is_ok());
+            }
         }
     }
 
