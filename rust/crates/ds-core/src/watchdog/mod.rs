@@ -193,6 +193,20 @@ impl TaskData {
     }
 }
 
+pub mod owner_mailbox;
+
+#[cfg(test)]
+#[path = "owner_mailbox_tests.rs"]
+mod owner_mailbox_tests;
+
+#[cfg(test)]
+#[path = "owner_mailbox_page_tests.rs"]
+mod owner_mailbox_page_tests;
+
+#[cfg(test)]
+#[path = "owner_mailbox_run_tests.rs"]
+mod owner_mailbox_run_tests;
+
 #[cfg(test)]
 #[path = "rules_tests.rs"]
 mod rules_tests;

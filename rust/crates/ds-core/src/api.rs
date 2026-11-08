@@ -2103,10 +2103,13 @@ fn owner_message_value(message: &crate::inbox_store::Message) -> Value {
 
 /// `owner_page` (t665): record one owner page for the Telegram outbox. Owner and system only.
 pub fn h_owner_page(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    // t3700: `class` (security, outage, money) marks a critical emergency page; anything else is
+    // recorded to the owner mailbox only.
     let paged = crate::owner::OwnerConversations::new(context.flock, context.env).page(
         args.get("body"),
         args.get("external_id"),
         context.self_pane_id(),
+        args.get("class"),
     )?;
     Ok(json!({
         "message": owner_message_value(&paged.message),
@@ -3525,6 +3528,10 @@ mod desk_nudge;
 #[cfg(test)]
 #[path = "api/owner_ingest_nudge_tests.rs"]
 mod owner_ingest_nudge_tests;
+
+#[cfg(test)]
+#[path = "api/owner_page_route_tests.rs"]
+mod owner_page_route_tests;
 
 #[cfg(test)]
 mod landed_parity_tests;

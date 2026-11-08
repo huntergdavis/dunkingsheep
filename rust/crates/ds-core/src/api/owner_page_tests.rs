@@ -16,10 +16,12 @@ fn page_dispatcher() -> Dispatcher {
 fn owner_page_records_a_telegram_page_and_repeats_idempotently() {
     let (_dir, flock, env) = owner_api_fixture("owner-page");
     let dispatcher = page_dispatcher();
+    // t3700: only a critical emergency class reaches Telegram, so this page names its class.
     let page_args = || {
         args(json!({
             "body": "PAGE OWNER security: token exposed",
-            "external_id": "page:key-1"
+            "external_id": "page:key-1",
+            "class": "security"
         }))
     };
 

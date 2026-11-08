@@ -624,7 +624,7 @@ pub static COMMANDS: &[Command] = &[
     Command {
         name: "owner_page",
         description: "Record one owner page for the Telegram outbox (t665, FLAT_FLEET.md 7.2). A page is a notice, not a question: it has no reply_to, so no desk answers it, and owner_outbox returns it to the telegram transport only. external_id is the producer's dedupe key. Owner and system only.",
-        params: &[Param { name: "body", schema: "{\"type\":\"string\",\"description\":\"The page text (the watchdog's PAGE OWNER digest).\"}" }, Param { name: "external_id", schema: "{\"type\":\"string\",\"description\":\"The producer's dedupe key; a repeat returns the row already recorded.\"}" }],
+        params: &[Param { name: "body", schema: "{\"type\":\"string\",\"description\":\"The page text (the watchdog's PAGE OWNER digest).\"}" }, Param { name: "external_id", schema: "{\"type\":\"string\",\"description\":\"The producer's dedupe key; a repeat returns the row already recorded.\"}" }, Param { name: "class", schema: "{\"type\":\"string\",\"description\":\"The watchdog page class (t3700): security, outage or money marks a critical emergency page that may reach Telegram; any other value, or none, is recorded to the owner mailbox only.\"}" }],
         dispatch_required: &["body"],
         required: &["body"],
         mcp: false,

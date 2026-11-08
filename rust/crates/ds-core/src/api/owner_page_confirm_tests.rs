@@ -48,7 +48,7 @@ fn the_watchdog_is_confirmed_only_by_a_delivered_page() {
         &flock,
         &env,
         "owner_page",
-        args(json!({"body": "PAGE OWNER outage: web desk down"})),
+        args(json!({"body": "PAGE OWNER outage: web desk down", "class": "outage"})),
         Some("w1:p1"),
     )
     .expect("owner page");
