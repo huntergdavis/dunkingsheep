@@ -61,6 +61,28 @@ pub fn claimable(task: &Candidate, pane_id: Option<&str>) -> bool {
     }
 }
 
+/// The Poolrad review routing rule (t3641; coordinator decision i49337, owner answer i49380). A review of
+/// huntergdavis/poolrad-decomp with no designated reviewer goes only to the default Poolrad reviewers.
+/// A designated reviewer is an assignee, and `claimable` lets only that assignee take the task. Never
+/// %234 or %235.
+pub const POOLRAD_REPO: &str = "huntergdavis/poolrad-decomp";
+/// The default Poolrad reviewer lanes.
+pub const POOLRAD_DEFAULT_REVIEWERS: [&str; 2] = ["%243", "%245"];
+
+/// Whether `pane_id` may take this task under the Poolrad review rule. Only a review of the Poolrad repo
+/// with no assignees is restricted; everything else is left to `claimable`.
+pub fn poolrad_review_ok(
+    repo: Option<&str>,
+    kind: &str,
+    assignees: &[String],
+    pane_id: &str,
+) -> bool {
+    if repo != Some(POOLRAD_REPO) || kind != "review" || !assignees.is_empty() {
+        return true;
+    }
+    POOLRAD_DEFAULT_REVIEWERS.contains(&pane_id)
+}
+
 /// Why nothing was claimable, as a reason plus the evidence for it (`_refusal`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Refusal {
@@ -266,6 +288,7 @@ struct Row {
     created_at: f64,
     kind: String,
     author: Option<String>,
+    repo: Option<String>,
 }
 
 impl Tasks {
@@ -312,10 +335,10 @@ impl Tasks {
                     .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                     .map_err(db::map_sqlite)?;
                 let (sql, bind): (&str, Vec<String>) = if mine_only {
-                    ("SELECT id, scope, priority, created_at, status, kind, author, assignees, multi_assignee FROM tasks WHERE scope IN (?, ?) AND status IN ('open', 'in_progress') ORDER BY created_at, id",
+                    ("SELECT id, scope, priority, created_at, status, kind, author, assignees, multi_assignee, repo FROM tasks WHERE scope IN (?, ?) AND status IN ('open', 'in_progress') ORDER BY created_at, id",
                      vec!["global".into(), pane.clone()])
                 } else {
-                    ("SELECT id, scope, priority, created_at, status, kind, author, assignees, multi_assignee FROM tasks WHERE scope = ? AND status IN ('open', 'in_progress') ORDER BY created_at, id",
+                    ("SELECT id, scope, priority, created_at, status, kind, author, assignees, multi_assignee, repo FROM tasks WHERE scope = ? AND status IN ('open', 'in_progress') ORDER BY created_at, id",
                      vec![target.clone()])
                 };
                 let mut rows: Vec<Row> = Vec::new();
@@ -337,6 +360,7 @@ impl Tasks {
                                 created_at: row.get(3)?,
                                 kind: row.get(5)?,
                                 author: row.get(6)?,
+                                repo: row.get(9)?,
                             })
                         })
                         .map_err(db::map_sqlite)?;
@@ -409,6 +433,7 @@ impl Tasks {
                                     || row.candidate.assignees.contains(&pane)
                             })
                         && !options.exclude_author.as_ref().is_some_and(|who| row.author.as_ref() == Some(who))
+                        && poolrad_review_ok(row.repo.as_deref(), &row.kind, &row.candidate.assignees, &pane)
                         && claimable(&row.candidate, Some(&pane))
                 });
                 let Some(chosen) = chosen else {
