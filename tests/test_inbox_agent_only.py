@@ -103,3 +103,17 @@ class AgentOnlyTests(unittest.TestCase):
                 self.assertEqual(other.execute('SELECT COUNT(*) FROM messages WHERE id=?', (message,)).fetchone()[0], 1)
                 self.assertEqual(other.execute('SELECT COUNT(*) FROM message_audiences WHERE message_id=?', (message,)).fetchone()[0], 1)
             store.db.close()
+
+    def test_opening_legacy_database_keeps_existing_message(self):
+        from dunk_inbox import Inbox
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = Inbox(path=str(root / 'inbox.db'), blob_dir=str(root / 'blobs'))
+            message = store.send('agent', 'legacy', subject='[agent-coordination] literal')['message_id']
+            store.db.execute('DROP TABLE message_audiences')
+            store.db.commit()
+            store.db.close()
+            reopened = Inbox(path=str(root / 'inbox.db'), blob_dir=str(root / 'blobs'))
+            self.assertEqual(reopened.get(message)['body'], 'legacy')
+            self.assertEqual(reopened.db.execute('SELECT COUNT(*) FROM message_audiences').fetchone()[0], 0)
+            reopened.db.close()

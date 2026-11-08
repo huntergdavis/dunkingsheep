@@ -267,3 +267,25 @@ fn failed_audience_write_rolls_back_the_message() {
         .unwrap();
     assert_eq!(count, 0);
 }
+
+#[test]
+fn opening_an_older_inbox_keeps_unclassified_messages_visible() {
+    let (dir, _flock, store) = fixture("agent-only-migration");
+    let id = store
+        .send(&Outgoing {
+            mailbox: OWNER_LANE_MAILBOX,
+            body: Some("legacy"),
+            subject: Some("[agent-coordination] literal"),
+            ..Outgoing::default()
+        })
+        .unwrap();
+    let db = rusqlite::Connection::open(store.path()).unwrap();
+    db.execute_batch("DROP TABLE message_audiences").unwrap();
+    drop(db);
+    let reopened = Store::open(store.path(), dir.path().join("reopened-blobs")).unwrap();
+    let rows = reopened
+        .conversation_across_visible(&[OWNER_LANE_MAILBOX.into()], Some(10), None)
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["id"], id);
+}
