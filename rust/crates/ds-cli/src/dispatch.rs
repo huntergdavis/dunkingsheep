@@ -4334,7 +4334,7 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
                         "inbox_send"
                     },
                     args,
-                    |result| crate::render_print::render_inbox_sent(result),
+                    crate::render_print::render_inbox_sent,
                 )
             }
             "list" => {

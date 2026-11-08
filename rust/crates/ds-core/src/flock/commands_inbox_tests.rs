@@ -397,6 +397,26 @@ fn send<'a>(to: &'a str, from: Option<&'a str>) -> SendArgs<'a> {
 }
 
 #[test]
+fn explicit_agent_audience_is_stored_with_delivery_and_hidden_before_windowing() {
+    let (e, d) = (env("worker"), tempfile::tempdir().unwrap());
+    let f = flock(&d);
+    let mut args = send("Other", Some("w1:p1"));
+    args.agent_only = true;
+    args.notify = false;
+    args.subject = Some("ordinary subject");
+    let result = f.inbox_send(&e, &args).unwrap();
+    let id = result.snapshot.summary.message_id;
+    let stored = e.store.get_message(&id).unwrap();
+    assert_eq!(stored.summary.subject.as_deref(), Some("ordinary subject"));
+    let visible = e
+        .store
+        .conversation_across_visible(&["Other".into()], Some(1), None)
+        .unwrap();
+    assert!(visible.is_empty());
+    assert_eq!(e.store.get_message(&id).unwrap().summary.message_id, id);
+}
+
+#[test]
 fn the_notice_is_one_short_line_naming_inbox_sender_and_subject() {
     assert_eq!(
         "[inbox] new message for Mine. Read it with: dunkingsheep inbox read",

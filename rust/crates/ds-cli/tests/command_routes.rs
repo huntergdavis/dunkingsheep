@@ -1049,7 +1049,7 @@ fn cli_route_06_inbox_read_a() {
 }
 
 #[test]
-fn inbox_agent_only_marks_the_stored_subject_and_rejects_human_decisions() {
+fn inbox_agent_only_uses_explicit_rpc_and_rejects_human_decisions() {
     let sent = run_daemon_cli(
         &[
             "inbox",
