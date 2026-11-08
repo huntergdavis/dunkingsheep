@@ -46,6 +46,28 @@ pub const OWNER_PAGE_SENDER: &str = "owner-page";
 pub const OWNER_PAGE_SUBJECT: &str = "PAGE OWNER";
 pub const OWNER_PAGE_TRANSPORT: &str = "telegram";
 
+/// Explicit subject prefixes of routine lane mail (t3592, coordinator decision i49515). Mail carrying one
+/// stays in storage and in the task evidence, but is not listed in the owner conversation. `[owner-decision]`
+/// and `[owner-blocker]` are not listed here, so they stay visible, and so does unmarked legacy mail.
+pub const ROUTINE_SUBJECT_PREFIXES: [&str; 2] = ["[review-verdict]", "[review-note]"];
+
+/// Whether a stored mail row is routine and must not appear in the owner conversation. Only the subject
+/// prefix decides: contradictory words in the body never override the marker. Owner replies (a row with
+/// `reply_to`) are never routine.
+pub fn is_routine_mail(row: &Value) -> bool {
+    if row.get("reply_to").is_some_and(value_truthy) {
+        return false;
+    }
+    let subject = row
+        .get("subject")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim_start();
+    ROUTINE_SUBJECT_PREFIXES
+        .iter()
+        .any(|prefix| subject.starts_with(prefix))
+}
+
 /// The number the watchdog compares for an owner page: the digits of its mailbox id (`i47710`
 /// -> 47710). None for any id that is not one of ours, so a stranger row never confirms a page.
 pub fn owner_page_number(message_id: &str) -> Option<i64> {
@@ -159,7 +181,10 @@ impl<'a> OwnerConversations<'a> {
         let store = self.authorised_store(self_pane_id)?;
         let limit = limit.filter(|limit| *limit != 0).unwrap_or(50);
         let mailboxes = self.conversation_mailboxes(&store)?;
-        let mut messages = store.conversation_across(&mailboxes, Some(limit), before)?;
+        // Routine lane mail (review verdicts and notes, marked by subject) is kept in storage and listed nowhere
+        // here (t3592). Owner decisions, owner blockers, owner replies and unmarked legacy mail stay listed.
+        let mut messages: Vec<Value> =
+            store.conversation_across_visible(&mailboxes, Some(limit), before)?;
         // `waiting` is the desk's list of owner questions. The window now also carries lane
         // mailboxes (t3535), but `reply()` only answers rows in the owner mailbox, so a lane's
         // unread mail must not be listed here: the same predicate `reply()` enforces.
@@ -1285,3 +1310,8 @@ mod tests {
 #[cfg(test)]
 #[path = "conversation_mailboxes_tests.rs"]
 mod conversation_mailboxes_tests;
+
+/// t3592: the routine-mail fixtures (coordinator decision i49515).
+#[cfg(test)]
+#[path = "routine_mail_tests.rs"]
+mod routine_mail_tests;
