@@ -4284,10 +4284,30 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
                 let mut args = Map::new();
                 args.insert("to".into(), ns.get("to").cloned().unwrap_or(Value::Null));
                 args.insert("body".into(), Value::String(body));
-                args.insert(
-                    "subject".into(),
-                    ns.get("subject").cloned().unwrap_or(Value::Null),
-                );
+                let subject = ns.get("subject").and_then(Value::as_str).unwrap_or("");
+                let agent_only = matches!(ns.get("agent_only"), Some(Value::Bool(true)));
+                if agent_only
+                    && (ds_core::inbox::normalise_mailbox(text(ns, "to").unwrap_or(""))
+                        .eq_ignore_ascii_case("owner")
+                        || subject.trim_start().starts_with("[owner-decision]")
+                        || subject.trim_start().starts_with("[owner-blocker]"))
+                {
+                    return Outcome {
+                        stdout: String::new(),
+                        stderr: "inbox send: --agent-only cannot target the human owner mailbox or mark a human decision\n".into(),
+                        code: 2,
+                    };
+                }
+                let subject = if agent_only {
+                    Value::String(if subject.is_empty() {
+                        "[agent-coordination]".into()
+                    } else {
+                        format!("[agent-coordination] {subject}")
+                    })
+                } else {
+                    ns.get("subject").cloned().unwrap_or(Value::Null)
+                };
+                args.insert("subject".into(), subject);
                 let attachments = ns
                     .get("attach")
                     .and_then(Value::as_array)

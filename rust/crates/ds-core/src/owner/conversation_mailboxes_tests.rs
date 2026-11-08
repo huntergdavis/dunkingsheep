@@ -126,3 +126,32 @@ fn a_lane_send_to_the_owner_lane_mailbox_shows_in_the_owner_conversation() {
         "an ordinary owner question still waits for the desk"
     );
 }
+
+#[test]
+fn agent_only_rows_stay_in_inbox_without_crowding_out_human_or_legacy_mail() {
+    let (_dir, flock, store) = fixture("agent-only");
+    let send = |mailbox: &str, subject: &str, body: &str, pane: Option<&str>| {
+        store.send(&Outgoing {
+            mailbox, subject: Some(subject), body: Some(body), pane_id: pane,
+            sender: Some(WORKER), ..Outgoing::default()
+        }).unwrap()
+    };
+    let human = send(OWNER_MAILBOX, "[agent-coordination] literal human subject", "human", None);
+    let legacy = send(OWNER_LANE_MAILBOX, "unmarked legacy decision", "legacy", Some(OWNER));
+    let decision = send(OWNER_LANE_MAILBOX, "[owner-decision] choose", "decide", Some(OWNER));
+    let mut hidden = Vec::new();
+    for _ in 0..6 {
+        hidden.push(send(OWNER_LANE_MAILBOX, "[agent-coordination] request", "private", Some(OWNER)));
+    }
+    let result = OwnerConversations::new(&flock, &NoPanes)
+        .conversation(Some(3), None, None).unwrap();
+    let ids: Vec<_> = result.messages.iter().map(|row| row["id"].as_str().unwrap()).collect();
+    assert_eq!(ids.len(), 3);
+    assert_eq!(result.count, 3);
+    assert_eq!(result.waiting, vec![human.clone()]);
+    for id in [&human, &legacy, &decision] { assert!(ids.contains(&id.as_str())); }
+    for id in hidden {
+        assert!(!ids.contains(&id.as_str()));
+        assert_eq!(store.get_message(&id).unwrap().summary.message_id, id);
+    }
+}
