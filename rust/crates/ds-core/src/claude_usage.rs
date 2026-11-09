@@ -134,9 +134,29 @@ async fn subscription_usage_at(home: &Path, now: f64, endpoint: &str, timeout: D
             display(&extra["utilization"])
         ));
     }
-    json!({"provider":"claude", "status":"ok", "meaning":"percent_used", "measured_at":now,
+    let mut result = json!({"provider":"claude", "status":"ok", "meaning":"percent_used", "measured_at":now,
         "source":ENDPOINT, "subscription":oauth["subscriptionType"], "rate_limit_tier":oauth["rateLimitTier"],
-        "windows":windows, "extra_usage":extra, "notes":notes})
+        "windows":windows, "extra_usage":extra, "notes":notes});
+    redact_token(&mut result, token);
+    result
+}
+
+fn redact_token(value: &mut Value, token: &str) {
+    match value {
+        Value::String(text) => *text = text.replace(token, "[redacted]"),
+        Value::Number(number) if number.to_string().contains(token) => {
+            *value = Value::String(number.to_string().replace(token, "[redacted]"));
+        }
+        Value::Array(items) => items.iter_mut().for_each(|item| redact_token(item, token)),
+        Value::Object(map) => {
+            let entries = std::mem::take(map);
+            for (key, mut item) in entries {
+                redact_token(&mut item, token);
+                map.insert(key.replace(token, "[redacted]"), item);
+            }
+        }
+        _ => {}
+    }
 }
 
 #[cfg(test)]
@@ -204,11 +224,11 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         credentials(
             home.path(),
-            r#"{"claudeAiOauth":{"accessToken":"dummy-secret","expiresAt":9999999,"subscriptionType":"pro","rateLimitTier":"tier"}}"#,
+            r#"{"claudeAiOauth":{"accessToken":"dummy-secret","expiresAt":9999999,"subscriptionType":"pro","rateLimitTier":"dummy-secret"}}"#,
         );
         let (url, server) = fake_server(
             "200 OK",
-            r#"{"five_hour":{"utilization":12.0,"resets_at":"later"},"seven_day":{"utilization":50.0},"extra_usage":{"used_credits":1,"monthly_limit":4,"utilization":25}}"#,
+            r#"{"five_hour":{"utilization":12.0,"resets_at":"dummy-secret"},"seven_day":{"utilization":50.0},"extra_usage":{"used_credits":1,"monthly_limit":4,"utilization":25,"nested":{"dummy-secret":"dummy-secret"}}}"#,
             0,
         );
         let value = subscription_usage_at(home.path(), 1000.0, &url, Duration::from_secs(1)).await;
@@ -221,6 +241,38 @@ mod tests {
         assert_eq!(value["windows"][0]["percent_remaining"], 88.0);
         assert_eq!(value["windows"][1]["name"], "weekly_all");
         assert!(!value.to_string().contains("dummy-secret"));
+    }
+    #[tokio::test]
+    async fn cross_origin_redirect_never_receives_a_request() {
+        let home = tempfile::tempdir().unwrap();
+        credentials(
+            home.path(),
+            r#"{"claudeAiOauth":{"accessToken":"dummy-secret"}}"#,
+        );
+        let destination = TcpListener::bind("127.0.0.1:0").unwrap();
+        destination.set_nonblocking(true).unwrap();
+        let location = destination.local_addr().unwrap();
+        let source = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = source.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = source.accept().unwrap();
+            let mut request = [0u8; 4096];
+            let _ = socket.read(&mut request).unwrap();
+            write!(socket, "HTTP/1.1 302 Found\r\nLocation: http://{location}/elsewhere\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+        });
+        let value = subscription_usage_at(
+            home.path(),
+            1000.0,
+            &format!("http://{address}/usage"),
+            Duration::from_secs(1),
+        )
+        .await;
+        server.join().unwrap();
+        assert!(value["error"].as_str().unwrap().contains("HTTP 302"));
+        assert_eq!(
+            destination.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
     }
     #[tokio::test]
     async fn errors_are_bounded_sanitized_and_redirects_are_not_followed() {
