@@ -65,6 +65,7 @@ pub mod server;
 pub mod server_runtime;
 pub(crate) mod sqlite_scalar;
 pub use server_runtime::{RuntimeObservability, RuntimeServiceInputs, RuntimeServices};
+pub mod claude_usage;
 pub mod state;
 pub mod stuck;
 pub mod superusers;

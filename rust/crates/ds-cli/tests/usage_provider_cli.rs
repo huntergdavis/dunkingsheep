@@ -7,7 +7,7 @@ use std::process::Command;
 fn native_provider_output_and_usage_runner_contract() {
     let dir = tempfile::tempdir().unwrap();
     let bin = env!("CARGO_BIN_EXE_dunkingsheep");
-    for provider in ["codex", "pi"] {
+    for provider in ["claude", "codex", "pi"] {
         let out = Command::new(bin)
             .args(["usage-provider", provider])
             .env("HOME", dir.path())

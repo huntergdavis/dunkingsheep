@@ -3823,6 +3823,15 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
                 })
                 .unwrap_or(3600.0);
             let result = match text(ns, "provider") {
+                Some("claude") => match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt.block_on(ds_core::claude_usage::subscription_usage(&home, now)),
+                    Err(_) => {
+                        serde_json::json!({"provider":"claude", "status":"error", "meaning":"unknown", "measured_at":now, "error":"cannot initialize Claude usage runtime"})
+                    }
+                },
                 Some("codex") => ds_core::usage_providers::codex(&home, max_age, now),
                 Some("pi") => ds_core::usage_providers::pi(&home, max_age, now),
                 Some("opencode") => ds_core::usage_providers::opencode(now),
