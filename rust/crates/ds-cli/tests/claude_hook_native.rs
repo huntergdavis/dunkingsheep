@@ -137,7 +137,7 @@ fn early_stop_waits_for_start_and_next_turn_still_completes() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     let cli = root.join("fake-cli");
-    fs::write(&cli, "#!/bin/sh\ncase \"$3\" in start) echo '{\"turn_id\":\"token-1\",\"pane_id\":\"%scratch\"}' ;; end) echo \"$5\" >> \"$CALLS\"; echo '{\"ended\":true}' ;; esac\n").unwrap();
+    fs::write(&cli, "#!/bin/sh\ncase \"$3\" in start) if [ -e \"$ROOT/count\" ]; then token=token-2; else token=token-1; : > \"$ROOT/count\"; fi; printf '{\"turn_id\":\"%s\",\"pane_id\":\"%%scratch\"}\\n' \"$token\" ;; end) echo \"$5\" >> \"$CALLS\"; echo '{\"ended\":true}' ;; esac\n").unwrap();
     fs::set_permissions(&cli, fs::Permissions::from_mode(0o700)).unwrap();
     for (name, event) in [("start", "UserPromptSubmit"), ("stop", "Stop")] {
         fs::write(root.join(name), format!("{{\"session_id\":\"session-1\",\"hook_event_name\":\"{event}\",\"stop_hook_active\":false,\"cwd\":\"{}\"}}", root.display())).unwrap();
@@ -156,6 +156,6 @@ fn early_stop_waits_for_start_and_next_turn_still_completes() {
     assert!(status.success());
     assert_eq!(
         fs::read_to_string(root.join("calls")).unwrap(),
-        "token-1\ntoken-1\n"
+        "token-1\ntoken-2\n"
     );
 }
