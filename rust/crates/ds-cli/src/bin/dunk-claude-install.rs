@@ -130,6 +130,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let home = d.path().join("home");
         fs::create_dir(&home).unwrap();
+        fs::set_permissions(&home, fs::Permissions::from_mode(0o700)).unwrap();
         let binary = d.path().join("source");
         fs::write(&binary, b"native").unwrap();
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
@@ -143,6 +144,7 @@ mod tests {
             write_new(path, bytes, mode)
         });
         assert!(result.is_err());
+        assert_eq!(calls, 2);
         assert!(!home.join("dunk-claude-turn").exists());
         assert!(!home.join("dunkingsheep-turn.sh").exists());
         assert!(!home.join("settings.json").exists());

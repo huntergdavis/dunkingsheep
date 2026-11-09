@@ -7,9 +7,10 @@ fn installs_into_private_home_and_refuses_existing_trust() {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("claude user's home");
     fs::create_dir(&home).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&home, fs::Permissions::from_mode(0o700)).unwrap();
     fs::write(home.join("auth-sentinel"), b"preserve").unwrap();
     let installer = env!("CARGO_BIN_EXE_dunk-claude-install");
-    use std::os::unix::fs::PermissionsExt;
     let binary = dir.path().join("fake-producer");
     fs::write(
         &binary,
