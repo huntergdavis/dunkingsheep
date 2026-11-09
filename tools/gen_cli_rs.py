@@ -57,6 +57,10 @@ def load_parser():
     queue.add_argument("queue_id", type=int)
     queue.add_argument("--path", required=True, help="exact source path")
     queue.add_argument("--reason", required=True)
+    usage_provider = root.add_parser("usage-provider", help="read native provider usage as JSON")
+    usage_provider.add_argument("provider", choices=["codex", "pi", "opencode"])
+    usage_provider.add_argument("--max-age-s", dest="max_age", type=float,
+                                help="snapshot maximum age in seconds")
     return parser
 
 
