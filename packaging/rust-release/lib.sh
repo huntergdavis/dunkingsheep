@@ -355,3 +355,17 @@ refuse_later_execstart() {
 $2
 ROOTS
 }
+
+# Cooperating release operations serialize per canonical bin directory. The private runtime
+# directory must belong to this user; older scripts do not participate in this protocol.
+lock_release_bin() {
+    state_home=${XDG_STATE_HOME:-$HOME/.local/state}
+    lock_root="$state_home/dunkingsheep-release-locks"
+    (umask 077; mkdir -p "$lock_root")
+    [ ! -L "$lock_root" ] && [ "$(stat -c %u "$lock_root")" = "$(id -u)" ] && [ "$(stat -c %a "$lock_root")" = 700 ] || die "unsafe release lock directory"
+    bin_key=$(printf '%s' "$(realpath -m "$1")" | sha256sum | cut -d ' ' -f1)
+    [ ! -L "$lock_root/$bin_key.lock" ] || die "unsafe release lock"
+    exec 8>"$lock_root/$bin_key.lock"
+    flock -n 8 || die "another release operation holds the bin lock"
+    poll_marker="$lock_root/$bin_key.poll-only"
+}

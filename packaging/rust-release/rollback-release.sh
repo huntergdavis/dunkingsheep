@@ -50,6 +50,8 @@ done
 require_plain_path --prefix "$prefix"
 require_plain_path --bin-dir "$bin_dir"
 require_plain_path --unit-dir "$unit_dir"
+lock_release_bin "$bin_dir"
+[ ! -e "$poll_marker" ] || die "poll-only install active; roll it back first"
 if [ -n "$to" ] && [ "$original" -eq 1 ]; then
     die "--to and --original are exclusive"
 fi

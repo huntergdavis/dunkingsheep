@@ -36,6 +36,8 @@ done
 require_plain_path --prefix "$prefix"
 require_plain_path --bin-dir "$bin_dir"
 require_plain_path --unit-dir "$unit_dir"
+lock_release_bin "$bin_dir"
+[ ! -e "$poll_marker" ] || die "poll-only install active; roll it back first"
 
 dropin="$unit_dir/dunkingsheep.service.d/99-rust-release.conf"
 rollback_dir="$prefix/rollback"
