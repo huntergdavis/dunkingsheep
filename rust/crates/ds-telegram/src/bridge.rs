@@ -6,8 +6,12 @@
 //! the legacy store's page rows and the forwarding cursor, read through `desk_store`.
 //!
 //! Not in this build (each is a visible reply or a named error, never a silent drop):
-//! attachments, `/status` (it needs the desk reconciliation), and the watchdog's own status file
-//! beyond the watermark write. See the PR body for the list.
+//! attachments and the watchdog's own status file beyond the watermark write. See the PR body.
+//!
+//! `/status` is a deliberate, owner-accepted difference from Python: the Python bridge reads the
+//! legacy desk store's `delivery` column, while this bridge records its questions in the one owner
+//! mailbox (t594) and so answers from that mailbox's state (t3671/t3672, owner 2026-11-08:
+//! "b I want it to be useful"). See `message_status`.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -32,6 +36,40 @@ use crate::pyval::{as_int, display, present, truthy};
 pub const RETRY_DELAY: Duration = Duration::from_secs(5);
 /// The long-poll window for `getUpdates`, as the Python `timeout=10`.
 pub const POLL_TIMEOUT_S: i64 = 10;
+/// How many owner-mailbox rows `/status` reads per `owner_conversation` page.
+pub const STATUS_PAGE: i64 = 100;
+/// How many pages it walks back before it reports uncertainty instead of an answer. The walk stops
+/// early at the end of the mailbox, so this is a ceiling, not a cost per request.
+pub const STATUS_MAX_PAGES: usize = 10;
+
+/// Is this owner-mailbox row a question THIS bridge recorded?
+///
+/// Two conditions, both load-bearing:
+///
+/// - `owner_ingest` writes the transport's own id, `telegram:<update_id>`, as the dedupe key. A
+///   daemon-written page or a lane message carries no such id, and a web question carries `web:*`.
+/// - a question is a row nothing answers. `owner_reply` writes `reply_to`, and `owner_delivered`
+///   MAY stamp the sent Telegram message's id onto that reply row as its `external_id` (the verb
+///   accepts one; this bridge passes none today), so the id alone is not enough to exclude a
+///   reply.
+fn is_ingested_question(row: &Value) -> bool {
+    if present(row.get("reply_to")).is_some() {
+        return false;
+    }
+    row.get("external_id")
+        .and_then(Value::as_str)
+        .is_some_and(|id| id.starts_with("telegram:"))
+}
+
+/// A row's `created_at`, the only field the daemon's page cursor reads.
+fn created_at(row: &Value) -> Option<f64> {
+    row.get("created_at").and_then(Value::as_f64)
+}
+
+/// The newest question in a page (the daemon returns rows oldest first).
+fn newest_question(rows: &[Value]) -> Option<&Value> {
+    rows.iter().rev().find(|row| is_ingested_question(row))
+}
 
 /// Where the bridge reads its channel registry and routing from, and how it talks to the world.
 pub struct Bridge<D: Daemon, B: Bot> {
@@ -132,6 +170,119 @@ impl<D: Daemon, B: Bot> Bridge<D, B> {
     pub fn channel_name(&self, channel: &str) -> Result<String, BridgeError> {
         let registry = load_registry(&self.registry_path)?;
         channel_name(&registry, channel)
+    }
+
+    /// `_message_status`, answered from the owner mailbox instead of the desk store.
+    ///
+    /// Python reconciles the desk store and reports the newest `role='owner'` row whose
+    /// `external_id` is `telegram:*`; this bridge never writes such a row for a text question (t594
+    /// moved it into the one owner mailbox), so the honest answer is the mailbox row the bridge
+    /// itself recorded. The owner accepted that difference and its wording on 2026-11-08 (t3672
+    /// acceptance, "b I want it to be useful"):
+    ///
+    /// - a question this bridge ingested (the `telegram:<update_id>` `external_id` that
+    ///   `owner_ingest` deduplicates on, and no `reply_to`) is the row reported;
+    /// - the reply is `"<desk name> message #<id>: <state>"` with the mailbox state the daemon
+    ///   reports, or `"No Telegram message has reached <desk name> yet."` when there is none.
+    ///
+    /// A reply is not a question, and a delivered page is not either, so both are skipped.
+    ///
+    /// The mailbox is walked backwards in pages (`before` = the oldest `created_at` seen), because
+    /// the conversation also carries owner-role lane mailboxes and unrelated traffic can fill any
+    /// fixed window (t3535; reviewer t3745).
+    ///
+    /// The strict cursor hides same-timestamp rows (reviewer t3762): `created_at < before` cannot
+    /// return the siblings of the row it stops at, so a page that ends on a timestamp shared by
+    /// more rows than fit leaves them invisible. That is not only a missing answer, it can make an
+    /// OLDER question look like the latest one. So each boundary is PROVED before the walk goes
+    /// below it (`boundary_cluster`), and two outcomes are never confused:
+    ///
+    /// - a page shorter than `STATUS_PAGE`, with every boundary above it proved, ends the mailbox:
+    ///   "No Telegram message has reached … yet" is then a fact;
+    /// - a boundary whose cluster will not fit in one page, `STATUS_MAX_PAGES` full pages, or a
+    ///   cursor that will not advance is NOT a fact: the reply says the message could not be found
+    ///   and points at the web desk.
+    fn message_status(&mut self, channel: &str) -> Result<String, BridgeError> {
+        let name = self.channel_name(channel)?;
+        let mut before: Option<f64> = None;
+        for _ in 0..STATUS_MAX_PAGES {
+            let rows = self.mailbox_page(before)?;
+            let full = rows.len() >= STATUS_PAGE as usize;
+            let oldest = rows.first().and_then(created_at);
+            if let Some(row) = newest_question(&rows) {
+                // A question strictly newer than the page's oldest timestamp has no same-timestamp
+                // sibling above it, and every boundary above was already proved: it is the answer.
+                if !full || created_at(row) != oldest {
+                    return Ok(message_line(&name, row));
+                }
+                // A question ON the boundary may have newer siblings the cursor hid. The cluster
+                // decides, and if the cluster will not fit, the answer is uncertainty.
+                let Some(boundary) = oldest else {
+                    return Ok(uncertain_line(&name));
+                };
+                let Some(cluster) = self.boundary_cluster(boundary)? else {
+                    return Ok(uncertain_line(&name));
+                };
+                return Ok(message_line(
+                    &name,
+                    newest_question(&cluster).unwrap_or(row),
+                ));
+            }
+            if !full {
+                // Every boundary above was proved complete, so this short page is the end of the
+                // mailbox and the absence is real.
+                return Ok(format!("No Telegram message has reached {name} yet."));
+            }
+            let Some(boundary) = oldest else {
+                return Ok(uncertain_line(&name));
+            };
+            // Prove this boundary before looking below it, and scan the cluster too: a hidden
+            // sibling at the boundary may be the question the page could not show.
+            let Some(cluster) = self.boundary_cluster(boundary)? else {
+                return Ok(uncertain_line(&name));
+            };
+            if let Some(row) = newest_question(&cluster) {
+                return Ok(message_line(&name, row));
+            }
+            // A cursor that does not move would re-read the same page forever.
+            if before.is_some_and(|previous| boundary >= previous) {
+                return Ok(uncertain_line(&name));
+            }
+            before = Some(boundary);
+        }
+        // The walk ran out of pages: never claim absence.
+        Ok(uncertain_line(&name))
+    }
+
+    /// One `owner_conversation` page: at most `STATUS_PAGE` rows strictly older than `before`,
+    /// oldest first.
+    fn mailbox_page(&mut self, before: Option<f64>) -> Result<Vec<Value>, BridgeError> {
+        let mut params = json!({"limit": STATUS_PAGE});
+        if let Some(cursor) = before {
+            params["before"] = json!(cursor);
+        }
+        let answer = self.daemon.call("owner_conversation", args(params))?;
+        Ok(answer
+            .get("messages")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    /// Every row the daemon will show at `boundary`, or `None` when it cannot be proved complete.
+    ///
+    /// `created_at < next_up(boundary)` accepts exactly the rows at or below the boundary (no
+    /// representable float lies between), so asking for the newest page of those returns the whole
+    /// boundary cluster whenever the cluster is smaller than a page. A cluster that fills the page
+    /// may have more rows behind it that nothing can enumerate: that is `None`, and the caller says
+    /// so instead of guessing.
+    fn boundary_cluster(&mut self, boundary: f64) -> Result<Option<Vec<Value>>, BridgeError> {
+        let rows = self.mailbox_page(Some(boundary.next_up()))?;
+        let cluster: Vec<Value> = rows
+            .into_iter()
+            .filter(|row| created_at(row) == Some(boundary))
+            .collect();
+        Ok((cluster.len() < STATUS_PAGE as usize).then_some(cluster))
     }
 
     /// `_prepare_route`: scope the forwarding cursor to its channel. A switch starts at the
@@ -249,10 +400,8 @@ impl<D: Daemon, B: Bot> Bridge<D, B> {
             );
         }
         if stripped == "/status" {
-            return self.send_text(
-                &chat_id,
-                "/status is not in the Rust bridge yet. Check the web desk for your last send.",
-            );
+            let reply = self.message_status(&channel)?;
+            return self.send_text(&chat_id, &reply);
         }
         let external_id = format!(
             "telegram:{}",
@@ -503,4 +652,23 @@ pub fn setup<B: Bot>(
     Ok(format!(
         "Bot @{username} saved in private local data.\nStart ./install-telegram-service.sh, then DM the bot: /pair {pair_code}"
     ))
+}
+
+/// `"<desk name> message #<id>: <state>"`: one answer from one mailbox row.
+fn message_line(name: &str, row: &Value) -> String {
+    format!(
+        "{name} message #{}: {}",
+        row.get("id").map(display).unwrap_or_default(),
+        row.get("state")
+            .map(display)
+            .unwrap_or_else(|| "None".to_string())
+    )
+}
+
+/// The reply when the walk stopped on an ambiguity: never a claim of absence.
+fn uncertain_line(name: &str) -> String {
+    format!(
+    "Could not find a Telegram message for {name} in the {} most recent mailbox rows; check the web desk.",
+    (STATUS_MAX_PAGES as i64) * STATUS_PAGE
+)
 }

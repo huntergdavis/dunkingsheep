@@ -41,6 +41,7 @@
         "daemon": {},
         "desk_rows": [],
         "name": "pair_with_the_code",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -102,6 +103,7 @@
         "daemon": {},
         "desk_rows": [],
         "name": "pair_with_a_wrong_code",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -163,6 +165,7 @@
         "daemon": {},
         "desk_rows": [],
         "name": "pair_ignores_an_unpaired_plain_message",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -235,6 +238,7 @@
         },
         "desk_rows": [],
         "name": "group_chat_and_other_chat_are_ignored",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -334,6 +338,7 @@
         },
         "desk_rows": [],
         "name": "text_question_is_recorded_and_acknowledged",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -420,6 +425,7 @@
         },
         "desk_rows": [],
         "name": "redelivered_question_says_already_recorded",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -500,6 +506,7 @@
         "daemon": {},
         "desk_rows": [],
         "name": "start_and_help_get_the_help_text",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -582,6 +589,7 @@
         "daemon": {},
         "desk_rows": [],
         "name": "an_empty_message_gets_the_other_items_reply",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -668,6 +676,7 @@
         },
         "desk_rows": [],
         "name": "routing_file_names_the_desk",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -734,6 +743,7 @@
         "daemon": {},
         "desk_rows": [],
         "name": "routing_file_with_an_extra_key_is_refused",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -801,6 +811,7 @@
         "daemon": {},
         "desk_rows": [],
         "name": "routing_channel_missing_from_registry_is_refused",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -869,6 +880,7 @@
         "daemon": {},
         "desk_rows": [],
         "name": "config_that_still_names_a_channel_is_refused",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -942,6 +954,7 @@
         },
         "desk_rows": [],
         "name": "a_web_question_produces_nothing_for_telegram",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -1034,6 +1047,7 @@
         },
         "desk_rows": [],
         "name": "a_telegram_reply_is_sent_and_receipted",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -1132,6 +1146,7 @@
         },
         "desk_rows": [],
         "name": "mailbox_page_is_sent_once_and_receipted",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -1291,6 +1306,7 @@
         },
         "desk_rows": [],
         "name": "mailbox_pages_share_the_budget",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -1389,6 +1405,7 @@
         },
         "desk_rows": [],
         "name": "mailbox_page_does_not_move_the_legacy_watermark",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -1451,6 +1468,7 @@
         },
         "desk_rows": [],
         "name": "unpaired_bridge_sends_nothing",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -1603,6 +1621,7 @@
           ]
         ],
         "name": "held_page_is_selected_again",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -1762,6 +1781,7 @@
           ]
         ],
         "name": "delivered_pages_move_the_watermark",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -1917,6 +1937,7 @@
         ],
         "fail_on": "money",
         "name": "failed_send_does_not_advance_past_the_failed_page",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -2079,6 +2100,7 @@
           ]
         ],
         "name": "pages_in_one_tick_each_spend_the_budget",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -2218,6 +2240,7 @@
           ]
         ],
         "name": "page_older_than_the_window_does_not_count",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -2323,6 +2346,7 @@
           ]
         ],
         "name": "first_run_carries_the_old_watermark_over",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -2408,6 +2432,7 @@
           ]
         ],
         "name": "first_run_with_no_marker_starts_from_now",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -2646,6 +2671,7 @@
           ]
         ],
         "name": "ordinary_rows_do_not_starve_a_page",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -2746,6 +2772,7 @@
           ]
         ],
         "name": "ordinary_rows_never_move_the_watermark",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -2887,6 +2914,7 @@
         },
         "desk_rows": [],
         "name": "poll_loop_processes_updates_in_order_and_saves_the_offset",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -3043,6 +3071,7 @@
         },
         "desk_rows": [],
         "name": "poll_loop_sends_replies_after_each_batch",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -3104,6 +3133,7 @@
         "daemon": {},
         "desk_rows": [],
         "name": "status_of_a_fresh_config",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -3157,6 +3187,7 @@
         "daemon": {},
         "desk_rows": [],
         "name": "status_reports_routing_and_pairing",
+        "owner_rows": [],
         "registry": [
           {
             "id": "vp",
@@ -3177,6 +3208,1591 @@
         ]
       },
       "name": "status_reports_routing_and_pairing"
+    },
+    {
+      "expected": {
+        "bot_log": [
+          [
+            "sendMessage",
+            {
+              "chat_id": 42.0,
+              "text": "No Telegram message has reached Chief of Staff yet."
+            }
+          ]
+        ],
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42.0,
+          "last_brief_id": null,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon_log": [],
+        "status": null,
+        "steps": [
+          {
+            "error": null,
+            "op": "process_update"
+          }
+        ]
+      },
+      "input": {
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42,
+          "last_brief_id": null,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon": {
+          "conversation": []
+        },
+        "desk_rows": [],
+        "name": "status_with_no_recorded_question_says_nothing_has_reached_the_desk",
+        "owner_rows": [],
+        "port": {
+          "bot_log": [
+            [
+              "sendMessage",
+              {
+                "chat_id": 42,
+                "text": "No Telegram message has reached Chief of Staff yet."
+              }
+            ]
+          ],
+          "daemon_log": [
+            [
+              "owner_conversation",
+              {
+                "limit": 100
+              }
+            ]
+          ]
+        },
+        "registry": [
+          {
+            "id": "vp",
+            "name": "VP"
+          },
+          {
+            "id": "cos",
+            "name": "Chief of Staff"
+          }
+        ],
+        "routing": null,
+        "steps": [
+          {
+            "op": "process_update",
+            "update": {
+              "message": {
+                "chat": {
+                  "id": 42,
+                  "type": "private"
+                },
+                "text": "/status"
+              },
+              "update_id": 9
+            }
+          }
+        ]
+      },
+      "name": "status_with_no_recorded_question_says_nothing_has_reached_the_desk"
+    },
+    {
+      "expected": {
+        "bot_log": [
+          [
+            "sendMessage",
+            {
+              "chat_id": 42.0,
+              "text": "No Telegram message has reached Chief of Staff yet."
+            }
+          ]
+        ],
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42.0,
+          "last_brief_id": null,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon_log": [],
+        "status": null,
+        "steps": [
+          {
+            "error": null,
+            "op": "process_update"
+          }
+        ]
+      },
+      "input": {
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42,
+          "last_brief_id": null,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon": {
+          "conversation": [
+            {
+              "created_at": 0.0,
+              "external_id": "telegram:7",
+              "id": "i7",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "telegram"
+            }
+          ]
+        },
+        "desk_rows": [],
+        "name": "status_answers_from_the_mailbox_where_python_has_no_desk_row",
+        "owner_rows": [],
+        "port": {
+          "bot_log": [
+            [
+              "sendMessage",
+              {
+                "chat_id": 42,
+                "text": "Chief of Staff message #i7: queued"
+              }
+            ]
+          ],
+          "daemon_log": [
+            [
+              "owner_conversation",
+              {
+                "limit": 100
+              }
+            ]
+          ]
+        },
+        "registry": [
+          {
+            "id": "vp",
+            "name": "VP"
+          },
+          {
+            "id": "cos",
+            "name": "Chief of Staff"
+          }
+        ],
+        "routing": null,
+        "steps": [
+          {
+            "op": "process_update",
+            "update": {
+              "message": {
+                "chat": {
+                  "id": 42,
+                  "type": "private"
+                },
+                "text": "/status"
+              },
+              "update_id": 9
+            }
+          }
+        ]
+      },
+      "name": "status_answers_from_the_mailbox_where_python_has_no_desk_row"
+    },
+    {
+      "expected": {
+        "bot_log": [
+          [
+            "sendMessage",
+            {
+              "chat_id": 42.0,
+              "text": "Chief of Staff message #12: sent"
+            }
+          ]
+        ],
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42.0,
+          "last_brief_id": null,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon_log": [],
+        "status": null,
+        "steps": [
+          {
+            "error": null,
+            "op": "process_update"
+          }
+        ]
+      },
+      "input": {
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42,
+          "last_brief_id": null,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon": {
+          "conversation": [
+            {
+              "created_at": 0.0,
+              "external_id": "telegram:2",
+              "id": "i12",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "telegram"
+            },
+            {
+              "created_at": 0.0,
+              "external_id": "web:9",
+              "id": "i13",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 0.0,
+              "external_id": null,
+              "id": "i14",
+              "reply_to": "i12",
+              "state": "acked",
+              "transport": "telegram"
+            },
+            {
+              "created_at": 0.0,
+              "external_id": "telegram:900",
+              "id": "i16",
+              "reply_to": "i12",
+              "state": "acked",
+              "transport": "telegram"
+            }
+          ]
+        },
+        "desk_rows": [],
+        "name": "status_reports_the_mailbox_state_not_the_desk_delivery",
+        "owner_rows": [
+          [
+            12,
+            "cos",
+            "sent",
+            "telegram:2"
+          ]
+        ],
+        "port": {
+          "bot_log": [
+            [
+              "sendMessage",
+              {
+                "chat_id": 42,
+                "text": "Chief of Staff message #i12: queued"
+              }
+            ]
+          ],
+          "daemon_log": [
+            [
+              "owner_conversation",
+              {
+                "limit": 100
+              }
+            ]
+          ]
+        },
+        "registry": [
+          {
+            "id": "vp",
+            "name": "VP"
+          },
+          {
+            "id": "cos",
+            "name": "Chief of Staff"
+          }
+        ],
+        "routing": null,
+        "steps": [
+          {
+            "op": "process_update",
+            "update": {
+              "message": {
+                "chat": {
+                  "id": 42,
+                  "type": "private"
+                },
+                "text": " /status "
+              },
+              "update_id": 9
+            }
+          }
+        ]
+      },
+      "name": "status_reports_the_mailbox_state_not_the_desk_delivery"
+    },
+    {
+      "expected": {
+        "bot_log": [
+          [
+            "sendMessage",
+            {
+              "chat_id": 42.0,
+              "text": "VP message #14: acked"
+            }
+          ]
+        ],
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "vp",
+          "chat_id": 42.0,
+          "last_brief_id": 0.0,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon_log": [],
+        "status": null,
+        "steps": [
+          {
+            "error": null,
+            "op": "process_update"
+          }
+        ]
+      },
+      "input": {
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42,
+          "last_brief_id": null,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon": {
+          "conversation": [
+            {
+              "created_at": 0.0,
+              "external_id": "telegram:30",
+              "id": "i30",
+              "reply_to": null,
+              "state": "read",
+              "transport": "telegram"
+            }
+          ]
+        },
+        "desk_rows": [],
+        "name": "status_names_the_routing_channel_and_ignores_another_desks_question",
+        "owner_rows": [
+          [
+            14,
+            "vp",
+            "acked",
+            "telegram:3"
+          ]
+        ],
+        "port": {
+          "bot_log": [
+            [
+              "sendMessage",
+              {
+                "chat_id": 42,
+                "text": "VP message #i30: read"
+              }
+            ]
+          ],
+          "daemon_log": [
+            [
+              "owner_conversation",
+              {
+                "limit": 100
+              }
+            ]
+          ]
+        },
+        "registry": [
+          {
+            "id": "vp",
+            "name": "VP"
+          },
+          {
+            "id": "cos",
+            "name": "Chief of Staff"
+          }
+        ],
+        "routing": {
+          "channel": "vp"
+        },
+        "steps": [
+          {
+            "op": "process_update",
+            "update": {
+              "message": {
+                "chat": {
+                  "id": 42,
+                  "type": "private"
+                },
+                "text": "/status"
+              },
+              "update_id": 9
+            }
+          }
+        ]
+      },
+      "name": "status_names_the_routing_channel_and_ignores_another_desks_question"
+    },
+    {
+      "expected": {
+        "bot_log": [
+          [
+            "sendMessage",
+            {
+              "chat_id": 42.0,
+              "text": "No Telegram message has reached Chief of Staff yet."
+            }
+          ]
+        ],
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42.0,
+          "last_brief_id": null,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon_log": [],
+        "status": null,
+        "steps": [
+          {
+            "error": null,
+            "op": "process_update"
+          }
+        ]
+      },
+      "input": {
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42,
+          "last_brief_id": null,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon": {
+          "conversation": [
+            {
+              "created_at": 1.0,
+              "external_id": "telegram:7",
+              "id": "i7",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "telegram"
+            },
+            {
+              "created_at": 10.0,
+              "external_id": "web:0",
+              "id": "web-0",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 11.0,
+              "external_id": "web:1",
+              "id": "web-1",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 12.0,
+              "external_id": "web:2",
+              "id": "web-2",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 13.0,
+              "external_id": "web:3",
+              "id": "web-3",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 14.0,
+              "external_id": "web:4",
+              "id": "web-4",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 15.0,
+              "external_id": "web:5",
+              "id": "web-5",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 16.0,
+              "external_id": "web:6",
+              "id": "web-6",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 17.0,
+              "external_id": "web:7",
+              "id": "web-7",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 18.0,
+              "external_id": "web:8",
+              "id": "web-8",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 19.0,
+              "external_id": "web:9",
+              "id": "web-9",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 20.0,
+              "external_id": "web:10",
+              "id": "web-10",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 21.0,
+              "external_id": "web:11",
+              "id": "web-11",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 22.0,
+              "external_id": "web:12",
+              "id": "web-12",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 23.0,
+              "external_id": "web:13",
+              "id": "web-13",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 24.0,
+              "external_id": "web:14",
+              "id": "web-14",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 25.0,
+              "external_id": "web:15",
+              "id": "web-15",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 26.0,
+              "external_id": "web:16",
+              "id": "web-16",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 27.0,
+              "external_id": "web:17",
+              "id": "web-17",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 28.0,
+              "external_id": "web:18",
+              "id": "web-18",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 29.0,
+              "external_id": "web:19",
+              "id": "web-19",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 30.0,
+              "external_id": "web:20",
+              "id": "web-20",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 31.0,
+              "external_id": "web:21",
+              "id": "web-21",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 32.0,
+              "external_id": "web:22",
+              "id": "web-22",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 33.0,
+              "external_id": "web:23",
+              "id": "web-23",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 34.0,
+              "external_id": "web:24",
+              "id": "web-24",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 35.0,
+              "external_id": "web:25",
+              "id": "web-25",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 36.0,
+              "external_id": "web:26",
+              "id": "web-26",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 37.0,
+              "external_id": "web:27",
+              "id": "web-27",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 38.0,
+              "external_id": "web:28",
+              "id": "web-28",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 39.0,
+              "external_id": "web:29",
+              "id": "web-29",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 40.0,
+              "external_id": "web:30",
+              "id": "web-30",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 41.0,
+              "external_id": "web:31",
+              "id": "web-31",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 42.0,
+              "external_id": "web:32",
+              "id": "web-32",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 43.0,
+              "external_id": "web:33",
+              "id": "web-33",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 44.0,
+              "external_id": "web:34",
+              "id": "web-34",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 45.0,
+              "external_id": "web:35",
+              "id": "web-35",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 46.0,
+              "external_id": "web:36",
+              "id": "web-36",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 47.0,
+              "external_id": "web:37",
+              "id": "web-37",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 48.0,
+              "external_id": "web:38",
+              "id": "web-38",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 49.0,
+              "external_id": "web:39",
+              "id": "web-39",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 50.0,
+              "external_id": "web:40",
+              "id": "web-40",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 51.0,
+              "external_id": "web:41",
+              "id": "web-41",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 52.0,
+              "external_id": "web:42",
+              "id": "web-42",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 53.0,
+              "external_id": "web:43",
+              "id": "web-43",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 54.0,
+              "external_id": "web:44",
+              "id": "web-44",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 55.0,
+              "external_id": "web:45",
+              "id": "web-45",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 56.0,
+              "external_id": "web:46",
+              "id": "web-46",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 57.0,
+              "external_id": "web:47",
+              "id": "web-47",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 58.0,
+              "external_id": "web:48",
+              "id": "web-48",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 59.0,
+              "external_id": "web:49",
+              "id": "web-49",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 60.0,
+              "external_id": "web:50",
+              "id": "web-50",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 61.0,
+              "external_id": "web:51",
+              "id": "web-51",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 62.0,
+              "external_id": "web:52",
+              "id": "web-52",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 63.0,
+              "external_id": "web:53",
+              "id": "web-53",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 64.0,
+              "external_id": "web:54",
+              "id": "web-54",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 65.0,
+              "external_id": "web:55",
+              "id": "web-55",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 66.0,
+              "external_id": "web:56",
+              "id": "web-56",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 67.0,
+              "external_id": "web:57",
+              "id": "web-57",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 68.0,
+              "external_id": "web:58",
+              "id": "web-58",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 69.0,
+              "external_id": "web:59",
+              "id": "web-59",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 70.0,
+              "external_id": "web:60",
+              "id": "web-60",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 71.0,
+              "external_id": "web:61",
+              "id": "web-61",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 72.0,
+              "external_id": "web:62",
+              "id": "web-62",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 73.0,
+              "external_id": "web:63",
+              "id": "web-63",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 74.0,
+              "external_id": "web:64",
+              "id": "web-64",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 75.0,
+              "external_id": "web:65",
+              "id": "web-65",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 76.0,
+              "external_id": "web:66",
+              "id": "web-66",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 77.0,
+              "external_id": "web:67",
+              "id": "web-67",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 78.0,
+              "external_id": "web:68",
+              "id": "web-68",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 79.0,
+              "external_id": "web:69",
+              "id": "web-69",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 80.0,
+              "external_id": "web:70",
+              "id": "web-70",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 81.0,
+              "external_id": "web:71",
+              "id": "web-71",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 82.0,
+              "external_id": "web:72",
+              "id": "web-72",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 83.0,
+              "external_id": "web:73",
+              "id": "web-73",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 84.0,
+              "external_id": "web:74",
+              "id": "web-74",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 85.0,
+              "external_id": "web:75",
+              "id": "web-75",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 86.0,
+              "external_id": "web:76",
+              "id": "web-76",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 87.0,
+              "external_id": "web:77",
+              "id": "web-77",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 88.0,
+              "external_id": "web:78",
+              "id": "web-78",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 89.0,
+              "external_id": "web:79",
+              "id": "web-79",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 90.0,
+              "external_id": "web:80",
+              "id": "web-80",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 91.0,
+              "external_id": "web:81",
+              "id": "web-81",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 92.0,
+              "external_id": "web:82",
+              "id": "web-82",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 93.0,
+              "external_id": "web:83",
+              "id": "web-83",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 94.0,
+              "external_id": "web:84",
+              "id": "web-84",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 95.0,
+              "external_id": "web:85",
+              "id": "web-85",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 96.0,
+              "external_id": "web:86",
+              "id": "web-86",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 97.0,
+              "external_id": "web:87",
+              "id": "web-87",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 98.0,
+              "external_id": "web:88",
+              "id": "web-88",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 99.0,
+              "external_id": "web:89",
+              "id": "web-89",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 100.0,
+              "external_id": "web:90",
+              "id": "web-90",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 101.0,
+              "external_id": "web:91",
+              "id": "web-91",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 102.0,
+              "external_id": "web:92",
+              "id": "web-92",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 103.0,
+              "external_id": "web:93",
+              "id": "web-93",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 104.0,
+              "external_id": "web:94",
+              "id": "web-94",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 105.0,
+              "external_id": "web:95",
+              "id": "web-95",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 106.0,
+              "external_id": "web:96",
+              "id": "web-96",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 107.0,
+              "external_id": "web:97",
+              "id": "web-97",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 108.0,
+              "external_id": "web:98",
+              "id": "web-98",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 109.0,
+              "external_id": "web:99",
+              "id": "web-99",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 110.0,
+              "external_id": "web:100",
+              "id": "web-100",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 111.0,
+              "external_id": "web:101",
+              "id": "web-101",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 112.0,
+              "external_id": "web:102",
+              "id": "web-102",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 113.0,
+              "external_id": "web:103",
+              "id": "web-103",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 114.0,
+              "external_id": "web:104",
+              "id": "web-104",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 115.0,
+              "external_id": "web:105",
+              "id": "web-105",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 116.0,
+              "external_id": "web:106",
+              "id": "web-106",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 117.0,
+              "external_id": "web:107",
+              "id": "web-107",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 118.0,
+              "external_id": "web:108",
+              "id": "web-108",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 119.0,
+              "external_id": "web:109",
+              "id": "web-109",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 120.0,
+              "external_id": "web:110",
+              "id": "web-110",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 121.0,
+              "external_id": "web:111",
+              "id": "web-111",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 122.0,
+              "external_id": "web:112",
+              "id": "web-112",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 123.0,
+              "external_id": "web:113",
+              "id": "web-113",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 124.0,
+              "external_id": "web:114",
+              "id": "web-114",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 125.0,
+              "external_id": "web:115",
+              "id": "web-115",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 126.0,
+              "external_id": "web:116",
+              "id": "web-116",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 127.0,
+              "external_id": "web:117",
+              "id": "web-117",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 128.0,
+              "external_id": "web:118",
+              "id": "web-118",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 129.0,
+              "external_id": "web:119",
+              "id": "web-119",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 130.0,
+              "external_id": "web:120",
+              "id": "web-120",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 131.0,
+              "external_id": "web:121",
+              "id": "web-121",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 132.0,
+              "external_id": "web:122",
+              "id": "web-122",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 133.0,
+              "external_id": "web:123",
+              "id": "web-123",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 134.0,
+              "external_id": "web:124",
+              "id": "web-124",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 135.0,
+              "external_id": "web:125",
+              "id": "web-125",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 136.0,
+              "external_id": "web:126",
+              "id": "web-126",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 137.0,
+              "external_id": "web:127",
+              "id": "web-127",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 138.0,
+              "external_id": "web:128",
+              "id": "web-128",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            },
+            {
+              "created_at": 139.0,
+              "external_id": "web:129",
+              "id": "web-129",
+              "reply_to": null,
+              "state": "queued",
+              "transport": "web"
+            }
+          ]
+        },
+        "desk_rows": [],
+        "name": "status_finds_a_question_older_than_unrelated_mailbox_traffic",
+        "owner_rows": [],
+        "port": {
+          "bot_log": [
+            [
+              "sendMessage",
+              {
+                "chat_id": 42,
+                "text": "Chief of Staff message #i7: queued"
+              }
+            ]
+          ],
+          "daemon_log": [
+            [
+              "owner_conversation",
+              {
+                "limit": 100
+              }
+            ],
+            [
+              "owner_conversation",
+              {
+                "before": 40.00000000000001,
+                "limit": 100
+              }
+            ],
+            [
+              "owner_conversation",
+              {
+                "before": 40,
+                "limit": 100
+              }
+            ]
+          ]
+        },
+        "registry": [
+          {
+            "id": "vp",
+            "name": "VP"
+          },
+          {
+            "id": "cos",
+            "name": "Chief of Staff"
+          }
+        ],
+        "routing": null,
+        "steps": [
+          {
+            "op": "process_update",
+            "update": {
+              "message": {
+                "chat": {
+                  "id": 42,
+                  "type": "private"
+                },
+                "text": "/status"
+              },
+              "update_id": 9
+            }
+          }
+        ]
+      },
+      "name": "status_finds_a_question_older_than_unrelated_mailbox_traffic"
     }
   ]
 }

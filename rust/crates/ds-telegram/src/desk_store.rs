@@ -4,6 +4,10 @@
 //! with the `PAGE OWNER` marker, in the desk's `messages` table) and the forwarding cursor's
 //! channel tail. Writes to that store (attachments, delivery reconciliation) are not ported yet.
 //! A missing database is an empty desk, not an error, so a fresh data directory works.
+//!
+//! `/status` does NOT read this store: this bridge answers it from the owner mailbox, the store it
+//! actually writes to (t3671/t3672). The desk store's `delivery` column is Python's source, and
+//! that is the one deliberate difference between the two bridges.
 
 use std::path::Path;
 

@@ -94,6 +94,8 @@ pub struct DaemonState {
     pub outbox: Vec<Value>,
     /// What `owner_ingest` returns.
     pub ingest: Value,
+    /// What `owner_conversation` returns as `messages` (the owner mailbox, oldest first).
+    pub conversation: Vec<Value>,
 }
 
 #[derive(Clone, Default)]
@@ -128,10 +130,43 @@ impl FakeDaemon {
 impl Daemon for FakeDaemon {
     fn call(&mut self, cmd: &str, args: Map<String, Value>) -> Result<Value, BridgeError> {
         let mut state = self.0.borrow_mut();
-        state.calls.push((cmd.to_string(), args));
+        state.calls.push((cmd.to_string(), args.clone()));
         match cmd {
             "owner_outbox" => Ok(json!({"messages": state.outbox.clone()})),
             "owner_ingest" => Ok(state.ingest.clone()),
+            "owner_conversation" => {
+                // The daemon's own contract: `created_at < before`, newest `limit` of those,
+                // returned oldest first (ds-core inbox_store::conversation_rows).
+                let limit = args
+                    .get("limit")
+                    .and_then(Value::as_f64)
+                    .map(|value| value as usize)
+                    .unwrap_or(50);
+                let before = args.get("before").and_then(Value::as_f64);
+                // The daemon orders by `created_at`; ties keep insertion order, which is as
+                // well defined as SQLite's own tie order and lets a test place a row inside a
+                // cluster.
+                let mut rows: Vec<Value> = state.conversation.clone();
+                rows.sort_by(|left, right| {
+                    let key = |row: &Value| {
+                        row.get("created_at")
+                            .and_then(Value::as_f64)
+                            .unwrap_or(f64::NEG_INFINITY)
+                    };
+                    key(left).total_cmp(&key(right))
+                });
+                rows.retain(
+                    |row| match (before, row.get("created_at").and_then(Value::as_f64)) {
+                        (Some(cursor), Some(created)) => created < cursor,
+                        _ => true,
+                    },
+                );
+                if rows.len() > limit {
+                    rows.drain(..rows.len() - limit);
+                }
+                let count = rows.len();
+                Ok(json!({"messages": rows, "count": count}))
+            }
             _ => Ok(json!({})),
         }
     }
@@ -201,10 +236,7 @@ impl Fixture {
     /// A legacy desk store with a `messages` table and the given `(id, channel, role, body)` rows.
     pub fn desk_rows(&self, rows: &[(i64, &str, &str, &str)]) {
         let conn = rusqlite::Connection::open(self.paths.desk_db()).expect("desk db");
-        conn.execute_batch(
-            "CREATE TABLE messages (id INTEGER PRIMARY KEY, channel TEXT, role TEXT, body TEXT);",
-        )
-        .expect("schema");
+        conn.execute_batch(DESK_SCHEMA).expect("schema");
         for (id, channel, role, body) in rows {
             conn.execute(
                 "INSERT INTO messages (id, channel, role, body) VALUES (?1, ?2, ?3, ?4)",
@@ -213,7 +245,25 @@ impl Fixture {
             .expect("row");
         }
     }
+
+    /// Append one row of any role carrying a Telegram `external_id`, as the desk stores a
+    /// Telegram message it recorded itself. Used to prove `/status` does not read this store.
+    pub fn desk_row_with_telegram_id(&self, id: i64, channel: &str, role: &str, telegram: &str) {
+        let conn = rusqlite::Connection::open(self.paths.desk_db()).expect("desk db");
+        conn.execute_batch(DESK_SCHEMA).expect("schema");
+        conn.execute(
+            "INSERT INTO messages (id, channel, role, body, external_id) VALUES (?1, ?2, ?3, '', ?4)",
+            rusqlite::params![id, channel, role, telegram],
+        )
+        .expect("row");
+    }
 }
+
+/// The desk's `messages` table, with the two columns `/status` reads. The real desk stores
+/// `delivery NOT NULL DEFAULT 'posted'`; the fixtures pass it explicitly.
+const DESK_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS messages (\
+     id INTEGER PRIMARY KEY, channel TEXT, role TEXT, body TEXT, \
+     delivery TEXT NOT NULL DEFAULT 'posted', external_id TEXT);";
 
 /// A paired private-chat text update.
 pub fn text_update(update_id: i64, chat_id: i64, text: &str) -> Value {
@@ -237,6 +287,40 @@ pub fn outbox_row(
         "reply_to": reply_to,
         "body": body,
     })
+}
+
+/// An owner-mailbox row as the daemon returns it in `owner_conversation` (oldest first).
+///
+/// `created_at` is what the paging cursor is built from; give rows distinct values so a page
+/// boundary is well defined.
+pub fn mailbox_row_at(
+    id: &str,
+    transport: &str,
+    state: &str,
+    external_id: Option<&str>,
+    reply_to: Option<&str>,
+    created_at: f64,
+) -> Value {
+    json!({
+        "id": id,
+        "transport": transport,
+        "state": state,
+        "external_id": external_id,
+        "reply_to": reply_to,
+        "created_at": created_at,
+        "answered": reply_to.is_none() && state == "acked",
+    })
+}
+
+/// `mailbox_row_at` with a `created_at` of 0, for tests that never cross a page boundary.
+pub fn mailbox_row(
+    id: &str,
+    transport: &str,
+    state: &str,
+    external_id: Option<&str>,
+    reply_to: Option<&str>,
+) -> Value {
+    mailbox_row_at(id, transport, state, external_id, reply_to, 0.0)
 }
 
 /// A config for a paired bridge with no prior cursor.

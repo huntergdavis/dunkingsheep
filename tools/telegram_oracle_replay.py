@@ -20,6 +20,7 @@ import argparse
 import contextlib
 import io
 import json
+import math
 import os
 import sqlite3
 import sys
@@ -112,12 +113,19 @@ class FakeBot:
 
 
 class FakeClient:
-    """The daemon: an owner outbox and an ingest answer, and a record of every call."""
+    """The daemon: an owner outbox, an ingest answer, the owner mail conversation, and a log.
 
-    def __init__(self, outbox, ingest):
+    `owner_conversation` exists because `/status` in the RUST port reads the owner mailbox. The
+    Python bridge answers `/status` from the desk store instead, so it never calls this; that is
+    the one deliberate difference between the two bridges (t3671/t3672, owner 2026-11-08), and the
+    fixture records it by carrying the port's own expectations in `port`.
+    """
+
+    def __init__(self, outbox, ingest, conversation=None):
         self.log = []
         self.outbox = outbox
         self.ingest = ingest
+        self.conversation = conversation or []
 
     def call(self, name, **kwargs):
         self.log.append([name, float_tree(kwargs)])
@@ -125,6 +133,14 @@ class FakeClient:
             return {"messages": list(self.outbox)}
         if name == "owner_ingest":
             return self.ingest
+        if name == "owner_conversation":
+            # The daemon's contract: `created_at < before`, newest `limit` of those, oldest first.
+            limit = int(kwargs.get("limit") or 50)
+            before = kwargs.get("before")
+            rows = [dict(row) for row in self.conversation
+                    if before is None or float(row.get("created_at") or 0.0) < float(before)]
+            rows = rows[-limit:]
+            return {"messages": rows, "count": len(rows)}
         return {}
 
 
@@ -151,13 +167,23 @@ def reset(work: Path, scenario: dict, desk):
     if scenario.get("routing") is not None:
         (work / "telegram-routing.json").write_text(json.dumps(scenario["routing"]), encoding="utf-8")
     # The desk store always has its table, as the real desk does (an absent table is not a state
-    # the desk ever leaves).
+    # the desk ever leaves). `delivery` and `external_id` are the two columns `/status` reads; they
+    # carry the desk's own defaults `delivery TEXT NOT NULL DEFAULT 'posted'` / NULL.
     conn = sqlite3.connect(work / "messages.sqlite3")
-    conn.execute("CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY, channel TEXT, role TEXT, body TEXT)")
+    conn.execute("CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY, channel TEXT, role TEXT, "
+                 "body TEXT, delivery TEXT NOT NULL DEFAULT 'posted', external_id TEXT)")
     conn.execute("DELETE FROM messages")
-    for row_id, channel, role, body in scenario.get("desk_rows", []):
-        conn.execute("INSERT INTO messages (id, channel, role, body) VALUES (?, ?, ?, ?)",
-                     (row_id, channel, role, body))
+    for row in scenario.get("desk_rows", []):
+        # (id, channel, role, body[, external_id]): an id-bearing row of any role.
+        row_id, channel, role, body = row[:4]
+        external_id = row[4] if len(row) > 4 else None
+        conn.execute("INSERT INTO messages (id, channel, role, body, external_id) "
+                     "VALUES (?, ?, ?, ?, ?)",
+                     (row_id, channel, role, body, external_id))
+    for row_id, channel, delivery, external_id in scenario.get("owner_rows", []):
+        conn.execute("INSERT INTO messages (id, channel, role, body, delivery, external_id) "
+                     "VALUES (?, ?, 'owner', '', ?, ?)",
+                     (row_id, channel, delivery, external_id))
     conn.commit()
     conn.close()
     if scenario.get("config") is not None:
@@ -175,7 +201,8 @@ def run_scenario(work: Path, scenario: dict, desk, bridge):
     bot = FakeBot(scenario.get("webhook_url", ""))
     bot.fail_on = scenario.get("fail_on")
     daemon_spec = scenario.get("daemon", {})
-    client = FakeClient(daemon_spec.get("outbox", []), daemon_spec.get("ingest"))
+    client = FakeClient(daemon_spec.get("outbox", []), daemon_spec.get("ingest"),
+                       daemon_spec.get("conversation"))
     bridge._daemon = lambda: client
     bridge.Telegram = lambda token: bot
     bridge.time = FakeTime()
@@ -227,6 +254,10 @@ def run_scenario(work: Path, scenario: dict, desk, bridge):
     status = read_json(work / "telegram-status.json")
     if isinstance(status, dict):
         status.pop("updated_at", None)
+    # `expected` stays exactly what the PYTHON bridge did. A scenario that records an intentional
+    # difference carries it in its own input as `port` ({bot_log, daemon_log}), so the fixture holds
+    # both answers side by side: the Python one here, the port's beside its inputs. Nothing is
+    # normalised, so drift in any other key still fails the replay.
     return {
         "name": scenario["name"],
         "input": scenario,
@@ -269,6 +300,20 @@ def outbox_row(message_id, sender, body, reply_to=None):
             "reply_to": reply_to, "body": body}
 
 
+def mailbox_row(row_id, transport, state, external_id=None, reply_to=None, created_at=0.0):
+    """One owner-mailbox row, as the daemon returns it in `owner_conversation`.
+
+    `created_at` is the paging cursor; give rows distinct values when a page boundary matters.
+    """
+    return {"id": row_id, "transport": transport, "state": state,
+            "external_id": external_id, "reply_to": reply_to, "created_at": created_at}
+
+
+def status_reply(text):
+    """The Telegram log a `/status` answer produces: exactly one sendMessage."""
+    return [["sendMessage", {"chat_id": 42, "text": text}]]
+
+
 def watermark_rows():
     return [
         [11, "cos", "agent", "PAGE OWNER outage: web desk down"],
@@ -285,7 +330,7 @@ def scenarios():
 
     def add(name, **kw):
         base = {"name": name, "registry": VP_COS, "routing": None, "desk_rows": [],
-                "config": None, "daemon": {}, "steps": []}
+                "owner_rows": [], "config": None, "daemon": {}, "steps": []}
         base.update(kw)
         out.append(base)
 
@@ -375,11 +420,67 @@ def scenarios():
         "ingest": ingest_ok, "outbox": [outbox_row("m2", None, "answer", "q")]},
         steps=[{"op": "run", "batches": [[text(3, 42, "question")]]}])
 
-    # ---- status ----
+    # ---- /status: answered from the owner mailbox by the port, from the desk store by Python ----
+    #
+    # t3671 filed the gap; t3672 wrote the wording; the owner chose it on 2026-11-08 ("b I want it
+    # to be useful", routed i50810/i50819) and accepted the consequence: this bridge records its
+    # questions in the one owner mailbox, so the mailbox is what it can honestly report. Python
+    # reads the legacy desk store. Each scenario below therefore carries `port`: the port's own
+    # expected bot_log/daemon_log. Whatever Python observed stays in the fixture beside it, so the
+    # difference is on the record instead of being normalised away.
+    status_call = [["owner_conversation", {"limit": 100}]]
     add("status_of_a_fresh_config", config={"bot_token": "123:TEST-TOKEN-NOT-REAL", "pair_code": PAIR,
         "chat_id": None}, steps=[{"op": "status"}])
     add("status_reports_routing_and_pairing", config=paired(last_brief_id=13, update_offset=900),
         routing={"channel": "vp"}, steps=[{"op": "status"}])
+    add("status_with_no_recorded_question_says_nothing_has_reached_the_desk", config=paired(),
+        daemon={"conversation": []},
+        steps=[{"op": "process_update", "update": text(9, 42, "/status")}],
+        port={"daemon_log": status_call,
+              "bot_log": status_reply("No Telegram message has reached Chief of Staff yet.")})
+    add("status_answers_from_the_mailbox_where_python_has_no_desk_row", config=paired(),
+        # The live case: a question is in the mailbox, the desk store has nothing (t594 moved the
+        # question there). Python answers the empty-store line; the port answers the real row.
+        daemon={"conversation": [mailbox_row("i7", "telegram", "queued", "telegram:7")]},
+        steps=[{"op": "process_update", "update": text(9, 42, "/status")}],
+        port={"daemon_log": status_call,
+              "bot_log": status_reply("Chief of Staff message #i7: queued")})
+    add("status_reports_the_mailbox_state_not_the_desk_delivery", config=paired(),
+        # Same row id in both stores, different state word: Python says `sent` (desk delivery),
+        # the port must say `queued` (mailbox state). A newer web question and a newer reply are
+        # in the conversation and must not be reported.
+        owner_rows=[[12, "cos", "sent", "telegram:2"]],
+        daemon={"conversation": [
+            mailbox_row("i12", "telegram", "queued", "telegram:2"),
+            mailbox_row("i13", "web", "queued", "web:9"),
+            mailbox_row("i14", "telegram", "acked", None, "i12"),
+            mailbox_row("i16", "telegram", "acked", "telegram:900", "i12")]},
+        steps=[{"op": "process_update", "update": text(9, 42, " /status ")}],
+        port={"daemon_log": status_call,
+              "bot_log": status_reply("Chief of Staff message #i12: queued")})
+    add("status_names_the_routing_channel_and_ignores_another_desks_question", config=paired(),
+        routing={"channel": "vp"},
+        owner_rows=[[14, "vp", "acked", "telegram:3"]],
+        daemon={"conversation": [
+            mailbox_row("i30", "telegram", "read", "telegram:30")]},
+        steps=[{"op": "process_update", "update": text(9, 42, "/status")}],
+        port={"daemon_log": status_call,
+              "bot_log": status_reply("VP message #i30: read")})
+    add("status_finds_a_question_older_than_unrelated_mailbox_traffic", config=paired(),
+        # Reviewers t3745 and t3762: the conversation also carries owner-lane mail, so a fixed
+        # window can fill with unrelated rows. 130 newer rows than the question force a second
+        # page, and the first page's boundary timestamp is proved before the walk goes below it.
+        daemon={"conversation": [mailbox_row("i7", "telegram", "queued", "telegram:7",
+                                             created_at=1.0)]
+                + [mailbox_row(f"web-{n}", "web", "queued", f"web:{n}", created_at=10.0 + n)
+                   for n in range(130)]},
+        steps=[{"op": "process_update", "update": text(9, 42, "/status")}],
+        port={"daemon_log": status_call
+              # The cluster probe: `next_up(40.0)` is the smallest float above the page's oldest
+              # timestamp, so `created_at < that` shows every row at 40.0 (one here).
+              + [["owner_conversation", {"limit": 100, "before": math.nextafter(40.0, math.inf)}],
+                 ["owner_conversation", {"limit": 100, "before": 40}]],
+              "bot_log": status_reply("Chief of Staff message #i7: queued")})
     return out
 
 
