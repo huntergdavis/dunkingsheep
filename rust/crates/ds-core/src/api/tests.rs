@@ -6234,6 +6234,81 @@ fn task_test_caller(pane: &str, pid: i64, start: &str, name: &str) -> Caller {
 }
 
 #[test]
+fn planner_socket_assignment_requires_fresh_process_binding() {
+    let (runtime, _dir, flock, _tasks, _dispatcher) = task_mutation_api_fixture();
+    let pid = i64::from(std::process::id());
+    let start = crate::proc::process_start(pid).expect("test process start");
+    let env = PaneApiEnv {
+        terminal: Mutex::new(Box::new(FakeTerminal::default())),
+        panes: vec![json!({"pane_id": "w1:p4", "pane_pid": pid})],
+    };
+    let request = RequestCtx {
+        self_pane_id: Some("w1:p4".into()),
+        socket_peer: Some(true),
+        identity_bound: Some(true),
+        caller: Some(task_test_caller("w1:p4", pid, &start, "test")),
+        ..RequestCtx::default()
+    };
+    let register = |role: &str, bound_pid: Option<i64>, bound_start: Option<&str>| {
+        flock
+            .with_roles(|roles, _| {
+                roles.register(
+                    "w1:p4",
+                    role,
+                    bound_pid,
+                    bound_start,
+                    None,
+                    None,
+                    None,
+                    None,
+                )?;
+                Ok(())
+            })
+            .unwrap();
+    };
+    let check = |request: &RequestCtx| {
+        let context = HandlerContext {
+            flock: &flock,
+            request,
+            env: &env,
+            runtime: runtime.handle(),
+        };
+        require_planner_assignment_binding(&context)
+    };
+    register("planner", Some(pid), Some(&start));
+    assert!(check(&request).is_ok());
+    register("planner", Some(pid), Some("stale-start"));
+    assert!(check(&request).is_err());
+    register("planner", Some(pid), None);
+    assert!(check(&request).is_err());
+    register("planner", Some(pid + 100_000), Some(&start));
+    assert!(check(&request).is_err());
+    register("worker", Some(pid), Some(&start));
+    assert!(check(&request).is_err());
+    register("planner", Some(pid), Some(&start));
+    let mut bad = request.clone();
+    bad.identity_bound = None;
+    assert!(check(&bad).is_err());
+    bad = request.clone();
+    bad.socket_peer = Some(false);
+    assert!(check(&bad).is_err());
+    bad = request.clone();
+    bad.caller = Some(task_test_caller("w1:p4", pid, "stale-caller", "test"));
+    assert!(check(&bad).is_err());
+    bad = request.clone();
+    bad.socket_peer = None;
+    assert!(check(&bad).is_ok()); // Existing trusted in-process calls keep their semantics.
+    let missing_env = TestEnv::default();
+    let context = HandlerContext {
+        flock: &flock,
+        request: &request,
+        env: &missing_env,
+        runtime: runtime.handle(),
+    };
+    assert!(require_planner_assignment_binding(&context).is_err());
+}
+
+#[test]
 fn planner_dispatch_refuses_assigning_review_to_explicit_author() {
     let (runtime, _dir, flock, tasks, dispatcher) = task_mutation_api_fixture();
     flock
