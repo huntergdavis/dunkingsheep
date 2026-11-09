@@ -454,7 +454,7 @@ pub static COMMANDS: &[Command] = &[
     Command {
         name: "lanes",
         description: "The lane registry, project membership and owner-controlled planner grants.",
-        params: &[Param { name: "project", schema: "{\"type\":\"string\"}" }, Param { name: "global", schema: "{\"type\":\"boolean\"}" }, Param { name: "action", schema: "{\"type\":\"string\",\"enum\":[\"list\",\"set\",\"project\",\"planner\"]}" }, Param { name: "operation", schema: "{\"type\":\"string\",\"enum\":[\"grant\",\"revoke\",\"task-project\"]}" }, Param { name: "task", schema: "{\"type\":\"string\"}" }, Param { name: "pane", schema: "{\"type\":\"string\",\"description\":\"pane id\"}" }, Param { name: "mailbox", schema: "{\"type\":\"string\",\"description\":\"lane name\"}" }],
+        params: &[Param { name: "project", schema: "{\"type\":\"string\"}" }, Param { name: "global", schema: "{\"type\":\"boolean\"}" }, Param { name: "action", schema: "{\"type\":\"string\",\"enum\":[\"list\",\"set\",\"project\",\"planner\"]}" }, Param { name: "operation", schema: "{\"type\":\"string\",\"enum\":[\"grant\",\"revoke\",\"task-project\"]}" }, Param { name: "task", schema: "{\"type\":\"string\"}" }, Param { name: "pane", schema: "{\"type\":\"string\",\"description\":\"set: the pane id\"}" }, Param { name: "mailbox", schema: "{\"type\":\"string\",\"description\":\"set: the lane name this pane IS\"}" }],
         dispatch_required: &[],
         required: &[],
         mcp: true,

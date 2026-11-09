@@ -55,9 +55,12 @@ fn every_input_schema_equals_the_pythons() {
             assert!(properties.remove("project").is_some());
             assert!(properties.remove("global").is_some());
             if name == "lanes" {
+                assert!(properties.remove("operation").is_some());
+                assert!(properties.remove("task").is_some());
                 let actions = properties.get_mut("action").unwrap()["enum"]
                     .as_array_mut()
                     .unwrap();
+                assert_eq!(actions.pop(), Some(serde_json::json!("planner")));
                 assert_eq!(actions.pop(), Some(serde_json::json!("project")));
                 properties.get_mut("action").unwrap()["description"] =
                     want["properties"]["action"]["description"].clone();
