@@ -5135,7 +5135,20 @@ fn cli_route_guard_actions_2() {
 
 #[test]
 fn cli_route_guide_and_empty_argv() {
-    assert_matches_python(&[]);
+    // The archived Python CLI predates this Rust-only command.
+    let rust = run_binary_without_command(&[]);
+    let python = run_python_reference(&[]);
+    assert_eq!(rust.status.code(), python.status.code());
+    let rust_help = String::from_utf8(rust.stdout).unwrap();
+    assert!(rust_help.contains("usage-provider"));
+    let without_extension = rust_help
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("usage-provider "))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    assert_eq!(without_extension.as_bytes(), python.stdout);
+    assert_eq!(rust.stderr, python.stderr);
     assert_matches_python(&["guide"]);
     assert_matches_python(&["guide", "--markdown"]);
     assert_matches_python(&["help"]);

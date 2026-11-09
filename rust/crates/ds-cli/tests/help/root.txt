@@ -121,6 +121,7 @@ positional arguments:
                         recipes)
     commands            list the socket/MCP command registry
     mcp-map             OLD flat MCP tool -> NEW grouped tool/action mapping
+    usage-provider      read native provider usage as JSON
 
 options:
   -h, --help            show this help message and exit

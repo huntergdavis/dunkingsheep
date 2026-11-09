@@ -14899,5 +14899,69 @@
    "self_pane": null,
    "socket": null
   }
+ },
+ {
+  "argv": [
+   "usage-provider",
+   "codex"
+  ],
+  "namespace": {
+   "command": "usage-provider",
+   "json": false,
+   "max_age": null,
+   "no_start_daemon": false,
+   "provider": "codex",
+   "self_pane": null,
+   "socket": null
+  }
+ },
+ {
+  "argv": [
+   "usage-provider",
+   "codex",
+   "--json"
+  ],
+  "namespace": {
+   "command": "usage-provider",
+   "json": true,
+   "max_age": null,
+   "no_start_daemon": false,
+   "provider": "codex",
+   "self_pane": null,
+   "socket": null
+  }
+ },
+ {
+  "argv": [
+   "--json",
+   "usage-provider",
+   "codex"
+  ],
+  "namespace": {
+   "command": "usage-provider",
+   "json": true,
+   "max_age": null,
+   "no_start_daemon": false,
+   "provider": "codex",
+   "self_pane": null,
+   "socket": null
+  }
+ },
+ {
+  "argv": [
+   "usage-provider",
+   "codex",
+   "--max-age-s",
+   "1.5"
+  ],
+  "namespace": {
+   "command": "usage-provider",
+   "json": false,
+   "max_age": 1.5,
+   "no_start_daemon": false,
+   "provider": "codex",
+   "self_pane": null,
+   "socket": null
+  }
  }
 ]

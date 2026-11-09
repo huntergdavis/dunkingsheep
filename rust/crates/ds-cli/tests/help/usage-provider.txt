@@ -1,0 +1,9 @@
+usage: dunkingsheep usage-provider [-h] [--max-age-s MAX_AGE]
+                                   {codex,pi,opencode}
+
+positional arguments:
+  {codex,pi,opencode}
+
+options:
+  -h, --help           show this help message and exit
+  --max-age-s MAX_AGE  snapshot maximum age in seconds
