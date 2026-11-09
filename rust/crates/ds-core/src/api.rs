@@ -3198,6 +3198,62 @@ pub fn h_task_update(context: &HandlerContext<'_>, args: Args) -> Result<Value, 
     Ok(task.wire)
 }
 
+/// Require fresh kernel evidence for a planner assigning over a socket.
+///
+/// This is a point-in-time process identity check, not a project grant or an
+/// atomic role-revocation guarantee. A process death overlapping the check may
+/// occur after a successful check; old daemons do not enforce this check.
+fn require_planner_assignment_binding(context: &HandlerContext<'_>) -> Result<(), DunkError> {
+    let refused = || {
+        DunkError::Refused(
+            "planner task assignment requires an authenticated live pane binding".into(),
+        )
+    };
+    match context.request.socket_peer {
+        None => return Ok(()), // Existing trusted in-process callers have no socket identity.
+        Some(true) if context.request.identity_bound == Some(true) => {}
+        _ => return Err(refused()),
+    }
+    let pane = context
+        .self_pane_id()
+        .filter(|p| !p.is_empty())
+        .ok_or_else(refused)?;
+    let info = context.env.get_pane(pane).ok_or_else(refused)?;
+    if info.get("pane_id").and_then(Value::as_str) != Some(pane) {
+        return Err(refused());
+    }
+    let pid = info
+        .get("pane_pid")
+        .and_then(|v| {
+            v.as_i64()
+                .or_else(|| v.as_str().and_then(|s| s.parse::<i64>().ok()))
+        })
+        .filter(|pid| *pid > 1)
+        .ok_or_else(refused)?;
+    let entry = context
+        .flock
+        .with_roles(|roles, _| roles.entry(pane))?
+        .ok_or_else(refused)?;
+    let stored_pid = entry.get("pane_pid").and_then(|v| {
+        v.as_i64()
+            .or_else(|| v.as_str().and_then(|s| s.parse::<i64>().ok()))
+    });
+    let stored_start = entry
+        .get("start")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(refused)?;
+    if entry.get("role").and_then(Value::as_str) != Some("planner")
+        || stored_pid != Some(pid)
+        || crate::proc::process_start(pid).as_deref() != Some(stored_start)
+        || crate::proc::caller_pane_auth_failure(context.request.caller.as_ref(), Some(pid))
+            .is_some()
+    {
+        return Err(refused());
+    }
+    Ok(())
+}
+
 /// `dunk_api.h_task_assign`.
 pub fn h_task_assign(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
     let pane = context.self_pane_id();
@@ -3206,6 +3262,9 @@ pub fn h_task_assign(context: &HandlerContext<'_>, args: Args) -> Result<Value, 
         return Err(DunkError::Refused(format!(
             "task assign requires the owner role (caller is {role}); lanes pull work with task next, they are not handed it"
         )));
+    }
+    if role == "planner" {
+        require_planner_assignment_binding(context)?;
     }
     let values = task_values(args.get("assignees"));
     let assignees = values

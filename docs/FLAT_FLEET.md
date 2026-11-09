@@ -189,6 +189,14 @@ it is written by the daemon at `task complete` from the bound pane that holds
 the lease, and only when that pane's role is `reviewer` and its registered
 provider is in `reviewer_providers`.
 
+For socket `task assign` requests from planners, the daemon requires a verified
+socket peer bound to the claimed pane, a fresh pane lookup, and a registered planner
+PID and process start that match the live process. Missing or unverifiable evidence
+is refused; the owner, system and web paths and trusted in-process calls retain their
+existing behavior. This checks identity at a point in time: a process can die after
+that check, and role changes are not atomic with task assignment. Older daemons do
+not enforce it. It does not establish project scope or reviewer independence.
+
 For a planner's `task assign` add or replace on a review with an explicit author,
 the author and assignees must be pane IDs, and no assignee may equal the author.
 `self` and `me` expand to the caller's pane. A named author or assignee is refused
