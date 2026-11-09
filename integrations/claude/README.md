@@ -67,3 +67,19 @@ files `0600` created before any secret bytes exist (`os.open`, never an
 umask-dependent open-then-chmod). Logs carry no
 tokens or prompt text. Every hook path exits 0: a nonzero UserPromptSubmit
 would block the agent's prompt.
+
+## Native installation into a fresh private home
+
+`dunk-claude-install ABSOLUTE_HOME NATIVE_BINARY` installs the native producer,
+a fail-open shell wrapper and the three turn hooks into an existing canonical,
+caller-owned directory that is not writable by group or others. It refuses any
+existing `settings.json`, `dunkingsheep-turn.sh` or `dunk-claude-turn`, including
+symlinks; existing configured homes need a separately reviewed migration. It
+does not copy credentials or start Claude. Review the generated settings and
+use Claude's normal trust and authentication flow before relying on the hook.
+
+The installer checks ownership through Linux `/proc/self`; parent directories
+must be trusted and no concurrent writer should modify the selected home. It
+cleans up files it created on ordinary errors, but cannot promise rollback after
+a hard kill or power loss. The legacy Python installer remains available for
+existing-home workflows until those are migrated.
