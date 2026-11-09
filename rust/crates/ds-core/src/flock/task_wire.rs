@@ -22,7 +22,7 @@ impl Flock {
         args: TaskUpdateArgs<'_>,
         self_pane_id: Option<&str>,
     ) -> Result<TaskWire, DunkError> {
-        self.task_update_wire_with_raw_block_reason(task_id, args, None, self_pane_id)
+        self.task_update_wire_with_raw_block_reason(task_id, args, None, self_pane_id, None)
             .await
     }
 
@@ -32,9 +32,16 @@ impl Flock {
         args: TaskUpdateArgs<'_>,
         raw_block_reason: Option<Option<Value>>,
         self_pane_id: Option<&str>,
+        dependency_editor: Option<crate::tasks::planner_scope::DependencyEditor>,
     ) -> Result<TaskWire, DunkError> {
         let task = self
-            .task_update_with_raw_block_reason(task_id, args, raw_block_reason, self_pane_id)
+            .task_update_with_raw_block_reason(
+                task_id,
+                args,
+                raw_block_reason,
+                self_pane_id,
+                dependency_editor,
+            )
             .await?;
         self.task_store()?
             .get_full_wire(&task.id, self_pane_id)

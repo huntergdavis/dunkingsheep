@@ -3253,11 +3253,28 @@ pub fn h_task_update(context: &HandlerContext<'_>, args: Args) -> Result<Value, 
             .then(|| python_bool_arg(&args, "multi_assignee", false)),
     };
     let id = args.get("id").map(python_value_string).unwrap_or_default();
+    let dependency_editor = if depends_on.is_some()
+        && !matches!(role.as_str(), "owner" | "system" | "web")
+        && context.request.socket_peer.is_some()
+    {
+        if role == "planner" {
+            let planner = require_planner_assignment_binding(context)?
+                .ok_or_else(|| DunkError::Refused("planner identity is required".into()))?;
+            Some(crate::tasks::planner_scope::DependencyEditor::Planner(
+                planner,
+            ))
+        } else {
+            Some(crate::tasks::planner_scope::DependencyEditor::Other)
+        }
+    } else {
+        None
+    };
     let task = context.block_on(context.flock.task_update_wire_with_raw_block_reason(
         &id,
         update,
         raw_block_reason,
         pane,
+        dependency_editor,
     ))??;
     Ok(task.wire)
 }

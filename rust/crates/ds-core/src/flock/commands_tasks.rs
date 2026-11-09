@@ -715,7 +715,7 @@ impl Flock {
         args: TaskUpdateArgs<'_>,
         self_pane_id: Option<&str>,
     ) -> Result<Task, DunkError> {
-        self.task_update_with_raw_block_reason(task_id, args, None, self_pane_id)
+        self.task_update_with_raw_block_reason(task_id, args, None, self_pane_id, None)
             .await
     }
 
@@ -725,6 +725,7 @@ impl Flock {
         args: TaskUpdateArgs<'_>,
         raw_block_reason: Option<Option<serde_json::Value>>,
         self_pane_id: Option<&str>,
+        dependency_editor: Option<crate::tasks::planner_scope::DependencyEditor>,
     ) -> Result<Task, DunkError> {
         let tasks = self.task_store()?;
         self.visible_task(&tasks, task_id, self_pane_id).await?;
@@ -750,6 +751,7 @@ impl Flock {
                 args.status,
                 self_pane_id,
                 raw_block_reason,
+                dependency_editor,
             )
             .await
     }

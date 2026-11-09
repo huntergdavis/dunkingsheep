@@ -1224,7 +1224,7 @@ impl Tasks {
         status: Option<&str>,
         actor: Option<&str>,
     ) -> Result<Task, DunkError> {
-        self.update_with_status_and_raw_block_reason(id, edit, status, actor, None)
+        self.update_with_status_and_raw_block_reason(id, edit, status, actor, None, None)
             .await
     }
 
@@ -1235,6 +1235,7 @@ impl Tasks {
         status: Option<&str>,
         actor: Option<&str>,
         raw_block_reason: Option<Option<JsonValue>>,
+        dependency_editor: Option<planner_scope::DependencyEditor>,
     ) -> Result<Task, DunkError> {
         if let Some(title) = &edit.title {
             if title.trim().is_empty() {
@@ -1257,6 +1258,13 @@ impl Tasks {
                     .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                     .map_err(db::map_sqlite)?;
                 let id = wanted.clone();
+                if edit_for_call.depends_on.is_some() {
+                    if let Some(editor) = &dependency_editor {
+                        if !planner_scope::dependency_edit_allowed(&tx, &id, editor).map_err(db::map_sqlite)? {
+                            return Err(DunkError::Refused("dependency edits require a planner grant for this project".into()));
+                        }
+                    }
+                }
                 let (scope, old_priority, old_deps, old_assignees, old_status, created_at):
                     (String, String, Option<String>, Option<String>, String, f64) = tx
                     .query_row(

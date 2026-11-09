@@ -22,6 +22,37 @@ pub struct RecipientIdentity {
     pub start: String,
 }
 
+#[derive(Clone, Debug)]
+pub enum DependencyEditor {
+    Planner(PlannerIdentity),
+    Other,
+}
+
+/// A project task's dependencies may be changed by its explicitly granted planner.
+pub fn dependency_edit_allowed(
+    db: &Connection,
+    task: &str,
+    editor: &DependencyEditor,
+) -> rusqlite::Result<bool> {
+    let project: Option<String> = db
+        .query_row(
+            "SELECT project FROM planner_task_projects WHERE task_id=?1",
+            [task],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(project) = project else {
+        return Ok(true);
+    };
+    match editor {
+        DependencyEditor::Planner(planner) => db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM planner_scope_grants WHERE pane_id=?1 AND pane_pid=?2 AND proc_start=?3 AND scope_kind='project' AND project=?4)",
+            params![planner.pane, planner.pid, planner.start, project], |row| row.get(0),
+        ),
+        DependencyEditor::Other => Ok(false),
+    }
+}
+
 /// Project grants route only to recipients explicitly associated with that project.
 pub fn recipients_allowed(db: &Connection, planner: &PlannerIdentity) -> rusqlite::Result<bool> {
     let project: Option<String> = db.query_row(
@@ -206,6 +237,44 @@ mod tests {
             }],
             expected_kind: Some("work".into()),
         };
+        let dependency_edit = super::super::FieldEdit {
+            depends_on: Some(vec![unrelated.id.clone()]),
+            ..Default::default()
+        };
+        assert!(tasks
+            .update_with_status_and_raw_block_reason(
+                &project.id,
+                dependency_edit.clone(),
+                None,
+                Some("%2"),
+                None,
+                Some(DependencyEditor::Other),
+            )
+            .await
+            .is_err());
+        tasks
+            .update_with_status_and_raw_block_reason(
+                &project.id,
+                dependency_edit,
+                None,
+                Some("%2"),
+                None,
+                Some(DependencyEditor::Planner(planner.clone())),
+            )
+            .await
+            .unwrap();
+        assert!(allows(&db, "%2", 22, "start", &unrelated.id).unwrap());
+        tasks
+            .update(
+                &project.id,
+                super::super::FieldEdit {
+                    depends_on: Some(vec![]),
+                    ..Default::default()
+                },
+                None,
+            )
+            .await
+            .unwrap();
         tasks
             .assign_with_planner_scope(&project.id, &["%3"], "add", true, Some(planner.clone()))
             .await
