@@ -98,18 +98,6 @@ fn make_config(root: &Path) -> Result<DeskConfig, Box<dyn Error>> {
         open_operations_db: ops_history::connect,
     })
 }
-async fn shutdown() {
-    #[cfg(unix)]
-    {
-        if let Ok(mut term) =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        {
-            tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = term.recv() => {} }
-            return;
-        }
-    }
-    let _ = tokio::signal::ctrl_c().await;
-}
 fn main() -> Result<(), Box<dyn Error>> {
     let root = env::current_dir()?;
     let config = make_config(&root)?;
@@ -124,9 +112,25 @@ fn main() -> Result<(), Box<dyn Error>> {
         .enable_all()
         .build()?;
     runtime.block_on(async {
+        // Register before binding: a signal arriving during startup must be retained
+        // until the server begins polling its graceful-shutdown future.
+        #[cfg(unix)]
+        let shutdown = {
+            let mut term =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+            let mut interrupt =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+            async move {
+                tokio::select! { _ = term.recv() => {}, _ = interrupt.recv() => {} }
+            }
+        };
+        #[cfg(not(unix))]
+        let shutdown = async {
+            let _ = tokio::signal::ctrl_c().await;
+        };
         let listener = tokio::net::TcpListener::bind((host.as_str(), port)).await?;
         eprintln!("desk listening on {host}:{port}");
-        web_server::serve(config, listener, shutdown())
+        web_server::serve(config, listener, shutdown)
             .await
             .map_err(|e| -> Box<dyn Error> { e.to_string().into() })
     })

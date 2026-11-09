@@ -10,6 +10,15 @@ use std::{
 
 #[test]
 fn production_launcher_serves_private_desk_and_stops_on_term() {
+    exercise(false);
+}
+
+#[test]
+fn production_launcher_handles_term_as_soon_as_listener_is_bound() {
+    exercise(true);
+}
+
+fn exercise(early_term: bool) {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     fs::create_dir_all(root.join("ui/dist")).unwrap();
@@ -50,16 +59,19 @@ fn production_launcher_serves_private_desk_and_stops_on_term() {
         assert!(Instant::now() < until, "desk did not start");
         thread::sleep(Duration::from_millis(50));
     };
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
-    stream
-        .write_all(b"GET /api/health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-        .unwrap();
-    let mut response = String::new();
-    stream.read_to_string(&mut response).unwrap();
-    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
-    assert!(root.join("data/auth.json").is_file());
+    if !early_term {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        stream
+            .write_all(b"GET /api/health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert!(root.join("data/auth.json").is_file());
+    }
+    drop(stream);
     assert!(Command::new("kill")
         .arg("-TERM")
         .arg(child.id().to_string())
