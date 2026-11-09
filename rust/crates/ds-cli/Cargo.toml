@@ -37,3 +37,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 [[bin]]
 name = "dunk-codex-turn"
 path = "src/bin/dunk-codex-turn.rs"
+
+[[bin]]
+name = "dunk-claude-turn"
+path = "src/bin/dunk-claude-turn.rs"

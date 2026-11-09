@@ -16,6 +16,11 @@
 set -u
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd 2>/dev/null) || exit 0
+# Native producer is opt-in; preserve existing Python fallback until deployed.
+if [ -x "$script_dir/dunk-claude-turn" ]; then
+    "$script_dir/dunk-claude-turn" "$@" || true
+    exit 0
+fi
 for candidate in "$script_dir/dunkingsheep-turn.py" "$script_dir/turn-generation.py"; do
     if [ -f "$candidate" ]; then
         python3 "$candidate" "$@" || true
