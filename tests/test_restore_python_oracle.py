@@ -64,6 +64,14 @@ class RestoreOracleTests(unittest.TestCase):
             restore.main()
         self.assertFalse((self.root.parent / "dunk_escape.py").exists())
 
+    def test_invalid_late_mode_is_rejected_before_any_write(self):
+        data = json.loads(self.manifest.read_text())
+        data["files"][-1]["mode"] = "not-octal"
+        self.manifest.write_text(json.dumps(data))
+        with self.assertRaises(ValueError):
+            restore.main()
+        self.assertFalse((self.root / "dunk_test00.py").exists())
+
     def test_corrupt_blob_publishes_no_files(self):
         def corrupt(*args):
             return b"corrupt" if args[1].endswith("dunk_test49.py") else self.git(*args)

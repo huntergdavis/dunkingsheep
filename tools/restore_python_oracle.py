@@ -32,6 +32,8 @@ def main():
         name = item["path"]
         if not (name == "dunkingsheep" or (name.startswith("dunk") and name.endswith(".py"))) or "/" in name:
             raise ValueError("invalid oracle path")
+        if item.get("mode") not in ("0o644", "0o755"):
+            raise ValueError(f"invalid oracle mode: {name}")
         if os.path.lexists(ROOT / name):
             raise FileExistsError(f"refusing to overwrite {name}")
     if subprocess.run(["git", "-C", str(ROOT), "cat-file", "-e", f"{commit}^{{commit}}"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
