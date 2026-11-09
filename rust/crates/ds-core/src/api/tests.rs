@@ -6309,6 +6309,56 @@ fn planner_socket_assignment_requires_fresh_process_binding() {
 }
 
 #[test]
+fn planner_dispatch_refuses_recorded_pr_worker() {
+    let (runtime, _dir, flock, tasks, dispatcher) = task_mutation_api_fixture();
+    flock
+        .with_roles(|roles, _| {
+            roles.register("w1:p4", "planner", None, None, None, None, None, None)?;
+            Ok(())
+        })
+        .unwrap();
+    let options = crate::tasks::AddOptions {
+        repo: Some("fixture/project".into()),
+        pr: Some("9".into()),
+        author: Some("w1:p3".into()),
+        ..Default::default()
+    };
+    runtime
+        .block_on(tasks.add_with("global", "work", "", options))
+        .unwrap();
+    let review = runtime
+        .block_on(tasks.add_with(
+            "global",
+            "review",
+            "",
+            crate::tasks::AddOptions {
+                kind: Some("review".into()),
+                repo: Some("fixture/project".into()),
+                pr: Some("9".into()),
+                head: Some("9".repeat(40)),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+    let error = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_assign",
+        json!({"id": review.id, "assignees": ["w1:p3"]}),
+        Some("w1:p4"),
+        None,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("recorded worker"), "{error}");
+    assert_eq!(
+        runtime.block_on(tasks.get(&review.id)).unwrap().assignees,
+        "[]"
+    );
+}
+
+#[test]
 fn planner_dispatch_refuses_assigning_review_to_explicit_author() {
     let (runtime, _dir, flock, tasks, dispatcher) = task_mutation_api_fixture();
     flock

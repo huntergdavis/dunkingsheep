@@ -4205,6 +4205,13 @@ mod tests {
             .await
             .unwrap();
         tasks.assign(&work.id, &["%3"], "add").await.unwrap();
+        let connection = rusqlite::Connection::open(tasks.path()).unwrap();
+        connection
+            .execute(
+                "UPDATE tasks SET completed_by = '%5' WHERE id = ?",
+                params![work.id],
+            )
+            .unwrap();
         let review = tasks
             .add_with(
                 "global",
@@ -4220,7 +4227,7 @@ mod tests {
             )
             .await
             .unwrap();
-        for worker in ["%2", "%3"] {
+        for worker in ["%2", "%3", "%5"] {
             let error = tasks
                 .assign_with_planner_author_guard(&review.id, &[worker], "add", true)
                 .await
@@ -4230,10 +4237,102 @@ mod tests {
         }
         assert!(decode_list(Some(&tasks.get(&review.id).await.unwrap().assignees)).is_empty());
         assert_eq!(tasks.events(&review.id).await, 1);
+        let error = tasks
+            .assign_with_planner_author_guard(&review.id, &["%4", "%3"], "replace", true)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("recorded worker"), "{error}");
+        assert_eq!(tasks.events(&review.id).await, 1);
         tasks
             .assign_with_planner_author_guard(&review.id, &["%4"], "add", true)
             .await
             .unwrap();
+        // Removing a worker and owner assignments retain their existing behavior.
+        tasks.assign(&review.id, &["%3"], "add").await.unwrap();
+        tasks
+            .assign_with_planner_author_guard(&review.id, &["%3"], "remove", true)
+            .await
+            .unwrap();
+        let other = tasks
+            .add_with(
+                "global",
+                "other review",
+                "",
+                AddOptions {
+                    kind: Some("review".into()),
+                    repo: Some("fixture/project".into()),
+                    pr: Some("43".into()),
+                    head: Some("b".repeat(40)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        tasks
+            .assign_with_planner_author_guard(&other.id, &["%3"], "add", true)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn planner_review_sees_worker_committed_before_assignment() {
+        let tasks = store("planner-worker-race").await;
+        let work = tasks
+            .add_with(
+                "global",
+                "work",
+                "",
+                AddOptions {
+                    repo: Some("fixture/race".into()),
+                    pr: Some("7".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let review = tasks
+            .add_with(
+                "global",
+                "review",
+                "",
+                AddOptions {
+                    kind: Some("review".into()),
+                    repo: Some("fixture/race".into()),
+                    pr: Some("7".into()),
+                    head: Some("c".repeat(40)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let other = std::sync::Arc::new(Tasks::open(tasks.path()).await.unwrap());
+        let mut connection = rusqlite::Connection::open(tasks.path()).unwrap();
+        let tx = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        tx.execute(
+            "UPDATE tasks SET completed_by = '%4' WHERE id = ?",
+            params![work.id],
+        )
+        .unwrap();
+        let id = review.id.clone();
+        let handle = tokio::spawn(async move {
+            other
+                .assign_with_planner_author_guard(&id, &["%4"], "add", true)
+                .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(!handle.is_finished());
+        tx.commit().unwrap();
+        assert!(handle
+            .await
+            .unwrap()
+            .unwrap_err()
+            .to_string()
+            .contains("recorded worker"));
+        assert!(decode_list(Some(&tasks.get(&review.id).await.unwrap().assignees)).is_empty());
+        assert_eq!(tasks.events(&review.id).await, 1);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
