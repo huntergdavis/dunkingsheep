@@ -57,6 +57,7 @@ fn every_input_schema_equals_the_pythons() {
             if name == "lanes" {
                 assert!(properties.remove("operation").is_some());
                 assert!(properties.remove("task").is_some());
+                assert!(properties.remove("repo").is_some());
                 let actions = properties.get_mut("action").unwrap()["enum"]
                     .as_array_mut()
                     .unwrap();
