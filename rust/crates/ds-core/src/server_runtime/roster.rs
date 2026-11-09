@@ -11,7 +11,18 @@ impl RequestRuntimeAdapter<'_> {
             .flock
             .resolve_lanes(&self.terminal, crate::clock::now_s())
         {
-            Ok(lanes) => Ok(lanes),
+            Ok(mut lanes) => {
+                for lane in &mut lanes {
+                    if let Some(pane) = lane
+                        .get("pane_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                    {
+                        lane["membership"] = self.terminal.flock.lane_project_view(self, &pane);
+                    }
+                }
+                Ok(lanes)
+            }
             Err(error) => Err(error.to_string()),
         }
     }

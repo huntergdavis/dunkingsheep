@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::{params, types::Value as SqlValue, Connection, OptionalExtension};
 use serde_json::{json, Value as JsonValue};
 
+pub mod lane_project;
 pub mod metrics;
 pub mod owner_answer;
 pub mod project_policy;
@@ -2041,6 +2042,7 @@ fn row_to_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
 
 /// Add the columns a live database may be missing (`dunk_tasks._migrate`).
 fn migrate(conn: &Connection) -> Result<(), DunkError> {
+    lane_project::migrate(conn).map_err(db::map_sqlite)?;
     // Every column the live table has, in its own order: an old file gains whatever
     // it lacks. Derived from PRAGMA table_info on the live store, not retyped.
     let wanted = [

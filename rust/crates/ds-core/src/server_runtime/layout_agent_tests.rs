@@ -17,6 +17,18 @@ type LayoutFixture = (
     Arc<RuntimeServices>,
     Arc<Mutex<Vec<Value>>>,
 );
+struct FakeAgent(std::process::Child);
+impl Drop for FakeAgent {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+fn fake_agent(dir: &tempfile::TempDir) -> FakeAgent {
+    let path = dir.path().join("codex");
+    std::os::unix::fs::symlink("/usr/bin/sleep", &path).unwrap();
+    FakeAgent(std::process::Command::new(path).arg("60").spawn().unwrap())
+}
 fn make_services(fail_layout: Option<&str>, available: bool) -> LayoutFixture {
     make_services_with_factory(fail_layout, available, None)
 }
@@ -74,9 +86,10 @@ fn make_services_with_factory(
         let mut terminal = FakeTerminal::new();
         terminal.raw_events = Arc::clone(&observed);
         terminal.show_created_tab_pane = true;
-        terminal.start_agent_pid = Some(None);
+        terminal.start_agent_pid = Some(Some(i64::from(std::process::id())));
         // This fixture uses coherent session IDs across the canned pane/tab/workspace rows.
         for pane in &mut terminal.panes {
+            pane.pane_pid = Some(i64::from(std::process::id()));
             pane.session_id = terminal
                 .tabs
                 .iter()
@@ -129,18 +142,21 @@ fn request(pane: &str) -> RequestCtx {
 fn dispatcher(services: &Arc<RuntimeServices>) -> super::super::dispatcher::RuntimeDispatcher {
     let mut handlers = api::Dispatcher::new();
     handlers.register_layout_agent();
+    handlers.register_lanes();
     super::super::dispatcher::RuntimeDispatcher::new(Arc::clone(services), handlers)
 }
 
 #[test]
-fn h_start_agent_matches_python() {
-    let (_dir, services, events) = make_services(None, true);
-    let out=dispatcher(&services).dispatch("start_agent",&json!({"name":" probe ","command":"codex --model 'test model'","workspace":"self","cwd":["raw",false],"focus":"false"}),&request("w2:p2")).unwrap();
+fn h_start_agent_records_explicit_global_membership() {
+    let (dir, services, events) = make_services(None, true);
+    let _agent = fake_agent(&dir);
+    let out=dispatcher(&services).dispatch("start_agent",&json!({"global":true,"name":" probe ","command":"codex --model 'test model'","workspace":"self","cwd":["raw",false],"focus":"false"}),&request("w2:p2")).unwrap();
     assert_eq!(out["name"], "probe");
     assert_eq!(out["argv"], json!(["codex", "--model", "test model"]));
     assert_eq!(out["pane_id"], "w1:p-probe");
-    assert_eq!(out["child_pid"], Value::Null);
+    assert!(out["child_pid"].is_number());
     assert_eq!(out["role"], Value::Null);
+    assert_eq!(out["membership"]["scope"], "global");
     assert_eq!(services.flock.last_message(), "Started agent probe");
     let launch = services.flock.launch("w1:p-probe").unwrap();
     assert_eq!(launch["cwd"], json!(["raw", false]));
@@ -248,7 +264,7 @@ fn layout_agent_conversion_and_error_order() {
     let error = d
         .dispatch(
             "start_agent",
-            &json!({"name":"probe","command":"codex","split":["right"]}),
+            &json!({"global":true,"name":"probe","command":"codex","split":["right"]}),
             &request("w2:p2"),
         )
         .unwrap_err();
@@ -258,12 +274,13 @@ fn layout_agent_conversion_and_error_order() {
 }
 #[test]
 fn layout_agent_role_failure_keeps_launch_before_last_message() {
-    let (_dir, services, _) = make_services(None, true);
+    let (dir, services, _) = make_services(None, true);
+    let _agent = fake_agent(&dir);
     services.flock.set_last_message("before");
     let error = dispatcher(&services)
         .dispatch(
             "start_agent",
-            &json!({"name":"probe","command":"codex","workspace":"self","role":"invalid"}),
+            &json!({"global":true,"name":"probe","command":"codex","workspace":"self","role":"invalid"}),
             &request("w2:p2"),
         )
         .unwrap_err();
@@ -291,7 +308,8 @@ fn layout_agent_dispatch_permission_precedes_required_arguments() {
 #[test]
 fn layout_agent_role_success_preserves_raw_fields_and_final_message() {
     let (dir, services, _) = make_services(None, true);
-    let out=dispatcher(&services).dispatch("start_agent",&json!({"name":"probe","command":"codex","workspace":"self","role":"worker","provider":false,"model":[]}),&request("w2:p2")).unwrap();
+    let _agent = fake_agent(&dir);
+    let out=dispatcher(&services).dispatch("start_agent",&json!({"global":true,"name":"probe","command":"codex","workspace":"self","role":"worker","provider":false,"model":[]}),&request("w2:p2")).unwrap();
     assert_eq!(out["role"]["provider"], "False");
     assert_eq!(out["role"]["model"], "[]");
     assert_eq!(out["role"]["label"], "probe");
@@ -315,7 +333,7 @@ fn layout_agent_verification_failure_precedes_launch_and_role_writeback() {
     let error = dispatcher(&services)
         .dispatch(
             "start_agent",
-            &json!({"name":"probe","command":"codex","workspace":"w2","role":"worker"}),
+            &json!({"global":true,"name":"probe","command":"codex","workspace":"w2","role":"worker"}),
             &request("w2:p2"),
         )
         .unwrap_err();
@@ -379,7 +397,8 @@ fn layout_agent_bridge_uses_same_terminal_and_releases_each_lock() {
 }
 #[test]
 fn layout_agent_raw_numbers_and_composites_preserve_python_strings() {
-    let (_dir, services, _) = make_services(None, true);
+    let (dir, services, _) = make_services(None, true);
+    let _agent = fake_agent(&dir);
     for (raw, expected) in [
         ("true", "True"),
         ("1e999", "inf"),
@@ -400,7 +419,7 @@ fn layout_agent_raw_numbers_and_composites_preserve_python_strings() {
     let out = dispatcher(&services)
         .dispatch(
             "start_agent",
-            &json!({"name":"\u{1c}probe\u{1f}","command":"codex","workspace":"self"}),
+            &json!({"global":true,"name":"\u{1c}probe\u{1f}","command":"codex","workspace":"self"}),
             &request("w2:p2"),
         )
         .unwrap();
@@ -455,4 +474,34 @@ esac
         assert_eq!(saved["panes"]["%2"]["label"], "new-label");
         assert!(saved["panes"]["%2"].get("name").is_none());
     }
+}
+
+#[test]
+fn start_agent_without_scope_or_live_parent_membership_refuses_before_creation() {
+    let (_dir, services, events) = make_services(None, true);
+    let error = dispatcher(&services)
+        .dispatch(
+            "start_agent",
+            &json!({"name":"probe","command":"codex"}),
+            &request("w2:p2"),
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("lane project") || error.to_string().contains("project"), "{error}");
+    assert!(events.lock().unwrap().is_empty());
+}
+
+#[test]
+fn owner_registers_live_project_and_child_inherits_it() {
+    let (dir, services, _) = make_services(None, true);
+    let _agent = fake_agent(&dir);
+    let d = dispatcher(&services);
+    let caller = request("w2:p2");
+    let registered = d.dispatch("lanes", &json!({"action":"project","pane":"w2:p2","project":"poolrad"}), &caller).unwrap();
+    assert_eq!(registered["scope"], "project");
+    assert_eq!(registered["project"], "poolrad");
+    let launched = d.dispatch("start_agent", &json!({"name":"probe","command":"codex","workspace":"self"}), &caller).unwrap();
+    assert_eq!(launched["membership"]["project"], "poolrad");
+    let queried = d.dispatch("lanes", &json!({"action":"project","pane":"w1:p-probe"}), &caller).unwrap();
+    assert_eq!(queried["scope"], "project");
+    assert_eq!(queried["project"], "poolrad");
 }

@@ -118,6 +118,7 @@ pub fn roster(env: &dyn RosterEnv, now: f64) -> Result<Value, String> {
             .filter(|s| *s != 0.0);
         rows.push(json!({
             "pane_id": pane_id, // internal; the UI drops it
+            "membership": lane.get("membership").cloned().unwrap_or_else(|| json!({"scope":"unknown","project":null})),
             "name": name.unwrap_or(pane_id),
             "harness": harness,
             "model": cell(Value::Null, None, Some(model_reason(harness))),

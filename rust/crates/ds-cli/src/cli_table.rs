@@ -2338,6 +2338,18 @@ pub static ROOT: Cmd = Cmd {
                     ],
                 },
                 Cmd {
+                    name: "project", aliases: &[],
+                    help: Some("query or set a lane's explicit project membership"),
+                    raw: false, raw_text: false, about: None, epilog: None,
+                    args: &[
+                        Arg { id: "json", dest: "json", tri: false, default_int: false, flags: &["--json"], positional: false, kind: Kind::StoreTrue, ty: Ty::Str, nargs: Nargs::Zero, choices: &[], default: None, required: false, help: None, hidden: true, metavar: None, version: None },
+                        Arg { id: "pane", dest: "pane", tri: false, default_int: false, flags: &[], positional: true, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &[], default: None, required: true, help: Some("live pane id"), hidden: false, metavar: None, version: None },
+                        Arg { id: "project", dest: "project", tri: false, default_int: false, flags: &["--project"], positional: false, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &[], default: None, required: false, help: Some("explicit project"), hidden: false, metavar: None, version: None },
+                        Arg { id: "global", dest: "global", tri: false, default_int: false, flags: &["--global"], positional: false, kind: Kind::StoreTrue, ty: Ty::Str, nargs: Nargs::Zero, choices: &[], default: None, required: false, help: Some("explicit global scope"), hidden: false, metavar: None, version: None },
+                    ],
+                    groups: &[], sub_dest: None, sub_metavar: None, sub_required: false, subs: &[],
+                },
+                Cmd {
                     name: "register", aliases: &[],
                     help: Some("bind a role to a pane's root process (owner only; the first owner may self-register)"),
                     raw: false,
@@ -2752,6 +2764,8 @@ pub static ROOT: Cmd = Cmd {
             about: None,
             epilog: Some("example: dunkingsheep start-agent writer -w Site -- claude --model opus"),
             args: &[
+                Arg { id: "project", dest: "project", tri: false, default_int: false, flags: &["--project"], positional: false, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &[], default: None, required: false, help: Some("explicit project membership"), hidden: false, metavar: None, version: None },
+                Arg { id: "global", dest: "global", tri: false, default_int: false, flags: &["--global"], positional: false, kind: Kind::StoreTrue, ty: Ty::Str, nargs: Nargs::Zero, choices: &[], default: None, required: false, help: Some("explicit global membership"), hidden: false, metavar: None, version: None },
                 Arg { id: "json", dest: "json", tri: false, default_int: false, flags: &["--json"], positional: false, kind: Kind::StoreTrue, ty: Ty::Str, nargs: Nargs::Zero, choices: &[], default: None, required: false, help: None, hidden: true, metavar: None, version: None },
                 Arg { id: "name", dest: "name", tri: false, default_int: false, flags: &[], positional: true, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &[], default: None, required: true, help: None, hidden: false, metavar: None, version: None },
                 Arg { id: "workspace", dest: "workspace", tri: false, default_int: false, flags: &["--workspace", "-w"], positional: false, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &[], default: None, required: false, help: Some("new tab in this workspace (id, label or 'self')"), hidden: false, metavar: None, version: None },

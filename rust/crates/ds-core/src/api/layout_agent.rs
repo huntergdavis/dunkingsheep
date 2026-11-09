@@ -2,6 +2,7 @@
 use super::{python_bool_arg, python_scope_arg, Args, HandlerContext};
 use crate::error::DunkError;
 use crate::flock::{agent_verify, commands_layout::LayoutBackend, resolve};
+use crate::tasks::lane_project::ProjectScope;
 use crate::terminal::raw::{equal, optional, string, truthy};
 use serde_json::{json, Value};
 
@@ -102,6 +103,19 @@ pub fn h_start_agent(context: &HandlerContext<'_>, args: Args) -> Result<Value, 
         ));
     }
     context.env.with_layout_agent(&mut |backend,panes,verifier,env,verify_s| {
+        let project = args.get("project").filter(|v| !v.is_null());
+        let global = python_bool_arg(&args,"global",false);
+        let inherited = !global && project.is_none();
+        if global && project.is_some() { return Err(DunkError::Refused("choose either a project or global scope".into())); }
+        let membership = if global { ProjectScope::Global }
+            else if let Some(value) = project {
+                let name=value.as_str().ok_or_else(||DunkError::Refused("project must be a string".into()))?;
+                if name.trim().is_empty() || name.trim()!=name { return Err(DunkError::Refused("project must be a non-empty name without surrounding whitespace".into())); }
+                ProjectScope::Project(name.to_owned())
+            } else {
+                let pane=context.self_pane_id().ok_or_else(||DunkError::Refused("select a project or global scope; no spawning lane is available".into()))?;
+                context.flock.lane_project(panes,pane)?.ok_or_else(||DunkError::Refused("select a project or global scope; spawning lane has no current membership".into()))?
+            };
         let tab = arg(&args,"tab"); let workspace=arg(&args,"workspace");
         let tab_id = if truthy(tab) { Some(string(&parent(backend,"tab",tab,context.self_pane_id())?["tab_id"])) } else {None};
         let mut workspace_id = if truthy(workspace) { Some(string(&parent(backend,"workspace",workspace,context.self_pane_id())?["workspace_id"])) } else {None};
@@ -134,10 +148,17 @@ pub fn h_start_agent(context: &HandlerContext<'_>, args: Args) -> Result<Value, 
         }
         let mut role=Value::Null;
         if truthy(arg(&args,"role")) && pane_id.is_some() {
-            role=context.flock.lane_register(pane_id.as_deref(),Some(&string(arg(&args,"role"))),python_scope_arg(args.get("provider")).as_deref(),python_scope_arg(args.get("model")).as_deref(),Some(&name),context.self_pane_id(),panes)?;
+            role=context.flock.lane_register(pane_id.as_deref(),Some(&string(arg(&args,"role"))),python_scope_arg(args.get("provider")).as_deref(),python_scope_arg(args.get("model")).as_deref(),Some(&name),context.self_pane_id(),panes).map_err(|error|DunkError::Refused(format!("agent started in {}, but role registration failed: {error}",pane_id.as_deref().unwrap_or("unknown pane"))))?;
         }
+        let id=pane_id.as_deref().ok_or_else(||DunkError::Refused("agent started without a pane id; project membership was not recorded".into()))?;
+        if inherited {
+            let parent=context.self_pane_id().ok_or_else(||DunkError::Refused(format!("agent started in {id}, but spawning lane is unavailable; project membership was not recorded")))?;
+            let current=context.flock.lane_project(panes,parent).map_err(|error|DunkError::Refused(format!("agent started in {id}, but spawning lane membership could not be rechecked: {error}")))?;
+            if current.as_ref()!=Some(&membership) { return Err(DunkError::Refused(format!("agent started in {id}, but spawning lane membership changed; project membership was not recorded"))); }
+        }
+        let project=context.flock.lane_project_set(panes,id,membership).map_err(|error|DunkError::Refused(format!("agent started in {id}, but project membership was not recorded: {error}")))?;
         context.flock.set_last_message(format!("Started agent {name}"));
-        Ok(json!({"agent":agent,"pane_id":pane_id,"name":name,"argv":started.get("argv").filter(|v|truthy(v)).cloned().unwrap_or_else(||json!(argv)),"child_pid":child_pid,"role":role}))
+        Ok(json!({"agent":agent,"pane_id":pane_id,"name":name,"argv":started.get("argv").filter(|v|truthy(v)).cloned().unwrap_or_else(||json!(argv)),"child_pid":child_pid,"role":role,"membership":project}))
     })
 }
 pub fn h_rename(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {

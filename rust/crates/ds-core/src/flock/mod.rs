@@ -886,6 +886,7 @@ pub mod commands_turns;
 pub mod delivery;
 pub mod dunks;
 pub mod guarded_submit;
+pub mod lane_project;
 pub mod lane_registry_rows;
 pub mod lanes;
 pub mod loop_env;
