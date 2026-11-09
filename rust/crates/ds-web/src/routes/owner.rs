@@ -1167,6 +1167,17 @@ mod tests {
     }
 
     #[test]
+    fn configured_front_desk_pin_wins_over_stale_desk_name() {
+        let config = json!({"id": "cos", "match": "desk", "pane": "%259"});
+        let panes = vec![
+            json!({"pane_id": "%133", "tab_label": "sn-desk"}),
+            json!({"pane_id": "%259", "tab_label": "sn-desk-terra"}),
+        ];
+        assert_eq!(match_pane(&config, &panes).unwrap()["pane_id"], "%259");
+        assert!(match_pane(&config, &panes[..1]).is_none());
+    }
+
+    #[test]
     fn capability_is_public_trimmed_and_cached_for_twenty_seconds() {
         let backend = Arc::new(FakeOwner::new());
         backend.reply(
