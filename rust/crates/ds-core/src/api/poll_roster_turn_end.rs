@@ -215,7 +215,59 @@ pub fn h_poll(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkErr
 }
 
 /// `dunk_api.h_roster`.
-pub fn h_roster(context: &HandlerContext<'_>, _args: Args) -> Result<Value, DunkError> {
-    crate::flock::roster::roster(context.env.roster_env()?, context.env.now_s())
-        .map_err(DunkError::Refused)
+pub fn h_roster(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let mut result = crate::flock::roster::roster(context.env.roster_env()?, context.env.now_s())
+        .map_err(DunkError::Refused)?;
+    filter_project(&mut result, args.get("project"))?;
+    Ok(result)
+}
+
+fn filter_project(result: &mut Value, requested: Option<&Value>) -> Result<(), DunkError> {
+    if let Some(project) = requested.filter(|v| !v.is_null()) {
+        let project = project
+            .as_str()
+            .filter(|s| !s.is_empty() && s.trim() == *s)
+            .ok_or_else(|| {
+                DunkError::Refused(
+                    "project must be a non-empty name without surrounding whitespace".into(),
+                )
+            })?;
+        let lanes = result["lanes"]
+            .as_array_mut()
+            .ok_or_else(|| DunkError::Refused("roster has no lanes".into()))?;
+        lanes.retain(|lane| {
+            lane["membership"]["scope"] == "project" && lane["membership"]["project"] == project
+        });
+        let count = lanes.len();
+        result["project"] = json!(project);
+        result["count"] = json!(count);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod project_filter_tests {
+    use super::*;
+    #[test]
+    fn named_project_uses_only_explicit_matching_membership() {
+        let original = json!({"as_of":"now","lanes":[
+            {"pane_id":"%1","membership":{"scope":"project","project":"global"}},
+            {"pane_id":"%2","membership":{"scope":"global","project":null}},
+            {"pane_id":"%3","membership":{"scope":"project","project":"alpha"}},
+            {"pane_id":"%4","membership":{"scope":"stale","project":"alpha"}},
+            {"pane_id":"%5","membership":{"scope":"unknown","project":null}}
+        ]});
+        let mut result = original.clone();
+        filter_project(&mut result, Some(&json!("global"))).unwrap();
+        assert_eq!(result["count"], 1);
+        assert_eq!(result["lanes"][0]["pane_id"], "%1");
+        let mut empty = original.clone();
+        filter_project(&mut empty, Some(&json!("missing"))).unwrap();
+        assert_eq!(empty["count"], 0);
+        assert_eq!(empty["lanes"], json!([]));
+        let mut all = original.clone();
+        filter_project(&mut all, None).unwrap();
+        assert_eq!(all, original);
+        assert!(filter_project(&mut all, Some(&json!(" alpha "))).is_err());
+    }
 }

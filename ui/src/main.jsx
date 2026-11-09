@@ -51,6 +51,7 @@ const DASH_ROUTES = {
   cos: { eyebrow: 'FRONT DESK', title: 'Front Desk', subtitle: 'Ask; decisions you owe are at the top' },
   fleet: { eyebrow: 'TERMINALS', title: 'Terminals', subtitle: 'See active agents and send a message' },
   operations: { eyebrow: 'OPERATIONS', title: 'Operations board', subtitle: 'Tasks, progress, and service health' },
+  projects: { eyebrow: 'PROJECTS', title: 'Projects', subtitle: 'Live lanes by explicit project membership' },
   play: { eyebrow: 'LIVE GAME', title: 'Play Pool of Radiance', subtitle: 'Private DOS run · save states' },
 };
 
@@ -1162,6 +1163,40 @@ function ChannelStandalone({ channel }) {
   </DashShell>;
 }
 
+function Projects({ standalone = false }) {
+  const [roster, setRoster] = useState(null);
+  const [error, setError] = useState('');
+  const [selected, setSelected] = useState('all');
+  useEffect(() => {
+    let live = true;
+    async function load() {
+      try { const data = await api('/projects'); if (live) { setRoster(data); setError(''); } }
+      catch (e) { if (live) { setRoster(null); setError(e.message); } }
+    }
+    load(); const timer = setInterval(load, 10000);
+    return () => { live = false; clearInterval(timer); };
+  }, []);
+  const groups = new Map();
+  for (const lane of roster?.lanes || []) {
+    const membership = lane.membership || {};
+    const name = membership.scope === 'project' && typeof membership.project === 'string' ? membership.project : null;
+    const key = name !== null ? `project:${name}` : `scope:${membership.scope || 'unknown'}`;
+    const title = name !== null ? name : ({global: 'Global', stale: 'Stale membership', unavailable: 'Membership unavailable', unknown: 'Unknown / unregistered'}[membership.scope] || 'Unknown / unregistered');
+    if (!groups.has(key)) groups.set(key, { key, title, lanes: [] });
+    groups.get(key).lanes.push(lane);
+  }
+  const ordered = [...groups.values()].sort((a, b) => a.title.localeCompare(b.title));
+  return <DashShell standalone={standalone} view="projects"><div className="dash-body">
+    <div className="ops-heading"><div><div className="eyebrow">PROJECTS</div><h1>Projects</h1><p>Live lanes grouped by their recorded membership.</p></div></div>
+    {error && <div role="alert">Project roster unavailable: {error}</div>}
+    {!roster && !error && <p>Loading projects…</p>}
+    {roster && <><label>Show <select aria-label="Filter projects" value={selected} onChange={e => setSelected(e.target.value)}><option value="all">All groups</option>{ordered.map(group => <option key={group.key} value={group.key}>{group.title}</option>)}</select></label>
+      {!ordered.length && <p>No live agent lanes are reported.</p>}
+      {ordered.filter(group => selected === 'all' || group.key === selected).map(group => <section className="project-group" key={group.key}><h2>{group.title} <small>({group.lanes.length})</small></h2><div className="ops-table-wrap"><table><thead><tr><th>Lane</th><th>Activity</th><th>Task</th><th>Model</th></tr></thead><tbody>{group.lanes.map(lane => <tr key={lane.pane_id}><td><a href={`/dash/fleet?pane=${encodeURIComponent(lane.pane_id)}`}>{lane.name || lane.pane_id}</a><small> {lane.pane_id}</small></td><td>{lane.state || 'Unknown'}</td><td>{lane.task ? [lane.task.id, lane.task.title].filter(Boolean).join(' · ') : 'Unknown'}</td><td>{lane.model?.value || 'Unknown'}</td></tr>)}</tbody></table></div></section>)}
+    </>}
+  </div></DashShell>;
+}
+
 function StandaloneDesk({ view, known }) {
   if (!known) {
     return <DashShell standalone view={view}>
@@ -1171,6 +1206,7 @@ function StandaloneDesk({ view, known }) {
     </DashShell>;
   }
   if (view === 'fleet') return <Fleet standalone />;
+  if (view === 'projects') return <Projects standalone />;
   if (view === 'operations') return <OpsBoard standalone />;
   if (view === 'play') return <PlayWorkspace standalone />;
   return <ChannelStandalone key={view} channel={view} />;

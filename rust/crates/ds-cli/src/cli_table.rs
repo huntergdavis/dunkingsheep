@@ -2239,6 +2239,7 @@ pub static ROOT: Cmd = Cmd {
             about: None,
             epilog: None,
             args: &[
+                Arg { id: "project", dest: "project", tri: false, default_int: false, flags: &["--project"], positional: false, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &[], default: None, required: false, help: Some("only lanes with this explicit project membership"), hidden: false, metavar: Some("NAME"), version: None },
                 Arg { id: "json", dest: "json", tri: false, default_int: false, flags: &["--json"], positional: false, kind: Kind::StoreTrue, ty: Ty::Str, nargs: Nargs::Zero, choices: &[], default: None, required: false, help: None, hidden: true, metavar: None, version: None },
             ],
             groups: &[],

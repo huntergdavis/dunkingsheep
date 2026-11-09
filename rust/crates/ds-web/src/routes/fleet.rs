@@ -95,6 +95,7 @@ pub fn router(state: Arc<FleetState>, auth: Arc<dyn AuthBackend>, scheme: Reques
     Router::new()
         .route("/api/pane-send", post(api_pane_send))
         .route("/api/fleet", get(api_fleet))
+        .route("/api/projects", get(api_projects))
         .route("/api/ops-metrics", get(operations_metrics))
         .layer(Extension(state))
         .layer(Extension(auth))
@@ -499,6 +500,23 @@ fn pending_counts(value: &Value) -> Option<HashMap<String, u64>> {
     }
     Some(counts)
 }
+async fn api_projects(
+    Extension(state): Extension<Arc<FleetState>>,
+    Extension(auth): Extension<Arc<dyn AuthBackend>>,
+    Extension(scheme): Extension<RequestScheme>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(response) = authenticate(auth.as_ref(), &headers, scheme).await {
+        return response.into_response();
+    }
+    match state.rpc.rpc("roster", json!({})).await {
+        Ok(value) if value.get("lanes").and_then(Value::as_array).is_some() => {
+            Json(value).into_response()
+        }
+        _ => detail(StatusCode::BAD_GATEWAY, "Project roster unavailable"),
+    }
+}
+
 async fn operations_metrics(
     Extension(state): Extension<Arc<FleetState>>,
     Extension(auth): Extension<Arc<dyn AuthBackend>>,
@@ -810,6 +828,25 @@ mod tests {
     fn send(f: Arc<Fake>, body: &str) -> (u16, Value) {
         http(app(f, true), "/api/pane-send", Some(body))
     }
+    #[test]
+    fn projects_require_auth_and_return_the_daemon_roster() {
+        let f = Fake::setup();
+        assert_eq!(http(app(f.clone(), false), "/api/projects", None).0, 401);
+        assert!(f.calls().is_empty());
+        assert_eq!(http(app(f.clone(), true), "/api/projects", None).0, 502);
+        let roster = json!({"as_of":"now","lanes":[
+            {"pane_id":"%1","membership":{"scope":"project","project":"alpha"}},
+            {"pane_id":"%2","membership":{"scope":"global","project":null}},
+            {"pane_id":"%3","membership":{"scope":"stale","project":null}},
+            {"pane_id":"%4","membership":{"scope":"unknown","project":null}}
+        ]});
+        f.reply("roster", roster.clone());
+        assert_eq!(
+            http(app(f.clone(), true), "/api/projects", None),
+            (200, roster)
+        );
+    }
+
     #[test]
     fn pane_send_auth_precedes_json_and_backend() {
         for body in ["{", r#"{"pane":"%9","text":"hi"}"#] {

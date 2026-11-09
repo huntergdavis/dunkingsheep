@@ -2937,7 +2937,12 @@ fn read_view(ns: &Map<String, Value>) -> Outcome {
     let command = text(ns, "command").unwrap_or("");
     let mut args = Map::new();
     let rpc = match command {
-        "roster" => "roster",
+        "roster" => {
+            if let Some(project) = text(ns, "project") {
+                args.insert("project".into(), Value::String(project.to_string()));
+            }
+            "roster"
+        }
         "message-state" => {
             args.insert(
                 "message_ids".into(),

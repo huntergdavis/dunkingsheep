@@ -1,4 +1,5 @@
-usage: dunkingsheep roster [-h]
+usage: dunkingsheep roster [-h] [--project NAME]
 
 options:
-  -h, --help  show this help message and exit
+  -h, --help      show this help message and exit
+  --project NAME  only lanes with this explicit project membership

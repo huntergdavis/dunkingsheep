@@ -11254,6 +11254,7 @@
    "command": "roster",
    "json": false,
    "no_start_daemon": false,
+   "project": null,
    "self_pane": null,
    "socket": null
   }
@@ -11267,6 +11268,7 @@
    "command": "roster",
    "json": true,
    "no_start_daemon": false,
+   "project": null,
    "self_pane": null,
    "socket": null
   }
@@ -11280,6 +11282,7 @@
    "command": "roster",
    "json": true,
    "no_start_daemon": false,
+   "project": null,
    "self_pane": null,
    "socket": null
   }
