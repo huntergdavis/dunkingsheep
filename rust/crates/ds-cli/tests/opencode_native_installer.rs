@@ -59,3 +59,35 @@ fn creates_private_parents_and_refuses_symlinked_directories() {
     assert!(!run(other.path()).status.success());
     assert!(!external.path().join("plugins").exists());
 }
+
+#[test]
+fn group_writable_requires_opt_in_but_world_writable_is_always_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    fs::set_permissions(root, fs::Permissions::from_mode(0o775)).unwrap();
+    let plugins = root.join("opencode/plugins");
+    fs::create_dir_all(&plugins).unwrap();
+    fs::set_permissions(root.join("opencode"), fs::Permissions::from_mode(0o775)).unwrap();
+    fs::set_permissions(&plugins, fs::Permissions::from_mode(0o775)).unwrap();
+    fs::write(plugins.join("other.js"), b"keep").unwrap();
+    assert!(!run(root).status.success());
+    let trusted = || {
+        Command::new(env!("CARGO_BIN_EXE_dunk-opencode-install"))
+            .arg("--trust-group-writable")
+            .arg(root)
+            .output()
+            .unwrap()
+    };
+    assert!(trusted().status.success());
+    assert_eq!(fs::read(plugins.join("other.js")).unwrap(), b"keep");
+    assert!(!trusted().status.success());
+    let other = tempfile::tempdir().unwrap();
+    fs::set_permissions(other.path(), fs::Permissions::from_mode(0o777)).unwrap();
+    assert!(!Command::new(env!("CARGO_BIN_EXE_dunk-opencode-install"))
+        .arg("--trust-group-writable")
+        .arg(other.path())
+        .status()
+        .unwrap()
+        .success());
+    assert!(!other.path().join("opencode").exists());
+}
