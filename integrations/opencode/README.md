@@ -37,6 +37,15 @@ restart is performed. The parent path must be trusted and no concurrent writer
 should modify it during installation; cleanup after failure is best effort and
 hard-kill or power-loss atomicity is not promised.
 
+For an existing caller-owned config tree whose directories are group-writable,
+`dunk-opencode-install --trust-group-writable ABSOLUTE_CONFIG_ROOT` explicitly
+accepts that every member of those directory groups can modify the installation.
+Use it only when those groups are trusted. The option does not change directory
+permissions, permit world-writable or symlinked directories, or overwrite an
+existing plugin. Trusting group writers also means the installer cannot prevent
+them from changing files after installation. ACLs are not inspected; ensure
+that every principal with write access to the tree is trusted too.
+
 The older Python installer remains available for existing overwrite workflows.
 
 ```sh
