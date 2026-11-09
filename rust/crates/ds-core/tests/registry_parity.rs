@@ -47,7 +47,22 @@ fn every_python_command_is_present_and_no_extra_ones_are() {
 fn every_input_schema_equals_the_pythons() {
     let fixture = expected();
     for (name, want) in fixture["commands"].as_object().expect("commands") {
-        let got = registry::input_schema(name).unwrap_or_else(|| panic!("{name} has no schema"));
+        let mut got =
+            registry::input_schema(name).unwrap_or_else(|| panic!("{name} has no schema"));
+        // Explicit project membership is a Rust-only extension; Python is retired.
+        if name == "start_agent" || name == "lanes" {
+            let properties = got["properties"].as_object_mut().unwrap();
+            assert!(properties.remove("project").is_some());
+            assert!(properties.remove("global").is_some());
+            if name == "lanes" {
+                let actions = properties.get_mut("action").unwrap()["enum"]
+                    .as_array_mut()
+                    .unwrap();
+                assert_eq!(actions.pop(), Some(serde_json::json!("project")));
+                properties.get_mut("action").unwrap()["description"] =
+                    want["properties"]["action"]["description"].clone();
+            }
+        }
         assert_eq!(want, &got, "{name}: input_schema() differs from the Python");
     }
 }

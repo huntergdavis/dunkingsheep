@@ -2,6 +2,7 @@ usage: dunkingsheep start-agent [-h] [--workspace WORKSPACE] [--tab TAB]
                                 [--split {right,down}] [--cwd CWD] [--focus]
                                 [--role {owner,desk,planner,worker,reviewer}]
                                 [--provider PROVIDER] [--model MODEL]
+                                [--project PROJECT] [--global]
                                 name COMMAND [COMMAND ...]
 
 positional arguments:
@@ -21,5 +22,7 @@ options:
   --provider PROVIDER   claude, codex, pi, opencode-go (reviewers must be
                         claude/codex)
   --model MODEL
+  --project PROJECT     explicit project membership
+  --global              explicit global membership
 
 example: dunkingsheep start-agent writer -w Site -- claude --model opus

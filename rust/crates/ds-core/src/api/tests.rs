@@ -1827,7 +1827,7 @@ fn h_lanes_matches_python() {
             "lanes",
             args(json!({"action":"remove"})),
         )),
-        "lanes action must be list or set"
+        "lanes action must be list, set or project"
     );
 
     let set = dispatch_as_flock_role(

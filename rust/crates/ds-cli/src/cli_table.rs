@@ -2390,6 +2390,24 @@ pub static ROOT: Cmd = Cmd {
                     subs: &[
                     ],
                 },
+                Cmd {
+                    name: "project", aliases: &[],
+                    help: Some("query or set a lane's explicit project membership"),
+                    raw: false,
+                    raw_text: false,
+                    about: None,
+                    epilog: None,
+                    args: &[
+                        Arg { id: "json", dest: "json", tri: false, default_int: false, flags: &["--json"], positional: false, kind: Kind::StoreTrue, ty: Ty::Str, nargs: Nargs::Zero, choices: &[], default: None, required: false, help: None, hidden: true, metavar: None, version: None },
+                        Arg { id: "pane", dest: "pane", tri: false, default_int: false, flags: &[], positional: true, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &[], default: None, required: true, help: Some("live pane id"), hidden: false, metavar: None, version: None },
+                        Arg { id: "project", dest: "project", tri: false, default_int: false, flags: &["--project"], positional: false, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &[], default: None, required: false, help: Some("explicit project"), hidden: false, metavar: None, version: None },
+                        Arg { id: "global", dest: "global", tri: false, default_int: false, flags: &["--global"], positional: false, kind: Kind::StoreTrue, ty: Ty::Str, nargs: Nargs::Zero, choices: &[], default: None, required: false, help: Some("explicit global scope"), hidden: false, metavar: None, version: None },
+                    ],
+                    groups: &[],
+                    sub_dest: None, sub_metavar: None, sub_required: false,
+                    subs: &[
+                    ],
+                },
             ],
         },
         Cmd {
@@ -2763,6 +2781,8 @@ pub static ROOT: Cmd = Cmd {
                 Arg { id: "provider", dest: "provider", tri: false, default_int: false, flags: &["--provider"], positional: false, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &[], default: None, required: false, help: Some("claude, codex, pi, opencode-go (reviewers must be claude/codex)"), hidden: false, metavar: None, version: None },
                 Arg { id: "model", dest: "model", tri: false, default_int: false, flags: &["--model"], positional: false, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &[], default: None, required: false, help: None, hidden: false, metavar: None, version: None },
                 Arg { id: "argv", dest: "argv", tri: false, default_int: false, flags: &[], positional: true, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::Plus, choices: &[], default: None, required: true, help: Some("the agent command line"), hidden: false, metavar: Some("COMMAND"), version: None },
+                Arg { id: "project", dest: "project", tri: false, default_int: false, flags: &["--project"], positional: false, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &[], default: None, required: false, help: Some("explicit project membership"), hidden: false, metavar: None, version: None },
+                Arg { id: "global", dest: "global", tri: false, default_int: false, flags: &["--global"], positional: false, kind: Kind::StoreTrue, ty: Ty::Str, nargs: Nargs::Zero, choices: &[], default: None, required: false, help: Some("explicit global membership"), hidden: false, metavar: None, version: None },
             ],
             groups: &[],
             sub_dest: None, sub_metavar: None, sub_required: false,

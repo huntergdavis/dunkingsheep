@@ -173,3 +173,13 @@ fn every_recorded_argv_parses_to_the_pythons_namespace() {
         bad.iter().take(15).cloned().collect::<Vec<_>>().join("\n")
     );
 }
+
+#[test]
+fn lane_project_commands_accept_explicit_project_and_global() {
+    let project = parse(&["lane", "project", "%9", "--project", "poolrad"]);
+    assert_eq!(project["lane_command"], json!("project"));
+    assert_eq!(project["pane"], json!("%9"));
+    assert_eq!(project["project"], json!("poolrad"));
+    let global = parse(&["start-agent", "writer", "--global", "--", "codex"]);
+    assert_eq!(global["global"], json!(true));
+}

@@ -2682,12 +2682,68 @@ pub fn h_lanes(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkEr
         context.flock.invalidate_view();
         return Ok(result);
     }
+    if action == "project" {
+        let pane = args
+            .get("pane")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| DunkError::Refused("lane project needs a pane id".into()))?;
+        let pane = if pane == "self" {
+            context
+                .self_pane_id()
+                .ok_or_else(|| DunkError::Refused("caller pane is unknown".into()))?
+        } else {
+            pane
+        };
+        let project = match args.get("project") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(value)) => Some(value.as_str()),
+            Some(_) => return Err(DunkError::Refused("project must be a string".into())),
+        };
+        let global = python_bool_arg(&args, "global", false);
+        if project.is_some() || global {
+            context
+                .flock
+                .require_superuser(context.self_pane_id(), "lane project", context.env)?;
+            if global && project.is_some() {
+                return Err(DunkError::Refused(
+                    "choose either a project or global scope".into(),
+                ));
+            }
+            let scope = if global {
+                crate::tasks::lane_project::ProjectScope::Global
+            } else {
+                let name = project.unwrap_or_default();
+                if name.trim().is_empty() || name.trim() != name {
+                    return Err(DunkError::Refused(
+                        "project must be a non-empty name without surrounding whitespace".into(),
+                    ));
+                }
+                crate::tasks::lane_project::ProjectScope::Project(name.to_owned())
+            };
+            return context.flock.lane_project_set(context.env, pane, scope);
+        }
+        let mut result = context.flock.lane_project_view(context.env, pane);
+        result["pane_id"] = json!(pane);
+        return Ok(result);
+    }
     if action != "list" {
         return Err(DunkError::Refused(
-            "lanes action must be list or set".into(),
+            "lanes action must be list, set or project".into(),
         ));
     }
-    let rows = context.flock.lanes();
+    let mut rows = context.flock.lanes();
+    if context.flock.stores().tasks.is_some() {
+        for row in &mut rows {
+            if let Some(pane) = row
+                .get("pane_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+            {
+                row["membership"] = context.flock.lane_project_view(context.env, &pane);
+            }
+        }
+    }
     Ok(json!({"lanes": rows, "count": rows.len()}))
 }
 

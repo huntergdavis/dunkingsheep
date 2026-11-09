@@ -30,7 +30,20 @@ def load_parser():
     spec = importlib.util.spec_from_loader("ds_cli_src", loader)
     module = importlib.util.module_from_spec(spec)
     loader.exec_module(module)
-    return module.build_parser()
+    parser = module.build_parser()
+    # The archived Python parser is frozen. Add the Rust-only lane membership
+    # surface here so the generated table, namespace fixtures and help stay in sync.
+    root = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
+    start = root.choices["start-agent"]
+    start.add_argument("--project", help="explicit project membership")
+    start.add_argument("--global", action="store_true", help="explicit global membership")
+    lane = root.choices["lane"]
+    actions = next(a for a in lane._actions if isinstance(a, argparse._SubParsersAction))
+    project = actions.add_parser("project", help="query or set a lane's explicit project membership")
+    project.add_argument("pane", help="live pane id")
+    project.add_argument("--project", help="explicit project")
+    project.add_argument("--global", action="store_true", help="explicit global scope")
+    return parser
 
 
 def s(text):

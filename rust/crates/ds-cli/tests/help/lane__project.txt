@@ -1,0 +1,9 @@
+usage: dunkingsheep lane project [-h] [--project PROJECT] [--global] pane
+
+positional arguments:
+  pane               live pane id
+
+options:
+  -h, --help         show this help message and exit
+  --project PROJECT  explicit project
+  --global           explicit global scope

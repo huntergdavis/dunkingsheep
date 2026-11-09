@@ -5146,13 +5146,69 @@ fn cli_route_guide_and_empty_argv() {
 
 #[test]
 fn cli_route_58_commands_map() {
-    assert_matches_python(&["commands"]);
-    assert_matches_python(&["commands", "--json"]);
-    assert_matches_python(&["--json", "commands"]);
-    assert_matches_python(&["mcp-map"]);
-    assert_matches_python(&["mcp-map", "--json"]);
-    assert_matches_python(&["--json", "mcp-map"]);
-    assert_matches_python(&["mcp-map", "--markdown"]);
+    // The retired Python oracle lacks the explicit project membership extension.
+    // Keep byte-level parity for every other command, and check the extension itself.
+    let rust = run_binary_without_command(&["commands"]);
+    let python = run_python_reference(&["commands"]);
+    assert!(rust.status.success() && python.status.success());
+    let r = String::from_utf8(rust.stdout).unwrap();
+    let p = String::from_utf8(python.stdout).unwrap();
+    assert!(r.contains("lanes(project, global, action, pane, mailbox)"));
+    assert!(r.contains("start_agent(project, global, role"));
+    let strip = |text: &str| {
+        let mut skip_description = false;
+        text.lines()
+            .filter_map(|line| {
+                if skip_description {
+                    skip_description = false;
+                    return None;
+                }
+                if line.starts_with("lanes(") || line.starts_with("start_agent(") {
+                    skip_description = true;
+                    None
+                } else {
+                    Some(line.to_owned())
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(strip(&r), strip(&p));
+    for args in [&["commands", "--json"][..], &["--json", "commands"][..]] {
+        let rust = run_binary_without_command(args);
+        let python = run_python_reference(args);
+        assert!(rust.status.success() && python.status.success());
+        let mut r: Vec<Value> = serde_json::from_slice(&rust.stdout).unwrap();
+        let mut p: Vec<Value> = serde_json::from_slice(&python.stdout).unwrap();
+        for name in ["lanes", "start_agent"] {
+            let row = r.iter().find(|row| row["name"] == name).unwrap();
+            assert!(row["input_schema"]["properties"].get("project").is_some());
+            assert!(row["input_schema"]["properties"].get("global").is_some());
+        }
+        r.retain(|row| row["name"] != "lanes" && row["name"] != "start_agent");
+        p.retain(|row| row["name"] != "lanes" && row["name"] != "start_agent");
+        assert_eq!(r, p);
+    }
+    for args in [
+        &["mcp-map"][..],
+        &["mcp-map", "--json"][..],
+        &["--json", "mcp-map"][..],
+        &["mcp-map", "--markdown"][..],
+    ] {
+        let rust = run_binary_without_command(args);
+        let python = run_python_reference(args);
+        assert!(rust.status.success() && python.status.success());
+        let r = String::from_utf8(rust.stdout).unwrap();
+        let p = String::from_utf8(python.stdout).unwrap();
+        let strip_sizes = |text: &str| {
+            text.lines()
+                .filter(|line| {
+                    !line.starts_with("declared ") && !line.starts_with("- grouped schema bytes:")
+                })
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(strip_sizes(&r), strip_sizes(&p));
+    }
 }
 
 fn replace_route_option<'a>(args: &mut Vec<&'a str>, flag: &str, value: &'a str) {

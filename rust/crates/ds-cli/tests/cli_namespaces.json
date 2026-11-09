@@ -11784,6 +11784,101 @@
  },
  {
   "argv": [
+   "lane",
+   "project",
+   "x"
+  ],
+  "namespace": {
+   "command": "lane",
+   "global": false,
+   "json": false,
+   "lane_command": "project",
+   "no_start_daemon": false,
+   "pane": "x",
+   "project": null,
+   "self_pane": null,
+   "socket": null
+  }
+ },
+ {
+  "argv": [
+   "lane",
+   "project",
+   "x",
+   "--json"
+  ],
+  "namespace": {
+   "command": "lane",
+   "global": false,
+   "json": true,
+   "lane_command": "project",
+   "no_start_daemon": false,
+   "pane": "x",
+   "project": null,
+   "self_pane": null,
+   "socket": null
+  }
+ },
+ {
+  "argv": [
+   "--json",
+   "lane",
+   "project",
+   "x"
+  ],
+  "namespace": {
+   "command": "lane",
+   "global": false,
+   "json": true,
+   "lane_command": "project",
+   "no_start_daemon": false,
+   "pane": "x",
+   "project": null,
+   "self_pane": null,
+   "socket": null
+  }
+ },
+ {
+  "argv": [
+   "lane",
+   "project",
+   "x",
+   "--project",
+   "x"
+  ],
+  "namespace": {
+   "command": "lane",
+   "global": false,
+   "json": false,
+   "lane_command": "project",
+   "no_start_daemon": false,
+   "pane": "x",
+   "project": "x",
+   "self_pane": null,
+   "socket": null
+  }
+ },
+ {
+  "argv": [
+   "lane",
+   "project",
+   "x",
+   "--global"
+  ],
+  "namespace": {
+   "command": "lane",
+   "global": true,
+   "json": false,
+   "lane_command": "project",
+   "no_start_daemon": false,
+   "pane": "x",
+   "project": null,
+   "self_pane": null,
+   "socket": null
+  }
+ },
+ {
+  "argv": [
    "retired",
    "retire",
    "x",
@@ -13251,10 +13346,12 @@
    "command": "start-agent",
    "cwd": null,
    "focus": false,
+   "global": false,
    "json": false,
    "model": null,
    "name": "x",
    "no_start_daemon": false,
+   "project": null,
    "provider": null,
    "role": null,
    "self_pane": null,
@@ -13278,10 +13375,12 @@
    "command": "start-agent",
    "cwd": null,
    "focus": false,
+   "global": false,
    "json": true,
    "model": null,
    "name": "x",
    "no_start_daemon": false,
+   "project": null,
    "provider": null,
    "role": null,
    "self_pane": null,
@@ -13305,10 +13404,12 @@
    "command": "start-agent",
    "cwd": null,
    "focus": false,
+   "global": false,
    "json": true,
    "model": null,
    "name": "x",
    "no_start_daemon": false,
+   "project": null,
    "provider": null,
    "role": null,
    "self_pane": null,
@@ -13333,10 +13434,12 @@
    "command": "start-agent",
    "cwd": null,
    "focus": false,
+   "global": false,
    "json": false,
    "model": null,
    "name": "x",
    "no_start_daemon": false,
+   "project": null,
    "provider": null,
    "role": null,
    "self_pane": null,
@@ -13361,10 +13464,12 @@
    "command": "start-agent",
    "cwd": null,
    "focus": false,
+   "global": false,
    "json": false,
    "model": null,
    "name": "x",
    "no_start_daemon": false,
+   "project": null,
    "provider": null,
    "role": null,
    "self_pane": null,
@@ -13389,10 +13494,12 @@
    "command": "start-agent",
    "cwd": null,
    "focus": false,
+   "global": false,
    "json": false,
    "model": null,
    "name": "x",
    "no_start_daemon": false,
+   "project": null,
    "provider": null,
    "role": null,
    "self_pane": null,
@@ -13417,10 +13524,12 @@
    "command": "start-agent",
    "cwd": "x",
    "focus": false,
+   "global": false,
    "json": false,
    "model": null,
    "name": "x",
    "no_start_daemon": false,
+   "project": null,
    "provider": null,
    "role": null,
    "self_pane": null,
@@ -13444,10 +13553,12 @@
    "command": "start-agent",
    "cwd": null,
    "focus": true,
+   "global": false,
    "json": false,
    "model": null,
    "name": "x",
    "no_start_daemon": false,
+   "project": null,
    "provider": null,
    "role": null,
    "self_pane": null,
@@ -13472,10 +13583,12 @@
    "command": "start-agent",
    "cwd": null,
    "focus": false,
+   "global": false,
    "json": false,
    "model": null,
    "name": "x",
    "no_start_daemon": false,
+   "project": null,
    "provider": null,
    "role": "owner",
    "self_pane": null,
@@ -13500,10 +13613,12 @@
    "command": "start-agent",
    "cwd": null,
    "focus": false,
+   "global": false,
    "json": false,
    "model": null,
    "name": "x",
    "no_start_daemon": false,
+   "project": null,
    "provider": "x",
    "role": null,
    "self_pane": null,
@@ -13528,10 +13643,71 @@
    "command": "start-agent",
    "cwd": null,
    "focus": false,
+   "global": false,
    "json": false,
    "model": "x",
    "name": "x",
    "no_start_daemon": false,
+   "project": null,
+   "provider": null,
+   "role": null,
+   "self_pane": null,
+   "socket": null,
+   "split": null,
+   "tab": null,
+   "workspace": null
+  }
+ },
+ {
+  "argv": [
+   "start-agent",
+   "x",
+   "x",
+   "--project",
+   "x"
+  ],
+  "namespace": {
+   "argv": [
+    "x"
+   ],
+   "command": "start-agent",
+   "cwd": null,
+   "focus": false,
+   "global": false,
+   "json": false,
+   "model": null,
+   "name": "x",
+   "no_start_daemon": false,
+   "project": "x",
+   "provider": null,
+   "role": null,
+   "self_pane": null,
+   "socket": null,
+   "split": null,
+   "tab": null,
+   "workspace": null
+  }
+ },
+ {
+  "argv": [
+   "start-agent",
+   "x",
+   "x",
+   "--global"
+  ],
+  "namespace": {
+   "argv": [
+    "x"
+   ],
+   "command": "start-agent",
+   "cwd": null,
+   "focus": false,
+   "global": true,
+   "json": false,
+   "model": null,
+   "name": "x",
+   "no_start_daemon": false,
+   "project": null,
    "provider": null,
    "role": null,
    "self_pane": null,
