@@ -41,3 +41,7 @@ path = "src/bin/dunk-codex-turn.rs"
 [[bin]]
 name = "dunk-claude-turn"
 path = "src/bin/dunk-claude-turn.rs"
+
+[[bin]]
+name = "dunk-codex-install"
+path = "src/bin/dunk-codex-install.rs"
