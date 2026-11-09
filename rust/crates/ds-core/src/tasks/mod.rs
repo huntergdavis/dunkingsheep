@@ -26,6 +26,7 @@ use serde_json::{json, Value as JsonValue};
 pub mod lane_project;
 pub mod metrics;
 pub mod owner_answer;
+pub mod planner_scope;
 pub mod project_policy;
 
 use crate::db;
@@ -1021,6 +1022,18 @@ impl Tasks {
         mode: &str,
         planner_author_guard: bool,
     ) -> Result<Task, DunkError> {
+        self.assign_with_planner_scope(id, assignees, mode, planner_author_guard, None)
+            .await
+    }
+
+    pub(crate) async fn assign_with_planner_scope(
+        &self,
+        id: &str,
+        assignees: &[&str],
+        mode: &str,
+        planner_author_guard: bool,
+        planner: Option<planner_scope::PlannerIdentity>,
+    ) -> Result<Task, DunkError> {
         let incoming: Vec<String> = assignees
             .iter()
             .map(|item| item.trim().to_string())
@@ -1049,6 +1062,15 @@ impl Tasks {
                 let tx = conn
                     .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                     .map_err(db::map_sqlite)?;
+                if let Some(planner) = &planner {
+                    if !planner_scope::allows(&tx, &planner.pane, planner.pid, &planner.start, &id)
+                        .map_err(db::map_sqlite)? {
+                        return Err(DunkError::Refused("planner grant does not authorize this task".into()));
+                    }
+                    if !planner_scope::recipients_allowed(&tx, planner).map_err(db::map_sqlite)? {
+                        return Err(DunkError::Refused("planner recipient is not in the granted project".into()));
+                    }
+                }
                 type AssignmentRow = (String, String, Option<String>, String, Option<String>, Option<String>, Option<i64>);
                 let (scope, priority, raw, kind, author, repo, pr): AssignmentRow = tx
                     .query_row(
@@ -1059,6 +1081,9 @@ impl Tasks {
                     .optional()
                     .map_err(db::map_sqlite)?
                     .ok_or_else(|| DunkError::Refused(format!("no task with id {id:?}")))?;
+                if planner.as_ref().and_then(|p| p.expected_kind.as_deref()).is_some_and(|expected| expected != kind) {
+                    return Err(DunkError::Refused("task kind changed during planner assignment".into()));
+                }
                 // Point-in-time explicit pane-ID check only; this does not establish
                 // independence or guard missing/subsequently changed provenance.
                 if planner_author_guard && mode != "remove" && kind == "review" {
@@ -1199,7 +1224,7 @@ impl Tasks {
         status: Option<&str>,
         actor: Option<&str>,
     ) -> Result<Task, DunkError> {
-        self.update_with_status_and_raw_block_reason(id, edit, status, actor, None)
+        self.update_with_status_and_raw_block_reason(id, edit, status, actor, None, None)
             .await
     }
 
@@ -1210,6 +1235,7 @@ impl Tasks {
         status: Option<&str>,
         actor: Option<&str>,
         raw_block_reason: Option<Option<JsonValue>>,
+        dependency_editor: Option<planner_scope::DependencyEditor>,
     ) -> Result<Task, DunkError> {
         if let Some(title) = &edit.title {
             if title.trim().is_empty() {
@@ -1232,6 +1258,13 @@ impl Tasks {
                     .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                     .map_err(db::map_sqlite)?;
                 let id = wanted.clone();
+                if edit_for_call.depends_on.is_some() {
+                    if let Some(editor) = &dependency_editor {
+                        if !planner_scope::dependency_edit_allowed(&tx, &id, editor).map_err(db::map_sqlite)? {
+                            return Err(DunkError::Refused("dependency edits require a planner grant for this project".into()));
+                        }
+                    }
+                }
                 let (scope, old_priority, old_deps, old_assignees, old_status, created_at):
                     (String, String, Option<String>, Option<String>, String, f64) = tx
                     .query_row(
@@ -2028,6 +2061,11 @@ fn is_terminal(status: &str) -> bool {
     matches!(status, "done" | "cancelled")
 }
 
+/// Cancelled and done-and-landed dependencies are satisfied; done but unlanded still blocks.
+fn dependency_blocks(status: &str, landed: bool) -> bool {
+    status != "cancelled" && (status != "done" || !landed)
+}
+
 /// A status after which the CLAIM is over, terminal or not (`_end_claim`, t872).
 ///
 /// `blocked` belongs here and not in `is_terminal`: a blocked task must be unblockable,
@@ -2103,6 +2141,7 @@ fn migrate(conn: &Connection) -> Result<(), DunkError> {
                 .map_err(db::map_sqlite)?;
         }
     }
+    planner_scope::migrate(conn).map_err(db::map_sqlite)?;
     // t1018 finding 4: the SCHEMA comment cites the CoS's twelve duplicate reviews of
     // PR #117 as the reason for this index, and the index was not created - a fresh store
     // had NO indexes at all. Every index and the counters table the Python's _migrate
@@ -2530,10 +2569,10 @@ fn dependency_state_conn(
                 if dep_status == "cancelled" {
                     state.dead_dependencies.push(dep.clone());
                     cancelled.push(dep.clone());
-                } else if dep_status == "done" && !landed {
-                    state.unlanded_dependencies.push(dep.clone());
-                    state.blocked_by.push(dep.clone());
-                } else if dep_status != "done" {
+                } else if dependency_blocks(&dep_status, landed) {
+                    if dep_status == "done" {
+                        state.unlanded_dependencies.push(dep.clone());
+                    }
                     state.blocked_by.push(dep.clone());
                 }
             }

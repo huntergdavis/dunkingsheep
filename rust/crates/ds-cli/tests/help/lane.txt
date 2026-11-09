@@ -8,6 +8,7 @@ positional arguments:
     unregister  remove a pane's role binding (owner only)
     set         declare who a pane IS (superuser); overrides any title
     project     query or set a lane's explicit project membership
+    planner     owner-controlled planner grants and task project scope
 
 options:
   -h, --help    show this help message and exit

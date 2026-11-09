@@ -11879,6 +11879,155 @@
  },
  {
   "argv": [
+   "lane",
+   "planner",
+   "grant"
+  ],
+  "namespace": {
+   "command": "lane",
+   "global": false,
+   "json": false,
+   "lane_command": "planner",
+   "no_start_daemon": false,
+   "operation": "grant",
+   "pane": null,
+   "project": null,
+   "self_pane": null,
+   "socket": null,
+   "task": null
+  }
+ },
+ {
+  "argv": [
+   "lane",
+   "planner",
+   "grant",
+   "--json"
+  ],
+  "namespace": {
+   "command": "lane",
+   "global": false,
+   "json": true,
+   "lane_command": "planner",
+   "no_start_daemon": false,
+   "operation": "grant",
+   "pane": null,
+   "project": null,
+   "self_pane": null,
+   "socket": null,
+   "task": null
+  }
+ },
+ {
+  "argv": [
+   "--json",
+   "lane",
+   "planner",
+   "grant"
+  ],
+  "namespace": {
+   "command": "lane",
+   "global": false,
+   "json": true,
+   "lane_command": "planner",
+   "no_start_daemon": false,
+   "operation": "grant",
+   "pane": null,
+   "project": null,
+   "self_pane": null,
+   "socket": null,
+   "task": null
+  }
+ },
+ {
+  "argv": [
+   "lane",
+   "planner",
+   "grant",
+   "--pane",
+   "x"
+  ],
+  "namespace": {
+   "command": "lane",
+   "global": false,
+   "json": false,
+   "lane_command": "planner",
+   "no_start_daemon": false,
+   "operation": "grant",
+   "pane": "x",
+   "project": null,
+   "self_pane": null,
+   "socket": null,
+   "task": null
+  }
+ },
+ {
+  "argv": [
+   "lane",
+   "planner",
+   "grant",
+   "--project",
+   "x"
+  ],
+  "namespace": {
+   "command": "lane",
+   "global": false,
+   "json": false,
+   "lane_command": "planner",
+   "no_start_daemon": false,
+   "operation": "grant",
+   "pane": null,
+   "project": "x",
+   "self_pane": null,
+   "socket": null,
+   "task": null
+  }
+ },
+ {
+  "argv": [
+   "lane",
+   "planner",
+   "grant",
+   "--global"
+  ],
+  "namespace": {
+   "command": "lane",
+   "global": true,
+   "json": false,
+   "lane_command": "planner",
+   "no_start_daemon": false,
+   "operation": "grant",
+   "pane": null,
+   "project": null,
+   "self_pane": null,
+   "socket": null,
+   "task": null
+  }
+ },
+ {
+  "argv": [
+   "lane",
+   "planner",
+   "grant",
+   "--task",
+   "x"
+  ],
+  "namespace": {
+   "command": "lane",
+   "global": false,
+   "json": false,
+   "lane_command": "planner",
+   "no_start_daemon": false,
+   "operation": "grant",
+   "pane": null,
+   "project": null,
+   "self_pane": null,
+   "socket": null,
+   "task": "x"
+  }
+ },
+ {
+  "argv": [
    "retired",
    "retire",
    "x",

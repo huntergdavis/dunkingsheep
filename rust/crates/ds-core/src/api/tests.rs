@@ -1818,6 +1818,7 @@ fn h_lanes_matches_python() {
         .unwrap(),
         listed
     );
+    // The Rust-only planner action extends the archived Python lane API.
     assert_eq!(
         refusal(dispatch_as_flock_role(
             &dispatcher,
@@ -1827,7 +1828,7 @@ fn h_lanes_matches_python() {
             "lanes",
             args(json!({"action":"remove"})),
         )),
-        "lanes action must be list, set or project"
+        "lanes action must be list, set, project or planner"
     );
 
     let set = dispatch_as_flock_role(

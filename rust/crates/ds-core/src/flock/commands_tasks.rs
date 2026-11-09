@@ -715,7 +715,7 @@ impl Flock {
         args: TaskUpdateArgs<'_>,
         self_pane_id: Option<&str>,
     ) -> Result<Task, DunkError> {
-        self.task_update_with_raw_block_reason(task_id, args, None, self_pane_id)
+        self.task_update_with_raw_block_reason(task_id, args, None, self_pane_id, None)
             .await
     }
 
@@ -725,6 +725,7 @@ impl Flock {
         args: TaskUpdateArgs<'_>,
         raw_block_reason: Option<Option<serde_json::Value>>,
         self_pane_id: Option<&str>,
+        dependency_editor: Option<crate::tasks::planner_scope::DependencyEditor>,
     ) -> Result<Task, DunkError> {
         let tasks = self.task_store()?;
         self.visible_task(&tasks, task_id, self_pane_id).await?;
@@ -750,6 +751,7 @@ impl Flock {
                 args.status,
                 self_pane_id,
                 raw_block_reason,
+                dependency_editor,
             )
             .await
     }
@@ -824,6 +826,7 @@ impl Flock {
             || Ok(mode.to_string()),
             self_pane_id,
             false,
+            None,
         )
         .await
     }
@@ -835,6 +838,7 @@ impl Flock {
         parse_mode: F,
         self_pane_id: Option<&str>,
         planner_author_guard: bool,
+        planner: Option<crate::tasks::planner_scope::PlannerIdentity>,
     ) -> Result<Task, DunkError>
     where
         F: FnOnce() -> Result<String, DunkError>,
@@ -849,7 +853,7 @@ impl Flock {
         }
         let mode = parse_mode()?;
         tasks
-            .assign_with_planner_author_guard(task_id, &refs, &mode, planner_author_guard)
+            .assign_with_planner_scope(task_id, &refs, &mode, planner_author_guard, planner)
             .await
     }
 

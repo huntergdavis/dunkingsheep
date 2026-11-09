@@ -2682,6 +2682,14 @@ pub fn h_lanes(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkEr
         context.flock.invalidate_view();
         return Ok(result);
     }
+    if action == "planner" {
+        context
+            .flock
+            .require_superuser(context.self_pane_id(), "planner scope", context.env)?;
+        return context
+            .flock
+            .planner_scope_admin(context.env, &Value::Object(args.clone()));
+    }
     if action == "project" {
         let pane = args
             .get("pane")
@@ -2729,7 +2737,7 @@ pub fn h_lanes(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkEr
     }
     if action != "list" {
         return Err(DunkError::Refused(
-            "lanes action must be list, set or project".into(),
+            "lanes action must be list, set, project or planner".into(),
         ));
     }
     let mut rows = context.flock.lanes();
@@ -3245,11 +3253,28 @@ pub fn h_task_update(context: &HandlerContext<'_>, args: Args) -> Result<Value, 
             .then(|| python_bool_arg(&args, "multi_assignee", false)),
     };
     let id = args.get("id").map(python_value_string).unwrap_or_default();
+    let dependency_editor = if depends_on.is_some()
+        && !matches!(role.as_str(), "owner" | "system" | "web")
+        && context.request.socket_peer.is_some()
+    {
+        if role == "planner" {
+            let planner = require_planner_assignment_binding(context)?
+                .ok_or_else(|| DunkError::Refused("planner identity is required".into()))?;
+            Some(crate::tasks::planner_scope::DependencyEditor::Planner(
+                planner,
+            ))
+        } else {
+            Some(crate::tasks::planner_scope::DependencyEditor::Other)
+        }
+    } else {
+        None
+    };
     let task = context.block_on(context.flock.task_update_wire_with_raw_block_reason(
         &id,
         update,
         raw_block_reason,
         pane,
+        dependency_editor,
     ))??;
     Ok(task.wire)
 }
@@ -3259,14 +3284,16 @@ pub fn h_task_update(context: &HandlerContext<'_>, args: Args) -> Result<Value, 
 /// This is a point-in-time process identity check, not a project grant or an
 /// atomic role-revocation guarantee. A process death overlapping the check may
 /// occur after a successful check; old daemons do not enforce this check.
-fn require_planner_assignment_binding(context: &HandlerContext<'_>) -> Result<(), DunkError> {
+fn require_planner_assignment_binding(
+    context: &HandlerContext<'_>,
+) -> Result<Option<crate::tasks::planner_scope::PlannerIdentity>, DunkError> {
     let refused = || {
         DunkError::Refused(
             "planner task assignment requires an authenticated live pane binding".into(),
         )
     };
     match context.request.socket_peer {
-        None => return Ok(()), // Existing trusted in-process callers have no socket identity.
+        None => return Ok(None), // Existing trusted in-process callers have no socket identity.
         Some(true) if context.request.identity_bound == Some(true) => {}
         _ => return Err(refused()),
     }
@@ -3307,7 +3334,13 @@ fn require_planner_assignment_binding(context: &HandlerContext<'_>) -> Result<()
     {
         return Err(refused());
     }
-    Ok(())
+    Ok(Some(crate::tasks::planner_scope::PlannerIdentity {
+        pane: pane.to_owned(),
+        pid,
+        start: stored_start.to_owned(),
+        recipients: Vec::new(),
+        expected_kind: None,
+    }))
 }
 
 /// `dunk_api.h_task_assign`.
@@ -3319,9 +3352,11 @@ pub fn h_task_assign(context: &HandlerContext<'_>, args: Args) -> Result<Value, 
             "task assign requires the owner role (caller is {role}); lanes pull work with task next, they are not handed it"
         )));
     }
-    if role == "planner" {
-        require_planner_assignment_binding(context)?;
-    }
+    let mut planner = if role == "planner" {
+        require_planner_assignment_binding(context)?
+    } else {
+        None
+    };
     let values = task_values(args.get("assignees"));
     let assignees = values
         .as_ref()
@@ -3329,6 +3364,35 @@ pub fn h_task_assign(context: &HandlerContext<'_>, args: Args) -> Result<Value, 
         .unwrap_or_default();
     let mode_value = args.get("mode").filter(|value| truthy(value));
     let id = args.get("id").map(python_value_string).unwrap_or_default();
+    if let Some(planner_identity) = planner.as_mut().filter(|_| {
+        !mode_value
+            .and_then(Value::as_str)
+            .is_some_and(|m| matches!(m.trim().to_lowercase().as_str(), "remove" | "rm"))
+    }) {
+        let task = context.block_on(context.flock.task_read(&id, pane))??;
+        planner_identity.expected_kind = Some(task.kind.clone());
+        let expected = if task.kind == "review" {
+            "reviewer"
+        } else {
+            "worker"
+        };
+        for target in crate::flock::Flock::task_assignees(&assignees, pane)? {
+            let actual = context.flock.caller_role(Some(&target), context.env)?;
+            if actual != expected {
+                return Err(DunkError::Refused(format!(
+                    "planner assignment requires a registered {expected} recipient"
+                )));
+            }
+            let (pid, start) = crate::flock::lane_project::identity(context.env, &target)?;
+            planner_identity
+                .recipients
+                .push(crate::tasks::planner_scope::RecipientIdentity {
+                    pane: target,
+                    pid,
+                    start,
+                });
+        }
+    }
     let task = context.block_on(context.flock.task_assign_wire_with_mode_parser(
         &id,
         &assignees,
@@ -3342,6 +3406,7 @@ pub fn h_task_assign(context: &HandlerContext<'_>, args: Args) -> Result<Value, 
         },
         pane,
         role == "planner",
+        planner,
     ))??;
     Ok(task.wire)
 }
