@@ -2183,6 +2183,47 @@ where
     G: ReviewPolicy + ReviewRepoConfig,
     X: GitHubTransport,
 {
+    async fn branch_task_authors(
+        &self,
+        repo: &str,
+        pr: &ReviewPull,
+    ) -> Result<Vec<String>, String> {
+        let component = pr.branch.split('/').next_back().unwrap_or_default();
+        let task_id = component.split('-').next().unwrap_or_default();
+        let Some(digits) = task_id.strip_prefix('t') else {
+            return Ok(Vec::new());
+        };
+        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return Ok(Vec::new());
+        }
+        let task = self.flock.full_task_wire(task_id).await?;
+        if task.typed.kind == "review" {
+            return Ok(Vec::new());
+        }
+        let notes = self.flock.notes(task_id).await?;
+        let url = format!("https://github.com/{repo}/pull/{}", pr.number);
+        let mut authors = std::collections::BTreeSet::new();
+        for note in notes {
+            let Some(actor) = note.actor else { continue };
+            let tokens = note
+                .text
+                .split_whitespace()
+                .map(|word| {
+                    word.trim_matches(|c: char| {
+                        matches!(c, '(' | ')' | '[' | ']' | ',' | ';' | ':')
+                    })
+                })
+                .collect::<Vec<_>>();
+            if task.decorated.assignees.contains(&actor)
+                && tokens.contains(&url.as_str())
+                && tokens.contains(&pr.head.as_str())
+            {
+                authors.insert(actor);
+            }
+        }
+        Ok(authors.into_iter().collect())
+    }
+
     async fn reconcile_terminal_status(
         &self,
         repo: &str,
@@ -2302,14 +2343,6 @@ where
                 return Ok(report);
             }
         };
-        let lanes = self
-            .flock
-            .lane_labels()
-            .map_err(|error| format!("review lane snapshot: {error}"))?;
-        let mints = self
-            .flock
-            .author_token_mints()
-            .map_err(|error| format!("author token mint snapshot: {error}"))?;
         let initial_rows = self.flock.list_review_rows().await?;
         let mut live = Vec::new();
         for row in initial_rows {
@@ -2490,16 +2523,22 @@ where
                     continue;
                 }
 
-                let mut author =
-                    attribute_author_at(Some(&pr.branch), pr.created_at.as_deref(), &lanes, &mints);
-                if author.is_none() {
-                    author = author_from_tasks(self.flock.authors_of(&repo, pr.number).await);
-                }
-                if author.is_none() {
-                    author = self
-                        .github
-                        .author_from_mints(crate::clock::now_s() - 1800.0)?;
-                }
+                let authors = self.flock.authors_of(&repo, pr.number).await;
+                let author = match authors {
+                    Ok(authors) => {
+                        // Combine explicit records; disagreement remains unknown.
+                        let mut authors: std::collections::BTreeSet<_> =
+                            authors.into_iter().collect();
+                        match self.branch_task_authors(&repo, &pr).await {
+                            Ok(from_note) => {
+                                authors.extend(from_note);
+                                (authors.len() == 1).then(|| authors.into_iter().next().unwrap())
+                            }
+                            Err(_) => None,
+                        }
+                    }
+                    Err(_) => None,
+                };
                 let detail = self
                     .raw_pull_detail(&repo, pr.number, &token)
                     .await
@@ -2737,31 +2776,6 @@ fn verdict_lanes(rows: &[ReviewTaskRow]) -> (Vec<String>, Vec<String>) {
         accepts.into_iter().collect(),
         needs_fix.into_iter().collect(),
     )
-}
-
-fn attribute_author_at(
-    branch: Option<&str>,
-    created_at: Option<&str>,
-    lanes: &[(String, String)],
-    mints: &[(String, f64)],
-) -> Option<String> {
-    let branch = branch.unwrap_or_default().to_lowercase();
-    for (pane, label) in lanes {
-        let label = label.trim().to_lowercase();
-        if !label.is_empty()
-            && (branch.starts_with(&format!("{label}/"))
-                || branch.starts_with(&format!("{label}-")))
-        {
-            return Some(pane.clone());
-        }
-    }
-    let created = _iso(created_at)? as f64;
-    let recent = mints
-        .iter()
-        .filter(|(_, minted)| *minted <= created && created - *minted < 2.0 * 60.0 * 60.0)
-        .map(|(pane, _)| pane)
-        .collect::<Vec<_>>();
-    (recent.len() == 1).then(|| recent[0].clone())
 }
 
 fn python_repr_value(value: Option<&Value>) -> String {
