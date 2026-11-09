@@ -1847,6 +1847,47 @@ fn h_lanes_matches_python() {
 }
 
 #[test]
+fn planner_repo_mapping_requires_owner() {
+    let (_dir, flock) = staffed_flock("api-planner-repo-mapping");
+    let env = ParityEnv::new(Some(std::process::id() as i64));
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_lanes();
+    let set = json!({"action":"planner", "operation":"repo-project", "repo":"example/one", "project":"alpha"});
+    assert!(dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w2:p2"),
+        "lanes",
+        args(set.clone())
+    )
+    .is_err());
+    assert!(
+        dispatch_as_flock_role(&dispatcher, &flock, &env, Some("w1:p1"), "lanes", args(set))
+            .is_ok()
+    );
+    let revoke = json!({"action":"planner", "operation":"repo-revoke", "repo":"example/one"});
+    assert!(dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w2:p2"),
+        "lanes",
+        args(revoke.clone())
+    )
+    .is_err());
+    assert!(dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p1"),
+        "lanes",
+        args(revoke)
+    )
+    .is_ok());
+}
+
+#[test]
 fn h_lane_set_invalidates_cached_status_view() {
     let (_dir, flock) = staffed_flock("api-lane-set");
     let env = ParityEnv::new(Some(std::process::id() as i64));
