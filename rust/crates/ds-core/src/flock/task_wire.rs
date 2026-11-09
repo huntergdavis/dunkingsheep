@@ -54,6 +54,7 @@ impl Flock {
             || Ok(mode.to_string()),
             self_pane_id,
             false,
+            None,
         )
         .await
     }
@@ -65,6 +66,7 @@ impl Flock {
         parse_mode: F,
         self_pane_id: Option<&str>,
         planner_author_guard: bool,
+        planner: Option<crate::tasks::planner_scope::PlannerIdentity>,
     ) -> Result<TaskWire, DunkError>
     where
         F: FnOnce() -> Result<String, DunkError>,
@@ -76,6 +78,7 @@ impl Flock {
                 parse_mode,
                 self_pane_id,
                 planner_author_guard,
+                planner,
             )
             .await?;
         self.task_store()?

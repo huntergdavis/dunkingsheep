@@ -824,6 +824,7 @@ impl Flock {
             || Ok(mode.to_string()),
             self_pane_id,
             false,
+            None,
         )
         .await
     }
@@ -835,6 +836,7 @@ impl Flock {
         parse_mode: F,
         self_pane_id: Option<&str>,
         planner_author_guard: bool,
+        planner: Option<crate::tasks::planner_scope::PlannerIdentity>,
     ) -> Result<Task, DunkError>
     where
         F: FnOnce() -> Result<String, DunkError>,
@@ -849,7 +851,7 @@ impl Flock {
         }
         let mode = parse_mode()?;
         tasks
-            .assign_with_planner_author_guard(task_id, &refs, &mode, planner_author_guard)
+            .assign_with_planner_scope(task_id, &refs, &mode, planner_author_guard, planner)
             .await
     }
 

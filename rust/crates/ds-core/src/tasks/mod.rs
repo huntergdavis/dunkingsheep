@@ -26,6 +26,7 @@ use serde_json::{json, Value as JsonValue};
 pub mod lane_project;
 pub mod metrics;
 pub mod owner_answer;
+pub mod planner_scope;
 pub mod project_policy;
 
 use crate::db;
@@ -1021,6 +1022,18 @@ impl Tasks {
         mode: &str,
         planner_author_guard: bool,
     ) -> Result<Task, DunkError> {
+        self.assign_with_planner_scope(id, assignees, mode, planner_author_guard, None)
+            .await
+    }
+
+    pub(crate) async fn assign_with_planner_scope(
+        &self,
+        id: &str,
+        assignees: &[&str],
+        mode: &str,
+        planner_author_guard: bool,
+        planner: Option<planner_scope::PlannerIdentity>,
+    ) -> Result<Task, DunkError> {
         let incoming: Vec<String> = assignees
             .iter()
             .map(|item| item.trim().to_string())
@@ -1049,6 +1062,12 @@ impl Tasks {
                 let tx = conn
                     .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                     .map_err(db::map_sqlite)?;
+                if let Some(planner) = &planner {
+                    if !planner_scope::allows(&tx, &planner.pane, planner.pid, &planner.start, &id)
+                        .map_err(db::map_sqlite)? {
+                        return Err(DunkError::Refused("planner grant does not authorize this task".into()));
+                    }
+                }
                 type AssignmentRow = (String, String, Option<String>, String, Option<String>, Option<String>, Option<i64>);
                 let (scope, priority, raw, kind, author, repo, pr): AssignmentRow = tx
                     .query_row(
@@ -2103,6 +2122,7 @@ fn migrate(conn: &Connection) -> Result<(), DunkError> {
                 .map_err(db::map_sqlite)?;
         }
     }
+    planner_scope::migrate(conn).map_err(db::map_sqlite)?;
     // t1018 finding 4: the SCHEMA comment cites the CoS's twelve duplicate reviews of
     // PR #117 as the reason for this index, and the index was not created - a fresh store
     // had NO indexes at all. Every index and the counters table the Python's _migrate

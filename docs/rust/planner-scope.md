@@ -1,0 +1,7 @@
+# Planner assignment scope (draft)
+
+An owner explicitly grants a live planner pane a scope with `dunkingsheep lane planner grant --pane %9 --global` or `--project PROJECT`. Global membership alone does not grant planner authority. Revoke with `lane planner revoke --pane %9`; a restarted pane needs a new grant.
+
+Associate a task with a project using `lane planner task-project --task t123 --project PROJECT`. For a global prerequisite, first add it as a direct dependency of an associated project task, then approve it with `lane planner blocker --task t123 --blocker t456`. The approval is invalidated when its dependency, scope, task or association changes. A project planner can assign associated work or an approved, still-current global blocker. A global planner can assign global work without a project association. Missing grants deny scoped planner assignments. Owner and service paths retain existing behavior.
+
+The grant check and assignment use the same SQLite write transaction. Live role and process checks are point-in-time. This first slice does not fence older daemons, make role-file changes atomic with assignment, resolve task visibility restrictions, or prove reviewer independence. Trusted in-process calls without a socket identity retain existing behavior. Recipient role and project membership enforcement require separate work. Do not claim deployment-wide enforcement while an old daemon can write the database.

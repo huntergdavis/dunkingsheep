@@ -2408,6 +2408,20 @@ pub static ROOT: Cmd = Cmd {
                     subs: &[
                     ],
                 },
+                Cmd {
+                    name: "planner", aliases: &[],
+                    help: Some("owner-controlled planner grants and task project scope"),
+                    raw: false, raw_text: false, about: None, epilog: None,
+                    args: &[
+                        Arg { id: "operation", dest: "operation", tri: false, default_int: false, flags: &[], positional: true, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &["grant", "revoke", "task-project", "blocker"], default: None, required: true, help: None, hidden: false, metavar: None, version: None },
+                        Arg { id: "pane", dest: "pane", tri: false, default_int: false, flags: &["--pane"], positional: false, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &[], default: None, required: false, help: None, hidden: false, metavar: None, version: None },
+                        Arg { id: "project", dest: "project", tri: false, default_int: false, flags: &["--project"], positional: false, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &[], default: None, required: false, help: None, hidden: false, metavar: None, version: None },
+                        Arg { id: "global", dest: "global", tri: false, default_int: false, flags: &["--global"], positional: false, kind: Kind::StoreTrue, ty: Ty::Str, nargs: Nargs::Zero, choices: &[], default: None, required: false, help: None, hidden: false, metavar: None, version: None },
+                        Arg { id: "task", dest: "task", tri: false, default_int: false, flags: &["--task"], positional: false, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &[], default: None, required: false, help: None, hidden: false, metavar: None, version: None },
+                        Arg { id: "blocker", dest: "blocker", tri: false, default_int: false, flags: &["--blocker"], positional: false, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &[], default: None, required: false, help: None, hidden: false, metavar: None, version: None },
+                    ],
+                    groups: &[], sub_dest: None, sub_metavar: None, sub_required: false, subs: &[],
+                },
             ],
         },
         Cmd {

@@ -39,6 +39,65 @@ impl Flock {
             .map_err(failure)?;
         Ok(db)
     }
+    /// The API authenticates the owner before invoking this operation.
+    pub fn planner_scope_admin(
+        &self,
+        env: &dyn PaneInfoEnv,
+        args: &Value,
+    ) -> Result<Value, DunkError> {
+        let field = |key: &str| {
+            args.get(key)
+                .and_then(Value::as_str)
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| failure(format!("{key} is required")))
+        };
+        let operation = field("operation")?;
+        let binding = if operation == "grant" {
+            Some(identity(env, field("pane")?)?)
+        } else {
+            None
+        };
+        let mut db = self.project_connection()?;
+        let tx = db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(failure)?;
+        match operation {
+            "grant" => {
+                let pane = field("pane")?;
+                let (pid, start) = binding.as_ref().expect("grant identity captured");
+                let scope = match args.get("project").and_then(Value::as_str) {
+                    Some(project) => ProjectScope::Project(project.to_owned()),
+                    None if args.get("global").and_then(Value::as_bool) == Some(true) => {
+                        ProjectScope::Global
+                    }
+                    _ => return Err(failure("choose a project or global grant")),
+                };
+                if args.get("global").and_then(Value::as_bool) == Some(true)
+                    && args.get("project").is_some_and(|value| !value.is_null())
+                {
+                    return Err(failure("choose a project or global grant"));
+                }
+                crate::tasks::planner_scope::set_grant(&tx, pane, *pid, start, &scope)
+                    .map_err(failure)?;
+            }
+            "revoke" => {
+                crate::tasks::planner_scope::revoke_grant(&tx, field("pane")?).map_err(failure)?
+            }
+            "task-project" => crate::tasks::planner_scope::set_task_project(
+                &tx,
+                field("task")?,
+                field("project")?,
+            )
+            .map_err(failure)?,
+            "blocker" => {
+                crate::tasks::planner_scope::approve_blocker(&tx, field("task")?, field("blocker")?)
+                    .map_err(failure)?
+            }
+            _ => return Err(failure("unknown planner scope operation")),
+        }
+        tx.commit().map_err(failure)?;
+        Ok(json!({"ok":true,"operation":operation}))
+    }
     /// Look up a currently live pane. A changed process or missing binding is unknown.
     pub fn lane_project(
         &self,

@@ -947,6 +947,25 @@ fn lane(ns: &Map<String, Value>) -> Outcome {
     type LanePrinter = Box<dyn Fn(&Value) -> String>;
     let action = text(ns, "lane_command").unwrap_or("list");
     let (rpc, args, printer): (&str, Map<String, Value>, LanePrinter) = match action {
+        "planner" => {
+            let mut args = Map::new();
+            args.insert("action".into(), Value::String("planner".into()));
+            for key in ["operation", "pane", "project", "global", "task", "blocker"] {
+                if let Some(value) = ns.get(key).filter(|value| !value.is_null()) {
+                    args.insert(key.into(), value.clone());
+                }
+            }
+            (
+                "lanes",
+                args,
+                Box::new(|result| {
+                    format!(
+                        "planner scope {}\n",
+                        crate::render_fleet::py_str(&result["operation"])
+                    )
+                }),
+            )
+        }
         "project" => {
             let mut args = Map::new();
             args.insert("action".into(), Value::String("project".into()));
