@@ -74,6 +74,7 @@ pub mod terminal;
 pub(crate) mod testsupport;
 pub mod unicode_casefold;
 pub mod usage;
+pub mod claude_usage;
 pub mod usage_providers;
 pub mod watchdog;
 pub mod watchdog_deadman;
