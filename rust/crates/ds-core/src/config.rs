@@ -197,7 +197,7 @@ impl Env {
             if !ENV_VARS.contains(&key.as_str())
                 && !matches!(
                     key.as_str(),
-                    "HOME" | "USERPROFILE" | "DUNKINGSHEEP_VERSION"
+                    "HOME" | "USERPROFILE" | "PATH" | "DUNKINGSHEEP_VERSION"
                 )
             {
                 continue;
