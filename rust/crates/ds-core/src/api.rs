@@ -3346,11 +3346,11 @@ pub fn h_task_assign(context: &HandlerContext<'_>, args: Args) -> Result<Value, 
         .unwrap_or_default();
     let mode_value = args.get("mode").filter(|value| truthy(value));
     let id = args.get("id").map(python_value_string).unwrap_or_default();
-    if planner.is_some()
-        && !mode_value
+    if let Some(planner_identity) = planner.as_mut().filter(|_| {
+        !mode_value
             .and_then(Value::as_str)
             .is_some_and(|m| matches!(m.trim().to_lowercase().as_str(), "remove" | "rm"))
-    {
+    }) {
         let task = context.block_on(context.flock.task_read(&id, pane))??;
         let expected = if task.kind == "review" {
             "reviewer"
@@ -3365,9 +3365,7 @@ pub fn h_task_assign(context: &HandlerContext<'_>, args: Args) -> Result<Value, 
                 )));
             }
             let (pid, start) = crate::flock::lane_project::identity(context.env, &target)?;
-            planner
-                .as_mut()
-                .expect("planner identity checked")
+            planner_identity
                 .recipients
                 .push(crate::tasks::planner_scope::RecipientIdentity {
                     pane: target,
