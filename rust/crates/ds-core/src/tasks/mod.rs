@@ -1081,6 +1081,9 @@ impl Tasks {
                     .optional()
                     .map_err(db::map_sqlite)?
                     .ok_or_else(|| DunkError::Refused(format!("no task with id {id:?}")))?;
+                if planner.as_ref().and_then(|p| p.expected_kind.as_deref()).is_some_and(|expected| expected != kind) {
+                    return Err(DunkError::Refused("task kind changed during planner assignment".into()));
+                }
                 // Point-in-time explicit pane-ID check only; this does not establish
                 // independence or guard missing/subsequently changed provenance.
                 if planner_author_guard && mode != "remove" && kind == "review" {

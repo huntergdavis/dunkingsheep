@@ -3322,6 +3322,7 @@ fn require_planner_assignment_binding(
         pid,
         start: stored_start.to_owned(),
         recipients: Vec::new(),
+        expected_kind: None,
     }))
 }
 
@@ -3352,6 +3353,7 @@ pub fn h_task_assign(context: &HandlerContext<'_>, args: Args) -> Result<Value, 
             .is_some_and(|m| matches!(m.trim().to_lowercase().as_str(), "remove" | "rm"))
     }) {
         let task = context.block_on(context.flock.task_read(&id, pane))??;
+        planner_identity.expected_kind = Some(task.kind.clone());
         let expected = if task.kind == "review" {
             "reviewer"
         } else {

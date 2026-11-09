@@ -12,6 +12,7 @@ pub struct PlannerIdentity {
     pub pid: i64,
     pub start: String,
     pub recipients: Vec<RecipientIdentity>,
+    pub expected_kind: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -203,10 +204,21 @@ mod tests {
                 pid: 33,
                 start: "recipient".into(),
             }],
+            expected_kind: Some("work".into()),
         };
         tasks
             .assign_with_planner_scope(&project.id, &["%3"], "add", true, Some(planner.clone()))
             .await
+            .unwrap();
+        db.execute("UPDATE tasks SET kind='review' WHERE id=?1", [&project.id])
+            .unwrap();
+        let error = tasks
+            .assign_with_planner_scope(&project.id, &["%3"], "add", true, Some(planner.clone()))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("task kind changed"), "{error}");
+        db.execute("UPDATE tasks SET kind='work' WHERE id=?1", [&project.id])
             .unwrap();
         assert!(tasks
             .assign_with_planner_scope(&unrelated.id, &["%3"], "add", true, Some(planner.clone()))
