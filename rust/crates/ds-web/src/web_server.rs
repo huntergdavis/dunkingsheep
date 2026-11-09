@@ -51,7 +51,10 @@ use std::{
     future::Future,
     net::SocketAddr,
     path::{Path, PathBuf},
-    sync::{mpsc, Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc, Mutex,
+    },
     thread::{self, JoinHandle},
     time::Duration,
 };
@@ -185,15 +188,16 @@ impl fmt::Display for DeskError {
     }
 }
 
-/// The desk's owned backends. [`Desk::open`] performs the startup order; [`Desk::router`] mounts
-/// every P0 route against them; [`Desk::start`] and [`Desk::stop`] bracket the serving period.
 struct DeliveryWatcher {
     stop: mpsc::Sender<()>,
-    done: mpsc::Receiver<()>,
+    stopping: Arc<AtomicBool>,
     handle: JoinHandle<()>,
 }
 
+/// The desk's owned backends. [`Desk::open`] performs the startup order; [`Desk::router`] mounts
+/// every P0 route against them; [`Desk::start`] and [`Desk::stop`] bracket the serving period.
 pub struct Desk {
+    lifecycle: Mutex<()>,
     delivery_watcher: Mutex<Option<DeliveryWatcher>>,
     auth: Arc<PersistentAuth>,
     panes: Arc<DaemonPanesBackend<UnixTransport>>,
@@ -296,6 +300,7 @@ impl Desk {
             config.ui_dist.clone(),
         );
         Ok(Self {
+            lifecycle: Mutex::new(()),
             delivery_watcher: Mutex::new(None),
             auth,
             panes,
@@ -312,6 +317,10 @@ impl Desk {
 
     /// Starts the receipt watcher and the board's background work once.
     pub fn start(&self) -> std::io::Result<()> {
+        let _lifecycle = self
+            .lifecycle
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         self.start_delivery_watcher()?;
         if let Err(error) = self.board.start() {
             self.stop_delivery_watcher();
@@ -335,7 +344,8 @@ impl Desk {
             let _ = old.handle.join();
         }
         let (stop, stop_rx) = mpsc::channel();
-        let (done_tx, done) = mpsc::channel();
+        let stopping = Arc::new(AtomicBool::new(false));
+        let thread_stopping = Arc::clone(&stopping);
         let messages = self.messages.clone();
         let handle = thread::Builder::new()
             .name("vp-delivery-watch".to_owned())
@@ -343,11 +353,14 @@ impl Desk {
                 while let Err(mpsc::RecvTimeoutError::Timeout) =
                     stop_rx.recv_timeout(Duration::from_secs(5))
                 {
-                    messages.reconcile_pending();
+                    messages.reconcile_pending(&thread_stopping);
                 }
-                let _ = done_tx.send(());
             })?;
-        *watcher = Some(DeliveryWatcher { stop, done, handle });
+        *watcher = Some(DeliveryWatcher {
+            stop,
+            stopping,
+            handle,
+        });
         Ok(())
     }
 
@@ -357,19 +370,19 @@ impl Desk {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let Some(worker) = slot.take() else { return };
+        worker.stopping.store(true, Ordering::SeqCst);
         let _ = worker.stop.send(());
-        match worker.done.recv_timeout(Duration::from_secs(6)) {
-            Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {
-                let _ = worker.handle.join();
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                *slot = Some(worker);
-            }
-        }
+        // A bounded daemon/SQLite operation may still be in flight. Join before returning so
+        // no receipt update survives shutdown and a concurrent restart cannot lose its worker.
+        let _ = worker.handle.join();
     }
 
     /// Stops the receipt and board timers and joins the usage workers.
     pub fn stop(&self) {
+        let _lifecycle = self
+            .lifecycle
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         self.stop_delivery_watcher();
         self.board.stop();
     }

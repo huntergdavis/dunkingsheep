@@ -1193,7 +1193,7 @@ impl MessagesBackend {
 
     /// Reconcile channels with outstanding receipts, as Python's delivery watcher does.
     /// A failed database or daemon read is retried on the next tick; reconciliation never resends.
-    pub(crate) fn reconcile_pending(&self) {
+    pub(crate) fn reconcile_pending(&self, stopping: &std::sync::atomic::AtomicBool) {
         let Ok(connection) = self.connect() else {
             return;
         };
@@ -1208,6 +1208,9 @@ impl MessagesBackend {
         };
         drop(connection);
         for channel in channels {
+            if stopping.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
             self.reconcile(&channel);
         }
     }
