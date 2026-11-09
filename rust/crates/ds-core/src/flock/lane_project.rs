@@ -61,6 +61,7 @@ impl Flock {
         let tx = db
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(failure)?;
+        let mut result = json!({"ok":true,"operation":operation});
         match operation {
             "grant" => {
                 let pane = field("pane")?;
@@ -83,16 +84,25 @@ impl Flock {
             "revoke" => {
                 crate::tasks::planner_scope::revoke_grant(&tx, field("pane")?).map_err(failure)?
             }
-            "task-project" => crate::tasks::planner_scope::set_task_project(
-                &tx,
-                field("task")?,
-                field("project")?,
-            )
-            .map_err(failure)?,
+            "task-project" => {
+                let task = field("task")?;
+                crate::tasks::planner_scope::set_task_project(&tx, task, field("project")?)
+                    .map_err(failure)?;
+                let raw: String = tx
+                    .query_row("SELECT depends_on FROM tasks WHERE id=?1", [task], |row| {
+                        row.get(0)
+                    })
+                    .map_err(failure)?;
+                let dependencies: Value = serde_json::from_str(&raw).map_err(failure)?;
+                if !dependencies.is_array() {
+                    return Err(failure("task dependencies are invalid"));
+                }
+                result["existing_dependencies"] = dependencies;
+            }
             _ => return Err(failure("unknown planner scope operation")),
         }
         tx.commit().map_err(failure)?;
-        Ok(json!({"ok":true,"operation":operation}))
+        Ok(result)
     }
     /// Look up a currently live pane. A changed process or missing binding is unknown.
     pub fn lane_project(
@@ -160,6 +170,46 @@ mod tests {
         fn get_pane(&self, id: &str) -> Option<Value> {
             Some(json!({"pane_id":id,"pane_pid":self.0}))
         }
+    }
+    #[tokio::test]
+    async fn project_association_reports_existing_dependencies() {
+        let dir = crate::testsupport::dir("planner-project-association");
+        let tasks = Arc::new(
+            crate::tasks::Tasks::open(dir.path().join("tasks.db"))
+                .await
+                .unwrap(),
+        );
+        let blocker = tasks.add("global", "blocker", "").await.unwrap();
+        let project = tasks
+            .add_with(
+                "global",
+                "project",
+                "",
+                crate::tasks::AddOptions {
+                    depends_on: vec![blocker.id.clone()],
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let flock = Flock::new(
+            dir.path().join("launches.json"),
+            dir.path().join("lanes.json"),
+            true,
+        );
+        flock.attach_stores(crate::flock::panes::Stores {
+            tasks: Some(tasks),
+            ..Default::default()
+        });
+        let result = flock
+            .planner_scope_admin(
+                &Pane(i64::from(std::process::id())),
+                &json!({
+                    "operation":"task-project", "task":project.id, "project":"alpha"
+                }),
+            )
+            .unwrap();
+        assert_eq!(result["existing_dependencies"], json!([blocker.id]));
     }
     #[tokio::test]
     async fn binding_survives_reopen_and_detects_process_change() {

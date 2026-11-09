@@ -959,10 +959,14 @@ fn lane(ns: &Map<String, Value>) -> Outcome {
                 "lanes",
                 args,
                 Box::new(|result| {
-                    format!(
+                    let mut output = format!(
                         "planner scope {}\n",
                         crate::render_fleet::py_str(&result["operation"])
-                    )
+                    );
+                    if let Some(dependencies) = result.get("existing_dependencies") {
+                        output.push_str(&format!("existing dependencies: {dependencies}\n"));
+                    }
+                    output
                 }),
             )
         }
