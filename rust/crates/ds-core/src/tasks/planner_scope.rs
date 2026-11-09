@@ -242,7 +242,7 @@ mod tests {
     }
 
     #[test]
-    fn grants_route_global_project_and_approved_current_blockers() {
+    fn grants_route_global_project_and_current_blockers() {
         let mut db = Connection::open_in_memory().unwrap();
         db.execute_batch(
             "CREATE TABLE tasks(id TEXT PRIMARY KEY,scope TEXT,depends_on TEXT,status TEXT DEFAULT 'open'); \
