@@ -435,6 +435,14 @@ impl Tasks {
                 }
                 return Err(db::map_sqlite(error));
             }
+            // Only owner-registered exact repository mappings confer project scope.
+            // Keep attribution atomic with the verdict guard and task insertion.
+            if expected_verdict_ids.is_some() && created_by.as_deref() == Some("review-sync") {
+                tx.execute(
+                    "INSERT INTO planner_task_projects(task_id,project) SELECT ?1,project FROM planner_repo_projects WHERE repo=?2",
+                    params![id, repo],
+                ).map_err(db::map_sqlite)?;
+            }
             // `meta={"kind": kind, "author": author}` only when it says something, as json.dumps writes it.
             let meta: Option<String> = (kind != "work" || author.is_some()).then(|| {
                 format!(
