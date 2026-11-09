@@ -34,7 +34,7 @@ fn add_column_if_missing(
     Ok(())
 }
 
-fn connect(path: &Path) -> rusqlite::Result<Connection> {
+pub fn connect(path: &Path) -> rusqlite::Result<Connection> {
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         fs::create_dir_all(parent).map_err(io_error)?;
     }
