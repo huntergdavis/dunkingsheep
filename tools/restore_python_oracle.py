@@ -44,11 +44,17 @@ def main():
         if len(data) != item["bytes"] or hashlib.sha256(data).hexdigest() != item["sha256"]:
             raise ValueError(f"archive verification failed: {item['path']}")
         restored.append((item, data))
-    for item, data in restored:
-        path = ROOT / item["path"]
-        with path.open("xb") as output:
-            output.write(data)
-        path.chmod(int(item["mode"], 8))
+    created = []
+    try:
+        for item, data in restored:
+            path = ROOT / item["path"]
+            with path.open("xb") as output:
+                created.append(item["path"])
+                output.write(data)
+            path.chmod(int(item["mode"], 8))
+    except OSError as error:
+        # Do not delete files here: another process may have changed them.
+        raise OSError(f"{error}; partial restore created {created}; see recovery in docs/rust/PYTHON_DAEMON_RETIREMENT.md") from error
     print(f"Restored {len(restored)} verified, untracked Python oracle files from {commit}")
 
 

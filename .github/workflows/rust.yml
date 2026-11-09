@@ -28,6 +28,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Test oracle restoration safeguards
+        run: python3 -I tests/test_restore_python_oracle.py
       - name: Restore pinned Python test oracle
         run: python3 tools/restore_python_oracle.py
       - uses: actions-rust-lang/setup-rust-toolchain@v1
