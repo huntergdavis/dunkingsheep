@@ -819,10 +819,3 @@ schedules (add_dunk with their pane as target).
   then any command restarts it with the saved dunks.
 - Send failed: the pane was closed. Re-target with `update <id> -T ...`.
 
-
-Owner-controlled review project routing uses an exact repository mapping:
-`dunkingsheep lane planner repo-project --repo OWNER/REPO --project PROJECT`.
-Use `repo-revoke --repo OWNER/REPO` to remove a mapping. Newly filed review-sync
-reviews use the mapping; unknown repositories remain global. Existing reviews are
-not changed: an owner can associate one with `lane planner task-project --task ID
---project PROJECT`. Project association does not establish review authorship.
