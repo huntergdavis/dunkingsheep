@@ -3807,6 +3807,25 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
             text(ns, "base").filter(|b| !b.is_empty()),
             matches!(ns.get("quiet"), Some(Value::Bool(true))),
         ),
+        "usage-provider" => {
+            let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default().as_secs_f64();
+            let max_age = ns.get("max_age").and_then(Value::as_f64)
+                .or_else(|| std::env::var("DUNKINGSHEEP_USAGE_MAX_AGE_S").ok().and_then(|s| s.parse().ok()))
+                .unwrap_or(3600.0);
+            let result = match text(ns, "provider") {
+                Some("codex") => ds_core::usage_providers::codex(&home, max_age, now),
+                Some("pi") => ds_core::usage_providers::pi(&home, max_age, now),
+                Some("opencode") => ds_core::usage_providers::opencode(now),
+                _ => unreachable!("provider is constrained by the parser"),
+            };
+            Outcome {
+                stdout: format!("{}\n", sorted_json(&result)),
+                stderr: String::new(),
+                code: i32::from(result.get("status").and_then(Value::as_str) != Some("ok")),
+            }
+        }
         "usage" => {
             let config = text(ns, "config").unwrap_or("");
             usage_command(

@@ -639,6 +639,12 @@ so the plan is UNKNOWN. `dunkingsheep --json usage` is the machine
 interface; the VP ops dashboard stores age-labelled provider_usage
 snapshots (VP_PROVIDER_USAGE=0 disables the external read, as tests do).
 
+Native provider commands are available as `dunkingsheep usage-provider codex`,
+`pi`, and `opencode`. They print a single JSON object and exit nonzero when
+the reading is unknown or errored, so they can be used as commands in a usage
+config. Codex and Pi accept `--max-age-s`; OpenCode still runs `opencode stats`
+and does not report plan quota. Claude's subscription probe remains separate.
+
 ## Recovery after a terminal upgrade
 
 An upgrade can restore every pane as a bare shell and lose the agent roster. `dunkingsheep doctor` is the read-only check: backend version (herdr on the rollback), pane detection, `read --source visible`, the guard, and any dunk whose target_agent or target_cwd no longer matches its pane. `dunkingsheep recover` prints a dry-run plan from dunks.json, launches.json and the memory index: `pi --session ...`, `codex resume ...`, `claude --resume ...`. `--record` snapshots live sessions first; `--apply` types a launch only into a pane that is still a bare shell, never over a live agent. A missing session is reported, never invented.

@@ -1910,6 +1910,16 @@ pub static ROOT: Cmd = Cmd {
             ],
         },
         Cmd {
+            name: "usage-provider", aliases: &[],
+            help: Some("read native provider usage as JSON"),
+            raw: false, raw_text: false, about: None, epilog: None,
+            args: &[
+                Arg { id: "provider", dest: "provider", tri: false, default_int: false, flags: &[], positional: true, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &["codex", "pi", "opencode"], default: None, required: true, help: None, hidden: false, metavar: None, version: None },
+                Arg { id: "max_age", dest: "max_age", tri: false, default_int: false, flags: &["--max-age-s"], positional: false, kind: Kind::Store, ty: Ty::Float, nargs: Nargs::One, choices: &[], default: None, required: false, help: Some("snapshot maximum age in seconds"), hidden: false, metavar: None, version: None },
+            ],
+            groups: &[], sub_dest: None, sub_metavar: None, sub_required: false, subs: &[],
+        },
+        Cmd {
             name: "usage", aliases: &[],
             help: Some("real provider usage from configurable commands"),
             raw: false,
