@@ -64,12 +64,35 @@ fn cli(args: &[&str], cwd: &str) -> Option<Value> {
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
+    let mut stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut out = Vec::new();
+        let mut buf = [0u8; 8192];
+        let mut overflow = false;
+        loop {
+            match stdout.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if out.len() + n <= 1024 * 1024 {
+                        out.extend_from_slice(&buf[..n]);
+                    } else {
+                        overflow = true;
+                    }
+                }
+                Err(_) => return None,
+            }
+        }
+        if overflow {
+            None
+        } else {
+            Some(out)
+        }
+    });
     let started = std::time::Instant::now();
     loop {
         match child.try_wait() {
             Ok(Some(status)) if status.success() => {
-                let mut out = Vec::new();
-                child.stdout.take()?.read_to_end(&mut out).ok()?;
+                let out = reader.join().ok()??;
                 return serde_json::from_slice(&out).ok();
             }
             Ok(Some(_)) | Err(_) => return None,
