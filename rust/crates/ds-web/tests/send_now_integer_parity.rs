@@ -31,7 +31,7 @@ use routes::{
     auth::{AuthBackend, AuthError, AuthFuture, Identity, RequestScheme},
     messages_write,
 };
-use rusqlite::Connection;
+use rusqlite::{types::Value as SqlValue, Connection};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
@@ -88,6 +88,29 @@ fn counts(connection: &Connection) -> Value {
         "answered": one("SELECT count(*) FROM messages WHERE answer_id IS NOT NULL"),
         "newest_id": one("SELECT coalesce(max(id), 0) FROM messages"),
     })
+}
+
+/// Capture every value, including blobs and the AUTOINCREMENT sequence, instead of only counts.
+fn full_state(connection: &Connection) -> Vec<Vec<Vec<SqlValue>>> {
+    [
+        "SELECT * FROM messages ORDER BY rowid",
+        "SELECT * FROM attachments ORDER BY rowid",
+        "SELECT * FROM sqlite_sequence ORDER BY name",
+    ]
+    .iter()
+    .map(|sql| {
+        let mut statement = connection.prepare(sql).expect(sql);
+        let columns = statement.column_count();
+        let rows = statement
+            .query_map([], |row| {
+                (0..columns)
+                    .map(|index| row.get(index))
+                    .collect::<rusqlite::Result<Vec<SqlValue>>>()
+            })
+            .expect(sql);
+        rows.collect::<rusqlite::Result<Vec<_>>>().expect(sql)
+    })
+    .collect()
 }
 
 fn key_set(value: &Value) -> std::collections::BTreeSet<String> {
@@ -148,7 +171,7 @@ async fn send_now_matches_the_python_desk_on_every_recorded_case() {
         .layer(Extension(read));
 
     let mut failures = Vec::new();
-    let (mut brief_seen, mut send_now_seen) = (0, 0);
+    let (mut brief_seen, mut send_now_seen, mut rollback_seen) = (0, 0, 0);
     // Every recorded case is replayed in order, because the database state each case sees
     // (its db_before) is the state the earlier brief cases left behind.
     for case in oracle["cases"].as_array().expect("cases") {
@@ -176,6 +199,11 @@ async fn send_now_matches_the_python_desk_on_every_recorded_case() {
             builder = builder.header(header::CONTENT_TYPE, "application/json");
         }
         let before = counts(&database);
+        let check_rollback = matches!(
+            name,
+            "brief_answer_too_large" | "brief_answer_overflow_64bit" | "send_now_huge_id"
+        );
+        let full_before = check_rollback.then(|| full_state(&database));
         let response = app
             .clone()
             .oneshot(builder.body(Body::from(body)).expect("request"))
@@ -187,6 +215,14 @@ async fn send_now_matches_the_python_desk_on_every_recorded_case() {
             .expect("response body")
             .to_vec();
         let after = counts(&database);
+        if let Some(full_before) = full_before {
+            rollback_seen += 1;
+            assert_eq!(
+                full_state(&database),
+                full_before,
+                "{name}: complete rows or sqlite_sequence changed"
+            );
+        }
 
         let want_status = case["status"].as_u64().expect("status") as u16;
         if status.as_u16() != want_status {
@@ -227,6 +263,10 @@ async fn send_now_matches_the_python_desk_on_every_recorded_case() {
             failures.push(format!("{name}: db after {after} != {}", case["db_after"]));
         }
     }
+    assert_eq!(
+        rollback_seen, 3,
+        "all huge-integer failure states must be compared"
+    );
     assert_eq!(brief_seen, 11, "every recorded brief case must be replayed");
     assert_eq!(
         send_now_seen, 3,
