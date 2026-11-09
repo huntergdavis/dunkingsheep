@@ -131,3 +131,31 @@ fn consumes_existing_python_format_state() {
     );
     assert!(!root.join("state/session-1.json").exists());
 }
+
+#[test]
+fn early_stop_waits_for_start_and_next_turn_still_completes() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let cli = root.join("fake-cli");
+    fs::write(&cli, "#!/bin/sh\ncase \"$3\" in start) echo '{\"turn_id\":\"token-1\",\"pane_id\":\"%scratch\"}' ;; end) echo \"$5\" >> \"$CALLS\"; echo '{\"ended\":true}' ;; esac\n").unwrap();
+    fs::set_permissions(&cli, fs::Permissions::from_mode(0o700)).unwrap();
+    for (name, event) in [("start", "UserPromptSubmit"), ("stop", "Stop")] {
+        fs::write(root.join(name), format!("{{\"session_id\":\"session-1\",\"hook_event_name\":\"{event}\",\"stop_hook_active\":false,\"cwd\":\"{}\"}}", root.display())).unwrap();
+    }
+    let script = "exec -a claude /bin/bash -c '\"$HOOK\" end < \"$ROOT/stop\" & first=$!; sleep .1; \"$HOOK\" start < \"$ROOT/start\"; wait $first; \"$HOOK\" start < \"$ROOT/start\"; \"$HOOK\" end < \"$ROOT/stop\"; :'";
+    let status = Command::new("/bin/bash")
+        .args(["-c", script])
+        .env("HOOK", env!("CARGO_BIN_EXE_dunk-claude-turn"))
+        .env("ROOT", root)
+        .env("DUNKINGSHEEP_BIN", &cli)
+        .env("DUNKINGSHEEP_CLAUDE_STATE_DIR", root.join("state"))
+        .env_remove("DUNKINGSHEEP_CLAUDE_END_WAIT_S")
+        .env("CALLS", root.join("calls"))
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(
+        fs::read_to_string(root.join("calls")).unwrap(),
+        "token-1\ntoken-1\n"
+    );
+}
