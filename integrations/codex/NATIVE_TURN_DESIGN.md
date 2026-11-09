@@ -13,3 +13,8 @@ or replayed stops, plus process-ancestry behavior. Existing source currently
 releases and reacquires its state lock before end; the native implementation
 must send an end only after it actually consumed the same generation under the
 lock. Live per-lane installation is a separate step after review.
+
+The wrapper selects an executable `dunk-codex-turn` sibling when explicitly
+installed; otherwise it retains the Python producer. Building the binary does
+not install it in a lane. Install or remove the sibling only with a reviewed
+per-lane plan that preserves the old wrapper and producer for rollback.
