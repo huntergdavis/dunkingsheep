@@ -437,7 +437,11 @@ fn native_poll_install_does_not_require_python_in_path() {
         .env("HOME", &sandbox.root)
         .output()
         .expect("run install with a relative PATH entry");
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
@@ -1098,4 +1102,63 @@ fn installed_release_serves_status_and_task_list_against_copied_state() {
         std::thread::sleep(Duration::from_millis(10));
     }
     daemon.0 = None;
+}
+
+#[test]
+fn rollback_restores_real_legacy_python_poller() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixListener;
+    let sandbox = Sandbox::new();
+    let old = sandbox.root.join("old-release/tools");
+    std::fs::create_dir_all(&old).unwrap();
+    let source = project_root().join("tools/dunk_poll.py");
+    assert_eq!(
+        sha256(source.to_str().unwrap()),
+        "5d1d60794dc0abfb2a4de7f9e834330888a779ad4e48133df8460181409d6521"
+    );
+    let script = old.join("dunk_poll.py");
+    std::fs::copy(source, &script).unwrap();
+    let old_launcher = format!(
+        "#!/bin/sh\nexec /usr/bin/python3 {} \"$@\"\n",
+        shell_quote(&script.display().to_string())
+    );
+    let launcher = sandbox.bin.join("dunk-poll");
+    std::fs::write(&launcher, &old_launcher).unwrap();
+    std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(sandbox.bin.join("dunkingsheep"), python_era_launcher()).unwrap();
+    ok(&sandbox.install("native"));
+    assert_ne!(std::fs::read_to_string(&launcher).unwrap(), old_launcher);
+    ok(&sandbox.rollback(&["--original"]));
+    assert_eq!(std::fs::read_to_string(&launcher).unwrap(), old_launcher);
+    let socket = sandbox.root.join("old.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut line = String::new();
+        BufReader::new(stream.try_clone().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(request["cmd"], "poll");
+        writeln!(
+            stream,
+            "{}",
+            serde_json::json!({"ok":true,"result":{"status":{"version":"legacy"}}})
+        )
+        .unwrap();
+    });
+    let output = Command::new(&launcher)
+        .args(["--socket", socket.to_str().unwrap(), "--compact"])
+        .env("HOME", &sandbox.root)
+        .env_remove("DUNKINGSHEEP_SOCKET")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["status"]["version"], "legacy");
+    server.join().unwrap();
 }

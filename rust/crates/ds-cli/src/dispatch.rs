@@ -1676,7 +1676,8 @@ fn install_launcher(ns: &Map<String, Value>, json: bool) -> Outcome {
             }
             crate::release_layout::native_poll_launcher_body(&native_poller)
         } else {
-            let python = python.ok_or_else(|| "no python3 found on PATH for dunk-poll".to_string())?;
+            let python =
+                python.ok_or_else(|| "no python3 found on PATH for dunk-poll".to_string())?;
             if !python.is_absolute() {
                 return Err(format!(
                     "python3 was found through a relative PATH entry ({}); put an absolute directory first on PATH, then install again",
@@ -1700,10 +1701,7 @@ fn install_launcher(ns: &Map<String, Value>, json: bool) -> Outcome {
             &launcher,
             &crate::release_layout::launcher_body(&executable),
         )?;
-        write_executable(
-            &poll_launcher,
-            &poll_launcher_body,
-        )?;
+        write_executable(&poll_launcher, &poll_launcher_body)?;
 
         let on_path_here = std::env::split_paths(&path_env)
             .filter(|path| !path.as_os_str().is_empty())
