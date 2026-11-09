@@ -2825,6 +2825,7 @@ os.rename(out_path + ".tmp", out_path)
             "resolve"
         );
         assert_eq!(memory.status().unwrap()["queue"]["resolved"], 1);
+        assert_eq!(memory.status().unwrap()["ok"], true);
         assert!(dispatcher
             .dispatch("memory_backfill", &resolve, &owner)
             .is_err());
