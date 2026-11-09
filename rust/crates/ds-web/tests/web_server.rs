@@ -1460,7 +1460,7 @@ fn delivery_watcher_stop_waits_for_inflight_rpc_before_restart() {
             if count.fetch_add(1, Ordering::SeqCst) == 0 {
                 let _ = entered_tx.send(());
                 release_rx
-                    .recv_timeout(Duration::from_secs(20))
+                    .recv_timeout(Duration::from_secs(25))
                     .map_err(|error| error.to_string())?;
             }
             Ok(json!({"queued": [], "recent": []}))
@@ -1471,6 +1471,7 @@ fn delivery_watcher_stop_waits_for_inflight_rpc_before_restart() {
         _ => Err("not provided by this fixture".to_owned()),
     });
     config.daemon_socket = daemon.socket.clone();
+    config.client_timeout = Duration::from_secs(20);
     let desk = Arc::new(web_server::Desk::open(config).unwrap());
     let database = Connection::open(root.path().join("desk/messages.sqlite3")).unwrap();
     database.execute("INSERT INTO messages(channel,role,body,delivery,transport_id) VALUES('pane-7','owner','one','queued','q-1')", []).unwrap();
@@ -1486,7 +1487,7 @@ fn delivery_watcher_stop_waits_for_inflight_rpc_before_restart() {
     });
     assert!(
         matches!(
-            stopped_rx.recv_timeout(Duration::from_millis(300)),
+            stopped_rx.recv_timeout(Duration::from_millis(7500)),
             Err(mpsc::RecvTimeoutError::Timeout)
         ),
         "stop must wait for the blocked RPC"
