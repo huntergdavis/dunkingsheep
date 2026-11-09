@@ -2935,6 +2935,137 @@ async fn run_dry_run_matches_python_fake_for_fresh_moved_closed_and_terminal_rev
 }
 
 #[tokio::test]
+async fn review_sync_refreshes_late_author_evidence_without_overwriting_known() {
+    let dir = crate::testsupport::dir("review-late-author");
+    let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    let work = store
+        .add_with(
+            "global",
+            "work",
+            "",
+            AddOptions {
+                assignees: vec!["%260".into()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let branch = format!("writer/{}-change", work.id);
+    let transport = FakeReviewTransport::with_responses([
+        github_response(200, open_pull(7, "exact-head", &branch)),
+        github_response(200, json!({"mergeable":true,"mergeable_state":"clean"})),
+        github_response(200, json!({"body":"details"})),
+        github_response(201, json!({"state":"pending"})),
+        github_response(200, open_pull(7, "exact-head", &branch)),
+        github_response(200, json!({"mergeable":true,"mergeable_state":"clean"})),
+        github_response(200, open_pull(7, "exact-head", &branch)),
+        github_response(200, json!({"mergeable":true,"mergeable_state":"clean"})),
+    ]);
+    let (sync, _) = run_actual_review_sync(store, transport, 2).await;
+    let row = sync
+        .flock
+        .list_review_rows_visible()
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(sync.flock.review_facts(&row.id).await.unwrap().author, None);
+    sync.flock.assign(&row.id, &["%260"], "add").await.unwrap();
+    sync.flock.claim_for_test(&row.id, "%260").await;
+    sync.flock
+        .note(
+            &work.id,
+            "note",
+            "%260",
+            Some("PR https://github.com/o/r/pull/7 head exact-head"),
+        )
+        .await
+        .unwrap();
+    sync.run(false).await.unwrap();
+    assert_eq!(
+        sync.flock
+            .review_facts(&row.id)
+            .await
+            .unwrap()
+            .author
+            .as_deref(),
+        Some("%260")
+    );
+    assert!(!sync
+        .flock
+        .refresh_review_author(&row.id, "exact-head", "%999")
+        .await
+        .unwrap());
+    assert!(!sync
+        .flock
+        .refresh_review_author(&row.id, "other-head", "%999")
+        .await
+        .unwrap());
+    sync.flock
+        .note(
+            &work.id,
+            "note",
+            "%260",
+            Some("PR https://github.com/o/r/pull/7 head exact-head"),
+        )
+        .await
+        .unwrap();
+    sync.run(false).await.unwrap();
+    assert_eq!(
+        sync.flock
+            .review_facts(&row.id)
+            .await
+            .unwrap()
+            .author
+            .as_deref(),
+        Some("%260")
+    );
+    let notes = sync.flock.notes(&row.id).await.unwrap();
+    assert_eq!(notes.len(), 1);
+    assert!(notes[0]
+        .text
+        .contains("coordinator must route an independent reviewer"));
+    assert!(sync
+        .flock
+        .set_verdict_with_author_guard(&row.id, "accept", Some("%260"), true)
+        .await
+        .is_err());
+    assert!(sync
+        .flock
+        .set_verdict_with_author_guard(&row.id, "accept", Some("%243"), true)
+        .await
+        .is_ok());
+    let earlier = sync
+        .flock
+        .add_with(
+            "global",
+            "verdict first",
+            "",
+            AddOptions {
+                kind: Some("review".into()),
+                repo: Some("o/r".into()),
+                pr: Some("8".into()),
+                head: Some("head-8".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    sync.flock
+        .set_verdict_with_author_guard(&earlier.id, "accept", Some("%260"), true)
+        .await
+        .unwrap();
+    assert!(!sync
+        .flock
+        .refresh_review_author(&earlier.id, "head-8", "%260")
+        .await
+        .unwrap());
+    assert_eq!(
+        sync.flock.review_facts(&earlier.id).await.unwrap().author,
+        None
+    );
+}
+
+#[tokio::test]
 async fn review_sync_uses_writer_note_for_exact_branch_task_and_head() {
     let dir = crate::testsupport::dir("review-author-task-note");
     let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();

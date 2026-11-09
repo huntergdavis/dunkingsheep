@@ -1761,6 +1761,29 @@ impl Tasks {
             .await
     }
 
+    /// Fill a live review's unknown author without changing a known or completed review.
+    pub async fn refresh_review_author(
+        &self,
+        id: &str,
+        head: &str,
+        author: &str,
+    ) -> Result<bool, DunkError> {
+        let (id, head, author) = (id.to_owned(), head.to_owned(), author.to_owned());
+        self.writer.call(move |conn| {
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(db::map_sqlite)?;
+            let changed = tx.execute("UPDATE tasks SET author=?3, body=replace(body, 'author lane: unknown (not attributable; say so in the verdict)', 'author lane: ' || ?3), updated_at=?4 WHERE id=?1 AND head=?2 AND kind='review' AND status IN ('open','in_progress','blocked') AND (author IS NULL OR author='') AND (verdict IS NULL OR verdict='')", params![id, head, author, crate::clock::now_s()]).map_err(db::map_sqlite)?;
+            if changed > 0 {
+                let raw: String = tx.query_row("SELECT assignees FROM tasks WHERE id=?1", [&id], |row| row.get(0)).map_err(db::map_sqlite)?;
+                let leased: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM task_leases WHERE task_id=?1 AND pane_id=?2)", params![id, author], |row| row.get(0)).map_err(db::map_sqlite)?;
+                let conflict = leased || decode_list(Some(&raw)).contains(&author);
+                let suffix = if conflict { "; author is assigned or claimed: coordinator must route an independent reviewer" } else { "" };
+                tx.execute("INSERT INTO task_events(task_id,event,at,actor,meta) VALUES (?1,'note',?2,'review-sync',?3)", params![id, crate::clock::now_s(), json!({"reason":format!("Review author refreshed from explicit PR work evidence: {author}{suffix}")}).to_string()]).map_err(db::map_sqlite)?;
+            }
+            tx.commit().map_err(db::map_sqlite)?;
+            Ok(changed > 0)
+        }).await
+    }
+
     /// `Tasks.recent_notes`: the last `limit` events that carry a reason, oldest first (t605).
     /// Read only; a limit of 0 gives none.
     pub async fn recent_notes(&self, id: &str, limit: usize) -> Result<Vec<RecentNote>, DunkError> {
@@ -1839,6 +1862,17 @@ impl Tasks {
         verdict: &str,
         by: Option<&str>,
     ) -> Result<Task, DunkError> {
+        self.set_verdict_with_author_guard(id, verdict, by, false)
+            .await
+    }
+
+    pub async fn set_verdict_with_author_guard(
+        &self,
+        id: &str,
+        verdict: &str,
+        by: Option<&str>,
+        guard_author: bool,
+    ) -> Result<Task, DunkError> {
         let verdict = verdict.trim().to_lowercase();
         if verdict != "accept" && verdict != "needs-fix" {
             return Err(DunkError::Refused(format!(
@@ -1853,12 +1887,12 @@ impl Tasks {
             .call(move |conn| {
                 let changed = conn
                     .execute(
-                        "UPDATE tasks SET verdict = ?, updated_at = ? WHERE id = ?",
-                        params![verdict, now, id],
+                        "UPDATE tasks SET verdict = ?, updated_at = ? WHERE id = ? AND (? = 0 OR author IS NULL OR author = '' OR author != ?)",
+                        params![verdict, now, id, guard_author, by],
                     )
                     .map_err(db::map_sqlite)?;
                 if changed == 0 {
-                    return Err(DunkError::Refused(format!("no task with id {id:?}")));
+                    return Err(DunkError::Refused(format!("review author changed or no task with id {id:?}")));
                 }
                 conn.execute(
                     "INSERT INTO task_events (task_id, event, at, actor, meta) VALUES (?,?,?,?,?)",
