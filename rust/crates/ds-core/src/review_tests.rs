@@ -2935,6 +2935,91 @@ async fn run_dry_run_matches_python_fake_for_fresh_moved_closed_and_terminal_rev
 }
 
 #[tokio::test]
+async fn review_sync_uses_writer_note_for_exact_branch_task_and_head() {
+    let dir = crate::testsupport::dir("review-author-task-note");
+    let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    let work = store
+        .add_with(
+            "global",
+            "work",
+            "",
+            AddOptions {
+                assignees: vec!["%260".into()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .note(
+            &work.id,
+            "note",
+            "%260",
+            Some("PR https://github.com/o/r/pull/7 head exact-head: ready"),
+        )
+        .await
+        .unwrap();
+    let branch = format!("writer/{}-change", work.id);
+    let transport = FakeReviewTransport::with_responses([
+        github_response(200, open_pull(7, "exact-head", &branch)),
+        github_response(200, json!({"mergeable": true, "mergeable_state": "clean"})),
+        github_response(200, json!({"body":"details"})),
+        github_response(201, json!({"state":"pending"})),
+    ]);
+    let (sync, _) = run_actual_review_sync(store, transport, 2).await;
+    let rows = sync.flock.list_review_rows_visible().await.unwrap();
+    assert_eq!(rows.len(), 1);
+    let facts = sync.flock.review_facts(&rows[0].id).await.unwrap();
+    assert_eq!(facts.author.as_deref(), Some("%260"));
+    let mut pull = parse_review_pull("o/r", &open_pull(7, "exact-head", &branch)[0]).unwrap();
+    // parse_review_pull consumes normalized provider rows; open_pull is raw GitHub JSON.
+    pull.branch = branch.clone();
+    pull.head = "exact-head".into();
+    assert_eq!(
+        sync.branch_task_authors("o/r", &pull).await.unwrap(),
+        vec!["%260"]
+    );
+    assert!(sync
+        .branch_task_authors("other/r", &pull)
+        .await
+        .unwrap()
+        .is_empty());
+    pull.head = "other-head".into();
+    assert!(sync
+        .branch_task_authors("o/r", &pull)
+        .await
+        .unwrap()
+        .is_empty());
+    pull.head = "exact-head".into();
+    sync.flock
+        .note(
+            &work.id,
+            "note",
+            "%999",
+            Some("PR https://github.com/o/r/pull/7 head exact-head"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        sync.branch_task_authors("o/r", &pull).await.unwrap(),
+        vec!["%260"]
+    );
+    rusqlite::Connection::open(sync.flock.path())
+        .unwrap()
+        .execute(
+            "UPDATE tasks SET assignees='[\"%260\",\"%999\"]' WHERE id=?1",
+            [&work.id],
+        )
+        .unwrap();
+    assert_eq!(
+        sync.branch_task_authors("o/r", &pull).await.unwrap(),
+        vec!["%260", "%999"]
+    );
+    pull.branch = "writer/t999999-missing".into();
+    assert!(sync.branch_task_authors("o/r", &pull).await.is_err());
+}
+
+#[tokio::test]
 async fn run_fresh_unjudged_pull_files_exactly_one_task_and_pending_status() {
     let dir = crate::testsupport::dir("review-sync-fresh-one-task-pending-status");
     let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
