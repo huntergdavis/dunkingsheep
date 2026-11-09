@@ -13,7 +13,7 @@ positional arguments:
     status        health, schema, ingest worker
     ingest        queue a session log/sqlite for async ingest
     backfill      discover + enqueue every session source
-    queue         quarantine or restore one failed ingest entry
+    queue         quarantine, restore or resolve one ingest entry
 
 options:
   -h, --help      show this help message and exit

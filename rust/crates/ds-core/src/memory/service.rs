@@ -688,12 +688,17 @@ impl MemoryService {
         path: &str,
         reason: &str,
         actor: &str,
-        restore: bool,
+        action: &str,
     ) -> Result<(), DunkError> {
         self.accepting()?;
-        let (path, reason, actor) = (path.to_owned(), reason.to_owned(), actor.to_owned());
+        let (path, reason, actor, action) = (
+            path.to_owned(),
+            reason.to_owned(),
+            actor.to_owned(),
+            action.to_owned(),
+        );
         self.writer.call(move |connection| {
-            ingest::queue_disposition(connection, id, &path, &reason, &actor, restore)
+            ingest::queue_disposition(connection, id, &path, &reason, &actor, &action)
         })
     }
     pub fn start(&self) -> Result<(), DunkError> {
