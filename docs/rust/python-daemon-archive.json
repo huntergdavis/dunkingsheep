@@ -1,0 +1,365 @@
+{
+  "tag": "python-pre-retirement-1b14a9fb",
+  "commit": "1b14a9fb15b7ccf8763b2e15a2ac428824cdc3a8",
+  "archive": "python-daemon-1b14a9fb.tar.gz",
+  "archive_sha256": "7a32fc5cb1752570d58ffa7af0b662bcea60d34432b145ce3718ff4562889105",
+  "files": [
+    {
+      "path": "dunk_activity.py",
+      "git_blob": "5e5b243fe784fd5ff4962cf589ade214c25f305e",
+      "sha256": "75a41c1c7bf7ba9ed389610f0f18b6bd48a5cbe9a980320d1ee38061469708f3",
+      "bytes": 6003,
+      "mode": "0o664"
+    },
+    {
+      "path": "dunk_allocator.py",
+      "git_blob": "582e895dd89c1b2ebebc94cc2785de9d2a5e074d",
+      "sha256": "cc5dc3b0448c91d9e460c1c0931feb6909f384a8e6561ef59ba8328ad5d15164",
+      "bytes": 16762,
+      "mode": "0o664"
+    },
+    {
+      "path": "dunk_api.py",
+      "git_blob": "b9cdad0e04392dbeeb8e5ac8b6c8143f5e333e25",
+      "sha256": "389883b588196199e0a8af97d646cea833525a874d2c9ab9dbe907af2f2d638c",
+      "bytes": 139253,
+      "mode": "0o664"
+    },
+    {
+      "path": "dunk_callers.py",
+      "git_blob": "104d8852204ca08ae1e203ecf77b62f0bc4706b3",
+      "sha256": "bdcb38d215d162ac9c78663e458c485480715e65caac189273c43c0a4d0655c9",
+      "bytes": 8508,
+      "mode": "0o664"
+    },
+    {
+      "path": "dunk_claude.py",
+      "git_blob": "3eb8a491f6b73bdcb9a0e136613ff72f49a47181",
+      "sha256": "51dbd53665aae3b20a5b4ab22808aa32b1c002af58da55f05d4cdad117b37d8e",
+      "bytes": 2763,
+      "mode": "0o664"
+    },
+    {
+      "path": "dunk_client.py",
+      "git_blob": "64e6abab12d20ebb355f85379e3e8081c0cee9ef",
+      "sha256": "e6bc15c161d1d91f3672b19bde39cdd4c28968ba3ce8f250ac2a7a6895e2f611",
+      "bytes": 32151,
+      "mode": "0o664"
+    },
+    {
+      "path": "dunk_context.py",
+      "git_blob": "e12d58122fe6a68170fbec68955a9939fb8254fc",
+      "sha256": "59721a633e9a32e18534394fec151f0331cd8acb8978bdfbf7f20ba2a5297b05",
+      "bytes": 33725,
+      "mode": "0o664"
+    },
+    {
+      "path": "dunk_core.py",
+      "git_blob": "03543f84b196841ceb79531b628d445c6adabeca",
+      "sha256": "a59317e367d278e1cce36a371382ed6a1f9843016495fe97b9fb6920d7ba5a6d",
+      "bytes": 516070,
+      "mode": "0o664"
+    },
+    {
+      "path": "dunk_desk.py",
+      "git_blob": "cddfed44fc0111bec6433eeaa70946e38ad0e2d6",
+      "sha256": "214395f2d5de64129d75de1cf551e6eb359e5650b01e609892fd3e644ef98711",
+      "bytes": 4269,
+      "mode": "0o664"
+    },
+    {
+      "path": "dunk_dialog_alerts.py",
+      "git_blob": "c0a298b954aad3f4cc23ff01476a5b0df327948c",
+      "sha256": "389d72f72a5820cc6fc8a2e365a54a8a5d87029f96d1321548a89e62bc01b61d",
+      "bytes": 3681,
+      "mode": "0o664"
+    },
+    {
+      "path": "dunk_dispatch.py",
+      "git_blob": "e2d636cf2a6212747210d982837add515ce754e3",
+      "sha256": "48357403ba09fecd25ee8dcd0d4a21c75740db6cf230f719adc84b3ab24c1c82",
+      "bytes": 26894,
+      "mode": "0o664"
+    },
+    {
+      "path": "dunk_fallback.py",
+      "git_blob": "b84b59b9f9297ba4060947884d12534e02f312fd",
+      "sha256": "a09daa9748214eb1bb68ba7332b11556fbeb0836b5f1ee494bb43ad281dc6432",
+      "bytes": 16141,
+      "mode": "0o664"
+    },
+    {
+      "path": "dunk_github.py",
+      "git_blob": "f823d4dfe87a54c77ce107da641d9e99517d82a8",
+      "sha256": "0692f753febae73ea7bf219d355b8dd437b5cc366fdcbc9a585436a351053a19",
+      "bytes": 27470,
+      "mode": "0o664"
+    },
+    {
+      "path": "dunk_guard.py",
+      "git_blob": "4a72281c5d17b006e40385ce3fdf499e1af04ccb",
+      "sha256": "3b6bb0fcd1c4a230ac749472da1cf701ff595029ee91bfc6cab684c4c569ad9c",
+      "bytes": 14651,
+      "mode": "0o664"
+    },
+    {
+      "path": "dunk_guard_wrapper.py",
+      "git_blob": "db74f1737fc748ee92ea637d314616a96a93a8e4",
+      "sha256": "1da16afaddc8533114eb7334de8dcde8804060bd9e8495e6e51f5cc3907b1a30",
+      "bytes": 6592,
+      "mode": "0o664"
+    },
+    {
+      "path": "dunk_health.py",
+      "git_blob": "bd41bf0a38440195404772b1ad088909eb713aab",
+      "sha256": "efdb4924376a45ce3418f1456ccc7dbafb3e2a33b57ca451b7851ea351041be0",
+      "bytes": 9003,
+      "mode": "0o664"
+    },
+    {
+      "path": "dunk_help.py",
+      "git_blob": "727f57474daa01c0093b84138a99c590a4ac8c4c",
+      "sha256": "ab53060be520a464df0d8f9816a149c78a28d58faa119d962686c855cd41e987",
+      "bytes": 53668,
+      "mode": "0o664"
+    },
+    {
+      "path": "dunk_http.py",
+      "git_blob": "194b35275a1f4390e8e86e79d7fe574e1fe40abe",
+      "sha256": "1acf9a8d49cc8015a0f21071448b3c8725f58146b650ac26b37be3a36726f96a",
+      "bytes": 12254,
+      "mode": "0o664"
+    },
+    {
+      "path": "dunk_inbox.py",
+      "git_blob": "bb69b5f891967b2c8c7b50092f7f26031f29b28c",
+      "sha256": "bee9c69293808c36a3f502b2f9ca5ac102722afcede9c47ef706cc85a6b1891c",
+      "bytes": 51692,
+      "mode": "0o664"
+    },
+    {
+      "path": "dunk_load.py",
+      "git_blob": "3d9b2caf86e4dc9452c74c96e659e431efdb6208",
+      "sha256": "6106869d8c2f9c61ddfc3c76160404dc4b330c1c636ce23404b7e2a6495654c4",
+      "bytes": 9610,
+      "mode": "0o664"
+    },
+    {
+      "path": "dunk_mcp.py",
+      "git_blob": "318fbd246f75e5b4f8bafb63bae27ccba621090e",
+      "sha256": "2a7c2581f3d061c937465af31d9e0938b29d9586621bb39f08f109c4379dd303",
+      "bytes": 14337,
+      "mode": "0o775"
+    },
+    {
+      "path": "dunk_memory.py",
+      "git_blob": "04b5c6f5408c881d5b074f3bf803df6ae18eb058",
+      "sha256": "c7af187879aa03751de70b078f101b4f24b0eadae303ffbbc7885a8723cdea50",
+      "bytes": 50406,
+      "mode": "0o664"
+    },
+    {
+      "path": "dunk_metrics.py",
+      "git_blob": "925fafd020f9fa53d90e280806d8b268aeb7d5a7",
+      "sha256": "4f224667ee008377058ae3d76273d431a259fb95a6adaa8486a346ec9738fdfa",
+      "bytes": 12090,
+      "mode": "0o664"
+    },
+    {
+      "path": "dunk_native_session.py",
+      "git_blob": "650c75cf1bdb560662bc71f5ebaef8b160fb3b80",
+      "sha256": "7c409c958567bbefc4b326c0df2c58c21e463ab6d3b662d6e554581d54ba2c44",
+      "bytes": 12727,
+      "mode": "0o664"
+    },
+    {
+      "path": "dunk_next_job.py",
+      "git_blob": "ec57c4e7313d1ef6e43fe476a44be40e4d26abe2",
+      "sha256": "b74ea3601516dab406a983835ca61e399df50e848df8ae8cc92b6ce5080b5ebf",
+      "bytes": 15479,
+      "mode": "0o664"
+    },
+    {
+      "path": "dunk_owner.py",
+      "git_blob": "13f1033bbdd027dcbe708a491f2ca086bfe8d6d6",
+      "sha256": "8c3accec0690c65009174c0cc5bcf93f67e827869c58186f31837414797cecbf",
+      "bytes": 9778,
+      "mode": "0o664"
+    },
+    {
+      "path": "dunk_panes.py",
+      "git_blob": "3c85c366ef3383631cf6d1499df43d2d4a255509",
+      "sha256": "ea8ba8128e1bf21c2986de0cb38cdd6bee8ea5662c6a540f67f8f1eb0a9d6fab",
+      "bytes": 7447,
+      "mode": "0o664"
+    },
+    {
+      "path": "dunk_pm.py",
+      "git_blob": "e90fb9bfb16d6090e4aacd32f9de1c2b3ee68344",
+      "sha256": "2e2dc1b9f182cdfdeb130260403fb85dc3c7a0e164f3030c0a748d375789154c",
+      "bytes": 6915,
+      "mode": "0o664"
+    },
+    {
+      "path": "dunk_policy.py",
+      "git_blob": "a5785e0f695512786f21ab89e2e3cff8d0685402",
+      "sha256": "c6bf46ae0778453e0af057555e4ad2e99c3c5231da8da79ec4fa44a471357c9f",
+      "bytes": 6566,
+      "mode": "0o664"
+    },
+    {
+      "path": "dunk_poolrad.py",
+      "git_blob": "520f87e667879317dbcbcdf716cc0904e86458f2",
+      "sha256": "d8af3a6c68826b75ba71ef8125f0b29489d6a3acebc537fc09929a6861071d8a",
+      "bytes": 29274,
+      "mode": "0o664"
+    },
+    {
+      "path": "dunk_recovery.py",
+      "git_blob": "0ef13133f6f03b18c55ba4fc8236d822f93dfbb5",
+      "sha256": "7b644cc56a9ba8f7abb2b4962e2d00a79d4cc15ed69d2f5dc6b4ed632ef2e446",
+      "bytes": 6150,
+      "mode": "0o664"
+    },
+    {
+      "path": "dunk_recovery_native.py",
+      "git_blob": "7e4696f2e00dcb15909066aac03a8b1a2673aa4f",
+      "sha256": "bdde3366e904bd371030a855c72b77b83f97287b821eaf1832c20acf1c536d2b",
+      "bytes": 6835,
+      "mode": "0o664"
+    },
+    {
+      "path": "dunk_report.py",
+      "git_blob": "195c0a08cec3f3e2c58c11040de4bfa773da98ac",
+      "sha256": "4c918b091437227844f411227ef5a17a96f545ff35630f211478fe60f3296a6a",
+      "bytes": 18249,
+      "mode": "0o664"
+    },
+    {
+      "path": "dunk_review.py",
+      "git_blob": "f3111905dd86f36632add340d82c8c03208f6c83",
+      "sha256": "67b12a4a2eb9839a644de4f538ad1e9c4ba2cf9af76d8e916f5131022cb3f5c6",
+      "bytes": 55817,
+      "mode": "0o664"
+    },
+    {
+      "path": "dunk_roles.py",
+      "git_blob": "29df530bc5968da438cd9cba6d6dbbef65b3fbc6",
+      "sha256": "252e136bc510e61db23565125f7ca67756740df18360269c20a121914609e91e",
+      "bytes": 20731,
+      "mode": "0o664"
+    },
+    {
+      "path": "dunk_secrets.py",
+      "git_blob": "d226ba0faafe6eedcb873218d8e5a0cf33b52245",
+      "sha256": "7c11e832f5268e1748429ec132d38216cbe1038ecdb413ebe1c4972b754349c0",
+      "bytes": 6918,
+      "mode": "0o664"
+    },
+    {
+      "path": "dunk_server.py",
+      "git_blob": "848582cd6d40cad3a6adaa55c590c0acb7ef2565",
+      "sha256": "b3f41573b0f743617231e4a2a594e4605cad4f3fd5878ee7a339ca301e6fc990",
+      "bytes": 17715,
+      "mode": "0o775"
+    },
+    {
+      "path": "dunk_sqlite.py",
+      "git_blob": "46cff07ce53156f9ce7235a148d7018ea6102713",
+      "sha256": "92ac596da2fd70c236d0d5f0eeaf951b095eae70ceab02d4fbfadb11775ba2ec",
+      "bytes": 1229,
+      "mode": "0o664"
+    },
+    {
+      "path": "dunk_state.py",
+      "git_blob": "d03c584b1a3d4755e858faf3a69daa1af6d52c61",
+      "sha256": "74ce91d0420a538fef1bbe48587640d05d256a0c34c9b03529a5e45ee8ac3fb2",
+      "bytes": 26169,
+      "mode": "0o664"
+    },
+    {
+      "path": "dunk_stuck.py",
+      "git_blob": "131fb92d44ccdf2b3899d5f3d968e23cfa682d00",
+      "sha256": "5a2748ddc36efcb1b789bc95d1f3759ce2e6b0c4cf96feb4125f98f903e09ef5",
+      "bytes": 16034,
+      "mode": "0o664"
+    },
+    {
+      "path": "dunk_superusers.py",
+      "git_blob": "1ff41267af78cad143d63e8b8f7bfd53b0111de7",
+      "sha256": "f80935a61644050f9a4f947b007d444d4e0badf9b491e4255b2caf137bf37856",
+      "bytes": 11022,
+      "mode": "0o664"
+    },
+    {
+      "path": "dunk_tasks.py",
+      "git_blob": "b3f82936901074b98de6d502f71b6fe7cca6ce29",
+      "sha256": "bc416641a9a3a6d08e81cc87f3ff4e0d7ccb37bf6672ba6a2afa67b0b1c0496d",
+      "bytes": 104237,
+      "mode": "0o664"
+    },
+    {
+      "path": "dunk_telegram_routing.py",
+      "git_blob": "ed3c3648e5360e77851b3fec0569caafcb62d6cb",
+      "sha256": "2fdf4fd803c140065e22d23996e4556ac420eb3075fc37ad21ee48a4ed72fc10",
+      "bytes": 1737,
+      "mode": "0o664"
+    },
+    {
+      "path": "dunk_terminal.py",
+      "git_blob": "9aa3523b11c19dc81d21fe08513835765838e810",
+      "sha256": "a49b4f7f4508d2183e65e271baf4dee04e941ab38d9786ce698cfe207192fc78",
+      "bytes": 41312,
+      "mode": "0o664"
+    },
+    {
+      "path": "dunk_tmux_guard.py",
+      "git_blob": "35718acd3ae2f89c4a6d598d579dd65eb700ff66",
+      "sha256": "4acb7c36abff45b8a236138e5d5691748014052f17f9058eba8e2e625b164c2f",
+      "bytes": 11952,
+      "mode": "0o664"
+    },
+    {
+      "path": "dunk_usage.py",
+      "git_blob": "f596f92cad31899be630af1354cb8454a2247aae",
+      "sha256": "147341b02be40988b68c30c8856d636d721fa00a7b438aefdcf91f799b6fd5ee",
+      "bytes": 8467,
+      "mode": "0o664"
+    },
+    {
+      "path": "dunk_views.py",
+      "git_blob": "67d45bd38a77df1ee3359c7af3106196c5e46d6d",
+      "sha256": "ba47cc37362c84879aa1b1a60d8b928139069dfae2a58152c67b302963eb68c9",
+      "bytes": 20868,
+      "mode": "0o664"
+    },
+    {
+      "path": "dunk_watchdog.py",
+      "git_blob": "ff783c514b3d2f80b26189b719fa066b1b289eb8",
+      "sha256": "ecf887e5486bf5b3a4dd33476344c3d6e85a548e3ab90692a75707a11b15ed0f",
+      "bytes": 97340,
+      "mode": "0o664"
+    },
+    {
+      "path": "dunk_watchdog_deadman.py",
+      "git_blob": "d03165df60e71d932f8f7cbbf6029c0adf1bb82e",
+      "sha256": "169a3e3b8d596e9564093c2a21bb296c9413df324ade66b8e902489aa0efac0f",
+      "bytes": 14225,
+      "mode": "0o664"
+    },
+    {
+      "path": "dunking_sheep_tui.py",
+      "git_blob": "f4b7609fde9f5d115ec8e507e5dee64be8683bb0",
+      "sha256": "8cbd39fd15a1a6cf03d97b67fc0d25918a3b3961ad73df718ba93bfeddc30a1a",
+      "bytes": 30626,
+      "mode": "0o775"
+    },
+    {
+      "path": "dunkingsheep",
+      "git_blob": "6d7f456d323cebdab95d79da3f767028385690bd",
+      "sha256": "35ceb710f4fd616e33fd976f87e1f3f17fb1d00c8bcb9dd1b94d55c2406d4010",
+      "bytes": 182521,
+      "mode": "0o775"
+    }
+  ]
+}
