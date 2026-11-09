@@ -7,7 +7,7 @@ import { Message, MessageList } from '@chatscope/chat-ui-kit-react';
 import '@chatscope/chat-ui-kit-styles/dist/default/styles.min.css';
 import { EditorContent, useEditor } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
-import ReactMarkdown from 'react-markdown';
+import MessageBody from './MessageBody';
 import TurndownService from 'turndown';
 import { themeStyles } from './theme-styles.js';
 import './style.css';
@@ -255,7 +255,7 @@ function Composer({ channel, onSend, pending, setPending, disabled }) {
   </section>;
 }
 
-function MessageCard({ item, highlight, onSendNow, onInspect }) {
+function MessageCard({ item, highlight, onSendNow, onInspect, frontDesk = false }) {
   const owner = item.role === 'owner';
   const senderLabel = owner ? 'YOU' : item.role === 'agent' ? 'AGENT' : 'SOURCE UNKNOWN';
   const senderClass = owner ? 'owner' : item.role === 'agent' ? 'agent' : 'unattributed';
@@ -266,7 +266,7 @@ function MessageCard({ item, highlight, onSendNow, onInspect }) {
   return <div className={`message-wrap ${senderClass} ${highlight ? 'highlight' : ''}`} id={`message-${item.id}`}>
     <div className="message-meta"><strong>{senderLabel}</strong><span>{new Date(item.created_at).toLocaleString()}</span>{owner && <span className={`delivery ${item.delivery}`} title={item.delivery_detail}>{deliveryLabel}</span>}</div>
     <Message model={{ message: '', direction: owner ? 'outgoing' : 'incoming', position: 'single', sender: senderLabel }}>
-      <Message.CustomContent><div className="markdown"><ReactMarkdown>{item.body}</ReactMarkdown></div>
+      <Message.CustomContent><MessageBody body={item.body} frontDesk={frontDesk} />
         {item.attachments?.length > 0 && <div className="attachments">{item.attachments.map(a => <div key={a.id} className="attachment-card">{['image/png','image/jpeg','image/gif','image/webp'].includes(a.mime) && <a href={`/api/uploads/${a.id}`} target="_blank" rel="noreferrer"><img src={`/api/uploads/${a.id}?preview=true`} loading="lazy" alt={a.filename} /></a>}<a href={`/api/uploads/${a.id}`} target="_blank" rel="noreferrer">📎 {a.filename}</a></div>)}</div>}</Message.CustomContent>
     </Message>
     {owner && item.delivery === 'queued' && <div className={`queue-help ${heldForDraft && waitingMinutes >= 2 ? 'long-wait' : ''}`} role={heldForDraft && waitingMinutes >= 2 ? 'alert' : undefined}><span>{heldForDraft && waitingMinutes >= 2 ? 'Action needed: the lane input box has an unfinished draft' : heldForDraft ? 'Waiting for the lane input box to clear' : (item.delivery_detail || 'Waiting for guarded delivery')} · {waitingMinutes < 1 ? 'under 1 min' : `${waitingMinutes} min`}</span>{heldForDraft && <button onClick={() => onSendNow(item)}>Send now</button>}</div>}
@@ -1150,7 +1150,7 @@ function ChannelStandalone({ channel }) {
       <div className="conversation" ref={messageScroll.ref} onScroll={messageScroll.onScroll}>
         <div className="conversation-inner">
           {!items.length && <div className="empty-state"><div className="empty-icon">✦</div><h2>Direct line to {selected?.name || 'the agent'}</h2></div>}
-          <MessageList autoScrollToBottom={false} autoScrollToBottomOnMount={false}>{items.map(item => <MessageCard key={item.id} item={item} onSendNow={() => {}} onInspect={() => {
+          <MessageList autoScrollToBottom={false} autoScrollToBottomOnMount={false}>{items.map(item => <MessageCard key={item.id} item={item} frontDesk={channel === 'cos'} onSendNow={() => {}} onInspect={() => {
             const pane = selected?.pane_id;
             window.location.assign(pane ? `/dash/fleet?pane=${encodeURIComponent(pane)}` : '/dash/fleet');
           }} />)}</MessageList>

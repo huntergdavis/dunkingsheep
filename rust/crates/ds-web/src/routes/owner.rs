@@ -1565,11 +1565,12 @@ mod tests {
 
     #[test]
     fn the_thread_shows_questions_and_the_desks_replies_in_order() {
+        let formatted = "| Name | Value |\n| --- | --- |\n| Alpha | 42 |\n\n```text\nx < 2\n```\n\n+---+\n| A |\n+---+\n\n<strong>HTML</strong>";
         let backend = Arc::new(FakeOwner::new());
         backend.reply("owner_conversation", json!({
             "messages": [
                 {"id":"i5", "body":"q1", "created_at":1000.0, "transport":"web", "sender":null, "reply_to":null, "answered":true},
-                {"id":"i6", "body":"a1", "created_at":1010.0, "transport":"web", "sender":"%133", "reply_to":"i5"},
+                {"id":"i6", "body":formatted, "created_at":1010.0, "transport":"web", "sender":"%133", "reply_to":"i5"},
                 {"id":"i9", "body":"agent report", "created_at":1020.0, "transport":null, "sender":"%21", "reply_to":null, "answered":false},
                 {"id":"i10", "body":"human follow-up", "created_at":1030.0, "transport":"web", "sender":null, "reply_to":"i9"},
                 {"id":"i11", "body":"legacy row", "created_at":1040.0, "transport":null, "sender":null, "reply_to":null},
@@ -1594,6 +1595,7 @@ mod tests {
         assert_eq!(body["items"][0]["created_at"], "1970-01-01T00:16:40Z");
         assert_eq!(body["items"][0]["delivery"], "acked");
         assert_eq!(body["items"][1]["role"], "agent");
+        assert_eq!(body["items"][1]["body"], formatted);
         assert_eq!(body["items"][2]["role"], "agent");
         assert_eq!(body["items"][3]["role"], "owner");
         assert_eq!(body["items"][3]["reply_to"], "i9");
