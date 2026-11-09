@@ -1009,6 +1009,17 @@ impl Tasks {
         assignees: &[&str],
         mode: &str,
     ) -> Result<Task, DunkError> {
+        self.assign_with_planner_author_guard(id, assignees, mode, false)
+            .await
+    }
+
+    pub(crate) async fn assign_with_planner_author_guard(
+        &self,
+        id: &str,
+        assignees: &[&str],
+        mode: &str,
+        planner_author_guard: bool,
+    ) -> Result<Task, DunkError> {
         let incoming: Vec<String> = assignees
             .iter()
             .map(|item| item.trim().to_string())
@@ -1037,15 +1048,29 @@ impl Tasks {
                 let tx = conn
                     .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                     .map_err(db::map_sqlite)?;
-                let (scope, priority, raw): (String, String, Option<String>) = tx
+                let (scope, priority, raw, kind, author): (String, String, Option<String>, String, Option<String>) = tx
                     .query_row(
-                        "SELECT scope, priority, assignees FROM tasks WHERE id = ?",
+                        "SELECT scope, priority, assignees, kind, author FROM tasks WHERE id = ?",
                         params![id],
-                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
                     )
                     .optional()
                     .map_err(db::map_sqlite)?
                     .ok_or_else(|| DunkError::Refused(format!("no task with id {id:?}")))?;
+                // Point-in-time explicit pane-ID check only; this does not establish
+                // independence or guard missing/subsequently changed provenance.
+                if planner_author_guard && mode != "remove" && kind == "review" {
+                    if let Some(author) = author.as_ref().filter(|author| !author.is_empty()) {
+                        let pane_id = |value: &str| value != "global" &&
+                            validate_scope(value).is_ok_and(|valid| valid == value);
+                        if !pane_id(author) || incoming.iter().any(|value| !pane_id(value)) {
+                            return Err(DunkError::Refused("planner review assignment requires pane IDs for author and assignees".into()));
+                        }
+                        if incoming.contains(author) {
+                            return Err(DunkError::Refused("a planner cannot assign a review to its author".into()));
+                        }
+                    }
+                }
                 let current = decode_list(raw.as_deref());
                 let merged: Vec<String> = match mode {
                     "add" => {
@@ -4030,6 +4055,172 @@ mod tests {
         assert!(tasks.assign(&task.id, &[" "], "add").await.is_err());
         assert!(tasks.assign(&task.id, &["%1"], "bogus").await.is_err());
         assert!(tasks.assign("t999", &["%1"], "add").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn planner_assignment_checks_review_author_inside_transaction() {
+        let tasks = store("planner-review-author").await;
+        let review = tasks
+            .add_with(
+                "global",
+                "review",
+                "",
+                AddOptions {
+                    kind: Some("review".into()),
+                    author: Some("%2".into()),
+                    repo: Some("fixture/project".into()),
+                    pr: Some("1".into()),
+                    head: Some("1".repeat(40)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let error = tasks
+            .assign_with_planner_author_guard(&review.id, &["%3", "%2"], "add", true)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("cannot assign a review to its author"),
+            "{error}"
+        );
+        let alias_error = tasks
+            .assign_with_planner_author_guard(&review.id, &["reviewer-name"], "add", true)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(alias_error.contains("requires pane IDs"), "{alias_error}");
+        let replace_error = tasks
+            .assign_with_planner_author_guard(&review.id, &["%3", "%2"], "replace", true)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            replace_error.contains("cannot assign a review to its author"),
+            "{replace_error}"
+        );
+        assert!(decode_list(Some(&tasks.get(&review.id).await.unwrap().assignees)).is_empty());
+        assert_eq!(tasks.events(&review.id).await, 1);
+        tasks
+            .assign_with_planner_author_guard(&review.id, &["%3"], "add", true)
+            .await
+            .unwrap();
+        tasks.assign(&review.id, &["%2"], "add").await.unwrap();
+        let removed = tasks
+            .assign_with_planner_author_guard(&review.id, &["%2"], "remove", true)
+            .await
+            .unwrap();
+        assert_eq!(decode_list(Some(&removed.assignees)), vec!["%3"]);
+        let work = tasks
+            .add_with(
+                "global",
+                "work",
+                "",
+                AddOptions {
+                    author: Some("%2".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let assigned = tasks
+            .assign_with_planner_author_guard(&work.id, &["%2"], "add", true)
+            .await
+            .unwrap();
+        assert_eq!(decode_list(Some(&assigned.assignees)), vec!["%2"]);
+        let alias_author = tasks
+            .add_with(
+                "global",
+                "alias",
+                "",
+                AddOptions {
+                    kind: Some("review".into()),
+                    author: Some("writer-name".into()),
+                    repo: Some("fixture/other".into()),
+                    pr: Some("2".into()),
+                    head: Some("2".repeat(40)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let error = tasks
+            .assign_with_planner_author_guard(&alias_author.id, &["%3"], "add", true)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("requires pane IDs"), "{error}");
+        let missing = tasks
+            .add_with(
+                "global",
+                "missing",
+                "",
+                AddOptions {
+                    kind: Some("review".into()),
+                    repo: Some("fixture/missing".into()),
+                    pr: Some("3".into()),
+                    head: Some("3".repeat(40)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let assigned = tasks
+            .assign_with_planner_author_guard(&missing.id, &["%3"], "add", true)
+            .await
+            .unwrap();
+        assert_eq!(decode_list(Some(&assigned.assignees)), vec!["%3"]);
+    }
+
+    #[tokio::test]
+    async fn planner_assignment_sees_author_committed_before_its_write_transaction() {
+        let tasks = store("planner-author-race").await;
+        let review = tasks
+            .add_with(
+                "global",
+                "review",
+                "",
+                AddOptions {
+                    kind: Some("review".into()),
+                    author: Some("%2".into()),
+                    repo: Some("fixture/project".into()),
+                    pr: Some("1".into()),
+                    head: Some("1".repeat(40)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let other = std::sync::Arc::new(Tasks::open(tasks.path()).await.unwrap());
+        let mut blocker = rusqlite::Connection::open(tasks.path()).unwrap();
+        let tx = blocker
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        tx.execute(
+            "UPDATE tasks SET author='%4' WHERE id=?",
+            params![review.id],
+        )
+        .unwrap();
+        let id = review.id.clone();
+        let handle = tokio::spawn(async move {
+            other
+                .assign_with_planner_author_guard(&id, &["%4"], "add", true)
+                .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            !handle.is_finished(),
+            "assignment should wait for the writer transaction"
+        );
+        tx.commit().unwrap();
+        let error = handle.await.unwrap().unwrap_err().to_string();
+        assert!(
+            error.contains("cannot assign a review to its author"),
+            "{error}"
+        );
+        assert!(decode_list(Some(&tasks.get(&review.id).await.unwrap().assignees)).is_empty());
+        assert_eq!(tasks.events(&review.id).await, 1);
     }
 
     #[tokio::test]

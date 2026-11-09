@@ -4,6 +4,7 @@ import os
 import sys
 import tempfile
 import logging
+import sqlite3
 import threading
 import unittest
 from unittest.mock import patch
@@ -315,6 +316,37 @@ class TaskStoreTests(unittest.TestCase):
     def tearDown(self):
         self.store.close()
         self.tmp.cleanup()
+
+    def test_planner_assignment_observes_author_change_committed_before_its_transaction(self):
+        task = self.store.add(GLOBAL, "review", kind="review", author="%2",
+                              repo="fixture/project", pr=1, head="1" * 40)
+        blocker = sqlite3.connect(self.path, timeout=5)
+        blocker.execute("BEGIN IMMEDIATE")
+        blocker.execute("UPDATE tasks SET author='%4' WHERE id=?", (task["id"],))
+        started, finished = threading.Event(), threading.Event()
+        errors = []
+        def assign():
+            started.set()
+            try:
+                self.store.assign(task["id"], ["%4"], planner_author_guard=True)
+            except Exception as error:  # capture the worker result for the test thread
+                errors.append(error)
+            finally:
+                finished.set()
+        thread = threading.Thread(target=assign)
+        thread.start()
+        try:
+            self.assertTrue(started.wait(2))
+            self.assertFalse(finished.wait(0.1), "assignment should wait for the writer")
+        finally:
+            blocker.commit()
+            blocker.close()
+            thread.join(5)
+        self.assertTrue(finished.is_set())
+        self.assertEqual(1, len(errors))
+        self.assertIsInstance(errors[0], TaskError)
+        self.assertIn("cannot assign a review to its author", str(errors[0]))
+        self.assertEqual([], self.store.get(task["id"])["assignees"])
 
     def test_priority_order_then_age(self):
         low = self.store.add(GLOBAL, "low", priority="low")
@@ -830,6 +862,51 @@ class FlockTaskTests(unittest.TestCase):
         self.flock.inbox.close()
         self.flock.tasks.close()
         self.tmp.cleanup()
+
+    def test_planner_cannot_assign_a_review_to_its_explicit_author(self):
+        task = self.flock.tasks.add(GLOBAL, "review", kind="review", author="%2",
+                                    repo="fixture/project", pr=1, head="1" * 40)
+        args = {"id": task["id"], "assignees": ["%3", "%2"]}
+        with patch.object(self.flock, "caller_role", return_value="planner"):
+            with self.assertRaisesRegex(DunkError, "cannot assign a review to its author"):
+                dunk_api.h_task_assign(self.flock, args, "%1")
+            with self.assertRaisesRegex(DunkError, "cannot assign a review to its author"):
+                dunk_api.h_task_assign(self.flock, {**args, "mode": "replace"}, "%1")
+            with self.assertRaisesRegex(DunkError, "requires pane IDs"):
+                dunk_api.h_task_assign(self.flock, {"id": task["id"], "assignees": ["reviewer-name"]}, "%1")
+            self.assertEqual([], self.flock.tasks.get(task["id"])["assignees"])
+            self.assertEqual(1, self.flock.tasks.db.execute(
+                "select count(*) from task_events where task_id=?", (task["id"],)).fetchone()[0])
+            dunk_api.h_task_assign(self.flock, {"id": task["id"], "assignees": ["%3"]}, "%1")
+        for role in ("owner", "system", "web"):
+            with patch.object(self.flock, "caller_role", return_value=role):
+                dunk_api.h_task_assign(self.flock, {"id": task["id"], "assignees": ["%2"]}, "%1")
+            self.assertIn("%2", self.flock.tasks.get(task["id"])["assignees"])
+            with patch.object(self.flock, "caller_role", return_value="planner"):
+                dunk_api.h_task_assign(self.flock, {"id": task["id"], "assignees": ["%2"], "mode": "remove"}, "%1")
+        self.assertEqual(["%3"], self.flock.tasks.get(task["id"])["assignees"])
+        work = self.flock.tasks.add(GLOBAL, "work", kind="work", author="%2")
+        with patch.object(self.flock, "caller_role", return_value="planner"):
+            dunk_api.h_task_assign(self.flock, {"id": work["id"], "assignees": ["%2"]}, "%1")
+        self.assertEqual(["%2"], self.flock.tasks.get(work["id"])["assignees"])
+        alias_author = self.flock.tasks.add(GLOBAL, "alias author", kind="review", author="writer-name",
+                                           repo="fixture/other", pr=2, head="2" * 40)
+        with patch.object(self.flock, "caller_role", return_value="planner"):
+            with self.assertRaisesRegex(DunkError, "requires pane IDs"):
+                dunk_api.h_task_assign(self.flock, {"id": alias_author["id"], "assignees": ["%3"]}, "%1")
+        self.assertEqual([], self.flock.tasks.get(alias_author["id"])["assignees"])
+        self_review = self.flock.tasks.add(GLOBAL, "self review", kind="review", author="%1",
+                                           repo="fixture/self", pr=4, head="4" * 40)
+        with patch.object(self.flock, "caller_role", return_value="planner"):
+            with self.assertRaisesRegex(DunkError, "cannot assign a review to its author"):
+                dunk_api.h_task_assign(self.flock, {"id": self_review["id"], "assignees": ["self"]}, "%1")
+            with self.assertRaisesRegex(DunkError, "cannot assign a review to its author"):
+                dunk_api.h_task_assign(self.flock, {"id": self_review["id"], "assignees": ["me"]}, "%1")
+        no_author = self.flock.tasks.add(GLOBAL, "missing author", kind="review",
+                                         repo="fixture/missing", pr=3, head="3" * 40)
+        with patch.object(self.flock, "caller_role", return_value="planner"):
+            dunk_api.h_task_assign(self.flock, {"id": no_author["id"], "assignees": ["%3"]}, "%1")
+        self.assertEqual(["%3"], self.flock.tasks.get(no_author["id"])["assignees"])
 
     def test_task_read_shows_the_latest_note_reasons(self):
         """t605: notes live in task_events, so `task read` used to show a fully

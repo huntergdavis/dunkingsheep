@@ -361,12 +361,15 @@ class PlannerAssignGateTests(unittest.TestCase):
         def __init__(self, role):
             self.role = role
             self.assigned = None
+            self.planner_author_guard = False
 
         def caller_role(self, self_pane_id):
             return self.role
 
-        def task_assign(self, task_id, assignees, mode="add", self_pane_id=None):
+        def task_assign(self, task_id, assignees, mode="add", self_pane_id=None,
+                        planner_author_guard=False):
             self.assigned = (task_id, assignees)
+            self.planner_author_guard = planner_author_guard
             return {"id": task_id}
 
     def test_the_planner_may_assign_and_a_worker_may_not(self):
@@ -374,6 +377,7 @@ class PlannerAssignGateTests(unittest.TestCase):
         flock = self._Flock("planner")
         h_task_assign(flock, {"id": "t1", "assignees": ["w1:p1"]}, "w9:p1")
         self.assertEqual(("t1", ["w1:p1"]), flock.assigned)
+        self.assertTrue(flock.planner_author_guard)
         with self.assertRaises(Exception) as ctx:
             h_task_assign(self._Flock("worker"), {"id": "t1", "assignees": ["w1:p1"]}, "w2:p2")
         self.assertIn("requires the owner role", str(ctx.exception))

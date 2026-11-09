@@ -6234,6 +6234,126 @@ fn task_test_caller(pane: &str, pid: i64, start: &str, name: &str) -> Caller {
 }
 
 #[test]
+fn planner_dispatch_refuses_assigning_review_to_explicit_author() {
+    let (runtime, _dir, flock, tasks, dispatcher) = task_mutation_api_fixture();
+    flock
+        .with_roles(|roles, _| {
+            roles.register("w1:p4", "planner", None, None, None, None, None, None)?;
+            Ok(())
+        })
+        .unwrap();
+    let review = runtime
+        .block_on(tasks.add_with(
+            "global",
+            "review",
+            "",
+            crate::tasks::AddOptions {
+                kind: Some("review".into()),
+                author: Some("w1:p3".into()),
+                repo: Some("fixture/project".into()),
+                pr: Some("1".into()),
+                head: Some("1".repeat(40)),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+    let error = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_assign",
+        json!({"id": review.id, "assignees": ["w1:p3"]}),
+        Some("w1:p4"),
+        None,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("cannot assign a review to its author"),
+        "{error}"
+    );
+    assert!(runtime.block_on(tasks.get(&review.id)).unwrap().assignees == "[]");
+    let self_review = runtime
+        .block_on(tasks.add_with(
+            "global",
+            "self-review",
+            "",
+            crate::tasks::AddOptions {
+                kind: Some("review".into()),
+                author: Some("w1:p4".into()),
+                repo: Some("fixture/self".into()),
+                pr: Some("2".into()),
+                head: Some("2".repeat(40)),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+    let self_error = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_assign",
+        json!({"id": self_review.id, "assignees": ["self"]}),
+        Some("w1:p4"),
+        None,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        self_error.contains("cannot assign a review to its author"),
+        "{self_error}"
+    );
+    let me_error = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_assign",
+        json!({"id": self_review.id, "assignees": ["me"]}),
+        Some("w1:p4"),
+        None,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        me_error.contains("cannot assign a review to its author"),
+        "{me_error}"
+    );
+    let assigned = dispatch_task_mutation(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_assign",
+        json!({"id": review.id, "assignees": ["w1:p3"]}),
+        Some("w1:p2"),
+        None,
+    )
+    .unwrap();
+    assert_eq!(assigned["assignees"], json!(["w1:p3"]));
+    for role in ["system", "web"] {
+        runtime
+            .block_on(tasks.assign(&review.id, &["w1:p3"], "remove"))
+            .unwrap();
+        let token = flock
+            .with_roles(|roles, _| roles.issue_token(role, Some(role), Some("fixture")))
+            .unwrap();
+        let request = RequestCtx {
+            service_token: Some(token),
+            ..RequestCtx::default()
+        };
+        let assigned = dispatch_task_mutation_request(
+            &dispatcher,
+            &flock,
+            &runtime,
+            "task_assign",
+            json!({"id": review.id, "assignees": ["w1:p3"]}),
+            &request,
+        )
+        .unwrap();
+        assert_eq!(assigned["assignees"], json!(["w1:p3"]));
+    }
+}
+
+#[test]
 fn api_t39_task_update_and_assign_preserve_dispatch_roles_values_and_full_wire() {
     let (runtime, _dir, flock, tasks, dispatcher) = task_mutation_api_fixture();
     let task = runtime
