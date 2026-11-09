@@ -53,7 +53,7 @@ def main():
             with path.open("xb") as output:
                 created.append(item["path"])
                 output.write(data)
-            path.chmod(int(item["mode"], 8))
+                os.fchmod(output.fileno(), int(item["mode"], 8))
     except OSError as error:
         # Do not delete files here: another process may have changed them.
         raise OSError(f"{error}; partial restore created {created}; see recovery in docs/rust/PYTHON_DAEMON_RETIREMENT.md") from error

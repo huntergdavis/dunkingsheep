@@ -84,6 +84,12 @@ class RestoreOracleTests(unittest.TestCase):
             restore.main()
         self.assertFalse((self.root / "dunk_test00.py").exists())
 
+    def test_chmod_failure_reports_created_file_without_deleting_it(self):
+        with mock.patch.object(restore.subprocess, "run", return_value=mock.Mock(returncode=0)), mock.patch.object(restore, "git", side_effect=self.git), mock.patch.object(restore.os, "fchmod", side_effect=OSError("synthetic chmod failure")), self.assertRaisesRegex(OSError, "partial restore created.*dunk_test00"):
+            restore.main()
+        self.assertTrue((self.root / "dunk_test00.py").is_file())
+        self.assertFalse((self.root / "dunk_test01.py").exists())
+
     def test_write_failure_reports_partial_files_without_deleting_them(self):
         original = Path.open
         def fail_second(path, mode="r", *args, **kwargs):
