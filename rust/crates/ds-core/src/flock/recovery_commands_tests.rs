@@ -729,21 +729,13 @@ fn recovery_metadata_equality_matches_python_numeric_boundaries_without_rewritin
     tokens.push("10000000000000000159028911097599180468360808563945281389781327557747838772170381060813469985856815104".into());
     tokens.push("10000000000000000159028911097599180468360808563945281389781327557747838772170381060813469985856815105".into());
     tokens.push(format!("1{}", "0".repeat(400)));
-    let mut child = Command::new("python3").args(["-c", "import json,sys; v=[json.loads(s) for s in json.load(sys.stdin)]; print(json.dumps([a==b for a in v for b in v]))"])
-        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(serde_json::to_string(&tokens).unwrap().as_bytes())
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let expected: Vec<bool> = serde_json::from_slice(&output.stdout).unwrap();
+    // Captured from Python 3.14.4 at commit 5c9839aa; compare tokens too so
+    // additions or reordering cannot silently reuse a stale equality matrix.
+    let fixture: Value =
+        serde_json::from_str(include_str!("fixtures/metadata_equality_python.json")).unwrap();
+    assert_eq!(fixture["tokens"], json!(tokens));
+    let expected: Vec<bool> = serde_json::from_value(fixture["expected"].clone()).unwrap();
+    assert_eq!(expected.len(), tokens.len() * tokens.len());
     let values: Vec<Value> = tokens
         .iter()
         .map(|raw| serde_json::from_str(raw).unwrap())
