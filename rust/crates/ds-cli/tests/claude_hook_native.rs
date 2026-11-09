@@ -103,3 +103,31 @@ fn python_flock_blocks_native_claude() {
     assert!(blocked, "native hook ignored Python flock");
     assert!(path.join("calls").exists());
 }
+
+#[test]
+fn consumes_existing_python_format_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let cli = root.join("fake-cli");
+    fs::write(
+        &cli,
+        "#!/bin/sh\necho \"$5\" >> \"$CALLS\"\necho '{\"ended\":true}'\n",
+    )
+    .unwrap();
+    fs::set_permissions(&cli, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::create_dir(root.join("state")).unwrap();
+    let event = root.join("stop");
+    fs::write(&event, format!("{{\"session_id\":\"session-1\",\"hook_event_name\":\"Stop\",\"stop_hook_active\":false,\"cwd\":\"{}\"}}", root.display())).unwrap();
+    let python = root.join("seed.py");
+    fs::write(&python, "import json,os,time\npid=os.getppid()\ntail=open('/proc/%s/stat'%pid).read().rsplit(')',1)[1].split()\ns={'daemon_turn_id':'python-token','session_id':'session-1','cwd':os.environ['ROOT'],'pane_id':'%scratch','root_pid':pid,'root_start':tail[19],'started_at':time.time(),'expires_at':time.time()+120}\nwith open(os.path.join(os.environ['ROOT'],'state','session-1.json'),'w') as f: json.dump(s,f)\n").unwrap();
+    let status = Command::new("/bin/bash").args(["-c", "exec -a claude /bin/bash -c 'python3 \"$ROOT/seed.py\"; \"$HOOK\" end < \"$ROOT/stop\"; :' "])
+        .env("ROOT", root).env("HOOK", env!("CARGO_BIN_EXE_dunk-claude-turn"))
+        .env("DUNKINGSHEEP_BIN", &cli).env("DUNKINGSHEEP_CLAUDE_STATE_DIR", root.join("state"))
+        .env("CALLS", root.join("calls")).status().unwrap();
+    assert!(status.success());
+    assert_eq!(
+        fs::read_to_string(root.join("calls")).unwrap(),
+        "python-token\n"
+    );
+    assert!(!root.join("state/session-1.json").exists());
+}
