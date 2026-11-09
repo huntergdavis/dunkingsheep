@@ -9,10 +9,10 @@ is a separate, owner-approved cutover step.
 
 ```
 <prefix>/releases/<id>/dunkingsheep   Rust binary (0555)
-<prefix>/releases/<id>/dunk-poll.py   copy of tools/dunk_poll.py (0444)
+<prefix>/releases/<id>/dunk-poll      native Rust poll client (0555)
 <prefix>/releases/<id>/MANIFEST       release_id, revision, sha256 of both files (0444)
 <bin-dir>/dunkingsheep                launcher: exec the release binary
-<bin-dir>/dunk-poll                   poll wrapper: pinned python3 + the release's poller copy
+<bin-dir>/dunk-poll                   poll wrapper: exec the release's native client
 <unit-dir>/dunkingsheep.service.d/99-rust-release.conf
                                       drop-in: ExecStart reset to the release binary, serve;
                                       DUNKINGSHEEP_SUPERVISED=1 kept
@@ -27,7 +27,7 @@ but an installed release (`release_layout::release_dir_of`).
 Every path is required. Nothing defaults to `$HOME`. None of the scripts runs `systemctl`.
 
 ```sh
-packaging/rust-release/install-release.sh --binary FILE --poll tools/dunk_poll.py \
+packaging/rust-release/install-release.sh --binary FILE --poll NATIVE_POLL_BINARY \
     --release-id ID --prefix DIR --bin-dir DIR --unit-dir DIR [--revision TEXT] [--dry-run]
 packaging/rust-release/rollback-release.sh --prefix DIR --bin-dir DIR --unit-dir DIR \
     [--to ID] [--dry-run]
@@ -62,8 +62,8 @@ packaging/rust-release/uninstall-release.sh --prefix DIR --bin-dir DIR --unit-di
   complete.
 - Uninstall refuses to change a drop-in it did not write (no `release_id` line). A
   rollback never destroys the pair it replaces, because that pair is saved as `previous`.
-- The poll wrapper pins an absolute `python3`. A `python3` found through a relative PATH
-  entry is refused, so the wrapper never depends on the working directory.
+- New poll wrappers pin the native client in the immutable release. Older releases can
+  still use their original Python wrapper when restored for rollback.
 - The drop-in is `99-rust-release.conf`, so it sorts after the operator drop-ins. systemd
   applies drop-ins in name order and the last `ExecStart` wins. Install and rollback `--to`
   refuse when a drop-in in the user unit load paths sorts after ours and sets `ExecStart`, or
@@ -93,8 +93,8 @@ steps are in the t3229 task notes. These scripts only prepare the artifacts.
 
 ## Known limits
 
-- `dunk-poll` still runs Python: a copy of `tools/dunk_poll.py` inside the release
-  (audit P1-9 makes it a Rust verb).
+- This changes the poll client only; harness hooks and older rollback releases may still
+  require Python and need their own inventory and migration.
 - The guard shims still compile in the Python wrappers (audit P0-8, t3230). They are
   not changed here.
 - The drop-in template targets the base unit `dunkingsheep.service`. The live

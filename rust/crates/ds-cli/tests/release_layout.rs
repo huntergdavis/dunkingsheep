@@ -123,7 +123,7 @@ impl Sandbox {
         env: &[(&str, &str)],
         standard: bool,
     ) -> Output {
-        let poll = project_root().join("tools/dunk_poll.py");
+        let poll = PathBuf::from(env!("CARGO_BIN_EXE_dunk-poll"));
         let mut args = vec![
             "--binary",
             env!("CARGO_BIN_EXE_dunkingsheep"),
@@ -223,9 +223,9 @@ fn install_writes_an_immutable_release_launchers_and_drop_in() {
     ok(&sandbox.install("t3229-test"));
     let release = sandbox.release("t3229-test");
     let binary = release.join("dunkingsheep");
-    let poll = release.join("dunk-poll.py");
+    let poll = release.join("dunk-poll");
     assert_eq!(0o555, mode(&binary));
-    assert_eq!(0o444, mode(&poll));
+    assert_eq!(0o555, mode(&poll));
 
     let manifest = std::fs::read_to_string(release.join("MANIFEST")).expect("manifest");
     assert!(manifest.contains("release_id=t3229-test\n"), "{manifest}");
@@ -266,7 +266,7 @@ fn install_writes_an_immutable_release_launchers_and_drop_in() {
     let other = sandbox.root.join("other-binary");
     std::fs::write(&other, "#!/bin/sh\necho different\n").expect("other binary");
     std::fs::set_permissions(&other, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-    let poll_path = project_root().join("tools/dunk_poll.py");
+    let poll_path = PathBuf::from(env!("CARGO_BIN_EXE_dunk-poll"));
     let refused = run_script(
         "install-release.sh",
         &[
@@ -422,17 +422,9 @@ fn uninstall_refuses_to_remove_a_drop_in_it_did_not_write() {
 }
 
 #[test]
-fn install_refuses_a_python_found_through_a_relative_path_entry() {
+fn native_poll_install_does_not_require_python_in_path() {
     let sandbox = Sandbox::new();
     ok(&sandbox.install("rel-py"));
-    let python = ["/usr/bin/python3", "/bin/python3"]
-        .into_iter()
-        .map(PathBuf::from)
-        .find(|path| path.is_file())
-        .expect("a python3 on the host");
-    let relative = sandbox.root.join("relpy");
-    std::fs::create_dir_all(&relative).expect("relative PATH entry");
-    std::os::unix::fs::symlink(&python, relative.join("python3")).expect("python3 link");
     let cli = sandbox.release("rel-py").join("dunkingsheep");
     let output = Command::new(&cli)
         .args([
@@ -441,13 +433,12 @@ fn install_refuses_a_python_found_through_a_relative_path_entry() {
             sandbox.bin.to_str().expect("utf-8 path"),
         ])
         .current_dir(&sandbox.root)
-        .env("PATH", "relpy:/usr/bin:/bin")
+        .env("PATH", "")
         .env("HOME", &sandbox.root)
         .output()
         .expect("run install with a relative PATH entry");
-    assert!(!output.status.success());
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("relative PATH entry"),
+        output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
@@ -1111,4 +1102,63 @@ fn installed_release_serves_status_and_task_list_against_copied_state() {
         std::thread::sleep(Duration::from_millis(10));
     }
     daemon.0 = None;
+}
+
+#[test]
+fn rollback_restores_real_legacy_python_poller() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixListener;
+    let sandbox = Sandbox::new();
+    let old = sandbox.root.join("old-release/tools");
+    std::fs::create_dir_all(&old).unwrap();
+    let source = project_root().join("tools/dunk_poll.py");
+    assert_eq!(
+        sha256(source.to_str().unwrap()),
+        "5d1d60794dc0abfb2a4de7f9e834330888a779ad4e48133df8460181409d6521"
+    );
+    let script = old.join("dunk_poll.py");
+    std::fs::copy(source, &script).unwrap();
+    let old_launcher = format!(
+        "#!/bin/sh\nexec /usr/bin/python3 {} \"$@\"\n",
+        shell_quote(&script.display().to_string())
+    );
+    let launcher = sandbox.bin.join("dunk-poll");
+    std::fs::write(&launcher, &old_launcher).unwrap();
+    std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(sandbox.bin.join("dunkingsheep"), python_era_launcher()).unwrap();
+    ok(&sandbox.install("native"));
+    assert_ne!(std::fs::read_to_string(&launcher).unwrap(), old_launcher);
+    ok(&sandbox.rollback(&["--original"]));
+    assert_eq!(std::fs::read_to_string(&launcher).unwrap(), old_launcher);
+    let socket = sandbox.root.join("old.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut line = String::new();
+        BufReader::new(stream.try_clone().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(request["cmd"], "poll");
+        writeln!(
+            stream,
+            "{}",
+            serde_json::json!({"ok":true,"result":{"status":{"version":"legacy"}}})
+        )
+        .unwrap();
+    });
+    let output = Command::new(&launcher)
+        .args(["--socket", socket.to_str().unwrap(), "--compact"])
+        .env("HOME", &sandbox.root)
+        .env_remove("DUNKINGSHEEP_SOCKET")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["status"]["version"], "legacy");
+    server.join().unwrap();
 }

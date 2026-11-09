@@ -1,7 +1,7 @@
 //! Immutable release layout for the Rust CLI (t3229, audit P0-1).
 //!
 //! A release is the directory `<prefix>/releases/<id>/`. It holds the Rust
-//! binary, a copy of the `dunk-poll` script and a MANIFEST. Launchers and the
+//! binary, a native `dunk-poll` client and a MANIFEST. Launchers and the
 //! systemd drop-in point only at that directory. They never point at a Cargo
 //! build tree and never at the dev checkout's Python. The scripts in
 //! `packaging/rust-release/` drive this layout. The launcher rendering lives here,
@@ -9,9 +9,10 @@
 
 use std::path::{Component, Path, PathBuf};
 
-/// The copy of `tools/dunk_poll.py` shipped inside each release. Until `dunk-poll`
-/// is a Rust verb (audit P1-9), the poll wrapper runs this copy.
+/// Legacy Python poll script retained for rollback to an older release.
 pub const POLL_SCRIPT: &str = "dunk-poll.py";
+/// The native poll binary in newly built releases.
+pub const POLL_BINARY: &str = "dunk-poll";
 
 /// First-line marker of the Rust launcher. `uninstall-release.sh` matches on it.
 pub const LAUNCHER_MARKER: &str = "Dunking Sheep Rust CLI launcher";
@@ -83,6 +84,14 @@ pub fn poll_launcher_body(python: &Path, poller: &Path) -> String {
     format!(
         "#!/bin/sh\n# {POLL_MARKER}, installed by `dunkingsheep install`.\nexec {} {} \"$@\"\n",
         shell_quote(&python.display().to_string()),
+        shell_quote(&poller.display().to_string())
+    )
+}
+
+/// Pin a launcher to the native poll binary in its immutable release.
+pub fn native_poll_launcher_body(poller: &Path) -> String {
+    format!(
+        "#!/bin/sh\n# {POLL_MARKER}, installed by `dunkingsheep install`.\nexec {} \"$@\"\n",
         shell_quote(&poller.display().to_string())
     )
 }

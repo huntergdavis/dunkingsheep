@@ -1654,25 +1654,38 @@ fn install_launcher(ns: &Map<String, Value>, json: bool) -> Outcome {
         Err(message) => return install_error(message),
     };
     let poller = release_dir.join(crate::release_layout::POLL_SCRIPT);
+    let native_poller = release_dir.join(crate::release_layout::POLL_BINARY);
     let path_env = std::env::var("PATH").unwrap_or_default();
     let python = find_executable("python3", &path_env);
 
     let result = (|| -> Result<Value, String> {
         std::fs::create_dir_all(&bin_dir)
             .map_err(|error| format!("cannot create {}: {error}", bin_dir.display()))?;
-        if !poller.is_file() {
+        if !native_poller.is_file() && !poller.is_file() {
             return Err(format!(
                 "no dunk-poll copy in the release at {}",
                 poller.display()
             ));
         }
-        let python = python.ok_or_else(|| "no python3 found on PATH for dunk-poll".to_string())?;
-        if !python.is_absolute() {
-            return Err(format!(
-                "python3 was found through a relative PATH entry ({}); put an absolute directory first on PATH, then install again",
-                python.display()
-            ));
-        }
+        let poll_launcher_body = if native_poller.is_file() {
+            let permissions = std::fs::metadata(&native_poller)
+                .map_err(|error| format!("cannot inspect native poll client: {error}"))?
+                .permissions();
+            if permissions.mode() & 0o111 == 0 {
+                return Err("native poll client is not executable".to_string());
+            }
+            crate::release_layout::native_poll_launcher_body(&native_poller)
+        } else {
+            let python =
+                python.ok_or_else(|| "no python3 found on PATH for dunk-poll".to_string())?;
+            if !python.is_absolute() {
+                return Err(format!(
+                    "python3 was found through a relative PATH entry ({}); put an absolute directory first on PATH, then install again",
+                    python.display()
+                ));
+            }
+            crate::release_layout::poll_launcher_body(&python, &poller)
+        };
         let launcher = bin_dir.join("dunkingsheep");
         let poll_launcher = bin_dir.join("dunk-poll");
         // A launcher that is a symbolic link would be written through to another file.
@@ -1688,10 +1701,7 @@ fn install_launcher(ns: &Map<String, Value>, json: bool) -> Outcome {
             &launcher,
             &crate::release_layout::launcher_body(&executable),
         )?;
-        write_executable(
-            &poll_launcher,
-            &crate::release_layout::poll_launcher_body(&python, &poller),
-        )?;
+        write_executable(&poll_launcher, &poll_launcher_body)?;
 
         let on_path_here = std::env::split_paths(&path_env)
             .filter(|path| !path.as_os_str().is_empty())
