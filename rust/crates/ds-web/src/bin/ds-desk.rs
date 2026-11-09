@@ -30,7 +30,8 @@ fn make_config(root: &Path) -> Result<DeskConfig, Box<dyn Error>> {
     let config_dir = path("DUNKINGSHEEP_DIR", home.join(".config/dunkingsheep"));
     let data_dir = path("VP_DATA_DIR", config_dir.join("desk"));
     let channels_path = value("VP_CHANNELS_FILE").map(PathBuf::from);
-    let channels = web_server::load_channel_registry(channels_path.as_deref(), root)?;
+    let channels = web_server::load_channel_registry(channels_path.as_deref(), root)
+        .map_err(|error| error.to_string())?;
     let token = ds_core::client::service_token(&|name| env::var(name).ok(), &|p| {
         std::fs::read_to_string(p)
     });
