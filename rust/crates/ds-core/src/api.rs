@@ -3321,6 +3321,7 @@ fn require_planner_assignment_binding(
         pane: pane.to_owned(),
         pid,
         start: stored_start.to_owned(),
+        recipients: Vec::new(),
     }))
 }
 
@@ -3333,7 +3334,7 @@ pub fn h_task_assign(context: &HandlerContext<'_>, args: Args) -> Result<Value, 
             "task assign requires the owner role (caller is {role}); lanes pull work with task next, they are not handed it"
         )));
     }
-    let planner = if role == "planner" {
+    let mut planner = if role == "planner" {
         require_planner_assignment_binding(context)?
     } else {
         None
@@ -3345,6 +3346,36 @@ pub fn h_task_assign(context: &HandlerContext<'_>, args: Args) -> Result<Value, 
         .unwrap_or_default();
     let mode_value = args.get("mode").filter(|value| truthy(value));
     let id = args.get("id").map(python_value_string).unwrap_or_default();
+    if planner.is_some()
+        && !mode_value
+            .and_then(Value::as_str)
+            .is_some_and(|m| matches!(m.trim().to_lowercase().as_str(), "remove" | "rm"))
+    {
+        let task = context.block_on(context.flock.task_read(&id, pane))??;
+        let expected = if task.kind == "review" {
+            "reviewer"
+        } else {
+            "worker"
+        };
+        for target in crate::flock::Flock::task_assignees(&assignees, pane)? {
+            let actual = context.flock.caller_role(Some(&target), context.env)?;
+            if actual != expected {
+                return Err(DunkError::Refused(format!(
+                    "planner assignment requires a registered {expected} recipient"
+                )));
+            }
+            let (pid, start) = crate::flock::lane_project::identity(context.env, &target)?;
+            planner
+                .as_mut()
+                .expect("planner identity checked")
+                .recipients
+                .push(crate::tasks::planner_scope::RecipientIdentity {
+                    pane: target,
+                    pid,
+                    start,
+                });
+        }
+    }
     let task = context.block_on(context.flock.task_assign_wire_with_mode_parser(
         &id,
         &assignees,

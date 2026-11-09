@@ -11,6 +11,33 @@ pub struct PlannerIdentity {
     pub pane: String,
     pub pid: i64,
     pub start: String,
+    pub recipients: Vec<RecipientIdentity>,
+}
+
+#[derive(Clone, Debug)]
+pub struct RecipientIdentity {
+    pub pane: String,
+    pub pid: i64,
+    pub start: String,
+}
+
+/// Project grants route only to recipients explicitly associated with that project.
+pub fn recipients_allowed(db: &Connection, planner: &PlannerIdentity) -> rusqlite::Result<bool> {
+    let project: Option<String> = db.query_row(
+        "SELECT project FROM planner_scope_grants WHERE pane_id=?1 AND pane_pid=?2 AND proc_start=?3 AND scope_kind='project'",
+        params![planner.pane, planner.pid, planner.start], |row| row.get(0),
+    ).optional()?;
+    let Some(project) = project else {
+        return Ok(true);
+    };
+    for recipient in &planner.recipients {
+        let membership =
+            super::lane_project::get(db, &recipient.pane, recipient.pid, &recipient.start)?;
+        if !membership.is_some_and(|m| m.scope == ProjectScope::Project(project.clone())) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 pub fn migrate(db: &Connection) -> rusqlite::Result<()> {
@@ -22,35 +49,12 @@ pub fn migrate(db: &Connection) -> rusqlite::Result<()> {
                (scope_kind='project' AND project IS NOT NULL AND length(project)>0)));\
          CREATE TABLE IF NOT EXISTS planner_task_projects (\
          task_id TEXT PRIMARY KEY, project TEXT NOT NULL CHECK(length(project)>0));\
-         CREATE TABLE IF NOT EXISTS planner_project_blockers (\
-         project_task_id TEXT NOT NULL, blocker_task_id TEXT NOT NULL,\
-         PRIMARY KEY(project_task_id, blocker_task_id));\
-         CREATE TRIGGER IF NOT EXISTS planner_task_changed AFTER UPDATE OF depends_on,scope ON tasks \
-         WHEN OLD.depends_on IS NOT NEW.depends_on OR OLD.scope IS NOT NEW.scope BEGIN \
-           DELETE FROM planner_project_blockers WHERE project_task_id=OLD.id OR blocker_task_id=OLD.id; \
-         END; \
          CREATE TRIGGER IF NOT EXISTS planner_task_deleted AFTER DELETE ON tasks BEGIN \
-           DELETE FROM planner_project_blockers WHERE project_task_id=OLD.id OR blocker_task_id=OLD.id; \
            DELETE FROM planner_task_projects WHERE task_id=OLD.id; \
          END; \
          CREATE TRIGGER IF NOT EXISTS planner_task_replaced BEFORE INSERT ON tasks \
          WHEN EXISTS(SELECT 1 FROM tasks WHERE id=NEW.id) BEGIN \
-           DELETE FROM planner_project_blockers WHERE project_task_id=NEW.id OR blocker_task_id=NEW.id; \
            DELETE FROM planner_task_projects WHERE task_id=NEW.id; \
-         END; \
-         CREATE TRIGGER IF NOT EXISTS planner_project_changed AFTER UPDATE OF project ON planner_task_projects \
-         WHEN OLD.project IS NOT NEW.project BEGIN \
-           DELETE FROM planner_project_blockers WHERE project_task_id=OLD.task_id OR blocker_task_id=OLD.task_id; \
-         END; \
-         CREATE TRIGGER IF NOT EXISTS planner_project_added AFTER INSERT ON planner_task_projects BEGIN \
-           DELETE FROM planner_project_blockers WHERE blocker_task_id=NEW.task_id; \
-         END; \
-         CREATE TRIGGER IF NOT EXISTS planner_project_replaced BEFORE INSERT ON planner_task_projects \
-         WHEN EXISTS(SELECT 1 FROM planner_task_projects WHERE task_id=NEW.task_id) BEGIN \
-           DELETE FROM planner_project_blockers WHERE project_task_id=NEW.task_id OR blocker_task_id=NEW.task_id; \
-         END; \
-         CREATE TRIGGER IF NOT EXISTS planner_project_removed AFTER DELETE ON planner_task_projects BEGIN \
-           DELETE FROM planner_project_blockers WHERE project_task_id=OLD.task_id OR blocker_task_id=OLD.task_id; \
          END;",
     )
 }
@@ -116,35 +120,6 @@ pub fn set_task_project(
     Ok(())
 }
 
-/// Approve a project task's existing direct prerequisite as a global blocker.
-pub fn approve_blocker(
-    db: &rusqlite::Transaction<'_>,
-    project_task: &str,
-    blocker: &str,
-) -> rusqlite::Result<()> {
-    let deps: String = db.query_row(
-        "SELECT depends_on FROM tasks WHERE id=?1",
-        [project_task],
-        |row| row.get(0),
-    )?;
-    let valid = super::decode_list(Some(&deps))
-        .iter()
-        .any(|id| id == blocker);
-    let associated: bool = db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM planner_task_projects WHERE task_id=?1)",
-        [project_task],
-        |row| row.get(0),
-    )?;
-    let global: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM tasks WHERE id=?1 AND scope='global') AND NOT EXISTS(SELECT 1 FROM planner_task_projects WHERE task_id=?1)", [blocker], |row| row.get(0))?;
-    if !valid || !associated || !global {
-        return Err(rusqlite::Error::InvalidParameterName(
-            "blocker requires an associated project task and its existing global dependency".into(),
-        ));
-    }
-    db.execute("INSERT OR IGNORE INTO planner_project_blockers(project_task_id,blocker_task_id) VALUES (?1,?2)", params![project_task,blocker])?;
-    Ok(())
-}
-
 /// Check a point-in-time pane grant and target inside the caller's assignment transaction.
 pub fn allows(
     db: &Connection,
@@ -173,8 +148,8 @@ pub fn allows(
     if visibility != "global" || target_project.is_some() {
         return Ok(false);
     }
-    let mut stmt=db.prepare("SELECT t.depends_on FROM planner_project_blockers b JOIN planner_task_projects p ON p.task_id=b.project_task_id JOIN tasks t ON t.id=p.task_id WHERE p.project=?1 AND b.blocker_task_id=?2")?;
-    let rows = stmt.query_map(params![project, task], |row| row.get::<_, String>(0))?;
+    let mut stmt=db.prepare("SELECT t.depends_on FROM planner_task_projects p JOIN tasks t ON t.id=p.task_id WHERE p.project=?1 AND t.status IN ('open','in_progress','blocked')")?;
+    let rows = stmt.query_map(params![project], |row| row.get::<_, String>(0))?;
     for deps in rows {
         if super::decode_list(Some(&deps?)).iter().any(|id| id == task) {
             return Ok(true);
@@ -208,29 +183,58 @@ mod tests {
             &ProjectScope::Project("alpha".into()),
         )
         .unwrap();
+        super::super::lane_project::set(
+            &tx,
+            &super::super::lane_project::Membership {
+                pane: "%3".into(),
+                pid: 33,
+                start: "recipient".into(),
+                scope: ProjectScope::Project("alpha".into()),
+            },
+        )
+        .unwrap();
         tx.commit().unwrap();
         let planner = PlannerIdentity {
             pane: "%2".into(),
             pid: 22,
             start: "start".into(),
+            recipients: vec![RecipientIdentity {
+                pane: "%3".into(),
+                pid: 33,
+                start: "recipient".into(),
+            }],
         };
         tasks
             .assign_with_planner_scope(&project.id, &["%3"], "add", true, Some(planner.clone()))
             .await
             .unwrap();
         assert!(tasks
-            .assign_with_planner_scope(&unrelated.id, &["%3"], "add", true, Some(planner))
+            .assign_with_planner_scope(&unrelated.id, &["%3"], "add", true, Some(planner.clone()))
             .await
             .is_err());
         assert_eq!(tasks.get(&unrelated.id).await.unwrap().assignees, "[]");
+        super::super::lane_project::set(
+            &db,
+            &super::super::lane_project::Membership {
+                pane: "%3".into(),
+                pid: 33,
+                start: "recipient".into(),
+                scope: ProjectScope::Project("beta".into()),
+            },
+        )
+        .unwrap();
+        assert!(tasks
+            .assign_with_planner_scope(&project.id, &["%3"], "add", true, Some(planner))
+            .await
+            .is_err());
     }
 
     #[test]
     fn grants_route_global_project_and_approved_current_blockers() {
         let mut db = Connection::open_in_memory().unwrap();
         db.execute_batch(
-            "CREATE TABLE tasks(id TEXT PRIMARY KEY,scope TEXT,depends_on TEXT); \
-            INSERT INTO tasks VALUES('global','global','[]'),('prereq','global','[]'),\
+            "CREATE TABLE tasks(id TEXT PRIMARY KEY,scope TEXT,depends_on TEXT,status TEXT DEFAULT 'open'); \
+            INSERT INTO tasks (id,scope,depends_on) VALUES('global','global','[]'),('prereq','global','[]'),\
             ('project','global','[\"prereq\"]'),('other','global','[]');",
         )
         .unwrap();
@@ -256,42 +260,11 @@ mod tests {
         assert!(!allows(&db, "%1", 11, "start", "project").unwrap());
         assert!(allows(&db, "%2", 22, "start", "project").unwrap());
         assert!(!allows(&db, "%2", 22, "start", "other").unwrap());
-        assert!(!allows(&db, "%2", 22, "start", "prereq").unwrap());
-        {
-            let tx = db
-                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-                .unwrap();
-            approve_blocker(&tx, "project", "prereq").unwrap();
-            tx.commit().unwrap();
-        }
         assert!(allows(&db, "%2", 22, "start", "prereq").unwrap());
         assert!(!allows(&db, "%2", 23, "start", "project").unwrap());
         db.execute("UPDATE tasks SET depends_on='[]' WHERE id='project'", [])
             .unwrap();
         assert!(!allows(&db, "%2", 22, "start", "prereq").unwrap());
-        db.execute(
-            "UPDATE tasks SET depends_on='[\"prereq\"]' WHERE id='project'",
-            [],
-        )
-        .unwrap();
-        assert!(!allows(&db, "%2", 22, "start", "prereq").unwrap());
-        {
-            let tx = db
-                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-                .unwrap();
-            approve_blocker(&tx, "project", "prereq").unwrap();
-            set_task_project(&tx, "project", "beta").unwrap();
-            tx.commit().unwrap();
-        }
-        set_grant(
-            &db,
-            "%3",
-            33,
-            "start",
-            &ProjectScope::Project("beta".into()),
-        )
-        .unwrap();
-        assert!(!allows(&db, "%3", 33, "start", "prereq").unwrap());
         revoke_grant(&db, "%2").unwrap();
         assert!(!allows(&db, "%2", 22, "start", "project").unwrap());
     }

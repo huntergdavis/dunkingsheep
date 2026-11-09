@@ -43,6 +43,12 @@ def load_parser():
     project.add_argument("pane", help="live pane id")
     project.add_argument("--project", help="explicit project")
     project.add_argument("--global", action="store_true", help="explicit global scope")
+    planner = actions.add_parser("planner", help="owner-controlled planner grants and task project scope")
+    planner.add_argument("operation", choices=["grant", "revoke", "task-project"])
+    planner.add_argument("--pane")
+    planner.add_argument("--project")
+    planner.add_argument("--global", action="store_true")
+    planner.add_argument("--task")
     return parser
 
 

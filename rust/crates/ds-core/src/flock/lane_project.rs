@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 fn failure(error: impl std::fmt::Display) -> DunkError {
     DunkError::Refused(format!("lane project: {error}"))
 }
-fn identity(env: &dyn PaneInfoEnv, pane: &str) -> Result<(i64, String), DunkError> {
+pub(crate) fn identity(env: &dyn PaneInfoEnv, pane: &str) -> Result<(i64, String), DunkError> {
     let row = env
         .get_pane(pane)
         .ok_or_else(|| failure("pane is not live"))?;
@@ -89,10 +89,6 @@ impl Flock {
                 field("project")?,
             )
             .map_err(failure)?,
-            "blocker" => {
-                crate::tasks::planner_scope::approve_blocker(&tx, field("task")?, field("blocker")?)
-                    .map_err(failure)?
-            }
             _ => return Err(failure("unknown planner scope operation")),
         }
         tx.commit().map_err(failure)?;
