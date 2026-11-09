@@ -12,6 +12,7 @@ fn run(root: &std::path::Path) -> std::process::Output {
 #[test]
 fn installs_once_and_preserves_other_plugins() {
     let dir = tempfile::tempdir().unwrap();
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
     let plugins = dir.path().join("opencode/plugins");
     fs::create_dir_all(&plugins).unwrap();
     fs::set_permissions(
@@ -43,6 +44,7 @@ fn installs_once_and_preserves_other_plugins() {
 #[test]
 fn creates_private_parents_and_refuses_symlinked_directories() {
     let dir = tempfile::tempdir().unwrap();
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
     assert!(run(dir.path()).status.success());
     let plugins = dir.path().join("opencode/plugins");
     assert_eq!(
@@ -51,6 +53,8 @@ fn creates_private_parents_and_refuses_symlinked_directories() {
     );
     let other = tempfile::tempdir().unwrap();
     let external = tempfile::tempdir().unwrap();
+    fs::set_permissions(other.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(external.path(), fs::Permissions::from_mode(0o700)).unwrap();
     symlink(external.path(), other.path().join("opencode")).unwrap();
     assert!(!run(other.path()).status.success());
     assert!(!external.path().join("plugins").exists());
