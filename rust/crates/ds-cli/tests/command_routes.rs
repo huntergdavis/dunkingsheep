@@ -5224,7 +5224,9 @@ fn cli_route_58_commands_map() {
         let strip_sizes = |text: &str| {
             text.lines()
                 .filter(|line| {
-                    !line.starts_with("declared ") && !line.starts_with("- grouped schema bytes:")
+                    !line.starts_with("declared ")
+                        && !line.starts_with("- grouped schema bytes:")
+                        && !line.starts_with("- hot set (`inbox`, `task`, `memory`):")
                 })
                 .map(str::to_owned)
                 .collect::<Vec<_>>()
