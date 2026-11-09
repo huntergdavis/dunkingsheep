@@ -98,6 +98,22 @@ fn make_services_with_factory(
                 .workspace_id
                 .clone();
         }
+        // Each request gets a fresh fake terminal. Rehydrate the pane created by a
+        // prior request so a subsequent query sees the same simulated live pane.
+        if observed
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|event| event[0] == "start_agent")
+        {
+            terminal.panes.push(crate::terminal::Pane {
+                pane_id: "w1:p-probe".into(),
+                pane_pid: Some(i64::from(std::process::id())),
+                window_id: "w1".into(),
+                session_id: "s1".into(),
+                ..crate::terminal::Pane::default()
+            });
+        }
         terminal.fail_layout = fail_layout.clone();
         terminal.available = available;
         Box::new(terminal)
