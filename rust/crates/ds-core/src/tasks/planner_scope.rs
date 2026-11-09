@@ -81,6 +81,8 @@ pub fn migrate(db: &Connection) -> rusqlite::Result<()> {
                (scope_kind='project' AND project IS NOT NULL AND length(project)>0)));\
          CREATE TABLE IF NOT EXISTS planner_task_projects (\
          task_id TEXT PRIMARY KEY, project TEXT NOT NULL CHECK(length(project)>0));\
+         CREATE TABLE IF NOT EXISTS planner_repo_projects (\
+         repo TEXT PRIMARY KEY, project TEXT NOT NULL CHECK(length(project)>0));\
          CREATE TRIGGER IF NOT EXISTS planner_task_deleted AFTER DELETE ON tasks BEGIN \
            DELETE FROM planner_task_projects WHERE task_id=OLD.id; \
          END; \
@@ -197,6 +199,69 @@ pub fn allows(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn review_sync_uses_only_explicit_repository_mapping() {
+        let dir = crate::testsupport::dir("review-project-mapping");
+        let tasks = super::super::Tasks::open(dir.path().join("tasks.db"))
+            .await
+            .unwrap();
+        let db = Connection::open(tasks.path()).unwrap();
+        db.execute(
+            "INSERT INTO planner_repo_projects(repo,project) VALUES ('example/one','alpha')",
+            [],
+        )
+        .unwrap();
+        for (repo, pr, expected) in [
+            ("example/one", "1", Some("alpha")),
+            ("example/one", "2", Some("alpha")),
+            ("other/one", "1", None),
+            ("Example/one", "1", None),
+        ] {
+            let opts = super::super::AddOptions {
+                kind: Some("review".into()),
+                repo: Some(repo.into()),
+                pr: Some(pr.into()),
+                head: Some("abc".into()),
+                created_by: Some("review-sync".into()),
+                ..Default::default()
+            };
+            let task = tasks
+                .add_review_with_verdict_guard("global", "review", "", opts, &[])
+                .await
+                .unwrap()
+                .unwrap();
+            let actual: Option<String> = db
+                .query_row(
+                    "SELECT project FROM planner_task_projects WHERE task_id=?1",
+                    [&task.id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .unwrap();
+            assert_eq!(actual.as_deref(), expected);
+        }
+        let manual = super::super::AddOptions {
+            kind: Some("review".into()),
+            repo: Some("example/one".into()),
+            pr: Some("3".into()),
+            head: Some("abc".into()),
+            created_by: Some("review-sync".into()),
+            ..Default::default()
+        };
+        let task = tasks
+            .add_with("global", "manual review", "", manual)
+            .await
+            .unwrap();
+        let assigned: bool = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM planner_task_projects WHERE task_id=?1)",
+                [&task.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!assigned);
+    }
 
     #[tokio::test]
     async fn planner_scope_controls_assignment_transaction() {

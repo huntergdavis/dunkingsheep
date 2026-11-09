@@ -1847,6 +1847,59 @@ fn h_lanes_matches_python() {
 }
 
 #[test]
+fn planner_repo_mapping_requires_owner() {
+    let (dir, flock) = staffed_flock("api-planner-repo-mapping");
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let tasks = Arc::new(
+        runtime
+            .block_on(Tasks::open(dir.path().join("tasks.db")))
+            .unwrap(),
+    );
+    flock.attach_stores(Stores {
+        tasks: Some(tasks),
+        ..Default::default()
+    });
+    let env = ParityEnv::new(Some(std::process::id() as i64));
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_lanes();
+    let set = json!({"action":"planner", "operation":"repo-project", "repo":"example/one", "project":"alpha"});
+    assert!(dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w2:p2"),
+        "lanes",
+        args(set.clone())
+    )
+    .is_err());
+    dispatch_as_flock_role(&dispatcher, &flock, &env, Some("w1:p1"), "lanes", args(set))
+        .expect("owner maps repository");
+    let revoke = json!({"action":"planner", "operation":"repo-revoke", "repo":"example/one"});
+    assert!(dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w2:p2"),
+        "lanes",
+        args(revoke.clone())
+    )
+    .is_err());
+    dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p1"),
+        "lanes",
+        args(revoke),
+    )
+    .expect("owner revokes repository mapping");
+}
+
+#[test]
 fn h_lane_set_invalidates_cached_status_view() {
     let (_dir, flock) = staffed_flock("api-lane-set");
     let env = ParityEnv::new(Some(std::process::id() as i64));

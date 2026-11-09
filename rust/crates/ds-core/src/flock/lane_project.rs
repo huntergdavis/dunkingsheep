@@ -99,6 +99,25 @@ impl Flock {
                 }
                 result["existing_dependencies"] = dependencies;
             }
+            "repo-project" => {
+                let repo = field("repo")?;
+                let project = field("project")?;
+                if repo.trim() != repo
+                    || project.trim() != project
+                    || repo.split('/').count() != 2
+                    || repo.split('/').any(str::is_empty)
+                {
+                    return Err(failure("expected exact owner/repository and project"));
+                }
+                tx.execute("INSERT INTO planner_repo_projects(repo,project) VALUES (?1,?2) ON CONFLICT(repo) DO UPDATE SET project=excluded.project", rusqlite::params![repo, project]).map_err(failure)?;
+            }
+            "repo-revoke" => {
+                tx.execute(
+                    "DELETE FROM planner_repo_projects WHERE repo=?1",
+                    [field("repo")?],
+                )
+                .map_err(failure)?;
+            }
             _ => return Err(failure("unknown planner scope operation")),
         }
         tx.commit().map_err(failure)?;

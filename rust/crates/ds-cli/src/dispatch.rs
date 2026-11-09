@@ -950,7 +950,7 @@ fn lane(ns: &Map<String, Value>) -> Outcome {
         "planner" => {
             let mut args = Map::new();
             args.insert("action".into(), Value::String("planner".into()));
-            for key in ["operation", "pane", "project", "global", "task"] {
+            for key in ["operation", "pane", "project", "global", "task", "repo"] {
                 if let Some(value) = ns.get(key).filter(|value| !value.is_null()) {
                     args.insert(key.into(), value.clone());
                 }

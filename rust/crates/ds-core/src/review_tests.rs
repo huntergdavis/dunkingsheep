@@ -2938,6 +2938,13 @@ async fn run_dry_run_matches_python_fake_for_fresh_moved_closed_and_terminal_rev
 async fn run_fresh_unjudged_pull_files_exactly_one_task_and_pending_status() {
     let dir = crate::testsupport::dir("review-sync-fresh-one-task-pending-status");
     let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    rusqlite::Connection::open(store.path())
+        .unwrap()
+        .execute(
+            "INSERT INTO planner_repo_projects(repo,project) VALUES ('o/r','alpha')",
+            [],
+        )
+        .unwrap();
     let transport = FakeReviewTransport::with_responses([
         github_response(200, open_pull(7, "fresh-head", "unclaimed/topic")),
         github_response(200, json!({"mergeable": true, "mergeable_state": "clean"})),
@@ -2952,6 +2959,15 @@ async fn run_fresh_unjudged_pull_files_exactly_one_task_and_pending_status() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].status, "open");
     assert_eq!(rows[0].head.as_deref(), Some("fresh-head"));
+    let project: String = rusqlite::Connection::open(sync.flock.path())
+        .unwrap()
+        .query_row(
+            "SELECT project FROM planner_task_projects WHERE task_id=?1",
+            [&rows[0].id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(project, "alpha");
     assert_eq!(report["filed"].as_array().unwrap().len(), 1);
     assert_eq!(report["statuses"][0]["state"], "pending");
     assert_eq!(report["statuses"][0]["head"], "fresh-head");
@@ -3612,6 +3628,13 @@ async fn run_preserves_the_needed_second_review_and_retires_stale_head_before_re
 
     let dir = crate::testsupport::dir("review-sync-run-stale-head-before-second");
     let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    rusqlite::Connection::open(store.path())
+        .unwrap()
+        .execute(
+            "INSERT INTO planner_repo_projects(repo,project) VALUES ('o/r','alpha')",
+            [],
+        )
+        .unwrap();
     let accepted = add_actual_review(&store, 7, "head-current", "current accept").await;
     finish_review(&store, &accepted.id, "%1", "accept").await;
     let stale = add_actual_review(&store, 7, "head-old", "stale live review").await;
@@ -3639,6 +3662,15 @@ async fn run_preserves_the_needed_second_review_and_retires_stale_head_before_re
         })
         .unwrap();
     let second_id = second.id.clone();
+    let project: String = rusqlite::Connection::open(sync.flock.path())
+        .unwrap()
+        .query_row(
+            "SELECT project FROM planner_task_projects WHERE task_id=?1",
+            [&second_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(project, "alpha");
     assert!(sync
         .flock
         .get(&second_id)

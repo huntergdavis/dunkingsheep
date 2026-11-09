@@ -11892,6 +11892,7 @@
    "operation": "grant",
    "pane": null,
    "project": null,
+   "repo": null,
    "self_pane": null,
    "socket": null,
    "task": null
@@ -11913,6 +11914,7 @@
    "operation": "grant",
    "pane": null,
    "project": null,
+   "repo": null,
    "self_pane": null,
    "socket": null,
    "task": null
@@ -11934,6 +11936,30 @@
    "operation": "grant",
    "pane": null,
    "project": null,
+   "repo": null,
+   "self_pane": null,
+   "socket": null,
+   "task": null
+  }
+ },
+ {
+  "argv": [
+   "lane",
+   "planner",
+   "grant",
+   "--repo",
+   "x"
+  ],
+  "namespace": {
+   "command": "lane",
+   "global": false,
+   "json": false,
+   "lane_command": "planner",
+   "no_start_daemon": false,
+   "operation": "grant",
+   "pane": null,
+   "project": null,
+   "repo": "x",
    "self_pane": null,
    "socket": null,
    "task": null
@@ -11956,6 +11982,7 @@
    "operation": "grant",
    "pane": "x",
    "project": null,
+   "repo": null,
    "self_pane": null,
    "socket": null,
    "task": null
@@ -11978,6 +12005,7 @@
    "operation": "grant",
    "pane": null,
    "project": "x",
+   "repo": null,
    "self_pane": null,
    "socket": null,
    "task": null
@@ -11999,6 +12027,7 @@
    "operation": "grant",
    "pane": null,
    "project": null,
+   "repo": null,
    "self_pane": null,
    "socket": null,
    "task": null
@@ -12021,6 +12050,7 @@
    "operation": "grant",
    "pane": null,
    "project": null,
+   "repo": null,
    "self_pane": null,
    "socket": null,
    "task": "x"
