@@ -42,6 +42,37 @@ fn enqueue_queues_a_pending_source() {
 }
 
 #[test]
+fn failed_queue_quarantine_and_restore_preserve_source_and_audit() {
+    let (dir, mut db) = store();
+    let path = sample(&dir, "q.jsonl");
+    enqueue(&mut db, &path, Some("generic"), Some("demo")).unwrap();
+    db.execute(
+        "UPDATE ingest_queue SET state='failed',error='bad format',attempts=3",
+        [],
+    )
+    .unwrap();
+    assert!(queue_disposition(&mut db, 1, "/wrong", "triage", "%1", false).is_err());
+    assert!(queue_disposition(&mut db, 1, &path, " ", "%1", false).is_err());
+    queue_disposition(&mut db, 1, &path, "unsupported input", "%1", false).unwrap();
+    assert_eq!(count(&db, "ingest_queue", "quarantined"), 1);
+    assert!(claim_next(&mut db, 30.0).unwrap().is_none());
+    assert_eq!(count(&db, "sources", "pending"), 1);
+    assert!(queue_disposition(&mut db, 1, &path, "duplicate", "%1", false).is_err());
+    queue_disposition(&mut db, 1, &path, "retry after correction", "%1", true).unwrap();
+    assert_eq!(count(&db, "ingest_queue", "failed"), 1);
+    let (attempts, error): (i64, String) = db
+        .query_row(
+            "SELECT attempts,error FROM ingest_queue WHERE id=1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((attempts, error), (3, "bad format".into()));
+    let events: i64 = db.query_row("SELECT count(*) FROM memory_events WHERE event IN ('queue_quarantine','queue_restore')", [], |r| r.get(0)).unwrap();
+    assert_eq!(events, 2);
+}
+
+#[test]
 fn stopped_ingest_is_skipped_not_failed() {
     let (dir, mut db) = store();
     let path = sample(&dir, "stop.jsonl");

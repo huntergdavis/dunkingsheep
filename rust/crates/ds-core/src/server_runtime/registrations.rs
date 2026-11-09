@@ -2749,6 +2749,35 @@ os.rename(out_path + ".tmp", out_path)
             .unwrap();
         assert_eq!(after_enqueue["queue"]["queued"], 2);
         assert_eq!(after_enqueue["ingestor"]["running"], false);
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute(
+                "UPDATE ingest_queue SET state='failed', error='bad' WHERE id=1",
+                [],
+            )
+            .unwrap();
+        let disposition = json!({"action":"quarantine", "queue_id":1, "path":inferred_path, "reason":"unsupported"});
+        assert!(dispatcher
+            .dispatch("memory_backfill", &disposition, &worker)
+            .unwrap_err()
+            .to_string()
+            .contains("requires a superuser"));
+        let result = dispatcher
+            .dispatch("memory_backfill", &disposition, &owner)
+            .unwrap();
+        assert_eq!(result["action"], "quarantine");
+        let quarantined_status = memory.status().unwrap();
+        assert_eq!(quarantined_status["queue"]["quarantined"], 1);
+        assert_eq!(quarantined_status["ok"], false);
+        let restore =
+            json!({"action":"restore", "queue_id":1, "path":inferred_path, "reason":"retry"});
+        assert!(dispatcher
+            .dispatch("memory_backfill", &restore, &worker)
+            .is_err());
+        dispatcher
+            .dispatch("memory_backfill", &restore, &owner)
+            .unwrap();
+        assert_eq!(memory.status().unwrap()["queue"]["failed"], 1);
     }
 
     #[test]

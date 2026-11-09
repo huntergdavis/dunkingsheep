@@ -67,6 +67,17 @@ fn every_input_schema_equals_the_pythons() {
                     want["properties"]["action"]["description"].clone();
             }
         }
+        if name == "memory_backfill" {
+            let properties = got["properties"].as_object_mut().unwrap();
+            for key in ["queue_id", "path", "reason"] {
+                assert!(properties.remove(key).is_some());
+            }
+            let actions = properties.get_mut("action").unwrap()["enum"]
+                .as_array_mut()
+                .unwrap();
+            assert_eq!(actions.pop(), Some(serde_json::json!("restore")));
+            assert_eq!(actions.pop(), Some(serde_json::json!("quarantine")));
+        }
         assert_eq!(want, &got, "{name}: input_schema() differs from the Python");
     }
 }

@@ -270,9 +270,13 @@ pub fn stats(pool: &ReadPool, db_path: &Path, queries: &QueryStats) -> Result<Va
             .collect::<Result<_, _>>()
             .map_err(map_sqlite)?;
         let state = |name: &str| count(c, "ingest_queue", &format!("WHERE state='{name}'"));
-        let queue = json!({"queued": state("queued")?, "leased": state("leased")?,
+        let mut queue = json!({"queued": state("queued")?, "leased": state("leased")?,
                            "failed": state("failed")?, "skipped": state("skipped")?,
                            "done": state("done")?});
+        let quarantined = state("quarantined")?;
+        if quarantined > 0 {
+            queue["quarantined"] = json!(quarantined);
+        }
         let last: Option<f64> = c
             .query_row("SELECT MAX(last_ingest) FROM sources", [], |row| row.get(0))
             .map_err(map_sqlite)?;
@@ -309,7 +313,8 @@ pub fn stats(pool: &ReadPool, db_path: &Path, queries: &QueryStats) -> Result<Va
 /// `status`: stats plus `ok` (no failed ingest).
 pub fn status(pool: &ReadPool, db_path: &Path, queries: &QueryStats) -> Result<Value, DunkError> {
     let mut value = stats(pool, db_path, queries)?;
-    let ok = value["queue"]["failed"].as_i64() == Some(0);
+    let ok = value["queue"]["failed"].as_i64() == Some(0)
+        && value["queue"]["quarantined"].as_i64().unwrap_or(0) == 0;
     value["ok"] = json!(ok);
     Ok(value)
 }

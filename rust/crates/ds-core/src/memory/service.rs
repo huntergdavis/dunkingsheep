@@ -681,6 +681,21 @@ impl MemoryService {
         value["ingestor"] = ingestor;
         Ok(value)
     }
+
+    pub fn queue_disposition(
+        &self,
+        id: i64,
+        path: &str,
+        reason: &str,
+        actor: &str,
+        restore: bool,
+    ) -> Result<(), DunkError> {
+        self.accepting()?;
+        let (path, reason, actor) = (path.to_owned(), reason.to_owned(), actor.to_owned());
+        self.writer.call(move |connection| {
+            ingest::queue_disposition(connection, id, &path, &reason, &actor, restore)
+        })
+    }
     pub fn start(&self) -> Result<(), DunkError> {
         self.while_accepting(|| self.ingestor.start())?
     }
