@@ -50,6 +50,13 @@ def load_parser():
     planner.add_argument("--project")
     planner.add_argument("--global", action="store_true")
     planner.add_argument("--task")
+    memory = root.choices["memory"]
+    memory_actions = next(a for a in memory._actions if isinstance(a, argparse._SubParsersAction))
+    queue = memory_actions.add_parser("queue", help="quarantine or restore one failed ingest entry")
+    queue.add_argument("action", choices=["quarantine", "restore"])
+    queue.add_argument("queue_id", type=int)
+    queue.add_argument("--path", required=True, help="exact source path")
+    queue.add_argument("--reason", required=True)
     return parser
 
 

@@ -503,8 +503,8 @@ pub static COMMANDS: &[Command] = &[
     },
     Command {
         name: "memory_backfill",
-        description: "Discover every known session source (Codex/Claude/pi/opencode) and enqueue it for the throttled background ingest. action=start|pause|resume|status; limit=N for a bounded run. Superusers only.",
-        params: &[Param { name: "action", schema: "{\"type\":\"string\",\"enum\":[\"start\",\"pause\",\"resume\",\"status\"]}" }, Param { name: "limit", schema: "{\"type\":\"integer\",\"minimum\":1}" }],
+        description: "Discover every known session source (Codex/Claude/pi/opencode) and enqueue it for the throttled background ingest. action=start|pause|resume|status or quarantine|restore a failed entry; limit=N for a bounded run. Superusers only.",
+        params: &[Param { name: "action", schema: "{\"type\":\"string\",\"enum\":[\"start\",\"pause\",\"resume\",\"status\",\"quarantine\",\"restore\"]}" }, Param { name: "limit", schema: "{\"type\":\"integer\",\"minimum\":1}" }, Param { name: "queue_id", schema: "{\"type\":\"integer\",\"minimum\":1}" }, Param { name: "path", schema: "{\"type\":\"string\"}" }, Param { name: "reason", schema: "{\"type\":\"string\"}" }],
         dispatch_required: &[],
         required: &[],
         mcp: true,

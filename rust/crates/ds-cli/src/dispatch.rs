@@ -781,6 +781,18 @@ fn memory(ns: &Map<String, Value>) -> Outcome {
                 )
             })
         }
+        Some("queue") => {
+            for key in ["action", "queue_id", "path", "reason"] {
+                args.insert(key.into(), ns.get(key).cloned().unwrap_or(Value::Null));
+            }
+            crate::daemon_cmd::run_command(ns, "memory_backfill", args, |result| {
+                format!(
+                    "queue {}: {}\n",
+                    crate::render_fleet::py_str(&result["queue_id"]),
+                    crate::render_fleet::py_str(&result["action"])
+                )
+            })
+        }
         Some("backfill") => {
             let action = if ns.get("pause") == Some(&Value::Bool(true)) {
                 "pause"

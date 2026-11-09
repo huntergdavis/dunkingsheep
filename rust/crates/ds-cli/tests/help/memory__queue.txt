@@ -1,0 +1,11 @@
+usage: dunkingsheep memory queue [-h] --path PATH --reason REASON
+                                 {quarantine,restore} queue_id
+
+positional arguments:
+  {quarantine,restore}
+  queue_id
+
+options:
+  -h, --help            show this help message and exit
+  --path PATH           exact source path
+  --reason REASON

@@ -5146,7 +5146,7 @@ fn cli_route_guide_and_empty_argv() {
 
 #[test]
 fn cli_route_58_commands_map() {
-    // The retired Python oracle lacks the explicit project membership extension.
+    // The retired Python oracle lacks project membership and memory queue extensions.
     // Keep byte-level parity for every other command, and check the extension itself.
     let rust = run_binary_without_command(&["commands"]);
     let python = run_python_reference(&["commands"]);
@@ -5155,6 +5155,7 @@ fn cli_route_58_commands_map() {
     let p = String::from_utf8(python.stdout).unwrap();
     assert!(r.contains("lanes(project, global, action, operation, task, repo, pane, mailbox)"));
     assert!(r.contains("start_agent(project, global, role"));
+    assert!(r.contains("memory_backfill(action, limit, queue_id, path, reason)"));
     let strip = |text: &str| {
         let mut skip_description = false;
         text.lines()
@@ -5163,7 +5164,10 @@ fn cli_route_58_commands_map() {
                     skip_description = false;
                     return None;
                 }
-                if line.starts_with("lanes(") || line.starts_with("start_agent(") {
+                if line.starts_with("lanes(")
+                    || line.starts_with("start_agent(")
+                    || line.starts_with("memory_backfill(")
+                {
                     skip_description = true;
                     None
                 } else {
@@ -5187,8 +5191,23 @@ fn cli_route_58_commands_map() {
                 assert!(row["input_schema"]["properties"].get("repo").is_some());
             }
         }
-        r.retain(|row| row["name"] != "lanes" && row["name"] != "start_agent");
-        p.retain(|row| row["name"] != "lanes" && row["name"] != "start_agent");
+        let memory = r
+            .iter()
+            .find(|row| row["name"] == "memory_backfill")
+            .unwrap();
+        for key in ["queue_id", "path", "reason"] {
+            assert!(memory["input_schema"]["properties"].get(key).is_some());
+        }
+        r.retain(|row| {
+            row["name"] != "lanes"
+                && row["name"] != "start_agent"
+                && row["name"] != "memory_backfill"
+        });
+        p.retain(|row| {
+            row["name"] != "lanes"
+                && row["name"] != "start_agent"
+                && row["name"] != "memory_backfill"
+        });
         assert_eq!(r, p);
     }
     for args in [
@@ -5205,7 +5224,9 @@ fn cli_route_58_commands_map() {
         let strip_sizes = |text: &str| {
             text.lines()
                 .filter(|line| {
-                    !line.starts_with("declared ") && !line.starts_with("- grouped schema bytes:")
+                    !line.starts_with("declared ")
+                        && !line.starts_with("- grouped schema bytes:")
+                        && !line.starts_with("- hot set (`inbox`, `task`, `memory`):")
                 })
                 .map(str::to_owned)
                 .collect::<Vec<_>>()

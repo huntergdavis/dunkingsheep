@@ -9124,6 +9124,80 @@
  },
  {
   "argv": [
+   "memory",
+   "queue",
+   "quarantine",
+   "1",
+   "--path",
+   "x",
+   "--reason",
+   "x"
+  ],
+  "namespace": {
+   "action": "quarantine",
+   "command": "memory",
+   "json": false,
+   "memory_command": "queue",
+   "no_start_daemon": false,
+   "path": "x",
+   "queue_id": 1,
+   "reason": "x",
+   "self_pane": null,
+   "socket": null
+  }
+ },
+ {
+  "argv": [
+   "memory",
+   "queue",
+   "quarantine",
+   "1",
+   "--path",
+   "x",
+   "--reason",
+   "x",
+   "--json"
+  ],
+  "namespace": {
+   "action": "quarantine",
+   "command": "memory",
+   "json": true,
+   "memory_command": "queue",
+   "no_start_daemon": false,
+   "path": "x",
+   "queue_id": 1,
+   "reason": "x",
+   "self_pane": null,
+   "socket": null
+  }
+ },
+ {
+  "argv": [
+   "--json",
+   "memory",
+   "queue",
+   "quarantine",
+   "1",
+   "--path",
+   "x",
+   "--reason",
+   "x"
+  ],
+  "namespace": {
+   "action": "quarantine",
+   "command": "memory",
+   "json": true,
+   "memory_command": "queue",
+   "no_start_daemon": false,
+   "path": "x",
+   "queue_id": 1,
+   "reason": "x",
+   "self_pane": null,
+   "socket": null
+  }
+ },
+ {
+  "argv": [
    "health"
   ],
   "namespace": {

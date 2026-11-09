@@ -28,6 +28,54 @@ pub const SCHEMA: &[&str] = &[
 
 pub const SCHEMA_VERSION: i64 = 1;
 
+/// Explicitly quarantine one failed entry or restore that same entry for retry.
+/// The caller authenticates the operator. Source records and indexed content are untouched.
+pub fn queue_disposition(
+    connection: &mut Connection,
+    id: i64,
+    expected_path: &str,
+    reason: &str,
+    actor: &str,
+    restore: bool,
+) -> Result<(), DunkError> {
+    if id <= 0 || expected_path.is_empty() || reason.trim().is_empty() || actor.is_empty() {
+        return Err(DunkError::Refused(
+            "queue id, exact path, reason and actor are required".into(),
+        ));
+    }
+    let tx = connection
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(map_sqlite)?;
+    let (old, new) = if restore {
+        ("quarantined", "failed")
+    } else {
+        ("failed", "quarantined")
+    };
+    let changed = tx.execute("UPDATE ingest_queue SET state=?1, next_at=CASE WHEN ?1='failed' THEN 0 ELSE next_at END WHERE id=?2 AND state=?3 AND source_id=(SELECT id FROM sources WHERE path=?4)", params![new,id,old,expected_path]).map_err(map_sqlite)?;
+    if changed != 1 {
+        return Err(DunkError::Refused(
+            "queue entry, state or source path changed; no action taken".into(),
+        ));
+    }
+    tx.execute(
+        "INSERT INTO memory_events(at,event,actor,source,metadata) VALUES (?1,?2,?3,?4,?5)",
+        params![
+            crate::clock::now_s(),
+            if restore {
+                "queue_restore"
+            } else {
+                "queue_quarantine"
+            },
+            actor,
+            expected_path,
+            serde_json::json!({"queue_id":id,"reason":reason,"from":old,"to":new}).to_string()
+        ],
+    )
+    .map_err(map_sqlite)?;
+    tx.commit().map_err(map_sqlite)?;
+    Ok(())
+}
+
 /// Create every table and record the schema version (`MemoryStore.__init__`).
 pub fn apply_full_schema(connection: &Connection) -> Result<(), DunkError> {
     super::recall::apply_schema(connection)?;

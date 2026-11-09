@@ -158,7 +158,8 @@ fn the_table_accepts_exactly_the_subcommands_the_dispatcher_routes() {
             "stats",
             "status",
             "ingest",
-            "backfill"
+            "backfill",
+            "queue"
         ])
     );
     assert_eq!(
