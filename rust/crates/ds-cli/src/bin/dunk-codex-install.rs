@@ -31,11 +31,18 @@ fn write_new(path: &Path, bytes: &[u8], mode: u32) -> io::Result<(u64, u64)> {
     Ok(identity)
 }
 
-fn install(home: &Path, binary: &Path) -> io::Result<()> {
+fn install_with<F>(home: &Path, binary: &Path, mut writer: F) -> io::Result<()>
+where
+    F: FnMut(&Path, &[u8], u32) -> io::Result<(u64, u64)>,
+{
     if !home.is_absolute() || fs::canonicalize(home)? != home || !home.is_dir() {
         return Err(io::Error::other(
             "home must be an existing canonical absolute directory",
         ));
+    }
+    // Linux /proc/self is owned by the effective UID of this process.
+    if fs::metadata(home)?.uid() != fs::metadata("/proc/self")?.uid() {
+        return Err(io::Error::other("home must be owned by the caller"));
     }
     if fs::metadata(home)?.permissions().mode() & 0o022 != 0 {
         return Err(io::Error::other(
@@ -74,7 +81,7 @@ fn install(home: &Path, binary: &Path) -> io::Result<()> {
             (&wrapper, WRAPPER.as_bytes(), 0o700),
             (&hooks, hook_json.as_slice(), 0o600),
         ] {
-            let identity = write_new(path, content, mode)?;
+            let identity = writer(path, content, mode)?;
             created.push((path.clone(), identity));
         }
         Ok(())
@@ -88,6 +95,38 @@ fn install(home: &Path, binary: &Path) -> io::Result<()> {
     }
     result
 }
+fn install(home: &Path, binary: &Path) -> io::Result<()> {
+    install_with(home, binary, write_new)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn failure_cleans_only_created_files() {
+        let d = tempfile::tempdir().unwrap();
+        let home = d.path().join("home");
+        fs::create_dir(&home).unwrap();
+        let binary = d.path().join("source");
+        fs::write(&binary, b"native").unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(home.join("sentinel"), b"keep").unwrap();
+        let mut calls = 0;
+        let result = install_with(&home, &binary, |path, bytes, mode| {
+            calls += 1;
+            if calls == 2 {
+                return Err(io::Error::other("injected failure"));
+            }
+            write_new(path, bytes, mode)
+        });
+        assert!(result.is_err());
+        assert!(!home.join("dunk-codex-turn").exists());
+        assert!(!home.join("dunkingsheep-turn.sh").exists());
+        assert!(!home.join("hooks.json").exists());
+        assert_eq!(fs::read(home.join("sentinel")).unwrap(), b"keep");
+    }
+}
+
 fn main() {
     let mut args = std::env::args_os().skip(1);
     let (Some(home), Some(binary), None) = (args.next(), args.next(), args.next()) else {

@@ -9,11 +9,18 @@ fn installs_into_private_home_and_refuses_existing_trust() {
     fs::create_dir(&home).unwrap();
     fs::write(home.join("auth-sentinel"), b"preserve").unwrap();
     let installer = env!("CARGO_BIN_EXE_dunk-codex-install");
-    let binary = env!("CARGO_BIN_EXE_dunk-codex-turn");
+    use std::os::unix::fs::PermissionsExt;
+    let binary = dir.path().join("fake-producer");
+    fs::write(
+        &binary,
+        b"#!/bin/sh\nprintf called > \"$INSTALL_TEST_CALLED\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
     let run = || {
         Command::new(installer)
             .arg(&home)
-            .arg(binary)
+            .arg(&binary)
             .output()
             .unwrap()
     };
@@ -31,6 +38,17 @@ fn installs_into_private_home_and_refuses_existing_trust() {
         assert!(h["command"].as_str().unwrap().ends_with(action));
         assert!(h["command"].as_str().unwrap().contains("'\\''"));
     }
+    let command = doc["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    let called = dir.path().join("called");
+    let shell = Command::new("/bin/sh")
+        .args(["-c", command])
+        .env("INSTALL_TEST_CALLED", &called)
+        .status()
+        .unwrap();
+    assert!(shell.success());
+    assert_eq!(fs::read(&called).unwrap(), b"called");
     assert_eq!(fs::read(home.join("auth-sentinel")).unwrap(), b"preserve");
     assert!(!run().status.success());
     assert_eq!(fs::read(home.join("hooks.json")).unwrap(), before);

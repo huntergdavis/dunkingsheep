@@ -100,7 +100,9 @@ replaced root, expired token, and no `--pane` argument.
 
 The `dunk-codex-install ABSOLUTE_HOME NATIVE_BINARY` release tool installs the
 native producer, wrapper and two hooks without Python. The home must already
-exist as a canonical directory not writable by group or others. It refuses any
+exist as a canonical, caller-owned directory not writable by group or others.
+The installer uses Linux `/proc/self` to check ownership; its parent path must
+be trusted against concurrent replacement by another writer. It refuses any
 existing `hooks.json`, wrapper or producer, leaving prior trust and other hooks
 untouched; use a separate private home rather than overwriting an existing
 configuration. It does not copy credentials, migrate sessions, start a lane or
