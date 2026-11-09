@@ -54,6 +54,14 @@ pub trait ReviewTaskStore {
 /// Async actor operations needed by the source-faithful ReviewSync methods.
 /// Production uses `Tasks`; tests inject a recording actor without opening a live DB.
 pub trait ReviewTaskActor {
+    fn refresh_review_author<'a>(
+        &'a self,
+        _id: &'a str,
+        _head: &'a str,
+        _author: &'a str,
+    ) -> ReviewFuture<'a, Result<bool, String>> {
+        Box::pin(async { Ok(false) })
+    }
     fn set_accounting_pr<'a>(
         &'a self,
         id: &'a str,
@@ -115,6 +123,18 @@ pub trait ReviewTaskActor {
 }
 
 impl ReviewTaskActor for Tasks {
+    fn refresh_review_author<'a>(
+        &'a self,
+        id: &'a str,
+        head: &'a str,
+        author: &'a str,
+    ) -> ReviewFuture<'a, Result<bool, String>> {
+        Box::pin(async move {
+            Tasks::refresh_review_author(self, id, head, author)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
     fn set_accounting_pr<'a>(
         &'a self,
         id: &'a str,
@@ -257,6 +277,20 @@ fn attached_review_tasks(flock: &Flock) -> Result<std::sync::Arc<Tasks>, crate::
 }
 
 impl ReviewTaskActor for Flock {
+    fn refresh_review_author<'a>(
+        &'a self,
+        id: &'a str,
+        head: &'a str,
+        author: &'a str,
+    ) -> ReviewFuture<'a, Result<bool, String>> {
+        let tasks = attached_review_tasks(self);
+        Box::pin(async move {
+            let tasks = tasks.map_err(|e| e.to_string())?;
+            Tasks::refresh_review_author(tasks.as_ref(), id, head, author)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
     fn set_accounting_pr<'a>(
         &'a self,
         id: &'a str,
@@ -2183,6 +2217,13 @@ where
     G: ReviewPolicy + ReviewRepoConfig,
     X: GitHubTransport,
 {
+    async fn explicit_author(&self, repo: &str, pr: &ReviewPull) -> Option<String> {
+        let authors = self.flock.authors_of(repo, pr.number).await.ok()?;
+        let mut authors: std::collections::BTreeSet<_> = authors.into_iter().collect();
+        authors.extend(self.branch_task_authors(repo, pr).await.ok()?);
+        (authors.len() == 1).then(|| authors.into_iter().next().unwrap())
+    }
+
     async fn branch_task_authors(
         &self,
         repo: &str,
@@ -2483,6 +2524,28 @@ where
                     .as_ref()
                     .is_some_and(|row| row.head.as_deref() == Some(pr.head.as_str()))
                 {
+                    if !dry_run {
+                        if let Some(author) = self.explicit_author(&repo, &pr).await {
+                            let id = &current.as_ref().expect("current review exists").id;
+                            match self
+                                .flock
+                                .refresh_review_author(id, &pr.head, &author)
+                                .await
+                            {
+                                Ok(true) => append_report(
+                                    &mut report,
+                                    "author_refreshed",
+                                    serde_json::json!({"task":id,"author":author}),
+                                ),
+                                Ok(false) => {}
+                                Err(error) => append_report(
+                                    &mut report,
+                                    "errors",
+                                    Value::String(format!("refresh review author {id}: {error}")),
+                                ),
+                            }
+                        }
+                    }
                     continue;
                 }
 
@@ -2523,22 +2586,7 @@ where
                     continue;
                 }
 
-                let authors = self.flock.authors_of(&repo, pr.number).await;
-                let author = match authors {
-                    Ok(authors) => {
-                        // Combine explicit records; disagreement remains unknown.
-                        let mut authors: std::collections::BTreeSet<_> =
-                            authors.into_iter().collect();
-                        match self.branch_task_authors(&repo, &pr).await {
-                            Ok(from_note) => {
-                                authors.extend(from_note);
-                                (authors.len() == 1).then(|| authors.into_iter().next().unwrap())
-                            }
-                            Err(_) => None,
-                        }
-                    }
-                    Err(_) => None,
-                };
+                let author = self.explicit_author(&repo, &pr).await;
                 let detail = self
                     .raw_pull_detail(&repo, pr.number, &token)
                     .await

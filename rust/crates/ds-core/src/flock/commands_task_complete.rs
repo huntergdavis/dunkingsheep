@@ -204,7 +204,9 @@ impl Flock {
             .or(by);
 
         if let Some(verdict) = validated_verdict.as_deref() {
-            tasks.set_verdict(task_id, verdict, actor).await?;
+            tasks
+                .set_verdict_with_author_guard(task_id, verdict, actor, role == "reviewer")
+                .await?;
         }
         let advance = next_jobs
             .advance(pane, "completion", Some(task_id), caller, operator_proof)
