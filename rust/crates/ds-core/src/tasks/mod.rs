@@ -4173,7 +4173,7 @@ mod tests {
         assert_eq!(decode_list(Some(&assigned.assignees)), vec!["%3"]);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn planner_assignment_sees_author_committed_before_its_write_transaction() {
         let tasks = store("planner-author-race").await;
         let review = tasks
