@@ -263,6 +263,63 @@ async fn send_now_matches_the_python_desk_on_every_recorded_case() {
             failures.push(format!("{name}: db after {after} != {}", case["db_after"]));
         }
     }
+    // A populated, unattached file exercises the UPDATE that precedes the overflowing
+    // answer binding. The pinned Python route was separately probed with this same shape:
+    // it returns 500 and leaves all rows, links, and sqlite_sequence unchanged.
+    database
+        .execute(
+            "INSERT INTO messages(channel, role, body) VALUES('cos', 'owner', 'fixture question')",
+            [],
+        )
+        .expect("seed an unanswered question");
+    let question_id = database.last_insert_rowid();
+    database.execute(
+        "INSERT INTO attachments(id, filename, mime, size, path) VALUES('fixture-attachment', 'note.txt', 'text/plain', 1, '/scratch/note')",
+        [],
+    ).expect("seed an unattached file");
+    let full_before = full_state(&database);
+    assert_eq!(
+        full_before[1].len(),
+        1,
+        "the attachment table must be populated"
+    );
+    let mut payload: Value = serde_json::from_str(
+        r#"{"channel":"cos","body":"fixture reply","attachment_ids":["fixture-attachment"],"answers":[1267650600228229401496703205376]}"#,
+    ).expect("preserve the Python-sized integer");
+    payload["answers"]
+        .as_array_mut()
+        .unwrap()
+        .insert(0, json!(question_id));
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/brief")
+                .header(header::AUTHORIZATION, format!("Bearer {API}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(payload.to_string()))
+                .unwrap(),
+        )
+        .await
+        .expect("router answers populated-attachment case");
+    assert_eq!(
+        response.status(),
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR
+    );
+    assert_eq!(
+        to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .as_ref(),
+        b"Internal Server Error"
+    );
+    assert_eq!(
+        full_state(&database),
+        full_before,
+        "attachment link, answer, message and sequence must roll back"
+    );
+
     assert_eq!(
         rollback_seen, 3,
         "all huge-integer failure states must be compared"
