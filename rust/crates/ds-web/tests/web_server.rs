@@ -748,8 +748,7 @@ fn mounted_methods(unmatched: &Probe, answer: &Probe) -> Vec<String> {
 /// `PYTHON_ROUTES` and the mounted routes must agree both ways, and the table must be Python's.
 /// The router is probed directly, below the path gate, so each route is judged by what the router
 /// mounts. HEAD is not compared: axum answers HEAD for every GET route, and FastAPI's APIRoute does
-/// not. `POST /api/ops-board/question` is mounted but not declared by Python, so this check does
-/// not cover it (t3328).
+/// not. `POST /api/ops-board/question` is a Rust UI extension, not part of the Python route table.
 #[test]
 fn python_routes_match_the_mounted_routes() {
     let (_root, config) = fixture();
@@ -1298,5 +1297,77 @@ fn ops_metrics_reports_the_python_summary_shape() {
     assert_eq!(summary["vp_message_counts"], json!([]));
     assert!(summary["limitations"].is_array());
 
+    assert_eq!(server.shutdown(), Ok(()));
+}
+
+// The current desk UI needs question versions and options before it can answer. Python did not
+// expose this endpoint; this is a deliberate Rust route extension, not Python route parity.
+#[test]
+fn owner_question_is_available_through_composed_desk_without_weakening_auth() {
+    fn answer(command: &str, args: &Map<String, Value>) -> Result<Value, String> {
+        match command {
+            "task_owner_question" if args.get("id") == Some(&json!("t1")) => Ok(json!({
+                "task_id": "t1", "question": "Which option?", "version": "3",
+                "options": [{"number": 1, "label": "alpha"}]
+            })),
+            "task_owner_question" => Err("fixture question unavailable".to_owned()),
+            _ => Err("not provided by this fixture".to_owned()),
+        }
+    }
+    let (root, mut config) = fixture();
+    let daemon = FakeDaemon::start(root.path(), answer);
+    config.daemon_socket = daemon.socket.clone();
+    let server = Server::start(config);
+    let addr = server.addr;
+    let payload = r#"{"task_id":"t1"}"#;
+    let anonymous = request(addr, "POST", "/api/ops-board/question", &[], Some(payload));
+    assert_eq!(anonymous.status, 401, "{}", anonymous.text());
+    let cookie = format!("vp_session={}", login(addr));
+    let cross = [
+        ("Cookie", cookie.as_str()),
+        ("Origin", "https://evil.example"),
+    ];
+    let rejected = request(
+        addr,
+        "POST",
+        "/api/ops-board/question",
+        &cross,
+        Some(payload),
+    );
+    assert_eq!(rejected.status, 403, "{}", rejected.text());
+    let session = [("Cookie", cookie.as_str())];
+    let found = request(
+        addr,
+        "POST",
+        "/api/ops-board/question",
+        &session,
+        Some(payload),
+    );
+    assert_eq!(found.status, 200, "{}", found.text());
+    assert_eq!(found.json()["version"], "3");
+    assert_eq!(found.json()["options"][0]["label"], "alpha");
+    let missing = request(
+        addr,
+        "POST",
+        "/api/ops-board/question",
+        &session,
+        Some(r#"{"task_id":"missing"}"#),
+    );
+    assert_eq!(missing.status, 503, "{}", missing.text());
+    let question_calls: Vec<_> = daemon
+        .sent()
+        .into_iter()
+        .filter(|sent| sent.command == "task_owner_question")
+        .collect();
+    assert_eq!(
+        question_calls.len(),
+        2,
+        "unauthorized requests must not reach the daemon"
+    );
+    assert_eq!(question_calls[0].args["id"], "t1");
+    assert_eq!(
+        question_calls[0].token.as_deref(),
+        Some("web-desk-test-token")
+    );
     assert_eq!(server.shutdown(), Ok(()));
 }
