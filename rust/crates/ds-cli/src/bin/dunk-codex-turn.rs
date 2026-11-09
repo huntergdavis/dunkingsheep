@@ -65,34 +65,39 @@ fn cli(args: &[&str], cwd: &str) -> Option<Value> {
         .spawn()
         .ok()?;
     let mut stdout = child.stdout.take()?;
-    let reader = std::thread::spawn(move || {
-        let mut out = Vec::new();
-        let mut buf = [0u8; 8192];
-        let mut overflow = false;
-        loop {
-            match stdout.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    if out.len() + n <= 1024 * 1024 {
-                        out.extend_from_slice(&buf[..n]);
-                    } else {
-                        overflow = true;
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let result = (|| {
+            let mut out = Vec::new();
+            let mut buf = [0u8; 8192];
+            let mut overflow = false;
+            loop {
+                match stdout.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if out.len() + n <= 1024 * 1024 {
+                            out.extend_from_slice(&buf[..n]);
+                        } else {
+                            overflow = true;
+                        }
                     }
+                    Err(_) => return None,
                 }
-                Err(_) => return None,
             }
-        }
-        if overflow {
-            None
-        } else {
-            Some(out)
-        }
+            if overflow {
+                None
+            } else {
+                Some(out)
+            }
+        })();
+        let _ = tx.send(result);
     });
     let started = std::time::Instant::now();
     loop {
         match child.try_wait() {
             Ok(Some(status)) if status.success() => {
-                let out = reader.join().ok()??;
+                let remaining = Duration::from_secs(10).saturating_sub(started.elapsed());
+                let out = rx.recv_timeout(remaining).ok()??;
                 return serde_json::from_slice(&out).ok();
             }
             Ok(Some(_)) | Err(_) => return None,

@@ -8,7 +8,7 @@ fn concurrent_stops_consume_one_token() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path();
     let cli = path.join("fake-cli");
-    fs::write(&cli, "#!/bin/sh\ncase \"$3\" in start) echo '{\"turn_id\":\"token-1\",\"pane_id\":\"%scratch\"}' ;; end) echo end >> \"$CALLS\"; echo '{\"ended\":true}' ;; esac\n").unwrap();
+    fs::write(&cli, "#!/bin/sh\ncase \"$3\" in start) echo '{\"turn_id\":\"token-1\",\"pane_id\":\"%scratch\"}' ;; end) echo \"$5\" >> \"$CALLS\"; echo '{\"ended\":true}' ;; esac\n").unwrap();
     fs::set_permissions(&cli, fs::Permissions::from_mode(0o700)).unwrap();
     let event = path.join("event.json");
     fs::write(
@@ -31,5 +31,5 @@ fn concurrent_stops_consume_one_token() {
         .status()
         .unwrap();
     assert!(status.success());
-    assert_eq!(fs::read_to_string(path.join("calls")).unwrap(), "end\n");
+    assert_eq!(fs::read_to_string(path.join("calls")).unwrap(), "token-1\n");
 }
