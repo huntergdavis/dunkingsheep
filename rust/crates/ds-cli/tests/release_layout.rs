@@ -123,7 +123,7 @@ impl Sandbox {
         env: &[(&str, &str)],
         standard: bool,
     ) -> Output {
-        let poll = project_root().join("tools/dunk_poll.py");
+        let poll = PathBuf::from(env!("CARGO_BIN_EXE_dunk-poll"));
         let mut args = vec![
             "--binary",
             env!("CARGO_BIN_EXE_dunkingsheep"),
@@ -223,9 +223,9 @@ fn install_writes_an_immutable_release_launchers_and_drop_in() {
     ok(&sandbox.install("t3229-test"));
     let release = sandbox.release("t3229-test");
     let binary = release.join("dunkingsheep");
-    let poll = release.join("dunk-poll.py");
+    let poll = release.join("dunk-poll");
     assert_eq!(0o555, mode(&binary));
-    assert_eq!(0o444, mode(&poll));
+    assert_eq!(0o555, mode(&poll));
 
     let manifest = std::fs::read_to_string(release.join("MANIFEST")).expect("manifest");
     assert!(manifest.contains("release_id=t3229-test\n"), "{manifest}");
@@ -266,7 +266,7 @@ fn install_writes_an_immutable_release_launchers_and_drop_in() {
     let other = sandbox.root.join("other-binary");
     std::fs::write(&other, "#!/bin/sh\necho different\n").expect("other binary");
     std::fs::set_permissions(&other, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-    let poll_path = project_root().join("tools/dunk_poll.py");
+    let poll_path = PathBuf::from(env!("CARGO_BIN_EXE_dunk-poll"));
     let refused = run_script(
         "install-release.sh",
         &[
@@ -422,17 +422,9 @@ fn uninstall_refuses_to_remove_a_drop_in_it_did_not_write() {
 }
 
 #[test]
-fn install_refuses_a_python_found_through_a_relative_path_entry() {
+fn native_poll_install_does_not_require_python_in_path() {
     let sandbox = Sandbox::new();
     ok(&sandbox.install("rel-py"));
-    let python = ["/usr/bin/python3", "/bin/python3"]
-        .into_iter()
-        .map(PathBuf::from)
-        .find(|path| path.is_file())
-        .expect("a python3 on the host");
-    let relative = sandbox.root.join("relpy");
-    std::fs::create_dir_all(&relative).expect("relative PATH entry");
-    std::os::unix::fs::symlink(&python, relative.join("python3")).expect("python3 link");
     let cli = sandbox.release("rel-py").join("dunkingsheep");
     let output = Command::new(&cli)
         .args([
@@ -441,16 +433,11 @@ fn install_refuses_a_python_found_through_a_relative_path_entry() {
             sandbox.bin.to_str().expect("utf-8 path"),
         ])
         .current_dir(&sandbox.root)
-        .env("PATH", "relpy:/usr/bin:/bin")
+        .env("PATH", "")
         .env("HOME", &sandbox.root)
         .output()
         .expect("run install with a relative PATH entry");
-    assert!(!output.status.success());
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("relative PATH entry"),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
 }
 
 #[test]

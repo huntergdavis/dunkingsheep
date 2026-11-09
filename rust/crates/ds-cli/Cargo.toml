@@ -13,6 +13,10 @@ path = "src/main.rs"
 name = "ds-http"
 path = "src/bin/ds-http.rs"
 
+[[bin]]
+name = "dunk-poll"
+path = "src/bin/dunk-poll.rs"
+
 [dependencies]
 clap.workspace = true
 ds-core = { path = "../ds-core" }

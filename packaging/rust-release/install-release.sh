@@ -1,7 +1,7 @@
 #!/bin/sh
 # Installs one immutable Rust release of the Dunking Sheep CLI (t3229, audit P0-1).
 #
-#   <prefix>/releases/<id>/                  dunkingsheep (0555), dunk-poll.py (0444), MANIFEST
+#   <prefix>/releases/<id>/                  dunkingsheep (0555), dunk-poll (0555), MANIFEST
 #   <bin-dir>/dunkingsheep, <bin-dir>/dunk-poll
 #       launchers, rendered by the release binary's own `install` verb
 #   <unit-dir>/dunkingsheep.service.d/99-rust-release.conf
@@ -66,13 +66,13 @@ require_plain_path --prefix "$prefix"
 require_plain_path --bin-dir "$bin_dir"
 require_plain_path --unit-dir "$unit_dir"
 [ -f "$binary" ] && [ -x "$binary" ] || die "--binary is not an executable file: $binary"
-[ -f "$poll" ] || die "--poll is not a file: $poll"
+[ -f "$poll" ] && [ -x "$poll" ] || die "--poll is not an executable file: $poll"
 check_scan_flags "$standard_scan"
 
 release_dir="$prefix/releases/$release_id"
 reuse=0
 if [ -e "$release_dir" ]; then
-    if cmp -s "$binary" "$release_dir/dunkingsheep" && cmp -s "$poll" "$release_dir/dunk-poll.py"; then
+    if cmp -s "$binary" "$release_dir/dunkingsheep" && cmp -s "$poll" "$release_dir/dunk-poll"; then
         reuse=1
     else
         die "release $release_id already exists with different contents; releases are immutable"
@@ -104,14 +104,14 @@ if [ "$reuse" -eq 0 ]; then
     rm -rf "$staging"
     mkdir "$staging"
     cp "$binary" "$staging/dunkingsheep"
-    cp "$poll" "$staging/dunk-poll.py"
+    cp "$poll" "$staging/dunk-poll"
     chmod 0555 "$staging/dunkingsheep"
-    chmod 0444 "$staging/dunk-poll.py"
+    chmod 0555 "$staging/dunk-poll"
     {
         echo "release_id=$release_id"
         echo "revision=$revision"
         echo "binary_sha256=$(sha256sum "$staging/dunkingsheep" | cut -d' ' -f1)"
-        echo "poll_sha256=$(sha256sum "$staging/dunk-poll.py" | cut -d' ' -f1)"
+        echo "poll_sha256=$(sha256sum "$staging/dunk-poll" | cut -d' ' -f1)"
     } > "$staging/MANIFEST"
     chmod 0444 "$staging/MANIFEST"
     mv "$staging" "$release_dir"
