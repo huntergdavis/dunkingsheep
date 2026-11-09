@@ -95,3 +95,19 @@ python3 -m unittest tests.test_codex_turn_generation -v
 The tests exercise the producer with a fake CLI and a fake process tree:
 delayed start / fast end, consumed token, failed start, stale `turn_id`,
 replaced root, expired token, and no `--pane` argument.
+
+## Native installation into a fresh private home
+
+The `dunk-codex-install ABSOLUTE_HOME NATIVE_BINARY` release tool installs the
+native producer, wrapper and two hooks without Python. The home must already
+exist as a canonical, caller-owned directory not writable by group or others.
+The installer uses Linux `/proc/self` to check ownership; its parent path must
+be trusted against concurrent replacement by another writer. It refuses any
+existing `hooks.json`, wrapper or producer, leaving prior trust and other hooks
+untouched; use a separate private home rather than overwriting an existing
+configuration. It does not copy credentials, migrate sessions, start a lane or
+approve hooks. Verify the binary provenance and hash before running it; trust
+new hooks through Codex and use `--no-daemon` for in-pane ancestry. If a process
+is interrupted mid-install, inspect the three files before manually recovering;
+no power-loss transaction is claimed. The legacy Python installer remains for
+existing configurations until their migration is resolved.
