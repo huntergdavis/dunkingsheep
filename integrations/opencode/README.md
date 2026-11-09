@@ -27,6 +27,18 @@ refuses its events; this plugin does not fall back to a cwd/session guess.
 
 ## Install
 
+For a native installer, run `dunk-opencode-install ABSOLUTE_CONFIG_ROOT` with an
+existing canonical caller-owned config root that is not writable by group or
+others. The installer creates private `opencode/plugins` directories as needed,
+preserves other plugins, and refuses an existing `dunkingsheep-turn.js` rather
+than replacing it. Existing intermediate directories must also be caller-owned,
+not group- or world-writable, and not symlinks. No config edit or OpenCode
+restart is performed. The parent path must be trusted and no concurrent writer
+should modify it during installation; cleanup after failure is best effort and
+hard-kill or power-loss atomicity is not promised.
+
+The older Python installer remains available for existing overwrite workflows.
+
 ```sh
 python3 integrations/opencode/install.py --check
 python3 integrations/opencode/install.py
