@@ -36,10 +36,8 @@
 //! - The P1 game routes are not in the route table. Python answers them, but here a POST gets the
 //!   mount's 405 (Allow `GET, HEAD`) and a GET gets a 404. The 405 wrongly implies the path takes only
 //!   GET and HEAD. This is documented rather than fixed.
-//! - `POST /api/ops-board/question` is registered by `routes::ops_board`, but web/app.py has no such
-//!   route. The gate sends it to the mount, which answers 405 with Allow `GET, HEAD`, so the
-//!   registration is unreachable through the composition. The route is kept; the producer module
-//!   documents it at its registration.
+//! - `POST /api/ops-board/question` is a Rust desk extension: the current UI needs it to obtain
+//!   the version and options for owner answers. Python has no equivalent route.
 //! - `PYTHON_ROUTES` is a hand-maintained copy of the P0 routes in web/app.py. The integration test
 //!   `python_routes_match_the_mounted_routes` checks it against the mounted axum routes and the
 //!   Python source, in both directions.
@@ -412,7 +410,9 @@ where
 
     fn call(&mut self, mut request: Request<B>) -> Self::Future {
         let decoded = percent_decode(request.uri().path());
-        if is_python_route(&decoded, request.method()) {
+        if is_python_route(&decoded, request.method())
+            || (request.method() == Method::POST && decoded == "/api/ops-board/question")
+        {
             if let Some(routed) = routed_uri(request.uri(), &decoded) {
                 *request.uri_mut() = routed;
             }
