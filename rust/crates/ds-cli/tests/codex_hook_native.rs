@@ -53,7 +53,7 @@ fn python_flock_blocks_native_producer() {
         ),
     )
     .unwrap();
-    let python = "import fcntl,os,time\nf=open(os.environ['LOCK'],'a+'); fcntl.flock(f,fcntl.LOCK_EX)\nopen(os.environ['READY'],'w').close()\nwhile not os.path.exists(os.environ['RELEASE']): time.sleep(.01)\n";
+    let python = "import fcntl,os,time\nf=open(os.environ['LOCK'],'a+'); fcntl.flock(f,fcntl.LOCK_EX)\nopen(os.environ['READY'],'w').close()\ndeadline=time.monotonic()+10\nwhile not os.path.exists(os.environ['RELEASE']) and time.monotonic()<deadline: time.sleep(.01)\n";
     let mut holder = Command::new("python3")
         .args(["-c", python])
         .env("LOCK", state.join("session-1.lock"))
@@ -65,11 +65,15 @@ fn python_flock_blocks_native_producer() {
     while !path.join("ready").exists() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(10));
     }
-    assert!(path.join("ready").exists());
+    if !path.join("ready").exists() {
+        let _ = holder.kill();
+        let _ = holder.wait();
+        panic!("Python lock holder did not start");
+    }
     let mut hook = Command::new("/bin/bash")
         .args([
             "-c",
-            "exec -a codex /bin/bash -c '\"$HOOK\" start < \"$EVENT\"'",
+            "exec -a codex /bin/bash -c '\"$HOOK\" start < \"$EVENT\"; :'",
         ])
         .env("HOOK", env!("CARGO_BIN_EXE_dunk-codex-turn"))
         .env("EVENT", &event)
@@ -78,8 +82,23 @@ fn python_flock_blocks_native_producer() {
         .env("CALLS", path.join("calls"))
         .spawn()
         .unwrap();
-    std::thread::sleep(Duration::from_millis(200));
-    let blocked = !path.join("calls").exists();
+    // /proc/locks reports a queued flock with an arrow and the blocked hook PID.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut blocked = false;
+    while Instant::now() < deadline {
+        let children = fs::read_to_string(format!("/proc/{0}/task/{0}/children", hook.id()))
+            .unwrap_or_default();
+        let locks = fs::read_to_string("/proc/locks").unwrap_or_default();
+        blocked = children.split_whitespace().any(|pid| {
+            locks.lines().any(|line| {
+                line.contains("->") && line.split_whitespace().any(|field| field == pid)
+            })
+        });
+        if blocked || path.join("calls").exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
     fs::write(path.join("release"), "").unwrap();
     assert!(holder.wait().unwrap().success());
     assert!(hook.wait().unwrap().success());
