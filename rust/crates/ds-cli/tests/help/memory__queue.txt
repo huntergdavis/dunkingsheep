@@ -1,8 +1,8 @@
 usage: dunkingsheep memory queue [-h] --path PATH --reason REASON
-                                 {quarantine,restore} queue_id
+                                 {quarantine,restore,resolve} queue_id
 
 positional arguments:
-  {quarantine,restore}
+  {quarantine,restore,resolve}
   queue_id
 
 options:

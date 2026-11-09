@@ -1821,14 +1821,14 @@ pub static ROOT: Cmd = Cmd {
                 },
                 Cmd {
                     name: "queue", aliases: &[],
-                    help: Some("quarantine or restore one failed ingest entry"),
+                    help: Some("quarantine, restore or resolve one ingest entry"),
                     raw: false,
                     raw_text: false,
                     about: None,
                     epilog: None,
                     args: &[
                         Arg { id: "json", dest: "json", tri: false, default_int: false, flags: &["--json"], positional: false, kind: Kind::StoreTrue, ty: Ty::Str, nargs: Nargs::Zero, choices: &[], default: None, required: false, help: None, hidden: true, metavar: None, version: None },
-                        Arg { id: "action", dest: "action", tri: false, default_int: false, flags: &[], positional: true, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &["quarantine", "restore"], default: None, required: true, help: None, hidden: false, metavar: None, version: None },
+                        Arg { id: "action", dest: "action", tri: false, default_int: false, flags: &[], positional: true, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &["quarantine", "restore", "resolve"], default: None, required: true, help: None, hidden: false, metavar: None, version: None },
                         Arg { id: "queue_id", dest: "queue_id", tri: false, default_int: false, flags: &[], positional: true, kind: Kind::Store, ty: Ty::Int, nargs: Nargs::One, choices: &[], default: None, required: true, help: None, hidden: false, metavar: None, version: None },
                         Arg { id: "path", dest: "path", tri: false, default_int: false, flags: &["--path"], positional: false, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &[], default: None, required: true, help: Some("exact source path"), hidden: false, metavar: None, version: None },
                         Arg { id: "reason", dest: "reason", tri: false, default_int: false, flags: &["--reason"], positional: false, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &[], default: None, required: true, help: None, hidden: false, metavar: None, version: None },

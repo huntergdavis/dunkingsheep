@@ -51,14 +51,22 @@ fn failed_queue_quarantine_and_restore_preserve_source_and_audit() {
         [],
     )
     .unwrap();
-    assert!(queue_disposition(&mut db, 1, "/wrong", "triage", "%1", false).is_err());
-    assert!(queue_disposition(&mut db, 1, &path, " ", "%1", false).is_err());
-    queue_disposition(&mut db, 1, &path, "unsupported input", "%1", false).unwrap();
+    assert!(queue_disposition(&mut db, 1, "/wrong", "triage", "%1", "quarantine").is_err());
+    assert!(queue_disposition(&mut db, 1, &path, " ", "%1", "quarantine").is_err());
+    queue_disposition(&mut db, 1, &path, "unsupported input", "%1", "quarantine").unwrap();
     assert_eq!(count(&db, "ingest_queue", "quarantined"), 1);
     assert!(claim_next(&mut db, 30.0).unwrap().is_none());
     assert_eq!(count(&db, "sources", "pending"), 1);
-    assert!(queue_disposition(&mut db, 1, &path, "duplicate", "%1", false).is_err());
-    queue_disposition(&mut db, 1, &path, "retry after correction", "%1", true).unwrap();
+    assert!(queue_disposition(&mut db, 1, &path, "duplicate", "%1", "quarantine").is_err());
+    assert!(queue_disposition(&mut db, 1, "/wrong", "resolve", "%1", "resolve").is_err());
+    queue_disposition(&mut db, 1, &path, "unsupported, retained", "%1", "resolve").unwrap();
+    assert_eq!(count(&db, "ingest_queue", "resolved"), 1);
+    assert!(claim_next(&mut db, 30.0).unwrap().is_none());
+    assert_eq!(count(&db, "sources", "pending"), 1);
+    assert!(queue_disposition(&mut db, 1, &path, "retry", "%1", "restore").is_err());
+    db.execute("UPDATE ingest_queue SET state='quarantined'", [])
+        .unwrap();
+    queue_disposition(&mut db, 1, &path, "retry after correction", "%1", "restore").unwrap();
     assert_eq!(count(&db, "ingest_queue", "failed"), 1);
     let (attempts, error): (i64, String) = db
         .query_row(
@@ -68,8 +76,8 @@ fn failed_queue_quarantine_and_restore_preserve_source_and_audit() {
         )
         .unwrap();
     assert_eq!((attempts, error), (3, "bad format".into()));
-    let events: i64 = db.query_row("SELECT count(*) FROM memory_events WHERE event IN ('queue_quarantine','queue_restore')", [], |r| r.get(0)).unwrap();
-    assert_eq!(events, 2);
+    let events: i64 = db.query_row("SELECT count(*) FROM memory_events WHERE event IN ('queue_quarantine','queue_restore','queue_resolve')", [], |r| r.get(0)).unwrap();
+    assert_eq!(events, 3);
 }
 
 #[test]

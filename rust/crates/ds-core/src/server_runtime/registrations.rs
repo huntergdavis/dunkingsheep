@@ -2811,6 +2811,24 @@ os.rename(out_path + ".tmp", out_path)
         let actor: String = rusqlite::Connection::open(&path).unwrap().query_row("SELECT actor FROM memory_events WHERE event='queue_quarantine' ORDER BY id DESC LIMIT 1", [], |row| row.get(0)).unwrap();
         assert_eq!(actor, "owner-token:fixture-owner");
         assert!(!actor.contains(&owner_token));
+        let resolve = json!({"action":"resolve", "queue_id":1, "path":inferred_path, "reason":"unsupported retained"});
+        assert!(dispatcher
+            .dispatch("memory_backfill", &resolve, &worker)
+            .is_err());
+        assert!(dispatcher
+            .dispatch("memory_backfill", &resolve, &token_request(&web_token))
+            .is_err());
+        assert_eq!(
+            dispatcher
+                .dispatch("memory_backfill", &resolve, &token_request(&owner_token))
+                .unwrap()["action"],
+            "resolve"
+        );
+        assert_eq!(memory.status().unwrap()["queue"]["resolved"], 1);
+        assert_eq!(memory.status().unwrap()["ok"], true);
+        assert!(dispatcher
+            .dispatch("memory_backfill", &resolve, &owner)
+            .is_err());
         services
             .flock()
             .with_roles(|roles, _| roles.revoke_token("fixture-owner"))
@@ -2818,7 +2836,7 @@ os.rename(out_path + ".tmp", out_path)
         assert!(dispatcher
             .dispatch("memory_backfill", &restore, &token_request(&owner_token))
             .is_err());
-        assert_eq!(memory.status().unwrap()["queue"]["quarantined"], 1);
+        assert_eq!(memory.status().unwrap()["queue"]["resolved"], 1);
     }
 
     #[test]

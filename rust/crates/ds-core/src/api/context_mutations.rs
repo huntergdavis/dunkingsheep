@@ -25,7 +25,9 @@ pub fn h_context_promote(context: &HandlerContext<'_>, args: Args) -> Result<Val
 }
 
 pub fn h_memory_backfill(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
-    if let Some(action @ ("quarantine" | "restore")) = args.get("action").and_then(Value::as_str) {
+    if let Some(action @ ("quarantine" | "restore" | "resolve")) =
+        args.get("action").and_then(Value::as_str)
+    {
         let id = args
             .get("queue_id")
             .and_then(Value::as_i64)
@@ -49,7 +51,7 @@ pub fn h_memory_backfill(context: &HandlerContext<'_>, args: Args) -> Result<Val
             .flock
             .memory_service()
             .ok_or_else(|| DunkError::Refused("memory service is not enabled".into()))?;
-        service.queue_disposition(id, path, reason, &actor, action == "restore")?;
+        service.queue_disposition(id, path, reason, &actor, action)?;
         return Ok(json!({"action":action,"queue_id":id,"path":path}));
     }
     context.flock.memory_backfill_raw(

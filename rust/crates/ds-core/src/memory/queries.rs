@@ -277,6 +277,10 @@ pub fn stats(pool: &ReadPool, db_path: &Path, queries: &QueryStats) -> Result<Va
         if quarantined > 0 {
             queue["quarantined"] = json!(quarantined);
         }
+        let resolved = state("resolved")?;
+        if resolved > 0 {
+            queue["resolved"] = json!(resolved);
+        }
         let last: Option<f64> = c
             .query_row("SELECT MAX(last_ingest) FROM sources", [], |row| row.get(0))
             .map_err(map_sqlite)?;
