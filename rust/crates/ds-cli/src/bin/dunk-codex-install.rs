@@ -99,6 +99,19 @@ fn install(home: &Path, binary: &Path) -> io::Result<()> {
     install_with(home, binary, write_new)
 }
 
+fn main() {
+    let mut args = std::env::args_os().skip(1);
+    let (Some(home), Some(binary), None) = (args.next(), args.next(), args.next()) else {
+        eprintln!("usage: dunk-codex-install ABSOLUTE_HOME NATIVE_BINARY");
+        std::process::exit(2);
+    };
+    if let Err(error) = install(Path::new(&home), Path::new(&binary)) {
+        eprintln!("installation refused: {error}");
+        std::process::exit(1);
+    }
+    println!("Installed native Codex hook in {}; trust the new hooks through Codex and launch with --no-daemon.",Path::new(&home).display());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -125,17 +138,4 @@ mod tests {
         assert!(!home.join("hooks.json").exists());
         assert_eq!(fs::read(home.join("sentinel")).unwrap(), b"keep");
     }
-}
-
-fn main() {
-    let mut args = std::env::args_os().skip(1);
-    let (Some(home), Some(binary), None) = (args.next(), args.next(), args.next()) else {
-        eprintln!("usage: dunk-codex-install ABSOLUTE_HOME NATIVE_BINARY");
-        std::process::exit(2);
-    };
-    if let Err(error) = install(Path::new(&home), Path::new(&binary)) {
-        eprintln!("installation refused: {error}");
-        std::process::exit(1);
-    }
-    println!("Installed native Codex hook in {}; trust the new hooks through Codex and launch with --no-daemon.",Path::new(&home).display());
 }
