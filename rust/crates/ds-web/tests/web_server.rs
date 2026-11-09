@@ -11,7 +11,10 @@ use std::{
     net::{SocketAddr, TcpStream},
     os::unix::net::UnixListener,
     path::{Path, PathBuf},
-    sync::{mpsc, Arc, Mutex},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        mpsc, Arc, Mutex,
+    },
     thread,
     time::{Duration, SystemTime},
 };
@@ -834,7 +837,10 @@ struct FakeDaemon {
 }
 
 impl FakeDaemon {
-    fn start(dir: &Path, answer: fn(&str, &Map<String, Value>) -> Result<Value, String>) -> Self {
+    fn start<F>(dir: &Path, answer: F) -> Self
+    where
+        F: Fn(&str, &Map<String, Value>) -> Result<Value, String> + Send + 'static,
+    {
         let socket = dir.join("daemon.sock");
         let listener = UnixListener::bind(&socket).expect("bind the fake daemon socket");
         let sent = Arc::new(Mutex::new(Vec::new()));
@@ -1370,4 +1376,167 @@ fn owner_question_is_available_through_composed_desk_without_weakening_auth() {
         Some("web-desk-test-token")
     );
     assert_eq!(server.shutdown(), Ok(()));
+}
+
+// A queued daemon receipt must be reconciled even if no client reads the message. The fake
+// daemon moves it to sent; the desk must never send the message a second time.
+#[test]
+fn delivery_watcher_reconciles_without_a_client_and_stops_cleanly() {
+    let (root, mut config) = fixture();
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let attempts_for_daemon = Arc::clone(&attempts);
+    let daemon = FakeDaemon::start(root.path(), move |command, _args| match command {
+        "list_messages" if attempts_for_daemon.fetch_add(1, Ordering::SeqCst) == 0 => {
+            Err("temporary scratch daemon outage".to_owned())
+        }
+        "list_messages" => Ok(json!({"queued": [], "recent": []})),
+        "get_message" => Ok(json!({"message_id":"q-1", "status":"sent", "message":"fixture sent"})),
+        _ => Err("not provided by this fixture".to_owned()),
+    });
+    config.daemon_socket = daemon.socket.clone();
+    let desk = web_server::Desk::open(config).expect("open desk");
+    let database = Connection::open(root.path().join("desk/messages.sqlite3")).unwrap();
+    database.execute(
+        "INSERT INTO messages(channel,role,body,delivery,transport_id) VALUES('pane-7','owner','scratch','queued','q-1')",
+        [],
+    ).unwrap();
+    desk.start().expect("start desk workers");
+    desk.start()
+        .expect("starting twice must not duplicate the watcher");
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let status: String = database
+            .query_row("SELECT delivery FROM messages WHERE id=1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        if status == "sent" {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "receipt was not reconciled after recovery: {status}"
+        );
+        thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        attempts.load(Ordering::SeqCst) >= 2,
+        "watcher must recover after an RPC error"
+    );
+    assert_eq!(
+        daemon
+            .sent()
+            .iter()
+            .filter(|entry| entry.command == "send_text")
+            .count(),
+        0,
+        "receipt reconciliation must never resend"
+    );
+    desk.stop();
+    let calls_at_stop = attempts.load(Ordering::SeqCst);
+    database.execute(
+        "INSERT INTO messages(channel,role,body,delivery,transport_id) VALUES('pane-7','owner','after stop','queued','q-2')",
+        [],
+    ).unwrap();
+    thread::sleep(Duration::from_millis(5300));
+    let status: String = database
+        .query_row("SELECT delivery FROM messages WHERE id=2", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(status, "queued", "shutdown must stop the watcher");
+    assert_eq!(attempts.load(Ordering::SeqCst), calls_at_stop);
+}
+
+#[test]
+fn delivery_watcher_stop_waits_for_inflight_rpc_before_restart() {
+    let (root, mut config) = fixture();
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let count = Arc::clone(&attempts);
+    let daemon = FakeDaemon::start(root.path(), move |command, args| match command {
+        "list_messages" => {
+            if count.fetch_add(1, Ordering::SeqCst) == 0 {
+                let _ = entered_tx.send(());
+                release_rx
+                    .recv_timeout(Duration::from_secs(25))
+                    .map_err(|error| error.to_string())?;
+            }
+            Ok(json!({"queued": [], "recent": []}))
+        }
+        "get_message" => {
+            Ok(json!({"message_id": args["message_id"], "status":"sent", "message":"fixture"}))
+        }
+        _ => Err("not provided by this fixture".to_owned()),
+    });
+    config.daemon_socket = daemon.socket.clone();
+    config.client_timeout = Duration::from_secs(20);
+    let desk = Arc::new(web_server::Desk::open(config).unwrap());
+    let database = Connection::open(root.path().join("desk/messages.sqlite3")).unwrap();
+    database.execute("INSERT INTO messages(channel,role,body,delivery,transport_id) VALUES('pane-7','owner','one','queued','q-1')", []).unwrap();
+    desk.start().unwrap();
+    entered_rx
+        .recv_timeout(Duration::from_secs(12))
+        .expect("watcher must enter the blocked RPC");
+    let (stopped_tx, stopped_rx) = mpsc::channel();
+    let stopping_desk = Arc::clone(&desk);
+    thread::spawn(move || {
+        stopping_desk.stop();
+        let _ = stopped_tx.send(());
+    });
+    assert!(
+        matches!(
+            stopped_rx.recv_timeout(Duration::from_millis(7500)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ),
+        "stop must wait for the blocked RPC"
+    );
+    let (started_tx, started_rx) = mpsc::channel();
+    let restarting_desk = Arc::clone(&desk);
+    thread::spawn(move || {
+        let result = restarting_desk.start();
+        let _ = started_tx.send(result);
+    });
+    assert!(
+        matches!(
+            started_rx.recv_timeout(Duration::from_millis(300)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ),
+        "restart must wait for stop"
+    );
+    release_tx.send(()).unwrap();
+    stopped_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("stop completes after release");
+    started_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("restart completes")
+        .expect("restart succeeds");
+    database.execute("INSERT INTO messages(channel,role,body,delivery,transport_id) VALUES('pane-7','owner','two','queued','q-2')", []).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(12);
+    loop {
+        let status: String = database
+            .query_row("SELECT delivery FROM messages WHERE id=2", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        if status == "sent" {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "restarted watcher did not reconcile: {status}"
+        );
+        thread::sleep(Duration::from_millis(100));
+    }
+    desk.stop();
+    assert_eq!(
+        daemon
+            .sent()
+            .iter()
+            .filter(|entry| entry.command == "send_text")
+            .count(),
+        0
+    );
 }

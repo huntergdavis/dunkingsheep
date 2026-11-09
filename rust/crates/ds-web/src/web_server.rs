@@ -20,10 +20,6 @@
 //! shell middleware runs first, so a path the desk does not keep gets a 307 to `/dash/<view>`.
 //!
 //! Known gaps, reported rather than widened here:
-//! - The Python `vp-delivery-watch` loop (reconcile pending owner messages every 5 seconds) has no
-//!   public Rust entry point. `MessagesBackend::reconcile` is private and runs only on message
-//!   paths. The composition does not start a watcher, so this is a parity exception until a public
-//!   reconcile hook exists.
 //! - The operations database must be opened with the schema initialised. `ops_history::connect`
 //!   is private, so the caller supplies the opener through `DeskConfig::open_operations_db`.
 //! - Static responses carry Content-Type and Content-Length. Starlette's ETag and Last-Modified
@@ -55,7 +51,11 @@ use std::{
     future::Future,
     net::SocketAddr,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc, Mutex,
+    },
+    thread::{self, JoinHandle},
     time::Duration,
 };
 
@@ -188,9 +188,17 @@ impl fmt::Display for DeskError {
     }
 }
 
+struct DeliveryWatcher {
+    stop: mpsc::Sender<()>,
+    stopping: Arc<AtomicBool>,
+    handle: JoinHandle<()>,
+}
+
 /// The desk's owned backends. [`Desk::open`] performs the startup order; [`Desk::router`] mounts
 /// every P0 route against them; [`Desk::start`] and [`Desk::stop`] bracket the serving period.
 pub struct Desk {
+    lifecycle: Mutex<()>,
+    delivery_watcher: Mutex<Option<DeliveryWatcher>>,
     auth: Arc<PersistentAuth>,
     panes: Arc<DaemonPanesBackend<UnixTransport>>,
     messages: MessagesBackend,
@@ -292,6 +300,8 @@ impl Desk {
             config.ui_dist.clone(),
         );
         Ok(Self {
+            lifecycle: Mutex::new(()),
+            delivery_watcher: Mutex::new(None),
             auth,
             panes,
             messages,
@@ -305,14 +315,75 @@ impl Desk {
         })
     }
 
-    /// Starts the background work that Python starts at lifespan startup: the provider usage
-    /// warm-up, then the board timer.
+    /// Starts the receipt watcher and the board's background work once.
     pub fn start(&self) -> std::io::Result<()> {
-        self.board.start()
+        let _lifecycle = self
+            .lifecycle
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        self.start_delivery_watcher()?;
+        if let Err(error) = self.board.start() {
+            self.stop_delivery_watcher();
+            return Err(error);
+        }
+        Ok(())
     }
 
-    /// Stops the board timer and joins the usage workers, as Python's shutdown does.
+    fn start_delivery_watcher(&self) -> std::io::Result<()> {
+        let mut watcher = self
+            .delivery_watcher
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if watcher
+            .as_ref()
+            .is_some_and(|worker| !worker.handle.is_finished())
+        {
+            return Ok(());
+        }
+        if let Some(old) = watcher.take() {
+            let _ = old.handle.join();
+        }
+        let (stop, stop_rx) = mpsc::channel();
+        let stopping = Arc::new(AtomicBool::new(false));
+        let thread_stopping = Arc::clone(&stopping);
+        let messages = self.messages.clone();
+        let handle = thread::Builder::new()
+            .name("vp-delivery-watch".to_owned())
+            .spawn(move || {
+                while let Err(mpsc::RecvTimeoutError::Timeout) =
+                    stop_rx.recv_timeout(Duration::from_secs(5))
+                {
+                    messages.reconcile_pending(&thread_stopping);
+                }
+            })?;
+        *watcher = Some(DeliveryWatcher {
+            stop,
+            stopping,
+            handle,
+        });
+        Ok(())
+    }
+
+    fn stop_delivery_watcher(&self) {
+        let mut slot = self
+            .delivery_watcher
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let Some(worker) = slot.take() else { return };
+        worker.stopping.store(true, Ordering::SeqCst);
+        let _ = worker.stop.send(());
+        // A bounded daemon/SQLite operation may still be in flight. Join before returning so
+        // no receipt update survives shutdown and a concurrent restart cannot lose its worker.
+        let _ = worker.handle.join();
+    }
+
+    /// Stops the receipt and board timers and joins the usage workers.
     pub fn stop(&self) {
+        let _lifecycle = self
+            .lifecycle
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        self.stop_delivery_watcher();
         self.board.stop();
     }
 

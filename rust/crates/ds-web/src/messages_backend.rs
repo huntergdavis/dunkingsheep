@@ -627,6 +627,10 @@ fn prompt_for(connection: &Connection, row: &Row) -> Result<String, Fault> {
     Ok(prompt)
 }
 
+fn stop_requested(stopping: Option<&std::sync::atomic::AtomicBool>) -> bool {
+    stopping.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst))
+}
+
 /// Shared state behind the three trait objects.
 struct Shared {
     db_path: PathBuf,
@@ -1191,21 +1195,62 @@ impl MessagesBackend {
         Ok(result)
     }
 
+    /// Reconcile channels with outstanding receipts, as Python's delivery watcher does.
+    /// A failed database or daemon read is retried on the next tick; reconciliation never resends.
+    pub(crate) fn reconcile_pending(&self, stopping: &std::sync::atomic::AtomicBool) {
+        let Ok(connection) = self.connect() else {
+            return;
+        };
+        let read_cutoff = now_epoch() - READ_STATUS_WINDOW_S;
+        let channels = match query_rows(
+            &connection,
+            "SELECT DISTINCT channel FROM messages WHERE delivery IN ('pending','queued','failed','uncertain','inbox') OR (delivery='read' AND transport_attempt_at>?)",
+            &[SqlValue::Real(read_cutoff)],
+        ) {
+            Ok(rows) => rows.into_iter().filter_map(|row| text_of(&row, "channel").map(str::to_owned)).collect::<Vec<_>>(),
+            Err(_) => return,
+        };
+        drop(connection);
+        for channel in channels {
+            if stopping.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
+            self.reconcile_until(&channel, Some(stopping));
+        }
+    }
+
     /// `_reconcile(channel)`: refreshes delivery state from the daemon. A pass that finds
     /// the lock held is skipped. Every daemon or database failure ends the pass quietly,
     /// and nothing here ever resends a message.
     fn reconcile(&self, channel: &str) {
+        self.reconcile_until(channel, None);
+    }
+
+    fn reconcile_until(&self, channel: &str, stopping: Option<&std::sync::atomic::AtomicBool>) {
         let _guard = match self.shared.delivery_lock.try_lock() {
             Ok(guard) => guard,
             Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
             Err(TryLockError::WouldBlock) => return,
         };
-        let _ = self.reconcile_passes(channel);
+        let _ = self.reconcile_passes(channel, stopping);
     }
 
-    fn reconcile_passes(&self, channel: &str) -> Result<(), Fault> {
-        self.reconcile_owner_pushes(channel)?;
-        self.reconcile_direct_guarded(channel)?;
+    fn reconcile_passes(
+        &self,
+        channel: &str,
+        stopping: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<(), Fault> {
+        if stop_requested(stopping) {
+            return Ok(());
+        }
+        self.reconcile_owner_pushes(channel, stopping)?;
+        if stop_requested(stopping) {
+            return Ok(());
+        }
+        self.reconcile_direct_guarded(channel, stopping)?;
+        if stop_requested(stopping) {
+            return Ok(());
+        }
         let read_cutoff = now_epoch() - READ_STATUS_WINDOW_S;
         let connection = self.connect()?;
         let queued = query_rows(
@@ -1217,6 +1262,9 @@ impl MessagesBackend {
             return Ok(());
         }
         let client = self.daemon_client()?;
+        if stop_requested(stopping) {
+            return Ok(());
+        }
         let legacy = queued.iter().any(|row| {
             row.get("direct_transport").is_some_and(Value::is_null) && !starts_with_i(row)
         });
@@ -1232,10 +1280,16 @@ impl MessagesBackend {
         } else {
             json!({"queued": [], "recent": []})
         };
+        if stop_requested(stopping) {
+            return Ok(());
+        }
         let queued_by_id = index_by_message_id(&recent)?;
         let writes = connection;
 
         for row in &queued {
+            if stop_requested(stopping) {
+                return Ok(());
+            }
             if !row.get("direct_transport").is_some_and(Value::is_null) {
                 continue; // The daemon receipt is preserved; legacy reconciliation cannot read it.
             }
@@ -1386,7 +1440,11 @@ impl MessagesBackend {
 
     /// `_reconcile_owner_pushes(channel)`: matches durable pickup receipts. An absent
     /// receipt proves nothing.
-    fn reconcile_owner_pushes(&self, channel: &str) -> Result<(), Fault> {
+    fn reconcile_owner_pushes(
+        &self,
+        channel: &str,
+        stopping: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<(), Fault> {
         let connection = self.connect()?;
         let rows = query_rows(
             &connection,
@@ -1421,13 +1479,26 @@ impl MessagesBackend {
             return Ok(());
         }
         // Everything below is best-effort: any failure ends the daemon section quietly.
-        let _ = self.apply_pickup_receipts(&pending);
+        let _ = self.apply_pickup_receipts(&pending, stopping);
         Ok(())
     }
 
-    fn apply_pickup_receipts(&self, pending: &[(Row, Map<String, Value>)]) -> Result<(), Fault> {
+    fn apply_pickup_receipts(
+        &self,
+        pending: &[(Row, Map<String, Value>)],
+        stopping: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<(), Fault> {
+        if stop_requested(stopping) {
+            return Ok(());
+        }
         let client = self.daemon_client()?;
+        if stop_requested(stopping) {
+            return Ok(());
+        }
         for batch in pending.chunks(100) {
+            if stop_requested(stopping) {
+                return Ok(());
+            }
             let push_ids: Vec<Value> = batch
                 .iter()
                 .map(|(_, transport)| transport.get("push_id").cloned().unwrap_or(Value::Null))
@@ -1442,6 +1513,9 @@ impl MessagesBackend {
                 return Ok(());
             };
             for (row, transport) in batch {
+                if stop_requested(stopping) {
+                    return Ok(());
+                }
                 let push_id = transport.get("push_id").cloned().unwrap_or(Value::Null);
                 let matches: Vec<&Value> = receipts
                     .iter()
@@ -1512,7 +1586,11 @@ impl MessagesBackend {
     /// `_reconcile_direct_guarded(channel)`: reconciles guarded direct sends against the
     /// daemon's record for the message id bound at send time. It moves a row only when the
     /// record matches the row's own identity, and it never replays an attempt.
-    fn reconcile_direct_guarded(&self, channel: &str) -> Result<(), Fault> {
+    fn reconcile_direct_guarded(
+        &self,
+        channel: &str,
+        stopping: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<(), Fault> {
         let connection = self.connect()?;
         let rows = query_rows(
             &connection,
@@ -1543,10 +1621,19 @@ impl MessagesBackend {
         if pending.is_empty() {
             return Ok(());
         }
+        if stop_requested(stopping) {
+            return Ok(());
+        }
         let Ok(client) = self.daemon_client() else {
             return Ok(());
         };
+        if stop_requested(stopping) {
+            return Ok(());
+        }
         for (row, transport, bound) in pending {
+            if stop_requested(stopping) {
+                return Ok(());
+            }
             let id = int_of(&row, "id")?;
             let record = match client.call("get_message", args([("message_id", json!(bound))])) {
                 Ok(record) => record,
