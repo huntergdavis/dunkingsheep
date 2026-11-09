@@ -55,6 +55,41 @@ fn native_provider_output_and_usage_runner_contract() {
         .as_str()
         .unwrap()
         .contains("not account quota"));
+    let config = dir.path().join("usage.json");
+    fs::write(&config, format!(r#"{{"schema":1,"providers":{{"codex":{{"command":"{} usage-provider codex","timeout_s":5,"parse":{{"windows":"windows","meaning":"meaning","measured_at":"measured_at"}}}},"opencode-go":{{"command":"{} usage-provider opencode","timeout_s":5,"parse":{{"meaning":"meaning","measured_at":"measured_at"}}}}}}}}"#, bin, bin)).unwrap();
+    let out = Command::new(bin)
+        .args(["--json", "usage", "--config"])
+        .arg(&config)
+        .env("HOME", dir.path())
+        .env("PATH", dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let readings: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let rows = readings.as_array().unwrap();
+    let codex = rows.iter().find(|v| v["provider"] == "codex").unwrap();
+    let opencode = rows
+        .iter()
+        .find(|v| v["provider"] == "opencode-go")
+        .unwrap();
+    assert_eq!(codex["status"], "ok");
+    assert_eq!(codex["windows"][0]["percent_remaining"], 60.0);
+    assert_eq!(opencode["status"], "unknown");
+    assert_eq!(opencode["exit_code"], 1);
+    let stale = Command::new(bin)
+        .args(["usage-provider", "codex"])
+        .env("HOME", dir.path())
+        .env("DUNKINGSHEEP_USAGE_MAX_AGE_S", "-1")
+        .output()
+        .unwrap();
+    assert_eq!(stale.status.code(), Some(1));
+    let fresh = Command::new(bin)
+        .args(["usage-provider", "codex", "--max-age-s", "3600"])
+        .env("HOME", dir.path())
+        .env("DUNKINGSHEEP_USAGE_MAX_AGE_S", "-1")
+        .output()
+        .unwrap();
+    assert_eq!(fresh.status.code(), Some(0));
     fs::remove_dir_all(sessions).unwrap();
     let config = dir.path().join("usage.json");
     fs::write(&config, format!(r#"{{"schema":1,"providers":{{"codex":{{"command":"{} usage-provider codex","timeout_s":5}}}}}}"#, bin)).unwrap();
