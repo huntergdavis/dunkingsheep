@@ -1191,6 +1191,27 @@ impl MessagesBackend {
         Ok(result)
     }
 
+    /// Reconcile channels with outstanding receipts, as Python's delivery watcher does.
+    /// A failed database or daemon read is retried on the next tick; reconciliation never resends.
+    pub(crate) fn reconcile_pending(&self) {
+        let Ok(connection) = self.connect() else {
+            return;
+        };
+        let read_cutoff = now_epoch() - READ_STATUS_WINDOW_S;
+        let channels = match query_rows(
+            &connection,
+            "SELECT DISTINCT channel FROM messages WHERE delivery IN ('pending','queued','failed','uncertain','inbox') OR (delivery='read' AND transport_attempt_at>?)",
+            &[SqlValue::Real(read_cutoff)],
+        ) {
+            Ok(rows) => rows.into_iter().filter_map(|row| text_of(&row, "channel").map(str::to_owned)).collect::<Vec<_>>(),
+            Err(_) => return,
+        };
+        drop(connection);
+        for channel in channels {
+            self.reconcile(&channel);
+        }
+    }
+
     /// `_reconcile(channel)`: refreshes delivery state from the daemon. A pass that finds
     /// the lock held is skipped. Every daemon or database failure ends the pass quietly,
     /// and nothing here ever resends a message.

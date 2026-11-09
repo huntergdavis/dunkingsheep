@@ -11,7 +11,10 @@ use std::{
     net::{SocketAddr, TcpStream},
     os::unix::net::UnixListener,
     path::{Path, PathBuf},
-    sync::{mpsc, Arc, Mutex},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        mpsc, Arc, Mutex,
+    },
     thread,
     time::{Duration, SystemTime},
 };
@@ -834,7 +837,10 @@ struct FakeDaemon {
 }
 
 impl FakeDaemon {
-    fn start(dir: &Path, answer: fn(&str, &Map<String, Value>) -> Result<Value, String>) -> Self {
+    fn start<F>(dir: &Path, answer: F) -> Self
+    where
+        F: Fn(&str, &Map<String, Value>) -> Result<Value, String> + Send + 'static,
+    {
         let socket = dir.join("daemon.sock");
         let listener = UnixListener::bind(&socket).expect("bind the fake daemon socket");
         let sent = Arc::new(Mutex::new(Vec::new()));
@@ -1370,4 +1376,74 @@ fn owner_question_is_available_through_composed_desk_without_weakening_auth() {
         Some("web-desk-test-token")
     );
     assert_eq!(server.shutdown(), Ok(()));
+}
+
+// A queued daemon receipt must be reconciled even if no client reads the message. The fake
+// daemon moves it to sent; the desk must never send the message a second time.
+#[test]
+fn delivery_watcher_reconciles_without_a_client_and_stops_cleanly() {
+    let (root, mut config) = fixture();
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let attempts_for_daemon = Arc::clone(&attempts);
+    let daemon = FakeDaemon::start(root.path(), move |command, _args| match command {
+        "list_messages" if attempts_for_daemon.fetch_add(1, Ordering::SeqCst) == 0 => {
+            Err("temporary scratch daemon outage".to_owned())
+        }
+        "list_messages" => Ok(json!({"queued": [], "recent": []})),
+        "get_message" => Ok(json!({"message_id":"q-1", "status":"sent", "message":"fixture sent"})),
+        _ => Err("not provided by this fixture".to_owned()),
+    });
+    config.daemon_socket = daemon.socket.clone();
+    let desk = web_server::Desk::open(config).expect("open desk");
+    let database = Connection::open(root.path().join("desk/messages.sqlite3")).unwrap();
+    database.execute(
+        "INSERT INTO messages(channel,role,body,delivery,transport_id) VALUES('pane-7','owner','scratch','queued','q-1')",
+        [],
+    ).unwrap();
+    desk.start().expect("start desk workers");
+    desk.start()
+        .expect("starting twice must not duplicate the watcher");
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let status: String = database
+            .query_row("SELECT delivery FROM messages WHERE id=1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        if status == "sent" {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "receipt was not reconciled after recovery: {status}"
+        );
+        thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        attempts.load(Ordering::SeqCst) >= 2,
+        "watcher must recover after an RPC error"
+    );
+    assert_eq!(
+        daemon
+            .sent()
+            .iter()
+            .filter(|entry| entry.command == "send_text")
+            .count(),
+        0,
+        "receipt reconciliation must never resend"
+    );
+    desk.stop();
+    let calls_at_stop = attempts.load(Ordering::SeqCst);
+    database.execute(
+        "INSERT INTO messages(channel,role,body,delivery,transport_id) VALUES('pane-7','owner','after stop','queued','q-2')",
+        [],
+    ).unwrap();
+    thread::sleep(Duration::from_millis(5300));
+    let status: String = database
+        .query_row("SELECT delivery FROM messages WHERE id=2", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(status, "queued", "shutdown must stop the watcher");
+    assert_eq!(attempts.load(Ordering::SeqCst), calls_at_stop);
 }
