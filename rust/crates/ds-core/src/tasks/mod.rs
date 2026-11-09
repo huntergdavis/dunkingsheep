@@ -1048,11 +1048,11 @@ impl Tasks {
                 let tx = conn
                     .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                     .map_err(db::map_sqlite)?;
-                let (scope, priority, raw, kind, author): (String, String, Option<String>, String, Option<String>) = tx
+                let (scope, priority, raw, kind, author, repo, pr): (String, String, Option<String>, String, Option<String>, Option<String>, Option<i64>) = tx
                     .query_row(
-                        "SELECT scope, priority, assignees, kind, author FROM tasks WHERE id = ?",
+                        "SELECT scope, priority, assignees, kind, author, repo, pr FROM tasks WHERE id = ?",
                         params![id],
-                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
                     )
                     .optional()
                     .map_err(db::map_sqlite)?
@@ -1068,6 +1068,20 @@ impl Tasks {
                         }
                         if incoming.contains(author) {
                             return Err(DunkError::Refused("a planner cannot assign a review to its author".into()));
+                        }
+                    }
+                    // Use the same related-work evidence as authors_of, within this
+                    // transaction, so a planner cannot route review to a known worker.
+                    if let (Some(repo), Some(pr)) = (repo.as_deref(), pr) {
+                        let mut stmt = tx.prepare("SELECT assignees, completed_by, author FROM tasks WHERE repo = ? AND pr = ? AND kind != 'review'").map_err(db::map_sqlite)?;
+                        let rows = stmt.query_map(params![repo, pr], |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, Option<String>>(2)?))).map_err(db::map_sqlite)?;
+                        for row in rows {
+                            let (workers, completed_by, work_author) = row.map_err(db::map_sqlite)?;
+                            let mut known = decode_list(workers.as_deref());
+                            known.extend([completed_by, work_author].into_iter().flatten());
+                            if incoming.iter().any(|assignee| known.contains(assignee)) {
+                                return Err(DunkError::Refused("a planner cannot assign a review to a recorded worker on the PR".into()));
+                            }
                         }
                     }
                 }
@@ -4171,6 +4185,55 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(decode_list(Some(&assigned.assignees)), vec!["%3"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn planner_review_refuses_recorded_pr_worker() {
+        let tasks = store("planner-review-worker").await;
+        let work = tasks
+            .add_with(
+                "global",
+                "work",
+                "",
+                AddOptions {
+                    repo: Some("fixture/project".into()),
+                    pr: Some("42".into()),
+                    author: Some("%2".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        tasks.assign(&work.id, &["%3"], "add").await.unwrap();
+        let review = tasks
+            .add_with(
+                "global",
+                "review",
+                "",
+                AddOptions {
+                    kind: Some("review".into()),
+                    repo: Some("fixture/project".into()),
+                    pr: Some("42".into()),
+                    head: Some("a".repeat(40)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        for worker in ["%2", "%3"] {
+            let error = tasks
+                .assign_with_planner_author_guard(&review.id, &[worker], "add", true)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("recorded worker"), "{error}");
+        }
+        assert!(decode_list(Some(&tasks.get(&review.id).await.unwrap().assignees)).is_empty());
+        assert_eq!(tasks.events(&review.id).await, 1);
+        tasks
+            .assign_with_planner_author_guard(&review.id, &["%4"], "add", true)
+            .await
+            .unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
