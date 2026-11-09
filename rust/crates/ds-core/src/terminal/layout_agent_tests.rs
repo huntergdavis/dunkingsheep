@@ -188,3 +188,70 @@ fn raw_rename_save_failure_leaves_old_registry_and_new_title() {
     assert_eq!(after.label, "old-agent");
     assert_eq!(after.title, "new-label");
 }
+
+#[test]
+fn guarded_launch_preserves_daemon_process_path_for_hooks() {
+    const MARKER: &str = "DS_TEST_GUARDED_PATH_CHILD";
+    if std::env::var_os(MARKER).is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = dir.path().join("guard");
+        std::fs::create_dir(&guard).unwrap();
+        std::fs::write(guard.join("tmux"), b"guard fixture").unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "terminal::layout_agent_tests::guarded_launch_preserves_daemon_process_path_for_hooks", "--nocapture"])
+            .env(MARKER, "1")
+            .env("PATH", "/usr/bin:/bin")
+            .env("DUNKINGSHEEP_TMUX_GUARD_DIR", &guard)
+            .env("DUNKINGSHEEP_TMUX_REGISTRY", dir.path().join("registry.json"))
+            .output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let (dir, _) = fixture();
+    let env = crate::config::Env::try_from_process().unwrap();
+    assert_eq!(env.get("PATH"), Some("/usr/bin:/bin"));
+    let guard = env.get("DUNKINGSHEEP_TMUX_GUARD_DIR").unwrap().to_owned();
+    let mut backend = TmuxBackend::from_env(dir.path().join("tmux"), env);
+    backend.start_agent(&spec(false)).unwrap();
+    backend
+        .start_agent_raw(&spec(false), false)
+        .unwrap()
+        .unwrap();
+    let calls = std::fs::read_to_string(dir.path().join("calls")).unwrap();
+    let expected = format!("PATH={guard}:/usr/bin:/bin");
+    assert_eq!(calls.matches(&expected).count(), 4, "{calls}");
+    let result = std::process::Command::new("/bin/sh")
+        .args(["-c", "command -v sh >/dev/null"])
+        .env("PATH", format!("{guard}:/usr/bin:/bin"))
+        .status()
+        .unwrap();
+    assert!(result.success());
+
+    let mut override_spec = spec(false);
+    override_spec
+        .env
+        .insert("PATH".into(), "/custom/bin".into());
+    backend.start_agent(&override_spec).unwrap();
+    backend
+        .start_agent_raw(&override_spec, false)
+        .unwrap()
+        .unwrap();
+    let calls = std::fs::read_to_string(dir.path().join("calls")).unwrap();
+    assert_eq!(
+        calls.matches(&format!("PATH={guard}:/custom/bin")).count(),
+        4
+    );
+
+    let (unguarded_dir, mut unguarded) = fixture();
+    unguarded.start_agent(&spec(false)).unwrap();
+    unguarded
+        .start_agent_raw(&spec(false), false)
+        .unwrap()
+        .unwrap();
+    let calls = std::fs::read_to_string(unguarded_dir.path().join("calls")).unwrap();
+    assert!(!calls.contains("PATH="), "{calls}");
+}
