@@ -155,7 +155,7 @@ is the rollback switch for binding alone.
 | `owner` | everything | - |
 | `system` | timers and bridges: `task add/assign/cancel`, `inbox send --system-sender`, `respawn_pane`, `send_keys` under the stuck/watchdog guards, `report`, `owner_*` | interactive typing |
 | `desk` | `task add` (unassigned, `kind=work` only) / `list` / `read` / `note` / `metrics`, `inbox read` (own mailbox), `owner_take`, `owner_reply`, `context digest` / `search`, `metrics summary`, `status`, `usage`, `report list/run`, `review list`, `poolrad progress`, `pane read`, `views *`, `memory recall/search` | `send_text`, `send_keys`, `inbox send`, `task next/claim/complete/heartbeat/release/update/assign`, every dunk verb, `respawn`, `start_agent`, `context add`, `gh_token` |
-| `planner` | `task add --kind work` (unassigned only), `task list/read/note`, `views *`, `memory recall`, `context digest` | everything else: no mail, no typing, no claiming, no status changes |
+| `planner` | `task add --kind work`, `task assign`, `task list/read/note`, `views *`, `memory recall`, `context digest` | no task cancellation or completion; review assignment has the explicit-author restriction below |
 | `worker` | `task next/heartbeat/complete/note/block/unblock/release/follow/unfollow/update/list/read/stats/metrics/followers/add`, `inbox read/send/*`, `context add --class fact`, `memory *`, `pane send self`, `gh_token author`, `status`/`health`/`roster`/`lanes`/`panes` reads | `task cancel`, `task assign`, `task add` with other assignees, `task complete` on a task it does not lease, anything superuser, `gh_token reviewer` |
 | `reviewer` | as worker, except `task next` yields only `kind=review` with `author != self`, and `gh_token reviewer` not `author` | pushing code: the reviewer App has `contents: read` |
 | `web` | the owner's transport: everything `owner` may call except the fleet-destructive verbs (`close`, `shutdown`, `respawn_pane`, `start_agent`, every dunk verb, `superuser *`, `gh_token`). Bound by a service token, not a pane (below). | the excluded verbs |
@@ -182,12 +182,21 @@ mechanism for one verb pair, and its name collides with the desk role.
 Also closed: `inbox read --mailbox X` for another mailbox (`_mailbox_or_self`),
 `task complete` by a non-lease-holder, ungated `owner_push`, and three
 indirect routes the first draft missed: `task update` drops `status` and
-`assignees` for every role but `owner`/`system`; `task assign` is
-`owner`/`system` only; `inbox send --system-sender` requires the system
+`assignees` for every role but `owner`/`system`/`web`; `task assign` is
+available to `owner`, `system`, `web` and `planner`; `inbox send --system-sender` requires the system
 token. The review verdict (`accept` / `needs-fix`) is not a free-text note:
 it is written by the daemon at `task complete` from the bound pane that holds
 the lease, and only when that pane's role is `reviewer` and its registered
 provider is in `reviewer_providers`.
+
+For a planner's `task assign` add or replace on a review with an explicit author,
+the author and assignees must be pane IDs, and no assignee may equal the author.
+`self` and `me` expand to the caller's pane. A named author or assignee is refused
+on this path; an owner, system or web caller can still assign it. Removal remains
+available. This compares stored pane strings at assignment time only: it does not
+establish identity across panes, protect reviews with missing authors or coauthors,
+or replace the review claim and completion checks. Project-scoped planner routing
+is separate work and is not enforced by this check.
 
 **Result caps for `desk`** (the latency mechanism, not a hope): every read the
 desk makes is clamped daemon-side to 4 KB and `limit <= 5` (`memory recall`

@@ -818,8 +818,14 @@ impl Flock {
         mode: &str,
         self_pane_id: Option<&str>,
     ) -> Result<Task, DunkError> {
-        self.task_assign_with_mode_parser(task_id, assignees, || Ok(mode.to_string()), self_pane_id)
-            .await
+        self.task_assign_with_mode_parser(
+            task_id,
+            assignees,
+            || Ok(mode.to_string()),
+            self_pane_id,
+            false,
+        )
+        .await
     }
 
     pub(crate) async fn task_assign_with_mode_parser<F>(
@@ -828,6 +834,7 @@ impl Flock {
         assignees: &[&str],
         parse_mode: F,
         self_pane_id: Option<&str>,
+        planner_author_guard: bool,
     ) -> Result<Task, DunkError>
     where
         F: FnOnce() -> Result<String, DunkError>,
@@ -841,7 +848,9 @@ impl Flock {
             return tasks.assign(task_id, &refs, "add").await;
         }
         let mode = parse_mode()?;
-        tasks.assign(task_id, &refs, &mode).await
+        tasks
+            .assign_with_planner_author_guard(task_id, &refs, &mode, planner_author_guard)
+            .await
     }
 
     /// `task_note`: append an explanatory event. Unlike the others it does NOT require the

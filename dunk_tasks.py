@@ -890,7 +890,7 @@ class Tasks:
                 raise
         return self.get(task_id)
 
-    def assign(self, task_id, assignees, mode="add"):
+    def assign(self, task_id, assignees, mode="add", planner_author_guard=False):
         incoming = _as_list(assignees)
         if not incoming:
             raise TaskError("at least one assignee is required")
@@ -905,6 +905,16 @@ class Tasks:
             self.db.execute("BEGIN IMMEDIATE")
             try:
                 row = self._require(task_id)
+                # This is only a point-in-time explicit pane-ID check. Missing or
+                # subsequently changed author provenance still needs review guards.
+                if (planner_author_guard and mode not in ("remove", "rm")
+                        and row["kind"] == "review" and row["author"]):
+                    author = row["author"]
+                    if not _PANE_ID.fullmatch(author) or any(
+                            not _PANE_ID.fullmatch(pane) for pane in incoming):
+                        raise TaskError("planner review assignment requires pane IDs for author and assignees")
+                    if author in incoming:
+                        raise TaskError("a planner cannot assign a review to its author")
                 current = _decode(row["assignees"])
                 if mode in ("add", "append"):
                     merged = current + [item for item in incoming if item not in current]

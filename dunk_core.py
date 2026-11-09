@@ -2765,10 +2765,14 @@ class Flock:
             updated_by=updated_by or self_pane_id)
 
     @_as_dunk_error
-    def task_assign(self, task_id, assignees, mode="add", self_pane_id=None):
+    def task_assign(self, task_id, assignees, mode="add", self_pane_id=None,
+                    planner_author_guard=False):
         self._require_task_visible(self.tasks.get(task_id), self_pane_id)
+        kwargs = {"mode": mode}
+        if planner_author_guard:
+            kwargs["planner_author_guard"] = True
         return self.tasks.assign(
-            task_id, self._task_assignees(assignees, self_pane_id), mode=mode)
+            task_id, self._task_assignees(assignees, self_pane_id), **kwargs)
 
     @_as_dunk_error
     def task_complete(self, task_id, by=None, self_pane_id=None, verdict=None,

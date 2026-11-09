@@ -3226,6 +3226,7 @@ pub fn h_task_assign(context: &HandlerContext<'_>, args: Args) -> Result<Value, 
             ))),
         },
         pane,
+        role == "planner",
     ))??;
     Ok(task.wire)
 }

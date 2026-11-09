@@ -939,9 +939,10 @@ def h_task_assign(flock, args, self_pane_id):
     if role not in ("owner", "system", "web", "planner"):
         raise DunkError(f"task assign requires the owner role (caller is {role}); "
                         "lanes pull work with task next, they are not handed it")
-    return flock.task_assign(args["id"], _task_values(args["assignees"]),
-                             mode=args.get("mode") or "add",
-                             self_pane_id=self_pane_id)
+    kwargs = {"mode": args.get("mode") or "add", "self_pane_id": self_pane_id}
+    if role == "planner":
+        kwargs["planner_author_guard"] = True
+    return flock.task_assign(args["id"], _task_values(args["assignees"]), **kwargs)
 
 
 def h_task_complete(flock, args, self_pane_id):

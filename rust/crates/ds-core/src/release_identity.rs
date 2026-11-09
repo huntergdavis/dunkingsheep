@@ -7,4 +7,4 @@
 /// `dunk_core.VERSION`.
 pub const VERSION: &str = "2.71.4";
 /// `dunk_core.CODE_IDENTITY["code_hash"]` of the tree the CLI was generated from.
-pub const CODE_HASH: &str = "16fa30c7207d";
+pub const CODE_HASH: &str = "fffcc5f1e234";

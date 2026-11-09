@@ -53,6 +53,7 @@ impl Flock {
             assignees,
             || Ok(mode.to_string()),
             self_pane_id,
+            false,
         )
         .await
     }
@@ -63,12 +64,19 @@ impl Flock {
         assignees: &[&str],
         parse_mode: F,
         self_pane_id: Option<&str>,
+        planner_author_guard: bool,
     ) -> Result<TaskWire, DunkError>
     where
         F: FnOnce() -> Result<String, DunkError>,
     {
         let task = self
-            .task_assign_with_mode_parser(task_id, assignees, parse_mode, self_pane_id)
+            .task_assign_with_mode_parser(
+                task_id,
+                assignees,
+                parse_mode,
+                self_pane_id,
+                planner_author_guard,
+            )
             .await?;
         self.task_store()?
             .get_full_wire(&task.id, self_pane_id)
