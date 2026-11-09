@@ -785,7 +785,7 @@ fn fleet_config(config: &DeskConfig) -> OwnerFleetConfig {
             Some((id, entry.clone()))
         })
         .collect();
-    OwnerFleetConfig::new(
+    let fleet = OwnerFleetConfig::new(
         config.data_dir.join("messages.sqlite3"),
         config.operations_db.clone(),
     )
@@ -801,7 +801,19 @@ fn fleet_config(config: &DeskConfig) -> OwnerFleetConfig {
         config.home.clone(),
         config.tmux_program.clone(),
         channels,
-    )
+    );
+    configure_desk_channel(fleet, &config.channels)
+}
+
+fn configure_desk_channel(fleet: OwnerFleetConfig, channels: &[Value]) -> OwnerFleetConfig {
+    let desk_channel = channels
+        .iter()
+        .find(|entry| entry.get("id").and_then(Value::as_str) == Some("cos"))
+        .cloned();
+    match desk_channel {
+        Some(channel) => fleet.with_desk_channel(channel),
+        None => fleet,
+    }
 }
 
 /// Paths the desk keeps itself (Python `_desk_keeps`): the bare prefixes, and anything below
@@ -1170,3 +1182,6 @@ fn hex(byte: u8) -> Option<u8> {
 
 #[cfg(test)]
 mod static_stream_tests;
+
+#[cfg(test)]
+mod desk_channel_tests;

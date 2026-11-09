@@ -1167,6 +1167,17 @@ mod tests {
     }
 
     #[test]
+    fn configured_front_desk_pin_wins_over_stale_desk_name() {
+        let config = json!({"id": "cos", "match": "desk", "pane": "%259"});
+        let panes = vec![
+            json!({"pane_id": "%133", "tab_label": "sn-desk"}),
+            json!({"pane_id": "%259", "tab_label": "sn-desk-terra"}),
+        ];
+        assert_eq!(match_pane(&config, &panes).unwrap()["pane_id"], "%259");
+        assert!(match_pane(&config, &panes[..1]).is_none());
+    }
+
+    #[test]
     fn capability_is_public_trimmed_and_cached_for_twenty_seconds() {
         let backend = Arc::new(FakeOwner::new());
         backend.reply(
@@ -1342,6 +1353,46 @@ mod tests {
             assert_eq!(body["detail"], expected_detail);
         }
         assert!(backend.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn owner_send_targets_the_pinned_desk_and_does_not_fall_back_to_stale_pane() {
+        for live in [true, false] {
+            let mut fake = FakeOwner::new();
+            fake.channel = Some(json!({"id":"cos", "match":"desk", "pane":"%259"}));
+            let backend = Arc::new(fake);
+            backend.reply("owner_ingest", json!({"message":{"message_id":"i7"}}));
+            let mut panes = vec![json!({"pane_id":"%133", "tab_label":"sn-desk"})];
+            if live {
+                panes.push(json!({"pane_id":"%259", "tab_label":"sn-desk-terra"}));
+                backend.reply(
+                    "delivery_capability",
+                    json!({"alive":true,"send":"guarded"}),
+                );
+                backend.reply("send_text", json!({"ok":true,"outcome":"ok"}));
+            }
+            backend.reply("list_panes", json!({"panes":panes}));
+            let response = block_on(app(authorized(), backend.clone()).oneshot(request(
+                "POST",
+                "/api/owner-send",
+                Some(json!({"text":"hi"}).to_string()),
+            )))
+            .unwrap();
+            let (status, body, _) = response_json(response);
+            assert_eq!(status, StatusCode::OK);
+            if live {
+                assert_eq!(body["notify"]["state"], "sent");
+                assert_eq!(body["notify"]["pane"], "%259");
+                let calls = backend.calls.lock().unwrap();
+                assert!(calls
+                    .iter()
+                    .any(|(method, args)| method == "send_text" && args["target"] == "%259"));
+                assert!(!calls.iter().any(|(_, args)| args["target"] == "%133"));
+            } else {
+                assert_eq!(body["notify"]["state"], "desk_offline");
+                assert_eq!(backend.methods(), ["owner_ingest", "list_panes"]);
+            }
+        }
     }
 
     #[test]
