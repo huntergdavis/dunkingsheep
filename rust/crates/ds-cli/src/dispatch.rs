@@ -3959,10 +3959,14 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
                 "role",
                 "provider",
                 "model",
-                "project",
-                "global",
             ] {
                 args.insert(key.into(), ns.get(key).cloned().unwrap_or(Value::Null));
+            }
+            if let Some(project) = ns.get("project").filter(|value| !value.is_null()) {
+                args.insert("project".into(), project.clone());
+            }
+            if ns.get("global") == Some(&Value::Bool(true)) {
+                args.insert("global".into(), Value::Bool(true));
             }
             crate::daemon_cmd::run_command(ns, "start_agent", args, |result| {
                 let argv = string_values(&result["argv"]);

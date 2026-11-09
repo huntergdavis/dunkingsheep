@@ -99,25 +99,48 @@ mod tests {
     use std::sync::Arc;
     struct Pane(i64);
     impl PaneInfoEnv for Pane {
-        fn list_panes_grouped(&self) -> Vec<Value> { vec![] }
-        fn get_pane(&self, id: &str) -> Option<Value> { Some(json!({"pane_id":id,"pane_pid":self.0})) }
+        fn list_panes_grouped(&self) -> Vec<Value> {
+            vec![]
+        }
+        fn get_pane(&self, id: &str) -> Option<Value> {
+            Some(json!({"pane_id":id,"pane_pid":self.0}))
+        }
     }
     #[tokio::test]
     async fn binding_survives_reopen_and_detects_process_change() {
-        let dir=crate::testsupport::dir("lane-project-live");
-        let path=dir.path().join("tasks.db");
-        let flock=Flock::new(dir.path().join("launches.json"),dir.path().join("lanes.json"),true);
-        let tasks=Arc::new(crate::tasks::Tasks::open(&path).await.unwrap());
-        flock.attach_stores(crate::flock::panes::Stores { tasks:Some(tasks), ..Default::default() });
-        let live=Pane(i64::from(std::process::id()));
-        assert_eq!(flock.lane_project_view(&live,"%1")["scope"],"unknown");
-        flock.lane_project_set(&live,"%1",ProjectScope::Project("poolrad".into())).unwrap();
-        assert_eq!(flock.lane_project_view(&live,"%1")["project"],"poolrad");
-        let stale=Pane(i64::MAX);
-        assert_eq!(flock.lane_project_view(&stale,"%1")["scope"],"stale");
-        let reopened=Flock::new(dir.path().join("launches-2.json"),dir.path().join("lanes-2.json"),true);
-        let tasks=Arc::new(crate::tasks::Tasks::open(&path).await.unwrap());
-        reopened.attach_stores(crate::flock::panes::Stores { tasks:Some(tasks), ..Default::default() });
-        assert_eq!(reopened.lane_project_view(&live,"%1")["project"],"poolrad");
+        let dir = crate::testsupport::dir("lane-project-live");
+        let path = dir.path().join("tasks.db");
+        let flock = Flock::new(
+            dir.path().join("launches.json"),
+            dir.path().join("lanes.json"),
+            true,
+        );
+        let tasks = Arc::new(crate::tasks::Tasks::open(&path).await.unwrap());
+        flock.attach_stores(crate::flock::panes::Stores {
+            tasks: Some(tasks),
+            ..Default::default()
+        });
+        let live = Pane(i64::from(std::process::id()));
+        assert_eq!(flock.lane_project_view(&live, "%1")["scope"], "unknown");
+        flock
+            .lane_project_set(&live, "%1", ProjectScope::Project("poolrad".into()))
+            .unwrap();
+        assert_eq!(flock.lane_project_view(&live, "%1")["project"], "poolrad");
+        let stale = Pane(i64::MAX);
+        assert_eq!(flock.lane_project_view(&stale, "%1")["scope"], "stale");
+        let reopened = Flock::new(
+            dir.path().join("launches-2.json"),
+            dir.path().join("lanes-2.json"),
+            true,
+        );
+        let tasks = Arc::new(crate::tasks::Tasks::open(&path).await.unwrap());
+        reopened.attach_stores(crate::flock::panes::Stores {
+            tasks: Some(tasks),
+            ..Default::default()
+        });
+        assert_eq!(
+            reopened.lane_project_view(&live, "%1")["project"],
+            "poolrad"
+        );
     }
 }

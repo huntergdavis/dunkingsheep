@@ -19,3 +19,15 @@ and independent role/assignment writers do not consult this store; they may
 still perform the prior broad assignment behavior. Process liveness is checked
 at lookup, not guaranteed afterwards. Scoped planner enforcement must address
 those limits separately; this metadata alone is not proof of such enforcement.
+
+## Rollout for existing lanes
+
+Before upgrading, inventory `start-agent` automation and make every unattended
+launch pass `--project NAME` or `--global`. The previous daemon does not support
+the new registration command, so after upgrading register each existing live
+spawner explicitly before relying on inheritance. Include the owner pane and
+roleless spawners; do not invent membership from cwd. Until registration, an
+unqualified start refuses before creating a workspace or pane. Test this sequence
+on an isolated daemon with copied configuration before deployment. Rollback to an
+older daemon retains the task database but the old daemon does not enforce or
+interpret these membership bindings; review planner behavior separately.

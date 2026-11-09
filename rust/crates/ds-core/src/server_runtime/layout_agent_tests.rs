@@ -486,7 +486,10 @@ fn start_agent_without_scope_or_live_parent_membership_refuses_before_creation()
             &request("w2:p2"),
         )
         .unwrap_err();
-    assert!(error.to_string().contains("lane project") || error.to_string().contains("project"), "{error}");
+    assert!(
+        error.to_string().contains("lane project") || error.to_string().contains("project"),
+        "{error}"
+    );
     assert!(events.lock().unwrap().is_empty());
 }
 
@@ -496,12 +499,30 @@ fn owner_registers_live_project_and_child_inherits_it() {
     let _agent = fake_agent(&dir);
     let d = dispatcher(&services);
     let caller = request("w2:p2");
-    let registered = d.dispatch("lanes", &json!({"action":"project","pane":"w2:p2","project":"poolrad"}), &caller).unwrap();
+    let registered = d
+        .dispatch(
+            "lanes",
+            &json!({"action":"project","pane":"w2:p2","project":"poolrad"}),
+            &caller,
+        )
+        .unwrap();
     assert_eq!(registered["scope"], "project");
     assert_eq!(registered["project"], "poolrad");
-    let launched = d.dispatch("start_agent", &json!({"name":"probe","command":"codex","workspace":"self"}), &caller).unwrap();
+    let launched = d
+        .dispatch(
+            "start_agent",
+            &json!({"name":"probe","command":"codex","workspace":"self"}),
+            &caller,
+        )
+        .unwrap();
     assert_eq!(launched["membership"]["project"], "poolrad");
-    let queried = d.dispatch("lanes", &json!({"action":"project","pane":"w1:p-probe"}), &caller).unwrap();
+    let queried = d
+        .dispatch(
+            "lanes",
+            &json!({"action":"project","pane":"w1:p-probe"}),
+            &caller,
+        )
+        .unwrap();
     assert_eq!(queried["scope"], "project");
     assert_eq!(queried["project"], "poolrad");
 }

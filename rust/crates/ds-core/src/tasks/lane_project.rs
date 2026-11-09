@@ -54,8 +54,8 @@ pub fn set(conn: &Connection, membership: &Membership) -> rusqlite::Result<()> {
         ));
     }
     conn.execute(
-        "INSERT INTO lane_project_membership (pane_id,pane_pid,proc_start,scope_kind,project)\
-         VALUES (?1,?2,?3,?4,?5) ON CONFLICT(pane_id) DO UPDATE SET\
+        "INSERT INTO lane_project_membership (pane_id,pane_pid,proc_start,scope_kind,project) \
+         VALUES (?1,?2,?3,?4,?5) ON CONFLICT(pane_id) DO UPDATE SET \
          pane_pid=excluded.pane_pid,proc_start=excluded.proc_start,\
          scope_kind=excluded.scope_kind,project=excluded.project",
         params![
