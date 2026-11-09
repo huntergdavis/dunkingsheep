@@ -230,4 +230,28 @@ fn guarded_launch_preserves_daemon_process_path_for_hooks() {
         .status()
         .unwrap();
     assert!(result.success());
+
+    let mut override_spec = spec(false);
+    override_spec
+        .env
+        .insert("PATH".into(), "/custom/bin".into());
+    backend.start_agent(&override_spec).unwrap();
+    backend
+        .start_agent_raw(&override_spec, false)
+        .unwrap()
+        .unwrap();
+    let calls = std::fs::read_to_string(dir.path().join("calls")).unwrap();
+    assert_eq!(
+        calls.matches(&format!("PATH={guard}:/custom/bin")).count(),
+        4
+    );
+
+    let (unguarded_dir, mut unguarded) = fixture();
+    unguarded.start_agent(&spec(false)).unwrap();
+    unguarded
+        .start_agent_raw(&spec(false), false)
+        .unwrap()
+        .unwrap();
+    let calls = std::fs::read_to_string(unguarded_dir.path().join("calls")).unwrap();
+    assert!(!calls.contains("PATH="), "{calls}");
 }
