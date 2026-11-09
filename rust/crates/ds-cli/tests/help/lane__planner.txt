@@ -1,12 +1,13 @@
-usage: dunkingsheep lane planner [-h] [--pane PANE] [--project PROJECT]
-                                 [--global] [--task TASK]
-                                 {grant,revoke,task-project}
+usage: dunkingsheep lane planner [-h] [--repo REPO] [--pane PANE]
+                                 [--project PROJECT] [--global] [--task TASK]
+                                 {grant,revoke,task-project,repo-project,repo-revoke}
 
 positional arguments:
-  {grant,revoke,task-project}
+  {grant,revoke,task-project,repo-project,repo-revoke}
 
 options:
   -h, --help            show this help message and exit
+  --repo REPO
   --pane PANE
   --project PROJECT
   --global
