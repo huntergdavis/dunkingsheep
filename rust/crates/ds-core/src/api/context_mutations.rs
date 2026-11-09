@@ -38,14 +38,18 @@ pub fn h_memory_backfill(context: &HandlerContext<'_>, args: Args) -> Result<Val
             .get("reason")
             .and_then(Value::as_str)
             .ok_or_else(|| DunkError::Refused("reason is required".into()))?;
-        let actor = context
-            .self_pane_id()
-            .ok_or_else(|| DunkError::Refused("operator identity is required".into()))?;
+        let actor = match context.self_pane_id().filter(|pane| !pane.is_empty()) {
+            Some(pane) => pane.to_owned(),
+            None => context
+                .flock
+                .owner_token_audit_actor(context.request.service_token.as_deref())?
+                .ok_or_else(|| DunkError::Refused("operator identity is required".into()))?,
+        };
         let service = context
             .flock
             .memory_service()
             .ok_or_else(|| DunkError::Refused("memory service is not enabled".into()))?;
-        service.queue_disposition(id, path, reason, actor, action == "restore")?;
+        service.queue_disposition(id, path, reason, &actor, action == "restore")?;
         return Ok(json!({"action":action,"queue_id":id,"path":path}));
     }
     context.flock.memory_backfill_raw(

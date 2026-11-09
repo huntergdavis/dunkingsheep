@@ -473,6 +473,21 @@ impl Roles {
             .map(String::from))
     }
 
+    /// Non-secret label for a currently valid owner token; never return its value or hash.
+    pub fn owner_token_audit_label(&mut self, token: &str) -> Result<Option<String>, DunkError> {
+        if token.is_empty() {
+            return Ok(None);
+        }
+        self.refresh(false)?;
+        Ok(self
+            .tokens
+            .get(&hash_token(token))
+            .filter(|entry| entry.get("role").and_then(Value::as_str) == Some("owner"))
+            .and_then(|entry| entry.get("label").and_then(Value::as_str))
+            .filter(|label| !label.is_empty())
+            .map(|label| format!("owner-token:{label}")))
+    }
+
     /// `tokens`: label, role and issue time for each token (never the hash).
     pub fn tokens(&mut self) -> Result<Vec<Value>, DunkError> {
         self.refresh(false)?;

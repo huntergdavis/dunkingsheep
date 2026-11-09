@@ -39,6 +39,15 @@ fn non_empty(text: Option<&str>) -> Option<&str> {
 }
 
 impl Flock {
+    pub(crate) fn owner_token_audit_actor(
+        &self,
+        token: Option<&str>,
+    ) -> Result<Option<String>, DunkError> {
+        match token.filter(|token| !token.is_empty()) {
+            Some(token) => self.with_roles(|roles, _| roles.owner_token_audit_label(token)),
+            None => Ok(None),
+        }
+    }
     /// Attach the registry (and the optional legacy allowlist).
     pub fn attach_roles(&self, roles: Roles, legacy: Option<Superusers>) {
         *self.role_stores.lock().expect("role stores lock") = RoleStores {

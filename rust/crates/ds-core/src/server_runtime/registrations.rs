@@ -2778,6 +2778,47 @@ os.rename(out_path + ".tmp", out_path)
             .dispatch("memory_backfill", &restore, &owner)
             .unwrap();
         assert_eq!(memory.status().unwrap()["queue"]["failed"], 1);
+        let (owner_token, web_token) = services
+            .flock()
+            .with_roles(|roles, _| {
+                Ok((
+                    roles.issue_token("owner", Some("fixture-owner"), None)?,
+                    roles.issue_token("web", Some("fixture-web"), None)?,
+                ))
+            })
+            .unwrap();
+        let token_request = |token: &str| RequestCtx {
+            service_token: Some(token.into()),
+            socket_peer: Some(true),
+            ..RequestCtx::default()
+        };
+        assert!(dispatcher
+            .dispatch("memory_backfill", &disposition, &token_request("invalid"))
+            .is_err());
+        assert!(dispatcher
+            .dispatch("memory_backfill", &disposition, &token_request(&web_token))
+            .is_err());
+        assert_eq!(
+            dispatcher
+                .dispatch(
+                    "memory_backfill",
+                    &disposition,
+                    &token_request(&owner_token)
+                )
+                .unwrap()["action"],
+            "quarantine"
+        );
+        let actor: String = rusqlite::Connection::open(&path).unwrap().query_row("SELECT actor FROM memory_events WHERE event='queue_quarantine' ORDER BY id DESC LIMIT 1", [], |row| row.get(0)).unwrap();
+        assert_eq!(actor, "owner-token:fixture-owner");
+        assert!(!actor.contains(&owner_token));
+        services
+            .flock()
+            .with_roles(|roles, _| roles.revoke_token("fixture-owner"))
+            .unwrap();
+        assert!(dispatcher
+            .dispatch("memory_backfill", &restore, &token_request(&owner_token))
+            .is_err());
+        assert_eq!(memory.status().unwrap()["queue"]["quarantined"], 1);
     }
 
     #[test]
