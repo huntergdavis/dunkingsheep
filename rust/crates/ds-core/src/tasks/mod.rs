@@ -2061,6 +2061,11 @@ fn is_terminal(status: &str) -> bool {
     matches!(status, "done" | "cancelled")
 }
 
+/// Cancelled and done-and-landed dependencies are satisfied; done but unlanded still blocks.
+fn dependency_blocks(status: &str, landed: bool) -> bool {
+    status != "cancelled" && (status != "done" || !landed)
+}
+
 /// A status after which the CLAIM is over, terminal or not (`_end_claim`, t872).
 ///
 /// `blocked` belongs here and not in `is_terminal`: a blocked task must be unblockable,
@@ -2564,10 +2569,10 @@ fn dependency_state_conn(
                 if dep_status == "cancelled" {
                     state.dead_dependencies.push(dep.clone());
                     cancelled.push(dep.clone());
-                } else if dep_status == "done" && !landed {
-                    state.unlanded_dependencies.push(dep.clone());
-                    state.blocked_by.push(dep.clone());
-                } else if dep_status != "done" {
+                } else if dependency_blocks(&dep_status, landed) {
+                    if dep_status == "done" {
+                        state.unlanded_dependencies.push(dep.clone());
+                    }
                     state.blocked_by.push(dep.clone());
                 }
             }

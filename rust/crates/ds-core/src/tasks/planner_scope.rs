@@ -164,8 +164,9 @@ pub fn allows(
     let Some((kind, project)) = grant else {
         return Ok(false);
     };
-    let target: Option<(String,Option<String>)> = db.query_row("SELECT t.scope,p.project FROM tasks t LEFT JOIN planner_task_projects p ON p.task_id=t.id WHERE t.id=?1", [task], |row| Ok((row.get(0)?,row.get(1)?))).optional()?;
-    let Some((visibility, target_project)) = target else {
+    type Target = (String, Option<String>, String, i64);
+    let target: Option<Target> = db.query_row("SELECT t.scope,p.project,t.status,t.landed FROM tasks t LEFT JOIN planner_task_projects p ON p.task_id=t.id WHERE t.id=?1", [task], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).optional()?;
+    let Some((visibility, target_project, status, landed)) = target else {
         return Ok(false);
     };
     if kind == "global" && project.is_none() {
@@ -177,7 +178,10 @@ pub fn allows(
     if target_project.as_deref() == Some(project.as_str()) {
         return Ok(true);
     }
-    if visibility != "global" || target_project.is_some() {
+    if visibility != "global"
+        || target_project.is_some()
+        || !super::dependency_blocks(&status, landed != 0)
+    {
         return Ok(false);
     }
     let mut stmt=db.prepare("SELECT t.depends_on FROM planner_task_projects p JOIN tasks t ON t.id=p.task_id WHERE p.project=?1 AND t.status IN ('open','in_progress','blocked')")?;
@@ -314,7 +318,7 @@ mod tests {
     fn grants_route_global_project_and_current_blockers() {
         let mut db = Connection::open_in_memory().unwrap();
         db.execute_batch(
-            "CREATE TABLE tasks(id TEXT PRIMARY KEY,scope TEXT,depends_on TEXT,status TEXT DEFAULT 'open'); \
+            "CREATE TABLE tasks(id TEXT PRIMARY KEY,scope TEXT,depends_on TEXT,status TEXT DEFAULT 'open', landed INTEGER DEFAULT 1); \
             INSERT INTO tasks (id,scope,depends_on) VALUES('global','global','[]'),('prereq','global','[]'),\
             ('project','global','[\"prereq\"]'),('other','global','[]');",
         )
@@ -342,6 +346,18 @@ mod tests {
         assert!(allows(&db, "%2", 22, "start", "project").unwrap());
         assert!(!allows(&db, "%2", 22, "start", "other").unwrap());
         assert!(allows(&db, "%2", 22, "start", "prereq").unwrap());
+        db.execute(
+            "UPDATE tasks SET status='done', landed=1 WHERE id='prereq'",
+            [],
+        )
+        .unwrap();
+        assert!(!allows(&db, "%2", 22, "start", "prereq").unwrap());
+        db.execute("UPDATE tasks SET landed=0 WHERE id='prereq'", [])
+            .unwrap();
+        assert!(allows(&db, "%2", 22, "start", "prereq").unwrap());
+        db.execute("UPDATE tasks SET status='cancelled' WHERE id='prereq'", [])
+            .unwrap();
+        assert!(!allows(&db, "%2", 22, "start", "prereq").unwrap());
         assert!(!allows(&db, "%2", 23, "start", "project").unwrap());
         db.execute("UPDATE tasks SET depends_on='[]' WHERE id='project'", [])
             .unwrap();
