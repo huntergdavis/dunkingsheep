@@ -1048,7 +1048,8 @@ impl Tasks {
                 let tx = conn
                     .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                     .map_err(db::map_sqlite)?;
-                let (scope, priority, raw, kind, author, repo, pr): (String, String, Option<String>, String, Option<String>, Option<String>, Option<i64>) = tx
+                type AssignmentRow = (String, String, Option<String>, String, Option<String>, Option<String>, Option<i64>);
+                let (scope, priority, raw, kind, author, repo, pr): AssignmentRow = tx
                     .query_row(
                         "SELECT scope, priority, assignees, kind, author, repo, pr FROM tasks WHERE id = ?",
                         params![id],
