@@ -2972,6 +2972,9 @@ async fn review_sync_uses_writer_note_for_exact_branch_task_and_head() {
     let facts = sync.flock.review_facts(&rows[0].id).await.unwrap();
     assert_eq!(facts.author.as_deref(), Some("%260"));
     let mut pull = parse_review_pull("o/r", &open_pull(7, "exact-head", &branch)[0]).unwrap();
+    // parse_review_pull consumes normalized provider rows; open_pull is raw GitHub JSON.
+    pull.branch = branch.clone();
+    pull.head = "exact-head".into();
     assert_eq!(
         sync.branch_task_authors("o/r", &pull).await.unwrap(),
         vec!["%260"]
