@@ -24,7 +24,7 @@ for dir in "$bin_dir" "$state_dir"; do
     mode=$(stat -c %a "$dir")
     [ $((0$mode & 0002)) -eq 0 ] || { echo "directory is world writable: $dir" >&2; exit 1; }
     if [ $((0$mode & 0020)) -ne 0 ]; then
-        [ "$(stat -c %g "$dir")" = "$(id -u)" ] && [ -z "$(getent group "$(stat -c %g "$dir")" | cut -d: -f4)" ] || { echo "directory group is not private: $dir" >&2; exit 1; }
+        [ "$(stat -c %g "$dir")" = "$(id -u)" ] && [ -z "$(getent group "$(stat -c %g "$dir")" | cut -d: -f4)" ] && [ "$(getent passwd | awk -F: -v g="$(stat -c %g "$dir")" -v u="$(id -u)" '$4 == g && $3 != u { print $1 }')" = "" ] || { echo "directory group is not private: $dir" >&2; exit 1; }
     fi
 done
 lock_release_bin "$bin_dir"
@@ -50,7 +50,9 @@ install)
     else
         tmp=$(mktemp "$state_dir/.artifact.XXXXXXXX"); cp "$binary" "$tmp"; chmod 0555 "$tmp"; mv "$tmp" "$artifact"
     fi
-    printf "%s\n" "$state_dir" > "$poll_marker"
+    tmp=$(mktemp "$lock_root/.marker.XXXXXXXX")
+    printf "%s\n" "$state_dir" > "$tmp"
+    mv "$tmp" "$poll_marker"
     tmp=$(mktemp "$state_dir/.previous.XXXXXXXX")
     cp -p "$launcher" "$tmp"
     mv "$tmp" "$state_dir/previous"
