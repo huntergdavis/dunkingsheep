@@ -25,7 +25,7 @@ pub(super) fn require_active_authority(
 }
 
 impl Store {
-    /// Persist a verified binding only when no authority exists or revocation was started.
+    /// Persist a verified binding only when no authority exists or revocation completed.
     #[allow(dead_code)] // The owner-only migration gate is not yet wired.
     pub(crate) fn authorize_delegation_supervisor(
         &self,
@@ -45,7 +45,7 @@ impl Store {
         self.writer.call(move |connection| {
             let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate).map_err(map_sqlite)?;
             let state: Option<String> = tx.query_row("SELECT state FROM owner_delegation_authority WHERE supervisor = ?", [SUPERVISOR], |row| row.get(0)).optional().map_err(map_sqlite)?;
-            if state.as_deref().is_some_and(|s| s != "revoking") {
+            if state.as_deref().is_some_and(|s| s != "revoked") {
                 return Err(refuse("delegation authority must be revoked before replacement"));
             }
             let now = now_s();
@@ -83,6 +83,34 @@ impl Store {
             Ok(())
         })
     }
+
+    /// Finish only after the caller has reconciled the corresponding registry mutation.
+    #[allow(dead_code)] // The mutation/recovery worker is not yet wired.
+    pub(crate) fn finish_delegation_revocation(
+        &self,
+        generation: &str,
+        actor: &str,
+    ) -> Result<(), DunkError> {
+        if generation.trim().is_empty() || actor.trim().is_empty() {
+            return Err(refuse("authority generation and owner actor are required"));
+        }
+        let (generation, actor) = (generation.to_owned(), actor.to_owned());
+        self.writer.call(move |connection| {
+            let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate).map_err(map_sqlite)?;
+            let state: Option<String> = tx.query_row("SELECT state FROM owner_delegation_authority WHERE supervisor = ? AND generation = ?", params![SUPERVISOR, generation], |row| row.get(0)).optional().map_err(map_sqlite)?;
+            match state.as_deref() {
+                Some("revoked") => {},
+                Some("revoking") => {
+                    let now = now_s();
+                    tx.execute("UPDATE owner_delegation_authority SET state='revoked', updated_at=? WHERE supervisor=? AND generation=?", params![now, SUPERVISOR, generation]).map_err(map_sqlite)?;
+                    tx.execute("INSERT INTO owner_delegation_authority_events (supervisor, generation, event, actor, at) VALUES (?, ?, 'revocation_finished', ?, ?)", params![SUPERVISOR, generation, actor, now]).map_err(map_sqlite)?;
+                }
+                _ => return Err(refuse("delegation authority is not being revoked")),
+            }
+            tx.commit().map_err(map_sqlite)?;
+            Ok(())
+        })
+    }
 }
 
 #[cfg(test)]
@@ -105,6 +133,11 @@ mod tests {
         drop(store);
         let store = Store::open(&db, &blobs).unwrap();
         store.begin_delegation_revocation(&first, "owner").unwrap();
+        assert!(store
+            .authorize_delegation_supervisor("%1", 123, "start", "owner")
+            .is_err());
+        store.finish_delegation_revocation(&first, "owner").unwrap();
+        store.finish_delegation_revocation(&first, "owner").unwrap();
         let second = store
             .authorize_delegation_supervisor("%1", 123, "start", "owner")
             .unwrap();

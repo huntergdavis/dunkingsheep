@@ -366,6 +366,9 @@ mod tests {
         assert!(store
             .answer_owner_question_guarded(&question, "revoked", Some("%1"), Some(&old))
             .is_err());
+        store
+            .finish_delegation_revocation(&authority, "owner")
+            .unwrap();
         let new_authority = store
             .authorize_delegation_supervisor("%1", 123, "start", "owner")
             .unwrap();
