@@ -50,7 +50,7 @@ pub fn nudge_subject(message_id: &str) -> String {
 /// the web route's nudge, with the transport named.
 pub fn nudge_body(message_id: &str, transport: &str, text: &str) -> String {
     format!(
-        "Owner message {message_id} ({transport}) is waiting in the owner mailbox: `dunkingsheep owner conversation`; answer with `owner reply {message_id}`.\n\n{text}"
+        "Owner message {message_id} ({transport}) is waiting in the owner mailbox: `dunkingsheep owner conversation`. Use `owner reply {message_id}` only for the final answer, not a routing acknowledgement. A final response may ask for needed clarification or explain an error. If more work is needed, leave the question pending.\n\n{text}"
     )
 }
 
@@ -107,6 +107,7 @@ mod tests {
         let body = nudge_body("i9", "telegram", "is the desk up?");
         assert!(body.starts_with("Owner message i9 (telegram) is waiting"));
         assert!(body.contains("`owner reply i9`"));
+        assert!(body.contains("only for the final answer, not a routing acknowledgement"));
         assert!(body.ends_with("is the desk up?"));
     }
 }
