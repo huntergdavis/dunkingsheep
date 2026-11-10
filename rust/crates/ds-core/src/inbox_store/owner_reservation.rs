@@ -14,6 +14,13 @@ use crate::inbox::normalise_mailbox;
 use super::{refuse, Store};
 
 pub(super) const SUPERVISOR: &str = "codex-rust-owner";
+type OwnerQuestionRow = (
+    String,
+    Option<String>,
+    Option<String>,
+    String,
+    Option<String>,
+);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Reservation {
@@ -145,7 +152,7 @@ impl Store {
         );
         self.writer.call(move |connection| {
             let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate).map_err(map_sqlite)?;
-            let question: Option<(String, Option<String>, Option<String>, String, Option<String>)> = tx.query_row(
+            let question: Option<OwnerQuestionRow> = tx.query_row(
                 "SELECT mailbox, reply_to, transport, state, sender FROM messages WHERE id = ?",
                 [&question_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
             ).optional().map_err(map_sqlite)?;
