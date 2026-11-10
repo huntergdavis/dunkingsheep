@@ -226,7 +226,7 @@ mod registry {
     }
 
     #[test]
-    fn delegation_generation_requires_matching_owner_and_rotates_on_reregistration() {
+    fn delegation_generation_survives_metadata_but_not_role_replacement() {
         let (_dir, mut roles) = fresh("delegation-generation");
         roles
             .register(
@@ -255,6 +255,45 @@ mod registry {
                 .and_then(serde_json::Value::as_str),
             Some(first.as_str())
         );
+        roles
+            .register(
+                OWNER,
+                "owner",
+                Some(123),
+                Some("start"),
+                Some("codex"),
+                Some("new-model"),
+                None,
+                Some("new label"),
+            )
+            .unwrap();
+        assert_eq!(
+            roles
+                .entry(OWNER)
+                .unwrap()
+                .unwrap()
+                .get("delegation_generation")
+                .and_then(serde_json::Value::as_str),
+            Some(first.as_str())
+        );
+        roles
+            .register(
+                OWNER,
+                "worker",
+                Some(123),
+                Some("start"),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        assert!(roles
+            .entry(OWNER)
+            .unwrap()
+            .unwrap()
+            .get("delegation_generation")
+            .is_none());
         roles
             .register(
                 OWNER,

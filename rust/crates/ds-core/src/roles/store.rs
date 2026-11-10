@@ -306,6 +306,28 @@ impl Roles {
         if let Some(pid) = pane_pid {
             entry.insert("pane_pid".into(), json!(pid));
         }
+        // A metadata-only update must not invalidate the same bound owner. Missing or
+        // changed process identity, a role change, or an unregistered pane never carries
+        // the delegation generation forward.
+        if role == "owner"
+            && pane_pid.is_some_and(|pid| pid > 1)
+            && start.is_some_and(|s| !s.is_empty())
+        {
+            if let Some(previous) = self.lanes.get(pane_id) {
+                if previous.get("role").and_then(Value::as_str) == Some("owner")
+                    && previous.get("pane_pid").and_then(Value::as_i64) == pane_pid
+                    && previous.get("start").and_then(Value::as_str) == start
+                {
+                    if let Some(generation) = previous
+                        .get("delegation_generation")
+                        .and_then(Value::as_str)
+                        .filter(|v| !v.is_empty())
+                    {
+                        entry.insert("delegation_generation".into(), json!(generation));
+                    }
+                }
+            }
+        }
         self.lanes.insert(pane_id.to_string(), entry.clone());
         self.save()?;
         entry.insert("pane_id".into(), json!(pane_id));
