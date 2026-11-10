@@ -306,6 +306,28 @@ impl Roles {
         if let Some(pid) = pane_pid {
             entry.insert("pane_pid".into(), json!(pid));
         }
+        // A metadata-only update must not invalidate the same bound owner. Missing or
+        // changed process identity, a role change, or an unregistered pane never carries
+        // the delegation generation forward.
+        if role == "owner"
+            && pane_pid.is_some_and(|pid| pid > 1)
+            && start.is_some_and(|s| !s.is_empty())
+        {
+            if let Some(previous) = self.lanes.get(pane_id) {
+                if previous.get("role").and_then(Value::as_str) == Some("owner")
+                    && previous.get("pane_pid").and_then(Value::as_i64) == pane_pid
+                    && previous.get("start").and_then(Value::as_str) == start
+                {
+                    if let Some(generation) = previous
+                        .get("delegation_generation")
+                        .and_then(Value::as_str)
+                        .filter(|v| !v.is_empty())
+                    {
+                        entry.insert("delegation_generation".into(), json!(generation));
+                    }
+                }
+            }
+        }
         self.lanes.insert(pane_id.to_string(), entry.clone());
         self.save()?;
         entry.insert("pane_id".into(), json!(pane_id));
@@ -325,6 +347,52 @@ impl Roles {
     pub fn entry(&mut self, pane_id: &str) -> Result<Option<Map<String, Value>>, DunkError> {
         self.refresh(false)?;
         Ok(self.lanes.get(pane_id).cloned())
+    }
+
+    /// Rotate a delegation-specific generation on an existing owner registration.
+    /// The caller must separately authorize the migration and verify the live pane and
+    /// process start. Ordinary registrations do not invoke this method.
+    #[allow(dead_code)] // Not exposed until the delegation identity gate is wired.
+    pub(crate) fn rotate_owner_delegation_generation(
+        &mut self,
+        pane_id: &str,
+        pid: i64,
+        start: &str,
+    ) -> Result<String, DunkError> {
+        let generation = token_urlsafe()?;
+        self.bind_owner_delegation_generation(pane_id, pid, start, &generation)?;
+        Ok(generation)
+    }
+
+    /// Mirror an owner-authorized inbox authority generation onto its role registration.
+    /// The caller must serialize this with authority and registry mutations.
+    #[allow(dead_code)] // The owner-authorized migration protocol is not wired.
+    pub(crate) fn bind_owner_delegation_generation(
+        &mut self,
+        pane_id: &str,
+        pid: i64,
+        start: &str,
+        generation: &str,
+    ) -> Result<(), DunkError> {
+        if pid <= 1 || start.trim().is_empty() || generation.trim().is_empty() {
+            return Err(role_error("delegation needs a live process identity"));
+        }
+        self.refresh(false)?;
+        let entry = self
+            .lanes
+            .get_mut(pane_id)
+            .ok_or_else(|| role_error("owner registration missing"))?;
+        if entry.get("role").and_then(Value::as_str) != Some("owner")
+            || entry.get("pane_pid").and_then(Value::as_i64) != Some(pid)
+            || entry.get("start").and_then(Value::as_str) != Some(start)
+        {
+            return Err(role_error(
+                "owner registration does not match live identity",
+            ));
+        }
+        entry.insert("delegation_generation".into(), json!(generation));
+        self.save()?;
+        Ok(())
     }
 
     pub fn owners(&mut self) -> Result<Vec<String>, DunkError> {

@@ -100,6 +100,19 @@ impl Store {
         body: &str,
         sender: Option<&str>,
     ) -> Result<Message, DunkError> {
+        self.answer_owner_question_guarded(question_id, body, sender, None)
+    }
+
+    /// The caller must authenticate the supervisor incarnation before supplying a reservation.
+    #[allow(dead_code)] // Wired by the delegation service in the next slice.
+    pub(crate) fn answer_owner_question_guarded(
+        &self,
+        question_id: &str,
+        body: &str,
+        sender: Option<&str>,
+        reservation: Option<&super::owner_reservation::Reservation>,
+    ) -> Result<Message, DunkError> {
+        let reservation = reservation.cloned();
         let (question_id, body, sender) = (
             question_id.to_owned(),
             body.to_owned(),
@@ -124,6 +137,23 @@ impl Store {
             if let Some(id) = existing {
                 return Err(refuse(format!("{question_id} was already answered by {id}; one answer per question, so the latency metric has one edge")));
             }
+            let active: Option<(String, String, String, i64, String)> = tx.query_row(
+                "SELECT supervisor, incarnation, transport, generation, state FROM owner_delegation_reservations WHERE question_id = ?",
+                [&question_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            ).optional().map_err(map_sqlite)?;
+            match (active.as_ref(), reservation.as_ref()) {
+                (None, None) => {},
+                (Some((supervisor, incarnation, reserved_transport, generation, state)), Some(proof))
+                    if proof.question_id == question_id && proof.supervisor == *supervisor
+                        && proof.incarnation == *incarnation && proof.transport == *reserved_transport
+                        && proof.generation == *generation && state == "active"
+                        && sender.as_deref().is_some_and(|actor| !actor.trim().is_empty())
+                        && transport.as_deref() == Some(reserved_transport.as_str()) => {},
+                _ => return Err(refuse("owner question is reserved or the delegation proof is stale")),
+            }
+            if let Some(proof) = reservation.as_ref() {
+                super::owner_authority::require_active_authority(&tx, &proof.incarnation)?;
+            }
             if body.trim().is_empty() { return Err(refuse("a reply needs a body")); }
             let transport = validate_transport(transport.as_deref()).map_err(refuse)?;
             crate::inbox::check_sizes(body.len(), "", 0, 0).map_err(refuse)?;
@@ -132,6 +162,10 @@ impl Store {
             tx.execute("INSERT INTO messages (id, mailbox, mailbox_label, pane_id, sender, subject, body, state, created_at, transport, reply_to, external_id) VALUES (?, ?, ?, NULL, ?, NULL, ?, 'queued', ?, ?, ?, NULL)",
                 params![id, OWNER_MAILBOX, OWNER_MAILBOX, sender, body, now, transport, question_id]).map_err(map_sqlite)?;
             tx.execute("UPDATE messages SET state = 'acked', acked_at = ?, read_at = COALESCE(read_at, ?) WHERE id = ? AND state IN ('queued', 'read')", params![now, now, question_id]).map_err(map_sqlite)?;
+            if active.is_some() {
+                tx.execute("UPDATE owner_delegation_reservations SET state = 'answered', updated_at = ? WHERE question_id = ? AND state = 'active'", params![now, question_id]).map_err(map_sqlite)?;
+                tx.execute("INSERT INTO owner_delegation_events (question_id, generation, event, actor, at) VALUES (?, ?, 'answered', ?, ?)", params![question_id, reservation.as_ref().expect("active reservation proof").generation, sender, now]).map_err(map_sqlite)?;
+            }
             let message = full_message(&tx, &id)?.ok_or_else(|| refuse("inserted owner answer missing"))?;
             tx.commit().map_err(map_sqlite)?;
             Ok(message)

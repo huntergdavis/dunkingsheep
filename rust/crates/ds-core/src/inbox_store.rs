@@ -33,7 +33,9 @@ use crate::inbox::{
 
 mod retired;
 pub use retired::RetiredArchiveOptions;
+mod owner_authority;
 mod owner_queries;
+pub(crate) mod owner_reservation;
 mod owner_service;
 const _: () = assert!(MAX_BLOB_BYTES > 0);
 
@@ -195,6 +197,10 @@ impl Store {
                 }
             }
             connection.execute_batch("CREATE TABLE IF NOT EXISTS message_audiences (message_id TEXT PRIMARY KEY, audience TEXT NOT NULL CHECK(audience = 'agent'))")
+                .map_err(|e| captured.sqlite(e, &db_path, "inbox_schema"))?;
+            connection.execute_batch("CREATE TABLE IF NOT EXISTS owner_delegation_reservations (question_id TEXT PRIMARY KEY, supervisor TEXT NOT NULL, incarnation TEXT NOT NULL, transport TEXT NOT NULL, generation INTEGER NOT NULL, state TEXT NOT NULL, updated_at REAL NOT NULL); CREATE TABLE IF NOT EXISTS owner_delegation_events (id INTEGER PRIMARY KEY, question_id TEXT NOT NULL, generation INTEGER NOT NULL, event TEXT NOT NULL, actor TEXT NOT NULL, at REAL NOT NULL)")
+                .map_err(|e| captured.sqlite(e, &db_path, "inbox_schema"))?;
+            connection.execute_batch("CREATE TABLE IF NOT EXISTS owner_delegation_authority (supervisor TEXT PRIMARY KEY, pane_id TEXT NOT NULL, pane_pid INTEGER NOT NULL, pane_start TEXT NOT NULL, generation TEXT NOT NULL, state TEXT NOT NULL, updated_at REAL NOT NULL); CREATE TABLE IF NOT EXISTS owner_delegation_authority_events (id INTEGER PRIMARY KEY, supervisor TEXT NOT NULL, generation TEXT NOT NULL, event TEXT NOT NULL, actor TEXT NOT NULL, at REAL NOT NULL)")
                 .map_err(|e| captured.sqlite(e, &db_path, "inbox_schema"))?;
             Ok(())
         })?;
@@ -443,6 +449,13 @@ impl Store {
         self.writer.call(move |connection| {
             let map_sqlite = |error| context.sqlite(error, &db_path, "send_snapshot");
             let transaction = connection.transaction().map_err(map_sqlite)?;
+            if let Some(question_id) = reply_to.as_deref().filter(|id| !id.is_empty()) {
+                let reserved: bool = transaction.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM owner_delegation_reservations WHERE question_id = ?)",
+                    [question_id], |row| row.get(0),
+                ).map_err(map_sqlite)?;
+                if reserved { return Err(refuse("owner question has a delegation reservation")); }
+            }
             let message_id = next_message_id_context(&transaction, &map_sqlite)?;
             let created = now_s();
             transaction

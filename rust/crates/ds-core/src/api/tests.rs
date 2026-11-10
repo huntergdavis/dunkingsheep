@@ -6345,6 +6345,115 @@ fn task_test_caller(pane: &str, pid: i64, start: &str, name: &str) -> Caller {
 }
 
 #[test]
+fn delegation_supervisor_binding_rejects_unbound_or_ambiguous_callers() {
+    let (runtime, dir, flock, tasks, _dispatcher) = task_mutation_api_fixture();
+    let pid = i64::from(std::process::id());
+    let start = crate::proc::process_start(pid).expect("test process start");
+    let inbox = Arc::new(
+        crate::inbox_store::Store::open(dir.path().join("inbox.db"), dir.path().join("blobs"))
+            .unwrap(),
+    );
+    let generation = inbox
+        .authorize_delegation_supervisor("w1:p4", pid, &start, "owner")
+        .unwrap();
+    flock.attach_stores(Stores {
+        tasks: Some(tasks),
+        inbox: Some(inbox.clone()),
+        ..Stores::default()
+    });
+    flock
+        .with_roles(|roles, _| {
+            roles.register(
+                "w1:p4",
+                "owner",
+                Some(pid),
+                Some(&start),
+                None,
+                None,
+                None,
+                None,
+            )?;
+            roles.bind_owner_delegation_generation("w1:p4", pid, &start, &generation)?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(flock.remember_lane("w1:p4", "codex-rust-owner", true));
+    let env = PaneApiEnv {
+        terminal: Mutex::new(Box::new(FakeTerminal::default())),
+        panes: vec![json!({"pane_id": "w1:p4", "pane_pid": pid})],
+    };
+    let request = RequestCtx {
+        self_pane_id: Some("w1:p4".into()),
+        socket_peer: Some(true),
+        identity_bound: Some(true),
+        caller: Some(task_test_caller("w1:p4", pid, &start, "test")),
+        ..RequestCtx::default()
+    };
+    let check = |request: &RequestCtx| {
+        let context = HandlerContext {
+            flock: &flock,
+            request,
+            env: &env,
+            runtime: runtime.handle(),
+        };
+        require_delegation_supervisor_binding(&context, &generation)
+    };
+    assert_eq!(check(&request).unwrap(), "w1:p4");
+    let mut bad = request.clone();
+    bad.identity_bound = None;
+    assert!(check(&bad).is_err());
+    bad = request.clone();
+    bad.socket_peer = None;
+    assert!(check(&bad).is_err());
+    bad = request.clone();
+    bad.caller = None;
+    assert!(check(&bad).is_err());
+    assert!(flock.remember_lane("w1:p5", "codex-rust-owner", true));
+    assert!(check(&request).is_err());
+    let mut registry = flock.lane_registry(true).unwrap();
+    registry.remove("w1:p5");
+    assert!(flock.write_lane_registry(&registry));
+    assert!(check(&request).is_ok());
+    flock
+        .with_roles(|roles, _| {
+            roles.register(
+                "w1:p4",
+                "owner",
+                Some(pid),
+                Some("stale-start"),
+                None,
+                None,
+                None,
+                None,
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(check(&request).is_err());
+    flock
+        .with_roles(|roles, _| {
+            roles.register(
+                "w1:p4",
+                "owner",
+                Some(pid),
+                Some(&start),
+                None,
+                None,
+                None,
+                None,
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    // Restoring the old role metadata does not restore its cleared generation.
+    assert!(check(&request).is_err());
+    inbox
+        .begin_delegation_revocation(&generation, "owner")
+        .unwrap();
+    assert!(check(&request).is_err());
+}
+
+#[test]
 fn planner_socket_assignment_requires_fresh_process_binding() {
     let (runtime, _dir, flock, _tasks, _dispatcher) = task_mutation_api_fixture();
     let pid = i64::from(std::process::id());
