@@ -25,6 +25,34 @@ pub(super) fn require_active_authority(
 }
 
 impl Store {
+    /// Check the stored binding against a caller identity already verified against the
+    /// socket peer, live process and declared mailbox. Mutations must also check the
+    /// generation within their write transaction, because it can change after this read.
+    #[allow(dead_code)] // The daemon identity gate is not wired yet.
+    pub(crate) fn verify_delegation_binding(
+        &self,
+        generation: &str,
+        pane: &str,
+        pid: i64,
+        start: &str,
+    ) -> Result<(), DunkError> {
+        if generation.trim().is_empty()
+            || pane.trim().is_empty()
+            || pid <= 1
+            || start.trim().is_empty()
+        {
+            return Err(refuse("complete verified supervisor identity is required"));
+        }
+        self.readers.with(|connection| {
+            let active: bool = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM owner_delegation_authority WHERE supervisor = ? AND generation = ? AND pane_id = ? AND pane_pid = ? AND pane_start = ? AND state = 'active')",
+                params![SUPERVISOR, generation, pane, pid, start], |row| row.get(0),
+            ).map_err(map_sqlite)?;
+            if !active { return Err(refuse("supervisor binding is missing, revoked or changed")); }
+            Ok(())
+        })
+    }
+
     /// Persist a verified binding only when no authority exists or revocation completed.
     #[allow(dead_code)] // The owner-only migration gate is not yet wired.
     pub(crate) fn authorize_delegation_supervisor(
@@ -126,10 +154,22 @@ mod tests {
         let first = store
             .authorize_delegation_supervisor("%1", 123, "start", "owner")
             .unwrap();
+        store
+            .verify_delegation_binding(&first, "%1", 123, "start")
+            .unwrap();
+        assert!(store
+            .verify_delegation_binding(&first, "%2", 123, "start")
+            .is_err());
+        assert!(store
+            .verify_delegation_binding(&first, "%1", 124, "start")
+            .is_err());
         assert!(store
             .authorize_delegation_supervisor("%1", 123, "start", "owner")
             .is_err());
         store.begin_delegation_revocation(&first, "owner").unwrap();
+        assert!(store
+            .verify_delegation_binding(&first, "%1", 123, "start")
+            .is_err());
         drop(store);
         let store = Store::open(&db, &blobs).unwrap();
         store.begin_delegation_revocation(&first, "owner").unwrap();
