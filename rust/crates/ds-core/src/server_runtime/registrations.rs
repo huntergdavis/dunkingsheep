@@ -897,6 +897,11 @@ os.rename(out_path + ".tmp", out_path)
         let pane_pid = caller.pid.expect("live socket peer identity");
         let terminal_factory: LoopTerminalFactory = Arc::new(move || {
             let mut terminal = FakeTerminal::new();
+            let mut wrapped = terminal.panes[2].clone();
+            wrapped.pane_id = "w4:p4".into();
+            wrapped.command = "sh".into();
+            wrapped.title = "plain shell".into();
+            terminal.panes.push(wrapped);
             for pane in &mut terminal.panes {
                 pane.pane_pid = Some(pane_pid);
                 if pane.pane_id == "w3:p3" {
@@ -999,7 +1004,7 @@ os.rename(out_path + ".tmp", out_path)
         // exercises production roster assembly and live PID/start validation.
         let db = rusqlite::Connection::open(config.join("tasks.db")).unwrap();
         let start = crate::proc::process_start(pane_pid).unwrap();
-        for (pane, project) in [("w2:p2", "alpha"), ("w3:p3", "beta")] {
+        for (pane, project) in [("w2:p2", "alpha"), ("w3:p3", "beta"), ("w4:p4", "wrapped")] {
             crate::tasks::lane_project::set(
                 &db,
                 &crate::tasks::lane_project::Membership {
@@ -1018,6 +1023,28 @@ os.rename(out_path + ".tmp", out_path)
         let beta = call("roster", json!({"project":"beta"}));
         assert_eq!(beta["count"], 1, "{beta}");
         assert_eq!(beta["lanes"][0]["pane_id"], "w3:p3");
+        let wrapped = call("roster", json!({"project":"wrapped"}));
+        assert_eq!(wrapped["count"], 1, "{wrapped}");
+        assert_eq!(wrapped["lanes"][0]["pane_id"], "w4:p4");
+        assert!(wrapped["lanes"][0]["harness"].is_null(), "{wrapped}");
+        assert_eq!(wrapped["lanes"][0]["state"], "unknown", "{wrapped}");
+        let db = rusqlite::Connection::open(config.join("tasks.db")).unwrap();
+        crate::tasks::lane_project::set(
+            &db,
+            &crate::tasks::lane_project::Membership {
+                pane: "w4:p4".into(),
+                pid: pane_pid,
+                start: "stale-start".into(),
+                scope: crate::tasks::lane_project::ProjectScope::Project("wrapped".into()),
+            },
+        )
+        .unwrap();
+        drop(db);
+        let stale = call("roster", json!({"project":"wrapped"}));
+        assert_eq!(
+            stale["count"], 0,
+            "stale shell binding must not produce a lane: {stale}"
+        );
         let absent = call("roster", json!({"project":"not-present"}));
         assert_eq!(absent["count"], 0, "{absent}");
 

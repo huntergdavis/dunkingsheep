@@ -84,10 +84,26 @@ fn cpu_for(env: &dyn RosterEnv, leases: &[Value], now: f64) -> Value {
     }
 }
 
-/// `roster`: one row per lane that has an agent (a bare shell has no harness and no mail).
+/// Include detected agents and live panes with explicit project or global membership.
+/// The runtime supplies `project`/`global` only after validating the pane PID/start binding.
+fn roster_lane(lane: &Value) -> bool {
+    if truthy(lane.get("agent")) {
+        return true;
+    }
+    match lane.pointer("/membership/scope").and_then(Value::as_str) {
+        Some("project") => lane
+            .pointer("/membership/project")
+            .and_then(Value::as_str)
+            .is_some_and(|name| !name.is_empty()),
+        Some("global") => true,
+        _ => false,
+    }
+}
+
+/// `roster`: detected agents plus live panes with explicit, valid membership.
 pub fn roster(env: &dyn RosterEnv, now: f64) -> Result<Value, String> {
     let mut rows = Vec::new();
-    for lane in env.lanes()?.iter().filter(|l| truthy(l.get("agent"))) {
+    for lane in env.lanes()?.iter().filter(|l| roster_lane(l)) {
         let pane_id = lane["pane_id"].as_str().unwrap_or("");
         // NULL, not the string "unknown" (reviewer on t227): the owner asked for a dash where
         // there is no status.
@@ -107,7 +123,7 @@ pub fn roster(env: &dyn RosterEnv, now: f64) -> Result<Value, String> {
         let (unread, oldest) = env
             .inbox_count(name.unwrap_or(pane_id))
             .unwrap_or((0, None));
-        let harness = lane["agent"].as_str().unwrap_or("");
+        let harness = lane["agent"].as_str().filter(|name| !name.is_empty());
         // What the lane is DOING comes from its own tool; an absent signal is UNKNOWN.
         let doing = env.activity(lane, now).unwrap_or_else(|error| {
             json!({"state": "unknown", "since": null, "source": "activity", "reason": format!("activity probe failed: {error}")})
@@ -121,7 +137,7 @@ pub fn roster(env: &dyn RosterEnv, now: f64) -> Result<Value, String> {
             "membership": lane.get("membership").cloned().unwrap_or_else(|| json!({"scope":"unknown","project":null})),
             "name": name.unwrap_or(pane_id),
             "harness": harness,
-            "model": cell(Value::Null, None, Some(model_reason(harness))),
+            "model": cell(Value::Null, None, Some(model_reason(harness.unwrap_or("")))),
             "state": doing.get("state").cloned().unwrap_or(Value::Null),
             "state_source": doing.get("source").cloned().unwrap_or(Value::Null),
             "state_reason": doing.get("reason").cloned().unwrap_or(Value::Null),
@@ -186,6 +202,33 @@ mod tests {
 
     fn lane(id: &str, agent: &str, name: Option<&str>) -> Value {
         json!({"pane_id": id, "agent": agent, "agent_name": name, "agent_status": null})
+    }
+
+    #[test]
+    fn explicitly_bound_panes_survive_unknown_harness_without_including_unbound_shells() {
+        let env = Env {
+            lanes: vec![
+                json!({"pane_id":"%1","agent":"","membership":{"scope":"project","project":"elite-force-switch"}}),
+                json!({"pane_id":"%2","agent":null,"membership":{"scope":"global","project":null}}),
+                json!({"pane_id":"%3","agent":"","membership":{"scope":"stale","project":null}}),
+                json!({"pane_id":"%4","agent":"","membership":{"scope":"unknown","project":null}}),
+                json!({"pane_id":"%5","agent":"","membership":{"scope":"unavailable","project":null}}),
+                json!({"pane_id":"%6","agent":"","membership":{"scope":"project","project":""}}),
+            ],
+            doing: Some(Ok(
+                json!({"state":"unknown","since":null,"source":"none","reason":"unknown harness"}),
+            )),
+            ..Env::default()
+        };
+        let out = roster(&env, NOW).unwrap();
+        let rows = out["lanes"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["pane_id"], "%1");
+        assert_eq!(rows[0]["membership"]["project"], "elite-force-switch");
+        assert!(rows[0]["harness"].is_null());
+        assert_eq!(rows[0]["state"], "unknown");
+        assert!(rows[0]["model"]["value"].is_null());
+        assert_eq!(rows[1]["membership"]["scope"], "global");
     }
 
     #[test]
