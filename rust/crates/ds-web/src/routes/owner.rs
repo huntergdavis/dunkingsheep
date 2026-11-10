@@ -265,7 +265,7 @@ async fn api_owner_send(
     };
 
     let prompt = format!(
-        "Owner message {} (web): {text}\nAnswer it now: dunkingsheep owner reply {} \"<your answer>\"",
+        "Owner message {} (web): {text}\nUse dunkingsheep owner reply {} \"<final answer>\" only for the final answer, not a routing acknowledgement. A final response may ask for needed clarification or explain an error. If more work is needed, leave the question pending.",
         python_string(&message_id),
         python_string(&message_id)
     );
@@ -829,7 +829,7 @@ async fn nudge_or_report(
     text: &str,
 ) -> Response {
     let body = format!(
-        "Owner message {} (web) is waiting in the owner mailbox: `dunkingsheep owner conversation`; answer with `owner reply {}`.\n\n{}",
+        "Owner message {} (web) is waiting in the owner mailbox: `dunkingsheep owner conversation`. Use `owner reply {}` only for the final answer, not a routing acknowledgement. A final response may ask for needed clarification or explain an error. If more work is needed, leave the question pending.\n\n{}",
         python_string(&result["message_id"]),
         python_string(&result["message_id"]),
         text
@@ -1269,6 +1269,10 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("owner reply i7"));
+        assert!(calls[3].1["text"]
+            .as_str()
+            .unwrap()
+            .contains("only for the final answer, not a routing acknowledgement"));
         assert_eq!(
             auth.seen.lock().unwrap().as_slice(),
             &[(Some("api-token".into()), None)]
@@ -1457,6 +1461,10 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("Owner message i7 (web)"));
+        assert!(nudge["body"]
+            .as_str()
+            .unwrap()
+            .contains("only for the final answer, not a routing acknowledgement"));
     }
 
     #[test]
