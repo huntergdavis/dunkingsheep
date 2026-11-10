@@ -67,6 +67,13 @@ fn every_input_schema_equals_the_pythons() {
                     want["properties"]["action"]["description"].clone();
             }
         }
+        if name == "roster" {
+            assert!(got["properties"]
+                .as_object_mut()
+                .unwrap()
+                .remove("project")
+                .is_some());
+        }
         if name == "memory_backfill" {
             let properties = got["properties"].as_object_mut().unwrap();
             for key in ["queue_id", "path", "reason"] {
