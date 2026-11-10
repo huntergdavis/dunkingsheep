@@ -251,6 +251,17 @@ mod tests {
                     .ensure_owner_delegation_notice(&proof, "%1", &task)
                     .unwrap()
             );
+            let visible = inbox
+                .conversation_across_visible(
+                    &["owner".into(), "codex-rust-owner".into()],
+                    None,
+                    None,
+                )
+                .unwrap();
+            assert!(visible
+                .iter()
+                .all(|row| row.get("id").and_then(serde_json::Value::as_str)
+                    != Some(notice.as_str())));
             let answer = inbox
                 .answer_owner_question_guarded(&question, "final answer", Some("%1"), Some(&proof))
                 .unwrap();

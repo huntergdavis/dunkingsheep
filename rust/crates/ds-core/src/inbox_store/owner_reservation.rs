@@ -107,6 +107,10 @@ impl Store {
             if !matches!(stored.4.as_str(), "queued" | "read" | "acked") {
                 return Err(refuse("terminal delegation notice requires recovery"));
             }
+            tx.execute(
+                "INSERT OR IGNORE INTO message_audiences (message_id, audience) VALUES (?, 'agent')",
+                [&id],
+            ).map_err(map_sqlite)?;
             tx.commit().map_err(map_sqlite)?;
             Ok(id)
         })
