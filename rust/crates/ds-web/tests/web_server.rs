@@ -1540,3 +1540,36 @@ fn delivery_watcher_stop_waits_for_inflight_rpc_before_restart() {
         0
     );
 }
+
+#[test]
+fn projects_route_uses_authenticated_daemon_roster_through_the_composed_desk() {
+    fn answer(command: &str, _: &Map<String, Value>) -> Result<Value, String> {
+        match command {
+            "roster" => Ok(json!({"as_of":"now","lanes":[
+                {"pane_id":"%1","membership":{"scope":"project","project":"alpha"}},
+                {"pane_id":"%2","membership":{"scope":"global","project":null}},
+                {"pane_id":"%3","membership":{"scope":"stale","project":null}}
+            ]})),
+            _ => Err("not provided by this fixture".to_owned()),
+        }
+    }
+    let (root, mut config) = fixture();
+    let daemon = FakeDaemon::start(root.path(), answer);
+    config.daemon_socket = daemon.socket.clone();
+    let server = Server::start(config);
+    let addr = server.addr;
+    assert_eq!(request(addr, "GET", "/api/projects", &[], None).status, 401);
+    let cookie = format!("vp_session={}", login(addr));
+    let found = request(
+        addr,
+        "GET",
+        "/api/projects",
+        &[("Cookie", cookie.as_str())],
+        None,
+    );
+    assert_eq!(found.status, 200, "{}", found.text());
+    assert_eq!(found.json()["lanes"][0]["membership"]["project"], "alpha");
+    assert_eq!(found.json()["lanes"][1]["membership"]["scope"], "global");
+    assert_eq!(found.json()["lanes"][2]["membership"]["scope"], "stale");
+    assert_eq!(server.shutdown(), Ok(()));
+}

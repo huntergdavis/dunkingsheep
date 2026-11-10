@@ -894,7 +894,7 @@ pub static COMMANDS: &[Command] = &[
     Command {
         name: "roster",
         description: "One row per agent lane for the Command Center: name, harness, model (null with a reason), state, current task, inbox count and oldest unread, cost, cpu. No screen reads: safe to poll.",
-        params: &[],
+        params: &[Param { name: "project", schema: "{\"type\":\"string\",\"description\":\"Only live lanes explicitly bound to this named project.\"}" }],
         dispatch_required: &[],
         required: &[],
         mcp: true,

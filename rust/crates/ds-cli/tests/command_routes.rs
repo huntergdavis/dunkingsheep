@@ -5169,6 +5169,7 @@ fn cli_route_58_commands_map() {
     assert!(r.contains("lanes(project, global, action, operation, task, repo, pane, mailbox)"));
     assert!(r.contains("start_agent(project, global, role"));
     assert!(r.contains("memory_backfill(action, limit, queue_id, path, reason)"));
+    assert!(r.contains("roster(project)"));
     let strip = |text: &str| {
         let mut skip_description = false;
         text.lines()
@@ -5178,6 +5179,7 @@ fn cli_route_58_commands_map() {
                     return None;
                 }
                 if line.starts_with("lanes(")
+                    || line.starts_with("roster(")
                     || line.starts_with("start_agent(")
                     || line.starts_with("memory_backfill(")
                 {
@@ -5204,6 +5206,10 @@ fn cli_route_58_commands_map() {
                 assert!(row["input_schema"]["properties"].get("repo").is_some());
             }
         }
+        let roster = r.iter().find(|row| row["name"] == "roster").unwrap();
+        assert!(roster["input_schema"]["properties"]
+            .get("project")
+            .is_some());
         let memory = r
             .iter()
             .find(|row| row["name"] == "memory_backfill")
@@ -5213,11 +5219,13 @@ fn cli_route_58_commands_map() {
         }
         r.retain(|row| {
             row["name"] != "lanes"
+                && row["name"] != "roster"
                 && row["name"] != "start_agent"
                 && row["name"] != "memory_backfill"
         });
         p.retain(|row| {
             row["name"] != "lanes"
+                && row["name"] != "roster"
                 && row["name"] != "start_agent"
                 && row["name"] != "memory_backfill"
         });

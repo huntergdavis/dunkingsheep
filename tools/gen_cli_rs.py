@@ -34,6 +34,7 @@ def load_parser():
     # The archived Python parser is frozen. Add the Rust-only lane membership
     # surface here so the generated table, namespace fixtures and help stay in sync.
     root = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
+    root.choices["roster"].add_argument("--project", metavar="NAME", help="only lanes with this explicit project membership")
     start = root.choices["start-agent"]
     start.add_argument("--project", help="explicit project membership")
     start.add_argument("--global", action="store_true", help="explicit global membership")

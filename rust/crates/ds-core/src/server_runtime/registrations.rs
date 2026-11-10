@@ -899,6 +899,9 @@ os.rename(out_path + ".tmp", out_path)
             let mut terminal = FakeTerminal::new();
             for pane in &mut terminal.panes {
                 pane.pane_pid = Some(pane_pid);
+                if pane.pane_id == "w3:p3" {
+                    pane.command = "codex".into();
+                }
             }
             terminal.statuses.insert("w1:p1".into(), "idle".into());
             terminal.statuses.insert("w2:p2".into(), "idle".into());
@@ -991,6 +994,32 @@ os.rename(out_path + ".tmp", out_path)
                 .any(|lane| lane["pane_id"] == "w2:p2"),
             "roster must contain the actual FakeTerminal agent lane: {roster}"
         );
+
+        // Seed only the isolated fixture's membership store. The socket query below
+        // exercises production roster assembly and live PID/start validation.
+        let db = rusqlite::Connection::open(config.join("tasks.db")).unwrap();
+        let start = crate::proc::process_start(pane_pid).unwrap();
+        for (pane, project) in [("w2:p2", "alpha"), ("w3:p3", "beta")] {
+            crate::tasks::lane_project::set(
+                &db,
+                &crate::tasks::lane_project::Membership {
+                    pane: pane.into(),
+                    pid: pane_pid,
+                    start: start.clone(),
+                    scope: crate::tasks::lane_project::ProjectScope::Project(project.into()),
+                },
+            )
+            .unwrap();
+        }
+        drop(db);
+        let alpha = call("roster", json!({"project":"alpha"}));
+        assert_eq!(alpha["count"], 1, "{alpha}");
+        assert_eq!(alpha["lanes"][0]["pane_id"], "w2:p2");
+        let beta = call("roster", json!({"project":"beta"}));
+        assert_eq!(beta["count"], 1, "{beta}");
+        assert_eq!(beta["lanes"][0]["pane_id"], "w3:p3");
+        let absent = call("roster", json!({"project":"not-present"}));
+        assert_eq!(absent["count"], 0, "{absent}");
 
         let added = call(
             "dispatch",
