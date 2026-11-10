@@ -13,7 +13,9 @@ use crate::error::DunkError;
 use crate::flock::mailbox::OWNER_MAILBOX;
 use crate::inbox::{mailbox_where, validate_transport};
 
-use super::{attachments_of, full_from_row, py_repr, refuse, Message, Store, FULL_COLUMNS};
+use super::{
+    attachments_of, full_from_row, next_message_id, py_repr, refuse, Message, Store, FULL_COLUMNS,
+};
 
 fn required_transport(transport: Option<&str>, message: &str) -> Result<String, DunkError> {
     validate_transport(transport)
@@ -90,6 +92,52 @@ fn full_message(
 }
 
 impl Store {
+    /// Insert an owner answer and acknowledge its question in one writer transaction.
+    /// A concurrent answer cannot pass the uniqueness check between a read and send.
+    pub fn answer_owner_question(
+        &self,
+        question_id: &str,
+        body: &str,
+        sender: Option<&str>,
+    ) -> Result<Message, DunkError> {
+        let (question_id, body, sender) = (
+            question_id.to_owned(),
+            body.to_owned(),
+            sender.map(str::to_owned),
+        );
+        self.writer.call(move |connection| {
+            let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(map_sqlite)?;
+            let question: Option<(String, Option<String>, Option<String>)> = tx.query_row(
+                "SELECT mailbox, reply_to, transport FROM messages WHERE id = ?",
+                [&question_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            ).optional().map_err(map_sqlite)?;
+            let (mailbox, parent, transport) = question.ok_or_else(|| refuse(format!("no message with id {question_id:?}")))?;
+            if crate::inbox::normalise_mailbox(&mailbox) != OWNER_MAILBOX {
+                return Err(refuse(format!("{question_id} is not an {OWNER_MAILBOX} message (mailbox {})", py_repr(&mailbox))));
+            }
+            if parent.as_deref().is_some_and(|id| !id.is_empty()) {
+                return Err(refuse(format!("{question_id} is itself a reply; answer the question it belongs to")));
+            }
+            let existing: Option<String> = tx.query_row(
+                "SELECT id FROM messages WHERE reply_to = ? ORDER BY created_at LIMIT 1", [&question_id], |row| row.get(0),
+            ).optional().map_err(map_sqlite)?;
+            if let Some(id) = existing {
+                return Err(refuse(format!("{question_id} was already answered by {id}; one answer per question, so the latency metric has one edge")));
+            }
+            if body.trim().is_empty() { return Err(refuse("a reply needs a body")); }
+            let transport = validate_transport(transport.as_deref()).map_err(refuse)?;
+            crate::inbox::check_sizes(body.len(), "", 0, 0).map_err(refuse)?;
+            let id = next_message_id(&tx)?;
+            let now = now_s();
+            tx.execute("INSERT INTO messages (id, mailbox, mailbox_label, pane_id, sender, subject, body, state, created_at, transport, reply_to, external_id) VALUES (?, ?, ?, NULL, ?, NULL, ?, 'queued', ?, ?, ?, NULL)",
+                params![id, OWNER_MAILBOX, OWNER_MAILBOX, sender, body, now, transport, question_id]).map_err(map_sqlite)?;
+            tx.execute("UPDATE messages SET state = 'acked', acked_at = ?, read_at = COALESCE(read_at, ?) WHERE id = ? AND state IN ('queued', 'read')", params![now, now, question_id]).map_err(map_sqlite)?;
+            let message = full_message(&tx, &id)?.ok_or_else(|| refuse("inserted owner answer missing"))?;
+            tx.commit().map_err(map_sqlite)?;
+            Ok(message)
+        })
+    }
+
     /// Return every raw message column that replies to this id, oldest first.
     pub fn replies_to(&self, message_id: &str) -> Result<Vec<Value>, DunkError> {
         let message_id = message_id.to_string();

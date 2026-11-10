@@ -415,56 +415,15 @@ impl<'a> OwnerConversations<'a> {
         self_pane_id: Option<&str>,
     ) -> Result<Reply, DunkError> {
         let store = self.authorised_store(self_pane_id)?;
-        let question = store.get_message(message_id)?;
-        if normalise_mailbox(&question.summary.mailbox) != OWNER_MAILBOX {
-            return Err(DunkError::Refused(format!(
-                "{message_id} is not an {OWNER_MAILBOX} message (mailbox {})",
-                python_repr(&question.summary.mailbox)
-            )));
-        }
-        if question
-            .summary
-            .reply_to
-            .as_deref()
-            .is_some_and(|reply_to| !reply_to.is_empty())
-        {
-            return Err(DunkError::Refused(format!(
-                "{message_id} is itself a reply; answer the question it belongs to"
-            )));
-        }
-        let replies = store.replies_to(&question.summary.message_id)?;
-        if let Some(first) = replies.first() {
-            let answered_by = first.get("id").and_then(Value::as_str).unwrap_or("None");
-            return Err(DunkError::Refused(format!(
-                "{message_id} was already answered by {answered_by}; one answer per question, so the latency metric has one edge"
-            )));
-        }
         let body = body.map(python_str).unwrap_or_default();
-        if body.trim().is_empty() {
-            return Err(DunkError::Refused("a reply needs a body".to_string()));
-        }
-        let transport = question.summary.transport.clone();
         let sender = self_pane_id.filter(|pane| !pane.is_empty());
-        let outgoing = Outgoing {
-            mailbox: OWNER_MAILBOX,
-            body: Some(&body),
-            sender,
-            mailbox_label: Some(OWNER_MAILBOX),
-            transport: transport.as_deref(),
-            reply_to: Some(&question.summary.message_id),
-            ..Outgoing::default()
-        };
-        let reply_id = store.send(&outgoing)?;
-        let reply = store.get_message(&reply_id)?;
-        store.ack(
-            std::slice::from_ref(&question.summary.message_id),
-            Some(OWNER_MAILBOX),
-        )?;
+        let reply = store.answer_owner_question(message_id, &body, sender)?;
+        let transport = reply.summary.transport.clone();
         Ok(Reply {
             reply,
             question: message_id.to_string(),
             transport,
-            acked: question.summary.message_id,
+            acked: message_id.to_string(),
         })
     }
 
@@ -891,6 +850,76 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_owner_answers_have_one_winner_and_keep_transport() {
+        let fixture = Fixture::new("owner-concurrent-answer", true);
+        let question = fixture.send(OWNER_MAILBOX, "question", Some("telegram"), None);
+        let (first, second) = std::thread::scope(|scope| {
+            let a = scope.spawn(|| {
+                fixture
+                    .service()
+                    .reply(&question, Some(&Value::String("one".into())), None)
+            });
+            let b = scope.spawn(|| {
+                fixture
+                    .service()
+                    .reply(&question, Some(&Value::String("two".into())), None)
+            });
+            (a.join().unwrap(), b.join().unwrap())
+        });
+        assert_ne!(first.is_ok(), second.is_ok());
+        let answer = first.or(second).unwrap();
+        assert_eq!(answer.transport.as_deref(), Some("telegram"));
+        assert_eq!(
+            answer.reply.summary.reply_to.as_deref(),
+            Some(question.as_str())
+        );
+        assert_eq!(fixture.store.replies_to(&question).unwrap().len(), 1);
+        assert_eq!(
+            fixture.store.get_message(&question).unwrap().summary.state,
+            "acked"
+        );
+    }
+
+    #[test]
+    fn independent_store_connections_cannot_answer_twice() {
+        let fixture = Fixture::new("owner-concurrent-stores", true);
+        let other = Store::open(
+            fixture.store.path(),
+            fixture._dir.path().join("other-blobs"),
+        )
+        .unwrap();
+        let question = fixture.send(OWNER_MAILBOX, "question", Some("web"), None);
+        let (first, second) = std::thread::scope(|scope| {
+            let a = scope.spawn(|| fixture.store.answer_owner_question(&question, "one", None));
+            let b = scope.spawn(|| other.answer_owner_question(&question, "two", None));
+            (a.join().unwrap(), b.join().unwrap())
+        });
+        assert_ne!(first.is_ok(), second.is_ok());
+        assert_eq!(fixture.store.replies_to(&question).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn invalid_legacy_transport_does_not_create_an_answer() {
+        let fixture = Fixture::new("owner-invalid-transport", true);
+        let question = fixture.send(OWNER_MAILBOX, "question", Some("web"), None);
+        let db = rusqlite::Connection::open(fixture.store.path()).unwrap();
+        db.execute(
+            "UPDATE messages SET transport = ? WHERE id = ?",
+            ["bad transport!", &question],
+        )
+        .unwrap();
+        assert!(fixture
+            .service()
+            .reply(&question, Some(&Value::String("answer".into())), None)
+            .is_err());
+        assert!(fixture.store.replies_to(&question).unwrap().is_empty());
+        assert_eq!(
+            fixture.store.get_message(&question).unwrap().summary.state,
+            "queued"
+        );
+    }
+
+    #[test]
     fn get_message_is_full_read_only_and_preserves_missing_id_error() {
         let fixture = Fixture::new("owner-get-full", true);
         let attachment = fixture._dir.path().join("note.txt");
@@ -1188,7 +1217,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_ack_leaves_the_already_created_reply_row() {
+    fn failed_ack_rolls_back_the_reply() {
         let fixture = Fixture::new("owner-reply-ack-failure", true);
         let question = fixture.send(OWNER_MAILBOX, "question", Some("web"), None);
         let connection = rusqlite::Connection::open(fixture.store.path()).unwrap();
@@ -1201,11 +1230,11 @@ mod tests {
             .unwrap();
         let failed = fixture.service().reply(
             &question,
-            Some(&Value::String("reply persists".into())),
+            Some(&Value::String("reply rolls back".into())),
             Some(DESK),
         );
         assert!(error(failed).contains("fixture ack failure"));
-        assert_eq!(1, fixture.store.replies_to(&question).unwrap().len());
+        assert!(fixture.store.replies_to(&question).unwrap().is_empty());
     }
 
     #[test]
