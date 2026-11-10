@@ -54,6 +54,7 @@ impl Store {
         );
         self.writer.call(move |connection| {
             let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate).map_err(map_sqlite)?;
+            super::owner_authority::require_active_authority(&tx, &new_incarnation)?;
             let transport: Option<String> = tx.query_row(
                 "SELECT transport FROM owner_delegation_reservations WHERE question_id = ? AND supervisor = ? AND generation = ? AND state = 'active'",
                 params![question_id, SUPERVISOR, expected_generation], |row| row.get(0),
@@ -86,6 +87,7 @@ impl Store {
         let (pane, task_id) = (pane.to_owned(), task_id.to_owned());
         self.writer.call(move |connection| {
             let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate).map_err(map_sqlite)?;
+            super::owner_authority::require_active_authority(&tx, &proof.incarnation)?;
             let valid: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM owner_delegation_reservations WHERE question_id = ? AND supervisor = ? AND incarnation = ? AND transport = ? AND generation = ? AND state = 'active')",
                 params![proof.question_id, proof.supervisor, proof.incarnation, proof.transport, proof.generation],
@@ -156,6 +158,7 @@ impl Store {
         );
         self.writer.call(move |connection| {
             let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate).map_err(map_sqlite)?;
+            super::owner_authority::require_active_authority(&tx, &incarnation)?;
             let question: Option<OwnerQuestionRow> = tx.query_row(
                 "SELECT mailbox, reply_to, transport, state, sender FROM messages WHERE id = ?",
                 [&question_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
@@ -205,6 +208,9 @@ mod tests {
         let db = dir.path().join("inbox.db");
         let blobs = dir.path().join("blobs");
         let store = Store::open(&db, &blobs).unwrap();
+        let authority = store
+            .authorize_delegation_supervisor("%1", 123, "start", "owner")
+            .unwrap();
         let question = store
             .send(&Outgoing {
                 mailbox: OWNER_MAILBOX,
@@ -214,12 +220,12 @@ mod tests {
             })
             .unwrap();
         let proof = store
-            .reserve_owner_question(&question, "pid:1:start:2", "desk")
+            .reserve_owner_question(&question, &authority, "desk")
             .unwrap();
         assert_eq!(
             proof,
             store
-                .reserve_owner_question(&question, "pid:1:start:2", "desk")
+                .reserve_owner_question(&question, &authority, "desk")
                 .unwrap()
         );
         assert!(store
@@ -273,6 +279,9 @@ mod tests {
         let db = dir.path().join("inbox.db");
         let first = Store::open(&db, dir.path().join("blobs1")).unwrap();
         let second = Store::open(&db, dir.path().join("blobs2")).unwrap();
+        let authority = first
+            .authorize_delegation_supervisor("%1", 123, "start", "owner")
+            .unwrap();
         let question = first
             .send(&Outgoing {
                 mailbox: OWNER_MAILBOX,
@@ -282,8 +291,7 @@ mod tests {
             })
             .unwrap();
         let (reserved, answered) = std::thread::scope(|scope| {
-            let a =
-                scope.spawn(|| first.reserve_owner_question(&question, "pid:1:start:2", "desk"));
+            let a = scope.spawn(|| first.reserve_owner_question(&question, &authority, "desk"));
             let b = scope.spawn(|| second.answer_owner_question(&question, "answer", None));
             (a.join().unwrap(), b.join().unwrap())
         });
@@ -302,6 +310,9 @@ mod tests {
         let db = dir.path().join("inbox.db");
         let first = Store::open(&db, dir.path().join("blobs1")).unwrap();
         let second = Store::open(&db, dir.path().join("blobs2")).unwrap();
+        let authority = first
+            .authorize_delegation_supervisor("%1", 123, "start", "owner")
+            .unwrap();
         let question = first
             .send(&Outgoing {
                 mailbox: OWNER_MAILBOX,
@@ -311,7 +322,7 @@ mod tests {
             })
             .unwrap();
         let (reserved, sent) = std::thread::scope(|scope| {
-            let a = scope.spawn(|| first.reserve_owner_question(&question, "incarnation", "desk"));
+            let a = scope.spawn(|| first.reserve_owner_question(&question, &authority, "desk"));
             let b = scope.spawn(|| {
                 second.send(&Outgoing {
                     mailbox: OWNER_MAILBOX,
@@ -332,6 +343,9 @@ mod tests {
     fn recovery_advances_generation_and_fences_old_supervisor() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path().join("inbox.db"), dir.path().join("blobs")).unwrap();
+        let authority = store
+            .authorize_delegation_supervisor("%1", 123, "start", "owner")
+            .unwrap();
         let question = store
             .send(&Outgoing {
                 mailbox: OWNER_MAILBOX,
@@ -341,13 +355,22 @@ mod tests {
             })
             .unwrap();
         let old = store
-            .reserve_owner_question(&question, "old", "desk")
+            .reserve_owner_question(&question, &authority, "desk")
             .unwrap();
         store
             .ensure_owner_delegation_notice(&old, "%1", "t1")
             .unwrap();
+        store
+            .begin_delegation_revocation(&authority, "owner")
+            .unwrap();
+        assert!(store
+            .answer_owner_question_guarded(&question, "revoked", Some("%1"), Some(&old))
+            .is_err());
+        let new_authority = store
+            .authorize_delegation_supervisor("%1", 123, "start", "owner")
+            .unwrap();
         let new = store
-            .recover_owner_reservation(&question, old.generation, "new", "owner")
+            .recover_owner_reservation(&question, old.generation, &new_authority, "owner")
             .unwrap();
         assert_eq!(new.generation, old.generation + 1);
         assert!(store

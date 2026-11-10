@@ -213,6 +213,9 @@ mod tests {
         let blobs = dir.path().join("blobs");
         let (inbox, question, proof) = tokio::task::block_in_place(|| {
             let inbox = Store::open(&inbox_path, &blobs).unwrap();
+            let authority = inbox
+                .authorize_delegation_supervisor("%1", 123, "start", "owner")
+                .unwrap();
             let question = inbox
                 .send(&Outgoing {
                     mailbox: "owner",
@@ -222,7 +225,7 @@ mod tests {
                 })
                 .unwrap();
             let proof = inbox
-                .reserve_owner_question(&question, "verified-incarnation", "desk")
+                .reserve_owner_question(&question, &authority, "desk")
                 .unwrap();
             drop(inbox);
             let inbox = Store::open(&inbox_path, &blobs).unwrap();

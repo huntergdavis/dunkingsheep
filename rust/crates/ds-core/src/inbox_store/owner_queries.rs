@@ -151,6 +151,9 @@ impl Store {
                         && transport.as_deref() == Some(reserved_transport.as_str()) => {},
                 _ => return Err(refuse("owner question is reserved or the delegation proof is stale")),
             }
+            if let Some(proof) = reservation.as_ref() {
+                super::owner_authority::require_active_authority(&tx, &proof.incarnation)?;
+            }
             if body.trim().is_empty() { return Err(refuse("a reply needs a body")); }
             let transport = validate_transport(transport.as_deref()).map_err(refuse)?;
             crate::inbox::check_sizes(body.len(), "", 0, 0).map_err(refuse)?;

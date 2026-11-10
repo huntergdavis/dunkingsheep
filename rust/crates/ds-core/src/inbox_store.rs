@@ -33,6 +33,7 @@ use crate::inbox::{
 
 mod retired;
 pub use retired::RetiredArchiveOptions;
+mod owner_authority;
 mod owner_queries;
 pub(crate) mod owner_reservation;
 mod owner_service;
@@ -198,6 +199,8 @@ impl Store {
             connection.execute_batch("CREATE TABLE IF NOT EXISTS message_audiences (message_id TEXT PRIMARY KEY, audience TEXT NOT NULL CHECK(audience = 'agent'))")
                 .map_err(|e| captured.sqlite(e, &db_path, "inbox_schema"))?;
             connection.execute_batch("CREATE TABLE IF NOT EXISTS owner_delegation_reservations (question_id TEXT PRIMARY KEY, supervisor TEXT NOT NULL, incarnation TEXT NOT NULL, transport TEXT NOT NULL, generation INTEGER NOT NULL, state TEXT NOT NULL, updated_at REAL NOT NULL); CREATE TABLE IF NOT EXISTS owner_delegation_events (id INTEGER PRIMARY KEY, question_id TEXT NOT NULL, generation INTEGER NOT NULL, event TEXT NOT NULL, actor TEXT NOT NULL, at REAL NOT NULL)")
+                .map_err(|e| captured.sqlite(e, &db_path, "inbox_schema"))?;
+            connection.execute_batch("CREATE TABLE IF NOT EXISTS owner_delegation_authority (supervisor TEXT PRIMARY KEY, pane_id TEXT NOT NULL, pane_pid INTEGER NOT NULL, pane_start TEXT NOT NULL, generation TEXT NOT NULL, state TEXT NOT NULL, updated_at REAL NOT NULL); CREATE TABLE IF NOT EXISTS owner_delegation_authority_events (id INTEGER PRIMARY KEY, supervisor TEXT NOT NULL, generation TEXT NOT NULL, event TEXT NOT NULL, actor TEXT NOT NULL, at REAL NOT NULL)")
                 .map_err(|e| captured.sqlite(e, &db_path, "inbox_schema"))?;
             Ok(())
         })?;
