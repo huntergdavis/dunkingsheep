@@ -6407,7 +6407,47 @@ fn delegation_supervisor_binding_rejects_unbound_or_ambiguous_callers() {
     bad = request.clone();
     bad.caller = None;
     assert!(check(&bad).is_err());
+    flock
+        .with_roles(|roles, _| {
+            roles.register(
+                "w1:p4",
+                "owner",
+                Some(pid),
+                Some("stale-start"),
+                None,
+                None,
+                None,
+                None,
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(check(&request).is_err());
+    flock
+        .with_roles(|roles, _| {
+            roles.register(
+                "w1:p4",
+                "owner",
+                Some(pid),
+                Some(&start),
+                None,
+                None,
+                None,
+                None,
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(check(&request).is_ok());
     assert!(flock.remember_lane("w1:p5", "codex-rust-owner", true));
+    assert!(check(&request).is_err());
+    let mut registry = flock.lane_registry(true).unwrap();
+    registry.remove("w1:p5");
+    assert!(flock.write_lane_registry(&registry));
+    assert!(check(&request).is_ok());
+    inbox
+        .begin_delegation_revocation(&generation, "owner")
+        .unwrap();
     assert!(check(&request).is_err());
 }
 
