@@ -813,6 +813,7 @@ struct ParityEnv {
     inbox_value: Cell<i64>,
     probes: Cell<u32>,
     turn_calls: Mutex<Vec<String>>,
+    roster_fixture: Option<Result<Vec<Value>, String>>,
     inbox_store: Store,
     inbox_pool: crate::db::ReadPool,
     _inbox_tmp: tempfile::TempDir,
@@ -834,6 +835,7 @@ impl ParityEnv {
             inbox_value: Cell::new(1),
             probes: Cell::new(0),
             turn_calls: Mutex::new(Vec::new()),
+            roster_fixture: None,
             inbox_store,
             inbox_pool,
             _inbox_tmp: inbox_tmp,
@@ -1032,9 +1034,11 @@ impl InboxEnv for ParityEnv {
 
 impl RosterEnv for ParityEnv {
     fn lanes(&self) -> Result<Vec<Value>, String> {
-        Ok(vec![json!({
-            "pane_id": "w1:p1", "agent": "pi", "agent_name": "worker"
-        })])
+        self.roster_fixture.clone().unwrap_or_else(|| {
+            Ok(vec![json!({
+                "pane_id": "w1:p1", "agent": "pi", "agent_name": "worker"
+            })])
+        })
     }
     fn leases_for_pane(&self, _: &str, _: f64) -> Vec<Value> {
         Vec::new()
@@ -3905,6 +3909,46 @@ fn h_poll_tasks_matches_python_wire_defaults_and_visibility() {
 }
 
 #[test]
+fn roster_project_query_uses_roster_membership_and_reports_uncertainty() {
+    let (_dir, flock) = flock();
+    let mut env = ParityEnv::new(None);
+    env.roster_fixture = Some(Ok(vec![
+        json!({"pane_id":"%1","agent":"pi","membership":{"scope":"project","project":"alpha"}}),
+        json!({"pane_id":"%2","agent":"pi","membership":{"scope":"project","project":"beta"}}),
+        json!({"pane_id":"%3","agent":"pi","membership":{"scope":"global","project":null}}),
+        json!({"pane_id":"%4","agent":"pi","membership":{"scope":"stale","project":null}}),
+        json!({"pane_id":"%5","agent":"pi","membership":{"scope":"unknown","project":null}}),
+        json!({"pane_id":"%6","agent":"pi","membership":{"scope":"unavailable","project":null}}),
+    ]));
+    let request = RequestCtx::default();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_turn_end_poll_roster();
+    let run = |project: &str, env: &ParityEnv| {
+        dispatch_with_env(
+            &dispatcher,
+            &flock,
+            &FixedRole("worker", false),
+            "roster",
+            args(json!({"project":project})),
+            &request,
+            env,
+        )
+    };
+    for (name, id) in [("alpha", "%1"), ("beta", "%2")] {
+        let result = run(name, &env).unwrap();
+        assert_eq!(result["count"], 1);
+        assert_eq!(result["lanes"][0]["pane_id"], id);
+        assert_eq!(
+            result["unresolved_membership"],
+            json!({"unknown":1,"stale":1,"unavailable":1})
+        );
+    }
+    assert_eq!(run("absent", &env).unwrap()["count"], 0);
+    env.roster_fixture = Some(Err("roster unavailable".into()));
+    assert!(run("alpha", &env).is_err());
+}
+
+#[test]
 fn h_roster_matches_python() {
     let (_dir, flock) = flock();
     let env = ParityEnv::new(None);
@@ -3925,6 +3969,19 @@ fn h_roster_matches_python() {
     assert_eq!(result["lanes"][0]["pane_id"], "w1:p1");
     assert_eq!(result["lanes"][0]["state"], "idle");
     assert_eq!(result["lanes"][0]["name"], "worker");
+    let named = dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("worker", false),
+        "roster",
+        args(json!({"project":"alpha"})),
+        &request,
+        &env,
+    )
+    .expect("project-filtered roster");
+    assert_eq!(named["project"], "alpha");
+    assert_eq!(named["count"], 0);
+    assert_eq!(named["lanes"], json!([]));
 }
 
 #[test]

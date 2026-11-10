@@ -235,12 +235,25 @@ fn filter_project(result: &mut Value, requested: Option<&Value>) -> Result<(), D
         let lanes = result["lanes"]
             .as_array_mut()
             .ok_or_else(|| DunkError::Refused("roster has no lanes".into()))?;
+        let unresolved = ["unknown", "stale", "unavailable"]
+            .into_iter()
+            .map(|scope| {
+                (
+                    scope.to_string(),
+                    json!(lanes
+                        .iter()
+                        .filter(|lane| lane["membership"]["scope"] == scope)
+                        .count()),
+                )
+            })
+            .collect::<serde_json::Map<String, Value>>();
         lanes.retain(|lane| {
             lane["membership"]["scope"] == "project" && lane["membership"]["project"] == project
         });
         let count = lanes.len();
         result["project"] = json!(project);
         result["count"] = json!(count);
+        result["unresolved_membership"] = json!(unresolved);
     }
     Ok(())
 }

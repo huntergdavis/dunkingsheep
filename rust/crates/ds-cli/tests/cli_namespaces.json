@@ -11289,6 +11289,21 @@
  },
  {
   "argv": [
+   "roster",
+   "--project",
+   "x"
+  ],
+  "namespace": {
+   "command": "roster",
+   "json": false,
+   "no_start_daemon": false,
+   "project": "x",
+   "self_pane": null,
+   "socket": null
+  }
+ },
+ {
+  "argv": [
    "message-state",
    "x"
   ],
