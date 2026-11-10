@@ -164,6 +164,9 @@ mod tests {
             .verify_delegation_binding(&first, "%1", 124, "start")
             .is_err());
         assert!(store
+            .verify_delegation_binding(&first, "%1", 123, "stale-start")
+            .is_err());
+        assert!(store
             .authorize_delegation_supervisor("%1", 123, "start", "owner")
             .is_err());
         store.begin_delegation_revocation(&first, "owner").unwrap();

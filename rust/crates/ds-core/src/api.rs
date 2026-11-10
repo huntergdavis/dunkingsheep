@@ -3279,6 +3279,75 @@ pub fn h_task_update(context: &HandlerContext<'_>, args: Args) -> Result<Value, 
     Ok(task.wire)
 }
 
+/// Verify a supervisor request against the socket, live pane, declared mailbox and
+/// stored delegation authority. A caller must still serialize registry mutations and
+/// recheck the authority generation in the inbox transaction before acting.
+#[allow(dead_code)] // Not exposed until the authority mutation protocol is wired.
+fn require_delegation_supervisor_binding(
+    context: &HandlerContext<'_>,
+    generation: &str,
+) -> Result<String, DunkError> {
+    let refused =
+        || DunkError::Refused("delegation requires a verified live supervisor binding".into());
+    if context.request.socket_peer != Some(true)
+        || context.request.identity_bound != Some(true)
+        || context.request.caller.is_none()
+    {
+        return Err(refused());
+    }
+    let pane = context
+        .self_pane_id()
+        .filter(|p| !p.is_empty())
+        .ok_or_else(refused)?;
+    let registry = context.flock.lane_registry(true)?;
+    let matches: Vec<&str> = registry
+        .iter()
+        .filter_map(|(id, row)| {
+            let (name, declared) = Flock::row_identity(Some(row));
+            (declared && name.as_deref() == Some("codex-rust-owner")).then_some(id.as_str())
+        })
+        .collect();
+    if matches.as_slice() != [pane] {
+        return Err(refused());
+    }
+    let info = context.env.get_pane(pane).ok_or_else(refused)?;
+    if info.get("pane_id").and_then(Value::as_str) != Some(pane) {
+        return Err(refused());
+    }
+    let pid = info
+        .get("pane_pid")
+        .and_then(|v| {
+            v.as_i64()
+                .or_else(|| v.as_str().and_then(|s| s.parse::<i64>().ok()))
+        })
+        .filter(|pid| *pid > 1)
+        .ok_or_else(refused)?;
+    let entry = context
+        .flock
+        .with_roles(|roles, _| roles.entry(pane))?
+        .ok_or_else(refused)?;
+    let stored_pid = entry.get("pane_pid").and_then(|v| {
+        v.as_i64()
+            .or_else(|| v.as_str().and_then(|s| s.parse::<i64>().ok()))
+    });
+    let start = entry
+        .get("start")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(refused)?;
+    if entry.get("role").and_then(Value::as_str) != Some("owner")
+        || stored_pid != Some(pid)
+        || crate::proc::process_start(pid).as_deref() != Some(start)
+        || crate::proc::caller_pane_auth_failure(context.request.caller.as_ref(), Some(pid))
+            .is_some()
+    {
+        return Err(refused());
+    }
+    let inbox = context.flock.stores().inbox.ok_or_else(refused)?;
+    inbox.verify_delegation_binding(generation, pane, pid, start)?;
+    Ok(pane.to_owned())
+}
+
 /// Require fresh kernel evidence for a planner assigning over a socket.
 ///
 /// This is a point-in-time process identity check, not a project grant or an
