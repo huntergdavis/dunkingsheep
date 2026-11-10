@@ -3337,6 +3337,7 @@ fn require_delegation_supervisor_binding(
         .ok_or_else(refused)?;
     if entry.get("role").and_then(Value::as_str) != Some("owner")
         || stored_pid != Some(pid)
+        || entry.get("delegation_generation").and_then(Value::as_str) != Some(generation)
         || crate::proc::process_start(pid).as_deref() != Some(start)
         || crate::proc::caller_pane_auth_failure(context.request.caller.as_ref(), Some(pid))
             .is_some()

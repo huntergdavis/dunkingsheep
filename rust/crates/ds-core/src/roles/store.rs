@@ -359,7 +359,22 @@ impl Roles {
         pid: i64,
         start: &str,
     ) -> Result<String, DunkError> {
-        if pid <= 1 || start.trim().is_empty() {
+        let generation = token_urlsafe()?;
+        self.bind_owner_delegation_generation(pane_id, pid, start, &generation)?;
+        Ok(generation)
+    }
+
+    /// Mirror an owner-authorized inbox authority generation onto its role registration.
+    /// The caller must serialize this with authority and registry mutations.
+    #[allow(dead_code)] // The owner-authorized migration protocol is not wired.
+    pub(crate) fn bind_owner_delegation_generation(
+        &mut self,
+        pane_id: &str,
+        pid: i64,
+        start: &str,
+        generation: &str,
+    ) -> Result<(), DunkError> {
+        if pid <= 1 || start.trim().is_empty() || generation.trim().is_empty() {
             return Err(role_error("delegation needs a live process identity"));
         }
         self.refresh(false)?;
@@ -375,10 +390,9 @@ impl Roles {
                 "owner registration does not match live identity",
             ));
         }
-        let generation = token_urlsafe()?;
         entry.insert("delegation_generation".into(), json!(generation));
         self.save()?;
-        Ok(generation)
+        Ok(())
     }
 
     pub fn owners(&mut self) -> Result<Vec<String>, DunkError> {

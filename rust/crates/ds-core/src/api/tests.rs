@@ -6373,6 +6373,7 @@ fn delegation_supervisor_binding_rejects_unbound_or_ambiguous_callers() {
                 None,
                 None,
             )?;
+            roles.bind_owner_delegation_generation("w1:p4", pid, &start, &generation)?;
             Ok(())
         })
         .unwrap();
@@ -6407,6 +6408,12 @@ fn delegation_supervisor_binding_rejects_unbound_or_ambiguous_callers() {
     bad = request.clone();
     bad.caller = None;
     assert!(check(&bad).is_err());
+    assert!(flock.remember_lane("w1:p5", "codex-rust-owner", true));
+    assert!(check(&request).is_err());
+    let mut registry = flock.lane_registry(true).unwrap();
+    registry.remove("w1:p5");
+    assert!(flock.write_lane_registry(&registry));
+    assert!(check(&request).is_ok());
     flock
         .with_roles(|roles, _| {
             roles.register(
@@ -6438,13 +6445,8 @@ fn delegation_supervisor_binding_rejects_unbound_or_ambiguous_callers() {
             Ok(())
         })
         .unwrap();
-    assert!(check(&request).is_ok());
-    assert!(flock.remember_lane("w1:p5", "codex-rust-owner", true));
+    // Restoring the old role metadata does not restore its cleared generation.
     assert!(check(&request).is_err());
-    let mut registry = flock.lane_registry(true).unwrap();
-    registry.remove("w1:p5");
-    assert!(flock.write_lane_registry(&registry));
-    assert!(check(&request).is_ok());
     inbox
         .begin_delegation_revocation(&generation, "owner")
         .unwrap();
