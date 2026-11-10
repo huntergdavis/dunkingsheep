@@ -26,6 +26,7 @@ use serde_json::{json, Value as JsonValue};
 pub mod lane_project;
 pub mod metrics;
 pub mod owner_answer;
+mod owner_delegation;
 pub mod planner_scope;
 pub mod project_policy;
 
@@ -119,6 +120,20 @@ CREATE TABLE IF NOT EXISTS task_events (
     status_to   TEXT,
     duration_ms INTEGER,
     meta        TEXT
+);
+CREATE TABLE IF NOT EXISTS owner_delegation_tasks (
+    question_id TEXT NOT NULL,
+    generation INTEGER NOT NULL,
+    incarnation TEXT NOT NULL,
+    pane_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    PRIMARY KEY(question_id, generation)
+);
+CREATE TABLE IF NOT EXISTS owner_delegation_retired (
+    question_id TEXT NOT NULL,
+    generation INTEGER NOT NULL,
+    incarnation TEXT NOT NULL,
+    PRIMARY KEY(question_id, generation)
 );
 "#;
 

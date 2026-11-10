@@ -226,6 +226,60 @@ mod registry {
     }
 
     #[test]
+    fn delegation_generation_requires_matching_owner_and_rotates_on_reregistration() {
+        let (_dir, mut roles) = fresh("delegation-generation");
+        roles
+            .register(
+                OWNER,
+                "owner",
+                Some(123),
+                Some("start"),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        assert!(roles
+            .rotate_owner_delegation_generation(OWNER, 123, "wrong")
+            .is_err());
+        let first = roles
+            .rotate_owner_delegation_generation(OWNER, 123, "start")
+            .unwrap();
+        assert_eq!(
+            reopen(&roles)
+                .entry(OWNER)
+                .unwrap()
+                .unwrap()
+                .get("delegation_generation")
+                .and_then(serde_json::Value::as_str),
+            Some(first.as_str())
+        );
+        roles
+            .register(
+                OWNER,
+                "owner",
+                Some(123),
+                Some("start"),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        assert!(roles
+            .entry(OWNER)
+            .unwrap()
+            .unwrap()
+            .get("delegation_generation")
+            .is_none());
+        let second = roles
+            .rotate_owner_delegation_generation(OWNER, 123, "start")
+            .unwrap();
+        assert_ne!(first, second);
+    }
+
+    #[test]
     fn unregistered_pane_is_a_worker_until_the_first_registration() {
         let (_dir, mut roles) = fresh("bootstrap");
         assert_eq!(roles.role_of(Some("w9:p9"), None).unwrap(), "worker");

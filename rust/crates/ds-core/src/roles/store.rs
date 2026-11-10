@@ -327,6 +327,38 @@ impl Roles {
         Ok(self.lanes.get(pane_id).cloned())
     }
 
+    /// Rotate a delegation-specific generation on an existing owner registration.
+    /// The caller must separately authorize the migration and verify the live pane and
+    /// process start. Ordinary registrations do not invoke this method.
+    #[allow(dead_code)] // Not exposed until the delegation identity gate is wired.
+    pub(crate) fn rotate_owner_delegation_generation(
+        &mut self,
+        pane_id: &str,
+        pid: i64,
+        start: &str,
+    ) -> Result<String, DunkError> {
+        if pid <= 1 || start.trim().is_empty() {
+            return Err(role_error("delegation needs a live process identity"));
+        }
+        self.refresh(false)?;
+        let entry = self
+            .lanes
+            .get_mut(pane_id)
+            .ok_or_else(|| role_error("owner registration missing"))?;
+        if entry.get("role").and_then(Value::as_str) != Some("owner")
+            || entry.get("pane_pid").and_then(Value::as_i64) != Some(pid)
+            || entry.get("start").and_then(Value::as_str) != Some(start)
+        {
+            return Err(role_error(
+                "owner registration does not match live identity",
+            ));
+        }
+        let generation = token_urlsafe()?;
+        entry.insert("delegation_generation".into(), json!(generation));
+        self.save()?;
+        Ok(generation)
+    }
+
     pub fn owners(&mut self) -> Result<Vec<String>, DunkError> {
         self.refresh(false)?;
         Ok(self
