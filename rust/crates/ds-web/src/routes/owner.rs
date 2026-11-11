@@ -265,7 +265,8 @@ async fn api_owner_send(
     };
 
     let prompt = format!(
-        "Owner message {} (web): {text}\nUse dunkingsheep owner reply {} \"<final answer>\" only for the final answer, not a routing acknowledgement. A final response may ask for needed clarification or explain an error. If more work is needed, leave the question pending.",
+        "Owner message {} (web): {text}\nUse dunkingsheep owner reply {} \"<final answer>\" only for the final answer, not a routing acknowledgement. A final response may ask for needed clarification or explain an error. If supervisor work is needed, run `dunkingsheep owner handoff {}` and leave the question pending. Quiet, failed or timed-out handoffs need recovery; queued does not mean picked up.",
+        python_string(&message_id),
         python_string(&message_id),
         python_string(&message_id)
     );
@@ -829,7 +830,8 @@ async fn nudge_or_report(
     text: &str,
 ) -> Response {
     let body = format!(
-        "Owner message {} (web) is waiting in the owner mailbox: `dunkingsheep owner conversation`. Use `owner reply {}` only for the final answer, not a routing acknowledgement. A final response may ask for needed clarification or explain an error. If more work is needed, leave the question pending.\n\n{}",
+        "Owner message {} (web) is waiting in the owner mailbox: `dunkingsheep owner conversation`. Use `owner reply {}` only for the final answer, not a routing acknowledgement. A final response may ask for needed clarification or explain an error. If supervisor work is needed, run `dunkingsheep owner handoff {}` and leave the question pending. Quiet, failed or timed-out handoffs need recovery; queued does not mean picked up.\n\n{}",
+        python_string(&result["message_id"]),
         python_string(&result["message_id"]),
         python_string(&result["message_id"]),
         text

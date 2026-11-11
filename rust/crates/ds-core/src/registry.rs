@@ -682,6 +682,16 @@ pub static COMMANDS: &[Command] = &[
         roles: &["owner", "system", "web", "desk", "planner", "worker", "reviewer", "anonymous"],
     },
     Command {
+        name: "owner_handoff",
+        description: "Hand an unanswered web or Telegram owner question to the fixed owner supervisor. Accepts only its message id. Reports quiet, notification and timeout status; a queued notice is not pickup or an answer.",
+        params: &[Param { name: "message_id", schema: "{\"type\":\"string\",\"description\":\"Original owner question id.\"}" }],
+        dispatch_required: &["message_id"],
+        required: &["message_id"],
+        mcp: true,
+        owner_only: false,
+        roles: &["desk"],
+    },
+    Command {
         name: "owner_reply",
         description: "Answer one owner question: writes one reply linked by reply_to, on the SAME transport the question arrived on (Telegram gets Telegram answers, the web shows everything), and acks the question. One answer per question, so the reply-latency metric has one edge. Desk and owner only.",
         params: &[Param { name: "message_id", schema: "{\"type\":\"string\",\"description\":\"The owner message being answered.\"}" }, Param { name: "body", schema: "{\"type\":\"string\",\"description\":\"The answer.\"}" }],
@@ -1358,7 +1368,7 @@ pub static GROUPS: &[Group] = &[
     Group {
         name: "inbox",
         description: "Agent-to-agent mailbox. action=send or send_agent_only (preferred over typing), count, list, read (also returns your tasks), recover, status, ack, cancel, delete, stats, fetch. No size limit; a send nudges the recipient with one line. The owner's mailbox (FLAT_FLEET.md 7.2) is read with action=conversation, answered with action=reply, which keeps the question's transport and links the answer to it, and fed by a bridge with action=ingest (transport + external_id), drained with action=outbox and confirmed with action=delivered (desk and owner only).",
-        actions: &[("send", "inbox_send"), ("send_agent_only", "inbox_send_agent_only"), ("count", "inbox_count"), ("list", "inbox_list"), ("read", "inbox_read"), ("recover", "inbox_recover"), ("status", "inbox_status"), ("ack", "inbox_ack"), ("cancel", "inbox_cancel"), ("delete", "inbox_delete"), ("stats", "inbox_stats"), ("fetch", "inbox_fetch"), ("archive", "inbox_archive"), ("conversation", "owner_conversation"), ("reply", "owner_reply"), ("ingest", "owner_ingest"), ("outbox", "owner_outbox"), ("delivered", "owner_delivered")],
+        actions: &[("send", "inbox_send"), ("send_agent_only", "inbox_send_agent_only"), ("count", "inbox_count"), ("list", "inbox_list"), ("read", "inbox_read"), ("recover", "inbox_recover"), ("status", "inbox_status"), ("ack", "inbox_ack"), ("cancel", "inbox_cancel"), ("delete", "inbox_delete"), ("stats", "inbox_stats"), ("fetch", "inbox_fetch"), ("archive", "inbox_archive"), ("conversation", "owner_conversation"), ("handoff", "owner_handoff"), ("reply", "owner_reply"), ("ingest", "owner_ingest"), ("outbox", "owner_outbox"), ("delivered", "owner_delivered")],
     },
     Group {
         name: "task",

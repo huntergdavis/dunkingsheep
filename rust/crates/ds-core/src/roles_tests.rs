@@ -84,11 +84,11 @@ fn a_worker_and_a_reviewer_share_one_grant() {
 #[test]
 fn the_tables_have_the_pythons_sizes() {
     // Sizes of the sets in dunk_roles.py when these tables were generated (t1170). A
-    // one-sided edit to either language changes a count here or fails a Python test.
+    // The retired Python tables are unchanged; the Rust-only desk handoff adds one entry.
     assert_eq!(47, READ_ONLY.len());
     assert_eq!(29, WORKER_EXTRA.len());
     assert_eq!(33, SYSTEM_EXTRA.len());
-    assert_eq!(16, DESK_EXTRA.len());
+    assert_eq!(17, DESK_EXTRA.len());
     assert_eq!(9, PLANNER_EXTRA.len());
     assert_eq!(30, WEB_DENIED.len());
 }
@@ -103,6 +103,7 @@ fn the_desk_grant_is_exactly_the_reviewed_set() {
             "inbox_fetch",
             "inbox_read",
             "owner_conversation",
+            "owner_handoff",
             "owner_outbox",
             "owner_poll",
             "owner_reply",

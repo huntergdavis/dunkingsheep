@@ -2042,6 +2042,16 @@ pub static ROOT: Cmd = Cmd {
                     ],
                 },
                 Cmd {
+                    name: "handoff", aliases: &[],
+                    help: Some("hand an owner question to the fixed supervisor"),
+                    raw: false, raw_text: false, about: None, epilog: None,
+                    args: &[
+                        Arg { id: "json", dest: "json", tri: false, default_int: false, flags: &["--json"], positional: false, kind: Kind::StoreTrue, ty: Ty::Str, nargs: Nargs::Zero, choices: &[], default: None, required: false, help: None, hidden: true, metavar: None, version: None },
+                        Arg { id: "message_id", dest: "message_id", tri: false, default_int: false, flags: &[], positional: true, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &[], default: None, required: true, help: None, hidden: false, metavar: None, version: None },
+                    ],
+                    groups: &[], sub_dest: None, sub_metavar: None, sub_required: false, subs: &[],
+                },
+                Cmd {
                     name: "reply", aliases: &[],
                     help: Some("answer one owner question (desk/web only)"),
                     raw: false,

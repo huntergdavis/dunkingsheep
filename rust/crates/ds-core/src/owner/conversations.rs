@@ -1360,6 +1360,47 @@ mod tests {
         );
         assert_eq!("2", view_version());
     }
+    #[test]
+    fn owner_handoff_reconciliation_preserves_actual_reply_transport() {
+        let fixture = Fixture::new("owner-handoff-recovery", true);
+        for (transport, task) in [("web", "t1"), ("telegram", "t2")] {
+            let question = fixture.send(OWNER_MAILBOX, "question", Some(transport), None);
+            let notice = fixture
+                .store
+                .ensure_owner_handoff_notice(&question, "%1", task)
+                .unwrap();
+            let answer = fixture
+                .service()
+                .reply(&question, Some(&Value::String("final".into())), Some(OWNER))
+                .unwrap();
+            assert_eq!(answer.transport.as_deref(), Some(transport));
+            assert_eq!(
+                answer.reply.summary.reply_to.as_deref(),
+                Some(question.as_str())
+            );
+            assert!(fixture
+                .store
+                .reconcile_answered_owner_notice(&question)
+                .unwrap());
+            assert_eq!(
+                fixture
+                    .store
+                    .get_message(&notice.notice_id)
+                    .unwrap()
+                    .summary
+                    .state,
+                "cancelled"
+            );
+            assert!(fixture
+                .service()
+                .reply(
+                    &question,
+                    Some(&Value::String("duplicate".into())),
+                    Some(OWNER)
+                )
+                .is_err());
+        }
+    }
 }
 
 #[cfg(test)]
