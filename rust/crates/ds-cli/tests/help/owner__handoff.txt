@@ -1,0 +1,7 @@
+usage: dunkingsheep owner handoff [-h] message_id
+
+positional arguments:
+  message_id  original owner question ID
+
+options:
+  -h, --help  show this help message and exit

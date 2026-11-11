@@ -5182,6 +5182,7 @@ fn cli_route_58_commands_map() {
                     || line.starts_with("roster(")
                     || line.starts_with("start_agent(")
                     || line.starts_with("memory_backfill(")
+                    || line.starts_with("owner_handoff(")
                 {
                     skip_description = true;
                     None
@@ -5222,12 +5223,14 @@ fn cli_route_58_commands_map() {
                 && row["name"] != "roster"
                 && row["name"] != "start_agent"
                 && row["name"] != "memory_backfill"
+                && row["name"] != "owner_handoff"
         });
         p.retain(|row| {
             row["name"] != "lanes"
                 && row["name"] != "roster"
                 && row["name"] != "start_agent"
                 && row["name"] != "memory_backfill"
+                && row["name"] != "owner_handoff"
         });
         assert_eq!(r, p);
     }

@@ -24,7 +24,8 @@ impl Tasks {
     ) -> Result<Option<HandoffMapping>, DunkError> {
         let question_id = question_id.to_owned();
         self.writer.call(move |connection| {
-            let row: Option<(String, String, i64, String, String, Option<String>, bool)> = connection.query_row(
+            type MappingRow = (String, String, i64, String, String, Option<String>, bool);
+            let row: Option<MappingRow> = connection.query_row(
                 "SELECT h.task_id, h.pane_id, h.supervisor_pid, h.supervisor_start, h.supervisor_boot, t.status, r.question_id IS NOT NULL FROM owner_handoff_tasks h LEFT JOIN tasks t ON t.id = h.task_id LEFT JOIN owner_handoff_reconciled r ON r.question_id = h.question_id WHERE h.question_id = ?",
                 [&question_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
             ).optional().map_err(db::map_sqlite)?;

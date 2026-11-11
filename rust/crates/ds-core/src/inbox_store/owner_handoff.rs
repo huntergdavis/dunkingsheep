@@ -152,7 +152,7 @@ impl Store {
 
     /// Read unresolved compensation records in bounded lexical pages. A caller must
     /// surface them and explicitly resolve them; this function clears nothing.
-    #[allow(dead_code)]
+    #[allow(dead_code, clippy::type_complexity)]
     pub(crate) fn owner_handoff_attention_page(
         &self,
         after: &str,
@@ -268,7 +268,7 @@ mod tests {
     #[test]
     fn owner_handoff_quarantine_contains_notice_and_blocks_recreation() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(&dir.path().join("inbox.db"), &dir.path().join("blobs")).unwrap();
+        let store = Store::open(dir.path().join("inbox.db"), dir.path().join("blobs")).unwrap();
         let q = store
             .send(&Outgoing {
                 mailbox: "owner",
@@ -301,7 +301,7 @@ mod tests {
     #[test]
     fn notice_is_idempotent_agent_only_and_refuses_answered_questions() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(&dir.path().join("inbox.db"), &dir.path().join("blobs")).unwrap();
+        let store = Store::open(dir.path().join("inbox.db"), dir.path().join("blobs")).unwrap();
         for (transport, task) in [("web", "t1"), ("telegram", "t2")] {
             let q = store
                 .send(&Outgoing {

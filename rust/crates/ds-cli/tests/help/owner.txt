@@ -13,6 +13,7 @@ positional arguments:
     delivered     record a transport's delivery receipt for one owner row
                   (t594)
     stats         owner-push counts and latency
+    handoff       hand an owner question to the supervisor
 
 options:
   -h, --help      show this help message and exit
