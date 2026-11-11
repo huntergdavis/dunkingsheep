@@ -93,7 +93,7 @@ fn cookie(headers: &HeaderMap) -> Option<String> {
         .filter_map(|p| p.trim().split_once('='))
         .filter(|(k, _)| *k == "vp_session")
         .map(|(_, v)| v.to_owned())
-        .last()
+        .next_back()
         .filter(|v| !v.is_empty())
 }
 async fn is_owner(state: &StreamState, token: &str) -> bool {
@@ -198,20 +198,41 @@ async fn upgrade(
         .max_frame_size(4096)
         .on_upgrade(move |ws| async move {
             let _permit = permit;
-            run(ws, state, name, token, binding, child, input, output).await;
+            run(
+                ws,
+                state,
+                name,
+                token,
+                binding,
+                ControlPipes {
+                    child,
+                    input,
+                    output,
+                },
+            )
+            .await;
         })
         .into_response()
 }
+struct ControlPipes {
+    child: tokio::process::Child,
+    input: tokio::process::ChildStdin,
+    output: tokio::process::ChildStdout,
+}
+
 async fn run(
     mut ws: WebSocket,
     state: Arc<StreamState>,
     name: String,
     token: String,
     binding: Binding,
-    mut child: tokio::process::Child,
-    mut input: tokio::process::ChildStdin,
-    mut output: tokio::process::ChildStdout,
+    control: ControlPipes,
 ) {
+    let ControlPipes {
+        mut child,
+        mut input,
+        mut output,
+    } = control;
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     let mut lines = ControlLines::default();
     let mut tracker = ControlReply::default();
