@@ -22,27 +22,12 @@ impl Drop for Children {
         }
     }
 }
-// A fake executable that was just written is synced and closed, then run once (a no-op: the
-// fakes match no subcommand) so the first real exec cannot race a fork that holds its descriptor.
-// This is the write-then-exec window that made CI report ETXTBSY (the known intermittent test).
+// A fake executable that was just written is run once (a no-op: the fakes match no subcommand) so
+// the first real exec does not hit the write-then-exec window that made CI report ETXTBSY. Only the
+// busy error is retried, by the shared helper (testsupport::exec_retrying_busy).
 fn settle_executable(path: &std::path::Path) {
-    std::fs::File::open(path)
-        .and_then(|file| file.sync_all())
-        .expect("sync the fake executable");
-    // Retry only the busy error, within a fixed budget (as spawn_fixture_child does).
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    loop {
-        match Command::new(path).arg("warm-up").status() {
-            Err(error)
-                if error.kind() == std::io::ErrorKind::ExecutableFileBusy
-                    && std::time::Instant::now() < deadline =>
-            {
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
-            Err(error) => panic!("settle the fake executable: {error}"),
-            Ok(_) => return,
-        }
-    }
+    crate::testsupport::exec_retrying_busy(|| Command::new(path).arg("warm-up").status())
+        .expect("settle the fake executable");
 }
 
 // fs::copy closes its handles before returning. CI can still report transient ETXTBSY
