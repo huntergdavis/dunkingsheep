@@ -16,6 +16,8 @@ pub mod python_http;
 pub mod python_json;
 pub mod roster;
 pub mod routes;
+pub mod terminal_stream;
+pub mod terminal_stream_route;
 pub mod web_server;
 
 pub use routes::auth::RequestScheme;
