@@ -22,6 +22,26 @@ owner on an allowed host. It lists only uniquely named, live, non-owner agent
 panes; state is null when no activity source is available. The listing is
 informational and a stream revalidates its target independently.
 
+`POST /api/terminals/{name}/resize` accepts `cols` and `rows` from 1 to
+1000. It requires the owner session, an allowed Host and matching Origin,
+and exactly one active stream owned by this desk process. It refuses shared
+or linked windows and windows viewed by another client. The tmux-side guard
+accepts server versions 3.4 and 3.6 only; other versions fail closed. A timeout or other
+uncertain result returns an outcome-unknown response: the operation may still
+run. The unknown-outcome response includes a router-instance `epoch`. `GET` on the same
+resize path reports `in_flight` and the current epoch. Only if epochs match,
+wait for `in_flight` to become false and inspect the actual size before deciding
+on a manual retry. A
+worker retains a name-and-pane fence until it returns, preventing overlapping
+resize attempts in that desk process. The fence is not durable across a desk
+restart or router recreation; after an epoch change during an unknown outcome, independently reconcile the
+tmux state before any retry. The role and process checks remain point-in-time; they are
+not an atomic transaction with tmux or role changes.
+
+If the resize worker panics, its fence remains busy until the router is
+recreated because a dispatched tmux command may still execute. An epoch
+change does not prove that command stopped; investigate before retrying.
+
 The stream endpoint sends output produced after attachment and accepts binary
 or text input frames. It does not send an initial screen snapshot. The existing
 port 8792 terminal listing and resize API are unchanged; this endpoint alone
