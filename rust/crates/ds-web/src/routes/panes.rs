@@ -239,8 +239,13 @@ struct QueryValidationDetail {
 
 async fn api_pane_text(
     Extension(state): Extension<Arc<PanesWebState>>,
+    Extension(auth): Extension<Arc<dyn AuthBackend>>,
+    Extension(scheme): Extension<RequestScheme>,
     request: Request,
 ) -> Response {
+    if let Err(response) = authenticate(auth.as_ref(), request.headers(), scheme).await {
+        return response.into_response();
+    }
     let query = match parse_query(request.uri().query()) {
         Ok(query) => query,
         Err(()) => return detail_response(StatusCode::BAD_REQUEST, "invalid query"),

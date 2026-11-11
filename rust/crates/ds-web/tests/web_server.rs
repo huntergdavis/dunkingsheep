@@ -591,18 +591,31 @@ fn fleet_routes_fail_closed_without_a_daemon() {
     let server = Server::start(config);
     let addr = server.addr;
 
-    // The fleet view is public, as in Python. With no daemon it answers an unavailable roster.
-    let fleet = request(addr, "GET", "/api/fleet", &[], None);
+    // Fleet and pane text require an owner session, even when the daemon is absent.
+    assert_eq!(request(addr, "GET", "/api/fleet", &[], None).status, 401);
+    assert_eq!(
+        request(addr, "GET", "/api/pane-text?pane=%259", &[], None).status,
+        401
+    );
+    let cookie = login(addr);
+    let cookie_header = format!("vp_session={cookie}");
+    let session = [("Cookie", cookie_header.as_str())];
+    let pane = request(addr, "GET", "/api/pane-text?pane=%259", &session, None);
+    assert_eq!(pane.status, 503, "{}", pane.text());
+    let fleet = request(addr, "GET", "/api/fleet", &session, None);
     assert_eq!(fleet.status, 200, "{}", fleet.text());
     assert!(fleet.text().contains("unavailable"), "{}", fleet.text());
+    // An authenticated cache fill must not make subsequent anonymous reads public.
+    assert_eq!(request(addr, "GET", "/api/fleet", &[], None).status, 401);
+    assert_eq!(
+        request(addr, "GET", "/api/pane-text?pane=%259", &[], None).status,
+        401
+    );
 
     // Sending to a pane needs a session, and with no daemon it never reports a delivery.
     let payload = r#"{"pane":"%9","text":"hi"}"#;
     let anonymous = request(addr, "POST", "/api/pane-send", &[], Some(payload));
     assert_eq!(anonymous.status, 401);
-    let cookie = login(addr);
-    let cookie_header = format!("vp_session={cookie}");
-    let session = [("Cookie", cookie_header.as_str())];
     let send = request(addr, "POST", "/api/pane-send", &session, Some(payload));
     assert!(matches!(send.status, 502 | 503), "{}", send.text());
     assert!(send.json()["detail"].is_string());
