@@ -445,7 +445,35 @@ mod tests {
                 None,
             )
             .unwrap();
-        let auth = Arc::new(FakeAuth(AtomicBool::new(true)));
+        let fake_auth = Arc::new(FakeAuth(AtomicBool::new(true)));
+        let real_data = dir.path().join("real-auth");
+        let real_auth = if std::env::var_os("T62_REAL_AUTH").is_some() {
+            let path = real_data.clone();
+            Some(Arc::new(
+                tokio::task::spawn_blocking(move || {
+                    crate::auth_backend::PersistentAuth::open_with_password(
+                        path,
+                        Some("private-fixture-password"),
+                    )
+                })
+                .await
+                .unwrap()
+                .unwrap(),
+            ))
+        } else {
+            None
+        };
+        let auth: Arc<dyn AuthBackend> = match &real_auth {
+            Some(real) => real.clone(),
+            None => fake_auth.clone(),
+        };
+        let session_token = if real_auth.is_some() {
+            auth.login("127.0.0.1", "private-fixture-password")
+                .await
+                .unwrap()
+        } else {
+            "private-test".to_owned()
+        };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         // Optional local integration against the actual gateway script. All
@@ -455,27 +483,31 @@ mod tests {
             let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let proxy_addr = reserved.local_addr().unwrap();
             drop(reserved);
-            let db = dir.path().join("proxy-auth.sqlite3");
-            let connection = rusqlite::Connection::open(&db).unwrap();
-            connection
-                .execute(
-                    "CREATE TABLE sessions(token_hash TEXT, expires_at REAL)",
-                    [],
-                )
-                .unwrap();
-            let digest = ring::digest::digest(&ring::digest::SHA256, b"private-test");
-            let hash = digest
-                .as_ref()
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<String>();
-            connection
-                .execute(
-                    "INSERT INTO sessions VALUES (?1, ?2)",
-                    rusqlite::params![hash, 9_999_999_999_f64],
-                )
-                .unwrap();
-            drop(connection);
+            let db = if real_auth.is_some() {
+                real_data.join("messages.sqlite3")
+            } else {
+                let db = dir.path().join("proxy-auth.sqlite3");
+                let connection = rusqlite::Connection::open(&db).unwrap();
+                connection
+                    .execute(
+                        "CREATE TABLE sessions(token_hash TEXT, expires_at REAL)",
+                        [],
+                    )
+                    .unwrap();
+                let digest = ring::digest::digest(&ring::digest::SHA256, session_token.as_bytes());
+                let hash = digest
+                    .as_ref()
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>();
+                connection
+                    .execute(
+                        "INSERT INTO sessions VALUES (?1, ?2)",
+                        rusqlite::params![hash, 9_999_999_999_f64],
+                    )
+                    .unwrap();
+                db
+            };
             let child = Command::new("python3")
                 .arg(script)
                 .env("HERDR_WEBUI_PROXY_BIND", proxy_addr.to_string())
@@ -521,8 +553,10 @@ mod tests {
             req.headers_mut()
                 .insert(header::ORIGIN, origin.parse().unwrap());
             if with_cookie {
-                req.headers_mut()
-                    .insert(header::COOKIE, "vp_session=private-test".parse().unwrap());
+                req.headers_mut().insert(
+                    header::COOKIE,
+                    format!("vp_session={session_token}").parse().unwrap(),
+                );
             }
             req
         };
@@ -559,7 +593,11 @@ mod tests {
         .await
         .unwrap();
         assert!(received);
-        auth.0.store(false, Ordering::SeqCst);
+        if real_auth.is_some() {
+            auth.logout(Some(&session_token)).await.unwrap();
+        } else {
+            fake_auth.0.store(false, Ordering::SeqCst);
+        }
         assert!(timeout(Duration::from_secs(6), async {
             while let Some(Ok(message)) = ws.next().await {
                 if matches!(message, ClientMessage::Close(_)) {
