@@ -147,13 +147,18 @@ impl OwnerProcess for StdOwnerProcess {
             use std::os::unix::process::CommandExt;
             process.process_group(0);
         }
-        let mut child = process
+        process
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| format!("could not start vpctl: {error}"))?;
+            .stderr(Stdio::piped());
+        // Only test fixtures can race a just-written fake executable. Keep the
+        // production spawn behavior unchanged.
+        #[cfg(test)]
+        let child = crate::testsupport::exec_retrying_busy(|| process.spawn());
+        #[cfg(not(test))]
+        let child = process.spawn();
+        let mut child = child.map_err(|error| format!("could not start vpctl: {error}"))?;
         let mut stdin = child.stdin.take().expect("piped child stdin");
         let input = body.as_bytes().to_vec();
         let writer = thread::spawn(move || stdin.write_all(&input));
