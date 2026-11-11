@@ -24,6 +24,7 @@ fn every_python_command_is_present_and_no_extra_ones_are() {
         "owner_page",
         "task_batch_claim",
         "owner_page_confirmed",
+        "owner_handoff",
     ];
     let extra: Vec<_> = rust
         .iter()
@@ -129,7 +130,15 @@ fn the_grouped_schemas_advertise_the_action_enum() {
             .iter()
             .map(|v| v.as_str().unwrap())
             .collect();
-        assert_eq!(actions.len(), advertised.len(), "{name}: action count");
+        let extension_count = usize::from(name == "inbox");
+        assert_eq!(
+            actions.len() + extension_count,
+            advertised.len(),
+            "{name}: action count"
+        );
+        if name == "inbox" {
+            assert!(advertised.contains(&"handoff"));
+        }
         for action in actions.keys() {
             assert!(
                 advertised.contains(&action.as_str()),
