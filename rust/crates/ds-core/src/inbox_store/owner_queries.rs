@@ -125,7 +125,7 @@ impl Store {
                 return Err(refuse(format!("{question_id} was already answered by {id}; one answer per question, so the latency metric has one edge")));
             }
             if body.trim().is_empty() { return Err(refuse("a reply needs a body")); }
-            let transport = validate_transport(transport.as_deref()).map_err(refuse)?;
+            let transport = required_transport(transport.as_deref(), "owner question has no originating transport; cannot deliver a reply")?;
             crate::inbox::check_sizes(body.len(), "", 0, 0).map_err(refuse)?;
             let id = next_message_id(&tx)?;
             let now = now_s();
@@ -472,6 +472,56 @@ mod tests {
 
     fn real(value: f64) -> SqlValue {
         SqlValue::Real(value)
+    }
+
+    #[test]
+    fn owner_answer_requires_deliverable_transport_without_mutating_question() {
+        let fixture = Fixture::new();
+        for transport in [None, Some("signal")] {
+            let question = fixture.send("owner", "question");
+            if let Some(transport) = transport {
+                fixture.execute(
+                    "UPDATE messages SET transport = ?1 WHERE id = ?2",
+                    vec![text(transport), text(&question)],
+                );
+            }
+            assert!(fixture
+                .store
+                .answer_owner_question(&question, "answer", Some("%1"))
+                .is_err());
+            assert!(fixture.store.replies_to(&question).unwrap().is_empty());
+            let row =
+                crate::inbox::status(&fixture.store.readers, &question, crate::clock::now_s())
+                    .unwrap();
+            assert_eq!(row.state, "queued");
+            assert!(row.acked_at.is_none());
+        }
+        for transport in ["web", "telegram"] {
+            let question = fixture.send_outgoing(&Outgoing {
+                mailbox: "owner",
+                body: Some("question"),
+                transport: Some(transport),
+                ..Default::default()
+            });
+            let answer = fixture
+                .store
+                .answer_owner_question(&question, "answer", Some("%1"))
+                .unwrap();
+            assert_eq!(answer.summary.transport.as_deref(), Some(transport));
+            assert_eq!(answer.summary.reply_to.as_deref(), Some(question.as_str()));
+            assert_eq!(
+                crate::inbox::status(&fixture.store.readers, &question, crate::clock::now_s())
+                    .unwrap()
+                    .state,
+                "acked"
+            );
+            assert!(fixture
+                .store
+                .owner_outbox(Some(transport), None)
+                .unwrap()
+                .iter()
+                .any(|item| item.summary.message_id == answer.summary.message_id));
+        }
     }
 
     #[test]
