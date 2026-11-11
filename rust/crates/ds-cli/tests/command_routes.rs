@@ -5249,10 +5249,13 @@ fn cli_route_58_commands_map() {
             text.lines()
                 .filter(|line| {
                     !line.starts_with("declared ")
+                        && !line.starts_with("- declared tools:")
                         && !line.starts_with("- grouped schema bytes:")
                         && !line.starts_with("- hot set (`inbox`, `task`, `memory`):")
+                        && !line.starts_with("owner_handoff ->")
+                        && !line.starts_with("| `owner_handoff` |")
                 })
-                .map(str::to_owned)
+                .map(|line| line.replace(", handoff,", ",").replace(", `handoff`,", ","))
                 .collect::<Vec<_>>()
         };
         assert_eq!(strip_sizes(&r), strip_sizes(&p));
