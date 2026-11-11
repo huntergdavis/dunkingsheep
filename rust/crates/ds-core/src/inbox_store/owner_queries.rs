@@ -496,30 +496,32 @@ mod tests {
             assert_eq!(row.state, "queued");
             assert!(row.acked_at.is_none());
         }
-        let question = fixture.send_outgoing(&Outgoing {
-            mailbox: "owner",
-            body: Some("web question"),
-            transport: Some("web"),
-            ..Default::default()
-        });
-        let answer = fixture
-            .store
-            .answer_owner_question(&question, "answer", Some("%1"))
-            .unwrap();
-        assert_eq!(answer.summary.transport.as_deref(), Some("web"));
-        assert_eq!(answer.summary.reply_to.as_deref(), Some(question.as_str()));
-        assert_eq!(
-            crate::inbox::status(&fixture.store.readers, &question, crate::clock::now_s())
+        for transport in ["web", "telegram"] {
+            let question = fixture.send_outgoing(&Outgoing {
+                mailbox: "owner",
+                body: Some("question"),
+                transport: Some(transport),
+                ..Default::default()
+            });
+            let answer = fixture
+                .store
+                .answer_owner_question(&question, "answer", Some("%1"))
+                .unwrap();
+            assert_eq!(answer.summary.transport.as_deref(), Some(transport));
+            assert_eq!(answer.summary.reply_to.as_deref(), Some(question.as_str()));
+            assert_eq!(
+                crate::inbox::status(&fixture.store.readers, &question, crate::clock::now_s())
+                    .unwrap()
+                    .state,
+                "acked"
+            );
+            assert!(fixture
+                .store
+                .owner_outbox(Some(transport), None)
                 .unwrap()
-                .state,
-            "acked"
-        );
-        assert!(fixture
-            .store
-            .owner_outbox(Some("web"), None)
-            .unwrap()
-            .iter()
-            .any(|item| item.summary.message_id == answer.summary.message_id));
+                .iter()
+                .any(|item| item.summary.message_id == answer.summary.message_id));
+        }
     }
 
     #[test]

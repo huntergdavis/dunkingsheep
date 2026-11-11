@@ -659,3 +659,7 @@ rate (about six).
   bodies today; free lanes are docs and triage. Nothing here is a 30x.
 - A GitHub outage stalls merges. The daemon's review status is the only gate
   that can be relaxed, and only by the owner editing branch protection.
+
+### Owner replies with no originating transport
+
+`owner reply` refuses a question whose stored transport is missing or unsupported, leaving the question and any existing rows unchanged. A bare owner inbox row does not identify a delivery channel, so do not infer one or replay it as an owner request. Inspect the record and escalate for an operator to determine the appropriate supported channel; answer a genuine transport-bearing question through the normal guarded reply path. There is no automatic repair of legacy rows. Generic owner inbox sends may still create transportless internal records and are not proof of external delivery.
