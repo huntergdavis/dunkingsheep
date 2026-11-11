@@ -50,7 +50,7 @@ pub fn nudge_subject(message_id: &str) -> String {
 /// the web route's nudge, with the transport named.
 pub fn nudge_body(message_id: &str, transport: &str, text: &str) -> String {
     format!(
-        "Owner message {message_id} ({transport}) is waiting in the owner mailbox: `dunkingsheep owner conversation`. Use `owner reply {message_id}` only for the final answer, not a routing acknowledgement. A final response may ask for needed clarification or explain an error. If more work is needed, leave the question pending.\n\n{text}"
+        "Owner message {message_id} ({transport}) is waiting in the owner mailbox: `dunkingsheep owner conversation`. Use `owner reply {message_id}` only for the final answer, not a routing acknowledgement. A final response may ask for needed clarification or explain an error. If supervisor work is needed, run `dunkingsheep owner handoff {message_id}` and leave the question pending. Quiet, failed or timed-out handoffs need recovery; queued does not mean picked up.\n\n{text}"
     )
 }
 

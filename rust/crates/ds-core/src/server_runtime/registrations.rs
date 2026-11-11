@@ -775,6 +775,7 @@ os.rename(out_path + ".tmp", out_path)
             "report_list",
             "owner_conversation",
             "owner_reply",
+            "owner_handoff",
             "owner_ingest",
             "owner_outbox",
             "owner_delivered",

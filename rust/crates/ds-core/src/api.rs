@@ -46,6 +46,9 @@ pub use layout_create::{h_create_tab, h_create_workspace, h_split_pane};
 mod respawn;
 pub use respawn::h_respawn_pane;
 
+#[path = "api_owner_handoff.rs"]
+pub(crate) mod owner_handoff;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -990,6 +993,7 @@ impl Dispatcher {
 
     /// Register only the T39 owner reply, ingest and outbox handlers.
     pub fn register_owner_reply_ingest_outbox(&mut self) {
+        self.register("owner_handoff", h_owner_handoff);
         self.register("owner_reply", h_owner_reply);
         self.register("owner_ingest", h_owner_ingest);
         self.register("owner_outbox", h_owner_outbox);
@@ -2051,6 +2055,19 @@ pub fn h_owner_conversation(context: &HandlerContext<'_>, args: Args) -> Result<
     let conversation = crate::owner::OwnerConversations::new(context.flock, context.env)
         .conversation(Some(limit), before, context.self_pane_id())?;
     serde_json::to_value(conversation).map_err(DunkError::from)
+}
+
+/// Hand an original owner question to the fixed registered supervisor.
+pub fn h_owner_handoff(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    if args.len() != 1 {
+        return Err(DunkError::Refused("handoff accepts only message_id".into()));
+    }
+    let id = args
+        .get("message_id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| DunkError::Refused("message_id must be a nonempty string".into()))?;
+    owner_handoff::handoff(context, id)
 }
 
 /// `dunk_api.h_owner_reply`.

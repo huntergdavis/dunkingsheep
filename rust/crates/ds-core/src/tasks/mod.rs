@@ -38,6 +38,7 @@ mod claim;
 mod claim_batch;
 pub mod next_job;
 pub mod next_job_runtime;
+pub(crate) mod owner_handoff;
 mod pane_view;
 pub mod wire;
 pub use claim::{
@@ -91,6 +92,18 @@ CREATE TABLE IF NOT EXISTS tasks (
 -- _migrate, after the kind/repo/pr/head columns exist on older databases: a
 -- duplicate is refused by the store, not by a check in the timer (the CoS
 -- filed twelve identical reviews for PR #117).
+CREATE TABLE IF NOT EXISTS owner_handoff_tasks (
+    question_id TEXT PRIMARY KEY,
+    pane_id TEXT NOT NULL,
+    task_id TEXT NOT NULL UNIQUE,
+    supervisor_pid INTEGER NOT NULL,
+    supervisor_start TEXT NOT NULL,
+    supervisor_boot TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS owner_handoff_reconciled (
+    question_id TEXT PRIMARY KEY,
+    reconciled_at REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS task_leases (
     task_id     TEXT NOT NULL,
     pane_id     TEXT NOT NULL,

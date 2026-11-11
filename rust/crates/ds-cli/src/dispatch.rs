@@ -67,6 +67,7 @@ const PYTHON_COMMAND_ORDER: &[&str] = &[
     "report_run",
     "report_list",
     "owner_conversation",
+    "owner_handoff",
     "owner_reply",
     "owner_ingest",
     "owner_outbox",
@@ -2423,6 +2424,16 @@ fn owner_inbox(ns: &Map<String, Value>) -> Outcome {
                 crate::render_print::render_owner_conversation(result, &stamp)
             })
         }
+        Some("handoff") => {
+            let mut args = Map::new();
+            args.insert(
+                "message_id".into(),
+                ns.get("message_id").cloned().unwrap_or(Value::Null),
+            );
+            crate::daemon_cmd::run_command(ns, "owner_handoff", args, |result| {
+                format!("{}\n", result)
+            })
+        }
         Some("reply") => {
             let body_file = text(ns, "body_file").filter(|path| !path.is_empty());
             let has_body = body_file.is_some()
@@ -3875,7 +3886,7 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
         "load" => load_report(ns),
         "pm" => pm(ns),
         "owner" => match text(ns, "owner_command") {
-            Some("conversation" | "reply" | "ingest") => owner_inbox(ns),
+            Some("conversation" | "handoff" | "reply" | "ingest") => owner_inbox(ns),
             Some("outbox" | "delivered" | "stats") | None => owner_outbox(ns),
             _ => owner_command(ns),
         },

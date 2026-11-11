@@ -233,6 +233,7 @@ fn the_table_accepts_exactly_the_subcommands_the_dispatcher_routes() {
             "poll",
             "take",
             "conversation",
+            "handoff",
             "reply",
             "ingest",
             "outbox",

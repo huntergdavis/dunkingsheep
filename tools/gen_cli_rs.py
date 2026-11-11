@@ -34,6 +34,9 @@ def load_parser():
     # The archived Python parser is frozen. Add the Rust-only lane membership
     # surface here so the generated table, namespace fixtures and help stay in sync.
     root = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
+    owner_actions = next(a for a in root.choices["owner"]._actions if isinstance(a, argparse._SubParsersAction))
+    handoff = owner_actions.add_parser("handoff", help="hand an owner question to the supervisor")
+    handoff.add_argument("message_id", help="original owner question ID")
     root.choices["roster"].add_argument("--project", metavar="NAME", help="only lanes with this explicit project membership")
     start = root.choices["start-agent"]
     start.add_argument("--project", help="explicit project membership")

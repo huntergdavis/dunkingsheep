@@ -1360,6 +1360,92 @@ mod tests {
         );
         assert_eq!("2", view_version());
     }
+    #[test]
+    fn owner_handoff_reconciliation_preserves_actual_reply_transport() {
+        let fixture = Fixture::new("owner-handoff-recovery", true);
+        for (transport, task) in [("web", "t1"), ("telegram", "t2")] {
+            let question = fixture.send(OWNER_MAILBOX, "question", Some(transport), None);
+            let notice = fixture
+                .store
+                .ensure_owner_handoff_notice(&question, "%1", task)
+                .unwrap();
+            let picked_up = fixture
+                .store
+                .read("codex-rust-owner", 10, false, true)
+                .unwrap();
+            assert_eq!(picked_up.len(), 1);
+            assert_eq!(picked_up[0].summary.message_id, notice.notice_id);
+            assert_eq!(picked_up[0].summary.state, "read");
+            let answer = fixture
+                .service()
+                .reply(&question, Some(&Value::String("final".into())), Some(OWNER))
+                .unwrap();
+            assert_eq!(answer.transport.as_deref(), Some(transport));
+            assert_eq!(
+                answer.reply.summary.reply_to.as_deref(),
+                Some(question.as_str())
+            );
+            assert!(fixture
+                .store
+                .reconcile_answered_owner_notice(&question)
+                .unwrap());
+            assert_eq!(
+                fixture
+                    .store
+                    .get_message(&notice.notice_id)
+                    .unwrap()
+                    .summary
+                    .state,
+                "cancelled"
+            );
+            assert!(fixture
+                .service()
+                .reply(
+                    &question,
+                    Some(&Value::String("duplicate".into())),
+                    Some(OWNER)
+                )
+                .is_err());
+        }
+    }
+
+    #[test]
+    fn owner_handoff_attention_allows_owner_to_answer_original_question() {
+        let fixture = Fixture::new("owner-handoff-manual-recovery", true);
+        let question = fixture.send(OWNER_MAILBOX, "question", Some("web"), None);
+        fixture
+            .store
+            .ensure_owner_handoff_notice(&question, "%1", "t1")
+            .unwrap();
+        fixture
+            .store
+            .quarantine_existing_owner_handoff(&question)
+            .unwrap();
+        let attention = fixture
+            .store
+            .owner_handoff_attention(&question)
+            .unwrap()
+            .unwrap();
+        assert_eq!(attention.0, "t1");
+        assert_eq!(attention.1, "%1");
+        let answer = fixture
+            .service()
+            .reply(&question, Some(&Value::String("final".into())), Some(OWNER))
+            .unwrap();
+        assert_eq!(answer.transport.as_deref(), Some("web"));
+        assert_eq!(
+            answer.reply.summary.reply_to.as_deref(),
+            Some(question.as_str())
+        );
+        assert!(fixture
+            .service()
+            .reply(
+                &question,
+                Some(&Value::String("duplicate".into())),
+                Some(OWNER)
+            )
+            .is_err());
+    }
 }
 
 #[cfg(test)]

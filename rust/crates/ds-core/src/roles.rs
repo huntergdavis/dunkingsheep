@@ -136,11 +136,12 @@ pub const SYSTEM_EXTRA: [&str; 33] = [
 ];
 
 /// `ALLOW["desk"]` minus `READ_ONLY`.
-pub const DESK_EXTRA: [&str; 16] = [
+pub const DESK_EXTRA: [&str; 17] = [
     "inbox_ack",
     "inbox_fetch",
     "inbox_read",
     "owner_conversation",
+    "owner_handoff",
     "owner_outbox",
     "owner_poll",
     "owner_reply",

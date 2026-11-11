@@ -10894,6 +10894,56 @@
  },
  {
   "argv": [
+   "owner",
+   "handoff",
+   "x"
+  ],
+  "namespace": {
+   "command": "owner",
+   "json": false,
+   "message_id": "x",
+   "no_start_daemon": false,
+   "owner_command": "handoff",
+   "self_pane": null,
+   "socket": null
+  }
+ },
+ {
+  "argv": [
+   "owner",
+   "handoff",
+   "x",
+   "--json"
+  ],
+  "namespace": {
+   "command": "owner",
+   "json": true,
+   "message_id": "x",
+   "no_start_daemon": false,
+   "owner_command": "handoff",
+   "self_pane": null,
+   "socket": null
+  }
+ },
+ {
+  "argv": [
+   "--json",
+   "owner",
+   "handoff",
+   "x"
+  ],
+  "namespace": {
+   "command": "owner",
+   "json": true,
+   "message_id": "x",
+   "no_start_daemon": false,
+   "owner_command": "handoff",
+   "self_pane": null,
+   "socket": null
+  }
+ },
+ {
+  "argv": [
    "report",
    "run"
   ],
