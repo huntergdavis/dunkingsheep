@@ -6,7 +6,7 @@ license.workspace = true
 description = "Dunking Sheep web adapter foundation (docs/rust/RUST_PORT.md section 2)."
 
 [dependencies]
-axum.workspace = true
+axum = { workspace = true, features = ["ws"] }
 base64 = "0.22"
 ring = "0.17"
 rusqlite = { version = "0.32", features = ["bundled"] }
@@ -22,9 +22,11 @@ futures-util = { version = "0.3", default-features = false }
 serde.workspace = true
 serde_json.workspace = true
 # fs and io-util let static bodies read through tokio::fs (t3330). Neither adds a crate to the lock.
-tokio = { version = "=1.54.1", features = ["rt-multi-thread", "net", "sync", "macros", "time", "fs", "io-util", "signal"] }
+tokio = { version = "=1.54.1", features = ["rt-multi-thread", "net", "sync", "macros", "time", "fs", "io-util", "signal", "process"] }
 # Dispatch framed requests into Axum without Hyper's incompatible framing layer.
 tower = { version = "=0.5.3", features = ["util"] }
 
 [dev-dependencies]
 tempfile = "3"
+tokio-tungstenite = "0.29"
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }

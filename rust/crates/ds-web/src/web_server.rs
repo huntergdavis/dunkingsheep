@@ -447,6 +447,10 @@ impl Desk {
                     .layer(Extension(auth.clone())),
             )
             .merge(ops_board::router(board, auth.clone(), scheme))
+            .merge(crate::terminal_stream_route::configured_router(
+                auth.clone(),
+                scheme,
+            ))
             .merge(dash::router(dash, auth, scheme))
             .fallback(move |request: Request| {
                 let root = ui_dist.clone();
