@@ -364,7 +364,15 @@ fn send_response(pane: &str, route: &str, payload: &Value) -> Response {
     }
     Json(result).into_response()
 }
-async fn api_fleet(Extension(state): Extension<Arc<FleetState>>) -> Response {
+async fn api_fleet(
+    Extension(state): Extension<Arc<FleetState>>,
+    Extension(auth): Extension<Arc<dyn AuthBackend>>,
+    Extension(scheme): Extension<RequestScheme>,
+    request: Request,
+) -> Response {
+    if let Err(response) = authenticate(auth.as_ref(), request.headers(), scheme).await {
+        return response.into_response();
+    }
     let now = state.rpc.now_seconds();
     if let Some((at, payload)) = state.payload.lock().unwrap().as_ref() {
         if now - at < 3.0 {
@@ -987,7 +995,7 @@ mod tests {
             if let Some(v) = listing {
                 f.reply("list_panes", v)
             }
-            let a = app(f.clone(), false);
+            let a = app(f.clone(), true);
             let (s, v) = http(a.clone(), "/api/fleet", None);
             assert_eq!(s, 200);
             assert_eq!(v["state"], "unavailable");
@@ -1016,7 +1024,7 @@ mod tests {
         );
         *f.registry.lock().unwrap() = json!({"%1":{"mailbox":"lane"}});
         f.turns.lock().unwrap().insert("sid".into(), 95.);
-        let (s, v) = http(app(f, false), "/api/fleet", None);
+        let (s, v) = http(app(f, true), "/api/fleet", None);
         assert_eq!(s, 200);
         assert_eq!(v["count"], 2);
         let r = &v["rows"][0];
@@ -1036,7 +1044,7 @@ mod tests {
             "list_panes",
             json!({"panes":[{"pane_id":"%1","agent":"pi"}]}),
         );
-        let a = app(f.clone(), false);
+        let a = app(f.clone(), true);
         let (_, v) = http(a.clone(), "/api/fleet", None);
         let r = &v["rows"][0];
         assert_eq!(r["pending"], Value::Null);
