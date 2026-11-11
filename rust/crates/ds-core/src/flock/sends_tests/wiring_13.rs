@@ -8,7 +8,6 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use rusqlite::Connection;
 use serde_json::{json, Value};
@@ -23,8 +22,6 @@ const T508_PREFIX: &str = include_str!("../testdata/t508-prefix.txt");
 const SESSION: &str = "01a173ee-beed-7461-a560-e5f6c1f666a7";
 /// The composer the renderer draws after a submitting Enter, as the oracle's fake draws it.
 const EMPTY_COMPOSER: &str = "\u{203a} \n\n  GPT-6-Astra high \u{b7} ~/workspace \u{b7} task\n";
-/// ETXTBSY: the copied codex binary is still open for writing in another fork.
-const ETXTBSY: i32 = 26;
 
 /// Pane screens, statuses and the keys sent to them. The renderer clears the composer on the Enter
 /// that submits, as the oracle's fake does. Nothing else is faked.
@@ -122,19 +119,10 @@ fn native_fixture(dir: &Path) -> NativeFixture {
     // named codex. The shell stays alive by blocking in `read` on a stdin pipe the guard holds.
     let binary = dir.join("codex");
     std::fs::copy("/bin/sh", &binary).unwrap();
-    let mut attempts = 0;
-    let mut child = loop {
-        match spawn_codex(&binary, &home, &hooks) {
-            Ok(child) => break NativeChild(child),
-            // Another test thread's fork can hold the copy open for an instant after it was
-            // written. Retry that one error, then fail on anything else.
-            Err(error) if error.raw_os_error() == Some(ETXTBSY) && attempts < 500 => {
-                attempts += 1;
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            Err(error) => panic!("spawn the codex fixture: {error}"),
-        }
-    };
+    let mut child = NativeChild(
+        crate::testsupport::exec_retrying_busy(|| spawn_codex(&binary, &home, &hooks))
+            .expect("spawn the codex fixture"),
+    );
     assert!(
         child.0.try_wait().unwrap().is_none(),
         "the codex fixture process exited at once"
