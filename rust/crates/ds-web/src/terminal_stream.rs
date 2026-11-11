@@ -4,6 +4,20 @@ use serde_json::{Map, Value};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
+/// Validate an external Host against explicitly configured authorities.
+pub fn valid_terminal_host(headers: &axum::http::HeaderMap, allowed_hosts: &[String]) -> bool {
+    let mut hosts = headers.get_all(axum::http::header::HOST).iter();
+    let Some(host) = hosts.next().and_then(|v| v.to_str().ok()) else {
+        return false;
+    };
+    hosts.next().is_none()
+        && !host.is_empty()
+        && !host.contains(['/', '\\', '@', ' ', '\t', ','])
+        && allowed_hosts
+            .iter()
+            .any(|allowed| allowed.eq_ignore_ascii_case(host))
+}
+
 /// Browser WebSocket handshakes require exactly one explicit Origin and Host.
 /// The scheme is server configuration, never a client forwarding header.
 pub fn valid_websocket_origin(
@@ -23,13 +37,7 @@ pub fn valid_websocket_origin(
     let (Ok(origin), Ok(host)) = (origin.to_str(), host.to_str()) else {
         return false;
     };
-    if host.is_empty() || host.contains(['/', '\\', '@', ' ', '\t', ',']) {
-        return false;
-    }
-    if !allowed_hosts
-        .iter()
-        .any(|allowed| allowed.eq_ignore_ascii_case(host))
-    {
+    if !valid_terminal_host(headers, allowed_hosts) {
         return false;
     }
     let protocol = match scheme {
@@ -271,6 +279,85 @@ pub fn resolve_live_agent(
         })
         .collect::<Vec<_>>();
     eligible_agent(name, panes, &roles.lanes, &live)
+}
+
+/// List only uniquely named managed agents with a live non-owner role binding.
+/// Every source is a point-in-time snapshot; a later request revalidates it.
+pub fn list_live_agents(
+    backend: &ds_core::terminal::tmux::TmuxBackend,
+    roles: &mut ds_core::roles::Roles,
+) -> Option<Vec<Value>> {
+    let registry = backend.registry().load().ok()?;
+    let managed = registry.get("panes")?.as_object()?;
+    roles.refresh(true).ok()?;
+    let geometry = backend
+        .run(&[
+            "list-panes",
+            "-a",
+            "-F",
+            "#{pane_id}|#{pane_pid}|#{pane_width}|#{pane_height}",
+        ])
+        .ok()?;
+    if geometry.code != 0 {
+        return None;
+    }
+    let mut live = Vec::new();
+    let mut sizes = std::collections::BTreeMap::new();
+    let mut duplicate_ids = std::collections::BTreeSet::new();
+    for line in geometry.stdout.lines() {
+        let fields: Vec<_> = line.split('|').collect();
+        let [id, pid, cols, rows] = fields.as_slice() else {
+            return None;
+        };
+        let digits = id.strip_prefix('%')?;
+        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let (pid, cols, rows) = (
+            pid.parse::<i64>().ok()?,
+            cols.parse::<u16>().ok()?,
+            rows.parse::<u16>().ok()?,
+        );
+        if pid <= 0 || cols == 0 || rows == 0 {
+            return None;
+        }
+        if let Some(start) = ds_core::proc::process_start(pid) {
+            live.push(((*id).to_owned(), pid, start));
+        }
+        if sizes.insert(*id, (cols, rows)).is_some() {
+            duplicate_ids.insert(*id);
+        }
+    }
+    let mut result = Vec::new();
+    for record in managed.values() {
+        let Some(name) = record.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        if name.contains('/')
+            || name
+                .strip_prefix('%')
+                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        {
+            continue;
+        }
+        let Some((pane, _, _)) = eligible_agent(name, managed, &roles.lanes, &live) else {
+            continue;
+        };
+        if duplicate_ids.contains(pane.as_str()) {
+            continue;
+        }
+        let Some((cols, rows)) = sizes.get(pane.as_str()) else {
+            continue;
+        };
+        let agent = record
+            .get("agent_kind")
+            .and_then(Value::as_str)
+            .map(Value::from)
+            .unwrap_or(Value::Null);
+        result.push(serde_json::json!({"name":name,"agent":agent,"state":null,"state_reason":"no activity source", "cols":cols,"rows":rows}));
+    }
+    result.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+    Some(result)
 }
 
 /// Resolve a named managed agent only when its role registration binds the live

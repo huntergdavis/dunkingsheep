@@ -11,7 +11,7 @@ use axum::{
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::get,
-    Router,
+    Json, Router,
 };
 use ds_core::{config::Env, roles::Roles, terminal::tmux::TmuxBackend};
 use std::{
@@ -80,8 +80,49 @@ fn router_from_env(auth: Arc<dyn AuthBackend>, scheme: RequestScheme, env: &Env)
         sessions: Arc::new(Semaphore::new(4)),
     });
     Router::new()
+        .route("/api/terminals", get(list_terminals))
         .route("/api/terminals/{name}/stream", get(upgrade))
         .with_state(state)
+}
+
+async fn list_terminals(State(state): State<Arc<StreamState>>, headers: HeaderMap) -> Response {
+    if !terminal_stream::valid_terminal_host(&headers, &state.hosts)
+        || (headers.contains_key(header::ORIGIN)
+            && !terminal_stream::valid_websocket_origin(&headers, state.scheme, &state.hosts))
+    {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(token) = cookie(&headers) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if !is_owner(&state, &token).await {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let Ok(permit) = state.workers.clone().try_acquire_owned() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let worker_state = state.clone();
+    let found = timeout(
+        Duration::from_secs(2),
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let mut roles = worker_state.roles.lock().ok()?;
+            terminal_stream::list_live_agents(&worker_state.backend, &mut roles)
+        }),
+    )
+    .await;
+    let Ok(Ok(Some(found))) = found else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    if !is_owner(&state, &token).await {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let mut response = Json(found).into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    response
 }
 
 fn cookie(headers: &HeaderMap) -> Option<String> {
@@ -362,16 +403,18 @@ mod tests {
             Env::from_pairs(&[]),
             Env::from_pairs(&[("DUNKINGSHEEP_TERMINAL_STREAM", "1")]),
         ] {
-            let response = router_from_env(auth.clone(), RequestScheme::Http, &env)
-                .oneshot(
-                    axum::http::Request::builder()
-                        .uri("/api/terminals/example/stream")
-                        .body(axum::body::Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+            for path in ["/api/terminals", "/api/terminals/example/stream"] {
+                let response = router_from_env(auth.clone(), RequestScheme::Http, &env)
+                    .oneshot(
+                        axum::http::Request::builder()
+                            .uri(path)
+                            .body(axum::body::Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::NOT_FOUND);
+            }
         }
     }
 
@@ -439,6 +482,55 @@ mod tests {
                 "worker",
                 Some(*pid),
                 Some(&start),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let owner = backend
+            .run(&[
+                "new-window",
+                "-d",
+                "-P",
+                "-F",
+                "#{pane_id}",
+                "-t",
+                "fixture",
+                "cat",
+            ])
+            .unwrap();
+        assert_eq!(owner.code, 0);
+        let owner_pane = owner.stdout.trim();
+        let identities = backend
+            .run(&[
+                "list-panes",
+                "-a",
+                "-F",
+                ds_core::terminal::identity::identity_format(),
+            ])
+            .unwrap();
+        let owner_pid = ds_core::terminal::identity::parse_pane_identities(&identities.stdout)
+            .unwrap()
+            .into_iter()
+            .find(|(id, _)| id == owner_pane)
+            .and_then(|(_, pid)| pid)
+            .unwrap();
+        let owner_start = ds_core::proc::process_start(owner_pid).unwrap();
+        backend
+            .registry()
+            .remember(
+                "pane",
+                owner_pane,
+                serde_json::json!({"name":"private-owner","agent":"private-owner"}),
+            )
+            .unwrap();
+        roles
+            .register(
+                owner_pane,
+                "owner",
+                Some(owner_pid),
+                Some(&owner_start),
                 None,
                 None,
                 None,
@@ -544,9 +636,59 @@ mod tests {
             sessions: Arc::new(Semaphore::new(4)),
         });
         let app = Router::new()
+            .route("/api/terminals", get(list_terminals))
             .route("/api/terminals/{name}/stream", get(upgrade))
             .with_state(state);
+        use tower::ServiceExt;
+        let list_request = |authenticated: bool| {
+            let mut request = axum::http::Request::builder()
+                .uri("/api/terminals")
+                .header(header::HOST, client_addr.to_string());
+            if authenticated {
+                request = request.header(header::COOKIE, format!("vp_session={session_token}"));
+            }
+            request.body(axum::body::Body::empty()).unwrap()
+        };
+        let denied = app.clone().oneshot(list_request(false)).await.unwrap();
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+        let cross_origin = axum::http::Request::builder()
+            .uri("/api/terminals")
+            .header(header::HOST, client_addr.to_string())
+            .header(header::ORIGIN, "http://evil.test")
+            .header(header::COOKIE, format!("vp_session={session_token}"))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(cross_origin).await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+        let listed = app.clone().oneshot(list_request(true)).await.unwrap();
+        assert_eq!(listed.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(listed.into_body(), 4096)
+            .await
+            .unwrap();
+        let items: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(items.as_array().unwrap().len(), 1);
+        assert_eq!(items[0]["name"], "fixture-worker");
+        assert!(items[0].get("pane_id").is_none());
         let serving = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut list_socket = tokio::net::TcpStream::connect(client_addr).await.unwrap();
+        let list_http = format!("GET /api/terminals HTTP/1.1\r\nHost: {client_addr}\r\nCookie: vp_session={session_token}\r\nConnection: close\r\n\r\n");
+        list_socket.write_all(list_http.as_bytes()).await.unwrap();
+        let mut response = Vec::new();
+        timeout(
+            Duration::from_secs(8),
+            list_socket.read_to_end(&mut response),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let text = std::str::from_utf8(&response).unwrap();
+        assert!(text.starts_with("HTTP/1.1 200"));
+        let body = text.split_once("\r\n\r\n").unwrap().1;
+        let items: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(items.as_array().unwrap().len(), 1);
+        assert_eq!(items[0]["name"], "fixture-worker");
         let url = format!("ws://{client_addr}/api/terminals/fixture-worker/stream");
         let request = |origin: &str, with_cookie: bool| {
             let mut req = url.as_str().into_client_request().unwrap();
