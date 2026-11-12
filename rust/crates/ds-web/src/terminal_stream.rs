@@ -270,18 +270,28 @@ pub fn resolve_live_agent(
     if result.code != 0 {
         return None;
     }
-    let live = ds_core::terminal::identity::parse_pane_identities(&result.stdout)
-        .ok()?
+    let identities = ds_core::terminal::identity::parse_pane_identities(&result.stdout).ok()?;
+    if !unique_pane_ids(&identities) {
+        return None;
+    }
+    let live = identities
         .into_iter()
         .filter_map(|(id, pid)| {
             let pid = pid?;
             Some((id, pid, ds_core::proc::process_start(pid)?))
         })
         .collect::<Vec<_>>();
-    eligible_agent(name, panes, &roles.lanes, &live)
+    if name == OWNER_TERMINAL_NAME {
+        if owner_namespace_collision(panes) {
+            return None;
+        }
+        eligible_owner(&roles.lanes, &live)
+    } else {
+        eligible_agent(name, panes, &roles.lanes, &live)
+    }
 }
 
-/// List only uniquely named managed agents with a live non-owner role binding.
+/// List uniquely named managed agents and the single unambiguous live owner.
 /// Every source is a point-in-time snapshot; a later request revalidates it.
 pub fn list_live_agents(
     backend: &ds_core::terminal::tmux::TmuxBackend,
@@ -356,8 +366,64 @@ pub fn list_live_agents(
             .unwrap_or(Value::Null);
         result.push(serde_json::json!({"name":name,"pane_id":pane,"agent":agent,"state":null,"state_reason":"no activity source", "cols":cols,"rows":rows}));
     }
+    if !owner_namespace_collision(managed) {
+        if let Some((pane, _, _)) = eligible_owner(&roles.lanes, &live) {
+            if !duplicate_ids.contains(pane.as_str()) {
+                if let Some((cols, rows)) = sizes.get(pane.as_str()) {
+                    result.push(serde_json::json!({"name": OWNER_TERMINAL_NAME, "pane_id": pane, "agent": "owner", "state": null, "state_reason": "no activity source", "cols": cols, "rows": rows}));
+                }
+            }
+        }
+    }
     result.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
     Some(result)
+}
+
+fn unique_pane_ids(identities: &[(String, Option<i64>)]) -> bool {
+    let mut seen = std::collections::BTreeSet::new();
+    identities.iter().all(|(id, _)| seen.insert(id))
+}
+
+const OWNER_TERMINAL_NAME: &str = "__owner_terminal__";
+
+fn owner_namespace_collision(managed: &Map<String, Value>) -> bool {
+    managed.values().any(|record| {
+        ["name", "agent"]
+            .iter()
+            .any(|field| record.get(*field).and_then(Value::as_str) == Some(OWNER_TERMINAL_NAME))
+    })
+}
+
+/// Resolve the owner only through one unambiguous owner-role registration and
+/// its live pane generation. A pane id provided by a client is never authority.
+pub fn eligible_owner(
+    roles: &std::collections::BTreeMap<String, Map<String, Value>>,
+    live: &[(String, i64, String)],
+) -> Option<(String, i64, String)> {
+    let owners: Vec<_> = roles
+        .iter()
+        .filter(|(_, role)| role.get("role").and_then(Value::as_str) == Some("owner"))
+        .collect();
+    let [(pane, role)] = owners.as_slice() else {
+        return None;
+    };
+    let digits = pane.strip_prefix('%')?;
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let pid = role.get("pane_pid")?.as_i64().filter(|pid| *pid > 0)?;
+    let start = role
+        .get("start")?
+        .as_str()
+        .filter(|start| !start.is_empty())?;
+    let identities: Vec<_> = live.iter().filter(|(id, _, _)| id == *pane).collect();
+    let [(id, current_pid, current_start)] = identities.as_slice() else {
+        return None;
+    };
+    if *current_pid != pid || current_start != start {
+        return None;
+    }
+    Some((id.clone(), pid, start.to_owned()))
 }
 
 /// Resolve a named managed agent only when its role registration binds the live
@@ -370,7 +436,7 @@ pub fn eligible_agent(
     roles: &std::collections::BTreeMap<String, Map<String, Value>>,
     live: &[(String, i64, String)],
 ) -> Option<(String, i64, String)> {
-    if name.is_empty() || name.trim() != name {
+    if name == OWNER_TERMINAL_NAME || name.is_empty() || name.trim() != name {
         return None;
     }
     let matches: Vec<_> = managed
@@ -575,6 +641,58 @@ mod tests {
         );
         assert!(input_command("%1;kill-server", b"x").is_none());
         assert!(input_command("%1", &vec![0; 4097]).is_none());
+    }
+
+    #[test]
+    fn duplicate_pane_id_is_rejected_even_when_one_pid_is_unreadable() {
+        assert!(!super::unique_pane_ids(&[
+            ("%1".to_owned(), None),
+            ("%1".to_owned(), Some(42))
+        ]));
+        assert!(super::unique_pane_ids(&[
+            ("%1".to_owned(), None),
+            ("%2".to_owned(), Some(42))
+        ]));
+    }
+
+    #[test]
+    fn owner_terminal_namespace_rejects_managed_aliases() {
+        let clean = json!({"%1": {"name": "worker", "agent": "worker"}});
+        assert!(!super::owner_namespace_collision(
+            clean.as_object().unwrap()
+        ));
+        let collision = json!({"%1": {"name": "__owner_terminal__", "agent": "worker"}});
+        assert!(super::owner_namespace_collision(
+            collision.as_object().unwrap()
+        ));
+        let agent_collision = json!({"%1": {"name": "worker", "agent": "__owner_terminal__"}});
+        assert!(super::owner_namespace_collision(
+            agent_collision.as_object().unwrap()
+        ));
+    }
+
+    #[test]
+    fn owner_eligibility_fails_closed_for_ambiguity_and_stale_generations() {
+        let owner = json!({"role":"owner","pane_pid":42,"start":"123"})
+            .as_object()
+            .unwrap()
+            .clone();
+        let mut roles = std::collections::BTreeMap::new();
+        roles.insert("%1".to_owned(), owner.clone());
+        let live = vec![("%1".to_owned(), 42, "123".to_owned())];
+        assert!(super::eligible_owner(&roles, &live).is_some());
+        assert!(
+            super::eligible_owner(&roles, &[("%1".to_owned(), 42, "changed".to_owned())]).is_none()
+        );
+        assert!(super::eligible_owner(&roles, &[live[0].clone(), live[0].clone()]).is_none());
+        roles.insert("%2".to_owned(), owner);
+        assert!(super::eligible_owner(&roles, &live).is_none());
+        roles.remove("%2");
+        roles
+            .get_mut("%1")
+            .unwrap()
+            .insert("role".to_owned(), json!("worker"));
+        assert!(super::eligible_owner(&roles, &live).is_none());
     }
 
     #[test]
