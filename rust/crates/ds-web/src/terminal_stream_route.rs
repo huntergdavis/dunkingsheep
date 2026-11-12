@@ -986,7 +986,7 @@ mod tests {
         let items: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(items.as_array().unwrap().len(), 1);
         assert_eq!(items[0]["name"], "fixture-worker");
-        assert_eq!(items[0]["pane_id"], pane);
+        assert_eq!(items[0]["pane_id"].as_str(), Some(pane.as_str()));
         let resize_request = |name: &str, body: &'static str| {
             axum::http::Request::builder()
                 .method("POST")
