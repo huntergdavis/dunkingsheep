@@ -984,9 +984,18 @@ mod tests {
             .await
             .unwrap();
         let items: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(items.as_array().unwrap().len(), 1);
-        assert_eq!(items[0]["name"], "fixture-worker");
-        assert_eq!(items[0]["pane_id"].as_str(), Some(pane.as_str()));
+        let items = items.as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        let worker = items
+            .iter()
+            .find(|item| item["name"] == "fixture-worker")
+            .unwrap();
+        let owner = items
+            .iter()
+            .find(|item| item["name"] == "__owner_terminal__")
+            .unwrap();
+        assert_eq!(worker["pane_id"].as_str(), Some(pane.as_str()));
+        assert_eq!(owner["pane_id"].as_str(), Some(owner_pane));
         let resize_request = |name: &str, body: &'static str| {
             axum::http::Request::builder()
                 .method("POST")
@@ -1058,8 +1067,151 @@ mod tests {
         assert!(text.starts_with("HTTP/1.1 200"));
         let body = text.split_once("\r\n\r\n").unwrap().1;
         let items: serde_json::Value = serde_json::from_str(body).unwrap();
-        assert_eq!(items.as_array().unwrap().len(), 1);
-        assert_eq!(items[0]["name"], "fixture-worker");
+        assert_eq!(items.as_array().unwrap().len(), 2);
+        assert!(items
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["name"] == "fixture-worker"));
+        assert!(items
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["name"] == "__owner_terminal__"));
+        let owner_url = format!("ws://{client_addr}/api/terminals/__owner_terminal__/stream");
+        let mut denied_owner = owner_url.as_str().into_client_request().unwrap();
+        denied_owner.headers_mut().insert(
+            header::ORIGIN,
+            format!("http://{client_addr}").parse().unwrap(),
+        );
+        assert!(tokio_tungstenite::connect_async(denied_owner)
+            .await
+            .is_err());
+        let mut wrong_origin_owner = owner_url.as_str().into_client_request().unwrap();
+        wrong_origin_owner
+            .headers_mut()
+            .insert(header::ORIGIN, "http://evil.test".parse().unwrap());
+        wrong_origin_owner.headers_mut().insert(
+            header::COOKIE,
+            format!("vp_session={session_token}").parse().unwrap(),
+        );
+        assert!(tokio_tungstenite::connect_async(wrong_origin_owner)
+            .await
+            .is_err());
+        let mut wrong_pane_owner = format!("{owner_url}?expected_pane=%25999999")
+            .into_client_request()
+            .unwrap();
+        wrong_pane_owner.headers_mut().insert(
+            header::ORIGIN,
+            format!("http://{client_addr}").parse().unwrap(),
+        );
+        wrong_pane_owner.headers_mut().insert(
+            header::COOKIE,
+            format!("vp_session={session_token}").parse().unwrap(),
+        );
+        assert!(tokio_tungstenite::connect_async(wrong_pane_owner)
+            .await
+            .is_err());
+        let mut allowed_owner = owner_url.as_str().into_client_request().unwrap();
+        allowed_owner.headers_mut().insert(
+            header::ORIGIN,
+            format!("http://{client_addr}").parse().unwrap(),
+        );
+        allowed_owner.headers_mut().insert(
+            header::COOKIE,
+            format!("vp_session={session_token}").parse().unwrap(),
+        );
+        let (mut owner_ws, _) = tokio_tungstenite::connect_async(allowed_owner)
+            .await
+            .unwrap();
+        owner_ws
+            .send(ClientMessage::Binary(
+                b"private-owner-echo\n".to_vec().into(),
+            ))
+            .await
+            .unwrap();
+        assert!(timeout(Duration::from_secs(8), async {
+            let mut received = Vec::new();
+            while let Some(Ok(message)) = owner_ws.next().await {
+                if let ClientMessage::Binary(bytes) = message {
+                    received.extend_from_slice(&bytes);
+                    if received
+                        .windows(b"private-owner-echo".len())
+                        .any(|w| w == b"private-owner-echo")
+                    {
+                        return true;
+                    }
+                }
+            }
+            false
+        })
+        .await
+        .unwrap());
+        state.roles.lock().unwrap().unregister(owner_pane).unwrap();
+        let _ = owner_ws
+            .send(ClientMessage::Binary(
+                b"revoked-input-must-not-arrive\n".to_vec().into(),
+            ))
+            .await;
+        let saw_close = timeout(Duration::from_secs(6), async {
+            while let Some(Ok(message)) = owner_ws.next().await {
+                if matches!(message, ClientMessage::Close(_)) {
+                    return true;
+                }
+            }
+            false
+        })
+        .await
+        .unwrap();
+        assert!(saw_close, "owner role revocation must cause a close frame");
+        let owner_screen = inspect_backend
+            .run(&["capture-pane", "-p", "-t", owner_pane])
+            .unwrap();
+        assert_eq!(owner_screen.code, 0);
+        assert!(!owner_screen
+            .stdout
+            .contains("revoked-input-must-not-arrive"));
+        state
+            .roles
+            .lock()
+            .unwrap()
+            .register(
+                owner_pane,
+                "owner",
+                Some(owner_pid),
+                Some("stale-generation"),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let mut stale_owner = owner_url.as_str().into_client_request().unwrap();
+        stale_owner.headers_mut().insert(
+            header::ORIGIN,
+            format!("http://{client_addr}").parse().unwrap(),
+        );
+        stale_owner.headers_mut().insert(
+            header::COOKIE,
+            format!("vp_session={session_token}").parse().unwrap(),
+        );
+        assert!(tokio_tungstenite::connect_async(stale_owner).await.is_err());
+        state.roles.lock().unwrap().unregister(owner_pane).unwrap();
+        state
+            .roles
+            .lock()
+            .unwrap()
+            .register(
+                owner_pane,
+                "owner",
+                Some(owner_pid),
+                Some(&owner_start),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
         let url = format!("ws://{client_addr}/api/terminals/fixture-worker/stream");
         let request = |origin: &str, with_cookie: bool| {
             let mut req = url.as_str().into_client_request().unwrap();
