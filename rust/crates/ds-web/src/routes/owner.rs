@@ -519,8 +519,8 @@ async fn owner_thread(state: &OwnerWebState, limit: i64) -> Result<Value, OwnerW
 fn owner_thread_item(row: &Value) -> Value {
     let sender = row.get("sender").cloned().unwrap_or(Value::Null);
     let transport = row.get("transport").cloned().unwrap_or(Value::Null);
-    let role = match if row.get("historical_owner_reply").and_then(Value::as_bool) == Some(true) {
-        OwnerThreadRole::Agent
+    let role = match if row.get("ambiguous_owner_reply").and_then(Value::as_bool) == Some(true) {
+        OwnerThreadRole::Unknown
     } else {
         owner_thread_role(sender.as_str(), transport.as_str())
     } {
@@ -1589,7 +1589,7 @@ mod tests {
                 {"id":"i10", "body":"human follow-up", "created_at":1030.0, "transport":"web", "sender":null, "reply_to":"i9"},
                 {"id":"i11", "body":"legacy row", "created_at":1040.0, "transport":null, "sender":null, "reply_to":null},
                 {"id":"i12", "body":"generated report", "created_at":1050.0, "transport":"report", "sender":null, "reply_to":null},
-                {"id":"i59713", "body":"detached answer", "created_at":1060.0, "transport":"web", "sender":null, "reply_to":"i59698", "historical_owner_reply":true}
+                {"id":"i59713", "body":"detached answer", "created_at":1060.0, "transport":"web", "sender":null, "reply_to":"i59698", "ambiguous_owner_reply":true}
             ],
             "waiting": ["i10"]
         }));
@@ -1617,7 +1617,7 @@ mod tests {
         assert_eq!(body["items"][3]["delivery"], "stored");
         assert_eq!(body["items"][4]["role"], "unknown");
         assert_eq!(body["items"][5]["role"], "unknown");
-        assert_eq!(body["items"][6]["role"], "agent");
+        assert_eq!(body["items"][6]["role"], "unknown");
         assert_eq!(backend.methods(), ["owner_conversation"]);
         assert_eq!(backend.calls.lock().unwrap()[0].1, json!({"limit": 200}));
     }
