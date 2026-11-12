@@ -6,7 +6,7 @@ license.workspace = true
 description = "Dunking Sheep web adapter foundation (docs/rust/RUST_PORT.md section 2)."
 
 [dependencies]
-axum = { workspace = true, features = ["ws"] }
+axum = { workspace = true, features = ["ws", "query"] }
 base64 = "0.22"
 ring = "0.17"
 rusqlite = { version = "0.32", features = ["bundled"] }
