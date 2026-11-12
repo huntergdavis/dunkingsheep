@@ -986,7 +986,7 @@ mod tests {
         let items: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(items.as_array().unwrap().len(), 1);
         assert_eq!(items[0]["name"], "fixture-worker");
-        assert!(items[0].get("pane_id").is_none());
+        assert_eq!(items[0]["pane_id"], pane);
         let resize_request = |name: &str, body: &'static str| {
             axum::http::Request::builder()
                 .method("POST")
@@ -1082,6 +1082,17 @@ mod tests {
                 .await
                 .is_err()
         );
+        let mut wrong = format!("{url}?expected_pane=%25999999")
+            .into_client_request()
+            .unwrap();
+        wrong
+            .headers_mut()
+            .insert(header::ORIGIN, origin.parse().unwrap());
+        wrong.headers_mut().insert(
+            header::COOKIE,
+            format!("vp_session={session_token}").parse().unwrap(),
+        );
+        assert!(tokio_tungstenite::connect_async(wrong).await.is_err());
         let (mut ws, _) = tokio_tungstenite::connect_async(request(&origin, true))
             .await
             .unwrap();
