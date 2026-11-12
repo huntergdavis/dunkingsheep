@@ -641,27 +641,70 @@ mod tests {
             caller_root_pid = row.ppid;
         }
         let caller_start = crate::proc::process_start(caller_root_pid).expect("live caller start");
-        struct Sleeper(std::process::Child);
-        impl Drop for Sleeper {
-            fn drop(&mut self) {
-                let _ = self.0.kill();
-                let _ = self.0.wait();
+        struct Peer {
+            launcher: std::process::Child,
+            stop: std::path::PathBuf,
+            identity: Option<(i64, String)>,
+        }
+        impl Peer {
+            fn stop_and_wait(&mut self) -> bool {
+                if std::fs::write(&self.stop, b"stop").is_err() {
+                    return false;
+                }
+                if self.launcher.wait().is_err() {
+                    return false;
+                }
+                if let Some((pid, start)) = &self.identity {
+                    for _ in 0..250 {
+                        if !crate::proc::process_alive(*pid, Some(start)) {
+                            return true;
+                        }
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    return false;
+                }
+                true
             }
         }
-        // A second actual socket peer represents the other pane. It has its own
-        // session and a recognized test-only comm, so caller_from_peer cannot
-        // accidentally attribute it to the test runner's parent agent.
+        impl Drop for Peer {
+            fn drop(&mut self) {
+                let _ = self.stop_and_wait();
+            }
+        }
+        // Reparent the peer away from this test process so concurrent process-tree
+        // tests cannot mistake it for a descendant of their own fixture.
         let request_path = dir.path().join("other-request.json");
         let response_path = dir.path().join("other-response.json");
         let ready_path = dir.path().join("other-ready");
+        let stop_path = dir.path().join("other-stop");
         let peer_program = r#"
-import ctypes, json, os, pathlib, socket, sys, time
+import json, os, pathlib, socket, sys, time
+launcher = os.getpid()
+if os.fork(): os._exit(0)
 os.setsid()
-assert ctypes.CDLL(None).prctl(15, b'codex', 0, 0, 0) == 0
-request, response, ready, address = map(pathlib.Path, sys.argv[1:])
-ready.touch()
+request, response, ready, address, stop = map(pathlib.Path, sys.argv[1:6])
+test_pid = int(sys.argv[6])
+def outside_test_tree():
+    current, seen = os.getpid(), set()
+    while current > 1 and current not in seen:
+        if current == test_pid: return False
+        seen.add(current)
+        try:
+            fields = pathlib.Path(f'/proc/{current}/stat').read_text().rsplit(')', 1)[1].split()
+            current = int(fields[1])
+        except (OSError, IndexError, ValueError): return False
+    return current <= 1
+for _ in range(500):
+    if os.getppid() != launcher and outside_test_tree(): break
+    if stop.exists(): sys.exit(0)
+    time.sleep(.02)
+else: raise RuntimeError('peer remained within test ancestry')
+ready_temp = ready.with_suffix('.tmp')
+ready_temp.write_text(str(os.getpid()))
+os.replace(ready_temp, ready)
 for _ in range(3000):
     if request.exists(): break
+    if stop.exists(): sys.exit(0)
     time.sleep(.02)
 else: raise RuntimeError('request not supplied')
 def call(body):
@@ -680,19 +723,25 @@ private = call(request.read_bytes())
 temporary = response.with_suffix('.tmp')
 temporary.write_text(json.dumps({'whoami':who,'private':private}))
 os.replace(temporary, response)
-time.sleep(3600)
+for _ in range(15000):
+    if stop.exists(): break
+    time.sleep(.02)
 "#;
-        let other = Sleeper(
-            std::process::Command::new("python3")
+        let mut other = Peer {
+            launcher: std::process::Command::new("python3")
                 .arg("-c")
                 .arg(peer_program)
                 .arg(&request_path)
                 .arg(&response_path)
                 .arg(&ready_path)
                 .arg(&socket)
+                .arg(&stop_path)
+                .arg(std::process::id().to_string())
                 .spawn()
                 .expect("unrelated live pane root"),
-        );
+            stop: stop_path,
+            identity: None,
+        };
         for _ in 0..500 {
             if ready_path.exists() {
                 break;
@@ -700,8 +749,12 @@ time.sleep(3600)
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(ready_path.exists(), "second peer initialized");
-        let other_pid = i64::from(other.0.id());
+        let other_pid: i64 = std::fs::read_to_string(&ready_path)
+            .expect("peer pid")
+            .parse()
+            .expect("numeric peer pid");
         let other_start = crate::proc::process_start(other_pid).expect("live second peer");
+        other.identity = Some((other_pid, other_start.clone()));
         std::fs::write(
             config.join("roles.json"),
             serde_json::json!({"default":"anonymous","lanes":{
@@ -1048,6 +1101,10 @@ time.sleep(3600)
             .expect("first-run allocator schema supports status after loop startup");
         assert_eq!(serde_json::json!([]), allocation_status["workers"]);
         assert_eq!(serde_json::json!([]), allocation_status["offers"]);
+        assert!(
+            other.stop_and_wait(),
+            "second peer terminates after cleanup"
+        );
     }
 
     #[test]

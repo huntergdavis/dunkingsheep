@@ -1039,13 +1039,13 @@ os.rename(out_path + ".tmp", out_path)
         // Seed only the isolated fixture's membership store. The socket query below
         // exercises production roster assembly and live PID/start validation.
         let db = rusqlite::Connection::open(config.join("tasks.db")).unwrap();
-        let start = crate::proc::process_start(pane_pid).unwrap();
+        let start = crate::proc::process_start(other_pid).unwrap();
         for (pane, project) in [("w2:p2", "alpha"), ("w3:p3", "beta"), ("w4:p4", "wrapped")] {
             crate::tasks::lane_project::set(
                 &db,
                 &crate::tasks::lane_project::Membership {
                     pane: pane.into(),
-                    pid: pane_pid,
+                    pid: other_pid,
                     start: start.clone(),
                     scope: crate::tasks::lane_project::ProjectScope::Project(project.into()),
                 },
@@ -1069,7 +1069,7 @@ os.rename(out_path + ".tmp", out_path)
             &db,
             &crate::tasks::lane_project::Membership {
                 pane: "w4:p4".into(),
-                pid: pane_pid,
+                pid: other_pid,
                 start: "stale-start".into(),
                 scope: crate::tasks::lane_project::ProjectScope::Project("wrapped".into()),
             },
