@@ -1148,15 +1148,55 @@ mod tests {
         .await
         .unwrap());
         state.roles.lock().unwrap().unregister(owner_pane).unwrap();
-        assert!(timeout(Duration::from_secs(6), async {
+        let _ = owner_ws
+            .send(ClientMessage::Binary(
+                b"revoked-input-must-not-arrive\n".to_vec().into(),
+            ))
+            .await;
+        let saw_close = timeout(Duration::from_secs(6), async {
             while let Some(Ok(message)) = owner_ws.next().await {
                 if matches!(message, ClientMessage::Close(_)) {
-                    break;
+                    return true;
                 }
             }
+            false
         })
         .await
-        .is_ok());
+        .unwrap();
+        assert!(saw_close, "owner role revocation must cause a close frame");
+        let owner_screen = inspect_backend
+            .run(&["capture-pane", "-p", "-t", owner_pane])
+            .unwrap();
+        assert_eq!(owner_screen.code, 0);
+        assert!(!owner_screen
+            .stdout
+            .contains("revoked-input-must-not-arrive"));
+        state
+            .roles
+            .lock()
+            .unwrap()
+            .register(
+                owner_pane,
+                "owner",
+                Some(owner_pid),
+                Some("stale-generation"),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let mut stale_owner = owner_url.as_str().into_client_request().unwrap();
+        stale_owner.headers_mut().insert(
+            header::ORIGIN,
+            format!("http://{client_addr}").parse().unwrap(),
+        );
+        stale_owner.headers_mut().insert(
+            header::COOKIE,
+            format!("vp_session={session_token}").parse().unwrap(),
+        );
+        assert!(tokio_tungstenite::connect_async(stale_owner).await.is_err());
+        state.roles.lock().unwrap().unregister(owner_pane).unwrap();
         state
             .roles
             .lock()
