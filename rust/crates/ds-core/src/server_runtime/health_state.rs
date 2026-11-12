@@ -287,6 +287,7 @@ mod tests {
             )),
             self_pane_id: Some("w1:p1".into()),
             socket_peer: Some(true),
+            socket_peer_uid: Some(nix::unistd::geteuid().as_raw()),
             ..RequestCtx::default()
         }
     }

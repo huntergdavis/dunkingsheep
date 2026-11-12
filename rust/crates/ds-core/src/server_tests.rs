@@ -27,6 +27,7 @@ impl Dispatcher for Fake {
                 "caller_pid": ctx.caller.as_ref().and_then(|c| c.pid),
                 "caller_start": ctx.caller.as_ref().and_then(|c| c.start.clone()),
                 "socket_peer": ctx.socket_peer,
+                "socket_peer_uid": ctx.socket_peer_uid,
             })),
             "shutdown" => Ok(json!({"shutting_down": true})),
             "boom" => panic!("kaboom"),
@@ -173,6 +174,21 @@ fn socket_requests_without_peer_credentials_keep_an_unverified_verdict() {
         reply.result.expect("whoami result")["socket_peer"],
         json!(false)
     );
+}
+
+#[test]
+fn socket_uid_is_kernel_derived_not_request_supplied() {
+    let (server, _client) = UnixStream::pair().unwrap();
+    let peer = peer_credentials(&server).expect("kernel credentials");
+    assert_eq!(peer.uid, nix::unistd::geteuid().as_raw());
+    assert_eq!(peer.pid, i64::from(std::process::id()));
+    let fake = Fake::default();
+    let line = format!(
+        r#"{{"id":1,"cmd":"whoami","socket_peer_uid":{}}}"#,
+        peer.uid.wrapping_add(1)
+    );
+    let (reply, _) = handle_line_with_peer(&fake, &line, Some(peer));
+    assert_eq!(reply.result.unwrap()["socket_peer_uid"], json!(peer.uid));
 }
 
 #[test]

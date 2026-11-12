@@ -207,6 +207,7 @@ fn request() -> RequestCtx {
         )),
         self_pane_id: Some(PANE.into()),
         socket_peer: Some(true),
+        socket_peer_uid: Some(nix::unistd::geteuid().as_raw()),
         ..RequestCtx::default()
     }
 }

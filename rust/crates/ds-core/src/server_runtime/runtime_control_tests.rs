@@ -113,6 +113,7 @@ fn request(pane: &str) -> RequestCtx {
         )),
         self_pane_id: Some(pane.into()),
         socket_peer: Some(true),
+        socket_peer_uid: Some(nix::unistd::geteuid().as_raw()),
         ..RequestCtx::default()
     }
 }
@@ -190,9 +191,8 @@ fn production_allocation_without_peer_credentials_is_refused_and_writes_nothing(
     let mut handlers = api::Dispatcher::new();
     handlers.register_runtime_control();
     let dispatcher = services.dispatcher(handlers);
-    // w2:p2 is an owner in this fixture's roles registry, so the role check passes and the refusal
-    // comes from the peer check. w1:p1 is a worker, and a worker claim is refused by the role check
-    // before the peer is looked at, which is why it is not used here.
+    // w2:p2 is an owner in this fixture's registry. Missing socket credentials now refuse the
+    // owner role itself, before allocation reaches its transport-specific peer check.
     let no_peer = RequestCtx {
         caller: None,
         self_pane_id: Some("w2:p2".into()),
@@ -206,7 +206,10 @@ fn production_allocation_without_peer_credentials_is_refused_and_writes_nothing(
         let error = dispatcher
             .dispatch("allocation", &args, &no_peer)
             .expect_err("a request without peer credentials must be refused");
-        assert!(error.to_string().contains("not authenticated"), "{error}");
+        assert!(
+            error.to_string().contains("daemon Unix principal"),
+            "{error}"
+        );
     }
     let tasks = services.flock().stores().tasks.unwrap();
     let status = services

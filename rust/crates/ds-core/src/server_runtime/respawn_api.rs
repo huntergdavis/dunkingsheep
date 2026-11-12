@@ -324,6 +324,7 @@ esac
             )),
             self_pane_id: Some("w2:p2".into()),
             socket_peer: Some(true),
+            socket_peer_uid: Some(nix::unistd::geteuid().as_raw()),
             ..RequestCtx::default()
         };
         let error = dispatcher
@@ -438,6 +439,7 @@ esac
             )),
             self_pane_id: Some("%1".into()),
             socket_peer: Some(true),
+            socket_peer_uid: Some(nix::unistd::geteuid().as_raw()),
             ..RequestCtx::default()
         }
     }

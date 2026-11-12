@@ -205,15 +205,50 @@ fn owner_token_rejects_nonowner_pane_but_preserves_headless_and_owner() {
         )
         .unwrap();
     let token = roles.issue_token("owner", Some("test"), None).unwrap();
+    let web_token = roles.issue_token("web", Some("web-test"), None).unwrap();
     flock.attach_roles(roles, None);
     let caller = json!({"pid":caller_pid,"start":caller_start,"source":"peer"});
+    flock.set_socket_peer(Some(true));
+    flock.with_caller(|state| state.socket_peer_uid = Some(nix::unistd::geteuid().as_raw()));
+    flock.clear_caller();
+    assert_eq!(
+        flock.caller_state().socket_peer_uid,
+        Some(nix::unistd::geteuid().as_raw())
+    );
+    flock.clear_socket_peer();
+    assert_eq!(flock.caller_state().socket_peer_uid, None);
     let check = |rows: Vec<Value>, fail: bool, claim: Option<&str>| {
         flock.clear_caller();
         flock.set_caller(Some(caller.clone()));
         flock.set_service_token(Some(&token));
         flock.set_socket_peer(Some(true));
+        flock.with_caller(|state| state.socket_peer_uid = Some(nix::unistd::geteuid().as_raw()));
         flock.caller_role(claim, &Panes { rows, fail })
     };
+    for uid in [None, Some(nix::unistd::geteuid().as_raw().wrapping_add(1))] {
+        flock.clear_caller();
+        flock.set_service_token(Some(&token));
+        flock.set_socket_peer(Some(true));
+        flock.with_caller(|state| state.socket_peer_uid = uid);
+        let error = flock.caller_role(
+            None,
+            &Panes {
+                rows: vec![],
+                fail: false,
+            },
+        );
+        assert!(error
+            .unwrap_err()
+            .to_string()
+            .contains("daemon Unix principal"));
+    }
+    flock.clear_caller();
+    flock.set_service_token(Some(&web_token));
+    flock.set_socket_peer(Some(true));
+    flock.with_caller(|state| {
+        state.socket_peer_uid = Some(nix::unistd::geteuid().as_raw().wrapping_add(1));
+    });
+    assert_eq!(flock.caller_role(None, &NoPanes).unwrap(), "web");
     let worker = json!({"pane_id":WORKER,"pane_pid":pid});
     for claim in [Some(WORKER), None, Some(OWNER)] {
         assert!(check(vec![worker.clone()], false, claim).is_err());
@@ -427,6 +462,56 @@ fn a_legacy_superuser_is_an_owner_only_where_the_registry_says_default() {
 }
 
 #[test]
+fn owner_pane_and_legacy_roles_require_the_daemon_socket_uid() {
+    let registered = staffed("owner-peer-uid-registered");
+    let (legacy, dir) = bare("owner-peer-uid-legacy");
+    let roles = Roles::new(
+        &Env::default(),
+        Some(dir.join("roles.json")),
+        Some(dir.join("tokens.json")),
+        None,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("superusers.json"),
+        json!({"panes": ["w9:p9"], "names": []}).to_string(),
+    )
+    .unwrap();
+    legacy.attach_roles(
+        roles,
+        Some(Superusers::new(dir.join("superusers.json"), true).unwrap()),
+    );
+    let uid = nix::unistd::geteuid().as_raw();
+    for (flock, pane) in [(&*registered, OWNER), (&legacy, "w9:p9")] {
+        for (peer_uid, allowed) in [
+            (Some(uid), true),
+            (Some(uid.wrapping_add(1)), false),
+            (None, false),
+        ] {
+            flock.clear_caller();
+            flock.set_socket_peer(Some(true));
+            flock.with_caller(|state| state.socket_peer_uid = peer_uid);
+            let result = flock.caller_role(Some(pane), &NoPanes);
+            if allowed {
+                assert_eq!(result.unwrap(), "owner");
+            } else {
+                assert!(result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("daemon Unix principal"));
+            }
+        }
+    }
+    registered.clear_caller();
+    registered.set_socket_peer(Some(true));
+    registered.with_caller(|state| state.socket_peer_uid = Some(uid.wrapping_add(1)));
+    assert_eq!(
+        registered.caller_role(Some(WORKER), &NoPanes).unwrap(),
+        "worker"
+    );
+}
+
+#[test]
 fn an_unattached_registry_is_a_named_refusal() {
     let dir = dir("unattached");
     let flock = Flock::new(dir.join("l.json"), dir.join("r.json"), false);
@@ -509,14 +594,22 @@ fn one_requests_socket_peer_verdict_and_cached_role_do_not_leak() {
     let a = {
         let (flock, a_set, b_looked) = (flock.clone(), a_set.clone(), b_looked.clone());
         std::thread::spawn(move || {
-            flock.set_socket_peer(Some(false)); // A's peer failed verification
+            flock.set_socket_peer(Some(true));
+            flock.with_caller(|state| {
+                state.socket_peer_uid = Some(nix::unistd::geteuid().as_raw());
+            });
             assert_eq!(flock.caller_role(Some(OWNER), &NoPanes).unwrap(), "owner"); // cached for A
             a_set.wait();
             b_looked.wait();
             assert_eq!(
                 flock.socket_peer_ok(),
-                Some(false),
+                Some(true),
                 "A keeps its own verdict"
+            );
+            assert_eq!(
+                flock.caller_state().socket_peer_uid,
+                Some(nix::unistd::geteuid().as_raw()),
+                "A keeps its own peer UID"
             );
             flock.clear_socket_peer();
         })
@@ -526,17 +619,22 @@ fn one_requests_socket_peer_verdict_and_cached_role_do_not_leak() {
         std::thread::spawn(move || {
             a_set.wait();
             let peer = flock.socket_peer_ok();
-            // B is also "in a request" (peer verified) and asks about the SAME pane id.
-            flock.set_socket_peer(Some(true));
-            let role = flock.caller_role(Some(OTHER), &NoPanes).unwrap();
+            let peer_uid = flock.caller_state().socket_peer_uid;
+            // B is also in a request, but its peer credentials failed verification.
+            flock.set_socket_peer(Some(false));
+            let role = flock.caller_role(Some(OWNER), &NoPanes);
             b_looked.wait();
-            (peer, role)
+            (peer, peer_uid, role)
         })
     };
     a.join().expect("request A");
-    let (peer, role) = b.join().expect("request B");
-    assert_eq!(peer, None, "B must not see A's failed-peer verdict");
-    assert_eq!(role, "anonymous");
+    let (peer, peer_uid, role) = b.join().expect("request B");
+    assert_eq!(peer, None, "B must not see A's peer verdict");
+    assert_eq!(peer_uid, None, "B must not see A's peer UID");
+    assert!(role
+        .unwrap_err()
+        .to_string()
+        .contains("daemon Unix principal"));
 }
 
 #[test]

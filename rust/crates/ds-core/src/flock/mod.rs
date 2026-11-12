@@ -106,6 +106,8 @@ pub struct CallerState {
     /// `None` = never set (in-process trusted code); `Some(false)` = socket peer failed
     /// verification (fail closed).
     pub socket_peer_ok: Option<bool>,
+    /// UID captured from the same kernel socket credentials as the peer PID.
+    pub socket_peer_uid: Option<u32>,
 }
 
 // Canonical launch insertion order matches Python dict; persistence remains sorted JSON.
@@ -829,13 +831,14 @@ impl Flock {
         self.with_caller(|state| state.value.clone())
     }
 
-    /// `clear_caller`: every per-request field except `socket_peer_ok`, which only
-    /// `clear_socket_peer` resets (as in the Python).
+    /// `clear_caller`: preserve socket provenance until `clear_socket_peer` resets it.
     pub fn clear_caller(&self) {
         self.with_caller(|state| {
             let peer = state.socket_peer_ok;
+            let peer_uid = state.socket_peer_uid;
             *state = CallerState::default();
             state.socket_peer_ok = peer;
+            state.socket_peer_uid = peer_uid;
         });
     }
 
@@ -847,7 +850,10 @@ impl Flock {
 
     /// `clear_socket_peer`.
     pub fn clear_socket_peer(&self) {
-        self.set_socket_peer(None);
+        self.with_caller(|state| {
+            state.socket_peer_ok = None;
+            state.socket_peer_uid = None;
+        });
     }
 
     /// The tri-state the completion binding reads.
