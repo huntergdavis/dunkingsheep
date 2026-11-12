@@ -11,6 +11,7 @@ export default function ProjectTerminal({ target, onClose }) {
   useEffect(() => {
     const term = new Terminal({ cursorBlink: true, scrollback: 5000, convertEol: false });
     const fit = new FitAddon(); term.loadAddon(fit); term.open(host.current);
+    host.current.scrollIntoView({ block: 'nearest' });
     let socket, timer, resizeTimer, disposed = false, attempt = 0, resizing = false, resizePending = false, resizeReady = false;
     const resizeKey = `ds-terminal-resize-unconfirmed:${target.name}:${target.pane_id}`;
     let resizeDisabled = true;
@@ -27,8 +28,16 @@ export default function ProjectTerminal({ target, onClose }) {
         localStorage.setItem(resizeKey, 'unconfirmed');
         const response = await fetch(`${path}/resize`, { method: 'POST', credentials: 'same-origin',
           headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ cols: term.cols, rows: term.rows, expected_pane: target.pane_id }) });
+        if ([400, 401, 403, 404, 409].includes(response.status)) {
+          // These route refusals happen before any resize operation is dispatched.
+          localStorage.removeItem(resizeKey);
+          resizePending = false;
+          if (!disposed) setResizeWarning(`Resize refused (${response.status}). Reopen after the cause is resolved.`);
+          return;
+        }
         if (!response.ok) throw new Error(`Resize unavailable (${response.status})`);
         localStorage.removeItem(resizeKey);
+        if (!disposed) setResizeWarning('');
       } catch {
         // A timeout may have applied the resize. Do not retry an unknown outcome.
         resizeDisabled = true;
