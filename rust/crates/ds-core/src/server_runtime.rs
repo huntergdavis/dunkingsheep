@@ -359,6 +359,17 @@ impl SendEnv for TerminalCallAdapter<'_> {
         self.helper_sendenv_send_key(pane_id, key)
     }
 
+    fn send_recovery_key(&mut self, pane_id: &str, key: &str) -> (bool, String) {
+        // Never wait indefinitely for the shared terminal mutex while holding recovery locks.
+        let Ok(mut terminal) = self.terminal.try_lock() else {
+            return (false, "terminal busy".into());
+        };
+        match terminal.send_recovery_key(pane_id, key) {
+            Ok(()) => (true, "sent".into()),
+            Err(error) => (false, error.to_string()),
+        }
+    }
+
     fn federated_input(&self) -> bool {
         self.helper_sendenv_federated_input()
     }

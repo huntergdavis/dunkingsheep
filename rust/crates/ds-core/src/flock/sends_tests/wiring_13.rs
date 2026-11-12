@@ -37,6 +37,9 @@ struct WiringEnv {
 }
 
 impl SendEnv for WiringEnv {
+    fn send_recovery_key(&mut self, pane_id: &str, key: &str) -> (bool, String) {
+        self.send_key(pane_id, key)
+    }
     fn read_pane(&self, pane_id: &str, _lines: i64, _ansi: bool) -> Option<String> {
         self.screens.get(pane_id).cloned()
     }
@@ -199,14 +202,10 @@ fn scan(flock: &Flock, env: &mut WiringEnv, now: f64) -> usize {
     crate::flock::loops_stuck::strict_stuck_observer_scan(flock, env, now).unwrap()
 }
 
-fn enter() -> (String, String) {
-    ("%1".to_string(), "Enter".to_string())
-}
-
 // t3355 wiring row 13, test_dunk_recovery_wiring.py::test_schedule_false_sent_with_real_frame_
 // recovers (oracle 79bc92fa). The schedule's dunk is running at this pane with the message's text.
 // The message is reported sent, the real frame stays on screen, and the native session authenticates
-// it. The first sighting starts the clock, and the threshold tick presses exactly once.
+// it. The wrapped frame cannot prove byte-exact composer contents and must not be submitted.
 #[test]
 fn a_scheduled_false_sent_real_frame_recovers_once_through_native_evidence() {
     let dir = tempfile::tempdir().unwrap();
@@ -230,5 +229,8 @@ fn a_scheduled_false_sent_real_frame_recovers_once_through_native_evidence() {
     scan(&flock, &mut env, base + 1.0);
     assert!(env.keys.is_empty(), "no key on the first sighting");
     scan(&flock, &mut env, base + 121.0);
-    assert_eq!(vec![enter()], env.keys, "exactly one key at the threshold");
+    assert!(
+        env.keys.is_empty(),
+        "wrapped native frame cannot prove exact composer contents"
+    );
 }
