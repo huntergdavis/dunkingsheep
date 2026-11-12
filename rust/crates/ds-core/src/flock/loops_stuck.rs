@@ -251,6 +251,18 @@ pub(crate) fn federated_recovery_step<E: SendEnv + PaneInfoEnv>(
         let Some(content) = crate::terminal::composer::federated_composer(true, &screen) else {
             continue;
         };
+        // A scheduled recovery is allowed only for the exact previously sent body.
+        // Unlike a general preserve-submit, this path must not submit edited drafts.
+        if entry.scheduled
+            && (entry.text != content || !flock.scheduled_recovery_current(&pane_id, &entry, now))
+        {
+            flock
+                .stuck_tracker
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .forget(&pane_id);
+            continue;
+        }
         let generation = sends::pane_generation(env, &pane_id);
         let dead = sends::dead_session(env, &pane_id).is_some();
         let busy = crate::terminal::screen::status_marker(
@@ -273,11 +285,18 @@ pub(crate) fn federated_recovery_step<E: SendEnv + PaneInfoEnv>(
             if ready { "ready" } else { "unknown" },
         );
         observation.generation = generation.clone();
+        let mut candidate_config = config;
+        if entry.scheduled {
+            candidate_config.threshold_s = 5.0;
+            candidate_config.observation_interval_s =
+                candidate_config.observation_interval_s.min(5.0);
+            candidate_config.max_attempts = 1;
+        }
         let decision = flock
             .stuck_tracker
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .decide(&observation, &config, now);
+            .decide(&observation, &candidate_config, now);
         if !decision.recovers() || !flock.persist_enabled || flock.save().is_err() {
             continue;
         }
@@ -296,6 +315,9 @@ pub(crate) fn federated_recovery_step<E: SendEnv + PaneInfoEnv>(
             .ok()
             .and_then(|rows| rows.get(&pane_id).cloned());
         if live.as_ref() != Some(&entry)
+            || (entry.scheduled
+                && (entry.text != content
+                    || !flock.scheduled_recovery_current(&pane_id, &entry, crate::clock::now_s())))
             || sends::pane_generation(env, &pane_id) != generation
             || current
                 .as_deref()

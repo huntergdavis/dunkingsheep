@@ -572,6 +572,36 @@ fn scheduled_47_control_unchanged_sent_schedule_presses_once() {
 /// 120 s threshold through the real observer. The spent attempt presses nothing at the later ticks. The
 /// tracker-layer test in stuck.rs covers the decision only.
 #[test]
+fn scheduled_checkin_recovers_once_after_five_unchanged_seconds() {
+    let dir = tempfile::tempdir().unwrap();
+    let (flock, mut env, created) =
+        scheduled_fixture(dir.path(), "sent", i64::from(std::process::id()));
+    env.screens
+        .insert("%1".into(), format!("\x1b[1m›\x1b[0m {TEXT}\n\n\n{FOOTER}"));
+    observe(&flock, &mut env, created + 1.0);
+    observe(&flock, &mut env, created + 5.0);
+    assert!(env.keys.is_empty());
+    observe(&flock, &mut env, created + 6.0);
+    assert_eq!(env.keys.len(), 1);
+    observe(&flock, &mut env, created + 20.0);
+    assert_eq!(env.keys.len(), 1);
+}
+
+#[test]
+fn scheduled_checkin_never_submits_human_continuation() {
+    let dir = tempfile::tempdir().unwrap();
+    let (flock, mut env, created) =
+        scheduled_fixture(dir.path(), "sent", i64::from(std::process::id()));
+    env.screens.insert(
+        "%1".into(),
+        format!("\x1b[1m›\x1b[0m {TEXT} human addition\n\n\n{FOOTER}"),
+    );
+    observe(&flock, &mut env, created + 1.0);
+    observe(&flock, &mut env, created + 10.0);
+    assert!(env.keys.is_empty());
+}
+
+#[test]
 fn scheduled_43_observer_sent_bright_pending_schedule_presses_once_at_120() {
     let dir = tempfile::tempdir().unwrap();
     let (flock, mut env, created) =

@@ -254,7 +254,12 @@ impl Flock {
         state.into()
     }
 
-    fn scheduled_recovery_current(&self, pane_id: &str, entry: &StuckCandidate, now: f64) -> bool {
+    pub(super) fn scheduled_recovery_current(
+        &self,
+        pane_id: &str,
+        entry: &StuckCandidate,
+        now: f64,
+    ) -> bool {
         let config = *self
             .stuck_config
             .lock()
@@ -465,6 +470,7 @@ impl Flock {
                 || entry.generation.as_deref() != Some(generation)
                 || !matches!(entry.status.as_str(), "failed" | "sent" | "typed")
                 || crate::stuck::collapse(&entry.text) != crate::stuck::collapse(&content)
+                || (entry.scheduled && entry.text != content)
                 || (entry.scheduled
                     && !self.scheduled_recovery_current(pane_id, entry, clock::now_s()))
             {
@@ -532,6 +538,18 @@ impl Flock {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !config.enabled {
             return false;
+        }
+        // Owner policy: accelerate only positively identified scheduled deliveries.
+        let scheduled = self
+            .stuck_candidates
+            .lock()
+            .ok()
+            .and_then(|rows| rows.get(pane_id).cloned())
+            .is_some_and(|entry| entry.scheduled && entry.eligible && entry.text == content);
+        if scheduled {
+            config.threshold_s = 5.0;
+            config.observation_interval_s = config.observation_interval_s.min(5.0);
+            config.max_attempts = 1;
         }
         {
             let mut last = self
