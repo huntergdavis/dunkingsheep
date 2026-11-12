@@ -77,18 +77,8 @@ fn spawn_codex(
     for (key, value) in env {
         command.env(key, value);
     }
-    let mut attempts = 0;
-    let mut child = loop {
-        match command.spawn() {
-            Ok(child) => break child,
-            // Another test thread can hold the copied binary open for an instant (ETXTBSY).
-            Err(error) if error.raw_os_error() == Some(26) && attempts < 100 => {
-                attempts += 1;
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-            Err(error) => panic!("spawn the codex stand-in: {error}"),
-        }
-    };
+    let mut child = crate::testsupport::exec_retrying_busy(|| command.spawn())
+        .expect("spawn the codex stand-in");
     assert!(
         child.try_wait().unwrap().is_none(),
         "the codex stand-in must stay alive"

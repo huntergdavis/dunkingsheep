@@ -1718,14 +1718,23 @@ fn a_human_continuation_is_refused_after_a_restart() {
         std::fs::create_dir_all(path).unwrap();
     }
     let binary = dir.path().join("codex");
-    std::fs::copy("/bin/sleep", &binary).unwrap();
-    let child = ChildGuard(
-        std::process::Command::new(binary)
-            .arg("300")
-            .env("CODEX_HOME", &home)
-            .env("DUNKINGSHEEP_CODEX_STATE_DIR", &hooks)
-            .spawn()
-            .unwrap(),
+    // A copied multi-call sleep can exit when renamed; a shell blocked on its
+    // retained stdin pipe preserves a live native process named `codex`.
+    std::fs::copy("/bin/sh", &binary).unwrap();
+    let mut child = ChildGuard(
+        crate::testsupport::exec_retrying_busy(|| {
+            std::process::Command::new(&binary)
+                .args(["-c", "read line"])
+                .stdin(std::process::Stdio::piped())
+                .env("CODEX_HOME", &home)
+                .env("DUNKINGSHEEP_CODEX_STATE_DIR", &hooks)
+                .spawn()
+        })
+        .unwrap(),
+    );
+    assert!(
+        child.0.try_wait().unwrap().is_none(),
+        "fixture exited early"
     );
     let pid = i64::from(child.0.id());
     let start = crate::proc::process_start(pid).unwrap();

@@ -26,15 +26,21 @@ fn spawn_codex(
     env: &[(&str, &std::path::Path)],
 ) -> (ChildGuard, i64, String) {
     let binary = dir.join("codex");
-    std::fs::copy("/bin/sleep", &binary).unwrap();
+    std::fs::copy("/bin/sh", &binary).unwrap();
     let mut command = std::process::Command::new(binary);
-    command.arg("300");
+    command
+        .args(["-c", "read line"])
+        .stdin(std::process::Stdio::piped());
     command.env_remove("CODEX_HOME");
     command.env_remove("DUNKINGSHEEP_CODEX_STATE_DIR");
     for (key, value) in env {
         command.env(key, value);
     }
-    let child = ChildGuard(command.spawn().unwrap());
+    let mut child = ChildGuard(crate::testsupport::exec_retrying_busy(|| command.spawn()).unwrap());
+    assert!(
+        child.0.try_wait().unwrap().is_none(),
+        "fixture exited early"
+    );
     let pid = i64::from(child.0.id());
     let start = crate::proc::process_start(pid).unwrap();
     (child, pid, start)

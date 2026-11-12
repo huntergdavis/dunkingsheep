@@ -261,14 +261,23 @@ fn production_env_keypress_pending_uses_authenticated_native_session() {
     std::fs::create_dir_all(&hooks).unwrap();
     std::fs::create_dir_all(&cwd).unwrap();
     let binary = dir.path().join("codex");
-    std::fs::copy("/bin/sleep", &binary).unwrap();
-    let child = std::process::Command::new(binary)
-        .arg("300")
-        .env("CODEX_HOME", &home)
-        .env("DUNKINGSHEEP_CODEX_STATE_DIR", &hooks)
-        .spawn()
-        .unwrap();
-    let child = ChildGuard(child);
+    // A copied multi-call sleep can exit when renamed; a shell blocked on its
+    // retained stdin pipe preserves a live native process named `codex`.
+    std::fs::copy("/bin/sh", &binary).unwrap();
+    let child = crate::testsupport::exec_retrying_busy(|| {
+        std::process::Command::new(&binary)
+            .args(["-c", "read line"])
+            .stdin(std::process::Stdio::piped())
+            .env("CODEX_HOME", &home)
+            .env("DUNKINGSHEEP_CODEX_STATE_DIR", &hooks)
+            .spawn()
+    })
+    .unwrap();
+    let mut child = ChildGuard(child);
+    assert!(
+        child.0.try_wait().unwrap().is_none(),
+        "fixture exited early"
+    );
     let pid = i64::from(child.0.id());
     let start = crate::proc::process_start(pid).unwrap();
     let session = "01a173ee-beed-7461-a560-e5f6c1f666a7";
