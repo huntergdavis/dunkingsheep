@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
+import { fencedResize } from './resize-fence.js';
 
 // The stream is live output, not a history snapshot. Never buffer or replay input.
 export default function ProjectTerminal({ target, onClose }) {
@@ -13,7 +14,7 @@ export default function ProjectTerminal({ target, onClose }) {
     const fit = new FitAddon(); term.loadAddon(fit); term.open(host.current);
     host.current.scrollIntoView({ block: 'nearest' });
     let socket, timer, resizeTimer, disposed = false, attempt = 0, resizing = false, resizePending = false, resizeReady = false;
-    const resizeKey = `ds-terminal-resize-unconfirmed:${target.name}:${target.pane_id}`;
+    const resizeKey = `ds-terminal-resize-unconfirmed:${target.pane_id}`;
     let resizeDisabled = true;
     try { resizeDisabled = localStorage.getItem(resizeKey) !== null; } catch { /* fail closed */ }
     if (resizeDisabled) setResizeWarning('Resize is unconfirmed. Reconcile the prior resize before retrying.');
@@ -24,20 +25,19 @@ export default function ProjectTerminal({ target, onClose }) {
       fit.fit();
       resizing = true;
       try {
-        // Persist before dispatch so a reload or tab close cannot silently retry.
-        localStorage.setItem(resizeKey, 'unconfirmed');
-        const response = await fetch(`${path}/resize`, { method: 'POST', credentials: 'same-origin',
-          headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ cols: term.cols, rows: term.rows, expected_pane: target.pane_id }) });
-        if ([400, 401, 403, 404, 409].includes(response.status)) {
-          // These route refusals happen before any resize operation is dispatched.
-          localStorage.removeItem(resizeKey);
+        const outcome = await fencedResize({ locks: navigator.locks, storage: localStorage, key: resizeKey,
+          send: () => fetch(`${path}/resize`, { method: 'POST', credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ cols: term.cols, rows: term.rows, expected_pane: target.pane_id }) }) });
+        if (outcome === 'unconfirmed') {
+          resizeDisabled = true;
+          if (!disposed) setResizeWarning('Resize is unconfirmed. Reconcile the prior resize before retrying.');
+        } else if (outcome === 'busy') {
           resizePending = false;
-          if (!disposed) setResizeWarning(`Resize refused (${response.status}). Reopen after the cause is resolved.`);
-          return;
-        }
-        if (!response.ok) throw new Error(`Resize unavailable (${response.status})`);
-        localStorage.removeItem(resizeKey);
-        if (!disposed) setResizeWarning('');
+          if (!disposed) setResizeWarning('Another tab is resizing this pane.');
+        } else if (outcome === 'refused') {
+          resizePending = false;
+          if (!disposed) setResizeWarning('Resize was refused. Reopen after the cause is resolved.');
+        } else if (!disposed) setResizeWarning('');
       } catch {
         // A timeout may have applied the resize. Do not retry an unknown outcome.
         resizeDisabled = true;
