@@ -187,14 +187,14 @@ pub fn review_creation_project(
     }
 }
 
-/// A project planner may only add assignees to a blocker outside its project.
-pub fn is_indirect_blocker(
+/// A project planner may only add assignees to a mapped foreign blocker.
+pub fn is_mapped_foreign(
     db: &Connection,
     planner: &PlannerIdentity,
     task: &str,
 ) -> rusqlite::Result<bool> {
     db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM planner_scope_grants g LEFT JOIN planner_task_projects p ON p.task_id=?4 WHERE g.pane_id=?1 AND g.pane_pid=?2 AND g.proc_start=?3 AND g.scope_kind='project' AND (p.project IS NULL OR p.project != g.project))",
+        "SELECT EXISTS(SELECT 1 FROM planner_scope_grants g JOIN planner_task_projects p ON p.task_id=?4 WHERE g.pane_id=?1 AND g.pane_pid=?2 AND g.proc_start=?3 AND g.scope_kind='project' AND p.project != g.project)",
         params![planner.pane, planner.pid, planner.start, task], |row| row.get(0),
     )
 }
@@ -470,25 +470,6 @@ mod tests {
             .await
             .unwrap();
         assert!(allows(&db, "%2", 22, "start", &unrelated.id).unwrap());
-        tasks.assign(&unrelated.id, &["%9"], "add").await.unwrap();
-        for mode in ["set", "remove"] {
-            assert!(tasks
-                .assign_with_planner_scope(
-                    &unrelated.id,
-                    &["%9"],
-                    mode,
-                    true,
-                    Some(planner.clone())
-                )
-                .await
-                .is_err());
-        }
-        tasks
-            .assign_with_planner_scope(&unrelated.id, &["%3"], "add", true, Some(planner.clone()))
-            .await
-            .unwrap();
-        let global_assignees = tasks.get(&unrelated.id).await.unwrap().assignees;
-        assert!(global_assignees.contains("%9") && global_assignees.contains("%3"));
         tasks
             .update(
                 &project.id,
@@ -518,10 +499,7 @@ mod tests {
             .assign_with_planner_scope(&unrelated.id, &["%3"], "add", true, Some(planner.clone()))
             .await
             .is_err());
-        assert_eq!(
-            tasks.get(&unrelated.id).await.unwrap().assignees,
-            global_assignees
-        );
+        assert_eq!(tasks.get(&unrelated.id).await.unwrap().assignees, "[]");
         super::super::lane_project::set(
             &db,
             &super::super::lane_project::Membership {
