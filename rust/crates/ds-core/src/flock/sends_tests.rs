@@ -91,6 +91,9 @@ struct Pane {
 }
 
 impl SendEnv for Pane {
+    fn send_recovery_key(&mut self, pane_id: &str, key: &str) -> (bool, String) {
+        self.send_key(pane_id, key)
+    }
     fn read_pane(&self, pane_id: &str, _lines: i64, ansi: bool) -> Option<String> {
         self.reads.borrow_mut().push((pane_id.to_string(), ansi));
         if let Some(callback) = self.on_read.borrow_mut().as_mut() {
@@ -2552,6 +2555,9 @@ fn test_a_dead_session_is_not_clear_to_send_and_a_redraw_into_one_is_caught() {
     // A screen that cannot be read on the second look is inconclusive, not a hold.
     struct Flaky(RefCell<u32>, Pane);
     impl SendEnv for Flaky {
+        fn send_recovery_key(&mut self, pane_id: &str, key: &str) -> (bool, String) {
+            self.send_key(pane_id, key)
+        }
         fn read_pane(&self, p: &str, l: i64, a: bool) -> Option<String> {
             *self.0.borrow_mut() += 1;
             // reads 1 (dead check) and 2 (box) succeed, 3+ (second look) do not
@@ -4345,8 +4351,8 @@ fn a_reported_sent_schedule_is_not_submitted_from_a_dim_or_unstyled_echo() {
 }
 
 // t3355 (t820 proof D) scheduled row 30 (oracle 79bc92fa). A failed scheduled send whose plain
-// composer has two blank rows before the footer: no key before two minutes, exactly one key at
-// 120 s, and none afterwards.
+// composer has two blank rows before the footer: no key before five unchanged seconds, exactly
+// one key at five seconds, and none afterwards.
 //
 // RESIDUAL (t3501 scheduled 30, owner decision): the oracle also asserts exactly one `stuck.recover` metric
 // with outcome `consumed`. In Rust that metric is recorded only by the federated watchdog path
@@ -4354,7 +4360,7 @@ fn a_reported_sent_schedule_is_not_submitted_from_a_dim_or_unstyled_echo() {
 // are kept; the missing metric is a divergence named here and filed as a production follow-up, not changed in
 // t3501.
 #[test]
-fn an_ambiguous_scheduled_composer_recovers_once_after_two_minutes() {
+fn an_ambiguous_scheduled_composer_recovers_once_after_five_seconds() {
     let dir = tempfile::tempdir().unwrap();
     // The schedule is current on the real clock (main's failed-reminder currency gate), so the
     // reminder is created at the real clock and the oracle ticks 1000, 1100, 1120 and 1300 are
@@ -4369,13 +4375,17 @@ fn an_ambiguous_scheduled_composer_recovers_once_after_two_minutes() {
             "\u{203a}", REPORTED_SENT_TEXT
         ),
     );
-    for offset in [1.0, 101.0] {
+    for offset in [1.0, 5.0] {
         crate::flock::loops_stuck::strict_stuck_observer_scan(&flock, &mut env, base + offset)
             .unwrap();
     }
-    assert!(env.keys.is_empty(), "no key before two minutes");
-    crate::flock::loops_stuck::strict_stuck_observer_scan(&flock, &mut env, base + 121.0).unwrap();
-    assert_eq!(1, env.keys.len(), "exactly one key at two minutes");
+    assert!(env.keys.is_empty(), "no key before five unchanged seconds");
+    crate::flock::loops_stuck::strict_stuck_observer_scan(&flock, &mut env, base + 6.0).unwrap();
+    assert_eq!(
+        1,
+        env.keys.len(),
+        "exactly one key after five unchanged seconds"
+    );
     crate::flock::loops_stuck::strict_stuck_observer_scan(&flock, &mut env, base + 301.0).unwrap();
     assert_eq!(1, env.keys.len(), "no key after the single attempt");
 }
@@ -4474,9 +4484,15 @@ fn a_scheduled_false_sent_real_frame_recovers_once_through_native_evidence() {
     crate::flock::loops_stuck::strict_stuck_observer_scan(&flock, &mut env, base + 1.0).unwrap();
     assert!(env.keys.is_empty(), "no key on the first sighting");
     crate::flock::loops_stuck::strict_stuck_observer_scan(&flock, &mut env, base + 121.0).unwrap();
-    assert_eq!(1, env.keys.len(), "exactly one key at the threshold");
+    assert!(
+        env.keys.is_empty(),
+        "wrapped native frame cannot prove exact composer contents"
+    );
     crate::flock::loops_stuck::strict_stuck_observer_scan(&flock, &mut env, base + 200.0).unwrap();
-    assert_eq!(1, env.keys.len(), "no second key after the single attempt");
+    assert!(
+        env.keys.is_empty(),
+        "ambiguous wrapped text stays untouched"
+    );
     drop(child);
 }
 
@@ -5018,7 +5034,7 @@ fn scheduled_recovery_requires_current_schedule_for_styled_and_real_native_evide
                         &mut env,
                         "%1",
                         "stuck body",
-                        Some(1.0),
+                        Some(100.0),
                         Some(&message),
                         101.0,
                         None,

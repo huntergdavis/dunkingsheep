@@ -419,6 +419,13 @@ pub trait Terminal: std::fmt::Debug {
     /// escape hatch for C-c, Up, Escape and friends.
     fn send_keys(&mut self, pane_id: &str, keys: &[&str]) -> Result<(), TerminalError>;
 
+    /// Bounded, fail-closed key submission for recovery while scheduler locks are held.
+    fn send_recovery_key(&mut self, _pane_id: &str, _key: &str) -> Result<(), TerminalError> {
+        Err(TerminalError::refused(
+            "bounded recovery key unavailable for this backend",
+        ))
+    }
+
     /// The pane's screen text, newest `lines` lines, optionally with ANSI colour
     /// (`capture-pane -p [-e] -S -<lines> -t <pane>`).
     ///

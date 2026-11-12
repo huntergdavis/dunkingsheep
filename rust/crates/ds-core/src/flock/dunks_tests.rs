@@ -93,6 +93,9 @@ struct FireEnv {
 }
 
 impl SendEnv for FireEnv {
+    fn send_recovery_key(&mut self, pane_id: &str, key: &str) -> (bool, String) {
+        self.send_key(pane_id, key)
+    }
     fn read_pane(&self, _pane_id: &str, _lines: i64, _ansi: bool) -> Option<String> {
         if let Some((flock, target)) = self
             .mutate_dunk_target_on_read

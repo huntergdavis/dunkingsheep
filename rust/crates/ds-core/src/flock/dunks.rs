@@ -978,6 +978,26 @@ impl DunkList {
         Ok(dunker)
     }
 
+    /// Keep the schedule identity stable through one guarded recovery operation.
+    pub(super) fn with_live_schedule<R>(
+        &self,
+        id: &str,
+        pane: &str,
+        template: Option<&str>,
+        operation: impl FnOnce() -> R,
+    ) -> Option<R> {
+        let state = self.state();
+        let index = Self::find(&state, id).ok()?;
+        let dunk = Self::lock_dunker(&state.dunkers[index]);
+        if !dunk.running
+            || dunk.target_pane_id.as_deref() != Some(pane)
+            || Some(dunk.text.as_str()) != template
+        {
+            return None;
+        }
+        Some(operation())
+    }
+
     pub fn list(&self) -> Vec<Map<String, Value>> {
         let state = self.state();
         state
@@ -1438,6 +1458,32 @@ fn stop_fields(dunker: &mut Dunker) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn live_schedule_guard_serializes_stop_with_recovery() {
+        let list = super::DunkList::new();
+        list.load(serde_json::json!({"dunkers":[{"id":"d7","target_pane_id":"%1","text":"check","running":true}]}).as_object().unwrap());
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let list_ref = &list;
+            let guarded = scope.spawn(move || {
+                list_ref.with_live_schedule("d7", "%1", Some("check"), || {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    "key"
+                })
+            });
+            entered_rx.recv().unwrap();
+            let stopped = scope.spawn(|| list.stop("d7").unwrap());
+            release_tx.send(()).unwrap();
+            assert_eq!(guarded.join().unwrap(), Some("key"));
+            stopped.join().unwrap();
+        });
+        assert_eq!(
+            list.with_live_schedule("d7", "%1", Some("check"), || "key"),
+            None
+        );
+    }
     use super::*;
 
     fn kw(value: Value) -> Map<String, Value> {
