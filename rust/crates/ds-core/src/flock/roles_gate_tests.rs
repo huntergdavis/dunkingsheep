@@ -594,14 +594,22 @@ fn one_requests_socket_peer_verdict_and_cached_role_do_not_leak() {
     let a = {
         let (flock, a_set, b_looked) = (flock.clone(), a_set.clone(), b_looked.clone());
         std::thread::spawn(move || {
-            flock.set_socket_peer(Some(false)); // A's peer failed verification
+            flock.set_socket_peer(Some(true));
+            flock.with_caller(|state| {
+                state.socket_peer_uid = Some(nix::unistd::geteuid().as_raw());
+            });
             assert_eq!(flock.caller_role(Some(OWNER), &NoPanes).unwrap(), "owner"); // cached for A
             a_set.wait();
             b_looked.wait();
             assert_eq!(
                 flock.socket_peer_ok(),
-                Some(false),
+                Some(true),
                 "A keeps its own verdict"
+            );
+            assert_eq!(
+                flock.caller_state().socket_peer_uid,
+                Some(nix::unistd::geteuid().as_raw()),
+                "A keeps its own peer UID"
             );
             flock.clear_socket_peer();
         })
@@ -611,17 +619,22 @@ fn one_requests_socket_peer_verdict_and_cached_role_do_not_leak() {
         std::thread::spawn(move || {
             a_set.wait();
             let peer = flock.socket_peer_ok();
-            // B is also "in a request" (peer verified) and asks about the SAME pane id.
-            flock.set_socket_peer(Some(true));
-            let role = flock.caller_role(Some(OTHER), &NoPanes).unwrap();
+            let peer_uid = flock.caller_state().socket_peer_uid;
+            // B is also in a request, but its peer credentials failed verification.
+            flock.set_socket_peer(Some(false));
+            let role = flock.caller_role(Some(OWNER), &NoPanes);
             b_looked.wait();
-            (peer, role)
+            (peer, peer_uid, role)
         })
     };
     a.join().expect("request A");
-    let (peer, role) = b.join().expect("request B");
-    assert_eq!(peer, None, "B must not see A's failed-peer verdict");
-    assert_eq!(role, "anonymous");
+    let (peer, peer_uid, role) = b.join().expect("request B");
+    assert_eq!(peer, None, "B must not see A's peer verdict");
+    assert_eq!(peer_uid, None, "B must not see A's peer UID");
+    assert!(role
+        .unwrap_err()
+        .to_string()
+        .contains("daemon Unix principal"));
 }
 
 #[test]
