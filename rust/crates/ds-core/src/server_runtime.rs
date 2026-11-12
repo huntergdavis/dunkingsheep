@@ -505,6 +505,10 @@ impl PaneInfoEnv for TerminalCallAdapter<'_> {
     fn get_pane(&self, pane_id: &str) -> Option<Value> {
         self.with_env(|env| PaneInfoEnv::get_pane(env, pane_id))
     }
+
+    fn try_authority_panes(&self) -> Result<Vec<Value>, DunkError> {
+        self.with_env(|env| MailboxEnv::try_list_panes_grouped(env))
+    }
 }
 
 impl MailboxEnv for TerminalCallAdapter<'_> {
@@ -536,6 +540,10 @@ impl PaneInfoEnv for RequestRuntimeAdapter<'_> {
 
     fn get_pane(&self, pane_id: &str) -> Option<Value> {
         PaneInfoEnv::get_pane(&self.terminal, pane_id)
+    }
+
+    fn try_authority_panes(&self) -> Result<Vec<Value>, DunkError> {
+        PaneInfoEnv::try_authority_panes(&self.terminal)
     }
 }
 

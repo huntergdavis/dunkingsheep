@@ -134,6 +134,170 @@ fn a_system_token_grants_system_and_a_web_token_grants_the_owner_transport() {
 }
 
 #[test]
+fn owner_token_rejects_nonowner_pane_but_preserves_headless_and_owner() {
+    struct Panes {
+        rows: Vec<Value>,
+        fail: bool,
+    }
+    impl PaneInfoEnv for Panes {
+        fn list_panes_grouped(&self) -> Vec<Value> {
+            self.rows.clone()
+        }
+        fn get_pane(&self, id: &str) -> Option<Value> {
+            self.rows.iter().find(|p| p["pane_id"] == id).cloned()
+        }
+        fn try_authority_panes(&self) -> Result<Vec<Value>, crate::error::DunkError> {
+            if self.fail {
+                Err(crate::error::DunkError::Refused("offline".into()))
+            } else {
+                Ok(self.rows.clone())
+            }
+        }
+    }
+    let (flock, dir) = bare("owner-token-peer");
+    let caller_pid = std::process::id() as i64;
+    let caller_start = crate::proc::process_start(caller_pid).unwrap();
+    let mut cursor = caller_pid;
+    let mut tmux_root = None;
+    for _ in 0..crate::proc::MAX_DEPTH {
+        let row = crate::proc::stat(cursor).unwrap();
+        if row.ppid <= 1 {
+            break;
+        }
+        let parent = crate::proc::stat(row.ppid).unwrap();
+        if parent.comm == "tmux: server" {
+            tmux_root = Some(cursor);
+            break;
+        }
+        cursor = row.ppid;
+    }
+    let pid = tmux_root.unwrap_or(caller_pid);
+    let start = crate::proc::process_start(pid).unwrap();
+    let mut roles = Roles::new(
+        &Env::default(),
+        Some(dir.join("roles.json")),
+        Some(dir.join("tokens.json")),
+        None,
+    )
+    .unwrap();
+    roles
+        .register(
+            WORKER,
+            "worker",
+            Some(pid),
+            Some(&start),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    roles
+        .register(
+            OWNER,
+            "owner",
+            Some(pid),
+            Some(&start),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    let token = roles.issue_token("owner", Some("test"), None).unwrap();
+    flock.attach_roles(roles, None);
+    let caller = json!({"pid":caller_pid,"start":caller_start,"source":"peer"});
+    let check = |rows: Vec<Value>, fail: bool, claim: Option<&str>| {
+        flock.clear_caller();
+        flock.set_caller(Some(caller.clone()));
+        flock.set_service_token(Some(&token));
+        flock.set_socket_peer(Some(true));
+        flock.caller_role(claim, &Panes { rows, fail })
+    };
+    let worker = json!({"pane_id":WORKER,"pane_pid":pid});
+    for claim in [Some(WORKER), None, Some(OWNER)] {
+        assert!(check(vec![worker.clone()], false, claim).is_err());
+    }
+    assert_eq!(
+        check(vec![json!({"pane_id":OWNER,"pane_pid":pid})], false, None).unwrap(),
+        "owner"
+    );
+    struct Child(std::process::Child);
+    impl Drop for Child {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let child = Child(
+        std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap(),
+    );
+    let unrelated = check(
+        vec![json!({"pane_id":"%unrelated","pane_pid":child.0.id()})],
+        false,
+        None,
+    );
+    if tmux_root.is_some() {
+        assert!(unrelated.is_err());
+    } else {
+        assert_eq!(unrelated.unwrap(), "owner");
+    }
+    assert!(check(
+        vec![json!({"pane_id":"%missing","pane_pid":99999999})],
+        false,
+        None
+    )
+    .is_err());
+    assert!(check(vec![worker.clone()], true, None).is_err());
+    assert!(check(
+        vec![worker, json!({"pane_id":OWNER,"pane_pid":pid})],
+        false,
+        None
+    )
+    .is_err());
+    assert!(check(
+        vec![json!({"pane_id":"%unknown","pane_pid":pid})],
+        false,
+        None
+    )
+    .is_err());
+    flock
+        .with_roles(|roles, _| {
+            roles
+                .register(
+                    OWNER,
+                    "owner",
+                    Some(pid),
+                    Some("stale"),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .map(|_| ())
+        })
+        .unwrap();
+    assert!(check(vec![json!({"pane_id":OWNER,"pane_pid":pid})], false, None).is_err());
+    flock.clear_caller();
+    flock.set_socket_peer(Some(true));
+    assert_eq!(
+        flock
+            .caller_role(
+                Some(WORKER),
+                &Panes {
+                    rows: vec![json!({"pane_id":WORKER,"pane_pid":pid})],
+                    fail: false
+                }
+            )
+            .unwrap(),
+        "worker"
+    );
+}
+
+#[test]
 fn only_the_owner_issues_tokens_and_registers_lanes() {
     let flock = staffed("owner-only");
     flock.clear_caller();

@@ -895,7 +895,38 @@ os.rename(out_path + ".tmp", out_path)
             Some("w1:p1".into()),
         );
         assert!(crate::proc::caller_alive(Some(&caller)));
-        let pane_pid = caller.pid.expect("live socket peer identity");
+        let mut pane_pid = caller.pid.expect("live socket peer identity");
+        for _ in 0..crate::proc::MAX_DEPTH {
+            let Some(row) = crate::proc::stat(pane_pid) else {
+                break;
+            };
+            let Some(parent) = crate::proc::stat(row.ppid) else {
+                break;
+            };
+            if parent.comm == "tmux: server" {
+                break;
+            }
+            if row.ppid <= 1 {
+                break;
+            }
+            pane_pid = row.ppid;
+        }
+        let caller_start = crate::proc::process_start(pane_pid).expect("live caller start");
+        std::fs::write(config.join("roles.json"), json!({"default":"anonymous","lanes":{"w1:p1":{"role":"owner","pane_pid":pane_pid,"start":caller_start}}}).to_string()).expect("bound owner fixture");
+        struct Sleeper(std::process::Child);
+        impl Drop for Sleeper {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let other = Sleeper(
+            std::process::Command::new("sleep")
+                .arg("3600")
+                .spawn()
+                .expect("unrelated live pane root"),
+        );
+        let other_pid = i64::from(other.0.id());
         let terminal_factory: LoopTerminalFactory = Arc::new(move || {
             let mut terminal = FakeTerminal::new();
             let mut wrapped = terminal.panes[2].clone();
@@ -904,7 +935,11 @@ os.rename(out_path + ".tmp", out_path)
             wrapped.title = "plain shell".into();
             terminal.panes.push(wrapped);
             for pane in &mut terminal.panes {
-                pane.pane_pid = Some(pane_pid);
+                pane.pane_pid = Some(if pane.pane_id == "w1:p1" {
+                    pane_pid
+                } else {
+                    other_pid
+                });
                 if pane.pane_id == "w3:p3" {
                     pane.command = "codex".into();
                 }
@@ -1004,13 +1039,13 @@ os.rename(out_path + ".tmp", out_path)
         // Seed only the isolated fixture's membership store. The socket query below
         // exercises production roster assembly and live PID/start validation.
         let db = rusqlite::Connection::open(config.join("tasks.db")).unwrap();
-        let start = crate::proc::process_start(pane_pid).unwrap();
+        let start = crate::proc::process_start(other_pid).unwrap();
         for (pane, project) in [("w2:p2", "alpha"), ("w3:p3", "beta"), ("w4:p4", "wrapped")] {
             crate::tasks::lane_project::set(
                 &db,
                 &crate::tasks::lane_project::Membership {
                     pane: pane.into(),
-                    pid: pane_pid,
+                    pid: other_pid,
                     start: start.clone(),
                     scope: crate::tasks::lane_project::ProjectScope::Project(project.into()),
                 },
@@ -1034,7 +1069,7 @@ os.rename(out_path + ".tmp", out_path)
             &db,
             &crate::tasks::lane_project::Membership {
                 pane: "w4:p4".into(),
-                pid: pane_pid,
+                pid: other_pid,
                 start: "stale-start".into(),
                 scope: crate::tasks::lane_project::ProjectScope::Project("wrapped".into()),
             },
@@ -2846,7 +2881,8 @@ os.rename(out_path + ".tmp", out_path)
             .unwrap();
         let token_request = |token: &str| RequestCtx {
             service_token: Some(token.into()),
-            socket_peer: Some(true),
+            // This directly invokes the in-process dispatcher; it has no kernel socket peer.
+            // The real socket tests exercise peer credential binding separately.
             ..RequestCtx::default()
         };
         assert!(dispatcher
