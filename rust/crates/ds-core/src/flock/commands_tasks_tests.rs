@@ -205,7 +205,7 @@ fn anonymous_caller_cannot_create_in_another_panes_private_queue() {
 
 #[test]
 fn a_free_model_cannot_file_reviews_but_the_system_and_the_owner_can() {
-    for role in ["worker", "reviewer", "desk", "planner"] {
+    for role in ["worker", "reviewer", "desk"] {
         let error = refused(Flock::check_task_add(
             "global",
             &[],
@@ -219,6 +219,9 @@ fn a_free_model_cannot_file_reviews_but_the_system_and_the_owner_can() {
             "{role}: {error}"
         );
     }
+    assert!(
+        Flock::check_task_add("global", &[], "planner", Some("review"), None, Some(WORKER)).is_ok()
+    );
     for role in ["system", "owner", "web"] {
         assert!(
             Flock::check_task_add("global", &[], role, Some("review"), None, None).is_ok(),

@@ -6420,6 +6420,112 @@ fn planner_socket_assignment_requires_fresh_process_binding() {
 }
 
 #[test]
+fn planner_review_creation_and_assignment_use_bound_project_grant() {
+    let (runtime, _dir, flock, tasks, mut dispatcher) = task_api_fixture();
+    dispatcher.register_task_mutation_leases();
+    let pid = i64::from(std::process::id());
+    let start = crate::proc::process_start(pid).expect("process start");
+    for (pane, role) in [("%4", "planner"), ("%5", "reviewer"), ("%6", "worker")] {
+        flock
+            .with_roles(|roles, _| {
+                roles.register(pane, role, Some(pid), Some(&start), None, None, None, None)?;
+                Ok(())
+            })
+            .unwrap();
+    }
+    let db = rusqlite::Connection::open(tasks.path()).unwrap();
+    crate::tasks::planner_scope::set_grant(
+        &db,
+        "%4",
+        pid,
+        &start,
+        &crate::tasks::lane_project::ProjectScope::Project("alpha".into()),
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO planner_repo_projects(repo,project) VALUES ('fixture/repo','alpha')",
+        [],
+    )
+    .unwrap();
+    crate::tasks::lane_project::set(
+        &db,
+        &crate::tasks::lane_project::Membership {
+            pane: "%5".into(),
+            pid,
+            start: start.clone(),
+            scope: crate::tasks::lane_project::ProjectScope::Project("alpha".into()),
+        },
+    )
+    .unwrap();
+    drop(db);
+    let env = PaneApiEnv {
+        terminal: Mutex::new(Box::new(FakeTerminal::default())),
+        panes: vec![
+            json!({"pane_id":"%4", "pane_pid":pid}),
+            json!({"pane_id":"%5", "pane_pid":pid}),
+        ],
+    };
+    let request = RequestCtx {
+        self_pane_id: Some("%4".into()),
+        socket_peer: Some(true),
+        identity_bound: Some(true),
+        caller: Some(task_test_caller("%4", pid, &start, "test")),
+        ..RequestCtx::default()
+    };
+    let context = HandlerContext {
+        flock: &flock,
+        request: &request,
+        env: &env,
+        runtime: runtime.handle(),
+    };
+    let gate = FlockGate(&context);
+    let input = json!({"title":"Review fixture", "kind":"review", "author":"%6", "repo":"fixture/repo", "pr":1, "head":"1234"});
+    let created = dispatcher
+        .dispatch(&context, &gate, "task_add", args(input.clone()))
+        .expect("authenticated planner creates review");
+    let id = created["id"].as_str().unwrap();
+    assert_eq!(created["assignees"], json!([]));
+    let assigned = dispatcher
+        .dispatch(
+            &context,
+            &gate,
+            "task_assign",
+            args(json!({"id":id,"assignees":["%5"]})),
+        )
+        .expect("project reviewer assigned");
+    assert_eq!(assigned["assignees"], json!(["%5"]));
+    let self_review = json!({"title":"Self review", "kind":"review", "author":"%5", "repo":"fixture/repo", "pr":3, "head":"abcd"});
+    let second = dispatcher
+        .dispatch(&context, &gate, "task_add", args(self_review))
+        .unwrap();
+    assert!(dispatcher
+        .dispatch(
+            &context,
+            &gate,
+            "task_assign",
+            args(json!({"id":second["id"],"assignees":["%5"]}))
+        )
+        .is_err());
+    let bad = json!({"title":"Bad", "kind":"review", "author":"%6", "repo":"foreign/repo", "pr":2, "head":"5678"});
+    assert!(dispatcher
+        .dispatch(&context, &gate, "task_add", args(bad))
+        .is_err());
+    let with_assignee = json!({"title":"Bad", "kind":"review", "author":"%6", "repo":"fixture/repo", "pr":2, "head":"5678", "assignees":["%4"]});
+    assert!(dispatcher
+        .dispatch(&context, &gate, "task_add", args(with_assignee))
+        .is_err());
+    let mut stale = request.clone();
+    stale.identity_bound = None;
+    let bad_context = HandlerContext {
+        flock: &flock,
+        request: &stale,
+        env: &env,
+        runtime: runtime.handle(),
+    };
+    assert!(h_task_add(&bad_context, args(input).unwrap()).is_err());
+}
+
+#[test]
 fn planner_dispatch_refuses_recorded_pr_worker() {
     let (runtime, _dir, flock, tasks, dispatcher) = task_mutation_api_fixture();
     flock

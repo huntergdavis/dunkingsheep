@@ -177,12 +177,14 @@ impl Flock {
                  lane is the owner's (lanes pull with task next)"
             )));
         }
-        if (role == "desk" || role == "planner") && kind != "work" {
+        if (role == "desk" && kind != "work")
+            || (role == "planner" && !matches!(kind, "work" | "review"))
+        {
             return Err(DunkError::Refused(format!(
                 "role {role} files kind=work only"
             )));
         }
-        if kind == "review" && !matches!(role, "owner" | "system" | "web") {
+        if kind == "review" && !matches!(role, "owner" | "system" | "web" | "planner") {
             return Err(DunkError::Refused(
                 "review tasks are filed by the review timer (system) or the owner".into(),
             ));
@@ -227,6 +229,21 @@ impl Flock {
         self_pane_id: Option<&str>,
         env: &dyn PaneInfoEnv,
     ) -> Result<Task, DunkError> {
+        self.task_add_with_planner(title, scope, body, opts, self_pane_id, env, None)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn task_add_with_planner(
+        &self,
+        title: &str,
+        scope: Option<&str>,
+        body: Option<&str>,
+        opts: TaskAddArgs<'_>,
+        self_pane_id: Option<&str>,
+        env: &dyn PaneInfoEnv,
+        planner: Option<crate::tasks::planner_scope::PlannerIdentity>,
+    ) -> Result<Task, DunkError> {
         let tasks = self.task_store()?;
         let target = Self::task_scope(scope, self_pane_id, TASK_GLOBAL)?;
         let mut owners = Self::task_assignees(opts.assignees, self_pane_id)?;
@@ -240,6 +257,18 @@ impl Flock {
             opts.status,
             self_pane_id,
         )?;
+        if role == "planner" && opts.kind == Some("review") {
+            if planner.is_none() {
+                return Err(DunkError::Refused(
+                    "planner review creation requires authenticated live pane binding".into(),
+                ));
+            }
+            if !owners.is_empty() {
+                return Err(DunkError::Refused(
+                    "planner review creation must be unassigned; assign separately".into(),
+                ));
+            }
+        }
         if owners.is_empty() {
             owners = Self::default_task_owner(self_pane_id);
         }
@@ -247,27 +276,35 @@ impl Flock {
             Some(v) if !v.is_empty() => v.to_string(),
             _ => d.to_string(),
         };
-        tasks
-            .add_with(
-                &target,
-                title,
-                body.unwrap_or(""),
-                AddOptions {
-                    status: Some(non_empty(opts.status, "open")),
-                    priority: Some(non_empty(opts.priority, "low")),
-                    assignees: owners,
-                    parent_id: opts.parent_id.map(str::to_string),
-                    depends_on: opts.depends_on.iter().map(|d| d.to_string()).collect(),
-                    created_by: self_pane_id.filter(|p| !p.is_empty()).map(str::to_string),
-                    multi_assignee: opts.multi_assignee,
-                    kind: Some(non_empty(opts.kind, "work")),
-                    author: opts.author.map(str::to_string),
-                    repo: opts.repo.map(str::to_string),
-                    pr: opts.pr.map(str::to_string),
-                    head: opts.head.map(str::to_string),
-                },
-            )
-            .await
+        let add_options = AddOptions {
+            status: Some(non_empty(opts.status, "open")),
+            priority: Some(non_empty(opts.priority, "low")),
+            assignees: owners,
+            parent_id: opts.parent_id.map(str::to_string),
+            depends_on: opts.depends_on.iter().map(|d| d.to_string()).collect(),
+            created_by: self_pane_id.filter(|p| !p.is_empty()).map(str::to_string),
+            multi_assignee: opts.multi_assignee,
+            kind: Some(non_empty(opts.kind, "work")),
+            author: opts.author.map(str::to_string),
+            repo: opts.repo.map(str::to_string),
+            pr: opts.pr.map(str::to_string),
+            head: opts.head.map(str::to_string),
+        };
+        if role == "planner" && opts.kind == Some("review") {
+            tasks
+                .add_planner_review(
+                    &target,
+                    title,
+                    body.unwrap_or(""),
+                    add_options,
+                    planner.expect("planner validated"),
+                )
+                .await
+        } else {
+            tasks
+                .add_with(&target, title, body.unwrap_or(""), add_options)
+                .await
+        }
     }
 
     /// `task_list`: `(explicit scope or None for "visible", tasks)`. A scope other than

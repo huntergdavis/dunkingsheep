@@ -3191,13 +3191,26 @@ pub fn h_task_add(context: &HandlerContext<'_>, args: Args) -> Result<Value, Dun
         depends_on: &depends_on,
         multi_assignee: python_bool_arg(&args, "multi_assignee", false),
     };
-    let task = context.block_on(context.flock.task_add_wire(
+    let role = context
+        .flock
+        .caller_role(context.self_pane_id(), context.env)?;
+    let planner = if role == "planner" && options.kind == Some("review") {
+        Some(require_planner_assignment_binding(context)?.ok_or_else(|| {
+            DunkError::Refused(
+                "planner review creation requires an authenticated live pane binding".into(),
+            )
+        })?)
+    } else {
+        None
+    };
+    let task = context.block_on(context.flock.task_add_wire_with_planner(
         title,
         scope,
         body,
         options,
         context.self_pane_id(),
         context.env,
+        planner,
     ))??;
     Ok(task.wire)
 }

@@ -384,3 +384,69 @@ fn daemon_log_carries_the_python_lifecycle_lines() {
     assert!(has_python_timestamp(lines[stops[0]]), "{text}");
     assert!(binds[0] < stops[0], "bind is logged before stop: {text}");
 }
+
+#[test]
+fn planner_review_create_and_assign_over_bound_unix_socket() {
+    let mut daemon = ProductionDaemon::start("planner-review-guard");
+    let caller =
+        crate::proc::caller_from_peer(Some(i64::from(std::process::id())), Some(SELF_PANE.into()));
+    let pid = caller.pid.expect("socket caller root");
+    let start = crate::proc::process_start(pid).expect("live caller start");
+    let env = Env::from_pairs(&[("DUNKINGSHEEP_DIR", daemon.config.to_str().unwrap())]);
+    let mut roles = crate::roles::Roles::new(&env, None, None, None).unwrap();
+    roles
+        .register(
+            SELF_PANE,
+            "planner",
+            Some(pid),
+            Some(&start),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    roles
+        .register(
+            "w1:p1",
+            "reviewer",
+            Some(pid),
+            Some(&start),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    let db = rusqlite::Connection::open(daemon.config.join("tasks.db")).unwrap();
+    crate::tasks::planner_scope::set_grant(
+        &db,
+        SELF_PANE,
+        pid,
+        &start,
+        &crate::tasks::lane_project::ProjectScope::Project("alpha".into()),
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO planner_repo_projects(repo,project) VALUES ('fixture/repo','alpha')",
+        [],
+    )
+    .unwrap();
+    crate::tasks::lane_project::set(
+        &db,
+        &crate::tasks::lane_project::Membership {
+            pane: "w1:p1".into(),
+            pid,
+            start,
+            scope: crate::tasks::lane_project::ProjectScope::Project("alpha".into()),
+        },
+    )
+    .unwrap();
+    drop(db);
+    let task = daemon.call("task_add", json!({"title":"socket review", "kind":"review", "author":"w3:p3", "repo":"fixture/repo", "pr":1, "head":"1234"}));
+    let id = task["id"].as_str().unwrap();
+    let assigned = daemon.call("task_assign", json!({"id":id,"assignees":["w1:p1"]}));
+    assert_eq!(assigned["assignees"], json!(["w1:p1"]));
+    let foreign = daemon.response("task_add", json!({"title":"foreign", "kind":"review", "author":"w3:p3", "repo":"foreign/repo", "pr":2, "head":"1234"}));
+    assert_eq!(foreign["ok"], false);
+}
