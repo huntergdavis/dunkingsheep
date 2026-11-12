@@ -261,7 +261,7 @@ impl Store {
                 object.insert("answered".to_string(), Value::Bool(answered));
                 // A senderless reply to an owner question can be a detached service answer
                 // or a human follow-up. Stored timestamps cannot distinguish them.
-                let ambiguous_owner_reply = if object.get("sender").is_none_or(Value::is_null) {
+                let ambiguous_owner_reply = if object.get("sender").is_none_or(|sender| sender.is_null() || sender.as_str() == Some("")) {
                     if let Some(id) = object.get("id").and_then(Value::as_str) {
                         connection.query_row(
                             "SELECT EXISTS(SELECT 1 FROM messages a JOIN messages q ON q.id = a.reply_to WHERE a.id = ? AND a.mailbox = 'owner' AND q.mailbox = 'owner' AND (q.reply_to IS NULL OR q.reply_to = '') AND (q.sender IS NULL OR q.sender = '') AND q.transport IN ('web', 'telegram'))",
@@ -502,6 +502,14 @@ mod tests {
             ..Default::default()
         });
         fixture.execute("UPDATE messages SET created_at = (SELECT acked_at FROM messages WHERE id = ?1) WHERE id = ?2", vec![text(&question), text(&collision)]);
+        let empty_sender = fixture.send_outgoing(&Outgoing {
+            mailbox: "owner",
+            body: Some("empty sender"),
+            sender: Some(""),
+            transport: Some("web"),
+            reply_to: Some(&question),
+            ..Default::default()
+        });
         let prior_question = fixture.send_outgoing(&Outgoing {
             mailbox: "owner",
             body: Some("already acked"),
@@ -533,6 +541,7 @@ mod tests {
             true
         );
         assert_eq!(row(&collision)["ambiguous_owner_reply"], true);
+        assert_eq!(row(&empty_sender)["ambiguous_owner_reply"], true);
         assert_eq!(
             row(&prior_answer.summary.message_id)["ambiguous_owner_reply"],
             true

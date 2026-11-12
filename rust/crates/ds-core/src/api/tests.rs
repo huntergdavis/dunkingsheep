@@ -9693,6 +9693,36 @@ fn owner_conversation_before_cursor_matches_python_over_real_socket() {
 }
 
 #[test]
+fn detached_owner_reply_handler_records_service_sender() {
+    let (_dir, flock, env) = owner_api_fixture("owner-detached-reply");
+    let inbox = flock.stores().inbox.unwrap();
+    let question = inbox
+        .send(&crate::inbox_store::Outgoing {
+            mailbox: crate::flock::mailbox::OWNER_MAILBOX,
+            body: Some("question"),
+            transport: Some("web"),
+            ..crate::inbox_store::Outgoing::default()
+        })
+        .unwrap();
+    let request = RequestCtx::default();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let context = HandlerContext {
+        flock: &flock,
+        request: &request,
+        env: &env,
+        runtime: runtime.handle(),
+    };
+    let result = h_owner_reply(
+        &context,
+        args(json!({"message_id": question, "body": "answer"})).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(result["reply"]["sender"], "owner-service");
+}
+
+#[test]
 fn h_owner_reply_matches_python() {
     let (_dir, flock, env) = owner_api_fixture("owner-reply-api");
     let inbox = flock.stores().inbox.unwrap();
