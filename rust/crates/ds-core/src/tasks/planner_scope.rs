@@ -154,6 +154,39 @@ pub fn set_task_project(
     Ok(())
 }
 
+/// Resolve a planner-created review's project from the owner's exact repository mapping.
+/// `None` means the grant or mapping does not authorize creation; `Some(None)` is
+/// a global grant and `Some(Some(project))` is a matching project grant. Call from
+/// the same transaction that inserts and associates the task.
+pub fn review_creation_project(
+    db: &Connection,
+    planner: &PlannerIdentity,
+    repo: Option<&str>,
+) -> rusqlite::Result<Option<Option<String>>> {
+    let grant: Option<(String, Option<String>)> = db.query_row(
+        "SELECT scope_kind, project FROM planner_scope_grants WHERE pane_id=?1 AND pane_pid=?2 AND proc_start=?3",
+        params![planner.pane, planner.pid, planner.start],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).optional()?;
+    match grant {
+        Some((kind, None)) if kind == "global" => Ok(Some(None)),
+        Some((kind, Some(project))) if kind == "project" => {
+            let mapped: Option<String> = match repo {
+                Some(repo) => db
+                    .query_row(
+                        "SELECT project FROM planner_repo_projects WHERE repo=?1",
+                        [repo],
+                        |row| row.get(0),
+                    )
+                    .optional()?,
+                None => None,
+            };
+            Ok((mapped.as_deref() == Some(project.as_str())).then_some(Some(project)))
+        }
+        _ => Ok(None),
+    }
+}
+
 /// Check a point-in-time pane grant and target inside the caller's assignment transaction.
 pub fn allows(
     db: &Connection,
@@ -199,6 +232,57 @@ pub fn allows(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn review_creation_uses_bound_grant_and_exact_repo_mapping() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY)", [])
+            .unwrap();
+        migrate(&db).unwrap();
+        let planner = PlannerIdentity {
+            pane: "%2".into(),
+            pid: 42,
+            start: "start".into(),
+            recipients: vec![],
+            expected_kind: None,
+        };
+        assert_eq!(
+            review_creation_project(&db, &planner, Some("org/repo")).unwrap(),
+            None
+        );
+        set_grant(
+            &db,
+            "%2",
+            42,
+            "start",
+            &ProjectScope::Project("alpha".into()),
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO planner_repo_projects(repo,project) VALUES ('org/repo','alpha')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            review_creation_project(&db, &planner, Some("org/repo")).unwrap(),
+            Some(Some("alpha".into()))
+        );
+        assert_eq!(
+            review_creation_project(&db, &planner, Some("org/other")).unwrap(),
+            None
+        );
+        let mut stale = planner.clone();
+        stale.start = "stale".into();
+        assert_eq!(
+            review_creation_project(&db, &stale, Some("org/repo")).unwrap(),
+            None
+        );
+        set_grant(&db, "%2", 42, "start", &ProjectScope::Global).unwrap();
+        assert_eq!(
+            review_creation_project(&db, &planner, None).unwrap(),
+            Some(None)
+        );
+    }
 
     #[tokio::test]
     async fn review_sync_uses_only_explicit_repository_mapping() {

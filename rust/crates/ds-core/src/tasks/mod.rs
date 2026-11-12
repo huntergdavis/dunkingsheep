@@ -273,7 +273,7 @@ impl Tasks {
         body: &str,
         opts: AddOptions,
     ) -> Result<Task, DunkError> {
-        self.add_with_verdict_guard(scope, title, body, opts, None)
+        self.add_with_verdict_guard(scope, title, body, opts, None, None)
             .await?
             .ok_or_else(|| DunkError::Refused("unconditional task insertion was refused".into()))
     }
@@ -299,8 +299,27 @@ impl Tasks {
             body,
             opts,
             Some(expected_verdict_ids.to_vec()),
+            None,
         )
         .await
+    }
+
+    /// Create a planner review using the bound grant in the same write transaction.
+    pub(crate) async fn add_planner_review(
+        &self,
+        scope: &str,
+        title: &str,
+        body: &str,
+        opts: AddOptions,
+        planner: planner_scope::PlannerIdentity,
+    ) -> Result<Task, DunkError> {
+        if scope != "global" || opts.kind.as_deref() != Some("review") || !opts.assignees.is_empty()
+        {
+            return Err(DunkError::Refused("planner review creation requires global scope and no initial assignees; assign separately".into()));
+        }
+        self.add_with_verdict_guard(scope, title, body, opts, None, Some(planner))
+            .await?
+            .ok_or_else(|| DunkError::Refused("planner review creation refused".into()))
     }
 
     async fn add_with_verdict_guard(
@@ -310,6 +329,7 @@ impl Tasks {
         body: &str,
         opts: AddOptions,
         expected_verdict_ids: Option<Vec<String>>,
+        planner: Option<planner_scope::PlannerIdentity>,
     ) -> Result<Option<Task>, DunkError> {
         let scope = validate_scope(scope)?;
         let title = title.trim().to_string();
@@ -336,6 +356,15 @@ impl Tasks {
                 .map(String::from)
         };
         let (author, repo, head) = (clean(&opts.author), clean(&opts.repo), clean(&opts.head));
+        if planner.is_some()
+            && !author
+                .as_deref()
+                .is_some_and(|a| a != "global" && validate_scope(a).is_ok_and(|v| v == a))
+        {
+            return Err(DunkError::Refused(
+                "planner review creation requires an explicit author pane ID".into(),
+            ));
+        }
         let pr: Option<i64> = match opts.pr.as_deref() {
             None | Some("") => None,
             Some(raw) => Some(raw.trim().parse::<i64>().map_err(|_| {
@@ -380,6 +409,11 @@ impl Tasks {
             let tx = conn
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                 .map_err(db::map_sqlite)?;
+            let planner_project = if let Some(planner) = &planner {
+                Some(planner_scope::review_creation_project(&tx, planner, repo.as_deref())
+                    .map_err(db::map_sqlite)?
+                    .ok_or_else(|| DunkError::Refused("planner grant does not authorize this review repository".into()))?)
+            } else { None };
             if let Some(expected_ids) = &expected_verdict_ids {
                 let actual_ids = {
                     let mut stmt = tx.prepare(
@@ -447,6 +481,9 @@ impl Tasks {
                     )));
                 }
                 return Err(db::map_sqlite(error));
+            }
+            if let Some(Some(project)) = &planner_project {
+                tx.execute("INSERT INTO planner_task_projects(task_id,project) VALUES (?1,?2)", params![id,project]).map_err(db::map_sqlite)?;
             }
             // Only owner-registered exact repository mappings confer project scope.
             // Keep attribution atomic with the verdict guard and task insertion.
