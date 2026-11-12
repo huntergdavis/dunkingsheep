@@ -11,21 +11,32 @@ export default function ProjectTerminal({ target, onClose }) {
   useEffect(() => {
     const term = new Terminal({ cursorBlink: true, scrollback: 5000, convertEol: false });
     const fit = new FitAddon(); term.loadAddon(fit); term.open(host.current);
-    let socket, timer, resizeTimer, disposed = false, attempt = 0, resizing = false, resizeDisabled = false, resizeReady = false;
+    let socket, timer, resizeTimer, disposed = false, attempt = 0, resizing = false, resizePending = false, resizeReady = false;
+    const resizeKey = `ds-terminal-resize-unconfirmed:${target.name}:${target.pane_id}`;
+    let resizeDisabled = true;
+    try { resizeDisabled = localStorage.getItem(resizeKey) !== null; } catch { /* fail closed */ }
+    if (resizeDisabled) setResizeWarning('Resize is unconfirmed. Reconcile the prior resize before retrying.');
     const path = `/api/terminals/${encodeURIComponent(target.name)}`;
     const resize = async () => {
-      if (disposed || !resizeReady || resizeDisabled || resizing || socket?.readyState !== WebSocket.OPEN) return;
+      if (disposed || !resizeReady || resizeDisabled || socket?.readyState !== WebSocket.OPEN) return;
+      if (resizing) { resizePending = true; return; }
       fit.fit();
       resizing = true;
       try {
+        // Persist before dispatch so a reload or tab close cannot silently retry.
+        localStorage.setItem(resizeKey, 'unconfirmed');
         const response = await fetch(`${path}/resize`, { method: 'POST', credentials: 'same-origin',
           headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ cols: term.cols, rows: term.rows, expected_pane: target.pane_id }) });
         if (!response.ok) throw new Error(`Resize unavailable (${response.status})`);
+        localStorage.removeItem(resizeKey);
       } catch {
         // A timeout may have applied the resize. Do not retry an unknown outcome.
         resizeDisabled = true;
-        if (!disposed) setResizeWarning('Resize could not be confirmed. Reopen the terminal to reconcile its size.');
-      } finally { resizing = false; }
+        if (!disposed) setResizeWarning('Resize is unconfirmed. Reconcile the prior resize before retrying.');
+      } finally {
+        resizing = false;
+        if (resizePending && !resizeDisabled) { resizePending = false; scheduleResize(); }
+      }
     };
     const scheduleResize = () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(resize, 500); };
     const observer = new ResizeObserver(scheduleResize); observer.observe(host.current);

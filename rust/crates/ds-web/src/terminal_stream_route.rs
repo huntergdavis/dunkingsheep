@@ -998,6 +998,17 @@ mod tests {
                 .body(axum::body::Body::from(body))
                 .unwrap()
         };
+        assert_eq!(
+            app.clone()
+                .oneshot(resize_request(
+                    "fixture-worker",
+                    r#"{"cols":95,"rows":30,"expected_pane":"%999999"}"#
+                ))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::CONFLICT
+        );
         let mut cross_resize = resize_request("fixture-worker", r#"{"cols":95,"rows":30}"#);
         cross_resize
             .headers_mut()
