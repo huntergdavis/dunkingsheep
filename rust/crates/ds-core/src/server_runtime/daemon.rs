@@ -624,7 +624,93 @@ mod tests {
             crate::proc::caller_alive(Some(&caller)),
             "test caller is live"
         );
-        let caller_root_pid = caller.pid.expect("resolved caller root pid");
+        let mut caller_root_pid = caller.pid.expect("resolved caller root pid");
+        for _ in 0..crate::proc::MAX_DEPTH {
+            let Some(row) = crate::proc::stat(caller_root_pid) else {
+                break;
+            };
+            let Some(parent) = crate::proc::stat(row.ppid) else {
+                break;
+            };
+            if parent.comm == "tmux: server" {
+                break;
+            }
+            if row.ppid <= 1 {
+                break;
+            }
+            caller_root_pid = row.ppid;
+        }
+        let caller_start = crate::proc::process_start(caller_root_pid).expect("live caller start");
+        struct Sleeper(std::process::Child);
+        impl Drop for Sleeper {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        // A second actual socket peer represents the other pane. It has its own
+        // session and a recognized test-only comm, so caller_from_peer cannot
+        // accidentally attribute it to the test runner's parent agent.
+        let request_path = dir.path().join("other-request.json");
+        let response_path = dir.path().join("other-response.json");
+        let ready_path = dir.path().join("other-ready");
+        let peer_program = r#"
+import ctypes, json, os, pathlib, socket, sys, time
+os.setsid()
+assert ctypes.CDLL(None).prctl(15, b'codex', 0, 0, 0) == 0
+request, response, ready, address = map(pathlib.Path, sys.argv[1:])
+ready.touch()
+for _ in range(3000):
+    if request.exists(): break
+    time.sleep(.02)
+else: raise RuntimeError('request not supplied')
+def call(body):
+    with socket.socket(socket.AF_UNIX) as conn:
+        conn.settimeout(10)
+        conn.connect(str(address))
+        conn.sendall(body + b'\n')
+        data = b''
+        while b'\n' not in data:
+            chunk = conn.recv(65536)
+            if not chunk: break
+            data += chunk
+        return json.loads(data)
+who = call(json.dumps({'id':10,'cmd':'whoami','args':{},'self_pane_id':'w2:p2'}).encode())
+private = call(request.read_bytes())
+temporary = response.with_suffix('.tmp')
+temporary.write_text(json.dumps({'whoami':who,'private':private}))
+os.replace(temporary, response)
+time.sleep(3600)
+"#;
+        let other = Sleeper(
+            std::process::Command::new("python3")
+                .arg("-c")
+                .arg(peer_program)
+                .arg(&request_path)
+                .arg(&response_path)
+                .arg(&ready_path)
+                .arg(&socket)
+                .spawn()
+                .expect("unrelated live pane root"),
+        );
+        for _ in 0..500 {
+            if ready_path.exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(ready_path.exists(), "second peer initialized");
+        let other_pid = i64::from(other.0.id());
+        let other_start = crate::proc::process_start(other_pid).expect("live second peer");
+        std::fs::write(
+            config.join("roles.json"),
+            serde_json::json!({"default":"anonymous","lanes":{
+                "w1:p1":{"role":"owner","pane_pid":caller_root_pid,"start":caller_start},
+                "w2:p2":{"role":"worker","pane_pid":other_pid,"start":other_start}
+            }})
+            .to_string(),
+        )
+        .expect("bound owner and worker fixtures");
         let terminal_factory: LoopTerminalFactory = Arc::new(move || {
             let is_connection = std::thread::current()
                 .name()
@@ -643,7 +729,11 @@ mod tests {
             }
             let mut terminal = crate::terminal::fakes::FakeTerminal::new();
             for pane in &mut terminal.panes {
-                pane.pane_pid = Some(caller_root_pid);
+                pane.pane_pid = Some(if pane.pane_id == "w1:p1" {
+                    caller_root_pid
+                } else {
+                    other_pid
+                });
             }
             Box::new(terminal)
         });
@@ -805,19 +895,34 @@ mod tests {
             Some("w2:p2"),
         );
         assert_eq!(true, other_pane_identity["ok"], "{other_pane_identity}");
-        assert_eq!("w2:p2", other_pane_identity["result"]["pane_id"]);
+        assert!(other_pane_identity["result"]["pane_id"].is_null());
         assert_eq!(
-            true, other_pane_identity["result"]["bound"],
+            false, other_pane_identity["result"]["bound"],
             "{other_pane_identity}"
         );
-        let private_read = daemon_call_with_identity(
-            &socket,
-            11,
-            "task_read",
-            serde_json::json!({"id": private_id}),
-            None,
-            Some("w2:p2"),
+        let request_temp = request_path.with_extension("tmp");
+        std::fs::write(&request_temp, serde_json::json!({"id":11,"cmd":"task_read","args":{"id":private_id},"self_pane_id":"w2:p2"}).to_string()).expect("request for second peer");
+        std::fs::rename(&request_temp, &request_path).expect("publish second peer request");
+        for _ in 0..500 {
+            if response_path.exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let responses: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&response_path).expect("second peer response"))
+                .expect("second peer JSON");
+        assert_eq!(responses["whoami"]["ok"], true, "{responses}");
+        assert_eq!(
+            responses["whoami"]["result"]["pane_id"], "w2:p2",
+            "{responses}"
         );
+        assert_eq!(responses["whoami"]["result"]["bound"], true, "{responses}");
+        assert_eq!(
+            responses["whoami"]["result"]["role"], "worker",
+            "{responses}"
+        );
+        let private_read = &responses["private"];
         assert_eq!(false, private_read["ok"], "{private_read}");
         assert!(
             private_read["error"]
