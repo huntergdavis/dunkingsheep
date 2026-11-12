@@ -1117,6 +1117,19 @@ mod tests {
         .await
         .unwrap();
         assert!(received);
+        // With an active control stream, a stale selected pane still must not resize it.
+        assert_eq!(
+            test_app
+                .clone()
+                .oneshot(resize_request(
+                    "fixture-worker",
+                    r#"{"cols":95,"rows":30,"expected_pane":"%999999"}"#
+                ))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::CONFLICT
+        );
         // Simulate an earlier operation whose pane was subsequently renamed.
         let held = state.resize_slots.acquire("prior-name", pane).unwrap();
         let status_request = || {
