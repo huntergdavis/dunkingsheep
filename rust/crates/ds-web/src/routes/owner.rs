@@ -519,7 +519,11 @@ async fn owner_thread(state: &OwnerWebState, limit: i64) -> Result<Value, OwnerW
 fn owner_thread_item(row: &Value) -> Value {
     let sender = row.get("sender").cloned().unwrap_or(Value::Null);
     let transport = row.get("transport").cloned().unwrap_or(Value::Null);
-    let role = match owner_thread_role(sender.as_str(), transport.as_str()) {
+    let role = match if row.get("historical_owner_reply").and_then(Value::as_bool) == Some(true) {
+        OwnerThreadRole::Agent
+    } else {
+        owner_thread_role(sender.as_str(), transport.as_str())
+    } {
         OwnerThreadRole::Owner => "owner",
         OwnerThreadRole::Agent => "agent",
         OwnerThreadRole::Unknown => "unknown",
@@ -1584,7 +1588,8 @@ mod tests {
                 {"id":"i9", "body":"agent report", "created_at":1020.0, "transport":null, "sender":"%21", "reply_to":null, "answered":false},
                 {"id":"i10", "body":"human follow-up", "created_at":1030.0, "transport":"web", "sender":null, "reply_to":"i9"},
                 {"id":"i11", "body":"legacy row", "created_at":1040.0, "transport":null, "sender":null, "reply_to":null},
-                {"id":"i12", "body":"generated report", "created_at":1050.0, "transport":"report", "sender":null, "reply_to":null}
+                {"id":"i12", "body":"generated report", "created_at":1050.0, "transport":"report", "sender":null, "reply_to":null},
+                {"id":"i59713", "body":"detached answer", "created_at":1060.0, "transport":"web", "sender":null, "reply_to":"i59698", "historical_owner_reply":true}
             ],
             "waiting": ["i10"]
         }));
@@ -1599,7 +1604,7 @@ mod tests {
         assert_eq!(headers[header::CONTENT_TYPE], "application/json");
         assert_eq!(body["source"], "owner_conversation");
         assert_eq!(body["waiting"], json!(["i10"]));
-        assert_eq!(body["items"].as_array().unwrap().len(), 6);
+        assert_eq!(body["items"].as_array().unwrap().len(), 7);
         assert_eq!(body["items"][0]["role"], "owner");
         assert_eq!(body["items"][0]["id"], 5);
         assert_eq!(body["items"][0]["created_at"], "1970-01-01T00:16:40Z");
@@ -1612,6 +1617,7 @@ mod tests {
         assert_eq!(body["items"][3]["delivery"], "stored");
         assert_eq!(body["items"][4]["role"], "unknown");
         assert_eq!(body["items"][5]["role"], "unknown");
+        assert_eq!(body["items"][6]["role"], "agent");
         assert_eq!(backend.methods(), ["owner_conversation"]);
         assert_eq!(backend.calls.lock().unwrap()[0].1, json!({"limit": 200}));
     }

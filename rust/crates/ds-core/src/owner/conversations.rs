@@ -416,7 +416,9 @@ impl<'a> OwnerConversations<'a> {
     ) -> Result<Reply, DunkError> {
         let store = self.authorised_store(self_pane_id)?;
         let body = body.map(python_str).unwrap_or_default();
-        let sender = self_pane_id.filter(|pane| !pane.is_empty());
+        let sender = self_pane_id
+            .filter(|pane| !pane.is_empty())
+            .or(Some("owner-service"));
         let reply = store.answer_owner_question(message_id, &body, sender)?;
         let transport = reply.summary.transport.clone();
         Ok(Reply {

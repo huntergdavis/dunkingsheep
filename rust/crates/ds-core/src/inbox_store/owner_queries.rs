@@ -259,6 +259,20 @@ impl Store {
                     continue;
                 };
                 object.insert("answered".to_string(), Value::Bool(answered));
+                // Older detached owner-service replies have no sender. The answer transaction
+                // used one timestamp for both the reply insert and the parent acknowledgement.
+                // A reply edge alone is insufficient: humans can also reply to messages.
+                let historical_owner_reply = if object.get("sender").is_none_or(Value::is_null) {
+                    if let Some(id) = object.get("id").and_then(Value::as_str) {
+                        connection.query_row(
+                            "SELECT EXISTS(SELECT 1 FROM messages a JOIN messages q ON q.id = a.reply_to WHERE a.id = ? AND a.mailbox = 'owner' AND q.mailbox = 'owner' AND (q.reply_to IS NULL OR q.reply_to = '') AND q.acked_at = a.created_at AND q.transport = a.transport)",
+                            [id], |row| row.get::<_, bool>(0),
+                        ).map_err(map_sqlite)?
+                    } else { false }
+                } else { false };
+                if exclude_routine && historical_owner_reply {
+                    object.insert("historical_owner_reply".to_string(), Value::Bool(true));
+                }
             }
             Ok(selected.into_iter().rev().collect())
         })
@@ -464,6 +478,39 @@ mod tests {
             std::fs::write(&path, bytes).expect("write temporary attachment");
             path
         }
+    }
+
+    #[test]
+    fn detached_owner_reply_has_transaction_evidence_but_human_followup_does_not() {
+        let fixture = Fixture::new();
+        let question = fixture.send_outgoing(&Outgoing {
+            mailbox: "owner",
+            body: Some("question"),
+            transport: Some("web"),
+            ..Default::default()
+        });
+        let answer = fixture
+            .store
+            .answer_owner_question(&question, "answer", None)
+            .unwrap();
+        let followup = fixture.send_outgoing(&Outgoing {
+            mailbox: "owner",
+            body: Some("followup"),
+            transport: Some("web"),
+            reply_to: Some(&answer.summary.message_id),
+            ..Default::default()
+        });
+        let rows = fixture
+            .store
+            .conversation_across_visible(&["owner".to_string()], Some(50), None)
+            .unwrap();
+        let row = |id: &str| rows.iter().find(|row| row["id"] == id).unwrap();
+        assert_eq!(
+            row(&answer.summary.message_id)["historical_owner_reply"],
+            true
+        );
+        assert!(row(&question).get("historical_owner_reply").is_none());
+        assert!(row(&followup).get("historical_owner_reply").is_none());
     }
 
     fn text(value: &str) -> SqlValue {
