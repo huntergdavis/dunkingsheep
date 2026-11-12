@@ -53,7 +53,7 @@ export default function ProjectTerminal({ target, onClose }) {
     });
     connect();
     return () => { disposed = true; clearTimeout(timer); clearTimeout(resizeTimer); observer.disconnect(); input.dispose(); socket?.close(); term.dispose(); };
-  }, [target.name]);
+  }, [target.name, target.pane_id]);
   return <section className="project-terminal" aria-label={`Terminal ${target.name}`}>
     <div className="project-terminal-header"><strong>{target.name}</strong><span role="status">{status}</span><button onClick={onClose}>Close terminal</button></div>
     <p>Live output begins when connected. For the current screen, use the existing lane view.</p>
