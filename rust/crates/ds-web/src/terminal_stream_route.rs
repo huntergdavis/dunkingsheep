@@ -7,7 +7,7 @@ use crate::{
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        DefaultBodyLimit, Path, State,
+        DefaultBodyLimit, Path, Query, State,
     },
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
@@ -112,6 +112,12 @@ fn new_resize_epoch() -> Option<String> {
 struct ResizeRequest {
     cols: i64,
     rows: i64,
+    expected_pane: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct StreamQuery {
+    expected_pane: Option<String>,
 }
 
 enum ResizeResult {
@@ -281,6 +287,13 @@ async fn resize_terminal(
         )
             .into_response();
     };
+    if request
+        .expected_pane
+        .as_deref()
+        .is_some_and(|pane| pane != binding.0)
+    {
+        return StatusCode::CONFLICT.into_response();
+    }
     let Some(client) = state.controls.unique(&binding.0) else {
         return (
             StatusCode::CONFLICT,
@@ -450,6 +463,7 @@ async fn register_control(state: &Arc<StreamState>, pane: &str, pid: u32) -> Opt
 async fn upgrade(
     State(state): State<Arc<StreamState>>,
     Path(name): Path<String>,
+    Query(query): Query<StreamQuery>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
@@ -468,6 +482,13 @@ async fn upgrade(
     let Some((binding, Some(session))) = lookup(state.clone(), name.clone(), true).await else {
         return StatusCode::NOT_FOUND.into_response();
     };
+    if query
+        .expected_pane
+        .as_deref()
+        .is_some_and(|pane| pane != binding.0)
+    {
+        return StatusCode::CONFLICT.into_response();
+    }
     let mut command = Command::new(&state.backend.tmux_bin);
     if let Some(socket) = state.socket.as_deref() {
         command.args(["-L", socket]);
@@ -965,7 +986,7 @@ mod tests {
         let items: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(items.as_array().unwrap().len(), 1);
         assert_eq!(items[0]["name"], "fixture-worker");
-        assert!(items[0].get("pane_id").is_none());
+        assert_eq!(items[0]["pane_id"].as_str(), Some(pane.as_str()));
         let resize_request = |name: &str, body: &'static str| {
             axum::http::Request::builder()
                 .method("POST")
@@ -977,6 +998,17 @@ mod tests {
                 .body(axum::body::Body::from(body))
                 .unwrap()
         };
+        assert_eq!(
+            app.clone()
+                .oneshot(resize_request(
+                    "fixture-worker",
+                    r#"{"cols":95,"rows":30,"expected_pane":"%999999"}"#
+                ))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::CONFLICT
+        );
         let mut cross_resize = resize_request("fixture-worker", r#"{"cols":95,"rows":30}"#);
         cross_resize
             .headers_mut()
@@ -1050,6 +1082,17 @@ mod tests {
                 .await
                 .is_err()
         );
+        let mut wrong = format!("{url}?expected_pane=%25999999")
+            .into_client_request()
+            .unwrap();
+        wrong
+            .headers_mut()
+            .insert(header::ORIGIN, origin.parse().unwrap());
+        wrong.headers_mut().insert(
+            header::COOKIE,
+            format!("vp_session={session_token}").parse().unwrap(),
+        );
+        assert!(tokio_tungstenite::connect_async(wrong).await.is_err());
         let (mut ws, _) = tokio_tungstenite::connect_async(request(&origin, true))
             .await
             .unwrap();
@@ -1074,6 +1117,19 @@ mod tests {
         .await
         .unwrap();
         assert!(received);
+        // With an active control stream, a stale selected pane still must not resize it.
+        assert_eq!(
+            test_app
+                .clone()
+                .oneshot(resize_request(
+                    "fixture-worker",
+                    r#"{"cols":95,"rows":30,"expected_pane":"%999999"}"#
+                ))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::CONFLICT
+        );
         // Simulate an earlier operation whose pane was subsequently renamed.
         let held = state.resize_slots.acquire("prior-name", pane).unwrap();
         let status_request = || {

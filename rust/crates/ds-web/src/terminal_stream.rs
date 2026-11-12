@@ -354,7 +354,7 @@ pub fn list_live_agents(
             .and_then(Value::as_str)
             .map(Value::from)
             .unwrap_or(Value::Null);
-        result.push(serde_json::json!({"name":name,"agent":agent,"state":null,"state_reason":"no activity source", "cols":cols,"rows":rows}));
+        result.push(serde_json::json!({"name":name,"pane_id":pane,"agent":agent,"state":null,"state_reason":"no activity source", "cols":cols,"rows":rows}));
     }
     result.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
     Some(result)
