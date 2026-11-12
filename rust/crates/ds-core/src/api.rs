@@ -529,6 +529,7 @@ impl<'a> RequestCallerGuard<'a> {
         flock.with_caller(|state| {
             state.identity_bound = request.identity_bound;
             state.identity_note = request.identity_note.clone();
+            state.socket_peer_uid = request.socket_peer_uid;
         });
         flock.set_socket_peer(request.socket_peer);
         Self(flock)

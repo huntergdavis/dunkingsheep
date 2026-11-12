@@ -257,6 +257,7 @@ impl Fixture {
         RequestCtx {
             self_pane_id: pane.map(str::to_owned),
             socket_peer: Some(true),
+            socket_peer_uid: Some(nix::unistd::geteuid().as_raw()),
             service_token: match role {
                 "system" => Some(self.system_token.clone()),
                 "web" => Some(self.web_token.clone()),

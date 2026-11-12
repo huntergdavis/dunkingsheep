@@ -205,15 +205,50 @@ fn owner_token_rejects_nonowner_pane_but_preserves_headless_and_owner() {
         )
         .unwrap();
     let token = roles.issue_token("owner", Some("test"), None).unwrap();
+    let web_token = roles.issue_token("web", Some("web-test"), None).unwrap();
     flock.attach_roles(roles, None);
     let caller = json!({"pid":caller_pid,"start":caller_start,"source":"peer"});
+    flock.set_socket_peer(Some(true));
+    flock.with_caller(|state| state.socket_peer_uid = Some(nix::unistd::geteuid().as_raw()));
+    flock.clear_caller();
+    assert_eq!(
+        flock.caller_state().socket_peer_uid,
+        Some(nix::unistd::geteuid().as_raw())
+    );
+    flock.clear_socket_peer();
+    assert_eq!(flock.caller_state().socket_peer_uid, None);
     let check = |rows: Vec<Value>, fail: bool, claim: Option<&str>| {
         flock.clear_caller();
         flock.set_caller(Some(caller.clone()));
         flock.set_service_token(Some(&token));
         flock.set_socket_peer(Some(true));
+        flock.with_caller(|state| state.socket_peer_uid = Some(nix::unistd::geteuid().as_raw()));
         flock.caller_role(claim, &Panes { rows, fail })
     };
+    for uid in [None, Some(nix::unistd::geteuid().as_raw().wrapping_add(1))] {
+        flock.clear_caller();
+        flock.set_service_token(Some(&token));
+        flock.set_socket_peer(Some(true));
+        flock.with_caller(|state| state.socket_peer_uid = uid);
+        let error = flock.caller_role(
+            None,
+            &Panes {
+                rows: vec![],
+                fail: false,
+            },
+        );
+        assert!(error
+            .unwrap_err()
+            .to_string()
+            .contains("daemon Unix principal"));
+    }
+    flock.clear_caller();
+    flock.set_service_token(Some(&web_token));
+    flock.set_socket_peer(Some(true));
+    flock.with_caller(|state| {
+        state.socket_peer_uid = Some(nix::unistd::geteuid().as_raw().wrapping_add(1));
+    });
+    assert_eq!(flock.caller_role(None, &NoPanes).unwrap(), "web");
     let worker = json!({"pane_id":WORKER,"pane_pid":pid});
     for claim in [Some(WORKER), None, Some(OWNER)] {
         assert!(check(vec![worker.clone()], false, claim).is_err());
@@ -423,6 +458,56 @@ fn a_legacy_superuser_is_an_owner_only_where_the_registry_says_default() {
         role(&flock, Some("w9:p9")),
         "owner",
         "no registry file: worker default is not 'default', legacy honoured only at the default"
+    );
+}
+
+#[test]
+fn owner_pane_and_legacy_roles_require_the_daemon_socket_uid() {
+    let registered = staffed("owner-peer-uid-registered");
+    let (legacy, dir) = bare("owner-peer-uid-legacy");
+    let roles = Roles::new(
+        &Env::default(),
+        Some(dir.join("roles.json")),
+        Some(dir.join("tokens.json")),
+        None,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("superusers.json"),
+        json!({"panes": ["w9:p9"], "names": []}).to_string(),
+    )
+    .unwrap();
+    legacy.attach_roles(
+        roles,
+        Some(Superusers::new(dir.join("superusers.json"), true).unwrap()),
+    );
+    let uid = nix::unistd::geteuid().as_raw();
+    for (flock, pane) in [(&*registered, OWNER), (&legacy, "w9:p9")] {
+        for (peer_uid, allowed) in [
+            (Some(uid), true),
+            (Some(uid.wrapping_add(1)), false),
+            (None, false),
+        ] {
+            flock.clear_caller();
+            flock.set_socket_peer(Some(true));
+            flock.with_caller(|state| state.socket_peer_uid = peer_uid);
+            let result = flock.caller_role(Some(pane), &NoPanes);
+            if allowed {
+                assert_eq!(result.unwrap(), "owner");
+            } else {
+                assert!(result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("daemon Unix principal"));
+            }
+        }
+    }
+    registered.clear_caller();
+    registered.set_socket_peer(Some(true));
+    registered.with_caller(|state| state.socket_peer_uid = Some(uid.wrapping_add(1)));
+    assert_eq!(
+        registered.caller_role(Some(WORKER), &NoPanes).unwrap(),
+        "worker"
     );
 }
 

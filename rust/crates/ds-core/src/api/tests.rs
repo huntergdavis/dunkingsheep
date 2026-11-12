@@ -4822,6 +4822,7 @@ fn concurrent_requests_keep_caller_identity_on_their_own_thread() {
                         ..crate::proc::Caller::default()
                     }),
                     socket_peer: Some(true),
+                    socket_peer_uid: Some(nix::unistd::geteuid().as_raw()),
                     ..RequestCtx::default()
                 };
                 let context = request_context(&flock, &request, &env, &runtime);
@@ -4871,6 +4872,7 @@ fn request_caller_fields_are_cleared_after_handler_error() {
         }),
         service_token: Some("secret".into()),
         socket_peer: Some(true),
+        socket_peer_uid: Some(nix::unistd::geteuid().as_raw()),
         ..RequestCtx::default()
     };
     let context = request_context(&flock, &request, &env, &runtime);
@@ -4922,6 +4924,7 @@ fn socket_peer_verdict_stays_distinct_from_trusted_in_process_dispatch() {
         caller: Some(caller.clone()),
         self_pane_id: pane.clone(),
         socket_peer: Some(true),
+        socket_peer_uid: Some(nix::unistd::geteuid().as_raw()),
         ..RequestCtx::default()
     };
     let result = dispatch_request(&dispatcher, &flock, &verified).expect("verified socket");
@@ -6356,6 +6359,7 @@ fn planner_socket_assignment_requires_fresh_process_binding() {
     let request = RequestCtx {
         self_pane_id: Some("w1:p4".into()),
         socket_peer: Some(true),
+        socket_peer_uid: Some(nix::unistd::geteuid().as_raw()),
         identity_bound: Some(true),
         caller: Some(task_test_caller("w1:p4", pid, &start, "test")),
         ..RequestCtx::default()
@@ -6468,6 +6472,7 @@ fn planner_review_creation_and_assignment_use_bound_project_grant() {
     let request = RequestCtx {
         self_pane_id: Some("%4".into()),
         socket_peer: Some(true),
+        socket_peer_uid: Some(nix::unistd::geteuid().as_raw()),
         identity_bound: Some(true),
         caller: Some(task_test_caller("%4", pid, &start, "test")),
         ..RequestCtx::default()
@@ -9678,10 +9683,11 @@ fn owner_conversation_before_cursor_matches_python_over_real_socket() {
         socket
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
-        let peer_pid = crate::server::peer_pid(&socket);
+        let socket_peer = crate::server::peer_credentials(&socket);
         let reader = BufReader::new(socket.try_clone().unwrap());
         for line in reader.lines() {
-            let (response, _) = crate::server::handle_line(&peer, &line.unwrap(), peer_pid);
+            let (response, _) =
+                crate::server::handle_line_with_peer(&peer, &line.unwrap(), socket_peer);
             socket
                 .write_all(crate::protocol::encode_line(&response).as_bytes())
                 .unwrap();
@@ -10666,10 +10672,11 @@ fn socket_nonfinite_leases_reach_real_task_sql_and_preserve_error_order() {
             socket
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
-            let peer_pid = crate::server::peer_pid(&socket);
+            let socket_peer = crate::server::peer_credentials(&socket);
             let reader = BufReader::new(socket.try_clone().unwrap());
             for line in reader.lines() {
-                let (response, _) = crate::server::handle_line(&peer, &line.unwrap(), peer_pid);
+                let (response, _) =
+                    crate::server::handle_line_with_peer(&peer, &line.unwrap(), socket_peer);
                 socket
                     .write_all(crate::protocol::encode_line(&response).as_bytes())
                     .unwrap();

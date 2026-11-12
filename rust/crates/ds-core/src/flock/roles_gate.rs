@@ -97,15 +97,14 @@ impl Flock {
         }
         let token = self.with_caller(|state| state.service_token.clone());
         let mut role: Option<String> = None;
+        let mut owner_token = false;
         if let Some(token) = non_empty(token.as_deref()) {
             role = self.with_roles(|roles, _| roles.token_role(token))?;
             // The owner token is also used by a legitimate detached owner app.
             // Deny its direct use from a non-owner pane without trusting the
             // client-supplied pane id. Detached callers remain a compatibility
             // exception; this is not an adversarial same-UID isolation boundary.
-            if role.as_deref() == Some("owner") && self.socket_peer_ok().is_some() {
-                self.owner_token_peer_check(env)?;
-            }
+            owner_token = role.as_deref() == Some("owner");
             if role.is_none() {
                 eprintln!("service token refused (unknown token)");
             }
@@ -139,6 +138,15 @@ impl Flock {
             });
         }
         let role = role.expect("set above");
+        if role == "owner" && self.socket_peer_ok().is_some() {
+            let uid = self.with_caller(|state| state.socket_peer_uid);
+            if self.socket_peer_ok() != Some(true) || uid != Some(nix::unistd::geteuid().as_raw()) {
+                return Err(refuse("owner role requires the daemon Unix principal"));
+            }
+            if owner_token {
+                self.owner_token_peer_check(env)?;
+            }
+        }
         self.with_caller(|state| {
             state.role = Some(role.clone());
             state.role_pane = self_pane_id.map(String::from);

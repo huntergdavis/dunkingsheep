@@ -266,6 +266,7 @@ mod tests {
         RequestCtx {
             self_pane_id: Some(pane.into()),
             socket_peer: Some(true),
+            socket_peer_uid: Some(nix::unistd::geteuid().as_raw()),
             ..RequestCtx::default()
         }
     }

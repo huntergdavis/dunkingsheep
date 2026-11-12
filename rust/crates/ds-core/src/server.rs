@@ -44,6 +44,8 @@ pub struct RequestCtx {
     /// code; `Some(false)` is a socket request without usable peer credentials; `Some(true)` is
     /// a socket request with peer credentials.
     pub socket_peer: Option<bool>,
+    /// Kernel-authenticated Unix peer UID. Never derived from the request body.
+    pub socket_peer_uid: Option<u32>,
 }
 
 /// What the server needs to know about a pane to bind an identity to it.
@@ -463,7 +465,7 @@ fn admit_connection(
 }
 
 fn serve_connection(dispatcher: Arc<dyn Dispatcher>, conn: UnixStream, stop: Arc<AtomicBool>) {
-    let peer_pid = peer_pid(&conn);
+    let peer = peer_credentials(&conn);
     if let Ok(reader) = conn.try_clone() {
         let mut writer = conn;
         for raw in BufReader::new(reader).split(b'\n') {
@@ -473,7 +475,7 @@ fn serve_connection(dispatcher: Arc<dyn Dispatcher>, conn: UnixStream, stop: Arc
             if line.is_empty() {
                 continue;
             }
-            let (response, stop_after) = handle_line(dispatcher.as_ref(), line, peer_pid);
+            let (response, stop_after) = handle_line_with_peer(dispatcher.as_ref(), line, peer);
             if writer.write_all(encode_line(&response).as_bytes()).is_err() {
                 break;
             }
@@ -487,10 +489,24 @@ fn serve_connection(dispatcher: Arc<dyn Dispatcher>, conn: UnixStream, stop: Arc
 
 /// The connecting process, from `SO_PEERCRED` (Linux); `None` when it cannot be read or is 0.
 pub fn peer_pid(conn: &UnixStream) -> Option<i64> {
+    peer_credentials(conn).map(|peer| peer.pid)
+}
+
+/// PID and UID from the same kernel `SO_PEERCRED` snapshot.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PeerCredentials {
+    pid: i64,
+    uid: u32,
+}
+
+pub(crate) fn peer_credentials(conn: &UnixStream) -> Option<PeerCredentials> {
     use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
     let creds = getsockopt(conn, PeerCredentials).ok()?;
     let pid = i64::from(creds.pid());
-    (pid != 0).then_some(pid)
+    (pid > 0).then_some(self::PeerCredentials {
+        pid,
+        uid: creds.uid(),
+    })
 }
 
 /// True if something accepts connections on the unix socket at `path`.
@@ -516,6 +532,23 @@ pub fn handle_line(
     dispatcher: &dyn Dispatcher,
     line: &str,
     peer_pid: Option<i64>,
+) -> (Response, bool) {
+    handle_line_parts(dispatcher, line, peer_pid, None)
+}
+
+pub(crate) fn handle_line_with_peer(
+    dispatcher: &dyn Dispatcher,
+    line: &str,
+    peer: Option<PeerCredentials>,
+) -> (Response, bool) {
+    handle_line_parts(dispatcher, line, peer.map(|p| p.pid), peer.map(|p| p.uid))
+}
+
+fn handle_line_parts(
+    dispatcher: &dyn Dispatcher,
+    line: &str,
+    peer_pid: Option<i64>,
+    peer_uid: Option<u32>,
 ) -> (Response, bool) {
     let request: Value = match crate::wire_json::from_str(line) {
         Ok(value) => value,
@@ -546,6 +579,7 @@ pub fn handle_line(
             .and_then(Value::as_str)
             .map(str::to_string),
         socket_peer: Some(peer_pid.is_some()),
+        socket_peer_uid: peer_uid,
         ..RequestCtx::default()
     };
     ctx.self_pane_id = bind_identity(dispatcher, &mut ctx, claimed, &name);
