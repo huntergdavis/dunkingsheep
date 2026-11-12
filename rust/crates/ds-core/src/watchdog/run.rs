@@ -689,11 +689,40 @@ fn recent_failure(state: &Value, now: f64) -> Value {
         .ok()
         .and_then(|value| value.parse::<f64>().ok())
         .unwrap_or(43200.0);
-    state
+    let Some(failure) = state
         .get("delivery_failure")
-        .filter(|f| now - f["at"].as_f64().unwrap_or(now) <= max_age)
-        .cloned()
-        .unwrap_or(Value::Null)
+        .filter(|failure| python_truthy(failure))
+    else {
+        return Value::Null;
+    };
+    let Some(at) = failure.get("at").and_then(python_float) else {
+        return Value::Null;
+    };
+    if now - at <= max_age {
+        failure.clone()
+    } else {
+        Value::Null
+    }
+}
+
+fn python_truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(value) => *value,
+        Value::Number(value) => value.as_f64().is_some_and(|value| value != 0.0),
+        Value::String(value) => !value.is_empty(),
+        Value::Array(value) => !value.is_empty(),
+        Value::Object(value) => !value.is_empty(),
+    }
+}
+
+fn python_float(value: &Value) -> Option<f64> {
+    match value {
+        Value::Number(value) => value.as_f64(),
+        Value::Bool(value) => Some(f64::from(u8::from(*value))),
+        Value::String(value) => value.trim().parse().ok(),
+        _ => None,
+    }
 }
 
 fn write_heartbeat(path: &Path, now: f64, cadence: f64) -> Result<(), DunkError> {
