@@ -187,6 +187,18 @@ pub fn review_creation_project(
     }
 }
 
+/// A project planner may only add assignees to a mapped foreign blocker.
+pub fn is_mapped_foreign(
+    db: &Connection,
+    planner: &PlannerIdentity,
+    task: &str,
+) -> rusqlite::Result<bool> {
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM planner_scope_grants g JOIN planner_task_projects p ON p.task_id=?4 WHERE g.pane_id=?1 AND g.pane_pid=?2 AND g.proc_start=?3 AND g.scope_kind='project' AND p.project != g.project)",
+        params![planner.pane, planner.pid, planner.start, task], |row| row.get(0),
+    )
+}
+
 /// Check a point-in-time pane grant and target inside the caller's assignment transaction.
 pub fn allows(
     db: &Connection,
@@ -408,10 +420,23 @@ mod tests {
             )
             .await
             .unwrap();
+        tasks.assign(&foreign.id, &["%9"], "add").await.unwrap();
+        for mode in ["set", "remove"] {
+            assert!(tasks
+                .assign_with_planner_scope(&foreign.id, &["%9"], mode, true, Some(planner.clone()))
+                .await
+                .is_err());
+        }
         tasks
             .assign_with_planner_scope(&foreign.id, &["%3"], "add", true, Some(planner.clone()))
             .await
             .unwrap();
+        assert!(tasks
+            .get(&foreign.id)
+            .await
+            .unwrap()
+            .assignees
+            .contains("%9"));
         assert!(tasks
             .get(&foreign.id)
             .await
