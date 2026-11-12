@@ -546,3 +546,7 @@
 /* Short bubbles hug their text instead of stretching to the row (t1055). */
 .message-wrap { width: fit-content; max-width: 100%; }
 .message-wrap .cs-message__content-wrapper { width: fit-content; max-width: 100%; }
+
+.project-terminal { margin-top: 1rem; padding: 1rem; border: 1px solid var(--dash-border); }
+.project-terminal-header { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; }
+.project-terminal-screen { height: min(60vh, 600px); min-height: 240px; background: #111; padding: 8px; }

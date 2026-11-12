@@ -20,6 +20,8 @@ import { leaderLine } from './leader-line.js';
 import { laneStatus } from './lane-status.js';
 import { channelDeliveryLabel, messageDeliveryLabel } from './delivery-label.js';
 import CharacterEditor from './CharacterEditor';
+import ProjectTerminal from './ProjectTerminal';
+import { terminalTargetForPane } from './project-terminal-targets.js';
 
 function LaneStatus({ row }) {
   const value = laneStatus(row);
@@ -1167,6 +1169,13 @@ function Projects({ standalone = false }) {
   const [roster, setRoster] = useState(null);
   const [error, setError] = useState('');
   const [selected, setSelected] = useState('all');
+  const [terminalTargets, setTerminalTargets] = useState([]);
+  const [terminalTarget, setTerminalTarget] = useState(null);
+  useEffect(() => {
+    let active = true;
+    api('/terminals').then(items => { if (active && Array.isArray(items)) setTerminalTargets(items); }).catch(() => { if (active) setTerminalTargets([]); });
+    return () => { active = false; };
+  }, []);
   useEffect(() => {
     let live = true;
     async function load() {
@@ -1193,8 +1202,9 @@ function Projects({ standalone = false }) {
     {!roster && !error && <p>Loading projects…</p>}
     {roster && <><label>Show <select aria-label="Filter projects" value={effectiveSelected} onChange={e => setSelected(e.target.value)}><option value="all">All groups</option>{ordered.map(group => <option key={group.key} value={group.key}>{group.title}</option>)}</select></label>
       {!ordered.length && <p>No live agent lanes are reported.</p>}
-      {ordered.filter(group => effectiveSelected === 'all' || group.key === effectiveSelected).map(group => <section className="project-group" key={group.key}><h2>{group.title} <small>({group.lanes.length})</small></h2><div className="ops-table-wrap"><table><thead><tr><th>Lane</th><th>Activity</th><th>Task</th><th>Model</th></tr></thead><tbody>{group.lanes.map(lane => <tr key={lane.pane_id}><td><a href={`/dash/fleet?pane=${encodeURIComponent(lane.pane_id)}`}>{lane.name || lane.pane_id}</a><small> {lane.pane_id}</small></td><td>{lane.state || 'Unknown'}</td><td>{lane.task ? [lane.task.id, lane.task.title].filter(Boolean).join(' · ') : 'Unknown'}</td><td>{lane.model?.value || 'Unknown'}</td></tr>)}</tbody></table></div></section>)}
+      {ordered.filter(group => effectiveSelected === 'all' || group.key === effectiveSelected).map(group => <section className="project-group" key={group.key}><h2>{group.title} <small>({group.lanes.length})</small></h2><div className="ops-table-wrap"><table><thead><tr><th>Lane</th><th>Activity</th><th>Task</th><th>Model</th></tr></thead><tbody>{group.lanes.map(lane => <tr key={lane.pane_id}><td><a href={`/dash/fleet?pane=${encodeURIComponent(lane.pane_id)}`}>{lane.name || lane.pane_id}</a><small> {lane.pane_id}</small>{terminalTargetForPane(terminalTargets, lane.pane_id) && <button type="button" onClick={() => setTerminalTarget(terminalTargetForPane(terminalTargets, lane.pane_id))}>Open terminal</button>}</td><td>{lane.state || 'Unknown'}</td><td>{lane.task ? [lane.task.id, lane.task.title].filter(Boolean).join(' · ') : 'Unknown'}</td><td>{lane.model?.value || 'Unknown'}</td></tr>)}</tbody></table></div></section>)}
     </>}
+    {terminalTarget && <ProjectTerminal key={terminalTarget.name} target={terminalTarget} onClose={() => setTerminalTarget(null)} />}
   </div></DashShell>;
 }
 

@@ -17,6 +17,8 @@
     "@tiptap/extension-link": "^3.0.0",
     "@tiptap/react": "^3.0.0",
     "@tiptap/starter-kit": "^3.0.0",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
     "react": "18.2.0",
     "react-dom": "18.2.0",
     "react-markdown": "^10.0.0",
