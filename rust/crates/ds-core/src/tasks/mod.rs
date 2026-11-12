@@ -1125,6 +1125,9 @@ impl Tasks {
                         .map_err(db::map_sqlite)? {
                         return Err(DunkError::Refused("planner grant does not authorize this task".into()));
                     }
+                    if mode != "add" && planner_scope::is_mapped_foreign(&tx, planner, &id).map_err(db::map_sqlite)? {
+                        return Err(DunkError::Refused("planner may only add assignees to a mapped foreign blocker".into()));
+                    }
                     if !planner_scope::recipients_allowed(&tx, planner).map_err(db::map_sqlite)? {
                         return Err(DunkError::Refused("planner recipient is not in the granted project".into()));
                     }
