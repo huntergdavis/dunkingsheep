@@ -309,12 +309,20 @@ pub(crate) fn federated_recovery_step<E: SendEnv + PaneInfoEnv>(
             continue;
         };
         let current = sends::read_screen(env, &pane_id, None, true);
-        let live = flock
+        // Freeze outbox and candidate identity across the final check and key.
+        let rows = flock
+            .outbox
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let candidates = flock
             .stuck_candidates
             .lock()
-            .ok()
-            .and_then(|rows| rows.get(&pane_id).cloned());
-        if live.as_ref() != Some(&entry)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let live = candidates.get(&pane_id);
+        if rows
+            .get(&pane_id)
+            .is_some_and(|queue| queue.iter().any(|message| message.status == "queued"))
+            || live != Some(&entry)
             || (entry.scheduled
                 && (entry.text != content
                     || !flock.scheduled_recovery_current(&pane_id, &entry, crate::clock::now_s())))
@@ -340,7 +348,24 @@ pub(crate) fn federated_recovery_step<E: SendEnv + PaneInfoEnv>(
         {
             continue;
         }
-        let (pressed, detail) = env.send_key(&pane_id, "Enter");
+        let (pressed, detail) = if entry.scheduled {
+            let result = flock
+                .dunks
+                .with_live_schedule(
+                    &entry.source,
+                    &pane_id,
+                    entry.schedule_template.as_deref(),
+                    || env.send_recovery_key(&pane_id, "Enter"),
+                )
+                .unwrap_or_else(|| (false, "schedule changed".into()));
+            drop(candidates);
+            drop(rows);
+            result
+        } else {
+            drop(candidates);
+            drop(rows);
+            env.send_key(&pane_id, "Enter")
+        };
         if !pressed {
             tracing::warn!(pane_id, detail, "federated stuck recovery key refused");
             continue;

@@ -19,7 +19,8 @@
 use super::tmux_registry::Registry;
 use serde_json::json;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 pub use super::parse::pane_separator;
 use super::parse::{parse_panes, parse_tabs, parse_workspaces, safe_name};
@@ -1407,6 +1408,48 @@ impl Terminal for TmuxBackend {
         Ok(())
     }
 
+    fn send_recovery_key(&mut self, pane_id: &str, key: &str) -> Result<(), TerminalError> {
+        let mut command = Command::new(&self.tmux_bin);
+        if let Some(socket) = self
+            .environment
+            .get("DUNKINGSHEEP_TMUX_SOCKET")
+            .filter(|v| !v.is_empty())
+        {
+            command.args(["-L", socket]);
+        }
+        let mut child = command
+            .args(["send-keys", "-t", pane_id, key])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|error| TerminalError::unavailable(format!("tmux recovery spawn: {error}")))?;
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) if status.success() => return Ok(()),
+                Ok(Some(_)) => return Err(TerminalError::refused("tmux recovery key failed")),
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(20))
+                }
+                Ok(None) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(TerminalError::unavailable(
+                        "tmux recovery key timed out; delivery unconfirmed",
+                    ));
+                }
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(TerminalError::unavailable(format!(
+                        "tmux recovery key status: {error}"
+                    )));
+                }
+            }
+        }
+    }
+
     fn read_pane(
         &self,
         pane_id: &str,
@@ -1607,4 +1650,39 @@ pub fn agent_launch(command: &str) -> String {
         "sh -c {}",
         crate::flock::commands_layout::shlex_join(&[script])
     )
+}
+
+#[cfg(test)]
+mod bounded_recovery_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn timeout_after_partial_key_is_unconfirmed_and_child_is_reaped() {
+        let dir = tempfile::tempdir().unwrap();
+        let executable = dir.path().join("fake-tmux");
+        let marker = dir.path().join("sent");
+        std::fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\nprintf x > '{}'\nexec sleep 30\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut backend = TmuxBackend::new(executable);
+        let started = Instant::now();
+        let result = backend.send_recovery_key("%1", "Enter");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("delivery unconfirmed"));
+        assert!(
+            marker.is_file(),
+            "the key may have been delivered before timeout"
+        );
+        assert!(started.elapsed() < Duration::from_secs(10));
+    }
 }

@@ -649,7 +649,10 @@ fn scheduled_44_long_false_sent_composer_presses_once_with_status_sent_and_no_co
     assert!(env.keys.is_empty(), "no press before two minutes");
     observe(&flock, &mut env, created + 121.0);
     observe(&flock, &mut env, created + 241.0);
-    assert_eq!(1, env.keys.len(), "one recovery key follows the ticks");
+    assert!(
+        env.keys.is_empty(),
+        "wrapped multiline draft cannot prove exact composer contents"
+    );
     let candidate = flock.stuck_candidates.lock().unwrap()["%1"].clone();
     assert_eq!("sent", candidate.status, "the status stays sent");
     assert_ne!(

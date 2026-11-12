@@ -511,7 +511,18 @@ impl Flock {
                 return (false, "native evidence changed".into());
             }
         }
-        let result = env.send_key(pane_id, "Enter");
+        let result = if let Some(entry) = live.filter(|entry| entry.scheduled) {
+            self.dunks
+                .with_live_schedule(
+                    &entry.source,
+                    pane_id,
+                    entry.schedule_template.as_deref(),
+                    || env.send_recovery_key(pane_id, "Enter"),
+                )
+                .unwrap_or_else(|| (false, "schedule changed".into()))
+        } else {
+            env.send_key(pane_id, "Enter")
+        };
         drop(candidates);
         drop(rows);
         result
@@ -1880,6 +1891,10 @@ pub trait SendEnv {
     fn read_status(&self, pane_id: &str) -> Option<String>;
     /// `herdr.send_keys(pane_id, key)` -> `(ok, detail)`.
     fn send_key(&mut self, pane_id: &str, key: &str) -> (bool, String);
+    /// Fail closed unless the backend guarantees a bounded recovery submission.
+    fn send_recovery_key(&mut self, _pane_id: &str, _key: &str) -> (bool, String) {
+        (false, "bounded recovery key unavailable".into())
+    }
     /// `DUNKINGSHEEP_FEDERATED_INPUT == "1"`.
     fn federated_input(&self) -> bool;
 }

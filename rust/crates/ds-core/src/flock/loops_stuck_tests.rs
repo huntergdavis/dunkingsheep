@@ -36,6 +36,9 @@ struct RecoveryProbe {
 }
 
 impl SendEnv for RecoveryProbe {
+    fn send_recovery_key(&mut self, pane_id: &str, key: &str) -> (bool, String) {
+        self.send_key(pane_id, key)
+    }
     fn read_pane(&self, _: &str, _: i64, _: bool) -> Option<String> {
         Some(self.screen.lock().unwrap().clone())
     }
@@ -634,6 +637,74 @@ async fn the_loop_invokes_non_noop_stuck_step_when_enabled() {
     }
 }
 
+fn scheduled_federated_fixture(flock: &Flock, probe: &RecoveryProbe, created: f64) {
+    flock.dunks.load(serde_json::json!({"dunkers":[{"id":"d7","target_pane_id":"%1","text":"pending text","running":true}]}).as_object().unwrap());
+    let mut message = failed_federated_candidate(probe);
+    message.status = "sent".into();
+    message.scheduled = true;
+    message.source = "d7".into();
+    message.schedule_template = Some("pending text".into());
+    message.created_at = created;
+    flock.note_stuck_candidate(&message);
+}
+
+#[test]
+fn scheduled_federated_exact_draft_recovers_once_after_five_seconds() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = persisted_flock(&dir);
+    let mut probe = federated_probe();
+    let now = crate::clock::now_s();
+    scheduled_federated_fixture(&flock, &probe, now);
+    assert_eq!(
+        0,
+        federated_recovery_step(&flock, &mut probe, now, &|_| {}).unwrap()
+    );
+    assert_eq!(
+        0,
+        federated_recovery_step(&flock, &mut probe, now + 4.0, &|_| {}).unwrap()
+    );
+    assert_eq!(
+        1,
+        federated_recovery_step(&flock, &mut probe, now + 5.0, &|_| {}).unwrap()
+    );
+    assert_eq!(
+        0,
+        federated_recovery_step(&flock, &mut probe, now + 10.0, &|_| {}).unwrap()
+    );
+    assert_eq!(1, probe.keys.lock().unwrap().len());
+}
+
+#[test]
+fn scheduled_federated_rejects_edited_draft_and_changed_generation() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = persisted_flock(&dir);
+    let mut probe = federated_probe();
+    let now = crate::clock::now_s();
+    scheduled_federated_fixture(&flock, &probe, now);
+    assert_eq!(
+        0,
+        federated_recovery_step(&flock, &mut probe, now, &|_| {}).unwrap()
+    );
+    {
+        let mut screen = probe.screen.lock().unwrap();
+        *screen = screen.replace("pending text", "pending text human addition");
+    }
+    assert_eq!(
+        0,
+        federated_recovery_step(&flock, &mut probe, now + 6.0, &|_| {}).unwrap()
+    );
+    {
+        let mut screen = probe.screen.lock().unwrap();
+        *screen = screen.replace("pending text human addition", "pending text");
+    }
+    probe.generation.push_str(":changed");
+    assert_eq!(
+        0,
+        federated_recovery_step(&flock, &mut probe, now + 12.0, &|_| {}).unwrap()
+    );
+    assert!(probe.keys.lock().unwrap().is_empty());
+}
+
 #[test]
 fn federated_recovery_waits_then_submits_once_without_replaying_text() {
     let dir = tempfile::tempdir().unwrap();
@@ -1155,6 +1226,9 @@ struct ScriptedProbe {
 }
 
 impl SendEnv for ScriptedProbe {
+    fn send_recovery_key(&mut self, pane_id: &str, key: &str) -> (bool, String) {
+        self.send_key(pane_id, key)
+    }
     fn read_pane(&self, _: &str, _: i64, _: bool) -> Option<String> {
         let mut reads = self.reads.lock().unwrap();
         let index = (*reads).min(self.screens.len() - 1);
@@ -1676,6 +1750,9 @@ fn a_human_continuation_is_refused_after_a_restart() {
         keys: Mutex<Vec<String>>,
     }
     impl SendEnv for NativeCodexPane {
+        fn send_recovery_key(&mut self, pane_id: &str, key: &str) -> (bool, String) {
+            self.send_key(pane_id, key)
+        }
         fn read_pane(&self, _: &str, _: i64, _: bool) -> Option<String> {
             Some(self.screen.lock().unwrap().clone())
         }
