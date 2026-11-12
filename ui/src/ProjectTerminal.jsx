@@ -19,7 +19,7 @@ export default function ProjectTerminal({ target, onClose }) {
       resizing = true;
       try {
         const response = await fetch(`${path}/resize`, { method: 'POST', credentials: 'same-origin',
-          headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ cols: term.cols, rows: term.rows }) });
+          headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ cols: term.cols, rows: term.rows, expected_pane: target.pane_id }) });
         if (!response.ok) throw new Error(`Resize unavailable (${response.status})`);
       } catch {
         // A timeout may have applied the resize. Do not retry an unknown outcome.
@@ -34,6 +34,7 @@ export default function ProjectTerminal({ target, onClose }) {
       setStatus(attempt ? 'Reconnecting…' : 'Connecting…');
       const url = new URL(`${path}/stream`, window.location.href);
       url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+      url.searchParams.set('expected_pane', target.pane_id);
       socket = new WebSocket(url); socket.binaryType = 'arraybuffer';
       socket.onopen = () => { attempt = 0; resizeReady = false; setStatus('Connected'); term.focus(); resizeTimer = setTimeout(() => { resizeReady = true; resize(); }, 1500); };
       socket.onmessage = event => { if (!disposed) term.write(typeof event.data === 'string' ? event.data : new Uint8Array(event.data)); };

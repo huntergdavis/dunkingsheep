@@ -7,7 +7,7 @@ use crate::{
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        DefaultBodyLimit, Path, State,
+        DefaultBodyLimit, Path, Query, State,
     },
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
@@ -112,6 +112,12 @@ fn new_resize_epoch() -> Option<String> {
 struct ResizeRequest {
     cols: i64,
     rows: i64,
+    expected_pane: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct StreamQuery {
+    expected_pane: Option<String>,
 }
 
 enum ResizeResult {
@@ -281,6 +287,13 @@ async fn resize_terminal(
         )
             .into_response();
     };
+    if request
+        .expected_pane
+        .as_deref()
+        .is_some_and(|pane| pane != binding.0)
+    {
+        return StatusCode::CONFLICT.into_response();
+    }
     let Some(client) = state.controls.unique(&binding.0) else {
         return (
             StatusCode::CONFLICT,
@@ -450,6 +463,7 @@ async fn register_control(state: &Arc<StreamState>, pane: &str, pid: u32) -> Opt
 async fn upgrade(
     State(state): State<Arc<StreamState>>,
     Path(name): Path<String>,
+    Query(query): Query<StreamQuery>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
@@ -468,6 +482,13 @@ async fn upgrade(
     let Some((binding, Some(session))) = lookup(state.clone(), name.clone(), true).await else {
         return StatusCode::NOT_FOUND.into_response();
     };
+    if query
+        .expected_pane
+        .as_deref()
+        .is_some_and(|pane| pane != binding.0)
+    {
+        return StatusCode::CONFLICT.into_response();
+    }
     let mut command = Command::new(&state.backend.tmux_bin);
     if let Some(socket) = state.socket.as_deref() {
         command.args(["-L", socket]);
