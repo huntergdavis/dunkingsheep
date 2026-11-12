@@ -12,6 +12,7 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use super::Flock;
+use crate::error::DunkError;
 use crate::inbox_store;
 use crate::tasks::Tasks;
 
@@ -21,6 +22,13 @@ pub trait PaneInfoEnv {
     fn list_panes_grouped(&self) -> Vec<Value>;
     /// `herdr.get_pane(id)`.
     fn get_pane(&self, pane_id: &str) -> Option<Value>;
+    /// Complete live pane listing for owner-token peer classification.
+    /// An adapter that cannot distinguish failure from an empty list must refuse.
+    fn try_authority_panes(&self) -> Result<Vec<Value>, DunkError> {
+        Err(DunkError::Refused(
+            "authoritative pane listing unavailable".into(),
+        ))
+    }
 }
 
 /// `_ROLE_PANE_TTL_S`: one tmux listing per request under load made every read cost 3-9 s.

@@ -99,6 +99,13 @@ impl Flock {
         let mut role: Option<String> = None;
         if let Some(token) = non_empty(token.as_deref()) {
             role = self.with_roles(|roles, _| roles.token_role(token))?;
+            // The owner token is also used by a legitimate detached owner app.
+            // Deny its direct use from a non-owner pane without trusting the
+            // client-supplied pane id. Detached callers remain a compatibility
+            // exception; this is not an adversarial same-UID isolation boundary.
+            if role.as_deref() == Some("owner") && self.socket_peer_ok().is_some() {
+                self.owner_token_peer_check(env)?;
+            }
             if role.is_none() {
                 eprintln!("service token refused (unknown token)");
             }
@@ -137,6 +144,125 @@ impl Flock {
             state.role_pane = self_pane_id.map(String::from);
         });
         Ok(role)
+    }
+
+    fn owner_token_peer_check(&self, env: &dyn PaneInfoEnv) -> Result<(), DunkError> {
+        let refuse_peer =
+            || refuse("owner token refused: peer identity or pane authority unavailable");
+        if self.socket_peer_ok() != Some(true) {
+            return Err(refuse_peer());
+        }
+        let caller = self.current_caller().ok_or_else(refuse_peer)?;
+        let mut pid = caller
+            .get("pid")
+            .and_then(Value::as_i64)
+            .filter(|p| *p > 1)
+            .ok_or_else(refuse_peer)?;
+        let start = caller
+            .get("start")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(refuse_peer)?;
+        let first = crate::proc::stat(pid).ok_or_else(refuse_peer)?;
+        if first.start != start || crate::proc::DEAD_STATES.contains(&first.state.as_str()) {
+            return Err(refuse_peer());
+        }
+        let mut ancestry = std::collections::HashSet::new();
+        let mut chain = Vec::new();
+        let mut reached_root = false;
+        for _ in 0..crate::proc::MAX_DEPTH {
+            if !ancestry.insert(pid) {
+                return Err(refuse_peer());
+            }
+            let process = crate::proc::stat(pid).ok_or_else(refuse_peer)?;
+            if crate::proc::DEAD_STATES.contains(&process.state.as_str()) {
+                return Err(refuse_peer());
+            }
+            chain.push(process.clone());
+            if process.ppid <= 1 {
+                reached_root = true;
+                break;
+            }
+            pid = process.ppid;
+        }
+        if !reached_root {
+            return Err(refuse_peer());
+        }
+        let panes = env.try_authority_panes()?;
+        if panes.is_empty() {
+            return Err(refuse_peer());
+        }
+        let mut matched = Vec::new();
+        for pane in &panes {
+            let id = pane
+                .get("pane_id")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(refuse_peer)?;
+            let root = pane
+                .get("pane_pid")
+                .and_then(|v| {
+                    v.as_i64()
+                        .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                })
+                .filter(|p| *p > 1)
+                .ok_or_else(refuse_peer)?;
+            // A listed pane with an unreadable/dead root makes it impossible to
+            // establish that a caller is truly outside every visible pane.
+            let root_stat = crate::proc::stat(root).ok_or_else(refuse_peer)?;
+            if crate::proc::DEAD_STATES.contains(&root_stat.state.as_str()) {
+                return Err(refuse_peer());
+            }
+            if ancestry.contains(&root) {
+                matched.push((id, root));
+            }
+        }
+        // A private or omitted tmux server must not be mistaken for a detached
+        // caller merely because the configured server did not list its pane.
+        for pair in chain.windows(2) {
+            if pair[1].comm == "tmux: server"
+                && !matched.iter().any(|(_, root)| *root == pair[0].pid)
+            {
+                return Err(refuse_peer());
+            }
+        }
+        // Detect process exit, PID reuse or reparenting during the lookup.
+        for prior in &chain {
+            let current = crate::proc::stat(prior.pid).ok_or_else(refuse_peer)?;
+            if current.start != prior.start
+                || current.ppid != prior.ppid
+                || crate::proc::DEAD_STATES.contains(&current.state.as_str())
+            {
+                return Err(refuse_peer());
+            }
+        }
+        if matched.is_empty() {
+            return Ok(());
+        } // legacy detached owner compatibility
+        if matched.len() != 1 {
+            return Err(refuse_peer());
+        }
+        let (pane, root) = matched[0];
+        let entry = self
+            .with_roles(|roles, _| roles.entry(pane))?
+            .ok_or_else(refuse_peer)?;
+        let stored_pid = entry.get("pane_pid").and_then(|v| {
+            v.as_i64()
+                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        });
+        let stored_start = entry
+            .get("start")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(refuse_peer)?;
+        if entry.get("role").and_then(Value::as_str) != Some("owner")
+            || stored_pid != Some(root)
+            || !crate::proc::process_alive(root, Some(stored_start))
+            || !crate::proc::process_alive(first.pid, Some(start))
+        {
+            return Err(refuse_peer());
+        }
+        Ok(())
     }
 
     /// `is_superuser`: the owner role.
