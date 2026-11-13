@@ -345,6 +345,7 @@ pub fn h_inbox_send(c: &HandlerContext<'_>, args: Args) -> Result<Value, DunkErr
                     Some(Value::Bool(true)) => true,
                     _ => return Err(DunkError::Refused("agent_only must be a boolean".into())),
                 },
+                wake_quiet: false,
             },
             args.get("subject"),
             args.get("attach"),

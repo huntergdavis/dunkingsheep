@@ -54,6 +54,23 @@ pub fn nudge_body(message_id: &str, transport: &str, text: &str) -> String {
     )
 }
 
+/// The body of the owner lane's nudge for a Telegram message (t4645). The owner lane is told as
+/// well as the desk, so the text says who else knows and how to answer without doing it twice.
+pub fn owner_lane_nudge_body(message_id: &str, text: &str) -> String {
+    format!(
+        "Owner message {message_id} (telegram) arrived in the owner mailbox: `dunkingsheep owner conversation`. The front desk was told as well and may answer it. If you answer it yourself, use `owner reply {message_id}` once, for the final answer; the reply goes back through Telegram.\n\n{text}"
+    )
+}
+
+/// The one registered owner lane to nudge, or `None` when there is not exactly one, or when it is
+/// the desk pane that was already nudged.
+pub fn owner_lane_for<'a>(owners: &'a [String], desk_pane: Option<&str>) -> Option<&'a str> {
+    match owners {
+        [only] if !only.is_empty() && Some(only.as_str()) != desk_pane => Some(only),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -61,6 +78,20 @@ mod tests {
 
     fn pane(id: &str, tab: &str, workspace: &str, cwd: &str) -> Value {
         json!({"pane_id": id, "tab_label": tab, "workspace_label": workspace, "cwd": cwd})
+    }
+
+    #[test]
+    fn the_owner_lane_is_nudged_only_when_there_is_exactly_one_and_it_is_not_the_desk() {
+        let one = ["%1".to_string()];
+        assert_eq!(owner_lane_for(&one, Some("%133")), Some("%1"));
+        assert_eq!(owner_lane_for(&one, None), Some("%1"));
+        assert_eq!(owner_lane_for(&one, Some("%1")), None);
+        assert_eq!(owner_lane_for(&[], Some("%133")), None);
+        assert_eq!(owner_lane_for(&["%1".into(), "%2".into()], None), None);
+        assert_eq!(owner_lane_for(&[String::new()], None), None);
+        let body = owner_lane_nudge_body("i9", "are you there?");
+        assert!(body.starts_with("Owner message i9 (telegram) arrived in the owner mailbox"));
+        assert!(body.ends_with("\n\nare you there?"));
     }
 
     #[test]

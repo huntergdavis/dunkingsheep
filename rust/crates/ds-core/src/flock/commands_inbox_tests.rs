@@ -805,6 +805,27 @@ fn quiet_recipient_alias_and_pane_still_store_unread_without_any_notice() {
     }
 }
 
+/// t4645: only a send that asks for it wakes a quiet recipient; the same send without the flag,
+/// and one with notify off, stay silent.
+#[test]
+fn wake_quiet_notifies_a_quiet_recipient_and_nothing_else_does() {
+    let (mut e, d) = (env("worker"), tempfile::tempdir().unwrap());
+    e.panes.push(pane("%1", "codex-rust-owner"));
+    e.silent_mailboxes = Some("codex-rust-owner,%1".into());
+    let f = flock(&d);
+    assert!(!f.inbox_send(&e, &send("%1", None)).unwrap().notified);
+    assert!(e.nudges.lock().unwrap().is_empty());
+    let mut wake = send("%1", None);
+    wake.wake_quiet = true;
+    let sent = f.inbox_send(&e, &wake).unwrap();
+    assert!(sent.notified);
+    assert_eq!("codex-rust-owner", sent.mailbox);
+    assert_eq!(1, e.nudges.lock().unwrap().len());
+    wake.notify = false;
+    assert!(!f.inbox_send(&e, &wake).unwrap().notified);
+    assert_eq!(1, e.nudges.lock().unwrap().len());
+}
+
 #[test]
 fn quiet_recipient_keeps_other_wakes_and_explicit_notify_false() {
     let (mut e, d) = (env("worker"), tempfile::tempdir().unwrap());

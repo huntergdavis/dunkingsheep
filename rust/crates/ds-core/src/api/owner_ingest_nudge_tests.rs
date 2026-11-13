@@ -1,5 +1,5 @@
 //! t1613 / t1352: the desk is nudged once for each new Telegram owner question, and the web route
-//! keeps its own nudge. These tests drive the daemon's `owner_ingest` handler directly, with an
+//! keeps its own nudge. t4645: the single registered owner lane is nudged as well, Telegram only. These tests drive the daemon's `owner_ingest` handler directly, with an
 //! environment that records every inbox write the handler asks for.
 
 use super::*;
@@ -72,6 +72,10 @@ fn desk_panes() -> Vec<Value> {
 }
 
 fn fixture(tag: &str, panes: Vec<Value>) -> Fixture {
+    fixture_with_owners(tag, panes, &["w1:p1"])
+}
+
+fn fixture_with_owners(tag: &str, panes: Vec<Value>, owners: &[&str]) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let flock = crate::flock::Flock::new(
         dir.path().join(format!("{tag}-launches.json")),
@@ -86,11 +90,13 @@ fn fixture(tag: &str, panes: Vec<Value>) -> Fixture {
     )
     .unwrap();
     roles
-        .register("w1:p1", "owner", None, None, None, None, None, None)
+        .register("w1:p8", "desk", None, None, None, None, None, None)
         .unwrap();
-    roles
-        .register("w1:p2", "worker", None, None, None, None, None, None)
-        .unwrap();
+    for owner in owners {
+        roles
+            .register(owner, "owner", None, None, None, None, None, None)
+            .unwrap();
+    }
     flock.attach_roles(roles, None);
     let inbox = Arc::new(
         Store::open(
@@ -118,8 +124,18 @@ fn fixture(tag: &str, panes: Vec<Value>) -> Fixture {
 }
 
 fn ingest(fixture: &Fixture, transport: &str, external_id: &str) -> Result<Value, DunkError> {
+    ingest_as(fixture, "w1:p1", transport, external_id)
+}
+
+/// `caller` must hold a role that may ingest: the owner lane, or the desk-role lane `w1:p8`.
+fn ingest_as(
+    fixture: &Fixture,
+    caller: &str,
+    transport: &str,
+    external_id: &str,
+) -> Result<Value, DunkError> {
     let request = RequestCtx {
-        self_pane_id: Some("w1:p1".into()),
+        self_pane_id: Some(caller.into()),
         ..RequestCtx::default()
     };
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -144,15 +160,33 @@ fn ingest(fixture: &Fixture, transport: &str, external_id: &str) -> Result<Value
 }
 
 #[test]
-fn a_new_telegram_question_nudges_the_desk_once() {
+fn a_new_telegram_question_nudges_the_desk_and_the_owner_lane_once_each() {
     let fixture = fixture("nudge-once", desk_panes());
     let out = ingest(&fixture, "telegram", "telegram:7").unwrap();
     assert_eq!(out["duplicate"], json!(false));
     assert_eq!(
         fixture.env.writes.get(),
-        1,
-        "one nudge to the desk for a new telegram question"
+        2,
+        "one nudge to the desk and one to the owner lane for a new telegram question"
     );
+}
+
+#[test]
+fn the_owner_lane_nudge_needs_exactly_one_owner_lane_that_is_not_the_desk() {
+    // No owner lane, two owner lanes, or the owner lane IS the desk pane: the desk nudge only.
+    for (tag, owners) in [
+        ("owner-none", &[][..]),
+        ("owner-two", &["w1:p1", "w1:p3"][..]),
+        ("owner-is-desk", &["w1:p2"][..]),
+    ] {
+        let fixture = fixture_with_owners(tag, desk_panes(), owners);
+        ingest_as(&fixture, "w1:p8", "telegram", "telegram:9").unwrap();
+        assert_eq!(fixture.env.writes.get(), 1, "{tag}");
+    }
+    // No desk pane at all: the owner lane is still told.
+    let fixture = fixture("owner-no-desk", Vec::new());
+    ingest(&fixture, "telegram", "telegram:10").unwrap();
+    assert_eq!(fixture.env.writes.get(), 1);
 }
 
 #[test]
@@ -161,7 +195,7 @@ fn a_redelivered_telegram_question_nudges_nothing_new() {
     ingest(&fixture, "telegram", "telegram:8").unwrap();
     let again = ingest(&fixture, "telegram", "telegram:8").unwrap();
     assert_eq!(again["duplicate"], json!(true));
-    assert_eq!(fixture.env.writes.get(), 1, "a redelivery adds no nudge");
+    assert_eq!(fixture.env.writes.get(), 2, "a redelivery adds no nudge");
 }
 
 #[test]
