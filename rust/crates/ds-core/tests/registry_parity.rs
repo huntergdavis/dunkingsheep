@@ -25,6 +25,8 @@ fn every_python_command_is_present_and_no_extra_ones_are() {
         "task_batch_claim",
         "owner_page_confirmed",
         "owner_handoff",
+        // t4648: the read-only backlog query, CLI and API; Python had no project mapping.
+        "task_backlog",
     ];
     let extra: Vec<_> = rust
         .iter()

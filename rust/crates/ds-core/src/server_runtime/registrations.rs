@@ -803,6 +803,7 @@ os.rename(out_path + ".tmp", out_path)
             "task_release",
             "task_stats",
             "task_metrics",
+            "task_backlog",
             "task_reap",
             "metrics",
             "doctor",

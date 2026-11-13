@@ -7300,6 +7300,230 @@
  },
  {
   "argv": [
+   "task",
+   "backlog"
+  ],
+  "namespace": {
+   "all": false,
+   "by": null,
+   "command": "task",
+   "json": false,
+   "kind": null,
+   "list": false,
+   "no_start_daemon": false,
+   "priority": null,
+   "project": null,
+   "self_pane": null,
+   "socket": null,
+   "status": null,
+   "task_command": "backlog"
+  }
+ },
+ {
+  "argv": [
+   "task",
+   "backlog",
+   "--json"
+  ],
+  "namespace": {
+   "all": false,
+   "by": null,
+   "command": "task",
+   "json": true,
+   "kind": null,
+   "list": false,
+   "no_start_daemon": false,
+   "priority": null,
+   "project": null,
+   "self_pane": null,
+   "socket": null,
+   "status": null,
+   "task_command": "backlog"
+  }
+ },
+ {
+  "argv": [
+   "--json",
+   "task",
+   "backlog"
+  ],
+  "namespace": {
+   "all": false,
+   "by": null,
+   "command": "task",
+   "json": true,
+   "kind": null,
+   "list": false,
+   "no_start_daemon": false,
+   "priority": null,
+   "project": null,
+   "self_pane": null,
+   "socket": null,
+   "status": null,
+   "task_command": "backlog"
+  }
+ },
+ {
+  "argv": [
+   "task",
+   "backlog",
+   "--project",
+   "x"
+  ],
+  "namespace": {
+   "all": false,
+   "by": null,
+   "command": "task",
+   "json": false,
+   "kind": null,
+   "list": false,
+   "no_start_daemon": false,
+   "priority": null,
+   "project": "x",
+   "self_pane": null,
+   "socket": null,
+   "status": null,
+   "task_command": "backlog"
+  }
+ },
+ {
+  "argv": [
+   "task",
+   "backlog",
+   "--status",
+   "x"
+  ],
+  "namespace": {
+   "all": false,
+   "by": null,
+   "command": "task",
+   "json": false,
+   "kind": null,
+   "list": false,
+   "no_start_daemon": false,
+   "priority": null,
+   "project": null,
+   "self_pane": null,
+   "socket": null,
+   "status": "x",
+   "task_command": "backlog"
+  }
+ },
+ {
+  "argv": [
+   "task",
+   "backlog",
+   "--priority",
+   "x"
+  ],
+  "namespace": {
+   "all": false,
+   "by": null,
+   "command": "task",
+   "json": false,
+   "kind": null,
+   "list": false,
+   "no_start_daemon": false,
+   "priority": "x",
+   "project": null,
+   "self_pane": null,
+   "socket": null,
+   "status": null,
+   "task_command": "backlog"
+  }
+ },
+ {
+  "argv": [
+   "task",
+   "backlog",
+   "--kind",
+   "x"
+  ],
+  "namespace": {
+   "all": false,
+   "by": null,
+   "command": "task",
+   "json": false,
+   "kind": "x",
+   "list": false,
+   "no_start_daemon": false,
+   "priority": null,
+   "project": null,
+   "self_pane": null,
+   "socket": null,
+   "status": null,
+   "task_command": "backlog"
+  }
+ },
+ {
+  "argv": [
+   "task",
+   "backlog",
+   "--by",
+   "priority"
+  ],
+  "namespace": {
+   "all": false,
+   "by": "priority",
+   "command": "task",
+   "json": false,
+   "kind": null,
+   "list": false,
+   "no_start_daemon": false,
+   "priority": null,
+   "project": null,
+   "self_pane": null,
+   "socket": null,
+   "status": null,
+   "task_command": "backlog"
+  }
+ },
+ {
+  "argv": [
+   "task",
+   "backlog",
+   "--list"
+  ],
+  "namespace": {
+   "all": false,
+   "by": null,
+   "command": "task",
+   "json": false,
+   "kind": null,
+   "list": true,
+   "no_start_daemon": false,
+   "priority": null,
+   "project": null,
+   "self_pane": null,
+   "socket": null,
+   "status": null,
+   "task_command": "backlog"
+  }
+ },
+ {
+  "argv": [
+   "task",
+   "backlog",
+   "--all"
+  ],
+  "namespace": {
+   "all": true,
+   "by": null,
+   "command": "task",
+   "json": false,
+   "kind": null,
+   "list": false,
+   "no_start_daemon": false,
+   "priority": null,
+   "project": null,
+   "self_pane": null,
+   "socket": null,
+   "status": null,
+   "task_command": "backlog"
+  }
+ },
+ {
+  "argv": [
    "gh-token"
   ],
   "namespace": {

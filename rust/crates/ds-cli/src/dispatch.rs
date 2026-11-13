@@ -4893,6 +4893,16 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
                     crate::render_print::render_task_metrics(result, &task_stamp)
                 })
             }
+            "backlog" => {
+                let mut args = Map::new();
+                for key in ["project", "status", "priority", "kind", "list", "all"] {
+                    args.insert(key.into(), ns.get(key).cloned().unwrap_or(Value::Null));
+                }
+                let by = text(ns, "by").map(str::to_string);
+                crate::daemon_cmd::run_command(ns, "task_backlog", args, |result| {
+                    crate::render_print::render_task_backlog(result, by.as_deref())
+                })
+            }
             "reap" => crate::daemon_cmd::run_command(ns, "task_reap", Map::new(), |result| {
                 let requeued = result["requeued"].as_array().cloned().unwrap_or_default();
                 let ids = requeued

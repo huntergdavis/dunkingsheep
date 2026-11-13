@@ -1313,6 +1313,28 @@ pub static ROOT: Cmd = Cmd {
                     subs: &[
                     ],
                 },
+                Cmd {
+                    name: "backlog", aliases: &[],
+                    help: Some("count unfinished global tasks by project, with the unmapped ones shown"),
+                    raw: false,
+                    raw_text: false,
+                    about: None,
+                    epilog: None,
+                    args: &[
+                        Arg { id: "json", dest: "json", tri: false, default_int: false, flags: &["--json"], positional: false, kind: Kind::StoreTrue, ty: Ty::Str, nargs: Nargs::Zero, choices: &[], default: None, required: false, help: None, hidden: true, metavar: None, version: None },
+                        Arg { id: "project", dest: "project", tri: false, default_int: false, flags: &["--project"], positional: false, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &[], default: None, required: false, help: Some("only this project, or 'unmapped'"), hidden: false, metavar: Some("NAME"), version: None },
+                        Arg { id: "status", dest: "status", tri: false, default_int: false, flags: &["--status"], positional: false, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &[], default: None, required: false, help: Some("comma-separated statuses (default: open,in_progress,blocked)"), hidden: false, metavar: Some("LIST"), version: None },
+                        Arg { id: "priority", dest: "priority", tri: false, default_int: false, flags: &["--priority"], positional: false, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &[], default: None, required: false, help: Some("comma-separated priorities"), hidden: false, metavar: Some("LIST"), version: None },
+                        Arg { id: "kind", dest: "kind", tri: false, default_int: false, flags: &["--kind"], positional: false, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &[], default: None, required: false, help: Some("comma-separated kinds"), hidden: false, metavar: Some("LIST"), version: None },
+                        Arg { id: "by", dest: "by", tri: false, default_int: false, flags: &["--by"], positional: false, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &["priority", "kind"], default: None, required: false, help: Some("add a per-priority or per-kind breakdown"), hidden: false, metavar: None, version: None },
+                        Arg { id: "list", dest: "list", tri: false, default_int: false, flags: &["--list"], positional: false, kind: Kind::StoreTrue, ty: Ty::Str, nargs: Nargs::Zero, choices: &[], default: None, required: false, help: Some("also list the matching tasks"), hidden: false, metavar: None, version: None },
+                        Arg { id: "all", dest: "all", tri: false, default_int: false, flags: &["--all"], positional: false, kind: Kind::StoreTrue, ty: Ty::Str, nargs: Nargs::Zero, choices: &[], default: None, required: false, help: Some("include done and cancelled"), hidden: false, metavar: None, version: None },
+                    ],
+                    groups: &[],
+                    sub_dest: None, sub_metavar: None, sub_required: false,
+                    subs: &[
+                    ],
+                },
             ],
         },
         Cmd {

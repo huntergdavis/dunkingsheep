@@ -1172,6 +1172,16 @@ pub static COMMANDS: &[Command] = &[
         roles: &["owner", "system", "web", "desk", "planner", "worker", "reviewer", "anonymous"],
     },
     Command {
+        name: "task_backlog",
+        description: "Backlog counts: unfinished global tasks per project (open, in progress, blocked, blocked on the owner, by priority and kind), with tasks that have no project mapping in their own 'unmapped' row. A task's project is its task mapping, else its repo mapping; nothing is inferred. Rows add up to the totals. Read-only.",
+        params: &[Param { name: "project", schema: "{\"type\":\"string\",\"description\":\"Only this project, or 'unmapped'.\"}" }, Param { name: "status", schema: "{\"type\":\"string\",\"description\":\"Comma-separated statuses (default: open,in_progress,blocked).\"}" }, Param { name: "priority", schema: "{\"type\":\"string\",\"description\":\"Comma-separated priorities.\"}" }, Param { name: "kind", schema: "{\"type\":\"string\",\"description\":\"Comma-separated kinds.\"}" }, Param { name: "all", schema: "{\"type\":\"boolean\",\"description\":\"Include done and cancelled.\"}" }, Param { name: "list", schema: "{\"type\":\"boolean\",\"description\":\"Also return the matching tasks.\"}" }],
+        dispatch_required: &[],
+        required: &[],
+        mcp: false,
+        owner_only: false,
+        roles: &["owner", "system", "web", "desk", "planner", "worker", "reviewer", "anonymous"],
+    },
+    Command {
         name: "task_metrics",
         description: "Timeseries-friendly task metrics: current queue depth, per-status / priority / scope breakdown, per-assignee load, created/claimed/completed/cancelled/requeued throughput in hourly or daily buckets, completion and claim latency (avg/p50/p90/max), and per-actor counts. Computed deterministically from an append-only event log; no model.",
         params: &[Param { name: "window_s", schema: "{\"type\":\"number\",\"minimum\":1,\"description\":\"Window ending now, seconds (default 3600).\"}" }, Param { name: "since", schema: "{\"type\":\"number\",\"description\":\"Window start epoch (overrides window_s).\"}" }, Param { name: "until", schema: "{\"type\":\"number\",\"description\":\"Window end epoch (default now).\"}" }, Param { name: "scope", schema: "{\"type\":\"string\",\"description\":\"'global' for the fleet queue, a pane id for a private queue, or 'self' for the caller's pane.\"}" }, Param { name: "bucket", schema: "{\"type\":\"string\",\"enum\":[\"hour\",\"day\"],\"description\":\"Throughput bucket size (default hour).\"}" }],

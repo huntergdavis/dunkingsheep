@@ -34,6 +34,7 @@ use crate::error::DunkError;
 
 pub mod advance;
 pub mod allocator;
+pub mod backlog;
 mod claim;
 mod claim_batch;
 pub mod next_job;

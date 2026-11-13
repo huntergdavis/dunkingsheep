@@ -11,7 +11,7 @@
 //! to either language fails here or in the Python tests.
 
 /// Commands every role may call (`READ_ONLY`).
-pub const READ_ONLY: [&str; 47] = [
+pub const READ_ONLY: [&str; 48] = [
     "delivery",
     "delivery_capability",
     "dispatch",
@@ -54,6 +54,7 @@ pub const READ_ONLY: [&str; 47] = [
     "task_followers",
     "task_list",
     "task_metrics",
+    "task_backlog",
     "task_read",
     "task_stats",
     "turn_end",

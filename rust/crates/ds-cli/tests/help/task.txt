@@ -26,6 +26,8 @@ positional arguments:
     stats       task counts by status
     metrics     task throughput, depth and latency (JSON)
     reap        requeue expired/dead leases now
+    backlog     count unfinished global tasks by project, with the unmapped
+                ones shown
 
 options:
   -h, --help    show this help message and exit

@@ -84,8 +84,9 @@ fn a_worker_and_a_reviewer_share_one_grant() {
 #[test]
 fn the_tables_have_the_pythons_sizes() {
     // Sizes of the sets in dunk_roles.py when these tables were generated (t1170). A
-    // The retired Python tables are unchanged; the Rust-only desk handoff adds one entry.
-    assert_eq!(47, READ_ONLY.len());
+    // The retired Python tables are unchanged; the Rust-only desk handoff adds one entry, and the
+    // Rust-only read-only backlog query (t4648) adds one to READ_ONLY.
+    assert_eq!(48, READ_ONLY.len());
     assert_eq!(29, WORKER_EXTRA.len());
     assert_eq!(33, SYSTEM_EXTRA.len());
     assert_eq!(17, DESK_EXTRA.len());
