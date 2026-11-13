@@ -57,6 +57,45 @@ jobs:
       - name: Restore pinned Python test oracle
         run: python3 tools/restore_python_oracle.py
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+      # t4601: the terminal stream tests drive a private tmux server, and the desk's initial
+      # screen depends on tmux control-mode behaviour. Production runs tmux 3.6; the runner image
+      # ships an older one. Build 3.6 from the upstream release tarball (sha256 pinned, cached).
+      # Boring fallback: if the download fails the image's tmux is used, with a warning, so an
+      # outage upstream does not block CI. A tarball with the wrong hash fails the job.
+      - name: Cache tmux 3.6
+        id: tmux-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/tmux-3.6
+          key: tmux-3.6-136db80cfbfb-${{ runner.os }}-${{ runner.arch }}-v1
+      - name: Build tmux 3.6 (production version)
+        if: steps.tmux-cache.outputs.cache-hit != 'true'
+        run: |
+          set -eu
+          url=https://github.com/tmux/tmux/releases/download/3.6/tmux-3.6.tar.gz
+          work=$(mktemp -d)
+          if ! curl -fsSL --retry 3 --max-time 120 -o "$work/tmux.tar.gz" "$url"; then
+            echo "::warning title=tmux 3.6 download failed::terminal tests will run on the runner image's tmux, not the production version"
+            exit 0
+          fi
+          echo "136db80cfbfba617a103401f52874e7c64927986b65b1b700350b6058ad69607  $work/tmux.tar.gz" | sha256sum -c -
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libevent-dev libncurses-dev bison pkg-config
+          tar -xzf "$work/tmux.tar.gz" -C "$work"
+          cd "$work/tmux-3.6"
+          ./configure --prefix="$HOME/tmux-3.6" >/dev/null
+          make -j2 >/dev/null
+          make install >/dev/null
+      - name: Select tmux for the tests
+        run: |
+          if [ -x "$HOME/tmux-3.6/bin/tmux" ]; then
+            echo "$HOME/tmux-3.6/bin" >> "$GITHUB_PATH"
+            "$HOME/tmux-3.6/bin/tmux" -V
+          else
+            echo "::warning title=tmux fallback::using the runner image's tmux: $(tmux -V)"
+          fi
+      - name: tmux version used by the tests
+        run: command -v tmux && tmux -V
       - run: cargo build --manifest-path rust/Cargo.toml --workspace
       - run: cargo test --manifest-path rust/Cargo.toml --workspace
 
