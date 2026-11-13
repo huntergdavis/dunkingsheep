@@ -22,7 +22,7 @@ import { channelDeliveryLabel, messageDeliveryLabel } from './delivery-label.js'
 import CharacterEditor from './CharacterEditor';
 import ProjectTerminal from './ProjectTerminal';
 import { nextTerminalList, terminalActionForLane, terminalListReason } from './project-terminal-targets.js';
-import { DASH_HOME, DASH_ROUTES, resolveDashRoute, viewForPath } from './dash-route.js';
+import { canonicalDashLocation, DASH_HOME, DASH_ROUTES, requestedPane, resolveDashRoute, viewForPath } from './dash-route.js';
 import { inboxOutcomeText, quickMessageBlock, quickMessageTargets, sendOutcomeText } from './quick-message.js';
 
 function LaneStatus({ row }) {
@@ -54,6 +54,10 @@ const api = async (path, options = {}) => {
 function useDashRoute() {
   const [path, setPath] = useState(() => window.location.pathname);
   useEffect(() => {
+    // t4646: a retired dashboard path (the old Terminals view) is rewritten in place to where it
+    // now lives, keeping the query string, so the address bar and reloads match what is shown.
+    const moved = canonicalDashLocation(window.location.pathname, window.location.search);
+    if (moved) { window.history.replaceState(null, '', moved); setPath(window.location.pathname); }
     const onPop = () => setPath(window.location.pathname);
     window.addEventListener('popstate', onPop);
     return () => window.removeEventListener('popstate', onPop);
@@ -1203,7 +1207,7 @@ function ChannelStandalone({ channel }) {
           {!items.length && <div className="empty-state"><div className="empty-icon">✦</div><h2>Direct line to {selected?.name || 'the agent'}</h2></div>}
           <MessageList autoScrollToBottom={false} autoScrollToBottomOnMount={false}>{items.map(item => <MessageCard key={item.id} item={item} frontDesk={channel === 'cos'} onSendNow={() => {}} onInspect={() => {
             const pane = selected?.pane_id;
-            window.location.assign(pane ? `/dash/fleet?pane=${encodeURIComponent(pane)}` : '/dash/fleet');
+            window.location.assign(pane ? `/dash/projects?pane=${encodeURIComponent(pane)}` : '/dash/projects');
           }} />)}</MessageList>
         </div>
       </div>
@@ -1229,6 +1233,16 @@ function Projects({ standalone = false }) {
     return () => { active = false; clearInterval(timer); };
   }, []);
   const ownerAction = (terminalList.targets || []).map(target => terminalActionForLane(terminalList, target.pane_id)).find(action => action.label === 'Open owner terminal');
+  // t4646: ?pane=%N (the old Terminals deep link) opens that lane's terminal once, if the server
+  // authorizes one; otherwise the row's own reason says why not.
+  const [deepLinkPane] = useState(() => requestedPane(window.location.search));
+  const deepLinkDone = useRef(false);
+  useEffect(() => {
+    if (deepLinkDone.current || !deepLinkPane || terminalList.state !== 'ready') return;
+    deepLinkDone.current = true;
+    const action = terminalActionForLane(terminalList, deepLinkPane);
+    if (action.target) setTerminalTarget(action.target);
+  }, [terminalList, deepLinkPane]);
   useEffect(() => {
     let live = true;
     async function load() {
@@ -1257,7 +1271,7 @@ function Projects({ standalone = false }) {
     {ownerAction && <section className="project-group"><h2>Owner terminal</h2><button type="button" onClick={() => setTerminalTarget(ownerAction.target)}>Open owner terminal</button></section>}
     {roster && <><label>Show <select aria-label="Filter projects" value={effectiveSelected} onChange={e => setSelected(e.target.value)}><option value="all">All groups</option>{ordered.map(group => <option key={group.key} value={group.key}>{group.title}</option>)}</select></label>
       {!ordered.length && <p>No live agent lanes are reported.</p>}
-      {ordered.filter(group => effectiveSelected === 'all' || group.key === effectiveSelected).map(group => <section className="project-group" key={group.key}><h2>{group.title} <small>({group.lanes.length})</small></h2><div className="ops-table-wrap"><table><thead><tr><th>Lane</th><th>Activity</th><th>Task</th><th>Model</th></tr></thead><tbody>{group.lanes.map(lane => <tr key={lane.pane_id}><td><a href={`/dash/fleet?pane=${encodeURIComponent(lane.pane_id)}`}>{lane.name || lane.pane_id}</a><small> {lane.pane_id}</small>{(action => action.target
+      {ordered.filter(group => effectiveSelected === 'all' || group.key === effectiveSelected).map(group => <section className="project-group" key={group.key}><h2>{group.title} <small>({group.lanes.length})</small></h2><div className="ops-table-wrap"><table><thead><tr><th>Lane</th><th>Activity</th><th>Task</th><th>Model</th></tr></thead><tbody>{group.lanes.map(lane => <tr key={lane.pane_id}><td className={lane.pane_id === deepLinkPane ? 'lane-deep-link' : undefined}><a href={`/dash/projects?pane=${encodeURIComponent(lane.pane_id)}`}>{lane.name || lane.pane_id}</a><small> {lane.pane_id}</small>{(action => action.target
         ? <button type="button" onClick={() => setTerminalTarget(action.target)}>{action.label}</button>
         : <small className="lane-terminal-reason"> {action.reason}</small>)(terminalActionForLane(terminalList, lane.pane_id))}</td><td>{lane.state || 'Unknown'}</td><td>{lane.task ? [lane.task.id, lane.task.title].filter(Boolean).join(' · ') : 'Unknown'}</td><td>{lane.model?.value || 'Unknown'}</td></tr>)}</tbody></table></div></section>)}
     </>}
@@ -1273,7 +1287,6 @@ function StandaloneDesk({ view, known }) {
       </div></div>
     </DashShell>;
   }
-  if (view === 'fleet') return <Fleet standalone />;
   if (view === 'projects') return <Projects standalone />;
   if (view === 'operations') return <OpsBoard standalone />;
   if (view === 'play') return <PlayWorkspace standalone />;
