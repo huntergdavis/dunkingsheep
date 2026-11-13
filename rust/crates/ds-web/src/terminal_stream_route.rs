@@ -717,10 +717,13 @@ mod tests {
             ("DUNKINGSHEEP_TERMINAL_STREAM_HOSTS", "desk.example:8787"),
             ("DUNKINGSHEEP_DIR", dir.path().to_str().unwrap()),
         ]);
-        let off = Env::from_pairs(&[("DUNKINGSHEEP_TERMINAL_STREAM", "1")]);
+        let no_hosts = Env::from_pairs(&[("DUNKINGSHEEP_TERMINAL_STREAM", "1")]);
+        let flag_off =
+            Env::from_pairs(&[("DUNKINGSHEEP_TERMINAL_STREAM_HOSTS", "desk.example:8787")]);
         for (env, wanted) in [
             (on, Ok(StatusCode::UNAUTHORIZED)),
-            (off, Err("DUNKINGSHEEP_TERMINAL_STREAM_HOSTS is empty")),
+            (no_hosts, Err("DUNKINGSHEEP_TERMINAL_STREAM_HOSTS is empty")),
+            (flag_off, Err("DUNKINGSHEEP_TERMINAL_STREAM is not 1")),
         ] {
             let auth = Arc::new(FakeAuth(AtomicBool::new(true)));
             let built = build_router(auth, RequestScheme::Http, &env);
@@ -756,6 +759,51 @@ mod tests {
                         "{method} {path}"
                     );
                 }
+            }
+        }
+    }
+
+    /// t4629: the desk path layer keeps its own list of terminal routes. If it drifts from the
+    /// routes mounted here, a mounted route answers 404 again (t4626) or the layer admits a
+    /// path nothing serves. Every method on every listed path must be mounted exactly when it
+    /// is listed. A route mounted on a path the list does not name at all is NOT detected.
+    #[tokio::test]
+    async fn desk_path_layer_route_list_matches_the_mounted_router() {
+        use crate::web_server::TERMINAL_ROUTES;
+        use tower::ServiceExt;
+        let dir = tempfile::tempdir().unwrap();
+        let env = Env::from_pairs(&[
+            ("DUNKINGSHEEP_TERMINAL_STREAM", "1"),
+            ("DUNKINGSHEEP_TERMINAL_STREAM_HOSTS", "desk.example:8787"),
+            ("DUNKINGSHEEP_DIR", dir.path().to_str().unwrap()),
+        ]);
+        let auth = Arc::new(FakeAuth(AtomicBool::new(true)));
+        let (router, _) = build_router(auth, RequestScheme::Http, &env).unwrap();
+        let mut patterns: Vec<&str> = TERMINAL_ROUTES.iter().map(|(_, path)| *path).collect();
+        patterns.dedup();
+        assert_eq!(patterns.len(), 3);
+        for pattern in patterns {
+            for method in ["GET", "POST", "PUT", "DELETE", "PATCH"] {
+                let response = router
+                    .clone()
+                    .oneshot(
+                        axum::http::Request::builder()
+                            .method(method)
+                            .uri(pattern.replace("{name}", "example"))
+                            .header(header::HOST, "desk.example:8787")
+                            .body(axum::body::Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                // Unauthenticated, so a mounted route refuses (401/403/400); only an unmounted
+                // path or method answers 404 or 405.
+                let mounted = !matches!(
+                    response.status(),
+                    StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
+                );
+                let listed = TERMINAL_ROUTES.contains(&(method, pattern));
+                assert_eq!(mounted, listed, "{method} {pattern}: {}", response.status());
             }
         }
     }
