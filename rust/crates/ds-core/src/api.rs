@@ -2191,15 +2191,24 @@ pub fn h_owner_ingest(context: &HandlerContext<'_>, args: Args) -> Result<Value,
         },
         context.self_pane_id(),
     )?;
-    // t1613: a new Telegram question nudges the desk once. Web is nudged by its own route.
-    // t4645/t4671: tell the single registered owner lane for new Telegram and web questions.
-    if !ingested.duplicate && matches!(ingested.transport.as_str(), "telegram" | "web") {
-        let desk_pane = if ingested.transport == "telegram" {
-            nudge_desk_for_telegram(context, &ingested.message)
-        } else {
-            None
+    // t1613: a new Telegram question nudges the desk once. The web route tells the desk itself.
+    // t4645/t4671: tell the single registered owner lane for new Telegram and web questions. For
+    // web the desk pane is only looked up, never nudged here, so an owner lane that is also the
+    // desk the web route tells is not told twice.
+    if !ingested.duplicate {
+        let desk_pane = match ingested.transport.as_str() {
+            "telegram" => Some(nudge_desk_for_telegram(context, &ingested.message)),
+            "web" => Some(default_desk_pane_id(context)),
+            _ => None,
         };
-        nudge_owner_lane_for_owner_message(context, &ingested.message, desk_pane.as_deref());
+        if let Some(desk_pane) = desk_pane {
+            nudge_owner_lane_for_owner_message(
+                context,
+                &ingested.message,
+                &ingested.transport,
+                desk_pane.as_deref(),
+            );
+        }
     }
     Ok(json!({
         "message": owner_message_value(&ingested.message),
@@ -2245,6 +2254,15 @@ fn nudge_desk_for_telegram(
     Some(pane_id.to_string())
 }
 
+/// t4671: the pane the web route tells for the default desk channel (`match: desk`), looked up
+/// without nudging it. The route's channel can also be pinned to a pane in the web's own config,
+/// which the daemon does not see; only the default match is deduplicated here.
+fn default_desk_pane_id(context: &HandlerContext<'_>) -> Option<String> {
+    let panes = context.env.list_panes_grouped();
+    let desk = desk_nudge::desk_pane_for(&panes)?;
+    Some(desk.get("pane_id").and_then(Value::as_str)?.to_string())
+}
+
 /// t4645/t4671: a Telegram or web message from the owner also tells the ONE registered owner lane,
 /// with a one-line inbox notice, even though that lane's mailboxes are configured silent
 /// (`DUNKINGSHEEP_INBOX_SILENT_MAILBOXES`). Only this nudge wakes a silent recipient; every other
@@ -2253,6 +2271,7 @@ fn nudge_desk_for_telegram(
 fn nudge_owner_lane_for_owner_message(
     context: &HandlerContext<'_>,
     message: &crate::inbox_store::Message,
+    transport: &str,
     desk_pane: Option<&str>,
 ) {
     let Ok(owners) = context.flock.with_roles(|roles, _| roles.owners()) else {
@@ -2262,7 +2281,7 @@ fn nudge_owner_lane_for_owner_message(
         return;
     };
     let message_id = message.summary.message_id.clone();
-    let body = desk_nudge::owner_lane_nudge_body(&message_id, &message.body);
+    let body = desk_nudge::owner_lane_nudge_body(&message_id, transport, &message.body);
     let subject = desk_nudge::nudge_subject(&message_id);
     let _ = context.env.with_inbox_env(&mut |env| {
         context.flock.inbox_send_wire(

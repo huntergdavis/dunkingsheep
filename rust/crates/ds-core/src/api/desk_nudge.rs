@@ -54,11 +54,16 @@ pub fn nudge_body(message_id: &str, transport: &str, text: &str) -> String {
     )
 }
 
-/// The body of the owner lane's nudge for a Telegram message (t4645). The owner lane is told as
-/// well as the desk, so the text says who else knows and how to answer without doing it twice.
-pub fn owner_lane_nudge_body(message_id: &str, text: &str) -> String {
+/// The body of the owner lane's nudge for a Telegram (t4645) or web (t4671) message. The owner lane
+/// is told as well as the desk, so the text names the transport the message really came by, says
+/// who else knows, and says where a reply goes, so the question is not answered twice.
+pub fn owner_lane_nudge_body(message_id: &str, transport: &str, text: &str) -> String {
+    let reply_route = match transport {
+        "web" => "the reply appears in the owner's web conversation",
+        _ => "the reply goes back through Telegram",
+    };
     format!(
-        "Owner message {message_id} (telegram) arrived in the owner mailbox: `dunkingsheep owner conversation`. The front desk was told as well and may answer it. If you answer it yourself, use `owner reply {message_id}` once, for the final answer; the reply goes back through Telegram.\n\n{text}"
+        "Owner message {message_id} ({transport}) arrived in the owner mailbox: `dunkingsheep owner conversation`. The front desk was told as well and may answer it. If you answer it yourself, use `owner reply {message_id}` once, for the final answer; {reply_route}.\n\n{text}"
     )
 }
 
@@ -89,8 +94,19 @@ mod tests {
         assert_eq!(owner_lane_for(&[], Some("%133")), None);
         assert_eq!(owner_lane_for(&["%1".into(), "%2".into()], None), None);
         assert_eq!(owner_lane_for(&[String::new()], None), None);
-        let body = owner_lane_nudge_body("i9", "are you there?");
+        let body = owner_lane_nudge_body("i9", "telegram", "are you there?");
         assert!(body.starts_with("Owner message i9 (telegram) arrived in the owner mailbox"));
+        assert!(body.contains("the reply goes back through Telegram"));
+        assert!(body.ends_with("\n\nare you there?"));
+    }
+
+    #[test]
+    fn a_web_owner_lane_nudge_names_the_web_and_never_telegram() {
+        let body = owner_lane_nudge_body("i9", "web", "are you there?");
+        assert!(body.starts_with("Owner message i9 (web) arrived in the owner mailbox"));
+        assert!(body.contains("`owner reply i9` once"));
+        assert!(body.contains("the reply appears in the owner's web conversation"));
+        assert!(!body.to_lowercase().contains("telegram"));
         assert!(body.ends_with("\n\nare you there?"));
     }
 
