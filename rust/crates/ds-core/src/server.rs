@@ -592,7 +592,10 @@ fn handle_line_parts(
         dispatcher.dispatch(command, &args, &ctx)
     }));
     let dispatch = started.elapsed().saturating_sub(bind);
-    if let Some(line) = slow_request_line(command, ctx.self_pane_id.as_deref(), bind, dispatch) {
+    let waits = requested_wait(command, &args);
+    if let Some(line) =
+        slow_request_line(command, ctx.self_pane_id.as_deref(), bind, dispatch, waits)
+    {
         tracing::warn!("{line}");
     }
     match outcome {
@@ -613,7 +616,26 @@ fn handle_line_parts(
 /// A request slower than this gets one log line (t4554).
 const SLOW_REQUEST: Duration = Duration::from_secs(2);
 
-/// The log line for a slow request, or `None` for a fast one. It names the command, the bound
+/// How long this request asked the daemon to block for delivery: `wait_s` on `send_text` and
+/// `send_keys` (default 3 s, at most an hour, as `api::send_wait_s` reads it). That wait is by
+/// design and is not slowness.
+fn requested_wait(command: &str, args: &Value) -> Duration {
+    if !matches!(command, "send_text" | "send_keys") {
+        return Duration::ZERO;
+    }
+    let seconds = match args.get("wait_s").filter(|value| !value.is_null()) {
+        Some(value) => value.as_f64().unwrap_or(0.0),
+        None => 3.0,
+    };
+    if seconds.is_finite() && seconds > 0.0 {
+        Duration::from_secs_f64(seconds.min(3600.0))
+    } else {
+        Duration::ZERO
+    }
+}
+
+/// The log line for a slow request, or `None` for a fast one. A request that asked to wait for
+/// delivery is slow only past that wait plus the threshold, and the line carries `wait_s`. It names the command, the bound
 /// pane and the two phases the server can see: binding the caller identity (a terminal read) and
 /// the dispatcher call (handler work, including any wait on a store inside it). Arguments are
 /// never logged: they can carry message bodies and tokens.
@@ -622,15 +644,21 @@ fn slow_request_line(
     pane: Option<&str>,
     bind: Duration,
     dispatch: Duration,
+    requested_wait: Duration,
 ) -> Option<String> {
     let total = bind + dispatch;
-    if total < SLOW_REQUEST {
+    if total < SLOW_REQUEST + requested_wait {
         return None;
     }
     let command: String = command.chars().take(64).collect();
     let pane: String = pane.unwrap_or("-").chars().take(32).collect();
+    let waited = if requested_wait.is_zero() {
+        String::new()
+    } else {
+        format!(" wait_s={:.3}", requested_wait.as_secs_f64())
+    };
     Some(format!(
-        "slow request cmd={command:?} pane={pane:?} total={:.3}s bind={:.3}s dispatch={:.3}s",
+        "slow request cmd={command:?} pane={pane:?} total={:.3}s bind={:.3}s dispatch={:.3}s{waited}",
         total.as_secs_f64(),
         bind.as_secs_f64(),
         dispatch.as_secs_f64(),
