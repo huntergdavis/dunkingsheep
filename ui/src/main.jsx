@@ -23,6 +23,7 @@ import CharacterEditor from './CharacterEditor';
 import ProjectTerminal from './ProjectTerminal';
 import { nextTerminalList, terminalActionForLane, terminalListReason } from './project-terminal-targets.js';
 import { DASH_HOME, DASH_ROUTES, resolveDashRoute, viewForPath } from './dash-route.js';
+import { quickMessageBlock, quickMessageTargets, sendOutcomeText } from './quick-message.js';
 
 function LaneStatus({ row }) {
   const value = laneStatus(row);
@@ -82,7 +83,9 @@ function DashHeader({ side, view, standalone }) {
 
 function DashNav({ view, side }) {
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [messageOpen, setMessageOpen] = useState(false);
   const settingsButton = useRef(null);
+  const messageButton = useRef(null);
   const boards = useRef(null);
   useEffect(() => {
     function dismiss(event) {
@@ -111,8 +114,9 @@ function DashNav({ view, side }) {
       <div className="dash-nav-links">{links}</div>
     </details>
     {side && <span className="dash-nav-status">{side}</span>}
-    <span className="dash-nav-right"><button className="dock-trigger" aria-label="Appearance" title="Appearance" ref={settingsButton} onClick={() => setSettingsOpen(true)}><span className="nav-action-label">Appearance</span><span className="nav-action-icon" aria-hidden="true">◐</span></button><EmergencyDock request={api} /></span>
+    <span className="dash-nav-right"><button className="dock-trigger" aria-label="Quick message" title="Message a pane" ref={messageButton} onClick={() => setMessageOpen(true)}><span className="nav-action-label">Message</span><span className="nav-action-icon" aria-hidden="true">✉</span></button><button className="dock-trigger" aria-label="Appearance" title="Appearance" ref={settingsButton} onClick={() => setSettingsOpen(true)}><span className="nav-action-label">Appearance</span><span className="nav-action-icon" aria-hidden="true">◐</span></button><EmergencyDock request={api} /></span>
     {settingsOpen && <AppearanceSettings onClose={closeSettings} />}
+    {messageOpen && <QuickMessage onClose={() => { setMessageOpen(false); messageButton.current?.focus(); }} />}
   </nav>;
 }
 
@@ -268,6 +272,60 @@ function MessageCard({ item, highlight, onSendNow, onInspect, frontDesk = false 
     {owner && item.delivery === 'failed' && <div className="queue-help"><span>{item.delivery_detail || 'Delivery failed; retrying when transport recovers'}</span></div>}
     {owner && item.delivery === 'uncertain' && <div className="queue-help"><span>Delivery uncertain. Check agent activity before resending.</span><button onClick={onInspect}>Live signal</button></div>}
   </div>;
+}
+
+// t4644: message any pane the desk can already message without opening the Terminals view. Same
+// roster (/api/fleet) and the same guarded send (/api/pane-send) as the Terminals composer.
+function QuickMessage({ onClose }) {
+  const [fleet, setFleet] = useState(null);
+  const [error, setError] = useState('');
+  const [pane, setPane] = useState('');
+  const [draft, setDraft] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [sent, setSent] = useState('');
+  const [sendError, setSendError] = useState('');
+  const sending = useRef(false);
+  useEffect(() => {
+    let live = true;
+    api('/fleet')
+      .then(data => { if (!live) return; if (data.state === 'unavailable') setError(`Panes unavailable: ${data.error || 'unknown reason'}`); else setFleet(data); })
+      .catch(e => { if (live) setError(`Panes unavailable: ${e.message}`); });
+    return () => { live = false; };
+  }, []);
+  const targets = quickMessageTargets(fleet);
+  const projects = [...new Set(targets.map(target => target.project))];
+  const block = quickMessageBlock(targets, pane, draft, busy);
+  async function send(event) {
+    event.preventDefault();
+    if (block || sending.current) return;
+    sending.current = true; setBusy(true); setSent(''); setSendError('');
+    try {
+      const data = await api('/pane-send', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pane, text: draft }) });
+      setDraft(current => current === draft ? '' : current);
+      setSent(sendOutcomeText(data));
+    } catch (e) { setSendError(e.message); }
+    finally { sending.current = false; setBusy(false); }
+  }
+  return <div className="modal-backdrop" onMouseDown={onClose}><div className="settings-modal" onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); onClose(); } }} onMouseDown={e => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Quick message">
+    <div className="settings-head"><div><div className="eyebrow">QUICK MESSAGE</div><h2>Message a pane</h2></div><button className="icon-button" onClick={onClose} aria-label="Close quick message">×</button></div>
+    {error && <div className="form-error" role="alert">{error}</div>}
+    {!fleet && !error && <p>Loading panes…</p>}
+    {fleet && !targets.length && <p>No panes can be messaged right now.</p>}
+    <form onSubmit={send}>
+      <label htmlFor="quick-message-pane">Pane</label>
+      <select id="quick-message-pane" value={pane} onChange={event => { setPane(event.target.value); setSent(''); setSendError(''); }} autoFocus>
+        <option value="">Choose a pane…</option>
+        {projects.map(project => <optgroup key={project} label={project}>
+          {targets.filter(target => target.project === project).map(target => <option key={target.pane_id} value={target.pane_id} disabled={target.blocked}>{target.label}{target.blocked ? ' (messaging unavailable)' : ''}</option>)}
+        </optgroup>)}
+      </select>
+      <label htmlFor="quick-message-text">Message</label>
+      <textarea id="quick-message-text" rows={4} value={draft} onChange={event => setDraft(event.target.value)} placeholder="Write a message" />
+      <button className="primary" type="submit" disabled={Boolean(block)} title={block || 'Send message'}>{busy ? 'Sending…' : 'Send'}</button>
+      {sent && <p className="settings-success" role="status">{sent}</p>}
+      {sendError && <div className="form-error" role="alert">{sendError}</div>}
+    </form>
+  </div></div>;
 }
 
 function ForceSendDialog({ item, busy, onClose, onConfirm }) {
@@ -581,8 +639,7 @@ function Fleet({ standalone = false }) {
       setDraft(current => current === draft ? '' : current);
       // The server performed the transport; it gets to describe it. Prefix the outcome so
       // 'stored' and 'unconfirmed' cannot be read as 'delivered'.
-      setSent(`${data.pane} [${data.outcome || 'unknown'}]: ${data.note || 'accepted'}`
-        + (data.detail && !data.unconfirmed ? ` (${data.detail})` : ''));
+      setSent(sendOutcomeText(data));
     } catch (e) { setSendError(e.message); }
     finally { sendingRef.current = false; setSendBusy(false); }
   }
