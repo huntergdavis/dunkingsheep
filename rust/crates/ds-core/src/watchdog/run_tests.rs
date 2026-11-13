@@ -1,6 +1,40 @@
 use super::*;
 use std::{cell::RefCell, time::Duration};
 
+#[test]
+fn recent_failure_float_strings_match_python_decimal_lexemes() {
+    // Differential cases checked against the frozen Python oracle's float(at).
+    for (at, retained) in [
+        ("1_000", true),
+        ("١٠٠٠", true), // Arabic-Indic decimal digits
+        ("1_٠٠٠", true),
+        ("_1000", false),
+        ("1__000", false),
+        ("1000_", false),
+    ] {
+        let state = json!({"delivery_failure":{"at":at}});
+        assert_eq!(
+            !recent_failure(&state, 1000.0).is_null(),
+            retained,
+            "at={at:?}"
+        );
+    }
+}
+
+#[test]
+fn python_float_string_accepts_underscores_only_between_digits() {
+    for (text, expected) in [
+        ("1_0", Some(10.0)),
+        ("1_0.5_0", Some(10.5)),
+        ("1e1_0", Some(10_000_000_000.0)),
+    ] {
+        assert_eq!(python_float_string(text), expected, "text={text:?}");
+    }
+    for text in ["_10", "10_", "1__0", "1_.0", "1._0", "1e_2"] {
+        assert_eq!(python_float_string(text), None, "text={text:?}");
+    }
+}
+
 struct FakeTransport {
     calls: RefCell<Vec<Value>>,
     fail: bool,
