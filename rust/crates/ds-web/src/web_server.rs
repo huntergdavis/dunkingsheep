@@ -566,11 +566,11 @@ pub const PYTHON_ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/version"),
 ];
 
-/// Whether a Python route claims this decoded path for this method.
 /// The Rust-only terminal stream routes (`terminal_stream_route`). Python never had them, so they
 /// are not in `PYTHON_ROUTES`; unless the path layer admits them they are forced to the static
 /// mount and answer 404 even when the router is mounted. Admitted only while the stream is on.
-const TERMINAL_ROUTES: &[(&str, &str)] = &[
+/// A test in `terminal_stream_route` checks this list against the router that module mounts.
+pub(crate) const TERMINAL_ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/terminals"),
     ("GET", "/api/terminals/{name}/resize"),
     ("POST", "/api/terminals/{name}/resize"),
@@ -600,6 +600,7 @@ pub(crate) fn decoded_path_routing(
     }
 }
 
+/// Whether a Python route claims this decoded path for this method.
 fn is_python_route(decoded: &str, method: &Method) -> bool {
     PYTHON_ROUTES.iter().any(|(route_method, pattern)| {
         *route_method == method.as_str() && pattern_matches(pattern, decoded)
