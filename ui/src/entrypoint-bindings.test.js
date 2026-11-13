@@ -16,7 +16,7 @@ const localExports = {
   'theme-registry.js': ['buildThemeRegistry', 'groupThemes', 'THEME_GROUP_ORDER'],
   'leader-line.js': ['leaderLine'],
   'dash-route.js': ['resolveDashRoute', 'viewForPath'],
-  'project-terminal-targets.js': ['terminalActionForLane', 'terminalListReason', 'terminalTargetForPane'],
+  'project-terminal-targets.js': ['nextTerminalList', 'terminalActionForLane', 'terminalListReason', 'terminalTargetForPane'],
 };
 
 const mainBundle = () => {

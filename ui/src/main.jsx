@@ -21,7 +21,7 @@ import { laneStatus } from './lane-status.js';
 import { channelDeliveryLabel, messageDeliveryLabel } from './delivery-label.js';
 import CharacterEditor from './CharacterEditor';
 import ProjectTerminal from './ProjectTerminal';
-import { terminalActionForLane, terminalListReason } from './project-terminal-targets.js';
+import { nextTerminalList, terminalActionForLane, terminalListReason } from './project-terminal-targets.js';
 import { DASH_HOME, DASH_ROUTES, resolveDashRoute, viewForPath } from './dash-route.js';
 
 function LaneStatus({ row }) {
@@ -1166,8 +1166,8 @@ function Projects({ standalone = false }) {
     let active = true;
     // Lanes come and go, so the authorized targets are re-read with them (t4643).
     const load = () => api('/terminals')
-      .then(items => { if (active) setTerminalList(Array.isArray(items) ? { state: 'ready', targets: items } : { state: 'error' }); })
-      .catch(e => { if (active) setTerminalList({ state: 'error', status: e.status }); });
+      .then(items => { if (active) setTerminalList(previous => nextTerminalList(previous, { items })); })
+      .catch(e => { if (active) setTerminalList(previous => nextTerminalList(previous, { status: e.status })); });
     load(); const timer = setInterval(load, 30000);
     return () => { active = false; clearInterval(timer); };
   }, []);
