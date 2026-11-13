@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::{mailbox_row, mailbox_row_at, paired_config, text_update, Fixture};
+use common::{mailbox_row, mailbox_row_at, outbox_row, paired_config, text_update, Fixture};
 use ds_telegram::{BridgeError, Config};
 use serde_json::{json, Value};
 
@@ -167,7 +167,8 @@ fn a_sticker_with_no_text_gets_the_other_items_reply() {
 #[test]
 fn a_photo_with_caption_is_downloaded_and_saved_as_a_desk_attachment() {
     let fixture = Fixture::new();
-    fixture.desk_rows(&[]);
+    fixture.daemon.0.borrow_mut().ingest =
+        json!({"message": {"message_id": "i7"}, "duplicate": false});
     fixture.bot.0.borrow_mut().files.insert(
         "photo-file".into(),
         json!({"file_path":"photos/photo.jpg", "file_size":11, "content":"photo bytes"}),
@@ -181,49 +182,51 @@ fn a_photo_with_caption_is_downloaded_and_saved_as_a_desk_attachment() {
     bridge.process_update(&photo, &mut config).unwrap();
     assert_eq!(
         fixture.bot.texts(),
-        vec!["Chief of Staff message #1: posted. I’ll reply here when ready.".to_string()]
+        vec!["Chief of Staff message #i7. I'll reply here when ready.".to_string()]
     );
     let calls = fixture.bot.0.borrow().log.clone();
     assert_eq!(calls[0].0, "getFile");
     assert_eq!(calls[0].1["file_id"], "photo-file");
-    assert!(fixture.daemon.args_of("owner_ingest").is_empty());
+    let ingest = fixture.daemon.args_of("owner_ingest");
+    assert_eq!(1, ingest.len());
+    assert_eq!("look", ingest[0]["body"]);
+    assert_eq!("telegram", ingest[0]["transport"]);
+    assert_eq!("telegram:6", ingest[0]["external_id"]);
+    assert_eq!(
+        b"photo bytes",
+        fixture.daemon.0.borrow().ingested_attachment_contents[0].as_slice()
+    );
+    let staged = ingest[0]["attach"][0].as_str().unwrap();
+    assert!(!std::path::Path::new(staged).exists());
+    fixture.daemon.0.borrow_mut().outbox = vec![outbox_row("i8", None, "photo answer", Some("i7"))];
+    bridge.send_owner_outbox(&mut config).unwrap();
+    assert!(fixture.bot.texts().contains(&"photo answer".to_string()));
+    assert_eq!(fixture.daemon.receipts(), vec!["i8"]);
+}
 
-    let conn = rusqlite::Connection::open(fixture.paths.desk_db()).unwrap();
-    let (channel, body, external_id, filename, mime, size, path): (
-        String,
-        String,
-        String,
-        String,
-        String,
-        i64,
-        String,
-    ) = conn
-        .query_row(
-            "SELECT m.channel,m.body,m.external_id,a.filename,a.mime,a.size,a.path \
-             FROM messages m JOIN attachments a ON a.message_id=m.id",
-            [],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                    row.get(6)?,
-                ))
-            },
-        )
-        .unwrap();
-    assert_eq!(
-        (channel.as_str(), body.as_str(), external_id.as_str()),
-        ("cos", "look", "telegram:6")
+#[test]
+fn a_redelivered_attachment_update_uses_owner_ingest_deduplication() {
+    let fixture = Fixture::new();
+    fixture.daemon.0.borrow_mut().ingest =
+        json!({"message": {"message_id": "i7"}, "duplicate": true});
+    fixture.bot.0.borrow_mut().files.insert(
+        "photo-file".into(),
+        json!({"file_path":"photos/photo.jpg", "file_size":11, "content":"photo bytes"}),
     );
+    let mut bridge = fixture.bridge();
+    let mut config = as_config(paired_config(42));
+    let photo = json!({
+        "update_id": 6,
+        "message": {"chat": {"id": 42, "type": "private"}, "caption": "look", "photo": [{"file_id": "photo-file", "file_size": 11}]}
+    });
+    bridge.process_update(&photo, &mut config).unwrap();
     assert_eq!(
-        (filename.as_str(), mime.as_str(), size),
-        ("telegram-photo.jpg", "image/jpeg", 11)
+        fixture.bot.texts(),
+        vec![
+            "Chief of Staff message #i7 (already recorded). I'll reply here when ready."
+                .to_string()
+        ]
     );
-    assert_eq!(std::fs::read(path).unwrap(), b"photo bytes");
 }
 
 #[test]

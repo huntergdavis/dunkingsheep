@@ -537,6 +537,38 @@
         },
         "name": "photo_with_caption_is_saved_as_a_desk_attachment",
         "owner_rows": [],
+        "port": {
+          "bot_log": [
+            [
+              "getFile",
+              {
+                "file_id": "photo-large"
+              }
+            ],
+            [
+              "sendMessage",
+              {
+                "chat_id": 42,
+                "text": "Chief of Staff message #i7. I'll reply here when ready."
+              }
+            ]
+          ],
+          "daemon_log": [
+            [
+              "owner_ingest",
+              {
+                "attach": [
+                  "telegram-photo.jpg"
+                ],
+                "body": "look at this",
+                "external_id": "telegram:20",
+                "subject": null,
+                "transport": "telegram"
+              }
+            ]
+          ],
+          "desk_attachments": []
+        },
         "registry": [
           {
             "id": "vp",
@@ -647,6 +679,38 @@
         },
         "name": "document_caption_and_sanitized_filename_are_saved",
         "owner_rows": [],
+        "port": {
+          "bot_log": [
+            [
+              "getFile",
+              {
+                "file_id": "document-1"
+              }
+            ],
+            [
+              "sendMessage",
+              {
+                "chat_id": 42,
+                "text": "Chief of Staff message #i7. I'll reply here when ready."
+              }
+            ]
+          ],
+          "daemon_log": [
+            [
+              "owner_ingest",
+              {
+                "attach": [
+                  "report_.txt"
+                ],
+                "body": "please review",
+                "external_id": "telegram:21",
+                "subject": null,
+                "transport": "telegram"
+              }
+            ]
+          ],
+          "desk_attachments": []
+        },
         "registry": [
           {
             "id": "vp",

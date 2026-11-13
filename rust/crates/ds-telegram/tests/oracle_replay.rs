@@ -7,13 +7,11 @@
 //! daemon call with its arguments, each step's result or exception, and the final telegram.json and
 //! status file.
 //!
-//! ONE intentional difference, recorded in the fixture instead of normalised away: `/status`. Python
-//! answers it from the legacy desk store's `delivery` column; this port records its questions in the
-//! owner mailbox and answers from that mailbox's state, which the owner accepted on 2026-11-08
-//! (t3671/t3672, "b I want it to be useful"). A scenario recording that difference carries
-//! `input.port` with the port's own `bot_log`/`daemon_log`; those two keys replace the Python ones for
-//! that scenario and nothing else does, so the difference cannot widen unnoticed. The fixture keeps
-//! both answers side by side, so a reviewer reads the divergence instead of trusting a filter.
+//! Intentional differences, recorded in the fixture instead of normalised away: `/status` reads
+//! the Rust owner mailbox rather than Python's legacy desk delivery column (t3671/t3672), and Rust
+//! sends attachment blobs through `owner_ingest` so they reach the desk's guarded mailbox and reply
+//! outbox. Attachment scenarios carry `input.port` with those Rust calls; those keys replace only
+//! their Python counterparts, so each divergence stays explicit and reviewable.
 //!
 //! Numbers are compared as floats, so an int in one language and a float in the other never decides
 //! a comparison. Attachment cases include the stored desk metadata and file contents.
@@ -45,7 +43,7 @@ fn expected_outputs(scenario: &Value) -> Value {
     else {
         return expected;
     };
-    for key in ["bot_log", "daemon_log"] {
+    for key in ["bot_log", "daemon_log", "desk_attachments"] {
         if let Some(value) = port.get(key) {
             expected[key] = value.clone();
         }
@@ -290,7 +288,17 @@ fn replay(input: &Value) -> Value {
         .borrow()
         .calls
         .iter()
-        .map(|(name, kwargs)| json!([name, Value::Object(kwargs.clone())]))
+        .map(|(name, kwargs)| {
+            let mut kwargs = kwargs.clone();
+            if let Some(paths) = kwargs.get_mut("attach").and_then(Value::as_array_mut) {
+                for path in paths {
+                    if let Some(value) = path.as_str() {
+                        *path = json!(Path::new(value).file_name().unwrap().to_string_lossy());
+                    }
+                }
+            }
+            json!([name, Value::Object(kwargs)])
+        })
         .collect();
     let config_on_disk = std::fs::read_to_string(paths.config())
         .ok()

@@ -3,8 +3,7 @@
 //! The bridge keeps no separate state store. Text questions are recorded in the one owner mailbox
 //! with `transport=telegram` and `external_id=telegram:<update_id>`; a reply or a page is read from
 //! the daemon's outbox and confirmed with `owner_delivered`. The legacy desk database holds page
-//! rows, the forwarding cursor, and attachment blobs/messages because the owner-mailbox API does
-//! not accept blobs.
+//! rows and the forwarding cursor. Attachments are staged and passed through `owner_ingest`.
 //!
 //! Not in this build: the watchdog's own status file beyond the watermark write.
 //!
@@ -115,7 +114,6 @@ fn message_text(message: &Value) -> String {
 struct AttachmentSpec {
     file_id: String,
     filename: String,
-    mime: String,
     file_size: Option<u64>,
 }
 
@@ -130,7 +128,7 @@ fn file_size(item: &Value) -> Option<u64> {
 fn attachment_spec(message: &Value) -> Result<Option<AttachmentSpec>, BridgeError> {
     let item_and_defaults =
         if let Some(item) = message.get("document").filter(|item| truthy(Some(item))) {
-            Some((item, "telegram-file", "application/octet-stream"))
+            Some((item, "telegram-file"))
         } else if let Some(photos) = message
             .get("photo")
             .and_then(Value::as_array)
@@ -142,18 +140,18 @@ fn attachment_spec(message: &Value) -> Result<Option<AttachmentSpec>, BridgeErro
                     largest = photo;
                 }
             }
-            Some((largest, "telegram-photo.jpg", "image/jpeg"))
+            Some((largest, "telegram-photo.jpg"))
         } else if let Some(item) = message.get("video").filter(|item| truthy(Some(item))) {
-            Some((item, "video.mp4", "video/mp4"))
+            Some((item, "video.mp4"))
         } else if let Some(item) = message.get("audio").filter(|item| truthy(Some(item))) {
-            Some((item, "audio.mp3", "audio/mpeg"))
+            Some((item, "audio.mp3"))
         } else {
             message
                 .get("voice")
                 .filter(|item| truthy(Some(item)))
-                .map(|item| (item, "voice.ogg", "audio/ogg"))
+                .map(|item| (item, "voice.ogg"))
         };
-    let Some((item, default_filename, default_mime)) = item_and_defaults else {
+    let Some((item, default_filename)) = item_and_defaults else {
         if message
             .get("photo")
             .is_some_and(|photo| truthy(Some(photo)))
@@ -172,16 +170,9 @@ fn attachment_spec(message: &Value) -> Result<Option<AttachmentSpec>, BridgeErro
         .filter(|filename| !filename.is_empty())
         .unwrap_or(default_filename)
         .to_string();
-    let mime = item
-        .get("mime_type")
-        .and_then(Value::as_str)
-        .filter(|mime| !mime.is_empty())
-        .unwrap_or(default_mime)
-        .to_string();
     Ok(Some(AttachmentSpec {
         file_id: file_id.to_string(),
         filename,
-        mime,
         file_size: file_size(item),
     }))
 }
@@ -494,24 +485,42 @@ impl<D: Daemon, B: Bot> Bridge<D, B> {
                     "Telegram Bot API cannot download files over 20 MB; use the VP web desk.",
                 );
             }
-            let posted = desk_store::post_telegram_attachment(
-                &self.paths.desk_db(),
+            let staged = desk_store::stage_telegram_attachment(
                 &self.paths.data.join("uploads"),
-                desk_store::TelegramAttachment {
-                    channel: &channel,
-                    body: &text,
-                    external_id: &external_id,
-                    filename: &spec.filename,
-                    mime: &spec.mime,
-                    content: &content,
-                },
+                &spec.filename,
+                &content,
             )?;
+            let ingested = self.daemon.call(
+                "owner_ingest",
+                args(json!({
+                    "body": text,
+                    "transport": "telegram",
+                    "external_id": external_id,
+                    "subject": Value::Null,
+                    "attach": [staged],
+                })),
+            );
+            let _ = std::fs::remove_file(&staged);
+            if let Some(parent) = staged.parent() {
+                let _ = std::fs::remove_dir(parent);
+            }
+            let ingested = ingested?;
+            let message_id = ingested
+                .pointer("/message/message_id")
+                .map(display)
+                .unwrap_or_else(|| "unknown".into());
+            let again = if ingested
+                .get("duplicate")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                " (already recorded)"
+            } else {
+                ""
+            };
             return self.send_text(
                 &chat_id,
-                &format!(
-                    "{name} message #{}: {}. I’ll reply here when ready.",
-                    posted.message_id, posted.delivery
-                ),
+                &format!("{name} message #{message_id}{again}. I'll reply here when ready."),
             );
         }
         if stripped.is_empty() {

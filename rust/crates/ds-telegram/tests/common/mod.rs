@@ -139,6 +139,9 @@ pub struct DaemonState {
     pub outbox: Vec<Value>,
     /// What `owner_ingest` returns.
     pub ingest: Value,
+    /// Each upload path supplied to `owner_ingest`; tests can inspect these before cleanup.
+    pub ingested_attachment_paths: Vec<String>,
+    pub ingested_attachment_contents: Vec<Vec<u8>>,
     /// What `owner_conversation` returns as `messages` (the owner mailbox, oldest first).
     pub conversation: Vec<Value>,
 }
@@ -178,7 +181,23 @@ impl Daemon for FakeDaemon {
         state.calls.push((cmd.to_string(), args.clone()));
         match cmd {
             "owner_outbox" => Ok(json!({"messages": state.outbox.clone()})),
-            "owner_ingest" => Ok(state.ingest.clone()),
+            "owner_ingest" => {
+                if let Some(attachments) = args.get("attach").and_then(Value::as_array) {
+                    for attachment in attachments {
+                        if let Some(path) = attachment.as_str() {
+                            state.ingested_attachment_paths.push(path.to_string());
+                            if let Ok(contents) = std::fs::read(path) {
+                                state.ingested_attachment_contents.push(contents);
+                            }
+                        }
+                    }
+                }
+                if state.ingest.is_null() {
+                    Ok(json!({"message":{"message_id":"i7"},"duplicate":false}))
+                } else {
+                    Ok(state.ingest.clone())
+                }
+            }
             "owner_conversation" => {
                 // The daemon's own contract: `created_at < before`, newest `limit` of those,
                 // returned oldest first (ds-core inbox_store::conversation_rows).

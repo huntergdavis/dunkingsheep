@@ -1,7 +1,7 @@
 //! Access to the legacy desk store, `messages.sqlite3`.
 //!
-//! The bridge reads watchdog owner pages and the forwarding cursor here. Telegram attachments are
-//! written here too because the owner-mailbox API does not accept blobs.
+//! The bridge reads watchdog owner pages and the forwarding cursor here. Attachment storage is
+//! handled by `owner_ingest`; this module does not write messages.
 //! A missing database is an empty desk, not an error, so a fresh data directory works.
 //!
 //! `/status` does NOT read this store: this bridge answers it from the owner mailbox, the store it
@@ -9,35 +9,18 @@
 //! that is the one deliberate difference between the two bridges.
 
 use std::fs::{self, OpenOptions};
-use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior};
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 
 use crate::error::BridgeError;
 use crate::policy::PAGE_MARKER;
 
 /// How many legacy rows one tick reads for pages, as `_legacy_pages` does.
 pub const PAGE_BATCH: i64 = 20;
-static ATTACHMENT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PostedAttachment {
-    pub message_id: i64,
-    pub delivery: String,
-}
-
-pub struct TelegramAttachment<'a> {
-    pub channel: &'a str,
-    pub body: &'a str,
-    pub external_id: &'a str,
-    pub filename: &'a str,
-    pub mime: &'a str,
-    pub content: &'a [u8],
-}
+static STAGE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 fn open(path: &Path) -> Result<Option<Connection>, BridgeError> {
     if !path.exists() {
@@ -55,17 +38,15 @@ fn store_error(error: rusqlite::Error) -> BridgeError {
     BridgeError::Runtime(format!("desk store: {error}"))
 }
 
-fn attachment_id() -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_nanos() as u64)
-        .unwrap_or(0);
-    let sequence = ATTACHMENT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    format!("{nanos:016x}{sequence:016x}")
-}
-
-/// Python `Path(filename).name` and `re.sub(r"[^\\w. ()-]", "_", ...)[:180]`.
-fn safe_filename(filename: &str) -> String {
+/// Stage a downloaded Telegram file for the daemon's guarded `owner_ingest` attachment path.
+/// The daemon copies it into its content-addressed store before creating a mailbox row.
+pub fn stage_telegram_attachment(
+    uploads: &Path,
+    filename: &str,
+    content: &[u8],
+) -> Result<PathBuf, BridgeError> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
     let basename = Path::new(filename)
         .file_name()
         .and_then(|name| name.to_str())
@@ -82,32 +63,25 @@ fn safe_filename(filename: &str) -> String {
         })
         .take(180)
         .collect();
-    if safe.is_empty() {
-        "telegram-file".into()
+    let safe = if safe.is_empty() {
+        "telegram-file".to_string()
     } else {
         safe
-    }
-}
-
-/// Persist an inbound Telegram blob and its desk message, matching `_save_attachment` followed by
-/// `desk.post_message`. The caller has already applied Telegram's 20 MB download cap.
-pub fn post_telegram_attachment(
-    database: &Path,
-    uploads: &Path,
-    attachment: TelegramAttachment<'_>,
-) -> Result<PostedAttachment, BridgeError> {
-    let TelegramAttachment {
-        channel,
-        body,
-        external_id,
-        filename,
-        mime,
-        content,
-    } = attachment;
-    let filename = safe_filename(filename);
+    };
     fs::create_dir_all(uploads).map_err(|error| BridgeError::Os(error.to_string()))?;
-    let id = attachment_id();
-    let path: PathBuf = uploads.join(format!("{id}_{filename}"));
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    let sequence = STAGE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let stage_dir = uploads.join(format!(".stage-{nanos:032x}{sequence:016x}"));
+    fs::create_dir(&stage_dir).map_err(|error| BridgeError::Os(error.to_string()))?;
+    fs::set_permissions(
+        &stage_dir,
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .map_err(|error| BridgeError::Os(error.to_string()))?;
+    let path = stage_dir.join(safe);
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -120,43 +94,7 @@ pub fn post_telegram_attachment(
     }
     drop(file);
 
-    let result = (|| {
-        let mut conn = Connection::open(database).map_err(store_error)?;
-        let tx = conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(store_error)?;
-        tx.execute(
-            "INSERT INTO attachments(id,filename,mime,size,path) VALUES(?,?,?,?,?)",
-            rusqlite::params![
-                id,
-                filename,
-                mime,
-                content.len() as i64,
-                path.to_string_lossy()
-            ],
-        )
-        .map_err(store_error)?;
-        tx.execute(
-            "INSERT INTO messages(channel,role,body,delivery,external_id) VALUES(?,'owner',?,'posted',?)",
-            rusqlite::params![channel, body.trim(), external_id],
-        )
-        .map_err(store_error)?;
-        let message_id = tx.last_insert_rowid();
-        tx.execute(
-            "UPDATE attachments SET message_id=? WHERE id=?",
-            rusqlite::params![message_id, id],
-        )
-        .map_err(store_error)?;
-        tx.commit().map_err(store_error)?;
-        Ok(PostedAttachment {
-            message_id,
-            delivery: "posted".into(),
-        })
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&path);
-    }
-    result
+    Ok(path)
 }
 
 /// `_latest_brief_id`: the newest agent row id on a channel, or 0.

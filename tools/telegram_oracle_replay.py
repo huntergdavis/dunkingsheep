@@ -613,7 +613,35 @@ def main(argv=None) -> int:
     os.environ["VP_DATA_DIR"] = str(work)
     desk = install_desk(work)
     import telegram_bridge as bridge  # noqa: E402 - needs the stub desk installed first
-    results = [run_scenario(work, scenario, desk, bridge) for scenario in scenarios()]
+    scenario_rows = scenarios()
+    # The current Rust bridge sends attachment blobs through owner_ingest so the desk can
+    # pick them up and reply through owner_outbox. Python's frozen implementation still
+    # records those two attachment cases in its legacy desk store; keep the Rust transport
+    # projection beside the Python output as an explicit, narrow oracle difference.
+    for scenario in scenario_rows:
+        name = scenario["name"]
+        if name not in {
+            "photo_with_caption_is_saved_as_a_desk_attachment",
+            "document_caption_and_sanitized_filename_are_saved",
+        }:
+            continue
+        photo = name.startswith("photo")
+        filename = "telegram-photo.jpg" if photo else "report_.txt"
+        caption = "look at this" if photo else "please review"
+        file_id = "photo-large" if photo else "document-1"
+        update_id = 20 if photo else 21
+        scenario["port"] = {
+            "bot_log": [
+                ["getFile", {"file_id": file_id}],
+                ["sendMessage", {"chat_id": 42, "text": "Chief of Staff message #i7. I'll reply here when ready."}],
+            ],
+            "daemon_log": [["owner_ingest", {
+                "body": caption, "transport": "telegram", "external_id": f"telegram:{update_id}",
+                "subject": None, "attach": [filename],
+            }]],
+            "desk_attachments": [],
+        }
+    results = [run_scenario(work, scenario, desk, bridge) for scenario in scenario_rows]
     Path(args.out).write_text(json.dumps({"now": NOW, "scenarios": results}, indent=2, sort_keys=True) + "\n",
                               encoding="utf-8")
     print(f"wrote {len(results)} scenarios to {args.out}")
