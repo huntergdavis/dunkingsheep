@@ -18,6 +18,11 @@ use crate::error::DunkError;
 
 /// `Flock.OWNER_MAILBOX`.
 pub const OWNER_MAILBOX: &str = "owner";
+/// The sender recorded for mail the web desk sends with its service token (t4644), and a second
+/// RESERVED recipient name: mail addressed to it is stored in the owner mailbox, so a lane that
+/// replies to the sender of a quick message reaches the owner's thread in the desk. Reserved
+/// names are matched before the lane registry and labels, so no pane or lane can take it.
+pub const OWNER_DESK: &str = "owner-desk";
 
 /// `(mailbox key, label, pane id)`.
 pub type Mailbox = (String, String, Option<String>);
@@ -297,7 +302,7 @@ impl Flock {
             return Err(Flock::pane_refusal(env, &hinted, Some(spec)));
         }
         // 1b-bis. RESERVED MAILBOXES: the owner is a person's channel, not a pane.
-        if spec.to_lowercase() == OWNER_MAILBOX {
+        if matches!(spec.to_lowercase().as_str(), OWNER_MAILBOX | OWNER_DESK) {
             return Ok((OWNER_MAILBOX.to_string(), "owner".to_string(), None));
         }
         // 1c. The LANE REGISTRY, read backwards.

@@ -329,6 +329,17 @@ pub fn h_inbox_send(c: &HandlerContext<'_>, args: Args) -> Result<Value, DunkErr
         .get("system_sender")
         .filter(|v| truthy(v))
         .map(python_value_string);
+    // t4644: the web desk has no pane, so its mail (the owner's quick messages, the owner-message
+    // nudge) arrived "from unknown". A pane-less caller whose authenticated role is `web` is
+    // recorded as `owner-desk`, a reserved name that also resolves to the owner mailbox, so a
+    // reply to the sender reaches the owner's thread. Any other pane-less caller is unchanged.
+    let pane_less = c.self_pane_id().is_none_or(str::is_empty);
+    let role_sender = (pane_less
+        && system.is_none()
+        && c.flock
+            .caller_role(None, c.env)
+            .is_ok_and(|role| role == "web"))
+    .then_some(crate::flock::mailbox::OWNER_DESK);
     c.env.with_inbox_env(&mut |env| {
         let r = c.flock.inbox_send_wire(
             env,
@@ -340,6 +351,7 @@ pub fn h_inbox_send(c: &HandlerContext<'_>, args: Args) -> Result<Value, DunkErr
                 notify: python_bool_arg(&args, "notify", true),
                 self_pane_id: c.self_pane_id(),
                 system_sender: system.as_deref(),
+                role_sender,
                 agent_only: match args.get("agent_only") {
                     None | Some(Value::Null) | Some(Value::Bool(false)) => false,
                     Some(Value::Bool(true)) => true,

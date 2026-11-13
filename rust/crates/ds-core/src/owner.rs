@@ -59,11 +59,14 @@ pub enum OwnerThreadRole {
 
 /// Classify an owner-thread row using only its recorded author provenance.
 ///
-/// Nonempty `sender` wins over transport. A sender-less web or Telegram row is
-/// human-origin; other sender-less rows remain unattributed. `reply_to` is
+/// Nonempty `sender` wins over transport, except the web desk's own sender name
+/// (`owner-desk`, t4644), which is the owner writing through the desk. A sender-less web or
+/// Telegram row is human-origin; other sender-less rows remain unattributed. `reply_to` is
 /// deliberately not an input because it describes the conversation link.
 pub fn owner_thread_role(sender: Option<&str>, transport: Option<&str>) -> OwnerThreadRole {
-    if sender.is_some_and(|value| !value.is_empty()) {
+    if sender == Some(crate::flock::mailbox::OWNER_DESK) {
+        OwnerThreadRole::Owner
+    } else if sender.is_some_and(|value| !value.is_empty()) {
         OwnerThreadRole::Agent
     } else if matches!(transport, Some("web" | "telegram")) {
         OwnerThreadRole::Owner
@@ -653,6 +656,13 @@ mod owner_thread_role_tests {
                 Some("other"),
                 OwnerThreadRole::Unknown,
                 "unknown",
+            ),
+            (
+                "the web desk's sender name is the owner writing through the desk",
+                Some("owner-desk"),
+                None,
+                OwnerThreadRole::Owner,
+                "owner",
             ),
         ];
 
