@@ -1,5 +1,5 @@
 //! t1613 / t1352: the desk is nudged once for each new Telegram owner question, and the web route
-//! keeps its own nudge. t4645: the single registered owner lane is nudged as well, Telegram only. These tests drive the daemon's `owner_ingest` handler directly, with an
+//! keeps its own nudge. t4645/t4671: the single registered owner lane is nudged for Telegram and web. These tests drive the daemon's `owner_ingest` handler directly, with an
 //! environment that records every inbox write the handler asks for.
 
 use super::*;
@@ -199,12 +199,50 @@ fn a_redelivered_telegram_question_nudges_nothing_new() {
 }
 
 #[test]
-fn a_web_question_is_nudged_by_its_own_route_not_by_the_ingest() {
+fn a_new_web_question_nudges_only_the_owner_lane_from_ingest() {
     let fixture = fixture("nudge-web", desk_panes());
-    ingest(&fixture, "web", "web-1").unwrap();
+    let out = ingest(&fixture, "web", "web-1").unwrap();
+    assert_eq!(out["duplicate"], json!(false));
     assert_eq!(
         fixture.env.writes.get(),
-        0,
-        "web stays single-nudge: the web route sends its own"
+        1,
+        "web ingest nudges the owner lane; its route separately nudges the desk"
     );
+}
+
+#[test]
+fn a_redelivered_web_question_does_not_nudge_the_owner_lane_again() {
+    let fixture = fixture("nudge-web-dup", desk_panes());
+    ingest(&fixture, "web", "web-2").unwrap();
+    let again = ingest(&fixture, "web", "web-2").unwrap();
+    assert_eq!(again["duplicate"], json!(true));
+    assert_eq!(fixture.env.writes.get(), 1, "a redelivery adds no nudge");
+}
+
+#[test]
+fn a_web_question_does_not_nudge_an_owner_lane_that_is_the_desk_the_route_tells() {
+    // The owner lane IS the default desk pane: the web route tells it, so the ingest adds nothing.
+    let owner_is_desk = fixture_with_owners("nudge-web-owner-is-desk", desk_panes(), &["w1:p2"]);
+    ingest_as(&owner_is_desk, "w1:p8", "web", "web-3").unwrap();
+    assert_eq!(owner_is_desk.env.writes.get(), 0);
+    // No owner lane, or two: nothing either. No desk pane at all: the owner lane is still told.
+    for (tag, owners) in [
+        ("nudge-web-owner-none", &[][..]),
+        ("nudge-web-owner-two", &["w1:p1", "w1:p3"][..]),
+    ] {
+        let no_single_owner = fixture_with_owners(tag, desk_panes(), owners);
+        ingest_as(&no_single_owner, "w1:p8", "web", "web-4").unwrap();
+        assert_eq!(no_single_owner.env.writes.get(), 0, "{tag}");
+    }
+    let no_desk = fixture("nudge-web-no-desk", Vec::new());
+    ingest(&no_desk, "web", "web-5").unwrap();
+    assert_eq!(no_desk.env.writes.get(), 1);
+}
+
+#[test]
+fn a_report_does_not_nudge_the_desk_or_the_owner_lane() {
+    let fixture = fixture("nudge-report", desk_panes());
+    let out = ingest(&fixture, "report", "report-1").unwrap();
+    assert_eq!(out["duplicate"], json!(false));
+    assert_eq!(fixture.env.writes.get(), 0);
 }
