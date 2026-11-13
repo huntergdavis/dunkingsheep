@@ -813,16 +813,28 @@ fn a_role_sender_names_pane_less_mail_and_never_overrides_a_pane() {
     let f = flock(&d);
     let mut args = send("w1:p2", None);
     assert_eq!(None, f.inbox_send(&e, &args).unwrap().sender);
-    args.role_sender = Some(super::commands_inbox::DESK_SENDER);
+    args.role_sender = Some(super::mailbox::OWNER_DESK);
     let sent = f.inbox_send(&e, &args).unwrap();
-    assert_eq!(Some("desk".to_string()), sent.sender);
+    assert_eq!(Some("owner-desk".to_string()), sent.sender);
     assert!(e
         .nudges
         .lock()
         .unwrap()
         .last()
         .unwrap()
-        .contains(" from desk"));
+        .contains(" from owner-desk"));
+    // A lane that replies to that sender reaches the owner mailbox, and the agent-only guard
+    // treats the alias exactly like `owner`.
+    let reply = f
+        .inbox_send(&e, &send("owner-desk", Some("w1:p2")))
+        .unwrap();
+    assert_eq!(
+        ("owner", None),
+        (reply.mailbox.as_str(), reply.pane_id.as_deref())
+    );
+    let mut agent_only = send("Owner-Desk", Some("w1:p2"));
+    agent_only.agent_only = true;
+    assert!(f.inbox_send(&e, &agent_only).is_err());
     args.self_pane_id = Some("w1:p1");
     assert_eq!(
         Some("w1:p1".into()),

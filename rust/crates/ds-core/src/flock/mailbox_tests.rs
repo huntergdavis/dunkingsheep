@@ -179,6 +179,31 @@ fn the_owner_mailbox_is_reserved_and_has_no_pane() {
     );
 }
 
+/// t4644: `owner-desk` is the web desk's sender name and a second reserved recipient. It
+/// resolves to the owner mailbox, and a pane that carries the same label cannot capture it.
+#[test]
+fn the_owner_desk_alias_is_reserved_to_the_owner_mailbox() {
+    let dir = tempfile::tempdir().unwrap();
+    let (f, mut e) = (flock(&dir), env());
+    for spec in ["owner-desk", " Owner-Desk "] {
+        assert_eq!(
+            go(&f, &e, spec, true).unwrap(),
+            ("owner".into(), "owner".into(), None)
+        );
+    }
+    e.panes.push(pane(
+        "w9:p9",
+        "owner-desk",
+        "owner-desk",
+        "owner-desk",
+        "owner-desk",
+    ));
+    assert_eq!(
+        go(&f, &e, "owner-desk", true).unwrap(),
+        ("owner".into(), "owner".into(), None)
+    );
+}
+
 #[test]
 fn the_lane_registry_wins_and_two_live_declarers_are_refused() {
     let dir = tempfile::tempdir().unwrap();

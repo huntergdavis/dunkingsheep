@@ -90,9 +90,6 @@ pub struct Nudge {
     pub message: Option<String>,
 }
 
-/// The sender recorded for mail the web desk sends with its service token (t4644).
-pub const DESK_SENDER: &str = "desk";
-
 /// `SYSTEM_SENDERS`.
 pub const SYSTEM_SENDERS: [&str; 1] = ["watchdog"];
 
@@ -156,8 +153,9 @@ pub struct SendArgs<'a> {
     pub self_pane_id: Option<&'a str>,
     pub system_sender: Option<&'a str>,
     pub agent_only: bool,
-    /// The sender to record when the caller has no pane and names no system sender: `desk` for
-    /// the web desk's service token (t4644), so its mail does not arrive "from unknown". Chosen
+    /// The sender to record when the caller has no pane and names no system sender:
+    /// `mailbox::OWNER_DESK` for the web desk's service token (t4644), so its mail does not arrive
+    /// "from unknown" and a reply to the sender reaches the owner mailbox. Chosen
     /// by the daemon from the authenticated role; it is not a wire argument.
     pub role_sender: Option<&'a str>,
     /// Notify the recipient even when `DUNKINGSHEEP_INBOX_SILENT_MAILBOXES` lists it. Only the
