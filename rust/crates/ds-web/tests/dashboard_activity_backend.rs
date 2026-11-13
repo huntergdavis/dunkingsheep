@@ -951,7 +951,7 @@ fn desk_dash_routes_serve_the_built_bundle_with_session_checks() {
 
     let (status, headers, _) = send(&dash, "GET", "/dash", None);
     assert_eq!(status, StatusCode::TEMPORARY_REDIRECT);
-    assert_eq!(headers[header::LOCATION], "/dash/cos");
+    assert_eq!(headers[header::LOCATION], "/dash/projects");
 
     let (status, headers, _) = send(&dash, "GET", "/dash/poolrad", Some(&session));
     assert_eq!(status, StatusCode::TEMPORARY_REDIRECT);

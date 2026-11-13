@@ -40,8 +40,13 @@ pub fn router(
         .layer(Extension(backend))
 }
 
+/// The bare dashboard path opens the landing view. Projects since t4642: Python sent this to
+/// `/dash/cos`, and the owner moved the landing view. Front Desk stays at `/dash/cos`, and the
+/// redirects of retired bookmarks (`web_server::legacy_view`) are unchanged.
+const DASH_LANDING: &str = "/dash/projects";
+
 async fn dash_root() -> Response {
-    redirect(StatusCode::TEMPORARY_REDIRECT, "/dash/cos")
+    redirect(StatusCode::TEMPORARY_REDIRECT, DASH_LANDING)
 }
 
 async fn dash_route(
@@ -357,13 +362,13 @@ mod tests {
     }
 
     #[test]
-    fn dash_root_redirects_both_path_forms_to_cos() {
+    fn dash_root_redirects_both_path_forms_to_the_projects_landing_view() {
         let (app, backend) = app(Some(b"index"));
         for uri in ["/dash", "/dash/"] {
             let response = block_on(app.clone().oneshot(request(uri, None))).unwrap();
             assert_eq!(
                 redirect_response(response),
-                (StatusCode::TEMPORARY_REDIRECT, "/dash/cos".into())
+                (StatusCode::TEMPORARY_REDIRECT, "/dash/projects".into())
             );
         }
         assert_eq!(*backend.reads.lock().unwrap(), 0);
