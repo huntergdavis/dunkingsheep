@@ -495,7 +495,7 @@ where
         if is_python_route(&decoded, request.method())
             || (request.method() == Method::GET && decoded == "/api/projects")
             || (request.method() == Method::POST && decoded == "/api/ops-board/question")
-            || (self.terminal_stream && is_terminal_route(&decoded, request.method()))
+            || (self.terminal_stream && is_terminal_route(&decoded))
         {
             if let Some(routed) = routed_uri(request.uri(), &decoded) {
                 *request.uri_mut() = routed;
@@ -566,21 +566,13 @@ pub const PYTHON_ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/version"),
 ];
 
-/// The Rust-only terminal stream routes (`terminal_stream_route`). Python never had them, so they
-/// are not in `PYTHON_ROUTES`; unless the path layer admits them they are forced to the static
-/// mount and answer 404 even when the router is mounted. Admitted only while the stream is on.
-/// A test in `terminal_stream_route` checks this list against the router that module mounts.
-pub(crate) const TERMINAL_ROUTES: &[(&str, &str)] = &[
-    ("GET", "/api/terminals"),
-    ("GET", "/api/terminals/{name}/resize"),
-    ("POST", "/api/terminals/{name}/resize"),
-    ("GET", "/api/terminals/{name}/stream"),
-];
-
-fn is_terminal_route(decoded: &str, method: &Method) -> bool {
-    TERMINAL_ROUTES.iter().any(|(route_method, pattern)| {
-        *route_method == method.as_str() && pattern_matches(pattern, decoded)
-    })
+/// The Rust-only terminal stream prefix (`terminal_stream_route`). Python never had these routes,
+/// so they are not in `PYTHON_ROUTES`; unless the path layer admits them they are forced to the
+/// static mount and answer 404 even when the router is mounted (t4626). While the stream is on the
+/// whole prefix is admitted, so a route added to that router needs no second list here (t4635);
+/// an unknown path under it falls to the static mount as any unmatched path does.
+fn is_terminal_route(decoded: &str) -> bool {
+    decoded == "/api/terminals" || decoded.starts_with("/api/terminals/")
 }
 
 /// The desk's path layer around `app`, as `serve` mounts it.

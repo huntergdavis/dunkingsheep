@@ -732,11 +732,21 @@ mod tests {
             let app = built
                 .map(|(router, _)| router)
                 .unwrap_or_default()
-                .fallback(|| async { StatusCode::NOT_FOUND });
+                // 404 for a request the path layer forced to the static mount, 418 for one it
+                // admitted that no terminal route matched.
+                .fallback(|uri: axum::http::Uri| async move {
+                    if uri.path() == "/__desk_static__" {
+                        StatusCode::NOT_FOUND
+                    } else {
+                        StatusCode::IM_A_TEAPOT
+                    }
+                });
             for (method, path) in [
                 ("GET", "/api/terminals"),
                 ("GET", "/api/terminals/example/resize"),
                 ("GET", "/api/terminals/example/stream"),
+                ("GET", "/api/terminals/example/added-later"),
+                ("GET", "/api/terminalsx"),
             ] {
                 let response = crate::web_server::decoded_path_routing(app.clone(), enabled)
                     .oneshot(
@@ -749,9 +759,17 @@ mod tests {
                     )
                     .await
                     .unwrap();
-                if enabled && path.ends_with("/stream") {
+                if path == "/api/terminalsx" {
+                    // Outside the prefix: forced to the static mount either way.
+                    assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+                } else if enabled && path.ends_with("/added-later") {
+                    // t4635: the whole prefix is admitted, so a route added to the terminal
+                    // router later is reachable without a second list in the path layer.
+                    assert_eq!(response.status(), StatusCode::IM_A_TEAPOT, "{path}");
+                } else if enabled && path.ends_with("/stream") {
                     // No upgrade headers: refused by the route itself, not the static mount.
                     assert_ne!(response.status(), StatusCode::NOT_FOUND, "{path}");
+                    assert_ne!(response.status(), StatusCode::IM_A_TEAPOT, "{path}");
                 } else {
                     assert_eq!(
                         response.status(),
@@ -759,51 +777,6 @@ mod tests {
                         "{method} {path}"
                     );
                 }
-            }
-        }
-    }
-
-    /// t4629: the desk path layer keeps its own list of terminal routes. If it drifts from the
-    /// routes mounted here, a mounted route answers 404 again (t4626) or the layer admits a
-    /// path nothing serves. Every method on every listed path must be mounted exactly when it
-    /// is listed. A route mounted on a path the list does not name at all is NOT detected.
-    #[tokio::test]
-    async fn desk_path_layer_route_list_matches_the_mounted_router() {
-        use crate::web_server::TERMINAL_ROUTES;
-        use tower::ServiceExt;
-        let dir = tempfile::tempdir().unwrap();
-        let env = Env::from_pairs(&[
-            ("DUNKINGSHEEP_TERMINAL_STREAM", "1"),
-            ("DUNKINGSHEEP_TERMINAL_STREAM_HOSTS", "desk.example:8787"),
-            ("DUNKINGSHEEP_DIR", dir.path().to_str().unwrap()),
-        ]);
-        let auth = Arc::new(FakeAuth(AtomicBool::new(true)));
-        let (router, _) = build_router(auth, RequestScheme::Http, &env).unwrap();
-        let mut patterns: Vec<&str> = TERMINAL_ROUTES.iter().map(|(_, path)| *path).collect();
-        patterns.dedup();
-        assert_eq!(patterns.len(), 3);
-        for pattern in patterns {
-            for method in ["GET", "POST", "PUT", "DELETE", "PATCH"] {
-                let response = router
-                    .clone()
-                    .oneshot(
-                        axum::http::Request::builder()
-                            .method(method)
-                            .uri(pattern.replace("{name}", "example"))
-                            .header(header::HOST, "desk.example:8787")
-                            .body(axum::body::Body::empty())
-                            .unwrap(),
-                    )
-                    .await
-                    .unwrap();
-                // Unauthenticated, so a mounted route refuses (401/403/400); only an unmounted
-                // path or method answers 404 or 405.
-                let mounted = !matches!(
-                    response.status(),
-                    StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
-                );
-                let listed = TERMINAL_ROUTES.contains(&(method, pattern));
-                assert_eq!(mounted, listed, "{method} {pattern}: {}", response.status());
             }
         }
     }
