@@ -32,6 +32,8 @@ pub struct BotState {
     pub poll_payloads: Vec<Map<String, Value>>,
     pub webhook_url: String,
     pub get_me: Value,
+    /// Scripted Bot API file metadata and UTF-8 fixture contents.
+    pub files: std::collections::BTreeMap<String, Value>,
 }
 
 #[derive(Clone, Default)]
@@ -81,8 +83,51 @@ impl Bot for FakeBot {
             }
             "getWebhookInfo" => Ok(json!({"url": state.webhook_url.clone()})),
             "getMe" => Ok(state.get_me.clone()),
+            "getFile" => {
+                let file_id = payload.get("file_id").and_then(Value::as_str).unwrap_or("");
+                let Some(file) = state.files.get(file_id) else {
+                    return Err(BridgeError::Runtime(
+                        "Telegram getFile: file not found".into(),
+                    ));
+                };
+                Ok(json!({
+                    "file_path": file["file_path"],
+                    "file_size": file.get("file_size").cloned().unwrap_or(Value::Null),
+                }))
+            }
             _ => Ok(json!({})),
         }
+    }
+
+    fn download(&self, file_id: &str) -> Result<Vec<u8>, BridgeError> {
+        let mut payload = Map::new();
+        payload.insert("file_id".into(), json!(file_id));
+        let info = self.call("getFile", payload)?;
+        if info
+            .get("file_size")
+            .and_then(Value::as_u64)
+            .is_some_and(|size| size > ds_telegram::bot::DOWNLOAD_LIMIT as u64)
+        {
+            return Err(BridgeError::Value(
+                "Telegram Bot API cannot download files over 20 MB; use the VP web desk.".into(),
+            ));
+        }
+        let state = self.0.borrow();
+        let file = state
+            .files
+            .get(file_id)
+            .ok_or_else(|| BridgeError::Runtime("Telegram file download failed".into()))?;
+        let content = file
+            .get("content")
+            .and_then(Value::as_str)
+            .ok_or_else(|| BridgeError::Runtime("Telegram file download failed".into()))?
+            .as_bytes();
+        if content.len() > ds_telegram::bot::DOWNLOAD_LIMIT {
+            return Err(BridgeError::Value(
+                "Telegram Bot API cannot download files over 20 MB; use the VP web desk.".into(),
+            ));
+        }
+        Ok(content.to_vec())
     }
 }
 
@@ -263,7 +308,9 @@ impl Fixture {
 /// `delivery NOT NULL DEFAULT 'posted'`; the fixtures pass it explicitly.
 const DESK_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS messages (\
      id INTEGER PRIMARY KEY, channel TEXT, role TEXT, body TEXT, \
-     delivery TEXT NOT NULL DEFAULT 'posted', external_id TEXT);";
+     delivery TEXT NOT NULL DEFAULT 'posted', external_id TEXT);\
+     CREATE TABLE IF NOT EXISTS attachments (id TEXT PRIMARY KEY, filename TEXT NOT NULL, \
+     mime TEXT NOT NULL, size INTEGER NOT NULL, path TEXT NOT NULL, message_id INTEGER);";
 
 /// A paired private-chat text update.
 pub fn text_update(update_id: i64, chat_id: i64, text: &str) -> Value {

@@ -165,22 +165,65 @@ fn a_sticker_with_no_text_gets_the_other_items_reply() {
 }
 
 #[test]
-fn a_file_is_not_recorded_by_this_build_and_says_so() {
-    // Attachments are a named gap of this build (see the PR body): a file gets a clear reply and no
-    // mailbox row, never a silent drop.
+fn a_photo_with_caption_is_downloaded_and_saved_as_a_desk_attachment() {
     let fixture = Fixture::new();
+    fixture.desk_rows(&[]);
+    fixture.bot.0.borrow_mut().files.insert(
+        "photo-file".into(),
+        json!({"file_path":"photos/photo.jpg", "file_size":11, "content":"photo bytes"}),
+    );
     let mut bridge = fixture.bridge();
     let mut config = as_config(paired_config(42));
     let photo = json!({
         "update_id": 6,
-        "message": {"chat": {"id": 42, "type": "private"}, "caption": "look", "photo": [{"file_id": "f", "file_size": 9}]}
+        "message": {"chat": {"id": 42, "type": "private"}, "caption": "look", "photo": [{"file_id": "photo-file", "file_size": 11}]}
     });
     bridge.process_update(&photo, &mut config).unwrap();
     assert_eq!(
         fixture.bot.texts(),
-        vec!["Telegram attachments are not in the Rust bridge yet. Send the text, or use the web desk.".to_string()]
+        vec!["Chief of Staff message #1: posted. I’ll reply here when ready.".to_string()]
     );
+    let calls = fixture.bot.0.borrow().log.clone();
+    assert_eq!(calls[0].0, "getFile");
+    assert_eq!(calls[0].1["file_id"], "photo-file");
     assert!(fixture.daemon.args_of("owner_ingest").is_empty());
+
+    let conn = rusqlite::Connection::open(fixture.paths.desk_db()).unwrap();
+    let (channel, body, external_id, filename, mime, size, path): (
+        String,
+        String,
+        String,
+        String,
+        String,
+        i64,
+        String,
+    ) = conn
+        .query_row(
+            "SELECT m.channel,m.body,m.external_id,a.filename,a.mime,a.size,a.path \
+             FROM messages m JOIN attachments a ON a.message_id=m.id",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        (channel.as_str(), body.as_str(), external_id.as_str()),
+        ("cos", "look", "telegram:6")
+    );
+    assert_eq!(
+        (filename.as_str(), mime.as_str(), size),
+        ("telegram-photo.jpg", "image/jpeg", 11)
+    );
+    assert_eq!(std::fs::read(path).unwrap(), b"photo bytes");
 }
 
 #[test]

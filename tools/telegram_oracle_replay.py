@@ -4,7 +4,8 @@
 Runs `bridges/telegram_bridge.py` (and its `telegram_transport` / `dunk_telegram_routing` modules)
 against a stub desk, a fake Telegram, a fake daemon and a fixed clock, for each scenario below. It
 writes the scenario INPUTS together with the OBSERVED outputs (every Telegram call, every daemon
-call, the final telegram.json and status file, each step's result or exception) to a JSON file.
+call, desk message and attachment snapshots, the final telegram.json and status file, each step's
+result or exception) to a JSON file.
 The Rust port replays the same inputs in `rust/crates/ds-telegram/tests/oracle_replay.rs` and must
 produce the same outputs.
 
@@ -22,6 +23,7 @@ import io
 import json
 import math
 import os
+import shutil
 import sqlite3
 import sys
 import types
@@ -78,18 +80,95 @@ def install_desk(data: Path):
     desk._db = _db
     desk._private_write = _private_write
     desk._reconcile = lambda channel: None
+
+    class MessageIn:
+        def __init__(self, *, channel, body, attachment_ids, external_id):
+            self.channel = channel
+            self.body = body
+            self.attachment_ids = attachment_ids
+            self.external_id = external_id
+
+    def post_message(data, identity):
+        assert identity == "api"
+        with _db() as conn:
+            cursor = conn.execute(
+                "INSERT INTO messages(channel,role,body,delivery,external_id) "
+                "VALUES(?, 'owner', ?, 'posted', ?)",
+                (data.channel, data.body.strip(), data.external_id),
+            )
+            message_id = cursor.lastrowid
+            for attachment_id in data.attachment_ids:
+                conn.execute("UPDATE attachments SET message_id=? WHERE id=?",
+                             (message_id, attachment_id))
+        return {"id": message_id, "delivery": "posted"}
+
+    desk.MessageIn = MessageIn
+    desk.post_message = post_message
+
+    def attachment_snapshot():
+        with _db() as conn:
+            rows = conn.execute(
+                "SELECT m.id,m.channel,m.body,m.delivery,m.external_id,"
+                "a.filename,a.mime,a.size,a.path FROM messages m "
+                "JOIN attachments a ON a.message_id=m.id ORDER BY m.id,a.rowid"
+            ).fetchall()
+        messages = {}
+        for row in rows:
+            message = messages.setdefault(row["id"], {
+                "message_id": row["id"], "channel": row["channel"], "body": row["body"],
+                "delivery": row["delivery"], "external_id": row["external_id"], "attachments": [],
+            })
+            message["attachments"].append({
+                "filename": row["filename"], "mime": row["mime"], "size": row["size"],
+                "content": Path(row["path"]).read_bytes().decode("utf-8"),
+            })
+        return list(messages.values())
+
+    desk.attachment_snapshot = attachment_snapshot
     package = types.ModuleType("web")
     sys.modules["web"] = package
     sys.modules["web.app"] = desk
+
+    # The production shared reader was retired with the Python daemon sources. Keep the exact
+    # routing contract needed by this frozen bridge oracle as a fake module (e8bbeebf).
+    routing = types.ModuleType("dunk_telegram_routing")
+
+    def resolve_telegram_channel(data_dir, *, channels_root=None):
+        data_dir = Path(data_dir)
+        route_path = data_dir / "telegram-routing.json"
+        config = json.loads(route_path.read_text(encoding="utf-8")) if route_path.exists() else {}
+        if not isinstance(config, dict) or set(config) - {"channel"}:
+            raise ValueError("Telegram routing config must contain only channel")
+        channel = os.environ.get("VP_TELEGRAM_CHANNEL", config.get("channel", "cos"))
+        channels_path = os.environ.get("VP_CHANNELS_FILE")
+        if channels_path:
+            registry_path = Path(channels_path).expanduser()
+        else:
+            root = Path(channels_root) if channels_root is not None else data_dir.parent
+            registry_path = root / "channels.json"
+            if not registry_path.exists():
+                registry_path = root / "channels.example.json"
+        channels = json.loads(registry_path.read_text(encoding="utf-8"))
+        if not isinstance(channels, list) or not all(
+            isinstance(row, dict) and isinstance(row.get("id"), str) for row in channels
+        ):
+            raise ValueError("Telegram desk channel registry is invalid")
+        if not isinstance(channel, str) or channel not in {row["id"] for row in channels}:
+            raise ValueError("Telegram channel must name a configured desk channel")
+        return channel
+
+    routing.resolve_telegram_channel = resolve_telegram_channel
+    sys.modules["dunk_telegram_routing"] = routing
     return desk
 
 
 class FakeBot:
-    def __init__(self, webhook_url=""):
+    def __init__(self, webhook_url="", files=None):
         self.log = []
         self.fail_on = None
         self.batches = []
         self.webhook_url = webhook_url
+        self.files = files or {}
 
     def call(self, method, **payload):
         # The real Telegram.call drops None-valued keys before it sends; so does the fake.
@@ -106,10 +185,19 @@ class FakeBot:
             return self.batches.pop(0)
         if method == "getWebhookInfo":
             return {"url": self.webhook_url}
+        if method == "getFile":
+            file = self.files.get(payload.get("file_id"), {})
+            return {key: file[key] for key in ("file_path", "file_size") if key in file}
         return {}
 
     def download(self, file_id):
-        raise RuntimeError("attachments are not replayed")
+        info = self.call("getFile", file_id=file_id)
+        if info.get("file_size", 0) > 20 * 1024 * 1024:
+            raise ValueError("Telegram Bot API cannot download files over 20 MB; use the VP web desk.")
+        content = self.files[file_id]["content"].encode("utf-8")
+        if len(content) > 20 * 1024 * 1024:
+            raise ValueError("Telegram Bot API cannot download files over 20 MB; use the VP web desk.")
+        return content
 
 
 class FakeClient:
@@ -158,6 +246,9 @@ def reset(work: Path, scenario: dict, desk):
         target = work / name
         if target.exists():
             target.unlink()
+    if desk.UPLOADS.exists():
+        shutil.rmtree(desk.UPLOADS)
+    desk.UPLOADS.mkdir(parents=True, exist_ok=True)
     registry = work / "channels.json"
     registry.write_text(json.dumps(scenario["registry"]), encoding="utf-8")
     os.environ["VP_CHANNELS_FILE"] = str(registry)
@@ -172,7 +263,10 @@ def reset(work: Path, scenario: dict, desk):
     conn = sqlite3.connect(work / "messages.sqlite3")
     conn.execute("CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY, channel TEXT, role TEXT, "
                  "body TEXT, delivery TEXT NOT NULL DEFAULT 'posted', external_id TEXT)")
+    conn.execute("CREATE TABLE IF NOT EXISTS attachments (id TEXT PRIMARY KEY, filename TEXT NOT NULL, "
+                 "mime TEXT NOT NULL, size INTEGER NOT NULL, path TEXT NOT NULL, message_id INTEGER)")
     conn.execute("DELETE FROM messages")
+    conn.execute("DELETE FROM attachments")
     for row in scenario.get("desk_rows", []):
         # (id, channel, role, body[, external_id]): an id-bearing row of any role.
         row_id, channel, role, body = row[:4]
@@ -198,7 +292,7 @@ def read_json(path: Path):
 
 def run_scenario(work: Path, scenario: dict, desk, bridge):
     reset(work, scenario, desk)
-    bot = FakeBot(scenario.get("webhook_url", ""))
+    bot = FakeBot(scenario.get("webhook_url", ""), scenario.get("files", {}))
     bot.fail_on = scenario.get("fail_on")
     daemon_spec = scenario.get("daemon", {})
     client = FakeClient(daemon_spec.get("outbox", []), daemon_spec.get("ingest"),
@@ -267,6 +361,7 @@ def run_scenario(work: Path, scenario: dict, desk, bridge):
             "daemon_log": client.log,
             "config": read_json(work / "telegram.json"),
             "status": status,
+            "desk_attachments": desk.attachment_snapshot(),
         },
     }
 
@@ -350,6 +445,30 @@ def scenarios():
         {"op": "process_update", "update": text(7, 42, "is the desk up?")}])
     add("redelivered_question_says_already_recorded", config=paired(), daemon={"ingest": ingest_dup}, steps=[
         {"op": "process_update", "update": text(7, 42, "again")}])
+    add("photo_with_caption_is_saved_as_a_desk_attachment", config=paired(), files={
+        "photo-small": {"file_path": "photos/small.jpg", "file_size": 10, "content": "small photo"},
+        "photo-large": {"file_path": "photos/large.jpg", "file_size": 12, "content": "photo bytes"},
+    }, steps=[{"op": "process_update", "update": {
+        "update_id": 20,
+        "message": {"chat": {"id": 42, "type": "private"}, "caption": "look at this",
+                    "photo": [{"file_id": "photo-small", "file_size": 10},
+                              {"file_id": "photo-large", "file_size": 12}]},
+    }}])
+    add("document_caption_and_sanitized_filename_are_saved", config=paired(), files={
+        "document-1": {"file_path": "documents/report.txt", "file_size": 13, "content": "document bytes"},
+    }, steps=[{"op": "process_update", "update": {
+        "update_id": 21,
+        "message": {"chat": {"id": 42, "type": "private"}, "caption": "please review",
+                    "document": {"file_id": "document-1", "file_name": "../../report?.txt",
+                                 "mime_type": "text/plain", "file_size": 13}},
+    }}])
+    add("oversized_attachment_is_refused_without_download", config=paired(), steps=[
+        {"op": "process_update", "update": {
+            "update_id": 22,
+            "message": {"chat": {"id": 42, "type": "private"}, "caption": "large file",
+                        "document": {"file_id": "too-large", "file_name": "large.bin",
+                                     "file_size": 20 * 1024 * 1024 + 1}},
+        }}])
     add("start_and_help_get_the_help_text", config=paired(), steps=[
         {"op": "process_update", "update": text(3, 42, "/start")},
         {"op": "process_update", "update": text(4, 42, " /help ")}])

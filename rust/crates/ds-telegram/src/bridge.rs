@@ -1,12 +1,12 @@
 //! `bridges/telegram_bridge.py`: pairing, inbound text, the outbox loop and the run loop.
 //!
-//! The bridge keeps no store of its own. An inbound question is recorded in the one owner mailbox
+//! The bridge keeps no separate state store. Text questions are recorded in the one owner mailbox
 //! with `transport=telegram` and `external_id=telegram:<update_id>`; a reply or a page is read from
-//! the daemon's outbox and confirmed with `owner_delivered`. The only desk-side state it touches is
-//! the legacy store's page rows and the forwarding cursor, read through `desk_store`.
+//! the daemon's outbox and confirmed with `owner_delivered`. The legacy desk database holds page
+//! rows, the forwarding cursor, and attachment blobs/messages because the owner-mailbox API does
+//! not accept blobs.
 //!
-//! Not in this build (each is a visible reply or a named error, never a silent drop):
-//! attachments and the watchdog's own status file beyond the watermark write. See the PR body.
+//! Not in this build: the watchdog's own status file beyond the watermark write.
 //!
 //! `/status` is a deliberate, owner-accepted difference from Python: the Python bridge reads the
 //! legacy desk store's `delivery` column, while this bridge records its questions in the one owner
@@ -18,7 +18,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Map, Value};
 
-use crate::bot::Bot;
+use crate::bot::{Bot, DOWNLOAD_LIMIT};
 use crate::config::{
     channel_name, load_config, load_registry, resolve_channel, save_config, write_atomic, Config,
     Paths,
@@ -112,12 +112,77 @@ fn message_text(message: &Value) -> String {
 }
 
 /// Does the message carry a file the bridge would have to download? Any of the Python keys.
-fn has_attachment(message: &Value) -> bool {
-    truthy(message.get("document"))
-        || truthy(message.get("photo"))
-        || truthy(message.get("video"))
-        || truthy(message.get("audio"))
-        || truthy(message.get("voice"))
+struct AttachmentSpec {
+    file_id: String,
+    filename: String,
+    mime: String,
+    file_size: Option<u64>,
+}
+
+fn file_size(item: &Value) -> Option<u64> {
+    item.get("file_size").and_then(Value::as_u64).or_else(|| {
+        item.get("file_size")
+            .and_then(Value::as_i64)
+            .and_then(|size| u64::try_from(size).ok())
+    })
+}
+
+fn attachment_spec(message: &Value) -> Result<Option<AttachmentSpec>, BridgeError> {
+    let item_and_defaults =
+        if let Some(item) = message.get("document").filter(|item| truthy(Some(item))) {
+            Some((item, "telegram-file", "application/octet-stream"))
+        } else if let Some(photos) = message
+            .get("photo")
+            .and_then(Value::as_array)
+            .filter(|photos| !photos.is_empty())
+        {
+            let mut largest = &photos[0];
+            for photo in photos.iter().skip(1) {
+                if file_size(photo).unwrap_or(0) > file_size(largest).unwrap_or(0) {
+                    largest = photo;
+                }
+            }
+            Some((largest, "telegram-photo.jpg", "image/jpeg"))
+        } else if let Some(item) = message.get("video").filter(|item| truthy(Some(item))) {
+            Some((item, "video.mp4", "video/mp4"))
+        } else if let Some(item) = message.get("audio").filter(|item| truthy(Some(item))) {
+            Some((item, "audio.mp3", "audio/mpeg"))
+        } else if let Some(item) = message.get("voice").filter(|item| truthy(Some(item))) {
+            Some((item, "voice.ogg", "audio/ogg"))
+        } else {
+            None
+        };
+    let Some((item, default_filename, default_mime)) = item_and_defaults else {
+        if message
+            .get("photo")
+            .is_some_and(|photo| truthy(Some(photo)))
+        {
+            return Err(BridgeError::Value("Telegram photo has no sizes".into()));
+        }
+        return Ok(None);
+    };
+    let file_id = item
+        .get("file_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| BridgeError::Value("Telegram attachment has no file_id".into()))?;
+    let filename = item
+        .get("file_name")
+        .and_then(Value::as_str)
+        .filter(|filename| !filename.is_empty())
+        .unwrap_or(default_filename)
+        .to_string();
+    let mime = item
+        .get("mime_type")
+        .and_then(Value::as_str)
+        .filter(|mime| !mime.is_empty())
+        .unwrap_or(default_mime)
+        .to_string();
+    Ok(Some(AttachmentSpec {
+        file_id: file_id.to_string(),
+        filename,
+        mime,
+        file_size: file_size(item),
+    }))
 }
 
 /// `secrets.compare_digest` for two strings: the same answer, without an early exit.
@@ -407,10 +472,43 @@ impl<D: Daemon, B: Bot> Bridge<D, B> {
             "telegram:{}",
             update.get("update_id").map(display).unwrap_or_default()
         );
-        if has_attachment(message) {
+        if let Some(spec) = attachment_spec(message)? {
+            if spec
+                .file_size
+                .is_some_and(|size| size > DOWNLOAD_LIMIT as u64)
+            {
+                return self.send_text(
+                    &chat_id,
+                    "Telegram Bot API cannot download files over 20 MB; use the VP web desk.",
+                );
+            }
+            let content = match self.bot.download(&spec.file_id) {
+                Ok(content) => content,
+                Err(BridgeError::Value(message)) => return self.send_text(&chat_id, &message),
+                Err(error) => return Err(error),
+            };
+            if content.len() > DOWNLOAD_LIMIT {
+                return self.send_text(
+                    &chat_id,
+                    "Telegram Bot API cannot download files over 20 MB; use the VP web desk.",
+                );
+            }
+            let posted = desk_store::post_telegram_attachment(
+                &self.paths.desk_db(),
+                &self.paths.data.join("uploads"),
+                &channel,
+                &text,
+                &external_id,
+                &spec.filename,
+                &spec.mime,
+                &content,
+            )?;
             return self.send_text(
                 &chat_id,
-                "Telegram attachments are not in the Rust bridge yet. Send the text, or use the web desk.",
+                &format!(
+                    "{name} message #{}: {}. I’ll reply here when ready.",
+                    posted.message_id, posted.delivery
+                ),
             );
         }
         if stripped.is_empty() {
