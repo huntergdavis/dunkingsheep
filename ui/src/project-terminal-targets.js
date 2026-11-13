@@ -10,7 +10,9 @@ export const OWNER_TERMINAL_NAME = '__owner_terminal__';
 // Why the whole terminal list is missing, in the owner's words (t4643).
 export function terminalListReason(status) {
   if (status === 404) return 'Terminals are switched off on this desk';
-  if (status === 401 || status === 403) return 'Sign in again to open terminals';
+  if (status === 401) return 'Sign in again to open terminals';
+  // 403 is the trusted-host or origin check, which signing in again does not change.
+  if (status === 403) return 'This desk address is not trusted for terminals';
   if (status === 503) return 'Terminal list unavailable: the desk could not read its lane records';
   return 'Terminal list unavailable';
 }
@@ -28,4 +30,18 @@ export function terminalActionForLane(list, pane) {
   return target.name === OWNER_TERMINAL_NAME
     ? { target: { ...target, label: 'Owner' }, label: 'Open owner terminal', reason: null }
     : { target, label: 'Open terminal', reason: null };
+}
+
+// How many refreshes in a row may fail before the last good targets are dropped (30 s apart).
+export const TERMINAL_LIST_MAX_FAILURES = 3;
+
+// The next list state after a refresh. `result` is { items } on success or { status } on failure.
+// One failed refresh (a transient 503, a network blip) keeps the last good targets so the buttons
+// do not vanish; the stream itself re-checks authorization when a terminal is opened. After
+// TERMINAL_LIST_MAX_FAILURES failures in a row, or with no good list yet, the error is shown.
+export function nextTerminalList(previous, result) {
+  if (Array.isArray(result?.items)) return { state: 'ready', targets: result.items, failures: 0 };
+  const failures = (previous?.failures || 0) + 1;
+  if (previous?.state === 'ready' && failures < TERMINAL_LIST_MAX_FAILURES) return { ...previous, failures };
+  return { state: 'error', status: result?.status, failures };
 }
