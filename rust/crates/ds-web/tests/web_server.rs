@@ -375,7 +375,7 @@ fn dash_routes_apply_the_session_gate_and_the_shell_redirects() {
 
     let root = request(addr, "GET", "/dash", &[], None);
     assert_eq!(root.status, 307);
-    assert_eq!(root.header("location"), Some("/dash/cos"));
+    assert_eq!(root.header("location"), Some("/dash/projects"));
 
     // Without a session a dashboard path goes to the password page with a return target.
     let anonymous = request(addr, "GET", "/dash/fleet", &[], None);
