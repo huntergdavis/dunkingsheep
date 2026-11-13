@@ -581,6 +581,10 @@ async fn run(
     let mut lines = ControlLines::default();
     let mut tracker = ControlReply::default();
     let mut ready = false;
+    // t4601: after startup one snapshot of the visible screen is read on this same control
+    // connection; only then is `%output` forwarded (`live`). See `terminal_stream::Snapshot`.
+    let mut snapshot: Option<terminal_stream::Snapshot> = None;
+    let mut live = false;
     let mut pending = false;
     let mut deadline = Instant::now() + Duration::from_secs(5);
     let mut queue: VecDeque<Vec<u8>> = VecDeque::new();
@@ -604,11 +608,28 @@ async fn run(
             read = output.read(&mut buf), if control_queue.is_empty() => {
                 let Ok(n) = read else { break }; if n == 0 { break; }
                 let Ok(batch) = lines.push(&buf[..n]) else { break };
-                if batch.len() > 32 { break; }
+                // A snapshot reply is one line per screen row; live output stays tightly bounded.
+                let limit = if snapshot.is_some() { terminal_stream::Snapshot::MAX_ROWS + 64 } else { 32 };
+                if batch.len() > limit { break; }
                 control_queue.extend(batch);
             }
             _ = std::future::ready(()), if !control_queue.is_empty() => {
                 if let Some(line) = control_queue.pop_front() {
+                    if let Some(reader) = snapshot.as_mut() {
+                        // Rows are screen text: never shown to the reply tracker or the output
+                        // decoder. Any framing mismatch closes the stream with nothing forwarded.
+                        match reader.observe(&line) {
+                            Ok(None) => {}
+                            Ok(Some(frame)) => {
+                                snapshot = None;
+                                live = true;
+                                pending = false;
+                                if !authorized(&state, &name, &token, &binding).await || !matches!(timeout(Duration::from_secs(2), ws.send(Message::Binary(frame.into()))).await, Ok(Ok(()))) { break 'stream; }
+                            }
+                            Err(_) => break 'stream,
+                        }
+                        continue 'stream;
+                    }
                     match tracker.observe(&line) {
                         Ok(Some(true)) if !ready => ready = true,
                         Ok(Some(true)) if pending => pending = false,
@@ -616,13 +637,30 @@ async fn run(
                         Ok(None) => {}
                     }
                     match terminal_stream::pane_output(&line, &binding.0) {
-                        Ok(Some(bytes)) if ready => {
+                        Ok(Some(bytes)) if live => {
                             if !authorized(&state, &name, &token, &binding).await || !matches!(timeout(Duration::from_secs(2), ws.send(Message::Binary(bytes.into()))).await, Ok(Ok(()))) { break 'stream; }
                         }
                         Ok(_) => {}, Err(_) => break 'stream,
                     }
                 }
             }
+        }
+        if ready && !live && snapshot.is_none() {
+            let Some(command) = terminal_stream::snapshot_command(&binding.0) else {
+                break;
+            };
+            if !authorized(&state, &name, &token, &binding).await
+                || !matches!(
+                    timeout(Duration::from_secs(2), input.write_all(&command)).await,
+                    Ok(Ok(()))
+                )
+            {
+                break;
+            }
+            snapshot = Some(terminal_stream::Snapshot::default());
+            // Holds keyboard input until the snapshot reply ends, and bounds the wait.
+            pending = true;
+            deadline = Instant::now() + Duration::from_secs(5);
         }
         if ready && !pending {
             if let Some(bytes) = queue.pop_front() {
