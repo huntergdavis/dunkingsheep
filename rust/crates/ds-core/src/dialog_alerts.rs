@@ -276,6 +276,7 @@ pub fn post_vp(
         self_pane_id: None,
         system_sender: Some("watchdog"),
         agent_only: false,
+        wake_quiet: false,
     };
     let sent = flock
         .inbox_send(env, &args)

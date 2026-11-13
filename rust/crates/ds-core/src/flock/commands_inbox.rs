@@ -153,6 +153,9 @@ pub struct SendArgs<'a> {
     pub self_pane_id: Option<&'a str>,
     pub system_sender: Option<&'a str>,
     pub agent_only: bool,
+    /// Notify the recipient even when `DUNKINGSHEEP_INBOX_SILENT_MAILBOXES` lists it. Only the
+    /// daemon's own Telegram owner-lane nudge sets this (t4645); it is not a wire argument.
+    pub wake_quiet: bool,
 }
 
 /// Project lifecycle reports use the daemon's existing inbox store and the reserved owner
@@ -683,12 +686,13 @@ impl Flock {
         let message_id = snapshot.summary.message_id.clone();
         let mut notified = false;
         if args.notify
-            && !recipient_is_quiet(
-                env.inbox_silent_mailboxes().as_deref(),
-                &mailbox,
-                &label,
-                pane_id.as_deref(),
-            )
+            && (args.wake_quiet
+                || !recipient_is_quiet(
+                    env.inbox_silent_mailboxes().as_deref(),
+                    &mailbox,
+                    &label,
+                    pane_id.as_deref(),
+                ))
         {
             if let Some(pane) = pane_id.as_deref() {
                 let unread = inbox::count(env.pool(), &mailbox, &[], env.now())?.unread;
