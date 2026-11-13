@@ -125,6 +125,14 @@ impl ControlClient {
         self.input.flush()
     }
 
+    /// Ask tmux for the pane's initial screen; the reply is read with [`Snapshot`].
+    pub fn request_snapshot(&mut self) -> io::Result<()> {
+        let command = snapshot_command(&self.pane)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid tmux identity"))?;
+        self.input.write_all(&command)?;
+        self.input.flush()
+    }
+
     /// Move the reader to a supervised worker so input and cancellation do not
     /// wait for terminal output. Dropping the client kills the control process.
     pub fn take_output(&mut self) -> Option<ControlOutput> {
@@ -523,6 +531,202 @@ pub fn input_command(pane: &str, input: &[u8]) -> Option<Vec<u8>> {
     Some(command.into_bytes())
 }
 
+/// The control-mode command for a pane's initial screen (t4601): one line of cursor, screen mode
+/// and size, then the visible rows with their colours. It must be sent on the SAME control
+/// connection that carries the pane's `%output`, so that tmux orders the reply against the output.
+pub fn snapshot_command(pane: &str) -> Option<Vec<u8>> {
+    let id = pane.strip_prefix('%')?;
+    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some(
+        format!(
+            "display-message -p -t %{id} '#{{cursor_x}} #{{cursor_y}} #{{alternate_on}} \
+             #{{pane_width}} #{{pane_height}}' ; capture-pane -p -e -t %{id}\n"
+        )
+        .into_bytes(),
+    )
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SnapshotStage {
+    AwaitBegin,
+    Meta,
+    AfterMeta,
+    AwaitSecondBegin,
+    Rows,
+    AwaitEnd,
+    Done,
+}
+
+/// Reads the reply to [`snapshot_command`] from the control stream and builds the first frame a
+/// terminal client receives.
+///
+/// Ordering: tmux writes pane output, notifications and command replies to a control client in
+/// one ordered stream. Every `%output` line before the reply's `%begin` is already in the
+/// captured screen, so the caller drops it (this reader ignores it); every `%output` after the
+/// final `%end` is newer than the capture, so the caller forwards it. Nothing is lost, repeated
+/// or drawn over by an older screen.
+///
+/// Framing: captured rows are unescaped screen text and can spell `%end ...`. The rows are
+/// therefore taken by COUNT (`pane_height` from the metadata line), never by content. Any
+/// mismatch is an error and the caller must close the stream without forwarding anything.
+pub struct Snapshot {
+    stage: SnapshotStage,
+    marker: Vec<u8>,
+    cursor: (usize, usize),
+    alternate: bool,
+    size: (usize, usize),
+    rows: Vec<Vec<u8>>,
+    bytes: usize,
+}
+
+impl Default for Snapshot {
+    fn default() -> Self {
+        Self {
+            stage: SnapshotStage::AwaitBegin,
+            marker: Vec::new(),
+            cursor: (0, 0),
+            alternate: false,
+            size: (0, 0),
+            rows: Vec::new(),
+            bytes: 0,
+        }
+    }
+}
+
+impl Snapshot {
+    pub const MAX_ROWS: usize = 500;
+    pub const MAX_COLS: usize = 2000;
+    pub const MAX_BYTES: usize = 1024 * 1024;
+
+    fn reply_marker(line: &[u8], prefix: &[u8]) -> Option<Vec<u8>> {
+        let marker = line.strip_prefix(prefix)?;
+        let fields: Vec<_> = marker.split(|byte| *byte == b' ').collect();
+        (fields.len() == 3
+            && fields
+                .iter()
+                .all(|field| !field.is_empty() && field.iter().all(u8::is_ascii_digit)))
+        .then(|| marker.to_vec())
+    }
+
+    fn is_end(&self, line: &[u8]) -> bool {
+        line.strip_prefix(b"%end ") == Some(self.marker.as_slice())
+    }
+
+    fn metadata(&mut self, line: &[u8]) -> Result<(), &'static str> {
+        let text = std::str::from_utf8(line).map_err(|_| "invalid snapshot metadata")?;
+        let fields: Vec<usize> = text
+            .split(' ')
+            .map(|field| {
+                (!field.is_empty() && field.len() <= 5 && field.bytes().all(|b| b.is_ascii_digit()))
+                    .then(|| field.parse().ok())
+                    .flatten()
+            })
+            .collect::<Option<_>>()
+            .ok_or("invalid snapshot metadata")?;
+        let [x, y, alternate, cols, rows] = fields[..] else {
+            return Err("invalid snapshot metadata");
+        };
+        if alternate > 1
+            || !(1..=Self::MAX_COLS).contains(&cols)
+            || !(1..=Self::MAX_ROWS).contains(&rows)
+            || x > cols
+            || y >= rows
+        {
+            return Err("snapshot metadata out of range");
+        }
+        self.cursor = (x, y);
+        self.alternate = alternate == 1;
+        self.size = (cols, rows);
+        Ok(())
+    }
+
+    fn row(&mut self, line: &[u8]) -> Result<(), &'static str> {
+        self.bytes += line.len() + 2;
+        if self.bytes > Self::MAX_BYTES {
+            return Err("snapshot too large");
+        }
+        self.rows.push(line.to_vec());
+        if self.rows.len() == self.size.1 {
+            self.stage = SnapshotStage::AwaitEnd;
+        }
+        Ok(())
+    }
+
+    /// Feed one control line. `Ok(Some(frame))` is the complete first frame; after it every
+    /// later line belongs to the live stream. `Err` means the stream must be closed.
+    pub fn observe(&mut self, line: &[u8]) -> Result<Option<Vec<u8>>, &'static str> {
+        let line = line.strip_suffix(b"\n").unwrap_or(line);
+        match self.stage {
+            SnapshotStage::AwaitBegin | SnapshotStage::AwaitSecondBegin => {
+                if let Some(marker) = Self::reply_marker(line, b"%begin ") {
+                    self.marker = marker;
+                    self.stage = if self.stage == SnapshotStage::AwaitBegin {
+                        SnapshotStage::Meta
+                    } else {
+                        SnapshotStage::Rows
+                    };
+                    Ok(None)
+                } else if line.starts_with(b"%end ")
+                    || line.starts_with(b"%error ")
+                    || !line.starts_with(b"%")
+                {
+                    Err("unexpected tmux line before the snapshot reply")
+                } else {
+                    // A notification, including `%output` that the capture already contains.
+                    Ok(None)
+                }
+            }
+            SnapshotStage::Meta => {
+                self.metadata(line)?;
+                self.stage = SnapshotStage::AfterMeta;
+                Ok(None)
+            }
+            SnapshotStage::AfterMeta => {
+                // tmux answers the two commands as two reply blocks or as one; accept both.
+                if self.is_end(line) {
+                    self.stage = SnapshotStage::AwaitSecondBegin;
+                    Ok(None)
+                } else {
+                    self.stage = SnapshotStage::Rows;
+                    self.row(line).map(|()| None)
+                }
+            }
+            SnapshotStage::Rows => self.row(line).map(|()| None),
+            SnapshotStage::AwaitEnd => {
+                if !self.is_end(line) {
+                    return Err("snapshot row count does not match the reply");
+                }
+                self.stage = SnapshotStage::Done;
+                Ok(Some(self.frame()))
+            }
+            SnapshotStage::Done => Err("snapshot already complete"),
+        }
+    }
+
+    /// Screen mode set explicitly, attributes reset, screen cleared (scrollback kept), rows with
+    /// no newline after the last, attributes reset, cursor placed.
+    fn frame(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.bytes + 64);
+        out.extend_from_slice(if self.alternate {
+            b"\x1b[?1049h"
+        } else {
+            b"\x1b[?1049l"
+        });
+        out.extend_from_slice(b"\x1b[0m\x1b[H\x1b[2J");
+        for (index, row) in self.rows.iter().enumerate() {
+            if index > 0 {
+                out.extend_from_slice(b"\r\n");
+            }
+            out.extend_from_slice(row);
+        }
+        let column = (self.cursor.0 + 1).min(self.size.0);
+        out.extend_from_slice(format!("\x1b[0m\x1b[{};{column}H", self.cursor.1 + 1).as_bytes());
+        out
+    }
+}
+
 /// Ignore notifications for other panes, and reject malformed escapes.
 pub fn pane_output(line: &[u8], pane: &str) -> Result<Option<Vec<u8>>, &'static str> {
     let Some(rest) = line.strip_prefix(b"%output ") else {
@@ -545,7 +749,7 @@ mod tests {
     use super::{
         decode_tmux_output, eligible_agent, input_command, pane_output, resolve_live_agent,
     };
-    use super::{ControlClient, ControlLines, ControlReply};
+    use super::{snapshot_command, ControlClient, ControlLines, ControlReply, Snapshot};
     use serde_json::json;
 
     #[test]
@@ -738,6 +942,213 @@ mod tests {
         let mut ambiguous = managed.clone();
         ambiguous.insert("%2".into(), json!({"name":"worker","agent":"worker"}));
         assert!(eligible_agent("worker", &ambiguous, &roles, &live).is_none());
+    }
+
+    fn feed(lines: &[&[u8]]) -> Result<Option<Vec<u8>>, &'static str> {
+        let mut snapshot = Snapshot::default();
+        let mut frame = None;
+        for line in lines {
+            assert!(
+                frame.is_none(),
+                "lines after the frame belong to the live stream"
+            );
+            frame = snapshot.observe(line)?;
+        }
+        Ok(frame)
+    }
+
+    /// t4601: rows are taken by count, so screen text that spells a reply marker is data; the
+    /// frame sets the screen mode explicitly, resets attributes and ends without a newline.
+    #[test]
+    fn snapshot_reads_rows_by_count_and_fails_closed_on_any_mismatch() {
+        assert_eq!(
+            snapshot_command("%7").unwrap(),
+            b"display-message -p -t %7 '#{cursor_x} #{cursor_y} #{alternate_on} #{pane_width} \
+              #{pane_height}' ; capture-pane -p -e -t %7\n"
+        );
+        assert!(snapshot_command("%7;kill-server").is_none());
+        let two_blocks: &[&[u8]] = &[
+            b"%output %7 already-on-screen\n",
+            b"%begin 10 5 1\n",
+            b"2 1 0 80 3\n",
+            b"%end 10 5 1\n",
+            b"%begin 10 6 1\n",
+            b"%end 10 6 1\n",
+            b"\x1b[31mred\n",
+            b"\n",
+            b"%end 10 6 1\n",
+        ];
+        assert_eq!(
+            feed(two_blocks).unwrap().unwrap(),
+            b"\x1b[?1049l\x1b[0m\x1b[H\x1b[2J%end 10 6 1\r\n\x1b[31mred\r\n\x1b[0m\x1b[2;3H"
+        );
+        let one_block: &[&[u8]] = &[
+            b"%begin 10 5 1\n",
+            b"0 0 1 80 1\n",
+            b"%output %7 text\n",
+            b"%end 10 5 1\n",
+        ];
+        assert_eq!(
+            feed(one_block).unwrap().unwrap(),
+            b"\x1b[?1049h\x1b[0m\x1b[H\x1b[2J%output %7 text\x1b[0m\x1b[1;1H"
+        );
+        for bad in [
+            "%begin 1 2 1|0 0 0 80",
+            "%begin 1 2 1|0 0 2 80 1",
+            "%begin 1 2 1|0 5 0 80 1",
+            "%begin 1 2 1|0 0 0 80 501",
+            "%begin 1 2 1|0 0 0 80 1|row|extra row",
+            "%begin 1 2 1|0 0 0 80 1|row|%end 1 3 1",
+            "%error 1 2 1",
+            "stray text",
+        ] {
+            let lines: Vec<Vec<u8>> = bad
+                .split('|')
+                .map(|line| format!("{line}\n").into_bytes())
+                .collect();
+            let lines: Vec<&[u8]> = lines.iter().map(Vec::as_slice).collect();
+            assert!(feed(&lines).is_err(), "{bad}");
+        }
+    }
+
+    fn strip_escapes(bytes: &[u8]) -> String {
+        let mut out = String::new();
+        let mut rest = bytes;
+        while let Some((&byte, tail)) = rest.split_first() {
+            rest = tail;
+            if byte == 0x1b && rest.first() == Some(&b'[') {
+                let end = rest[1..]
+                    .iter()
+                    .position(|b| (0x40..=0x7e).contains(b))
+                    .map_or(rest.len(), |at| at + 2);
+                rest = &rest[end..];
+            } else {
+                out.push(char::from(byte));
+            }
+        }
+        out
+    }
+
+    /// t4601 against a real private tmux server: with a pane printing a counter non-stop, the
+    /// snapshot frame followed by the forwarded live output shows every number once and in
+    /// order (nothing lost, nothing repeated), a screen holding reply-marker text still frames
+    /// correctly, and a second connection gets its own snapshot. This is the proof of the tmux
+    /// behaviour the design assumes: reply shape, one line per row, and output ordering.
+    #[test]
+    fn snapshot_then_live_output_is_gapless_on_a_private_tmux_server() {
+        struct PrivateServer(String);
+        impl Drop for PrivateServer {
+            fn drop(&mut self) {
+                let _ = std::process::Command::new("tmux")
+                    .args(["-L", &self.0, "kill-server"])
+                    .output();
+            }
+        }
+        let socket = format!(
+            "ds-t4601-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let server = PrivateServer(socket.clone());
+        let tmux = |args: &[&str]| {
+            let output = std::process::Command::new("tmux")
+                .args(["-L", &server.0])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{args:?}");
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        };
+        tmux(&[
+            "new-session",
+            "-d",
+            "-s",
+            "fixture",
+            "-x",
+            "80",
+            "-y",
+            "24",
+            "i=0; while :; do echo L$i; i=$((i+1)); sleep 0.005; done",
+        ]);
+        let hostile = tmux(&[
+            "new-window",
+            "-d",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "-t",
+            "fixture",
+            "printf '%%end 1 2 3\\n%%begin 1 2 3\\n%%output %%0 x\\n'; exec cat",
+        ]);
+        let session = tmux(&["display-message", "-p", "-t", "fixture", "#{session_id}"]);
+        let counter = tmux(&["list-panes", "-t", "fixture:0", "-F", "#{pane_id}"]);
+        let height: usize = tmux(&["display-message", "-p", "-t", &counter, "#{pane_height}"])
+            .parse()
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(400));
+
+        let connect = |pane: &str| {
+            let mut control =
+                ControlClient::attach(std::path::Path::new("tmux"), Some(&socket), &session, pane)
+                    .unwrap();
+            let mut output = control.take_output().unwrap();
+            let mut startup = ControlReply::default();
+            while startup
+                .observe(&output.read_line().unwrap())
+                .unwrap()
+                .is_none()
+            {}
+            control.request_snapshot().unwrap();
+            let mut snapshot = Snapshot::default();
+            let frame = loop {
+                if let Some(frame) = snapshot.observe(&output.read_line().unwrap()).unwrap() {
+                    break frame;
+                }
+            };
+            (control, output, frame)
+        };
+
+        for _connection in 0..2 {
+            let (_control, mut output, frame) = connect(&counter);
+            let text = strip_escapes(&frame);
+            let rows: Vec<&str> = text.split("\r\n").collect();
+            assert_eq!(rows.len(), height, "one row per pane line: {text:?}");
+            // The frame ends with the cursor position; rows above the cursor are complete.
+            let cursor = std::str::from_utf8(&frame[frame.len() - 12..]).unwrap();
+            let (y, x) = cursor[cursor.rfind('[').unwrap() + 1..cursor.len() - 1]
+                .split_once(';')
+                .unwrap();
+            let (y, x): (usize, usize) = (y.parse().unwrap(), x.parse().unwrap());
+            assert!(y >= 2, "the counter has printed at least one full line");
+            let number = |line: &str| line.strip_prefix('L').and_then(|n| n.parse::<u64>().ok());
+            let last_complete = number(rows[y - 2]).unwrap();
+            let mut stream = rows[y - 1][..x - 1].to_owned();
+            let mut seen = Vec::new();
+            while seen.len() < 40 {
+                let line = output.read_line().unwrap();
+                if let Some(bytes) = output.output_from_line(&line).unwrap() {
+                    stream.push_str(&String::from_utf8(bytes).unwrap());
+                }
+                let complete: Vec<&str> = stream.split("\r\n").collect();
+                seen = complete[..complete.len() - 1]
+                    .iter()
+                    .map(|line| number(line).unwrap_or_else(|| panic!("garbled line {line:?}")))
+                    .collect();
+            }
+            let expected: Vec<u64> = (last_complete + 1..).take(seen.len()).collect();
+            assert_eq!(seen, expected, "no gap and no repeat after the snapshot");
+        }
+
+        let (_control, _output, frame) = connect(&hostile);
+        let text = strip_escapes(&frame);
+        assert_eq!(text.split("\r\n").count(), height);
+        assert!(
+            text.starts_with("%end 1 2 3\r\n%begin 1 2 3\r\n%output %0 x\r\n"),
+            "{text:?}"
+        );
     }
 
     #[test]
