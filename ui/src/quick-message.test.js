@@ -2,7 +2,7 @@
 // the server's own delivery outcome.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { inboxOutcomeText, quickMessageBlock, quickMessageTargets, sendOutcomeText } from './quick-message.js';
+import { inboxOutcomeText, quickMessageBlock, quickMessageRoster, quickMessageTargets, sendOutcomeText } from './quick-message.js';
 
 const fleet = { rows: [
   { pane_id: '%304', name: 'ds-fable-writer', project: 'dunkingsheep', send: 'guarded', can_type: true },
@@ -45,4 +45,23 @@ test('the Terminals composer outcome text is the server\'s, with stored and unco
   assert.equal(sendOutcomeText({ pane: '%304', outcome: 'stored', note: 'in the inbox', detail: 'i123' }), '%304 [stored]: in the inbox (i123)');
   assert.equal(sendOutcomeText({ pane: '%304', outcome: 'unconfirmed', note: 'typed, not confirmed', detail: 'x', unconfirmed: true }), '%304 [unconfirmed]: typed, not confirmed');
   assert.equal(sendOutcomeText({ pane: '%304' }), '%304 [unknown]: accepted');
+});
+
+test('the recipient list says whether it is loading, failed with the reason, empty or ready', () => {
+  assert.deepEqual(quickMessageRoster({ status: 'loading' }, null), { kind: 'loading', text: 'Loading recipients…', retry: false });
+  assert.deepEqual(quickMessageRoster(undefined, null), { kind: 'loading', text: 'Loading recipients…', retry: false });
+  assert.deepEqual(quickMessageRoster({ status: 'failed', error: 'Request failed (502)' }, null),
+    { kind: 'failed', text: 'Recipients could not be loaded: Request failed (502)', retry: true });
+  assert.deepEqual(quickMessageRoster({ status: 'ready' }, { state: 'unavailable', error: 'pane roster could not be read: timeout', rows: [] }),
+    { kind: 'failed', text: 'Recipients could not be loaded: pane roster could not be read: timeout', retry: true });
+  assert.deepEqual(quickMessageRoster({ status: 'ready' }, { state: 'ok', rows: [] }),
+    { kind: 'empty', text: 'No live lanes are listed right now.', retry: true });
+  assert.deepEqual(quickMessageRoster({ status: 'ready' }, fleet), { kind: 'ready', text: '3 recipients', retry: false });
+});
+
+test('a lane the daemon lists without a detected agent is a recipient like any other', () => {
+  // The row shape /api/fleet returns for a Claude lane: agent is the empty string.
+  const rows = [{ pane_id: '%308', name: 'ds-fable-writer-fresh', project: 'dunkingsheep', agent: '', alive: true, send: 'guarded' }];
+  assert.deepEqual(quickMessageTargets({ state: 'ok', rows }),
+    [{ pane_id: '%308', project: 'dunkingsheep', name: 'ds-fable-writer-fresh', label: 'ds-fable-writer-fresh · %308' }]);
 });

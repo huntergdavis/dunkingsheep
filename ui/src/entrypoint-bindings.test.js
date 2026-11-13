@@ -16,7 +16,7 @@ const localExports = {
   'theme-registry.js': ['buildThemeRegistry', 'groupThemes', 'THEME_GROUP_ORDER'],
   'leader-line.js': ['leaderLine'],
   'dash-route.js': ['resolveDashRoute', 'viewForPath'],
-  'quick-message.js': ['inboxOutcomeText', 'quickMessageBlock', 'quickMessageTargets', 'sendOutcomeText'],
+  'quick-message.js': ['inboxOutcomeText', 'quickMessageBlock', 'quickMessageRoster', 'quickMessageTargets', 'sendOutcomeText'],
   'project-terminal-targets.js': ['nextTerminalList', 'terminalActionForLane', 'terminalListReason', 'terminalTargetForPane'],
 };
 

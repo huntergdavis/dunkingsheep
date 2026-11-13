@@ -537,9 +537,16 @@ async fn api_fleet(
             }
         }
     }
+    // t4644: the daemon's roster is the list of lanes. It holds detected agents and also live
+    // panes with a valid project or global membership, whose `agent` field is empty in the pane
+    // listing (most Claude lanes). Those are lanes too, so they are rows here, named by the roster.
+    let mut roster_names: HashMap<String, Value> = HashMap::new();
     if let Ok(value) = state.rpc.rpc("roster", json!({})).await {
         if let Some(lanes) = value["lanes"].as_array() {
             for lane in lanes {
+                if let Some(pane) = lane["pane_id"].as_str().filter(|s| !s.is_empty()) {
+                    roster_names.insert(pane.to_owned(), lane["name"].clone());
+                }
                 if let Some(unread) = lane["inbox"]["unread"].as_i64() {
                     for key in ["name", "pane_id"] {
                         if let Some(k) = lane[key].as_str().filter(|s| !s.is_empty()) {
@@ -560,7 +567,7 @@ async fn api_fleet(
     let mut rows = Vec::new();
     for pane in panes {
         let id = pane["pane_id"].as_str().unwrap();
-        if id.is_empty() || !truth(&pane["agent"]) {
+        if id.is_empty() || !(truth(&pane["agent"]) || roster_names.contains_key(id)) {
             continue;
         }
         let recorded = &registry[id];
@@ -577,6 +584,11 @@ async fn api_fleet(
             recorded.clone()
         } else if truth(&pane["label"]) {
             pane["label"].clone()
+        } else if let Some(listed) = roster_names
+            .get(id)
+            .filter(|name| name.is_string() && truth(name))
+        {
+            listed.clone()
         } else {
             json!(id)
         };

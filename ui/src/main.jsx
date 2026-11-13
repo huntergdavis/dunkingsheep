@@ -2,7 +2,6 @@ import './viewportReport';
 import React, { createContext, useContext, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useMessageScroll, mergeMessages } from './useMessageScroll';
 import { createRoot } from 'react-dom/client';
-import EmergencyDock from './EmergencyDock';
 import { Message, MessageList } from '@chatscope/chat-ui-kit-react';
 import '@chatscope/chat-ui-kit-styles/dist/default/styles.min.css';
 import { EditorContent, useEditor } from '@tiptap/react';
@@ -23,7 +22,7 @@ import CharacterEditor from './CharacterEditor';
 import ProjectTerminal from './ProjectTerminal';
 import { nextTerminalList, terminalActionForLane, terminalListReason } from './project-terminal-targets.js';
 import { DASH_HOME, DASH_ROUTES, resolveDashRoute, viewForPath } from './dash-route.js';
-import { inboxOutcomeText, quickMessageBlock, quickMessageTargets, sendOutcomeText } from './quick-message.js';
+import { inboxOutcomeText, quickMessageBlock, quickMessageRoster, quickMessageTargets, sendOutcomeText } from './quick-message.js';
 
 function LaneStatus({ row }) {
   const value = laneStatus(row);
@@ -104,6 +103,14 @@ function DashNav({ view, side }) {
       document.removeEventListener('pointerdown', dismiss);
     };
   }, []);
+  // Ctrl+/ opened the retired 'Message the desk' dock; it now opens the general Message dialog.
+  useEffect(() => {
+    function shortcut(event) {
+      if ((event.ctrlKey || event.metaKey) && (event.key === '/' || event.code === 'Slash')) { event.preventDefault(); setMessageOpen(true); }
+    }
+    window.addEventListener('keydown', shortcut);
+    return () => window.removeEventListener('keydown', shortcut);
+  }, []);
   const links = Object.entries(DASH_ROUTES).map(([key, route]) => <a key={key} href={`/dash/${key}`} aria-current={view === key ? 'page' : undefined}>{route.title}</a>);
   function closeSettings() { setSettingsOpen(false); settingsButton.current?.focus(); }
   return <nav className="dash-nav" aria-label="Dashboards">
@@ -114,7 +121,7 @@ function DashNav({ view, side }) {
       <div className="dash-nav-links">{links}</div>
     </details>
     {side && <span className="dash-nav-status">{side}</span>}
-    <span className="dash-nav-right"><button className="dock-trigger" aria-label="Quick message" title="Message a pane" ref={messageButton} onClick={() => setMessageOpen(true)}><span className="nav-action-label">Message</span><span className="nav-action-icon" aria-hidden="true">✉</span></button><button className="dock-trigger" aria-label="Appearance" title="Appearance" ref={settingsButton} onClick={() => setSettingsOpen(true)}><span className="nav-action-label">Appearance</span><span className="nav-action-icon" aria-hidden="true">◐</span></button><EmergencyDock request={api} /></span>
+    <span className="dash-nav-right"><button className="dock-trigger" aria-label="Quick message" title="Message a pane" ref={messageButton} onClick={() => setMessageOpen(true)}><span className="nav-action-label">Message</span><span className="nav-action-icon" aria-hidden="true">✉</span> <kbd>Ctrl+/</kbd></button><button className="dock-trigger" aria-label="Appearance" title="Appearance" ref={settingsButton} onClick={() => setSettingsOpen(true)}><span className="nav-action-label">Appearance</span><span className="nav-action-icon" aria-hidden="true">◐</span></button></span>
     {settingsOpen && <AppearanceSettings onClose={closeSettings} />}
     {messageOpen && <QuickMessage onClose={() => { setMessageOpen(false); messageButton.current?.focus(); }} />}
   </nav>;
@@ -278,7 +285,8 @@ function MessageCard({ item, highlight, onSendNow, onInspect, frontDesk = false 
 // /api/fleet; the message is stored by /api/pane-inbox (the daemon's inbox send), never typed.
 function QuickMessage({ onClose }) {
   const [fleet, setFleet] = useState(null);
-  const [error, setError] = useState('');
+  const [load, setLoad] = useState({ status: 'loading', error: '' });
+  const [attempt, setAttempt] = useState(0);
   const [pane, setPane] = useState('');
   const [draft, setDraft] = useState('');
   const [busy, setBusy] = useState(false);
@@ -287,11 +295,13 @@ function QuickMessage({ onClose }) {
   const sending = useRef(false);
   useEffect(() => {
     let live = true;
+    setLoad({ status: 'loading', error: '' });
     api('/fleet')
-      .then(data => { if (!live) return; if (data.state === 'unavailable') setError(`Panes unavailable: ${data.error || 'unknown reason'}`); else setFleet(data); })
-      .catch(e => { if (live) setError(`Panes unavailable: ${e.message}`); });
+      .then(data => { if (!live) return; setFleet(data); setLoad({ status: 'ready', error: '' }); })
+      .catch(e => { if (live) setLoad({ status: 'failed', error: e.message }); });
     return () => { live = false; };
-  }, []);
+  }, [attempt]);
+  const roster = quickMessageRoster(load, fleet);
   const targets = quickMessageTargets(fleet);
   const projects = [...new Set(targets.map(target => target.project))];
   const block = quickMessageBlock(targets, pane, draft, busy);
@@ -308,9 +318,9 @@ function QuickMessage({ onClose }) {
   }
   return <div className="modal-backdrop" onMouseDown={onClose}><div className="settings-modal" onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); onClose(); } }} onMouseDown={e => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Quick message">
     <div className="settings-head"><div><div className="eyebrow">QUICK MESSAGE</div><h2>Leave an inbox message</h2></div><button className="icon-button" onClick={onClose} aria-label="Close quick message">×</button></div>
-    {error && <div className="form-error" role="alert">{error}</div>}
-    {!fleet && !error && <p>Loading panes…</p>}
-    {fleet && !targets.length && <p>No live lanes are listed right now.</p>}
+    {roster.kind === 'failed' && <div className="form-error" role="alert">{roster.text} <button type="button" onClick={() => setAttempt(n => n + 1)}>Retry</button></div>}
+    {roster.kind === 'loading' && <p role="status">{roster.text}</p>}
+    {roster.kind === 'empty' && <p role="status">{roster.text} <button type="button" onClick={() => setAttempt(n => n + 1)}>Reload</button></p>}
     <form onSubmit={send}>
       <label htmlFor="quick-message-pane">Pane</label>
       <select id="quick-message-pane" value={pane} onChange={event => { setPane(event.target.value); setSent(''); setSendError(''); }} autoFocus>
