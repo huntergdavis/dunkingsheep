@@ -718,3 +718,21 @@ fn actual_client_and_server_preserve_nonfinite_number_arguments() {
     assert_eq!(crate::api::python_value_string(&result["n"]), "nan");
     assert_eq!(result["literal"], "NaN");
 }
+
+/// t4554: lanes saw client timeouts the daemon never logged. A slow request names itself and
+/// where the time went; a fast one stays silent; arguments and long names are not echoed.
+#[test]
+fn slow_request_line_reports_phases_only_past_the_threshold() {
+    use std::time::Duration;
+    let ms = Duration::from_millis;
+    assert_eq!(
+        slow_request_line("status", Some("%7"), ms(900), ms(1099)),
+        None
+    );
+    assert_eq!(
+        slow_request_line("task_next", Some("%7"), ms(250), ms(1750)).as_deref(),
+        Some("slow request cmd=\"task_next\" pane=\"%7\" total=2.000s bind=0.250s dispatch=1.750s")
+    );
+    let line = slow_request_line(&"x\n".repeat(100), None, ms(0), ms(2500)).unwrap();
+    assert!(line.contains("pane=\"-\"") && !line.contains('\n') && line.len() < 260);
+}
