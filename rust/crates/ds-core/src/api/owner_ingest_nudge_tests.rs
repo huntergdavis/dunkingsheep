@@ -1,5 +1,5 @@
 //! t1613 / t1352: the desk is nudged once for each new Telegram owner question, and the web route
-//! keeps its own nudge. t4645: the single registered owner lane is nudged as well, Telegram only. These tests drive the daemon's `owner_ingest` handler directly, with an
+//! keeps its own nudge. t4645/t4671: the single registered owner lane is nudged for Telegram and web. These tests drive the daemon's `owner_ingest` handler directly, with an
 //! environment that records every inbox write the handler asks for.
 
 use super::*;
@@ -199,12 +199,29 @@ fn a_redelivered_telegram_question_nudges_nothing_new() {
 }
 
 #[test]
-fn a_web_question_is_nudged_by_its_own_route_not_by_the_ingest() {
+fn a_new_web_question_nudges_only_the_owner_lane_from_ingest() {
     let fixture = fixture("nudge-web", desk_panes());
-    ingest(&fixture, "web", "web-1").unwrap();
+    let out = ingest(&fixture, "web", "web-1").unwrap();
+    assert_eq!(out["duplicate"], json!(false));
     assert_eq!(
         fixture.env.writes.get(),
-        0,
-        "web stays single-nudge: the web route sends its own"
+        1,
+        "web ingest nudges the owner lane; its route separately nudges the desk"
     );
+}
+
+#[test]
+fn a_redelivered_web_question_does_not_nudge_the_owner_lane_again() {
+    let fixture = fixture("nudge-web-dup", desk_panes());
+    ingest(&fixture, "web", "web-2").unwrap();
+    let again = ingest(&fixture, "web", "web-2").unwrap();
+    assert_eq!(again["duplicate"], json!(true));
+    assert_eq!(fixture.env.writes.get(), 1, "a redelivery adds no nudge");
+}
+
+#[test]
+fn other_transports_do_not_nudge_the_owner_lane() {
+    let fixture = fixture("nudge-other", desk_panes());
+    ingest(&fixture, "other", "other-1").unwrap();
+    assert_eq!(fixture.env.writes.get(), 0);
 }

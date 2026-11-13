@@ -2191,12 +2191,15 @@ pub fn h_owner_ingest(context: &HandlerContext<'_>, args: Args) -> Result<Value,
         },
         context.self_pane_id(),
     )?;
-    // t1613: a new Telegram question nudges the desk once. Web is nudged by its own route, and a
-    // redelivery was nudged when it first arrived, so neither is nudged here.
-    // t4645: the single registered owner lane is told as well, for Telegram only.
-    if !ingested.duplicate && ingested.transport == "telegram" {
-        let desk_pane = nudge_desk_for_telegram(context, &ingested.message);
-        nudge_owner_lane_for_telegram(context, &ingested.message, desk_pane.as_deref());
+    // t1613: a new Telegram question nudges the desk once. Web is nudged by its own route.
+    // t4645/t4671: tell the single registered owner lane for new Telegram and web questions.
+    if !ingested.duplicate && matches!(ingested.transport.as_str(), "telegram" | "web") {
+        let desk_pane = if ingested.transport == "telegram" {
+            nudge_desk_for_telegram(context, &ingested.message)
+        } else {
+            None
+        };
+        nudge_owner_lane_for_owner_message(context, &ingested.message, desk_pane.as_deref());
     }
     Ok(json!({
         "message": owner_message_value(&ingested.message),
@@ -2242,12 +2245,12 @@ fn nudge_desk_for_telegram(
     Some(pane_id.to_string())
 }
 
-/// t4645: a Telegram message from the owner also tells the ONE registered owner lane, with a
-/// one-line inbox notice, even though that lane's mailboxes are configured silent
-/// (`DUNKINGSHEEP_INBOX_SILENT_MAILBOXES`): the owner asked for Telegram to reach the owner pane.
-/// Only this nudge wakes a silent recipient; every other send to it stays silent. Best effort, as
-/// the desk nudge is: no owner lane, more than one, or a refused write never fails the ingest.
-fn nudge_owner_lane_for_telegram(
+/// t4645/t4671: a Telegram or web message from the owner also tells the ONE registered owner lane,
+/// with a one-line inbox notice, even though that lane's mailboxes are configured silent
+/// (`DUNKINGSHEEP_INBOX_SILENT_MAILBOXES`). Only this nudge wakes a silent recipient; every other
+/// send to it stays silent. Best effort, as the desk nudge is: no owner lane, more than one, or a
+/// refused write never fails the ingest.
+fn nudge_owner_lane_for_owner_message(
     context: &HandlerContext<'_>,
     message: &crate::inbox_store::Message,
     desk_pane: Option<&str>,
