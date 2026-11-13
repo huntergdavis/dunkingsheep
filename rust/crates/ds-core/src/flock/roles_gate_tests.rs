@@ -654,3 +654,125 @@ fn clear_caller_on_one_thread_leaves_another_threads_state_alone() {
     assert_eq!(flock.caller_state().service_token.as_deref(), Some("mine"));
     flock.clear_caller();
 }
+
+/// t4553 option A: every accepted detached owner-token call leaves an audit record naming the
+/// caller, its parent, the root of its process chain and whether that root changed; an in-pane
+/// owner call leaves none. The decision itself is unchanged.
+#[test]
+fn accepted_detached_owner_token_calls_are_audited() {
+    use super::roles_gate::DetachedOwnerCall;
+    let stat = |pid: i64, ppid: i64, comm: &str, start: &str| crate::proc::ProcStat {
+        pid,
+        comm: comm.into(),
+        state: "S".into(),
+        ppid,
+        session: 0,
+        start: start.into(),
+    };
+    let chain = [
+        stat(900, 800, "dunkingsheep", "5"),
+        stat(800, 700, "codex\nforged line", "4"),
+        stat(700, 1, "codex", "3"),
+    ];
+    let first = DetachedOwnerCall::new(&chain, Some("/work".into()), None).unwrap();
+    assert_eq!(
+        first.line(),
+        "owner token accepted from a detached caller: pid=900 parent=\"codex\\nforged line\" \
+         root=700:3 cwd=\"/work\" root_seen=first"
+    );
+    let again = DetachedOwnerCall::new(&chain, None, Some(&first)).unwrap();
+    assert_eq!((again.root_seen, again.cwd.as_str()), ("same_root", ""));
+    let moved = [stat(901, 1, "sh", "9")];
+    let other = DetachedOwnerCall::new(&moved, None, Some(&first)).unwrap();
+    assert_eq!((other.root_seen, other.parent.as_str()), ("new_root", ""));
+    assert_eq!(other.root, (901, "9".to_string()));
+    assert!(DetachedOwnerCall::new(&[], None, None).is_none());
+
+    struct Panes(Vec<Value>);
+    impl PaneInfoEnv for Panes {
+        fn list_panes_grouped(&self) -> Vec<Value> {
+            self.0.clone()
+        }
+        fn get_pane(&self, id: &str) -> Option<Value> {
+            self.0.iter().find(|p| p["pane_id"] == id).cloned()
+        }
+        fn try_authority_panes(&self) -> Result<Vec<Value>, crate::error::DunkError> {
+            Ok(self.0.clone())
+        }
+    }
+    // Through the gate with the real process chain of this test. Under a tmux server the
+    // caller is not detached, so only the pure checks above apply there.
+    let caller_pid = std::process::id() as i64;
+    let mut cursor = caller_pid;
+    let mut ancestors = vec![caller_pid];
+    let mut under_tmux = false;
+    for _ in 0..crate::proc::MAX_DEPTH {
+        let row = crate::proc::stat(cursor).unwrap();
+        under_tmux |= row.comm == "tmux: server";
+        if row.ppid <= 1 {
+            break;
+        }
+        cursor = row.ppid;
+        ancestors.push(cursor);
+    }
+    if under_tmux {
+        return;
+    }
+    let (flock, dir) = bare("owner-token-audit");
+    let mut roles = Roles::new(
+        &Env::default(),
+        Some(dir.join("roles.json")),
+        Some(dir.join("tokens.json")),
+        None,
+    )
+    .unwrap();
+    let caller_start = crate::proc::process_start(caller_pid).unwrap();
+    roles
+        .register(
+            OWNER,
+            "owner",
+            Some(caller_pid),
+            Some(&caller_start),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    let token = roles.issue_token("owner", Some("test"), None).unwrap();
+    flock.attach_roles(roles, None);
+    let check = |rows: Vec<Value>| {
+        flock.clear_caller();
+        flock.set_caller(Some(
+            json!({"pid":caller_pid,"start":caller_start,"source":"peer"}),
+        ));
+        flock.set_service_token(Some(&token));
+        flock.set_socket_peer(Some(true));
+        flock.with_caller(|state| state.socket_peer_uid = Some(nix::unistd::geteuid().as_raw()));
+        flock.caller_role(None, &Panes(rows))
+    };
+    let recorded = || flock.detached_owner.lock().unwrap().clone();
+    // In an owner pane: accepted, not detached, no record.
+    assert_eq!(
+        check(vec![json!({"pane_id":OWNER,"pane_pid":caller_pid})]).unwrap(),
+        "owner"
+    );
+    assert_eq!(recorded(), None);
+    // Outside every listed pane: accepted as before, and recorded.
+    let unrelated = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    let rows = vec![json!({"pane_id":"%unrelated","pane_pid":unrelated.id()})];
+    assert_eq!(check(rows.clone()).unwrap(), "owner");
+    let call = recorded().expect("a detached accept is recorded");
+    assert_eq!(
+        (call.pid, call.root.0, call.root_seen),
+        (caller_pid, *ancestors.last().unwrap(), "first")
+    );
+    assert_eq!(check(rows).unwrap(), "owner");
+    assert_eq!(recorded().unwrap().root_seen, "same_root");
+    let mut unrelated = unrelated;
+    let _ = unrelated.kill();
+    let _ = unrelated.wait();
+}
