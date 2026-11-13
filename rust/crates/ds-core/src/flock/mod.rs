@@ -166,6 +166,8 @@ pub struct Flock {
     /// `self._next_job_wake` (an Event): set on turn end, task completion and close; the push
     /// loop waits on it with the sweep interval as the timeout (`flock/loops_push.rs`).
     pub(crate) push_wake: Arc<tokio::sync::Notify>,
+    /// The last accepted detached owner-token call (`flock/roles_gate.rs`, t4553 audit).
+    pub(crate) detached_owner: Mutex<Option<roles_gate::DetachedOwnerCall>>,
     /// pane_id -> the last push claim that found an empty queue (`flock/loops_push.rs`, t4554).
     pub(crate) push_empty: Mutex<BTreeMap<String, loops_push::EmptyClaim>>,
     role_panes: Mutex<panes::RolePaneCache>,
@@ -223,6 +225,7 @@ impl Flock {
             id: NEXT_FLOCK_ID.fetch_add(1, Ordering::Relaxed),
             task_waiters: Mutex::new(BTreeMap::new()),
             push_wake: Arc::new(tokio::sync::Notify::new()),
+            detached_owner: Mutex::new(None),
             push_empty: Mutex::new(BTreeMap::new()),
             role_panes: Mutex::new(panes::RolePaneCache::default()),
             turns: Mutex::new(BTreeMap::new()),

@@ -30,6 +30,59 @@ pub struct RoleStores {
 /// The `Flock` field type.
 pub type RoleStoresCell = Mutex<RoleStores>;
 
+/// One ACCEPTED owner-token call from a caller outside every pane (t4553). The gate still
+/// accepts these ("legacy detached owner"); this record is the evidence of who they are: it is
+/// logged and counted on every accept, and never changes the decision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DetachedOwnerCall {
+    pub pid: i64,
+    /// Kernel name of the caller's parent, if it has one in the chain.
+    pub parent: String,
+    /// The top of the caller's process chain: the ancestor whose parent is init.
+    pub root: (i64, String),
+    pub cwd: String,
+    /// `first`, `same_root` or `new_root`, against the previous accepted detached call.
+    pub root_seen: &'static str,
+}
+
+impl DetachedOwnerCall {
+    pub(crate) fn new(
+        chain: &[crate::proc::ProcStat],
+        cwd: Option<String>,
+        previous: Option<&DetachedOwnerCall>,
+    ) -> Option<Self> {
+        let (caller, top) = (chain.first()?, chain.last()?);
+        let root = (top.pid, top.start.clone());
+        let root_seen = match previous {
+            None => "first",
+            Some(previous) if previous.root == root => "same_root",
+            Some(_) => "new_root",
+        };
+        Some(Self {
+            pid: caller.pid,
+            parent: chain.get(1).map(|p| p.comm.clone()).unwrap_or_default(),
+            root,
+            cwd: cwd.unwrap_or_default(),
+            root_seen,
+        })
+    }
+
+    /// The journal line. Free text is escaped and bounded; no token or argument is included.
+    pub(crate) fn line(&self) -> String {
+        let short = |text: &str| text.chars().take(120).collect::<String>();
+        format!(
+            "owner token accepted from a detached caller: pid={} parent={:?} root={}:{} cwd={:?} \
+             root_seen={}",
+            self.pid,
+            short(&self.parent),
+            self.root.0,
+            short(&self.root.1),
+            short(&self.cwd),
+            self.root_seen
+        )
+    }
+}
+
 fn refuse(text: impl Into<String>) -> DunkError {
     DunkError::Refused(text.into())
 }
@@ -154,6 +207,34 @@ impl Flock {
         Ok(role)
     }
 
+    /// Log and count an accepted detached owner-token call. Never fails the request.
+    fn audit_detached_owner(&self, chain: &[crate::proc::ProcStat]) {
+        let cwd = chain.first().and_then(|caller| {
+            std::fs::read_link(format!("/proc/{}/cwd", caller.pid))
+                .ok()
+                .map(|path| path.to_string_lossy().into_owned())
+        });
+        let mut last = self
+            .detached_owner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(call) = DetachedOwnerCall::new(chain, cwd, last.as_ref()) else {
+            return;
+        };
+        eprintln!("{}", call.line());
+        if let Some(metrics) = self.stores().metrics {
+            metrics.record(&crate::metrics::Event {
+                at: crate::clock::now_s(),
+                kind: "owner.detached_accept".into(),
+                source: Some(format!("{}:{}", call.root.0, call.root.1)),
+                reason: Some(call.parent.chars().take(120).collect()),
+                outcome: Some(call.root_seen.into()),
+                ..crate::metrics::Event::default()
+            });
+        }
+        *last = Some(call);
+    }
+
     fn owner_token_peer_check(&self, env: &dyn PaneInfoEnv) -> Result<(), DunkError> {
         let refuse_peer =
             || refuse("owner token refused: peer identity or pane authority unavailable");
@@ -245,8 +326,10 @@ impl Flock {
             }
         }
         if matched.is_empty() {
+            // Legacy detached owner compatibility: still accepted, now on the record.
+            self.audit_detached_owner(&chain);
             return Ok(());
-        } // legacy detached owner compatibility
+        }
         if matched.len() != 1 {
             return Err(refuse_peer());
         }
