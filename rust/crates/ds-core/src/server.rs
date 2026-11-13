@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
@@ -582,13 +582,19 @@ fn handle_line_parts(
         socket_peer_uid: peer_uid,
         ..RequestCtx::default()
     };
+    let started = Instant::now();
     ctx.self_pane_id = bind_identity(dispatcher, &mut ctx, claimed, &name);
+    let bind = started.elapsed();
     // Python's `dispatch(name)` formats a non-string name through repr; the dispatcher sees
     // the string form (NOT verified for a missing/non-string cmd: the empty string stands in).
     let command = name.as_str().unwrap_or("");
     let outcome = catch_unwind(AssertUnwindSafe(|| {
         dispatcher.dispatch(command, &args, &ctx)
     }));
+    let dispatch = started.elapsed().saturating_sub(bind);
+    if let Some(line) = slow_request_line(command, ctx.self_pane_id.as_deref(), bind, dispatch) {
+        tracing::warn!("{line}");
+    }
     match outcome {
         Ok(Ok(result)) => (Response::ok(req_id, result), command == "shutdown"),
         Ok(Err(error)) => (Response::refused(req_id, &error), false),
@@ -602,6 +608,33 @@ fn handle_line_parts(
             (bad(req_id, &format!("internal error: {text}")), false)
         }
     }
+}
+
+/// A request slower than this gets one log line (t4554).
+const SLOW_REQUEST: Duration = Duration::from_secs(2);
+
+/// The log line for a slow request, or `None` for a fast one. It names the command, the bound
+/// pane and the two phases the server can see: binding the caller identity (a terminal read) and
+/// the dispatcher call (handler work, including any wait on a store inside it). Arguments are
+/// never logged: they can carry message bodies and tokens.
+fn slow_request_line(
+    command: &str,
+    pane: Option<&str>,
+    bind: Duration,
+    dispatch: Duration,
+) -> Option<String> {
+    let total = bind + dispatch;
+    if total < SLOW_REQUEST {
+        return None;
+    }
+    let command: String = command.chars().take(64).collect();
+    let pane: String = pane.unwrap_or("-").chars().take(32).collect();
+    Some(format!(
+        "slow request cmd={command:?} pane={pane:?} total={:.3}s bind={:.3}s dispatch={:.3}s",
+        total.as_secs_f64(),
+        bind.as_secs_f64(),
+        dispatch.as_secs_f64(),
+    ))
 }
 
 fn bad(id: Value, text: &str) -> Response {
