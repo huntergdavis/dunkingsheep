@@ -1,15 +1,17 @@
-//! Read-only access to the legacy desk store, `messages.sqlite3`.
+//! Access to the legacy desk store, `messages.sqlite3`.
 //!
-//! Two things still live there and the bridge must read them: the watchdog's owner pages (rows
-//! with the `PAGE OWNER` marker, in the desk's `messages` table) and the forwarding cursor's
-//! channel tail. Writes to that store (attachments, delivery reconciliation) are not ported yet.
+//! The bridge reads watchdog owner pages and the forwarding cursor here. Attachment storage is
+//! handled by `owner_ingest`; this module does not write messages.
 //! A missing database is an empty desk, not an error, so a fresh data directory works.
 //!
 //! `/status` does NOT read this store: this bridge answers it from the owner mailbox, the store it
 //! actually writes to (t3671/t3672). The desk store's `delivery` column is Python's source, and
 //! that is the one deliberate difference between the two bridges.
 
-use std::path::Path;
+use std::fs::{self, OpenOptions};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 
@@ -18,6 +20,7 @@ use crate::policy::PAGE_MARKER;
 
 /// How many legacy rows one tick reads for pages, as `_legacy_pages` does.
 pub const PAGE_BATCH: i64 = 20;
+static STAGE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 fn open(path: &Path) -> Result<Option<Connection>, BridgeError> {
     if !path.exists() {
@@ -33,6 +36,65 @@ fn open(path: &Path) -> Result<Option<Connection>, BridgeError> {
 
 fn store_error(error: rusqlite::Error) -> BridgeError {
     BridgeError::Runtime(format!("desk store: {error}"))
+}
+
+/// Stage a downloaded Telegram file for the daemon's guarded `owner_ingest` attachment path.
+/// The daemon copies it into its content-addressed store before creating a mailbox row.
+pub fn stage_telegram_attachment(
+    uploads: &Path,
+    filename: &str,
+    content: &[u8],
+) -> Result<PathBuf, BridgeError> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let basename = Path::new(filename)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("telegram-file");
+    let safe: String = basename
+        .chars()
+        .map(|character| {
+            if character.is_alphanumeric() || matches!(character, '_' | '.' | ' ' | '(' | ')' | '-')
+            {
+                character
+            } else {
+                '_'
+            }
+        })
+        .take(180)
+        .collect();
+    let safe = if safe.is_empty() {
+        "telegram-file".to_string()
+    } else {
+        safe
+    };
+    fs::create_dir_all(uploads).map_err(|error| BridgeError::Os(error.to_string()))?;
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    let sequence = STAGE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let stage_dir = uploads.join(format!(".stage-{nanos:032x}{sequence:016x}"));
+    fs::create_dir(&stage_dir).map_err(|error| BridgeError::Os(error.to_string()))?;
+    fs::set_permissions(
+        &stage_dir,
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .map_err(|error| BridgeError::Os(error.to_string()))?;
+    let path = stage_dir.join(safe);
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .map_err(|error| BridgeError::Os(error.to_string()))?;
+    if let Err(error) = file.write_all(content) {
+        let _ = fs::remove_file(&path);
+        return Err(BridgeError::Os(error.to_string()));
+    }
+    drop(file);
+
+    Ok(path)
 }
 
 /// `_latest_brief_id`: the newest agent row id on a channel, or 0.

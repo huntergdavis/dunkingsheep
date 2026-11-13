@@ -21,6 +21,7 @@
           "update_offset": null
         },
         "daemon_log": [],
+        "desk_attachments": [],
         "status": null,
         "steps": [
           {
@@ -83,6 +84,7 @@
           "update_offset": null
         },
         "daemon_log": [],
+        "desk_attachments": [],
         "status": null,
         "steps": [
           {
@@ -145,6 +147,7 @@
           "update_offset": null
         },
         "daemon_log": [],
+        "desk_attachments": [],
         "status": null,
         "steps": [
           {
@@ -207,6 +210,7 @@
           "update_offset": null
         },
         "daemon_log": [],
+        "desk_attachments": [],
         "status": null,
         "steps": [
           {
@@ -311,6 +315,7 @@
             }
           ]
         ],
+        "desk_attachments": [],
         "status": null,
         "steps": [
           {
@@ -398,6 +403,7 @@
             }
           ]
         ],
+        "desk_attachments": [],
         "status": null,
         "steps": [
           {
@@ -459,6 +465,367 @@
       "expected": {
         "bot_log": [
           [
+            "getFile",
+            {
+              "file_id": "photo-large"
+            }
+          ],
+          [
+            "sendMessage",
+            {
+              "chat_id": 42.0,
+              "text": "Chief of Staff message #1: posted. I\u2019ll reply here when ready."
+            }
+          ]
+        ],
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42.0,
+          "last_brief_id": null,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon_log": [],
+        "desk_attachments": [
+          {
+            "attachments": [
+              {
+                "content": "photo bytes",
+                "filename": "telegram-photo.jpg",
+                "mime": "image/jpeg",
+                "size": 11
+              }
+            ],
+            "body": "look at this",
+            "channel": "cos",
+            "delivery": "posted",
+            "external_id": "telegram:20",
+            "message_id": 1
+          }
+        ],
+        "status": null,
+        "steps": [
+          {
+            "error": null,
+            "op": "process_update"
+          }
+        ]
+      },
+      "input": {
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42,
+          "last_brief_id": null,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon": {},
+        "desk_rows": [],
+        "files": {
+          "photo-large": {
+            "content": "photo bytes",
+            "file_path": "photos/large.jpg",
+            "file_size": 12
+          },
+          "photo-small": {
+            "content": "small photo",
+            "file_path": "photos/small.jpg",
+            "file_size": 10
+          }
+        },
+        "name": "photo_with_caption_is_saved_as_a_desk_attachment",
+        "owner_rows": [],
+        "port": {
+          "bot_log": [
+            [
+              "getFile",
+              {
+                "file_id": "photo-large"
+              }
+            ],
+            [
+              "sendMessage",
+              {
+                "chat_id": 42,
+                "text": "Chief of Staff message #i7. I'll reply here when ready."
+              }
+            ]
+          ],
+          "daemon_log": [
+            [
+              "owner_ingest",
+              {
+                "attach": [
+                  "telegram-photo.jpg"
+                ],
+                "body": "look at this",
+                "external_id": "telegram:20",
+                "subject": null,
+                "transport": "telegram"
+              }
+            ]
+          ],
+          "desk_attachments": []
+        },
+        "registry": [
+          {
+            "id": "vp",
+            "name": "VP"
+          },
+          {
+            "id": "cos",
+            "name": "Chief of Staff"
+          }
+        ],
+        "routing": null,
+        "steps": [
+          {
+            "op": "process_update",
+            "update": {
+              "message": {
+                "caption": "look at this",
+                "chat": {
+                  "id": 42,
+                  "type": "private"
+                },
+                "photo": [
+                  {
+                    "file_id": "photo-small",
+                    "file_size": 10
+                  },
+                  {
+                    "file_id": "photo-large",
+                    "file_size": 12
+                  }
+                ]
+              },
+              "update_id": 20
+            }
+          }
+        ]
+      },
+      "name": "photo_with_caption_is_saved_as_a_desk_attachment"
+    },
+    {
+      "expected": {
+        "bot_log": [
+          [
+            "getFile",
+            {
+              "file_id": "document-1"
+            }
+          ],
+          [
+            "sendMessage",
+            {
+              "chat_id": 42.0,
+              "text": "Chief of Staff message #1: posted. I\u2019ll reply here when ready."
+            }
+          ]
+        ],
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42.0,
+          "last_brief_id": null,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon_log": [],
+        "desk_attachments": [
+          {
+            "attachments": [
+              {
+                "content": "document bytes",
+                "filename": "report_.txt",
+                "mime": "text/plain",
+                "size": 14
+              }
+            ],
+            "body": "please review",
+            "channel": "cos",
+            "delivery": "posted",
+            "external_id": "telegram:21",
+            "message_id": 1
+          }
+        ],
+        "status": null,
+        "steps": [
+          {
+            "error": null,
+            "op": "process_update"
+          }
+        ]
+      },
+      "input": {
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42,
+          "last_brief_id": null,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon": {},
+        "desk_rows": [],
+        "files": {
+          "document-1": {
+            "content": "document bytes",
+            "file_path": "documents/report.txt",
+            "file_size": 13
+          }
+        },
+        "name": "document_caption_and_sanitized_filename_are_saved",
+        "owner_rows": [],
+        "port": {
+          "bot_log": [
+            [
+              "getFile",
+              {
+                "file_id": "document-1"
+              }
+            ],
+            [
+              "sendMessage",
+              {
+                "chat_id": 42,
+                "text": "Chief of Staff message #i7. I'll reply here when ready."
+              }
+            ]
+          ],
+          "daemon_log": [
+            [
+              "owner_ingest",
+              {
+                "attach": [
+                  "report_.txt"
+                ],
+                "body": "please review",
+                "external_id": "telegram:21",
+                "subject": null,
+                "transport": "telegram"
+              }
+            ]
+          ],
+          "desk_attachments": []
+        },
+        "registry": [
+          {
+            "id": "vp",
+            "name": "VP"
+          },
+          {
+            "id": "cos",
+            "name": "Chief of Staff"
+          }
+        ],
+        "routing": null,
+        "steps": [
+          {
+            "op": "process_update",
+            "update": {
+              "message": {
+                "caption": "please review",
+                "chat": {
+                  "id": 42,
+                  "type": "private"
+                },
+                "document": {
+                  "file_id": "document-1",
+                  "file_name": "../../report?.txt",
+                  "file_size": 13,
+                  "mime_type": "text/plain"
+                }
+              },
+              "update_id": 21
+            }
+          }
+        ]
+      },
+      "name": "document_caption_and_sanitized_filename_are_saved"
+    },
+    {
+      "expected": {
+        "bot_log": [
+          [
+            "sendMessage",
+            {
+              "chat_id": 42.0,
+              "text": "Telegram Bot API cannot download files over 20 MB; use the VP web desk."
+            }
+          ]
+        ],
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42.0,
+          "last_brief_id": null,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon_log": [],
+        "desk_attachments": [],
+        "status": null,
+        "steps": [
+          {
+            "error": null,
+            "op": "process_update"
+          }
+        ]
+      },
+      "input": {
+        "config": {
+          "bot_token": "123:TEST-TOKEN-NOT-REAL",
+          "brief_channel": "cos",
+          "chat_id": 42,
+          "last_brief_id": null,
+          "pair_code": "PAIRCODE",
+          "update_offset": null
+        },
+        "daemon": {},
+        "desk_rows": [],
+        "name": "oversized_attachment_is_refused_without_download",
+        "owner_rows": [],
+        "registry": [
+          {
+            "id": "vp",
+            "name": "VP"
+          },
+          {
+            "id": "cos",
+            "name": "Chief of Staff"
+          }
+        ],
+        "routing": null,
+        "steps": [
+          {
+            "op": "process_update",
+            "update": {
+              "message": {
+                "caption": "large file",
+                "chat": {
+                  "id": 42,
+                  "type": "private"
+                },
+                "document": {
+                  "file_id": "too-large",
+                  "file_name": "large.bin",
+                  "file_size": 20971521
+                }
+              },
+              "update_id": 22
+            }
+          }
+        ]
+      },
+      "name": "oversized_attachment_is_refused_without_download"
+    },
+    {
+      "expected": {
+        "bot_log": [
+          [
             "sendMessage",
             {
               "chat_id": 42.0,
@@ -482,6 +849,7 @@
           "update_offset": null
         },
         "daemon_log": [],
+        "desk_attachments": [],
         "status": null,
         "steps": [
           {
@@ -569,6 +937,7 @@
           "update_offset": null
         },
         "daemon_log": [],
+        "desk_attachments": [],
         "status": null,
         "steps": [
           {
@@ -649,6 +1018,7 @@
             }
           ]
         ],
+        "desk_attachments": [],
         "status": null,
         "steps": [
           {
@@ -720,6 +1090,7 @@
           "update_offset": null
         },
         "daemon_log": [],
+        "desk_attachments": [],
         "status": null,
         "steps": [
           {
@@ -788,6 +1159,7 @@
           "update_offset": null
         },
         "daemon_log": [],
+        "desk_attachments": [],
         "status": null,
         "steps": [
           {
@@ -856,6 +1228,7 @@
           "update_offset": null
         },
         "daemon_log": [],
+        "desk_attachments": [],
         "status": null,
         "steps": [
           {
@@ -930,6 +1303,7 @@
             }
           ]
         ],
+        "desk_attachments": [],
         "status": null,
         "steps": [
           {
@@ -1009,6 +1383,7 @@
             }
           ]
         ],
+        "desk_attachments": [],
         "status": null,
         "steps": [
           {
@@ -1105,6 +1480,7 @@
             }
           ]
         ],
+        "desk_attachments": [],
         "status": {
           "channel": "cos",
           "last_brief_id": 5.0
@@ -1234,6 +1610,7 @@
             }
           ]
         ],
+        "desk_attachments": [],
         "status": {
           "channel": "cos",
           "last_brief_id": 5.0
@@ -1364,6 +1741,7 @@
             }
           ]
         ],
+        "desk_attachments": [],
         "status": {
           "channel": "cos",
           "last_brief_id": 5.0
@@ -1437,6 +1815,7 @@
           "update_offset": null
         },
         "daemon_log": [],
+        "desk_attachments": [],
         "status": null,
         "steps": [
           {
@@ -1541,6 +1920,7 @@
             }
           ]
         ],
+        "desk_attachments": [],
         "status": {
           "channel": "cos",
           "last_brief_id": 14.0
@@ -1710,6 +2090,7 @@
             }
           ]
         ],
+        "desk_attachments": [],
         "status": {
           "channel": "cos",
           "last_brief_id": 14.0
@@ -1864,6 +2245,7 @@
             }
           ]
         ],
+        "desk_attachments": [],
         "status": {
           "channel": "cos",
           "last_brief_id": 14.0
@@ -2017,6 +2399,7 @@
             }
           ]
         ],
+        "desk_attachments": [],
         "status": {
           "channel": "cos",
           "last_brief_id": 14.0
@@ -2170,6 +2553,7 @@
             }
           ]
         ],
+        "desk_attachments": [],
         "status": {
           "channel": "cos",
           "last_brief_id": 14.0
@@ -2291,6 +2675,7 @@
             }
           ]
         ],
+        "desk_attachments": [],
         "status": {
           "channel": "cos",
           "last_brief_id": 14.0
@@ -2386,6 +2771,7 @@
             }
           ]
         ],
+        "desk_attachments": [],
         "status": null,
         "steps": [
           {
@@ -2483,6 +2869,7 @@
             }
           ]
         ],
+        "desk_attachments": [],
         "status": {
           "channel": "cos",
           "last_brief_id": 200.0
@@ -2722,6 +3109,7 @@
             }
           ]
         ],
+        "desk_attachments": [],
         "status": {
           "channel": "cos",
           "last_brief_id": 32.0
@@ -2885,6 +3273,7 @@
             }
           ]
         ],
+        "desk_attachments": [],
         "status": null,
         "steps": [
           {
@@ -3033,6 +3422,7 @@
             }
           ]
         ],
+        "desk_attachments": [],
         "status": null,
         "steps": [
           {
@@ -3114,6 +3504,7 @@
           "pair_code": "PAIRCODE"
         },
         "daemon_log": [],
+        "desk_attachments": [],
         "status": null,
         "steps": [
           {
@@ -3165,6 +3556,7 @@
           "update_offset": 900.0
         },
         "daemon_log": [],
+        "desk_attachments": [],
         "status": null,
         "steps": [
           {
@@ -3229,6 +3621,7 @@
           "update_offset": null
         },
         "daemon_log": [],
+        "desk_attachments": [],
         "status": null,
         "steps": [
           {
@@ -3320,6 +3713,7 @@
           "update_offset": null
         },
         "daemon_log": [],
+        "desk_attachments": [],
         "status": null,
         "steps": [
           {
@@ -3420,6 +3814,7 @@
           "update_offset": null
         },
         "daemon_log": [],
+        "desk_attachments": [],
         "status": null,
         "steps": [
           {
@@ -3551,6 +3946,7 @@
           "update_offset": null
         },
         "daemon_log": [],
+        "desk_attachments": [],
         "status": null,
         "steps": [
           {
@@ -3660,6 +4056,7 @@
           "update_offset": null
         },
         "daemon_log": [],
+        "desk_attachments": [],
         "status": null,
         "steps": [
           {

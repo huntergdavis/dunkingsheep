@@ -7,17 +7,14 @@
 //! daemon call with its arguments, each step's result or exception, and the final telegram.json and
 //! status file.
 //!
-//! ONE intentional difference, recorded in the fixture instead of normalised away: `/status`. Python
-//! answers it from the legacy desk store's `delivery` column; this port records its questions in the
-//! owner mailbox and answers from that mailbox's state, which the owner accepted on 2026-11-08
-//! (t3671/t3672, "b I want it to be useful"). A scenario recording that difference carries
-//! `input.port` with the port's own `bot_log`/`daemon_log`; those two keys replace the Python ones for
-//! that scenario and nothing else does, so the difference cannot widen unnoticed. The fixture keeps
-//! both answers side by side, so a reviewer reads the divergence instead of trusting a filter.
+//! Intentional differences, recorded in the fixture instead of normalised away: `/status` reads
+//! the Rust owner mailbox rather than Python's legacy desk delivery column (t3671/t3672), and Rust
+//! sends attachment blobs through `owner_ingest` so they reach the desk's guarded mailbox and reply
+//! outbox. Attachment scenarios carry `input.port` with those Rust calls; those keys replace only
+//! their Python counterparts, so each divergence stays explicit and reviewable.
 //!
-//! Known, named differences are NOT in the fixture: attachments (the port answers with a visible
-//! reply; Python downloads). Numbers are compared as floats, so an int in one language and a float
-//! in the other never decides a comparison.
+//! Numbers are compared as floats, so an int in one language and a float in the other never decides
+//! a comparison. Attachment cases include the stored desk metadata and file contents.
 
 mod common;
 
@@ -46,7 +43,7 @@ fn expected_outputs(scenario: &Value) -> Value {
     else {
         return expected;
     };
-    for key in ["bot_log", "daemon_log"] {
+    for key in ["bot_log", "daemon_log", "desk_attachments"] {
         if let Some(value) = port.get(key) {
             expected[key] = value.clone();
         }
@@ -133,7 +130,9 @@ fn replay(input: &Value) -> Value {
         let conn = rusqlite::Connection::open(paths.desk_db()).expect("desk db");
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY, channel TEXT, role TEXT, \
-             body TEXT, delivery TEXT NOT NULL DEFAULT 'posted', external_id TEXT);",
+             body TEXT, delivery TEXT NOT NULL DEFAULT 'posted', external_id TEXT);\
+             CREATE TABLE IF NOT EXISTS attachments (id TEXT PRIMARY KEY, filename TEXT NOT NULL, \
+             mime TEXT NOT NULL, size INTEGER NOT NULL, path TEXT NOT NULL, message_id INTEGER);",
         )
         .expect("schema");
         for row in input["desk_rows"].as_array().cloned().unwrap_or_default() {
@@ -171,6 +170,12 @@ fn replay(input: &Value) -> Value {
         let mut state = bot.0.borrow_mut();
         state.webhook_url = input["webhook_url"].as_str().unwrap_or("").to_string();
         state.fail_on = input["fail_on"].as_str().map(str::to_string);
+        state.files = input["files"]
+            .as_object()
+            .into_iter()
+            .flat_map(|files| files.iter())
+            .map(|(file_id, file)| (file_id.clone(), file.clone()))
+            .collect();
     }
     let daemon = FakeDaemon::default();
     {
@@ -283,7 +288,17 @@ fn replay(input: &Value) -> Value {
         .borrow()
         .calls
         .iter()
-        .map(|(name, kwargs)| json!([name, Value::Object(kwargs.clone())]))
+        .map(|(name, kwargs)| {
+            let mut kwargs = kwargs.clone();
+            if let Some(paths) = kwargs.get_mut("attach").and_then(Value::as_array_mut) {
+                for path in paths {
+                    if let Some(value) = path.as_str() {
+                        *path = json!(Path::new(value).file_name().unwrap().to_string_lossy());
+                    }
+                }
+            }
+            json!([name, Value::Object(kwargs)])
+        })
         .collect();
     let config_on_disk = std::fs::read_to_string(paths.config())
         .ok()
@@ -299,13 +314,62 @@ fn replay(input: &Value) -> Value {
             value
         })
         .unwrap_or(Value::Null);
+    let desk_attachments = desk_attachment_snapshot(&paths.desk_db());
     json!({
         "steps": steps,
         "bot_log": bot_log,
         "daemon_log": daemon_log,
         "config": config_on_disk,
         "status": status,
+        "desk_attachments": desk_attachments,
     })
+}
+
+fn desk_attachment_snapshot(database: &Path) -> Value {
+    use std::collections::BTreeMap;
+
+    let conn = rusqlite::Connection::open(database).expect("desk db");
+    let mut statement = conn
+        .prepare(concat!(
+            "SELECT m.id,m.channel,m.body,m.delivery,m.external_id,",
+            "a.filename,a.mime,a.size,a.path FROM messages m ",
+            "JOIN attachments a ON a.message_id=m.id ORDER BY m.id,a.rowid"
+        ))
+        .expect("attachment snapshot query");
+    let mut rows = statement.query([]).expect("attachment snapshot rows");
+    let mut messages: BTreeMap<i64, Value> = BTreeMap::new();
+    while let Some(row) = rows.next().expect("attachment snapshot row") {
+        let message_id: i64 = row.get(0).expect("message id");
+        let channel: String = row.get(1).expect("channel");
+        let body: String = row.get(2).expect("body");
+        let delivery: String = row.get(3).expect("delivery");
+        let external_id: Option<String> = row.get(4).expect("external id");
+        let filename: String = row.get(5).expect("filename");
+        let mime: String = row.get(6).expect("mime");
+        let size: i64 = row.get(7).expect("size");
+        let path: String = row.get(8).expect("attachment path");
+        let content = std::fs::read(path).expect("stored attachment bytes");
+        let message = messages.entry(message_id).or_insert_with(|| {
+            json!({
+                "message_id": message_id,
+                "channel": channel,
+                "body": body,
+                "delivery": delivery,
+                "external_id": external_id,
+                "attachments": [],
+            })
+        });
+        message["attachments"]
+            .as_array_mut()
+            .expect("attachment list")
+            .push(json!({
+                "filename": filename,
+                "mime": mime,
+                "size": size,
+                "content": String::from_utf8_lossy(&content),
+            }));
+    }
+    Value::Array(messages.into_values().collect())
 }
 
 #[test]
@@ -331,10 +395,17 @@ fn every_scenario_matches_the_python_oracle() {
         let expected = normalize(&expected_outputs(scenario));
         let actual = normalize(&replay(&scenario["input"]));
         if expected != actual {
-            let keys: Vec<&str> = ["steps", "bot_log", "daemon_log", "config", "status"]
-                .into_iter()
-                .filter(|key| expected[*key] != actual[*key])
-                .collect();
+            let keys: Vec<&str> = [
+                "steps",
+                "bot_log",
+                "daemon_log",
+                "config",
+                "status",
+                "desk_attachments",
+            ]
+            .into_iter()
+            .filter(|key| expected[*key] != actual[*key])
+            .collect();
             failures.push(format!("{name}: differs in {keys:?}"));
             if failures.len() == 1 {
                 eprintln!(
