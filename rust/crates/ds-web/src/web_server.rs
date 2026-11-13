@@ -34,6 +34,8 @@
 //!   GET and HEAD. This is documented rather than fixed.
 //! - `POST /api/ops-board/question` is a Rust desk extension: the current UI needs it to obtain
 //!   the version and options for owner answers. Python has no equivalent route.
+//! - `POST /api/pane-inbox` is a Rust desk extension (t4644): the quick-message dialog stores an inbox
+//!   message for a live lane through the daemon's inbox send. Python has no equivalent route.
 //! - `PYTHON_ROUTES` is a hand-maintained copy of the P0 routes in web/app.py. The integration test
 //!   `python_routes_match_the_mounted_routes` checks it against the mounted axum routes and the
 //!   Python source, in both directions.
@@ -495,6 +497,7 @@ where
         if is_python_route(&decoded, request.method())
             || (request.method() == Method::GET && decoded == "/api/projects")
             || (request.method() == Method::POST && decoded == "/api/ops-board/question")
+            || (request.method() == Method::POST && decoded == "/api/pane-inbox")
             || (self.terminal_stream && is_terminal_route(&decoded))
         {
             if let Some(routed) = routed_uri(request.uri(), &decoded) {

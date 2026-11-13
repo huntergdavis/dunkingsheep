@@ -94,6 +94,7 @@ impl FleetState {
 pub fn router(state: Arc<FleetState>, auth: Arc<dyn AuthBackend>, scheme: RequestScheme) -> Router {
     Router::new()
         .route("/api/pane-send", post(api_pane_send))
+        .route("/api/pane-inbox", post(api_pane_inbox))
         .route("/api/fleet", get(api_fleet))
         .route("/api/projects", get(api_projects))
         .route("/api/ops-metrics", get(operations_metrics))
@@ -317,6 +318,111 @@ async fn api_pane_send(
         Ok(v) => send_response(&pane, route, &v),
         Err(e) => rpc_error(e, "delivery path unavailable: ", StatusCode::BAD_GATEWAY),
     }
+}
+/// The largest `/api/pane-inbox` request body: 16000 characters of at most four bytes each, plus
+/// room for JSON escaping and framing.
+const PANE_INBOX_BODY_LIMIT: usize = 16000 * 6 + 1024;
+
+/// A tmux pane id, nothing else: the target is never a label, a name or `self`.
+fn tmux_pane_id(value: &Value) -> Option<&str> {
+    let pane = value.as_str()?;
+    let digits = pane.strip_prefix('%')?;
+    (!digits.is_empty() && digits.len() <= 9 && digits.bytes().all(|b| b.is_ascii_digit()))
+        .then_some(pane)
+}
+
+/// `POST /api/pane-inbox` (t4644): store one inbox message for a live lane. Rust desk extension
+/// with no Python route. The same sign-in and same-origin check as `/api/pane-send`, then the
+/// daemon's ordinary `inbox_send` under the desk's own service identity: nothing is typed into a
+/// pane and no command the desk could not already call is used. The daemon decides where the
+/// message is stored; its answer (id, mailbox, any redirect, whether the lane was told) is
+/// returned as given, never invented.
+async fn api_pane_inbox(
+    Extension(state): Extension<Arc<FleetState>>,
+    Extension(auth): Extension<Arc<dyn AuthBackend>>,
+    Extension(scheme): Extension<RequestScheme>,
+    request: Request,
+) -> Response {
+    if let Err(response) = authenticate(auth.as_ref(), request.headers(), scheme).await {
+        return response.into_response();
+    }
+    let Ok(bytes) = to_bytes(request.into_body(), PANE_INBOX_BODY_LIMIT).await else {
+        return detail(StatusCode::PAYLOAD_TOO_LARGE, "message too large");
+    };
+    let body: Value = match serde_json::from_slice(&bytes) {
+        Ok(value @ Value::Object(_)) => value,
+        _ => {
+            return detail(
+                StatusCode::BAD_REQUEST,
+                "send a JSON object with pane and text",
+            )
+        }
+    };
+    let Some(pane) = tmux_pane_id(&body["pane"]) else {
+        return detail(StatusCode::BAD_REQUEST, "a tmux pane id looks like %9");
+    };
+    let Some(message) = body["text"].as_str() else {
+        return detail(StatusCode::BAD_REQUEST, "text must be a string");
+    };
+    if message.trim().is_empty() {
+        return detail(StatusCode::BAD_REQUEST, "nothing to send");
+    }
+    if message.chars().count() > 16000 {
+        return detail(StatusCode::BAD_REQUEST, "keep it under 16000 characters");
+    }
+    let cap = state.capability(pane).await;
+    if !truth(&cap) {
+        return detail(
+            StatusCode::BAD_GATEWAY,
+            "the daemon could not describe this lane",
+        );
+    }
+    if !truth(&cap["alive"]) {
+        return detail(
+            StatusCode::CONFLICT,
+            format!("{pane} is not alive: nothing to send to"),
+        );
+    }
+    let stored = match state
+        .rpc
+        .rpc(
+            "inbox_send",
+            json!({"to":pane,"body":message,"notify":true}),
+        )
+        .await
+    {
+        Ok(value) => value,
+        Err(e) => return rpc_error(e, "inbox unavailable: ", StatusCode::BAD_GATEWAY),
+    };
+    let Some(message_id) = stored["message_id"].as_str().filter(|id| !id.is_empty()) else {
+        return detail(
+            StatusCode::BAD_GATEWAY,
+            "the daemon returned no message id, so the desk will not claim the message was stored",
+        );
+    };
+    if truth(&stored["outcome"]) {
+        // Only a refused system send carries an outcome; the desk never sends as one.
+        return detail(
+            StatusCode::BAD_GATEWAY,
+            format!(
+                "the inbox refused the message: {}",
+                cut(&text(&stored["reason"]), 200)
+            ),
+        );
+    }
+    Json(json!({
+        "ok": true,
+        "pane": pane,
+        "route": "inbox",
+        "outcome": "stored",
+        "message_id": message_id,
+        "mailbox": stored["mailbox"],
+        "state": stored["state"],
+        "notified": stored["notified"] == true,
+        "redirected": stored["redirected"],
+        "note": "Stored in the lane's inbox. It has not been read until the lane opens its mail.",
+    }))
+    .into_response()
 }
 fn rpc_error(e: PanesWebError, prefix: &str, status: StatusCode) -> Response {
     match e {
@@ -855,6 +961,101 @@ mod tests {
         );
     }
 
+    fn inbox(f: Arc<Fake>, body: &str) -> (u16, Value) {
+        http(app(f, true), "/api/pane-inbox", Some(body))
+    }
+    /// t4644: the owner's quick message is stored as an inbox message through the daemon's own
+    /// inbox send; sign-in and validation come first, a dead or unknown lane gets nothing, and
+    /// the answer is the daemon's.
+    #[test]
+    fn pane_inbox_stores_one_inbox_message_for_a_live_lane() {
+        for body in ["{", r#"{"pane":"%9","text":"hi"}"#] {
+            let f = Fake::setup();
+            assert_eq!(
+                http(app(f.clone(), false), "/api/pane-inbox", Some(body)),
+                (401, json!({"detail":"Sign in required"}))
+            );
+            assert!(f.calls().is_empty());
+        }
+        for (body, error) in [
+            (
+                json!([1]).to_string(),
+                "send a JSON object with pane and text",
+            ),
+            ("{".to_string(), "send a JSON object with pane and text"),
+            (
+                json!({"pane":"self","text":"hi"}).to_string(),
+                "a tmux pane id looks like %9",
+            ),
+            (
+                json!({"pane":"%9 x","text":"hi"}).to_string(),
+                "a tmux pane id looks like %9",
+            ),
+            (
+                json!({"pane":"ds-fable-writer","text":"hi"}).to_string(),
+                "a tmux pane id looks like %9",
+            ),
+            (
+                json!({"pane":"%9","text":7}).to_string(),
+                "text must be a string",
+            ),
+            (
+                json!({"pane":"%9","text":" "}).to_string(),
+                "nothing to send",
+            ),
+            (
+                json!({"pane":"%9","text":"x".repeat(16001)}).to_string(),
+                "keep it under 16000 characters",
+            ),
+        ] {
+            let f = Fake::setup();
+            assert_eq!(inbox(f.clone(), &body), (400, json!({"detail":error})));
+            assert!(f.calls().is_empty());
+        }
+        let f = Fake::setup();
+        let huge = json!({"pane":"%9","text":"x".repeat(PANE_INBOX_BODY_LIMIT)}).to_string();
+        assert_eq!(inbox(f.clone(), &huge).0, 413);
+        assert!(f.calls().is_empty());
+        for (cap, status) in [(json!({}), 502), (json!({"alive":false}), 409)] {
+            let f = Fake::setup();
+            f.reply("delivery_capability", cap);
+            assert_eq!(inbox(f.clone(), r#"{"pane":"%9","text":"hi"}"#).0, status);
+            assert_eq!(f.calls(), vec!["delivery_capability"]);
+        }
+        let f = Fake::setup();
+        // A lane with no typing route is still a valid inbox target.
+        f.reply(
+            "delivery_capability",
+            json!({"alive":true,"send":"unknown"}),
+        );
+        f.reply(
+            "inbox_send",
+            json!({"message_id":"i77","state":"queued","mailbox":"ds-fable-writer","notified":true}),
+        );
+        let (status, value) = inbox(f.clone(), r#"{"pane":"%9","text":" hello\nthere "}"#);
+        assert_eq!(status, 200);
+        assert_eq!(
+            value,
+            json!({"ok":true,"pane":"%9","route":"inbox","outcome":"stored","message_id":"i77",
+                "mailbox":"ds-fable-writer","state":"queued","notified":true,"redirected":null,
+                "note":"Stored in the lane's inbox. It has not been read until the lane opens its mail."})
+        );
+        assert_eq!(f.calls(), vec!["delivery_capability", "inbox_send"]);
+        assert_eq!(
+            f.calls.lock().unwrap()[1].1,
+            json!({"to":"%9","body":" hello\nthere ","notify":true})
+        );
+        // No id, or a refusal outcome: the desk does not claim it was stored.
+        for reply in [
+            json!({"state":"queued"}),
+            json!({"message_id":"i78","outcome":"undeliverable","reason":"no"}),
+        ] {
+            let f = Fake::setup();
+            f.reply("delivery_capability", json!({"alive":true}));
+            f.reply("inbox_send", reply);
+            assert_eq!(inbox(f, r#"{"pane":"%9","text":"hi"}"#).0, 502);
+        }
+    }
     #[test]
     fn pane_send_auth_precedes_json_and_backend() {
         for body in ["{", r#"{"pane":"%9","text":"hi"}"#] {
