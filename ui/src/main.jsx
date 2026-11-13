@@ -22,6 +22,7 @@ import { channelDeliveryLabel, messageDeliveryLabel } from './delivery-label.js'
 import CharacterEditor from './CharacterEditor';
 import ProjectTerminal from './ProjectTerminal';
 import { terminalTargetForPane } from './project-terminal-targets.js';
+import { DASH_HOME, DASH_ROUTES, resolveDashRoute, viewForPath } from './dash-route.js';
 
 function LaneStatus({ row }) {
   const value = laneStatus(row);
@@ -49,14 +50,6 @@ const api = async (path, options = {}) => {
   return response.json();
 };
 
-const DASH_ROUTES = {
-  cos: { eyebrow: 'FRONT DESK', title: 'Front Desk', subtitle: 'Ask; decisions you owe are at the top' },
-  fleet: { eyebrow: 'TERMINALS', title: 'Terminals', subtitle: 'See active agents and send a message' },
-  operations: { eyebrow: 'OPERATIONS', title: 'Operations board', subtitle: 'Tasks, progress, and service health' },
-  projects: { eyebrow: 'PROJECTS', title: 'Projects', subtitle: 'Live lanes by explicit project membership' },
-  play: { eyebrow: 'LIVE GAME', title: 'Play Pool of Radiance', subtitle: 'Private DOS run · save states' },
-};
-
 function useDashRoute() {
   const [path, setPath] = useState(() => window.location.pathname);
   useEffect(() => {
@@ -64,9 +57,7 @@ function useDashRoute() {
     window.addEventListener('popstate', onPop);
     return () => window.removeEventListener('popstate', onPop);
   }, []);
-  const match = /^\/dash\/([a-z]+)\/?$/.exec(path);
-  const view = match ? match[1] : 'cos';
-  return { standalone: path === '/dash' || path.startsWith('/dash/'), view, known: view in DASH_ROUTES };
+  return { ...resolveDashRoute(path), ...viewForPath(path) };
 }
 
 // How the desk was told about an owner message (t1166): 'sent' (typed straight in) and 'nudged'
@@ -113,7 +104,7 @@ function DashNav({ view, side }) {
   const links = Object.entries(DASH_ROUTES).map(([key, route]) => <a key={key} href={`/dash/${key}`} aria-current={view === key ? 'page' : undefined}>{route.title}</a>);
   function closeSettings() { setSettingsOpen(false); settingsButton.current?.focus(); }
   return <nav className="dash-nav" aria-label="Dashboards">
-    <a className="dash-nav-brand" href="/" aria-label="Dunking Sheep home"><span className="dash-nav-mark">DS</span></a>
+    <a className="dash-nav-brand" href={DASH_HOME} aria-label="Dunking Sheep home: Projects"><span className="dash-nav-mark">DS</span></a>
     <span className="dash-nav-links">{links}</span>
     <details className="dash-nav-boards" ref={boards}>
       <summary>Boards <span aria-hidden="true">▾</span></summary>
@@ -1248,7 +1239,7 @@ function App() {
   if (authorized === null) return <div className="splash">DUNKING SHEEP</div>;
   // Keep the owner on the conversations and boards in this desk.
   const content = authorized
-    ? <StandaloneDesk view={route.standalone ? route.view : 'cos'} known={route.standalone ? route.known : true} />
+    ? <StandaloneDesk view={route.view} known={route.known} />
     : <Login onSuccess={() => setAuthorized(true)} />;
   return <ThemeContext.Provider value={{ theme, chooseTheme, themeError }}>{updateAvailable && <div className="update-banner" role="status">A desk update is ready. Save any draft, then <button onClick={() => window.location.reload()}>Refresh now</button>.</div>}{content}</ThemeContext.Provider>;
 }
