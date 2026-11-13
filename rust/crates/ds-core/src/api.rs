@@ -2035,7 +2035,7 @@ pub fn h_owner_conversation(context: &HandlerContext<'_>, args: Args) -> Result<
             }
         },
         Some(Value::Bool(value)) => Some(if *value { 1.0 } else { 0.0 }),
-        Some(Value::String(text)) => Some(text.trim().parse::<f64>().map_err(|_| {
+        Some(Value::String(text)) => Some(parse_python_float_string(text).ok_or_else(|| {
             DunkError::Refused(format!(
                 "could not convert string to float: {}",
                 py_repr(text)
@@ -2056,6 +2056,35 @@ pub fn h_owner_conversation(context: &HandlerContext<'_>, args: Args) -> Result<
     let conversation = crate::owner::OwnerConversations::new(context.flock, context.env)
         .conversation(Some(limit), before, context.self_pane_id())?;
     serde_json::to_value(conversation).map_err(DunkError::from)
+}
+
+/// Python `float(string)` permits underscores between decimal digits and accepts Unicode
+/// decimal digits. Normalize those forms before Rust's decimal float parser.
+fn parse_python_float_string(value: &str) -> Option<f64> {
+    let value = value.trim();
+    let mut normalized = String::with_capacity(value.len());
+    let mut chars = value.chars().peekable();
+    let mut previous_was_digit = false;
+    while let Some(character) = chars.next() {
+        if character == '_' {
+            let next_is_digit = chars
+                .peek()
+                .is_some_and(|next| python_decimal_digit(*next).is_some());
+            if !previous_was_digit || !next_is_digit {
+                return None;
+            }
+            previous_was_digit = false;
+            continue;
+        }
+        if let Some(digit) = python_decimal_digit(character) {
+            normalized.push(char::from(b'0' + digit));
+            previous_was_digit = true;
+        } else {
+            normalized.push(character);
+            previous_was_digit = false;
+        }
+    }
+    normalized.parse().ok()
 }
 
 /// Hand an original owner question to the fixed registered supervisor.

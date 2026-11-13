@@ -9662,6 +9662,16 @@ fn owner_conversation_before_cursor_matches_python_over_real_socket() {
             assert_eq!(result(&call(r#"{"before":-Infinity}"#))["count"], 0);
             assert_eq!(result(&call(r#"{"before":"NaN"}"#))["count"], 0);
             assert_eq!(result(&call(r#"{"before":0}"#))["count"], 0);
+            // Python float(string) accepts underscores between digits.
+            assert_eq!(
+                result(&call(r#"{"before":"1_900_000_000_000"}"#))["count"],
+                2
+            );
+            let invalid_underscore = call(r#"{"before":"1__900"}"#);
+            assert_eq!(
+                invalid_underscore["error"],
+                "could not convert string to float: '1__900'"
+            );
             // Python float(int) overflows past the float range; dispatch answers the
             // OverflowError as "internal error: ..." (dunk_server.handle_line). A 309-digit
             // integer is still finite and keeps every row.

@@ -14,12 +14,19 @@ mod serialize;
 #[derive(Debug, Clone, Copy)]
 struct DecodeError;
 
+/// CPython 3.14's default `int` conversion limit, applied by `json.loads` to integer tokens.
+const PYTHON_MAX_INTEGER_DIGITS: usize = 4_300;
+
 /// Decode structure ourselves so a literal `$serde_json::private::Number` key is
 /// an ordinary user key, not serde's internal arbitrary-precision number tag.
 /// Serde still validates every string and finite JSON number token.
 pub fn from_str(text: &str) -> Result<Value, serde_json::Error> {
+    let mut parser = Parser {
+        text,
+        at: 0,
+        oversized_integer: false,
+    };
     let parsed = (|| {
-        let mut parser = Parser { text, at: 0 };
         let value = parser.value(0)?;
         parser.space();
         if parser.at != text.len() {
@@ -27,6 +34,11 @@ pub fn from_str(text: &str) -> Result<Value, serde_json::Error> {
         }
         Ok(value)
     })();
+    if parser.oversized_integer {
+        return Err(<serde_json::Error as serde::de::Error>::custom(
+            "invalid JSON",
+        ));
+    }
     parsed.map_err(|_| {
         // Preserve the established client's detailed strict-JSON error for malformed
         // frames. A valid Python extension cannot reach this branch.
@@ -39,6 +51,7 @@ pub fn from_str(text: &str) -> Result<Value, serde_json::Error> {
 struct Parser<'a> {
     text: &'a str,
     at: usize,
+    oversized_integer: bool,
 }
 impl Parser<'_> {
     fn peek(&self) -> Option<u8> {
@@ -117,6 +130,15 @@ impl Parser<'_> {
                     self.at += 1;
                 }
                 let token = &self.text[start..self.at];
+                if !token.contains(['.', 'e', 'E']) {
+                    let digits = token.strip_prefix('-').unwrap_or(token);
+                    if digits.len() > PYTHON_MAX_INTEGER_DIGITS
+                        && digits.bytes().all(|byte| byte.is_ascii_digit())
+                    {
+                        self.oversized_integer = true;
+                        return Err(DecodeError);
+                    }
+                }
                 match token {
                     "null" => Ok(Value::Null),
                     "true" => Ok(Value::Bool(true)),
@@ -328,5 +350,17 @@ mod tests {
         ] {
             assert!(from_str(valid).is_ok(), "{valid}");
         }
+    }
+
+    #[test]
+    fn wire_parser_matches_python_integer_string_digit_limit() {
+        let at_limit = "1".repeat(PYTHON_MAX_INTEGER_DIGITS);
+        let over_limit = "1".repeat(PYTHON_MAX_INTEGER_DIGITS + 1);
+        assert!(from_str(&at_limit).is_ok());
+        assert!(from_str(&format!("-{at_limit}")).is_ok());
+        assert!(from_str(&over_limit).is_err());
+        assert!(from_str(&format!("-{over_limit}")).is_err());
+        // Python's JSON float path is not subject to the integer conversion limit.
+        assert!(from_str(&format!("{over_limit}.0")).is_ok());
     }
 }
