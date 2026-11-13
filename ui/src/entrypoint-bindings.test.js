@@ -15,6 +15,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const localExports = {
   'theme-registry.js': ['buildThemeRegistry', 'groupThemes', 'THEME_GROUP_ORDER'],
   'leader-line.js': ['leaderLine'],
+  'dash-route.js': ['resolveDashRoute', 'viewForPath'],
 };
 
 const mainBundle = () => {
