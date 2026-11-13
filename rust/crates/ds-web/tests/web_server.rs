@@ -1391,6 +1391,61 @@ fn owner_question_is_available_through_composed_desk_without_weakening_auth() {
     assert_eq!(server.shutdown(), Ok(()));
 }
 
+// t4644: `/api/pane-inbox` is a Rust desk extension. Through the real serve path (the t4626
+// lesson: a mounted route the path layer does not admit answers 404) it requires the owner's
+// session and same origin, and stores the message with the daemon's inbox send under the desk's
+// own service token.
+#[test]
+fn pane_inbox_is_reachable_through_the_composed_desk_without_weakening_auth() {
+    fn answer(command: &str, args: &Map<String, Value>) -> Result<Value, String> {
+        match command {
+            "delivery_capability" if args.get("target") == Some(&json!("%7")) => {
+                Ok(json!({"alive": true, "send": "guarded"}))
+            }
+            "inbox_send" => Ok(json!({
+                "message_id": "i501", "state": "queued", "mailbox": "fixture-lane",
+                "notified": true
+            })),
+            _ => Err("not provided by this fixture".to_owned()),
+        }
+    }
+    let (root, mut config) = fixture();
+    let daemon = FakeDaemon::start(root.path(), answer);
+    config.daemon_socket = daemon.socket.clone();
+    let server = Server::start(config);
+    let addr = server.addr;
+    let payload = r#"{"pane":"%7","text":"hello lane"}"#;
+    let anonymous = request(addr, "POST", "/api/pane-inbox", &[], Some(payload));
+    assert_eq!(anonymous.status, 401, "{}", anonymous.text());
+    let cookie = format!("vp_session={}", login(addr));
+    let cross = [
+        ("Cookie", cookie.as_str()),
+        ("Origin", "https://evil.example"),
+    ];
+    let rejected = request(addr, "POST", "/api/pane-inbox", &cross, Some(payload));
+    assert_eq!(rejected.status, 403, "{}", rejected.text());
+    let session = [("Cookie", cookie.as_str())];
+    let stored = request(addr, "POST", "/api/pane-inbox", &session, Some(payload));
+    assert_eq!(stored.status, 200, "{}", stored.text());
+    assert_eq!(stored.json()["message_id"], "i501");
+    assert_eq!(stored.json()["outcome"], "stored");
+    assert_eq!(stored.json()["notified"], true);
+    let sends: Vec<_> = daemon
+        .sent()
+        .into_iter()
+        .filter(|sent| sent.command == "inbox_send")
+        .collect();
+    assert_eq!(
+        sends.len(),
+        1,
+        "unauthorized requests must not reach the daemon"
+    );
+    assert_eq!(sends[0].args["to"], "%7");
+    assert_eq!(sends[0].args["body"], "hello lane");
+    assert_eq!(sends[0].token.as_deref(), Some("web-desk-test-token"));
+    assert_eq!(server.shutdown(), Ok(()));
+}
+
 // A queued daemon receipt must be reconciled even if no client reads the message. The fake
 // daemon moves it to sent; the desk must never send the message a second time.
 #[test]

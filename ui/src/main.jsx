@@ -23,7 +23,7 @@ import CharacterEditor from './CharacterEditor';
 import ProjectTerminal from './ProjectTerminal';
 import { nextTerminalList, terminalActionForLane, terminalListReason } from './project-terminal-targets.js';
 import { DASH_HOME, DASH_ROUTES, resolveDashRoute, viewForPath } from './dash-route.js';
-import { quickMessageBlock, quickMessageTargets, sendOutcomeText } from './quick-message.js';
+import { inboxOutcomeText, quickMessageBlock, quickMessageTargets, sendOutcomeText } from './quick-message.js';
 
 function LaneStatus({ row }) {
   const value = laneStatus(row);
@@ -274,8 +274,8 @@ function MessageCard({ item, highlight, onSendNow, onInspect, frontDesk = false 
   </div>;
 }
 
-// t4644: message any pane the desk can already message without opening the Terminals view. Same
-// roster (/api/fleet) and the same guarded send (/api/pane-send) as the Terminals composer.
+// t4644: leave an inbox message for a live lane without opening the Terminals view. The roster is
+// /api/fleet; the message is stored by /api/pane-inbox (the daemon's inbox send), never typed.
 function QuickMessage({ onClose }) {
   const [fleet, setFleet] = useState(null);
   const [error, setError] = useState('');
@@ -300,23 +300,23 @@ function QuickMessage({ onClose }) {
     if (block || sending.current) return;
     sending.current = true; setBusy(true); setSent(''); setSendError('');
     try {
-      const data = await api('/pane-send', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pane, text: draft }) });
+      const data = await api('/pane-inbox', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pane, text: draft }) });
       setDraft(current => current === draft ? '' : current);
-      setSent(sendOutcomeText(data));
+      setSent(inboxOutcomeText(data, targets.find(target => target.pane_id === pane)));
     } catch (e) { setSendError(e.message); }
     finally { sending.current = false; setBusy(false); }
   }
   return <div className="modal-backdrop" onMouseDown={onClose}><div className="settings-modal" onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); onClose(); } }} onMouseDown={e => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Quick message">
-    <div className="settings-head"><div><div className="eyebrow">QUICK MESSAGE</div><h2>Message a pane</h2></div><button className="icon-button" onClick={onClose} aria-label="Close quick message">×</button></div>
+    <div className="settings-head"><div><div className="eyebrow">QUICK MESSAGE</div><h2>Leave an inbox message</h2></div><button className="icon-button" onClick={onClose} aria-label="Close quick message">×</button></div>
     {error && <div className="form-error" role="alert">{error}</div>}
     {!fleet && !error && <p>Loading panes…</p>}
-    {fleet && !targets.length && <p>No panes can be messaged right now.</p>}
+    {fleet && !targets.length && <p>No live lanes are listed right now.</p>}
     <form onSubmit={send}>
       <label htmlFor="quick-message-pane">Pane</label>
       <select id="quick-message-pane" value={pane} onChange={event => { setPane(event.target.value); setSent(''); setSendError(''); }} autoFocus>
         <option value="">Choose a pane…</option>
         {projects.map(project => <optgroup key={project} label={project}>
-          {targets.filter(target => target.project === project).map(target => <option key={target.pane_id} value={target.pane_id} disabled={target.blocked}>{target.label}{target.blocked ? ' (messaging unavailable)' : ''}</option>)}
+          {targets.filter(target => target.project === project).map(target => <option key={target.pane_id} value={target.pane_id}>{target.label}</option>)}
         </optgroup>)}
       </select>
       <label htmlFor="quick-message-text">Message</label>
