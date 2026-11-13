@@ -515,6 +515,23 @@ impl Tasks {
         self.get(&id).await.map(Some)
     }
 
+    /// A token that changes whenever this database is written: this connection's
+    /// `total_changes()` plus `PRAGMA data_version` (commits by any other connection). Equal
+    /// tokens mean no row changed in between, so a claim that found nothing still finds nothing.
+    pub async fn change_token(&self) -> Result<(i64, i64), DunkError> {
+        self.writer
+            .call(|conn| {
+                let own: i64 = conn
+                    .query_row("SELECT total_changes()", [], |row| row.get(0))
+                    .map_err(db::map_sqlite)?;
+                let others: i64 = conn
+                    .query_row("PRAGMA data_version", [], |row| row.get(0))
+                    .map_err(db::map_sqlite)?;
+                Ok((own, others))
+            })
+            .await
+    }
+
     /// One task by id.
     pub async fn get(&self, id: &str) -> Result<Task, DunkError> {
         let wanted = id.to_string();

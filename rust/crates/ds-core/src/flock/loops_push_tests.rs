@@ -687,3 +687,25 @@ async fn loop_push_env_futures_are_awaited_in_source_order() {
         .await
         .contains_key(IDLE_WORKER));
 }
+
+/// t4554: ~44 empty claims a minute, each a write transaction and two log lines, for lanes with
+/// nothing to do. An unchanged empty queue is not asked again; any task write ends the skip.
+#[tokio::test]
+async fn test_an_unchanged_empty_queue_is_not_claimed_again_until_a_write() {
+    let (flock, tasks, _dir) = setup("empty-skip").await;
+    let fake = Fake::standard();
+    fake.register(IDLE_WORKER, "worker");
+    subscribe(&flock, IDLE_WORKER);
+    let first = flock.push_tasks(&fake).await;
+    assert_eq!(first[0].action, "none");
+    assert_eq!(first[0].detail, "scope=global reason=empty via=follower");
+    let second = flock.push_tasks(&fake).await;
+    assert_eq!(
+        second[0].detail,
+        "scope=global reason=empty via=follower unchanged"
+    );
+    let task = tasks.add("global", "new work", "").await.unwrap();
+    let third = flock.push_tasks(&fake).await;
+    assert_eq!(third[0].action, "claim");
+    assert_eq!(status(&tasks, &task.id).await, "in_progress");
+}

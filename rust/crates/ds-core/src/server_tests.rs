@@ -726,13 +726,32 @@ fn slow_request_line_reports_phases_only_past_the_threshold() {
     use std::time::Duration;
     let ms = Duration::from_millis;
     assert_eq!(
-        slow_request_line("status", Some("%7"), ms(900), ms(1099)),
+        slow_request_line("status", Some("%7"), ms(900), ms(1099), ms(0)),
         None
     );
     assert_eq!(
-        slow_request_line("task_next", Some("%7"), ms(250), ms(1750)).as_deref(),
+        slow_request_line("task_next", Some("%7"), ms(250), ms(1750), ms(0)).as_deref(),
         Some("slow request cmd=\"task_next\" pane=\"%7\" total=2.000s bind=0.250s dispatch=1.750s")
     );
-    let line = slow_request_line(&"x\n".repeat(100), None, ms(0), ms(2500)).unwrap();
+    let line = slow_request_line(&"x\n".repeat(100), None, ms(0), ms(2500), ms(0)).unwrap();
     assert!(line.contains("pane=\"-\"") && !line.contains('\n') && line.len() < 260);
+}
+
+/// t4554 review residual: a send that waits for delivery by design is not a slow request.
+#[test]
+fn a_requested_delivery_wait_is_not_reported_as_slow() {
+    use std::time::Duration;
+    let ms = Duration::from_millis;
+    assert_eq!(requested_wait("send_text", &json!({})), ms(3000));
+    assert_eq!(requested_wait("send_keys", &json!({"wait_s": 0})), ms(0));
+    assert_eq!(requested_wait("task_next", &json!({"wait_s": 9})), ms(0));
+    let waits = requested_wait("send_text", &json!({"wait_s": 1.5}));
+    assert_eq!(
+        slow_request_line("send_text", None, ms(0), ms(3400), waits),
+        None
+    );
+    assert_eq!(
+        slow_request_line("send_text", None, ms(0), ms(3500), waits).as_deref(),
+        Some("slow request cmd=\"send_text\" pane=\"-\" total=3.500s bind=0.000s dispatch=3.500s wait_s=1.500")
+    );
 }

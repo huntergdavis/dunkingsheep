@@ -81,6 +81,22 @@ pub trait PushEnv: Send + Sync {
     }
 }
 
+/// An idle lane's last claim that found an empty queue (t4554). While the task database is
+/// unchanged the same claim finds the same nothing, so the sweep skips the claim transaction and
+/// its log lines. `empty` means no open task is in the lane's scope at all, which only a write
+/// can change; `EMPTY_CLAIM_MAX_AGE` bounds the skip anyway.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct EmptyClaim {
+    /// Scope, role and kind filter the claim ran with.
+    key: String,
+    /// `Tasks::change_token` read before that claim.
+    token: (i64, i64),
+    at: std::time::Instant,
+}
+
+/// The longest an empty claim is trusted without asking the store again.
+const EMPTY_CLAIM_MAX_AGE: Duration = Duration::from_secs(60);
+
 /// One decision of a sweep, the same words the Python logs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PushDecision {
@@ -171,8 +187,14 @@ impl Flock {
             eprintln!("push sweep skipped: no task store is attached");
             return decisions;
         };
+        // Read before any claim of this sweep: a write that lands later changes the token, so
+        // the next sweep asks again.
+        let token = tasks.change_token().await.ok();
         let mut note = |pane: &str, action: &'static str, detail: String| {
-            eprintln!("push {action} pane={pane} {detail}");
+            // An unchanged empty queue was logged when it was first seen.
+            if !detail.ends_with(" unchanged") {
+                eprintln!("push {action} pane={pane} {detail}");
+            }
             decisions.push(PushDecision {
                 pane_id: pane.to_string(),
                 action,
@@ -231,12 +253,56 @@ impl Flock {
                 note(pane_id, "skip", format!("no_kind_for_role via={why}"));
                 continue;
             }
+            let key = format!("{scope}|{role}|{kinds:?}|{exclude_author:?}");
+            let known_empty = token.is_some_and(|token| {
+                self.push_empty
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .get(pane_id)
+                    .is_some_and(|last| {
+                        last.key == key
+                            && last.token == token
+                            && last.at.elapsed() < EMPTY_CLAIM_MAX_AGE
+                    })
+            });
+            if known_empty {
+                note(
+                    pane_id,
+                    "none",
+                    format!("scope={scope} reason=empty via={why} unchanged"),
+                );
+                continue;
+            }
             let options = ClaimOptions {
                 kinds,
                 exclude_author,
                 ..ClaimOptions::default()
             };
-            match tasks.claim_next(scope, pane_id, options).await {
+            let outcome = tasks.claim_next(scope, pane_id, options).await;
+            {
+                let mut empty = self
+                    .push_empty
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                match (&outcome, token) {
+                    (Ok(ClaimOutcome::Refused { refusal, .. }), Some(token))
+                        if refusal.reason == "empty" =>
+                    {
+                        empty.insert(
+                            pane_id.clone(),
+                            EmptyClaim {
+                                key,
+                                token,
+                                at: std::time::Instant::now(),
+                            },
+                        );
+                    }
+                    _ => {
+                        empty.remove(pane_id);
+                    }
+                }
+            }
+            match outcome {
                 Err(error) => {
                     eprintln!("task claim failed for {pane_id}: {error}");
                     note(pane_id, "claim_failed", error.to_string());
