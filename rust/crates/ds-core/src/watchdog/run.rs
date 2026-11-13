@@ -689,11 +689,90 @@ fn recent_failure(state: &Value, now: f64) -> Value {
         .ok()
         .and_then(|value| value.parse::<f64>().ok())
         .unwrap_or(43200.0);
-    state
+    let Some(failure) = state
         .get("delivery_failure")
-        .filter(|f| now - f["at"].as_f64().unwrap_or(now) <= max_age)
-        .cloned()
-        .unwrap_or(Value::Null)
+        .filter(|failure| python_truthy(failure))
+    else {
+        return Value::Null;
+    };
+    let Some(at) = failure.get("at").and_then(python_float) else {
+        return Value::Null;
+    };
+    if now - at <= max_age {
+        failure.clone()
+    } else {
+        Value::Null
+    }
+}
+
+fn python_truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(value) => *value,
+        Value::Number(value) => value.as_f64().is_some_and(|value| value != 0.0),
+        Value::String(value) => !value.is_empty(),
+        Value::Array(value) => !value.is_empty(),
+        Value::Object(value) => !value.is_empty(),
+    }
+}
+
+fn python_float(value: &Value) -> Option<f64> {
+    match value {
+        Value::Number(value) => value.as_f64(),
+        Value::Bool(value) => Some(f64::from(u8::from(*value))),
+        Value::String(value) => python_float_string(value),
+        _ => None,
+    }
+}
+
+/// Python's float(string) permits underscores between digits and accepts Unicode decimal
+/// digits. Normalize those lexical forms before using Rust's decimal float parser.
+fn python_float_string(value: &str) -> Option<f64> {
+    let value = value.trim();
+    let mut normalized = String::with_capacity(value.len());
+    let mut chars = value.chars().peekable();
+    let mut previous_was_digit = false;
+    while let Some(ch) = chars.next() {
+        if ch == '_' {
+            let next_is_digit = chars
+                .peek()
+                .is_some_and(|next| decimal_digit(*next).is_some());
+            if !previous_was_digit || !next_is_digit {
+                return None;
+            }
+            previous_was_digit = false;
+            continue;
+        }
+        if let Some(digit) = decimal_digit(ch) {
+            normalized.push(char::from(b'0' + digit));
+            previous_was_digit = true;
+        } else {
+            normalized.push(ch);
+            previous_was_digit = ch.is_ascii_digit();
+        }
+    }
+    normalized.parse().ok()
+}
+
+/// Return the value of a Unicode decimal digit (general category Nd).
+fn decimal_digit(ch: char) -> Option<u8> {
+    // Unicode Nd blocks are ten contiguous code points. Keep the table explicit so this parser
+    // has no new runtime dependency and does not mistake superscripts/fractions for Nd.
+    const ZEROES: &[u32] = &[
+        0x0030, 0x0660, 0x06f0, 0x07c0, 0x0966, 0x09e6, 0x0a66, 0x0ae6, 0x0b66, 0x0be6, 0x0c66,
+        0x0ce6, 0x0d66, 0x0de6, 0x0e50, 0x0ed0, 0x0f20, 0x1040, 0x1090, 0x17e0, 0x1810, 0x1946,
+        0x19d0, 0x1a80, 0x1a90, 0x1b50, 0x1bb0, 0x1c40, 0x1c50, 0xa620, 0xa8d0, 0xa900, 0xa9d0,
+        0xa9f0, 0xaa50, 0xabf0, 0xff10, 0x104a0, 0x10d30, 0x10d40, 0x11066, 0x110f0, 0x11136,
+        0x111d0, 0x112f0, 0x11450, 0x114d0, 0x11650, 0x116c0, 0x116d0, 0x116da, 0x11730, 0x118e0,
+        0x11950, 0x11bf0, 0x11c50, 0x11d50, 0x11da0, 0x11f50, 0x16130, 0x16a60, 0x16ac0, 0x16b50,
+        0x16d70, 0x1ccf0, 0x1d7ce, 0x1d7d8, 0x1d7e2, 0x1d7ec, 0x1d7f6, 0x1e140, 0x1e2f0, 0x1e4f0,
+        0x1e5f1, 0x1e950, 0x1fbf0,
+    ];
+    let cp = ch as u32;
+    ZEROES.iter().find_map(|zero| {
+        let digit = cp.checked_sub(*zero)?;
+        (digit < 10).then_some(digit as u8)
+    })
 }
 
 fn write_heartbeat(path: &Path, now: f64, cadence: f64) -> Result<(), DunkError> {
