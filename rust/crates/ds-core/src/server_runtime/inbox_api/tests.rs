@@ -553,6 +553,41 @@ fn inbox_status_cache_ttl_validates_captured_startup_config() {
     }
 }
 
+/// t4644: mail the web desk sends with its service token is recorded as from the desk. A
+/// pane-less caller with any other token role, and a caller with a pane, are unchanged.
+#[test]
+fn inbox_send_from_the_web_role_without_a_pane_is_stamped_as_the_desk() {
+    let (_dir, services) = make_services("desk-sender", factory(None), None);
+    let dispatcher = services.dispatcher(handlers());
+    let (web, system) = services
+        .flock()
+        .with_roles(|roles, _| {
+            Ok((
+                roles.issue_token("web", Some("desk"), None)?,
+                roles.issue_token("system", Some("timers"), None)?,
+            ))
+        })
+        .unwrap();
+    let token_ctx = |token: &str| RequestCtx {
+        service_token: Some(token.into()),
+        socket_peer: Some(true),
+        socket_peer_uid: Some(nix::unistd::geteuid().as_raw()),
+        ..RequestCtx::default()
+    };
+    let send = |ctx: &RequestCtx| {
+        dispatcher
+            .dispatch(
+                "inbox_send",
+                &json!({"to":"w1:p1","body":"quick message","notify":false}),
+                ctx,
+            )
+            .unwrap()
+    };
+    assert_eq!(send(&token_ctx(&web))["sender"], "desk");
+    assert_eq!(send(&token_ctx(&system))["sender"], json!(null));
+    assert_eq!(send(&request("w1:p1"))["sender"], "w1:p1");
+}
+
 #[test]
 fn inbox_send_raw_values_preserve_body_subject_and_notification_error_order() {
     let (_dir, services) = make_services("raw-send", factory(None), None);

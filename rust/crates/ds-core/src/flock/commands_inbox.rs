@@ -90,6 +90,9 @@ pub struct Nudge {
     pub message: Option<String>,
 }
 
+/// The sender recorded for mail the web desk sends with its service token (t4644).
+pub const DESK_SENDER: &str = "desk";
+
 /// `SYSTEM_SENDERS`.
 pub const SYSTEM_SENDERS: [&str; 1] = ["watchdog"];
 
@@ -153,6 +156,10 @@ pub struct SendArgs<'a> {
     pub self_pane_id: Option<&'a str>,
     pub system_sender: Option<&'a str>,
     pub agent_only: bool,
+    /// The sender to record when the caller has no pane and names no system sender: `desk` for
+    /// the web desk's service token (t4644), so its mail does not arrive "from unknown". Chosen
+    /// by the daemon from the authenticated role; it is not a wire argument.
+    pub role_sender: Option<&'a str>,
     /// Notify the recipient even when `DUNKINGSHEEP_INBOX_SILENT_MAILBOXES` lists it. Only the
     /// daemon's own Telegram owner-lane nudge sets this (t4645); it is not a wire argument.
     pub wake_quiet: bool,
@@ -605,7 +612,8 @@ impl Flock {
         let sender: Option<String> = args
             .system_sender
             .map(str::to_string)
-            .or_else(|| self_pane.map(str::to_string));
+            .or_else(|| self_pane.map(str::to_string))
+            .or_else(|| args.role_sender.map(str::to_string));
         // PM routing: a lane that messages the VP out of habit is redirected to its project
         // PM (or flagged). Routing must never block a send.
         let mut body = args.body.to_string();

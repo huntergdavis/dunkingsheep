@@ -805,6 +805,31 @@ fn quiet_recipient_alias_and_pane_still_store_unread_without_any_notice() {
     }
 }
 
+/// t4644: a pane-less send with a role sender is recorded and announced as from that sender; a
+/// pane or a system sender still wins, and without it the sender stays unknown.
+#[test]
+fn a_role_sender_names_pane_less_mail_and_never_overrides_a_pane() {
+    let (e, d) = (env("worker"), tempfile::tempdir().unwrap());
+    let f = flock(&d);
+    let mut args = send("w1:p2", None);
+    assert_eq!(None, f.inbox_send(&e, &args).unwrap().sender);
+    args.role_sender = Some(super::commands_inbox::DESK_SENDER);
+    let sent = f.inbox_send(&e, &args).unwrap();
+    assert_eq!(Some("desk".to_string()), sent.sender);
+    assert!(e
+        .nudges
+        .lock()
+        .unwrap()
+        .last()
+        .unwrap()
+        .contains(" from desk"));
+    args.self_pane_id = Some("w1:p1");
+    assert_eq!(
+        Some("w1:p1".into()),
+        f.inbox_send(&e, &args).unwrap().sender
+    );
+}
+
 /// t4645: only a send that asks for it wakes a quiet recipient; the same send without the flag,
 /// and one with notify off, stay silent.
 #[test]
