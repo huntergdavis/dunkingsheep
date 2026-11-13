@@ -42,15 +42,38 @@ struct StreamState {
     resize_epoch: String,
 }
 
-/// Disabled unless explicitly enabled and supplied with trusted hosts.
-pub fn configured_router(auth: Arc<dyn AuthBackend>, scheme: RequestScheme) -> Router {
+/// Disabled unless explicitly enabled and supplied with trusted hosts. Returns the router and
+/// whether its routes are mounted, and logs one startup line saying which, so a deployment that
+/// answers 404 names its own cause.
+pub fn configured_router(auth: Arc<dyn AuthBackend>, scheme: RequestScheme) -> (Router, bool) {
     let env = Env::from_process();
-    router_from_env(auth, scheme, &env)
+    match build_router(auth, scheme, &env) {
+        Ok((router, hosts)) => {
+            eprintln!("terminal stream enabled ({hosts} trusted host(s))");
+            (router, true)
+        }
+        Err(reason) => {
+            eprintln!("terminal stream disabled: {reason}");
+            (Router::new(), false)
+        }
+    }
 }
 
+#[cfg(test)]
 fn router_from_env(auth: Arc<dyn AuthBackend>, scheme: RequestScheme, env: &Env) -> Router {
+    build_router(auth, scheme, env)
+        .map(|(router, _)| router)
+        .unwrap_or_default()
+}
+
+/// The router and its trusted-host count, or why the stream stays off.
+fn build_router(
+    auth: Arc<dyn AuthBackend>,
+    scheme: RequestScheme,
+    env: &Env,
+) -> Result<(Router, usize), String> {
     if env.get("DUNKINGSHEEP_TERMINAL_STREAM") != Some("1") {
-        return Router::new();
+        return Err("DUNKINGSHEEP_TERMINAL_STREAM is not 1".into());
     }
     let hosts: Vec<String> = env
         .get("DUNKINGSHEEP_TERMINAL_STREAM_HOSTS")
@@ -61,17 +84,14 @@ fn router_from_env(auth: Arc<dyn AuthBackend>, scheme: RequestScheme, env: &Env)
         .map(str::to_owned)
         .collect();
     if hosts.is_empty() {
-        return Router::new();
+        return Err("DUNKINGSHEEP_TERMINAL_STREAM_HOSTS is empty".into());
     }
-    let Ok(backend) = ds_core::server_runtime::configured_backend() else {
-        return Router::new();
-    };
-    let Ok(roles) = Roles::new(env, None, None, None) else {
-        return Router::new();
-    };
-    let Some(resize_epoch) = new_resize_epoch() else {
-        return Router::new();
-    };
+    let host_count = hosts.len();
+    let backend = ds_core::server_runtime::configured_backend()
+        .map_err(|error| format!("terminal backend: {error}"))?;
+    let roles =
+        Roles::new(env, None, None, None).map_err(|error| format!("role registry: {error}"))?;
+    let resize_epoch = new_resize_epoch().ok_or("no system randomness for the resize epoch")?;
     let socket = env
         .get("DUNKINGSHEEP_TMUX_SOCKET")
         .filter(|s| !s.is_empty())
@@ -89,7 +109,7 @@ fn router_from_env(auth: Arc<dyn AuthBackend>, scheme: RequestScheme, env: &Env)
         resize_slots: Arc::new(ResizeSlots::default()),
         resize_epoch,
     });
-    Router::new()
+    let router = Router::new()
         .route("/api/terminals", get(list_terminals))
         .route(
             "/api/terminals/{name}/resize",
@@ -98,7 +118,8 @@ fn router_from_env(auth: Arc<dyn AuthBackend>, scheme: RequestScheme, env: &Env)
                 .layer(DefaultBodyLimit::max(4096)),
         )
         .route("/api/terminals/{name}/stream", get(upgrade))
-        .with_state(state)
+        .with_state(state);
+    Ok((router, host_count))
 }
 
 fn new_resize_epoch() -> Option<String> {
@@ -683,6 +704,60 @@ mod tests {
         let second = new_resize_epoch().unwrap();
         assert_eq!(first.len(), 32);
         assert_ne!(first, second);
+    }
+
+    /// t4626: the candidate desk answered 404 on `/api/terminals` with the stream enabled,
+    /// because the desk's path layer sent every non-Python route to the static mount.
+    #[tokio::test]
+    async fn desk_path_layer_admits_terminal_routes_only_when_enabled() {
+        use tower::ServiceExt;
+        let dir = tempfile::tempdir().unwrap();
+        let on = Env::from_pairs(&[
+            ("DUNKINGSHEEP_TERMINAL_STREAM", "1"),
+            ("DUNKINGSHEEP_TERMINAL_STREAM_HOSTS", "desk.example:8787"),
+            ("DUNKINGSHEEP_DIR", dir.path().to_str().unwrap()),
+        ]);
+        let off = Env::from_pairs(&[("DUNKINGSHEEP_TERMINAL_STREAM", "1")]);
+        for (env, wanted) in [
+            (on, Ok(StatusCode::UNAUTHORIZED)),
+            (off, Err("DUNKINGSHEEP_TERMINAL_STREAM_HOSTS is empty")),
+        ] {
+            let auth = Arc::new(FakeAuth(AtomicBool::new(true)));
+            let built = build_router(auth, RequestScheme::Http, &env);
+            assert_eq!(built.as_ref().err().map(String::as_str), wanted.err());
+            let enabled = built.is_ok();
+            let app = built
+                .map(|(router, _)| router)
+                .unwrap_or_default()
+                .fallback(|| async { StatusCode::NOT_FOUND });
+            for (method, path) in [
+                ("GET", "/api/terminals"),
+                ("GET", "/api/terminals/example/resize"),
+                ("GET", "/api/terminals/example/stream"),
+            ] {
+                let response = crate::web_server::decoded_path_routing(app.clone(), enabled)
+                    .oneshot(
+                        axum::http::Request::builder()
+                            .method(method)
+                            .uri(path)
+                            .header(header::HOST, "desk.example:8787")
+                            .body(axum::body::Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                if enabled && path.ends_with("/stream") {
+                    // No upgrade headers: refused by the route itself, not the static mount.
+                    assert_ne!(response.status(), StatusCode::NOT_FOUND, "{path}");
+                } else {
+                    assert_eq!(
+                        response.status(),
+                        wanted.unwrap_or(StatusCode::NOT_FOUND),
+                        "{method} {path}"
+                    );
+                }
+            }
+        }
     }
 
     #[tokio::test]

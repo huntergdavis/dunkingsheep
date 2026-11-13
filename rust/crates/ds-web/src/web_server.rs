@@ -390,7 +390,14 @@ impl Desk {
     /// Mounts every P0 route against the owned backends, then the legacy redirect middleware
     /// (outermost, so it sees every path) and the static fallback.
     pub fn router(&self) -> Router {
+        self.router_and_terminal_stream().0
+    }
+
+    /// The router, and whether the terminal stream routes are mounted on it.
+    fn router_and_terminal_stream(&self) -> (Router, bool) {
         let auth: Arc<dyn AuthBackend> = self.auth.clone();
+        let (terminal_stream, terminal_stream_enabled) =
+            crate::terminal_stream_route::configured_router(auth.clone(), self.scheme);
         let scheme = self.scheme;
         let (messages_read_backend, messages_write_backend, search_backend) =
             self.messages.trait_objects();
@@ -410,7 +417,7 @@ impl Desk {
         let dash: Arc<dyn DashRoutes> = self.dash.clone();
         let ui_dist = self.ui_dist.clone();
 
-        Router::new()
+        let router = Router::new()
             .merge(system::router(self.system.clone(), auth.clone(), scheme))
             .merge(crate::routes::auth::router_with_scheme(scheme).layer(Extension(auth.clone())))
             .merge(
@@ -447,16 +454,14 @@ impl Desk {
                     .layer(Extension(auth.clone())),
             )
             .merge(ops_board::router(board, auth.clone(), scheme))
-            .merge(crate::terminal_stream_route::configured_router(
-                auth.clone(),
-                scheme,
-            ))
+            .merge(terminal_stream)
             .merge(dash::router(dash, auth, scheme))
             .fallback(move |request: Request| {
                 let root = ui_dist.clone();
                 async move { serve_static(&root, request).await }
             })
-            .layer(middleware::from_fn(retire_the_desk_ui))
+            .layer(middleware::from_fn(retire_the_desk_ui));
+        (router, terminal_stream_enabled)
     }
 }
 
@@ -466,6 +471,8 @@ impl Desk {
 #[derive(Clone)]
 struct DecodedPathRouting<S> {
     inner: S,
+    /// Whether the terminal stream routes are mounted on `inner`.
+    terminal_stream: bool,
 }
 
 impl<S, B> tower::Service<Request<B>> for DecodedPathRouting<S>
@@ -488,6 +495,7 @@ where
         if is_python_route(&decoded, request.method())
             || (request.method() == Method::GET && decoded == "/api/projects")
             || (request.method() == Method::POST && decoded == "/api/ops-board/question")
+            || (self.terminal_stream && is_terminal_route(&decoded, request.method()))
         {
             if let Some(routed) = routed_uri(request.uri(), &decoded) {
                 *request.uri_mut() = routed;
@@ -559,6 +567,39 @@ pub const PYTHON_ROUTES: &[(&str, &str)] = &[
 ];
 
 /// Whether a Python route claims this decoded path for this method.
+/// The Rust-only terminal stream routes (`terminal_stream_route`). Python never had them, so they
+/// are not in `PYTHON_ROUTES`; unless the path layer admits them they are forced to the static
+/// mount and answer 404 even when the router is mounted. Admitted only while the stream is on.
+const TERMINAL_ROUTES: &[(&str, &str)] = &[
+    ("GET", "/api/terminals"),
+    ("GET", "/api/terminals/{name}/resize"),
+    ("POST", "/api/terminals/{name}/resize"),
+    ("GET", "/api/terminals/{name}/stream"),
+];
+
+fn is_terminal_route(decoded: &str, method: &Method) -> bool {
+    TERMINAL_ROUTES.iter().any(|(route_method, pattern)| {
+        *route_method == method.as_str() && pattern_matches(pattern, decoded)
+    })
+}
+
+/// The desk's path layer around `app`, as `serve` mounts it.
+#[cfg(test)]
+pub(crate) fn decoded_path_routing(
+    app: Router,
+    terminal_stream: bool,
+) -> impl tower::Service<
+    Request,
+    Response = Response,
+    Error = std::convert::Infallible,
+    Future = impl Future<Output = Result<Response, std::convert::Infallible>>,
+> {
+    DecodedPathRouting {
+        inner: app,
+        terminal_stream,
+    }
+}
+
 fn is_python_route(decoded: &str, method: &Method) -> bool {
     PYTHON_ROUTES.iter().any(|(route_method, pattern)| {
         *route_method == method.as_str() && pattern_matches(pattern, decoded)
@@ -600,11 +641,14 @@ pub async fn serve(
     let desk = Desk::open(config)?;
     desk.start()
         .map_err(|error| DeskError::Startup(format!("board: {error}")))?;
-    let app = desk.router();
+    let (app, terminal_stream) = desk.router_and_terminal_stream();
     let served = axum::serve(
         listener,
         axum::ServiceExt::<Request>::into_make_service_with_connect_info::<SocketAddr>(
-            DecodedPathRouting { inner: app },
+            DecodedPathRouting {
+                inner: app,
+                terminal_stream,
+            },
         ),
     )
     .with_graceful_shutdown(shutdown)
