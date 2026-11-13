@@ -30,6 +30,15 @@ pub struct PostedAttachment {
     pub delivery: String,
 }
 
+pub struct TelegramAttachment<'a> {
+    pub channel: &'a str,
+    pub body: &'a str,
+    pub external_id: &'a str,
+    pub filename: &'a str,
+    pub mime: &'a str,
+    pub content: &'a [u8],
+}
+
 fn open(path: &Path) -> Result<Option<Connection>, BridgeError> {
     if !path.exists() {
         return Ok(None);
@@ -85,13 +94,16 @@ fn safe_filename(filename: &str) -> String {
 pub fn post_telegram_attachment(
     database: &Path,
     uploads: &Path,
-    channel: &str,
-    body: &str,
-    external_id: &str,
-    filename: &str,
-    mime: &str,
-    content: &[u8],
+    attachment: TelegramAttachment<'_>,
 ) -> Result<PostedAttachment, BridgeError> {
+    let TelegramAttachment {
+        channel,
+        body,
+        external_id,
+        filename,
+        mime,
+        content,
+    } = attachment;
     let filename = safe_filename(filename);
     fs::create_dir_all(uploads).map_err(|error| BridgeError::Os(error.to_string()))?;
     let id = attachment_id();

@@ -147,10 +147,11 @@ fn attachment_spec(message: &Value) -> Result<Option<AttachmentSpec>, BridgeErro
             Some((item, "video.mp4", "video/mp4"))
         } else if let Some(item) = message.get("audio").filter(|item| truthy(Some(item))) {
             Some((item, "audio.mp3", "audio/mpeg"))
-        } else if let Some(item) = message.get("voice").filter(|item| truthy(Some(item))) {
-            Some((item, "voice.ogg", "audio/ogg"))
         } else {
-            None
+            message
+                .get("voice")
+                .filter(|item| truthy(Some(item)))
+                .map(|item| (item, "voice.ogg", "audio/ogg"))
         };
     let Some((item, default_filename, default_mime)) = item_and_defaults else {
         if message
@@ -496,12 +497,14 @@ impl<D: Daemon, B: Bot> Bridge<D, B> {
             let posted = desk_store::post_telegram_attachment(
                 &self.paths.desk_db(),
                 &self.paths.data.join("uploads"),
-                &channel,
-                &text,
-                &external_id,
-                &spec.filename,
-                &spec.mime,
-                &content,
+                desk_store::TelegramAttachment {
+                    channel: &channel,
+                    body: &text,
+                    external_id: &external_id,
+                    filename: &spec.filename,
+                    mime: &spec.mime,
+                    content: &content,
+                },
             )?;
             return self.send_text(
                 &chat_id,
