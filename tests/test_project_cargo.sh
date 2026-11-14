@@ -24,7 +24,7 @@ chmod +x "$fixture/bin/cargo"
 wrapper=$repo/tools/proj-cargo
 wait_start() {
     for ((i=0; i<100; i++)); do
-        if [[ -f $TRACE ]] && rg -q "^start $1$" "$TRACE"; then return; fi
+        if [[ -f $TRACE ]] && grep -Eq "^start $1$" "$TRACE"; then return; fi
         sleep 0.05
     done
     echo "missing start $1" >&2; exit 1
@@ -38,11 +38,11 @@ expect_exit() {
 "$wrapper" beta second 2> "$fixture/second.log" & b=$!; pids+=("$b")
 wait_start first; wait_start second
 expect_exit 75 "$wrapper" gamma third 2> "$fixture/host-busy.log"
-if rg -q '^start third$' "$TRACE"; then exit 1; fi
-rg -q 'holder pid=[0-9]+.*project=(alpha|beta)' "$fixture/host-busy.log"
+if grep -Eq '^start third$' "$TRACE"; then exit 1; fi
+grep -Eq 'holder pid=[0-9]+.*project=(alpha|beta)' "$fixture/host-busy.log"
 expect_exit 75 "$wrapper" alpha duplicate 2> "$fixture/project-busy.log"
-if rg -q '^start duplicate$' "$TRACE"; then exit 1; fi
-rg -q 'holder pid=[0-9]+.*cwd=.*project=alpha' "$fixture/project-busy.log"
+if grep -Eq '^start duplicate$' "$TRACE"; then exit 1; fi
+grep -Eq 'holder pid=[0-9]+.*cwd=.*project=alpha' "$fixture/project-busy.log"
 # Cargo reads remain available even with all compile slots held.
 touch "$RELEASE/metadata"
 "$wrapper" gamma metadata 2> "$fixture/read.log"
@@ -65,7 +65,7 @@ for ((i=0; i<100; i++)); do
     sleep 0.01
 done
 expect_exit 75 "$wrapper" foreign blocked 2> "$fixture/foreign.log"
-rg -q "holder pid=$foreign .*project=unmanaged" "$fixture/foreign.log"
+grep -Eq "holder pid=$foreign .*project=unmanaged" "$fixture/foreign.log"
 wait "$foreign"
 # Owner config rejects invalid limits, and lowering is only allowed while idle.
 mkdir -p "$XDG_CONFIG_HOME/compile-slots"
@@ -74,7 +74,7 @@ expect_exit 64 "$wrapper" alpha config-error 2> "$fixture/config.log"
 echo 1 > "$XDG_CONFIG_HOME/compile-slots/limit"
 touch "$RELEASE/config-one"
 "$wrapper" alpha config-one 2> "$fixture/config-one.log"
-rg -q 'host-slot=1/1' "$fixture/config-one.log"
+grep -Eq 'host-slot=1/1' "$fixture/config-one.log"
 expect_exit 64 "$wrapper" ../escape build 2> "$fixture/slug.log"
 # Exercise install mechanics only in a private prefix. Stub process/lock listings
 # so unrelated real builds are neither inspected as test failures nor modified.
