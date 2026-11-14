@@ -283,13 +283,13 @@ pub fn report(
     dirs.sort_by_key(|dir| std::cmp::Reverse(dir["bytes"].as_u64().unwrap_or(0)));
     let filesystem = match nix::sys::statvfs::statvfs(root) {
         Ok(stat) => {
-            let unit = stat.fragment_size() as u64;
-            let total = stat.blocks() as u64 * unit;
-            let free = stat.blocks_available() as u64 * unit;
+            let unit = stat.fragment_size();
+            let total = stat.blocks() * unit;
+            let free = stat.blocks_available() * unit;
             json!({
                 "total_bytes": total,
                 "free_bytes": free,
-                "used_pct": if total > 0 { Some(((total - free.min(total)) * 100 / total) as i64) } else { None },
+                "used_pct": ((total - free.min(total)) * 100).checked_div(total),
                 "reason": null,
             })
         }

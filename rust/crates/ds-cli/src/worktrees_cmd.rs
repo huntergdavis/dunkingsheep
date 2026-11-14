@@ -33,6 +33,18 @@ fn git(dir: &Path, args: &[&str]) -> Option<String> {
         .filter(|text| !text.is_empty())
 }
 
+/// True when `dir` is itself the top of a git checkout. A plain directory inside some other
+/// checkout answers git with that checkout's branch and origin; it must not borrow them.
+pub fn own_checkout(dir: &Path) -> bool {
+    let Some(top) = git(dir, &["rev-parse", "--show-toplevel"]) else {
+        return false;
+    };
+    match (std::fs::canonicalize(top), std::fs::canonicalize(dir)) {
+        (Ok(top), Ok(dir)) => top == dir,
+        _ => false,
+    }
+}
+
 /// `owner/repo` of a GitHub remote URL (`https://github.com/o/r.git`, `git@github.com:o/r.git`).
 pub fn github_repo(url: &str) -> Option<String> {
     let rest = url
@@ -157,6 +169,9 @@ pub fn disk_command(root: Option<&str>, json: bool) -> Outcome {
     let cache: RefCell<HashMap<String, Result<HashMap<String, (i64, String)>, String>>> =
         RefCell::new(HashMap::new());
     let link = |dir: &Path| {
+        if !own_checkout(dir) {
+            return PrLink::unknown("not the top of a git checkout");
+        }
         let branch = git(dir, &["symbolic-ref", "--short", "-q", "HEAD"]);
         let repo = git(dir, &["remote", "get-url", "origin"]).and_then(|url| github_repo(&url));
         link_for(branch, repo, &mut |repo| {
@@ -270,6 +285,27 @@ mod tests {
             )]))
         });
         assert_eq!(odd.state, "unknown");
+    }
+
+    #[test]
+    fn a_directory_inside_another_checkout_is_not_its_own_checkout() {
+        let home = tempfile::tempdir().unwrap();
+        let repo = home.path().join("repo");
+        let inner = repo.join("scratch");
+        std::fs::create_dir_all(&inner).unwrap();
+        let made = Command::new("git")
+            .arg("init")
+            .arg("-q")
+            .arg(&repo)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        assert!(own_checkout(&repo));
+        assert!(
+            !own_checkout(&inner),
+            "it would answer with the parent's branch"
+        );
+        assert!(!own_checkout(home.path()), "not in a checkout at all");
     }
 
     #[test]
