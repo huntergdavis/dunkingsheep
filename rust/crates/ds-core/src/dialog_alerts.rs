@@ -4,13 +4,9 @@
 //! are passed explicitly; this module owns identity, retry timing and persistence,
 //! and wires the owner and VP delivery paths through injectable boundaries.
 
-use std::ffi::{OsStr, OsString};
-use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::{Mutex, MutexGuard, OnceLock};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use sha2::{Digest, Sha256};
@@ -20,264 +16,32 @@ use crate::error::DunkError;
 use crate::flock::commands_inbox::{InboxEnv, SendArgs};
 use crate::flock::Flock;
 
-const OWNER_POST_TIMEOUT: Duration = Duration::from_secs(15);
-const DEFAULT_VP_PANE: &str = "w9:pH";
+/// The subject of every stuck-dialog alert row.
+pub const ALERT_SUBJECT: &str = "Dialog blocks queued delivery";
 
-#[cfg(unix)]
-const PYTHON_DEFAULT_SEARCH_PATH: &str = "/bin:/usr/bin";
-#[cfg(windows)]
-const PYTHON_DEFAULT_SEARCH_PATH: &str = r".;C:\Windows\System32";
-#[cfg(not(any(unix, windows)))]
-const PYTHON_DEFAULT_SEARCH_PATH: &str = "/bin:/usr/bin";
-
-/// Inputs used to resolve the `vpctl` executable. `Some("")` mirrors Python's empty
-/// `DUNKINGSHEEP_VPCTL`: it falls through to PATH and then the home-directory fallback.
-#[derive(Debug, Clone)]
-pub struct OwnerPostConfig {
-    pub override_command: Option<OsString>,
-    pub path: Option<OsString>,
-    pub home: Option<PathBuf>,
-}
-
-impl OwnerPostConfig {
-    /// Read the three process-environment values used by the Python owner sink.
-    pub fn from_environment() -> Self {
-        Self {
-            override_command: std::env::var_os("DUNKINGSHEEP_VPCTL"),
-            path: std::env::var_os("PATH"),
-            home: python_home(
-                std::env::var_os("HOME").map(PathBuf::from),
-                account_home_directory,
-            ),
-        }
-    }
-}
-
-fn python_home(
-    configured_home: Option<PathBuf>,
-    account_home: impl FnOnce() -> Option<PathBuf>,
-) -> Option<PathBuf> {
-    configured_home.or_else(account_home)
-}
-
-/// `Path.home()` uses the account database if HOME is absent. Rust's equivalent is
-/// deprecated for general application use, but preserves that specific platform fallback
-/// without adding a dependency to this port.
-#[allow(deprecated)]
-fn account_home_directory() -> Option<PathBuf> {
-    std::env::home_dir()
-}
-
-/// Resolve the command using the same override, PATH, home fallback order as Python.
-pub fn resolve_owner_command(config: &OwnerPostConfig) -> Result<PathBuf, String> {
-    resolve_owner_command_with_default_path(config, OsStr::new(PYTHON_DEFAULT_SEARCH_PATH))
-}
-
-fn resolve_owner_command_with_default_path(
-    config: &OwnerPostConfig,
-    default_search_path: &OsStr,
-) -> Result<PathBuf, String> {
-    if let Some(command) = config
-        .override_command
-        .as_deref()
-        .filter(|command| !command.is_empty())
-    {
-        return Ok(PathBuf::from(command));
-    }
-    let search_path = config.path.as_deref().unwrap_or(default_search_path);
-    for directory in std::env::split_paths(search_path) {
-        let candidate = directory.join("vpctl");
-        if is_executable(&candidate) {
-            return Ok(candidate);
-        }
-    }
-    config
-        .home
-        .as_ref()
-        .map(|home| home.join("workspace/vp-of-agentry/vpctl"))
-        .ok_or_else(|| "HOME is not set and vpctl was not found on PATH".to_string())
-}
-
-#[cfg(unix)]
-fn is_executable(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path)
-        .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
-        .unwrap_or(false)
-}
-
-#[cfg(not(unix))]
-fn is_executable(path: &Path) -> bool {
-    path.is_file()
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OwnerProcessOutput {
-    pub success: bool,
-    pub stdout: String,
-    pub stderr: String,
-}
-
-/// Injectable process boundary for the owner post. Production uses [`StdOwnerProcess`]; tests
-/// can assert the exact invocation without executing any real owner tooling.
-pub trait OwnerProcess {
-    fn run(
-        &mut self,
-        command: &OsStr,
-        args: &[OsString],
-        body: &str,
-        timeout: Duration,
-    ) -> Result<OwnerProcessOutput, String>;
-}
-
-#[derive(Debug, Default)]
-pub struct StdOwnerProcess;
-
-impl OwnerProcess for StdOwnerProcess {
-    fn run(
-        &mut self,
-        command: &OsStr,
-        args: &[OsString],
-        body: &str,
-        timeout: Duration,
-    ) -> Result<OwnerProcessOutput, String> {
-        let mut process = Command::new(command);
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            process.process_group(0);
-        }
-        process
-            .args(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        // Only test fixtures can race a just-written fake executable. Keep the
-        // production spawn behavior unchanged.
-        #[cfg(test)]
-        let child = crate::testsupport::exec_retrying_busy(|| process.spawn());
-        #[cfg(not(test))]
-        let child = process.spawn();
-        let mut child = child.map_err(|error| format!("could not start vpctl: {error}"))?;
-        let mut stdin = child.stdin.take().expect("piped child stdin");
-        let input = body.as_bytes().to_vec();
-        let writer = thread::spawn(move || stdin.write_all(&input));
-        let mut stdout = child.stdout.take().expect("piped child stdout");
-        let stdout_reader = thread::spawn(move || {
-            let mut output = Vec::new();
-            stdout.read_to_end(&mut output).map(|_| output)
-        });
-        let mut stderr = child.stderr.take().expect("piped child stderr");
-        let stderr_reader = thread::spawn(move || {
-            let mut output = Vec::new();
-            stderr.read_to_end(&mut output).map(|_| output)
-        });
-
-        let start = Instant::now();
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break Some(status),
-                Ok(None) if start.elapsed() < timeout => thread::sleep(Duration::from_millis(10)),
-                Ok(None) => {
-                    terminate_owner_process(&mut child);
-                    break None;
-                }
-                Err(error) => {
-                    terminate_owner_process(&mut child);
-                    return Err(format!("vpctl wait failed: {error}"));
-                }
-            }
-        };
-        let _ = writer
-            .join()
-            .map_err(|_| "vpctl stdin writer panicked".to_string())?;
-        let stdout = stdout_reader
-            .join()
-            .map_err(|_| "vpctl stdout reader panicked".to_string())?
-            .map_err(|error| format!("could not read vpctl stdout: {error}"))?;
-        let stderr = stderr_reader
-            .join()
-            .map_err(|_| "vpctl stderr reader panicked".to_string())?
-            .map_err(|error| format!("could not read vpctl stderr: {error}"))?;
-        let output = OwnerProcessOutput {
-            success: status.is_some_and(|status| status.success()),
-            stdout: String::from_utf8_lossy(&stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&stderr).into_owned(),
-        };
-        if status.is_none() {
-            return Err(format!(
-                "vpctl timed out after {} seconds",
-                timeout.as_secs()
-            ));
-        }
-        Ok(output)
-    }
-}
-
-fn terminate_owner_process(child: &mut std::process::Child) {
-    #[cfg(unix)]
-    {
-        let group = format!("-{}", child.id());
-        let _ = Command::new("/bin/kill")
-            .args(["-KILL", "--", group.as_str()])
-            .status();
-    }
-    let _ = child.kill();
-    let _ = child.wait();
-}
-
-/// Send one dialog body to the owner using `vpctl brief --channel cos`.
-pub fn post_owner(
-    body: &str,
-    config: &OwnerPostConfig,
-    process: &mut dyn OwnerProcess,
-) -> Result<SinkDelivery, String> {
-    let command = resolve_owner_command(config)?;
-    let args = [
-        OsString::from("brief"),
-        OsString::from("--channel"),
-        OsString::from("cos"),
-    ];
-    let output = process.run(command.as_os_str(), &args, body, OWNER_POST_TIMEOUT)?;
-    if !output.success {
-        // Keep captured output inside the process boundary. Like Python's notify wrapper,
-        // the durable sink result exposes the exception class, never arbitrary child text.
-        return Err("CalledProcessError".into());
-    }
-    Ok(SinkDelivery::Delivered)
-}
-
-/// Production owner sink using process environment and the bounded std process runner.
-pub fn post_owner_from_environment(body: &str) -> Result<SinkDelivery, String> {
-    post_owner(
-        body,
-        &OwnerPostConfig::from_environment(),
-        &mut StdOwnerProcess,
-    )
-}
-
-/// Deliver a dialog alert to the VP through the real inbox storage/send path.
-pub fn post_vp(
+/// One stuck-dialog alert as an inbox row from the watchdog, through the daemon's own inbox
+/// store. `wake_quiet` notifies a recipient whose mailboxes are configured silent (the owner
+/// lane's are); it is set by the daemon only and is not a wire argument. `agent_only` stores
+/// the row with the agent audience, which keeps it out of a person's conversation view.
+fn post_inbox(
     flock: &Flock,
     env: &dyn InboxEnv,
+    to: &str,
     body: &str,
-    vp_pane: Option<&str>,
+    wake_quiet: bool,
+    agent_only: bool,
 ) -> Result<SinkDelivery, String> {
-    let pane = match vp_pane {
-        Some(pane) => pane.to_string(),
-        None => resolve_vp_pane(std::env::var("DUNKINGSHEEP_VP_PANE").ok().as_deref()),
-    };
     let args = SendArgs {
-        to: &pane,
+        to,
         body,
-        subject: Some("Dialog blocks queued delivery"),
+        subject: Some(ALERT_SUBJECT),
         attach: &[],
         notify: true,
         self_pane_id: None,
         system_sender: Some("watchdog"),
-        agent_only: false,
+        agent_only,
         role_sender: None,
-        wake_quiet: false,
+        wake_quiet,
     };
     let sent = flock
         .inbox_send(env, &args)
@@ -289,11 +53,45 @@ pub fn post_vp(
     }
 }
 
-fn resolve_vp_pane(configured: Option<&str>) -> String {
-    configured.unwrap_or(DEFAULT_VP_PANE).to_string()
+/// t4678: the owner sink. The alert is a row in the reserved owner mailbox (the owner's
+/// conversation in the desk). No subprocess and no channel that can be retired underneath it.
+pub fn post_owner_mailbox(
+    flock: &Flock,
+    env: &dyn InboxEnv,
+    body: &str,
+) -> Result<SinkDelivery, String> {
+    post_inbox(
+        flock,
+        env,
+        crate::flock::mailbox::OWNER_MAILBOX,
+        body,
+        false,
+        false,
+    )
 }
 
+/// t4678: the lane sink: one inbox notice to a pane that can act on the stuck lane (its project
+/// coordinator, else the owner lane). A target that is gone is `Undeliverable`.
+///
+/// `owner_lane` says the target is the owner-lane fallback. That notice wakes the lane although
+/// its mailboxes are configured silent, and it is stored with the agent audience: the owner
+/// conversation reads the owner lane's mailbox too, and the person must see exactly ONE alert
+/// row (the owner-mailbox one), not a second copy. A coordinator lane gets an ordinary notice.
+pub fn post_lane(
+    flock: &Flock,
+    env: &dyn InboxEnv,
+    body: &str,
+    target: &str,
+    owner_lane: bool,
+) -> Result<SinkDelivery, String> {
+    post_inbox(flock, env, target, body, owner_lane, owner_lane)
+}
+
+/// The ledger name of the lane sink (the project coordinator, else the owner lane).
+pub const LANE_SINK: &str = "coordinator";
 pub const RETRY_S: f64 = 60.0;
+/// After this many consecutive failures a sink rests for [`COOLDOWN_S`] before trying again.
+pub const MAX_FAILURES: i64 = 5;
 pub const COOLDOWN_S: f64 = 1800.0;
 
 static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -315,6 +113,9 @@ pub struct SinkAttempt {
     pub sink: &'static str,
     pub delivered: bool,
     pub error: Option<String>,
+    /// Consecutive failures of this sink for this dialog, counting this attempt; 0 when
+    /// delivered. The caller logs the first one as an error and stays quiet after that.
+    pub failures: i64,
 }
 
 fn default_path() -> Result<PathBuf, DunkError> {
@@ -335,11 +136,21 @@ fn identity(pane_id: &str, generation: &str, signature: &str) -> String {
     format!("{:x}", Sha256::digest(input.as_bytes()))
 }
 
-fn alert_body(pane_id: &str, signature: &str) -> String {
+fn alert_body(pane_id: &str, signature: &str, stuck_s: Option<f64>) -> String {
     let visible: String = signature.chars().take(500).collect();
+    let age = match stuck_s.filter(|seconds| seconds.is_finite() && *seconds >= 0.0) {
+        Some(seconds) if seconds >= 120.0 => {
+            format!(
+                " It has been there for about {} minutes.",
+                (seconds / 60.0) as i64
+            )
+        }
+        Some(seconds) => format!(" It has been there for about {} seconds.", seconds as i64),
+        None => String::new(),
+    };
     format!(
-        "Dunking Sheep: a dialog in {pane_id} needs attention and prevents message delivery. \
-Open that terminal to inspect the question. The VP may handle routine \
+        "Dunking Sheep: a dialog in {pane_id} needs attention and prevents message delivery.{age} \
+Open that terminal to inspect the question. The lane's project coordinator may handle routine \
 questions within existing authority; approvals needing the owner remain \
 for the owner. No answer or key has been sent automatically.\n\n\
 Visible dialog: {visible}"
@@ -368,6 +179,19 @@ fn open(path: &Path) -> Result<Connection, DunkError> {
             )",
         )
         .map_err(map_sqlite)?;
+    // t4678: a ledger written before the failure bound existed gains the column in place.
+    let has_failures: bool = connection
+        .prepare("SELECT 1 FROM pragma_table_info('alerts') WHERE name='failures'")
+        .and_then(|mut statement| statement.exists([]))
+        .map_err(map_sqlite)?;
+    if !has_failures {
+        connection
+            .execute(
+                "ALTER TABLE alerts ADD COLUMN failures INTEGER NOT NULL DEFAULT 0",
+                [],
+            )
+            .map_err(map_sqlite)?;
+    }
     Ok(connection)
 }
 
@@ -382,22 +206,29 @@ fn attempt_sink(
     let transaction = db
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(map_sqlite)?;
-    let prior: Option<(f64, Option<f64>)> = transaction
+    let prior: Option<(f64, Option<f64>, i64)> = transaction
         .query_row(
-            "SELECT last_attempt, delivered FROM alerts WHERE identity=?1 AND sink=?2",
+            "SELECT last_attempt, delivered, failures FROM alerts WHERE identity=?1 AND sink=?2",
             (identity, name),
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()
         .map_err(map_sqlite)?;
-    let suppressed = prior.is_some_and(|(last_attempt, delivered)| {
+    let suppressed = prior.is_some_and(|(last_attempt, delivered, failures)| {
         delivered.is_some_and(|delivered| now - delivered < COOLDOWN_S)
             || now - last_attempt < RETRY_S
+            // A sink that keeps failing is not hammered every minute for ever: after
+            // MAX_FAILURES in a row it rests for the cooldown, then starts a new round.
+            || (failures >= MAX_FAILURES && now - last_attempt < COOLDOWN_S)
     });
     if suppressed {
         transaction.commit().map_err(map_sqlite)?;
         return Ok(None);
     }
+    let earlier_failures = match prior {
+        Some((_, None, failures)) if failures < MAX_FAILURES => failures,
+        _ => 0,
+    };
     transaction
         .execute(
             "INSERT INTO alerts(identity,sink,last_attempt,delivered) VALUES (?1,?2,?3,NULL) \
@@ -407,34 +238,36 @@ fn attempt_sink(
         .map_err(map_sqlite)?;
     transaction.commit().map_err(map_sqlite)?;
 
-    let result = match sink(body) {
-        Ok(SinkDelivery::Delivered) => {
-            db.execute(
-                "UPDATE alerts SET delivered=?1 WHERE identity=?2 AND sink=?3",
-                (now, identity, name),
-            )
-            .map_err(map_sqlite)?;
-            SinkAttempt {
-                sink: name,
-                delivered: true,
-                error: None,
-            }
-        }
-        Ok(SinkDelivery::Undeliverable) => SinkAttempt {
-            sink: name,
-            delivered: false,
-            error: Some("notification target is unavailable".into()),
-        },
-        Err(error) => SinkAttempt {
-            sink: name,
-            delivered: false,
-            error: Some(error),
-        },
+    let outcome = sink(body);
+    let delivered = matches!(outcome, Ok(SinkDelivery::Delivered));
+    let failures = if delivered { 0 } else { earlier_failures + 1 };
+    if delivered {
+        db.execute(
+            "UPDATE alerts SET delivered=?1, failures=0 WHERE identity=?2 AND sink=?3",
+            (now, identity, name),
+        )
+        .map_err(map_sqlite)?;
+    } else {
+        db.execute(
+            "UPDATE alerts SET failures=?1 WHERE identity=?2 AND sink=?3",
+            (failures, identity, name),
+        )
+        .map_err(map_sqlite)?;
+    }
+    let error = match outcome {
+        Ok(SinkDelivery::Delivered) => None,
+        Ok(SinkDelivery::Undeliverable) => Some("notification target is unavailable".into()),
+        Err(error) => Some(error),
     };
-    Ok(Some(result))
+    Ok(Some(SinkAttempt {
+        sink: name,
+        delivered,
+        error,
+        failures,
+    }))
 }
 
-/// Notify the owner and VP sinks independently for one pane/process/dialog identity.
+/// Notify the owner and lane sinks independently for one pane/process/dialog identity.
 ///
 /// Missing generation or signature skips without creating the database. Each sink's
 /// `last_attempt` is committed before its callback runs. A callback returning
@@ -446,7 +279,24 @@ pub fn notify(
     generation: Option<&str>,
     signature: Option<&str>,
     owner_sink: &mut dyn FnMut(&str) -> Result<SinkDelivery, String>,
-    vp_sink: &mut dyn FnMut(&str) -> Result<SinkDelivery, String>,
+    lane_sink: &mut dyn FnMut(&str) -> Result<SinkDelivery, String>,
+    path: Option<&Path>,
+    now: Option<f64>,
+) -> Result<Vec<SinkAttempt>, DunkError> {
+    notify_stuck_for(
+        pane_id, generation, signature, None, owner_sink, lane_sink, path, now,
+    )
+}
+
+/// [`notify`] with how long the dialog has been stuck, which the alert text then states.
+#[allow(clippy::too_many_arguments)]
+pub fn notify_stuck_for(
+    pane_id: &str,
+    generation: Option<&str>,
+    signature: Option<&str>,
+    stuck_s: Option<f64>,
+    owner_sink: &mut dyn FnMut(&str) -> Result<SinkDelivery, String>,
+    lane_sink: &mut dyn FnMut(&str) -> Result<SinkDelivery, String>,
     path: Option<&Path>,
     now: Option<f64>,
 ) -> Result<Vec<SinkAttempt>, DunkError> {
@@ -457,7 +307,7 @@ pub fn notify(
         return Ok(Vec::new());
     };
     let identity = identity(pane_id, generation, signature);
-    let body = alert_body(pane_id, signature);
+    let body = alert_body(pane_id, signature, stuck_s);
     let path = match path {
         Some(path) => path.to_path_buf(),
         None => default_path()?,
@@ -470,7 +320,7 @@ pub fn notify(
     if let Some(result) = attempt_sink(&mut db, &identity, "owner", now, &body, owner_sink)? {
         results.push(result);
     }
-    if let Some(result) = attempt_sink(&mut db, &identity, "vp", now, &body, vp_sink)? {
+    if let Some(result) = attempt_sink(&mut db, &identity, LANE_SINK, now, &body, lane_sink)? {
         results.push(result);
     }
     Ok(results)
@@ -602,258 +452,14 @@ mod tests {
             .unwrap()
     }
 
-    struct FakeOwnerProcess {
-        command: Option<OsString>,
-        args: Vec<OsString>,
-        body: Option<String>,
-        timeout: Option<Duration>,
-        result: Result<OwnerProcessOutput, String>,
-    }
-
-    impl Default for FakeOwnerProcess {
-        fn default() -> Self {
-            Self {
-                command: None,
-                args: Vec::new(),
-                body: None,
-                timeout: None,
-                result: Ok(OwnerProcessOutput {
-                    success: true,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                }),
-            }
-        }
-    }
-
-    impl OwnerProcess for FakeOwnerProcess {
-        fn run(
-            &mut self,
-            command: &OsStr,
-            args: &[OsString],
-            body: &str,
-            timeout: Duration,
-        ) -> Result<OwnerProcessOutput, String> {
-            self.command = Some(command.to_os_string());
-            self.args = args.to_vec();
-            self.body = Some(body.to_string());
-            self.timeout = Some(timeout);
-            self.result.clone()
-        }
-    }
-
-    fn executable(path: &Path, body: &str) {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::write(path, body).unwrap();
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-
     #[test]
-    fn owner_command_resolution_preserves_override_path_and_fallback_order() {
-        let directory = tempfile::tempdir().unwrap();
-        let bin = directory.path().join("bin");
-        std::fs::create_dir(&bin).unwrap();
-        let on_path = bin.join("vpctl");
-        executable(&on_path, "#!/bin/sh\nexit 0\n");
-        let fallback = directory.path().join("workspace/vp-of-agentry/vpctl");
-        std::fs::create_dir_all(fallback.parent().unwrap()).unwrap();
-        executable(&fallback, "#!/bin/sh\nexit 0\n");
-
-        let config = OwnerPostConfig {
-            override_command: Some(OsString::from("/explicit/vpctl")),
-            path: Some(bin.as_os_str().to_os_string()),
-            home: Some(directory.path().to_path_buf()),
-        };
-        assert_eq!(
-            PathBuf::from("/explicit/vpctl"),
-            resolve_owner_command(&config).unwrap()
-        );
-
-        let config = OwnerPostConfig {
-            override_command: Some(OsString::new()),
-            ..config
-        };
-        assert_eq!(on_path, resolve_owner_command(&config).unwrap());
-
-        let config = OwnerPostConfig {
-            path: None,
-            ..config
-        };
-        assert_eq!(fallback, resolve_owner_command(&config).unwrap());
-
-        let missing = OwnerPostConfig {
-            override_command: None,
-            path: None,
-            home: None,
-        };
-        assert!(resolve_owner_command(&missing)
-            .unwrap_err()
-            .contains("HOME is not set"));
-    }
-
-    #[test]
-    fn missing_path_uses_python_default_search_path_and_home_fallback() {
-        let directory = tempfile::tempdir().unwrap();
-        let default_bin = directory.path().join("default-bin");
-        std::fs::create_dir(&default_bin).unwrap();
-        let default_vpctl = default_bin.join("vpctl");
-        executable(&default_vpctl, "#!/bin/sh\nexit 0\n");
-
-        let config = OwnerPostConfig {
-            override_command: None,
-            path: None,
-            home: None,
-        };
-        assert_eq!(
-            default_vpctl,
-            resolve_owner_command_with_default_path(&config, default_bin.as_os_str()).unwrap()
-        );
-
-        let account_home = directory.path().join("account-home");
-        assert_eq!(
-            Some(account_home.clone()),
-            python_home(None, || Some(account_home))
-        );
-    }
-
-    #[test]
-    fn owner_post_uses_exact_args_unicode_stdin_and_fifteen_second_timeout() {
-        let (_directory, path) = path();
-        let mut process = FakeOwnerProcess {
-            result: Ok(OwnerProcessOutput {
-                success: true,
-                stdout: "accepted".into(),
-                stderr: String::new(),
-            }),
-            ..Default::default()
-        };
-        let config = OwnerPostConfig {
-            override_command: Some(path.as_os_str().to_os_string()),
-            path: None,
-            home: None,
-        };
-        assert_eq!(
-            SinkDelivery::Delivered,
-            post_owner("question — ¿?", &config, &mut process).unwrap()
-        );
-        assert_eq!(Some(path.into_os_string()), process.command);
-        assert_eq!(
-            vec!["brief", "--channel", "cos"]
-                .into_iter()
-                .map(OsString::from)
-                .collect::<Vec<_>>(),
-            process.args
-        );
-        assert_eq!(Some("question — ¿?".to_string()), process.body);
-        assert_eq!(Some(OWNER_POST_TIMEOUT), process.timeout);
-    }
-
-    #[test]
-    fn owner_post_redacts_nonzero_process_output_and_reports_timeout() {
-        let directory = tempfile::tempdir().unwrap();
-        let command = directory.path().join("vpctl");
-        let config = OwnerPostConfig {
-            override_command: Some(command.as_os_str().to_os_string()),
-            path: None,
-            home: None,
-        };
-        let mut timed_out = FakeOwnerProcess {
-            result: Err("vpctl timed out after 15 seconds".into()),
-            ..Default::default()
-        };
-        assert!(post_owner("body", &config, &mut timed_out)
-            .unwrap_err()
-            .contains("timed out"));
-        let mut failed = FakeOwnerProcess {
-            result: Ok(OwnerProcessOutput {
-                success: false,
-                stdout: "out".into(),
-                stderr: "denied".into(),
-            }),
-            ..Default::default()
-        };
-        let error = post_owner("body", &config, &mut failed).unwrap_err();
-        assert_eq!("CalledProcessError", error);
-        assert!(!error.contains("out"));
-        assert!(!error.contains("denied"));
-
-        let (_alerts_dir, alerts_db) = path();
-        let mut owner = |body: &str| post_owner(body, &config, &mut failed);
-        let mut vp = successful_sink;
-        let report = notify(
-            "%2",
-            Some("g-redacted"),
-            Some("question"),
-            &mut owner,
-            &mut vp,
-            Some(&alerts_db),
-            Some(100.0),
-        )
-        .unwrap();
-        assert_eq!("CalledProcessError", report[0].error.as_deref().unwrap());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn std_owner_process_drains_pipes_and_captures_fake_executable_output() {
-        let directory = tempfile::tempdir().unwrap();
-        let command = directory.path().join("vpctl");
-        executable(
-            &command,
-            "#!/bin/sh\ncat\nprintf 'stdout'\nprintf 'stderr' >&2\n",
-        );
-        let output = StdOwnerProcess
-            .run(
-                command.as_os_str(),
-                &["brief".into(), "--channel".into(), "cos".into()],
-                "unicode λ body",
-                Duration::from_secs(2),
-            )
-            .unwrap();
-        assert!(output.success);
-        assert_eq!("unicode λ bodystdout", output.stdout);
-        assert_eq!("stderr", output.stderr);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn std_owner_process_enforces_injected_test_timeout_and_spawn_errors() {
-        let mut process = StdOwnerProcess;
-        let timeout = process
-            .run(
-                OsStr::new("/bin/sleep"),
-                &[OsString::from("2")],
-                "body",
-                Duration::from_millis(20),
-            )
-            .unwrap_err();
-        assert!(timeout.contains("timed out"));
-        let missing = process
-            .run(
-                Path::new("/definitely/missing/vpctl").as_os_str(),
-                &[],
-                "body",
-                Duration::from_millis(20),
-            )
-            .unwrap_err();
-        assert!(missing.contains("could not start vpctl"));
-    }
-
-    #[test]
-    fn vp_target_uses_default_when_unset_and_preserves_empty_override() {
-        assert_eq!("w9:pH", resolve_vp_pane(None));
-        assert_eq!("w2:pVP", resolve_vp_pane(Some("w2:pVP")));
-        assert_eq!("", resolve_vp_pane(Some("")));
-    }
-
-    #[test]
-    fn vp_sink_stores_watchdog_message_with_exact_fields_and_fake_nudge() {
+    fn lane_sink_stores_watchdog_message_with_exact_fields_and_fake_nudge() {
         let fixture = InboxFixture::new();
         let flock = fixture_flock(&fixture);
         let body = "Dialog needs attention — λ";
         assert_eq!(
             SinkDelivery::Delivered,
-            post_vp(&flock, &fixture, body, Some("w9:pH")).unwrap()
+            post_lane(&flock, &fixture, body, "w9:pH", false).unwrap()
         );
         assert_eq!(1, fixture.nudges.lock().unwrap().len());
         let message_id = latest_message_id(&fixture);
@@ -869,16 +475,16 @@ mod tests {
     }
 
     #[test]
-    fn vp_sink_maps_undeliverable_and_propagates_store_errors() {
+    fn lane_sink_maps_undeliverable_and_propagates_store_errors() {
         let fixture = InboxFixture::new();
         let flock = fixture_flock(&fixture);
         assert_eq!(
             SinkDelivery::Undeliverable,
-            post_vp(&flock, &fixture, "body", Some("missing-vp-mailbox")).unwrap()
+            post_lane(&flock, &fixture, "body", "missing-vp-mailbox", false).unwrap()
         );
-        assert!(post_vp(&flock, &fixture, "body", Some("")).is_err());
+        assert!(post_lane(&flock, &fixture, "body", "", false).is_err());
         let too_large = "x".repeat(crate::inbox::MAX_BODY_BYTES + 1);
-        assert!(post_vp(&flock, &fixture, &too_large, Some("w9:pH")).is_err());
+        assert!(post_lane(&flock, &fixture, &too_large, "w9:pH", false).is_err());
     }
 
     #[test]
@@ -895,7 +501,7 @@ mod tests {
                 Ok(SinkDelivery::Delivered)
             }
         };
-        let mut vp = |body: &str| post_vp(&flock, &fixture, body, Some("w9:pH"));
+        let mut vp = |body: &str| post_lane(&flock, &fixture, body, "w9:pH", false);
         let first = notify(
             "w1:p1",
             Some("pid:1:start:1"),
@@ -952,7 +558,7 @@ mod tests {
             owner_calls.set(owner_calls.get() + 1);
             Ok(SinkDelivery::Delivered)
         };
-        let mut vp = |body: &str| post_vp(&flock, &fixture, body, Some("missing-vp-mailbox"));
+        let mut vp = |body: &str| post_lane(&flock, &fixture, body, "missing-vp-mailbox", false);
         let first = notify(
             "w1:p1",
             Some("pid:1:start:2"),
@@ -991,7 +597,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            vec!["vp"],
+            vec![LANE_SINK],
             retry.iter().map(|attempt| attempt.sink).collect::<Vec<_>>()
         );
         assert_eq!(1, owner_calls.get());
@@ -1008,6 +614,7 @@ mod tests {
             sink,
             delivered: true,
             error: None,
+            failures: 0,
         }
     }
 
@@ -1144,9 +751,10 @@ mod tests {
                 SinkAttempt {
                     sink: "owner",
                     delivered: false,
-                    error: Some("offline".into())
+                    error: Some("offline".into()),
+                    failures: 1,
                 },
-                delivered("vp"),
+                delivered(LANE_SINK),
             ],
             first
         );
@@ -1206,7 +814,7 @@ mod tests {
             first[1].error
         );
         assert_eq!(
-            vec![delivered("vp")],
+            vec![delivered(LANE_SINK)],
             notify(
                 "%2",
                 Some("g1"),
@@ -1291,5 +899,160 @@ mod tests {
             "crash after reservation",
             report[0].error.as_deref().unwrap()
         );
+    }
+
+    /// t4678: the owner sink is a row in the reserved owner mailbox, written through the inbox
+    /// store: no subprocess, and no pane is typed into.
+    #[test]
+    fn owner_sink_stores_one_watchdog_row_in_the_owner_mailbox() {
+        let fixture = InboxFixture::new();
+        let flock = fixture_flock(&fixture);
+        assert_eq!(
+            SinkDelivery::Delivered,
+            post_owner_mailbox(&flock, &fixture, "a dialog in %304 needs attention").unwrap()
+        );
+        let message_id = latest_message_id(&fixture);
+        let (summary, body) = crate::inbox::get(&fixture.pool, &message_id, fixture.now()).unwrap();
+        assert_eq!(crate::flock::mailbox::OWNER_MAILBOX, summary.mailbox);
+        assert_eq!(Some("watchdog"), summary.sender.as_deref());
+        assert_eq!(Some(ALERT_SUBJECT), summary.subject.as_deref());
+        assert_eq!("a dialog in %304 needs attention", body);
+        assert!(
+            fixture.nudges.lock().unwrap().is_empty(),
+            "the owner mailbox has no pane to type into"
+        );
+    }
+
+    /// t4678: an owner-lane fallback notice is agent-only, so the person's conversation over
+    /// that lane's mailbox does not show a second copy of the alert; a coordinator-lane notice
+    /// is an ordinary one.
+    #[test]
+    fn an_owner_lane_notice_is_agent_only_and_a_coordinator_notice_is_not() {
+        let fixture = InboxFixture::new();
+        let flock = fixture_flock(&fixture);
+        let visible = |fixture: &InboxFixture| {
+            fixture
+                .store
+                .conversation_across_visible(&["VP".to_string()], None, None)
+                .unwrap()
+                .len()
+        };
+        assert_eq!(
+            SinkDelivery::Delivered,
+            post_lane(&flock, &fixture, "stuck dialog", "w9:pH", true).unwrap()
+        );
+        assert_eq!(
+            1,
+            fixture.nudges.lock().unwrap().len(),
+            "the lane is still woken"
+        );
+        let stored = crate::inbox::count(&fixture.pool, "VP", &[], fixture.now()).unwrap();
+        assert_eq!(1, stored.unread, "the notice is in the lane's mailbox");
+        assert_eq!(
+            0,
+            visible(&fixture),
+            "and not in a person's conversation view"
+        );
+
+        assert_eq!(
+            SinkDelivery::Delivered,
+            post_lane(&flock, &fixture, "stuck dialog", "w9:pH", false).unwrap()
+        );
+        assert_eq!(
+            1,
+            visible(&fixture),
+            "a coordinator-lane notice is an ordinary row"
+        );
+    }
+
+    /// t4678: the alert says which pane and for how long, and no longer names the VP.
+    #[test]
+    fn alert_text_names_the_pane_and_how_long_it_has_been_stuck() {
+        let minutes = alert_body("%304", "Rate limit reached. Continue?", Some(1500.0));
+        assert!(
+            minutes.contains("a dialog in %304 needs attention"),
+            "{minutes}"
+        );
+        assert!(
+            minutes.contains("It has been there for about 25 minutes."),
+            "{minutes}"
+        );
+        assert!(minutes.ends_with("Visible dialog: Rate limit reached. Continue?"));
+        assert!(!minutes.contains("VP"), "{minutes}");
+        let seconds = alert_body("%304", "q", Some(45.0));
+        assert!(seconds.contains("for about 45 seconds."), "{seconds}");
+        assert!(!alert_body("%304", "q", None).contains("It has been there"));
+    }
+
+    /// t4678: a sink that keeps failing is retried a bounded number of times, then rests for
+    /// the cooldown; each attempt carries its failure count so only the first is logged.
+    #[test]
+    fn a_failing_sink_is_bounded_and_counts_its_failures() {
+        let (_directory, path) = path();
+        let lane_calls = Cell::new(0);
+        let mut owner = successful_sink;
+        let mut lane = |_: &str| {
+            lane_calls.set(lane_calls.get() + 1);
+            Ok(SinkDelivery::Undeliverable)
+        };
+        let mut counts = Vec::new();
+        let mut now = 100.0;
+        // One attempt a minute for an hour: far more ticks than the bound allows attempts.
+        for _ in 0..60 {
+            for attempt in notify(
+                "w1:p1",
+                Some("pid:1:start:1"),
+                Some("question"),
+                &mut owner,
+                &mut lane,
+                Some(&path),
+                Some(now),
+            )
+            .unwrap()
+            {
+                if attempt.sink == LANE_SINK {
+                    counts.push(attempt.failures);
+                }
+            }
+            now += RETRY_S;
+        }
+        // Five in a row, a 30-minute rest, then a new round that starts counting at one again.
+        assert_eq!(vec![1, 2, 3, 4, 5, 1, 2, 3, 4, 5], counts);
+        assert_eq!(10, lane_calls.get());
+    }
+
+    /// t4678: a ledger written by an earlier daemon (no `failures` column) is upgraded in place
+    /// and its rows keep their meaning.
+    #[test]
+    fn an_older_ledger_gains_the_failure_column_without_losing_rows() {
+        let (_directory, path) = path();
+        {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let old = Connection::open(&path).unwrap();
+            old.execute_batch(
+                "CREATE TABLE alerts (identity TEXT NOT NULL, sink TEXT NOT NULL, \
+                 last_attempt REAL NOT NULL, delivered REAL, PRIMARY KEY(identity, sink));",
+            )
+            .unwrap();
+            old.execute(
+                "INSERT INTO alerts VALUES (?1, 'owner', 100.0, 100.0)",
+                [identity("w1:p1", "pid:1:start:1", "question")],
+            )
+            .unwrap();
+        }
+        let mut owner = successful_sink;
+        let mut lane = successful_sink;
+        let attempts = notify(
+            "w1:p1",
+            Some("pid:1:start:1"),
+            Some("question"),
+            &mut owner,
+            &mut lane,
+            Some(&path),
+            Some(160.0),
+        )
+        .unwrap();
+        // The owner row delivered at 100 is still inside its cooldown; only the lane sink runs.
+        assert_eq!(vec![delivered(LANE_SINK)], attempts);
     }
 }

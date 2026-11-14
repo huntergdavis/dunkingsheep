@@ -317,37 +317,19 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn production_env_stuck_sink_uses_concrete_services() {
-        use std::os::unix::fs::PermissionsExt;
         use std::process::Command;
 
         const CHILD: &str = "DS_STUCK_SINK_TEST_CHILD";
         const TEST_NAME: &str =
             "server_runtime::stuck::tests::production_env_stuck_sink_uses_concrete_services";
         if std::env::var_os(CHILD).is_none() {
+            // t4678: both alert sinks are the daemon's own inbox store now; the child needs only
+            // an isolated config directory for the alert ledger.
             let config = tempfile::tempdir().expect("isolated alert config");
-            let owner_calls = config.path().join("owner-calls");
-            let owner = config.path().join("fake-vpctl");
-            std::fs::write(
-                &owner,
-                format!(
-                    "#!/bin/sh\ncount=0\nif [ -f '{}' ]; then count=$(cat '{}'); fi\ncount=$((count + 1))\nprintf '%s' \"$count\" > '{}'\n[ \"$count\" -eq 1 ] && exit 1\nexit 0\n",
-                    owner_calls.display(),
-                    owner_calls.display(),
-                    owner_calls.display()
-                ),
-            )
-            .expect("fake owner process");
-            let mut permissions = std::fs::metadata(&owner)
-                .expect("fake owner metadata")
-                .permissions();
-            permissions.set_mode(0o700);
-            std::fs::set_permissions(&owner, permissions).expect("executable fake owner");
             let output = Command::new(std::env::current_exe().expect("test binary"))
                 .args(["--exact", TEST_NAME, "--nocapture"])
                 .env(CHILD, "1")
                 .env("DUNKINGSHEEP_DIR", config.path())
-                .env("DUNKINGSHEEP_VPCTL", &owner)
-                .env("DUNKINGSHEEP_VP_PANE", "w9:pH")
                 .output()
                 .expect("isolated child test");
             assert!(
@@ -356,10 +338,10 @@ mod tests {
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
             );
-            assert_eq!(
-                std::fs::read_to_string(owner_calls).expect("owner call count"),
-                "2",
-                "the failed owner sink is retried once"
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                !stderr.contains("ERROR dialog alert"),
+                "both sinks deliver in this fixture, so no failure is logged:\n{stderr}"
             );
             return;
         }
@@ -388,11 +370,25 @@ mod tests {
                 "Allow command?",
                 now + 10.0,
             ));
-        let owner_calls = std::env::var("DUNKINGSHEEP_DIR")
-            .map(std::path::PathBuf::from)
-            .expect("isolated alert config")
-            .join("owner-calls");
-        assert!(!owner_calls.exists(), "modal delay suppresses alert sinks");
+        // Every alert row is written by the watchdog; the owner sink's go to the owner mailbox.
+        let inbox_path = dir.path().join("inbox.db");
+        let alert_rows = |mailbox: Option<&str>| -> i64 {
+            let db = rusqlite::Connection::open(&inbox_path).expect("canonical inbox database");
+            match mailbox {
+                Some(mailbox) => db.query_row(
+                    "SELECT COUNT(*) FROM messages WHERE sender = 'watchdog' AND mailbox = ?1",
+                    [mailbox],
+                    |row| row.get(0),
+                ),
+                None => db.query_row(
+                    "SELECT COUNT(*) FROM messages WHERE sender = 'watchdog'",
+                    [],
+                    |row| row.get(0),
+                ),
+            }
+            .expect("count alert rows")
+        };
+        assert_eq!(0, alert_rows(None), "modal delay suppresses alert sinks");
 
         let missing_identity_factory: crate::flock::loop_env::LoopTerminalFactory =
             Arc::new(|| {
@@ -416,8 +412,9 @@ mod tests {
                 "Allow command?",
                 now - 31.0,
             ));
-        assert!(
-            !owner_calls.exists(),
+        assert_eq!(
+            0,
+            alert_rows(None),
             "missing process identity refuses alert sinks"
         );
 
@@ -428,31 +425,69 @@ mod tests {
                 "Allow command?",
                 now - 31.0,
             ));
-        assert_eq!(
-            std::fs::read_to_string(&owner_calls).expect("first owner attempt"),
-            "1"
-        );
-        let inbox_db = rusqlite::Connection::open(dir.path().join("inbox.db"))
-            .expect("canonical inbox database");
-        let vp_messages: i64 = inbox_db
+        // The owner sink wrote one row to the owner mailbox. This fixture has no project
+        // coordinator, so the lane sink told the registered owner lane (w9:pH): a second
+        // watchdog row, in that lane's own mailbox.
+        assert_eq!(1, alert_rows(Some("owner")), "one row in the owner mailbox");
+        assert_eq!(2, alert_rows(None), "and one notice to the owner lane");
+        // The owner-lane notice is agent-only: the person's conversation (the owner mailbox plus
+        // the owner lane's mailbox) shows exactly ONE alert row, the owner-mailbox one.
+        let (lane_mailbox, agent_only): (String, i64) = rusqlite::Connection::open(&inbox_path)
+            .expect("canonical inbox database")
             .query_row(
-                "SELECT COUNT(*) FROM messages WHERE sender = 'watchdog'",
+                "SELECT m.mailbox, EXISTS(SELECT 1 FROM message_audiences a \
+                 WHERE a.message_id = m.id AND a.audience = 'agent') \
+                 FROM messages m WHERE m.sender = 'watchdog' AND m.mailbox != 'owner'",
                 [],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
-            .expect("count durable VP alerts");
-        assert_eq!(vp_messages, 1, "the real inbox accepted the VP alert");
-        drop(inbox_db);
+            .expect("the owner-lane notice");
+        assert_eq!(
+            1, agent_only,
+            "the owner-lane notice has the agent audience"
+        );
+        let conversation = services
+            .flock
+            .stores()
+            .inbox
+            .expect("runtime inbox store")
+            .conversation_across_visible(&["owner".to_string(), lane_mailbox.clone()], None, None)
+            .expect("owner conversation");
+        let alerts: Vec<&serde_json::Value> = conversation
+            .iter()
+            .filter(|row| row["sender"] == "watchdog")
+            .collect();
+        assert_eq!(
+            1,
+            alerts.len(),
+            "one alert row for the person: {conversation:?}"
+        );
+        assert_eq!("owner", alerts[0]["mailbox"], "{lane_mailbox}");
         let alert_db = std::path::PathBuf::from(std::env::var("DUNKINGSHEEP_DIR").unwrap())
             .join("dialog-alerts.db");
-        let connection = rusqlite::Connection::open(alert_db).expect("alert database");
-        connection
-            .execute(
-                "UPDATE alerts SET last_attempt = ?1 WHERE sink = 'owner'",
-                [crate::clock::now_s() - crate::dialog_alerts::RETRY_S - 1.0],
-            )
-            .expect("make failed owner sink due for retry");
-        drop(connection);
+        let delivered: Vec<(String, i64)> = {
+            let db = rusqlite::Connection::open(&alert_db).expect("alert database");
+            let mut statement = db
+                .prepare(
+                    "SELECT sink, failures FROM alerts WHERE delivered IS NOT NULL ORDER BY sink",
+                )
+                .expect("ledger query");
+            let rows = statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .expect("ledger rows")
+                .map(|row| row.expect("ledger row"))
+                .collect();
+            rows
+        };
+        assert_eq!(
+            vec![
+                (crate::dialog_alerts::LANE_SINK.to_string(), 0),
+                ("owner".to_string(), 0)
+            ],
+            delivered,
+            "both sinks are recorded as delivered, with no failures"
+        );
+        // The same dialog a moment later: both sinks are inside their cooldown, nothing repeats.
         services
             .runtime
             .block_on(adapter.helper_stuckenv_note_stale_panel(
@@ -460,20 +495,7 @@ mod tests {
                 "Allow command?",
                 now - 31.0,
             ));
-        assert_eq!(
-            std::fs::read_to_string(&owner_calls).expect("retried owner attempt"),
-            "2"
-        );
-        let inbox_db = rusqlite::Connection::open(dir.path().join("inbox.db"))
-            .expect("canonical inbox database after retry");
-        let vp_messages: i64 = inbox_db
-            .query_row(
-                "SELECT COUNT(*) FROM messages WHERE sender = 'watchdog'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("count durable VP alerts after retry");
-        assert_eq!(vp_messages, 1, "a successful VP alert is not repeated");
+        assert_eq!(2, alert_rows(None), "a delivered alert is not repeated");
         let metrics = services.flock.stores().metrics.expect("runtime metrics");
         let events = metrics
             .events_between(0.0, crate::clock::now_s() + 1.0)
