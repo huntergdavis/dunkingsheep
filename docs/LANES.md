@@ -21,7 +21,11 @@ the owner re-registers it.
 > your own worktree, never in a shared checkout. Record evidence with
 > `task note <id> --reason "<commands run, commit sha, what is NOT verified>"`
 > before `task complete <id>`. Push with https and open a PR; the review timer
-> files the review, a reviewer lane judges it, GitHub merges it. You cannot
+> files the review, a reviewer lane judges it, GitHub merges it. After
+> `gh pr create`, call `dunkingsheep pr wait OWNER/REPO#PR --head FULL_SHA`
+> and end the turn; the shared review timer sends an inbox notice when the
+> head, CI, review or PR state ends the wait. See [PR waits](pr-wait/README.md).
+> You cannot
 > assign work, complete reviews, type into other panes, or write rules; the
 > daemon refuses those calls. If you need the owner's decision:
 > `task block <id> --reason "needs-owner: <one question>"` and move on.
