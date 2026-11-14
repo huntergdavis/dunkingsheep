@@ -23,7 +23,7 @@ pub fn valid_terminal_host(headers: &axum::http::HeaderMap, allowed_hosts: &[Str
         .any(|allowed| allowed == host)
 }
 
-fn terminal_authority(value: &str) -> Option<(String, Option<u16>)> {
+pub(crate) fn terminal_authority(value: &str) -> Option<(String, Option<u16>)> {
     if value.is_empty() || value.contains(['/', '\\', '@', ' ', '\t', ',', '?', '#', '%']) {
         return None;
     }

@@ -14,22 +14,42 @@ pub(crate) fn local_hosts(
     scheme: RequestScheme,
     domains: &[String],
 ) -> Result<Vec<String>, String> {
-    let identity = discover();
-    let mut domains = domains.to_vec();
-    // These are locally configured search suffixes, not DNS answers for an untrusted Host.
-    if let Ok(resolver) = std::fs::read_to_string("/etc/resolv.conf") {
-        for line in resolver.lines() {
-            let mut words = line
-                .split(['#', ';'])
-                .next()
-                .unwrap_or_default()
-                .split_whitespace();
-            if matches!(words.next(), Some("search" | "domain")) {
-                domains.extend(words.map(str::to_owned));
-            }
-        }
+    hosts_for_identity(&discover(), port, scheme, domains)
+}
+
+/// LAN destination addresses only: shared CGNAT/public/loopback addresses are not RFC1918.
+fn lan_address(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(address) => address.is_private(),
+        IpAddr::V6(address) => address.is_unique_local() || address.is_unicast_link_local(),
     }
-    hosts_for_identity(&identity, port, scheme, &domains)
+}
+
+#[cfg(any(unix, test))]
+fn lan_interface(name: &str, point_to_point: bool, loopback: bool, tuntap: bool) -> bool {
+    let name = name.to_ascii_lowercase();
+    !point_to_point
+        && !loopback
+        && !tuntap
+        && ![
+            "tailscale",
+            "tun",
+            "utun",
+            "tap",
+            "wg",
+            "ppp",
+            "zt",
+            "ipip",
+            "sit",
+            "gre",
+            "erspan",
+            "ip6tnl",
+            "vti",
+            "vxlan",
+            "vpn",
+        ]
+        .iter()
+        .any(|prefix| name.starts_with(*prefix))
 }
 
 fn hostname(value: &str) -> Option<String> {
@@ -64,17 +84,11 @@ pub(crate) fn hosts_for_identity(
     let mut names = BTreeSet::new();
     if let Some(full) = identity.hostname.as_deref().and_then(hostname) {
         let short = full.split('.').next().unwrap().to_owned();
-        names.insert(full);
         names.insert(short.clone());
         names.insert(format!("{short}.local"));
-        for domain in domains.iter().filter_map(|domain| hostname(domain)) {
-            if let Some(alias) = hostname(&format!("{short}.{domain}")) {
-                names.insert(alias);
-            }
-        }
     }
     for address in &identity.addresses {
-        if address.is_unspecified() || address.is_multicast() {
+        if !lan_address(*address) {
             continue;
         }
         names.insert(match address {
@@ -82,13 +96,25 @@ pub(crate) fn hosts_for_identity(
             IpAddr::V6(_) => format!("[{address}]"),
         });
     }
-    if names.is_empty() {
-        return Err("local terminal authority discovery unavailable".into());
-    }
+    // Preserve only DNS authorities explicitly trusted before this change, at this port.
+    // Old IP entries cannot bypass current LAN interface/range checks; no resolver suffixes.
     let default_port = match scheme {
         RequestScheme::Http => 80,
         RequestScheme::Https => 443,
     };
+    for authority in domains {
+        if let Some((name, explicit_port)) = crate::terminal_stream::terminal_authority(authority) {
+            if name.parse::<IpAddr>().is_err() && explicit_port.unwrap_or(default_port) == port {
+                if let Some(name) = hostname(&name) {
+                    names.insert(name);
+                }
+            }
+        }
+    }
+    if names.is_empty() {
+        return Err("local terminal authority discovery unavailable".into());
+    }
+
     let mut hosts = Vec::new();
     for name in names {
         hosts.push(format!("{name}:{port}"));
@@ -112,6 +138,19 @@ fn discover() -> LocalIdentity {
         return identity;
     };
     for interface in interfaces {
+        use nix::net::if_::InterfaceFlags;
+        let tuntap = std::path::Path::new("/sys/class/net")
+            .join(&interface.interface_name)
+            .join("tun_flags")
+            .exists();
+        if !lan_interface(
+            &interface.interface_name,
+            interface.flags.contains(InterfaceFlags::IFF_POINTOPOINT),
+            interface.flags.contains(InterfaceFlags::IFF_LOOPBACK),
+            tuntap,
+        ) {
+            continue;
+        }
         let Some(address) = interface.address else {
             continue;
         };
@@ -134,24 +173,28 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     #[test]
-    fn interface_discovery_recognizes_a_real_private_loopback_listener() {
+    fn loopback_listener_is_not_automatically_a_lan_authority() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let hosts = local_hosts(address.port(), RequestScheme::Http, &[]).unwrap();
-        assert!(hosts.iter().any(|host| host == &address.to_string()));
+        assert!(!hosts.iter().any(|host| host == &address.to_string()));
     }
 
     #[test]
     fn local_aliases_interfaces_and_listener_port_define_authorities() {
         let identity = LocalIdentity {
             hostname: Some("Cell.lan".into()),
-            addresses: vec!["192.0.2.8".parse().unwrap(), "::1".parse().unwrap()],
+            addresses: vec!["192.168.0.209".parse().unwrap(), "fe80::1".parse().unwrap()],
         };
         let hosts = hosts_for_identity(
             &identity,
             8787,
             RequestScheme::Http,
-            &["home.arpa".into(), "evil/path".into()],
+            &[
+                "cell.home.arpa:8787".into(),
+                "cell.lan:8787".into(),
+                "evil/path".into(),
+            ],
         )
         .unwrap();
         for expected in [
@@ -159,14 +202,14 @@ mod tests {
             "cell.local:8787",
             "cell.lan:8787",
             "cell.home.arpa:8787",
-            "192.0.2.8:8787",
-            "[::1]:8787",
+            "192.168.0.209:8787",
+            "[fe80::1]:8787",
         ] {
             assert!(hosts.iter().any(|host| host == expected), "{expected}");
         }
         for rejected in [
             "cell",
-            "192.0.2.8",
+            "192.168.0.209",
             "foreign:8787",
             "cell.evil/path:8787",
             "cell:80",
@@ -176,7 +219,7 @@ mod tests {
         for (scheme, port) in [(RequestScheme::Http, 80), (RequestScheme::Https, 443)] {
             let hosts = hosts_for_identity(&identity, port, scheme, &[]).unwrap();
             assert!(hosts.iter().any(|host| host == "cell"));
-            assert!(hosts.iter().any(|host| host == "192.0.2.8"));
+            assert!(hosts.iter().any(|host| host == "192.168.0.209"));
         }
         assert!(
             !hosts_for_identity(&identity, 443, RequestScheme::Http, &[])
@@ -185,6 +228,47 @@ mod tests {
                 .any(|host| host == "cell")
         );
     }
+    #[test]
+    fn lan_scope_excludes_tailnet_search_names_and_tunnel_interfaces() {
+        let identity = LocalIdentity {
+            hostname: Some("cell".into()),
+            addresses: vec![
+                "192.168.0.209".parse().unwrap(),
+                "100.91.92.49".parse().unwrap(),
+                "203.0.113.9".parse().unwrap(),
+                "127.0.0.1".parse().unwrap(),
+            ],
+        };
+        let hosts = hosts_for_identity(&identity, 8787, RequestScheme::Http, &[]).unwrap();
+        assert!(hosts.iter().any(|host| host == "192.168.0.209:8787"));
+        assert!(hosts.iter().any(|host| host == "cell.local:8787"));
+        for rejected in [
+            "100.91.92.49:8787",
+            "203.0.113.9:8787",
+            "127.0.0.1:8787",
+            "cell.tail68fe78.ts.net:8787",
+        ] {
+            assert!(!hosts.iter().any(|host| host == rejected), "{rejected}");
+        }
+        // The exception is an existing explicit DNS authorization, never a discovered suffix.
+        assert!(hosts_for_identity(
+            &identity,
+            8787,
+            RequestScheme::Http,
+            &["cell.tail68fe78.ts.net:8787".into()]
+        )
+        .unwrap()
+        .iter()
+        .any(|host| host == "cell.tail68fe78.ts.net:8787"));
+        assert!(lan_interface("enp0s31f6", false, false, false));
+        for name in ["tailscale0", "tun0", "tap0", "wg0", "utun1", "vxlan10"] {
+            assert!(!lan_interface(name, false, false, false), "{name}");
+        }
+        assert!(!lan_interface("renamed0", true, false, false));
+        assert!(!lan_interface("renamed0", false, false, true));
+        assert!(!lan_interface("lo", false, true, false));
+    }
+
     #[test]
     fn stale_or_unavailable_interface_data_does_not_create_trust() {
         assert!(

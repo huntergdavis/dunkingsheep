@@ -16,8 +16,8 @@ use axum::{
 };
 use ds_core::{config::Env, roles::Roles, terminal::tmux::TmuxBackend};
 use std::{
-    collections::VecDeque,
-    net::SocketAddr,
+    collections::{HashMap, VecDeque},
+    net::{IpAddr, SocketAddr},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -35,11 +35,85 @@ type Binding = (String, i64, String);
 const INPUT_FRAME_BYTES: usize = 4096;
 const INPUT_BUFFER_BYTES: usize = 32 * 1024;
 type HostSource = Arc<dyn Fn() -> Result<Vec<String>, String> + Send + Sync>;
+
+const REFUSAL_LOG_INTERVAL: Duration = Duration::from_secs(60);
+const MAX_REFUSAL_PEERS: usize = 1024;
+#[derive(Default)]
+struct RefusalThrottle {
+    peers: HashMap<Option<IpAddr>, RefusalWindow>,
+    untracked: u64,
+}
+struct RefusalWindow {
+    emitted: std::time::Instant,
+    suppressed: u64,
+}
+struct RefusalCounts {
+    suppressed: u64,
+    untracked: u64,
+}
+impl RefusalThrottle {
+    fn observe(
+        &mut self,
+        remote: Option<SocketAddr>,
+        now: std::time::Instant,
+    ) -> Option<RefusalCounts> {
+        // Source-port rotation and IPv4-mapped IPv6 cannot create a new budget.
+        let peer = remote.map(|remote| remote.ip().to_canonical());
+        if let Some(window) = self.peers.get_mut(&peer) {
+            if now
+                .checked_duration_since(window.emitted)
+                .unwrap_or_default()
+                < REFUSAL_LOG_INTERVAL
+            {
+                window.suppressed = window.suppressed.saturating_add(1);
+                return None;
+            }
+            window.emitted = now;
+            return Some(RefusalCounts {
+                suppressed: std::mem::take(&mut window.suppressed),
+                untracked: std::mem::take(&mut self.untracked),
+            });
+        }
+        if self.peers.len() >= MAX_REFUSAL_PEERS {
+            let mut expired = 0_u64;
+            self.peers.retain(|_, window| {
+                if now
+                    .checked_duration_since(window.emitted)
+                    .unwrap_or_default()
+                    < REFUSAL_LOG_INTERVAL
+                {
+                    true
+                } else {
+                    expired = expired.saturating_add(window.suppressed);
+                    false
+                }
+            });
+            self.untracked = self.untracked.saturating_add(expired);
+            if self.peers.len() >= MAX_REFUSAL_PEERS {
+                self.untracked = self.untracked.saturating_add(1);
+                return None;
+            }
+        }
+        self.peers.insert(
+            peer,
+            RefusalWindow {
+                emitted: now,
+                suppressed: 0,
+            },
+        );
+        Some(RefusalCounts {
+            suppressed: 0,
+            untracked: std::mem::take(&mut self.untracked),
+        })
+    }
+}
+
 struct StreamState {
     auth: Arc<dyn AuthBackend>,
     scheme: RequestScheme,
     hosts: HostSource,
     bound_port: u16,
+    refusal_log: Mutex<RefusalThrottle>,
     backend: TmuxBackend,
     roles: Mutex<Roles>,
     socket: Option<String>,
@@ -59,8 +133,9 @@ pub fn configured_router(
     port: u16,
 ) -> (Router, bool) {
     let env = Env::from_process();
+    // Only pre-existing explicit DNS authorities are grandfathered; never resolver search names.
     let domains = env
-        .get("DUNKINGSHEEP_TERMINAL_LAN_DOMAINS")
+        .get("DUNKINGSHEEP_TERMINAL_STREAM_HOSTS")
         .unwrap_or("")
         .split(',')
         .map(str::trim)
@@ -89,7 +164,7 @@ fn router_from_env(auth: Arc<dyn AuthBackend>, scheme: RequestScheme, env: &Env)
 }
 
 // Existing transport/auth fixtures inject deterministic hosts, rather than depend on the
-// test machine's interfaces. Production never uses the retired static HOSTS setting.
+// test machine's interfaces. Production discovers LAN addresses; old explicit DNS aliases are preserved.
 #[cfg(test)]
 fn build_router(
     auth: Arc<dyn AuthBackend>,
@@ -148,6 +223,7 @@ fn build_router_with_hosts(
         scheme,
         hosts,
         bound_port,
+        refusal_log: Mutex::new(RefusalThrottle::default()),
         backend,
         roles: Mutex::new(roles),
         socket,
@@ -203,16 +279,32 @@ fn refusal_context(
         }, "remote_address":remote.map(|address| address.to_string()), "listener_port":listener_port, "reason":reason})
 }
 
-fn auth_refusal(
+fn log_refusal(
+    state: &StreamState,
     headers: &HeaderMap,
     reason: &'static str,
     remote: Option<SocketAddr>,
-    listener_port: u16,
+) {
+    let report = state
+        .refusal_log
+        .lock()
+        .ok()
+        .and_then(|mut throttle| throttle.observe(remote, std::time::Instant::now()));
+    if let Some(report) = report {
+        let mut record = refusal_context(headers, reason, remote, state.bound_port);
+        record["suppressed"] = serde_json::json!(report.suppressed);
+        record["suppressed_untracked"] = serde_json::json!(report.untracked);
+        eprintln!("terminal request refused {record}");
+    }
+}
+
+fn auth_refusal(
+    state: &StreamState,
+    headers: &HeaderMap,
+    reason: &'static str,
+    remote: Option<SocketAddr>,
 ) -> Response {
-    eprintln!(
-        "terminal request refused {}",
-        refusal_context(headers, reason, remote, listener_port)
-    );
+    log_refusal(state, headers, reason, remote);
     StatusCode::UNAUTHORIZED.into_response()
 }
 
@@ -236,10 +328,7 @@ fn request_hosts_allowed(
         Ok(_) => None,
     };
     if let Some(reason) = reason {
-        eprintln!(
-            "terminal request refused {}",
-            refusal_context(headers, reason, remote, state.bound_port)
-        );
+        log_refusal(state, headers, reason, remote);
         false
     } else {
         true
@@ -282,10 +371,10 @@ async fn resize_status(
         return StatusCode::FORBIDDEN.into_response();
     }
     let Some(token) = cookie(&headers) else {
-        return auth_refusal(&headers, "owner_session_required", peer, state.bound_port);
+        return auth_refusal(&state, &headers, "owner_session_required", peer);
     };
     if !is_owner(&state, &token).await {
-        return auth_refusal(&headers, "owner_session_required", peer, state.bound_port);
+        return auth_refusal(&state, &headers, "owner_session_required", peer);
     }
     let Some(busy_name) = state.resize_slots.busy_name(&name) else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
@@ -304,7 +393,7 @@ async fn resize_status(
         busy
     };
     if !is_owner(&state, &token).await {
-        return auth_refusal(&headers, "owner_session_required", peer, state.bound_port);
+        return auth_refusal(&state, &headers, "owner_session_required", peer);
     }
     let mut response =
         Json(serde_json::json!({"in_flight":in_flight,"epoch":state.resize_epoch.as_str()}))
@@ -414,10 +503,10 @@ async fn resize_terminal(
         return StatusCode::FORBIDDEN.into_response();
     }
     let Some(token) = cookie(&headers) else {
-        return auth_refusal(&headers, "owner_session_required", peer, state.bound_port);
+        return auth_refusal(&state, &headers, "owner_session_required", peer);
     };
     if !is_owner(&state, &token).await {
-        return auth_refusal(&headers, "owner_session_required", peer, state.bound_port);
+        return auth_refusal(&state, &headers, "owner_session_required", peer);
     }
     if !(1..=1000).contains(&request.cols) || !(1..=1000).contains(&request.rows) {
         return (
@@ -455,7 +544,7 @@ async fn resize_terminal(
             .into_response();
     };
     if !is_owner(&state, &token).await {
-        return auth_refusal(&headers, "owner_session_required", peer, state.bound_port);
+        return auth_refusal(&state, &headers, "owner_session_required", peer);
     }
     let Ok(permit) = state.workers.clone().try_acquire_owned() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
@@ -496,10 +585,10 @@ async fn list_terminals(
         return StatusCode::FORBIDDEN.into_response();
     }
     let Some(token) = cookie(&headers) else {
-        return auth_refusal(&headers, "owner_session_required", peer, state.bound_port);
+        return auth_refusal(&state, &headers, "owner_session_required", peer);
     };
     if !is_owner(&state, &token).await {
-        return auth_refusal(&headers, "owner_session_required", peer, state.bound_port);
+        return auth_refusal(&state, &headers, "owner_session_required", peer);
     }
     let Ok(permit) = state.workers.clone().try_acquire_owned() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
@@ -518,7 +607,7 @@ async fn list_terminals(
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
     if !is_owner(&state, &token).await {
-        return auth_refusal(&headers, "owner_session_required", peer, state.bound_port);
+        return auth_refusal(&state, &headers, "owner_session_required", peer);
     }
     let mut response = Json(found).into_response();
     response.headers_mut().insert(
@@ -621,10 +710,10 @@ async fn upgrade(
         return StatusCode::FORBIDDEN.into_response();
     }
     let Some(token) = cookie(&headers) else {
-        return auth_refusal(&headers, "owner_session_required", peer, state.bound_port);
+        return auth_refusal(&state, &headers, "owner_session_required", peer);
     };
     if !is_owner(&state, &token).await {
-        return auth_refusal(&headers, "owner_session_required", peer, state.bound_port);
+        return auth_refusal(&state, &headers, "owner_session_required", peer);
     }
     let Ok(permit) = state.sessions.clone().try_acquire_owned() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
@@ -881,6 +970,86 @@ mod tests {
         }
     }
 
+    #[test]
+    fn refusal_logs_share_one_minute_budget_per_ip_and_report_suppression() {
+        let mut throttle = RefusalThrottle::default();
+        let now = std::time::Instant::now();
+        let first = Some("192.0.2.8:1111".parse().unwrap());
+        assert_eq!(throttle.observe(first, now).unwrap().suppressed, 0);
+        assert!(throttle
+            .observe(
+                Some("192.0.2.8:2222".parse().unwrap()),
+                now + Duration::from_secs(1)
+            )
+            .is_none());
+        assert!(throttle
+            .observe(
+                Some("[::ffff:192.0.2.8]:3333".parse().unwrap()),
+                now + Duration::from_secs(2)
+            )
+            .is_none());
+        assert_eq!(
+            throttle
+                .observe(
+                    Some("192.0.2.9:1111".parse().unwrap()),
+                    now + Duration::from_secs(2)
+                )
+                .unwrap()
+                .suppressed,
+            0
+        );
+        assert!(throttle
+            .observe(first, now + Duration::from_secs(59))
+            .is_none());
+        assert_eq!(
+            throttle
+                .observe(first, now + Duration::from_secs(60))
+                .unwrap()
+                .suppressed,
+            3
+        );
+        assert!(throttle
+            .observe(first, now + Duration::from_secs(61))
+            .is_none());
+        assert_eq!(
+            throttle
+                .observe(first, now + Duration::from_secs(120))
+                .unwrap()
+                .suppressed,
+            1
+        );
+    }
+
+    #[test]
+    fn refusal_peer_storage_is_bounded_without_resetting_active_budgets() {
+        let mut throttle = RefusalThrottle::default();
+        let now = std::time::Instant::now();
+        for number in 0..MAX_REFUSAL_PEERS {
+            let address = std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, number as u16, 1);
+            assert!(throttle
+                .observe(Some(SocketAddr::new(address.into(), 1000)), now)
+                .is_some());
+        }
+        let extra = Some("[2001:db8:ffff::1]:1000".parse().unwrap());
+        assert!(throttle
+            .observe(extra, now + Duration::from_secs(1))
+            .is_none());
+        assert_eq!(throttle.peers.len(), MAX_REFUSAL_PEERS);
+        let first = Some("[2001:db8::1]:2000".parse().unwrap());
+        assert!(throttle
+            .observe(first, now + Duration::from_secs(59))
+            .is_none());
+        let report = throttle
+            .observe(first, now + Duration::from_secs(60))
+            .unwrap();
+        assert_eq!(report.suppressed, 1);
+        assert_eq!(report.untracked, 1);
+        assert!(throttle
+            .observe(extra, now + Duration::from_secs(60))
+            .is_some());
+        assert!(throttle.peers.len() <= MAX_REFUSAL_PEERS);
+    }
+
     #[tokio::test]
     async fn local_lan_authorities_keep_origin_and_login_gates() {
         use tower::ServiceExt;
@@ -891,7 +1060,7 @@ mod tests {
         ]);
         let identity = Arc::new(Mutex::new(crate::terminal_hosts::LocalIdentity {
             hostname: Some("cell".into()),
-            addresses: vec!["192.0.2.8".parse().unwrap(), "::1".parse().unwrap()],
+            addresses: vec!["192.168.0.209".parse().unwrap(), "fe80::1".parse().unwrap()],
         }));
         let source = identity.clone();
         let hosts: HostSource = Arc::new(move || {
@@ -899,7 +1068,7 @@ mod tests {
                 &source.lock().unwrap(),
                 8787,
                 RequestScheme::Http,
-                &["home.arpa".into()],
+                &[],
             )
         });
         let app = build_router_with_hosts(
@@ -921,12 +1090,11 @@ mod tests {
             request.body(axum::body::Body::empty()).unwrap()
         };
         for host in [
-            "192.0.2.8:8787",
+            "192.168.0.209:8787",
             "cell:8787",
             "cell.local:8787",
-            "cell.home.arpa:8787",
-            "[::1]:8787",
-            "[0:0:0:0:0:0:0:1]:8787",
+            "[fe80::1]:8787",
+            "[fe80:0:0:0:0:0:0:1]:8787",
         ] {
             let origin = format!("http://{host}");
             assert_eq!(
@@ -949,11 +1117,14 @@ mod tests {
         );
         for host in [
             "foreign.example:8787",
+            "100.91.92.49:8787",
+            "cell.tail68fe78.ts.net:8787",
+            "cell.home.arpa:8787",
             "cell:80",
             "cell",
-            "192.0.2.8",
+            "192.168.0.209",
             "cell.local.evil:8787",
-            "192.0.2.9:8787",
+            "192.168.0.210:8787",
         ] {
             assert_eq!(
                 app.clone()
@@ -993,17 +1164,17 @@ mod tests {
             StatusCode::FORBIDDEN
         );
         // The same router re-reads current interfaces instead of retaining startup IPs.
-        identity.lock().unwrap().addresses = vec!["192.0.2.9".parse().unwrap()];
+        identity.lock().unwrap().addresses = vec!["192.168.0.210".parse().unwrap()];
         assert_eq!(
             app.clone()
-                .oneshot(request("192.0.2.8:8787", None))
+                .oneshot(request("192.168.0.209:8787", None))
                 .await
                 .unwrap()
                 .status(),
             StatusCode::FORBIDDEN
         );
         assert_eq!(
-            app.oneshot(request("192.0.2.9:8787", None))
+            app.oneshot(request("192.168.0.210:8787", None))
                 .await
                 .unwrap()
                 .status(),
@@ -1379,6 +1550,7 @@ mod tests {
             auth: auth.clone(),
             scheme: RequestScheme::Http,
             bound_port: addr.port(),
+            refusal_log: Mutex::new(RefusalThrottle::default()),
             hosts: {
                 let hosts = vec![addr.to_string(), client_addr.to_string()];
                 Arc::new(move || Ok(hosts.clone()))
