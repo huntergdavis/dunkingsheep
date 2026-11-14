@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import MessageBody from './MessageBody';
 import InboxCompose from './InboxCompose';
-import { INBOX_VIEWS, validateInboxPage } from './inbox-views.js';
+import { HISTORICAL_REASONS, INBOX_VIEWS, validateInboxPage } from './inbox-views.js';
 import './owner-inbox.css';
 
 const PAGE_SIZE = 25;
@@ -119,13 +119,14 @@ function OwnerInboxThread({ api, sourceFilter, controls }) {
             <strong>{item.sender || (item.role === 'owner' ? 'You' : 'Unknown sender')}</strong>
             <time dateTime={item.created_at}>{new Date(item.created_at).toLocaleString()}</time>
             <span className="owner-inbox-preview">{item.body?.trim().split('\n').find(line => line.trim()) || '(Empty message)'}</span>
-            <small>{view.label}</small>
+            <small>{sourceFilter === 'historical' ? [HISTORICAL_REASONS[item.historical_reason], ...item.historical_labels].join(' · ') : view.label}</small>
           </button>
         </li>)}</ul>
       </section>
       {selected && <article className="owner-inbox-reader" aria-label="Selected message" key={selected.id}>
         <header><h2>{selected.sender || (selected.role === 'owner' ? 'You' : 'Unknown sender')}</h2>
           <p><time dateTime={selected.created_at}>{new Date(selected.created_at).toLocaleString()}</time> · {selected.message_id || selected.id}</p>
+          {sourceFilter === 'historical' && <p>{[HISTORICAL_REASONS[selected.historical_reason], ...selected.historical_labels].join(' · ')}</p>}
           <p>{view.label}{sourceFilter === 'historical' && selected.reply_to ? ` · Original reply reference: ${selected.reply_to}` : ''}</p>
         </header>
         <MessageBody body={selected.body || ''} frontDesk />

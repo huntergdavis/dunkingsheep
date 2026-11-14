@@ -24,7 +24,7 @@ def item(mid, body, source, audience=None):
         'created_at':'2026-11-13T00:00:00Z','conversation_source':source,'audience':audience,
         'mailbox':'owner' if source == 'human' else 'codex-rust-owner',
         'thread_version':None if historical else 1,'parent_id':None,'root_id':None if historical else f'i{mid}',
-        'conversation_kind':None if historical else source,'sender_kind':None if historical else 'agent'}
+        'conversation_kind':None if historical else source,'sender_kind':None if historical else 'agent','historical_reason':'prior_version' if historical else None,'historical_labels':['Agent-only','Scheduled check-in'] if historical and audience=='agent' else []}
 HUMAN = item(201,'HUMAN-CONVERSATION: agent-only words do not classify','human')
 HUMAN_OLD = item(101,'HUMAN-OLDER','human')
 VP = item(401,'VP-UNTAGGED-COORDINATION','vp')
@@ -32,11 +32,13 @@ TAGGED = item(402,'VP-TAGGED-COORDINATION','vp','agent')
 VP_OLD = item(301,'VP-OLDER','vp')
 HISTORY = item(901,'PRIOR-VERSION-UNTAGGED','historical')
 HISTORY_TAGGED = item(902,'PRIOR-VERSION-TAGGED','historical','agent')
+HISTORY_OTHER = {**item(903,'RECORDED-OTHER-CONVERSATION','historical'),'historical_reason':'other'}
+HISTORY_UNKNOWN = {**item(904,'UNRECOGNISED-CONVERSATION','historical'),'historical_reason':'unknown','historical_labels':['Routine agent mail']}
 
 def fulfill(route, value, status=200):
     route.fulfill(status=status,content_type='application/json',body=json.dumps(value))
 def response(view,before):
-    rows = ([HUMAN_OLD] if before else [HUMAN]) if view == 'human_threads' else ([VP_OLD] if before else [TAGGED,VP]) if view == 'vp_threads' else [HISTORY_TAGGED,HISTORY]
+    rows = ([HUMAN_OLD] if before else [HUMAN]) if view == 'human_threads' else ([VP_OLD] if before else [TAGGED,VP]) if view == 'vp_threads' else [HISTORY_UNKNOWN,HISTORY_OTHER,HISTORY_TAGGED,HISTORY]
     cursor = None if before or view == 'historical' else 'i201' if view == 'human_threads' else 'i401'
     return {'items':rows,'next_before':cursor,'source_filter':view,'include_internal':False}
 def mock(route):
@@ -83,6 +85,7 @@ try:
             page.get_by_role('heading',name='Historical / prior versions',exact=True).wait_for()
             page.get_by_text(HISTORY['body'],exact=True).first.wait_for()
             page.get_by_text(HISTORY_TAGGED['body'],exact=True).first.wait_for()
+            for label in ('Other conversation','Unrecognised conversation metadata','Agent-only','Scheduled check-in','Routine agent mail'): assert page.get_by_text(label,exact=False).count()>0,label
             assert page.get_by_text(TAGGED['body'],exact=True).count() == 0
             assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
             if os.environ.get('OWNER_FILTER_SCREENSHOT_DIR'):

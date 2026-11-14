@@ -587,6 +587,12 @@ async fn owner_thread(
             }
             if let Some(view) = filter.thread_view() {
                 if view == "historical" {
+                    if !matches!(
+                        row["historical_reason"].as_str(),
+                        Some("prior_version" | "other" | "unknown")
+                    ) {
+                        return Err(invalid());
+                    }
                     for field in [
                         "thread_version",
                         "parent_id",
@@ -674,6 +680,23 @@ async fn owner_thread(
                                 "sender_kind",
                             ] {
                                 item[field] = row[field].clone();
+                            }
+                            if view == "historical" {
+                                item["historical_reason"] = row["historical_reason"].clone();
+                                let mut labels = Vec::new();
+                                if row["audience"] == "agent" {
+                                    labels.push("Agent-only");
+                                }
+                                if ds_core::owner::conversations::is_routine_mail(row) {
+                                    labels.push("Routine agent mail");
+                                }
+                                if row["digest_id"]
+                                    .as_str()
+                                    .is_some_and(|id| id.starts_with("dunk:"))
+                                {
+                                    labels.push("Scheduled check-in");
+                                }
+                                item["historical_labels"] = json!(labels);
                             }
                             if view != "historical" {
                                 item["role"] =
@@ -2135,7 +2158,7 @@ mod tests {
                 "thread_version":if historical {Value::Null}else{json!(1)},
                 "parent_id":null,"root_id":if historical {Value::Null}else{json!("i7")},
                 "conversation_kind":if historical {Value::Null}else{json!(kind)},
-                "sender_kind":if historical {Value::Null}else{json!("agent")}});
+                "sender_kind":if historical {Value::Null}else{json!("agent")},"historical_reason":if historical {json!("prior_version")}else{Value::Null}});
             backend.reply("owner_conversation",json!({"source_filter":filter,"include_internal":false,"messages":[row],"waiting":[]}));
             let response = block_on(app(authorized(), backend.clone()).oneshot(request(
                 "GET",
@@ -2180,5 +2203,28 @@ mod tests {
             assert_eq!(StatusCode::BAD_GATEWAY, status);
             assert!(!body.to_string().contains("DO_NOT_DISPLAY"));
         }
+    }
+    #[test]
+    fn historical_labels_use_recorded_audience_digest_and_existing_routine_marker() {
+        let backend = Arc::new(FakeOwner::new());
+        let row = json!({"id":"i7","mailbox":"owner","audience":"agent","created_at":100,"body":"unchanged","subject":"[review-note] recorded marker","digest_id":"dunk:d7","thread_version":null,"parent_id":null,"root_id":null,"conversation_kind":null,"sender_kind":null,"historical_reason":"other"});
+        backend.reply(
+            "owner_conversation",
+            json!({"source_filter":"historical","include_internal":false,"messages":[row]}),
+        );
+        let response = block_on(app(authorized(), backend).oneshot(request(
+            "GET",
+            "/api/owner-thread?paged=true&filter=historical",
+            None,
+        )))
+        .unwrap();
+        let (status, body, _) = response_json(response);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["items"][0]["historical_reason"], "other");
+        assert_eq!(
+            body["items"][0]["historical_labels"],
+            json!(["Agent-only", "Routine agent mail", "Scheduled check-in"])
+        );
+        assert_eq!(body["items"][0]["body"], "unchanged");
     }
 }
