@@ -1458,6 +1458,8 @@ fn inbox_body_view_is_scoped_opt_in_and_preserves_message_and_notify_bytes() {
     }
     assert_eq!(get("i999999", false)["status"], "not_found");
     for args in [
+        json!({}),
+        json!({"mailbox":"exact box","message_id":plain,"body":"MUST_NOT_LOG"}),
         json!({"mailbox":"exact box","message_id":"i01"}),
         json!({"mailbox":"exact box","message_id":plain,"include_agent":"true"}),
         json!({"mailbox":"bad\nbox","message_id":plain}),

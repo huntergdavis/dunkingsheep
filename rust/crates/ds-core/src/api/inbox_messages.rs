@@ -149,11 +149,19 @@ pub fn h_inbox_list(c: &HandlerContext<'_>, args: Args) -> Result<Value, DunkErr
 }
 /// Internal body lookup for the owner transport. It never uses inbox_read or resolves labels.
 pub fn h_inbox_get(c: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
-    let role = c.flock.caller_role(c.self_pane_id(), c.env)?;
+    let role = match c.flock.caller_role(c.self_pane_id(), c.env) {
+        Ok(role) => role,
+        Err(error) => {
+            audit_inbox_get_refusal(c, "unresolved", Some(&args));
+            return Err(error);
+        }
+    };
+    let refused = |reason: &str| -> Result<Value, DunkError> {
+        audit_inbox_get_refusal(c, &role, Some(&args));
+        Err(DunkError::Refused(reason.into()))
+    };
     if !matches!(role.as_str(), "owner" | "web") {
-        return Err(DunkError::Refused(
-            "message bodies require the owner or web role".into(),
-        ));
+        return refused("message bodies require the owner or web role");
     }
     let key = match args.get("mailbox") {
         Some(Value::String(key))
@@ -163,16 +171,16 @@ pub fn h_inbox_get(c: &HandlerContext<'_>, args: Args) -> Result<Value, DunkErro
         {
             key
         }
-        _ => return Err(DunkError::Refused("invalid literal mailbox".into())),
+        _ => return refused("invalid literal mailbox"),
     };
     let id = match args.get("message_id") {
         Some(Value::String(id)) if crate::inbox::valid_message_id(id) => id,
-        _ => return Err(DunkError::Refused("invalid inbox message id".into())),
+        _ => return refused("invalid inbox message id"),
     };
     let include_agent = match args.get("include_agent") {
         None | Some(Value::Null) | Some(Value::Bool(false)) => false,
         Some(Value::Bool(true)) => true,
-        _ => return Err(DunkError::Refused("include_agent must be a boolean".into())),
+        _ => return refused("include_agent must be a boolean"),
     };
     let result = c.env.with_inbox_env(&mut |env| {
         let Some(metadata) = crate::inbox::message_view_metadata(env.pool(), key, id)? else {
@@ -196,11 +204,11 @@ pub fn h_inbox_get(c: &HandlerContext<'_>, args: Args) -> Result<Value, DunkErro
         value["audience"] = json!(metadata.audience);
         Ok(json!({"status":"ok","message":value}))
     });
-    let status = result
-        .as_ref()
-        .ok()
-        .and_then(|value| value["status"].as_str())
-        .unwrap_or("error");
+    let status = match &result {
+        Ok(value) => value["status"].as_str().unwrap_or("error"),
+        Err(DunkError::Refused(_)) => "refused",
+        Err(_) => "error",
+    };
     eprintln!(
         "{}",
         crate::inbox::body_view_audit(&role, c.self_pane_id(), key, id, include_agent, status)

@@ -497,6 +497,21 @@ pub struct HandlerContext<'a> {
     pub runtime: &'a Handle,
 }
 
+// Refusal logging is scoped to this privileged body verb and selects metadata fields explicitly.
+fn audit_inbox_get_refusal(context: &HandlerContext<'_>, role: &str, args: Option<&Args>) {
+    let field = |key| args.and_then(|args| args.get(key));
+    eprintln!(
+        "{}",
+        crate::inbox::body_view_refusal_audit(
+            role,
+            context.self_pane_id(),
+            field("mailbox"),
+            field("message_id"),
+            field("include_agent")
+        )
+    );
+}
+
 impl HandlerContext<'_> {
     pub fn self_pane_id(&self) -> Option<&str> {
         self.request.self_pane_id.as_deref()
@@ -1125,11 +1140,22 @@ impl Dispatcher {
         let self_pane_id = context.self_pane_id();
         let command = registry::command(name)
             .ok_or_else(|| DunkError::Refused(format!("unknown command {}", py_repr(name))))?;
-        let role = gate.caller_role(self_pane_id)?;
+        let role = match gate.caller_role(self_pane_id) {
+            Ok(role) => role,
+            Err(error) => {
+                if name == "inbox_get" {
+                    audit_inbox_get_refusal(context, "unresolved", args.as_ref());
+                }
+                return Err(error);
+            }
+        };
         if command.owner_only && role != "system" && role != "web" {
             // The owner gate: passing it IS the permission for these verbs.
             gate.require_superuser(self_pane_id, name)?;
         } else if !roles::allowed(&role, name) {
+            if name == "inbox_get" {
+                audit_inbox_get_refusal(context, &role, args.as_ref());
+            }
             return Err(DunkError::Refused(format!(
                 "{name} is not permitted for role {role}{}; see docs/FLAT_FLEET.md section 4.3",
                 match self_pane_id.filter(|p| !p.is_empty()) {
@@ -1154,6 +1180,9 @@ impl Dispatcher {
             })
             .collect();
         if !missing.is_empty() {
+            if name == "inbox_get" {
+                audit_inbox_get_refusal(context, &role, Some(&args));
+            }
             return Err(DunkError::Refused(format!(
                 "{name}: missing required argument(s): {}",
                 missing.join(", ")
@@ -1166,6 +1195,9 @@ impl Dispatcher {
             .collect();
         if !unknown.is_empty() {
             unknown.sort_unstable();
+            if name == "inbox_get" {
+                audit_inbox_get_refusal(context, &role, Some(&args));
+            }
             return Err(DunkError::Refused(format!(
                 "{name}: unknown argument(s): {}",
                 unknown.join(", ")
@@ -1174,6 +1206,9 @@ impl Dispatcher {
         // The production table is total (registrations.rs enforces it); only a partial test
         // table can land here, and it is told so by name rather than given a guess.
         let handler = self.handlers.get(command.name).ok_or_else(|| {
+            if name == "inbox_get" {
+                audit_inbox_get_refusal(context, &role, Some(&args));
+            }
             DunkError::Refused(format!(
                 "internal error: no handler registered for {}",
                 command.name

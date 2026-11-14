@@ -1,7 +1,7 @@
 //! Guard inputs and read audience metadata before a privileged body lookup.
 use super::{map_sqlite, DunkError, ReadPool};
 use rusqlite::OptionalExtension;
-use serde_json::json;
+use serde_json::{json, Value};
 
 /// Inbox IDs are canonical positive i64 counter values prefixed by `i`.
 pub fn valid_message_id(id: &str) -> bool {
@@ -51,6 +51,35 @@ pub(crate) fn body_view_audit(
     .to_string()
 }
 
+// Refusals can precede input validation: keep only bounded string metadata, never raw values.
+pub(crate) fn body_view_refusal_audit(
+    role: &str,
+    pane: Option<&str>,
+    mailbox: Option<&Value>,
+    id: Option<&Value>,
+    include_agent: Option<&Value>,
+) -> String {
+    let mailbox = mailbox
+        .and_then(Value::as_str)
+        .filter(|key| {
+            !key.trim().is_empty() && key.len() <= 1024 && !key.chars().any(char::is_control)
+        })
+        .unwrap_or("<invalid>");
+    let id = id
+        .and_then(Value::as_str)
+        .filter(|id| valid_message_id(id))
+        .unwrap_or("<invalid>");
+    let pane = pane.filter(|pane| pane.len() <= 128 && !pane.chars().any(char::is_control));
+    body_view_audit(
+        role,
+        pane,
+        mailbox,
+        id,
+        include_agent == Some(&Value::Bool(true)),
+        "refused",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -78,6 +107,18 @@ mod tests {
         assert_eq!(audit["event"], "inbox_body_view");
         assert_eq!(audit["role"], "web");
         assert_eq!(audit["message_id"], "i42");
+        let raw = json!({"body":"MUST_NOT_LOG"});
+        let refusal = body_view_refusal_audit(
+            "worker",
+            Some("w1:p1"),
+            Some(&raw),
+            Some(&json!("i1\nMUST_NOT_LOG")),
+            Some(&raw),
+        );
+        assert!(!refusal.contains("MUST_NOT_LOG") && !refusal.contains('\n'));
+        let refused: Value = serde_json::from_str(&refusal).unwrap();
+        assert_eq!(refused["result"], "refused");
+        assert_eq!(refused["message_id"], "<invalid>");
         assert!(
             audit.get("body").is_none()
                 && audit.get("subject").is_none()

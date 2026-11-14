@@ -197,7 +197,7 @@ mod inbox_tests;
 mod message_view;
 mod paging;
 pub use message_view::valid_message_id;
-pub(crate) use message_view::{body_view_audit, message_view_metadata};
+pub(crate) use message_view::{body_view_audit, body_view_refusal_audit, message_view_metadata};
 pub use paging::list_page;
 
 use rusqlite::Connection;

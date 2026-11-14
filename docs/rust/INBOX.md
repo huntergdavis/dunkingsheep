@@ -118,3 +118,10 @@ cannot enable S-D bodies. The browser treats502 as a soft unavailable state, men
 daemon upgrade may be needed, and keeps Owner conversation reachable; no error fallback reads
 or acknowledges mail. A daemon containing inbox_get must be live before S-D body browsing is
 advertised as available.
+
+Refused inbox_get calls are audited as metadata-only `result=refused`, including caller/role,
+missing/unknown arguments and invalid inputs before body access. Unvalidated metadata is
+bounded and replaced with `<invalid>` when it is not a safe key/ID; raw argument objects and
+credentials are never serialized. Opening a folder/history page automatically previews its
+first eligible message and produces a body-view audit line; this is not a read/ack receipt.
+The owner role includes the authenticated owner seat, whose body access is intentional.
