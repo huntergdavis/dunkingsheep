@@ -19,6 +19,10 @@
 # step, so it also works after an activate that died part way through.
 #
 # Environment (tests and non-default hosts; the defaults are the live host's):
+# Unit staging (t4699): plan|stage --unit daemon|web|telegram --sha SHA
+#   --artifact FILE --artifact-sha256 LOWERCASE_SHA256 [--apply]
+# This slice has no unit activation/verification/rollback or retention commands.
+#
 #   RUST_REPO      the checkout the pinned sha lives in         (default: this script's repo)
 #   RUST_WORKTREE  the detached build worktree                   (default: <workspace>/.dunk-port-work/owner-release-wt)
 #   RUST_RELEASES  the immutable release trees                   (default: $HOME/.local/share/dunkingsheep/releases)
@@ -26,7 +30,10 @@
 #   RUST_OWNER     the owner's mailbox for the inbox check       (default: %1)
 set -eu
 
-REPO=${RUST_REPO:-$(cd "$(dirname "$0")/.." && pwd)}
+TOOL_ROOT=$(cd "$(dirname "$0")/.." && pwd)
+REPO=${RUST_REPO:-$TOOL_ROOT}
+# Reuse the packaging path validation and private staging cleanup helpers.
+. "$TOOL_ROOT/packaging/rust-release/lib.sh"
 # The git common dir is the main checkout's .git, from any checkout or worktree. Its grandparent is
 # the workspace that holds .dunk-port-work, where the runbook puts the owner-release worktree.
 COMMON_DIR=$(cd "$REPO" && cd "$(git rev-parse --git-common-dir)" && pwd)
@@ -44,10 +51,18 @@ DROPIN=$DROPIN_DIR/99-rust-cutover.conf
 SQLITE_FILES="tasks.db inbox.db context-ledger.db dispatch.db agent-state.db"
 
 cmd=${1:-plan}; shift || true
-SHA=""; APPLY=0
+SHA=""; APPLY=0; UNIT=""; ARTIFACT=""; ARTIFACT_SHA=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --sha) [ $# -ge 2 ] || { echo "--sha needs a value" >&2; exit 2; }; SHA=$2; shift 2;;
+    --unit|--artifact|--artifact-sha256)
+      [ $# -ge 2 ] || { echo "$1 needs a value" >&2; exit 2; }
+      case "$1" in
+        --unit) UNIT=$2;;
+        --artifact) ARTIFACT=$2;;
+        --artifact-sha256) ARTIFACT_SHA=$2;;
+      esac
+      shift 2;;
     --apply) APPLY=1; shift;;
     *) echo "unknown argument: $1" >&2; exit 2;;
   esac
@@ -57,6 +72,23 @@ if [ -n "$SHA" ]; then
     plan|stage|activate) ;;
     *) echo "$cmd takes no --sha: it reverses or checks what is recorded" >&2; exit 2;;
   esac
+fi
+
+# Unit-aware staging is opt-in. Never route a web/Telegram request into the
+# legacy daemon cutover while the later switch/postcheck slice is not implemented.
+if [ -n "$UNIT" ]; then
+  case "$UNIT" in
+    daemon) UNIT_BINARY=dunkingsheep;;
+    web) UNIT_BINARY=ds-desk;;
+    telegram) UNIT_BINARY=dunkingsheep-telegram;;
+    *) die "--unit must be daemon, web or telegram";;
+  esac
+  case "$cmd" in
+    plan|stage) ;;
+    *) die "--unit currently supports plan/stage only; unit switching is not implemented";;
+  esac
+else
+  [ -z "$ARTIFACT$ARTIFACT_SHA" ] || die "--artifact and --artifact-sha256 require --unit"
 fi
 
 # Shows the command in dry-run, runs it with --apply.
@@ -118,6 +150,81 @@ stage() {
   run chmod 0555 "$dest/dunkingsheep"
   run chmod 0555 "$dest"
   echo "staged $SHA into $dest (no restart performed)"
+}
+
+# t4699 slice 1: stage an operator-pinned artifact without executing it. This
+# never builds, writes launchers/drop-ins/state, or invokes a service/API.
+unit_manifest() {
+  printf 'format=1\nunit=%s\nrevision=%s\nbinary=%s\nbinary_sha256=%s\n' \
+    "$UNIT" "$SHA" "$UNIT_BINARY" "$ARTIFACT_SHA"
+}
+
+check_unit_release() {
+  [ ! -L "$unit_dest" ] && [ -d "$unit_dest" ] || die "invalid release directory: $unit_dest"
+  for entry in "$unit_dest/$UNIT_BINARY" "$unit_dest/MANIFEST"; do
+    [ ! -L "$entry" ] && [ -f "$entry" ] || die "invalid release file: $entry"
+  done
+  [ "$(cat "$unit_dest/MANIFEST")" = "$(unit_manifest)" ] || die "release MANIFEST differs; immutable release refused"
+  [ "$(sha256sum "$unit_dest/$UNIT_BINARY" | cut -d' ' -f1)" = "$ARTIFACT_SHA" ] || die "release binary differs; immutable release refused"
+  [ "$(stat -c %a "$unit_dest")" = 555 ] &&
+    [ "$(stat -c %a "$unit_dest/$UNIT_BINARY")" = 555 ] &&
+    [ "$(stat -c %a "$unit_dest/MANIFEST")" = 444 ] || die "release modes differ; immutable release refused"
+}
+
+cleanup_unit_stage() {
+  unit_status=$?
+  trap - EXIT HUP INT TERM
+  if [ -n "${unit_staging:-}" ]; then
+    clear_tree "$unit_staging" || echo "could not remove private staging tree: $unit_staging" >&2
+  fi
+  exit "$unit_status"
+}
+
+stage_unit() {
+  need_sha
+  require_plain_path RUST_RELEASES "$RELEASES"
+  [ ! -L "$RELEASES" ] || die "release root must not be a symbolic link"
+  [ -n "$ARTIFACT" ] && [ ! -L "$ARTIFACT" ] && [ -f "$ARTIFACT" ] && [ -x "$ARTIFACT" ] ||
+    die "--artifact must be a regular, non-symlink executable file"
+  [ "${#ARTIFACT_SHA}" = 64 ] || die "--artifact-sha256 must be a full SHA256"
+  case "$ARTIFACT_SHA" in *[!a-f0-9]*) die "--artifact-sha256 must use lowercase hex";; esac
+  [ "$(sha256sum "$ARTIFACT" | cut -d' ' -f1)" = "$ARTIFACT_SHA" ] || die "artifact SHA256 mismatch"
+  unit_dest=$RELEASES/rust-$SHA-$UNIT
+  if [ "$APPLY" = 0 ]; then
+    if [ -e "$unit_dest" ] || [ -L "$unit_dest" ]; then check_unit_release; fi
+    echo "DRY-RUN: stage $ARTIFACT -> $unit_dest/$UNIT_BINARY (0555)"
+    echo "DRY-RUN: write $unit_dest/MANIFEST (0444), directory (0555):"
+    unit_manifest
+    echo "No services, launchers, drop-ins or state changed. Unit switching is not implemented."
+    return
+  fi
+  mkdir -p "$RELEASES"
+  # Stage writers serialize per unit; dry-run does not create even this lock.
+  unit_lock=$RELEASES/.stage-$UNIT.lock
+  [ ! -L "$unit_lock" ] || die "stage lock must not be a symbolic link"
+  exec 9>"$unit_lock"
+  flock -n 9 || die "another stage for $UNIT is running"
+  if [ -e "$unit_dest" ] || [ -L "$unit_dest" ]; then
+    check_unit_release
+    echo "already staged: $unit_dest"
+    return
+  fi
+  unit_staging=$(mktemp -d "$RELEASES/.stage-$UNIT-XXXXXXXX")
+  trap cleanup_unit_stage EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  cp "$ARTIFACT" "$unit_staging/$UNIT_BINARY"
+  # Detect a source that changed between the initial hash and the copy.
+  [ "$(sha256sum "$unit_staging/$UNIT_BINARY" | cut -d' ' -f1)" = "$ARTIFACT_SHA" ] || die "copied artifact SHA256 mismatch"
+  unit_manifest > "$unit_staging/MANIFEST"
+  chmod 0555 "$unit_staging/$UNIT_BINARY"
+  chmod 0444 "$unit_staging/MANIFEST"
+  chmod 0555 "$unit_staging"
+  mv -T "$unit_staging" "$unit_dest"
+  unit_staging=""
+  trap - EXIT HUP INT TERM
+  echo "staged $UNIT at $SHA into $unit_dest (no activation performed)"
 }
 
 # Runbook 8.3: the backup is taken while the python daemon still serves, from a copy that holds a
@@ -335,6 +442,13 @@ plan() {
   echo "             (check the python release can read the state BEFORE --apply: its dry-run output says how)"
   echo "Dry-run by default: nothing above changes anything without --apply. Operator only."
 }
+
+if [ -n "$UNIT" ]; then
+  # A plan always stays read-only, including when --apply was accidentally supplied.
+  if [ "$cmd" = plan ]; then APPLY=0; fi
+  stage_unit
+  exit 0
+fi
 
 case "$cmd" in
   plan) plan;;

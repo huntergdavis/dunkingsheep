@@ -91,6 +91,11 @@ def read(path):
         return handle.read()
 
 
+def open_bytes(path):
+    with open(path, "rb") as handle:
+        return handle.read()
+
+
 def mode_of(path):
     return stat.S_IMODE(os.stat(path).st_mode)
 
@@ -443,6 +448,146 @@ class RustRolloutTests(unittest.TestCase):
         job = workflow[workflow.index("  rust-rollout-tests:"):]
         self.assertIn("sh -n tools/rust_rollout.sh", job)
         self.assertIn("tests/test_rust_rollout.py", job)
+
+    # t4699 slice 1: unit-qualified staging only, all under this fake HOME.
+    def unit_artifact(self):
+        artifact = os.path.join(self.tmp, "artifact")
+        write(artifact, '#!/bin/sh\necho ARTIFACT_EXECUTED >> "$FAKE_LOG"\nexit 99\n', mode=0o755)
+        digest = hashlib.sha256(read(artifact).encode()).hexdigest()
+        return artifact, digest
+
+    def unit_args(self, unit):
+        artifact, digest = self.unit_artifact()
+        return ["stage", "--unit", unit, "--sha", self.sha, "--artifact", artifact,
+                "--artifact-sha256", digest]
+
+    def tree_snapshot(self):
+        snapshot = {}
+        for root, dirs, files in os.walk(self.tmp):
+            for name in dirs + files:
+                path = os.path.join(root, name)
+                snapshot[os.path.relpath(path, self.tmp)] = (
+                    stat.S_IMODE(os.lstat(path).st_mode),
+                    hashlib.sha256(open_bytes(path)).hexdigest() if os.path.isfile(path) else None)
+        return snapshot
+
+    def test_unit_stage_all_three_are_immutable_and_never_execute_the_artifact(self):
+        for unit, binary in [("daemon", "dunkingsheep"), ("web", "ds-desk"),
+                             ("telegram", "dunkingsheep-telegram")]:
+            with self.subTest(unit=unit):
+                args = self.unit_args(unit)
+                proc = self.run_script(*args, apply=True)
+                self.assertEqual(0, proc.returncode, proc.stdout + proc.stderr)
+                dest = os.path.join(self.releases, "rust-" + self.sha + "-" + unit)
+                self.assertEqual({binary, "MANIFEST"}, set(os.listdir(dest)))
+                self.assertEqual(read(args[6]), read(os.path.join(dest, binary)))
+                self.assertEqual(0o555, mode_of(dest))
+                self.assertEqual(0o555, mode_of(os.path.join(dest, binary)))
+                self.assertEqual(0o444, mode_of(os.path.join(dest, "MANIFEST")))
+                self.assertEqual(dict(format="1", unit=unit, revision=self.sha, binary=binary,
+                                      binary_sha256=args[-1]),
+                                 dict(line.split("=", 1) for line in read(os.path.join(dest, "MANIFEST")).splitlines()))
+                before = os.stat(os.path.join(dest, binary)).st_mtime_ns
+                proc = self.run_script(*args, apply=True)
+                self.assertEqual(0, proc.returncode, proc.stderr)
+                self.assertIn("already staged", proc.stdout)
+                self.assertEqual(before, os.stat(os.path.join(dest, binary)).st_mtime_ns)
+        self.assertEqual([], self.log_lines())
+        self.assertEqual(OLD_LAUNCHER, read(self.launcher))
+        self.assertFalse(os.path.exists(self.dropin))
+        self.assertFalse(os.path.exists(self.state))
+        self.assertFalse(os.path.exists(self.worktree))
+
+    def test_unit_stage_and_plan_dry_runs_write_nothing(self):
+        for unit in ["daemon", "web", "telegram"]:
+            args = self.unit_args(unit)
+            before = self.tree_snapshot()
+            proc = self.run_script(*args)
+            self.assertEqual(0, proc.returncode, proc.stderr)
+            self.assertIn("DRY-RUN: stage", proc.stdout)
+            self.assertEqual(before, self.tree_snapshot())
+            args[0] = "plan"
+            proc = self.run_script(*args, apply=True)
+            self.assertEqual(0, proc.returncode, proc.stderr)
+            self.assertEqual(before, self.tree_snapshot())
+
+    def test_unit_stage_refuses_mismatched_hash_and_symlink_without_writes(self):
+        args = self.unit_args("web")
+        for digest in ["0" * 64, "bad", "A" * 64]:
+            before = self.tree_snapshot()
+            proc = self.run_script(*args[:-1], digest, apply=True)
+            self.assertNotEqual(0, proc.returncode)
+            self.assertEqual(before, self.tree_snapshot())
+        link = os.path.join(self.tmp, "artifact-link")
+        os.symlink(args[6], link)
+        args[6] = link
+        before = self.tree_snapshot()
+        proc = self.run_script(*args, apply=True)
+        self.assertNotEqual(0, proc.returncode)
+        self.assertIn("regular, non-symlink executable", proc.stderr)
+        self.assertEqual(before, self.tree_snapshot())
+
+    def test_unit_stage_refuses_tampering_without_replacing_the_release(self):
+        for unit, binary in [("daemon", "dunkingsheep"), ("web", "ds-desk"),
+                             ("telegram", "dunkingsheep-telegram")]:
+            args = self.unit_args(unit)
+            self.assertEqual(0, self.run_script(*args, apply=True).returncode)
+            dest = os.path.join(self.releases, "rust-" + self.sha + "-" + unit)
+            file = os.path.join(dest, binary)
+            os.chmod(file, 0o755)
+            write(file, "tampered bytes\n")
+            os.chmod(file, 0o555)
+            proc = self.run_script(*args, apply=True)
+            self.assertNotEqual(0, proc.returncode)
+            self.assertIn("immutable release refused", proc.stderr)
+            self.assertEqual("tampered bytes\n", read(file))
+
+    def test_unit_stage_reuse_checks_manifest_and_modes(self):
+        args = self.unit_args("web")
+        self.assertEqual(0, self.run_script(*args, apply=True).returncode)
+        dest = os.path.join(self.releases, "rust-" + self.sha + "-web")
+        manifest = os.path.join(dest, "MANIFEST")
+        original = read(manifest)
+        os.chmod(manifest, 0o644)
+        write(manifest, original.replace("unit=web", "unit=daemon"))
+        os.chmod(manifest, 0o444)
+        proc = self.run_script(*args, apply=True)
+        self.assertNotEqual(0, proc.returncode)
+        self.assertIn("MANIFEST differs", proc.stderr)
+        os.chmod(manifest, 0o644)
+        write(manifest, original)
+        os.chmod(manifest, 0o444)
+        binary = os.path.join(dest, "ds-desk")
+        os.chmod(binary, 0o755)
+        proc = self.run_script(*args, apply=True)
+        self.assertNotEqual(0, proc.returncode)
+        self.assertIn("modes differ", proc.stderr)
+        self.assertEqual(0o755, mode_of(binary))
+
+    def test_unit_stage_failed_or_changed_copy_never_publishes_partial_release(self):
+        for corrupt in [False, True]:
+            args = self.unit_args("daemon")
+            write(os.path.join(self.bindir, "cp"),
+                  '#!/bin/sh\nfor arg; do dest=$arg; done\nprintf partial > "$dest"\nexit ' +
+                  ("0" if corrupt else "1") + "\n", mode=0o755)
+            proc = self.run_script(*args, apply=True)
+            self.assertNotEqual(0, proc.returncode)
+            self.assertFalse(os.path.exists(os.path.join(self.releases, "rust-" + self.sha + "-daemon")))
+            self.assertEqual([".stage-daemon.lock"], os.listdir(self.releases))
+            self.assertEqual(OLD_LAUNCHER, read(self.launcher))
+            self.assertEqual([], self.log_lines())
+
+    def test_unit_switch_commands_and_artifact_flags_without_unit_are_refused(self):
+        args = self.unit_args("telegram")
+        for cmd in ["activate", "verify", "rollback"]:
+            proc = self.run_script(cmd, "--unit", "telegram", apply=True)
+            self.assertNotEqual(0, proc.returncode)
+            self.assertIn("unit switching is not implemented", proc.stderr)
+        args[2] = "typo"
+        self.assertNotEqual(0, self.run_script(*args, apply=True).returncode)
+        self.assertNotEqual(0, self.run_script("stage", "--artifact", args[6], apply=True).returncode)
+        self.assertEqual([], self.log_lines())
+        self.assertFalse(os.path.exists(self.releases))
 
 
 if __name__ == "__main__":
