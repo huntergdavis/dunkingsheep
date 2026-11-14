@@ -989,7 +989,7 @@ where
             .map(python_string)
             .unwrap_or_else(|| "None".into());
         format!(
-            "Accounting row for the accepted body {ident}.\n\n- body PR (the reviewed content): #{number}\n- review task: {id}, verdict `accept` by {by}\n- head reviewed: {head}\n- ledger: `{ledger}`\n- row added: `{ident},{doc}`\n\nDerived deterministically from the verdict notes and the files the body PR\nadds: one row id, one evidence document that carries its unit and offset. No\nmodel decided anything here. The reviewed content is the body PR; this PR only\nrecords the credit.\n\nOpened by the review timer as `dunkingsheep-reviewer[bot]` and approved as\n`dunkingsheep-author[bot]` so the two identities GitHub counts are distinct.\nAuto-merge is enabled; branch protection decides when it lands."
+            "Accounting row for the accepted body {ident}.\n\n- body PR (the reviewed content): #{number}\n- review task: {id}, verdict `accept` by {by}\n- head reviewed: {head}\n- ledger: `{ledger}`\n- row added: `{ident},{doc}`\n\nDerived deterministically from the verdict notes and the files the body PR\nadds: one row id, one evidence document that carries its unit and offset. No\nmodel decided anything here. The reviewed content is the body PR; this PR only\nrecords the credit.\n\nOpened by the review timer as `dunkingsheep-reviewer[bot]` and approved as\n`dunkingsheep-author[bot]` so the two identities GitHub counts are distinct.\nAuto-merge is held until the required checks are known and successful on the exact accounting head."
         )
     }
 
@@ -1114,6 +1114,42 @@ impl<S, T, G, X> ReviewSync<S, T, G, X>
 where
     S: ReviewTaskActor,
 {
+    async fn record_merge_hold(
+        &self,
+        task_id: Option<&str>,
+        repo: &str,
+        number: i64,
+        head: &str,
+        reason: &str,
+    ) {
+        let Some(id) = task_id.filter(|id| !id.is_empty()) else {
+            return;
+        };
+        // A timer retry should not flood the task with the same hold note.
+        if self
+            .flock
+            .notes(id)
+            .await
+            .ok()
+            .and_then(|notes| notes.last().map(|n| n.text.clone()))
+            .as_deref()
+            == Some(reason)
+        {
+            return;
+        }
+        let _ = self
+            .flock
+            .note_with_meta(
+                id,
+                "note",
+                "review-sync",
+                &serde_json::json!({
+                    "reason":reason,"repo":repo,"pr":number,"head":head,
+                }),
+            )
+            .await;
+    }
+
     /// Join all note text on the review task in event order; a missing note store is empty.
     pub async fn _verdict_text(&self, task: &Value) -> String {
         let id = task.get("id").map(python_string).unwrap_or_default();
@@ -1528,18 +1564,21 @@ where
                 &reviewer,
             )
             .await?;
-            Ok::<(), crate::github::GitHubError>(())
+            Ok::<String, crate::github::GitHubError>(commit)
         }
         .await;
-        if let Err(error) = creation {
-            append_report(
-                &mut out,
-                "errors",
-                Value::String(format!("commit the ledger row: {error}")),
-            );
-            let _ = self._record_accounting(task, &out).await;
-            return Ok(out);
-        }
+        let accounting_commit = match creation {
+            Ok(commit) => commit,
+            Err(error) => {
+                append_report(
+                    &mut out,
+                    "errors",
+                    Value::String(format!("commit the ledger row: {error}")),
+                );
+                let _ = self._record_accounting(task, &out).await;
+                return Ok(out);
+            }
+        };
 
         let accounting_title = format!("Accept {ident}: accounting row for #{number}");
         let accounting_body = self._accounting_body(task, &ident, &doc, config.ledger, number, by);
@@ -1594,6 +1633,28 @@ where
                 "errors",
                 Value::String(format!("approve as the author App: {error}")),
             ),
+        }
+        if let Err(reason) = crate::github::require_merge_ci(
+            &self.transport,
+            &self.api_root,
+            &repo,
+            accounting_number,
+            &accounting_commit,
+            &reviewer,
+        )
+        .await
+        {
+            out["held"] = serde_json::json!({"reason":reason});
+            self.record_merge_hold(
+                Some(&task_id),
+                &repo,
+                accounting_number,
+                &accounting_commit,
+                &reason,
+            )
+            .await;
+            let _ = self._record_accounting(task, &out).await;
+            return Ok(out);
         }
         match crate::github::enable_auto_merge(
             &self.transport,
@@ -1941,6 +2002,23 @@ where
                     Value::String(format!("approve: {error}")),
                 ),
             }
+            if let Err(reason) = crate::github::require_merge_ci(
+                &self.transport,
+                &self.api_root,
+                &repo,
+                number,
+                &head,
+                &token,
+            )
+            .await
+            {
+                out["merged"] = Value::Bool(false);
+                out["held"] = serde_json::json!({"reason":reason});
+                out["accounting"] = serde_json::json!({"skipped":"the body PR is not merged yet; required CI gate held"});
+                self.record_merge_hold(Some(&task_id), &repo, number, &head, &reason)
+                    .await;
+                return Ok(out);
+            }
             match crate::github::merge_pull(
                 &self.transport,
                 &self.api_root,
@@ -2152,6 +2230,25 @@ where
         report: &mut Value,
         task_id: Option<&str>,
     ) -> bool {
+        if let Err(reason) = crate::github::require_merge_ci(
+            &self.transport,
+            &self.api_root,
+            repo,
+            number,
+            head,
+            token,
+        )
+        .await
+        {
+            append_report(
+                report,
+                "held",
+                serde_json::json!({"repo":repo,"pr":number,"head":head,"reason":reason}),
+            );
+            self.record_merge_hold(task_id, repo, number, head, &reason)
+                .await;
+            return false;
+        }
         match crate::github::merge_pull(
             &self.transport,
             &self.api_root,

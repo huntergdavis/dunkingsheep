@@ -556,6 +556,16 @@ impl FakeReviewTransport {
         }
     }
 
+    // Existing merge/accounting tests explicitly provide a known green policy before
+    // exercising their original downstream behavior. Guard refusals have separate fixtures.
+    fn with_green_merge_gate_at(self, index: usize, head: &str) -> Self {
+        self.responses
+            .lock()
+            .unwrap()
+            .splice(index..index, required_ci_responses(head));
+        self
+    }
+
     fn complete_review_on_request(
         &self,
         url_fragment: &str,
@@ -1305,7 +1315,7 @@ async fn accounting_and_review_bodies_match_exact_multiline_source_text() {
             "records the credit.\n\n",
             "Opened by the review timer as `dunkingsheep-reviewer[bot]` and approved as\n",
             "`dunkingsheep-author[bot]` so the two identities GitHub counts are distinct.\n",
-            "Auto-merge is enabled; branch protection decides when it lands."
+            "Auto-merge is held until the required checks are known and successful on the exact accounting head."
         ),
         sync._accounting_body(&task, "OVL_A", "doc.md", "ledger.csv", 41, None)
     );
@@ -1659,37 +1669,8 @@ async fn account_opens_approves_and_queues_a_deterministic_ledger_pr() {
         .note(&stored.id, "note", "%2", Some("OVL_007F_0F7E"))
         .await
         .unwrap();
-    let transport = FakeReviewTransport::with_responses([
-        github_response(200, json!({"object":{"sha":"base-sha"}})),
-        github_file_response("id,evidence_doc\n"),
-        github_response(
-            200,
-            json!([{"filename":"docs/re/U7F_STATE_FLAGS_0F7E.md","status":"added"}]),
-        ),
-        github_response(200, json!({"body":""})),
-        github_file_response("id,status\nOVL_007F_0F7E,full\n"),
-        github_file_response("id,kind\nOVL_007F_0F7E,overlay\n"),
-        github_file_response("evidence exists on base\n"),
-        github_response(404, json!({"message":"Not Found"})),
-        github_response(200, json!({"tree":{"sha":"base-tree"}})),
-        github_response(201, json!({"sha":"new-tree"})),
-        github_response(201, json!({"sha":"new-commit"})),
-        github_response(201, json!({"object":{"sha":"new-commit"}})),
-        github_response(
-            201,
-            json!({"number":82,"html_url":"https://example.test/pr/82","node_id":"PR_node"}),
-        ),
-        github_response(200, json!({"id":1})),
-        github_response(200, json!({"node_id":"PR_node"})),
-        github_response(
-            200,
-            json!({"data":{"enablePullRequestAutoMerge":{"pullRequest":{"number":82}}}}),
-        ),
-        github_response(
-            200,
-            json!({"state":"open","merged":false,"merged_at":null,"mergeable_state":"blocked","auto_merge":true}),
-        ),
-    ]);
+    let transport = FakeReviewTransport::with_responses(accounting_success_responses())
+        .with_green_merge_gate_at(14, "new-commit");
     let sync = ReviewSync::with_transport(
         tasks,
         FakeAccountingTokens::new(Ok("reviewer-token"), Ok("author-token")),
@@ -1708,7 +1689,7 @@ async fn account_opens_approves_and_queues_a_deterministic_ledger_pr() {
     assert_eq!("open", out["state"]["state"]);
     assert_eq!(vec!["reviewer", "author"], *token_calls.lock().unwrap());
     let requests = sync.transport.requests.lock().unwrap();
-    assert_eq!(17, requests.len());
+    assert_eq!(21, requests.len());
     assert_eq!("token reviewer-token", requests[0].headers["Authorization"]);
     assert_eq!("POST", requests[13].method);
     assert_eq!("token author-token", requests[13].headers["Authorization"]);
@@ -1718,8 +1699,8 @@ async fn account_opens_approves_and_queues_a_deterministic_ledger_pr() {
         .as_str()
         .unwrap()
         .contains("accepted content in #7"));
-    assert_eq!("POST", requests[15].method);
-    assert!(requests[15].url.ends_with("/graphql"));
+    assert_eq!("POST", requests[19].method);
+    assert!(requests[19].url.ends_with("/graphql"));
     let accounting = review_event_meta(&dir.path().join("tasks.db"), &stored.id, "accounting");
     assert!(accounting["reason"]
         .as_str()
@@ -1800,7 +1781,8 @@ async fn final_accept_accounts_only_after_merge_confirmation() {
                     json!({"merged":true})
                 },
             ),
-        ]);
+        ])
+        .with_green_merge_gate_at(2, "final-head");
         let tokens = FakeAccountingTokens::new(Ok("reviewer-token"), Err("author unavailable"));
         let token_calls = tokens.calls.clone();
         let sync = ReviewSync::with_transport(
@@ -1875,7 +1857,7 @@ async fn merge_uses_full_task_snapshot_accounts_after_success_and_marks_landed_l
             200,
             json!({"state":"open","merged":false,"merged_at":null,"mergeable_state":"blocked","auto_merge":true}),
         ),
-    ]);
+    ]).with_green_merge_gate_at(0, "reviewed-head-123456").with_green_merge_gate_at(19, "new-commit");
     let tokens = FakeAccountingTokens::new(Ok("reviewer-token"), Ok("author-token"));
     let token_calls = tokens.calls.clone();
     let sync = ReviewSync::with_transport(
@@ -1908,15 +1890,15 @@ async fn merge_uses_full_task_snapshot_accounts_after_success_and_marks_landed_l
 
     {
         let requests = sync.transport.requests.lock().unwrap();
-        assert_eq!(18, requests.len());
-        assert!(requests[0].url.ends_with("/pulls/7/merge"));
-        let merge_body: Value = serde_json::from_slice(requests[0].body.as_ref().unwrap()).unwrap();
+        assert_eq!(26, requests.len());
+        assert!(requests[4].url.ends_with("/pulls/7/merge"));
+        let merge_body: Value = serde_json::from_slice(requests[4].body.as_ref().unwrap()).unwrap();
         assert_eq!("reviewed-head-123456", merge_body["sha"]);
-        assert!(requests[1].url.ends_with("/git/ref/heads/main"));
-        assert_eq!("POST", requests[13].method);
-        assert!(requests[13].url.ends_with("/pulls"));
+        assert!(requests[5].url.ends_with("/git/ref/heads/main"));
+        assert_eq!("POST", requests[17].method);
+        assert!(requests[17].url.ends_with("/pulls"));
         let accounting_body: Value =
-            serde_json::from_slice(requests[13].body.as_ref().unwrap()).unwrap();
+            serde_json::from_slice(requests[17].body.as_ref().unwrap()).unwrap();
         assert!(accounting_body["body"]
             .as_str()
             .unwrap()
@@ -1970,7 +1952,8 @@ async fn merge_405_is_ignored_and_skips_accounting_and_landed_writes() {
         tokens,
         FakeReviewPolicy::default(),
         "https://api.example.test",
-        FakeReviewTransport::with_responses([github_response(405, json!({"message":"protected"}))]),
+        FakeReviewTransport::with_responses([github_response(405, json!({"message":"protected"}))])
+            .with_green_merge_gate_at(0, "reviewed-head"),
     );
     let mut report = json!({"errors": []});
 
@@ -2001,7 +1984,8 @@ async fn merge_405_is_ignored_and_skips_accounting_and_landed_writes() {
         FakeReviewTransport::with_responses([github_response(
             500,
             json!({"message":"merge backend failed"}),
-        )]),
+        )])
+        .with_green_merge_gate_at(0, "reviewed-head"),
     );
     let mut failed_report = json!({"errors": []});
     assert!(
@@ -2040,7 +2024,8 @@ async fn merge_without_task_id_skips_accounting_but_still_marks_landed() {
         tokens,
         FakeReviewPolicy::default(),
         "https://api.example.test",
-        FakeReviewTransport::with_responses([github_response(200, json!({"merged":true}))]),
+        FakeReviewTransport::with_responses([github_response(200, json!({"merged":true}))])
+            .with_green_merge_gate_at(0, "body-head-123456"),
     );
     let mut report = json!({"errors": []});
 
@@ -2106,7 +2091,8 @@ async fn merge_success_survives_full_row_and_landed_writer_failures() {
         FakeAccountingTokens::new(Ok("reviewer-token"), Ok("author-token")),
         FakeReviewPolicy::default(),
         "https://api.example.test",
-        FakeReviewTransport::with_responses([github_response(200, json!({"merged":true}))]),
+        FakeReviewTransport::with_responses([github_response(200, json!({"merged":true}))])
+            .with_green_merge_gate_at(0, "exact-head"),
     );
     let mut report = json!({"errors": []});
 
@@ -3387,16 +3373,17 @@ async fn run_cancelled_duplicate_pending_is_repaired_before_merge() {
         github_response(200, combined_review_status("pending")),
         github_response(201, json!({"state": "success"})),
         github_response(405, json!({"message": "required review is expected"})),
-    ]);
+    ])
+    .with_green_merge_gate_at(5, "head-a");
     let (sync, report) = run_actual_review_sync(store, transport, 2).await;
     let requests = sync.transport.requests.lock().unwrap();
-    assert_eq!(6, requests.len());
+    assert_eq!(10, requests.len());
     assert_eq!("GET", requests[3].method);
     assert!(requests[3].url.ends_with("/commits/head-a/status"));
     assert_eq!("POST", requests[4].method);
     assert!(requests[4].url.ends_with("/statuses/head-a"));
-    assert_eq!("PUT", requests[5].method);
-    assert!(requests[5].url.ends_with("/pulls/7/merge"));
+    assert_eq!("PUT", requests[9].method);
+    assert!(requests[9].url.ends_with("/pulls/7/merge"));
     drop(requests);
     assert!(report["errors"].as_array().unwrap().is_empty());
     assert!(report["statuses"]
@@ -3739,7 +3726,8 @@ async fn run_routes_final_accept_through_real_merge_and_landed_writer() {
         github_response(200, combined_review_status("pending")),
         github_response(201, json!({"state": "success"})),
         github_response(200, json!({"merged":true})),
-    ]);
+    ])
+    .with_green_merge_gate_at(5, "exact-head");
     let sync = ReviewSync::with_transport(
         store,
         FakeReviewTokens(Ok("test-token".into())),
@@ -3773,8 +3761,8 @@ async fn run_routes_final_accept_through_real_merge_and_landed_writer() {
     assert!(requests[2].url.ends_with("/pulls/7"));
     assert!(requests[3].url.ends_with("/commits/exact-head/status"));
     assert!(requests[4].url.ends_with("/statuses/exact-head"));
-    assert!(requests[5].url.ends_with("/pulls/7/merge"));
-    let merge_body: Value = serde_json::from_slice(requests[5].body.as_ref().unwrap()).unwrap();
+    assert!(requests[9].url.ends_with("/pulls/7/merge"));
+    let merge_body: Value = serde_json::from_slice(requests[9].body.as_ref().unwrap()).unwrap();
     assert_eq!("exact-head", merge_body["sha"]);
 }
 
@@ -3987,4 +3975,364 @@ async fn run_refreshes_verdicts_during_github_listing_and_reads_history_past_one
         .unwrap()
         .title
         .contains("second reviewer"));
+}
+
+// t4793: policy certainty, rather than observed green checks, authorizes a merge.
+fn required_ci_responses(head: &str) -> Vec<Result<crate::github::GitHubResponse, String>> {
+    vec![
+        github_response(
+            200,
+            json!({"state":"open","head":{"sha":head},"base":{"ref":"main"}}),
+        ),
+        github_response(
+            200,
+            json!({"required_status_checks":{"contexts":["dunkingsheep/review","CI"],"checks":[]}}),
+        ),
+        github_response(
+            200,
+            json!({"total_count":1,"check_runs":[{"id":1,"name":"CI","app":{"id":7},"head_sha":head,"status":"completed","conclusion":"success"}]}),
+        ),
+        github_response(
+            200,
+            json!({"sha":head,"total_count":1,"statuses":[{"id":1,"context":"dunkingsheep/review","state":"success"}]}),
+        ),
+    ]
+}
+
+#[tokio::test]
+async fn required_ci_gate_holds_unknown_missing_pending_and_truncated_policy_or_results() {
+    use crate::github::require_merge_ci;
+    for case in [
+        "unprotected",
+        "forbidden",
+        "empty",
+        "malformed",
+        "missing",
+        "pending",
+        "failed",
+        "wrong-app",
+        "wrong-head",
+        "truncated-runs",
+        "truncated-statuses",
+        "review-pending",
+        "same-name-status-failed",
+        "all-green",
+    ] {
+        let mut responses = required_ci_responses("exact-head");
+        let change = |response: &mut Result<crate::github::GitHubResponse, String>, body: Value| {
+            *response = github_response(200, body);
+        };
+        match case {
+            "unprotected" => responses[1] = github_response(404, json!({"message":"unprotected"})),
+            "forbidden" => {
+                responses[1] = github_response(
+                    403,
+                    json!({"message":"Resource not accessible by integration"}),
+                )
+            }
+            "empty" => change(
+                &mut responses[1],
+                json!({"required_status_checks":{"contexts":[],"checks":[]}}),
+            ),
+            "malformed" => change(&mut responses[1], json!({})),
+            "missing" => change(&mut responses[2], json!({"total_count":0,"check_runs":[]})),
+            "pending" | "failed" | "wrong-app" | "wrong-head" => {
+                let mut runs = json!({"total_count":1,"check_runs":[{"id":2,"name":"CI","app":{"id":7},"head_sha":"exact-head","status":"completed","conclusion":"success"}]});
+                match case {
+                    "pending" => runs["check_runs"][0]["status"] = json!("in_progress"),
+                    "failed" => runs["check_runs"][0]["conclusion"] = json!("failure"),
+                    "wrong-head" => runs["check_runs"][0]["head_sha"] = json!("other"),
+                    "wrong-app" => change(
+                        &mut responses[1],
+                        json!({"required_status_checks":{"contexts":["CI"],"checks":[{"context":"CI","app_id":42}]}}),
+                    ),
+                    _ => unreachable!(),
+                }
+                change(&mut responses[2], runs);
+            }
+            "truncated-runs" => change(
+                &mut responses[2],
+                json!({"total_count":101,"check_runs":[]}),
+            ),
+            "truncated-statuses" => change(
+                &mut responses[3],
+                json!({"sha":"exact-head","total_count":101,"statuses":[]}),
+            ),
+            "review-pending" => change(
+                &mut responses[3],
+                json!({"sha":"exact-head","total_count":1,"statuses":[{"id":2,"context":"dunkingsheep/review","state":"pending"}]}),
+            ),
+            "same-name-status-failed" => change(
+                &mut responses[3],
+                json!({"sha":"exact-head","total_count":2,"statuses":[{"id":1,"context":"dunkingsheep/review","state":"success"},{"id":2,"context":"CI","state":"failure"}]}),
+            ),
+            "all-green" => {}
+            _ => unreachable!(),
+        }
+        let transport = FakeReviewTransport::with_responses(responses);
+        let result = require_merge_ci(
+            &transport,
+            "https://api.example.test",
+            "o/r",
+            7,
+            "exact-head",
+            "token",
+        )
+        .await;
+        assert_eq!(case == "all-green", result.is_ok(), "{case}: {result:?}");
+        if matches!(case, "unprotected" | "forbidden" | "empty" | "malformed") {
+            assert_eq!(
+                "merge held: required checks unknown",
+                result.unwrap_err(),
+                "{case}"
+            );
+            assert_eq!(2, transport.requests.lock().unwrap().len());
+        }
+    }
+}
+
+#[tokio::test]
+async fn required_ci_gate_uses_latest_attempt_and_keeps_branch_names_in_one_segment() {
+    let mut responses = required_ci_responses("exact-head");
+    responses[0] = github_response(
+        200,
+        json!({"state":"open","head":{"sha":"exact-head"},"base":{"ref":"desk/a?#b"}}),
+    );
+    responses[2] = github_response(
+        200,
+        json!({"total_count":2,"check_runs":[
+            {"id":1,"name":"CI","app":{"id":7},"head_sha":"exact-head","status":"completed","conclusion":"failure"},
+            {"id":2,"name":"CI","app":{"id":7},"head_sha":"exact-head","status":"completed","conclusion":"success"}
+        ]}),
+    );
+    let transport = FakeReviewTransport::with_responses(responses);
+    crate::github::require_merge_ci(
+        &transport,
+        "https://api.example.test",
+        "o/r",
+        7,
+        "exact-head",
+        "token",
+    )
+    .await
+    .unwrap();
+    assert!(transport.requests.lock().unwrap()[1]
+        .url
+        .ends_with("/branches/desk%2Fa%3F%23b/protection"));
+}
+
+#[tokio::test]
+async fn required_ci_gate_applies_to_verdict_and_sync_merge_paths() {
+    for verdict_path in [false, true] {
+        for known_green in [false, true] {
+            let mut responses = Vec::new();
+            if verdict_path {
+                responses.extend([
+                    github_response(200, json!({})),
+                    github_response(200, json!({})),
+                ]);
+            }
+            let mut gate = required_ci_responses("exact-head");
+            if !known_green {
+                gate[1] = github_response(403, json!({"message":"no admin read"}));
+                gate.truncate(2);
+            }
+            responses.extend(gate);
+            if known_green {
+                responses.push(github_response(200, json!({"merged":true})));
+            }
+            let sync = ReviewSync::with_transport(
+                FakeReviewActor::default(),
+                FakeAccountingTokens::new(Ok("token"), Err("unused")),
+                FakeReviewPolicy::default(),
+                "https://api.example.test",
+                FakeReviewTransport::with_responses(responses),
+            );
+            let merged = if verdict_path {
+                let out = sync
+                    .on_verdict(
+                        &json!({"id":"t7","repo":"o/r","pr":7,"head":"exact-head"}),
+                        "accept",
+                        Some("%2"),
+                    )
+                    .await
+                    .unwrap();
+                if !known_green {
+                    assert_eq!("merge held: required checks unknown", out["held"]["reason"]);
+                }
+                out["merged"] == true
+            } else {
+                let mut report = json!({"errors":[]});
+                sync._merge("o/r", 7, "exact-head", "token", &mut report, Some("t7"))
+                    .await
+            };
+            assert_eq!(known_green, merged);
+            if !known_green {
+                assert!(sync
+                    .flock
+                    .writes
+                    .borrow()
+                    .iter()
+                    .any(|(operation, data)| operation == "note_with_meta"
+                        && data["event"] == "note"
+                        && data["meta"]["reason"] == "merge held: required checks unknown"));
+            }
+            assert_eq!(
+                usize::from(known_green),
+                sync.transport
+                    .requests
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|r| r.method == "PUT" && r.url.ends_with("/merge"))
+                    .count()
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn required_ci_gate_binds_commit_status_to_the_required_app_not_creator_user_id() {
+    for (creator_type, app_id, expected) in
+        [("Bot", 42, true), ("Bot", 7, false), ("User", 42, false)]
+    {
+        let mut responses = required_ci_responses("exact-head");
+        responses[1] = github_response(
+            200,
+            json!({"required_status_checks":{"contexts":["dunkingsheep/review"],"checks":[{"context":"dunkingsheep/review","app_id":42}]}}),
+        );
+        responses[3] = github_response(
+            200,
+            json!({"sha":"exact-head","total_count":1,"statuses":[{"id":1,"context":"dunkingsheep/review","state":"success","creator":{"id":42,"type":creator_type,"login":"review-app[bot]"}}]}),
+        );
+        if creator_type == "Bot" {
+            responses.push(github_response(
+                200,
+                json!({"id":app_id,"slug":"review-app"}),
+            ));
+        }
+        let transport = FakeReviewTransport::with_responses(responses);
+        let result = crate::github::require_merge_ci(
+            &transport,
+            "https://api.example.test",
+            "o/r",
+            7,
+            "exact-head",
+            "token",
+        )
+        .await;
+        assert_eq!(
+            expected,
+            result.is_ok(),
+            "{creator_type}/{app_id}: {result:?}"
+        );
+        if creator_type == "Bot" {
+            assert!(transport
+                .requests
+                .lock()
+                .unwrap()
+                .last()
+                .unwrap()
+                .url
+                .ends_with("/apps/review-app"));
+        }
+    }
+}
+
+fn accounting_success_responses() -> Vec<Result<crate::github::GitHubResponse, String>> {
+    [
+        github_response(200, json!({"object":{"sha":"base-sha"}})),
+        github_file_response("id,evidence_doc\n"),
+        github_response(
+            200,
+            json!([{"filename":"docs/re/U7F_STATE_FLAGS_0F7E.md","status":"added"}]),
+        ),
+        github_response(200, json!({"body":""})),
+        github_file_response("id,status\nOVL_007F_0F7E,full\n"),
+        github_file_response("id,kind\nOVL_007F_0F7E,overlay\n"),
+        github_file_response("evidence exists on base\n"),
+        github_response(404, json!({"message":"Not Found"})),
+        github_response(200, json!({"tree":{"sha":"base-tree"}})),
+        github_response(201, json!({"sha":"new-tree"})),
+        github_response(201, json!({"sha":"new-commit"})),
+        github_response(201, json!({"object":{"sha":"new-commit"}})),
+        github_response(
+            201,
+            json!({"number":82,"html_url":"https://example.test/pr/82","node_id":"PR_node"}),
+        ),
+        github_response(200, json!({"id":1})),
+        github_response(200, json!({"node_id":"PR_node"})),
+        github_response(
+            200,
+            json!({"data":{"enablePullRequestAutoMerge":{"pullRequest":{"number":82}}}}),
+        ),
+        github_response(
+            200,
+            json!({"state":"open","merged":false,"merged_at":null,"mergeable_state":"blocked","auto_merge":true}),
+        ),
+    ].into_iter().collect()
+}
+
+#[tokio::test]
+async fn required_ci_gate_holds_accounting_auto_merge_without_a_known_green_policy() {
+    for case in ["unprotected", "forbidden", "empty", "pending"] {
+        let dir = crate::testsupport::dir(&format!("review-account-ci-held-{case}"));
+        let tasks = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+        let (stored, task) = add_poolrad_review(&tasks, "OVL_007F_0F7E").await;
+        tasks
+            .note(&stored.id, "note", "%2", Some("OVL_007F_0F7E"))
+            .await
+            .unwrap();
+        let mut responses = accounting_success_responses();
+        responses.truncate(14);
+        let mut gate = required_ci_responses("new-commit");
+        match case {
+            "unprotected" => {
+                gate[1] = github_response(404, json!({}));
+                gate.truncate(2);
+            }
+            "forbidden" => {
+                gate[1] = github_response(403, json!({}));
+                gate.truncate(2);
+            }
+            "empty" => {
+                gate[1] = github_response(
+                    200,
+                    json!({"required_status_checks":{"contexts":[],"checks":[]}}),
+                );
+                gate.truncate(2);
+            }
+            "pending" => {
+                gate[2] = github_response(
+                    200,
+                    json!({"total_count":1,"check_runs":[{"id":1,"name":"CI","app":{"id":7},"head_sha":"new-commit","status":"in_progress","conclusion":null}]}),
+                )
+            }
+            _ => unreachable!(),
+        }
+        responses.extend(gate);
+        let sync = ReviewSync::with_transport(
+            tasks,
+            FakeAccountingTokens::new(Ok("reviewer-token"), Ok("author-token")),
+            FakeReviewPolicy::default(),
+            "https://api.example.test",
+            FakeReviewTransport::with_responses(responses),
+        );
+        let out = sync.account(&task, Some("%2"), false).await.unwrap();
+        assert_eq!(82, out["accounting_pr"]);
+        assert!(out["auto_merge"].is_null());
+        assert!(out["held"]["reason"]
+            .as_str()
+            .unwrap()
+            .starts_with("merge held:"));
+        assert!(sync
+            .transport
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|r| !r.url.ends_with("/graphql")));
+        let notes = sync.flock.notes(&stored.id).await.unwrap();
+        assert!(notes.iter().any(|n| n.text.starts_with("merge held:")));
+    }
 }
