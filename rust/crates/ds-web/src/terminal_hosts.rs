@@ -101,47 +101,25 @@ pub(crate) fn hosts_for_identity(
 
 #[cfg(unix)]
 fn discover() -> LocalIdentity {
-    let mut identity = LocalIdentity::default();
-    // Buffers and interface lists are owned here; no request value reaches a syscall.
-    let mut name = [0_u8; 256];
-    if unsafe { libc::gethostname(name.as_mut_ptr().cast(), name.len()) } == 0 {
-        let length = name
-            .iter()
-            .position(|byte| *byte == 0)
-            .unwrap_or(name.len());
-        identity.hostname = std::str::from_utf8(&name[..length]).ok().map(str::to_owned);
-    }
-    struct Interfaces(*mut libc::ifaddrs);
-    impl Drop for Interfaces {
-        fn drop(&mut self) {
-            unsafe { libc::freeifaddrs(self.0) };
-        }
-    }
-    let mut first = std::ptr::null_mut();
-    if unsafe { libc::getifaddrs(&mut first) } != 0 {
+    let mut identity = LocalIdentity {
+        hostname: nix::unistd::gethostname()
+            .ok()
+            .and_then(|name| name.into_string().ok()),
+        addresses: Vec::new(),
+    };
+    // nix owns/frees the interface snapshot and keeps all FFI outside this unsafe-free crate.
+    let Ok(interfaces) = nix::ifaddrs::getifaddrs() else {
         return identity;
-    }
-    let interfaces = Interfaces(first);
-    let mut next = interfaces.0;
-    while let Some(interface) = unsafe { next.as_ref() } {
-        if let Some(address) = unsafe { interface.ifa_addr.as_ref() } {
-            match i32::from(address.sa_family) {
-                libc::AF_INET => {
-                    let address = unsafe { &*interface.ifa_addr.cast::<libc::sockaddr_in>() };
-                    identity.addresses.push(
-                        std::net::Ipv4Addr::from(address.sin_addr.s_addr.to_ne_bytes()).into(),
-                    );
-                }
-                libc::AF_INET6 => {
-                    let address = unsafe { &*interface.ifa_addr.cast::<libc::sockaddr_in6>() };
-                    identity
-                        .addresses
-                        .push(std::net::Ipv6Addr::from(address.sin6_addr.s6_addr).into());
-                }
-                _ => {}
-            }
+    };
+    for interface in interfaces {
+        let Some(address) = interface.address else {
+            continue;
+        };
+        if let Some(address) = address.as_sockaddr_in() {
+            identity.addresses.push(address.ip().into());
+        } else if let Some(address) = address.as_sockaddr_in6() {
+            identity.addresses.push(address.ip().into());
         }
-        next = interface.ifa_next;
     }
     identity
 }
