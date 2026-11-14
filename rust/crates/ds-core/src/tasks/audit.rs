@@ -94,7 +94,11 @@ mod tests {
         assert_eq!("superseded", meta["reason"]);
         assert_eq!("wait for release", meta["previous_block_reason"]);
         // Full task read uses this same persisted history, even after block_reason changed.
-        let wire = tasks.get_full_wire(&t.id, None).await.unwrap().wire;
+        let wire = tasks
+            .read_visible_wire_with_notes(&t.id, None)
+            .await
+            .unwrap()
+            .wire;
         assert!(wire["notes"]
             .as_array()
             .unwrap()
@@ -208,7 +212,12 @@ mod owner_answer_tests {
             .owner_answer(&t.id, version, None, Some("yes"), None, None)
             .await
             .unwrap();
-        let note = result["task"]["notes"]
+        assert_eq!("open", result["task"]["status"]);
+        let read = tasks
+            .read_visible_wire_with_notes(&t.id, None)
+            .await
+            .unwrap();
+        let note = read.wire["notes"]
             .as_array()
             .unwrap()
             .iter()

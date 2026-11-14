@@ -11214,8 +11214,9 @@ fn task_history_all_has_a_200_note_ceiling_and_scoped_continuation() {
 }
 
 #[test]
-fn task_audit_dispatch_uses_bound_actor_ignores_spoof_and_renders_transition_reasons() {
-    let (runtime, _dir, flock, tasks, dispatcher) = task_mutation_api_fixture();
+fn task_audit_dispatch_rejects_spoofed_actor_and_renders_bound_transition_reasons() {
+    let (runtime, _dir, flock, tasks, mut dispatcher) = task_mutation_api_fixture();
+    dispatcher.register("task_read", h_task_read);
     let task = runtime
         .block_on(tasks.add("global", "audited", ""))
         .unwrap();
@@ -11234,12 +11235,43 @@ fn task_audit_dispatch_uses_bound_actor_ignores_spoof_and_renders_transition_rea
         input["reason"] = json!(reason);
         input["actor"] = json!("%spoof");
         input["by"] = json!("%spoof");
-        let wire = dispatch_task_mutation(
+        let before = runtime.block_on(tasks.events(&task.id));
+        let refusal = dispatch_task_mutation(
+            &dispatcher,
+            &flock,
+            &runtime,
+            verb,
+            input.clone(),
+            Some("w1:p2"),
+            None,
+        )
+        .unwrap_err();
+        assert!(refusal
+            .to_string()
+            .contains("unknown argument(s): actor, by"));
+        assert_eq!(
+            before,
+            runtime.block_on(tasks.events(&task.id)),
+            "a spoofed actor is refused before writes"
+        );
+        input.as_object_mut().unwrap().remove("actor");
+        input.as_object_mut().unwrap().remove("by");
+        dispatch_task_mutation(
             &dispatcher,
             &flock,
             &runtime,
             verb,
             input,
+            Some("w1:p2"),
+            None,
+        )
+        .unwrap();
+        let wire = dispatch_task_mutation(
+            &dispatcher,
+            &flock,
+            &runtime,
+            "task_read",
+            json!({"id":task.id}),
             Some("w1:p2"),
             None,
         )
@@ -11263,7 +11295,8 @@ fn task_audit_dispatch_uses_bound_actor_ignores_spoof_and_renders_transition_rea
 
 #[test]
 fn task_audit_authenticated_services_have_names_and_do_not_accept_an_actor_field() {
-    let (runtime, _dir, flock, tasks, dispatcher) = task_mutation_api_fixture();
+    let (runtime, _dir, flock, tasks, mut dispatcher) = task_mutation_api_fixture();
+    dispatcher.register("task_read", h_task_read);
     for (role, label, expected) in [
         ("owner", "owner fixture", "owner-service"),
         ("system", "scheduler", "service:scheduler"),
@@ -11282,12 +11315,33 @@ fn task_audit_authenticated_services_have_names_and_do_not_accept_an_actor_field
         let task = runtime
             .block_on(tasks.add("global", "service audited", ""))
             .unwrap();
-        let wire = dispatch_task_mutation_request(
+        let before = runtime.block_on(tasks.events(&task.id));
+        let refusal = dispatch_task_mutation_request(
             &dispatcher,
             &flock,
             &runtime,
             "task_block",
             json!({"id":task.id,"reason":"service request","actor":"spoof"}),
+            &request,
+        )
+        .unwrap_err();
+        assert!(refusal.to_string().contains("unknown argument(s): actor"));
+        assert_eq!(before, runtime.block_on(tasks.events(&task.id)));
+        dispatch_task_mutation_request(
+            &dispatcher,
+            &flock,
+            &runtime,
+            "task_block",
+            json!({"id":task.id,"reason":"service request"}),
+            &request,
+        )
+        .unwrap();
+        let wire = dispatch_task_mutation_request(
+            &dispatcher,
+            &flock,
+            &runtime,
+            "task_read",
+            json!({"id":task.id}),
             &request,
         )
         .unwrap();

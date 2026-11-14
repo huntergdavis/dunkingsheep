@@ -3041,7 +3041,7 @@ os.rename(out_path + ".tmp", out_path)
     }
 
     #[test]
-    fn production_dispatcher_task_mutation_handlers_use_real_tasks_and_identity() {
+    fn production_dispatcher_task_mutation_handlers_audit_real_tasks_and_identity() {
         let observations = Arc::new(Mutex::new(SendObservations::default()));
         let (_dir, services) = make_services(
             "task-mutations-runtime",
@@ -3085,11 +3085,15 @@ os.rename(out_path + ".tmp", out_path)
         let assigned = dispatcher
             .dispatch(
                 "task_assign",
-                &json!({"id":id,"assignees":["w1:p1"],"reason":"runtime handoff","actor":"spoof"}),
+                &json!({"id":id,"assignees":["w1:p1"],"reason":"runtime handoff"}),
                 &owner,
             )
             .unwrap();
-        let note = assigned["notes"].as_array().unwrap().last().unwrap();
+        assert_eq!(json!(["w1:p1"]), assigned["assignees"]);
+        let read = dispatcher
+            .dispatch("task_read", &json!({"id":id}), &owner)
+            .unwrap();
+        let note = read["notes"].as_array().unwrap().last().unwrap();
         assert_eq!("w2:p2", note["actor"]);
         assert_eq!("runtime handoff", note["reason"]);
         let claimed = dispatcher
@@ -3115,7 +3119,10 @@ os.rename(out_path + ".tmp", out_path)
             .dispatch("task_block", &json!({"id":id,"reason":"wait"}), &worker)
             .unwrap();
         assert_eq!(blocked["status"], "blocked");
-        let note = blocked["notes"].as_array().unwrap().last().unwrap();
+        let read = dispatcher
+            .dispatch("task_read", &json!({"id":id}), &owner)
+            .unwrap();
+        let note = read["notes"].as_array().unwrap().last().unwrap();
         assert_eq!("w1:p1", note["actor"]);
         assert_eq!("wait", note["reason"]);
         let unblocked = dispatcher
@@ -3126,7 +3133,10 @@ os.rename(out_path + ".tmp", out_path)
             )
             .unwrap();
         assert_eq!(unblocked["status"], "open");
-        let note = unblocked["notes"].as_array().unwrap().last().unwrap();
+        let read = dispatcher
+            .dispatch("task_read", &json!({"id":id}), &owner)
+            .unwrap();
+        let note = read["notes"].as_array().unwrap().last().unwrap();
         assert_eq!("w2:p2", note["actor"]);
         assert_eq!("runtime evidence received", note["reason"]);
         let denied = dispatcher
@@ -3149,7 +3159,10 @@ os.rename(out_path + ".tmp", out_path)
             .dispatch("task_cancel", &json!({"id":id,"reason":"done"}), &owner)
             .unwrap();
         assert_eq!(cancelled["status"], "cancelled");
-        let note = cancelled["notes"].as_array().unwrap().last().unwrap();
+        let read = dispatcher
+            .dispatch("task_read", &json!({"id":id}), &owner)
+            .unwrap();
+        let note = read["notes"].as_array().unwrap().last().unwrap();
         assert_eq!("w2:p2", note["actor"]);
         assert_eq!("done", note["reason"]);
         services.shutdown();
