@@ -554,3 +554,81 @@ async fn test_active_handoffs_ignores_tasks_the_pane_does_not_own() {
     record(&store, &other.id, "sent", "m-other").await;
     assert!(store.active_handoffs(PANE, &[]).await.unwrap().is_empty());
 }
+
+// ---- t4781: the owner's detached tooling completes as the actor `owner-service` ----
+
+async fn completed_actor(store: &Tasks, task: &str) -> Option<String> {
+    let task = task.to_string();
+    store
+        .writer
+        .call(move |c| {
+            c.query_row(
+                "SELECT actor FROM task_events WHERE task_id = ? AND event = 'completed'",
+                params![task],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(db::map_sqlite)
+        })
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn the_owner_service_completes_a_task_it_does_not_own_and_is_recorded_as_the_actor() {
+    let store = store("owner-service").await;
+    let task = owned_task(&store, "answered question").await;
+    let out = store
+        .advance_next_job(
+            OWNER_SERVICE,
+            "completion",
+            completion(&task.id, Some(owner_service_proof())),
+            skip_planner(),
+        )
+        .await
+        .unwrap();
+    let done = out.task.unwrap();
+    assert_eq!("done", done.status);
+    assert_eq!(Some(OWNER_SERVICE), done.completed_by.as_deref());
+    assert_eq!(
+        Some(OWNER_SERVICE.to_string()),
+        completed_actor(&store, &task.id).await
+    );
+    assert_eq!(1, count(&store, &task.id, "completed").await);
+}
+
+#[tokio::test]
+async fn the_owner_service_proof_grants_nothing_to_any_other_actor() {
+    let store = store("owner-service-only").await;
+    let task = owned_task(&store, "mine").await;
+    // A pane presenting the owner-service proof: the proof names another actor, so it is not
+    // even consulted, and a foreign pane is refused as always.
+    for actor in [FOREIGN, OPERATOR] {
+        let error = store
+            .advance_next_job(
+                actor,
+                "completion",
+                completion(&task.id, Some(owner_service_proof())),
+                skip_planner(),
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("completion refused"), "{actor:?}: {error}");
+    }
+    // And the predicate itself says yes for owner-service only.
+    let proof = owner_service_proof();
+    let mut answers = Vec::new();
+    proof
+        .allowlist
+        .with_locked(&mut |matches| {
+            for actor in [OWNER_SERVICE, FOREIGN, "%1", ""] {
+                answers.push(matches(actor, None));
+            }
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(vec![true, false, false, false], answers);
+    assert_eq!("open", store.get(&task.id).await.unwrap().status);
+    assert_eq!(0, count(&store, &task.id, "completed").await);
+}

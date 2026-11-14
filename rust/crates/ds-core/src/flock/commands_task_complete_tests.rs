@@ -1140,3 +1140,83 @@ async fn authors_of_names_the_lanes_that_worked_a_pr_but_not_its_reviews() {
     assert!(tasks.authors_of("o/r", 0).await.unwrap().is_empty());
     assert!(tasks.authors_of("", 5).await.unwrap().is_empty());
 }
+
+// ---- t4781: who counts as the owner's detached tooling ----
+
+#[test]
+fn only_a_paneless_owner_token_over_a_verified_socket_is_the_owner_service() {
+    assert!(owner_service_request(false, "owner", Some(true)));
+    // No token is `anonymous`; every other token role gains nothing.
+    for role in [
+        "anonymous",
+        "worker",
+        "planner",
+        "reviewer",
+        "web",
+        "desk",
+        "system",
+        "",
+    ] {
+        assert!(!owner_service_request(false, role, Some(true)), "{role}");
+    }
+    // A request that names a pane is a pane request: ancestry and binding checks as before.
+    assert!(!owner_service_request(true, "owner", Some(true)));
+    // An unverified peer, or an in-process caller with no socket at all, is not it.
+    assert!(!owner_service_request(false, "owner", Some(false)));
+    assert!(!owner_service_request(false, "owner", None));
+}
+
+#[test]
+fn a_revoked_owner_token_is_refused_on_the_next_request() {
+    // The role is resolved from the token file on every request, never cached across
+    // requests: once the token is revoked it resolves to nothing, the caller is anonymous,
+    // and it is no longer the owner service.
+    let dir = tempfile::tempdir().unwrap();
+    let mut roles = Roles::new(
+        &Env::from_pairs(&[]),
+        Some(dir.path().join("roles.json")),
+        Some(dir.path().join("tokens.json")),
+        None,
+    )
+    .unwrap();
+    let token = roles
+        .issue_token("owner", Some("owner-service"), None)
+        .unwrap();
+    let role_of = |roles: &mut Roles| {
+        roles
+            .token_role(&token)
+            .unwrap()
+            .unwrap_or_else(|| "anonymous".to_string())
+    };
+    let first = role_of(&mut roles);
+    assert_eq!("owner", first);
+    assert!(owner_service_request(false, &first, Some(true)));
+
+    assert_eq!(1, roles.revoke_token("owner-service").unwrap());
+    let next = role_of(&mut roles);
+    assert_eq!("anonymous", next);
+    assert!(!owner_service_request(false, &next, Some(true)));
+
+    // A second registry reading the same file (another request, another process) agrees.
+    let mut reopened = Roles::new(
+        &Env::from_pairs(&[]),
+        Some(dir.path().join("roles.json")),
+        Some(dir.path().join("tokens.json")),
+        None,
+    )
+    .unwrap();
+    assert_eq!(None, reopened.token_role(&token).unwrap());
+}
+
+#[tokio::test]
+async fn a_paneless_caller_that_is_not_the_owner_service_is_refused_as_before() {
+    let (flock, tasks) = setup("paneless").await;
+    let t = tasks.add("global", "t", "").await.unwrap();
+    let d = tasks.decorate(&t.id, None).await.unwrap();
+    // The pane-keyed authorization is untouched: without a pane it refuses, operator or not.
+    let err = text(flock.authorize_task_complete(&d, None, true, &Panes(None), None));
+    assert!(
+        err.contains("cannot be completed without a pane identity"),
+        "{err}"
+    );
+}

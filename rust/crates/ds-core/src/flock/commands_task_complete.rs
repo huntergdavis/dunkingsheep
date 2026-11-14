@@ -11,12 +11,20 @@ use crate::error::DunkError;
 use crate::proc::{caller_pane_auth_failure, Caller};
 use crate::review::ConfiguredReviewPolicy;
 use crate::superusers::FileAllowlist;
-use crate::tasks::advance::OperatorProof;
+use crate::tasks::advance::{OperatorProof, OWNER_SERVICE};
 use crate::tasks::{validate_verdict, Decorated, ReviewFacts, Task, Tasks};
 use serde_json::{json, Value};
 
 fn refuse<T>(text: impl Into<String>) -> Result<T, DunkError> {
     Err(DunkError::Refused(text.into()))
+}
+
+/// t4781: whether a request is the owner's detached tooling: it names NO pane, its service
+/// token resolved to the owner role (that is the only way a pane-less caller is `owner`), and
+/// the socket peer was verified. Any other token role, no token (`anonymous`), a named pane, or
+/// an unverified or in-process transport is not it, and is handled exactly as before.
+pub(crate) fn owner_service_request(has_pane: bool, role: &str, socket_peer: Option<bool>) -> bool {
+    !has_pane && role == "owner" && socket_peer == Some(true)
 }
 
 /// What the review gates read about the completing caller.
@@ -173,13 +181,29 @@ impl Flock {
             None => self.caller_role(self_pane_id.as_deref(), context.env)?,
         };
         let operator = matches!(role.as_str(), "owner" | "system");
-        self.authorize_task_complete(
-            &task,
-            self_pane_id.as_deref(),
-            operator,
-            context.env,
-            caller.as_ref(),
-        )?;
+        let pane_given = self_pane_id.as_deref().filter(|pane| !pane.is_empty());
+        if pane_given == Some(OWNER_SERVICE) || by == Some(OWNER_SERVICE) {
+            return refuse(format!(
+                "'{OWNER_SERVICE}' is a reserved actor; it cannot be given as a pane or with --by"
+            ));
+        }
+        // t4781: the owner's own detached tooling has no pane. When the request's service token
+        // resolves to the owner role over a verified socket peer, the completion runs as the
+        // actor `owner-service`. Every review, verdict and evidence check above has already run
+        // with role `owner`, exactly as for an owner pane; this only replaces the pane-keyed
+        // ownership steps, which have no pane to check. A request that names a pane keeps the
+        // ancestry binding below unchanged.
+        let owner_service =
+            owner_service_request(pane_given.is_some(), &role, self.socket_peer_ok());
+        if !owner_service {
+            self.authorize_task_complete(
+                &task,
+                self_pane_id.as_deref(),
+                operator,
+                context.env,
+                caller.as_ref(),
+            )?;
+        }
         let next_jobs = context.env.next_jobs()?;
         if !next_jobs.owns_flock(self) {
             return refuse("request next-job flock mismatch");
@@ -189,19 +213,29 @@ impl Flock {
                 .map(|allowlist| allowlist.path.clone())
                 .unwrap_or_else(|| roles.path.clone()))
         })?;
-        let pane = self_pane_id
-            .as_deref()
-            .filter(|pane| !pane.is_empty())
-            .ok_or_else(|| DunkError::Refused("task completion needs a pane identity".into()))?;
-        let operator_proof = Some(OperatorProof {
-            pane_id: pane.to_owned(),
-            pane_info,
-            allowlist: Arc::new(FileAllowlist(allowlist_path)),
+        let pane = match pane_given {
+            Some(pane) => pane,
+            None if owner_service => OWNER_SERVICE,
+            None => {
+                return Err(DunkError::Refused(
+                    "task completion needs a pane identity".into(),
+                ))
+            }
+        };
+        let operator_proof = Some(if owner_service {
+            crate::tasks::advance::owner_service_proof()
+        } else {
+            OperatorProof {
+                pane_id: pane.to_owned(),
+                pane_info,
+                allowlist: Arc::new(FileAllowlist(allowlist_path)),
+            }
         });
-        let actor = self_pane_id
-            .as_deref()
-            .filter(|pane| !pane.is_empty())
-            .or(by);
+        let actor = if owner_service {
+            Some(OWNER_SERVICE)
+        } else {
+            pane_given.or(by)
+        };
 
         if let Some(verdict) = validated_verdict.as_deref() {
             tasks
