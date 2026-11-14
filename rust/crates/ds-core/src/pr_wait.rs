@@ -26,6 +26,7 @@ pub struct SweepTransport<'a> {
     inner: &'a dyn GitHubTransport,
     reads: Mutex<BTreeMap<String, Value>>,
     gets: std::sync::atomic::AtomicUsize,
+    reviews: Vec<crate::tasks::ReviewTaskRow>,
 }
 impl<'a> SweepTransport<'a> {
     pub fn new(inner: &'a dyn GitHubTransport) -> Self {
@@ -33,7 +34,11 @@ impl<'a> SweepTransport<'a> {
             inner,
             reads: Mutex::new(BTreeMap::new()),
             gets: std::sync::atomic::AtomicUsize::new(0),
+            reviews: Vec::new(),
         }
+    }
+    pub(crate) fn set_reviews(&mut self, rows: Vec<crate::tasks::ReviewTaskRow>) {
+        self.reviews = rows;
     }
     async fn get(
         &self,
@@ -252,6 +257,31 @@ impl SweepTransport<'_> {
                 .filter_map(|w| w.head.as_ref())
                 .any(|h| h != &out.head)
         {
+            return Ok(out);
+        }
+        // A first verdict in a multi-review repository is an event even while the
+        // aggregate GitHub status remains pending. Apply the canonical exact-head guards.
+        if let Some(row) = self
+            .reviews
+            .iter()
+            .filter(|row| {
+                row.status == "done"
+                    && row.repo.as_deref() == Some(repo)
+                    && row.pr == Some(pr)
+                    && row.head.as_deref() == Some(out.head.as_str())
+                    && row
+                        .completed_by
+                        .as_deref()
+                        .is_some_and(|lane| !lane.is_empty())
+                    && matches!(row.verdict.as_deref(), Some("accept" | "needs-fix"))
+            })
+            .min_by_key(|row| row.verdict.as_deref() != Some("needs-fix"))
+        {
+            out.verdict = Some(format!(
+                "review verdict: {} (task {})",
+                row.verdict.as_deref().unwrap(),
+                row.id
+            ));
             return Ok(out);
         }
         let combined = self
@@ -558,6 +588,41 @@ mod tests {
                 .len(),
             11
         );
+    }
+    #[test]
+    fn pr_wait_first_local_verdict_ends_wait_while_aggregate_is_pending_only_for_exact_head() {
+        for head in ["abc", "old"] {
+            let (_d, s) = store(&format!("pr-wait-local-verdict-{head}"));
+            register(&s, "one", Some("abc"));
+            let mut f = Fake::new();
+            f.status["statuses"] = json!([{"context":"dunkingsheep/review","state":"pending"}]);
+            f.runs["check_runs"][0]["status"] = json!("in_progress");
+            let mut sweep = SweepTransport::new(&f);
+            sweep.set_reviews(vec![crate::tasks::ReviewTaskRow {
+                id: "t-review".into(),
+                status: "done".into(),
+                completed_by: Some("%reviewer".into()),
+                repo: Some("o/r".into()),
+                pr: Some(1),
+                head: Some(head.into()),
+                verdict: Some("accept".into()),
+            }]);
+            let result = tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(sweep.poll(&s, "https://api.test", Ok("fixture".into()), 100.))
+                .unwrap();
+            if head == "abc" {
+                assert_eq!(result["completed"], 1);
+                assert_eq!(f.calls.load(Ordering::Relaxed), 1);
+                assert!(s.pr_wait_pending(100.).unwrap()[0]
+                    .2
+                    .contains("review verdict: accept (task t-review)"));
+            } else {
+                assert_eq!(result["completed"], 0);
+                assert_eq!(f.calls.load(Ordering::Relaxed), 4);
+                assert!(s.pr_wait_pending(100.).unwrap().is_empty());
+            }
+        }
     }
     #[test]
     fn pr_wait_missing_pending_and_app_bound_checks_do_not_pass() {

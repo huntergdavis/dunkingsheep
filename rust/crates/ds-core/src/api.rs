@@ -2659,7 +2659,7 @@ pub fn h_review_sync(context: &HandlerContext<'_>, args: Args) -> Result<Value, 
     let policy = crate::review::ConfiguredReviewPolicy {
         config_dir: tokens.config_dir().to_path_buf(),
     };
-    let sweep = crate::pr_wait::SweepTransport::new(transport);
+    let mut sweep = crate::pr_wait::SweepTransport::new(transport);
     let dry_run = python_bool_arg(&args, "dry_run", false);
     let result = context.block_on(context.flock.review_sync(
         tokens,
@@ -2670,6 +2670,14 @@ pub fn h_review_sync(context: &HandlerContext<'_>, args: Args) -> Result<Value, 
     ))?;
     if !dry_run {
         if let Some(store) = context.flock.stores().inbox {
+            if let Some(tasks) = context.flock.stores().tasks {
+                match context.block_on(tasks.list_review_rows_visible())? {
+                    Ok(rows) => sweep.set_reviews(rows),
+                    Err(_) => eprintln!(
+                        "pr-wait: local review snapshot unavailable; observing GitHub status"
+                    ),
+                }
+            }
             let token =
                 context.block_on(crate::review::ReviewTokenSource::reviewer_token(tokens))?;
             context
