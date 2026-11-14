@@ -869,6 +869,37 @@ impl Flock {
         tasks.set_status(task_id, "blocked", reason, None).await
     }
 
+    /// t4704: `task block <id> --waiting-on <what>`: a block whose reason says what the task
+    /// waits for. `task:<id>` is the existing dependency block, so completing that task
+    /// reopens this one; it takes no extra reason. Every other wait is a reason prefix.
+    pub async fn task_block_waiting_on(
+        &self,
+        task_id: &str,
+        waiting_on: &str,
+        reason: Option<&str>,
+        self_pane_id: Option<&str>,
+    ) -> Result<Task, DunkError> {
+        use crate::tasks::block_kind::{parse_waiting_on, WaitingOn};
+        let tasks = self.task_store()?;
+        self.visible_task(&tasks, task_id, self_pane_id).await?;
+        let waiting = parse_waiting_on(waiting_on)?;
+        match &waiting {
+            WaitingOn::Task(other) => {
+                if reason.is_some_and(|why| !why.trim().is_empty()) {
+                    return Err(DunkError::Refused(
+                        "a block waiting on a task takes no reason: its reason is the task it waits for; add a note instead".into(),
+                    ));
+                }
+                tasks.block_by(task_id, other).await
+            }
+            _ => {
+                tasks
+                    .set_status(task_id, "blocked", Some(&waiting.reason(reason)), None)
+                    .await
+            }
+        }
+    }
+
     /// `task_unblock`.
     pub async fn task_unblock(
         &self,
@@ -979,6 +1010,9 @@ impl Flock {
     }
 }
 
+#[cfg(test)]
+#[path = "commands_tasks_block_tests.rs"]
+mod commands_tasks_block_tests;
 #[cfg(test)]
 #[path = "commands_tasks_project_tests.rs"]
 mod commands_tasks_project_tests;

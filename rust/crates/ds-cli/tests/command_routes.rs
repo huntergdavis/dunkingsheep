@@ -141,7 +141,7 @@ fn assert_matches_python(args: &[&str]) {
         // t4701: the archived guide has no task projects. The Rust guide says which project
         // a new task is filed under, after the paragraph on who owns it.
         let old_owner = "than left ownerless.\n`task_metrics` is the read-only analytics endpoint";
-        let new_owner = "than left ownerless.\nA new global task is filed under its creator lane's project (the lane's\nproject membership, when it still belongs to the pane's running\nprocess); a lane with no membership takes the `--parent` task's project\nwhen it could have named that project itself. `--project NAME` files it\nunder a named project instead: your own, or one you hold a planner grant\nfor (the owner may name any; any other name is refused). `--no-project`\nfiles it under none. A lane with global membership files unmapped tasks\nunless it names a project.\n`task_metrics` is the read-only analytics endpoint";
+        let new_owner = "than left ownerless.\nA new global task is filed under its creator lane's project (the lane's\nproject membership, when it still belongs to the pane's running\nprocess); a lane with no membership takes the `--parent` task's project\nwhen it could have named that project itself. `--project NAME` files it\nunder a named project instead: your own, or one you hold a planner grant\nfor (the owner may name any; any other name is refused). `--no-project`\nfiles it under none. A lane with global membership files unmapped tasks\nunless it names a project.\nA task that waits for something is BLOCKED with what it waits for, so\nthe next-job handoff skips it: `task block <id> --waiting-on owner |\nevidence | release | numbers | task:<id> | pr:<repo>#<number>`\n(`--reason` adds the detail). The kind is shown in `task read`,\n`task list`, `task backlog` and `task_metrics`. `task:<id>` reopens\nthe task when that task completes; every other wait is cleared with\n`task unblock`.\n`task_metrics` is the read-only analytics endpoint";
         assert!(
             text.contains(old_owner),
             "archived guide's task ownership paragraph changed unexpectedly"
@@ -2090,6 +2090,32 @@ fn cli_route_22_task_metrics() {
         String::from_utf8(reap.stdout).unwrap()
     );
     assert!(reap.stderr.is_empty());
+}
+
+/// t4704: `task block --waiting-on` reaches `task_block`, and the kind is printed.
+#[test]
+fn cli_task_block_forwards_waiting_on_and_prints_what_the_task_waits_on() {
+    let blocked = run_daemon_cli(
+        &[
+            "task",
+            "block",
+            "t2",
+            "--waiting-on",
+            "release",
+            "--reason",
+            "next daemon",
+        ],
+        "task_block",
+        json!({"id": "t2", "reason": "next daemon", "waiting_on": "release"}),
+        json!({"id":"t2", "priority":"high", "status":"blocked", "title":"Review", "scope":"global",
+            "block_reason":"waiting-release: next daemon", "block_kind":"release"}),
+    );
+    assert_eq!(0, blocked.status.code().unwrap());
+    assert_eq!(
+        "t2 [high] blocked  Review\nscope       global\nblocked     waiting-release: next daemon\nwaiting on  release\n",
+        String::from_utf8(blocked.stdout).unwrap()
+    );
+    assert!(blocked.stderr.is_empty());
 }
 
 /// t4701: `--project` and `--no-project` reach `task_add`, and the task's project is printed.
@@ -5291,6 +5317,8 @@ fn cli_route_58_commands_map() {
     assert!(r.contains("memory_backfill(action, limit, queue_id, path, reason)"));
     assert!(r.contains("roster(project)"));
     assert!(r.contains("head, project, no_project)"));
+    // A required parameter is printed with a `*`.
+    assert!(r.contains("task_block(id*, reason, waiting_on)"));
     assert!(r.contains("Task queues are omitted by default"));
     assert!(
         r.contains("owner_conversation(limit, before, before_id, source_filter, include_internal)")
@@ -5313,6 +5341,7 @@ fn cli_route_58_commands_map() {
                     || line.starts_with("owner_handoff(")
                     || line.starts_with("inbox_read(")
                     || line.starts_with("task_add(")
+                    || line.starts_with("task_block(")
                 {
                     skip_description = true;
                     None
@@ -5373,6 +5402,16 @@ fn cli_route_58_commands_map() {
                 .remove(key)
                 .is_some());
         }
+        // t4704: the typed block wait is Rust-only.
+        let task_block = r
+            .iter_mut()
+            .find(|row| row["name"] == "task_block")
+            .unwrap();
+        assert!(task_block["input_schema"]["properties"]
+            .as_object_mut()
+            .unwrap()
+            .remove("waiting_on")
+            .is_some());
         // t4701: the two task project overrides are Rust-only.
         let task_add = r.iter_mut().find(|row| row["name"] == "task_add").unwrap();
         for key in ["project", "no_project"] {

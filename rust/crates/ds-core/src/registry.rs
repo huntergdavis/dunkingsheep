@@ -1114,7 +1114,7 @@ pub static COMMANDS: &[Command] = &[
     Command {
         name: "task_block",
         description: "Mark a task blocked, with an optional reason.",
-        params: &[Param { name: "id", schema: "{\"type\":\"string\",\"description\":\"Task id, e.g. t12.\"}" }, Param { name: "reason", schema: "{\"type\":\"string\",\"description\":\"Why it is blocked.\"}" }],
+        params: &[Param { name: "id", schema: "{\"type\":\"string\",\"description\":\"Task id, e.g. t12.\"}" }, Param { name: "reason", schema: "{\"type\":\"string\",\"description\":\"Why it is blocked.\"}" }, Param { name: "waiting_on", schema: "{\"type\":\"string\",\"description\":\"What the task waits for: owner, evidence, release, numbers, task:<id> or pr:<repo>#<number>. Recorded as the kind of the block; task:<id> reopens the task when that task completes.\"}" }],
         dispatch_required: &["id"],
         required: &["id"],
         mcp: true,

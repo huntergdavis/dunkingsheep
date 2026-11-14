@@ -628,6 +628,10 @@ pub fn task_row(task: &Value) -> String {
             join(get(task, "dead_dependencies"), ", ")
         );
     }
+    // t4704: what a blocked task waits on, when its block says so.
+    if truthy(get(task, "block_kind")) {
+        row += &format!("  [waiting on {}]", py_str(get(task, "block_kind")));
+    }
     row
 }
 
@@ -694,6 +698,10 @@ pub fn render_task(task: &Value, stamp: Stamp) -> String {
     }
     if truthy(get(task, "block_reason")) {
         out += &format!("blocked     {}\n", py_str(get(task, "block_reason")));
+    }
+    // t4704: what the block waits on, when its reason is one of the typed waits.
+    if truthy(get(task, "block_kind")) {
+        out += &format!("waiting on  {}\n", py_str(get(task, "block_kind")));
     }
     if truthy(get(task, "body")) {
         out += &format!("\n{}\n", py_str(get(task, "body")));
@@ -928,7 +936,26 @@ pub fn render_task_backlog(result: &Value, by: Option<&str>) -> String {
         cells.push(format!("active={:<4}", number(row, "active")));
         cells.push(format!("on_owner={:<3}", number(row, "blocked_on_owner")));
         cells.push(format!("total={}", number(row, "total")));
-        format!("{}{}\n", cells.join(" ").trim_end(), breakdown(row))
+        // t4704: what the blocked tasks wait on, when any are blocked.
+        let waiting: Vec<String> = row
+            .get("blocked_waiting_on")
+            .and_then(Value::as_object)
+            .map(|map| {
+                map.iter()
+                    .map(|(kind, n)| format!("{kind}={}", py_str(n)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let waiting = if waiting.is_empty() {
+            String::new()
+        } else {
+            format!("  waiting[{}]", waiting.join(" "))
+        };
+        format!(
+            "{}{waiting}{}\n",
+            cells.join(" ").trim_end(),
+            breakdown(row)
+        )
     };
     let mut out = String::new();
     for row in get(result, "projects").as_array().into_iter().flatten() {
@@ -2137,6 +2164,37 @@ mod tests {
         task["project"] = json!("dunkingsheep");
         assert!(render_task(&task, &utc_stamp)
             .contains("scope       global\nproject     dunkingsheep\n"));
+    }
+
+    #[test]
+    fn a_blocked_task_shows_what_it_waits_on_in_detail_rows_and_backlog() {
+        let task = json!({"id": "t1", "priority": "low", "status": "blocked", "title": "T", "scope": "global",
+            "block_reason": "waiting-release: ships after the next daemon", "block_kind": "release"});
+        let out = render_task(&task, &utc_stamp);
+        assert!(
+            out.contains(
+                "blocked     waiting-release: ships after the next daemon\nwaiting on  release\n"
+            ),
+            "{out}"
+        );
+        assert!(task_row(&task).ends_with("  [waiting on release]"));
+        let plain = json!({"id": "t2", "priority": "low", "status": "blocked", "title": "T", "scope": "global",
+            "block_reason": "because"});
+        assert!(!render_task(&plain, &utc_stamp).contains("waiting on"));
+        assert!(!task_row(&plain).contains("waiting on"));
+
+        let result = json!({"statuses": ["open", "in_progress", "blocked"], "by": null, "projects": [
+                {"project": "alpha", "open": 1, "in_progress": 0, "blocked": 3, "active": 1,
+                 "blocked_on_owner": 1, "total": 4,
+                 "blocked_waiting_on": {"owner": 1, "release": 1, "other": 1}}],
+            "totals": {"open": 1, "in_progress": 0, "blocked": 3, "active": 1,
+                       "blocked_on_owner": 1, "total": 4,
+                       "blocked_waiting_on": {"owner": 1, "release": 1, "other": 1}}});
+        let out = render_task_backlog(&result, None);
+        assert!(
+            out.contains("total=4  waiting[owner=1 release=1 other=1]\n"),
+            "{out}"
+        );
     }
 
     #[test]

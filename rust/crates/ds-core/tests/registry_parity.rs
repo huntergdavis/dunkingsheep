@@ -97,6 +97,14 @@ fn every_input_schema_equals_the_pythons() {
                 assert!(properties.remove(key).is_some());
             }
         }
+        if name == "task_block" {
+            // t4704: the typed wait is Rust-only.
+            assert!(got["properties"]
+                .as_object_mut()
+                .unwrap()
+                .remove("waiting_on")
+                .is_some());
+        }
         if name == "roster" {
             assert!(got["properties"]
                 .as_object_mut()

@@ -617,6 +617,31 @@
     "anonymous"
    ],
    "after": "task_list"
+  },
+  "task_block": {
+   "params": [
+    [
+     "id",
+     {
+      "type": "string",
+      "description": "Task id, e.g. t12."
+     }
+    ],
+    [
+     "reason",
+     {
+      "type": "string",
+      "description": "Why it is blocked."
+     }
+    ],
+    [
+     "waiting_on",
+     {
+      "type": "string",
+      "description": "What the task waits for: owner, evidence, release, numbers, task:<id> or pr:<repo>#<number>. Recorded as the kind of the block; task:<id> reopens the task when that task completes."
+     }
+    ]
+   ]
   }
  },
  "groups": {

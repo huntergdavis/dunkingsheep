@@ -77,6 +77,10 @@ def load_parser():
     task_add = task_actions.choices["add"]
     task_add.add_argument("--project", metavar="NAME", help="file the task under this project (your own or one you hold a planner grant for; the owner may name any) instead of your lane's")
     task_add.add_argument("--no-project", action="store_true", help="file the task under no project")
+    # t4704: a block that says what the task waits for. Rust-only.
+    task_actions.choices["block"].add_argument(
+        "--waiting-on", metavar="WHAT",
+        help="what the task waits for: owner, evidence, release, numbers, task:<id> or pr:<repo>#<number>")
     backlog = task_actions.add_parser("backlog", help="count unfinished global tasks by project, with the unmapped ones shown")
     backlog.add_argument("--project", metavar="NAME", help="only this project, or 'unmapped'")
     backlog.add_argument("--status", metavar="LIST", help="comma-separated statuses (default: open,in_progress,blocked)")

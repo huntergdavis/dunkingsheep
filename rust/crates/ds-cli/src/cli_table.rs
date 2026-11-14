@@ -1095,6 +1095,7 @@ pub static ROOT: Cmd = Cmd {
                         Arg { id: "json", dest: "json", tri: false, default_int: false, flags: &["--json"], positional: false, kind: Kind::StoreTrue, ty: Ty::Str, nargs: Nargs::Zero, choices: &[], default: None, required: false, help: None, hidden: true, metavar: None, version: None },
                         Arg { id: "id", dest: "id", tri: false, default_int: false, flags: &[], positional: true, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &[], default: None, required: true, help: None, hidden: false, metavar: None, version: None },
                         Arg { id: "reason", dest: "reason", tri: false, default_int: false, flags: &["--reason"], positional: false, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &[], default: None, required: false, help: None, hidden: false, metavar: None, version: None },
+                        Arg { id: "waiting_on", dest: "waiting_on", tri: false, default_int: false, flags: &["--waiting-on"], positional: false, kind: Kind::Store, ty: Ty::Str, nargs: Nargs::One, choices: &[], default: None, required: false, help: Some("what the task waits for: owner, evidence, release, numbers, task:<id> or pr:<repo>#<number>"), hidden: false, metavar: Some("WHAT"), version: None },
                     ],
                     groups: &[],
                     sub_dest: None, sub_metavar: None, sub_required: false,

@@ -219,6 +219,7 @@ impl Tasks {
 
         let mut by_status: BTreeMap<String, i64> =
             STATUSES.iter().map(|s| (s.to_string(), 0)).collect();
+        let mut blocked_waiting_on: BTreeMap<&'static str, i64> = BTreeMap::new();
         let mut by_priority: BTreeMap<String, i64> =
             PRIORITIES.iter().map(|p| (p.to_string(), 0)).collect();
         let (mut global_count, mut pane_count) = (0i64, 0i64);
@@ -227,6 +228,11 @@ impl Tasks {
         for task in &tasks {
             *by_status.entry(task.status.clone()).or_insert(0) += 1;
             *by_priority.entry(task.priority.clone()).or_insert(0) += 1;
+            if task.status == "blocked" {
+                // t4704: blocked tasks by what they wait on.
+                let kind = super::block_kind::kind_of(task.block_reason.as_deref());
+                *blocked_waiting_on.entry(kind).or_insert(0) += 1;
+            }
             if task.scope == "global" {
                 global_count += 1;
             } else {
@@ -304,6 +310,7 @@ impl Tasks {
                 "by_status": by_status,
                 "by_priority": by_priority,
                 "by_scope": {"global": global_count, "pane": pane_count},
+                "blocked_waiting_on": blocked_waiting_on,
                 "blocked_vs_in_progress": {
                     "blocked": by_status.get("blocked").copied().unwrap_or(0),
                     "in_progress": by_status.get("in_progress").copied().unwrap_or(0),
@@ -423,6 +430,26 @@ mod tests {
         assert_eq!(1, metrics["current"]["by_status"]["done"]);
         assert_eq!(1, metrics["current"]["by_status"]["blocked"]);
         assert!(metrics["coverage"]["events_total"].as_i64().unwrap() >= 5);
+    }
+
+    #[tokio::test]
+    async fn blocked_tasks_are_counted_by_what_they_wait_on() {
+        let store = store("metrics-waiting-on").await;
+        for reason in [
+            "needs-owner: pick one",
+            "waiting-release: next daemon",
+            "waiting-release: the one after",
+            "waiting on CI",
+        ] {
+            let task = store.add("global", reason, "").await.unwrap();
+            store.block(&task.id, reason).await.unwrap();
+        }
+        store.add("global", "open", "").await.unwrap();
+        let metrics = store.metrics(MetricsOptions::default()).await.unwrap();
+        assert_eq!(
+            metrics["current"]["blocked_waiting_on"],
+            json!({"owner": 1, "release": 2, "other": 1})
+        );
     }
 
     #[tokio::test]
@@ -555,7 +582,14 @@ mod tests {
                 bucket: args["bucket"].as_str().unwrap_or("hour").to_string(),
                 scope_label: args["scope_label"].as_str().unwrap_or("all").to_string(),
             };
-            let actual = store.metrics(options).await.unwrap();
+            let mut actual = store.metrics(options).await.unwrap();
+            // t4704: `current.blocked_waiting_on` is Rust-only; the Python golden predates it.
+            // It must be present, and everything else must equal the Python byte for byte.
+            assert!(actual["current"]
+                .as_object_mut()
+                .unwrap()
+                .remove("blocked_waiting_on")
+                .is_some_and(|kinds| kinds.is_object()));
             assert_eq!(
                 case["expected"],
                 actual,

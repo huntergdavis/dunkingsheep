@@ -110,6 +110,24 @@ impl Flock {
             .await
     }
 
+    /// t4704: `task_block` with a typed wait.
+    pub async fn task_block_waiting_on_wire(
+        &self,
+        task_id: &str,
+        waiting_on: &str,
+        reason: Option<&str>,
+        self_pane_id: Option<&str>,
+    ) -> Result<TaskWire, DunkError> {
+        // Preserve visibility and terminal-state refusals, as `task_block_wire` does.
+        self.task_read(task_id, self_pane_id).await?;
+        let task = self
+            .task_block_waiting_on(task_id, waiting_on, reason, self_pane_id)
+            .await?;
+        self.task_store()?
+            .get_full_wire(&task.id, self_pane_id)
+            .await
+    }
+
     pub async fn task_unblock_wire(
         &self,
         task_id: &str,

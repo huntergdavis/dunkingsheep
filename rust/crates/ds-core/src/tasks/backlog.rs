@@ -85,6 +85,8 @@ struct Row {
     priority: String,
     kind: String,
     on_owner: bool,
+    /// t4704: what a blocked task waits on (`block_kind::kind_of` of its reason).
+    waiting: &'static str,
 }
 
 fn counts(rows: &[&Row], statuses: &[&str]) -> Value {
@@ -101,6 +103,15 @@ fn counts(rows: &[&Row], statuses: &[&str]) -> Value {
         "blocked_on_owner".into(),
         json!(count(&|r| r.status == "blocked" && r.on_owner)),
     );
+    // t4704: the blocked tasks by what they wait on; only kinds that occur, in report order.
+    let mut waiting = Map::new();
+    for kind in super::block_kind::KINDS {
+        let n = count(&|r| r.status == "blocked" && r.waiting == kind);
+        if n > 0 {
+            waiting.insert(kind.into(), json!(n));
+        }
+    }
+    out.insert("blocked_waiting_on".into(), Value::Object(waiting));
     out.insert("total".into(), json!(rows.len()));
     let tally = |field: &dyn Fn(&Row) -> &str, order: &[&str]| -> Value {
         let mut map = Map::new();
@@ -153,6 +164,7 @@ impl Tasks {
                             priority: row.get(4)?,
                             kind: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
                             on_owner: reason.trim_start().starts_with("needs-owner:"),
+                            waiting: super::block_kind::kind_of(Some(&reason)),
                         })
                     })
                     .map_err(db::map_sqlite)?;
@@ -215,7 +227,8 @@ impl Tasks {
                 .map(|r| {
                     json!({"id": r.id, "title": r.title, "status": r.status,
                         "priority": r.priority, "kind": r.kind, "project": r.project,
-                        "blocked_on_owner": r.status == "blocked" && r.on_owner})
+                        "blocked_on_owner": r.status == "blocked" && r.on_owner,
+                        "waiting_on": (r.status == "blocked").then_some(r.waiting)})
                 })
                 .collect();
         }
