@@ -1,4 +1,8 @@
 //! One read-only batched daemon request. Native replacement for tools/dunk_poll.py.
+//!
+//! The default output is compact (t4696): the caller's own dunks without their text, and task
+//! rows reduced to a few fields. `--all` lists the whole fleet's dunks; `--full` returns the
+//! daemon's answer unchanged. It marks nothing read in any mode.
 use clap::{Arg, ArgAction, Command};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
@@ -37,6 +41,11 @@ fn run() -> i32 {
         )
         .arg(flag("text"))
         .arg(flag("compact"))
+        .arg(
+            flag("all")
+                .help("list every dunk in the fleet, not only the ones that target this pane"),
+        )
+        .arg(flag("full").help("every dunk and task with every field, including dunk text (large)"))
         .get_matches();
     let socket = args
         .get_one::<String>("socket")
@@ -149,6 +158,9 @@ fn run() -> i32 {
     })();
     match response {
         Ok(mut value) => {
+            if !args.get_flag("full") {
+                shape_default(&mut value, pane.as_deref(), args.get_flag("all"));
+            }
             value.sort_all_objects();
             if args.get_flag("text") {
                 println!("{}", render_text(&value));
@@ -169,6 +181,122 @@ fn run() -> i32 {
         }
     }
 }
+/// The fields of a dunk row that say what is scheduled and whether it is healthy. The text a
+/// dunk types (`text`, `last_sent_text`) and its counters are left to `--full`.
+const DUNK_FIELDS: [&str; 11] = [
+    "id",
+    "name",
+    "target_pane_id",
+    "target_label",
+    "target_agent",
+    "interval_minutes",
+    "running",
+    "status",
+    "next_send_at",
+    "next_send_in_s",
+    "last_error",
+];
+/// The fields of a task row, the same small set `inbox read` prints after the messages.
+const TASK_FIELDS: [&str; 6] = ["id", "status", "priority", "scope", "assignees", "title"];
+const TASK_TITLE_CHARS: usize = 100;
+
+const DUNK_LABEL_CHARS: usize = 60;
+
+/// What to call a dunk in a list: its name, or the start of its text when it has none. The
+/// full text stays out of the default answer; this is enough to recognise the dunk.
+fn dunk_label(row: &Value) -> String {
+    let text = |key: &str| {
+        row.get(key)
+            .and_then(Value::as_str)
+            .map(|value| value.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|value| !value.is_empty())
+    };
+    let label = text("name").or_else(|| text("text")).unwrap_or_default();
+    if label.chars().count() > DUNK_LABEL_CHARS {
+        let short: String = label.chars().take(DUNK_LABEL_CHARS).collect();
+        format!("{short}\u{2026}")
+    } else {
+        label
+    }
+}
+
+fn pick(row: &Value, fields: &[&str]) -> Value {
+    let mut out = serde_json::Map::new();
+    for field in fields {
+        if let Some(value) = row.get(*field) {
+            out.insert((*field).to_string(), value.clone());
+        }
+    }
+    Value::Object(out)
+}
+
+/// t4696: the default answer carries what the caller needs and no more. Dunks: only the ones
+/// that target the caller's pane (`--all`: the whole fleet), each without the text it types.
+/// Tasks: the same rows, reduced to the fields a queue listing needs. The counts say how much
+/// was left out, so a short list is never mistaken for the whole fleet. `--full` skips this.
+///
+/// A dunk row records its target, not who created it, so "the caller's dunks" means the ones
+/// aimed at the caller's pane.
+fn shape_default(value: &mut Value, self_pane: Option<&str>, all: bool) {
+    let own = value
+        .pointer("/status/self_pane_id")
+        .and_then(Value::as_str)
+        .filter(|pane| !pane.is_empty())
+        .map(str::to_owned)
+        .or_else(|| self_pane.map(str::to_owned));
+    if let Some(rows) = value
+        .pointer("/dunks/dunks")
+        .and_then(Value::as_array)
+        .cloned()
+    {
+        let total = rows.len();
+        let shown: Vec<Value> = rows
+            .iter()
+            .filter(|row| {
+                all || own.as_deref().is_some_and(|pane| {
+                    row.get("target_pane_id").and_then(Value::as_str) == Some(pane)
+                })
+            })
+            .map(|row| {
+                let mut dunk = pick(row, &DUNK_FIELDS);
+                dunk["label"] = json!(dunk_label(row));
+                dunk
+            })
+            .collect();
+        let dunks = &mut value["dunks"];
+        dunks["total"] = json!(total);
+        dunks["scope"] = json!(if all { "all" } else { "self" });
+        if !all && shown.len() < total {
+            dunks["note"] = json!(format!(
+                "{} of {total} fleet dunks target this pane; --all lists every dunk, --full adds text",
+                shown.len()
+            ));
+        }
+        dunks["dunks"] = Value::Array(shown);
+    }
+    if let Some(rows) = value
+        .pointer("/tasks/tasks")
+        .and_then(Value::as_array)
+        .cloned()
+    {
+        let compact: Vec<Value> = rows
+            .iter()
+            .map(|row| {
+                let mut task = pick(row, &TASK_FIELDS);
+                if let Some(title) = row.get("title").and_then(Value::as_str) {
+                    if title.chars().count() > TASK_TITLE_CHARS {
+                        let short: String = title.chars().take(TASK_TITLE_CHARS).collect();
+                        task["title"] = json!(format!("{short}\u{2026}"));
+                    }
+                }
+                task
+            })
+            .collect();
+        value["tasks"]["tasks"] = Value::Array(compact);
+        value["tasks"]["fields"] = json!("compact; --full for bodies and every field");
+    }
+}
+
 fn show(value: Option<&Value>, default: &str) -> String {
     match value {
         None | Some(Value::Null) => default.into(),
@@ -180,10 +308,14 @@ fn render_text(result: &Value) -> String {
     let status = &result["status"];
     let count = &result["inbox_count"];
     let dunks = &result["dunks"];
+    // The running/total counts are the whole fleet's. When the list below is only this
+    // pane's dunks, the count is labelled as the fleet's so the two are not confused.
+    let self_only = dunks.get("scope").and_then(Value::as_str) == Some("self");
     let mut lines = vec![format!(
-        "self {}  v{}  dunks {}/{} running  inbox {} unread / {}",
+        "self {}  v{}  {} {}/{} running  inbox {} unread / {}",
         show(status.get("self_pane_id"), "?"),
         show(status.get("version"), "None"),
+        if self_only { "fleet dunks" } else { "dunks" },
         show(status.get("running"), "0"),
         show(status.get("dunkers"), "0"),
         show(count.get("unread"), "0"),
@@ -204,6 +336,16 @@ fn render_text(result: &Value) -> String {
                 )
             ));
         }
+    }
+    if self_only {
+        let own = dunks
+            .get("dunks")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        lines.push(format!(
+            "  showing your {own} dunk{}; --all for the fleet",
+            if own == 1 { "" } else { "s" }
+        ));
     }
     if let Some(rows) = dunks.get("dunks").and_then(Value::as_array) {
         for d in rows.iter().take(10) {

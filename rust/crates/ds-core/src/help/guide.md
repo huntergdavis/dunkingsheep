@@ -616,12 +616,20 @@ docs/TERMINAL_ADAPTER.md.
 
 ## Sidebar poll (dunk-poll)
 
-`dunk-poll` is a stdlib-only client: one socket request returns status +
-inbox count + unread messages + dunks (optionally panes/tasks). It
+`dunk-poll` is a small native client: one socket request returns status +
+inbox count + unread messages + dunks (optionally panes/tasks). By default
+the answer is compact: only the dunks that target the caller's pane (a
+dunk records its target, not who created it), each without the text it
+types, and `--tasks` rows reduced to id, status,
+priority, scope, assignees and title. `--all` lists every dunk in the
+fleet (still without text); `--full` returns everything the daemon sent.
+A caller that shows the fleet's dunks (a sidebar, a status board) must
+pass `--all`. It
 replaces three full CLI startups per sidebar poll (the owner's CPU note)
 and never asks the terminal for `pane current`; identity comes from
 TMUX_PANE (HERDR_PANE_ID on the herdr rollback). `dunkingsheep poll` is
-the same batch for a human, and `dunkingsheep install` writes
+the daemon's full batch for a human (the same as `dunk-poll --full`), and
+`dunkingsheep install` writes
 `~/.local/bin/dunk-poll`. The status half skips the terminal probe
 unless --check-herdr is given.
 
