@@ -672,3 +672,270 @@ async fn a_task_blocked_on_a_typed_wait_is_never_the_next_job() {
         only_blocked.get(&parked.id).await.unwrap().status
     );
 }
+
+fn inline_completion(id: &str, next: bool) -> AdvanceOptions {
+    AdvanceOptions {
+        from_task: Some(id.into()),
+        completion: Some(CompletionOptions {
+            note: Some("commit abc; targeted checks passed; live rollout unverified".into()),
+            next,
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn inline_note_and_completion_commit_in_order() {
+    let store = store("inline-order").await;
+    let task = owned_task(&store, "current").await;
+    store
+        .advance_next_job(
+            OWNER,
+            "completion",
+            inline_completion(&task.id, false),
+            skip_planner(),
+        )
+        .await
+        .unwrap();
+    let events = store.events_named(&task.id).await;
+    assert!(
+        events.iter().position(|e| e == "note").unwrap()
+            < events.iter().position(|e| e == "completed").unwrap()
+    );
+    assert_eq!("done", store.get(&task.id).await.unwrap().status);
+    assert!(
+        store.get_full_wire(&task.id, None).await.unwrap().wire["landed"]
+            .as_bool()
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn inline_next_only_claims_assigned_and_replays_after_restart_and_turn_end() {
+    let store = store("inline-replay").await;
+    let current = owned_task(&store, "current").await;
+    let unowned = store.add("global", "unowned older task", "").await.unwrap();
+    let foreign = store.add("global", "foreign task", "").await.unwrap();
+    store.assign(&foreign.id, &[FOREIGN], "set").await.unwrap();
+    let next = owned_task(&store, "assigned next").await;
+    let third = owned_task(&store, "assigned third").await;
+    let first = store
+        .advance_next_job(
+            OWNER,
+            "completion",
+            inline_completion(&current.id, true),
+            claim_first(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        json!({"id":next.id,"title":next.title,"body":next.body}),
+        first.plan["next_task"]
+    );
+    assert_eq!("open", store.get(&unowned.id).await.unwrap().status);
+    assert_eq!("open", store.get(&foreign.id).await.unwrap().status);
+    // A later generic decision used to hide the receipt. It must not affect a retry.
+    store
+        .advance_next_job(
+            OWNER,
+            "turn_end",
+            AdvanceOptions {
+                from_task: Some(current.id.clone()),
+                ..Default::default()
+            },
+            skip_planner(),
+        )
+        .await
+        .unwrap();
+    let reopened = Tasks::open(store.path()).await.unwrap();
+    let replay = reopened
+        .advance_next_job(
+            OWNER,
+            "completion",
+            inline_completion(&current.id, true),
+            claim_first(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.plan["next_task"], replay.plan["next_task"]);
+    assert_eq!(1, count(&reopened, &current.id, "note").await);
+    assert_eq!(1, count(&reopened, &current.id, "completed").await);
+    assert_eq!(1, count(&reopened, &next.id, "claimed").await);
+    assert_eq!(0, count(&reopened, &third.id, "claimed").await);
+    assert_eq!("open", reopened.get(&third.id).await.unwrap().status);
+}
+
+#[tokio::test]
+async fn inline_empty_next_result_is_durable_even_when_work_arrives() {
+    let store = store("inline-empty").await;
+    let current = owned_task(&store, "current").await;
+    let first = store
+        .advance_next_job(
+            OWNER,
+            "completion",
+            inline_completion(&current.id, true),
+            claim_first(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(Value::Null, first.plan["next_task"]);
+    let later = owned_task(&store, "later").await;
+    let replay = store
+        .advance_next_job(
+            OWNER,
+            "completion",
+            inline_completion(&current.id, true),
+            claim_first(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(Value::Null, replay.plan["next_task"]);
+    assert_eq!("open", store.get(&later.id).await.unwrap().status);
+    assert_eq!(1, count(&store, &current.id, "note").await);
+}
+
+#[tokio::test]
+async fn inline_busy_or_blocked_next_does_not_undo_completion() {
+    for busy in [false, true] {
+        let store = store(if busy {
+            "inline-busy"
+        } else {
+            "inline-blocked"
+        })
+        .await;
+        let current = owned_task(&store, "current").await;
+        let next = owned_task(&store, "next").await;
+        if busy {
+            store
+                .claim_next("mine", OWNER, Default::default())
+                .await
+                .unwrap();
+            store
+                .claim_next(
+                    "mine",
+                    OWNER,
+                    super::super::ClaimOptions {
+                        allow_busy: true,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+        } else {
+            store
+                .update_with_status(&next.id, Default::default(), Some("blocked"), Some(OWNER))
+                .await
+                .unwrap();
+        }
+        let out = store
+            .advance_next_job(
+                OWNER,
+                "completion",
+                inline_completion(&current.id, true),
+                claim_first(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(Value::Null, out.plan["next_task"]);
+        assert_eq!("done", store.get(&current.id).await.unwrap().status);
+        assert_eq!(1, count(&store, &current.id, "note").await);
+    }
+}
+
+#[tokio::test]
+async fn inline_refusals_roll_back_note_verdict_completion_and_next_claim() {
+    for late in [false, true] {
+        let store = store(if late {
+            "inline-late"
+        } else {
+            "inline-foreign"
+        })
+        .await;
+        let current = owned_task(&store, "current").await;
+        store.assign(&current.id, &[FOREIGN], "set").await.unwrap();
+        let next = owned_task(&store, "next").await;
+        let mut options = inline_completion(&current.id, true);
+        options.completion.as_mut().unwrap().verdict = Some("accept".into());
+        options.operator_proof = proof(OWNER, usize::from(late), false);
+        assert!(store
+            .advance_next_job(OWNER, "completion", options, claim_first())
+            .await
+            .is_err());
+        assert_eq!("open", store.get(&current.id).await.unwrap().status);
+        for event in ["note", "verdict", "completed", "task_complete_result"] {
+            assert_eq!(
+                0,
+                count(&store, &current.id, event).await,
+                "{event}, late={late}"
+            );
+        }
+        assert_eq!(0, count(&store, &next.id, "claimed").await);
+    }
+}
+
+#[tokio::test]
+async fn inline_author_guard_rolls_back_evidence_and_leaves_next_unclaimed() {
+    let store = store("inline-self-review").await;
+    let current = store
+        .add_with(
+            "global",
+            "review",
+            "",
+            super::super::AddOptions {
+                kind: Some("review".into()),
+                author: Some(OWNER.into()),
+                assignees: vec![OWNER.into()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let next = owned_task(&store, "next").await;
+    let mut options = inline_completion(&current.id, true);
+    let completion = options.completion.as_mut().unwrap();
+    completion.verdict = Some("accept".into());
+    completion.guard_author = true;
+    assert!(store
+        .advance_next_job(OWNER, "completion", options, claim_first())
+        .await
+        .is_err());
+    assert_eq!(0, count(&store, &current.id, "note").await);
+    assert_eq!(0, count(&store, &current.id, "completed").await);
+    assert_eq!(0, count(&store, &next.id, "claimed").await);
+}
+
+#[tokio::test]
+async fn inline_unlanded_completion_keeps_dependent_closed() {
+    let store = store("inline-unlanded").await;
+    let current = owned_task(&store, "stacked branch").await;
+    let dependent = store
+        .add_with(
+            "global",
+            "dependent",
+            "",
+            super::super::AddOptions {
+                depends_on: vec![current.id.clone()],
+                assignees: vec![OWNER.into()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let mut options = inline_completion(&current.id, true);
+    options.completion.as_mut().unwrap().landed = false;
+    let out = store
+        .advance_next_job(OWNER, "completion", options, claim_first())
+        .await
+        .unwrap();
+    assert_eq!(Value::Null, out.plan["next_task"]);
+    assert_eq!(
+        vec![current.id],
+        store
+            .decorate(&dependent.id, None)
+            .await
+            .unwrap()
+            .deps
+            .blocked_by
+    );
+}

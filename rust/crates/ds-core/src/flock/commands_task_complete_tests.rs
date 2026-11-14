@@ -1530,3 +1530,163 @@ fn the_owner_token_from_inside_a_non_owner_pane_is_refused_even_with_no_pane_on_
     assert_eq!(None, after.completed_by);
     assert_eq!(None, completed_event_actor(&tasks, &task.id));
 }
+
+fn invoke_inline(
+    flock: &Flock,
+    runtime: &tokio::runtime::Runtime,
+    env: &dyn CommandEnv,
+    args: Value,
+) -> Result<Value, DunkError> {
+    let request = completion_request();
+    let context = HandlerContext {
+        flock,
+        request: &request,
+        env,
+        runtime: runtime.handle(),
+    };
+    crate::api::h_task_complete(&context, args.as_object().unwrap().clone())
+}
+
+#[test]
+fn inline_socket_completion_returns_compact_next_without_duplicate_claims() {
+    let (_dir, runtime, flock, tasks, jobs, tokens) = completion_services("owner", false);
+    let current = add_owned_task(&runtime, &tasks, "current");
+    let next = add_owned_task(&runtime, &tasks, "next");
+    let third = add_owned_task(&runtime, &tasks, "third");
+    let env = completion_env(&jobs, tokens, Box::<NoNetworkTransport>::default());
+    let args = json!({"id": current.id, "note": "commit abc, checks passed", "next": true});
+    let first = invoke_inline(&flock, &runtime, &env, args.clone()).unwrap();
+    assert_eq!(
+        json!({"id":next.id,"title":next.title,"body":next.body}),
+        first["next_task"]
+    );
+    let replay = invoke_inline(&flock, &runtime, &env, args).unwrap();
+    assert_eq!(first["next_task"], replay["next_task"]);
+    assert_eq!(
+        "open",
+        runtime.block_on(tasks.get(&third.id)).unwrap().status
+    );
+    let events = runtime.block_on(tasks.events_named(&current.id));
+    assert_eq!(1, events.iter().filter(|e| *e == "note").count());
+    assert_eq!(1, events.iter().filter(|e| *e == "completed").count());
+}
+
+#[test]
+fn inline_review_note_verdict_and_completion_commit_before_github() {
+    let (_dir, runtime, flock, tasks, jobs, tokens) = completion_services("reviewer", false);
+    let review = add_review_task(&runtime, &tasks);
+    runtime
+        .block_on(tasks.claim_next("mine", "w1:p1", Default::default()))
+        .unwrap();
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let env = completion_env(
+        &jobs,
+        tokens,
+        Box::new(CompletionReviewTransport {
+            tasks: Arc::clone(&tasks),
+            task_id: review.id.clone(),
+            observed: Arc::clone(&observed),
+            fail: true,
+        }),
+    );
+    let args = json!({"id":review.id,"note":"exact head inspected, CI checked","verdict":"accept","next":true});
+    let result = invoke_inline(&flock, &runtime, &env, args.clone()).unwrap();
+    assert_eq!("done", result["status"]);
+    assert_eq!("accept", result["verdict"]);
+    assert!(result["next_task"].is_null());
+    let observed = observed.lock().unwrap();
+    assert!(!observed.is_empty());
+    assert!(observed
+        .iter()
+        .all(|(s, v)| s == "done" && v.as_deref() == Some("accept")));
+    drop(observed);
+    let events = runtime.block_on(tasks.events_named(&review.id));
+    assert!(
+        events.iter().position(|e| e == "note").unwrap()
+            < events.iter().position(|e| e == "completed").unwrap()
+    );
+    let error = invoke_inline(&flock, &runtime, &env, args).unwrap_err();
+    assert!(error.to_string().contains("already done"), "{error}");
+    assert_eq!(events, runtime.block_on(tasks.events_named(&review.id)));
+}
+
+#[test]
+fn inline_review_transaction_failure_rolls_back_note_and_verdict() {
+    let (_dir, runtime, flock, tasks, jobs, tokens) = completion_services("reviewer", false);
+    let review = add_review_task(&runtime, &tasks);
+    runtime
+        .block_on(tasks.claim_next("mine", "w1:p1", Default::default()))
+        .unwrap();
+    let conn = rusqlite::Connection::open(tasks.path()).unwrap();
+    conn.execute_batch("CREATE TRIGGER reject_inline_completion BEFORE UPDATE OF status ON tasks WHEN NEW.status='done' BEGIN SELECT RAISE(ABORT,'scripted failure'); END;").unwrap();
+    let env = completion_env(&jobs, tokens, Box::<NoNetworkTransport>::default());
+    assert!(invoke_inline(
+        &flock,
+        &runtime,
+        &env,
+        json!({"id":review.id,"note":"reviewed","verdict":"accept","next":true})
+    )
+    .is_err());
+    let task = runtime
+        .block_on(tasks.get_full_wire(&review.id, None))
+        .unwrap()
+        .wire;
+    assert_eq!("in_progress", task["status"]);
+    assert!(task["verdict"].is_null());
+    let events = runtime.block_on(tasks.events_named(&review.id));
+    for absent in ["note", "verdict", "completed", "task_complete_result"] {
+        assert!(!events.iter().any(|e| e == absent), "{absent}");
+    }
+}
+
+#[test]
+fn inline_note_does_not_bypass_review_or_ownership_refusals() {
+    for case in [
+        "foreign",
+        "self",
+        "missing-verdict",
+        "empty-note",
+        "cancelled",
+        "provider",
+    ] {
+        let (dir, runtime, flock, tasks, jobs, tokens) = completion_services("reviewer", false);
+        let review = if case == "foreign" {
+            foreign_task(&runtime, &tasks, "foreign")
+        } else {
+            add_review_task(&runtime, &tasks)
+        };
+        let conn = rusqlite::Connection::open(tasks.path()).unwrap();
+        if case == "self" {
+            conn.execute("UPDATE tasks SET author='w1:p1' WHERE id=?", [&review.id])
+                .unwrap();
+        }
+        if case == "cancelled" {
+            conn.execute(
+                "UPDATE tasks SET status='cancelled' WHERE id=?",
+                [&review.id],
+            )
+            .unwrap();
+        }
+        if case == "provider" {
+            std::fs::write(dir.path().join("roles.json"), serde_json::to_vec(&json!({"lanes":{"w1:p1":{"role":"reviewer","provider":"openai"}},"reviewer_providers":["other"]})).unwrap()).unwrap();
+        }
+        let before = runtime.block_on(tasks.events_named(&review.id));
+        let env = completion_env(&jobs, tokens, Box::<NoNetworkTransport>::default());
+        let mut args = json!({"id":review.id,"note":"reviewed","verdict":"accept","next":true});
+        if case == "foreign" || case == "missing-verdict" {
+            args.as_object_mut().unwrap().remove("verdict");
+        }
+        if case == "empty-note" {
+            args["note"] = json!("  ");
+        }
+        assert!(
+            invoke_inline(&flock, &runtime, &env, args).is_err(),
+            "{case}"
+        );
+        assert_eq!(
+            before,
+            runtime.block_on(tasks.events_named(&review.id)),
+            "{case}"
+        );
+    }
+}

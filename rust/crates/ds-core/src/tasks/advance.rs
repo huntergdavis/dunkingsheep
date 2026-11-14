@@ -94,12 +94,38 @@ pub fn owner_service_proof() -> OperatorProof {
 /// `advance_next_job`'s keyword arguments.
 #[derive(Default, Clone)]
 pub struct AdvanceOptions {
+    /// Opt-in one-call completion; absent preserves the legacy next-job planner.
+    pub completion: Option<CompletionOptions>,
     pub from_task: Option<String>,
     pub caller: Map<String, Value>,
     pub unread: i64,
     pub pending_delivery: bool,
     pub dispatch_reason: Option<String>,
     pub operator_proof: Option<OperatorProof>,
+}
+
+/// Inputs already checked by Flock's completion guards. Store checks remain transactional.
+#[derive(Clone)]
+pub struct CompletionOptions {
+    pub note: Option<String>,
+    pub next: bool,
+    pub verdict: Option<String>,
+    pub guard_author: bool,
+    pub landed: bool,
+    pub claim: super::ClaimOptions,
+}
+
+impl Default for CompletionOptions {
+    fn default() -> Self {
+        Self {
+            note: None,
+            next: false,
+            verdict: None,
+            guard_author: false,
+            landed: true,
+            claim: super::ClaimOptions::default(),
+        }
+    }
 }
 
 /// What `advance_next_job` returns: the plan dict, plus `task` for a completion.
@@ -234,10 +260,23 @@ fn advance_in(
         let id = from_task.clone().unwrap_or_default();
         let row = require(&tx, &id)?;
         if row.status == "done" {
-            tx.commit().map_err(db::map_sqlite)?;
-            let mut plan = Plan::new();
+            // A dedicated receipt cannot be replaced by a later turn-end decision.
+            // Read it under the same transaction, before releasing the writer lock.
+            let saved: Option<String> = tx.query_row(
+                "SELECT meta FROM task_events WHERE task_id=? AND actor=? AND event='task_complete_result' ORDER BY id DESC LIMIT 1",
+                params![id, pane], |r| r.get(0),
+            ).optional().map_err(db::map_sqlite)?;
+            let mut plan = saved
+                .map(|raw| serde_json::from_str::<Plan>(&raw))
+                .transpose()
+                .map_err(|error| {
+                    DunkError::Refused(format!("invalid completion receipt: {error}"))
+                })?
+                .unwrap_or_default();
             plan.insert("action".into(), json!("skip"));
             plan.insert("reason".into(), json!("already_completed"));
+            plan.remove("handoff");
+            tx.commit().map_err(db::map_sqlite)?;
             return Ok(Advance {
                 plan,
                 task: Some(row),
@@ -270,6 +309,35 @@ fn advance_in(
         // through advance is a status path, and the review of #807 found it had neither.
         super::claim_batch::guard_completion(&tx, &id, &row.status, "done")?;
         super::claim_batch::leave_batch_on_status(&tx, &id, &row.status, "done")?;
+        if let Some(options) = &opts.completion {
+            if let Some(note) = &options.note {
+                tx.execute(
+                    "INSERT INTO task_events(task_id,event,at,actor,scope,priority,meta) VALUES (?,'note',?,?,?,?,?)",
+                    params![id, now, pane, row.scope, row.priority, json!({"reason":note}).to_string()],
+                )
+                .map_err(db::map_sqlite)?;
+            }
+            if let Some(verdict) = &options.verdict {
+                let verdict = super::validate_verdict(verdict)?;
+                let changed = tx.execute(
+                    "UPDATE tasks SET verdict=?, updated_at=? WHERE id=? AND (?=0 OR author IS NULL OR author='' OR author!=?)",
+                    params![verdict, now, id, options.guard_author, pane]).map_err(db::map_sqlite)?;
+                if changed == 0 {
+                    return refuse(format!("review author changed or no task with id {id:?}"));
+                }
+                tx.execute("INSERT INTO task_events(task_id,event,at,actor,scope,priority,meta) VALUES (?,'verdict',?,?,?,?,?)",
+                    params![id, now, pane, row.scope, row.priority, json!({"verdict":verdict}).to_string()]).map_err(db::map_sqlite)?;
+            }
+            if !options.landed {
+                tx.execute(
+                    "UPDATE tasks SET landed=0, updated_at=? WHERE id=?",
+                    params![now, id],
+                )
+                .map_err(db::map_sqlite)?;
+                tx.execute("INSERT INTO task_events(task_id,event,at,actor,scope,priority,meta) VALUES (?,'unlanded',?,?,?,?,?)",
+                    params![id,now,pane,row.scope,row.priority,json!({"landed":false}).to_string()]).map_err(db::map_sqlite)?;
+            }
+        }
         tx.execute(
             "UPDATE tasks SET status='done', completed_at=?, completed_by=?, updated_at=?, cancelled_at=NULL, block_reason=NULL WHERE id=?",
             params![now, pane, now, id],
@@ -347,19 +415,44 @@ fn advance_in(
     let held = tasks
         .iter()
         .any(|t| t.task.status == "in_progress" && t.claimed_by.iter().any(|c| c == pane));
-    let mut plan = planner(&PlanInput {
-        trigger,
-        pane_id: pane,
-        tasks: &tasks,
-        unread: opts.unread,
-        pending_delivery: opts.pending_delivery || !active.is_empty() || held,
-        now,
-        dispatch_reason: opts.dispatch_reason.as_deref(),
-    });
+    let explicit_next = opts.completion.as_ref().is_some_and(|c| c.next);
+    let mut plan = if explicit_next {
+        let options = &opts.completion.as_ref().expect("explicit completion").claim;
+        let chosen =
+            super::claim::claim_next_in(&tx, "mine", pane, options, default_lease_s(), now)?;
+        let mut plan = Plan::new();
+        match chosen {
+            Ok(id) => {
+                let task = require(&tx, &id)?;
+                plan.insert("action".into(), json!("claim"));
+                plan.insert("task_id".into(), json!(id));
+                plan.insert(
+                    "next_task".into(),
+                    json!({"id":task.id,"title":task.title,"body":task.body}),
+                );
+            }
+            Err(refusal) => {
+                plan.insert("action".into(), json!("skip"));
+                plan.insert("reason".into(), json!(refusal.reason));
+                plan.insert("next_task".into(), Value::Null);
+            }
+        }
+        plan
+    } else {
+        planner(&PlanInput {
+            trigger,
+            pane_id: pane,
+            tasks: &tasks,
+            unread: opts.unread,
+            pending_delivery: opts.pending_delivery || !active.is_empty() || held,
+            now,
+            dispatch_reason: opts.dispatch_reason.as_deref(),
+        })
+    };
     plan.insert("from_task".into(), json!(from_task));
     plan.insert("completion_at".into(), json!(completion));
     plan.insert("caller".into(), Value::Object(opts.caller.clone()));
-    if plan.get("action").and_then(Value::as_str) == Some("claim") {
+    if !explicit_next && plan.get("action").and_then(Value::as_str) == Some("claim") {
         let wanted = plan.get("task_id").and_then(Value::as_str).unwrap_or("");
         let chosen = tasks
             .iter()
@@ -422,6 +515,13 @@ fn advance_in(
         ],
     )
     .map_err(db::map_sqlite)?;
+
+    if trigger == "completion" && opts.completion.is_some() {
+        tx.execute(
+            "INSERT INTO task_events (task_id,event,at,actor,meta) VALUES (?,'task_complete_result',?,?,?)",
+            params![from_task.as_deref().unwrap_or_default(), now, pane, Value::Object(plan.clone()).to_string()],
+        ).map_err(db::map_sqlite)?;
+    }
 
     // LATE authorization, held through commit (t423/t430): re-read ownership plus the
     // allowlist and keep the lock until the commit, so no writer lands between
