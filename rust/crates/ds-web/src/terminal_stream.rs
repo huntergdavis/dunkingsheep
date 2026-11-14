@@ -815,6 +815,7 @@ mod tests {
     use super::{
         decode_tmux_output, eligible_agent, input_command, pane_output, resolve_live_agent,
     };
+    use super::{layout_changed, size_message};
     use super::{snapshot_command, ControlClient, ControlLines, ControlReply, Snapshot};
     use serde_json::json;
 
