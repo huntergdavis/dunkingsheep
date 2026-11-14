@@ -28,7 +28,7 @@ export function terminalActionForLane(list, pane) {
     return { target: null, reason: 'No terminal: not a named, registered Dunking Sheep lane, or relaunched since it registered' };
   }
   return target.name === OWNER_TERMINAL_NAME
-    ? { target: { ...target, label: 'Owner' }, label: 'Open owner terminal', reason: null }
+    ? { target: { ...target, label: 'VP of Agentry' }, label: 'Open VP terminal', reason: null }
     : { target, label: 'Open terminal', reason: null };
 }
 

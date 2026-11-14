@@ -1,3 +1,5 @@
+import { laneDisplayName } from './lane-label.js';
+
 // Quick message (t4644): leave an inbox message for any live lane, from the nav, without opening
 // the Terminals view. Targets come from the /api/fleet rows; the message is stored by
 // POST /api/pane-inbox, which uses the daemon's inbox send. Nothing is typed into a pane, so a
@@ -15,7 +17,7 @@ export function quickMessageTargets(fleet) {
       pane_id: row.pane_id,
       project: row.project || 'Unassigned',
       name: row.name || row.pane_id,
-      label: `${row.name || row.pane_id} · ${row.pane_id}`,
+      label: `${laneDisplayName(row, row.pane_id)} · ${row.pane_id}`,
     }))
     .sort((a, b) => a.project.localeCompare(b.project) || a.label.localeCompare(b.label));
 }

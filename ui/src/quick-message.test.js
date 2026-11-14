@@ -20,7 +20,7 @@ test('targets are the uniquely identified fleet panes, ordered; typing ability d
   assert.deepEqual(quickMessageTargets(fleet), [
     { pane_id: '%304', project: 'dunkingsheep', name: 'ds-fable-writer', label: 'ds-fable-writer · %304' },
     { pane_id: '%260', project: 'Poolrad', name: 'poolrad-writer', label: 'poolrad-writer · %260' },
-    { pane_id: '%1', project: 'Unassigned', name: 'owner', label: 'owner · %1' },
+    { pane_id: '%1', project: 'Unassigned', name: 'owner', label: 'VP of Agentry · %1' },
   ]);
   assert.deepEqual(quickMessageTargets(null), []);
   assert.deepEqual(quickMessageTargets({ state: 'unavailable' }), []);
