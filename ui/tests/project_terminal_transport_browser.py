@@ -58,7 +58,7 @@ env = {
     'DUNKINGSHEEP_TERMINAL_STREAM_HOSTS': f'{HOST}:{PORT}',
     'VP_CHANNELS_FILE': str(RUN / 'channels.json'),
     'VP_DATA_DIR': str(RUN / 'data'), 'VP_BIND': '127.0.0.1', 'VP_PORT': str(PORT),
-    'VP_PASSWORD': 'private-fixture-password', 'DS_DESK_SCHEME': 'http',
+    'VP_PASSWORD': 'fixture-only', 'DS_DESK_SCHEME': 'http',
     'TMPDIR': str(RUN),
 }
 (RUN / 'channels.json').write_text(json.dumps([{'id':'fixture','name':'Fixture','match':'fixture','kind':'monitor'}]))
@@ -92,7 +92,7 @@ try:
         page.goto(BASE+'/', wait_until='domcontentloaded')
         status = page.evaluate('''async () => (await fetch('/api/login', {
             method: 'POST', headers: {'Content-Type':'application/json'},
-            body: JSON.stringify({password:'private-fixture-password'})
+            body: JSON.stringify({password:'fixture-only'})
         })).status''')
         assert status == 200, status
         events = []
