@@ -34,10 +34,15 @@ pub trait RosterEnv {
     /// The daemon's own launch record of a pane: `{agent, argv, recorded_at, ...}`, None when
     /// the daemon did not launch it.
     fn launch(&self, pane_id: &str) -> Option<Value>;
+    /// When the lane's pane root process started (epoch seconds), None when it cannot be read.
+    fn pane_started_at(&self, lane: &Value) -> Option<f64>;
 }
 
 /// A model sample older than this is not shown as the lane's model (t4473).
 pub const MODEL_FRESH_S: f64 = 15.0 * 60.0;
+/// A launch record belongs to the pane's current process only when that process started
+/// within this many seconds of the record (the record is written once the agent is up).
+pub const LAUNCH_BIND_S: f64 = 120.0;
 /// How far back the roster looks for a sample, so a stale one can be told from a missing one.
 const MODEL_LOOKBACK_S: f64 = 24.0 * 3600.0;
 
@@ -45,6 +50,8 @@ const MODEL_LOOKBACK_S: f64 = 24.0 * 3600.0;
 ///
 /// * `launch flag`: the model named on the command the daemon launched the lane with, with
 ///   the launch time. `observed` is false: this is what the lane was started as, not a reading.
+///   The record must be for the kind of agent the lane runs, and the pane's root process must
+///   have started within `LAUNCH_BIND_S` of it; a record of an earlier process is unknown.
 /// * `process environment`: the model named in the lane process's environment, from the
 ///   newest agent-state sample, when that sample is at most `MODEL_FRESH_S` old. Also what the
 ///   lane was started as (`observed` false); `as_of` is when the environment was read.
@@ -54,6 +61,7 @@ const MODEL_LOOKBACK_S: f64 = 24.0 * 3600.0;
 /// true; a later source that does may say so. A stale sample's value is never carried.
 fn model_cell(
     launch: Option<&Value>,
+    started: Option<f64>,
     sample: Option<&Value>,
     read_error: Option<&str>,
     harness: Option<&str>,
@@ -84,32 +92,62 @@ fn model_cell(
             })
             .unwrap_or_default()
     };
-    // The launch record counts only when it is for the agent the lane runs now.
-    let launch =
-        launch.filter(
-            |record| match (record.get("agent").and_then(Value::as_str), harness) {
-                (Some(launched), Some(running)) => launched.eq_ignore_ascii_case(running),
-                _ => true,
-            },
-        );
     if let Some(record) = launch {
         let argv = argv_of(record);
         let flagged =
             crate::state::flag(&argv, &crate::state::MODEL_FLAGS).filter(|model| !model.is_empty());
         if let Some(model) = flagged {
+            // A launch record is kept after its process is gone, and the pane may run something
+            // else by now. It counts only for the kind of agent the lane runs and only when the
+            // pane's root process started when the record was written.
             let launched = record
                 .get("recorded_at")
                 .and_then(Value::as_f64)
                 .filter(|at| *at != 0.0);
+            let kind = argv
+                .first()
+                .map(|exe| exe.rsplit('/').next().unwrap_or(exe).to_lowercase())
+                .unwrap_or_default();
+            if !crate::state::AGENT_EXES.contains(&kind.as_str()) {
+                return unknown(
+                    "the launch record's command is not a known agent".into(),
+                    None,
+                );
+            }
+            if let Some(running) = harness.filter(|running| !running.eq_ignore_ascii_case(&kind)) {
+                return unknown(
+                    format!("the launch record is for {kind}, and the lane runs {running}"),
+                    None,
+                );
+            }
+            let Some(launched) = launched else {
+                return unknown(
+                    "the launch record has no time, so it cannot be tied to the lane's process"
+                        .into(),
+                    None,
+                );
+            };
+            let Some(started) = started else {
+                return unknown(
+                    "the start of the lane's process could not be read, so the launch record cannot be tied to it".into(),
+                    None,
+                );
+            };
+            if (launched - started).abs() > LAUNCH_BIND_S {
+                return unknown(
+                    "the launch record is for an earlier process in this pane".into(),
+                    None,
+                );
+            }
             return json!({
                 "value": model,
                 "effort": crate::state::flag(&argv, &crate::state::THINKING_FLAGS)
                     .filter(|effort| !effort.is_empty()),
                 "source": "launch flag",
                 "observed": false,
-                "launched_at": iso_cell(launched),
-                "as_of": iso_cell(launched),
-                "age_s": age(launched),
+                "launched_at": iso_cell(Some(launched)),
+                "as_of": iso_cell(Some(launched)),
+                "age_s": age(Some(launched)),
                 "reason": null,
             });
         }
@@ -301,6 +339,7 @@ pub fn roster(env: &dyn RosterEnv, now: f64) -> Result<Value, String> {
             "harness": harness,
             "model": model_cell(
                 env.launch(pane_id).as_ref(),
+                env.pane_started_at(lane),
                 samples.as_ref().ok().and_then(|samples| samples.get(pane_id)),
                 samples.as_ref().err().map(String::as_str),
                 harness,
@@ -342,6 +381,7 @@ mod tests {
         samples: HashMap<String, Value>,
         samples_error: Option<String>,
         launches: HashMap<String, Value>,
+        started: Option<f64>,
     }
 
     impl RosterEnv for Env {
@@ -371,6 +411,9 @@ mod tests {
         }
         fn launch(&self, pane_id: &str) -> Option<Value> {
             self.launches.get(pane_id).cloned()
+        }
+        fn pane_started_at(&self, _: &Value) -> Option<f64> {
+            self.started
         }
         fn model_samples(&self, since: f64) -> Result<HashMap<String, Value>, String> {
             match &self.samples_error {
@@ -608,8 +651,23 @@ mod tests {
     }
 
     fn model_of(launch: Option<Value>, samples: Value, error: Option<&str>) -> Value {
+        model_on("claude", launch, Some(NOW - 10_831.0), samples, error)
+    }
+
+    /// The model cell of one lane running `harness` whose pane root process started at
+    /// `started`.
+    fn model_on(
+        harness: &str,
+        launch: Option<Value>,
+        started: Option<f64>,
+        samples: Value,
+        error: Option<&str>,
+    ) -> Value {
+        // A lane with no detected agent is still a lane when it has a membership.
+        let mut row = lane("%1", harness, Some("writer"));
+        row["membership"] = json!({"scope": "global", "project": null});
         let env = Env {
-            lanes: vec![lane("%1", "claude", Some("writer"))],
+            lanes: vec![row],
             samples: samples
                 .as_object()
                 .unwrap()
@@ -621,17 +679,28 @@ mod tests {
                 .into_iter()
                 .map(|record| ("%1".to_string(), record))
                 .collect(),
+            started,
             ..Env::default()
         };
         roster(&env, NOW).unwrap()["lanes"][0]["model"].clone()
     }
 
+    /// A launch record as `start_agent` writes it: `agent` is the lane NAME, not the harness.
+    fn launched(exe: &str, at: Option<f64>) -> Value {
+        let mut record =
+            json!({"agent": "writer", "argv": [exe, "--model", "opus-5.5", "--effort", "medium"]});
+        if let Some(at) = at {
+            record["recorded_at"] = json!(at);
+        }
+        record
+    }
+
     #[test]
     fn a_launch_flag_is_reported_as_what_the_lane_was_launched_as_with_the_launch_time() {
-        // Launched three hours ago: a launch fact does not go stale, and it is never "seen".
+        // Launched three hours ago; the pane's shell started 31 s before the record was written.
+        // A launch fact does not go stale, and it is never "seen".
         let cell = model_of(
-            Some(json!({"agent": "claude", "recorded_at": NOW - 10_800.0,
-                        "argv": ["claude", "--model", "opus-5.5", "--effort", "medium"]})),
+            Some(launched("/usr/local/bin/claude", Some(NOW - 10_800.0))),
             // A fresh sample that repeats the flag changes nothing.
             json!({"%1": {"at": NOW - 60.0, "model": "opus-5.5", "argv": ["claude", "--model", "opus-5.5"]}}),
             None,
@@ -644,37 +713,92 @@ mod tests {
                 "as_of": "1970-01-01T21:00:00Z", "age_s": 10_800, "reason": null,
             })
         );
-        // A record without a time still names the source, and says the time is not known.
-        let undated = model_of(
-            Some(json!({"agent": "claude", "argv": ["claude", "--model=opus-5.5"]})),
+        // The same record counts when the harness of the lane is not known: the process tie
+        // is what binds it.
+        let unnamed = model_on(
+            "",
+            Some(launched("codex", Some(NOW - 10_800.0))),
+            Some(NOW - 10_800.0 + LAUNCH_BIND_S),
             json!({}),
-            Some("database is locked"),
+            None,
         );
-        assert_eq!(undated["value"], "opus-5.5");
-        assert_eq!(undated["launched_at"], Value::Null);
-        assert_eq!(undated["age_s"], Value::Null);
+        assert_eq!(unnamed["value"], "opus-5.5");
     }
 
     #[test]
-    fn a_launch_record_for_another_agent_or_without_a_model_flag_is_not_used() {
-        let other_agent = model_of(
-            Some(
-                json!({"agent": "codex", "recorded_at": NOW - 60.0, "argv": ["codex", "--model", "gpt"]}),
-            ),
+    fn a_launch_record_is_used_only_for_the_process_and_agent_kind_it_was_written_for() {
+        let reason = |cell: Value| {
+            assert_eq!(cell["value"], Value::Null, "{cell}");
+            assert!(!cell.to_string().contains("opus"), "{cell}");
+            cell["reason"].as_str().unwrap().to_string()
+        };
+        let at = NOW - 10_800.0;
+        // The pane's root process started long after the record: a later process in the pane.
+        assert_eq!(
+            reason(model_on(
+                "claude",
+                Some(launched("claude", Some(at))),
+                Some(at + LAUNCH_BIND_S + 1.0),
+                json!({}),
+                None
+            )),
+            "the launch record is for an earlier process in this pane"
+        );
+        assert_eq!(
+            reason(model_on(
+                "claude",
+                Some(launched("claude", Some(at))),
+                Some(at - LAUNCH_BIND_S - 1.0),
+                json!({}),
+                None
+            )),
+            "the launch record is for an earlier process in this pane"
+        );
+        assert_eq!(
+            reason(model_on("claude", Some(launched("claude", Some(at))), None, json!({}), None)),
+            "the start of the lane's process could not be read, so the launch record cannot be tied to it"
+        );
+        assert_eq!(
+            reason(model_on(
+                "claude",
+                Some(launched("claude", None)),
+                Some(at),
+                json!({}),
+                None
+            )),
+            "the launch record has no time, so it cannot be tied to the lane's process"
+        );
+        // The record's command decides the kind, not its `agent` field (the lane name).
+        assert_eq!(
+            reason(model_on(
+                "codex",
+                Some(launched("claude", Some(at))),
+                Some(at),
+                json!({}),
+                None
+            )),
+            "the launch record is for claude, and the lane runs codex"
+        );
+        assert_eq!(
+            reason(model_on(
+                "claude",
+                Some(launched("bash", Some(at))),
+                Some(at),
+                json!({}),
+                None
+            )),
+            "the launch record's command is not a known agent"
+        );
+        // A record with no model flag says nothing; the sample path answers.
+        let no_flag = model_of(
+            Some(json!({"agent": "writer", "recorded_at": at, "argv": ["claude"]})),
             json!({}),
             None,
         );
-        assert_eq!(other_agent["value"], Value::Null);
-        assert!(other_agent["reason"]
+        assert!(no_flag["reason"]
             .as_str()
             .unwrap()
             .starts_with("no model flag on the launch command and no agent-state sample"));
-        let no_flag = model_of(
-            Some(json!({"agent": "claude", "recorded_at": NOW - 60.0, "argv": ["claude"]})),
-            json!({}),
-            None,
-        );
-        assert_eq!(no_flag["value"], Value::Null);
     }
 
     #[test]

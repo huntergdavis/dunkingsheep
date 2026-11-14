@@ -139,6 +139,11 @@ impl crate::flock::roster::RosterEnv for RequestRuntimeAdapter<'_> {
     fn launch(&self, pane_id: &str) -> Option<Value> {
         self.terminal.flock.launch(pane_id).map(Value::Object)
     }
+    fn pane_started_at(&self, lane: &Value) -> Option<f64> {
+        use crate::state::proc::ProcReader;
+        let pid = lane.get("pane_pid").and_then(Value::as_i64)?;
+        crate::state::proc::LiveProc::new("").proc_start(pid)
+    }
     fn model_samples(
         &self,
         since: f64,
