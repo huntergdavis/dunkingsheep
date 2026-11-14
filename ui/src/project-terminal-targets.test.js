@@ -17,7 +17,7 @@ test('a lane row gets its authorized terminal or the reason there is none', () =
   const owner = { pane_id: '%1', name: '__owner_terminal__' };
   const ready = { state: 'ready', targets: [worker, owner] };
   assert.deepEqual(terminalActionForLane(ready, '%42'), { target: worker, label: 'Open terminal', reason: null });
-  assert.deepEqual(terminalActionForLane(ready, '%1'), { target: { ...owner, label: 'Owner' }, label: 'Open owner terminal', reason: null });
+  assert.deepEqual(terminalActionForLane(ready, '%1'), { target: { ...owner, label: 'VP of Agentry' }, label: 'Open VP terminal', reason: null });
   const none = terminalActionForLane(ready, '%133');
   assert.equal(none.target, null);
   assert.match(none.reason, /^No terminal: not a named, registered/);

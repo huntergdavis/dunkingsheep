@@ -83,7 +83,7 @@ try:
             assert composer.get_by_role('button', name='Close composer').is_disabled()
             hold = False
             fulfill(pending.pop(), {'outcome': 'stored', 'message_id': 'i901'})
-            composer.get_by_text('Stored in owner inbox', exact=False).wait_for()
+            composer.get_by_text('Stored in VP inbox', exact=False).wait_for()
             assert text.input_value() == ''
             recipient.select_option('%9')
             text.fill('Lane draft kept')
@@ -117,7 +117,7 @@ try:
             composer.get_by_role('button', name='Close composer').click()
             page.get_by_role('button', name='Compose message', exact=True).click()
             assert text.input_value() == 'Preserve on close'
-            assert composer.get_by_role('link', name='Follow up in owner conversation').get_attribute('href') == '/dash/cos?panel=conversation'
+            assert composer.get_by_role('link', name='Follow up with VP of Agentry').get_attribute('href') == '/dash/cos?panel=conversation'
             assert page.get_by_role('button', name='Reply', exact=True).count() == 0
             assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
             if os.environ.get('INBOX_COMPOSE_SCREENSHOT_DIR'):

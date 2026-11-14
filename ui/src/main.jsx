@@ -20,10 +20,11 @@ import { buildThemeRegistry, groupThemes } from './theme-registry.js';
 import { leaderLine } from './leader-line.js';
 import { laneStatus } from './lane-status.js';
 import { laneModel } from './lane-model.js';
+import { channelDisplayName, laneDisplayName } from './lane-label.js';
 import { channelDeliveryLabel, messageDeliveryLabel } from './delivery-label.js';
 import CharacterEditor from './CharacterEditor';
 import ProjectTerminal from './ProjectTerminal';
-import { nextTerminalList, terminalActionForLane, terminalListReason } from './project-terminal-targets.js';
+import { nextTerminalList, OWNER_TERMINAL_NAME, terminalActionForLane, terminalListReason } from './project-terminal-targets.js';
 import { agoText, laneMailText, unroutedSection } from './project-fleet.js';
 import { canonicalDashLocation, DASH_HOME, DASH_ROUTES, requestedPane, resolveDashRoute, viewForPath } from './dash-route.js';
 import { inboxOutcomeText, quickMessageBlock, quickMessageRoster, quickMessageTargets, sendOutcomeText } from './quick-message.js';
@@ -678,7 +679,7 @@ function Fleet({ standalone = false }) {
         <h2>{project} <span className="dash-muted">· {rows.length} lanes</span></h2>
         <div className="fleet-lanes">{rows.map(row => <button key={row.pane_id}
           aria-pressed={selected === row.pane_id} onClick={() => setSelected(row.pane_id)}>
-          {row.name} <small>{row.agent} · {age(row.last_activity_s)}</small>
+          {laneDisplayName(row)} <small>{row.agent} · {age(row.last_activity_s)}</small>
           {(row.pending_state === 'unknown' || row.pending == null) && <small>Pending: UNKNOWN</small>}
         </button>)}</div>
       </section>)}
@@ -697,7 +698,7 @@ function Fleet({ standalone = false }) {
         </>}
     </section>
     {selected && <section ref={terminalRef} className="dash-terminal" data-testid="pane-text">
-      <h2>{(fleet?.rows || []).find(row => row.pane_id === selected)?.name || 'Agent'} · Terminal</h2>
+      <h2>{laneDisplayName((fleet?.rows || []).find(row => row.pane_id === selected))} · Terminal</h2>
       {(() => {
         const lane = (fleet?.rows || []).find(r => r.pane_id === selected);
         if (!lane) return null;
@@ -1213,7 +1214,7 @@ function ChannelStandalone({ channel }) {
     setItems(old => mergeMessages(old, [item]));
   }
   return <DashShell standalone view={channel} side={<>
-      {selected && <span className="dash-meta">{selected.name} · {selected.status}</span>}
+      {selected && <span className="dash-meta">{channelDisplayName(selected)} · {selected.status}</span>}
       <span className="dash-meta">updated {updated ? updated.toLocaleTimeString() : '—'}</span>
     </>}>
     <div className="dash-body dash-conversation">
@@ -1224,7 +1225,7 @@ function ChannelStandalone({ channel }) {
       </div>
       <div className="conversation" ref={messageScroll.ref} onScroll={messageScroll.onScroll}>
         <div className="conversation-inner">
-          {!items.length && <div className="empty-state"><div className="empty-icon">✦</div><h2>Direct line to {selected?.name || 'the agent'}</h2></div>}
+          {!items.length && <div className="empty-state"><div className="empty-icon">✦</div><h2>Direct line to {channelDisplayName(selected)}</h2></div>}
           <MessageList autoScrollToBottom={false} autoScrollToBottomOnMount={false}>{items.map(item => <MessageCard key={item.id} item={item} frontDesk={channel === 'cos'} onSendNow={() => {}} onInspect={() => {
             const pane = selected?.pane_id;
             window.location.assign(pane ? `/dash/projects?pane=${encodeURIComponent(pane)}` : '/dash/projects');
@@ -1252,7 +1253,7 @@ function Projects({ standalone = false }) {
     load(); const timer = setInterval(load, 30000);
     return () => { active = false; clearInterval(timer); };
   }, []);
-  const ownerAction = (terminalList.targets || []).map(target => terminalActionForLane(terminalList, target.pane_id)).find(action => action.label === 'Open owner terminal');
+  const ownerAction = (terminalList.targets || []).map(target => terminalActionForLane(terminalList, target.pane_id)).find(action => action.target?.name === OWNER_TERMINAL_NAME);
   // PR924: a legacy pane bookmark opens only an exact server-authorized terminal, once.
   const [deepLinkPane] = useState(() => requestedPane(window.location.search));
   const deepLinkDone = useRef(false);
@@ -1301,10 +1302,10 @@ function Projects({ standalone = false }) {
     {!roster && !error && <p>Loading projects…</p>}
     {terminalList.state === 'error' && <p role="status">{terminalListReason(terminalList.status)}.</p>}
     {deepLinkPane && <p role="status">Selected lane {deepLinkPane}{terminalActionForLane(terminalList, deepLinkPane).reason ? ` · ${terminalActionForLane(terminalList, deepLinkPane).reason}` : ''}</p>}
-    {ownerAction && <section className="project-group"><h2>Owner terminal</h2><button type="button" onClick={() => setTerminalTarget(ownerAction.target)}>Open owner terminal</button></section>}
+    {ownerAction && <section className="project-group"><h2>VP of Agentry</h2><button type="button" onClick={() => setTerminalTarget(ownerAction.target)}>Open VP terminal</button></section>}
     {roster && <><label>Show <select aria-label="Filter projects" value={effectiveSelected} onChange={e => setSelected(e.target.value)}><option value="all">All groups</option>{ordered.map(group => <option key={group.key} value={group.key}>{group.title}</option>)}</select></label>
       {!ordered.length && <p>No live agent lanes are reported.</p>}
-      {ordered.filter(group => effectiveSelected === 'all' || group.key === effectiveSelected).map(group => <section className="project-group" key={group.key}><h2>{group.title} <small>({group.lanes.length})</small></h2><div className="ops-table-wrap"><table><thead><tr><th>Lane</th><th>Activity</th><th>Mail</th><th>Task</th><th>Model</th></tr></thead><tbody>{group.lanes.map(lane => <tr key={lane.pane_id}><td className={lane.pane_id === deepLinkPane ? 'lane-deep-link' : undefined}><a aria-current={lane.pane_id === deepLinkPane ? 'true' : undefined} href={`/dash/projects?pane=${encodeURIComponent(lane.pane_id)}`}>{lane.name || lane.pane_id}</a><small> {lane.pane_id}</small>{(action => action.target
+      {ordered.filter(group => effectiveSelected === 'all' || group.key === effectiveSelected).map(group => <section className="project-group" key={group.key}><h2>{group.title} <small>({group.lanes.length})</small></h2><div className="ops-table-wrap"><table><thead><tr><th>Lane</th><th>Activity</th><th>Mail</th><th>Task</th><th>Model</th></tr></thead><tbody>{group.lanes.map(lane => <tr key={lane.pane_id}><td className={lane.pane_id === deepLinkPane ? 'lane-deep-link' : undefined}><a aria-current={lane.pane_id === deepLinkPane ? 'true' : undefined} href={`/dash/projects?pane=${encodeURIComponent(lane.pane_id)}`}>{laneDisplayName(lane, lane.pane_id)}</a><small> {lane.pane_id}</small>{(action => action.target
         ? <button type="button" onClick={() => setTerminalTarget(action.target)}>{action.label}</button>
         : <small className="lane-terminal-reason"> {action.reason}</small>)(terminalActionForLane(terminalList, lane.pane_id))}</td><td>{lane.state || 'Unknown'}</td><td>{(mail => <span title={mail.reason || undefined}>{mail.text}</span>)(laneMailText(fleet, lane.pane_id))}</td><td>{lane.task ? [lane.task.id, lane.task.title].filter(Boolean).join(' · ') : 'Unknown'}</td><td data-lane-model={lane.pane_id}>{(model => <>{model.text}<small> {model.detail}</small></>)(laneModel(lane.model))}</td></tr>)}</tbody></table></div></section>)}
     </>}

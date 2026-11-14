@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import MessageBody from './MessageBody';
 import InboxCompose from './InboxCompose';
 import { normaliseMailbox } from './mailboxKey';
+import { laneDisplayName } from './lane-label.js';
 import './mailbox-browser.css';
 
 function stamp(seconds) {
@@ -53,7 +54,7 @@ export default function MailboxBrowser({ api }) {
         if (data.include_agent !== includeAgent || !Array.isArray(data.messages) || data.messages.some(row => (typeof row.mailbox !== 'string' || normaliseMailbox(row.mailbox) !== normaliseMailbox(mailbox)) || !Object.hasOwn(row, 'audience') || (row.audience !== null && row.audience !== 'agent') || (!includeAgent && row.audience === 'agent'))) throw new Error('Mailbox filter response was not safe to display.');
         setSummary({ key: pageKey, state: 'ready', rows: data.messages, next: data.next_before });
       })
-      .catch(e => { if (live) setSummary({ key: pageKey, state: e.status === 502 ? 'unavailable' : 'error', error: e.status === 502 ? 'Mailbox browsing is temporarily unavailable. A daemon upgrade may be needed; try Refresh or use Owner conversation.' : e.message }); });
+      .catch(e => { if (live) setSummary({ key: pageKey, state: e.status === 502 ? 'unavailable' : 'error', error: e.status === 502 ? 'Mailbox browsing is temporarily unavailable. A daemon upgrade may be needed; try Refresh or use VP conversation.' : e.message }); });
     return () => { live = false; };
   }, [api, pageKey]);
   const rows = summary.key === pageKey && summary.state === 'ready' ? summary.rows : [];
@@ -69,7 +70,7 @@ export default function MailboxBrowser({ api }) {
         if (!live) return;
         if (!data.message || data.message.message_id !== selected.message_id || data.message.mailbox !== selected.mailbox) throw new Error('Message unavailable');
         setBody({ key: readKey, state: 'ready', message: data.message });
-      }).catch(e => { if (live) setBody({ key: readKey, state: e.status === 502 ? 'unavailable' : 'error', error: e.status === 502 ? 'Mailbox browsing is temporarily unavailable. A daemon upgrade may be needed; try Refresh or use Owner conversation.' : e.message }); });
+      }).catch(e => { if (live) setBody({ key: readKey, state: e.status === 502 ? 'unavailable' : 'error', error: e.status === 502 ? 'Mailbox browsing is temporarily unavailable. A daemon upgrade may be needed; try Refresh or use VP conversation.' : e.message }); });
     return () => { live = false; };
   }, [api, readKey]);
   const visibleBody = body.key === readKey ? body : { state: 'loading' };
@@ -90,14 +91,14 @@ export default function MailboxBrowser({ api }) {
     </button></li>;
   }
   return <div className="mailbox-browser">
-    <header className="mailbox-browser-heading"><div><h1>Mailboxes</h1><p>Browse history without marking messages read.</p></div><a href="/dash/cos?panel=conversation">Owner conversation</a><button onClick={reload}>Refresh</button></header>
+    <header className="mailbox-browser-heading"><div><h1>Mailboxes</h1><p>Browse history without marking messages read.</p></div><a href="/dash/cos?panel=conversation">VP conversation</a><button onClick={reload}>Refresh</button></header>
     <InboxCompose api={api} onSent={reload} />
     <label className="mailbox-agent-opt-in"><input type="checkbox" checked={includeAgent} onChange={event => { setIncludeAgent(event.target.checked); setBefore(null); setTrail([]); setSelectedId(null); }} /> Include agent-only mail in this browser</label>
     <div className="mailbox-browser-columns">
       <nav className="mailbox-directory" aria-label="Mailboxes">
         <button className="mailbox-folder" aria-current={mailbox === 'owner' ? 'true' : undefined} onClick={() => chooseMailbox('owner')}>Your inbox</button>
         {[...groups.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([group, folders]) => <section key={group}><h2>{group}</h2>{folders.map(row => <button className="mailbox-folder" key={row.mailbox} aria-current={mailbox === row.mailbox ? 'true' : undefined} onClick={() => chooseMailbox(row.mailbox)}>
-          <strong>{row.mailbox}</strong><small>{row.lanes?.map(lane => lane.name).filter(Boolean).join(' / ') || row.destination || 'No current lane match'}</small><small>{row.unread ?? '—'} unread · {row.total ?? '—'} messages</small>
+          <strong>{row.mailbox}</strong><small>{row.lanes?.map(lane => laneDisplayName(lane, lane.name)).filter(Boolean).join(' / ') || row.destination || 'No current lane match'}</small><small>{row.unread ?? '—'} unread · {row.total ?? '—'} messages</small>
         </button>)}</section>)}
         <p>{mailboxes.length} of {index.total ?? '—'} mailboxes loaded</p>
         {index.state === 'loading' && <p role="status">Loading mailboxes…</p>}

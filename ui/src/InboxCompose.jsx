@@ -44,7 +44,7 @@ export default function InboxCompose({ api, onSent }) {
       if (result.outcome !== 'stored' || typeof result.message_id !== 'string' || !result.message_id) {
         throw new Error('No storage receipt was returned. Check the conversation or mailbox before sending again.');
       }
-      setReceipt(owner ? `Stored in owner inbox · ${result.message_id}. This is not a read receipt. ${result.notify?.detail || ''}` : inboxOutcomeText(result, target));
+      setReceipt(owner ? `Stored in VP inbox · ${result.message_id}. This is not a read receipt. ${result.notify?.detail || ''}` : inboxOutcomeText(result, target));
       setDraft(current => current === draft ? '' : current);
       onSent?.();
     } catch (e) { setError(e.message); }
@@ -56,7 +56,7 @@ export default function InboxCompose({ api, onSent }) {
     {open && <form onSubmit={send}>
       <h2>New inbox message</h2>
       <label>To<select aria-label="Message recipient" value={recipient} disabled={busy} onChange={event => { setRecipient(event.target.value); setReceipt(''); setError(''); }}>
-        <option value="owner">Owner conversation</option>
+        <option value="owner">VP conversation</option>
         {!owner && !target && <option value={recipient} disabled>{recipient} · unavailable; choose a recipient</option>}
         {targets.map(row => <option key={row.pane_id} value={row.pane_id}>{row.project} · {row.label}</option>)}
       </select></label>
@@ -64,7 +64,7 @@ export default function InboxCompose({ api, onSent }) {
       {roster.kind === 'ready' && <button type="button" disabled={busy} onClick={() => setAttempt(value => value + 1)}>Reload recipients</button>}
       <label>Message<textarea aria-label="Inbox message" rows={5} value={draft} disabled={busy} onChange={event => setDraft(event.target.value)} autoFocus /></label>
       <small>{Array.from(draft).length} / 16000 characters</small>
-      <div className="inbox-compose-actions"><button type="submit" disabled={blocked}>{busy ? 'Sending…' : 'Send message'}</button><button type="button" disabled={busy} onClick={close}>Close composer</button><a href="/dash/cos?panel=conversation">Follow up in owner conversation</a></div>
+      <div className="inbox-compose-actions"><button type="submit" disabled={blocked}>{busy ? 'Sending…' : 'Send message'}</button><button type="button" disabled={busy} onClick={close}>Close composer</button><a href="/dash/cos?panel=conversation">Follow up with VP of Agentry</a></div>
       {receipt && <p role="status">{receipt}</p>}
       {error && <p role="alert">{error} Your draft is kept. Check for a stored message before sending again.</p>}
     </form>}
