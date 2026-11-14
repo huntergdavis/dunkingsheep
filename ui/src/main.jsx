@@ -7,6 +7,7 @@ import '@chatscope/chat-ui-kit-styles/dist/default/styles.min.css';
 import { EditorContent, useEditor } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import MessageBody from './MessageBody';
+import OwnerInbox from './OwnerInbox';
 import TurndownService from 'turndown';
 import { themeStyles } from './theme-styles.js';
 import './style.css';
@@ -1208,6 +1209,7 @@ function ChannelStandalone({ channel }) {
       <span className="dash-meta">updated {updated ? updated.toLocaleTimeString() : '—'}</span>
     </>}>
     <div className="dash-body dash-conversation">
+      {channel === 'cos' && <a href="/dash/cos">Back to Inbox</a>}
       {error && <div className="dash-error" role="alert">{error}</div>}
       <div className="channel-delivery-summary" role="status" title="Time from the desk accepting your message to the agent harness picking it up; this does not mean a reply is ready.">
         {channelDeliveryLabel(lastDelivery)}
@@ -1287,6 +1289,7 @@ function StandaloneDesk({ view, known }) {
       </div></div>
     </DashShell>;
   }
+  if (view === 'cos' && new URLSearchParams(window.location.search).get('panel') !== 'conversation') return <DashShell standalone view="cos"><OwnerInbox api={api} /></DashShell>;
   if (view === 'fleet') return <Fleet standalone />;
   if (view === 'projects') return <Projects standalone />;
   if (view === 'operations') return <OpsBoard standalone />;

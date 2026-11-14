@@ -1,0 +1,24 @@
+.owner-inbox { display: flex; flex-direction: column; flex: 1; min-height: 0; padding: 16px; gap: 12px; overflow: auto; }
+.owner-inbox-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; }
+.owner-inbox-heading h1 { margin: 0; }
+.owner-inbox-heading p { max-width: 70ch; color: var(--dash-muted); margin: 6px 0; }
+.owner-inbox-heading a { color: var(--dash-accent); }
+.owner-inbox-columns { display: grid; grid-template-columns: minmax(260px, 36%) minmax(0, 1fr); flex: 1; min-height: 0; border: 1px solid var(--dash-border); }
+.owner-inbox-list { min-width: 0; overflow: auto; border-right: 1px solid var(--dash-border); }
+.owner-inbox-pages { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; padding: 10px; }
+.owner-inbox-list ul { list-style: none; margin: 0; padding: 0; }
+.owner-inbox-row { display: grid; gap: 5px; width: 100%; padding: 12px; border: 0; border-top: 1px solid var(--dash-border); border-radius: 0; text-align: left; color: var(--dash-fg); background: var(--dash-panel); cursor: pointer; }
+.owner-inbox-row[aria-current="true"] { background: var(--dash-panel-2); box-shadow: inset 3px 0 var(--dash-accent); }
+.owner-inbox-row time, .owner-inbox-row small { color: var(--dash-muted); }
+.owner-inbox-row strong, .owner-inbox-preview { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.owner-inbox-row:focus-visible { outline: 2px solid var(--dash-accent); outline-offset: -3px; }
+.owner-inbox-reader { min-width: 0; overflow: auto; padding: 20px; overflow-wrap: anywhere; background: var(--dash-panel); }
+.owner-inbox-reader header { border-bottom: 1px solid var(--dash-border); margin-bottom: 16px; }
+.owner-inbox-reader h2 { margin-top: 0; }
+.owner-inbox-reader header p { color: var(--dash-muted); }
+@media (max-width: 700px) {
+  .owner-inbox { padding: 10px; }
+  .owner-inbox-columns { display: flex; flex-direction: column; flex: none; }
+  .owner-inbox-list { max-height: 35vh; border-right: 0; border-bottom: 1px solid var(--dash-border); }
+  .owner-inbox-reader { overflow: visible; padding: 14px; }
+}
