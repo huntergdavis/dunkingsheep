@@ -44,6 +44,7 @@ pub mod next_job;
 pub mod next_job_runtime;
 pub(crate) mod owner_handoff;
 mod pane_view;
+pub mod pr_wait;
 pub mod wire;
 pub use claim::{
     claimable, refusal, CallerAlive, Candidate, ClaimOptions, ClaimOutcome, Refusal, Requeued,

@@ -30,6 +30,7 @@ pub fn kind_of(reason: Option<&str>) -> &'static str {
         ("needs-owner:", "owner"),
         ("blocked-by:", "task"),
         ("waiting-pr:", "pr"),
+        (PR_CLOSED_PREFIX, "pr"),
         ("waiting-evidence:", "evidence"),
         ("waiting-release:", "release"),
         ("waiting-numbers:", "numbers"),
@@ -41,6 +42,22 @@ pub fn kind_of(reason: Option<&str>) -> &'static str {
     "other"
 }
 
+/// The reason prefix of a pull-request wait whose pull request closed without merging. It is
+/// still kind `pr`, but it is no longer a live wait: nothing reopens it.
+pub const PR_CLOSED_PREFIX: &str = "waiting-pr-closed:";
+
+/// The `(repo, number)` of a live `waiting-pr:<repo>#<n>[: detail]` reason, if it is one.
+pub fn pr_wait_ref(reason: &str) -> Option<(String, i64)> {
+    let rest = reason.trim_start().strip_prefix("waiting-pr:")?;
+    // The reference ends at the first ':' (a repo name has none) or at the end.
+    let reference = rest.split(':').next()?.trim();
+    let (repo, number) = reference.rsplit_once('#')?;
+    if repo.is_empty() || repo.chars().any(char::is_whitespace) {
+        return None;
+    }
+    Some((repo.to_string(), number.parse().ok().filter(|n| *n > 0)?))
+}
+
 /// A parsed `--waiting-on` value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WaitingOn {
@@ -50,7 +67,7 @@ pub enum WaitingOn {
     Numbers,
     /// Another task: blocked with a dependency, reopened when that task completes.
     Task(String),
-    /// A pull request, `<repo>#<number>`. Recorded; it does not reopen the task by itself yet.
+    /// A pull request, `<repo>#<number>`: review-sync reopens the task when it merges.
     Pr(String),
 }
 

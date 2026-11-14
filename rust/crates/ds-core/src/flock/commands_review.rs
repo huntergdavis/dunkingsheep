@@ -67,6 +67,18 @@ impl ReviewTaskActor for &Flock {
         <Flock as ReviewTaskActor>::list_review_rows(self)
     }
 
+    fn pr_waits(&self) -> ReviewFuture<'_, Result<Vec<crate::tasks::pr_wait::PrWait>, String>> {
+        <Flock as ReviewTaskActor>::pr_waits(self)
+    }
+
+    fn resolve_pr_wait<'a>(
+        &'a self,
+        wait: &'a crate::tasks::pr_wait::PrWait,
+        outcome: crate::tasks::pr_wait::PrOutcome,
+    ) -> ReviewFuture<'a, Result<bool, String>> {
+        <Flock as ReviewTaskActor>::resolve_pr_wait(self, wait, outcome)
+    }
+
     fn task_status<'a>(&'a self, id: &'a str) -> ReviewFuture<'a, Result<String, String>> {
         <Flock as ReviewTaskActor>::task_status(self, id)
     }

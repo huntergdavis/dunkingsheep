@@ -535,8 +535,10 @@ the next-job handoff skips it: `task block <id> --waiting-on owner |
 evidence | release | numbers | task:<id> | pr:<repo>#<number>`
 (`--reason` adds the detail). The kind is shown in `task read`,
 `task list`, `task backlog` and `task_metrics`. `task:<id>` reopens
-the task when that task completes; every other wait is cleared with
-`task unblock`.
+the task when that task completes, and `pr:<repo>#<number>` when
+review-sync sees that pull request merged (if it closes without
+merging the task stays blocked and gets a note). Every other wait is
+cleared with `task unblock`.
 `task_metrics` is the read-only analytics endpoint for a status board or
 the CTO. It reports current queue depth and the status / priority / scope
 mix, per-assignee load, created/claimed/completed/cancelled/requeued
