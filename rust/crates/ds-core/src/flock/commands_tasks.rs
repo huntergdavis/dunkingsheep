@@ -341,18 +341,27 @@ impl Flock {
         } else {
             // t4701: the creator's identity is read from the live pane record here; the store
             // matches it against the lane's membership inside the insert transaction.
+            let identity = || {
+                self_pane_id
+                    .filter(|pane| !pane.is_empty())
+                    .and_then(|pane| {
+                        super::lane_project::identity(env, pane)
+                            .ok()
+                            .map(|(pid, start)| (pane.to_string(), pid, start))
+                    })
+            };
             let project = match project {
                 TaskProject::None => crate::tasks::ProjectRequest::None,
-                TaskProject::Named(name) => crate::tasks::ProjectRequest::Named(name.to_string()),
-                TaskProject::Creator => crate::tasks::ProjectRequest::Creator(
-                    self_pane_id
-                        .filter(|pane| !pane.is_empty())
-                        .and_then(|pane| {
-                            super::lane_project::identity(env, pane)
-                                .ok()
-                                .map(|(pid, start)| (pane.to_string(), pid, start))
-                        }),
-                ),
+                // The owner files under any project; a lane only under its own or a granted one.
+                TaskProject::Named(name) if role == "owner" => {
+                    crate::tasks::ProjectRequest::Named(name.to_string())
+                }
+                TaskProject::Named(name) => {
+                    crate::tasks::ProjectRequest::NamedBy(name.to_string(), identity())
+                }
+                TaskProject::Creator => {
+                    crate::tasks::ProjectRequest::Creator(identity(), role == "owner")
+                }
             };
             tasks
                 .add_with_project(&target, title, body.unwrap_or(""), add_options, project)

@@ -9,6 +9,8 @@ const WORKER: &str = "%1";
 const PLANNER: &str = "%2";
 const OWNER: &str = "%3";
 const UNBOUND: &str = "%4";
+/// An owner-role lane with no project membership at all.
+const BARE_OWNER: &str = "%5";
 
 /// Every pane runs as `pid`.
 struct Panes(i64);
@@ -47,6 +49,7 @@ async fn fixture() -> (tempfile::TempDir, Flock, Arc<Tasks>) {
         (PLANNER, "planner"),
         (OWNER, "owner"),
         (UNBOUND, "worker"),
+        (BARE_OWNER, "owner"),
     ] {
         roles
             .register(pane, role, None, None, None, None, None, None)
@@ -118,32 +121,64 @@ async fn a_global_member_keeps_filing_unmapped_tasks_even_under_a_mapped_parent(
 }
 
 #[tokio::test]
-async fn an_explicit_project_or_no_project_overrides_the_creators() {
+async fn a_lane_names_only_its_own_or_a_granted_project_and_the_owner_any() {
     let (_dir, flock, tasks) = fixture().await;
     let none = TaskAddArgs::default();
-    let (_, named) = add(
-        &flock,
-        &tasks,
-        WORKER,
-        &live(),
-        none,
-        TaskProject::Named("gamma"),
-    )
-    .await;
-    assert_eq!(named.as_deref(), Some("gamma"));
+    // Own project, named explicitly.
+    let own = TaskProject::Named("alpha");
+    let (_, own) = add(&flock, &tasks, WORKER, &live(), none, own).await;
+    assert_eq!(own.as_deref(), Some("alpha"));
+    // `--no-project` beats the creator's own project.
     let (_, cleared) = add(&flock, &tasks, WORKER, &live(), none, TaskProject::None).await;
     assert_eq!(cleared, None);
-    // The owner seat names a project the same way.
-    let (_, owner) = add(
-        &flock,
-        &tasks,
-        OWNER,
-        &live(),
-        none,
-        TaskProject::Named("alpha"),
-    )
-    .await;
-    assert_eq!(owner.as_deref(), Some("alpha"));
+    // A project the planner holds a live grant for, although its own project is beta.
+    flock
+        .planner_scope_admin(
+            &live(),
+            &json!({"operation": "grant", "pane": PLANNER, "project": "gamma"}),
+        )
+        .unwrap();
+    let gamma = TaskProject::Named("gamma");
+    let (_, granted) = add(&flock, &tasks, PLANNER, &live(), none, gamma).await;
+    assert_eq!(granted.as_deref(), Some("gamma"));
+    // The owner names any project.
+    let delta = TaskProject::Named("delta");
+    let (_, owner) = add(&flock, &tasks, OWNER, &live(), none, delta).await;
+    assert_eq!(owner.as_deref(), Some("delta"));
+
+    // Foreign projects are refused and no task is created: another lane's project, a project
+    // nobody has, a grant held by a process that is no longer the pane's, an unbound lane.
+    let before = tasks.list("global").await.unwrap().len();
+    for (pane, env, project) in [
+        (WORKER, live(), "beta"),
+        (WORKER, live(), "gamma"),
+        (PLANNER, live(), "alpha"),
+        (PLANNER, Panes(1), "gamma"),
+        (WORKER, Panes(1), "alpha"),
+        (UNBOUND, live(), "alpha"),
+    ] {
+        let refused = flock
+            .task_add_with_project(
+                "foreign",
+                None,
+                None,
+                none,
+                Some(pane),
+                &env,
+                None,
+                TaskProject::Named(project),
+            )
+            .await
+            .expect_err("a foreign project is refused");
+        assert!(
+            refused
+                .to_string()
+                .contains("only the owner files a task under another project"),
+            "{pane} {project}: {refused}"
+        );
+    }
+    assert_eq!(before, tasks.list("global").await.unwrap().len());
+
     for bad in ["", " alpha", "alpha "] {
         let refused = flock
             .task_add_with_project(
@@ -151,7 +186,7 @@ async fn an_explicit_project_or_no_project_overrides_the_creators() {
                 None,
                 None,
                 none,
-                Some(WORKER),
+                Some(OWNER),
                 &live(),
                 None,
                 TaskProject::Named(bad),
@@ -163,59 +198,53 @@ async fn an_explicit_project_or_no_project_overrides_the_creators() {
 }
 
 #[tokio::test]
-async fn a_caller_without_a_project_takes_the_parents() {
+async fn a_parents_project_is_inherited_only_by_a_caller_who_could_name_it() {
     let (_dir, flock, tasks) = fixture().await;
     let none = TaskAddArgs::default();
-    let (orphan, project) = add(&flock, &tasks, UNBOUND, &live(), none, TaskProject::Creator).await;
+    let creator = TaskProject::Creator;
+    let (orphan, project) = add(&flock, &tasks, UNBOUND, &live(), none, creator).await;
     assert_eq!(project, None, "no membership and no parent");
-    let (parent, _) = add(&flock, &tasks, WORKER, &live(), none, TaskProject::Creator).await;
+    let (parent, _) = add(&flock, &tasks, WORKER, &live(), none, creator).await;
     let child = TaskAddArgs {
         parent_id: Some(&parent),
         ..Default::default()
     };
-    let (_, project) = add(
-        &flock,
-        &tasks,
-        UNBOUND,
-        &live(),
-        child,
-        TaskProject::Creator,
-    )
-    .await;
+    // An unbound lane under a foreign parent: the task is created, with no project.
+    let (_, project) = add(&flock, &tasks, UNBOUND, &live(), child, creator).await;
+    assert_eq!(project, None);
+    // A member under a parent of its own project: its project.
+    let (_, project) = add(&flock, &tasks, WORKER, &live(), child, creator).await;
     assert_eq!(project.as_deref(), Some("alpha"));
+    // A member of another project under that parent: the creator's own project.
+    let (_, project) = add(&flock, &tasks, PLANNER, &live(), child, creator).await;
+    assert_eq!(project.as_deref(), Some("beta"));
+    // The owner role with no membership inherits any parent's project.
+    let (_, project) = add(&flock, &tasks, BARE_OWNER, &live(), child, creator).await;
+    assert_eq!(project.as_deref(), Some("alpha"));
+    // A lane with no membership but a live planner grant for the parent's project inherits it;
+    // the same grant held by another process does not count.
+    flock
+        .planner_scope_admin(
+            &live(),
+            &json!({"operation": "grant", "pane": UNBOUND, "project": "alpha"}),
+        )
+        .unwrap();
+    let (_, project) = add(&flock, &tasks, UNBOUND, &live(), child, creator).await;
+    assert_eq!(project.as_deref(), Some("alpha"));
+    let (_, project) = add(&flock, &tasks, UNBOUND, &Panes(1), child, creator).await;
+    assert_eq!(project, None);
     // A parent with no project gives none.
-    let child = TaskAddArgs {
+    let under_orphan = TaskAddArgs {
         parent_id: Some(&orphan),
         ..Default::default()
     };
-    let (_, project) = add(
-        &flock,
-        &tasks,
-        UNBOUND,
-        &live(),
-        child,
-        TaskProject::Creator,
-    )
-    .await;
+    let (_, project) = add(&flock, &tasks, BARE_OWNER, &live(), under_orphan, creator).await;
     assert_eq!(project, None);
-    // The creator's own project wins over the parent's.
-    let child = TaskAddArgs {
-        parent_id: Some(&parent),
-        ..Default::default()
-    };
-    let (_, project) = add(
-        &flock,
-        &tasks,
-        PLANNER,
-        &live(),
-        child,
-        TaskProject::Creator,
-    )
-    .await;
-    assert_eq!(project.as_deref(), Some("beta"));
-    // `--no-project` also stops the parent's project.
-    let (_, project) = add(&flock, &tasks, UNBOUND, &live(), child, TaskProject::None).await;
-    assert_eq!(project, None);
+    // `--no-project` is open to everyone and also stops the parent's project.
+    for pane in [UNBOUND, WORKER, BARE_OWNER] {
+        let (_, project) = add(&flock, &tasks, pane, &live(), child, TaskProject::None).await;
+        assert_eq!(project, None, "{pane}");
+    }
 }
 
 #[tokio::test]
