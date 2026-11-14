@@ -28,6 +28,11 @@ use tokio::{
 };
 
 type Binding = (String, i64, String);
+// Keep keyboard bytes bounded while allowing WebSocket/TCP backpressure to pause
+// the sender. Counting messages made a short burst of single-key events close
+// the terminal before tmux acknowledged the first command.
+const INPUT_FRAME_BYTES: usize = 4096;
+const INPUT_BUFFER_BYTES: usize = 32 * 1024;
 struct StreamState {
     auth: Arc<dyn AuthBackend>,
     scheme: RequestScheme,
@@ -587,34 +592,39 @@ async fn run(
     let mut live = false;
     let mut pending = false;
     let mut deadline = Instant::now() + Duration::from_secs(5);
-    let mut queue: VecDeque<Vec<u8>> = VecDeque::new();
+    let mut queue: VecDeque<u8> = VecDeque::new();
     let mut control_queue: VecDeque<Vec<u8>> = VecDeque::new();
     let mut buf = [0u8; 8192];
-    'stream: loop {
+    let close_reason = 'stream: loop {
         tokio::select! {
             _ = tick.tick() => {
-                if ((!ready || pending) && Instant::now() >= deadline) || !authorized(&state, &name, &token, &binding).await { break; }
+                if (!ready || pending) && Instant::now() >= deadline { break 'stream "tmux_reply_timeout"; }
+                if !authorized(&state, &name, &token, &binding).await { break 'stream "authorization_changed"; }
             }
-            incoming = ws.recv() => {
+            incoming = ws.recv(), if queue.len() <= INPUT_BUFFER_BYTES - INPUT_FRAME_BYTES => {
                 let bytes = match incoming {
                     Some(Ok(Message::Binary(bytes))) => bytes.to_vec(),
                     Some(Ok(Message::Text(text))) => text.as_bytes().to_vec(),
                     Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => continue,
-                    _ => break,
+                    Some(Err(_)) => break 'stream "websocket_receive_failed",
+                    _ => break 'stream "peer_closed",
                 };
-                if queue.len() >= 8 || !authorized(&state, &name, &token, &binding).await { break; }
-                if !bytes.is_empty() { queue.push_back(bytes); }
+                // Authorization is checked immediately before dispatch below,
+                // and by the periodic revocation check. Queuing grants no input
+                // authority; avoid a blocking tmux identity lookup per keystroke.
+                queue.extend(bytes);
             }
             read = output.read(&mut buf), if control_queue.is_empty() => {
-                let Ok(n) = read else { break }; if n == 0 { break; }
-                let Ok(batch) = lines.push(&buf[..n]) else { break };
-                // A snapshot reply is one line per screen row; live output stays tightly bounded.
-                let limit = if snapshot.is_some() { terminal_stream::Snapshot::MAX_ROWS + 64 } else { 32 };
-                if batch.len() > limit { break; }
+                let Ok(n) = read else { break 'stream "tmux_read_failed" }; if n == 0 { break 'stream "tmux_eof"; }
+                let Ok(batch) = lines.push(&buf[..n]) else { break 'stream "tmux_line_invalid" };
+                // ControlLines bounds each partial line; this read is at most
+                // 8192 bytes. A byte-bounded batch can legitimately contain many
+                // short output notifications, especially while typing quickly.
                 control_queue.extend(batch);
             }
             _ = std::future::ready(()), if !control_queue.is_empty() => {
-                if let Some(line) = control_queue.pop_front() {
+                let mut frame = Vec::new();
+                while let Some(line) = control_queue.pop_front() {
                     if let Some(reader) = snapshot.as_mut() {
                         // Rows are screen text: never shown to the reply tracker or the output
                         // decoder. Any framing mismatch closes the stream with nothing forwarded.
@@ -624,62 +634,73 @@ async fn run(
                                 snapshot = None;
                                 live = true;
                                 pending = false;
-                                if !authorized(&state, &name, &token, &binding).await || !matches!(timeout(Duration::from_secs(2), ws.send(Message::Binary(frame.into()))).await, Ok(Ok(()))) { break 'stream; }
+                                if !authorized(&state, &name, &token, &binding).await { break 'stream "authorization_changed"; }
+                                if !matches!(timeout(Duration::from_secs(2), ws.send(Message::Binary(frame.into()))).await, Ok(Ok(()))) { break 'stream "websocket_send_failed"; }
                             }
-                            Err(_) => break 'stream,
+                            Err(_) => break 'stream "tmux_snapshot_invalid",
                         }
                         continue 'stream;
                     }
                     match tracker.observe(&line) {
                         Ok(Some(true)) if !ready => ready = true,
                         Ok(Some(true)) if pending => pending = false,
-                        Ok(Some(_)) | Err(_) => break 'stream,
+                        Ok(Some(_)) | Err(_) => break 'stream "tmux_reply_invalid",
                         Ok(None) => {}
                     }
                     match terminal_stream::pane_output(&line, &binding.0) {
                         Ok(Some(bytes)) if live => {
-                            if !authorized(&state, &name, &token, &binding).await || !matches!(timeout(Duration::from_secs(2), ws.send(Message::Binary(bytes.into()))).await, Ok(Ok(()))) { break 'stream; }
+                            frame.extend(bytes);
                         }
-                        Ok(_) => {}, Err(_) => break 'stream,
+                        Ok(_) => {}, Err(_) => break 'stream "tmux_output_invalid",
                     }
+                }
+                // Forward one bounded read batch in order. Rechecking tmux's
+                // identity for every short output notification stalled active
+                // TUIs and allowed their control pipe to accumulate output.
+                if !frame.is_empty() {
+                    if !authorized(&state, &name, &token, &binding).await { break 'stream "authorization_changed"; }
+                    if !matches!(timeout(Duration::from_secs(2), ws.send(Message::Binary(frame.into()))).await, Ok(Ok(()))) { break 'stream "websocket_send_failed"; }
                 }
             }
         }
         if ready && !live && snapshot.is_none() {
             let Some(command) = terminal_stream::snapshot_command(&binding.0) else {
-                break;
+                break 'stream "tmux_snapshot_command_invalid";
             };
-            if !authorized(&state, &name, &token, &binding).await
-                || !matches!(
-                    timeout(Duration::from_secs(2), input.write_all(&command)).await,
-                    Ok(Ok(()))
-                )
-            {
-                break;
+            if !authorized(&state, &name, &token, &binding).await {
+                break 'stream "authorization_changed";
+            }
+            if !matches!(
+                timeout(Duration::from_secs(2), input.write_all(&command)).await,
+                Ok(Ok(()))
+            ) {
+                break 'stream "tmux_write_failed";
             }
             snapshot = Some(terminal_stream::Snapshot::default());
             // Holds keyboard input until the snapshot reply ends, and bounds the wait.
             pending = true;
             deadline = Instant::now() + Duration::from_secs(5);
         }
-        if ready && !pending {
-            if let Some(bytes) = queue.pop_front() {
-                let Some(command) = terminal_stream::input_command(&binding.0, &bytes) else {
-                    break;
-                };
-                if !authorized(&state, &name, &token, &binding).await
-                    || !matches!(
-                        timeout(Duration::from_secs(2), input.write_all(&command)).await,
-                        Ok(Ok(()))
-                    )
-                {
-                    break;
-                }
-                pending = true;
-                deadline = Instant::now() + Duration::from_secs(5);
+        if ready && !pending && !queue.is_empty() {
+            let bytes: Vec<u8> = queue.drain(..queue.len().min(INPUT_FRAME_BYTES)).collect();
+            let Some(command) = terminal_stream::input_command(&binding.0, &bytes) else {
+                break 'stream "tmux_input_invalid";
+            };
+            if !authorized(&state, &name, &token, &binding).await {
+                break 'stream "authorization_changed";
             }
+            if !matches!(
+                timeout(Duration::from_secs(2), input.write_all(&command)).await,
+                Ok(Ok(()))
+            ) {
+                break 'stream "tmux_write_failed";
+            }
+            pending = true;
+            deadline = Instant::now() + Duration::from_secs(5);
         }
-    }
+    };
+    // Fixed reason codes only: never log terminal bytes, cookies, or names.
+    eprintln!("terminal stream closed: {close_reason}");
     let _ = child.start_kill();
     let _ = timeout(Duration::from_secs(2), child.wait()).await;
     let _ = timeout(Duration::from_secs(2), ws.send(Message::Close(None))).await;
@@ -1403,6 +1424,32 @@ mod tests {
         .await
         .unwrap();
         assert!(received);
+        // A browser emits one WebSocket frame per key. A quick burst must not
+        // overflow an eight-message queue while the first tmux ACK is pending.
+        let burst = b"t4955-abcdefghijklmnopqrstuvwxyz-0123456789-ABCDEFGHIJKLMNOPQRSTUVWXYZ\n";
+        for byte in burst {
+            ws.send(ClientMessage::Binary(vec![*byte].into()))
+                .await
+                .unwrap();
+        }
+        let echoed = timeout(Duration::from_secs(8), async {
+            let mut bytes = Vec::new();
+            while let Some(Ok(message)) = ws.next().await {
+                if let ClientMessage::Binary(chunk) = message {
+                    bytes.extend_from_slice(&chunk);
+                    if bytes
+                        .windows(burst.len() - 1)
+                        .any(|w| w == &burst[..burst.len() - 1])
+                    {
+                        return true;
+                    }
+                }
+            }
+            false
+        })
+        .await
+        .unwrap();
+        assert!(echoed, "keyboard burst was lost or disconnected");
         // With an active control stream, a stale selected pane still must not resize it.
         assert_eq!(
             test_app
