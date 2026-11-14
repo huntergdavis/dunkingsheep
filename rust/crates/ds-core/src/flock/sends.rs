@@ -2101,6 +2101,26 @@ fn press_until_submitted_value(
                     }
                 }
                 if last_hold == Some(false) {
+                    // t4779: for a long text to a Codex pane an empty box is not yet proof.
+                    if let Some(verdict) = super::guarded_submit::settle_collapsed_paste(
+                        env,
+                        pane_id,
+                        text,
+                        pre_status.as_deref(),
+                        busy_hint,
+                    ) {
+                        env.record_submit_attempt(
+                            pane_id,
+                            if verdict.0 {
+                                "ok-collapsed-paste"
+                            } else {
+                                "collapsed-paste"
+                            },
+                            attempt,
+                            text.len(),
+                        );
+                        return verdict;
+                    }
                     if attempt > 1 {
                         env.remember_submit_key(pane_id, if key == "Tab" { "Enter" } else { &key });
                     }
