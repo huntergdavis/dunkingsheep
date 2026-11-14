@@ -19,6 +19,7 @@ pub trait RosterEnv {
     /// `flock.tasks.get(task_id)`: a row with `id` and `title`, or None when it is gone.
     fn task(&self, task_id: &str) -> Option<Value>;
     /// `flock.inbox.count(name)`: `(unread, oldest_unread_s)`, None when the count failed.
+    /// A failed count is reported as unknown (`unread: null` with a reason), never as 0.
     fn inbox_count(&self, mailbox: &str) -> Option<(i64, Option<f64>)>;
     /// `dunk_activity.activity(lane, ...)`: `{state, since, source, reason}`, or the error text.
     fn activity(&self, lane: &Value, now: f64) -> Result<Value, String>;
@@ -100,6 +101,9 @@ fn roster_lane(lane: &Value) -> bool {
     }
 }
 
+/// Why a lane's `inbox.unread` is null.
+pub const INBOX_COUNT_FAILED: &str = "the inbox count could not be read";
+
 /// `roster`: detected agents plus live panes with explicit, valid membership.
 pub fn roster(env: &dyn RosterEnv, now: f64) -> Result<Value, String> {
     let mut rows = Vec::new();
@@ -120,9 +124,22 @@ pub fn roster(env: &dyn RosterEnv, now: f64) -> Result<Value, String> {
             .get("agent_name")
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty());
-        let (unread, oldest) = env
-            .inbox_count(name.unwrap_or(pane_id))
-            .unwrap_or((0, None));
+        // t4742: a count that could not be read is UNKNOWN, not zero. A lane with waiting
+        // mail must not look caught up because the inbox store failed.
+        let inbox = match env.inbox_count(name.unwrap_or(pane_id)) {
+            Some((unread, oldest)) => json!({
+                "unread": unread,
+                "unread_reason": null,
+                "oldest_unread_s": cell(
+                    oldest.map(|o| json!(o)).unwrap_or(Value::Null), None,
+                    if oldest.is_some() { None } else { Some("no unread mail") }),
+            }),
+            None => json!({
+                "unread": null,
+                "unread_reason": INBOX_COUNT_FAILED,
+                "oldest_unread_s": cell(Value::Null, None, Some(INBOX_COUNT_FAILED)),
+            }),
+        };
         let harness = lane["agent"].as_str().filter(|name| !name.is_empty());
         // What the lane is DOING comes from its own tool; an absent signal is UNKNOWN.
         let doing = env.activity(lane, now).unwrap_or_else(|error| {
@@ -148,9 +165,7 @@ pub fn roster(env: &dyn RosterEnv, now: f64) -> Result<Value, String> {
             ),
             "pane_status": status,
             "task": task,
-            "inbox": {"unread": unread, "oldest_unread_s": cell(
-                oldest.map(|o| json!(o)).unwrap_or(Value::Null), None,
-                if oldest.is_some() { None } else { Some("no unread mail") })},
+            "inbox": inbox,
             "cost": cell(Value::Null, None, Some("cost is metered per provider, not per lane")),
             "cpu": cpu_for(env, &leases, now),
         }));
@@ -170,6 +185,7 @@ mod tests {
         leases: BTreeMap<String, Vec<Value>>,
         tasks: BTreeMap<String, Value>,
         inbox: BTreeMap<String, (i64, Option<f64>)>,
+        inbox_fails: bool,
         doing: Option<Result<Value, String>>,
         cpu: Option<Result<Option<Value>, String>>,
     }
@@ -188,7 +204,10 @@ mod tests {
             self.tasks.get(id).cloned()
         }
         fn inbox_count(&self, mailbox: &str) -> Option<(i64, Option<f64>)> {
-            self.inbox.get(mailbox).copied()
+            if self.inbox_fails {
+                return None;
+            }
+            Some(self.inbox.get(mailbox).copied().unwrap_or((0, None)))
         }
         fn activity(&self, _: &Value, _: f64) -> Result<Value, String> {
             self.doing.clone().unwrap_or_else(|| Ok(json!({"state": "idle", "since": null, "source": "terminal backend", "reason": null})))
@@ -267,7 +286,7 @@ mod tests {
         assert!(row["task"].is_null());
         assert_eq!(
             row["inbox"],
-            json!({"unread": 0, "oldest_unread_s": {"value": null, "as_of": null, "reason": "no unread mail"}})
+            json!({"unread": 0, "unread_reason": null, "oldest_unread_s": {"value": null, "as_of": null, "reason": "no unread mail"}})
         );
         assert_eq!(
             row["cost"]["reason"],
@@ -332,6 +351,25 @@ mod tests {
             row["inbox"]["oldest_unread_s"],
             json!({"value": 42.0, "as_of": null, "reason": null})
         );
+    }
+
+    #[test]
+    fn a_failed_inbox_count_is_unknown_with_a_reason_not_zero_unread() {
+        let mut env = Env {
+            lanes: vec![lane("%2", "pi", Some("w2"))],
+            inbox_fails: true,
+            ..Env::default()
+        };
+        // Mail IS waiting; the count just cannot be read.
+        env.inbox.insert("w2".into(), (3, Some(42.0)));
+        let row = &roster(&env, NOW).unwrap()["lanes"][0];
+        assert!(row["inbox"]["unread"].is_null(), "not 0: {row}");
+        assert_eq!(row["inbox"]["unread_reason"], INBOX_COUNT_FAILED);
+        assert_eq!(
+            row["inbox"]["oldest_unread_s"],
+            json!({"value": null, "as_of": null, "reason": INBOX_COUNT_FAILED})
+        );
+        assert_eq!(row["name"], "w2", "the rest of the row is still served");
     }
 
     #[test]
