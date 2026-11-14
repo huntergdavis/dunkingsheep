@@ -83,7 +83,7 @@ try:
             assert composer.get_by_role('button', name='Close composer').is_disabled()
             hold = False
             fulfill(pending.pop(), {'outcome': 'stored', 'message_id': 'i901'})
-            composer.get_by_text('Stored in VP inbox', exact=False).wait_for()
+            composer.get_by_text('Message to VP of Agentry · stored as i901 in Your inbox.', exact=False).wait_for()
             assert text.input_value() == ''
             recipient.select_option('%9')
             text.fill('Lane draft kept')

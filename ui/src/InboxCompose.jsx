@@ -44,7 +44,7 @@ export default function InboxCompose({ api, onSent }) {
       if (result.outcome !== 'stored' || typeof result.message_id !== 'string' || !result.message_id) {
         throw new Error('No storage receipt was returned. Check the conversation or mailbox before sending again.');
       }
-      setReceipt(owner ? `Stored in VP inbox · ${result.message_id}. This is not a read receipt. ${result.notify?.detail || ''}` : inboxOutcomeText(result, target));
+      setReceipt(owner ? `Message to VP of Agentry · stored as ${result.message_id} in Your inbox. This is not a read receipt. ${result.notify?.detail || ''}` : inboxOutcomeText(result, target));
       setDraft(current => current === draft ? '' : current);
       onSent?.();
     } catch (e) { setError(e.message); }

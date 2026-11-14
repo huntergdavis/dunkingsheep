@@ -45,8 +45,7 @@ export function quickMessageBlock(targets, pane, draft, busy) {
 // What the dialog says after /api/pane-inbox answered: where the daemon stored the message, its
 // id, and whether the lane was told. The mailbox is the daemon's; the lane name is only a fallback.
 export function inboxOutcomeText(data, target) {
-  const mailbox = (typeof data?.mailbox === 'string' && data.mailbox) || target?.name || data?.pane || 'the lane';
-  const where = mailbox === 'owner' ? 'VP of Agentry' : mailbox;
+  const where = (typeof data?.mailbox === 'string' && data.mailbox) || target?.name || data?.pane || 'the lane';
   const told = data?.notified === true ? 'lane notified' : 'lane not notified yet';
   const moved = data?.redirected ? ' · redirected by the daemon' : '';
   return `Stored in ${where} inbox · ${data?.message_id || 'no id'} · ${told}${moved}`;
