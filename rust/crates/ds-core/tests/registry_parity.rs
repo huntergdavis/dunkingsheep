@@ -111,6 +111,23 @@ fn every_input_schema_equals_the_pythons() {
                 .remove("waiting_on")
                 .is_some());
         }
+        if name == "task_assign" || name == "task_unblock" {
+            // t4700: audit reasons extend only the Rust surface; the Python oracle is frozen.
+            let reason = got["properties"]
+                .as_object_mut()
+                .unwrap()
+                .remove("reason")
+                .expect("Rust task transitions advertise an audit reason");
+            assert_eq!(reason["type"], "string");
+            assert!(
+                !got["required"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|field| field == "reason"),
+                "audit reason remains optional"
+            );
+        }
         if name == "task_read" || name == "task_note" {
             let properties = got["properties"].as_object_mut().unwrap();
             assert!(properties.remove("note_kind").is_some());
