@@ -14,15 +14,23 @@ pub const BURST_SETTLE_MIN_CHARS: usize = 500;
 pub const BURST_SETTLE_READS: usize = 4;
 pub const BURST_SETTLE_GAP_S: f64 = 1.0;
 
-/// The `N` of a collapsed paste shown as `[Pasted Content N chars]`, if `shown` is one.
-pub(crate) fn collapsed_paste_chars(shown: &str) -> Option<usize> {
-    let low = shown.to_lowercase();
-    let rest = low.split_once("[pasted content ")?.1;
-    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
-    if digits.is_empty() || !rest[digits.len()..].trim_start().starts_with("char") {
+/// The `N` of a collapsed paste, when the box text is that placeholder ALONE:
+/// `[Pasted Content N chars]` and nothing else. A placeholder with anything typed beside it is
+/// not "alone": the extra text is somebody's, and submitting the box would submit it too.
+pub(crate) fn collapsed_paste_alone(shown: &str) -> Option<usize> {
+    let low = shown.trim().to_lowercase();
+    let digits = low
+        .strip_prefix("[pasted content ")?
+        .strip_suffix(" chars]")?;
+    if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
         return None;
     }
     digits.parse().ok()
+}
+
+/// Whether the box text contains a collapsed-paste placeholder at all.
+fn mentions_collapsed_paste(shown: &str) -> bool {
+    shown.to_lowercase().contains("[pasted content ")
 }
 
 /// t4779: an EMPTY box right after typing a long text into a Codex pane is not yet proof that
@@ -30,14 +38,16 @@ pub(crate) fn collapsed_paste_chars(shown: &str) -> Option<usize> {
 /// ("sent"): the box stayed empty, a turn started, the pane could not be read, or this send is
 /// not a long text to a Codex pane. `Some` replaces it:
 ///
-/// * the box now shows a collapsed paste whose character count is OURS (the text's length, or
-///   one more for our own Enter kept as a newline): press the submit key ONCE more, and report
-///   sent only if the box then empties or a turn starts, failed otherwise;
-/// * the box shows a collapsed paste with any other count: it cannot be proven to be this
-///   send, so nothing is pressed and the send is reported failed.
+/// * the box holds OUR send and nothing else, either as a collapsed paste whose character
+///   count is ours (the text's length, or one more for our own Enter kept as a newline) or
+///   as our expanded text: press the submit key ONCE more, and report sent only if the box
+///   then empties or a turn starts, failed otherwise;
+/// * the box holds a collapsed paste that is not provably ours (another count), or a
+///   collapsed paste with anything else beside it: nothing is pressed and the send is
+///   reported failed. A person's text is never submitted for them.
 ///
-/// Any other text that appears is left alone and does not change the verdict: it is not ours
-/// to submit, and it is not evidence that our send failed.
+/// Other text that appears with no placeholder is left alone and does not change the
+/// verdict: it is not ours to submit, and it is not evidence that our send failed.
 pub(crate) fn settle_collapsed_paste(
     env: &mut dyn SubmitEnv,
     pane_id: &str,
@@ -56,22 +66,38 @@ pub(crate) fn settle_collapsed_paste(
         env.sleep_s(BURST_SETTLE_GAP_S);
         let (screen, shown, _detail) = read_box(env, pane_id);
         screen.as_ref()?;
-        let Some(count) = collapsed_paste_chars(&shown) else {
+        if shown.trim().is_empty() {
             continue;
-        };
-        if count != chars && count != chars + 1 {
-            eprintln!(
-                "{pane_id}: a collapsed paste of {count} characters is in the input box after a {chars}-character send; it is not provably this send, so nothing is pressed"
-            );
-            return Some((
-                false,
-                format!(
-                    "submission unconfirmed: the pane's input box holds a collapsed paste of {count} characters that does not match this {chars}-character send; nothing was pressed"
-                ),
-            ));
         }
+        let what = match collapsed_paste_alone(&shown) {
+            Some(count) if count == chars || count == chars + 1 => "a collapsed paste",
+            Some(count) => {
+                eprintln!(
+                    "{pane_id}: a collapsed paste of {count} characters is in the input box after a {chars}-character send; it is not provably this send, so nothing is pressed"
+                );
+                return Some((
+                    false,
+                    format!(
+                        "submission unconfirmed: the pane's input box holds a collapsed paste of {count} characters that does not match this {chars}-character send; nothing was pressed"
+                    ),
+                ));
+            }
+            None if mentions_collapsed_paste(&shown) => {
+                eprintln!(
+                    "{pane_id}: the input box holds a collapsed paste with other text beside it after a {chars}-character send; nothing is pressed"
+                );
+                return Some((
+                    false,
+                    "submission unconfirmed: the pane's input box holds a collapsed paste with other text beside it; nothing was pressed".into(),
+                ));
+            }
+            // Our own text, expanded: the burst surfaced as plain text and is still waiting.
+            None if crate::terminal::screen::is_our_send(&shown, Some(text), false) => "plain text",
+            // Somebody else's text: not ours to submit, and no evidence about our send.
+            None => continue,
+        };
         eprintln!(
-            "{pane_id}: this {chars}-character send is still in the input box as a collapsed paste; pressing the submit key once more"
+            "{pane_id}: this {chars}-character send is still in the input box as {what}; pressing the submit key once more"
         );
         let (ok, detail, _key) = env.send_submit_key_guarded(pane_id, "Enter", busy_hint);
         if !ok {
@@ -80,10 +106,7 @@ pub(crate) fn settle_collapsed_paste(
         for wait in SUBMIT_POLL_S {
             env.sleep_s(wait);
             if box_holds(env, pane_id, text) == Some(false) {
-                return Some((
-                    true,
-                    "sent (a collapsed paste needed one more Enter)".into(),
-                ));
+                return Some((true, format!("sent ({what} needed one more Enter)")));
             }
             if turn_started(env, pane_id, pre_status) {
                 return Some((true, "sent (confirmed by the turn it started)".into()));
@@ -91,7 +114,7 @@ pub(crate) fn settle_collapsed_paste(
         }
         return Some((
             false,
-            "text did not submit; it is still in the pane's input box as a collapsed paste".into(),
+            format!("text did not submit; it is still in the pane's input box as {what}"),
         ));
     }
     None
@@ -403,19 +426,25 @@ mod tests {
     }
 
     #[test]
-    fn the_collapsed_paste_count_is_read_from_the_placeholder() {
+    fn the_collapsed_paste_count_is_read_only_from_a_placeholder_that_is_alone() {
         assert_eq!(
             Some(1379),
-            collapsed_paste_chars("[Pasted Content 1379 chars]")
+            collapsed_paste_alone("[Pasted Content 1379 chars]")
         );
         assert_eq!(
             Some(7),
-            collapsed_paste_chars("x [pasted content 7 chars] y")
+            collapsed_paste_alone("  [pasted content 7 chars] ")
         );
-        assert_eq!(None, collapsed_paste_chars("[Pasted text #1 +75 lines]"));
-        assert_eq!(None, collapsed_paste_chars("[Pasted Content chars]"));
-        assert_eq!(None, collapsed_paste_chars("[Pasted Content 12 lines]"));
-        assert_eq!(None, collapsed_paste_chars("a draft about pasted content"));
+        // Anything typed beside the placeholder makes it not alone.
+        assert_eq!(None, collapsed_paste_alone("x [Pasted Content 7 chars]"));
+        assert_eq!(
+            None,
+            collapsed_paste_alone("[Pasted Content 7 chars] and my note")
+        );
+        assert_eq!(None, collapsed_paste_alone("[Pasted text #1 +75 lines]"));
+        assert_eq!(None, collapsed_paste_alone("[Pasted Content chars]"));
+        assert_eq!(None, collapsed_paste_alone("[Pasted Content 12 lines]"));
+        assert_eq!(None, collapsed_paste_alone("a draft about pasted content"));
     }
 
     #[test]
@@ -490,6 +519,85 @@ mod tests {
             p.keys.is_empty(),
             "nothing is pressed on text that is not ours"
         );
+    }
+
+    #[test]
+    fn a_collapsed_paste_with_a_persons_text_beside_it_is_never_submitted() {
+        let text = long_text();
+        let mut p = codex_pane();
+        // Our placeholder, and somebody typed next to it inside the settle window.
+        let beside = || {
+            Some(codex(
+                "\x1b[1m\u{203a}\x1b[22m \x1b[38;5;6m[Pasted Content 601 chars]\x1b[0m and my note",
+            ))
+        };
+        script(
+            &p,
+            std::iter::repeat_with(codex_hint)
+                .take(4)
+                .chain(std::iter::repeat_with(beside).take(8)),
+        );
+        let (ok, detail) = run_text(&mut p, &text);
+        assert!(!ok, "{detail}");
+        assert!(
+            detail.contains("with other text beside it; nothing was pressed"),
+            "{detail}"
+        );
+        assert!(
+            p.keys.is_empty(),
+            "a person's text is never submitted for them"
+        );
+    }
+
+    #[test]
+    fn our_own_expanded_text_in_the_box_gets_one_more_enter_like_the_placeholder() {
+        let text = long_text();
+        let mut p = codex_pane();
+        // The burst surfaced as plain text (its first row is what the box reader shows).
+        let expanded = || Some(codex(&format!("\u{203a} {}", &long_text()[..100])));
+        script(
+            &p,
+            std::iter::repeat_with(codex_hint)
+                .take(4)
+                .chain(std::iter::repeat_with(expanded).take(2))
+                .chain(std::iter::repeat_with(codex_hint).take(8)),
+        );
+        let (ok, detail) = run_text(&mut p, &text);
+        assert!(ok, "{detail}");
+        assert_eq!("sent (plain text needed one more Enter)", detail);
+        assert_eq!(vec!["Enter".to_string()], p.keys);
+
+        // And when it stays: failed, after that one Enter.
+        let mut p = codex_pane();
+        script(
+            &p,
+            std::iter::repeat_with(codex_hint)
+                .take(4)
+                .chain(std::iter::repeat_with(expanded).take(16)),
+        );
+        let (ok, detail) = run_text(&mut p, &text);
+        assert!(!ok, "{detail}");
+        assert_eq!(
+            "text did not submit; it is still in the pane's input box as plain text",
+            detail
+        );
+        assert_eq!(vec!["Enter".to_string()], p.keys);
+    }
+
+    #[test]
+    fn somebody_elses_text_alone_is_left_alone_and_does_not_change_the_verdict() {
+        let text = long_text();
+        let mut p = codex_pane();
+        let foreign = || Some(codex("\u{203a} a person started a new question"));
+        script(
+            &p,
+            std::iter::repeat_with(codex_hint)
+                .take(4)
+                .chain(std::iter::repeat_with(foreign).take(8)),
+        );
+        let (ok, detail) = run_text(&mut p, &text);
+        assert!(ok && detail == "sent", "{detail}");
+        assert!(p.keys.is_empty());
     }
 
     #[test]
