@@ -430,6 +430,39 @@ mod tests {
         // watchdog row, in that lane's own mailbox.
         assert_eq!(1, alert_rows(Some("owner")), "one row in the owner mailbox");
         assert_eq!(2, alert_rows(None), "and one notice to the owner lane");
+        // The owner-lane notice is agent-only: the person's conversation (the owner mailbox plus
+        // the owner lane's mailbox) shows exactly ONE alert row, the owner-mailbox one.
+        let (lane_mailbox, agent_only): (String, i64) = rusqlite::Connection::open(&inbox_path)
+            .expect("canonical inbox database")
+            .query_row(
+                "SELECT m.mailbox, EXISTS(SELECT 1 FROM message_audiences a \
+                 WHERE a.message_id = m.id AND a.audience = 'agent') \
+                 FROM messages m WHERE m.sender = 'watchdog' AND m.mailbox != 'owner'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("the owner-lane notice");
+        assert_eq!(
+            1, agent_only,
+            "the owner-lane notice has the agent audience"
+        );
+        let conversation = services
+            .flock
+            .stores()
+            .inbox
+            .expect("runtime inbox store")
+            .conversation_across_visible(&["owner".to_string(), lane_mailbox.clone()], None, None)
+            .expect("owner conversation");
+        let alerts: Vec<&serde_json::Value> = conversation
+            .iter()
+            .filter(|row| row["sender"] == "watchdog")
+            .collect();
+        assert_eq!(
+            1,
+            alerts.len(),
+            "one alert row for the person: {conversation:?}"
+        );
+        assert_eq!("owner", alerts[0]["mailbox"], "{lane_mailbox}");
         let alert_db = std::path::PathBuf::from(std::env::var("DUNKINGSHEEP_DIR").unwrap())
             .join("dialog-alerts.db");
         let delivered: Vec<(String, i64)> = {

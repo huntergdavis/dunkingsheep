@@ -21,13 +21,15 @@ pub const ALERT_SUBJECT: &str = "Dialog blocks queued delivery";
 
 /// One stuck-dialog alert as an inbox row from the watchdog, through the daemon's own inbox
 /// store. `wake_quiet` notifies a recipient whose mailboxes are configured silent (the owner
-/// lane's are); it is set by the daemon only and is not a wire argument.
+/// lane's are); it is set by the daemon only and is not a wire argument. `agent_only` stores
+/// the row with the agent audience, which keeps it out of a person's conversation view.
 fn post_inbox(
     flock: &Flock,
     env: &dyn InboxEnv,
     to: &str,
     body: &str,
     wake_quiet: bool,
+    agent_only: bool,
 ) -> Result<SinkDelivery, String> {
     let args = SendArgs {
         to,
@@ -37,7 +39,7 @@ fn post_inbox(
         notify: true,
         self_pane_id: None,
         system_sender: Some("watchdog"),
-        agent_only: false,
+        agent_only,
         role_sender: None,
         wake_quiet,
     };
@@ -64,19 +66,25 @@ pub fn post_owner_mailbox(
         crate::flock::mailbox::OWNER_MAILBOX,
         body,
         false,
+        false,
     )
 }
 
 /// t4678: the lane sink: one inbox notice to a pane that can act on the stuck lane (its project
 /// coordinator, else the owner lane). A target that is gone is `Undeliverable`.
+///
+/// `owner_lane` says the target is the owner-lane fallback. That notice wakes the lane although
+/// its mailboxes are configured silent, and it is stored with the agent audience: the owner
+/// conversation reads the owner lane's mailbox too, and the person must see exactly ONE alert
+/// row (the owner-mailbox one), not a second copy. A coordinator lane gets an ordinary notice.
 pub fn post_lane(
     flock: &Flock,
     env: &dyn InboxEnv,
     body: &str,
     target: &str,
-    wake_quiet: bool,
+    owner_lane: bool,
 ) -> Result<SinkDelivery, String> {
-    post_inbox(flock, env, target, body, wake_quiet)
+    post_inbox(flock, env, target, body, owner_lane, owner_lane)
 }
 
 /// The ledger name of the lane sink (the project coordinator, else the owner lane).
@@ -912,6 +920,48 @@ mod tests {
         assert!(
             fixture.nudges.lock().unwrap().is_empty(),
             "the owner mailbox has no pane to type into"
+        );
+    }
+
+    /// t4678: an owner-lane fallback notice is agent-only, so the person's conversation over
+    /// that lane's mailbox does not show a second copy of the alert; a coordinator-lane notice
+    /// is an ordinary one.
+    #[test]
+    fn an_owner_lane_notice_is_agent_only_and_a_coordinator_notice_is_not() {
+        let fixture = InboxFixture::new();
+        let flock = fixture_flock(&fixture);
+        let visible = |fixture: &InboxFixture| {
+            fixture
+                .store
+                .conversation_across_visible(&["VP".to_string()], None, None)
+                .unwrap()
+                .len()
+        };
+        assert_eq!(
+            SinkDelivery::Delivered,
+            post_lane(&flock, &fixture, "stuck dialog", "w9:pH", true).unwrap()
+        );
+        assert_eq!(
+            1,
+            fixture.nudges.lock().unwrap().len(),
+            "the lane is still woken"
+        );
+        let stored = crate::inbox::count(&fixture.pool, "VP", &[], fixture.now()).unwrap();
+        assert_eq!(1, stored.unread, "the notice is in the lane's mailbox");
+        assert_eq!(
+            0,
+            visible(&fixture),
+            "and not in a person's conversation view"
+        );
+
+        assert_eq!(
+            SinkDelivery::Delivered,
+            post_lane(&flock, &fixture, "stuck dialog", "w9:pH", false).unwrap()
+        );
+        assert_eq!(
+            1,
+            visible(&fixture),
+            "a coordinator-lane notice is an ordinary row"
         );
     }
 

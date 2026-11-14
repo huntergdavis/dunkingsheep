@@ -526,8 +526,8 @@ impl StalePanelReporter {
         let target = flock.dialog_alert_lane(&inbox.list_panes(), pane_id);
         let mut owner = |body: &str| crate::dialog_alerts::post_owner_mailbox(flock, inbox, body);
         let mut vp = |body: &str| match &target {
-            Some((pane, wake_quiet)) => {
-                crate::dialog_alerts::post_lane(flock, inbox, body, pane, *wake_quiet)
+            Some((pane, owner_lane)) => {
+                crate::dialog_alerts::post_lane(flock, inbox, body, pane, *owner_lane)
             }
             None => Err("no project coordinator or owner lane to notify".to_string()),
         };

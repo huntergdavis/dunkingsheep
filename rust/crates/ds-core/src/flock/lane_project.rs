@@ -158,8 +158,8 @@ impl Flock {
         out["pane_id"] = json!(pane);
         Ok(out)
     }
-    /// t4678: who is told about a dialog stuck in `stuck_pane`, and whether that notice must wake
-    /// a recipient whose mailboxes are configured silent. First a live project coordinator of
+    /// t4678: who is told about a dialog stuck in `stuck_pane`, and whether that target is the
+    /// owner-lane fallback (its notice wakes a silent mailbox and is stored agent-only). First a live project coordinator of
     /// the stuck lane's project (a planner grant whose pane still runs the granted process),
     /// never the stuck pane itself; otherwise the single registered owner lane, woken although
     /// silent. `None` when neither exists. `panes` is the live pane listing.
