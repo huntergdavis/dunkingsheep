@@ -1643,6 +1643,36 @@ mod tests {
     }
 
     #[test]
+    fn mailbox_summary_accepts_pane_aliases_but_preserves_stored_keys() {
+        let f = Fake::setup();
+        for (requested, stored, status) in [
+            ("VP", "VP (%1)", 200),
+            ("VP", "VP (wR:p1)", 200),
+            ("VP (%1)", "VP", 200),
+            ("VP", "Other (%1)", 502),
+            ("VP", "VP (second shift)", 502),
+            ("VP", "VP (%x)", 502),
+        ] {
+            f.reply("inbox_list", json!({"mailbox":requested,"order":"newest_first","next_before":null,"include_agent":false,"messages":[{
+                "message_id":"i8","mailbox":stored,"destination":stored,"sender":null,"subject":null,"state":"read","created_at":100,
+                "body_bytes":0,"attachment_count":0,"audience":null
+            }]}));
+            let path = format!(
+                "/api/mailbox-messages?mailbox={}&include_agent=false",
+                requested.replace('%', "%25").replace(' ', "%20")
+            );
+            let (actual, page) = http(owner_app(f.clone()), &path, None);
+            assert_eq!(actual, status, "{requested}: {stored}");
+            if status == 200 {
+                assert_eq!(
+                    page["messages"][0]["mailbox"], stored,
+                    "body reads must use the persisted key"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn mailbox_summary_production_path_and_rpc_failure_do_not_fall_to_static() {
         let f = Fake::setup();
         let service = crate::web_server::decoded_path_routing(owner_app(f), false);

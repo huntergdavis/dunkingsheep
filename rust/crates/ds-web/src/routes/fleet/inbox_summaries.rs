@@ -91,7 +91,8 @@ pub(super) async fn api_mailbox_messages(
                 && (query.include_agent.is_none()
                     || (page.include_agent == query.include_agent
                         && page.messages.iter().all(|row| {
-                            row.mailbox == query.mailbox
+                            ds_core::inbox::normalise_mailbox(&row.mailbox)
+                                == ds_core::inbox::normalise_mailbox(&query.mailbox)
                                 && match row.audience.as_deref() {
                                     None => true,
                                     Some("agent") => query.include_agent == Some(true),

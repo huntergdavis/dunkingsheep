@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import MessageBody from './MessageBody';
 import InboxCompose from './InboxCompose';
+import { normaliseMailbox } from './mailboxKey';
 import './mailbox-browser.css';
 
 function stamp(seconds) {
@@ -49,7 +50,7 @@ export default function MailboxBrowser({ api }) {
     api(`/mailbox-messages?mailbox=${encodeURIComponent(mailbox)}&limit=50&include_agent=${includeAgent}${before ? `&before=${encodeURIComponent(before)}` : ''}`)
       .then(data => {
         if (!live) return;
-        if (data.include_agent !== includeAgent || !Array.isArray(data.messages) || data.messages.some(row => row.mailbox !== mailbox || !Object.hasOwn(row, 'audience') || (row.audience !== null && row.audience !== 'agent') || (!includeAgent && row.audience === 'agent'))) throw new Error('Mailbox filter response was not safe to display.');
+        if (data.include_agent !== includeAgent || !Array.isArray(data.messages) || data.messages.some(row => (typeof row.mailbox !== 'string' || normaliseMailbox(row.mailbox) !== normaliseMailbox(mailbox)) || !Object.hasOwn(row, 'audience') || (row.audience !== null && row.audience !== 'agent') || (!includeAgent && row.audience === 'agent'))) throw new Error('Mailbox filter response was not safe to display.');
         setSummary({ key: pageKey, state: 'ready', rows: data.messages, next: data.next_before });
       })
       .catch(e => { if (live) setSummary({ key: pageKey, state: e.status === 502 ? 'unavailable' : 'error', error: e.status === 502 ? 'Mailbox browsing is temporarily unavailable. A daemon upgrade may be needed; try Refresh or use Owner conversation.' : e.message }); });

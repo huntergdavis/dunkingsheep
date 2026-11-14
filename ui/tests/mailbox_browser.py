@@ -11,7 +11,7 @@ from playwright.sync_api import sync_playwright
 
 DIST = Path(__file__).resolve().parents[1] / 'dist'
 assert (DIST / 'index.html').is_file()
-LANE = 'lane-alpha & beta (%2)'
+LANE = 'lane-alpha & beta'
 RAW = '''AGENT-ONLY-SECRET
 
 | Name | Value |
@@ -35,8 +35,8 @@ def summary(mid, mailbox, subject, audience=None):
             'created_at': 100, 'state': 'read', 'audience': audience}
 OWNER = summary('i101', 'owner', 'Owner newest')
 OLDER = summary('i99', 'owner', 'Owner older')
-PLAIN = summary('i201', LANE, 'Lane plain')
-AGENT = summary('i202', LANE, 'Agent secret', 'agent')
+PLAIN = summary('i201', LANE + ' (%2)', 'Lane plain')
+AGENT = summary('i202', LANE + ' (wR:p1)', 'Agent secret', 'agent')
 ALL = {row['message_id']: row for row in [OWNER, OLDER, PLAIN, AGENT]}
 BODIES = {'i101': 'OWNER-BODY', 'i99': 'OLDER-BODY', 'i201': 'LANE-PLAIN-BODY', 'i202': RAW}
 
