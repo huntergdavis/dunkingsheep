@@ -10862,7 +10862,8 @@ mod context_mutation_tests;
 
 #[test]
 fn task_history_summary_and_kinds_are_bounded_explicit_and_private() {
-    let (runtime, _dir, flock, tasks, dispatcher) = task_api_fixture();
+    let (runtime, _dir, flock, tasks, mut dispatcher) = task_api_fixture();
+    dispatcher.register("task_note", h_task_note);
     let long = "\n\"\\🧶".repeat(3000);
     let task = dispatch_task_api(
         &dispatcher,
