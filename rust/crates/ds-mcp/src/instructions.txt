@@ -16,8 +16,8 @@ extend the lease; task(action="complete") when done (global completion: it is do
 everyone). task(action="follow") asks the daemon to PUSH the next task to you when your
 pane is idle, reusing the dunk idle gate and guarded inbox nudge, so you do not
 poll. task(action="add|list|read|update|assign|block|unblock") manage the queue. scope is 'global' (default, fleet-wide) or
-'self' (your pane only). inbox_read also returns your global and pane tasks
-after the messages. task(action="metrics") is the timeseries-friendly query endpoint
+'self' (your pane only). inbox_read returns messages without task queues by default;
+set include_tasks=true to include them. task(action="metrics") is the timeseries-friendly query endpoint
 (queue depth, status/priority/scope mix, per-assignee load, created/claimed/
 completed throughput in hourly or daily buckets, completion and claim latency)
 for a status board or the CTO. Everything is priority order, dependency

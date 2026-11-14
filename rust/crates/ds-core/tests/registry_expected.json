@@ -689,7 +689,7 @@
    "additionalProperties": false,
    "properties": {
     "include_tasks": {
-     "description": "Include the caller's task queues in the result (default true).",
+     "description": "Include the caller's task queues in the result (default false).",
      "type": "boolean"
     },
     "limit": {
@@ -2612,7 +2612,7 @@
     "stats": "inbox_stats",
     "status": "inbox_status"
    },
-   "description": "Agent-to-agent mailbox. action=send or send_agent_only (preferred over typing), count, list, read (also returns your tasks), recover, status, ack, cancel, delete, stats, fetch. No size limit; a send nudges the recipient with one line. The owner's mailbox (FLAT_FLEET.md 7.2) is read with action=conversation, answered with action=reply, which keeps the question's transport and links the answer to it, and fed by a bridge with action=ingest (transport + external_id), drained with action=outbox and confirmed with action=delivered (desk and owner only)."
+   "description": "Agent-to-agent mailbox. action=send or send_agent_only (preferred over typing), count, list, read (add include_tasks=true to include task queues), recover, status, ack, cancel, delete, stats, fetch. No size limit; a send nudges the recipient with one line. The owner's mailbox (FLAT_FLEET.md 7.2) is read with action=conversation, answered with action=reply, which keeps the question's transport and links the answer to it, and fed by a bridge with action=ingest (transport + external_id), drained with action=outbox and confirmed with action=delivered (desk and owner only)."
   },
   "memory": {
    "actions": {

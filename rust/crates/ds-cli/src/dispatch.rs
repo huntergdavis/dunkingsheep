@@ -4494,9 +4494,10 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
                     "peek".into(),
                     Value::Bool(matches!(ns.get("peek"), Some(Value::Bool(true)))),
                 );
-                if matches!(ns.get("messages_only"), Some(Value::Bool(true))) {
-                    args.insert("include_tasks".into(), Value::Bool(false));
-                }
+                let include_tasks = matches!(ns.get("with_tasks"), Some(Value::Bool(true)))
+                    && !matches!(ns.get("messages_only"), Some(Value::Bool(true)));
+                // Send the choice explicitly so a new CLI is compact even against an older daemon.
+                args.insert("include_tasks".into(), Value::Bool(include_tasks));
                 crate::daemon_cmd::run_command(ns, "inbox_read", args, |result| {
                     crate::render_print::render_inbox_read(result)
                 })

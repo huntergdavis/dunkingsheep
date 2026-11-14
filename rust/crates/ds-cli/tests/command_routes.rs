@@ -120,22 +120,34 @@ fn assert_matches_python(args: &[&str]) {
     let rust = run_binary_without_command(args);
     let python = run_python_reference(args);
     assert_eq!(rust.status.code(), python.status.code(), "args: {args:?}");
-    if rust.stdout != python.stdout {
+    // The frozen Python oracle describes the old inbox default. Compare the
+    // rest of the guide byte for byte while explicitly checking this Rust-only
+    // behavior change instead of changing the archived oracle.
+    let python_stdout = if matches!(args.first().copied(), Some("guide" | "help" | "docs")) {
+        let text = String::from_utf8(python.stdout).unwrap();
+        let old = "automatically. `inbox_read` includes global and pane task queues by default;\nuse `dunkingsheep inbox read --messages-only` or\n`inbox_read(include_tasks=false)` to omit them.";
+        let new = "automatically. `inbox_read` returns messages without task queues by default;\nuse `dunkingsheep inbox read --with-tasks` or\n`inbox_read(include_tasks=true)` to include the queues. The existing\n`--messages-only` option remains supported and overrides `--with-tasks`.";
+        assert!(text.contains(old), "archived guide changed unexpectedly");
+        text.replacen(old, new, 1).into_bytes()
+    } else {
+        python.stdout
+    };
+    if rust.stdout != python_stdout {
         let first = rust
             .stdout
             .iter()
-            .zip(&python.stdout)
+            .zip(&python_stdout)
             .take_while(|(left, right)| left == right)
             .count();
         let start = first.saturating_sub(100);
         let rust_end = (first + 180).min(rust.stdout.len());
-        let python_end = (first + 180).min(python.stdout.len());
+        let python_end = (first + 180).min(python_stdout.len());
         panic!(
             "stdout differs for args {args:?} at byte {first}; lengths Rust={} Python={}; Rust={:?}; Python={:?}",
             rust.stdout.len(),
-            python.stdout.len(),
+            python_stdout.len(),
             String::from_utf8_lossy(&rust.stdout[start..rust_end]),
-            String::from_utf8_lossy(&python.stdout[start..python_end]),
+            String::from_utf8_lossy(&python_stdout[start..python_end]),
         );
     }
     assert_eq!(rust.stderr, python.stderr, "stderr for args: {args:?}");
@@ -2411,7 +2423,7 @@ fn cli_route_07_inbox_read_b() {
     let read = run_daemon_cli(
         &["inbox", "read", "reviewer", "--limit", "3", "--peek"],
         "inbox_read",
-        json!({"mailbox": "reviewer", "limit": 3, "peek": true}),
+        json!({"mailbox": "reviewer", "limit": 3, "peek": true, "include_tasks": false}),
         json!({
             "mailbox": "reviewer",
             "messages": [{
@@ -2485,6 +2497,18 @@ fn cli_inbox_read_messages_only_forwards_opt_out() {
         "inbox_read",
         json!({"mailbox": "reviewer", "limit": 10, "peek": true, "include_tasks": false}),
         json!({"mailbox": "reviewer", "messages": [], "truncated": false, "omitted": 0, "note": null}),
+    );
+    assert_eq!(0, output.status.code().unwrap());
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn cli_inbox_read_with_tasks_forwards_opt_in() {
+    let output = run_daemon_cli(
+        &["inbox", "read", "reviewer", "--with-tasks", "--peek"],
+        "inbox_read",
+        json!({"mailbox": "reviewer", "limit": 10, "peek": true, "include_tasks": true}),
+        json!({"mailbox": "reviewer", "messages": [], "tasks": {"global": []}}),
     );
     assert_eq!(0, output.status.code().unwrap());
     assert!(output.stderr.is_empty());
@@ -5170,6 +5194,7 @@ fn cli_route_58_commands_map() {
     assert!(r.contains("start_agent(project, global, role"));
     assert!(r.contains("memory_backfill(action, limit, queue_id, path, reason)"));
     assert!(r.contains("roster(project)"));
+    assert!(r.contains("Task queues are omitted by default"));
     let strip = |text: &str| {
         let mut skip_description = false;
         text.lines()
@@ -5183,6 +5208,7 @@ fn cli_route_58_commands_map() {
                     || line.starts_with("start_agent(")
                     || line.starts_with("memory_backfill(")
                     || line.starts_with("owner_handoff(")
+                    || line.starts_with("inbox_read(")
                 {
                     skip_description = true;
                     None
@@ -5218,12 +5244,24 @@ fn cli_route_58_commands_map() {
         for key in ["queue_id", "path", "reason"] {
             assert!(memory["input_schema"]["properties"].get(key).is_some());
         }
+        let inbox_read = r.iter().find(|row| row["name"] == "inbox_read").unwrap();
+        assert!(inbox_read["description"]
+            .as_str()
+            .unwrap()
+            .contains("Task queues are omitted by default"));
+        assert!(
+            inbox_read["input_schema"]["properties"]["include_tasks"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("default false")
+        );
         r.retain(|row| {
             row["name"] != "lanes"
                 && row["name"] != "roster"
                 && row["name"] != "start_agent"
                 && row["name"] != "memory_backfill"
                 && row["name"] != "owner_handoff"
+                && row["name"] != "inbox_read"
         });
         p.retain(|row| {
             row["name"] != "lanes"
@@ -5231,6 +5269,7 @@ fn cli_route_58_commands_map() {
                 && row["name"] != "start_agent"
                 && row["name"] != "memory_backfill"
                 && row["name"] != "owner_handoff"
+                && row["name"] != "inbox_read"
         });
         assert_eq!(r, p);
     }

@@ -491,9 +491,10 @@ and records a lease in one SQLite transaction. `task_heartbeat` extends the
 lease; `task_complete` completes it for everyone. `task_follow` is the
 push: the daemon then hands you the next task when the backend reports
 your pane idle, so you do not poll. An empty task_next subscribes you
-automatically. `inbox_read` includes global and pane task queues by default;
-use `dunkingsheep inbox read --messages-only` or
-`inbox_read(include_tasks=false)` to omit them.
+automatically. `inbox_read` returns messages without task queues by default;
+use `dunkingsheep inbox read --with-tasks` or
+`inbox_read(include_tasks=true)` to include the queues. The existing
+`--messages-only` option remains supported and overrides `--with-tasks`.
 
     dunkingsheep task add "Ship the parser" -p high --body "..."
     dunkingsheep task add "Write tests" --depends-on t12

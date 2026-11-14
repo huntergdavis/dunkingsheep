@@ -716,19 +716,25 @@ fn inbox_read_task_failure_precedes_mark_and_receipt() {
     stores.tasks = None;
     services.flock().attach_stores(stores);
     let dispatcher = services.dispatcher(handlers());
+    let peek = dispatcher
+        .dispatch("inbox_read", &json!({"peek": true}), &request("w1:p1"))
+        .expect("a default read must not require the task store");
+    assert_eq!(peek["messages"][0]["message_id"], id);
+    assert!(peek.get("tasks").is_none());
+    assert!(store.get_message(&id).unwrap().read_at.is_none());
     assert!(dispatcher
-        .dispatch("inbox_read", &json!({}), &request("w1:p1"))
+        .dispatch(
+            "inbox_read",
+            &json!({"include_tasks": true}),
+            &request("w1:p1")
+        )
         .unwrap_err()
         .to_string()
         .contains("task store is not attached"));
     assert!(store.get_message(&id).unwrap().read_at.is_none());
     assert!(store.recover_delivery("w1:p1").unwrap().is_empty());
     let read = dispatcher
-        .dispatch(
-            "inbox_read",
-            &json!({"include_tasks":false}),
-            &request("w1:p1"),
-        )
+        .dispatch("inbox_read", &json!({}), &request("w1:p1"))
         .unwrap();
     assert_eq!(read["marked_read"], 1);
     dispatcher.close();
@@ -771,7 +777,9 @@ fn a_desk_inbox_read_never_marks_a_message_its_response_leaves_out() {
                     .unwrap();
                 sent.push(id);
             }
-            let read = dispatcher.dispatch("inbox_read", &json!({}), &ctx).unwrap();
+            let read = dispatcher
+                .dispatch("inbox_read", &json!({"include_tasks": with_queues}), &ctx)
+                .unwrap();
             let size = py_dumps(&read).len();
             let carried: Vec<String> = read
                 .get("messages")
@@ -852,7 +860,11 @@ fn an_inbox_read_leaves_an_unowned_global_task_unowned_and_still_lists_it() {
         .unwrap();
     let dispatcher = services.dispatcher(handlers());
     let read = dispatcher
-        .dispatch("inbox_read", &json!({}), &request("w1:p1"))
+        .dispatch(
+            "inbox_read",
+            &json!({"include_tasks": true}),
+            &request("w1:p1"),
+        )
         .unwrap();
     let listed = read["tasks"]["global"]
         .as_array()

@@ -121,7 +121,7 @@ pub fn h_inbox_read(c: &HandlerContext<'_>, args: Args) -> Result<Value, DunkErr
     let m = mailbox(&args);
     let n = limit(&args, 10)?;
     let peek = python_bool_arg(&args, "peek", false);
-    let include_tasks = python_bool_arg(&args, "include_tasks", true);
+    let include_tasks = python_bool_arg(&args, "include_tasks", false);
     // Set by the dispatcher for the desk role only (api.rs). The desk response is clamped after this
     // handler returns, so the messages must be chosen before anything is marked read (t3539).
     let desk_clamp = python_bool_arg(&args, "desk_clamp", false);
