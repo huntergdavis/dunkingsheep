@@ -239,7 +239,11 @@ impl ReviewTaskActor for Tasks {
         id: &'a str,
         reason: &'a str,
     ) -> ReviewFuture<'a, Result<(), crate::error::DunkError>> {
-        Box::pin(async move { Tasks::cancel(self, id, reason).await.map(|_| ()) })
+        Box::pin(async move {
+            Tasks::set_status(self, id, "cancelled", Some(reason), Some("review-sync"))
+                .await
+                .map(|_| ())
+        })
     }
 
     fn authors_of<'a>(
@@ -443,7 +447,15 @@ impl ReviewTaskActor for Flock {
         let tasks = attached_review_tasks(self);
         Box::pin(async move {
             let tasks = tasks?;
-            Tasks::cancel(tasks.as_ref(), id, reason).await.map(|_| ())
+            Tasks::set_status(
+                tasks.as_ref(),
+                id,
+                "cancelled",
+                Some(reason),
+                Some("review-sync"),
+            )
+            .await
+            .map(|_| ())
         })
     }
 

@@ -72,6 +72,9 @@ def load_parser():
     # t4648: the backlog query is Rust-only; the Python CLI had no project mapping to count by.
     task = root.choices["task"]
     task_actions = next(a for a in task._actions if isinstance(a, argparse._SubParsersAction))
+    # t4700: reasons are audit text; actor always comes from daemon binding.
+    for action in ("assign", "unblock"):
+        task_actions.choices[action].add_argument("--reason", help="why this transition is requested (stored in task history)")
     # t4703: opt-in task history; the archived Python parser stays unchanged.
     note_kinds = ["evidence", "decision", "handoff", "progress", "correction"]
     task_actions.choices["note"].add_argument("--kind", choices=note_kinds,

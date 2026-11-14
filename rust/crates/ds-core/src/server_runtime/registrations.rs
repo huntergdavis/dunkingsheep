@@ -3041,7 +3041,7 @@ os.rename(out_path + ".tmp", out_path)
     }
 
     #[test]
-    fn production_dispatcher_task_mutation_handlers_use_real_tasks_and_identity() {
+    fn production_dispatcher_task_mutation_handlers_audit_real_tasks_and_identity() {
         let observations = Arc::new(Mutex::new(SendObservations::default()));
         let (_dir, services) = make_services(
             "task-mutations-runtime",
@@ -3053,10 +3053,12 @@ os.rename(out_path + ".tmp", out_path)
             None,
         );
         let dispatcher = services.production_dispatcher();
-        let owner = request("w2:p2");
+        let mut owner = request("w2:p2");
+        owner.identity_bound = Some(true);
         let pid = std::process::id() as i64;
         let process = crate::proc::stat(pid).unwrap();
         let mut worker = request("w1:p1");
+        worker.identity_bound = Some(true);
         worker.caller = Some(crate::proc::Caller::new(
             Some(pid),
             Some(process.start),
@@ -3080,13 +3082,20 @@ os.rename(out_path + ".tmp", out_path)
             )
             .unwrap();
         assert_eq!(updated["title"], "updated");
-        dispatcher
+        let assigned = dispatcher
             .dispatch(
                 "task_assign",
-                &json!({"id":id,"assignees":["w1:p1"]}),
+                &json!({"id":id,"assignees":["w1:p1"],"reason":"runtime handoff"}),
                 &owner,
             )
             .unwrap();
+        assert_eq!(json!(["w1:p1"]), assigned["assignees"]);
+        let read = dispatcher
+            .dispatch("task_read", &json!({"id":id}), &owner)
+            .unwrap();
+        let note = read["notes"].as_array().unwrap().last().unwrap();
+        assert_eq!("w2:p2", note["actor"]);
+        assert_eq!("runtime handoff", note["reason"]);
         let claimed = dispatcher
             .dispatch("task_next", &json!({"scope":"global"}), &worker)
             .unwrap();
@@ -3110,10 +3119,26 @@ os.rename(out_path + ".tmp", out_path)
             .dispatch("task_block", &json!({"id":id,"reason":"wait"}), &worker)
             .unwrap();
         assert_eq!(blocked["status"], "blocked");
+        let read = dispatcher
+            .dispatch("task_read", &json!({"id":id}), &owner)
+            .unwrap();
+        let note = read["notes"].as_array().unwrap().last().unwrap();
+        assert_eq!("w1:p1", note["actor"]);
+        assert_eq!("wait", note["reason"]);
         let unblocked = dispatcher
-            .dispatch("task_unblock", &json!({"id":id}), &owner)
+            .dispatch(
+                "task_unblock",
+                &json!({"id":id,"reason":"runtime evidence received"}),
+                &owner,
+            )
             .unwrap();
         assert_eq!(unblocked["status"], "open");
+        let read = dispatcher
+            .dispatch("task_read", &json!({"id":id}), &owner)
+            .unwrap();
+        let note = read["notes"].as_array().unwrap().last().unwrap();
+        assert_eq!("w2:p2", note["actor"]);
+        assert_eq!("runtime evidence received", note["reason"]);
         let denied = dispatcher
             .dispatch(
                 "task_assign",
@@ -3134,6 +3159,12 @@ os.rename(out_path + ".tmp", out_path)
             .dispatch("task_cancel", &json!({"id":id,"reason":"done"}), &owner)
             .unwrap();
         assert_eq!(cancelled["status"], "cancelled");
+        let read = dispatcher
+            .dispatch("task_read", &json!({"id":id}), &owner)
+            .unwrap();
+        let note = read["notes"].as_array().unwrap().last().unwrap();
+        assert_eq!("w2:p2", note["actor"]);
+        assert_eq!("done", note["reason"]);
         services.shutdown();
     }
 

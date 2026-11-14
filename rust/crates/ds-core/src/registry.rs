@@ -1094,7 +1094,7 @@ pub static COMMANDS: &[Command] = &[
     Command {
         name: "task_assign",
         description: "Assign a task to one or more panes/agents. assignees=['self'] assigns it to the caller. mode=add|remove|set (default add).",
-        params: &[Param { name: "id", schema: "{\"type\":\"string\",\"description\":\"Task id, e.g. t12.\"}" }, Param { name: "assignees", schema: "{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Pane ids or agent names. 'self' means the caller's pane.\"}" }, Param { name: "mode", schema: "{\"type\":\"string\",\"enum\":[\"add\",\"remove\",\"set\"],\"description\":\"How to apply the assignees (default add).\"}" }],
+        params: &[Param { name: "id", schema: "{\"type\":\"string\",\"description\":\"Task id, e.g. t12.\"}" }, Param { name: "assignees", schema: "{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Pane ids or agent names. 'self' means the caller's pane.\"}" }, Param { name: "mode", schema: "{\"type\":\"string\",\"enum\":[\"add\",\"remove\",\"set\"],\"description\":\"How to apply the assignees (default add).\"}" }, Param { name: "reason", schema: "{\"type\":\"string\",\"description\":\"Why this task transition is requested; recorded in the audit event.\"}" }],
         dispatch_required: &["id", "assignees"],
         required: &["id", "assignees"],
         mcp: true,
@@ -1294,7 +1294,7 @@ pub static COMMANDS: &[Command] = &[
     Command {
         name: "task_unblock",
         description: "Return a blocked task to the open queue.",
-        params: &[Param { name: "id", schema: "{\"type\":\"string\",\"description\":\"Task id, e.g. t12.\"}" }],
+        params: &[Param { name: "id", schema: "{\"type\":\"string\",\"description\":\"Task id, e.g. t12.\"}" }, Param { name: "reason", schema: "{\"type\":\"string\",\"description\":\"Why this task transition is requested; recorded in the audit event.\"}" }],
         dispatch_required: &["id"],
         required: &["id"],
         mcp: true,

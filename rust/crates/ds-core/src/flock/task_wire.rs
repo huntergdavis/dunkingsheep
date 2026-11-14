@@ -62,10 +62,12 @@ impl Flock {
             self_pane_id,
             false,
             None,
+            None,
         )
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn task_assign_wire_with_mode_parser<F>(
         &self,
         task_id: &str,
@@ -74,6 +76,7 @@ impl Flock {
         self_pane_id: Option<&str>,
         planner_author_guard: bool,
         planner: Option<crate::tasks::planner_scope::PlannerIdentity>,
+        reason: Option<&str>,
     ) -> Result<TaskWire, DunkError>
     where
         F: FnOnce() -> Result<String, DunkError>,
@@ -86,6 +89,7 @@ impl Flock {
                 self_pane_id,
                 planner_author_guard,
                 planner,
+                reason,
             )
             .await?;
         self.task_store()?
@@ -103,7 +107,12 @@ impl Flock {
         self.task_read(task_id, self_pane_id).await?;
         let task = self
             .task_store()?
-            .set_status_with_raw_reason(task_id, "blocked", reason, None)
+            .set_status_with_raw_reason(
+                task_id,
+                "blocked",
+                reason,
+                Some(&self.task_audit_actor(self_pane_id)?),
+            )
             .await?;
         self.task_store()?
             .get_full_wire(&task.id, self_pane_id)
@@ -133,7 +142,19 @@ impl Flock {
         task_id: &str,
         self_pane_id: Option<&str>,
     ) -> Result<TaskWire, DunkError> {
-        let task = self.task_unblock(task_id, self_pane_id).await?;
+        self.task_unblock_wire_with_reason(task_id, None, self_pane_id)
+            .await
+    }
+
+    pub(crate) async fn task_unblock_wire_with_reason(
+        &self,
+        task_id: &str,
+        reason: Option<&str>,
+        self_pane_id: Option<&str>,
+    ) -> Result<TaskWire, DunkError> {
+        let task = self
+            .task_unblock_with_reason(task_id, reason, self_pane_id)
+            .await?;
         self.task_store()?
             .get_full_wire(&task.id, self_pane_id)
             .await
@@ -148,7 +169,12 @@ impl Flock {
         self.task_read(task_id, self_pane_id).await?;
         let tasks = self.task_store()?;
         let task = tasks
-            .set_status_with_raw_reason(task_id, "cancelled", reason, None)
+            .set_status_with_raw_reason(
+                task_id,
+                "cancelled",
+                reason,
+                Some(&self.task_audit_actor(self_pane_id)?),
+            )
             .await?;
         let blocked_dependents = tasks.blocked_dependents(&task.id).await?;
         let wire = tasks.get_full_wire(&task.id, self_pane_id).await?;

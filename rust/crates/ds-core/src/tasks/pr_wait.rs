@@ -121,7 +121,7 @@ impl Tasks {
                         .map_err(db::map_sqlite)?;
                         tx.execute(
                             "INSERT INTO task_events (task_id, event, at, actor, scope, priority, status_from, status_to, meta) VALUES (?,?,?,?,?,?,?,?,?)",
-                            params![wait.id, "unblocked", now, "system", scope, priority, "blocked", "open",
+                            params![wait.id, "unblocked", now, "rule:pr-wait", scope, priority, "blocked", "open",
                                     json!({"reason": format!("auto: {pr} merged")}).to_string()],
                         )
                         .map_err(db::map_sqlite)?;
@@ -137,7 +137,7 @@ impl Tasks {
                         .map_err(db::map_sqlite)?;
                         tx.execute(
                             "INSERT INTO task_events (task_id, event, at, actor, scope, priority, meta) VALUES (?,?,?,?,?,?,?)",
-                            params![wait.id, "note", now, "system", scope, priority,
+                            params![wait.id, "note", now, "rule:pr-wait", scope, priority,
                                     json!({"reason": format!("{pr} closed without merging; this task waited on it and stays blocked (was: {})", wait.reason)}).to_string()],
                         )
                         .map_err(db::map_sqlite)?;
@@ -213,9 +213,9 @@ mod tests {
         assert!(store.blocked_pr_waits().await.unwrap().is_empty());
         let notes = store.recent_notes(&id, 5).await.unwrap();
         assert!(
-            notes
-                .iter()
-                .any(|n| n.event == "unblocked" && n.reason == "auto: owner/repo#42 merged"),
+            notes.iter().any(|n| n.event == "unblocked"
+                && n.actor.as_deref() == Some("rule:pr-wait")
+                && n.reason == "auto: owner/repo#42 merged"),
             "{notes:?}"
         );
     }

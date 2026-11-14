@@ -40,6 +40,14 @@ the owner re-registers it.
 > `decision`, `progress` and `correction`. Free `--event` names remain legacy
 > `note` entries. MCP uses `note_kind` to distinguish this from task type `kind`.
 
+Assignment, block, unblock and cancellation events record the daemon-bound pane
+or authenticated service and the reason in `meta.reason`. Internal rules name
+themselves, such as `rule:auto-unblock` or `review-sync`. `task assign --reason`
+and `task unblock --reason` can state why; an omitted reason is recorded explicitly.
+Unblocking also preserves the previous block reason in the event. `task read`
+shows this history after the task's current reason changes. Actor names cannot
+be supplied through a task command argument. Historical rows are unchanged.
+
 The review timer assigns a newly filed initial review when exactly one live reviewer
 in the repository's explicitly mapped project passes the registered provider policy
 and is absent from the PR's author/contributor records. Role and project membership

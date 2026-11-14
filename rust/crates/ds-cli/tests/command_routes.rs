@@ -5322,6 +5322,8 @@ fn cli_route_58_commands_map() {
     assert!(r.contains("task_read(id*, summary, notes, note_kind, before_note)"));
     assert!(r.contains("task_note(id*, event, reason, note_kind)"));
     assert!(r.contains("task_complete(id*, by, verdict, landed, note, next)"));
+    assert!(r.contains("task_assign(id*, assignees*, mode, reason)"));
+    assert!(r.contains("task_unblock(id*, reason)"));
     assert!(r.contains("Task queues are omitted by default"));
     assert!(
         r.contains("owner_conversation(limit, before, before_id, source_filter, include_internal)")
@@ -5355,7 +5357,9 @@ fn cli_route_58_commands_map() {
                     ).replace("owner_conversation(limit, before, before_id, source_filter, include_internal)", "owner_conversation(limit, before)")
                     .replace("task_read(id*, summary, notes, note_kind, before_note)", "task_read(id*)")
                     .replace("task_note(id*, event, reason, note_kind)", "task_note(id*, event, reason)")
-                    .replace("task_complete(id*, by, verdict, landed, note, next)", "task_complete(id*, by, verdict, landed)"))
+                    .replace("task_complete(id*, by, verdict, landed, note, next)", "task_complete(id*, by, verdict, landed)")
+                    .replace("task_assign(id*, assignees*, mode, reason)", "task_assign(id*, assignees*, mode)")
+                    .replace("task_unblock(id*, reason)", "task_unblock(id*)"))
                 }
             })
             .collect::<Vec<_>>()
@@ -5429,6 +5433,16 @@ fn cli_route_58_commands_map() {
             .unwrap()
             .remove("waiting_on")
             .is_some());
+        // t4700: audit reasons extend the frozen Python surface on these two actions.
+        for name in ["task_assign", "task_unblock"] {
+            let task = r.iter_mut().find(|row| row["name"] == name).unwrap();
+            let reason = task["input_schema"]["properties"]
+                .as_object_mut()
+                .unwrap()
+                .remove("reason")
+                .unwrap();
+            assert_eq!("string", reason["type"]);
+        }
         // t4701: the two task project overrides are Rust-only.
         for name in ["task_read", "task_note"] {
             let task = r.iter_mut().find(|row| row["name"] == name).unwrap();
@@ -6395,4 +6409,22 @@ fn cli_task_history_flags_reach_the_daemon_and_render_the_explicit_view() {
     );
     assert!(note.status.success());
     assert_eq!(String::from_utf8(note.stdout).unwrap(), "noted t9: note\n");
+}
+
+#[test]
+fn task_audit_cli_assign_and_unblock_send_optional_reasons_without_an_actor() {
+    let assigned = run_daemon_cli(
+        &["task", "assign", "t7", "%2", "--reason", "review handoff"],
+        "task_assign",
+        json!({"id":"t7","assignees":["%2"],"mode":"add","reason":"review handoff"}),
+        json!({"id":"t7","title":"work","scope":"global","status":"open","priority":"medium"}),
+    );
+    assert_eq!(Some(0), assigned.status.code());
+    let unblocked = run_daemon_cli(
+        &["task", "unblock", "t7", "--reason", "evidence received"],
+        "task_unblock",
+        json!({"id":"t7","reason":"evidence received"}),
+        json!({"id":"t7","title":"work","scope":"global","status":"open","priority":"medium"}),
+    );
+    assert_eq!(Some(0), unblocked.status.code());
 }

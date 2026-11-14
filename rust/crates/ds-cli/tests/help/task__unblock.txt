@@ -1,7 +1,8 @@
-usage: dunkingsheep task unblock [-h] id
+usage: dunkingsheep task unblock [-h] [--reason REASON] id
 
 positional arguments:
   id
 
 options:
-  -h, --help  show this help message and exit
+  -h, --help       show this help message and exit
+  --reason REASON  why this transition is requested (stored in task history)

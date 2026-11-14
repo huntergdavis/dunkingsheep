@@ -7158,7 +7158,11 @@ fn api_t39_task_block_cancel_bind_raw_reasons_after_guards_and_return_dependents
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(meta, None, "status event adds no synthetic reason meta");
+    assert_eq!(
+        serde_json::from_str::<Value>(meta.as_deref().unwrap()).unwrap()["reason"],
+        "0",
+        "the audit reason preserves SQLite scalar affinity"
+    );
 
     let events_before = runtime.block_on(tasks.events(&task.id));
     for (reason, kind) in [
@@ -11206,5 +11210,269 @@ fn task_history_all_has_a_200_note_ceiling_and_scoped_continuation() {
             "w1:p1"
         )
         .is_err());
+    }
+}
+
+#[test]
+fn task_audit_dispatch_rejects_spoofed_actor_and_renders_bound_transition_reasons() {
+    let (runtime, _dir, flock, tasks, mut dispatcher) = task_mutation_api_fixture();
+    dispatcher.register("task_read", h_task_read);
+    let task = runtime
+        .block_on(tasks.add("global", "audited", ""))
+        .unwrap();
+    for (verb, extra, reason) in [
+        (
+            "task_assign",
+            json!({"assignees":["w1:p3"]}),
+            "lane handoff",
+        ),
+        ("task_block", json!({}), "waiting for evidence"),
+        ("task_unblock", json!({}), "evidence received"),
+        ("task_cancel", json!({}), "superseded"),
+    ] {
+        let mut input = extra;
+        input["id"] = json!(task.id);
+        input["reason"] = json!(reason);
+        input["actor"] = json!("%spoof");
+        input["by"] = json!("%spoof");
+        let before = runtime.block_on(tasks.events(&task.id));
+        let refusal = dispatch_task_mutation(
+            &dispatcher,
+            &flock,
+            &runtime,
+            verb,
+            input.clone(),
+            Some("w1:p2"),
+            None,
+        )
+        .unwrap_err();
+        assert!(refusal
+            .to_string()
+            .contains("unknown argument(s): actor, by"));
+        assert_eq!(
+            before,
+            runtime.block_on(tasks.events(&task.id)),
+            "a spoofed actor is refused before writes"
+        );
+        input.as_object_mut().unwrap().remove("actor");
+        input.as_object_mut().unwrap().remove("by");
+        dispatch_task_mutation(
+            &dispatcher,
+            &flock,
+            &runtime,
+            verb,
+            input,
+            Some("w1:p2"),
+            None,
+        )
+        .unwrap();
+        let wire = dispatch_task_mutation(
+            &dispatcher,
+            &flock,
+            &runtime,
+            "task_read",
+            json!({"id":task.id}),
+            Some("w1:p2"),
+            None,
+        )
+        .unwrap();
+        let event = match verb {
+            "task_assign" => "assigned",
+            "task_block" => "blocked",
+            "task_unblock" => "unblocked",
+            _ => "cancelled",
+        };
+        let note = wire["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["event"] == event)
+            .unwrap();
+        assert_eq!("w1:p2", note["actor"]);
+        assert_eq!(reason, note["reason"]);
+    }
+}
+
+#[test]
+fn task_audit_authenticated_services_have_names_and_do_not_accept_an_actor_field() {
+    let (runtime, _dir, flock, tasks, mut dispatcher) = task_mutation_api_fixture();
+    dispatcher.register("task_read", h_task_read);
+    for (role, label, expected) in [
+        ("owner", "owner fixture", "owner-service"),
+        ("system", "scheduler", "service:scheduler"),
+        ("web", "desk", "service:desk"),
+    ] {
+        let token = flock
+            .with_roles(|roles, _| roles.issue_token(role, Some(label), None))
+            .unwrap();
+        let request = RequestCtx {
+            service_token: Some(token),
+            self_pane_id: (role == "system").then(|| "w1:p3".to_string()),
+            socket_peer: (role == "system").then_some(true),
+            identity_bound: (role == "system").then_some(false),
+            ..RequestCtx::default()
+        };
+        let task = runtime
+            .block_on(tasks.add("global", "service audited", ""))
+            .unwrap();
+        let before = runtime.block_on(tasks.events(&task.id));
+        let refusal = dispatch_task_mutation_request(
+            &dispatcher,
+            &flock,
+            &runtime,
+            "task_block",
+            json!({"id":task.id,"reason":"service request","actor":"spoof"}),
+            &request,
+        )
+        .unwrap_err();
+        assert!(refusal.to_string().contains("unknown argument(s): actor"));
+        assert_eq!(before, runtime.block_on(tasks.events(&task.id)));
+        dispatch_task_mutation_request(
+            &dispatcher,
+            &flock,
+            &runtime,
+            "task_block",
+            json!({"id":task.id,"reason":"service request"}),
+            &request,
+        )
+        .unwrap();
+        let wire = dispatch_task_mutation_request(
+            &dispatcher,
+            &flock,
+            &runtime,
+            "task_read",
+            json!({"id":task.id}),
+            &request,
+        )
+        .unwrap();
+        let note = wire["notes"].as_array().unwrap().last().unwrap();
+        assert_eq!(expected, note["actor"]);
+        assert_eq!("service request", note["reason"]);
+    }
+}
+
+#[test]
+fn task_audit_service_update_preserves_null_completion_attribution_with_a_verdict() {
+    let (runtime, _dir, flock, tasks, dispatcher) = task_mutation_api_fixture();
+    let prerequisite = runtime
+        .block_on(tasks.add("global", "prerequisite", ""))
+        .unwrap();
+    runtime.block_on(tasks.complete(&prerequisite.id)).unwrap();
+    for (index, (role, label, expected)) in [
+        ("owner", "owner fixture", "owner-service"),
+        ("system", "scheduler", "service:scheduler"),
+        ("web", "desk", "service:desk"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let token = flock
+            .with_roles(|roles, _| roles.issue_token(role, Some(label), None))
+            .unwrap();
+        let request = RequestCtx {
+            service_token: Some(token),
+            ..RequestCtx::default()
+        };
+        let task = runtime
+            .block_on(tasks.add_with(
+                "global",
+                "review attribution",
+                "",
+                crate::tasks::AddOptions {
+                    kind: Some("review".into()),
+                    repo: Some("fixture/audit".into()),
+                    pr: Some((index + 700).to_string()),
+                    head: Some("exact-head".into()),
+                    ..Default::default()
+                },
+            ))
+            .unwrap();
+        // Reproduce the separate verdict/done writes without invoking any GitHub service.
+        runtime
+            .block_on(tasks.set_verdict(&task.id, "accept", Some("w1:p3")))
+            .unwrap();
+        assert!(runtime
+            .block_on(tasks.get(&task.id))
+            .unwrap()
+            .completed_by
+            .is_none());
+        runtime.block_on(tasks.insert_lease(&task.id, "w1:p3", 1.0, 1.0, 1e20));
+        let updated=dispatch_task_mutation_request(&dispatcher,&flock,&runtime,"task_update",json!({
+            "id":task.id,"status":"done","priority":"high","depends_on":[prerequisite.id],"assignees":["w1:p3"]
+        }),&request).unwrap();
+        assert!(
+            updated["completed_by"].is_null(),
+            "{role}: audit identity must not become a review lane"
+        );
+        let row = runtime
+            .block_on(tasks.list_review_rows_visible())
+            .unwrap()
+            .into_iter()
+            .find(|row| row.id == task.id)
+            .unwrap();
+        assert_eq!("done", row.status);
+        assert_eq!(Some("accept"), row.verdict.as_deref());
+        assert!(
+            row.completed_by.is_none(),
+            "verdict-lane readers must still skip this row"
+        );
+        let connection = rusqlite::Connection::open(tasks.path()).unwrap();
+        for event in ["completed", "priority", "depends", "lease_released"] {
+            let actor:Option<String>=connection.query_row(
+                "SELECT actor FROM task_events WHERE task_id=?1 AND event=?2 ORDER BY id DESC LIMIT 1",
+                rusqlite::params![task.id,event],|row|row.get(0)).unwrap();
+            assert_eq!(
+                None, actor,
+                "{role}: preserve the original actor for {event}"
+            );
+        }
+        let assigned:String=connection.query_row(
+            "SELECT actor FROM task_events WHERE task_id=?1 AND event='assigned' ORDER BY id DESC LIMIT 1",
+            [&task.id],|row|row.get(0)).unwrap();
+        assert_eq!(
+            expected, assigned,
+            "assignment still records the authenticated service"
+        );
+
+        let work = runtime
+            .block_on(tasks.add("global", "status attribution", ""))
+            .unwrap();
+        dispatch_task_mutation_request(
+            &dispatcher,
+            &flock,
+            &runtime,
+            "task_update",
+            json!({"id":work.id,"status":"in_progress"}),
+            &request,
+        )
+        .unwrap();
+        let status_actor: Option<String> = connection
+            .query_row(
+                "SELECT actor FROM task_events WHERE task_id=?1 AND event='status'",
+                [&work.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(None, status_actor);
+        dispatch_task_mutation_request(
+            &dispatcher,
+            &flock,
+            &runtime,
+            "task_update",
+            json!({"id":work.id,"status":"blocked","block_reason":"wait for release"}),
+            &request,
+        )
+        .unwrap();
+        let blocked: String = connection
+            .query_row(
+                "SELECT actor FROM task_events WHERE task_id=?1 AND event='blocked'",
+                [&work.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            expected, blocked,
+            "only audited transitions use the service identity"
+        );
     }
 }
