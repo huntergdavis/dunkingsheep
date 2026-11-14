@@ -15,7 +15,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const localExports = {
   'theme-registry.js': ['buildThemeRegistry', 'groupThemes', 'THEME_GROUP_ORDER'],
   'leader-line.js': ['leaderLine'],
-  'dash-route.js': ['resolveDashRoute', 'viewForPath'],
+  'dash-route.js': ['canonicalDashLocation', 'requestedPane', 'resolveDashRoute', 'viewForPath'],
   'quick-message.js': ['inboxOutcomeText', 'quickMessageBlock', 'quickMessageRoster', 'quickMessageTargets', 'sendOutcomeText'],
   'project-fleet.js': ['agoText', 'laneMailText', 'unroutedSection'],
   'project-terminal-targets.js': ['nextTerminalList', 'terminalActionForLane', 'terminalListReason', 'terminalTargetForPane'],

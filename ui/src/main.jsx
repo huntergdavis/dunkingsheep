@@ -24,7 +24,7 @@ import CharacterEditor from './CharacterEditor';
 import ProjectTerminal from './ProjectTerminal';
 import { nextTerminalList, terminalActionForLane, terminalListReason } from './project-terminal-targets.js';
 import { agoText, laneMailText, unroutedSection } from './project-fleet.js';
-import { DASH_HOME, DASH_ROUTES, resolveDashRoute, viewForPath } from './dash-route.js';
+import { canonicalDashLocation, DASH_HOME, DASH_ROUTES, requestedPane, resolveDashRoute, viewForPath } from './dash-route.js';
 import { inboxOutcomeText, quickMessageBlock, quickMessageRoster, quickMessageTargets, sendOutcomeText } from './quick-message.js';
 
 function LaneStatus({ row }) {
@@ -54,13 +54,18 @@ const api = async (path, options = {}) => {
 };
 
 function useDashRoute() {
-  const [path, setPath] = useState(() => window.location.pathname);
+  const [location, setLocation] = useState(() => ({ path: window.location.pathname, search: window.location.search }));
   useEffect(() => {
-    const onPop = () => setPath(window.location.pathname);
-    window.addEventListener('popstate', onPop);
-    return () => window.removeEventListener('popstate', onPop);
+    const update = () => {
+      const moved = canonicalDashLocation(window.location.pathname, window.location.search, window.location.hash);
+      if (moved) window.history.replaceState(null, '', moved);
+      setLocation({ path: window.location.pathname, search: window.location.search });
+    };
+    update();
+    window.addEventListener('popstate', update);
+    return () => window.removeEventListener('popstate', update);
   }, []);
-  return { ...resolveDashRoute(path), ...viewForPath(path) };
+  return { ...resolveDashRoute(location.path), ...viewForPath(location.path), search: location.search };
 }
 
 // How the desk was told about an owner message (t1166): 'sent' (typed straight in) and 'nudged'
@@ -1221,7 +1226,7 @@ function ChannelStandalone({ channel }) {
           {!items.length && <div className="empty-state"><div className="empty-icon">✦</div><h2>Direct line to {selected?.name || 'the agent'}</h2></div>}
           <MessageList autoScrollToBottom={false} autoScrollToBottomOnMount={false}>{items.map(item => <MessageCard key={item.id} item={item} frontDesk={channel === 'cos'} onSendNow={() => {}} onInspect={() => {
             const pane = selected?.pane_id;
-            window.location.assign(pane ? `/dash/fleet?pane=${encodeURIComponent(pane)}` : '/dash/fleet');
+            window.location.assign(pane ? `/dash/projects?pane=${encodeURIComponent(pane)}` : '/dash/projects');
           }} />)}</MessageList>
         </div>
       </div>
@@ -1247,6 +1252,15 @@ function Projects({ standalone = false }) {
     return () => { active = false; clearInterval(timer); };
   }, []);
   const ownerAction = (terminalList.targets || []).map(target => terminalActionForLane(terminalList, target.pane_id)).find(action => action.label === 'Open owner terminal');
+  // PR924: a legacy pane bookmark opens only an exact server-authorized terminal, once.
+  const [deepLinkPane] = useState(() => requestedPane(window.location.search));
+  const deepLinkDone = useRef(false);
+  useEffect(() => {
+    if (deepLinkDone.current || !deepLinkPane || terminalList.state !== 'ready') return;
+    deepLinkDone.current = true;
+    const action = terminalActionForLane(terminalList, deepLinkPane);
+    if (action.target) setTerminalTarget(action.target);
+  }, [terminalList, deepLinkPane]);
   useEffect(() => {
     let live = true;
     async function load() {
@@ -1285,10 +1299,11 @@ function Projects({ standalone = false }) {
     {error && <div role="alert">Project roster unavailable: {error}</div>}
     {!roster && !error && <p>Loading projects…</p>}
     {terminalList.state === 'error' && <p role="status">{terminalListReason(terminalList.status)}.</p>}
+    {deepLinkPane && <p role="status">Selected lane {deepLinkPane}{terminalActionForLane(terminalList, deepLinkPane).reason ? ` · ${terminalActionForLane(terminalList, deepLinkPane).reason}` : ''}</p>}
     {ownerAction && <section className="project-group"><h2>Owner terminal</h2><button type="button" onClick={() => setTerminalTarget(ownerAction.target)}>Open owner terminal</button></section>}
     {roster && <><label>Show <select aria-label="Filter projects" value={effectiveSelected} onChange={e => setSelected(e.target.value)}><option value="all">All groups</option>{ordered.map(group => <option key={group.key} value={group.key}>{group.title}</option>)}</select></label>
       {!ordered.length && <p>No live agent lanes are reported.</p>}
-      {ordered.filter(group => effectiveSelected === 'all' || group.key === effectiveSelected).map(group => <section className="project-group" key={group.key}><h2>{group.title} <small>({group.lanes.length})</small></h2><div className="ops-table-wrap"><table><thead><tr><th>Lane</th><th>Activity</th><th>Mail</th><th>Task</th><th>Model</th></tr></thead><tbody>{group.lanes.map(lane => <tr key={lane.pane_id}><td><a href={`/dash/fleet?pane=${encodeURIComponent(lane.pane_id)}`}>{lane.name || lane.pane_id}</a><small> {lane.pane_id}</small>{(action => action.target
+      {ordered.filter(group => effectiveSelected === 'all' || group.key === effectiveSelected).map(group => <section className="project-group" key={group.key}><h2>{group.title} <small>({group.lanes.length})</small></h2><div className="ops-table-wrap"><table><thead><tr><th>Lane</th><th>Activity</th><th>Mail</th><th>Task</th><th>Model</th></tr></thead><tbody>{group.lanes.map(lane => <tr key={lane.pane_id}><td className={lane.pane_id === deepLinkPane ? 'lane-deep-link' : undefined}><a aria-current={lane.pane_id === deepLinkPane ? 'true' : undefined} href={`/dash/projects?pane=${encodeURIComponent(lane.pane_id)}`}>{lane.name || lane.pane_id}</a><small> {lane.pane_id}</small>{(action => action.target
         ? <button type="button" onClick={() => setTerminalTarget(action.target)}>{action.label}</button>
         : <small className="lane-terminal-reason"> {action.reason}</small>)(terminalActionForLane(terminalList, lane.pane_id))}</td><td>{lane.state || 'Unknown'}</td><td>{(mail => <span title={mail.reason || undefined}>{mail.text}</span>)(laneMailText(fleet, lane.pane_id))}</td><td>{lane.task ? [lane.task.id, lane.task.title].filter(Boolean).join(' · ') : 'Unknown'}</td><td>{lane.model?.value || 'Unknown'}</td></tr>)}</tbody></table></div></section>)}
     </>}
@@ -1318,7 +1333,6 @@ function StandaloneDesk({ view, known }) {
   }
   if (view === 'cos' && new URLSearchParams(window.location.search).get('panel') === 'mailboxes') return <DashShell standalone view="cos"><MailboxBrowser api={api} /></DashShell>;
   if (view === 'cos' && new URLSearchParams(window.location.search).get('panel') !== 'conversation') return <DashShell standalone view="cos"><OwnerInbox api={api} /></DashShell>;
-  if (view === 'fleet') return <Fleet standalone />;
   if (view === 'projects') return <Projects standalone />;
   if (view === 'operations') return <OpsBoard standalone />;
   if (view === 'play') return <PlayWorkspace standalone />;
@@ -1349,7 +1363,7 @@ function App() {
   if (authorized === null) return <div className="splash">DUNKING SHEEP</div>;
   // Keep the owner on the conversations and boards in this desk.
   const content = authorized
-    ? <StandaloneDesk view={route.view} known={route.known} />
+    ? <StandaloneDesk key={`${route.view}:${route.search}`} view={route.view} known={route.known} />
     : <Login onSuccess={() => setAuthorized(true)} />;
   return <ThemeContext.Provider value={{ theme, chooseTheme, themeError }}>{updateAvailable && <div className="update-banner" role="status">A desk update is ready. Save any draft, then <button onClick={() => window.location.reload()}>Refresh now</button>.</div>}{content}</ThemeContext.Provider>;
 }
