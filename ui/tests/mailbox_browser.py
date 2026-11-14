@@ -156,6 +156,9 @@ try:
             if os.environ.get('MAILBOX_SCREENSHOT_DIR'):
                 page.screenshot(path=str(Path(os.environ['MAILBOX_SCREENSHOT_DIR']) / f's-d-mailboxes-{width}.png'))
             page.get_by_role('link', name='Owner conversation', exact=True).click()
+            page.get_by_role('link', name='Back to Inbox', exact=True).wait_for()
+            assert urlsplit(page.url).query == 'panel=conversation'
+            page.get_by_role('link', name='Back to Inbox', exact=True).click()
             page.get_by_role('heading', name='Owner inbox', exact=True).wait_for()
             page.get_by_role('link', name='Browse all mailboxes', exact=True).click()
             page.get_by_role('heading', name='Mailboxes', exact=True).wait_for()
