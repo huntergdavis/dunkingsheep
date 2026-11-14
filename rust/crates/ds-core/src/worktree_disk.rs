@@ -64,12 +64,49 @@ pub struct Usage {
     pub newest: Option<f64>,
     /// Entries that could not be read; their size is not in `bytes`.
     pub unreadable: u64,
+    /// The scan ran out of its budget inside this path: `bytes` and `newest` are incomplete.
+    pub truncated: bool,
+}
+
+/// How much one report may do. A worktree root only grows, so a report that reads all of it
+/// takes longer every week; past the budget the report stops and says it is partial.
+#[derive(Debug, Clone, Copy)]
+pub struct Budget {
+    started: std::time::Instant,
+    /// Wall time for the whole scan.
+    pub max: std::time::Duration,
+    /// Directories directly below the root that are scanned.
+    pub max_dirs: usize,
+}
+
+impl Budget {
+    pub fn new(max_seconds: f64, max_dirs: usize) -> Budget {
+        Budget {
+            started: std::time::Instant::now(),
+            // A limit that is not a number is no time at all, not a panic.
+            max: std::time::Duration::from_secs_f64(if max_seconds.is_finite() {
+                max_seconds.clamp(0.0, 86_400.0)
+            } else {
+                0.0
+            }),
+            max_dirs,
+        }
+    }
+
+    pub fn unlimited() -> Budget {
+        Budget::new(86_400.0, usize::MAX)
+    }
+
+    fn spent(&self) -> bool {
+        self.started.elapsed() >= self.max
+    }
 }
 
 impl Usage {
     fn add(&mut self, other: Usage) {
         self.bytes += other.bytes;
         self.unreadable += other.unreadable;
+        self.truncated |= other.truncated;
         self.newest = match (self.newest, other.newest) {
             (Some(a), Some(b)) => Some(a.max(b)),
             (a, b) => a.or(b),
@@ -77,8 +114,9 @@ impl Usage {
     }
 }
 
-/// Walk `path` without following symbolic links, leaving out the `skip` directories.
-pub fn usage(path: &Path, skip: &[PathBuf]) -> Usage {
+/// Walk `path` without following symbolic links, leaving out the `skip` directories. Stops,
+/// marked `truncated`, once the budget's time is spent.
+pub fn usage(path: &Path, skip: &[PathBuf], budget: &Budget) -> Usage {
     let mut total = Usage::default();
     let Ok(meta) = std::fs::symlink_metadata(path) else {
         total.unreadable = 1;
@@ -102,7 +140,11 @@ pub fn usage(path: &Path, skip: &[PathBuf]) -> Usage {
         if skip.contains(&child) {
             continue;
         }
-        total.add(usage(&child, skip));
+        if budget.spent() {
+            total.truncated = true;
+            break;
+        }
+        total.add(usage(&child, skip, budget));
     }
     total
 }
@@ -189,6 +231,19 @@ pub fn report(
     link: &dyn Fn(&Path) -> PrLink,
     busy: &Result<Vec<PathBuf>, String>,
 ) -> Result<Value, String> {
+    report_within(root, now, link, busy, &Budget::unlimited())
+}
+
+/// `report`, stopping at the budget: directories past it are not scanned and are counted in
+/// `skipped_dirs`, and the report is marked `partial`. A cache whose own scan was cut short
+/// is kept.
+pub fn report_within(
+    root: &Path,
+    now: f64,
+    link: &dyn Fn(&Path) -> PrLink,
+    busy: &Result<Vec<PathBuf>, String>,
+    budget: &Budget,
+) -> Result<Value, String> {
     let entries =
         std::fs::read_dir(root).map_err(|error| format!("{}: {error}", root.display()))?;
     let mut children: Vec<PathBuf> = entries
@@ -204,10 +259,22 @@ pub fn report(
 
     let mut dirs = Vec::new();
     let (mut bytes, mut target_bytes, mut eligible_bytes, mut eligible_targets) = (0, 0, 0, 0u64);
-    for dir in children {
+    let found_dirs = children.len();
+    let mut skipped_dirs = 0usize;
+    let mut partial_reason: Option<&str> = None;
+    for (index, dir) in children.into_iter().enumerate() {
+        if index >= budget.max_dirs {
+            partial_reason.get_or_insert("the directory limit was reached");
+        } else if budget.spent() {
+            partial_reason.get_or_insert("the time limit was reached");
+        }
+        if partial_reason.is_some() {
+            skipped_dirs += 1;
+            continue;
+        }
         let found = find_targets(&dir);
         let skip: Vec<PathBuf> = found.iter().map(|(path, _)| path.clone()).collect();
-        let mut total = usage(&dir, &skip);
+        let mut total = usage(&dir, &skip, budget);
         let pr = link(&dir);
         let dir_real = real(&dir);
         let dir_busy = busy_real
@@ -215,13 +282,16 @@ pub fn report(
             .is_ok_and(|paths| paths.iter().any(|path| path.starts_with(&dir_real)));
         let mut targets = Vec::new();
         for (target, tagged) in found {
-            let used = usage(&target, &[]);
+            let used = usage(&target, &[], budget);
             total.add(used);
             target_bytes += used.bytes;
             let target_real = real(&target);
             let mut keep: Vec<String> = Vec::new();
             if !tagged {
                 keep.push("no Cargo cache tag: not known to be a build cache".into());
+            }
+            if used.truncated {
+                keep.push("the scan ran out of time before reading it fully".into());
             }
             match pr.state.as_str() {
                 "merged" | "closed" => {}
@@ -269,6 +339,7 @@ pub fn report(
             "path": dir,
             "bytes": total.bytes,
             "unreadable": total.unreadable,
+            "truncated": total.truncated,
             "newest_mtime": total.newest,
             "age_s": age(now, total.newest),
             "branch": pr.branch,
@@ -303,6 +374,14 @@ pub fn report(
         "generated_at": now,
         "untouched_s": UNTOUCHED_S,
         "read_only": true,
+        "partial": partial_reason.is_some() || dirs.iter().any(|dir| dir["truncated"] == true),
+        "partial_reason": partial_reason.or_else(|| {
+            dirs.iter()
+                .any(|dir| dir["truncated"] == true)
+                .then_some("the time limit was reached")
+        }),
+        "found_dirs": found_dirs,
+        "skipped_dirs": skipped_dirs,
         "filesystem": filesystem,
         "totals": {
             "dirs": dirs.len(),
@@ -359,6 +438,14 @@ pub fn render_text(report: &Value) -> String {
         )),
     }
     out.push_str("read-only report: nothing was deleted\n");
+    if report["partial"] == true {
+        out.push_str(&format!(
+            "PARTIAL: {}; {} of {} directories were not scanned, and the totals cover only the rest\n",
+            report["partial_reason"].as_str().unwrap_or("a limit was reached"),
+            report["skipped_dirs"].as_u64().unwrap_or(0),
+            report["found_dirs"].as_u64().unwrap_or(0),
+        ));
+    }
     for dir in report["dirs"].as_array().into_iter().flatten() {
         let pr = match (
             dir["pr"].as_i64(),
@@ -568,7 +655,7 @@ mod tests {
             "{report}"
         );
         assert_eq!(
-            usage(&big, &[]).bytes,
+            usage(&big, &[], &Budget::unlimited()).bytes,
             dir_bytes,
             "the cache is counted once"
         );
@@ -583,6 +670,66 @@ mod tests {
             big.join("rust/target/debug/artifact").exists(),
             "nothing is deleted"
         );
+    }
+
+    #[test]
+    fn a_report_past_its_budget_is_partial_and_says_what_it_left_out() {
+        let home = crate::testsupport::dir("worktree-disk-budget");
+        worktree(home.path(), "a-wt", true, OLD);
+        worktree(home.path(), "b-wt", true, OLD);
+        let idle = Ok(Vec::new());
+        let full = report(home.path(), NOW, &link("merged"), &idle).unwrap();
+        assert_eq!(
+            (&full["partial"], &full["skipped_dirs"]),
+            (&json!(false), &json!(0))
+        );
+        assert_eq!(full["partial_reason"], Value::Null);
+
+        let one = report_within(
+            home.path(),
+            NOW,
+            &link("merged"),
+            &idle,
+            &Budget::new(3600.0, 1),
+        )
+        .unwrap();
+        assert_eq!(one["partial"], true);
+        assert_eq!(one["partial_reason"], "the directory limit was reached");
+        assert_eq!(
+            (&one["found_dirs"], &one["skipped_dirs"]),
+            (&json!(2), &json!(1))
+        );
+        assert_eq!(one["totals"]["dirs"], 1);
+        assert_eq!(
+            one["totals"]["eligible_targets"], 1,
+            "only what was scanned is counted"
+        );
+        assert!(render_text(&one).contains("PARTIAL: the directory limit was reached; 1 of 2"));
+
+        let none = report_within(
+            home.path(),
+            NOW,
+            &link("merged"),
+            &idle,
+            &Budget::new(0.0, 100),
+        )
+        .unwrap();
+        assert_eq!(none["partial_reason"], "the time limit was reached");
+        assert_eq!(
+            (&none["skipped_dirs"], &none["totals"]["dirs"]),
+            (&json!(2), &json!(0))
+        );
+        assert_eq!(none["totals"]["eligible_targets"], 0);
+    }
+
+    #[test]
+    fn a_walk_cut_short_is_marked_and_its_cache_is_kept() {
+        let home = crate::testsupport::dir("worktree-disk-truncated");
+        let dir = worktree(home.path(), "a-wt", true, OLD);
+        let cut = usage(&dir, &[], &Budget::new(0.0, 100));
+        assert!(cut.truncated);
+        assert!(cut.bytes < usage(&dir, &[], &Budget::unlimited()).bytes);
+        assert!(!usage(&dir, &[], &Budget::unlimited()).truncated);
     }
 
     #[test]

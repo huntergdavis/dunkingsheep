@@ -1,5 +1,10 @@
-usage: dunkingsheep worktrees disk [-h] [--root DIR]
+usage: dunkingsheep worktrees disk [-h] [--root DIR] [--max-seconds S]
+                                   [--max-dirs N]
 
 options:
-  -h, --help  show this help message and exit
-  --root DIR  the worktree root (default: ~/workspace/.dunk-port-work)
+  -h, --help       show this help message and exit
+  --root DIR       the worktree root (default: ~/workspace/.dunk-port-work)
+  --max-seconds S  stop scanning after S seconds and mark the report partial
+                   (default: 300)
+  --max-dirs N     scan at most N directories and mark the report partial
+                   (default: 2000)

@@ -113,6 +113,8 @@ def load_parser():
     worktree_actions = worktrees.add_subparsers(dest="worktrees_command", metavar="<subcommand>", required=True)
     disk = worktree_actions.add_parser("disk", help="read-only report: size, age, pull request and build caches of each directory")
     disk.add_argument("--root", metavar="DIR", help="the worktree root (default: ~/workspace/.dunk-port-work)")
+    disk.add_argument("--max-seconds", dest="max_seconds", type=float, metavar="S", help="stop scanning after S seconds and mark the report partial (default: 300)")
+    disk.add_argument("--max-dirs", dest="max_dirs", type=int, metavar="N", help="scan at most N directories and mark the report partial (default: 2000)")
     pr = root.add_parser("pr", help="one-shot PR event subscriptions")
     actions = pr.add_subparsers(dest="pr_command", metavar="<subcommand>", required=True)
     wait = actions.add_parser("wait", help="register a PR wait, then end the turn")

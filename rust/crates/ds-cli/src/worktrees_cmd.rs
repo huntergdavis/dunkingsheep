@@ -153,9 +153,18 @@ pub fn link_for(
     }
 }
 
-/// `worktrees disk [--root DIR]`, `json` being the global `--json` flag. Exit 2 when the root
+/// The default limits of one run; past either the report is marked partial.
+pub const DEFAULT_MAX_SECONDS: f64 = 300.0;
+pub const DEFAULT_MAX_DIRS: usize = 2000;
+
+/// `worktrees disk [--root DIR] [--max-seconds S] [--max-dirs N]`, `json` being the global `--json` flag. Exit 2 when the root
 /// cannot be read.
-pub fn disk_command(root: Option<&str>, json: bool) -> Outcome {
+pub fn disk_command(
+    root: Option<&str>,
+    max_seconds: Option<f64>,
+    max_dirs: Option<i64>,
+    json: bool,
+) -> Outcome {
     let root = match root.filter(|root| !root.is_empty()) {
         Some(root) => PathBuf::from(root),
         None => PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
@@ -183,7 +192,11 @@ pub fn disk_command(root: Option<&str>, json: bool) -> Outcome {
         })
     };
     let busy = worktree_disk::busy_paths(Path::new("/proc"));
-    match worktree_disk::report(&root, now, &link, &busy) {
+    let budget = worktree_disk::Budget::new(
+        max_seconds.unwrap_or(DEFAULT_MAX_SECONDS),
+        max_dirs.map_or(DEFAULT_MAX_DIRS, |dirs| dirs.max(0) as usize),
+    );
+    match worktree_disk::report_within(&root, now, &link, &busy, &budget) {
         Ok(report) => Outcome {
             stdout: if json {
                 format!("{}\n", sorted_json(&report))
@@ -310,7 +323,7 @@ mod tests {
 
     #[test]
     fn a_root_that_cannot_be_read_is_a_usage_error() {
-        let outcome = disk_command(Some("/nonexistent/worktree/root"), true);
+        let outcome = disk_command(Some("/nonexistent/worktree/root"), None, None, true);
         assert_eq!(outcome.code, 2);
         assert!(
             outcome.stderr.starts_with("worktrees disk: "),
