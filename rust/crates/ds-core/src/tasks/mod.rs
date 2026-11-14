@@ -28,6 +28,7 @@ pub mod metrics;
 pub mod owner_answer;
 pub mod planner_scope;
 pub mod project_policy;
+pub mod review_routing;
 
 use crate::db;
 use crate::error::DunkError;
@@ -299,7 +300,7 @@ impl Tasks {
                 ));
             }
         }
-        self.add_with_verdict_guard(scope, title, body, opts, None, None, project)
+        self.add_with_verdict_guard(scope, title, body, opts, None, None, project, None)
             .await?
             .ok_or_else(|| DunkError::Refused("unconditional task insertion was refused".into()))
     }
@@ -330,6 +331,29 @@ impl Tasks {
         opts: AddOptions,
         expected_verdict_ids: &[String],
     ) -> Result<Option<Task>, DunkError> {
+        self.add_review_with_routing_guard(scope, title, body, opts, expected_verdict_ids, None)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn add_review_with_routing_guard(
+        &self,
+        scope: &str,
+        title: &str,
+        body: &str,
+        opts: AddOptions,
+        expected_verdict_ids: &[String],
+        routing: Option<review_routing::Snapshot>,
+    ) -> Result<Option<Task>, DunkError> {
+        if routing.is_some()
+            && (!expected_verdict_ids.is_empty()
+                || opts.created_by.as_deref() != Some("review-sync")
+                || !opts.assignees.is_empty())
+        {
+            return Err(DunkError::Refused(
+                "automatic routing requires an unassigned initial review-sync review".into(),
+            ));
+        }
         if scope != "global" || opts.kind.as_deref() != Some("review") {
             return Err(DunkError::Refused(
                 "review verdict expectations require a global review".into(),
@@ -343,6 +367,7 @@ impl Tasks {
             Some(expected_verdict_ids.to_vec()),
             None,
             ProjectRequest::Unset,
+            routing,
         )
         .await
     }
@@ -368,6 +393,7 @@ impl Tasks {
             None,
             Some(planner),
             ProjectRequest::Unset,
+            None,
         )
         .await?
         .ok_or_else(|| DunkError::Refused("planner review creation refused".into()))
@@ -385,6 +411,7 @@ impl Tasks {
         expected_verdict_ids: Option<Vec<String>>,
         planner: Option<planner_scope::PlannerIdentity>,
         project: ProjectRequest,
+        routing: Option<review_routing::Snapshot>,
     ) -> Result<Option<Task>, DunkError> {
         let scope = validate_scope(scope)?;
         let title = title.trim().to_string();
@@ -641,6 +668,9 @@ impl Tasks {
                 "INSERT INTO task_events (task_id, event, at, actor, scope, priority, status_to, meta) VALUES (?,?,?,?,?,?,?,?)",
                 params![id, "created", now, created_by, scope, priority, status, meta],
             ).map_err(db::map_sqlite)?;
+            if let Some(snapshot) = routing {
+                review_routing::apply(&tx, &id, repo.as_deref(), pr, author.as_deref(), snapshot, now)?;
+            }
             tx.commit().map_err(db::map_sqlite)?;
             Ok(Some(id))
         }).await?;

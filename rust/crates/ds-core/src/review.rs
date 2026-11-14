@@ -591,6 +591,7 @@ pub struct ReviewTaskRequest<'a> {
     pub repo: &'a str,
     pub number: i64,
     pub head: &'a str,
+    pub routing: Option<crate::tasks::review_routing::Snapshot>,
     pub expected_verdict_ids: &'a [String],
 }
 
@@ -708,7 +709,7 @@ impl ReviewTaskCreator for Tasks {
         request: ReviewTaskRequest<'a>,
     ) -> ReviewFuture<'a, Result<Option<String>, String>> {
         Box::pin(async move {
-            self.add_review_with_verdict_guard(
+            self.add_review_with_routing_guard(
                 "global",
                 request.title,
                 request.body,
@@ -723,6 +724,7 @@ impl ReviewTaskCreator for Tasks {
                     ..Default::default()
                 },
                 request.expected_verdict_ids,
+                request.routing,
             )
             .await
             .map(|task| task.map(|task| task.id))
@@ -740,7 +742,7 @@ impl ReviewTaskCreator for Flock {
         Box::pin(async move {
             let tasks = tasks.map_err(|error| error.to_string())?;
             tasks
-                .add_review_with_verdict_guard(
+                .add_review_with_routing_guard(
                     "global",
                     request.title,
                     request.body,
@@ -755,6 +757,7 @@ impl ReviewTaskCreator for Flock {
                         ..Default::default()
                     },
                     request.expected_verdict_ids,
+                    request.routing,
                 )
                 .await
                 .map(|task| task.map(|task| task.id))
@@ -792,12 +795,13 @@ pub struct ReviewDetail {
 
 /// Rust counterpart of `Sync`: dependencies are supplied at construction so
 /// these helpers never create credentials, make requests, or touch a live store.
-pub struct ReviewSync<S, T, G, X = ()> {
+pub struct ReviewSync<S, T, G, X = (), R = ()> {
     pub flock: S,
     pub tokens: T,
     pub github: G,
     pub transport: X,
     pub api_root: String,
+    pub routing: R,
 }
 
 impl<S, G: Default> ReviewSync<S, (), G, ()> {
@@ -809,6 +813,7 @@ impl<S, G: Default> ReviewSync<S, (), G, ()> {
             tokens: (),
             github: github.unwrap_or_default(),
             transport: (),
+            routing: (),
             api_root: crate::github::DEFAULT_API.to_string(),
         }
     }
@@ -822,6 +827,7 @@ impl<S, T, G> ReviewSync<S, T, G, ()> {
             tokens,
             github,
             transport: (),
+            routing: (),
             api_root: crate::github::DEFAULT_API.to_string(),
         }
     }
@@ -841,7 +847,30 @@ impl<S, T, G, X> ReviewSync<S, T, G, X> {
             tokens,
             github,
             transport,
+            routing: (),
             api_root: api_root.into(),
+        }
+    }
+}
+
+/// Supplies a fresh authoritative candidate snapshot immediately before initial filing.
+pub trait ReviewRoutingSource {
+    fn reviewer_snapshot(&self) -> Option<crate::tasks::review_routing::Snapshot>;
+}
+impl ReviewRoutingSource for () {
+    fn reviewer_snapshot(&self) -> Option<crate::tasks::review_routing::Snapshot> {
+        None
+    }
+}
+impl<S, T, G, X, R> ReviewSync<S, T, G, X, R> {
+    pub fn with_review_routing<N>(self, routing: N) -> ReviewSync<S, T, G, X, N> {
+        ReviewSync {
+            flock: self.flock,
+            tokens: self.tokens,
+            github: self.github,
+            transport: self.transport,
+            api_root: self.api_root,
+            routing,
         }
     }
 }
@@ -999,7 +1028,7 @@ fn verdict_lanes_from_rows(
     )
 }
 
-impl<S, T, G, X> ReviewSync<S, T, G, X>
+impl<S, T, G, X, R> ReviewSync<S, T, G, X, R>
 where
     X: GitHubTransport,
 {
@@ -1074,7 +1103,7 @@ where
     }
 }
 
-impl<S, T, G, X> ReviewSync<S, T, G, X>
+impl<S, T, G, X, R> ReviewSync<S, T, G, X, R>
 where
     S: ReviewTaskActor,
 {
@@ -1222,7 +1251,7 @@ where
     }
 }
 
-impl<S, T, G, X> ReviewSync<S, T, G, X>
+impl<S, T, G, X, R> ReviewSync<S, T, G, X, R>
 where
     S: ReviewTaskActor,
 {
@@ -1280,7 +1309,7 @@ where
     }
 }
 
-impl<S, T, G, X> ReviewSync<S, T, G, X>
+impl<S, T, G, X, R> ReviewSync<S, T, G, X, R>
 where
     S: ReviewTaskActor,
     T: ReviewTokenSource,
@@ -1917,7 +1946,7 @@ where
     }
 }
 
-impl<S, T, G, X> ReviewSync<S, T, G, X>
+impl<S, T, G, X, R> ReviewSync<S, T, G, X, R>
 where
     S: ReviewTaskActor + ReviewTaskCreator,
     G: ReviewPolicy,
@@ -2012,6 +2041,7 @@ where
                 repo,
                 number,
                 head,
+                routing: None,
                 expected_verdict_ids: &expected_verdict_ids,
             })
             .await
@@ -2031,7 +2061,7 @@ where
     }
 }
 
-impl<S, T, G, X> ReviewSync<S, T, G, X>
+impl<S, T, G, X, R> ReviewSync<S, T, G, X, R>
 where
     S: ReviewTaskActor + ReviewTaskCreator,
     T: ReviewTokenSource,
@@ -2369,7 +2399,7 @@ where
     }
 }
 
-impl<S, T, G, X> ReviewSync<S, T, G, X>
+impl<S, T, G, X, R> ReviewSync<S, T, G, X, R>
 where
     S: ReviewTaskActor,
     T: ReviewTokenSource,
@@ -2538,8 +2568,9 @@ where
     }
 }
 
-impl<S, T, G, X> ReviewSync<S, T, G, X>
+impl<S, T, G, X, R> ReviewSync<S, T, G, X, R>
 where
+    R: ReviewRoutingSource,
     S: ReviewTaskActor + ReviewTaskCreator + ReviewRunContext,
     T: ReviewTokenSource,
     G: ReviewPolicy + ReviewRepoConfig,
@@ -2800,36 +2831,60 @@ where
 
                 let key = (repo.clone(), pr.number);
                 seen.insert(key.clone());
-                let mut current = live
-                    .iter()
-                    .find(|(candidate, _)| candidate == &key)
-                    .map(|(_, row)| row.clone());
                 // This read is deliberately after the GitHub conflict request. A verdict
                 // may have committed while GitHub was answering.
                 let latest_rows = self.flock.list_review_rows().await?;
+                let mut current = latest_rows
+                    .iter()
+                    .rev()
+                    .find(|row| {
+                        row.repo.as_deref() == Some(repo.as_str())
+                            && row.pr == Some(pr.number)
+                            && matches!(row.status.as_str(), "open" | "in_progress" | "blocked")
+                            && !review_head_definitely_differs(row.head.as_deref(), &pr.head)
+                    })
+                    .cloned();
                 let terminal_verdict_rows = terminal_rows(&latest_rows, &repo, pr.number, &pr.head);
                 let done = terminal_verdict_rows.last().cloned();
 
-                // Cancel a stale head before handling the current head's verdict. The live
-                // review uniqueness constraint otherwise blocks the required second review.
+                // Retire every older open head from the fresh snapshot, including one
+                // superseded by a peer filing the current head during the GitHub await.
+                for stale in latest_rows.iter().filter(|row| {
+                    row.repo.as_deref() == Some(repo.as_str())
+                        && row.pr == Some(pr.number)
+                        && matches!(row.status.as_str(), "open" | "in_progress" | "blocked")
+                        && review_head_definitely_differs(row.head.as_deref(), &pr.head)
+                }) {
+                    let reason = format!(
+                        "head moved to {}; delta review filed",
+                        pr.head.chars().take(12).collect::<String>()
+                    );
+                    let cancelled = if dry_run {
+                        true
+                    } else {
+                        self.cancel_review_if_live(&stale.id, &reason).await?
+                    };
+                    if cancelled {
+                        append_report(&mut report, "cancelled", Value::String(stale.id.clone()));
+                    }
+                }
+
+                // Legacy/manual review tasks may carry an abbreviated SHA (t3549).
+                // A matching abbreviation is not evidence of a push. Retain the slot,
+                // but never promote that abbreviation to an exact-head verdict or merge.
                 if current
                     .as_ref()
                     .is_some_and(|row| row.head.as_deref() != Some(pr.head.as_str()))
                 {
-                    if let Some(stale) = current.take() {
-                        let reason = format!(
-                            "head moved to {}; delta review filed",
-                            pr.head.chars().take(12).collect::<String>()
-                        );
-                        let cancelled = if dry_run {
-                            true
-                        } else {
-                            self.cancel_review_if_live(&stale.id, &reason).await?
-                        };
-                        if cancelled {
-                            append_report(&mut report, "cancelled", Value::String(stale.id));
-                        }
-                    }
+                    append_report(
+                        &mut report,
+                        "retained",
+                        serde_json::json!({
+                            "task":current.as_ref().unwrap().id,
+                            "reason":"incomplete review head; exact head still required for verdict"
+                        }),
+                    );
+                    continue;
                 }
 
                 if let Some(done_row) = done.as_ref() {
@@ -2989,6 +3044,7 @@ where
                         repo: &repo,
                         number: pr.number,
                         head: &pr.head,
+                        routing: self.routing.reviewer_snapshot(),
                         expected_verdict_ids: &expected_verdict_ids,
                     })
                     .await
@@ -3203,6 +3259,25 @@ where
             Err(error) => Err(error.to_string()),
         }
     }
+}
+
+/// Cancellation requires evidence that a head moved, unlike verdict/merge checks,
+/// which require exact equality. A legacy 7+ digit SHA prefix cannot prove movement.
+fn review_head_definitely_differs(stored: Option<&str>, current: &str) -> bool {
+    let Some(stored) = stored.filter(|s| !s.is_empty()) else {
+        return false;
+    };
+    if stored == current {
+        return false;
+    }
+    let matching_abbreviation = (7..current.len()).contains(&stored.len())
+        && matches!(current.len(), 40 | 64)
+        && stored.bytes().all(|b| b.is_ascii_hexdigit())
+        && current.bytes().all(|b| b.is_ascii_hexdigit())
+        && current
+            .get(..stored.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(stored));
+    !matching_abbreviation
 }
 
 fn parse_review_pull(repo: &str, value: &Value) -> Option<ReviewPull> {

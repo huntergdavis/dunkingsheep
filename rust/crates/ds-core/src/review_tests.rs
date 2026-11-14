@@ -540,6 +540,7 @@ struct FakeReviewTransport {
     responses: Mutex<VecDeque<Result<crate::github::GitHubResponse, String>>>,
     completion_on_request: Mutex<Option<CompletionOnRequest>>,
     completion_on_request_index: Mutex<Option<CompletionOnRequestIndex>>,
+    live_review_on_conflict: Mutex<Option<(Arc<Tasks>, String)>>,
 }
 
 type CompletionOnRequest = (String, usize, Arc<Tasks>, String, String, String);
@@ -561,6 +562,7 @@ impl FakeReviewTransport {
             responses: Mutex::new(responses.into_iter().collect()),
             completion_on_request: Mutex::new(None),
             completion_on_request_index: Mutex::new(None),
+            live_review_on_conflict: Mutex::new(None),
         }
     }
 
@@ -660,6 +662,18 @@ impl GitHubTransport for FakeReviewTransport {
                     .task_complete(&id, Some(&by), true)
                     .await
                     .map_err(|error| error.to_string())?;
+            }
+            if url.ends_with("/pulls/7") {
+                let live = self.live_review_on_conflict.lock().unwrap().take();
+                if let Some((tasks, head)) = live {
+                    add_actual_review(
+                        &tasks,
+                        7,
+                        &head,
+                        "peer filed current head during conflict check",
+                    )
+                    .await;
+                }
             }
             let body_fetch_effect = {
                 let mut effect = self.completion_on_request_index.lock().unwrap();
@@ -4852,4 +4866,95 @@ async fn run_does_not_read_the_detail_of_a_waited_pr_that_is_in_the_open_listing
     assert!(report.get("pr_waits_opened").is_none(), "{report}");
     let task = sync.flock.get(&ids[0]).await.unwrap();
     assert_eq!(task.status, "blocked");
+}
+
+#[tokio::test]
+async fn unchanged_abbreviated_head_keeps_its_review_slot_without_verdict_or_merge() {
+    // Actual t3549/t3551: manually filed at 3944b26b, cancelled against this full SHA.
+    let head = "3944b26b71bfb2b22190fcbd23b7027264f63a2f";
+    for stored in ["3944b26b", head] {
+        let dir = crate::testsupport::dir(&format!("review-unchanged-prefix-{stored}"));
+        let tasks = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+        let task = add_actual_review(&tasks, 7, stored, "unchanged review").await;
+        let transport = FakeReviewTransport::with_responses([
+            github_response(200, open_pull(7, head, "work/topic")),
+            github_response(200, json!({"mergeable":true,"state":"open"})),
+        ]);
+        let (sync, report) = run_actual_review_sync(tasks, transport, 1).await;
+        assert_eq!("open", sync.flock.get(&task.id).await.unwrap().status);
+        for key in ["cancelled", "filed", "merged", "errors"] {
+            assert_eq!(json!([]), report[key], "{key}: {stored}");
+        }
+        assert_eq!(2, sync.transport.requests.lock().unwrap().len());
+        assert_eq!(
+            json!(stored),
+            sync.flock.get_full_wire(&task.id, None).await.unwrap().wire["head"],
+            "do not silently promote a prefix into an exact-head verdict"
+        );
+    }
+}
+
+#[tokio::test]
+async fn moved_head_cancels_abbreviated_review_with_a_reason_and_files_the_full_head() {
+    let dir = crate::testsupport::dir("review-moved-prefix");
+    let tasks = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    let stale = add_actual_review(&tasks, 7, "3944b26b", "stale review").await;
+    let head = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let transport = FakeReviewTransport::with_responses([
+        github_response(200, open_pull(7, head, "work/topic")),
+        github_response(200, json!({"mergeable":true,"state":"open"})),
+        github_response(200, json!({"state":"open","body":""})),
+        github_response(201, json!({"id":1})),
+    ]);
+    let (sync, report) = run_actual_review_sync(tasks, transport, 1).await;
+    let task = sync.flock.get(&stale.id).await.unwrap();
+    assert_eq!("cancelled", task.status);
+    assert_eq!(
+        Some("head moved to aaaaaaaaaaaa; delta review filed"),
+        task.block_reason.as_deref()
+    );
+    assert_eq!(json!([stale.id]), report["cancelled"]);
+    assert_eq!(head, report["filed"][0]["head"]);
+}
+
+#[test]
+fn cancellation_head_comparison_does_not_weaken_exact_verdict_matching() {
+    let head = "3944b26b71bfb2b22190fcbd23b7027264f63a2f";
+    assert!(!review_head_definitely_differs(None, head));
+    assert!(!review_head_definitely_differs(Some(""), head));
+    assert!(!review_head_definitely_differs(Some("3944B26B"), head));
+    assert!(review_head_definitely_differs(Some("3944"), head));
+    assert!(review_head_definitely_differs(Some("3944b26c"), head));
+    assert!(review_head_definitely_differs(
+        Some(&format!("{head}aa")),
+        head
+    ));
+    assert!(review_head_definitely_differs(Some("head-a"), "head-b"));
+}
+
+#[tokio::test]
+async fn sweep_refreshes_live_reviews_after_github_and_cancels_only_older_heads() {
+    let dir = crate::testsupport::dir("review-fresh-live-snapshot");
+    let tasks = Arc::new(Tasks::open(dir.path().join("tasks.db")).await.unwrap());
+    let stale = add_actual_review(&tasks, 7, "old-head", "old review").await;
+    let transport = FakeReviewTransport::with_responses([
+        github_response(200, open_pull(7, "current-head", "work/topic")),
+        github_response(200, json!({"mergeable":true,"state":"open"})),
+    ]);
+    *transport.live_review_on_conflict.lock().unwrap() =
+        Some((tasks.clone(), "current-head".into()));
+    // Tasks itself is the creator adapter; the transport holds an Arc of the same database.
+    let store = Tasks::open(tasks.path()).await.unwrap();
+    let (sync, report) = run_actual_review_sync(store, transport, 1).await;
+    assert_eq!(json!([stale.id]), report["cancelled"]);
+    assert_eq!(json!([]), report["filed"]);
+    assert_eq!(json!([]), report["errors"]);
+    let rows = sync.flock.list_review_rows_visible().await.unwrap();
+    assert_eq!(
+        1,
+        rows.iter()
+            .filter(|r| r.status == "open" && r.head.as_deref() == Some("current-head"))
+            .count()
+    );
+    assert_eq!(2, sync.transport.requests.lock().unwrap().len());
 }
