@@ -81,6 +81,9 @@ impl HealthEnv for CoreHealthEnv<'_, '_> {
     fn registry_pane_gap(&self) -> Option<Result<Vec<Value>, String>> {
         Some(Ok(self.adapter.health_registry_gap()))
     }
+    fn root_used_fraction(&self) -> Option<Result<f64, String>> {
+        Some(crate::health::used_fraction(std::path::Path::new("/")))
+    }
 }
 
 struct CoreCaptureEnv<'a, 'b> {

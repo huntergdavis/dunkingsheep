@@ -42,6 +42,7 @@ spawns a detached `serve` exactly as before.
 | stale ingest leases | expired lease or a `partial` source left by a restart | `recover_leases()` + `requeue_partial()` |
 | WAL size | `> 64 MiB` (`WAL_WARN_BYTES`) | `checkpoint()` (PASSIVE, never blocks a reader) |
 | free disk | `< 512 MiB` (`DISK_MIN_FREE_BYTES`) | — |
+| root filesystem use | a problem from `85%` used until it is below `80%` (`checks.disk_root`); the watchdog's `health.failed` rule alerts once and reports the recovery | — |
 | task counts | always reported | — |
 
 `ok` is `problems == []`. A repaired condition moves from `problems` to

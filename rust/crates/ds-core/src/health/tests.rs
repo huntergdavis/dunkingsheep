@@ -380,3 +380,158 @@ fn repair_preserves_typed_failure_and_stops_before_later_maintenance() {
         }
     }
 }
+
+/// A health environment with no memory store and a root filesystem that is as full as told.
+struct Disk(Result<f64, String>);
+
+impl HealthEnv for Disk {
+    fn memory_enabled(&self) -> bool {
+        false
+    }
+    fn memory_stats(&self) -> Result<Value, String> {
+        Err("no memory".into())
+    }
+    fn memory_status(&self) -> Result<Value, String> {
+        Err("no memory".into())
+    }
+    fn recover_leases(&self) -> Result<(), DunkError> {
+        Ok(())
+    }
+    fn requeue_partial(&self) -> Result<(), DunkError> {
+        Ok(())
+    }
+    fn checkpoint(&self) -> Result<(), DunkError> {
+        Ok(())
+    }
+    fn task_totals(&self) -> Result<Value, String> {
+        Ok(json!({}))
+    }
+    fn root_used_fraction(&self) -> Option<Result<f64, String>> {
+        Some(self.0.clone())
+    }
+}
+
+/// One health run with the root filesystem `used` full; the report is written where the next
+/// run looks for the previous state, as the health timer does.
+fn disk_run(dir: &Path, used: Result<f64, String>) -> Value {
+    let report = run_health(
+        &Disk(used),
+        false,
+        false,
+        dir,
+        now(),
+        &Thresholds::default(),
+    )
+    .unwrap();
+    fs::write(dir.join("health.json"), report.to_string()).unwrap();
+    report
+}
+
+fn disk_problems(report: &Value) -> Vec<String> {
+    report["problems"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .filter(|problem| problem.contains("root filesystem"))
+        .map(str::to_string)
+        .collect()
+}
+
+#[test]
+fn the_root_filesystem_is_a_problem_from_85_percent_until_it_is_below_80() {
+    let dir = tempfile::tempdir().unwrap();
+    // Below the warning level: no problem, and the state says so.
+    let fine = disk_run(dir.path(), Ok(0.849));
+    assert_eq!(disk_problems(&fine), Vec::<String>::new());
+    assert_eq!(
+        fine["checks"]["disk_root"],
+        json!({"used_percent": 84, "alerting": false, "reason": null})
+    );
+    // Crossing 85%: the problem appears.
+    let high = disk_run(dir.path(), Ok(0.85));
+    assert_eq!(
+        disk_problems(&high),
+        ["root filesystem 85% used (a problem from 85%, until below 80%)"]
+    );
+    assert_eq!(high["checks"]["disk_root"]["alerting"], true);
+    assert_eq!(high["ok"], false);
+    // Back under 85% but not under 80%: still the same problem, so no clear-and-alert again.
+    for used in [0.84, 0.80] {
+        let between = disk_run(dir.path(), Ok(used));
+        assert_eq!(disk_problems(&between).len(), 1, "{used}");
+        assert_eq!(between["checks"]["disk_root"]["alerting"], true);
+    }
+    // Under 80%: the problem is gone, which is what the watchdog reports as resolved.
+    let recovered = disk_run(dir.path(), Ok(0.799));
+    assert_eq!(disk_problems(&recovered), Vec::<String>::new());
+    assert_eq!(recovered["checks"]["disk_root"]["alerting"], false);
+    // And 84% is fine again after a recovery.
+    assert_eq!(
+        disk_problems(&disk_run(dir.path(), Ok(0.84))),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn an_unreadable_root_filesystem_is_a_problem_and_keeps_the_previous_state() {
+    let dir = tempfile::tempdir().unwrap();
+    disk_run(dir.path(), Ok(0.90));
+    let failed = disk_run(dir.path(), Err("statvfs failed".into()));
+    assert_eq!(
+        disk_problems(&failed),
+        ["root filesystem usage could not be read: statvfs failed"]
+    );
+    assert_eq!(
+        failed["checks"]["disk_root"],
+        json!({"used_percent": null, "alerting": true, "reason": "statvfs failed"})
+    );
+    // 82% after that is still inside the alert: the failed read did not reset it.
+    assert_eq!(disk_problems(&disk_run(dir.path(), Ok(0.82))).len(), 1);
+}
+
+#[test]
+fn an_environment_that_does_not_sample_the_root_filesystem_reports_nothing_about_it() {
+    struct Unsampled;
+    impl HealthEnv for Unsampled {
+        fn memory_enabled(&self) -> bool {
+            false
+        }
+        fn memory_stats(&self) -> Result<Value, String> {
+            Err("no memory".into())
+        }
+        fn memory_status(&self) -> Result<Value, String> {
+            Err("no memory".into())
+        }
+        fn recover_leases(&self) -> Result<(), DunkError> {
+            Ok(())
+        }
+        fn requeue_partial(&self) -> Result<(), DunkError> {
+            Ok(())
+        }
+        fn checkpoint(&self) -> Result<(), DunkError> {
+            Ok(())
+        }
+        fn task_totals(&self) -> Result<Value, String> {
+            Ok(json!({}))
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let report = run_health(
+        &Unsampled,
+        false,
+        false,
+        dir.path(),
+        now(),
+        &Thresholds::default(),
+    )
+    .unwrap();
+    assert!(report["checks"].get("disk_root").is_none());
+}
+
+#[test]
+fn the_used_fraction_of_a_real_filesystem_is_between_zero_and_one() {
+    let used = used_fraction(Path::new("/")).unwrap();
+    assert!((0.0..=1.0).contains(&used), "{used}");
+    assert!(used_fraction(Path::new("/nonexistent/path")).is_err());
+}
