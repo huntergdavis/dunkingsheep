@@ -5141,9 +5141,13 @@ fn cli_route_guide_and_empty_argv() {
     assert_eq!(rust.status.code(), python.status.code());
     let rust_help = String::from_utf8(rust.stdout).unwrap();
     assert!(rust_help.contains("usage-provider"));
+    assert!(rust_help.contains("one-shot PR event subscriptions"));
     let without_extension = rust_help
         .lines()
-        .filter(|line| !line.trim_start().starts_with("usage-provider "))
+        .filter(|line| {
+            !line.trim_start().starts_with("usage-provider ")
+                && !line.trim_start().starts_with("pr ")
+        })
         .collect::<Vec<_>>()
         .join("\n")
         + "\n";
@@ -6070,4 +6074,27 @@ fn ds_http_help_defaults_follow_environment() {
         configured.contains("Port to bind (default: 9321)"),
         "{configured}"
     );
+}
+
+#[test]
+fn cli_route_pr_wait_registration_list_and_cancel() {
+    let sha = "1234567890123456789012345678901234567890";
+    for (argv, args) in [
+        (
+            vec!["pr", "wait", "o/r#7", "--head", sha],
+            json!({"target":"o/r#7","head":sha,"list":false}),
+        ),
+        (vec!["pr", "wait", "--list"], json!({"list":true})),
+        (
+            vec!["pr", "wait", "--cancel", "17"],
+            json!({"list":false,"cancel":17}),
+        ),
+    ] {
+        let output = run_daemon_cli(&argv, "pr_wait", args, json!({"fixture":true}));
+        assert_eq!(output.status.code(), Some(0));
+        assert!(String::from_utf8(output.stdout)
+            .unwrap()
+            .contains("fixture"));
+        assert!(output.stderr.is_empty());
+    }
 }
