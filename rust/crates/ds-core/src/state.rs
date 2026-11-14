@@ -190,6 +190,41 @@ impl StateStore {
         )
     }
 
+    /// The newest sample of every pane sampled at or after `since`, keyed by pane id (t4473):
+    /// `{at, model, model_reason, thinking, argv}`. One query; nothing is written.
+    pub fn latest_model_samples(
+        &self,
+        since: f64,
+    ) -> Result<std::collections::HashMap<String, Value>, DunkError> {
+        let connection = self.connection();
+        let mut statement = connection
+            .prepare(
+                "SELECT pane_id, MAX(at), model, model_reason, thinking, argv FROM agent_state \
+                 WHERE at >= ? GROUP BY pane_id",
+            )
+            .map_err(db::map_sqlite)?;
+        let rows = statement
+            .query_map([since], |row| {
+                let pane: String = row.get(0)?;
+                let argv: Option<String> = row.get(5)?;
+                let argv = argv
+                    .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+                    .unwrap_or(Value::Null);
+                Ok((
+                    pane,
+                    json!({
+                        "at": row.get::<_, f64>(1)?,
+                        "model": row.get::<_, Option<String>>(2)?,
+                        "model_reason": row.get::<_, Option<String>>(3)?,
+                        "thinking": row.get::<_, Option<String>>(4)?,
+                        "argv": argv,
+                    }),
+                ))
+            })
+            .map_err(db::map_sqlite)?;
+        rows.collect::<Result<_, _>>().map_err(db::map_sqlite)
+    }
+
     /// Raw Python SQLite bindings. `None` limit represents an integer outside SQLite range;
     /// defer that error until after earlier filter parameters have been bound.
     pub fn latest_raw(

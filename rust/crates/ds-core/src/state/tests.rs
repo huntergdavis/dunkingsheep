@@ -224,3 +224,29 @@ fn raw_state_exponent_overflow_preserves_sign_in_both_filters() {
     }
     assert_eq!(store.latest(None, None, 50).unwrap().len(), 2);
 }
+
+#[test]
+fn test_latest_model_samples_is_the_newest_row_per_pane_inside_the_window() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = StateStore::open(dir.path().join("s.db")).expect("store");
+    let row = |pane: &str, model: Value| json!({"pane_id": pane, "argv": ["pi", "--model", "m"], "model": model, "thinking": "high"});
+    store
+        .add(&[row("%1", json!("old")), row("%2", json!("gone"))], 100.0)
+        .unwrap();
+    store
+        .add(
+            &[json!({"pane_id": "%1", "model": null, "model_reason": "no --model flag"})],
+            200.0,
+        )
+        .unwrap();
+    let samples = store.latest_model_samples(150.0).unwrap();
+    assert_eq!(samples.len(), 1, "%2 was last sampled before the window");
+    assert_eq!(
+        samples["%1"],
+        json!({"at": 200.0, "model": null, "model_reason": "no --model flag", "thinking": null, "argv": null}),
+        "the newest row, not the newest row that names a model"
+    );
+    let all = store.latest_model_samples(0.0).unwrap();
+    assert_eq!(all["%2"]["model"], "gone");
+    assert_eq!(all["%2"]["argv"], json!(["pi", "--model", "m"]));
+}
