@@ -2733,7 +2733,8 @@ pub fn h_review_sync(context: &HandlerContext<'_>, args: Args) -> Result<Value, 
     };
     let mut sweep = crate::pr_wait::SweepTransport::new(transport);
     let dry_run = python_bool_arg(&args, "dry_run", false);
-    let result = context.block_on(context.flock.review_sync(
+    let result = context.block_on(context.flock.review_sync_with_routing(
+        context.env,
         tokens,
         policy,
         tokens.api_root(),

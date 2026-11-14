@@ -40,6 +40,17 @@ the owner re-registers it.
 > `decision`, `progress` and `correction`. Free `--event` names remain legacy
 > `note` entries. MCP uses `note_kind` to distinguish this from task type `kind`.
 
+The review timer assigns a newly filed initial review when exactly one live reviewer
+in the repository's explicitly mapped project passes the registered provider policy
+and is absent from the PR's author/contributor records. Role and project membership
+must match the lane's live PID and process start. Missing inventory, mapping or
+author provenance leaves the review unassigned, as do zero or several eligible
+reviewers; the planner decides. The creation transaction records
+`single_project_reviewer_v1`, the candidates and exclusions, and the decision reason
+in an `assigned` or `review_routing` event. Second-review routing is unchanged.
+A legacy review with a matching abbreviated SHA retains its slot until its head
+can be established; that abbreviation never authorizes an exact-head verdict or merge.
+
 ## Reviewer
 
 > You are a reviewer lane. `task next` gives you only review tasks whose head

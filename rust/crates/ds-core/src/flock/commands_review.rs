@@ -154,6 +154,80 @@ impl ReviewRunContext for &Flock {
     }
 }
 
+struct LiveReviewRouting<'a> {
+    flock: &'a Flock,
+    env: &'a dyn super::panes::PaneInfoEnv,
+}
+
+impl crate::review::ReviewRoutingSource for LiveReviewRouting<'_> {
+    fn reviewer_snapshot(&self) -> Option<crate::tasks::review_routing::Snapshot> {
+        use crate::tasks::review_routing::{Candidate, Snapshot};
+        let result = (|| -> Result<Snapshot, DunkError> {
+            // No role cache/grace, caller-role resolution, label/CWD inference, or busy-lane
+            // filtering: a registered reviewer is considered using its own live identity.
+            let panes = self.env.try_authority_panes()?;
+            let mut live = std::collections::BTreeMap::new();
+            for pane in panes {
+                let id = pane["pane_id"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| {
+                        DunkError::Refused("malformed authoritative pane identity".into())
+                    })?;
+                let pid = pane["pane_pid"]
+                    .as_i64()
+                    .or_else(|| pane["pane_pid"].as_str().and_then(|s| s.parse().ok()))
+                    .filter(|pid| *pid > 0)
+                    .ok_or_else(|| DunkError::Refused("malformed authoritative pane PID".into()))?;
+                if live.insert(id.to_string(), pid).is_some() {
+                    return Err(DunkError::Refused(
+                        "duplicate authoritative pane identity".into(),
+                    ));
+                }
+            }
+            self.flock.with_roles(|roles, _| {
+                let description = roles.describe()?;
+                let lanes = description["lanes"]
+                    .as_object()
+                    .ok_or_else(|| DunkError::Refused("reviewer registry unavailable".into()))?;
+                let mut candidates = Vec::new();
+                for (pane, entry) in lanes {
+                    if entry["role"].as_str() != Some("reviewer") {
+                        continue;
+                    }
+                    let provider = roles.provider_of(pane)?;
+                    let pid = entry["pane_pid"].as_i64();
+                    let start = entry["start"].as_str().filter(|s| !s.is_empty());
+                    let identity = pid.zip(start).map(|(pid, start)| (pid, start.to_string()));
+                    let rejection = if !roles.may_review(pane, Some("reviewer"))? {
+                        Some("provider rejected by reviewer policy".into())
+                    } else if !identity.as_ref().is_some_and(|(pid, start)| {
+                        live.get(pane) == Some(pid) && crate::proc::process_alive(*pid, Some(start))
+                    }) {
+                        Some("missing, stale, or dead role/pane binding".into())
+                    } else {
+                        None
+                    };
+                    candidates.push(Candidate {
+                        pane: pane.clone(),
+                        provider,
+                        identity,
+                        rejection,
+                    });
+                }
+                Ok(Snapshot {
+                    candidates,
+                    unavailable: None,
+                })
+            })
+        })();
+        Some(result.unwrap_or_else(|error| Snapshot {
+            candidates: Vec::new(),
+            unavailable: Some(error.to_string()),
+        }))
+    }
+}
+
 impl Flock {
     /// `Flock.review_sync`: run the canonical review engine with this Flock's
     /// attached task actor, role snapshot, and token-mint attribution.
@@ -177,6 +251,34 @@ impl Flock {
             api_root,
             transport,
         )
+        .run(dry_run)
+        .await
+    }
+
+    /// Production initial-review routing uses a fresh authoritative runtime snapshot.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn review_sync_with_routing<T, G, X>(
+        &self,
+        env: &dyn super::panes::PaneInfoEnv,
+        tokens: &T,
+        github: G,
+        api_root: &str,
+        transport: X,
+        dry_run: bool,
+    ) -> Result<Value, String>
+    where
+        T: ReviewTokenSource,
+        G: ReviewPolicy + ReviewRepoConfig,
+        X: GitHubTransport,
+    {
+        ReviewSync::with_transport(
+            self,
+            BorrowedReviewTokens(tokens),
+            github,
+            api_root,
+            transport,
+        )
+        .with_review_routing(LiveReviewRouting { flock: self, env })
         .run(dry_run)
         .await
     }

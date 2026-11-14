@@ -450,3 +450,208 @@ async fn test_an_accepted_head_is_never_refiled_and_is_merged_when_protection_al
     assert_eq!(1, rows.len());
     assert_eq!(stored.id, rows[0].id);
 }
+
+struct RoutingEnv {
+    panes: Vec<Value>,
+    unavailable: bool,
+}
+impl crate::flock::panes::PaneInfoEnv for RoutingEnv {
+    fn list_panes_grouped(&self) -> Vec<Value> {
+        self.panes.clone()
+    }
+    fn get_pane(&self, id: &str) -> Option<Value> {
+        self.panes.iter().find(|p| p["pane_id"] == id).cloned()
+    }
+    fn try_authority_panes(&self) -> Result<Vec<Value>, DunkError> {
+        if self.unavailable {
+            Err(DunkError::Refused("test backend unavailable".into()))
+        } else {
+            Ok(self.panes.clone())
+        }
+    }
+}
+
+#[tokio::test]
+async fn routing_uses_fresh_registered_role_pid_start_and_provider_without_grace() {
+    use crate::review::ReviewRoutingSource;
+    let (flock, _) = setup("routing-snapshot").await;
+    let pid = i64::from(std::process::id());
+    let start = crate::proc::process_start(pid).unwrap();
+    flock
+        .with_roles(|roles, _| {
+            for (pane, role, provider, binding) in [
+                ("%live", "reviewer", "codex", start.as_str()),
+                ("%stale", "reviewer", "codex", "wrong-start"),
+                ("%gone", "reviewer", "claude", start.as_str()),
+                ("%free", "reviewer", "opencode", start.as_str()),
+                ("%worker", "worker", "codex", start.as_str()),
+            ] {
+                roles.register(
+                    pane,
+                    role,
+                    Some(pid),
+                    Some(binding),
+                    Some(provider),
+                    None,
+                    None,
+                    None,
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    let mut env = RoutingEnv {
+        panes: ["%live", "%stale", "%free", "%worker"]
+            .into_iter()
+            .map(|id| json!({"pane_id":id,"pane_pid":pid}))
+            .collect(),
+        unavailable: false,
+    };
+    let source = LiveReviewRouting {
+        flock: &flock,
+        env: &env,
+    };
+    let snapshot = source.reviewer_snapshot().unwrap();
+    assert!(snapshot.unavailable.is_none());
+    assert_eq!(
+        1,
+        snapshot
+            .candidates
+            .iter()
+            .filter(|c| c.rejection.is_none())
+            .count()
+    );
+    assert_eq!(
+        "%live",
+        snapshot
+            .candidates
+            .iter()
+            .find(|c| c.rejection.is_none())
+            .unwrap()
+            .pane
+    );
+    assert!(!snapshot.candidates.iter().any(|c| c.pane == "%worker"));
+    // The next snapshot must not reuse a previously live pane from the role grace cache.
+    env.panes.clear();
+    let snapshot = LiveReviewRouting {
+        flock: &flock,
+        env: &env,
+    }
+    .reviewer_snapshot()
+    .unwrap();
+    assert!(snapshot.candidates.iter().all(|c| c.rejection.is_some()));
+    env.unavailable = true;
+    let snapshot = LiveReviewRouting {
+        flock: &flock,
+        env: &env,
+    }
+    .reviewer_snapshot()
+    .unwrap();
+    assert!(snapshot
+        .unavailable
+        .unwrap()
+        .contains("test backend unavailable"));
+}
+
+#[tokio::test]
+async fn production_sync_assigns_only_the_sole_eligible_initial_reviewer() {
+    let (flock, tasks) = setup("routing-end-to-end").await;
+    let pid = i64::from(std::process::id());
+    let start = crate::proc::process_start(pid).unwrap();
+    flock
+        .with_roles(|roles, _| {
+            roles.register(
+                "%2",
+                "reviewer",
+                Some(pid),
+                Some(&start),
+                Some("codex"),
+                None,
+                None,
+                None,
+            )
+        })
+        .unwrap();
+    let conn = rusqlite::Connection::open(tasks.path()).unwrap();
+    conn.execute(
+        "INSERT INTO planner_repo_projects(repo,project) VALUES ('o/r','alpha')",
+        [],
+    )
+    .unwrap();
+    crate::tasks::lane_project::set(
+        &conn,
+        &crate::tasks::lane_project::Membership {
+            pane: "%2".into(),
+            pid,
+            start,
+            scope: crate::tasks::lane_project::ProjectScope::Project("alpha".into()),
+        },
+    )
+    .unwrap();
+    tasks
+        .add_with(
+            "global",
+            "related work",
+            "",
+            AddOptions {
+                repo: Some("o/r".into()),
+                pr: Some("7".into()),
+                author: Some("%1".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let env = RoutingEnv {
+        panes: vec![json!({"pane_id":"%2","pane_pid":pid})],
+        unavailable: false,
+    };
+    let transport = TestTransport::with_responses([
+        response(
+            200,
+            json!([{"number":7,"title":"candidate","draft":false,"head":{"sha":"full-head","ref":"work/topic"},"base":{"ref":"main"}}]),
+        ),
+        response(200, json!({"mergeable":true,"state":"open"})),
+        response(200, json!({"state":"open","body":""})),
+        response(201, json!({"id":1})),
+    ]);
+    let report = flock
+        .review_sync_with_routing(
+            &env,
+            &TestTokens(Ok("reviewer-token".into())),
+            TestPolicy,
+            "https://api.example.test",
+            BorrowedGitHubTransport(&transport),
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(json!([]), report["errors"]);
+    let id = report["filed"][0]["task"].as_str().unwrap();
+    let task = tasks.get(id).await.unwrap();
+    assert_eq!(
+        json!(["%2"]),
+        serde_json::from_str::<Value>(&task.assignees).unwrap()
+    );
+    assert_eq!(
+        Some("%1"),
+        tasks.review_facts(id).await.unwrap().author.as_deref()
+    );
+    assert_eq!("open", task.status);
+    assert_eq!(
+        4,
+        transport.requests.lock().unwrap().len(),
+        "assignment adds no GitHub verdict or merge request"
+    );
+    let meta: String = conn
+        .query_row(
+            "SELECT meta FROM task_events WHERE task_id=?1 AND event='assigned'",
+            [id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        crate::tasks::review_routing::RULE,
+        serde_json::from_str::<Value>(&meta).unwrap()["rule"]
+    );
+}
