@@ -581,7 +581,7 @@ mod etag_tests {
             request: GitHubRequest,
         ) -> PinBoxFuture<'a, Result<(GitHubResponse, Option<String>), String>> {
             Box::pin(async move {
-                let conditional = request.headers.get("If-None-Match").is_some();
+                let conditional = request.headers.contains_key("If-None-Match");
                 self.0.lock().unwrap().push(request);
                 Ok((
                     GitHubResponse {
