@@ -4458,22 +4458,7 @@ impl Flock {
         let press_enter = message.press_enter;
         let attempt_generation = message.attempt_generation.clone();
         let has_dunk_action = message.dunk_delivery.is_some();
-        // t4681: the wake for an owner lane keeps the idle gate. A notice is not typed into an
-        // owner pane whose agent is busy, even with an empty box; it waits for the pane to be
-        // idle, as a wait (never counted toward undeliverable).
-        let owner_busy = message.is_notice
-            && self.is_owner_lane(&pane_id)
-            && env
-                .read_status(&pane_id)
-                .is_some_and(|status| crate::push::BUSY_STATUSES.contains(&status.as_str()));
-        let (sent, ok, detail, blocker_reason) = if owner_busy {
-            (
-                false,
-                None,
-                "the owner pane is busy; the notice waits for it to be idle".to_string(),
-                Some("owner-busy".to_string()),
-            )
-        } else {
+        let (sent, ok, detail, blocker_reason) =
             send_guarded_with_reason(self, env, &pane_id, options, permission, |env, guard| {
                 if has_dunk_action {
                     let still_queued = {
@@ -4524,8 +4509,7 @@ impl Flock {
                         Some(guard),
                     ))
                 }
-            })
-        };
+            });
 
         if has_dunk_action {
             let still_queued = {
@@ -4555,7 +4539,6 @@ impl Flock {
                     // An owner lane's box that cannot be read may hold a person's draft: the
                     // notice waits for it to read clear, however long that takes.
                     Some("ambiguous-composer") => self.is_owner_lane(&pane_id),
-                    Some("owner-busy") => true,
                     _ => false,
                 };
             if waiting_for_person {
