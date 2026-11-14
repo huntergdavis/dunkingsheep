@@ -24,6 +24,12 @@ test('a lane row shows its unread and awaiting-receipt counts', () => {
 test('a count that could not be read is unknown, never zero', () => {
   assert.deepEqual(laneMailText(fleet, '%308'),
     { known: false, text: '3 unread · unknown awaiting receipt', reason: 'a count could not be read from the daemon' });
+  // The server could not get an unread count for the lane (roster call failed, or the lane is not
+  // in the roster): it sends null with unread_state 'unknown', which is shown as unknown.
+  assert.equal(laneMailText({ state: 'ok', rows: [{ pane_id: '%4', unread: null, unread_state: 'unknown', pending: 2, pending_state: 'ok' }] }, '%4').text,
+    'unknown unread · 2 awaiting receipt');
+  assert.equal(laneMailText({ state: 'ok', rows: [{ pane_id: '%4', unread: 0, unread_state: 'unknown', pending: 2, pending_state: 'ok' }] }, '%4').text,
+    'unknown unread · 2 awaiting receipt', 'a zero the server marks unknown is not shown as zero');
   assert.equal(laneMailText(fleet, '%1').text, 'Unknown');
   assert.equal(laneMailText(fleet, '%1').reason, 'this lane is not in the pane roster');
   assert.equal(laneMailText(fleet, '%9').reason, 'more than one roster row for this pane');

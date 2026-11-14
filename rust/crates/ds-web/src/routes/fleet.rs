@@ -435,12 +435,12 @@ async fn api_pane_inbox(
 /// and its name; Python added the two lookups, which doubled the count whenever both keys named
 /// the same lane. One lane has one count: the pane id is the exact key, the name the fallback
 /// for a roster row that carries no pane id.
-fn lane_unread(waiting: &HashMap<String, i64>, pane_id: &str, name: &str) -> i64 {
-    waiting
-        .get(pane_id)
-        .or_else(|| waiting.get(name))
-        .copied()
-        .unwrap_or(0)
+///
+/// `None` when the roster gave no count for this lane (the roster call failed, or the lane is
+/// not in it): the row then carries `unread: null` with `unread_state: "unknown"`, because a
+/// count that could not be read is not zero (t4646 S5a).
+fn lane_unread(waiting: &HashMap<String, i64>, pane_id: &str, name: &str) -> Option<i64> {
+    waiting.get(pane_id).or_else(|| waiting.get(name)).copied()
 }
 fn rpc_error(e: PanesWebError, prefix: &str, status: StatusCode) -> Response {
     match e {
@@ -613,8 +613,9 @@ async fn api_fleet(
             .or_else(|| turns.get(sid.split('-').next().unwrap_or("")))
             .filter(|t| **t != 0.0)
             .or_else(|| activity.get(id).filter(|t| **t != 0.0));
+        let unread = lane_unread(&waiting, id, name_str);
         rows.push(json!({"pane_id":id,"name":name,"project":project,"cwd":pane["cwd"],"agent":pane["agent"],"alive":true,
-            "last_activity_s":last.map(|t|(now-t) as i64),"unread":lane_unread(&waiting, id, name_str),
+            "last_activity_s":last.map(|t|(now-t) as i64),"unread":unread,"unread_state":if unread.is_some(){"ok"}else{"unknown"},
             "session":session,"send":cap["send"],"drains":cap["drains"],"pending":pending.as_ref().map(|p|p.get(id).copied().unwrap_or(0)),
             "pending_state":if pending.is_some(){"ok"}else{"unknown"},"can_type":cap["send"]=="guarded"}));
     }
@@ -1349,15 +1350,17 @@ mod tests {
     #[test]
     fn lane_unread_is_counted_once_by_pane_id_then_by_name() {
         let both: HashMap<String, i64> = [("lane".to_string(), 3), ("%1".to_string(), 3)].into();
-        assert_eq!(lane_unread(&both, "%1", "lane"), 3);
+        assert_eq!(lane_unread(&both, "%1", "lane"), Some(3));
         // The row name is the pane id itself (no registry name, no label).
-        assert_eq!(lane_unread(&both, "%1", "%1"), 3);
+        assert_eq!(lane_unread(&both, "%1", "%1"), Some(3));
         let name_only: HashMap<String, i64> = [("lane".to_string(), 4)].into();
-        assert_eq!(lane_unread(&name_only, "%1", "lane"), 4);
-        assert_eq!(lane_unread(&name_only, "%2", "other"), 0);
+        assert_eq!(lane_unread(&name_only, "%1", "lane"), Some(4));
+        // A lane the roster has no count for is unknown, not zero.
+        assert_eq!(lane_unread(&name_only, "%2", "other"), None);
+        assert_eq!(lane_unread(&HashMap::new(), "%1", "lane"), None);
         // A stale name entry never adds to the pane's own count.
         let differ: HashMap<String, i64> = [("lane".to_string(), 9), ("%1".to_string(), 2)].into();
-        assert_eq!(lane_unread(&differ, "%1", "lane"), 2);
+        assert_eq!(lane_unread(&differ, "%1", "lane"), Some(2));
     }
     #[test]
     fn fleet_rows_filter_sort_and_activity_precedence() {

@@ -553,7 +553,9 @@ async fn fleet_keeps_partial_sources_unknown_and_inventory_private() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(fleet["state"], "ok");
     assert_eq!(fleet["rows"][0]["pending_state"], "unknown");
-    assert_eq!(fleet["rows"][0]["unread"], 0);
+    // The roster call failed: the unread count is unknown, not zero.
+    assert_eq!(fleet["rows"][0]["unread"], Value::Null);
+    assert_eq!(fleet["rows"][0]["unread_state"], "unknown");
     let inventory = fleet["unrouted"]["rows"][0].as_object().unwrap();
     assert_eq!(inventory["agent"], "codex");
     assert!(!inventory.contains_key("cmdline"));
@@ -608,6 +610,7 @@ async fn fleet_lists_roster_lanes_without_a_detected_agent_and_still_skips_shell
     assert_eq!(member["agent"], "");
     assert_eq!(member["project"], "dunkingsheep");
     assert_eq!(member["unread"], 1);
+    assert_eq!(member["unread_state"], "ok");
     assert_eq!(member["send"], "guarded");
     daemon.finish();
 }

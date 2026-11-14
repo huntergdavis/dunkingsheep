@@ -15,7 +15,7 @@ export function laneMailText(fleet, paneId) {
   }
   const count = value => Number.isInteger(value) && value >= 0;
   const row = rows[0];
-  const unread = count(row.unread) ? String(row.unread) : 'unknown';
+  const unread = row.unread_state !== 'unknown' && count(row.unread) ? String(row.unread) : 'unknown';
   const pending = row.pending_state !== 'unknown' && count(row.pending) ? String(row.pending) : 'unknown';
   const known = unread !== 'unknown' && pending !== 'unknown';
   return {
