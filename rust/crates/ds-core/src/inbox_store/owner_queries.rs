@@ -170,7 +170,7 @@ impl Store {
         limit: Option<i64>,
         before: Option<f64>,
     ) -> Result<Vec<Value>, DunkError> {
-        self.conversation_rows(mailboxes, limit, before, false)
+        self.conversation_rows(mailboxes, limit, before, false, None)
     }
 
     /// The owner conversation window (t3592, repair for t3711/t3712): as `conversation_across`, but routine
@@ -183,7 +183,20 @@ impl Store {
         limit: Option<i64>,
         before: Option<f64>,
     ) -> Result<Vec<Value>, DunkError> {
-        self.conversation_rows(mailboxes, limit, before, true)
+        self.conversation_rows(mailboxes, limit, before, true, None)
+    }
+
+    /// Stable ID-cursor window; Some(None) starts paging without a boundary.
+    pub fn conversation_visible_cursor(
+        &self,
+        mailboxes: &[String],
+        limit: i64,
+        before_id: Option<&str>,
+    ) -> Result<Vec<Value>, DunkError> {
+        if before_id.is_some_and(|id| !crate::inbox::valid_message_id(id)) {
+            return Err(refuse("invalid conversation cursor"));
+        }
+        self.conversation_rows(mailboxes, Some(limit), None, true, Some(before_id))
     }
 
     fn conversation_rows(
@@ -192,6 +205,7 @@ impl Store {
         limit: Option<i64>,
         before: Option<f64>,
         exclude_routine: bool,
+        cursor: Option<Option<&str>>,
     ) -> Result<Vec<Value>, DunkError> {
         let mut conditions = Vec::with_capacity(mailboxes.len());
         let mut box_params: Vec<String> = Vec::new();
@@ -238,10 +252,33 @@ impl Store {
             sql.push_str(" AND created_at < ?");
             values.push(SqlValue::Real(before));
         }
-        sql.push_str(" ORDER BY created_at DESC LIMIT ?");
-        values.push(SqlValue::Integer(limit.unwrap_or(50)));
+        let cursor_id = cursor.flatten().map(str::to_owned);
+        let cursor_query = format!(
+            "SELECT created_at, CAST(SUBSTR(id, 2) AS INTEGER) FROM messages WHERE {} AND id = ?",
+            sql.split_once(" WHERE ").unwrap().1
+        );
+        let cursor_values = values.clone();
+        // Resolve the cursor against the same mailbox/visibility predicate, without loading a body.
+        if cursor_id.is_some() {
+            sql.push_str(
+                " AND (created_at < ? OR (created_at = ? AND CAST(SUBSTR(id, 2) AS INTEGER) < ?))",
+            );
+        }
+        sql.push_str(if cursor.is_some() {
+            " ORDER BY created_at DESC, CAST(SUBSTR(id, 2) AS INTEGER) DESC LIMIT ?"
+        } else {
+            " ORDER BY created_at DESC LIMIT ?"
+        });
 
         self.readers.with(move |connection| {
+            if let Some(id) = cursor_id {
+                let mut lookup = cursor_values;
+                lookup.push(SqlValue::Text(id));
+                let boundary: Option<(f64, i64)> = connection.query_row(&cursor_query, params_from_iter(lookup.iter()), |row| Ok((row.get(0)?, row.get(1)?))).optional().map_err(map_sqlite)?;
+                let (timestamp, id) = boundary.ok_or_else(|| refuse("conversation cursor is no longer available; refresh history"))?;
+                values.extend([SqlValue::Real(timestamp), SqlValue::Real(timestamp), SqlValue::Integer(id)]);
+            }
+            values.push(SqlValue::Integer(limit.unwrap_or(50)));
             let mut selected = {
                 let mut statement = connection.prepare(&sql).map_err(map_sqlite)?;
                 let rows = statement
@@ -433,6 +470,7 @@ mod tests {
     mod page_tests;
 
     // t3592 repair (t3711/t3712): routine mail is excluded in the query, before the limit and the boundary.
+    mod history_cursor_tests;
     mod routine_window_tests;
 
     struct Fixture {

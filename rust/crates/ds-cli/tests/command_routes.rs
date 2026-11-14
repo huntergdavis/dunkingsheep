@@ -5208,6 +5208,7 @@ fn cli_route_58_commands_map() {
     assert!(r.contains("memory_backfill(action, limit, queue_id, path, reason)"));
     assert!(r.contains("roster(project)"));
     assert!(r.contains("Task queues are omitted by default"));
+    assert!(r.contains("owner_conversation(limit, before, before_id)"));
     assert!(r.contains(
         "inbox_list(mailbox, unread_only, limit, newest_first, before, literal_mailbox)"
     ));
@@ -5232,7 +5233,7 @@ fn cli_route_58_commands_map() {
                     Some(line.replace(
                         "inbox_list(mailbox, unread_only, limit, newest_first, before, literal_mailbox)",
                         "inbox_list(mailbox, unread_only, limit)",
-                    ))
+                    ).replace("owner_conversation(limit, before, before_id)", "owner_conversation(limit, before)"))
                 }
             })
             .collect::<Vec<_>>()
@@ -5274,6 +5275,15 @@ fn cli_route_58_commands_map() {
                 .unwrap()
                 .contains("default false")
         );
+        let conversation = r
+            .iter_mut()
+            .find(|row| row["name"] == "owner_conversation")
+            .unwrap();
+        assert!(conversation["input_schema"]["properties"]
+            .as_object_mut()
+            .unwrap()
+            .remove("before_id")
+            .is_some());
         let inbox_list = r
             .iter_mut()
             .find(|row| row["name"] == "inbox_list")

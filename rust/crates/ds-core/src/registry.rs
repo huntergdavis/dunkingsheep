@@ -604,7 +604,7 @@ pub static COMMANDS: &[Command] = &[
     Command {
         name: "owner_conversation",
         description: "The owner mailbox as one conversation: questions and their answers, oldest first. Each row carries `transport` (web|telegram|report: where it arrived) and `reply_to` (the question a reply answers), and `answered` is computed from the rows, so it cannot disagree with itself. Desk and owner only.",
-        params: &[Param { name: "limit", schema: "{\"type\":\"integer\",\"description\":\"How many messages (default 50).\"}" }, Param { name: "before", schema: "{\"type\":\"number\",\"description\":\"Only messages older than this unix time.\"}" }],
+        params: &[Param { name: "limit", schema: "{\"type\":\"integer\",\"description\":\"How many messages (default 50).\"}" }, Param { name: "before", schema: "{\"type\":\"number\",\"description\":\"Only messages older than this unix time.\"}" }, Param { name: "before_id", schema: "{\"type\":[\"string\",\"null\"],\"description\":\"Opt in to stable read-only history paging: null starts, a message ID is an exclusive cursor. Cannot combine with before.\"}" }],
         dispatch_required: &[],
         required: &[],
         mcp: true,

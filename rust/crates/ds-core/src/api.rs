@@ -2050,6 +2050,21 @@ pub fn h_owner_conversation(context: &HandlerContext<'_>, args: Args) -> Result<
             memory_int_arg(&limit_args, "limit", 50)?
         }
     };
+    if let Some(cursor) = args.get("before_id") {
+        if args.get("before").is_some_and(|value| !value.is_null()) {
+            return Err(DunkError::Refused(
+                "before and before_id cannot be combined".into(),
+            ));
+        }
+        let before_id = match cursor {
+            Value::Null => None,
+            Value::String(id) if crate::inbox::valid_message_id(id) => Some(id.as_str()),
+            _ => return Err(DunkError::Refused("invalid conversation cursor".into())),
+        };
+        let conversation = crate::owner::OwnerConversations::new(context.flock, context.env)
+            .conversation_cursor(limit, before_id, context.self_pane_id())?;
+        return serde_json::to_value(conversation).map_err(DunkError::from);
+    }
     let before = match args.get("before") {
         None | Some(Value::Null) => None,
         // `as_f64` refuses nonfinite and overflowing numbers. An integer token past the float

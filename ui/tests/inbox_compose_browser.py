@@ -44,7 +44,7 @@ def mock(route):
     if path == '/api/fleet':
         return fulfill(route, {'rows': [{'pane_id': '%9', 'name': 'Test lane', 'project': 'Test project'}] if lane_present else []})
     if path == '/api/owner-thread':
-        return fulfill(route, {'items': []})
+        return fulfill(route, {'items': [], 'next_before': None})
     if path == '/api/channels':
         return fulfill(route, {'channels': []})
     if path == '/api/mailboxes':

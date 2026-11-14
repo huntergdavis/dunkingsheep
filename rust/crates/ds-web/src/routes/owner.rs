@@ -330,9 +330,10 @@ async fn api_owner_thread(
     Extension(scheme): Extension<RequestScheme>,
     request: Request,
 ) -> Response {
-    if let Err(response) = authenticate(auth.as_ref(), request.headers(), scheme).await {
-        return response.into_response();
-    }
+    let identity = match authenticate(auth.as_ref(), request.headers(), scheme).await {
+        Ok(identity) => identity,
+        Err(response) => return response.into_response(),
+    };
     let query = match parse_query(request.uri().query()) {
         Ok(query) => query,
         Err(()) => return detail_response(StatusCode::BAD_REQUEST, "invalid query".to_owned()),
@@ -341,7 +342,27 @@ async fn api_owner_thread(
         Ok(limit) => limit,
         Err(response) => return response.into_response(),
     };
-    match owner_thread(state.as_ref(), limit).await {
+    let paged = match query.get("paged").map(String::as_str) {
+        None | Some("false") => false,
+        Some("true") => true,
+        _ => return detail_response(StatusCode::BAD_REQUEST, "invalid paging flag".into()),
+    };
+    if paged && !matches!(identity, Identity::Owner) {
+        return detail_response(
+            StatusCode::FORBIDDEN,
+            "history paging requires an owner session".into(),
+        );
+    }
+    let before = query.get("before").map(String::as_str);
+    if before.is_some_and(|id| !ds_core::inbox::valid_message_id(id))
+        || (before.is_some() && !paged)
+    {
+        return detail_response(StatusCode::BAD_REQUEST, "invalid history cursor".into());
+    }
+    match owner_thread(state.as_ref(), limit, paged.then_some(before)).await {
+        Ok(result) if paged => {
+            ([(header::CACHE_CONTROL, "no-store")], Json(result)).into_response()
+        }
         Ok(result) => Json(result).into_response(),
         Err(error) => error.into_response(),
     }
@@ -489,12 +510,16 @@ fn parse_thread_limit(raw: Option<&str>) -> Result<i64, WebResponseError> {
     }
 }
 
-async fn owner_thread(state: &OwnerWebState, limit: i64) -> Result<Value, OwnerWebError> {
-    let data = match state
-        .backend
-        .rpc("owner_conversation", json!({"limit": limit}))
-        .await
-    {
+async fn owner_thread(
+    state: &OwnerWebState,
+    limit: i64,
+    cursor: Option<Option<&str>>,
+) -> Result<Value, OwnerWebError> {
+    let mut args = json!({"limit": if cursor.is_some() { limit + 1 } else { limit }});
+    if let Some(before_id) = cursor {
+        args["before_id"] = json!(before_id);
+    }
+    let data = match state.backend.rpc("owner_conversation", args).await {
         Ok(data) => data,
         Err(error @ OwnerWebError::Http { .. }) => return Err(error),
         Err(OwnerWebError::Failure(error)) => {
@@ -504,6 +529,30 @@ async fn owner_thread(state: &OwnerWebState, limit: i64) -> Result<Value, OwnerW
             })
         }
     };
+    let mut next_before = None;
+    let mut data = data;
+    if cursor.is_some() {
+        let rows = data
+            .get_mut("messages")
+            .and_then(Value::as_array_mut)
+            .ok_or_else(|| OwnerWebError::Http {
+                status: StatusCode::BAD_GATEWAY,
+                detail: "history paging unavailable; daemon upgrade may be needed".into(),
+            })?;
+        if rows.len() > limit as usize {
+            rows.remove(0); // daemon returns oldest first; discard only the lookahead row.
+            next_before = Some(
+                rows.first()
+                    .and_then(|row| row["id"].as_str())
+                    .filter(|id| ds_core::inbox::valid_message_id(id))
+                    .ok_or_else(|| OwnerWebError::Http {
+                        status: StatusCode::BAD_GATEWAY,
+                        detail: "invalid history page boundary".into(),
+                    })?
+                    .to_owned(),
+            );
+        }
+    }
     let messages = data
         .get("messages")
         .and_then(Value::as_array)
@@ -513,7 +562,21 @@ async fn owner_thread(state: &OwnerWebState, limit: i64) -> Result<Value, OwnerW
         .get("waiting")
         .cloned()
         .unwrap_or_else(|| Value::Array(Vec::new()));
-    Ok(json!({"items": messages, "waiting": waiting, "source": "owner_conversation"}))
+    let mut result = json!({"items": messages, "waiting": waiting, "source": "owner_conversation"});
+    if cursor.is_some() {
+        if let Some(waiting) = result["waiting"].as_array().cloned() {
+            result["waiting"] = json!(waiting
+                .into_iter()
+                .filter(|id| result["items"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|item| item["message_id"] == *id))
+                .collect::<Vec<_>>());
+        }
+        result["next_before"] = json!(next_before);
+    }
+    Ok(result)
 }
 
 fn owner_thread_item(row: &Value) -> Value {
@@ -1575,6 +1638,92 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["notify"]["state"], "sent");
         assert_eq!(backend.methods()[1], "list_panes");
+    }
+
+    #[test]
+    fn owner_history_paging_uses_id_cursor_lookahead_and_preserves_legacy_route() {
+        let backend = Arc::new(FakeOwner::new());
+        backend.reply(
+            "owner_conversation",
+            json!({"messages":[
+            {"id":"i8","created_at":100,"body":"lookahead"},
+            {"id":"i9","created_at":100,"body":"older"},
+            {"id":"i10","created_at":100,"body":"newer"}
+        ],"waiting":["i8","i9"]}),
+        );
+        let response = block_on(app(authorized(), backend.clone()).oneshot(request(
+            "GET",
+            "/api/owner-thread?paged=true&limit=2",
+            None,
+        )))
+        .unwrap();
+        let (status, body, headers) = response_json(response);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+        assert_eq!(body["items"].as_array().unwrap().len(), 2);
+        assert_eq!(body["items"][0]["message_id"], "i9");
+        assert_eq!(body["next_before"], "i9");
+        assert_eq!(body["waiting"], json!(["i9"]));
+        assert_eq!(
+            backend.calls.lock().unwrap()[0].1,
+            json!({"limit":3,"before_id":null})
+        );
+        backend.reply(
+            "owner_conversation",
+            json!({"messages":[{"id":"i8","created_at":100,"body":"oldest"}],"waiting":[]}),
+        );
+        let response = block_on(app(authorized(), backend.clone()).oneshot(request(
+            "GET",
+            "/api/owner-thread?paged=true&limit=2&before=i9",
+            None,
+        )))
+        .unwrap();
+        let (status, body, _) = response_json(response);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["next_before"], Value::Null);
+        assert_eq!(body["items"][0]["message_id"], "i8");
+        assert_eq!(
+            backend.calls.lock().unwrap()[1].1,
+            json!({"limit":3,"before_id":"i9"})
+        );
+        assert_eq!(
+            backend.methods(),
+            ["owner_conversation", "owner_conversation"]
+        );
+    }
+
+    #[test]
+    fn owner_history_paging_refuses_bad_inputs_and_api_identity_before_rpc() {
+        let backend = Arc::new(FakeOwner::new());
+        for path in [
+            "/api/owner-thread?paged=yes",
+            "/api/owner-thread?paged=true&before=i01",
+            "/api/owner-thread?before=i9",
+        ] {
+            let response =
+                block_on(app(authorized(), backend.clone()).oneshot(request("GET", path, None)))
+                    .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+        let response = block_on(
+            app(
+                Arc::new(FakeAuth::accepting(Identity::Api)),
+                backend.clone(),
+            )
+            .oneshot(request("GET", "/api/owner-thread?paged=true", None)),
+        )
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let response = block_on(
+            app(
+                Arc::new(FakeAuth::refusing(AuthError::SignInRequired)),
+                backend.clone(),
+            )
+            .oneshot(request("GET", "/api/owner-thread?paged=true", None)),
+        )
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(backend.methods().is_empty());
     }
 
     #[test]

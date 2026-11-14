@@ -2,7 +2,8 @@
 
 The owner Inbox first uses the existing owner conversation projection. That projection includes
 `owner` and mailboxes attached to registered owner-role panes, filters routine lane mail, and
-exposes up to 200 recent rows through `/api/owner-thread`. It is not a complete mailbox archive.
+exposes up to 200 rows per request through `/api/owner-thread`. Legacy callers get one recent
+window; S-F adds explicit history paging for the default Inbox below.
 
 ## Mailbox directory: S-B
 
@@ -146,3 +147,35 @@ receipts preserve the draft and advise checking for storage before resending. No
 automatically. Lane receipts report the daemon's mailbox, notification and redirect; stored does
 not mean read. Drafts live only in the current view, survive closing the inline form, and are not
 saved to browser storage. Attachments are outside this slice. No daemon or send-route changes.
+
+## Owner Inbox history: S-F
+
+The default Owner inbox now offers **Load older messages**, with no fixed limit on the number
+of pages loaded. It preserves the existing owner conversation projection (owner mailbox plus
+registered owner lanes, existing routine/audience rules), renderer and send actions. It does
+not turn the projection into an unfiltered raw mailbox view. Older pages merge by ID, remain
+available while newest-page polling continues, and keep the selected message. Page failures
+retain loaded history and offer a retry. The start of conversation is reported only after a
+successful page proves there are no more visible rows.
+
+The response route stays `/api/owner-thread`. `paged=true` opts into owner-session-only history;
+API bearer identities are refused for this new mode. `before=iNN` is its exclusive cursor.
+Existing callers with no paging arguments retain their RPC arguments and response shape. Paged responses
+add `next_before` (null at the start of history), use a one-row lookahead and `Cache-Control:
+no-store`, and retain a per-request limit of 1..200. That is a page size, not a history cap.
+
+The existing daemon `owner_conversation` accepts one new optional nullable `before_id` argument:
+null opts into a stable first page, and a canonical message ID opts into a page before that row.
+It cannot be combined with the legacy timestamp `before`. Legacy calls retain their ordering
+and wire shape. Only cursor queries sort by creation time and numeric ID descending before
+returning the selected window oldest-first, so equal timestamps cross a boundary without
+skipping or repeating rows. The cursor must still belong to the same visible conversation;
+missing, purged or newly hidden cursor rows refuse the page rather than restarting silently.
+The existing timestamp-only parameter remains unchanged for other clients.
+
+Cursor lookup and page queries use read connections and the same visibility predicate. They
+do not mark read, acknowledge, recover, archive, send or notify. There is no schema change.
+History is live rather than a database snapshot; refresh the page to restart after a removed
+cursor or changed lane membership. Deploy this daemon extension before the S-F desk. Older
+daemons refuse the new argument; there is no fallback to consuming reads or timestamp paging.
+The frozen `4cd8dc6a` desk stage does not include S-F. Human/owner-lane filters are a later slice.

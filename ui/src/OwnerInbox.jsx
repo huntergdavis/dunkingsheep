@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import MessageBody from './MessageBody';
 import InboxCompose from './InboxCompose';
 import './owner-inbox.css';
@@ -13,12 +13,19 @@ export default function OwnerInbox({ api }) {
   const [page, setPage] = useState(0);
   const [error, setError] = useState('');
   const [attempt, setAttempt] = useState(0);
+  const [cursor, setCursor] = useState(undefined);
+  const [history, setHistory] = useState({ busy: false, error: '' });
+  const olderBusy = useRef(false);
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   useEffect(() => {
     let live = true;
     async function load() {
       try {
-        const data = await api('/owner-thread?limit=200');
+        const data = await api('/owner-thread?limit=200&paged=true');
+        if (!Object.hasOwn(data, 'next_before')) throw new Error('History paging is unavailable; a daemon upgrade may be needed.');
         if (!live) return;
+        setCursor(previous => previous === undefined ? data.next_before : previous);
         setItems(previous => {
           // Keep rows already loaded if a new arrival pushes one outside the API window.
           const merged = new Map((previous || []).map(item => [item.id, item]));
@@ -34,18 +41,42 @@ export default function OwnerInbox({ api }) {
     const timer = setInterval(load, 5000);
     return () => { live = false; clearInterval(timer); };
   }, [api, attempt]);
+  async function loadOlder() {
+    if (!cursor || olderBusy.current) return;
+    olderBusy.current = true;
+    setHistory({ busy: true, error: '' });
+    try {
+      const data = await api(`/owner-thread?limit=200&paged=true&before=${encodeURIComponent(cursor)}`);
+      if (!mounted.current) return;
+      if (!Object.hasOwn(data, 'next_before') || data.next_before === cursor) throw new Error('History cursor did not advance; refresh the Inbox to restart.');
+      setItems(previous => {
+        const merged = new Map((previous || []).map(item => [item.id, item]));
+        for (const item of data.items || []) merged.set(item.id, item);
+        return [...merged.values()].sort((a, b) => new Date(b.created_at) - new Date(a.created_at) || b.id - a.id);
+      });
+      setCursor(data.next_before);
+      setPage(Math.floor((items?.length || 0) / PAGE_SIZE));
+      setHistory({ busy: false, error: '' });
+    } catch (e) { if (mounted.current) setHistory({ busy: false, error: e.message }); }
+    finally { olderBusy.current = false; }
+  }
   const rows = items || [];
   const selected = rows.find(item => item.id === selectedId) || rows[0];
   const pages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
   const currentPage = Math.min(page, pages - 1);
   return <div className="owner-inbox">
     <header className="owner-inbox-heading">
-      <div><h1>Owner inbox</h1><p>Owner conversation, including owner lane mail. Up to 200 recent messages on opening; earlier history is not loaded yet.</p></div>
+      <div><h1>Owner inbox</h1><p>Owner conversation, including owner lane mail. Load older messages to browse the full available history.</p></div>
       <a href="/dash/cos?panel=mailboxes">Browse all mailboxes</a>
       <a href="/dash/cos?panel=conversation">Open conversation / send a message</a>
     </header>
     <InboxCompose api={api} onSent={() => setAttempt(value => value + 1)} />
     {error && <div className="dash-error" role="alert">{items ? 'Updates unavailable. Showing previously loaded messages. ' : 'Inbox unavailable. '}{error} <button onClick={() => setAttempt(value => value + 1)}>Retry</button></div>}
+    {items !== null && <div className="owner-inbox-history">
+      {cursor && <button disabled={history.busy} onClick={loadOlder}>{history.busy ? 'Loading older messages…' : 'Load older messages'}</button>}
+      {cursor === null && <p role="status">Start of conversation reached · {rows.length} messages loaded</p>}
+      {history.error && <p role="alert">Older messages unavailable. {history.error} <button onClick={loadOlder}>Retry older messages</button></p>}
+    </div>}
     {items === null && !error && <p role="status">Loading inbox…</p>}
     {items !== null && !rows.length && <p role="status">No messages in the owner conversation.</p>}
     {rows.length > 0 && <div className="owner-inbox-columns">
