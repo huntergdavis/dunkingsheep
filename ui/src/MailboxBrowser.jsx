@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import MessageBody from './MessageBody';
+import InboxCompose from './InboxCompose';
 import './mailbox-browser.css';
 
 function stamp(seconds) {
@@ -85,6 +86,7 @@ export default function MailboxBrowser({ api }) {
   }
   return <div className="mailbox-browser">
     <header className="mailbox-browser-heading"><div><h1>Mailboxes</h1><p>Browse history without marking messages read.</p></div><a href="/dash/cos">Owner conversation</a><button onClick={reload}>Refresh</button></header>
+    <InboxCompose api={api} onSent={reload} />
     <label className="mailbox-agent-opt-in"><input type="checkbox" checked={includeAgent} onChange={event => setIncludeAgent(event.target.checked)} /> Include agent-only mail in this browser</label>
     <div className="mailbox-browser-columns">
       <nav className="mailbox-directory" aria-label="Mailboxes">

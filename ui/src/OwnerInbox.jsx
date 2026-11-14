@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import MessageBody from './MessageBody';
+import InboxCompose from './InboxCompose';
 import './owner-inbox.css';
 
 const PAGE_SIZE = 25;
@@ -43,6 +44,7 @@ export default function OwnerInbox({ api }) {
       <a href="/dash/cos?panel=mailboxes">Browse all mailboxes</a>
       <a href="/dash/cos?panel=conversation">Open conversation / send a message</a>
     </header>
+    <InboxCompose api={api} onSent={() => setAttempt(value => value + 1)} />
     {error && <div className="dash-error" role="alert">{items ? 'Updates unavailable. Showing previously loaded messages. ' : 'Inbox unavailable. '}{error} <button onClick={() => setAttempt(value => value + 1)}>Retry</button></div>}
     {items === null && !error && <p role="status">Loading inbox…</p>}
     {items !== null && !rows.length && <p role="status">No messages in the owner conversation.</p>}

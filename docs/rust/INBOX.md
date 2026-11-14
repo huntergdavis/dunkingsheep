@@ -125,3 +125,24 @@ bounded and replaced with `<invalid>` when it is not a safe key/ID; raw argument
 credentials are never serialized. Opening a folder/history page automatically previews its
 first eligible message and produces a body-view audit line; this is not a read/ack receipt.
 The owner role includes the authenticated owner seat, whose body access is intentional.
+
+## Inbox compose: S-E
+
+Both Inbox views offer an inline **Compose message** form. Owner conversation is the initial
+recipient; it sends a new owner question through the existing `/api/owner-send`. For follow-up,
+the existing owner conversation and composer remain one link away. This slice adds no threading
+API or reply-to field. It does not offer Reply on agent-only mail or derive recipients from a
+message's sender, subject, or mailbox key.
+
+Lane recipients come from the current `/api/fleet`, using the same target filtering as Quick
+message. Sending uses `/api/pane-inbox` with an explicit pane ID and text; the server retains its
+capability/liveness checks and guarded inbox delivery. Recipient reloads clear stale roster
+choices from the available targets and block sending to a missing lane. Owner compose remains
+usable when no lane can be listed. Browsing, opening compose and choosing recipients never send.
+
+The form prevents concurrent submissions and changes to an in-flight recipient or draft. A
+successful storage receipt clears the sent draft and refreshes the list; errors or malformed
+receipts preserve the draft and advise checking for storage before resending. No retry occurs
+automatically. Lane receipts report the daemon's mailbox, notification and redirect; stored does
+not mean read. Drafts live only in the current view, survive closing the inline form, and are not
+saved to browser storage. Attachments are outside this slice. No daemon or send-route changes.
