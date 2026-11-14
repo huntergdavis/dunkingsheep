@@ -1,0 +1,9 @@
+.inbox-compose { min-width: 0; }
+.inbox-compose form { display: grid; gap: 10px; padding: 16px; margin-top: 10px; border: 1px solid var(--dash-border); background: var(--dash-panel); overflow-wrap: anywhere; }
+.inbox-compose h2, .inbox-compose p { margin: 0; }
+.inbox-compose label { display: grid; gap: 6px; min-width: 0; }
+.inbox-compose select, .inbox-compose textarea { width: 100%; min-width: 0; max-width: 100%; box-sizing: border-box; color: var(--dash-fg); background: var(--dash-panel-2); padding: 10px; border: 1px solid var(--dash-border); }
+.inbox-compose textarea { resize: vertical; }
+.inbox-compose small { color: var(--dash-muted); }
+.inbox-compose-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.inbox-compose a { color: var(--dash-accent); }
