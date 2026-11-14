@@ -293,6 +293,7 @@ fn the_top_level_table_is_exactly_what_run_dispatches() {
         "watchdog-deadman",
         "usage",
         "usage-provider",
+        "worktrees",
         "recover",
         "doctor",
         "owner",

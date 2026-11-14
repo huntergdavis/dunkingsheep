@@ -15,3 +15,4 @@ pub mod render_print;
 pub mod secrets_cmd;
 pub mod spec;
 pub mod usage_cmd;
+pub mod worktrees_cmd;

@@ -1,0 +1,9 @@
+usage: dunkingsheep worktrees [-h] <subcommand> ...
+
+positional arguments:
+  <subcommand>
+    disk        read-only report: size, age, pull request and build caches of
+                each directory
+
+options:
+  -h, --help    show this help message and exit

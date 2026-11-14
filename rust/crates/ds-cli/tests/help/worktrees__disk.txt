@@ -1,0 +1,5 @@
+usage: dunkingsheep worktrees disk [-h] [--root DIR]
+
+options:
+  -h, --help  show this help message and exit
+  --root DIR  the worktree root (default: ~/workspace/.dunk-port-work)

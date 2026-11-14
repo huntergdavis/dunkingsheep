@@ -3868,6 +3868,12 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
                 json,
             )
         }
+        // `worktrees disk [--root DIR]`: the read-only disk report (t3912).
+        "worktrees" => match text(ns, "worktrees_command") {
+            Some("disk") => crate::worktrees_cmd::disk_command(text(ns, "root"), json),
+            Some(other) => not_ported(&format!("worktrees {other}")),
+            None => not_ported("worktrees"),
+        },
         "watchdog-deadman" => watchdog_deadman(ns),
         "github" => github(ns),
         "guard" => guard(ns),
