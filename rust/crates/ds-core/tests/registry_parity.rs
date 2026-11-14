@@ -105,6 +105,14 @@ fn every_input_schema_equals_the_pythons() {
                 .remove("waiting_on")
                 .is_some());
         }
+        if name == "task_read" || name == "task_note" {
+            let properties = got["properties"].as_object_mut().unwrap();
+            assert!(properties.remove("note_kind").is_some());
+            if name == "task_read" {
+                assert!(properties.remove("summary").is_some());
+                assert!(properties.remove("notes").is_some());
+            }
+        }
         if name == "roster" {
             assert!(got["properties"]
                 .as_object_mut()
@@ -211,4 +219,26 @@ fn roles_are_the_python_allowlist() {
     assert!(status.roles.contains(&"anonymous"));
     let close = registry::command("close").expect("close");
     assert_eq!(&["owner"], close.roles);
+}
+
+#[test]
+fn task_history_mcp_fields_do_not_collide_with_task_type() {
+    let schema = registry::grouped_input_schema("task").unwrap();
+    assert_eq!(schema["properties"]["summary"]["type"], "boolean");
+    assert_eq!(schema["properties"]["notes"]["type"], "string");
+    let task_kinds = schema["properties"]["kind"]["enum"].as_array().unwrap();
+    assert!(task_kinds.contains(&serde_json::json!("work")));
+    let note_kinds = schema["properties"]["note_kind"]["enum"]
+        .as_array()
+        .unwrap();
+    for kind in [
+        "evidence",
+        "decision",
+        "handoff",
+        "progress",
+        "correction",
+        "note",
+    ] {
+        assert!(note_kinds.contains(&serde_json::json!(kind)));
+    }
 }

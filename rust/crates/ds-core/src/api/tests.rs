@@ -7060,7 +7060,7 @@ fn api_t39_task_note_preserves_raw_event_meta_and_null_actor_without_task_lookup
     )
     .expect("truthy numeric event binds as TEXT and falsey reason is discarded");
     assert_eq!(numeric_event["event"], 5);
-    assert_eq!(numeric_event["meta"], json!({}));
+    assert_eq!(numeric_event["meta"], json!({"kind":"note"}));
 
     let connection = rusqlite::Connection::open(tasks.path()).expect("read task DB");
     let rows: Vec<(String, Option<String>, String)> = connection
@@ -7088,7 +7088,7 @@ fn api_t39_task_note_preserves_raw_event_meta_and_null_actor_without_task_lookup
     assert_eq!(rows[2].1, None);
     assert_eq!(
         serde_json::from_str::<Value>(&rows[2].2).unwrap(),
-        json!({})
+        json!({"kind":"note"})
     );
 
     let before = rows.len();
@@ -10859,3 +10859,236 @@ fn socket_nonfinite_leases_reach_real_task_sql_and_preserve_error_order() {
 
 #[path = "context_mutation_tests.rs"]
 mod context_mutation_tests;
+
+#[test]
+fn task_history_summary_and_kinds_are_bounded_explicit_and_private() {
+    let (runtime, _dir, flock, tasks, dispatcher) = task_api_fixture();
+    let long = "\n\"\\🧶".repeat(3000);
+    let task = dispatch_task_api(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_add",
+        json!({"title":"history", "scope":"self", "body":long}),
+        "w1:p1",
+    )
+    .unwrap();
+    let id = task["id"].as_str().unwrap();
+    for kind in crate::tasks::history::NOTE_KINDS {
+        for index in 0..if kind == "evidence" { 3 } else { 1 } {
+            let result = dispatch_task_api(
+                &dispatcher,
+                &flock,
+                &runtime,
+                "task_note",
+                json!({"id":id,"note_kind":kind,"reason":format!("{kind}-{index} {long}")}),
+                "w1:p1",
+            )
+            .unwrap();
+            assert_eq!(result["event"], "note");
+            assert_eq!(result["meta"]["kind"], kind);
+        }
+    }
+    // A free event that happens to name a fixed kind stays a legacy note.
+    dispatch_task_api(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_note",
+        json!({"id":id,"event":"handoff","reason":"legacy evidence decision handoff"}),
+        "w1:p1",
+    )
+    .unwrap();
+    let conn = rusqlite::Connection::open(tasks.path()).unwrap();
+    conn.execute(
+        "UPDATE tasks SET title=?1, block_reason=?1, assignees=?2 WHERE id=?3",
+        rusqlite::params![
+            long,
+            serde_json::to_string(&vec![long.clone(); 50]).unwrap(),
+            id
+        ],
+    )
+    .unwrap();
+    // Equal timestamps still have deterministic append order.
+    conn.execute("UPDATE task_events SET at=100 WHERE task_id=?", [id])
+        .unwrap();
+    let snapshot = || {
+        conn.prepare("SELECT id,event,meta FROM task_events WHERE task_id=? ORDER BY id")
+            .unwrap()
+            .query_map([id], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    let before = snapshot();
+    let default = dispatch_task_api(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_read",
+        json!({"id":id}),
+        "w1:p1",
+    )
+    .unwrap();
+    assert_eq!(default["notes"].as_array().unwrap().len(), 3);
+    assert!(default.get("summary").is_none());
+    assert!(default["notes"][0].get("kind").is_none());
+    let summary = dispatch_task_api(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_read",
+        json!({"id":id,"summary":true}),
+        "w1:p1",
+    )
+    .unwrap();
+    assert!(
+        serde_json::to_vec(&summary).unwrap().len() < 2048,
+        "{}",
+        serde_json::to_vec(&summary).unwrap().len()
+    );
+    for key in [
+        "title",
+        "status",
+        "assignees",
+        "block_reason",
+        "body",
+        "notes",
+    ] {
+        assert!(summary.get(key).is_some());
+    }
+    assert!(summary["body"].as_str().unwrap().ends_with("[more]"));
+    assert_eq!(summary["assignees_more"], 46);
+    assert!(summary.get("children").is_none());
+    assert!(summary.get("leases").is_none());
+    assert_eq!(summary["notes"].as_array().unwrap().len(), 6);
+    let evidence = summary["notes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["kind"] == "evidence")
+        .unwrap();
+    assert!(evidence["reason"]
+        .as_str()
+        .unwrap()
+        .starts_with("evidence-2"));
+    let legacy = summary["notes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["kind"] == "note")
+        .unwrap();
+    assert_eq!(legacy["reason"], "legacy evidence decision handoff");
+    let page = dispatch_task_api(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_read",
+        json!({"id":id,"notes":"2","note_kind":"evidence"}),
+        "w1:p1",
+    )
+    .unwrap();
+    let notes = page["notes"].as_array().unwrap();
+    assert_eq!(notes.len(), 2);
+    assert!(notes[0]["reason"]
+        .as_str()
+        .unwrap()
+        .starts_with("evidence-1"));
+    assert!(notes[1]["reason"]
+        .as_str()
+        .unwrap()
+        .starts_with("evidence-2"));
+    assert!(notes[0]["note_id"].as_i64() < notes[1]["note_id"].as_i64());
+    assert_eq!(page["notes_more"], true);
+    let all = dispatch_task_api(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_read",
+        json!({"id":id,"notes":"all"}),
+        "w1:p1",
+    )
+    .unwrap();
+    assert_eq!(all["notes"].as_array().unwrap().len(), 8);
+    assert_eq!(all["notes_more"], false);
+    let legacy = dispatch_task_api(
+        &dispatcher,
+        &flock,
+        &runtime,
+        "task_read",
+        json!({"id":id,"notes":"all","note_kind":"note"}),
+        "w1:p1",
+    )
+    .unwrap();
+    assert_eq!(legacy["notes"].as_array().unwrap().len(), 1);
+    assert_eq!(legacy["notes"][0]["event"], "handoff");
+    for extra in [json!({"summary":true}), json!({"notes":"all"})] {
+        let mut args = extra.as_object().unwrap().clone();
+        args.insert("id".into(), json!(id));
+        assert!(dispatch_task_api(
+            &dispatcher,
+            &flock,
+            &runtime,
+            "task_read",
+            Value::Object(args),
+            "w1:p3"
+        )
+        .is_err());
+    }
+    for extra in [
+        json!({"notes":"0"}),
+        json!({"notes":"-1"}),
+        json!({"notes":2}),
+        json!({"notes":"oops"}),
+        json!({"summary":"true"}),
+        json!({"summary":true,"notes":"all"}),
+        json!({"note_kind":"evidence"}),
+        json!({"notes":"all","note_kind":"work"}),
+    ] {
+        let mut args = extra.as_object().unwrap().clone();
+        args.insert("id".into(), json!(id));
+        assert!(dispatch_task_api(
+            &dispatcher,
+            &flock,
+            &runtime,
+            "task_read",
+            Value::Object(args),
+            "w1:p1"
+        )
+        .is_err());
+    }
+    for kind in [json!("note"), json!("work"), Value::Null, json!(true)] {
+        assert!(dispatch_task_api(
+            &dispatcher,
+            &flock,
+            &runtime,
+            "task_note",
+            json!({"id":id,"note_kind":kind,"reason":"must not write"}),
+            "w1:p1"
+        )
+        .is_err());
+    }
+    assert_eq!(
+        snapshot(),
+        before,
+        "history reads and refused writes preserve stored events"
+    );
+    assert_eq!(
+        dispatch_task_api(
+            &dispatcher,
+            &flock,
+            &runtime,
+            "task_read",
+            json!({"id":id,"summary":false}),
+            "w1:p1"
+        )
+        .unwrap(),
+        default
+    );
+}

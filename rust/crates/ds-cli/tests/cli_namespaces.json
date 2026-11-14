@@ -5902,9 +5902,12 @@
    "command": "task",
    "id": "x",
    "json": false,
+   "kind": null,
    "no_start_daemon": false,
+   "notes": null,
    "self_pane": null,
    "socket": null,
+   "summary": false,
    "task_command": "read"
   }
  },
@@ -5919,9 +5922,12 @@
    "command": "task",
    "id": "x",
    "json": true,
+   "kind": null,
    "no_start_daemon": false,
+   "notes": null,
    "self_pane": null,
    "socket": null,
+   "summary": false,
    "task_command": "read"
   }
  },
@@ -5936,9 +5942,74 @@
    "command": "task",
    "id": "x",
    "json": true,
+   "kind": null,
    "no_start_daemon": false,
+   "notes": null,
    "self_pane": null,
    "socket": null,
+   "summary": false,
+   "task_command": "read"
+  }
+ },
+ {
+  "argv": [
+   "task",
+   "read",
+   "x",
+   "--summary"
+  ],
+  "namespace": {
+   "command": "task",
+   "id": "x",
+   "json": false,
+   "kind": null,
+   "no_start_daemon": false,
+   "notes": null,
+   "self_pane": null,
+   "socket": null,
+   "summary": true,
+   "task_command": "read"
+  }
+ },
+ {
+  "argv": [
+   "task",
+   "read",
+   "x",
+   "--notes",
+   "x"
+  ],
+  "namespace": {
+   "command": "task",
+   "id": "x",
+   "json": false,
+   "kind": null,
+   "no_start_daemon": false,
+   "notes": "x",
+   "self_pane": null,
+   "socket": null,
+   "summary": false,
+   "task_command": "read"
+  }
+ },
+ {
+  "argv": [
+   "task",
+   "read",
+   "x",
+   "--kind",
+   "evidence"
+  ],
+  "namespace": {
+   "command": "task",
+   "id": "x",
+   "json": false,
+   "kind": "evidence",
+   "no_start_daemon": false,
+   "notes": null,
+   "self_pane": null,
+   "socket": null,
+   "summary": false,
    "task_command": "read"
   }
  },
@@ -6779,6 +6850,7 @@
    "event": "note",
    "id": "x",
    "json": false,
+   "kind": null,
    "no_start_daemon": false,
    "reason": null,
    "self_pane": null,
@@ -6798,6 +6870,7 @@
    "event": "note",
    "id": "x",
    "json": true,
+   "kind": null,
    "no_start_daemon": false,
    "reason": null,
    "self_pane": null,
@@ -6817,6 +6890,7 @@
    "event": "note",
    "id": "x",
    "json": true,
+   "kind": null,
    "no_start_daemon": false,
    "reason": null,
    "self_pane": null,
@@ -6837,6 +6911,7 @@
    "event": "x",
    "id": "x",
    "json": false,
+   "kind": null,
    "no_start_daemon": false,
    "reason": null,
    "self_pane": null,
@@ -6857,8 +6932,30 @@
    "event": "note",
    "id": "x",
    "json": false,
+   "kind": null,
    "no_start_daemon": false,
    "reason": "x",
+   "self_pane": null,
+   "socket": null,
+   "task_command": "note"
+  }
+ },
+ {
+  "argv": [
+   "task",
+   "note",
+   "x",
+   "--kind",
+   "evidence"
+  ],
+  "namespace": {
+   "command": "task",
+   "event": "note",
+   "id": "x",
+   "json": false,
+   "kind": "evidence",
+   "no_start_daemon": false,
+   "reason": null,
    "self_pane": null,
    "socket": null,
    "task_command": "note"

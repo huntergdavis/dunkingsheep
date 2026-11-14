@@ -5319,6 +5319,8 @@ fn cli_route_58_commands_map() {
     assert!(r.contains("head, project, no_project)"));
     // A required parameter is printed with a `*`.
     assert!(r.contains("task_block(id*, reason, waiting_on)"));
+    assert!(r.contains("task_read(id, summary, notes, note_kind)"));
+    assert!(r.contains("task_note(id, event, reason, note_kind)"));
     assert!(r.contains("Task queues are omitted by default"));
     assert!(
         r.contains("owner_conversation(limit, before, before_id, source_filter, include_internal)")
@@ -5349,7 +5351,9 @@ fn cli_route_58_commands_map() {
                     Some(line.replace(
                         "inbox_list(mailbox, unread_only, limit, newest_first, before, literal_mailbox)",
                         "inbox_list(mailbox, unread_only, limit)",
-                    ).replace("owner_conversation(limit, before, before_id, source_filter, include_internal)", "owner_conversation(limit, before)"))
+                    ).replace("owner_conversation(limit, before, before_id, source_filter, include_internal)", "owner_conversation(limit, before)")
+                    .replace("task_read(id, summary, notes, note_kind)", "task_read(id)")
+                    .replace("task_note(id, event, reason, note_kind)", "task_note(id, event, reason)"))
                 }
             })
             .collect::<Vec<_>>()
@@ -5413,6 +5417,15 @@ fn cli_route_58_commands_map() {
             .remove("waiting_on")
             .is_some());
         // t4701: the two task project overrides are Rust-only.
+        for name in ["task_read", "task_note"] {
+            let task = r.iter_mut().find(|row| row["name"] == name).unwrap();
+            let properties = task["input_schema"]["properties"].as_object_mut().unwrap();
+            assert!(properties.remove("note_kind").is_some());
+            if name == "task_read" {
+                assert!(properties.remove("summary").is_some());
+                assert!(properties.remove("notes").is_some());
+            }
+        }
         let task_add = r.iter_mut().find(|row| row["name"] == "task_add").unwrap();
         for key in ["project", "no_project"] {
             assert!(task_add["input_schema"]["properties"]
@@ -6309,4 +6322,53 @@ fn cli_route_pr_wait_registration_list_and_cancel() {
             .contains("fixture"));
         assert!(output.stderr.is_empty());
     }
+}
+
+#[test]
+fn cli_task_history_flags_reach_the_daemon_and_render_the_explicit_view() {
+    let summary = run_daemon_cli(
+        &["task", "read", "t9", "--summary"],
+        "task_read",
+        json!({"id":"t9","summary":true}),
+        json!({"id":"t9","summary":true,"title":"Bounded task","status":"blocked","assignees":["%1"],"assignees_more":0,"block_reason":"waiting","body":"body [more]","notes":[{"kind":"evidence","at":100,"actor":"%1","reason":"checks [more]"}]}),
+    );
+    assert!(summary.status.success());
+    let text = String::from_utf8(summary.stdout).unwrap();
+    assert!(text.contains("body [more]"));
+    assert!(text.contains("latest notes by kind"));
+    assert!(text.contains("evidence"));
+    assert!(!text.contains("scope       None"));
+    let page = run_daemon_cli(
+        &["task", "read", "t9", "--notes", "2", "--kind", "evidence"],
+        "task_read",
+        json!({"id":"t9","notes":"2","note_kind":"evidence"}),
+        json!({"id":"t9","title":"Task","status":"open","priority":"low","scope":"global","notes":[{"kind":"evidence","event":"note","at":100,"actor":"%1","reason":"ran checks"}],"notes_more":true}),
+    );
+    assert!(page.status.success());
+    let text = String::from_utf8(page.stdout).unwrap();
+    assert!(text.contains("evidence (note)"));
+    assert!(text.contains("--notes all"));
+    let all = run_daemon_cli(
+        &["task", "read", "t9", "--notes", "all", "--kind", "note"],
+        "task_read",
+        json!({"id":"t9","notes":"all","note_kind":"note"}),
+        json!({"id":"t9","notes":[]}),
+    );
+    assert!(all.status.success());
+    let note = run_daemon_cli(
+        &[
+            "task",
+            "note",
+            "t9",
+            "--kind",
+            "handoff",
+            "--reason",
+            "ready for review",
+        ],
+        "task_note",
+        json!({"id":"t9","event":"note","reason":"ready for review","note_kind":"handoff"}),
+        json!({"noted":"t9","event":"note"}),
+    );
+    assert!(note.status.success());
+    assert_eq!(String::from_utf8(note.stdout).unwrap(), "noted t9: note\n");
 }

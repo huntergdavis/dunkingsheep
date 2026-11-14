@@ -1,7 +1,13 @@
-usage: dunkingsheep task read [-h] id
+usage: dunkingsheep task read [-h] [--summary] [--notes N|all]
+                              [--kind {evidence,decision,handoff,progress,correction,note}]
+                              id
 
 positional arguments:
   id
 
 options:
-  -h, --help  show this help message and exit
+  -h, --help            show this help message and exit
+  --summary             bounded body and latest note of each kind
+  --notes N|all         latest N notes, or the full history, oldest first
+  --kind {evidence,decision,handoff,progress,correction,note}
+                        filter --notes by kind; note includes legacy events
