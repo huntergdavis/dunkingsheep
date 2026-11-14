@@ -22,6 +22,13 @@ use super::Flock;
 pub trait InboxEnv: MailboxEnv {
     /// `caller_role(pane)`.
     fn caller_role(&self, pane_id: &str) -> Result<String, DunkError>;
+    /// t4762: the role of a caller that has NO pane, from the service token its connection
+    /// authenticated with (`system`, `owner`, `web`, ...). `None` when the environment has no
+    /// such identity, which is treated as `anonymous`. The watchdog is such a caller: a
+    /// pane-less process holding the system token.
+    fn paneless_role(&self) -> Result<Option<String>, DunkError> {
+        Ok(None)
+    }
     /// `DUNKINGSHEEP_MAILBOX`, trimmed; `None` when unset or blank.
     fn mailbox_override(&self) -> Option<String>;
     /// Recipient-side wake policy; tests inject it without changing process environment.
@@ -570,7 +577,12 @@ impl Flock {
             if self.socket_peer_ok().is_some() {
                 let role = match self_pane {
                     Some(pane) => env.caller_role(pane)?,
-                    None => "anonymous".to_string(),
+                    // A pane-less caller is whatever its connection's token says it is.
+                    // It used to be forced to `anonymous` here, so the watchdog, which has
+                    // no pane and holds the system token, could never send (t4762).
+                    None => env
+                        .paneless_role()?
+                        .unwrap_or_else(|| "anonymous".to_string()),
                 };
                 if !matches!(role.as_str(), "system" | "owner") {
                     return Err(refused(format!(

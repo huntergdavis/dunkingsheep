@@ -18,6 +18,14 @@ impl RequestRuntimeAdapter<'_> {
             .caller_role(Some(pane_id), &self.terminal)
     }
 
+    /// t4762: the role of a caller with no pane, from the request's service token.
+    fn helper_inboxenv_paneless_role(&self) -> Result<Option<String>, DunkError> {
+        self.terminal
+            .flock
+            .caller_role(None, &self.terminal)
+            .map(Some)
+    }
+
     #[allow(dead_code)] // The complete InboxEnv assembly belongs to its dependent leaf.
     fn helper_inboxenv_mailbox_override(&self) -> Option<String> {
         mailbox_override_from(std::env::var("DUNKINGSHEEP_MAILBOX").ok().as_deref())
@@ -83,6 +91,11 @@ impl MailboxEnv for InboxRuntimeView<'_> {
 impl InboxEnv for InboxRuntimeView<'_> {
     fn caller_role(&self, pane: &str) -> Result<String, DunkError> {
         self.adapter.helper_inboxenv_caller_role(pane)
+    }
+    /// The role the request's service token resolves to, for a caller with no pane. Reads the
+    /// per-request caller context, so it is called on the request's thread.
+    fn paneless_role(&self) -> Result<Option<String>, DunkError> {
+        self.adapter.helper_inboxenv_paneless_role()
     }
     fn mailbox_override(&self) -> Option<String> {
         self.adapter.helper_inboxenv_mailbox_override()
