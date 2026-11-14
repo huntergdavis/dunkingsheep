@@ -22,6 +22,7 @@ test('every dashboard keeps its own route, Inbox included, and Projects is first
     assert.equal(canonicalDashLocation(`/dash/${key}`, '?pane=%257'), null);
   }
   assert.equal(DASH_ROUTES.cos.title, 'Inbox');
+  assert.equal(DASH_ROUTES.cos.eyebrow, 'INBOX');
 });
 
 // t4646: the Terminals view is retired; its bookmarks land on Projects with the lane kept.
