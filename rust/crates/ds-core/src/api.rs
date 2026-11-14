@@ -1136,6 +1136,21 @@ impl Dispatcher {
         name: &str,
         args: Option<Args>,
     ) -> Result<Value, DunkError> {
+        let started = std::time::Instant::now();
+        let mut role = None;
+        let result = self.dispatch_counted(context, gate, name, args, &mut role);
+        count_command(context, name, role.as_deref(), started.elapsed(), &result);
+        result
+    }
+
+    fn dispatch_counted<G: CallerGate + ?Sized>(
+        &self,
+        context: &HandlerContext<'_>,
+        gate: &G,
+        name: &str,
+        args: Option<Args>,
+        role_seen: &mut Option<String>,
+    ) -> Result<Value, DunkError> {
         let _caller = RequestCallerGuard::install(context.flock, context.request);
         let self_pane_id = context.self_pane_id();
         let command = registry::command(name)
@@ -1149,6 +1164,7 @@ impl Dispatcher {
                 return Err(error);
             }
         };
+        *role_seen = Some(role.clone());
         if command.owner_only && role != "system" && role != "web" {
             // The owner gate: passing it IS the permission for these verbs.
             gate.require_superuser(self_pane_id, name)?;
@@ -1227,6 +1243,36 @@ impl Dispatcher {
             result
         })
     }
+}
+
+/// Add one dispatched command to the per-minute counters (t4706): command, caller role, the
+/// time spent in the dispatcher and the size of the result. A name outside the registry is
+/// counted under one label, and counting never fails or changes the request.
+fn count_command(
+    context: &HandlerContext<'_>,
+    name: &str,
+    role: Option<&str>,
+    elapsed: std::time::Duration,
+    result: &Result<Value, DunkError>,
+) {
+    let Some(metrics) = context.flock.stores().metrics else {
+        return;
+    };
+    let command = registry::command(name)
+        .map(|command| command.name)
+        .unwrap_or(crate::command_stats::UNKNOWN_COMMAND);
+    let bytes = result
+        .as_ref()
+        .map(crate::command_stats::json_size)
+        .unwrap_or(0);
+    metrics.record_command(
+        context.env.now_s(),
+        command,
+        role.unwrap_or(crate::command_stats::UNRESOLVED_ROLE),
+        i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX),
+        bytes,
+        result.is_ok(),
+    );
 }
 
 /// `dunk_api.h_whoami`.

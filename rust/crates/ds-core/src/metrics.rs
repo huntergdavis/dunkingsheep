@@ -50,6 +50,8 @@ pub struct MetricsStore {
     writer: crate::db::SyncWriter,
     pub enabled: bool,
     pub retention_s: f64,
+    /// Per-command counters not yet written (t4706).
+    commands: crate::command_stats::Pending,
 }
 
 impl MetricsStore {
@@ -67,11 +69,104 @@ impl MetricsStore {
         }
         let writer = crate::db::SyncWriter::spawn(path)?;
         writer.call(|conn| conn.execute_batch(SCHEMA).map_err(crate::db::map_sqlite))?;
+        writer.call(|conn| {
+            conn.execute_batch(crate::command_stats::SCHEMA)
+                .map_err(crate::db::map_sqlite)
+        })?;
         Ok(MetricsStore {
             writer,
             enabled: true,
             retention_s: RETENTION_S,
+            commands: crate::command_stats::Pending::default(),
         })
+    }
+
+    /// Count one dispatched command (t4706). The cell stays in memory for its minute; the cells
+    /// of earlier minutes are written here, one row per minute and key. Never fails the caller.
+    pub fn record_command(
+        &self,
+        at: f64,
+        command: &str,
+        role: &str,
+        duration_ms: i64,
+        bytes: i64,
+        ok: bool,
+    ) {
+        if !self.enabled {
+            return;
+        }
+        let closed = self.commands.add(at, command, role, duration_ms, bytes, ok);
+        if closed.is_empty() {
+            return;
+        }
+        let rows = closed.clone();
+        let written = self.writer.call(move |conn| {
+            let tx = conn.transaction().map_err(crate::db::map_sqlite)?;
+            for ((minute, command, role), cell) in &rows {
+                tx.execute(
+                    "INSERT INTO command_minutes (minute, command, role, count, errors, \
+                     total_ms, max_ms, bytes, buckets) VALUES (?,?,?,?,?,?,?,?,?)",
+                    rusqlite::params![
+                        minute,
+                        command,
+                        role,
+                        cell.count,
+                        cell.errors,
+                        cell.total_ms,
+                        cell.max_ms,
+                        cell.bytes,
+                        cell.buckets_text()
+                    ],
+                )
+                .map_err(crate::db::map_sqlite)?;
+            }
+            tx.commit().map_err(crate::db::map_sqlite)
+        });
+        if written.is_err() {
+            self.commands.restore(closed);
+        }
+    }
+
+    /// The per-command cells of every minute overlapping `[start, end)`: the written rows plus
+    /// the ones still in memory.
+    pub fn command_cells(
+        &self,
+        start: f64,
+        end: f64,
+    ) -> Result<Vec<(crate::command_stats::Key, crate::command_stats::Cell)>, crate::error::DunkError>
+    {
+        let first = crate::command_stats::minute_of(start);
+        let last = crate::command_stats::minute_of(end);
+        let mut cells: Vec<(crate::command_stats::Key, crate::command_stats::Cell)> =
+            self.writer.call(move |conn| {
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT minute, command, role, count, errors, total_ms, max_ms, bytes, \
+                     buckets FROM command_minutes WHERE minute >= ? AND minute <= ? \
+                     ORDER BY minute",
+                    )
+                    .map_err(crate::db::map_sqlite)?;
+                let rows = stmt
+                    .query_map([first, last], |r| {
+                        let buckets: String = r.get(8)?;
+                        Ok((
+                            (r.get(0)?, r.get(1)?, r.get(2)?),
+                            crate::command_stats::Cell {
+                                count: r.get(3)?,
+                                errors: r.get(4)?,
+                                total_ms: r.get(5)?,
+                                max_ms: r.get(6)?,
+                                bytes: r.get(7)?,
+                                buckets: crate::command_stats::Cell::buckets_from_text(&buckets),
+                            },
+                        ))
+                    })
+                    .map_err(crate::db::map_sqlite)?;
+                rows.collect::<Result<Vec<_>, _>>()
+                    .map_err(crate::db::map_sqlite)
+            })?;
+        cells.extend(self.commands.snapshot());
+        Ok(cells)
     }
 
     /// `record`: never fails the caller (telemetry must not break delivery).
@@ -112,6 +207,11 @@ impl MetricsStore {
             let mut removed = conn
                 .execute("DELETE FROM events WHERE at < ?", [cutoff])
                 .map_err(crate::db::map_sqlite)? as i64;
+            conn.execute(
+                "DELETE FROM command_minutes WHERE minute < ?",
+                [crate::command_stats::minute_of(cutoff)],
+            )
+            .map_err(crate::db::map_sqlite)?;
             let total: i64 = conn
                 .query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))
                 .map_err(crate::db::map_sqlite)?;

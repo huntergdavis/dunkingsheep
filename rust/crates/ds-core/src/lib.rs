@@ -17,6 +17,7 @@ pub mod api;
 pub mod atomic_json;
 pub mod client;
 pub mod clock;
+pub mod command_stats;
 pub mod config;
 pub mod context;
 pub mod daemon_log;
