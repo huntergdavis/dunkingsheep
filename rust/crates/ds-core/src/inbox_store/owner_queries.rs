@@ -223,14 +223,17 @@ impl Store {
                     .iter()
                     .map(|prefix| SqlValue::Text((*prefix).to_string())),
             );
-            // Only a durable sender-selected audience excludes a lane message. Literal
-            // subjects and legacy rows without a classification remain visible.
-            let (owner_mailbox, owner_params) = mailbox_where(OWNER_MAILBOX, "mailbox");
-            sql.push_str(&format!(
-                " AND ({owner_mailbox} OR NOT EXISTS (SELECT 1 FROM message_audiences WHERE message_id = messages.id AND audience = 'agent'))"
-            ));
-            values.extend(owner_params.into_iter().map(SqlValue::Text));
         }
+        // Only a durable sender-selected audience excludes a lane message. Literal subjects and
+        // legacy rows without a classification remain visible. t4681: this holds for EVERY
+        // conversation query, not only the window that hides routine mail: a conversation is
+        // what a person reads, and agent-only mail (a stored scheduled dunk, a handoff notice)
+        // must not appear in it by any path. No caller asks for agent rows.
+        let (owner_mailbox, owner_params) = mailbox_where(OWNER_MAILBOX, "mailbox");
+        sql.push_str(&format!(
+            " AND ({owner_mailbox} OR NOT EXISTS (SELECT 1 FROM message_audiences WHERE message_id = messages.id AND audience = 'agent'))"
+        ));
+        values.extend(owner_params.into_iter().map(SqlValue::Text));
         if let Some(before) = before {
             sql.push_str(" AND created_at < ?");
             values.push(SqlValue::Real(before));
