@@ -5183,7 +5183,7 @@ fn cli_route_guide_and_empty_argv() {
 
 #[test]
 fn cli_route_58_commands_map() {
-    // The retired Python oracle lacks project membership and memory queue extensions.
+    // The retired Python oracle lacks project membership, memory queue and inbox paging extensions.
     // Keep byte-level parity for every other command, and check the extension itself.
     let rust = run_binary_without_command(&["commands"]);
     let python = run_python_reference(&["commands"]);
@@ -5195,6 +5195,9 @@ fn cli_route_58_commands_map() {
     assert!(r.contains("memory_backfill(action, limit, queue_id, path, reason)"));
     assert!(r.contains("roster(project)"));
     assert!(r.contains("Task queues are omitted by default"));
+    assert!(r.contains(
+        "inbox_list(mailbox, unread_only, limit, newest_first, before, literal_mailbox)"
+    ));
     let strip = |text: &str| {
         let mut skip_description = false;
         text.lines()
@@ -5213,7 +5216,10 @@ fn cli_route_58_commands_map() {
                     skip_description = true;
                     None
                 } else {
-                    Some(line.to_owned())
+                    Some(line.replace(
+                        "inbox_list(mailbox, unread_only, limit, newest_first, before, literal_mailbox)",
+                        "inbox_list(mailbox, unread_only, limit)",
+                    ))
                 }
             })
             .collect::<Vec<_>>()
@@ -5255,6 +5261,17 @@ fn cli_route_58_commands_map() {
                 .unwrap()
                 .contains("default false")
         );
+        let inbox_list = r
+            .iter_mut()
+            .find(|row| row["name"] == "inbox_list")
+            .unwrap();
+        for key in ["newest_first", "before", "literal_mailbox"] {
+            assert!(inbox_list["input_schema"]["properties"]
+                .as_object_mut()
+                .unwrap()
+                .remove(key)
+                .is_some());
+        }
         r.retain(|row| {
             row["name"] != "lanes"
                 && row["name"] != "roster"
