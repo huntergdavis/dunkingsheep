@@ -268,6 +268,8 @@ impl Store {
                 exclude_routine: true
             }
         );
+        let annotate_ambiguous =
+            exclude_routine || matches!(visibility, ConversationVisibility::Filter(_));
         let columns = if matches!(visibility, ConversationVisibility::Filter(_)) {
             "*, (SELECT audience FROM message_audiences WHERE message_id = messages.id) AS audience"
         } else {
@@ -395,7 +397,7 @@ impl Store {
                         ).map_err(map_sqlite)?
                     } else { false }
                 } else { false };
-                if exclude_routine && ambiguous_owner_reply {
+                if annotate_ambiguous && ambiguous_owner_reply {
                     object.insert("ambiguous_owner_reply".to_string(), Value::Bool(true));
                 }
             }

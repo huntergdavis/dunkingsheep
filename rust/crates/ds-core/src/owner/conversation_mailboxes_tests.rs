@@ -332,6 +332,15 @@ fn inbox_source_filters_use_metadata_scope_and_opt_in_without_consuming() {
         false,
     );
     let human_web = send("owner", None, Some("web"), "question", false);
+    let root_reply = store
+        .send(&Outgoing {
+            mailbox: "owner",
+            transport: Some("web"),
+            reply_to: Some(&human_web),
+            body: Some("sender-less answer remains unattributed"),
+            ..Default::default()
+        })
+        .unwrap();
     let root_agent = send("owner", None, None, "ordinary", true);
     let lane_legacy = send(
         OWNER_LANE_MAILBOX,
@@ -381,7 +390,10 @@ fn inbox_source_filters_use_metadata_scope_and_opt_in_without_consuming() {
             .map(|row| row["id"].as_str().unwrap().to_owned())
             .collect::<Vec<_>>()
     };
-    assert_eq!(ids(Human), vec![human_legacy.clone(), human_web.clone()]);
+    assert_eq!(
+        ids(Human),
+        vec![human_legacy.clone(), human_web.clone(), root_reply.clone()]
+    );
     assert_eq!(
         ids(OwnerLane {
             include_internal: false
@@ -399,6 +411,17 @@ fn inbox_source_filters_use_metadata_scope_and_opt_in_without_consuming() {
         service
             .conversation_filtered_cursor(50, None, Some(OWNER), All)
             .unwrap()
+    );
+    let human_rows = service
+        .conversation_filtered_cursor(50, None, Some(OWNER), Human)
+        .unwrap();
+    assert_eq!(
+        human_rows
+            .messages
+            .iter()
+            .find(|row| row["id"] == root_reply)
+            .unwrap()["ambiguous_owner_reply"],
+        true
     );
     assert!(ids(All).contains(&root_agent)); // preserve the existing root-mailbox audience exception.
     assert!(!ids(All).contains(&foreign));
