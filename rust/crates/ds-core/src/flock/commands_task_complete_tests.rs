@@ -83,6 +83,9 @@ struct TaskCompletionEnv<'a> {
     tokens: Tokens,
     transport: Box<dyn GitHubTransport>,
     pane: String,
+    /// The authoritative live pane listing the owner-token peer check reads; `None` is the
+    /// trait's default (unavailable), which is what every pane-keyed test wants.
+    authority: Option<Vec<Value>>,
 }
 
 impl PaneInfoEnv for TaskCompletionEnv<'_> {
@@ -92,6 +95,12 @@ impl PaneInfoEnv for TaskCompletionEnv<'_> {
 
     fn get_pane(&self, pane_id: &str) -> Option<Value> {
         (pane_id == self.pane).then(|| json!({"pane_id": self.pane, "pane_pid": 1101}))
+    }
+
+    fn try_authority_panes(&self) -> Result<Vec<Value>, DunkError> {
+        self.authority
+            .clone()
+            .ok_or_else(|| DunkError::Refused("authoritative pane listing unavailable".into()))
     }
 }
 
@@ -276,6 +285,7 @@ fn completion_env<'a>(
         tokens,
         transport,
         pane: "w1:p1".into(),
+        authority: None,
     }
 }
 
@@ -1219,4 +1229,258 @@ async fn a_paneless_caller_that_is_not_the_owner_service_is_refused_as_before() 
         err.contains("cannot be completed without a pane identity"),
         "{err}"
     );
+}
+
+// ---- t4781 follow-up: the whole path with a real owner token, and the next-job gate ----
+
+const OWNER_PANE: &str = "%owner";
+
+/// Authenticate this thread's request state as the owner's detached tooling: a real owner
+/// token issued by the registry, a verified socket peer with the daemon's uid, and this test
+/// process as the caller. Returns the authoritative pane listing the peer check needs.
+///
+/// The owner-token check walks the caller's process ancestry. Under a terminal multiplexer
+/// the ancestry passes through a pane root, which must then be the registered owner pane;
+/// elsewhere (CI) the test process itself stands in as that root. Either way the request
+/// names NO pane, which is what makes it the owner service.
+fn authenticate_owner_service(flock: &Flock) -> Vec<Value> {
+    let caller_pid = std::process::id() as i64;
+    let caller_start = crate::proc::process_start(caller_pid).unwrap();
+    let mut cursor = caller_pid;
+    let mut pane_root = None;
+    for _ in 0..crate::proc::MAX_DEPTH {
+        let row = crate::proc::stat(cursor).unwrap();
+        if row.ppid <= 1 {
+            break;
+        }
+        if crate::proc::stat(row.ppid).unwrap().comm == "tmux: server" {
+            pane_root = Some(cursor);
+            break;
+        }
+        cursor = row.ppid;
+    }
+    let root = pane_root.unwrap_or(caller_pid);
+    let root_start = crate::proc::process_start(root).unwrap();
+    let token = flock
+        .with_roles(|roles, _| {
+            roles.register(
+                OWNER_PANE,
+                "owner",
+                Some(root),
+                Some(&root_start),
+                None,
+                None,
+                None,
+                None,
+            )?;
+            roles.issue_token("owner", Some("owner-service-test"), None)
+        })
+        .unwrap();
+    flock.clear_caller();
+    flock.set_caller(Some(
+        json!({"pid": caller_pid, "start": caller_start, "source": "peer"}),
+    ));
+    flock.set_service_token(Some(&token));
+    flock.set_socket_peer(Some(true));
+    flock.with_caller(|state| state.socket_peer_uid = Some(nix::unistd::geteuid().as_raw()));
+    vec![json!({"pane_id": OWNER_PANE, "pane_pid": root})]
+}
+
+fn paneless_request() -> RequestCtx {
+    RequestCtx {
+        self_pane_id: None,
+        ..Default::default()
+    }
+}
+
+fn foreign_task(runtime: &tokio::runtime::Runtime, tasks: &Tasks, title: &str) -> Task {
+    runtime
+        .block_on(tasks.add_with(
+            "global",
+            title,
+            "",
+            AddOptions {
+                assignees: vec!["w9:p9".into()],
+                ..Default::default()
+            },
+        ))
+        .unwrap()
+}
+
+fn completed_event_actor(tasks: &Tasks, id: &str) -> Option<String> {
+    use rusqlite::OptionalExtension;
+    rusqlite::Connection::open(tasks.path())
+        .unwrap()
+        .query_row(
+            "SELECT actor FROM task_events WHERE task_id = ? AND event = 'completed'",
+            [id],
+            |row| row.get(0),
+        )
+        .optional()
+        .unwrap()
+}
+
+#[test]
+fn a_real_owner_token_without_a_pane_completes_as_owner_service_and_claims_no_next_job() {
+    let (_dir, runtime, flock, tasks, jobs, tokens) = completion_services("worker", true);
+    let answered = foreign_task(&runtime, &tasks, "answered owner question");
+    // Work the dispatcher could hand out next: it must not be claimed for 'owner-service'.
+    let next = runtime.block_on(tasks.add("global", "next", "")).unwrap();
+    let mut env = completion_env(&jobs, tokens, Box::<NoNetworkTransport>::default());
+    env.authority = Some(authenticate_owner_service(&flock));
+
+    let result = invoke_task_complete(
+        &flock,
+        &runtime,
+        &env,
+        &paneless_request(),
+        &answered.id,
+        None,
+        None,
+        true,
+    )
+    .unwrap();
+
+    let done = runtime.block_on(tasks.get(&answered.id)).unwrap();
+    assert_eq!("done", done.status);
+    assert_eq!(Some(OWNER_SERVICE), done.completed_by.as_deref());
+    assert_eq!(
+        Some(OWNER_SERVICE.to_string()),
+        completed_event_actor(&tasks, &answered.id)
+    );
+    // The next-job plan is a skip: nothing was claimed, nothing handed off.
+    assert!(result["next_job"].get("task").is_none(), "{result}");
+    let untouched = runtime.block_on(tasks.decorate(&next.id, None)).unwrap();
+    assert_eq!("open", untouched.task.status);
+    assert!(
+        untouched.claimed_by.is_empty(),
+        "{:?}",
+        untouched.claimed_by
+    );
+    assert!(untouched.assignees.is_empty(), "{:?}", untouched.assignees);
+}
+
+#[test]
+fn the_dispatch_gate_never_admits_owner_service() {
+    // 'owner-service' is not a lane: the gate that decides whether a completer may be handed
+    // its next job answers with a reason, so the planner skips.
+    let (_dir, runtime, _flock, _tasks, jobs, _tokens) = completion_services("worker", true);
+    let reason = runtime.block_on(jobs.gate(OWNER_SERVICE, None));
+    assert!(reason.is_some(), "the gate must refuse a non-lane actor");
+}
+
+#[test]
+fn without_the_owner_token_a_paneless_completion_is_refused_and_changes_nothing() {
+    let (_dir, runtime, flock, tasks, jobs, tokens) = completion_services("worker", true);
+    let task = foreign_task(&runtime, &tasks, "not yours");
+    let mut env = completion_env(&jobs, tokens, Box::<NoNetworkTransport>::default());
+    env.authority = Some(authenticate_owner_service(&flock));
+    let attempt = |flock: &Flock| {
+        invoke_task_complete(
+            flock,
+            &runtime,
+            &env,
+            &paneless_request(),
+            &task.id,
+            None,
+            None,
+            true,
+        )
+        .unwrap_err()
+        .to_string()
+    };
+
+    // No token at all: anonymous.
+    flock.clear_caller();
+    flock.set_service_token(None);
+    flock.set_socket_peer(Some(true));
+    let err = attempt(&flock);
+    assert!(
+        err.contains("cannot be completed without a pane identity"),
+        "{err}"
+    );
+
+    // A web token: a real token, the wrong role.
+    let web = flock
+        .with_roles(|roles, _| roles.issue_token("web", Some("web-test"), None))
+        .unwrap();
+    flock.clear_caller();
+    flock.set_service_token(Some(&web));
+    flock.set_socket_peer(Some(true));
+    let err = attempt(&flock);
+    assert!(
+        err.contains("cannot be completed without a pane identity"),
+        "{err}"
+    );
+
+    // The owner token after it was revoked: the next request is refused.
+    let _ = authenticate_owner_service(&flock);
+    flock
+        .with_roles(|roles, _| roles.revoke_token("owner-service-test"))
+        .unwrap();
+    flock.clear_caller();
+    flock.set_socket_peer(Some(true));
+    flock.with_caller(|state| state.socket_peer_uid = Some(nix::unistd::geteuid().as_raw()));
+    let err = attempt(&flock);
+    assert!(
+        err.contains("cannot be completed without a pane identity"),
+        "{err}"
+    );
+
+    assert_eq!(
+        "open",
+        runtime.block_on(tasks.get(&task.id)).unwrap().status
+    );
+}
+
+#[test]
+fn the_owner_token_naming_a_pane_it_is_not_in_keeps_the_ancestry_refusal() {
+    // A request that NAMES a pane is a pane request: the owner token used from a pane that is
+    // not the owner's is refused before anything is completed.
+    let (_dir, runtime, flock, tasks, jobs, tokens) = completion_services("worker", true);
+    let task = foreign_task(&runtime, &tasks, "not yours");
+    let mut env = completion_env(&jobs, tokens, Box::<NoNetworkTransport>::default());
+    env.authority = Some(authenticate_owner_service(&flock));
+    let request = RequestCtx {
+        self_pane_id: Some("w1:p1".into()),
+        ..Default::default()
+    };
+    let result = invoke_task_complete(&flock, &runtime, &env, &request, &task.id, None, None, true);
+    assert!(result.is_err(), "{result:?}");
+    assert_eq!(
+        "open",
+        runtime.block_on(tasks.get(&task.id)).unwrap().status
+    );
+}
+
+#[test]
+fn a_note_from_the_owner_service_records_that_actor() {
+    let (_dir, runtime, flock, tasks, jobs, tokens) = completion_services("worker", true);
+    let task = foreign_task(&runtime, &tasks, "answered");
+    let mut env = completion_env(&jobs, tokens, Box::<NoNetworkTransport>::default());
+    env.authority = Some(authenticate_owner_service(&flock));
+    let request = paneless_request();
+    let context = HandlerContext {
+        flock: &flock,
+        request: &request,
+        env: &env,
+        runtime: runtime.handle(),
+    };
+    let args = json!({"id": task.id, "reason": "answered once with evidence"})
+        .as_object()
+        .unwrap()
+        .clone();
+    let noted = crate::api::h_task_note(&context, args).unwrap();
+    assert_eq!(noted["actor"], OWNER_SERVICE);
+
+    // Without the token the note is still accepted, with no actor, as before.
+    flock.clear_caller();
+    flock.set_service_token(None);
+    flock.set_socket_peer(Some(true));
+    let args = json!({"id": task.id, "reason": "second"})
+        .as_object()
+        .unwrap()
+        .clone();
+    let noted = crate::api::h_task_note(&context, args).unwrap();
+    assert_eq!(noted["actor"], Value::Null);
 }
