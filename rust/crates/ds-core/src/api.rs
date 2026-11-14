@@ -2050,7 +2050,9 @@ pub fn h_owner_conversation(context: &HandlerContext<'_>, args: Args) -> Result<
             memory_int_arg(&limit_args, "limit", 50)?
         }
     };
-    if let Some(cursor) = args.get("before_id") {
+    let filtered = args.contains_key("source_filter") || args.contains_key("include_internal");
+    if args.contains_key("before_id") || filtered {
+        let cursor = args.get("before_id").unwrap_or(&Value::Null);
         if args.get("before").is_some_and(|value| !value.is_null()) {
             return Err(DunkError::Refused(
                 "before and before_id cannot be combined".into(),
@@ -2061,9 +2063,29 @@ pub fn h_owner_conversation(context: &HandlerContext<'_>, args: Args) -> Result<
             Value::String(id) if crate::inbox::valid_message_id(id) => Some(id.as_str()),
             _ => return Err(DunkError::Refused("invalid conversation cursor".into())),
         };
+        let name = match args.get("source_filter") {
+            None => "all",
+            Some(Value::String(value)) => value.as_str(),
+            _ => return Err(DunkError::Refused("source_filter must be a string".into())),
+        };
+        let include_internal = match args.get("include_internal") {
+            None | Some(Value::Bool(false)) => false,
+            Some(Value::Bool(true)) => true,
+            _ => {
+                return Err(DunkError::Refused(
+                    "include_internal must be a boolean".into(),
+                ))
+            }
+        };
+        let filter = crate::owner::ConversationFilter::parse(name, include_internal)?;
         let conversation = crate::owner::OwnerConversations::new(context.flock, context.env)
-            .conversation_cursor(limit, before_id, context.self_pane_id())?;
-        return serde_json::to_value(conversation).map_err(DunkError::from);
+            .conversation_filtered_cursor(limit, before_id, context.self_pane_id(), filter)?;
+        let mut value = serde_json::to_value(conversation).map_err(DunkError::from)?;
+        if filtered {
+            value["source_filter"] = json!(filter.name());
+            value["include_internal"] = json!(filter.include_internal());
+        }
+        return Ok(value);
     }
     let before = match args.get("before") {
         None | Some(Value::Null) => None,

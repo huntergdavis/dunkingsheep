@@ -188,3 +188,41 @@ It never calls consuming reads or pretends that the fallback reached the start o
 Newest polling probes for paging again, so the controls recover after an upgrade. Auth/origin
 failures never trigger this fallback. A cursor-only failure probes the first page: when paging
 still works, the cursor error and reload guidance stay visible rather than silently restarting.
+
+## Metadata source filters: S-G
+
+The default Owner inbox adds **All** (unchanged/default), **Human conversation** and **Owner
+lane**. The one-line rule under the selector describes the partition. Human means the owner
+root mailbox, excluding agent-only audience, with any transport: human input, quick messages,
+legacy mail and agent replies addressed to the owner. It does not mean human senders only.
+Owner lane means mailbox keys discovered for registered owner-role lanes, excluding the root;
+no working-directory, name-substring, subject or body inference is involved. The explicit views
+use metadata only, including unmarked routine mail. All keeps the pre-existing routine/audience
+visibility rules and is not redefined as a raw union of the other views.
+
+Owner lane starts with **Include internal agent-only mail** off. Only the actual boolean true
+opts into agent-only rows. Leaving the view resets the toggle. Changing the filter or toggle
+remounts the read state, starts a new cursor chain, removes the old body immediately and ignores
+late responses. Internal rows are labelled; no new Reply action or inferred recipient is added.
+
+The existing paged owner-thread route accepts `filter=all|human|owner_lane` and optional
+`include_internal=true`. Filters require an owner session, paging and the existing origin
+checks. `include_internal` is invalid outside owner_lane. Non-All requests require an exact
+source/opt-in echo and explicit audience on every upstream row; wrong or missing metadata,
+root/lane mismatch or unexpected agent rows fail closed. Filtered responses never fall back to
+unfiltered recent data if an older desk/daemon cannot serve the selected view. All retains
+S-F's read-only legacy-window fallback.
+
+The daemon's existing owner_conversation adds flat-schema `source_filter` and boolean
+`include_internal`. A source filter opts into stable cursor paging (before_id may be omitted
+for the first page), cannot combine with legacy timestamp before, and uses the same limit.
+Explicit Human/Owner-lane views require owner or web roles; legacy All access is unchanged.
+Mailbox partition and audience constraints apply before cursor lookup, ordering and limit.
+A cursor outside the requested filter, hidden by audience, or excluded by changed registration refuses rather than
+crossing scope. Unknown audience classifications are excluded. There is no schema migration.
+
+Each body returned by an explicit source-filter query is logged with the existing metadata-only
+inbox_body_view audit helper, including the lookahead row; opt-in is recorded as include_agent.
+No body, subject or sender enters that logger. Refused/failed query execution after role resolution emits a separate
+metadata-only owner_history_filter result; browsing never changes inbox state or sends notices.
+Deploy daemon support before the matching desk. Neither S-F nor S-G is in the S5-only live UI.

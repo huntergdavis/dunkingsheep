@@ -9503,6 +9503,41 @@ fn reply_stats_propagates_inbox_query_failures() {
 }
 
 #[test]
+fn owner_history_filter_dispatch_checks_typed_scope_and_flags() {
+    let (_dir, flock, env) = owner_api_fixture("owner-source-filter");
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_owner_stats_receipts_conversation();
+    let result = dispatch_owner_api(
+        &dispatcher,
+        &flock,
+        &env,
+        "owner_conversation",
+        args(json!({"source_filter":"human"})),
+        Some("w1:p1"),
+    )
+    .unwrap();
+    assert_eq!(result["source_filter"], "human");
+    assert_eq!(result["include_internal"], false);
+    for value in [
+        json!({"source_filter":"human","before":100}),
+        json!({"before_id":null,"source_filter":"other"}),
+        json!({"before_id":null,"source_filter":"human","include_internal":true}),
+        json!({"before_id":null,"source_filter":"owner_lane","include_internal":"true"}),
+        json!({"before_id":null,"source_filter":{"body":"MUST_NOT_LOG"}}),
+    ] {
+        assert!(dispatch_owner_api(
+            &dispatcher,
+            &flock,
+            &env,
+            "owner_conversation",
+            args(value),
+            Some("w1:p1")
+        )
+        .is_err());
+    }
+}
+
+#[test]
 fn owner_history_cursor_dispatch_starts_and_advances_without_consuming() {
     let (_dir, flock, env) = owner_api_fixture("owner-history-cursor");
     let inbox = flock.stores().inbox.unwrap();

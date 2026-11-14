@@ -17,6 +17,12 @@ use super::{
     attachments_of, full_from_row, next_message_id, py_repr, refuse, Message, Store, FULL_COLUMNS,
 };
 
+#[derive(Clone, Copy)]
+enum ConversationVisibility {
+    Legacy { exclude_routine: bool },
+    Filter(crate::owner::ConversationFilter),
+}
+
 fn required_transport(transport: Option<&str>, message: &str) -> Result<String, DunkError> {
     validate_transport(transport)
         .map_err(refuse)?
@@ -170,7 +176,15 @@ impl Store {
         limit: Option<i64>,
         before: Option<f64>,
     ) -> Result<Vec<Value>, DunkError> {
-        self.conversation_rows(mailboxes, limit, before, false, None)
+        self.conversation_rows(
+            mailboxes,
+            limit,
+            before,
+            ConversationVisibility::Legacy {
+                exclude_routine: false,
+            },
+            None,
+        )
     }
 
     /// The owner conversation window (t3592, repair for t3711/t3712): as `conversation_across`, but routine
@@ -183,7 +197,15 @@ impl Store {
         limit: Option<i64>,
         before: Option<f64>,
     ) -> Result<Vec<Value>, DunkError> {
-        self.conversation_rows(mailboxes, limit, before, true, None)
+        self.conversation_rows(
+            mailboxes,
+            limit,
+            before,
+            ConversationVisibility::Legacy {
+                exclude_routine: true,
+            },
+            None,
+        )
     }
 
     /// Stable ID-cursor window; Some(None) starts paging without a boundary.
@@ -193,10 +215,31 @@ impl Store {
         limit: i64,
         before_id: Option<&str>,
     ) -> Result<Vec<Value>, DunkError> {
+        self.conversation_filtered_cursor(
+            mailboxes,
+            limit,
+            before_id,
+            crate::owner::ConversationFilter::All,
+        )
+    }
+
+    pub fn conversation_filtered_cursor(
+        &self,
+        mailboxes: &[String],
+        limit: i64,
+        before_id: Option<&str>,
+        filter: crate::owner::ConversationFilter,
+    ) -> Result<Vec<Value>, DunkError> {
         if before_id.is_some_and(|id| !crate::inbox::valid_message_id(id)) {
             return Err(refuse("invalid conversation cursor"));
         }
-        self.conversation_rows(mailboxes, Some(limit), None, true, Some(before_id))
+        let visibility = match filter {
+            crate::owner::ConversationFilter::All => ConversationVisibility::Legacy {
+                exclude_routine: true,
+            },
+            filter => ConversationVisibility::Filter(filter),
+        };
+        self.conversation_rows(mailboxes, Some(limit), None, visibility, Some(before_id))
     }
 
     fn conversation_rows(
@@ -204,7 +247,7 @@ impl Store {
         mailboxes: &[String],
         limit: Option<i64>,
         before: Option<f64>,
-        exclude_routine: bool,
+        visibility: ConversationVisibility,
         cursor: Option<Option<&str>>,
     ) -> Result<Vec<Value>, DunkError> {
         let mut conditions = Vec::with_capacity(mailboxes.len());
@@ -219,7 +262,19 @@ impl Store {
         } else {
             format!("({})", conditions.join(" OR "))
         };
-        let mut sql = format!("SELECT * FROM messages WHERE {condition} AND state != 'cancelled'");
+        let exclude_routine = matches!(
+            visibility,
+            ConversationVisibility::Legacy {
+                exclude_routine: true
+            }
+        );
+        let columns = if matches!(visibility, ConversationVisibility::Filter(_)) {
+            "*, (SELECT audience FROM message_audiences WHERE message_id = messages.id) AS audience"
+        } else {
+            "*"
+        };
+        let mut sql =
+            format!("SELECT {columns} FROM messages WHERE {condition} AND state != 'cancelled'");
         let mut values: Vec<SqlValue> = box_params.into_iter().map(SqlValue::Text).collect();
         if exclude_routine {
             // Same rule as `is_routine_mail`: the subject, after leading whitespace, starts with a routine
@@ -238,16 +293,47 @@ impl Store {
                     .map(|prefix| SqlValue::Text((*prefix).to_string())),
             );
         }
-        // Only a durable sender-selected audience excludes a lane message. Literal subjects and
-        // legacy rows without a classification remain visible. t4681: this holds for EVERY
-        // conversation query, not only the window that hides routine mail: a conversation is
-        // what a person reads, and agent-only mail (a stored scheduled dunk, a handoff notice)
-        // must not appear in it by any path. No caller asks for agent rows.
-        let (owner_mailbox, owner_params) = mailbox_where(OWNER_MAILBOX, "mailbox");
-        sql.push_str(&format!(
+        let root_partition = match visibility {
+            ConversationVisibility::Filter(crate::owner::ConversationFilter::Human) => Some(true),
+            ConversationVisibility::Filter(crate::owner::ConversationFilter::OwnerLane {
+                ..
+            }) => Some(false),
+            _ => None,
+        };
+        if let Some(root) = root_partition {
+            let (predicate, params) = mailbox_where(OWNER_MAILBOX, "mailbox");
+            sql.push_str(&format!(
+                " AND {}({predicate})",
+                if root { "" } else { "NOT " }
+            ));
+            values.extend(params.into_iter().map(SqlValue::Text));
+        }
+        match visibility {
+            ConversationVisibility::Filter(crate::owner::ConversationFilter::Human)
+            | ConversationVisibility::Filter(crate::owner::ConversationFilter::OwnerLane {
+                include_internal: false,
+            }) => {
+                // Explicit partitions use metadata only. Unknown future classifications fail closed.
+                sql.push_str(" AND NOT EXISTS (SELECT 1 FROM message_audiences WHERE message_id = messages.id)");
+            }
+            ConversationVisibility::Filter(crate::owner::ConversationFilter::OwnerLane {
+                include_internal: true,
+            }) => {
+                sql.push_str(" AND NOT EXISTS (SELECT 1 FROM message_audiences WHERE message_id = messages.id AND (audience IS NULL OR audience != 'agent'))");
+            }
+            _ => {
+                // Only a durable sender-selected audience excludes a lane message. Literal subjects and
+                // legacy rows without a classification remain visible. t4681: this holds for EVERY
+                // conversation query, not only the window that hides routine mail: a conversation is
+                // what a person reads, and agent-only mail (a stored scheduled dunk, a handoff notice)
+                // must not appear in it by any path. No caller asks for agent rows.
+                let (owner_mailbox, owner_params) = mailbox_where(OWNER_MAILBOX, "mailbox");
+                sql.push_str(&format!(
             " AND ({owner_mailbox} OR NOT EXISTS (SELECT 1 FROM message_audiences WHERE message_id = messages.id AND audience = 'agent'))"
         ));
-        values.extend(owner_params.into_iter().map(SqlValue::Text));
+                values.extend(owner_params.into_iter().map(SqlValue::Text));
+            }
+        }
         if let Some(before) = before {
             sql.push_str(" AND created_at < ?");
             values.push(SqlValue::Real(before));
@@ -255,7 +341,7 @@ impl Store {
         let cursor_id = cursor.flatten().map(str::to_owned);
         let cursor_query = format!(
             "SELECT created_at, CAST(SUBSTR(id, 2) AS INTEGER) FROM messages WHERE {} AND id = ?",
-            sql.split_once(" WHERE ").unwrap().1
+            sql.replacen(&format!("SELECT {columns} FROM messages WHERE "), "", 1)
         );
         let cursor_values = values.clone();
         // Resolve the cursor against the same mailbox/visibility predicate, without loading a body.

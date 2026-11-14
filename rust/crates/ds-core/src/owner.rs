@@ -17,7 +17,7 @@
 //! methods keep the Python's blocking shape, and reads go through a `ReadPool`.
 
 pub mod conversations;
-pub use conversations::OwnerConversations;
+pub use conversations::{ConversationFilter, OwnerConversations};
 
 use std::path::Path;
 

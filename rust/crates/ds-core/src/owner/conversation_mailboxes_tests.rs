@@ -289,3 +289,181 @@ fn opening_an_older_inbox_keeps_unclassified_messages_visible() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["id"], id);
 }
+
+#[test]
+fn inbox_source_filters_use_metadata_scope_and_opt_in_without_consuming() {
+    use crate::owner::ConversationFilter::{All, Human, OwnerLane};
+    let (dir, flock, store) = fixture("source-filters");
+    flock
+        .with_roles(|roles, _| {
+            roles.register("w1:p4", "desk", None, None, None, None, None, None)?;
+            Ok(())
+        })
+        .unwrap();
+    let send = |mailbox: &str, pane, transport, subject: &str, agent| {
+        let outgoing = Outgoing {
+            mailbox,
+            pane_id: pane,
+            transport,
+            subject: Some(subject),
+            body: Some("human codex-rust-owner agent-only: these words do not classify mail"),
+            ..Default::default()
+        };
+        if agent {
+            store
+                .send_snapshot_wire_agent_only(
+                    &outgoing,
+                    Some(&serde_json::json!(subject)),
+                    None,
+                    true,
+                )
+                .unwrap()
+                .summary
+                .message_id
+        } else {
+            store.send(&outgoing).unwrap()
+        }
+    };
+    let human_legacy = send(
+        "owner",
+        None,
+        None,
+        "[review-note] still human by mailbox",
+        false,
+    );
+    let human_web = send("owner", None, Some("web"), "question", false);
+    let root_agent = send("owner", None, None, "ordinary", true);
+    let lane_legacy = send(
+        OWNER_LANE_MAILBOX,
+        Some(OWNER),
+        None,
+        "[review-note] internal routine",
+        false,
+    );
+    let lane_agent = send(
+        OWNER_LANE_MAILBOX,
+        Some(OWNER),
+        Some("web"),
+        "ordinary",
+        true,
+    );
+    let lane_alias = send("owner-alias", Some(OWNER), None, "legacy", false);
+    let foreign = send(
+        "codex-rust-owner-lookalike",
+        Some(WORKER),
+        None,
+        "ordinary",
+        false,
+    );
+    let db = rusqlite::Connection::open(dir.path().join("source-filters-inbox.db")).unwrap();
+    db.execute("UPDATE messages SET created_at=100", [])
+        .unwrap();
+    let snapshot = || {
+        let mut statement = db.prepare("SELECT * FROM messages ORDER BY id").unwrap();
+        let columns = statement.column_count();
+        let rows = statement
+            .query_map([], |row| {
+                (0..columns)
+                    .map(|column| row.get::<_, rusqlite::types::Value>(column))
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .unwrap();
+        rows.collect::<Result<Vec<_>, _>>().unwrap()
+    };
+    let before = snapshot();
+    let service = OwnerConversations::new(&flock, &NoPanes);
+    let ids = |filter| {
+        service
+            .conversation_filtered_cursor(50, None, Some(OWNER), filter)
+            .unwrap()
+            .messages
+            .into_iter()
+            .map(|row| row["id"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ids(Human), vec![human_legacy.clone(), human_web.clone()]);
+    assert_eq!(
+        ids(OwnerLane {
+            include_internal: false
+        }),
+        vec![lane_legacy.clone(), lane_alias.clone()]
+    );
+    assert_eq!(
+        ids(OwnerLane {
+            include_internal: true
+        }),
+        vec![lane_legacy.clone(), lane_agent.clone(), lane_alias.clone()]
+    );
+    assert_eq!(
+        service.conversation_cursor(50, None, Some(OWNER)).unwrap(),
+        service
+            .conversation_filtered_cursor(50, None, Some(OWNER), All)
+            .unwrap()
+    );
+    assert!(ids(All).contains(&root_agent)); // preserve the existing root-mailbox audience exception.
+    assert!(!ids(All).contains(&foreign));
+    let page = service
+        .conversation_filtered_cursor(
+            1,
+            None,
+            Some(OWNER),
+            OwnerLane {
+                include_internal: true,
+            },
+        )
+        .unwrap();
+    assert_eq!(page.messages[0]["id"], lane_alias);
+    let page = service
+        .conversation_filtered_cursor(
+            1,
+            Some(&lane_alias),
+            Some(OWNER),
+            OwnerLane {
+                include_internal: true,
+            },
+        )
+        .unwrap();
+    assert_eq!(page.messages[0]["id"], lane_agent);
+    assert!(service
+        .conversation_filtered_cursor(
+            1,
+            Some(&lane_agent),
+            Some(OWNER),
+            OwnerLane {
+                include_internal: false
+            }
+        )
+        .is_err());
+    assert!(service
+        .conversation_filtered_cursor(1, Some(&lane_alias), Some(OWNER), Human)
+        .is_err());
+    assert!(service
+        .conversation_filtered_cursor(
+            1,
+            Some(&human_web),
+            Some(OWNER),
+            OwnerLane {
+                include_internal: true
+            }
+        )
+        .is_err());
+    for pane in [Some(WORKER), Some("w1:p4"), None] {
+        assert!(service
+            .conversation_filtered_cursor(50, None, pane, Human)
+            .is_err());
+        assert!(service
+            .conversation_filtered_cursor(
+                50,
+                None,
+                pane,
+                OwnerLane {
+                    include_internal: true
+                }
+            )
+            .is_err());
+    }
+    assert!(service
+        .conversation_filtered_cursor(1, Some(&root_agent), Some(OWNER), Human)
+        .is_err());
+    assert_eq!(before, snapshot());
+}
