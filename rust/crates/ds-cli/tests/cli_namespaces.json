@@ -15747,6 +15747,169 @@
  },
  {
   "argv": [
+   "worktrees",
+   "clean"
+  ],
+  "namespace": {
+   "apply": false,
+   "command": "worktrees",
+   "from": null,
+   "json": false,
+   "max_dirs": null,
+   "max_seconds": null,
+   "no_start_daemon": false,
+   "root": null,
+   "self_pane": null,
+   "socket": null,
+   "worktrees_command": "clean"
+  }
+ },
+ {
+  "argv": [
+   "worktrees",
+   "clean",
+   "--json"
+  ],
+  "namespace": {
+   "apply": false,
+   "command": "worktrees",
+   "from": null,
+   "json": true,
+   "max_dirs": null,
+   "max_seconds": null,
+   "no_start_daemon": false,
+   "root": null,
+   "self_pane": null,
+   "socket": null,
+   "worktrees_command": "clean"
+  }
+ },
+ {
+  "argv": [
+   "--json",
+   "worktrees",
+   "clean"
+  ],
+  "namespace": {
+   "apply": false,
+   "command": "worktrees",
+   "from": null,
+   "json": true,
+   "max_dirs": null,
+   "max_seconds": null,
+   "no_start_daemon": false,
+   "root": null,
+   "self_pane": null,
+   "socket": null,
+   "worktrees_command": "clean"
+  }
+ },
+ {
+  "argv": [
+   "worktrees",
+   "clean",
+   "--root",
+   "x"
+  ],
+  "namespace": {
+   "apply": false,
+   "command": "worktrees",
+   "from": null,
+   "json": false,
+   "max_dirs": null,
+   "max_seconds": null,
+   "no_start_daemon": false,
+   "root": "x",
+   "self_pane": null,
+   "socket": null,
+   "worktrees_command": "clean"
+  }
+ },
+ {
+  "argv": [
+   "worktrees",
+   "clean",
+   "--apply"
+  ],
+  "namespace": {
+   "apply": true,
+   "command": "worktrees",
+   "from": null,
+   "json": false,
+   "max_dirs": null,
+   "max_seconds": null,
+   "no_start_daemon": false,
+   "root": null,
+   "self_pane": null,
+   "socket": null,
+   "worktrees_command": "clean"
+  }
+ },
+ {
+  "argv": [
+   "worktrees",
+   "clean",
+   "--from",
+   "x"
+  ],
+  "namespace": {
+   "apply": false,
+   "command": "worktrees",
+   "from": "x",
+   "json": false,
+   "max_dirs": null,
+   "max_seconds": null,
+   "no_start_daemon": false,
+   "root": null,
+   "self_pane": null,
+   "socket": null,
+   "worktrees_command": "clean"
+  }
+ },
+ {
+  "argv": [
+   "worktrees",
+   "clean",
+   "--max-seconds",
+   "1.5"
+  ],
+  "namespace": {
+   "apply": false,
+   "command": "worktrees",
+   "from": null,
+   "json": false,
+   "max_dirs": null,
+   "max_seconds": 1.5,
+   "no_start_daemon": false,
+   "root": null,
+   "self_pane": null,
+   "socket": null,
+   "worktrees_command": "clean"
+  }
+ },
+ {
+  "argv": [
+   "worktrees",
+   "clean",
+   "--max-dirs",
+   "1"
+  ],
+  "namespace": {
+   "apply": false,
+   "command": "worktrees",
+   "from": null,
+   "json": false,
+   "max_dirs": 1,
+   "max_seconds": null,
+   "no_start_daemon": false,
+   "root": null,
+   "self_pane": null,
+   "socket": null,
+   "worktrees_command": "clean"
+  }
+ },
+ {
+  "argv": [
    "pr",
    "wait"
   ],

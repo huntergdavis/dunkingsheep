@@ -4,6 +4,8 @@ positional arguments:
   <subcommand>
     disk        read-only report: size, age, pull request and build caches of
                 each directory
+    clean       delete merged worktrees' Cargo build caches; a dry run unless
+                --apply
 
 options:
   -h, --help    show this help message and exit
