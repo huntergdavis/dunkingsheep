@@ -24,6 +24,8 @@ struct Env {
     metrics: std::sync::Mutex<Vec<RecordedMetric>>,
     panes: Vec<Value>,
     role: &'static str,
+    /// The role of a pane-less caller's token, when the fixture gives it one.
+    paneless: Option<&'static str>,
     role_flock: Option<Flock>,
     backend_error: bool,
     override_name: Option<String>,
@@ -66,6 +68,9 @@ impl InboxEnv for Env {
             return flock.caller_role(Some(pane), self);
         }
         Ok(self.role.to_string())
+    }
+    fn paneless_role(&self) -> Result<Option<String>, DunkError> {
+        Ok(self.paneless.map(String::from))
     }
     fn mailbox_override(&self) -> Option<String> {
         self.override_name.clone()
@@ -154,6 +159,7 @@ fn env(role: &'static str) -> Env {
         metrics: Default::default(),
         panes: vec![pane("w1:p1", "Mine"), pane("w1:p2", "Other")],
         role,
+        paneless: None,
         role_flock: None,
         backend_error: false,
         override_name: None,
@@ -544,6 +550,75 @@ fn over_the_socket_a_system_sender_needs_the_system_token() {
     args.system_sender = Some("watchdog");
     let err = f.inbox_send(&e, &args).unwrap_err().to_string();
     assert!(err.contains("requires the system token"), "{err}");
+}
+
+/// t4762: the watchdog has no pane and holds the system token. Its role comes from that token;
+/// it is not forced to `anonymous` because it has no pane.
+#[test]
+fn a_paneless_caller_with_the_system_token_may_send_as_a_system_sender() {
+    for role in ["system", "owner"] {
+        let (mut e, d) = (env("worker"), tempfile::tempdir().unwrap());
+        e.paneless = Some(role);
+        let f = flock(&d);
+        f.set_socket_peer(Some(true));
+        let mut args = send("w1:p2", None);
+        args.system_sender = Some("watchdog");
+        let sent = f.inbox_send(&e, &args).unwrap();
+        assert_eq!(Some("watchdog".to_string()), sent.sender, "{role}");
+        assert_ne!(Some("undeliverable".to_string()), sent.outcome, "{role}");
+    }
+}
+
+#[test]
+fn a_paneless_caller_without_the_system_token_is_still_refused() {
+    // No token at all, or a token for a role that is not the system's or the owner's.
+    for paneless in [
+        None,
+        Some("anonymous"),
+        Some("web"),
+        Some("worker"),
+        Some("desk"),
+    ] {
+        let (mut e, d) = (env("worker"), tempfile::tempdir().unwrap());
+        e.paneless = paneless;
+        let f = flock(&d);
+        f.set_socket_peer(Some(true));
+        let mut args = send("w1:p2", None);
+        args.system_sender = Some("watchdog");
+        let err = f.inbox_send(&e, &args).unwrap_err().to_string();
+        assert!(
+            err.contains("requires the system token"),
+            "{paneless:?}: {err}"
+        );
+        assert_eq!(
+            0,
+            crate::inbox::count(&e.pool, "Other", &[], 0.0)
+                .unwrap()
+                .total,
+            "{paneless:?}: nothing is stored"
+        );
+    }
+}
+
+#[test]
+fn a_pane_can_never_claim_a_system_sender_even_with_a_privileged_role() {
+    // Over the socket, a caller that HAS a pane is refused whatever its role, and a pane-less
+    // token does not help it.
+    for role in ["owner", "system", "worker"] {
+        let (mut e, d) = (env(role), tempfile::tempdir().unwrap());
+        e.paneless = Some("system");
+        let f = flock(&d);
+        f.set_socket_peer(Some(true));
+        let mut args = send("w1:p2", None);
+        args.system_sender = Some("watchdog");
+        args.self_pane_id = Some("w1:p1");
+        let err = f.inbox_send(&e, &args).unwrap_err().to_string();
+        assert!(
+            err.contains("a system sender cannot be claimed from a pane")
+                || err.contains("requires the system token"),
+            "{role}: {err}"
+        );
+    }
 }
 
 fn vp_routing() -> Vec<RouteEntry> {
