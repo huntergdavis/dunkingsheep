@@ -5317,7 +5317,8 @@ fn cli_route_58_commands_map() {
     assert!(r.contains("memory_backfill(action, limit, queue_id, path, reason)"));
     assert!(r.contains("roster(project)"));
     assert!(r.contains("head, project, no_project)"));
-    assert!(r.contains("task_block(id, reason, waiting_on)"));
+    // A required parameter is printed with a `*`.
+    assert!(r.contains("task_block(id*, reason, waiting_on)"));
     assert!(r.contains("Task queues are omitted by default"));
     assert!(
         r.contains("owner_conversation(limit, before, before_id, source_filter, include_internal)")
