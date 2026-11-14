@@ -410,9 +410,12 @@ supply the signal for a harness, that harness stays on herdr.
 
 `dunk-poll` returns the **same view** as `dunkingsheep status`, `list` and
 `inbox count`: the status fields are byte-for-byte the CLI status fields
-(verified empty key/value diff), the dunks list is the same list, and the
-inbox count is the same object. It returns **only** those (plus unread messages)
-and is read-only; `--panes`/`--tasks` are explicit extras. Panes and tasks are
+(verified empty key/value diff), and the inbox count is the same object. The
+dunks list is the same list only with `--full`; by default it is the caller's
+own dunks (those that target its pane) without their text, and `--all` gives
+the whole fleet's dunks without text. It returns **only** those (plus unread messages)
+and is read-only; `--panes`/`--tasks` are explicit extras, and `--tasks` rows
+are compact unless `--full` is given. Panes and tasks are
 NOT included by default. All writes (inbox read/send/ack, task next/heartbeat/
 complete, send, close, start-agent) stay on the full guarded CLI; the batch is
 never a write bypass. Lanes should poll `dunk-poll`, not spawn the CLI.
