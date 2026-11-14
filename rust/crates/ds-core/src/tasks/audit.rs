@@ -290,3 +290,55 @@ mod reason_edit_tests {
         assert_eq!("first reason", meta["previous_block_reason"]);
     }
 }
+
+#[cfg(test)]
+mod completion_actor_tests {
+    use crate::tasks::{FieldEdit, Tasks};
+    #[tokio::test]
+    async fn audit_identity_cannot_replace_the_original_completion_or_metadata_actor() {
+        let dir = crate::testsupport::dir("task-audit-completion-actor");
+        let tasks = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+        for actor in [None, Some("%legacy-pane")] {
+            let task = tasks.add("global", "attribution", "").await.unwrap();
+            tasks
+                .update_with_status_and_raw_block_reason_audit(
+                    &task.id,
+                    FieldEdit {
+                        priority: Some("high".into()),
+                        assignees: Some(vec!["%2".into()]),
+                        ..Default::default()
+                    },
+                    Some("done"),
+                    actor,
+                    None,
+                    None,
+                    Some("service:task-api"),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                actor,
+                tasks.get(&task.id).await.unwrap().completed_by.as_deref()
+            );
+            let connection = rusqlite::Connection::open(tasks.path()).unwrap();
+            for event in ["completed", "priority"] {
+                let stored: Option<String> = connection
+                    .query_row(
+                        "SELECT actor FROM task_events WHERE task_id=?1 AND event=?2",
+                        rusqlite::params![task.id, event],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(actor, stored.as_deref());
+            }
+            let assigned: String = connection
+                .query_row(
+                    "SELECT actor FROM task_events WHERE task_id=?1 AND event='assigned'",
+                    [&task.id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!("service:task-api", assigned);
+        }
+    }
+}

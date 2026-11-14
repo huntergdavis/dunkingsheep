@@ -872,13 +872,14 @@ impl Flock {
             block_reason: args.block_reason.map(|r| r.map(own)),
         };
         tasks
-            .update_with_status_and_raw_block_reason(
+            .update_with_status_and_raw_block_reason_audit(
                 task_id,
                 edit,
                 args.status,
-                Some(&self.task_audit_actor(self_pane_id)?),
+                self_pane_id,
                 raw_block_reason,
                 dependency_editor,
+                Some(&self.task_audit_actor(self_pane_id)?),
             )
             .await
     }

@@ -11350,3 +11350,129 @@ fn task_audit_authenticated_services_have_names_and_do_not_accept_an_actor_field
         assert_eq!("service request", note["reason"]);
     }
 }
+
+#[test]
+fn task_audit_service_update_preserves_null_completion_attribution_with_a_verdict() {
+    let (runtime, _dir, flock, tasks, dispatcher) = task_mutation_api_fixture();
+    let prerequisite = runtime
+        .block_on(tasks.add("global", "prerequisite", ""))
+        .unwrap();
+    runtime.block_on(tasks.complete(&prerequisite.id)).unwrap();
+    for (index, (role, label, expected)) in [
+        ("owner", "owner fixture", "owner-service"),
+        ("system", "scheduler", "service:scheduler"),
+        ("web", "desk", "service:desk"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let token = flock
+            .with_roles(|roles, _| roles.issue_token(role, Some(label), None))
+            .unwrap();
+        let request = RequestCtx {
+            service_token: Some(token),
+            ..RequestCtx::default()
+        };
+        let task = runtime
+            .block_on(tasks.add_with(
+                "global",
+                "review attribution",
+                "",
+                crate::tasks::AddOptions {
+                    kind: Some("review".into()),
+                    repo: Some("fixture/audit".into()),
+                    pr: Some((index + 700).to_string()),
+                    head: Some("exact-head".into()),
+                    ..Default::default()
+                },
+            ))
+            .unwrap();
+        // Reproduce the separate verdict/done writes without invoking any GitHub service.
+        runtime
+            .block_on(tasks.set_verdict(&task.id, "accept", Some("w1:p3")))
+            .unwrap();
+        assert!(runtime
+            .block_on(tasks.get(&task.id))
+            .unwrap()
+            .completed_by
+            .is_none());
+        runtime.block_on(tasks.insert_lease(&task.id, "w1:p3", 1.0, 1.0, 1e20));
+        let updated=dispatch_task_mutation_request(&dispatcher,&flock,&runtime,"task_update",json!({
+            "id":task.id,"status":"done","priority":"high","depends_on":[prerequisite.id],"assignees":["w1:p3"]
+        }),&request).unwrap();
+        assert!(
+            updated["completed_by"].is_null(),
+            "{role}: audit identity must not become a review lane"
+        );
+        let row = runtime
+            .block_on(tasks.list_review_rows_visible())
+            .unwrap()
+            .into_iter()
+            .find(|row| row.id == task.id)
+            .unwrap();
+        assert_eq!("done", row.status);
+        assert_eq!(Some("accept"), row.verdict.as_deref());
+        assert!(
+            row.completed_by.is_none(),
+            "verdict-lane readers must still skip this row"
+        );
+        let connection = rusqlite::Connection::open(tasks.path()).unwrap();
+        for event in ["completed", "priority", "depends", "lease_released"] {
+            let actor:Option<String>=connection.query_row(
+                "SELECT actor FROM task_events WHERE task_id=?1 AND event=?2 ORDER BY id DESC LIMIT 1",
+                rusqlite::params![task.id,event],|row|row.get(0)).unwrap();
+            assert_eq!(
+                None, actor,
+                "{role}: preserve the original actor for {event}"
+            );
+        }
+        let assigned:String=connection.query_row(
+            "SELECT actor FROM task_events WHERE task_id=?1 AND event='assigned' ORDER BY id DESC LIMIT 1",
+            [&task.id],|row|row.get(0)).unwrap();
+        assert_eq!(
+            expected, assigned,
+            "assignment still records the authenticated service"
+        );
+
+        let work = runtime
+            .block_on(tasks.add("global", "status attribution", ""))
+            .unwrap();
+        dispatch_task_mutation_request(
+            &dispatcher,
+            &flock,
+            &runtime,
+            "task_update",
+            json!({"id":work.id,"status":"in_progress"}),
+            &request,
+        )
+        .unwrap();
+        let status_actor: Option<String> = connection
+            .query_row(
+                "SELECT actor FROM task_events WHERE task_id=?1 AND event='status'",
+                [&work.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(None, status_actor);
+        dispatch_task_mutation_request(
+            &dispatcher,
+            &flock,
+            &runtime,
+            "task_update",
+            json!({"id":work.id,"status":"blocked","block_reason":"wait for release"}),
+            &request,
+        )
+        .unwrap();
+        let blocked: String = connection
+            .query_row(
+                "SELECT actor FROM task_events WHERE task_id=?1 AND event='blocked'",
+                [&work.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            expected, blocked,
+            "only audited transitions use the service identity"
+        );
+    }
+}

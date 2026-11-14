@@ -1532,6 +1532,32 @@ impl Tasks {
         raw_block_reason: Option<Option<JsonValue>>,
         dependency_editor: Option<planner_scope::DependencyEditor>,
     ) -> Result<Task, DunkError> {
+        self.update_with_status_and_raw_block_reason_audit(
+            id,
+            edit,
+            status,
+            actor,
+            raw_block_reason,
+            dependency_editor,
+            None,
+        )
+        .await
+    }
+
+    /// Audit identity affects only the four audited events; it never changes completion
+    /// attribution, verdict lanes, or unrelated event actors.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn update_with_status_and_raw_block_reason_audit(
+        &self,
+        id: &str,
+        edit: FieldEdit,
+        status: Option<&str>,
+        actor: Option<&str>,
+        raw_block_reason: Option<Option<JsonValue>>,
+        dependency_editor: Option<planner_scope::DependencyEditor>,
+        audit_actor: Option<&str>,
+    ) -> Result<Task, DunkError> {
+        let audit_actor = audit::actor(audit_actor.or(actor), "service:tasks");
         if let Some(title) = &edit.title {
             if title.trim().is_empty() {
                 return Err(DunkError::Refused("a task needs a title".into()));
@@ -1553,6 +1579,11 @@ impl Tasks {
                     .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                     .map_err(db::map_sqlite)?;
                 let id = wanted.clone();
+                let event_actor = |event:&str| {
+                    if matches!(event,"blocked"|"unblocked"|"cancelled") {
+                        Some(audit_actor.clone())
+                    } else { actor.clone() }
+                };
                 let mut status_audit = None;
                 let previous_reason: Option<String> = tx.query_row("SELECT block_reason FROM tasks WHERE id=?",params![id],|r|r.get(0)).optional().map_err(db::map_sqlite)?.flatten();
                 if edit_for_call.depends_on.is_some() {
@@ -1744,7 +1775,7 @@ impl Tasks {
                         tx.execute(
                             "INSERT INTO task_events (task_id, event, at, actor, scope, priority, \
                              status_from, status_to, duration_ms) VALUES (?,?,?,?,?,?,?,?,?)",
-                            params![id, event, now, audit::transition_actor(event,actor.as_deref()), scope,
+                            params![id, event, now, event_actor(event), scope,
                                     priority.as_deref().unwrap_or(&old_priority), old_status,
                                     status, duration_ms],
                         ).map_err(db::map_sqlite)?;
@@ -1786,7 +1817,7 @@ impl Tasks {
                 if status_audit.is_none() && has_reason_edit && matches!(effective_status,"blocked"|"cancelled") {
                     let event = effective_status;
                     tx.execute("INSERT INTO task_events(task_id,event,at,actor,scope,priority,status_from,status_to) VALUES (?,?,?,?,?,?,?,?)",
-                        params![id,event,now,audit::transition_actor(event,actor.as_deref()),scope,priority.as_deref().unwrap_or(&old_priority),old_status,effective_status]).map_err(db::map_sqlite)?;
+                        params![id,event,now,event_actor(event),scope,priority.as_deref().unwrap_or(&old_priority),old_status,effective_status]).map_err(db::map_sqlite)?;
                     status_audit=Some((tx.last_insert_rowid(),event.to_string()));
                 }
                 if let Some((event_id,event)) = status_audit {
@@ -1815,7 +1846,7 @@ impl Tasks {
                 if let Some(after) = assigned_event {
                     tx.execute(
                         "INSERT INTO task_events (task_id, event, at, actor, scope, priority, meta) VALUES (?,?,?,?,?,?,?)",
-                        params![id, "assigned", now, audit::actor(actor.as_deref(),"service:tasks"), scope, old_priority,
+                        params![id, "assigned", now, audit_actor, scope, old_priority,
                                 json!({ "assignees": after, "reason":"assignees updated (no reason supplied)" }).to_string()],
                     ).map_err(db::map_sqlite)?;
                 }
