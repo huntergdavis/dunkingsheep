@@ -316,7 +316,7 @@ function QuickMessage({ onClose }) {
     } catch (e) { setSendError(e.message); }
     finally { sending.current = false; setBusy(false); }
   }
-  return <div className="modal-backdrop" onMouseDown={onClose}><div className="settings-modal" onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); onClose(); } }} onMouseDown={e => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Quick message">
+  return <div className="modal-backdrop" onMouseDown={onClose}><div className="settings-modal quick-message" onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); onClose(); } }} onMouseDown={e => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Quick message">
     <div className="settings-head"><div><div className="eyebrow">QUICK MESSAGE</div><h2>Leave an inbox message</h2></div><button className="icon-button" onClick={onClose} aria-label="Close quick message">×</button></div>
     {roster.kind === 'failed' && <div className="form-error" role="alert">{roster.text} <button type="button" onClick={() => setAttempt(n => n + 1)}>Retry</button></div>}
     {roster.kind === 'loading' && <p role="status">{roster.text}</p>}
@@ -331,7 +331,11 @@ function QuickMessage({ onClose }) {
       </select>
       <label htmlFor="quick-message-text">Message</label>
       <textarea id="quick-message-text" rows={4} value={draft} onChange={event => setDraft(event.target.value)} placeholder="Write a message" />
-      <button className="primary" type="submit" disabled={Boolean(block)} title={block || 'Send message'}>{busy ? 'Sending…' : 'Send'}</button>
+      {/* Send and Cancel sit on their own row under the text box, so Send is always in view. */}
+      <div className="quick-message-actions">
+        <button className="primary" type="submit" disabled={Boolean(block)} title={block || 'Send message'}>{busy ? 'Sending…' : 'Send'}</button>
+        <button type="button" onClick={onClose}>Cancel</button>
+      </div>
       {sent && <p className="settings-success" role="status">{sent}</p>}
       {sendError && <div className="form-error" role="alert">{sendError}</div>}
     </form>

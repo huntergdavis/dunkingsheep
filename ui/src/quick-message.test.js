@@ -2,6 +2,9 @@
 // the server's own delivery outcome.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { inboxOutcomeText, quickMessageBlock, quickMessageRoster, quickMessageTargets, sendOutcomeText } from './quick-message.js';
 
 const fleet = { rows: [
@@ -64,4 +67,30 @@ test('a lane the daemon lists without a detected agent is a recipient like any o
   const rows = [{ pane_id: '%308', name: 'ds-fable-writer-fresh', project: 'dunkingsheep', agent: '', alive: true, send: 'guarded' }];
   assert.deepEqual(quickMessageTargets({ state: 'ok', rows }),
     [{ pane_id: '%308', project: 'dunkingsheep', name: 'ds-fable-writer-fresh', label: 'ds-fable-writer-fresh · %308' }]);
+});
+
+test('Send and Cancel are on their own row after the text box, inside the dialog form', () => {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const source = readFileSync(path.join(here, 'main.jsx'), 'utf8');
+  const start = source.indexOf('function QuickMessage(');
+  const dialog = source.slice(start, source.indexOf('\nfunction ', start + 1));
+  const at = needle => { const index = dialog.indexOf(needle); assert.notEqual(index, -1, `missing ${needle}`); return index; };
+  const order = [
+    at('<form onSubmit={send}>'),
+    at('id="quick-message-pane"'),
+    at('<textarea id="quick-message-text"'),
+    at('<div className="quick-message-actions">'),
+    at('type="submit"'),
+    at('<button type="button" onClick={onClose}>Cancel</button>'),
+    at('</div>\n      {sent &&'),
+    at('</form>'),
+  ];
+  assert.deepEqual(order, [...order].sort((a, b) => a - b), 'pane, text box, then the action row with Send before Cancel');
+  assert.match(dialog, /className="settings-modal quick-message"/);
+  // The row and the dialog are laid out by classes, with no fixed pixel width that could overflow.
+  const css = readFileSync(path.join(here, 'dash.css'), 'utf8');
+  const rules = css.split('\n').filter(line => line.includes('.quick-message'));
+  assert.ok(rules.some(line => line.includes('white-space: normal')), 'the nav nowrap is undone for the dialog');
+  assert.ok(rules.some(line => line.includes('.quick-message-actions') && line.includes('flex-wrap: wrap')), 'the action row may wrap');
+  assert.ok(!rules.some(line => /(^|[^-])width: \d+px/.test(line)), 'no fixed widths');
 });
