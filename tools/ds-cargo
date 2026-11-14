@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# CI-matched DS toolchain; locking shared with other projects via proj-cargo.
+set -euo pipefail
+toolchain=/home/hunter/.local/share/dunkingsheep/toolchains/rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin
+if [[ ! -x $toolchain/cargo || ! -x $toolchain/rustc ]]; then
+    echo 'CI-matched Rust1.99.1 is not ready; use exact-head CI and record local NOT RUN.' >&2
+    exit 75
+fi
+export PATH="$toolchain:$PATH"
+export RUSTC="$toolchain/rustc"
+export RUSTDOC="$toolchain/rustdoc"
+export RUSTFLAGS=${RUSTFLAGS:--D warnings}
+export PROJ_CARGO_TIMEOUT_SECONDS=${DS_CARGO_TIMEOUT_SECONDS:-3600}
+exec "$(dirname -- "$(readlink -f -- "$0")")/proj-cargo" dunkingsheep "$@"

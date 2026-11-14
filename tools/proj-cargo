@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+# Project serialization plus a shared, bounded host compile pool (t5053).
+set -euo pipefail
+umask 077
+die() { echo "proj-cargo: $*" >&2; exit 64; }
+project=${1:-}
+[[ $project =~ ^[a-z][a-z0-9-]{0,47}$ && $project != compile-slots ]] || die 'usage: proj-cargo <project-slug> <cargo arguments>'
+shift
+(($#)) || die 'cargo arguments are required'
+limit_seconds=${PROJ_CARGO_TIMEOUT_SECONDS:-3600}
+wait_seconds=${PROJ_CARGO_WAIT_SECONDS:-30}
+if ! [[ $limit_seconds =~ ^[0-9]{1,4}$ ]] || ! ((10#$limit_seconds >= 1 && 10#$limit_seconds <= 3600)); then
+    die 'timeout must be 1..3600 seconds'
+fi
+if ! [[ $wait_seconds =~ ^[0-9]{1,2}$ ]] || ! ((10#$wait_seconds >= 1 && 10#$wait_seconds <= 30)); then
+    die 'lock wait must be 1..30 seconds'
+fi
+limit_seconds=$((10#$limit_seconds))
+wait_seconds=$((10#$wait_seconds))
+previous=''
+for arg in "$@"; do
+    if [[ $arg == --release || $arg == -r || $arg == --profile=release || ( $previous == --profile && $arg == release ) ]]; then
+        limit_seconds=3600
+    fi
+    previous=$arg
+done
+export CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-2}
+case $1 in
+    fmt|--version|-V|version|metadata) exec timeout "${limit_seconds}s" cargo "$@" ;;
+esac
+runtime=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
+config=${XDG_CONFIG_HOME:-$HOME/.config}/compile-slots/limit
+slots=2
+if [[ -e $config ]]; then
+    slots=$(cat -- "$config")
+    if ! [[ $slots =~ ^[0-9]{1,2}$ ]] || ! ((10#$slots >= 1 && 10#$slots <= 16)); then
+        die "$config must contain one integer, 1..16"
+    fi
+    slots=$((10#$slots))
+fi
+project_dir=$runtime/$project
+pool=$runtime/compile-slots
+mkdir -p -- "$project_dir" "$pool"
+project_lock=$project_dir/compile.lock
+deadline=$((SECONDS + wait_seconds))
+# Cooperating launches pause during an atomic wrapper installation. Older
+# wrappers lack this gate, so initial migration also needs a coordinated idle window.
+exec 7> "$pool/maintenance.lock"
+if ! flock -s -w "$wait_seconds" 7; then
+    echo "proj-cargo: wrapper maintenance active; project=$project local NOT RUN (exit 75)" >&2
+    exit 75
+fi
+
+# Holder records are diagnostic only. Validate the live descriptor before using
+# one; stale records after exec/exit cannot identify an unrelated reused PID.
+describe_holder() {
+    local lock=$1 fd=$2 pid owner cwd found=0 lock_pid lock_path
+    if [[ -f $lock.holder ]]; then
+        { read -r pid owner; IFS= read -r cwd; } < "$lock.holder" || true
+        if [[ ${pid:-} =~ ^[0-9]+$ && $(readlink "/proc/$pid/fd/$fd" 2>/dev/null || true) == "$lock" ]]; then
+            printf 'proj-cargo: holder pid=%s cwd=%q project=%s lock=%q\n' "$pid" "${cwd:0:240}" "$owner" "$lock" >&2
+            found=1
+        fi
+    fi
+    if ((found == 0)); then
+        while read -r lock_pid lock_path; do
+            if [[ $lock_path == "$lock" && $lock_pid =~ ^[0-9]+$ ]]; then
+                cwd=$(readlink "/proc/$lock_pid/cwd" 2>/dev/null || echo unavailable)
+                printf 'proj-cargo: holder pid=%s cwd=%q project=unmanaged lock=%q\n' "$lock_pid" "${cwd:0:240}" "$lock" >&2
+                found=1
+            fi
+        done < <(lslocks --noheadings --raw --output PID,PATH 2>/dev/null || true)
+    fi
+    ((found)) || printf 'proj-cargo: holder pid=unknown cwd=unknown project=unknown lock=%q (released or not visible)\n' "$lock" >&2
+}
+record_holder() {
+    local lock=$1
+    printf '%s %s\n%s\n' "$$" "$project" "${PWD//$'\n'/ }" > "$lock.holder.$$"
+    mv -f -- "$lock.holder.$$" "$lock.holder"
+}
+busy() { echo "proj-cargo: project=$project lock wait exhausted (${wait_seconds}s); local NOT RUN (exit 75)" >&2; exit 75; }
+exec 9> "$project_lock"
+if ! flock -n 9; then
+    echo "proj-cargo: project=$project waiting for project lock" >&2
+    describe_holder "$project_lock" 9
+    remaining=$((deadline - SECONDS))
+    ((remaining > 0)) || remaining=0
+    if ! flock -w "$remaining" 9; then
+        describe_holder "$project_lock" 9
+        busy
+    fi
+fi
+record_holder "$project_lock"
+announced=0
+while :; do
+    for ((slot=1; slot<=slots; slot++)); do
+        slot_lock=$pool/slot-$slot
+        exec 8> "$slot_lock"
+        if flock -n 8; then
+            record_holder "$slot_lock"
+            echo "proj-cargo: project=$project pid=$$ host-slot=$slot/$slots" >&2
+            # Both descriptors survive exec and remain held through timeout and
+            # Cargo's children. No lock inode is renamed or removed.
+            exec timeout "${limit_seconds}s" cargo "$@"
+        fi
+        exec 8>&-
+    done
+    if ((announced == 0 || SECONDS >= deadline)); then
+        echo "proj-cargo: project=$project waiting for host slot (limit=$slots)" >&2
+        for ((slot=1; slot<=slots; slot++)); do describe_holder "$pool/slot-$slot" 8; done
+        announced=1
+    fi
+    ((SECONDS < deadline)) || busy
+    sleep 0.1
+done
