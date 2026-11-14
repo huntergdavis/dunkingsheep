@@ -85,7 +85,7 @@ fn every_input_schema_equals_the_pythons() {
         if name == "inbox_list" {
             // t4684 summary paging is opt-in and Rust-only; preserve the frozen legacy schema.
             let properties = got["properties"].as_object_mut().unwrap();
-            for key in ["newest_first", "before", "literal_mailbox"] {
+            for key in ["newest_first", "before", "literal_mailbox", "include_agent"] {
                 assert!(properties.remove(key).is_some());
             }
         }

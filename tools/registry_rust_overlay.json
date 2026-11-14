@@ -86,6 +86,13 @@
       "type": "boolean",
       "description": "Owner/web/system only: use the mailbox as data without live-label resolution; requires newest_first."
      }
+    ],
+    [
+     "include_agent",
+     {
+      "type": "boolean",
+      "description": "With newest_first, independently include recorded agent-only mail when true or exclude it when false, before paging. Omit to preserve legacy summary behavior."
+     }
     ]
    ]
   },
@@ -267,16 +274,17 @@
       "enum": [
        "all",
        "human",
-       "owner_lane"
+       "owner_lane",
+       "all_sources"
       ],
-      "description": "Metadata partition opts into stable history paging; before_id is optional. All preserves the current view."
+      "description": "Recorded mailbox partition: human (Your inbox), owner_lane (VP), all_sources (both). The all alias preserves the legacy view."
      }
     ],
     [
      "include_internal",
      {
       "type": "boolean",
-      "description": "Explicit owner/web opt-in to agent-only owner-lane mail; default false, owner_lane only."
+      "description": "Independent opt-in to recorded agent-only mail in human, owner_lane or all_sources; default false. Legacy all remains unchanged."
      }
     ]
    ]

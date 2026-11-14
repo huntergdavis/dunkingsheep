@@ -5329,7 +5329,7 @@ fn cli_route_58_commands_map() {
         r.contains("owner_conversation(limit, before, before_id, source_filter, include_internal)")
     );
     assert!(r.contains(
-        "inbox_list(mailbox, unread_only, limit, newest_first, before, literal_mailbox)"
+        "inbox_list(mailbox, unread_only, limit, newest_first, before, literal_mailbox, include_agent)"
     ));
     let strip = |text: &str| {
         let mut skip_description = false;
@@ -5352,7 +5352,7 @@ fn cli_route_58_commands_map() {
                     None
                 } else {
                     Some(line.replace(
-                        "inbox_list(mailbox, unread_only, limit, newest_first, before, literal_mailbox)",
+                        "inbox_list(mailbox, unread_only, limit, newest_first, before, literal_mailbox, include_agent)",
                         "inbox_list(mailbox, unread_only, limit)",
                     ).replace("owner_conversation(limit, before, before_id, source_filter, include_internal)", "owner_conversation(limit, before)")
                     .replace("task_read(id*, summary, notes, note_kind, before_note)", "task_read(id*)")
@@ -5466,7 +5466,7 @@ fn cli_route_58_commands_map() {
             .iter_mut()
             .find(|row| row["name"] == "inbox_list")
             .unwrap();
-        for key in ["newest_first", "before", "literal_mailbox"] {
+        for key in ["newest_first", "before", "literal_mailbox", "include_agent"] {
             assert!(inbox_list["input_schema"]["properties"]
                 .as_object_mut()
                 .unwrap()

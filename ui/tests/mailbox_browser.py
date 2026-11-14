@@ -73,7 +73,10 @@ def mock(route):
             return fulfill(route, {'detail': 'Synthetic failure'}, 503)
         mailbox = query['mailbox'][0]
         rows = [OLDER] if mailbox == 'owner' and query.get('before') else [OWNER] if mailbox == 'owner' else [AGENT, PLAIN] if mailbox == LANE else []
-        return fulfill(route, {'messages': rows, 'next_before': 'i101' if rows == [OWNER] else None})
+        include = query.get('include_agent') == ['true']
+        assert query.get('include_agent') in (['true'], ['false'])
+        rows = [row for row in rows if include or row['audience'] != 'agent']
+        return fulfill(route, {'messages': rows, 'include_agent': include, 'next_before': 'i101' if rows == [OWNER] else None})
     if url.path == '/api/mailbox-message':
         if old_daemon:
             return fulfill(route, {'detail': 'Message unavailable'}, 502)
@@ -104,14 +107,14 @@ try:
             page.locator('.mailbox-folder').filter(has_text=LANE).click()
             reader.get_by_text('LANE-PLAIN-BODY', exact=True).wait_for()
             assert page.get_by_role('heading', name='Project: Arbitrary project').count() == 1
-            details = page.locator('.mailbox-summaries details')
-            assert details.get_attribute('open') is None
-            assert page.locator('.mailbox-message-row').filter(has_text='Agent secret').is_disabled()
+            assert page.locator('.mailbox-message-row').filter(has_text='Agent secret').count() == 0
             assert all(query.get('message_id') != ['i202'] for _, path, query in requests if path == '/api/mailbox-message')
             optin = page.get_by_role('checkbox', name='Include agent-only mail in this browser')
+            before_optin = len(requests)
             optin.check()
             page.locator('.mailbox-message-row').filter(has_text='Agent secret').click()
             reader.get_by_text('AGENT-ONLY-SECRET', exact=True).wait_for()
+            assert any(path == '/api/mailbox-messages' and query.get('include_agent') == ['true'] for _, path, query in requests[before_optin:])
             assert reader.locator('table').count() == 1
             assert reader.locator('.ascii-diagram').count() == 1
             assert reader.locator('script, img, iframe').count() == 0
@@ -159,7 +162,7 @@ try:
             page.get_by_role('link', name='Back to Inbox', exact=True).wait_for()
             assert urlsplit(page.url).query == 'panel=conversation'
             page.get_by_role('link', name='Back to Inbox', exact=True).click()
-            page.get_by_role('heading', name='Owner inbox', exact=True).wait_for()
+            page.get_by_role('heading', name='Inbox', exact=True).wait_for()
             page.get_by_role('link', name='Browse all mailboxes', exact=True).click()
             page.get_by_role('heading', name='Mailboxes', exact=True).wait_for()
             assert not page.get_by_role('checkbox').is_checked()

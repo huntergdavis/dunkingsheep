@@ -44,13 +44,13 @@ def mock(route):
     if path == '/api/fleet':
         return fulfill(route, {'rows': [{'pane_id': '%9', 'name': 'Test lane', 'project': 'Test project'}] if lane_present else []})
     if path == '/api/owner-thread':
-        return fulfill(route, {'items': [], 'next_before': None})
+        return fulfill(route, {'items': [], 'next_before': None, 'source_filter': 'all_sources', 'include_internal': False})
     if path == '/api/channels':
         return fulfill(route, {'channels': []})
     if path == '/api/mailboxes':
         return fulfill(route, {'mailboxes': [], 'total': 0, 'next_after': None})
     if path == '/api/mailbox-messages':
-        return fulfill(route, {'messages': [{'message_id': 'i8', 'mailbox': 'owner', 'audience': 'agent', 'subject': 'Agent-only fixture', 'created_at': 100, 'state': 'read'}], 'next_before': None})
+        return fulfill(route, {'messages': [], 'next_before': None, 'include_agent': False})
     if path == '/api/mailbox-message':
         raise AssertionError('Collapsed agent mail must not be read by compose')
     return fulfill(route, {'ok': True})

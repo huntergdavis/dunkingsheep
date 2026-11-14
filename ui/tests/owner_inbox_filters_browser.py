@@ -27,18 +27,19 @@ def item(mid, body, source=None, audience=None):
     if source:
         row.update({'conversation_source': source, 'audience': audience, 'mailbox': 'owner' if source == 'human' else 'codex-rust-owner'})
     return row
-ALL = item(900, 'ALL-UNCHANGED')
+ALL = item(900, 'ALL-UNCHANGED', 'human')
 HUMAN = item(201, 'HUMAN: codex-rust-owner agent-only words do not classify this', 'human')
 HUMAN_OLD = item(101, 'HUMAN-OLDER', 'human')
 LANE = item(401, 'OWNER-LANE-PLAIN', 'owner_lane')
 LANE_OLD = item(301, 'OWNER-LANE-OLDER', 'owner_lane')
 AGENT = item(402, 'INTERNAL-AGENT-SECRET', 'owner_lane', 'agent')
+HUMAN_AGENT = item(199, 'ROOT-AGENT-ONLY', 'human', 'agent')
 
 def fulfill(route, data, status=200):
     route.fulfill(status=status, content_type='application/json', body=json.dumps(data))
 def response(source, internal, before):
-    rows = [ALL] if source == 'all' else [HUMAN_OLD] if source == 'human' and before else [HUMAN] if source == 'human' else [AGENT, LANE] if internal else [LANE_OLD] if before else [LANE]
-    cursor = None if source == 'all' or internal or before else 'i201' if source == 'human' else 'i401'
+    rows = ([ALL, LANE, AGENT, HUMAN_AGENT] if internal else [ALL, LANE]) if source == 'all_sources' else [HUMAN_OLD] if source == 'human' and before else ([HUMAN, HUMAN_AGENT] if internal else [HUMAN]) if source == 'human' else [AGENT, LANE] if internal else [LANE_OLD] if before else [LANE]
+    cursor = None if source == 'all_sources' or internal or before else 'i201' if source == 'human' else 'i401'
     return {'items': rows, 'next_before': cursor, 'source_filter': source, 'include_internal': internal}
 def mock(route):
     path = urlsplit(route.request.url).path
@@ -49,13 +50,12 @@ def mock(route):
     if path == '/api/owner-thread':
         if query.get('paged') != ['true']:
             return fulfill(route, {'items': [ALL]})
-        source = query.get('filter', ['all'])[0]
+        source = query.get('filter', ['all_sources'])[0]
         internal = query.get('include_internal') == ['true']
         before = query.get('before', [None])[0]
-        assert not internal or source == 'owner_lane'
         if before:
             assert before == ('i201' if source == 'human' else 'i401'), query
-        if source != 'all' and unavailable:
+        if source != 'all_sources' and unavailable:
             return fulfill(route, {'detail': 'Filtered history unavailable'}, 502)
         if source == 'human' and unsafe:
             data = response(source, internal, before)
@@ -80,8 +80,8 @@ try:
             reader = page.get_by_role('article', name='Selected message')
             reader.get_by_text('ALL-UNCHANGED', exact=True).wait_for()
             choice = page.get_by_role('combobox', name='Inbox filter')
-            assert choice.input_value() == 'all'
-            assert page.get_by_role('checkbox').count() == 0
+            assert choice.input_value() == 'all_sources'
+            assert page.get_by_role('checkbox', name='Include agent-only mail').count() == 1
             choice.select_option('human')
             reader.get_by_text(HUMAN['body'], exact=True).wait_for()
             assert reader.get_by_text('ALL-UNCHANGED', exact=True).count() == 0
@@ -89,7 +89,7 @@ try:
             page.get_by_text('Start of conversation reached · 2 messages loaded', exact=True).wait_for()
             choice.select_option('owner_lane')
             reader.get_by_text('OWNER-LANE-PLAIN', exact=True).wait_for()
-            toggle = page.get_by_role('checkbox', name='Include internal agent-only mail')
+            toggle = page.get_by_role('checkbox', name='Include agent-only mail')
             assert not toggle.is_checked()
             page.get_by_role('button', name='Load older messages', exact=True).click()
             page.get_by_text('Start of conversation reached · 2 messages loaded', exact=True).wait_for()
@@ -118,17 +118,33 @@ try:
             reader.get_by_text('INTERNAL-AGENT-SECRET', exact=True).wait_for()
             choice.select_option('human')
             reader.get_by_text(HUMAN['body'], exact=True).wait_for()
+            assert toggle.is_checked(), 'source selection must preserve independent audience choice'
             assert page.get_by_text('INTERNAL-AGENT-SECRET', exact=True).count() == 0
+            choice.select_option('all_sources')
+            reader.get_by_text('ALL-UNCHANGED', exact=True).wait_for()
+            assert toggle.is_checked()
             choice.select_option('owner_lane')
+            reader.get_by_text('INTERNAL-AGENT-SECRET', exact=True).wait_for()
+            toggle.uncheck()
             reader.get_by_text('OWNER-LANE-PLAIN', exact=True).wait_for()
-            assert not toggle.is_checked(), 'opt-in must reset after leaving owner-lane scope'
+            for source in ('human', 'owner_lane', 'all_sources'):
+                choice.select_option(source)
+                page.locator('.owner-inbox-row').first.wait_for()
+                assert not toggle.is_checked()
+                assert page.locator('.owner-inbox-row').filter(has_text='ROOT-AGENT-ONLY').count() == 0
+                toggle.check()
+                page.locator('.owner-inbox-row').filter(has_text='ROOT-AGENT-ONLY' if source != 'owner_lane' else 'INTERNAL-AGENT-SECRET').wait_for()
+                toggle.uncheck()
+                page.locator('.owner-inbox-row').first.wait_for()
+                assert page.locator('.owner-inbox-row').filter(has_text='ROOT-AGENT-ONLY').count() == 0
+                assert page.locator('.owner-inbox-row').filter(has_text='INTERNAL-AGENT-SECRET').count() == 0
             for bad in ('missing_scope', 'agent_row'):
                 unsafe = bad
                 choice.select_option('human')
                 page.get_by_role('alert').wait_for()
                 assert page.get_by_text('ALL-UNCHANGED', exact=True).count() == 0
                 assert page.get_by_text('INTERNAL-AGENT-SECRET', exact=True).count() == 0
-                choice.select_option('all')
+                choice.select_option('all_sources')
                 reader.get_by_text('ALL-UNCHANGED', exact=True).wait_for()
             unsafe = None
             unavailable = True

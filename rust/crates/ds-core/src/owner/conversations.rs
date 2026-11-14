@@ -39,22 +39,21 @@ pub struct Conversation {
     pub waiting: Vec<String>,
 }
 
-/// Metadata partition for the explicit owner Inbox filters. All preserves legacy visibility.
+/// Source and audience are independent. All retains the legacy API projection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConversationFilter {
     All,
-    Human,
+    AllSources { include_internal: bool },
+    Human { include_internal: bool },
     OwnerLane { include_internal: bool },
 }
 impl ConversationFilter {
     pub fn parse(name: &str, include_internal: bool) -> Result<Self, DunkError> {
-        match (name, include_internal) {
-            ("all", false) => Ok(Self::All),
-            ("human", false) => Ok(Self::Human),
-            ("owner_lane", include_internal) => Ok(Self::OwnerLane { include_internal }),
-            ("all" | "human", true) => Err(DunkError::Refused(
-                "include_internal requires the owner_lane filter".into(),
-            )),
+        match name {
+            "all" if !include_internal => Ok(Self::All),
+            "all_sources" => Ok(Self::AllSources { include_internal }),
+            "human" => Ok(Self::Human { include_internal }),
+            "owner_lane" => Ok(Self::OwnerLane { include_internal }),
             _ => Err(DunkError::Refused(
                 "invalid conversation source filter".into(),
             )),
@@ -63,17 +62,25 @@ impl ConversationFilter {
     pub fn name(self) -> &'static str {
         match self {
             Self::All => "all",
-            Self::Human => "human",
+            Self::AllSources { .. } => "all_sources",
+            Self::Human { .. } => "human",
             Self::OwnerLane { .. } => "owner_lane",
         }
     }
     pub fn include_internal(self) -> bool {
-        matches!(
-            self,
-            Self::OwnerLane {
-                include_internal: true
-            }
-        )
+        match self {
+            Self::All => false,
+            Self::AllSources { include_internal }
+            | Self::Human { include_internal }
+            | Self::OwnerLane { include_internal } => include_internal,
+        }
+    }
+    pub fn root_partition(self) -> Option<bool> {
+        match self {
+            Self::Human { .. } => Some(true),
+            Self::OwnerLane { .. } => Some(false),
+            _ => None,
+        }
     }
 }
 
@@ -314,13 +321,15 @@ impl<'a> OwnerConversations<'a> {
         let store = self.authorised_store(self_pane_id)?;
         let limit = limit.filter(|limit| *limit != 0).unwrap_or(50);
         let mailboxes = match filter {
-            ConversationFilter::Human => vec![OWNER_MAILBOX.to_owned()],
+            ConversationFilter::Human { .. } => vec![OWNER_MAILBOX.to_owned()],
             ConversationFilter::OwnerLane { .. } => self
                 .conversation_mailboxes(&store)?
                 .into_iter()
                 .filter(|key| normalise_mailbox(key) != OWNER_MAILBOX)
                 .collect(),
-            ConversationFilter::All => self.conversation_mailboxes(&store)?,
+            ConversationFilter::All | ConversationFilter::AllSources { .. } => {
+                self.conversation_mailboxes(&store)?
+            }
         };
         // Routine lane mail (review verdicts and notes, marked by subject) is kept in storage and listed nowhere
         // here (t3592). Owner decisions, owner blockers, owner replies and unmarked legacy mail stay listed.

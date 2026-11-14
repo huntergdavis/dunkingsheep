@@ -10,6 +10,7 @@ pub fn list_page(
     limit: i64,
     before: Option<&str>,
     now: f64,
+    include_agent: Option<bool>,
 ) -> Result<Value, DunkError> {
     if !(1..=500).contains(&limit) {
         return Err(DunkError::Refused(
@@ -38,6 +39,13 @@ pub fn list_page(
             let at = at.ok_or_else(|| DunkError::Refused("inbox cursor unavailable; refresh the mailbox".into()))?;
             condition.push_str(" AND (created_at < ? OR (created_at = ? AND id < ?))");
             params.extend([SqlValue::Real(at), SqlValue::Real(at), SqlValue::Text(id.into())]);
+        }
+        if let Some(include) = include_agent {
+            condition.push_str(if include {
+                " AND NOT EXISTS (SELECT 1 FROM message_audiences a WHERE a.message_id = messages.id AND (a.audience IS NULL OR a.audience != 'agent'))"
+            } else {
+                " AND NOT EXISTS (SELECT 1 FROM message_audiences a WHERE a.message_id = messages.id)"
+            });
         }
         if unread_only {
             condition.push_str(" AND state = 'queued'");
@@ -79,6 +87,10 @@ pub fn list_page(
         let more = messages.len() > limit as usize;
         messages.truncate(limit as usize);
         let next_before = more.then(|| messages.last().unwrap()["message_id"].clone());
-        Ok(json!({"mailbox":mailbox,"messages":messages,"order":"newest_first","next_before":next_before}))
+        let mut page = json!({"mailbox":mailbox,"messages":messages,"order":"newest_first","next_before":next_before});
+        if let Some(include) = include_agent {
+            page["include_agent"] = json!(include);
+        }
+        Ok(page)
     })
 }
