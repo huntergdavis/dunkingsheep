@@ -1055,6 +1055,12 @@ impl RosterEnv for ParityEnv {
     fn cpu_sample(&self, _: &Value, _: f64) -> Result<Option<Value>, String> {
         Ok(None)
     }
+    fn launch(&self, _: &str) -> Option<Value> {
+        None
+    }
+    fn pane_started_at(&self, _: &Value) -> Option<f64> {
+        None
+    }
     fn model_samples(&self, _: f64) -> Result<std::collections::HashMap<String, Value>, String> {
         Ok(std::collections::HashMap::new())
     }
