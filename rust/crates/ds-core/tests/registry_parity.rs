@@ -89,6 +89,14 @@ fn every_input_schema_equals_the_pythons() {
                 assert!(properties.remove(key).is_some());
             }
         }
+        if name == "task_add" {
+            // t4701: a new task takes its creator lane's project; the two overrides are
+            // Rust-only (the Python task store had no project mapping).
+            let properties = got["properties"].as_object_mut().unwrap();
+            for key in ["project", "no_project"] {
+                assert!(properties.remove(key).is_some());
+            }
+        }
         if name == "roster" {
             assert!(got["properties"]
                 .as_object_mut()

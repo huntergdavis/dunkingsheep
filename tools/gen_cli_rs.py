@@ -72,6 +72,11 @@ def load_parser():
     # t4648: the backlog query is Rust-only; the Python CLI had no project mapping to count by.
     task = root.choices["task"]
     task_actions = next(a for a in task._actions if isinstance(a, argparse._SubParsersAction))
+    # t4701: a new task takes its creator lane's project; these two override that. Rust-only:
+    # the Python task store had no project mapping.
+    task_add = task_actions.choices["add"]
+    task_add.add_argument("--project", metavar="NAME", help="file the task under this project (your own or one you hold a planner grant for; the owner may name any) instead of your lane's")
+    task_add.add_argument("--no-project", action="store_true", help="file the task under no project")
     backlog = task_actions.add_parser("backlog", help="count unfinished global tasks by project, with the unmapped ones shown")
     backlog.add_argument("--project", metavar="NAME", help="only this project, or 'unmapped'")
     backlog.add_argument("--status", metavar="LIST", help="comma-separated statuses (default: open,in_progress,blocked)")

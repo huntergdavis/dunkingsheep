@@ -522,6 +522,14 @@ later is `task assign`, an explicit write. A caller with no pane at all
 (a systemd unit, a web/HTTP caller) needs a declared leader
 (`DUNKINGSHEEP_LEADER_PANE`) and is refused with that instruction rather
 than left ownerless.
+A new global task is filed under its creator lane's project (the lane's
+project membership, when it still belongs to the pane's running
+process); a lane with no membership takes the `--parent` task's project
+when it could have named that project itself. `--project NAME` files it
+under a named project instead: your own, or one you hold a planner grant
+for (the owner may name any; any other name is refused). `--no-project`
+files it under none. A lane with global membership files unmapped tasks
+unless it names a project.
 `task_metrics` is the read-only analytics endpoint for a status board or
 the CTO. It reports current queue depth and the status / priority / scope
 mix, per-assignee load, created/claimed/completed/cancelled/requeued
