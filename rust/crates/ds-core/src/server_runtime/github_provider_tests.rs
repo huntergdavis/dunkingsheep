@@ -674,3 +674,24 @@ fn pr_wait_production_registration_listing_and_cancellation_are_caller_scoped() 
         "registration/list/cancel makes no API calls"
     );
 }
+
+#[test]
+fn pr_wait_production_sweep_delivers_pending_event_once_through_inbox_send() {
+    let f = Fixture::with(&["reviewer"], lanes());
+    let store = f.services.flock().stores().inbox.unwrap();
+    let id = store
+        .pr_wait_register("o/r", 7, "owner", "%owner", None)
+        .unwrap()["id"]
+        .as_i64()
+        .unwrap();
+    store
+        .pr_wait_finish(id, "o/r#7 fixture: PR closed")
+        .unwrap();
+    f.dispatch("review_sync", json!({}), "%owner").unwrap();
+    assert!(store.pr_wait_pending(NOW).unwrap().is_empty());
+    let messages = store.read("owner", 10, true, false).unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].body, "o/r#7 fixture: PR closed");
+    f.dispatch("review_sync", json!({}), "%owner").unwrap();
+    assert_eq!(store.read("owner", 10, true, false).unwrap().len(), 1);
+}

@@ -441,9 +441,9 @@ mod tests {
             })
         }
     }
-    fn store(label: &str) -> (std::path::PathBuf, Store) {
+    fn store(label: &str) -> (tempfile::TempDir, Store) {
         let d = dir(label);
-        let s = Store::open(d.join("inbox.db"), d.join("blobs")).unwrap();
+        let s = Store::open(d.path().join("inbox.db"), d.path().join("blobs")).unwrap();
         (d, s)
     }
     fn register(s: &Store, mailbox: &str, head: Option<&str>) -> i64 {
@@ -518,14 +518,14 @@ mod tests {
         poll(&s, &f, 820.);
         assert!(s.pr_wait_pending(100.).unwrap().is_empty());
         drop(s);
-        let s = Store::open(d.join("inbox.db"), d.join("blobs")).unwrap();
+        let s = Store::open(d.path().join("inbox.db"), d.path().join("blobs")).unwrap();
         poll(&s, &f, 1780.);
         let pending = s.pr_wait_pending(1780.).unwrap();
         assert_eq!(pending.len(), 1);
         assert!(pending[0].2.contains("could not watch"));
         s.pr_wait_delivered(pending[0].0).unwrap();
         drop(s);
-        let s = Store::open(d.join("inbox.db"), d.join("blobs")).unwrap();
+        let s = Store::open(d.path().join("inbox.db"), d.path().join("blobs")).unwrap();
         poll(&s, &f, 5000.);
         assert!(s.pr_wait_pending(5000.).unwrap().is_empty());
         assert_eq!(f.calls.load(Ordering::Relaxed), 4);
@@ -604,7 +604,7 @@ mod etag_tests {
         let endpoint = Endpoint(Mutex::new(Vec::new()));
         let runtime = tokio::runtime::Runtime::new().unwrap();
         for _ in 0..2 {
-            let store = Store::open(d.join("inbox.db"), d.join("blobs")).unwrap();
+            let store = Store::open(d.path().join("inbox.db"), d.path().join("blobs")).unwrap();
             let sweep = SweepTransport::new(&endpoint);
             let result = runtime
                 .block_on(sweep.get(&store, "https://fake.invalid", "o/r/pulls/1", "fixture"))
