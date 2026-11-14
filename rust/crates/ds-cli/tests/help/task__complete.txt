@@ -1,5 +1,6 @@
 usage: dunkingsheep task complete [-h] [--by BY]
                                   [--verdict {accept,needs-fix}] [--unmerged]
+                                  [--note NOTE] [--next]
                                   id
 
 positional arguments:
@@ -14,3 +15,5 @@ options:
   --unmerged            the work is done but its PR is NOT on main (a stacked
                         branch): dependents stay closed until the merge is
                         recorded (t906)
+  --note NOTE           record evidence atomically with completion
+  --next                also claim the next task assigned to this lane

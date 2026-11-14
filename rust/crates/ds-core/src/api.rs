@@ -4029,9 +4029,11 @@ pub fn h_task_complete(context: &HandlerContext<'_>, args: Args) -> Result<Value
     let by = task_string_arg(&args, "by", "task_complete")?;
     let verdict = task_string_arg(&args, "verdict", "task_complete")?;
     let landed = python_bool_arg(&args, "landed", true);
+    let note = task_string_arg(&args, "note", "task_complete")?;
+    let next = python_bool_arg(&args, "next", false);
     context
         .flock
-        .task_complete(context, &id, by, verdict, landed)
+        .task_complete_with_options(context, &id, by, verdict, landed, note, next)
 }
 
 /// `dunk_api.h_task_delete`.

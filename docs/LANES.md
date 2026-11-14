@@ -100,3 +100,18 @@ Distinct reviewer and GitHub merge gates still apply.
 The owner's pane is registered `owner` and is the only role that may: assign
 work, promote or retire rules, issue tokens, register lanes, close panes,
 restart the daemon. Those verbs stay on a human in a terminal.
+
+### Finish with evidence and receive the next assignment
+
+Use `dunkingsheep task complete <id> --note "commit/PR, checks and limits" --next`
+to write evidence, complete your held task and claim your next assigned task in one
+transaction. Omitting `--next` keeps the existing automatic handoff behavior. Reviewers combine
+`--note` with `--verdict accept|needs-fix`; all review and ownership gates still apply.
+
+The response includes `next_task` with its id, title and body, or null when no assigned
+work is claimable. Unowned global work is never selected by `--next`. A busy lane or
+blocked assignment leaves the completion committed with no next task. Retrying a
+completion cannot write a second note, complete twice or claim another task; work-task
+retries replay the original next-task result, including after a daemon restart. Completed
+reviews retain the existing refusal against a second verdict. Socket `task_complete`
+and MCP task action `complete` accept `note` and `next` with the same behavior.

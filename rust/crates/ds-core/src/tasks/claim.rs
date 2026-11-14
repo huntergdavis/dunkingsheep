@@ -428,152 +428,9 @@ impl Tasks {
                 let tx = conn
                     .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                     .map_err(db::map_sqlite)?;
-                let (sql, bind): (&str, Vec<String>) = if mine_only {
-                    ("SELECT id, scope, priority, created_at, status, kind, author, assignees, multi_assignee, repo FROM tasks WHERE scope IN (?, ?) AND status IN ('open', 'in_progress') ORDER BY created_at, id",
-                     vec!["global".into(), pane.clone()])
-                } else {
-                    ("SELECT id, scope, priority, created_at, status, kind, author, assignees, multi_assignee, repo FROM tasks WHERE scope = ? AND status IN ('open', 'in_progress') ORDER BY created_at, id",
-                     vec![target.clone()])
-                };
-                let mut rows: Vec<Row> = Vec::new();
-                {
-                    let mut stmt = tx.prepare(sql).map_err(db::map_sqlite)?;
-                    let found = stmt
-                        .query_map(rusqlite::params_from_iter(bind.iter()), |row| {
-                            let assignees: Option<String> = row.get(7)?;
-                            Ok(Row {
-                                candidate: Candidate {
-                                    id: row.get(0)?,
-                                    status: row.get(4)?,
-                                    assignees: decode_list(assignees.as_deref()),
-                                    multi_assignee: row.get::<_, i64>(8)? != 0,
-                                    ..Default::default()
-                                },
-                                scope: row.get(1)?,
-                                priority: row.get(2)?,
-                                created_at: row.get(3)?,
-                                kind: row.get(5)?,
-                                author: row.get(6)?,
-                                repo: row.get(9)?,
-                            })
-                        })
-                        .map_err(db::map_sqlite)?;
-                    for row in found {
-                        rows.push(row.map_err(db::map_sqlite)?);
-                    }
-                }
-                if mine_only {
-                    rows.retain(|row| row.candidate.assignees.contains(&pane));
-                }
-                for row in rows.iter_mut() {
-                    let id = row.candidate.id.clone();
-                    let mut stmt = tx
-                        .prepare("SELECT pane_id FROM task_leases WHERE task_id = ? AND expires_at > ?")
-                        .map_err(db::map_sqlite)?;
-                    row.candidate.leased_by = stmt
-                        .query_map(params![id, now], |r| r.get::<_, String>(0))
-                        .map_err(db::map_sqlite)?
-                        .collect::<Result<_, _>>()
-                        .map_err(db::map_sqlite)?;
-                    row.candidate.blocked_by = dependency_state_conn(&tx, &id)?.1.blocked_by;
-                    // The allocation table may not exist yet (the Python tolerates that).
-                    let offer: Option<(String, String)> = match tx
-                        .query_row("SELECT owners, offered_by FROM allocation_offers WHERE task_id = ? AND state = 'ready'",
-                                   params![id], |r| Ok((r.get(0)?, r.get(1)?)))
-                        .optional()
-                    {
-                        Ok(found) => found,
-                        Err(error) if error.to_string().contains("no such table") => None,
-                        Err(error) => return Err(db::map_sqlite(error)),
-                    };
-                    if let Some((owners, offered_by)) = offer {
-                        let mut mine = row.candidate.assignees.clone();
-                        mine.sort();
-                        row.candidate.allocation_waiting = mine == decode_list(Some(&owners));
-                        row.candidate.offered_by = Some(offered_by);
-                    }
-                }
-                rows.sort_by_key(|row| order_key(&row.priority, row.created_at, &row.candidate.id));
-                let refuse = |tx: rusqlite::Transaction<'_>, refusal: Refusal| -> Result<Result<String, Refusal>, DunkError> {
-                    tx.commit().map_err(db::map_sqlite)?;
-                    eprintln!("task claim refused: pane={pane} scope={target} reason={} tasks={}",
-                              refusal.reason, if refusal.task_ids.is_empty() { "-".to_string() } else { refusal.task_ids.join(",") });
-                    Ok(Err(refusal))
-                };
-                if !options.allow_busy {
-                    let mut stmt = tx
-                        .prepare("SELECT DISTINCT lease.task_id FROM task_leases AS lease JOIN tasks AS task ON task.id = lease.task_id WHERE lease.pane_id = ? AND lease.expires_at > ? AND task.status = 'in_progress' ORDER BY lease.task_id")
-                        .map_err(db::map_sqlite)?;
-                    let busy: Vec<String> = stmt
-                        .query_map(params![pane, now], |r| r.get::<_, String>(0))
-                        .map_err(db::map_sqlite)?
-                        .collect::<Result<_, _>>()
-                        .map_err(db::map_sqlite)?;
-                    drop(stmt);
-                    if !busy.is_empty() {
-                        return refuse(tx, Refusal { reason: "busy", task_ids: busy, owned_by: None });
-                    }
-                }
-                let chosen = rows.iter().find(|row| {
-                    row.candidate.blocked_by.is_empty()
-                        && options
-                            .kinds
-                            .as_ref()
-                            // t3617: an explicitly assigned task is claimable by its assignee whatever its
-                            // kind; unassigned work keeps the role's kind filter.
-                            .is_none_or(|kinds| {
-                                kinds.is_empty()
-                                    || kinds.contains(&row.kind)
-                                    || row.candidate.assignees.contains(&pane)
-                            })
-                        && !options.exclude_author.as_ref().is_some_and(|who| row.author.as_ref() == Some(who))
-                        && poolrad_review_ok(row.repo.as_deref(), &row.kind, &row.candidate.assignees, &pane)
-                        && claimable(&row.candidate, Some(&pane))
-                });
-                let Some(chosen) = chosen else {
-                    let all: Vec<Candidate> = rows.iter().map(|r| r.candidate.clone()).collect();
-                    return refuse(tx, refusal(&all, Some(&pane)));
-                };
-                // `_claim_locked`: the lease, the status, the attempt and the event.
-                let mut assignees = chosen.candidate.assignees.clone();
-                let added = !assignees.contains(&pane);
-                if added {
-                    assignees.push(pane.clone());
-                }
-                let (pid, start, name) = match &options.caller {
-                    Some((p, s, n)) => (Some(*p), s.clone(), n.clone()),
-                    None => (None, None, None),
-                };
-                tx.execute(
-                    "INSERT OR REPLACE INTO task_leases (task_id, pane_id, claimed_at, heartbeat_at, expires_at, caller_pid, caller_start, caller_name, assignee_added) VALUES (?,?,?,?,?,?,?,?,?)",
-                    params![chosen.candidate.id, pane, now, now, now + lease_s, pid, start, name, added as i64],
-                ).map_err(db::map_sqlite)?;
-                tx.execute(
-                    "UPDATE tasks SET status = 'in_progress', assignees = ?, attempts = attempts + 1, updated_at = ?, block_reason = NULL WHERE id = ?",
-                    params![json!(assignees).to_string(), now, chosen.candidate.id],
-                ).map_err(db::map_sqlite)?;
-                if chosen.candidate.allocation_waiting {
-                    // The assignee took the task its ready offer named, so the allocation is done;
-                    // close the offer as `allocate` does (t3617).
-                    tx.execute(
-                        "UPDATE allocation_offers SET state='assigned' WHERE task_id=? AND state='ready'",
-                        params![chosen.candidate.id],
-                    ).map_err(db::map_sqlite)?;
-                }
-                tx.execute(
-                    "INSERT INTO task_events (task_id, event, at, actor, scope, priority, status_from, status_to, duration_ms, meta) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                    params![chosen.candidate.id, "claimed", now, pane, chosen.scope, chosen.priority,
-                            chosen.candidate.status, "in_progress", ((now - chosen.created_at) * 1000.0) as i64,
-                            json!({
-                                "lease_seconds": crate::github::python_float_json_value(lease_s)
-                                    .expect("SQLite accepted task lease value"),
-                                "caller_pid": pid,
-                                "caller_name": name,
-                            }).to_string()],
-                ).map_err(db::map_sqlite)?;
-                let id = chosen.candidate.id.clone();
+                let result = claim_next_in(&tx, &target, &pane, &options, lease_s, now)?;
                 tx.commit().map_err(db::map_sqlite)?;
-                Ok(Ok(id))
+                Ok(result)
             })
             .await?;
         match chosen_id {
@@ -589,6 +446,185 @@ impl Tasks {
             }),
         }
     }
+}
+
+/// The exact single-claim rules, reusable inside an existing completion transaction.
+pub(super) fn claim_next_in(
+    tx: &rusqlite::Transaction<'_>,
+    target: &str,
+    pane: &str,
+    options: &ClaimOptions,
+    lease_s: f64,
+    now: f64,
+) -> Result<Result<String, Refusal>, DunkError> {
+    if lease_s <= 0.0 {
+        return Err(DunkError::Refused("lease_seconds must be positive".into()));
+    }
+    let mine_only = target == "mine";
+    let (sql, bind): (&str, Vec<String>) = if mine_only {
+        ("SELECT id, scope, priority, created_at, status, kind, author, assignees, multi_assignee, repo FROM tasks WHERE scope IN (?, ?) AND status IN ('open', 'in_progress') ORDER BY created_at, id",
+     vec!["global".into(), pane.to_string()])
+    } else {
+        ("SELECT id, scope, priority, created_at, status, kind, author, assignees, multi_assignee, repo FROM tasks WHERE scope = ? AND status IN ('open', 'in_progress') ORDER BY created_at, id",
+     vec![target.to_string()])
+    };
+    let mut rows: Vec<Row> = Vec::new();
+    {
+        let mut stmt = tx.prepare(sql).map_err(db::map_sqlite)?;
+        let found = stmt
+            .query_map(rusqlite::params_from_iter(bind.iter()), |row| {
+                let assignees: Option<String> = row.get(7)?;
+                Ok(Row {
+                    candidate: Candidate {
+                        id: row.get(0)?,
+                        status: row.get(4)?,
+                        assignees: decode_list(assignees.as_deref()),
+                        multi_assignee: row.get::<_, i64>(8)? != 0,
+                        ..Default::default()
+                    },
+                    scope: row.get(1)?,
+                    priority: row.get(2)?,
+                    created_at: row.get(3)?,
+                    kind: row.get(5)?,
+                    author: row.get(6)?,
+                    repo: row.get(9)?,
+                })
+            })
+            .map_err(db::map_sqlite)?;
+        for row in found {
+            rows.push(row.map_err(db::map_sqlite)?);
+        }
+    }
+    if mine_only {
+        rows.retain(|row| row.candidate.assignees.iter().any(|who| who == pane));
+    }
+    for row in rows.iter_mut() {
+        let id = row.candidate.id.clone();
+        let mut stmt = tx
+            .prepare("SELECT pane_id FROM task_leases WHERE task_id = ? AND expires_at > ?")
+            .map_err(db::map_sqlite)?;
+        row.candidate.leased_by = stmt
+            .query_map(params![id, now], |r| r.get::<_, String>(0))
+            .map_err(db::map_sqlite)?
+            .collect::<Result<_, _>>()
+            .map_err(db::map_sqlite)?;
+        row.candidate.blocked_by = dependency_state_conn(tx, &id)?.1.blocked_by;
+        // The allocation table may not exist yet (the Python tolerates that).
+        let offer: Option<(String, String)> = match tx
+        .query_row("SELECT owners, offered_by FROM allocation_offers WHERE task_id = ? AND state = 'ready'",
+                   params![id], |r| Ok((r.get(0)?, r.get(1)?)))
+        .optional()
+    {
+        Ok(found) => found,
+        Err(error) if error.to_string().contains("no such table") => None,
+        Err(error) => return Err(db::map_sqlite(error)),
+    };
+        if let Some((owners, offered_by)) = offer {
+            let mut mine = row.candidate.assignees.clone();
+            mine.sort();
+            row.candidate.allocation_waiting = mine == decode_list(Some(&owners));
+            row.candidate.offered_by = Some(offered_by);
+        }
+    }
+    rows.sort_by_key(|row| order_key(&row.priority, row.created_at, &row.candidate.id));
+    let refuse = |refusal: Refusal| -> Result<Result<String, Refusal>, DunkError> {
+        eprintln!(
+            "task claim refused: pane={pane} scope={target} reason={} tasks={}",
+            refusal.reason,
+            if refusal.task_ids.is_empty() {
+                "-".to_string()
+            } else {
+                refusal.task_ids.join(",")
+            }
+        );
+        Ok(Err(refusal))
+    };
+    if !options.allow_busy {
+        let mut stmt = tx
+        .prepare("SELECT DISTINCT lease.task_id FROM task_leases AS lease JOIN tasks AS task ON task.id = lease.task_id WHERE lease.pane_id = ? AND lease.expires_at > ? AND task.status = 'in_progress' ORDER BY lease.task_id")
+        .map_err(db::map_sqlite)?;
+        let busy: Vec<String> = stmt
+            .query_map(params![pane, now], |r| r.get::<_, String>(0))
+            .map_err(db::map_sqlite)?
+            .collect::<Result<_, _>>()
+            .map_err(db::map_sqlite)?;
+        drop(stmt);
+        if !busy.is_empty() {
+            return refuse(Refusal {
+                reason: "busy",
+                task_ids: busy,
+                owned_by: None,
+            });
+        }
+    }
+    let chosen = rows.iter().find(|row| {
+        row.candidate.blocked_by.is_empty()
+            && options
+                .kinds
+                .as_ref()
+                // t3617: an explicitly assigned task is claimable by its assignee whatever its
+                // kind; unassigned work keeps the role's kind filter.
+                .is_none_or(|kinds| {
+                    kinds.is_empty()
+                        || kinds.contains(&row.kind)
+                        || row.candidate.assignees.iter().any(|who| who == pane)
+                })
+            && !options
+                .exclude_author
+                .as_ref()
+                .is_some_and(|who| row.author.as_ref() == Some(who))
+            && poolrad_review_ok(
+                row.repo.as_deref(),
+                &row.kind,
+                &row.candidate.assignees,
+                pane,
+            )
+            && claimable(&row.candidate, Some(pane))
+    });
+    let Some(chosen) = chosen else {
+        let all: Vec<Candidate> = rows.iter().map(|r| r.candidate.clone()).collect();
+        return refuse(refusal(&all, Some(pane)));
+    };
+    // `_claim_locked`: the lease, the status, the attempt and the event.
+    let mut assignees = chosen.candidate.assignees.clone();
+    let added = !assignees.iter().any(|who| who == pane);
+    if added {
+        assignees.push(pane.to_string());
+    }
+    let (pid, start, name) = match &options.caller {
+        Some((p, s, n)) => (Some(*p), s.clone(), n.clone()),
+        None => (None, None, None),
+    };
+    tx.execute(
+    "INSERT OR REPLACE INTO task_leases (task_id, pane_id, claimed_at, heartbeat_at, expires_at, caller_pid, caller_start, caller_name, assignee_added) VALUES (?,?,?,?,?,?,?,?,?)",
+    params![chosen.candidate.id, pane, now, now, now + lease_s, pid, start, name, added as i64],
+).map_err(db::map_sqlite)?;
+    tx.execute(
+    "UPDATE tasks SET status = 'in_progress', assignees = ?, attempts = attempts + 1, updated_at = ?, block_reason = NULL WHERE id = ?",
+    params![json!(assignees).to_string(), now, chosen.candidate.id],
+).map_err(db::map_sqlite)?;
+    if chosen.candidate.allocation_waiting {
+        // The assignee took the task its ready offer named, so the allocation is done;
+        // close the offer as `allocate` does (t3617).
+        tx.execute(
+            "UPDATE allocation_offers SET state='assigned' WHERE task_id=? AND state='ready'",
+            params![chosen.candidate.id],
+        )
+        .map_err(db::map_sqlite)?;
+    }
+    tx.execute(
+    "INSERT INTO task_events (task_id, event, at, actor, scope, priority, status_from, status_to, duration_ms, meta) VALUES (?,?,?,?,?,?,?,?,?,?)",
+    params![chosen.candidate.id, "claimed", now, pane, chosen.scope, chosen.priority,
+            chosen.candidate.status, "in_progress", ((now - chosen.created_at) * 1000.0) as i64,
+            json!({
+                "lease_seconds": crate::github::python_float_json_value(lease_s)
+                    .expect("SQLite accepted task lease value"),
+                "caller_pid": pid,
+                "caller_name": name,
+            }).to_string()],
+).map_err(db::map_sqlite)?;
+    let id = chosen.candidate.id.clone();
+    Ok(Ok(id))
 }
 
 /// One requeued claim returned by `reap`.

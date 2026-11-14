@@ -90,6 +90,9 @@ def load_parser():
     task_actions.choices["block"].add_argument(
         "--waiting-on", metavar="WHAT",
         help="what the task waits for: owner, evidence, release, numbers, task:<id> or pr:<repo>#<number>")
+    complete = task_actions.choices["complete"]
+    complete.add_argument("--note", help="record evidence atomically with completion")
+    complete.add_argument("--next", action="store_true", help="also claim the next task assigned to this lane")
     backlog = task_actions.add_parser("backlog", help="count unfinished global tasks by project, with the unmapped ones shown")
     backlog.add_argument("--project", metavar="NAME", help="only this project, or 'unmapped'")
     backlog.add_argument("--status", metavar="LIST", help="comma-separated statuses (default: open,in_progress,blocked)")

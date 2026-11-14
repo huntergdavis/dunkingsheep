@@ -12,7 +12,9 @@ use std::sync::{Arc, Mutex};
 use serde_json::{json, Map, Value};
 use tokio::sync::OwnedMutexGuard;
 
-use super::advance::{Advance, AdvanceOptions, OperatorProof, PlanInput, Planner};
+use super::advance::{
+    Advance, AdvanceOptions, CompletionOptions, OperatorProof, PlanInput, Planner,
+};
 use super::next_job::Handoff;
 use crate::config::Env;
 use crate::dispatch::NextJob;
@@ -49,6 +51,7 @@ pub struct NextJobs {
 }
 
 struct AdvanceRequest<'a> {
+    completion: Option<CompletionOptions>,
     pane: &'a str,
     trigger: &'a str,
     from_task: Option<&'a str>,
@@ -238,6 +241,20 @@ impl NextJobs {
         caller: Option<Caller>,
         operator_proof: Option<OperatorProof>,
     ) -> Result<Advance, DunkError> {
+        self.advance_completion(pane, trigger, from_task, caller, operator_proof, None)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn advance_completion(
+        &self,
+        pane: &str,
+        trigger: &str,
+        from_task: Option<&str>,
+        caller: Option<Caller>,
+        operator_proof: Option<OperatorProof>,
+        completion: Option<CompletionOptions>,
+    ) -> Result<Advance, DunkError> {
         let _pane_guard = self.lock_pane(pane).await;
         let dispatch_reason = self.gate(pane, None).await;
         let unread = if dispatch_reason.is_some() {
@@ -253,6 +270,7 @@ impl NextJobs {
 
         self.advance_with_materialiser(
             AdvanceRequest {
+                completion,
                 pane,
                 trigger,
                 from_task,
@@ -277,6 +295,7 @@ impl NextJobs {
         Fut: Future<Output = Result<crate::inbox::Status, MaterialiseError>>,
     {
         let AdvanceRequest {
+            completion,
             pane,
             trigger,
             from_task,
@@ -328,6 +347,7 @@ impl NextJobs {
                 .unwrap_or_default()
         });
         let options = AdvanceOptions {
+            completion,
             from_task: from_task.map(str::to_owned),
             caller,
             unread: unread.unwrap_or(-1),
@@ -1753,6 +1773,7 @@ mod tests {
             .unwrap();
         jobs.advance_with_materialiser(
             AdvanceRequest {
+                completion: None,
                 pane: "w1:p1",
                 trigger: "turn.end",
                 from_task: Some(&source_task.id),
@@ -1768,6 +1789,7 @@ mod tests {
         .unwrap();
         jobs.advance_with_materialiser(
             AdvanceRequest {
+                completion: None,
                 pane: "w2:p2",
                 trigger: "turn.start",
                 from_task: None,
@@ -1783,6 +1805,7 @@ mod tests {
         .unwrap();
         jobs.advance_with_materialiser(
             AdvanceRequest {
+                completion: None,
                 pane: "w2:p2",
                 trigger: "turn.end",
                 from_task: None,
@@ -2728,6 +2751,7 @@ mod tests {
         let advance = jobs
             .advance_with_materialiser(
                 AdvanceRequest {
+                    completion: None,
                     pane: "%leader",
                     trigger: "completion",
                     from_task: Some(&source.id),
@@ -2773,6 +2797,7 @@ mod tests {
         let advance = jobs
             .advance_with_materialiser(
                 AdvanceRequest {
+                    completion: None,
                     pane,
                     trigger: "turn.end",
                     from_task: None,
@@ -2834,6 +2859,7 @@ mod tests {
         let advance = jobs
             .advance_with_materialiser(
                 AdvanceRequest {
+                    completion: None,
                     pane,
                     trigger: "turn.end",
                     from_task: None,
@@ -2876,6 +2902,7 @@ mod tests {
             let advance = jobs
                 .advance_with_materialiser(
                     AdvanceRequest {
+                        completion: None,
                         pane,
                         trigger: "turn.end",
                         from_task: None,

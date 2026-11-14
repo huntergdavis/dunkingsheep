@@ -97,6 +97,12 @@ fn every_input_schema_equals_the_pythons() {
                 assert!(properties.remove(key).is_some());
             }
         }
+        if name == "task_complete" {
+            let properties = got["properties"].as_object_mut().unwrap();
+            for key in ["note", "next"] {
+                assert!(properties.remove(key).is_some());
+            }
+        }
         if name == "task_block" {
             // t4704: the typed wait is Rust-only.
             assert!(got["properties"]
@@ -242,5 +248,16 @@ fn task_history_mcp_fields_do_not_collide_with_task_type() {
         "note",
     ] {
         assert!(note_kinds.contains(&serde_json::json!(kind)));
+    }
+}
+
+#[test]
+fn atomic_completion_fields_are_available_to_socket_and_mcp() {
+    for schema in [
+        registry::input_schema("task_complete").unwrap(),
+        registry::grouped_input_schema("task").unwrap(),
+    ] {
+        assert_eq!(schema["properties"]["note"]["type"], "string");
+        assert_eq!(schema["properties"]["next"]["type"], "boolean");
     }
 }

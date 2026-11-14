@@ -54,6 +54,20 @@ impl Flock {
         verdict: Option<&str>,
         landed: bool,
     ) -> Result<Value, DunkError> {
+        self.task_complete_with_options(context, task_id, by, verdict, landed, None, false)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn task_complete_with_options(
+        &self,
+        context: &crate::api::HandlerContext<'_>,
+        task_id: &str,
+        by: Option<&str>,
+        verdict: Option<&str>,
+        landed: bool,
+        note: Option<&str>,
+        next: bool,
+    ) -> Result<Value, DunkError> {
         if !std::ptr::eq(self, context.flock) {
             return refuse("task completion request flock mismatch");
         }
@@ -68,6 +82,8 @@ impl Flock {
             by.as_deref(),
             verdict.as_deref(),
             landed,
+            note.map(str::to_owned),
+            next,
             caller,
             self_pane_id,
         ))?
@@ -81,6 +97,8 @@ impl Flock {
         by: Option<&str>,
         requested_verdict: Option<&str>,
         landed: bool,
+        note: Option<String>,
+        next: bool,
         caller: Option<Caller>,
         self_pane_id: Option<String>,
     ) -> Result<Value, DunkError> {
@@ -161,13 +179,17 @@ impl Flock {
                 requested_verdict,
                 &review_caller,
             )?;
-            Self::require_review_evidence(
-                tasks.as_ref(),
-                &task.task,
-                self_pane_id.as_deref(),
-                role,
-            )
-            .await?;
+            // A nonempty inline note will be written by this bound lane in the
+            // completion transaction. Empty notes retain the existing evidence refusal.
+            if note.as_deref().is_none_or(|text| text.trim().is_empty()) {
+                Self::require_review_evidence(
+                    tasks.as_ref(),
+                    &task.task,
+                    self_pane_id.as_deref(),
+                    role,
+                )
+                .await?;
+            }
             Self::check_review_head_unjudged(&task, &facts)?;
         }
 
@@ -237,13 +259,59 @@ impl Flock {
             pane_given.or(by)
         };
 
-        if let Some(verdict) = validated_verdict.as_deref() {
-            tasks
-                .set_verdict_with_author_guard(task_id, verdict, actor, role == "reviewer")
-                .await?;
+        let inline = note.is_some() || next;
+        let completion = if inline {
+            let (kinds, exclude_author) = Self::filters_for_role(&role, Some(pane));
+            // The provider restriction on review claims is the same as task_next mine.
+            if next && role == "reviewer" {
+                let (may, provider, allowed) = self.with_roles(|roles, _| {
+                    Ok((
+                        roles.may_review(pane, Some(&role))?,
+                        roles.provider_of(pane)?,
+                        roles.reviewer_providers.join(", "),
+                    ))
+                })?;
+                if !may {
+                    return refuse(format!(
+                        "{pane} is a reviewer lane on a provider that may not review ({}; allowed: {allowed}). Free models are the worker tier.",
+                        provider.unwrap_or_else(|| "unknown".into())
+                    ));
+                }
+            }
+            Some(crate::tasks::advance::CompletionOptions {
+                note,
+                next,
+                verdict: validated_verdict.clone(),
+                guard_author: role == "reviewer",
+                landed,
+                claim: crate::tasks::ClaimOptions {
+                    kinds,
+                    exclude_author,
+                    caller: caller
+                        .as_ref()
+                        .and_then(|c| c.pid.map(|pid| (pid, c.start.clone(), c.name.clone()))),
+                    ..Default::default()
+                },
+            })
+        } else {
+            None
+        };
+        if !inline {
+            if let Some(verdict) = validated_verdict.as_deref() {
+                tasks
+                    .set_verdict_with_author_guard(task_id, verdict, actor, role == "reviewer")
+                    .await?;
+            }
         }
         let advance = next_jobs
-            .advance(pane, "completion", Some(task_id), caller, operator_proof)
+            .advance_completion(
+                pane,
+                "completion",
+                Some(task_id),
+                caller,
+                operator_proof,
+                completion,
+            )
             .await?;
         self.wake_push();
 
@@ -255,10 +323,18 @@ impl Flock {
             .cloned()
             .ok_or_else(|| DunkError::Refused("completed task is not an object".into()))?;
         let mut next_job = advance.plan;
+        if next {
+            result.insert(
+                "next_task".into(),
+                next_job.remove("next_task").unwrap_or(Value::Null),
+            );
+        }
         next_job.remove("task");
         result.insert("next_job".into(), Value::Object(next_job));
         if !landed {
-            tasks.set_landed(task_id, false, actor, None, None).await?;
+            if !inline {
+                tasks.set_landed(task_id, false, actor, None, None).await?;
+            }
             result.insert("landed".into(), json!(false));
         }
         if let Some(verdict) = validated_verdict.as_deref() {

@@ -4643,8 +4643,28 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
                     "landed".into(),
                     ns.get("landed").cloned().unwrap_or(Value::Bool(true)),
                 );
+                if let Some(note) = ns.get("note").filter(|value| !value.is_null()) {
+                    args.insert("note".into(), note.clone());
+                }
+                let next = ns.get("next").and_then(Value::as_bool).unwrap_or(false);
+                if next {
+                    args.insert("next".into(), Value::Bool(true));
+                }
                 crate::daemon_cmd::run_command(ns, "task_complete", args, |task| {
-                    crate::render_print::render_task(task, &task_stamp)
+                    let mut output = crate::render_print::render_task(task, &task_stamp);
+                    if next {
+                        if let Some(next_task) = task.get("next_task").filter(|t| !t.is_null()) {
+                            output.push_str(&format!(
+                                "\nnext {}: {}\n{}\n",
+                                next_task["id"].as_str().unwrap_or_default(),
+                                next_task["title"].as_str().unwrap_or_default(),
+                                next_task["body"].as_str().unwrap_or_default()
+                            ));
+                        } else {
+                            output.push_str("\nno next assigned task\n");
+                        }
+                    }
+                    output
                 })
             }
             "add" => {
