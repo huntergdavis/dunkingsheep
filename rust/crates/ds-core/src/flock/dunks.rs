@@ -1389,37 +1389,31 @@ impl Flock {
             panes.remove(pane_id);
             return false;
         }
-        let fresh = panes
-            .get(pane_id)
-            .is_none_or(|since| now - since >= DUNK_DRAFT_HOLD_S);
-        if fresh {
-            // The bound runs from the first refusal; later intervals do not extend it.
-            panes.insert(pane_id.to_owned(), now);
+        // One window per draft. The bound runs from the first refusal and later refusals never
+        // extend it. An entry whose window has passed STAYS, spent, until the box is seen empty
+        // or something is typed there: the same leftover text cannot start a second window, so
+        // a dunk that fires every few minutes cannot hold a lane's notices back to back.
+        if panes.contains_key(pane_id) {
+            return false;
         }
-        fresh
+        panes.insert(pane_id.to_owned(), now);
+        true
     }
 
     /// t4681: whether a notice to this pane must leave a draft alone: a registered owner lane,
-    /// or, for at most [`DUNK_DRAFT_HOLD_S`], a pane where a scheduled dunk has just been
-    /// refused over a person's draft. An expired entry is dropped, and the pane's notices then
-    /// behave as on any other lane.
+    /// or, for at most [`DUNK_DRAFT_HOLD_S`] after the first refusal, a pane where a scheduled
+    /// dunk was refused over a person's draft. Once that window has passed the pane's notices
+    /// behave as on any other lane, and stay that way until a new draft appears.
     pub(crate) fn notice_preserves_draft(&self, pane_id: &str) -> bool {
         if self.is_owner_lane(pane_id) {
             return true;
         }
         let now = clock::now_s();
-        let mut panes = self
-            .dunk_draft_panes
+        self.dunk_draft_panes
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match panes.get(pane_id) {
-            Some(since) if now - since < DUNK_DRAFT_HOLD_S => true,
-            Some(_) => {
-                panes.remove(pane_id);
-                false
-            }
-            None => false,
-        }
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(pane_id)
+            .is_some_and(|since| now - since < DUNK_DRAFT_HOLD_S)
     }
 
     /// t4681: store a scheduled dunk as ONE inbox row in its target lane's mailbox instead of

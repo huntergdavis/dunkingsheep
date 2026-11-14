@@ -7152,23 +7152,31 @@ fn a_pane_with_a_refused_dunk_holds_its_notice_for_a_bounded_time_then_behaves_a
     assert!(pane.typed.is_empty());
     assert!(pane.keys.is_empty());
 
-    // The bound has passed and the text is still there: the pane is forgotten and the notice
-    // is delivered the way it is on any other lane (the leftover text is flushed first).
+    // The window has passed and the same text is still there.
     flock
         .dunk_draft_panes
         .lock()
         .unwrap()
         .insert(P.into(), now - super::dunks::DUNK_DRAFT_HOLD_S - 1.0);
     assert!(!flock.notice_preserves_draft(P), "expired");
+    // The dunk fires again and is refused over the same leftover text: that does NOT start a
+    // second window (a 5- or 10-minute dunk would otherwise hold the lane's notices for ever).
     assert!(
-        flock.dunk_draft_panes.lock().unwrap().is_empty(),
-        "an expired pane is dropped"
+        !flock.set_dunk_draft_at(P, true, now),
+        "a spent window is not re-armed by another refusal"
     );
+    assert!(!flock.notice_preserves_draft(P), "still not held");
+    // So the pending notice is delivered the way it is on any other lane (the leftover text
+    // is flushed first).
     let _ = flock.deliver_message("m-notice", 99_000.0, &mut pane, || None);
     assert!(
         !pane.keys.is_empty(),
         "after the bound the notice path is the ordinary one"
     );
+    // Only a NEW draft starts a new window: the box is seen empty (or something is typed),
+    // then a later refusal arms again.
+    flock.set_dunk_draft_at(P, false, now);
+    assert!(flock.set_dunk_draft_at(P, true, now + 5.0));
 }
 
 #[test]
