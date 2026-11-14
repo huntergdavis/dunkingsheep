@@ -70,6 +70,10 @@ impl Store {
             let count: i64 = tx.query_row("SELECT COUNT(*) FROM pr_waits WHERE mailbox=?",[&mailbox],|r|r.get(0)).map_err(map_sqlite)?;
             let existing: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM pr_waits WHERE repo=? AND pr=? AND mailbox=?)",rusqlite::params![repo,pr,mailbox],|r|r.get(0)).map_err(map_sqlite)?;
             if count>=20 && !existing {return Err(refuse("at most 20 PR waits per lane"));}
+            if existing && head.is_some() {
+                let pinned: Option<String> = tx.query_row("SELECT head FROM pr_waits WHERE repo=? AND pr=? AND mailbox=?",rusqlite::params![repo,pr,mailbox],|r|r.get(0)).map_err(map_sqlite)?;
+                if pinned != head {return Err(refuse("active wait has a different head; cancel it before registering another head"));}
+            }
             tx.execute("INSERT OR IGNORE INTO pr_watches(repo,pr) VALUES(?,?)", rusqlite::params![repo,pr]).map_err(map_sqlite)?;
             tx.execute("INSERT INTO pr_waits(repo,pr,mailbox,pane,head,created_at) VALUES(?,?,?,?,?,?) ON CONFLICT(repo,pr,mailbox) DO NOTHING", rusqlite::params![repo,pr,mailbox,pane,head,now_s()]).map_err(map_sqlite)?;
             let id: i64 = tx.query_row("SELECT id FROM pr_waits WHERE repo=? AND pr=? AND mailbox=?", rusqlite::params![repo,pr,mailbox], |r| r.get(0)).map_err(map_sqlite)?;

@@ -536,6 +536,12 @@ mod tests {
         let id = register(&s, "one", None);
         assert_eq!(s.pr_wait_list("other", Some(id)).unwrap()["cancelled"], 0);
         assert_eq!(s.pr_wait_list("one", Some(id)).unwrap()["cancelled"], 1);
+        let id = register(&s, "one", Some("abc"));
+        assert_eq!(register(&s, "one", Some("abc")), id);
+        assert!(s
+            .pr_wait_register("o/r", 1, "one", "%2", Some("def"))
+            .is_err());
+        s.pr_wait_list("one", Some(id)).unwrap();
         for pr in 1..=10 {
             s.pr_wait_register("o/r", pr, "one", "%2", None).unwrap();
         }
