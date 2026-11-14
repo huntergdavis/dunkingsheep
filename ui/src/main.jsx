@@ -22,6 +22,7 @@ import { channelDeliveryLabel, messageDeliveryLabel } from './delivery-label.js'
 import CharacterEditor from './CharacterEditor';
 import ProjectTerminal from './ProjectTerminal';
 import { nextTerminalList, terminalActionForLane, terminalListReason } from './project-terminal-targets.js';
+import { agoText, laneMailText, unroutedSection } from './project-fleet.js';
 import { DASH_HOME, DASH_ROUTES, resolveDashRoute, viewForPath } from './dash-route.js';
 import { inboxOutcomeText, quickMessageBlock, quickMessageRoster, quickMessageTargets, sendOutcomeText } from './quick-message.js';
 
@@ -1254,6 +1255,19 @@ function Projects({ standalone = false }) {
     load(); const timer = setInterval(load, 10000);
     return () => { live = false; clearInterval(timer); };
   }, []);
+  // S5a (t4646): the mail counts and the unrouted-process list come from the pane roster, which
+  // the Terminals view used to be the only reader of. A failed read is kept as a state the
+  // helpers turn into "Unknown" with the reason, never into zeros.
+  const [fleet, setFleet] = useState(null);
+  useEffect(() => {
+    let live = true;
+    const load = () => api('/fleet')
+      .then(data => { if (live) setFleet(data); })
+      .catch(e => { if (live) setFleet({ state: 'unavailable', error: e.message, rows: [] }); });
+    load(); const timer = setInterval(load, 10000);
+    return () => { live = false; clearInterval(timer); };
+  }, []);
+  const unrouted = unroutedSection(fleet);
   const groups = new Map();
   for (const lane of roster?.lanes || []) {
     const membership = lane.membership || {};
@@ -1273,10 +1287,22 @@ function Projects({ standalone = false }) {
     {ownerAction && <section className="project-group"><h2>Owner terminal</h2><button type="button" onClick={() => setTerminalTarget(ownerAction.target)}>Open owner terminal</button></section>}
     {roster && <><label>Show <select aria-label="Filter projects" value={effectiveSelected} onChange={e => setSelected(e.target.value)}><option value="all">All groups</option>{ordered.map(group => <option key={group.key} value={group.key}>{group.title}</option>)}</select></label>
       {!ordered.length && <p>No live agent lanes are reported.</p>}
-      {ordered.filter(group => effectiveSelected === 'all' || group.key === effectiveSelected).map(group => <section className="project-group" key={group.key}><h2>{group.title} <small>({group.lanes.length})</small></h2><div className="ops-table-wrap"><table><thead><tr><th>Lane</th><th>Activity</th><th>Task</th><th>Model</th></tr></thead><tbody>{group.lanes.map(lane => <tr key={lane.pane_id}><td><a href={`/dash/fleet?pane=${encodeURIComponent(lane.pane_id)}`}>{lane.name || lane.pane_id}</a><small> {lane.pane_id}</small>{(action => action.target
+      {ordered.filter(group => effectiveSelected === 'all' || group.key === effectiveSelected).map(group => <section className="project-group" key={group.key}><h2>{group.title} <small>({group.lanes.length})</small></h2><div className="ops-table-wrap"><table><thead><tr><th>Lane</th><th>Activity</th><th>Mail</th><th>Task</th><th>Model</th></tr></thead><tbody>{group.lanes.map(lane => <tr key={lane.pane_id}><td><a href={`/dash/fleet?pane=${encodeURIComponent(lane.pane_id)}`}>{lane.name || lane.pane_id}</a><small> {lane.pane_id}</small>{(action => action.target
         ? <button type="button" onClick={() => setTerminalTarget(action.target)}>{action.label}</button>
-        : <small className="lane-terminal-reason"> {action.reason}</small>)(terminalActionForLane(terminalList, lane.pane_id))}</td><td>{lane.state || 'Unknown'}</td><td>{lane.task ? [lane.task.id, lane.task.title].filter(Boolean).join(' · ') : 'Unknown'}</td><td>{lane.model?.value || 'Unknown'}</td></tr>)}</tbody></table></div></section>)}
+        : <small className="lane-terminal-reason"> {action.reason}</small>)(terminalActionForLane(terminalList, lane.pane_id))}</td><td>{lane.state || 'Unknown'}</td><td>{(mail => <span title={mail.reason || undefined}>{mail.text}</span>)(laneMailText(fleet, lane.pane_id))}</td><td>{lane.task ? [lane.task.id, lane.task.title].filter(Boolean).join(' · ') : 'Unknown'}</td><td>{lane.model?.value || 'Unknown'}</td></tr>)}</tbody></table></div></section>)}
     </>}
+    <details className="project-unrouted">
+      <summary>{unrouted.title}</summary>
+      {!unrouted.known ? <p className="dash-muted">{unrouted.reason}</p> : <>
+        {unrouted.note && <p className="dash-muted">{unrouted.note}</p>}
+        {!unrouted.rows.length && <p>No unrouted agent processes detected.</p>}
+        {unrouted.rows.map(row => <p key={row.pid}>
+          <strong>{row.project}</strong> · {row.agent} · PID {row.pid}
+          <br />{row.reason} · Session write: {agoText(row.last_session_write_s)}
+          {row.session_age_reason ? ' · ' + row.session_age_reason : ''}
+        </p>)}
+      </>}
+    </details>
     {terminalTarget && <ProjectTerminal key={`${terminalTarget.name}:${terminalTarget.pane_id}`} target={terminalTarget} onClose={() => setTerminalTarget(null)} />}
   </div></DashShell>;
 }

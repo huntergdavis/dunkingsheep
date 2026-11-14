@@ -532,6 +532,9 @@
   background: var(--dash-panel-2);
   color: var(--dash-fg);
 }
+.dash-root .project-unrouted { margin-top: 18px; }
+.dash-root .project-unrouted > summary { cursor: pointer; color: var(--dash-muted); font-weight: 700; }
+.dash-root .project-unrouted p { margin: 8px 0; overflow-wrap: anywhere; }
 .dash-root .settings-modal .icon-button {
   border-color: var(--icon-button-panel-border, var(--dash-border));
   background: var(--dash-panel-2);

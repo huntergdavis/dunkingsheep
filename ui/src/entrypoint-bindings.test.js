@@ -17,6 +17,7 @@ const localExports = {
   'leader-line.js': ['leaderLine'],
   'dash-route.js': ['resolveDashRoute', 'viewForPath'],
   'quick-message.js': ['inboxOutcomeText', 'quickMessageBlock', 'quickMessageRoster', 'quickMessageTargets', 'sendOutcomeText'],
+  'project-fleet.js': ['agoText', 'laneMailText', 'unroutedSection'],
   'project-terminal-targets.js': ['nextTerminalList', 'terminalActionForLane', 'terminalListReason', 'terminalTargetForPane'],
 };
 

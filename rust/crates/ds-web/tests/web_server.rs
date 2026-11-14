@@ -979,6 +979,7 @@ const LANE_ROW_KEYS: &[&str] = &[
     "send",
     "session",
     "unread",
+    "unread_state",
 ];
 
 const OPS_SUMMARY_KEYS: &[&str] = &[
@@ -1074,6 +1075,7 @@ fn fleet_lists_the_lanes_in_the_python_shape() {
     assert_eq!(alpha["agent"], "claude");
     assert_eq!(alpha["alive"], true);
     assert_eq!(alpha["unread"], 3);
+    assert_eq!(alpha["unread_state"], "ok");
     assert_eq!(alpha["session"], "sid-alpha");
     assert_eq!(alpha["send"], "guarded");
     assert_eq!(alpha["drains"], false);
@@ -1090,7 +1092,9 @@ fn fleet_lists_the_lanes_in_the_python_shape() {
     assert_eq!(beta["name"], "beta-label");
     assert_eq!(beta["project"], "beta");
     assert_eq!(beta["agent"], "pi");
-    assert_eq!(beta["unread"], 0);
+    // The roster has no count for this lane: unknown, never a false zero.
+    assert_eq!(beta["unread"], Value::Null);
+    assert_eq!(beta["unread_state"], "unknown");
     assert_eq!(beta["send"], "owner_push");
     assert_eq!(beta["drains"], true);
     assert_eq!(beta["pending"], 2);
