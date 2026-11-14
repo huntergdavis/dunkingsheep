@@ -69,6 +69,17 @@ def load_parser():
     queue.add_argument("queue_id", type=int)
     queue.add_argument("--path", required=True, help="exact source path")
     queue.add_argument("--reason", required=True)
+    # t4648: the backlog query is Rust-only; the Python CLI had no project mapping to count by.
+    task = root.choices["task"]
+    task_actions = next(a for a in task._actions if isinstance(a, argparse._SubParsersAction))
+    backlog = task_actions.add_parser("backlog", help="count unfinished global tasks by project, with the unmapped ones shown")
+    backlog.add_argument("--project", metavar="NAME", help="only this project, or 'unmapped'")
+    backlog.add_argument("--status", metavar="LIST", help="comma-separated statuses (default: open,in_progress,blocked)")
+    backlog.add_argument("--priority", metavar="LIST", help="comma-separated priorities")
+    backlog.add_argument("--kind", metavar="LIST", help="comma-separated kinds")
+    backlog.add_argument("--by", choices=["priority", "kind"], help="add a per-priority or per-kind breakdown")
+    backlog.add_argument("--list", action="store_true", help="also list the matching tasks")
+    backlog.add_argument("--all", action="store_true", help="include done and cancelled")
     usage_provider = root.add_parser("usage-provider", help="read native provider usage as JSON")
     usage_provider.add_argument("provider", choices=["claude", "codex", "pi", "opencode"])
     usage_provider.add_argument("--max-age-s", dest="max_age", type=float,

@@ -5,6 +5,7 @@ impl Dispatcher {
     pub fn register_task_statistics(&mut self) {
         self.register("task_stats", h_task_stats);
         self.register("task_metrics", h_task_metrics);
+        self.register("task_backlog", h_task_backlog);
         self.register("task_reap", h_task_reap);
     }
 }
@@ -22,6 +23,50 @@ pub fn h_task_stats(context: &HandlerContext<'_>, args: Args) -> Result<Value, D
             .flock
             .task_stats(scope.as_deref(), context.self_pane_id()),
     )?
+}
+
+/// A filter given as one value, a comma-separated string or a list; empty means no filter.
+fn backlog_values(args: &Args, key: &str) -> Vec<String> {
+    let split = |text: &str| -> Vec<String> {
+        text.split(',')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .map(str::to_string)
+            .collect()
+    };
+    match args.get(key) {
+        Some(Value::String(text)) => split(text),
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(Value::as_str)
+            .flat_map(split)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// `task_backlog` (t4648): unfinished global tasks counted by project, with the unmapped ones in
+/// their own row. Rust-only and read-only; every role may ask (it shows nothing `task_list`
+/// does not already show that role).
+pub fn h_task_backlog(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let query = crate::tasks::backlog::BacklogQuery {
+        project: args
+            .get("project")
+            .filter(|value| !value.is_null())
+            .map(python_value_string),
+        statuses: backlog_values(&args, "status"),
+        priorities: backlog_values(&args, "priority"),
+        kinds: backlog_values(&args, "kind"),
+        all: args.get("all").is_some_and(truthy),
+        list: args.get("list").is_some_and(truthy),
+    };
+    query.validate()?;
+    let tasks = context
+        .flock
+        .stores()
+        .tasks
+        .ok_or_else(|| DunkError::Refused("the task store is not attached".into()))?;
+    context.block_on(tasks.backlog(query, context.env.now_s()))?
 }
 
 pub fn h_task_metrics(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {

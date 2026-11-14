@@ -886,6 +886,71 @@ pub fn render_task_stats(result: &Value) -> String {
     out
 }
 
+/// `task backlog` (t4648, Rust-only): one row per project, the unmapped bucket, then totals.
+/// `by` adds the per-priority or per-kind breakdown. The definition line is always printed, so
+/// a count is never read without what it counts.
+pub fn render_task_backlog(result: &Value, by: Option<&str>) -> String {
+    let statuses: Vec<String> = get(result, "statuses")
+        .as_array()
+        .map(|items| items.iter().map(py_str).collect())
+        .unwrap_or_default();
+    let number = |row: &Value, key: &str| row.get(key).and_then(Value::as_i64).unwrap_or(0);
+    let breakdown = |row: &Value| -> String {
+        let key = match by {
+            Some("priority") => "by_priority",
+            Some("kind") => "by_kind",
+            _ => return String::new(),
+        };
+        let parts: Vec<String> = row
+            .get(key)
+            .and_then(Value::as_object)
+            .map(|map| {
+                map.iter()
+                    .map(|(k, v)| format!("{k}={}", py_str(v)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if parts.is_empty() {
+            String::new()
+        } else {
+            format!("  [{}]", parts.join(" "))
+        }
+    };
+    let line = |name: &str, row: &Value| -> String {
+        let mut cells = vec![format!("{name:<24}")];
+        for status in &statuses {
+            cells.push(format!("{status}={:<4}", number(row, status)));
+        }
+        cells.push(format!("active={:<4}", number(row, "active")));
+        cells.push(format!("on_owner={:<3}", number(row, "blocked_on_owner")));
+        cells.push(format!("total={}", number(row, "total")));
+        format!("{}{}\n", cells.join(" ").trim_end(), breakdown(row))
+    };
+    let mut out = String::new();
+    for row in get(result, "projects").as_array().into_iter().flatten() {
+        out += &line(&py_str(get(row, "project")), row);
+    }
+    out += &line("TOTAL", get(result, "totals"));
+    out += &format!("({})\n", py_str(get(result, "definition")));
+    if let Some(tasks) = result.get("tasks").and_then(Value::as_array) {
+        out.push('\n');
+        for task in tasks {
+            out += &format!(
+                "  {:<7} {:<11} {:<6} {:<16} {}\n",
+                py_str(get(task, "id")),
+                py_str(get(task, "status")),
+                py_str(get(task, "priority")),
+                first_chars(&py_str(get(task, "project")), 16),
+                first_chars(&py_str(get(task, "title")), 60),
+            );
+        }
+        if tasks.is_empty() {
+            out += "  (no matching tasks)\n";
+        }
+    }
+    out
+}
+
 fn first_chars(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
 }
@@ -2236,6 +2301,41 @@ mod tests {
             render_status(&stale, &utc_stamp, 0.0),
             "code_stale       UNKNOWN - source identity unavailable: e1\n"
         );
+    }
+
+    /// t4648: rows, totals, the definition line, the optional breakdown and the task list.
+    #[test]
+    fn task_backlog_prints_every_project_row_the_totals_and_the_definition() {
+        let result = json!({
+            "statuses": ["open", "in_progress", "blocked"],
+            "definition": "global tasks only",
+            "projects": [
+                {"project": "alpha", "open": 1, "in_progress": 1, "blocked": 1, "active": 2,
+                 "blocked_on_owner": 1, "total": 3, "by_priority": {"urgent": 1, "low": 2}},
+                {"project": "unmapped", "open": 2, "in_progress": 0, "blocked": 0, "active": 2,
+                 "blocked_on_owner": 0, "total": 2, "by_priority": {"low": 2}},
+            ],
+            "totals": {"open": 3, "in_progress": 1, "blocked": 1, "active": 4,
+                       "blocked_on_owner": 1, "total": 5, "by_priority": {"urgent": 1, "low": 4}},
+        });
+        assert_eq!(
+            render_task_backlog(&result, None),
+            concat!(
+                "alpha                    open=1    in_progress=1    blocked=1    active=2    on_owner=1   total=3\n",
+                "unmapped                 open=2    in_progress=0    blocked=0    active=2    on_owner=0   total=2\n",
+                "TOTAL                    open=3    in_progress=1    blocked=1    active=4    on_owner=1   total=5\n",
+                "(global tasks only)\n"
+            )
+        );
+        let by = render_task_backlog(&result, Some("priority"));
+        assert!(by.contains("total=3  [urgent=1 low=2]\n"), "{by}");
+        let mut listed = result.clone();
+        listed["tasks"] = json!([{"id": "t7", "status": "open", "priority": "high",
+            "project": "alpha", "title": "do the thing"}]);
+        assert!(render_task_backlog(&listed, None)
+            .ends_with("\n  t7      open        high   alpha            do the thing\n"));
+        listed["tasks"] = json!([]);
+        assert!(render_task_backlog(&listed, None).ends_with("  (no matching tasks)\n"));
     }
 
     #[test]

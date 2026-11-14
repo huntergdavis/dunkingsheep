@@ -398,7 +398,7 @@ pub const READ_RETRIES: usize = 1;
 /// and `superuser_recover` (bootstrap WRITES: the first owner may register itself) and `dispatch`
 /// (a dry run is a read, a real tick files tasks); `turn_start`/`turn_end` are writes (retrying
 /// one can record the same turn twice).
-pub const IDEMPOTENT_READS: [&str; 41] = [
+pub const IDEMPOTENT_READS: [&str; 42] = [
     "status",
     "poll",
     "health",
@@ -414,6 +414,7 @@ pub const IDEMPOTENT_READS: [&str; 41] = [
     "task_read",
     "task_stats",
     "task_metrics",
+    "task_backlog",
     "task_followers",
     "metrics",
     "inbox_count",

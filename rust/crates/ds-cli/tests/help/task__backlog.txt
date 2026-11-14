@@ -1,0 +1,14 @@
+usage: dunkingsheep task backlog [-h] [--project NAME] [--status LIST]
+                                 [--priority LIST] [--kind LIST]
+                                 [--by {priority,kind}] [--list] [--all]
+
+options:
+  -h, --help            show this help message and exit
+  --project NAME        only this project, or 'unmapped'
+  --status LIST         comma-separated statuses (default:
+                        open,in_progress,blocked)
+  --priority LIST       comma-separated priorities
+  --kind LIST           comma-separated kinds
+  --by {priority,kind}  add a per-priority or per-kind breakdown
+  --list                also list the matching tasks
+  --all                 include done and cancelled
