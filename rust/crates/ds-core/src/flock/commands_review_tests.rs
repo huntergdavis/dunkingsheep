@@ -12,6 +12,13 @@ use crate::tasks::{AddOptions, Tasks};
 struct TestTokens(Result<String, String>);
 
 impl ReviewTokenSource for TestTokens {
+    fn reviewer_app(&self) -> Result<Option<crate::github::StatusApp>, String> {
+        Ok(Some(crate::github::StatusApp {
+            id: 5531872,
+            bot_login: "dunkingsheep-reviewer[bot]".into(),
+        }))
+    }
+
     fn reviewer_token(&self) -> ReviewFuture<'_, Result<String, String>> {
         let result = self.0.clone();
         Box::pin(async move { result })
@@ -61,6 +68,28 @@ impl TestTransport {
             ),
             completed_task: Mutex::new(None),
         }
+    }
+
+    fn with_green_merge_gate_at(self, index: usize, head: &str) -> Self {
+        let fixtures = [
+            json!({"state":"open","head":{"sha":head},"base":{"ref":"main"}}),
+            json!({"required_status_checks":{"contexts":["CI","dunkingsheep/review"],"checks":[{"context":"CI","app_id":7},{"context":"dunkingsheep/review","app_id":5531872}]}}),
+            json!({"total_count":1,"check_runs":[{"id":1,"name":"CI","app":{"id":7},"head_sha":head,"status":"completed","conclusion":"success"}]}),
+            json!([{"id":1,"context":"dunkingsheep/review","state":"success","creator":{"id":42,"login":"dunkingsheep-reviewer[bot]","type":"Bot"}}]),
+        ];
+        let mut responses = self.responses.lock().unwrap();
+        for (offset, value) in fixtures.into_iter().enumerate() {
+            responses.insert(
+                index + offset,
+                Ok(GitHubResponse {
+                    status: 200,
+                    reason: "OK".into(),
+                    body: serde_json::to_vec(&value).unwrap(),
+                }),
+            );
+        }
+        drop(responses);
+        self
     }
 
     fn assert_task_done_before_requests(&self, tasks: Arc<Tasks>, id: &str) {
@@ -166,7 +195,8 @@ async fn test_accept_posts_success_and_approves_as_the_reviewer_app() {
         response(200, json!({"state":"success"})),
         response(200, json!({"id": 1})),
         response(200, json!({"merged": true})),
-    ]);
+    ])
+    .with_green_merge_gate_at(2, "head-7");
     transport.assert_task_done_before_requests(tasks.clone(), &stored.id);
     let task = json!({
         "id": stored.id.clone(),
@@ -191,7 +221,7 @@ async fn test_accept_posts_success_and_approves_as_the_reviewer_app() {
     assert_eq!(Value::Bool(true), out["merged"]);
     assert_eq!("done", tasks.get(&stored.id).await.unwrap().status);
     let requests = transport.requests.lock().unwrap();
-    assert_eq!(3, requests.len());
+    assert_eq!(7, requests.len());
     assert_eq!("POST", requests[0].method);
     assert!(requests[0].url.ends_with("/repos/o/r/statuses/head-7"));
     assert_eq!("POST", requests[1].method);
@@ -202,8 +232,8 @@ async fn test_accept_posts_success_and_approves_as_the_reviewer_app() {
     );
     let approval: Value = serde_json::from_slice(requests[1].body.as_ref().unwrap()).unwrap();
     assert_eq!("APPROVE", approval["event"]);
-    assert_eq!("PUT", requests[2].method);
-    assert!(requests[2].url.ends_with("/repos/o/r/pulls/7/merge"));
+    assert_eq!("PUT", requests[6].method);
+    assert!(requests[6].url.ends_with("/repos/o/r/pulls/7/merge"));
 }
 
 #[tokio::test]
@@ -400,7 +430,8 @@ async fn test_an_accepted_head_is_never_refiled_and_is_merged_when_protection_al
             json!({"statuses":[{"context":"dunkingsheep/review", "state":"success"}]}),
         ),
         response(200, json!({"merged":true})),
-    ]);
+    ])
+    .with_green_merge_gate_at(4, "head-7");
 
     let report = flock
         .review_sync(

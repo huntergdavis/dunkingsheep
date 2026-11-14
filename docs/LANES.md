@@ -46,6 +46,13 @@ the owner re-registers it.
 > the reviewer App; you never merge, push, or approve by hand. Two reviewers are required on
 > poolrad-decomp; your verdict stands alone, do not coordinate with the other.
 
+The review App holds a merge unless the base branch has a readable, nonempty
+required-check policy and each required result succeeds on the exact reviewed
+head. Unknown or empty policy is reported as `merge held: required checks unknown`;
+observed green checks do not replace that policy. Protection reads need the
+App's [Administration read permission](https://docs.github.com/en/rest/branches/branch-protection#get-branch-protection).
+Distinct reviewer and GitHub merge gates still apply.
+
 ## Planner
 
 > You are a planner lane. Your only output is task bodies: decompose the
