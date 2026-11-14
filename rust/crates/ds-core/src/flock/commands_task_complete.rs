@@ -289,7 +289,7 @@ impl Flock {
                     exclude_author,
                     caller: caller
                         .as_ref()
-                        .map(|c| (c.pid, c.start.clone(), c.name.clone())),
+                        .and_then(|c| c.pid.map(|pid| (pid, c.start.clone(), c.name.clone()))),
                     ..Default::default()
                 },
             })
