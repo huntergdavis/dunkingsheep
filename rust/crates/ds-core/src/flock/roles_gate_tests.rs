@@ -863,6 +863,21 @@ fn a_system_token_is_accepted_from_a_service_unit_and_refused_from_a_detached_st
         assert!(line.starts_with("WARNING system token 'cos'"), "{line}");
         assert!(line.contains("%9"), "{line}");
     }
+    // The timers token from a pane is refused now; a pane the owner listed for it is not.
+    let SystemTokenVerdict::Refuse(line) =
+        system_token_verdict("timers", &SystemPeer::Panes(vec!["%9".into()]), &listed)
+    else {
+        panic!("timers from a pane is refused");
+    };
+    assert!(line.contains("'timers'") && line.contains("%9"), "{line}");
+    assert!(matches!(
+        system_token_verdict("timers", &SystemPeer::Panes(vec![]), &listed),
+        SystemTokenVerdict::Refuse(_)
+    ));
+    assert_eq!(
+        system_token_verdict("timers", &SystemPeer::Panes(vec!["%7".into()]), &listed),
+        SystemTokenVerdict::Accept
+    );
     assert!(matches!(
         system_token_verdict("cos", &SystemPeer::Panes(vec![]), &listed),
         SystemTokenVerdict::Warn(_)
@@ -955,6 +970,25 @@ fn a_system_token_over_the_socket_is_checked_against_where_the_caller_runs() {
     .unwrap();
     assert_eq!(check(vec![mine]).unwrap(), "system");
 
+    // The timers token from the same unlisted pane is refused, with no token in the text.
+    let timers = flock
+        .with_roles(|roles, _| roles.issue_token("system", Some("timers"), None))
+        .unwrap();
+    flock.clear_caller();
+    flock.set_caller(Some(caller.clone()));
+    flock.set_service_token(Some(&timers));
+    flock.set_socket_peer(Some(true));
+    flock.with_caller(|state| state.socket_peer_uid = Some(nix::unistd::geteuid().as_raw()));
+    let refused = flock
+        .caller_role(
+            None,
+            &Panes(vec![json!({"pane_id": OTHER, "pane_pid": pane_root})]),
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(refused.starts_with("system token refused:"), "{refused}");
+    assert!(!refused.contains(&timers));
+
     // Outside every listed pane, and this test process is not a dunkingsheep service unit.
     struct Child(std::process::Child);
     impl Drop for Child {
@@ -978,10 +1012,7 @@ fn a_system_token_over_the_socket_is_checked_against_where_the_caller_runs() {
         assert_eq!(elsewhere.unwrap(), "system");
     } else {
         let refused = elsewhere.unwrap_err().to_string();
-        assert_eq!(
-            refused,
-            "system token refused: the caller is not a dunkingsheep service unit"
-        );
+        assert!(refused.starts_with("system token refused:"), "{refused}");
         assert!(
             !refused.contains(&token),
             "the token is never in the refusal"

@@ -137,6 +137,9 @@ pub(crate) fn is_system_unit(unit: &str) -> bool {
         })
 }
 
+/// Token labels whose use from an unlisted pane is refused now, not warned about.
+pub(crate) const ENFORCED_SYSTEM_LABELS: [&str; 1] = ["timers"];
+
 /// The decision for a system-token caller. Every line names the token's label and the place,
 /// never the token.
 pub(crate) fn system_token_verdict(
@@ -153,6 +156,14 @@ pub(crate) fn system_token_verdict(
             if !panes.is_empty() && panes.iter().all(|pane| allowed_panes.contains(pane)) =>
         {
             SystemTokenVerdict::Accept
+        }
+        // The timers run as units and never in a pane: their token in an unlisted pane is
+        // refused at once. Other labels get one release of warnings first.
+        SystemPeer::Panes(panes) if ENFORCED_SYSTEM_LABELS.contains(&label) => {
+            SystemTokenVerdict::Refuse(format!(
+                "system token '{label}' refused: used from pane {}, and this token is for the dunkingsheep-*.service units only",
+                panes.join(", ")
+            ))
         }
         SystemPeer::Panes(panes) => SystemTokenVerdict::Warn(format!(
             "WARNING system token '{label}' used from pane {}, which the owner has not listed for it; accepted for this release, to be refused in the next",
@@ -444,8 +455,9 @@ impl Flock {
     ///   listing, so the watchdog still delivers when the terminal backend is down;
     /// * outside every listed pane and not such a unit: REFUSED;
     /// * inside a pane the owner listed for this token label: accepted;
-    /// * inside any other pane, or a place that cannot be established: accepted for this
-    ///   release with a warning that names the label and the pane, never the token.
+    /// * inside any other pane: refused for the `timers` token; for other labels accepted for
+    ///   this release with a warning that names the label and the pane, never the token;
+    /// * a place that cannot be established: accepted for this release with a warning.
     fn system_token_peer_check(&self, env: &dyn PaneInfoEnv, label: &str) -> Result<(), DunkError> {
         let unknown = || refuse("system token refused: peer identity unavailable");
         let verified_unit = || -> Option<String> {
@@ -488,7 +500,7 @@ impl Flock {
             SystemTokenVerdict::Refuse(line) => {
                 eprintln!("{line}");
                 Err(refuse(
-                    "system token refused: the caller is not a dunkingsheep service unit",
+                    "system token refused: the caller is not a dunkingsheep service unit or a pane the owner listed for this token",
                 ))
             }
         }
