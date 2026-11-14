@@ -55,6 +55,12 @@ def load_parser():
     project.add_argument("pane", help="live pane id")
     project.add_argument("--project", help="explicit project")
     project.add_argument("--global", action="store_true", help="explicit global scope")
+    # t4473 slice C: record a lane's model change. Rust-only.
+    lane_model = actions.add_parser("model", help="record the model a lane now runs (recorded, not applied)")
+    lane_model.add_argument("pane", help="live pane id, or 'self'")
+    lane_model.add_argument("--model", required=True, help="the model the lane now runs")
+    lane_model.add_argument("--effort", help="the reasoning effort, when the lane has one")
+    lane_model.add_argument("--provider", choices=["claude", "pi", "codex", "opencode"], help="the agent kind")
     planner = actions.add_parser("planner", help="owner-controlled planner grants and task project scope")
     planner.add_argument("operation", choices=["grant", "revoke", "task-project", "repo-project", "repo-revoke"])
     planner.add_argument("--repo")

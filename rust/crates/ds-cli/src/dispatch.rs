@@ -1005,6 +1005,29 @@ fn lane(ns: &Map<String, Value>) -> Outcome {
                 }),
             )
         }
+        "model" => {
+            let mut args = Map::new();
+            args.insert("action".into(), Value::String("model".into()));
+            for key in ["pane", "model", "effort", "provider"] {
+                args.insert(key.into(), ns.get(key).cloned().unwrap_or(Value::Null));
+            }
+            (
+                "lanes",
+                args,
+                Box::new(|result| {
+                    let declared = &result["declared"];
+                    format!(
+                        "{}: model recorded as {}{} (recorded only: nothing was changed in the pane)\n",
+                        crate::render_fleet::py_str(&result["pane_id"]),
+                        crate::render_fleet::py_str(&declared["model"]),
+                        declared["effort"]
+                            .as_str()
+                            .map(|effort| format!(" {effort}"))
+                            .unwrap_or_default(),
+                    )
+                }),
+            )
+        }
         "register" => {
             let mut args = Map::new();
             for key in ["pane", "role", "provider", "model", "label"] {

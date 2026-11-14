@@ -132,7 +132,7 @@
    ]
   },
   "lanes": {
-   "description": "The lane registry, project membership and owner-controlled planner grants.",
+   "description": "The lane registry, project membership, owner-controlled planner grants, and a lane's declared model.",
    "params": [
     [
      "project",
@@ -154,6 +154,7 @@
        "list",
        "set",
        "project",
+       "model",
        "planner"
       ]
      }
@@ -187,7 +188,7 @@
      "pane",
      {
       "type": "string",
-      "description": "set: the pane id"
+      "description": "set: the pane id; project, model: the pane id, or 'self' (model only)"
      }
     ],
     [
@@ -195,6 +196,27 @@
      {
       "type": "string",
       "description": "set: the lane name this pane IS"
+     }
+    ],
+    [
+     "model",
+     {
+      "type": "string",
+      "description": "model: the model the lane now runs. Recorded, not applied: nothing is typed into the pane or respawned. A lane may declare its own; the owner may declare any lane's."
+     }
+    ],
+    [
+     "effort",
+     {
+      "type": "string",
+      "description": "model: the reasoning effort, when the lane has one."
+     }
+    ],
+    [
+     "provider",
+     {
+      "type": "string",
+      "description": "model: the agent kind (claude, pi, codex or opencode), when it should be recorded."
      }
     ]
    ]

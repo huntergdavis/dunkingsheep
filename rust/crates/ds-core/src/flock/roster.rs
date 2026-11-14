@@ -49,6 +49,69 @@ pub const LAUNCH_BIND_S: f64 = 120.0;
 /// How far back the roster looks for a sample, so a stale one can be told from a missing one.
 const MODEL_LOOKBACK_S: f64 = 24.0 * 3600.0;
 
+/// The model cell of a lane whose launch record holds a declared model (t4473 slice C,
+/// `lanes action=model`), or `None` when it holds none. A declaration is newer than the launch
+/// and says who made it and when; it is not a reading of the running agent (`observed` false).
+/// It counts only while the process it was made for still runs in the pane. After that it is
+/// STALE: the value is withheld and the cell says why.
+fn declared_cell(
+    launch: Option<&Value>,
+    live: &dyn Fn(i64, &str) -> Option<bool>,
+    now: f64,
+) -> Option<Value> {
+    let declared = launch?.get("model_declared")?;
+    let text = |key: &str| {
+        declared
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+    };
+    let model = text("model")?;
+    let at = declared.get("at").and_then(Value::as_f64);
+    let withheld = |stale: bool, reason: &str| {
+        json!({
+            "value": null, "effort": null, "source": null, "declared_by": null,
+            "declared_by_kind": null,
+            "stale": stale, "observed": false, "launched_at": null,
+            "as_of": iso_cell(at),
+            "age_s": at.map(|at| (now - at).max(0.0).floor() as i64),
+            "reason": reason,
+        })
+    };
+    let process = declared
+        .get("process_pid")
+        .and_then(Value::as_i64)
+        .zip(text("process_start"));
+    let bound = match process {
+        Some((pid, start)) => live(pid, start),
+        // A declaration that names no process cannot be tied to anything.
+        None => Some(false),
+    };
+    Some(match bound {
+        Some(true) => json!({
+            "value": model,
+            "effort": text("effort"),
+            "source": "declared",
+            "declared_by": text("by"),
+            "declared_by_kind": text("by_kind"),
+            "stale": false,
+            "observed": false,
+            "launched_at": null,
+            "as_of": iso_cell(at),
+            "age_s": at.map(|at| (now - at).max(0.0).floor() as i64),
+            "reason": null,
+        }),
+        Some(false) => withheld(
+            true,
+            "the model was declared for an earlier process in this pane",
+        ),
+        None => withheld(
+            false,
+            "the lane's process could not be read, so the declared model cannot be tied to it",
+        ),
+    })
+}
+
 /// The roster's `model` cell (t4473). It says only what is known and how it is known:
 ///
 /// * `launch flag`: the model named on the command the daemon launched the lane with, with
@@ -83,6 +146,13 @@ fn model_cell(
             "age_s": age(at),
             "reason": reason,
         })
+    };
+    // The record describes a process that no longer runs here: the value is withheld and the
+    // cell is marked stale, which the desk shows as such instead of as plain "unknown".
+    let stale = |reason: String| {
+        let mut cell = unknown(reason, None);
+        cell["stale"] = json!(true);
+        cell
     };
     let argv_of = |record: &Value| -> Vec<String> {
         record
@@ -141,9 +211,8 @@ fn model_cell(
             let bound_by = match bound {
                 Some(Some(true)) => "process",
                 Some(Some(false)) => {
-                    return unknown(
+                    return stale(
                         "the launch record is for an earlier process in this pane".into(),
-                        None,
                     )
                 }
                 Some(None) => {
@@ -167,9 +236,8 @@ fn model_cell(
                         );
                     };
                     if (launched - started).abs() > LAUNCH_BIND_S {
-                        return unknown(
+                        return stale(
                             "the launch record is for an earlier process in this pane".into(),
-                            None,
                         );
                     }
                     "start time"
@@ -378,20 +446,33 @@ pub fn roster(env: &dyn RosterEnv, now: f64) -> Result<Value, String> {
             let start = record.get("process_start")?.as_str()?;
             Some(env.launch_process_live(lane, pid, start))
         });
+        // A declared model (slice C) is newer than the launch; without one, the launch record
+        // and the samples answer.
+        let model = declared_cell(
+            launch.as_ref(),
+            &|pid, start| env.launch_process_live(lane, pid, start),
+            now,
+        )
+        .unwrap_or_else(|| {
+            model_cell(
+                launch.as_ref(),
+                launch_bound,
+                env.pane_started_at(lane),
+                samples
+                    .as_ref()
+                    .ok()
+                    .and_then(|samples| samples.get(pane_id)),
+                samples.as_ref().err().map(String::as_str),
+                harness,
+                now,
+            )
+        });
         rows.push(json!({
             "pane_id": pane_id, // internal; the UI drops it
             "membership": lane.get("membership").cloned().unwrap_or_else(|| json!({"scope":"unknown","project":null})),
             "name": name.unwrap_or(pane_id),
             "harness": harness,
-            "model": model_cell(
-                launch.as_ref(),
-                launch_bound,
-                env.pane_started_at(lane),
-                samples.as_ref().ok().and_then(|samples| samples.get(pane_id)),
-                samples.as_ref().err().map(String::as_str),
-                harness,
-                now,
-            ),
+            "model": model,
             "state": doing.get("state").cloned().unwrap_or(Value::Null),
             "state_source": doing.get("source").cloned().unwrap_or(Value::Null),
             "state_reason": doing.get("reason").cloned().unwrap_or(Value::Null),
@@ -1063,5 +1144,93 @@ mod tests {
             Some(NOW - 500.0),
         );
         assert_eq!(outside["value"], Value::Null);
+    }
+
+    /// The model cell of a codex lane launched with `gpt-sol` whose record also holds a
+    /// declaration made for process 4242/"777", while `live` runs in the pane.
+    fn model_declared(declared: Value, live: Option<(i64, &str)>) -> Value {
+        model_with_process(json!({"model_declared": declared}), live, None)
+    }
+
+    fn declaration() -> Value {
+        json!({
+            "model": "gpt-luna", "effort": "low", "provider": "codex",
+            "at": NOW - 600.0, "by": "%1", "by_kind": "lane",
+            "process_pid": 4242, "process_start": "777",
+        })
+    }
+
+    #[test]
+    fn a_declared_model_is_shown_as_declared_with_who_and_when_and_wins_over_the_launch() {
+        assert_eq!(
+            model_declared(declaration(), Some((4242, "777"))),
+            json!({
+                "value": "gpt-luna", "effort": "low", "source": "declared", "declared_by": "%1",
+                "declared_by_kind": "lane", "stale": false, "observed": false, "launched_at": null,
+                "as_of": "1970-01-01T23:50:00Z", "age_s": 600, "reason": null,
+            })
+        );
+        let mut by_owner = declaration();
+        by_owner["by"] = json!("owner-service");
+        by_owner["by_kind"] = json!("owner-role");
+        by_owner["effort"] = Value::Null;
+        let cell = model_declared(by_owner, Some((4242, "777")));
+        assert_eq!(cell["declared_by_kind"], "owner-role");
+        assert_eq!(
+            (&cell["declared_by"], &cell["effort"]),
+            (&json!("owner-service"), &Value::Null)
+        );
+    }
+
+    #[test]
+    fn a_declaration_for_a_replaced_process_is_stale_and_its_value_is_withheld() {
+        for live in [Some((4242, "778")), Some((5000, "777"))] {
+            let cell = model_declared(declaration(), live);
+            assert_eq!(cell["value"], Value::Null, "{cell}");
+            assert_eq!(cell["stale"], true);
+            assert_eq!(
+                cell["reason"],
+                "the model was declared for an earlier process in this pane"
+            );
+            assert!(!cell.to_string().contains("gpt-luna"), "{cell}");
+            // The launch record's model is not shown instead: it is older than the declaration.
+            assert!(!cell.to_string().contains("gpt-sol"), "{cell}");
+        }
+        // A declaration that names no process cannot be current either.
+        let mut unnamed = declaration();
+        unnamed["process_start"] = Value::Null;
+        assert_eq!(model_declared(unnamed, Some((4242, "777")))["stale"], true);
+    }
+
+    #[test]
+    fn a_declaration_that_cannot_be_checked_is_unknown_not_stale() {
+        let cell = model_declared(declaration(), None);
+        assert_eq!(
+            (&cell["value"], &cell["stale"]),
+            (&Value::Null, &json!(false))
+        );
+        assert_eq!(
+            cell["reason"],
+            "the lane's process could not be read, so the declared model cannot be tied to it"
+        );
+    }
+
+    #[test]
+    fn a_launch_record_for_an_earlier_process_is_marked_stale() {
+        let replaced = model_with_process(json!({}), Some((4242, "778")), None);
+        assert_eq!(
+            (&replaced["value"], &replaced["stale"]),
+            (&Value::Null, &json!(true))
+        );
+        // An empty or missing declaration is no declaration: the launch record answers.
+        let none = model_with_process(
+            json!({"model_declared": {"model": ""}}),
+            Some((4242, "777")),
+            None,
+        );
+        assert_eq!(
+            (&none["value"], &none["source"]),
+            (&json!("gpt-sol"), &json!("launch flag"))
+        );
     }
 }

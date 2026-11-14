@@ -1,0 +1,13 @@
+usage: dunkingsheep lane model [-h] --model MODEL [--effort EFFORT]
+                               [--provider {claude,pi,codex,opencode}]
+                               pane
+
+positional arguments:
+  pane                  live pane id, or 'self'
+
+options:
+  -h, --help            show this help message and exit
+  --model MODEL         the model the lane now runs
+  --effort EFFORT       the reasoning effort, when the lane has one
+  --provider {claude,pi,codex,opencode}
+                        the agent kind

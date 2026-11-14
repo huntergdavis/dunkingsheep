@@ -5313,7 +5313,9 @@ fn cli_route_58_commands_map() {
     assert!(rust.status.success() && python.status.success());
     let r = String::from_utf8(rust.stdout).unwrap();
     let p = String::from_utf8(python.stdout).unwrap();
-    assert!(r.contains("lanes(project, global, action, operation, task, repo, pane, mailbox)"));
+    assert!(r.contains(
+        "lanes(project, global, action, operation, task, repo, pane, mailbox, model, effort, provider)"
+    ));
     assert!(r.contains("start_agent(project, global, role"));
     assert!(r.contains("memory_backfill(action, limit, queue_id, path, reason)"));
     assert!(r.contains("roster(project)"));

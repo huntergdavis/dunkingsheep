@@ -67,9 +67,21 @@ fn every_input_schema_equals_the_pythons() {
                     .as_array_mut()
                     .unwrap();
                 assert_eq!(actions.pop(), Some(serde_json::json!("planner")));
+                // t4473 slice C: the record-only model declaration is Rust-only.
+                assert_eq!(actions.pop(), Some(serde_json::json!("model")));
                 assert_eq!(actions.pop(), Some(serde_json::json!("project")));
                 properties.get_mut("action").unwrap()["description"] =
                     want["properties"]["action"]["description"].clone();
+                for key in ["model", "effort", "provider"] {
+                    let param = properties
+                        .remove(key)
+                        .unwrap_or_else(|| panic!("lanes advertises the Rust-only {key}"));
+                    assert_eq!(param["type"], "string", "{key}");
+                }
+                // `pane` is the same string; its description also names the model action.
+                assert_eq!(properties["pane"]["type"], "string");
+                properties.get_mut("pane").unwrap()["description"] =
+                    want["properties"]["pane"]["description"].clone();
             }
         }
         if name == "owner_conversation" {
