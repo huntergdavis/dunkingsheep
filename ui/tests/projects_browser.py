@@ -44,7 +44,7 @@ try:
             assert page.locator('.project-group').count()==1
             assert page.get_by_text('Reviewer B').count()==1
             assert page.get_by_text('Writer A').count()==0
-            assert page.get_by_role('link',name='Reviewer B').get_attribute('href')=='/dash/fleet?pane=%252'
+            assert page.get_by_role('link',name='Reviewer B').get_attribute('href')=='/dash/projects?pane=%252'
             lanes[:] = [lane for lane in lanes if lane['pane_id'] != '%2']
             page.get_by_text('Writer A').wait_for(timeout=15000)
             assert page.get_by_label('Filter projects').input_value() == 'all'
