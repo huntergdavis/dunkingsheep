@@ -123,3 +123,10 @@ completion cannot write a second note, complete twice or claim another task; wor
 retries replay the original next-task result, including after a daemon restart. Completed
 reviews retain the existing refusal against a second verdict. Socket `task_complete`
 and MCP task action `complete` accept `note` and `next` with the same behavior.
+
+## Cargo builds
+
+Use `ds-cargo` for Dunking Sheep and `proj-cargo <project>` for other projects.
+Never flock another project's lock. Both wrappers share bounded host compile
+slots; see [project Cargo locks](COMPILE_LOCKS.md) for configuration and idle-only
+installation/rollback.
