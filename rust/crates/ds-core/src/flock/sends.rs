@@ -1674,7 +1674,9 @@ pub(super) fn send_dunk_now(
         SendGuardOptions {
             hold_while_typing: dunk.hold_while_typing,
             allow_modal: false,
-            preserve_draft: false,
+            // t4681: a scheduled dunk never submits or appends to text that is not ours. The
+            // refusal (`human_draft`) is what lets the timer store the dunk as an inbox row.
+            preserve_draft: true,
             inconclusive_fallback: false,
         },
         permission,
@@ -2491,6 +2493,22 @@ pub(crate) fn clear_to_send_with_fallback(
     match read_screen(env, pane_id, None, true) {
         None => true,
         Some(_) => dead_session(env, pane_id).is_none(),
+    }
+}
+
+/// t4681: the pane's input box was read and is conclusively empty (no text, not ambiguous, no
+/// dialog). An unreadable or ambiguous box is not "empty".
+pub(crate) fn box_is_empty(env: &dyn SendEnv, pane_id: &str) -> bool {
+    let (screen, text, detail) = read_box(env, pane_id);
+    let Some(screen) = screen else {
+        return false;
+    };
+    if modal_open(&screen) || detail.starts_with(AMBIGUOUS_COMPOSER) {
+        return false;
+    }
+    match federated_composer(env.federated_input(), &screen) {
+        Some(federated) => federated.is_empty(),
+        None => text.is_empty() && typed_text(&screen).is_some_and(|typed| typed.is_empty()),
     }
 }
 
@@ -4405,7 +4423,13 @@ impl Flock {
         let options = SendGuardOptions {
             hold_while_typing: message.hold_while_typing,
             allow_modal: message.kind == "keys",
-            preserve_draft: false,
+            // t4681: a queued dunk never submits or follows a draft that is not ours. A one-line
+            // inbox notice does the same ONLY for a registered owner lane (the pane a person
+            // types in) or a pane where a scheduled dunk has just been refused over a draft; for
+            // every other lane a notice behaves exactly as before (it flushes leftover text and
+            // goes in), so an agent lane with stray text cannot go deaf.
+            preserve_draft: message.dunk_delivery.is_some()
+                || (message.is_notice && self.notice_preserves_draft(&message.pane_id)),
             inconclusive_fallback: message.holds >= HOLD_ATTEMPT_LIMIT,
         };
         let is_keys = message.kind == "keys";
@@ -4483,12 +4507,19 @@ impl Flock {
             let reason = blocker_reason.as_deref();
             let permanent = detail.starts_with("dead session (")
                 || detail == "the lane's recorded process is gone";
+            // t4681: a notice waiting for a person's draft (an owner lane, or for a bounded time
+            // a pane where a dunk was just refused over one) is a wait, not a refusal. It is
+            // retried on the usual schedule and never counted toward `undeliverable`; the row
+            // stays in the mailbox meanwhile.
+            let waiting_for_person = reason == Some("human_draft")
+                && message.is_notice
+                && self.notice_preserves_draft(&pane_id);
             self.record_outbox_hold(OutboxHold {
                 message: &message,
                 now,
                 permanent,
                 reason,
-                refused_detail: Some(&detail),
+                refused_detail: (!waiting_for_person).then_some(detail.as_str()),
                 signature: hold_signature,
             })
         } else {
@@ -4498,6 +4529,8 @@ impl Flock {
                 "failed"
             }
             .into();
+            // Something of ours went into the box: the person's draft is no longer there.
+            self.set_dunk_draft(&pane_id, false);
             message.detail = Some(detail.clone());
             message.finished_at = Some(clock::now_s());
             self.set_last_message(if ok.unwrap_or(false) {

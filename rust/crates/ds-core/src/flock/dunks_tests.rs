@@ -1024,3 +1024,254 @@ fn save_dunks_forwards_snapshot_store_errors() {
     let error = flock._save_dunks(&OfflineSnapshotStore).unwrap_err();
     assert!(matches!(error, DunkError::Refused(message) if message == "offline"));
 }
+
+// ---- t4681: a scheduled dunk is never typed over a person's draft; it waits in the inbox ----
+
+/// A bordered composer that holds text nobody in this flock sent.
+fn foreign_draft_screen() -> String {
+    "\u{2502} \u{276f} my unfinished draft\n\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n".to_string()
+}
+
+struct DunkInbox {
+    pool: crate::db::ReadPool,
+    store: Arc<crate::inbox_store::Store>,
+    _dir: tempfile::TempDir,
+    notices: Mutex<Vec<(String, String)>>,
+    queued: bool,
+}
+
+impl DunkInbox {
+    fn new(queued: bool) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(
+            crate::inbox_store::Store::open(dir.path().join("inbox.db"), dir.path().join("blobs"))
+                .unwrap(),
+        );
+        let pool = crate::db::ReadPool::open(store.path(), 1).unwrap();
+        Self {
+            pool,
+            store,
+            _dir: dir,
+            notices: Mutex::new(Vec::new()),
+            queued,
+        }
+    }
+}
+
+impl super::mailbox::MailboxEnv for DunkInbox {
+    fn list_panes(&self) -> Vec<Value> {
+        vec![json!({"pane_id": "w1:p2", "tab_label": "Agent", "label": "Agent"})]
+    }
+    fn list_panes_grouped(&self) -> Vec<Value> {
+        self.list_panes()
+    }
+    fn registered_pane(&self, _: &str) -> (bool, bool, Option<String>) {
+        (false, false, None)
+    }
+}
+
+impl super::commands_inbox::InboxEnv for DunkInbox {
+    fn caller_role(&self, _: &str) -> Result<String, DunkError> {
+        Ok("system".into())
+    }
+    fn mailbox_override(&self) -> Option<String> {
+        None
+    }
+    /// Every mailbox of the target is configured silent, as the owner lane's are.
+    fn inbox_silent_mailboxes(&self) -> Option<String> {
+        Some("Agent,w1:p2".into())
+    }
+    fn backend_name(&self) -> Result<String, DunkError> {
+        Ok("fixture".into())
+    }
+    fn lane_panes(&self) -> Vec<String> {
+        Vec::new()
+    }
+    fn pool(&self) -> &crate::db::ReadPool {
+        &self.pool
+    }
+    fn store(&self) -> &crate::inbox_store::Store {
+        &self.store
+    }
+    fn now(&self) -> f64 {
+        100.0
+    }
+    fn record_metric(
+        &self,
+        _: &str,
+        _: Option<&str>,
+        _: &str,
+        _: Option<&str>,
+        _: Option<i64>,
+        _: Option<i64>,
+    ) {
+    }
+    fn pm_routing(&self) -> Vec<super::commands_inbox::RouteEntry> {
+        Vec::new()
+    }
+    fn fold_into_queued_notice(&self, _: &str, _: &str, _: &str) -> Option<String> {
+        None
+    }
+    fn send_now(
+        &self,
+        pane_id: &str,
+        text: &str,
+        _: &str,
+    ) -> Result<super::commands_inbox::Nudge, DunkError> {
+        self.notices
+            .lock()
+            .unwrap()
+            .push((pane_id.to_string(), text.to_string()));
+        Ok(super::commands_inbox::Nudge {
+            queued: self.queued,
+            message: None,
+        })
+    }
+    fn record_sent(&self, _: Option<&str>, _: &str, _: Option<&str>, _: usize, _: usize) {}
+    fn tasks_for_pane(&self, _: &str) -> Result<Value, DunkError> {
+        Ok(json!([]))
+    }
+}
+
+#[test]
+fn a_scheduled_dunk_types_nothing_into_a_box_that_holds_a_persons_draft() {
+    let (_dir, flock) = new_flock();
+    load_one_fire_dunk(&flock, "scheduled text", None);
+    let flock = Arc::new(flock);
+    let handle = flock.dunks.handle("d1").unwrap();
+    let mut env = fire_env(false);
+    env.screen = foreign_draft_screen();
+    let store = Arc::new(CapturingSnapshotStore::default());
+
+    let (sent, ok, detail, blocker) = flock.scheduled_dunk_send(&handle, &mut env, store, || None);
+
+    assert!(!sent, "{detail}");
+    assert_eq!(None, ok);
+    assert_eq!(Some("human_draft"), blocker.as_deref(), "{detail}");
+    assert!(env.typed.is_empty(), "nothing is typed after the draft");
+    assert!(env.keys.is_empty(), "no key submits the person's draft");
+    assert_eq!(json!(0), flock.dunks.get("d1").unwrap()["send_count"]);
+}
+
+#[test]
+fn a_dunk_held_by_a_draft_is_one_inbox_row_and_wakes_even_a_silent_mailbox_each_interval() {
+    let (_dir, flock) = new_flock();
+    load_one_fire_dunk(&flock, "inspect the coordinators", None);
+    let handle = flock.dunks.handle("d1").unwrap();
+    let inbox = DunkInbox::new(true);
+
+    let first = flock.store_scheduled_dunk(&handle, &inbox).unwrap();
+    let super::dunks::DunkStored::Stored { message_id, notice } = first else {
+        panic!("the first store writes a row: {first:?}");
+    };
+    assert_eq!("queued", notice);
+    {
+        let notices = inbox.notices.lock().unwrap();
+        assert_eq!(1, notices.len());
+        assert_eq!("w1:p2", notices[0].0);
+        assert!(notices[0].1.starts_with("[inbox] "), "{}", notices[0].1);
+        assert!(
+            !notices[0].1.contains("inspect the coordinators"),
+            "the notice is one line about the mailbox, never the dunk text"
+        );
+    }
+    let (summary, body) = crate::inbox::get(&inbox.pool, &message_id, 100.0).unwrap();
+    assert_eq!("inspect the coordinators", body);
+    assert_eq!(Some("dunk d1"), summary.sender.as_deref());
+    assert_eq!(Some("dunk:d1"), summary.digest_id.as_deref());
+    // Agent audience: the row is mail for the agent in the pane. It is not part of the owner
+    // conversation window over that mailbox (the query the owner thread uses, which reads
+    // owner-lane mailboxes too), while an ordinary digest row in the same mailbox is.
+    assert!(
+        inbox
+            .store
+            .conversation_across_visible(std::slice::from_ref(&summary.mailbox), None, None)
+            .unwrap()
+            .is_empty(),
+        "a stored dunk never shows in the owner's conversation"
+    );
+    inbox
+        .store
+        .upsert_digest(crate::inbox_store::DigestUpsert::new(
+            &summary.mailbox,
+            "other-digest",
+            "a row for people",
+        ))
+        .unwrap();
+    assert_eq!(
+        1,
+        inbox
+            .store
+            .conversation_across_visible(std::slice::from_ref(&summary.mailbox), None, None)
+            .unwrap()
+            .len()
+    );
+    inbox
+        .store
+        .delete(&[inbox.store.digest_waiting("other-digest").unwrap().unwrap()])
+        .unwrap();
+
+    // The mailbox is configured silent; the wake above was sent all the same.
+    assert!(
+        crate::flock::commands_inbox::recipient_is_quiet(
+            Some("Agent,w1:p2"),
+            &summary.mailbox,
+            "Agent",
+            Some("w1:p2"),
+        ),
+        "the fixture mailbox {} is a silent one",
+        summary.mailbox
+    );
+
+    // The next interval, still unread: no second row, but the lane is woken again.
+    let again = flock.store_scheduled_dunk(&handle, &inbox).unwrap();
+    assert_eq!(
+        super::dunks::DunkStored::Waiting {
+            message_id: message_id.clone(),
+            notice: "queued".into()
+        },
+        again
+    );
+    assert_eq!(2, inbox.notices.lock().unwrap().len());
+    assert_eq!(
+        1,
+        crate::inbox::count(&inbox.pool, &summary.mailbox, &[], 100.0)
+            .unwrap()
+            .unread,
+        "still exactly one unread row for the dunk"
+    );
+
+    // Once the lane has read it, the next interval refreshes the same row and announces it.
+    inbox
+        .store
+        .mark_read(std::slice::from_ref(&message_id), Some(101.0))
+        .unwrap();
+    let later = flock.store_scheduled_dunk(&handle, &inbox).unwrap();
+    assert!(
+        matches!(&later, super::dunks::DunkStored::Stored { message_id: id, .. } if *id == message_id),
+        "{later:?}"
+    );
+    assert_eq!(3, inbox.notices.lock().unwrap().len());
+}
+
+#[test]
+fn a_stored_dunk_counts_as_a_send_and_leaves_nothing_to_be_consumed() {
+    let (_dir, flock) = new_flock();
+    load_one_fire_dunk(&flock, "scheduled text", Some(1));
+    flock.dunks.start("d1").unwrap();
+    let handle = flock.dunks.handle("d1").unwrap();
+
+    assert!(
+        super::dunks::DunkList::timer_stored(&handle),
+        "max_sends 1 is reached"
+    );
+
+    let row = flock.dunks.get("d1").unwrap();
+    assert_eq!(json!(1), row["send_count"]);
+    assert_eq!(json!(false), row["awaiting_consumption"]);
+    assert_eq!(Value::Null, row["last_sent_text"]);
+    assert!(row["status"]
+        .as_str()
+        .unwrap()
+        .starts_with("Stored (inbox) "));
+}

@@ -1767,6 +1767,196 @@ mod tests {
         );
     }
 
+    /// t4681: one real scheduled-dunk timer per case, through gate, send and store, on the fake
+    /// terminal. Run in a child process so the journal lines (stderr) can be read back and the
+    /// silent-mailbox list can be set without touching this process's environment.
+    #[test]
+    fn real_timer_never_types_a_dunk_over_a_draft_or_into_an_owner_lane() {
+        const NAME: &str = "server_runtime::outbox_runtime::tests::real_timer_never_types_a_dunk_over_a_draft_or_into_an_owner_lane";
+        const DRAFT: &str = "\u{2502} \u{276f} my unfinished draft\n\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n";
+        const EMPTY: &str = "\u{2502} \u{276f} \n\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n";
+        let Some(case) = std::env::var_os("DS_T4681_CASE") else {
+            for (case, expected) in [
+                (
+                    "draft",
+                    vec![
+                        "dunk d1 -> w1:p1: stored in the inbox as ",
+                        "nothing typed (the input box holds a draft)",
+                        "dunk d1 -> w1:p1: not stored again, ",
+                        "re-wake notice ",
+                    ],
+                ),
+                (
+                    "owner",
+                    vec![
+                        "dunk d1 -> w1:p1: stored in the inbox as ",
+                        "nothing typed (owner lane)",
+                    ],
+                ),
+                ("clear", vec!["dunk d1 -> w1:p1: typed and submitted"]),
+            ] {
+                let output = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", NAME, "--nocapture"])
+                    .env("DS_T4681_CASE", case)
+                    // Every name the fixture pane's mailbox could have is configured silent.
+                    .env(
+                        "DUNKINGSHEEP_INBOX_SILENT_MAILBOXES",
+                        "w1:p1,\u{3c0} - work,1,work",
+                    )
+                    .output()
+                    .unwrap();
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                assert!(
+                    output.status.success(),
+                    "case {case}\n{}\n{stderr}",
+                    String::from_utf8_lossy(&output.stdout)
+                );
+                for line in expected {
+                    assert!(
+                        stderr.contains(line),
+                        "case {case}: no journal line {line:?}\n{stderr}"
+                    );
+                }
+            }
+            return;
+        };
+        let case = case.to_string_lossy().to_string();
+        let dir = tempfile::tempdir().unwrap();
+        let flock = Arc::new(Flock::new(
+            dir.path().join("launches"),
+            dir.path().join("lanes"),
+            false,
+        ));
+        let inbox_path = dir.path().join("inbox.db");
+        flock.attach_stores(crate::flock::panes::Stores {
+            inbox: Some(Arc::new(
+                crate::inbox_store::Store::open(&inbox_path, dir.path().join("blobs")).unwrap(),
+            )),
+            ..Default::default()
+        });
+        if case == "owner" {
+            let mut roles = crate::roles::Roles::new(
+                &crate::config::Env::default(),
+                Some(dir.path().join("roles.json")),
+                Some(dir.path().join("tokens.json")),
+                None,
+            )
+            .unwrap();
+            roles
+                .register("w1:p1", "owner", None, None, None, None, None, None)
+                .unwrap();
+            flock.attach_roles(roles, None);
+        }
+        let terminal = Arc::new(Mutex::new(FakeTerminal::new()));
+        {
+            let mut fake = terminal.lock().unwrap();
+            fake.panes[0].pane_pid = Some(std::process::id() as i64);
+            fake.screens.insert(
+                "w1:p1".into(),
+                if case == "draft" { DRAFT } else { EMPTY }.into(),
+            );
+        }
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let worker_terminal = Arc::clone(&terminal);
+        let owner = OutboxRuntime::new(
+            Arc::clone(&flock),
+            runtime.handle().clone(),
+            Arc::new(move || Box::new(SharedTerminal(Arc::clone(&worker_terminal), 0))),
+        )
+        .unwrap();
+        let pane = serde_json::json!({"pane_id": "w1:p1"});
+        owner
+            .add_dunk(
+                pane.as_object(),
+                &AddArgs {
+                    text: Some("WATCH inspect every coordinator".into()),
+                    start: true,
+                    interval: Some("0.001".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        // Two scheduled fires: the second shows what a later interval does.
+        let deadline = Instant::now() + Duration::from_secs(40);
+        loop {
+            let row = flock.dunks.get("d1").unwrap();
+            if row["send_count"].as_i64().unwrap() >= 2 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "case {case}: the timer did not fire twice: {row:?}"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+        let status = flock.dunks.get("d1").unwrap()["status"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        owner.stop_dunk("d1").unwrap();
+        thread::sleep(Duration::from_millis(500));
+        owner.stop_and_join();
+
+        let rows: i64 = rusqlite::Connection::open(&inbox_path)
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE digest_id = 'dunk:d1' AND read_at IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let fake = terminal.lock().unwrap();
+        let typed: Vec<&String> = fake
+            .sends
+            .iter()
+            .chain(fake.submits.iter())
+            .map(|(_, text)| text)
+            .collect();
+        let dunk_typed = typed
+            .iter()
+            .filter(|text| text.contains("WATCH inspect"))
+            .count();
+        let notices = typed
+            .iter()
+            .filter(|text| text.starts_with("[inbox] "))
+            .count();
+        match case.as_str() {
+            "draft" => {
+                assert_eq!(1, rows, "one unread row for the dunk after two intervals");
+                assert!(
+                    typed.is_empty(),
+                    "nothing at all is typed over the draft: {typed:?}"
+                );
+                assert!(
+                    fake.keys_sent.is_empty(),
+                    "no key submits the draft: {:?}",
+                    fake.keys_sent
+                );
+                assert!(status.starts_with("Stored (inbox) "), "{status}");
+            }
+            "owner" => {
+                assert_eq!(1, rows, "one unread row for the dunk after two intervals");
+                assert_eq!(
+                    0, dunk_typed,
+                    "dunk text is never typed into an owner lane: {typed:?}"
+                );
+                assert!(
+                    notices >= 1,
+                    "the owner lane is woken although its mailbox is configured silent: {typed:?}"
+                );
+                assert!(status.starts_with("Stored (inbox) "), "{status}");
+            }
+            _ => {
+                assert_eq!(0, rows, "a clear box on an ordinary lane stores nothing");
+                assert!(dunk_typed >= 1, "typed as before: {typed:?}");
+                assert_eq!(0, notices, "{typed:?}");
+            }
+        }
+    }
+
     #[test]
     fn scheduled_timer_sends_through_dunk_action_and_removes_at_max_sends() {
         let dir = tempfile::tempdir().unwrap();

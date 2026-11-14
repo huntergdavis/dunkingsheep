@@ -542,6 +542,21 @@ pub(crate) type DunkerHandle = Arc<std::sync::Mutex<Dunker>>;
 #[path = "dunk_phase_fixture_tests.rs"]
 mod dunk_phase_fixture_tests;
 
+/// t4681: how long a non-owner pane's notices wait for an empty box after a scheduled dunk was
+/// refused there over a person's draft. Bounded so a misread box cannot silence a lane.
+pub(crate) const DUNK_DRAFT_HOLD_S: f64 = 600.0;
+
+/// What [`Flock::store_scheduled_dunk`] did (t4681).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DunkStored {
+    /// A row was written (new, or the previous one had been read); `notice` says what happened
+    /// to its one-line notice: `sent`, `queued`, `folded into <id>` or `failed (<why>)`.
+    Stored { message_id: String, notice: String },
+    /// An earlier row of this dunk is still unread: nothing was stored, and the lane was woken
+    /// again (`notice` as above).
+    Waiting { message_id: String, notice: String },
+}
+
 pub(super) struct DunkSendSnapshot {
     pub id: String,
     pub pane_id: String,
@@ -751,6 +766,24 @@ impl DunkList {
         dunker.hold_count += 1;
         dunker.last_held_at = Some(clock::now_s());
         dunker.status = "Held (typing)".into();
+    }
+
+    /// t4681: the dunk was stored as an inbox row instead of being typed. It counts as a send for
+    /// the interval and `max_sends`, but nothing of ours is in the pane's input box, so the
+    /// consumption check has nothing to wait for. Returns true when `max_sends` is reached.
+    pub(crate) fn timer_stored(handle: &DunkerHandle) -> bool {
+        let Some(mut dunker) = Self::lock_running_dunker(handle) else {
+            return false;
+        };
+        dunker.send_count += 1;
+        dunker.skip_count = 0;
+        dunker.unknown_skips = 0;
+        dunker.last_sent_at = Some(clock::now_s());
+        dunker.last_error = None;
+        dunker.awaiting_consumption = false;
+        dunker.next_send_at = Some(clock::now_s() + (dunker.interval_minutes * 60.0).max(1.0));
+        dunker.status = format!("Stored (inbox) {}", chrono::Local::now().format("%H:%M:%S"));
+        dunker.max_sends.is_some_and(|max| dunker.send_count >= max)
     }
 
     pub(crate) fn timer_target_gone(handle: &DunkerHandle) {
@@ -1331,6 +1364,141 @@ impl Flock {
         }
         drop(dunker);
         Ok((handle, running))
+    }
+
+    /// t4681: whether `pane_id` is a registered owner lane, the pane a person types in. No role
+    /// registry, or a registry that cannot be read, is "no".
+    pub(crate) fn is_owner_lane(&self, pane_id: &str) -> bool {
+        self.with_roles(|roles, _| roles.owners())
+            .map(|owners| owners.iter().any(|owner| owner == pane_id))
+            .unwrap_or(false)
+    }
+
+    /// t4681: remember (or forget) that a scheduled dunk found a person's draft in this pane.
+    /// Returns true when the pane was not remembered before (the caller logs that once).
+    pub(crate) fn set_dunk_draft(&self, pane_id: &str, present: bool) -> bool {
+        self.set_dunk_draft_at(pane_id, present, clock::now_s())
+    }
+
+    pub(crate) fn set_dunk_draft_at(&self, pane_id: &str, present: bool, now: f64) -> bool {
+        let mut panes = self
+            .dunk_draft_panes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !present {
+            panes.remove(pane_id);
+            return false;
+        }
+        // One window per draft. The bound runs from the first refusal and later refusals never
+        // extend it. An entry whose window has passed STAYS, spent, until the box is seen empty
+        // or something is typed there: the same leftover text cannot start a second window, so
+        // a dunk that fires every few minutes cannot hold a lane's notices back to back.
+        if panes.contains_key(pane_id) {
+            return false;
+        }
+        panes.insert(pane_id.to_owned(), now);
+        true
+    }
+
+    /// t4681: whether a notice to this pane must leave a draft alone: a registered owner lane,
+    /// or, for at most [`DUNK_DRAFT_HOLD_S`] after the first refusal, a pane where a scheduled
+    /// dunk was refused over a person's draft. Once that window has passed the pane's notices
+    /// behave as on any other lane, and stay that way until a new draft appears.
+    pub(crate) fn notice_preserves_draft(&self, pane_id: &str) -> bool {
+        if self.is_owner_lane(pane_id) {
+            return true;
+        }
+        let now = clock::now_s();
+        self.dunk_draft_panes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(pane_id)
+            .is_some_and(|since| now - since < DUNK_DRAFT_HOLD_S)
+    }
+
+    /// t4681: store a scheduled dunk as ONE inbox row in its target lane's mailbox instead of
+    /// typing it, for a pane a person is using. The row is keyed by the dunk (`dunk:<id>`): while
+    /// an earlier row of the same dunk is still unread nothing is stored again, but the lane is
+    /// woken again, once per interval, so one missed wake never ends supervision.
+    ///
+    /// The wake is the ordinary one-line inbox notice, which the outbox types only into an empty
+    /// box (it holds over a draft and retries). It is sent even when the recipient's mailboxes
+    /// are configured silent (`DUNKINGSHEEP_INBOX_SILENT_MAILBOXES`, as the owner lane's are):
+    /// this call never consults that list, the same daemon-internal wake PR 922 gives a Telegram
+    /// question. It is not reachable from the wire.
+    pub(crate) fn store_scheduled_dunk<E: super::commands_inbox::InboxEnv>(
+        &self,
+        handle: &DunkerHandle,
+        env: &E,
+    ) -> Result<DunkStored, DunkError> {
+        let dunk = DunkList::send_snapshot(handle);
+        let name = DunkList::lock_dunker(handle).name.clone();
+        let (mailbox, label, pane_id) =
+            self.resolve_mailbox(env, &dunk.pane_id, None, false, "")?;
+        let digest_id = format!("dunk:{}", dunk.id);
+        let sender = format!("dunk {}", dunk.id);
+        let subject = format!(
+            "scheduled: {}",
+            if name.trim().is_empty() {
+                &dunk.id
+            } else {
+                name.trim()
+            }
+        );
+        let pane = pane_id.as_deref().unwrap_or(&dunk.pane_id);
+        // The row is the delivery; a notice that cannot be queued or sent never undoes it.
+        let wake = |message_id: &str| -> String {
+            (|| -> Result<String, DunkError> {
+                let unread = crate::inbox::count(env.pool(), &mailbox, &[], env.now())?.unread;
+                let text = super::commands_inbox::notice_text(
+                    &mailbox,
+                    unread,
+                    Some(&sender),
+                    Some(&subject),
+                );
+                if let Some(existing) = env.fold_into_queued_notice(pane, &text, message_id) {
+                    env.store().record_notify(
+                        message_id,
+                        "queued",
+                        Some(&format!("folded into {existing}")),
+                        None,
+                        None,
+                    )?;
+                    return Ok(format!("folded into {existing}"));
+                }
+                let nudge = env.send_now(pane, &text, message_id)?;
+                let state = if nudge.queued { "queued" } else { "sent" };
+                env.store().record_notify(
+                    message_id,
+                    state,
+                    nudge.message.as_deref(),
+                    None,
+                    None,
+                )?;
+                Ok(state.to_string())
+            })()
+            .unwrap_or_else(|error| format!("failed ({error})"))
+        };
+        if let Some(message_id) = env.store().digest_waiting(&digest_id)? {
+            let notice = wake(&message_id);
+            return Ok(DunkStored::Waiting { message_id, notice });
+        }
+        let message_id = env
+            .store()
+            .upsert_digest(crate::inbox_store::DigestUpsert {
+                mailbox: &mailbox,
+                digest_id: &digest_id,
+                body: &dunk.text,
+                subject: Some(&subject),
+                sender: Some(&sender),
+                mailbox_label: Some(&label),
+                pane_id: pane_id.as_deref(),
+                // Agent audience: a scheduled check-in for an owner lane is mail for the
+                // agent in that pane, not a message in the person's own conversation view.
+                agent_only: true,
+            })?;
+        let notice = wake(&message_id);
+        Ok(DunkStored::Stored { message_id, notice })
     }
 
     pub(crate) fn scheduled_dunk_send(

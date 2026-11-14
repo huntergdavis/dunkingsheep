@@ -303,6 +303,68 @@ fn save_timer_state(
     }
 }
 
+/// t4681: one journal line for every thing a scheduled dunk does, so a delivery can be read back.
+fn log_dunk(handle: &crate::flock::dunks::DunkerHandle, pane: &str, what: &str) {
+    let id = crate::flock::dunks::DunkList::timer_fields(handle).id;
+    eprintln!("dunk {id} -> {pane}: {what}");
+}
+
+/// t4681: the composer refusals that mean "a person's text is in the box". The dunk is then
+/// stored as an inbox row; every other refusal stays an ordinary hold.
+fn human_draft(blocker: Option<&str>) -> bool {
+    matches!(blocker, Some("human_draft"))
+}
+
+/// t4681: store the dunk as an inbox row instead of typing it, log what happened and advance the
+/// schedule. `Some(done)` when it was stored or is already waiting; `None` when the store failed
+/// and the caller should hold.
+fn store_instead_of_typing(
+    flock: &Flock,
+    inbox: &InboxRuntimeView<'_>,
+    handle: &crate::flock::dunks::DunkerHandle,
+    pane: &str,
+    why: &str,
+) -> Option<bool> {
+    use crate::flock::dunks::DunkStored;
+    match flock.store_scheduled_dunk(handle, inbox) {
+        Ok(DunkStored::Stored { message_id, notice }) => {
+            log_dunk(
+                handle,
+                pane,
+                &format!(
+                    "stored in the inbox as {message_id}, nothing typed ({why}); notice {notice}"
+                ),
+            );
+            record_timer_metric(flock, handle, "dunk.stored", "ok", Some(why.to_owned()));
+        }
+        Ok(DunkStored::Waiting { message_id, notice }) => {
+            log_dunk(
+                handle,
+                pane,
+                &format!(
+                    "not stored again, {message_id} is still unread, nothing typed ({why}); re-wake notice {notice}"
+                ),
+            );
+            record_timer_metric(
+                flock,
+                handle,
+                "dunk.stored",
+                "waiting",
+                Some(why.to_owned()),
+            );
+        }
+        Err(error) => {
+            log_dunk(
+                handle,
+                pane,
+                &format!("could not be stored in the inbox ({error}); held, nothing typed ({why})"),
+            );
+            return None;
+        }
+    }
+    Some(crate::flock::dunks::DunkList::timer_stored(handle))
+}
+
 fn record_timer_metric(
     flock: &Flock,
     handle: &crate::flock::dunks::DunkerHandle,
@@ -440,6 +502,11 @@ fn run_dunk_timer(
             if !gate_held {
                 gate_held = true;
                 crate::flock::dunks::DunkList::timer_hold(&handle, "the box would not clear");
+                log_dunk(
+                    &handle,
+                    pane,
+                    "held before typing (the pane is not clear to send)",
+                );
                 save_timer_state(&flock, &handle, store.as_ref());
             }
             crate::flock::dunks::DunkList::set_timer_status(&handle, "Held (typing)");
@@ -494,6 +561,30 @@ fn run_dunk_timer(
         if signal.cancelled.load(Ordering::Acquire) {
             break;
         }
+        // The box is read here on every tick: once it is seen empty the person's draft is
+        // gone, and the pane's notices go back to behaving as on any other lane.
+        if crate::flock::sends::box_is_empty(&env, pane) {
+            flock.set_dunk_draft(pane, false);
+        }
+        if flock.is_owner_lane(pane) {
+            match store_instead_of_typing(&flock, &inbox, &handle, pane, "owner lane") {
+                Some(done) => {
+                    save_timer_state(&flock, &handle, store.as_ref());
+                    if done {
+                        flock.dunks.remove_handle(&handle);
+                        save_timer_state(&flock, &handle, store.as_ref());
+                        break;
+                    }
+                    timer_wait(&signal, &observed_wake, 1.0);
+                }
+                None => {
+                    crate::flock::dunks::DunkList::timer_hold(&handle, "inbox store failed");
+                    save_timer_state(&flock, &handle, store.as_ref());
+                    timer_wait(&signal, &observed_wake, 60.0);
+                }
+            }
+            continue;
+        }
         crate::flock::dunks::DunkList::set_timer_status(&handle, "Sending...");
         #[cfg(test)]
         {
@@ -520,6 +611,16 @@ fn run_dunk_timer(
             continue;
         }
         if sent {
+            flock.set_dunk_draft(pane, false);
+            log_dunk(
+                &handle,
+                pane,
+                &if ok.unwrap_or(false) {
+                    "typed and submitted".to_owned()
+                } else {
+                    format!("typed but the submit failed ({detail})")
+                },
+            );
             let done =
                 crate::flock::dunks::DunkList::timer_after_send(&handle, true, ok.unwrap_or(false));
             save_timer_state(&flock, &handle, store.as_ref());
@@ -529,6 +630,41 @@ fn run_dunk_timer(
                 break;
             }
             timer_wait(&signal, &observed_wake, 1.0);
+        } else if human_draft(blocker.as_deref()) {
+            // A person's text is in the box: nothing was typed. The dunk waits in the inbox, and
+            // its notice must not flush that draft either.
+            if flock.set_dunk_draft(pane, true) {
+                log_dunk(
+                    &handle,
+                    pane,
+                    &format!(
+                        "a person's draft is in the input box; notices to this pane wait for an empty box for up to {} minutes",
+                        (crate::flock::dunks::DUNK_DRAFT_HOLD_S / 60.0) as i64
+                    ),
+                );
+            }
+            match store_instead_of_typing(
+                &flock,
+                &inbox,
+                &handle,
+                pane,
+                "the input box holds a draft",
+            ) {
+                Some(done) => {
+                    save_timer_state(&flock, &handle, store.as_ref());
+                    if done {
+                        flock.dunks.remove_handle(&handle);
+                        save_timer_state(&flock, &handle, store.as_ref());
+                        break;
+                    }
+                    timer_wait(&signal, &observed_wake, 1.0);
+                }
+                None => {
+                    crate::flock::dunks::DunkList::timer_hold(&handle, "inbox store failed");
+                    save_timer_state(&flock, &handle, store.as_ref());
+                    timer_wait(&signal, &observed_wake, 60.0);
+                }
+            }
         } else {
             let now = crate::clock::now_s();
             let signature = flock.dunk_hold_signature(&env, pane);
@@ -558,10 +694,16 @@ fn run_dunk_timer(
                     true,
                 )
             {
+                log_dunk(
+                    &handle,
+                    pane,
+                    "recovered our own text stuck in the input box",
+                );
                 panel_seen = None;
                 panel_since = now;
                 continue;
             }
+            log_dunk(&handle, pane, &format!("held, nothing typed ({detail})"));
             crate::flock::dunks::DunkList::timer_hold(
                 &handle,
                 blocker.as_deref().unwrap_or(&detail),
