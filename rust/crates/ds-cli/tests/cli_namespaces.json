@@ -2618,11 +2618,11 @@
    "limit": 10,
    "mailbox": null,
    "messages_only": false,
-   "with_tasks": false,
    "no_start_daemon": false,
    "peek": false,
    "self_pane": null,
-   "socket": null
+   "socket": null,
+   "with_tasks": false
   }
  },
  {
@@ -2638,11 +2638,11 @@
    "limit": 10,
    "mailbox": null,
    "messages_only": false,
-   "with_tasks": false,
    "no_start_daemon": false,
    "peek": false,
    "self_pane": null,
-   "socket": null
+   "socket": null,
+   "with_tasks": false
   }
  },
  {
@@ -2658,11 +2658,11 @@
    "limit": 10,
    "mailbox": null,
    "messages_only": false,
-   "with_tasks": false,
    "no_start_daemon": false,
    "peek": false,
    "self_pane": null,
-   "socket": null
+   "socket": null,
+   "with_tasks": false
   }
  },
  {
@@ -2679,11 +2679,11 @@
    "limit": 1,
    "mailbox": null,
    "messages_only": false,
-   "with_tasks": false,
    "no_start_daemon": false,
    "peek": false,
    "self_pane": null,
-   "socket": null
+   "socket": null,
+   "with_tasks": false
   }
  },
  {
@@ -2699,11 +2699,11 @@
    "limit": 10,
    "mailbox": null,
    "messages_only": false,
-   "with_tasks": false,
    "no_start_daemon": false,
    "peek": true,
    "self_pane": null,
-   "socket": null
+   "socket": null,
+   "with_tasks": false
   }
  },
  {
@@ -2719,11 +2719,31 @@
    "limit": 10,
    "mailbox": null,
    "messages_only": true,
-   "with_tasks": false,
    "no_start_daemon": false,
    "peek": false,
    "self_pane": null,
-   "socket": null
+   "socket": null,
+   "with_tasks": false
+  }
+ },
+ {
+  "argv": [
+   "inbox",
+   "read",
+   "--with-tasks"
+  ],
+  "namespace": {
+   "command": "inbox",
+   "inbox_command": "read",
+   "json": false,
+   "limit": 10,
+   "mailbox": null,
+   "messages_only": false,
+   "no_start_daemon": false,
+   "peek": false,
+   "self_pane": null,
+   "socket": null,
+   "with_tasks": true
   }
  },
  {
