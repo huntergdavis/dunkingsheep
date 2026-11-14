@@ -1,0 +1,725 @@
+{
+ "commands": {
+  "inbox_get": {
+   "new": true,
+   "description": "Internal owner/web body view by exact persisted mailbox and canonical message id. Does not mark read, acknowledge or notify. Agent-only mail requires explicit include_agent=true. One metadata-only audit line per lookup.",
+   "params": [
+    [
+     "mailbox",
+     {
+      "type": "string",
+      "description": "Exact persisted mailbox key (not a live target label)."
+     }
+    ],
+    [
+     "message_id",
+     {
+      "type": "string",
+      "description": "Canonical inbox id, for example i42."
+     }
+    ],
+    [
+     "include_agent",
+     {
+      "type": "boolean",
+      "description": "Explicit opt-in for agent-only mail; default false."
+     }
+    ]
+   ],
+   "required": [
+    "mailbox",
+    "message_id"
+   ],
+   "mcp_required": [
+    "mailbox",
+    "message_id"
+   ],
+   "mcp": false,
+   "owner_only": false,
+   "roles": [
+    "owner",
+    "web"
+   ]
+  },
+  "inbox_list": {
+   "params": [
+    [
+     "mailbox",
+     {
+      "type": "string",
+      "description": "Whose inbox: an agent name, a pane id, a unique label substring, or 'self' for your own. Agent names are preferred because they survive a pane moving or restarting. A name that matches no live pane still works, so mail can be left for an agent that is not running."
+     }
+    ],
+    [
+     "unread_only",
+     {
+      "type": "boolean",
+      "description": "Only unread messages (default true)."
+     }
+    ],
+    [
+     "limit",
+     {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 500,
+      "description": "How many to return (default 50)."
+     }
+    ],
+    [
+     "newest_first",
+     {
+      "type": "boolean",
+      "description": "Opt in to newest-first summary history with audience and next_before cursor; default false preserves the existing list."
+     }
+    ],
+    [
+     "before",
+     {
+      "type": "string",
+      "description": "Exclusive message-id cursor from next_before; requires newest_first."
+     }
+    ],
+    [
+     "literal_mailbox",
+     {
+      "type": "boolean",
+      "description": "Owner/web/system only: use the mailbox as data without live-label resolution; requires newest_first."
+     }
+    ]
+   ]
+  },
+  "inbox_read": {
+   "description": "Read waiting messages in order, with their full bodies, and mark them read. Task queues are omitted by default; set include_tasks=true to include them. This is the one an agent calls when it has mail. Use peek=true to look without marking them read. If the answer never arrives, inbox_recover replays the batch instead of losing it.",
+   "params": [
+    [
+     "mailbox",
+     {
+      "type": "string",
+      "description": "Whose inbox: an agent name, a pane id, a unique label substring, or 'self' for your own. Agent names are preferred because they survive a pane moving or restarting. A name that matches no live pane still works, so mail can be left for an agent that is not running."
+     }
+    ],
+    [
+     "limit",
+     {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100,
+      "description": "How many to read (default 10)."
+     }
+    ],
+    [
+     "peek",
+     {
+      "type": "boolean",
+      "description": "Do not mark them read (default false)."
+     }
+    ],
+    [
+     "include_tasks",
+     {
+      "type": "boolean",
+      "description": "Include the caller's task queues in the result (default false)."
+     }
+    ]
+   ]
+  },
+  "lanes": {
+   "description": "The lane registry, project membership and owner-controlled planner grants.",
+   "params": [
+    [
+     "project",
+     {
+      "type": "string"
+     }
+    ],
+    [
+     "global",
+     {
+      "type": "boolean"
+     }
+    ],
+    [
+     "action",
+     {
+      "type": "string",
+      "enum": [
+       "list",
+       "set",
+       "project",
+       "planner"
+      ]
+     }
+    ],
+    [
+     "operation",
+     {
+      "type": "string",
+      "enum": [
+       "grant",
+       "revoke",
+       "task-project",
+       "repo-project",
+       "repo-revoke"
+      ]
+     }
+    ],
+    [
+     "task",
+     {
+      "type": "string"
+     }
+    ],
+    [
+     "repo",
+     {
+      "type": "string"
+     }
+    ],
+    [
+     "pane",
+     {
+      "type": "string",
+      "description": "set: the pane id"
+     }
+    ],
+    [
+     "mailbox",
+     {
+      "type": "string",
+      "description": "set: the lane name this pane IS"
+     }
+    ]
+   ]
+  },
+  "memory_backfill": {
+   "description": "Discover every known session source (Codex/Claude/pi/opencode) and enqueue it for the throttled background ingest. action=start|pause|resume|status or quarantine|restore a failed entry; limit=N for a bounded run. Superusers only.",
+   "params": [
+    [
+     "action",
+     {
+      "type": "string",
+      "enum": [
+       "start",
+       "pause",
+       "resume",
+       "status",
+       "quarantine",
+       "restore"
+      ]
+     }
+    ],
+    [
+     "limit",
+     {
+      "type": "integer",
+      "minimum": 1
+     }
+    ],
+    [
+     "queue_id",
+     {
+      "type": "integer",
+      "minimum": 1
+     }
+    ],
+    [
+     "path",
+     {
+      "type": "string"
+     }
+    ],
+    [
+     "reason",
+     {
+      "type": "string"
+     }
+    ]
+   ]
+  },
+  "owner_conversation": {
+   "params": [
+    [
+     "limit",
+     {
+      "type": "integer",
+      "description": "How many messages (default 50)."
+     }
+    ],
+    [
+     "before",
+     {
+      "type": "number",
+      "description": "Only messages older than this unix time."
+     }
+    ],
+    [
+     "before_id",
+     {
+      "type": "string",
+      "description": "Opt in to stable read-only history paging: null starts, a message ID is an exclusive cursor. Cannot combine with before."
+     }
+    ],
+    [
+     "source_filter",
+     {
+      "type": "string",
+      "enum": [
+       "all",
+       "human",
+       "owner_lane"
+      ],
+      "description": "Metadata partition opts into stable history paging; before_id is optional. All preserves the current view."
+     }
+    ],
+    [
+     "include_internal",
+     {
+      "type": "boolean",
+      "description": "Explicit owner/web opt-in to agent-only owner-lane mail; default false, owner_lane only."
+     }
+    ]
+   ]
+  },
+  "owner_handoff": {
+   "new": true,
+   "description": "Hand an unanswered web or Telegram owner question to the fixed owner supervisor. Accepts only its message id. Reports quiet, notification and timeout status; a queued notice is not pickup or an answer.",
+   "params": [
+    [
+     "message_id",
+     {
+      "type": "string",
+      "description": "Original owner question id."
+     }
+    ]
+   ],
+   "required": [
+    "message_id"
+   ],
+   "mcp_required": [
+    "message_id"
+   ],
+   "mcp": true,
+   "owner_only": false,
+   "roles": [
+    "desk"
+   ],
+   "after": "owner_receipts"
+  },
+  "roster": {
+   "params": [
+    [
+     "project",
+     {
+      "type": "string",
+      "description": "Only live lanes explicitly bound to this named project."
+     }
+    ]
+   ]
+  },
+  "start_agent": {
+   "params": [
+    [
+     "project",
+     {
+      "type": "string",
+      "description": "explicit project membership"
+     }
+    ],
+    [
+     "global",
+     {
+      "type": "boolean",
+      "description": "explicit global membership"
+     }
+    ],
+    [
+     "role",
+     {
+      "type": "string",
+      "enum": [
+       "owner",
+       "desk",
+       "planner",
+       "worker",
+       "reviewer"
+      ],
+      "description": "bind this role to the new pane (registered from the launch record)"
+     }
+    ],
+    [
+     "provider",
+     {
+      "type": "string"
+     }
+    ],
+    [
+     "model",
+     {
+      "type": "string"
+     }
+    ],
+    [
+     "name",
+     {
+      "type": "string",
+      "description": "Agent name as the backend will show it, e.g. 'writer'."
+     }
+    ],
+    [
+     "command",
+     {
+      "type": "string",
+      "description": "Command line to run, shell-split, e.g. 'claude --model opus'."
+     }
+    ],
+    [
+     "workspace",
+     {
+      "type": "string",
+      "description": "Workspace id ('w9'), label, unique label substring, or 'self' for the caller's own workspace (the default when omitted)."
+     }
+    ],
+    [
+     "tab",
+     {
+      "type": "string",
+      "description": "Tab id ('w9:t2'), label, unique label substring, or 'self' for the caller's tab."
+     }
+    ],
+    [
+     "split",
+     {
+      "type": "string",
+      "enum": [
+       "right",
+       "down"
+      ],
+      "description": "With `tab`: split that tab's pane instead of replacing it."
+     }
+    ],
+    [
+     "cwd",
+     {
+      "type": "string",
+      "description": "Working directory for the new shell (default: the backend's)."
+     }
+    ],
+    [
+     "focus",
+     {
+      "type": "boolean",
+      "description": "Switch the human's view to it (default false: create in the background)."
+     }
+    ]
+   ]
+  },
+  "task_add": {
+   "params": [
+    [
+     "title",
+     {
+      "type": "string",
+      "description": "Short task title."
+     }
+    ],
+    [
+     "scope",
+     {
+      "type": "string",
+      "description": "'global' (default, fleet-wide), 'self' (private to the caller's pane), or a pane id."
+     }
+    ],
+    [
+     "body",
+     {
+      "type": "string",
+      "description": "Longer description or acceptance notes."
+     }
+    ],
+    [
+     "status",
+     {
+      "type": "string",
+      "enum": [
+       "open",
+       "in_progress",
+       "blocked",
+       "done",
+       "cancelled"
+      ],
+      "description": "open, in_progress, blocked, done or cancelled."
+     }
+    ],
+    [
+     "priority",
+     {
+      "type": "string",
+      "enum": [
+       "low",
+       "medium",
+       "high",
+       "urgent"
+      ],
+      "description": "urgent, high, medium or low (default low)."
+     }
+    ],
+    [
+     "assignees",
+     {
+      "type": "array",
+      "items": {
+       "type": "string"
+      },
+      "description": "Pane ids or agent names. 'self' means the caller's pane."
+     }
+    ],
+    [
+     "parent_id",
+     {
+      "type": "string",
+      "description": "Parent task id, for a subtask."
+     }
+    ],
+    [
+     "depends_on",
+     {
+      "type": "array",
+      "items": {
+       "type": "string"
+      },
+      "description": "Task ids that must be done before this one is eligible."
+     }
+    ],
+    [
+     "multi_assignee",
+     {
+      "type": "boolean",
+      "description": "Allow several agents to claim this task."
+     }
+    ],
+    [
+     "kind",
+     {
+      "type": "string",
+      "enum": [
+       "work",
+       "review",
+       "verify",
+       "report"
+      ],
+      "description": "work (default); review is filed by the review timer."
+     }
+    ],
+    [
+     "author",
+     {
+      "type": "string",
+      "description": "lane that produced the artefact under review"
+     }
+    ],
+    [
+     "repo",
+     {
+      "type": "string",
+      "description": "owner/name, for reviews"
+     }
+    ],
+    [
+     "pr",
+     {
+      "type": "integer",
+      "description": "PR number, for reviews"
+     }
+    ],
+    [
+     "head",
+     {
+      "type": "string",
+      "description": "exact commit under review"
+     }
+    ],
+    [
+     "project",
+     {
+      "type": "string",
+      "description": "File the task under this project instead of the creator lane's: your own project or one you hold a planner grant for (the owner may name any)."
+     }
+    ],
+    [
+     "no_project",
+     {
+      "type": "boolean",
+      "description": "File the task under no project (default false: a new global task takes its creator lane's project)."
+     }
+    ]
+   ]
+  },
+  "task_backlog": {
+   "new": true,
+   "description": "Backlog counts: unfinished global tasks per project (open, in progress, blocked, blocked on the owner, by priority and kind), with tasks that have no project mapping in their own 'unmapped' row. A task's project is its task mapping, else its repo mapping; nothing is inferred. Rows add up to the totals. Read-only.",
+   "params": [
+    [
+     "project",
+     {
+      "type": "string",
+      "description": "Only this project, or 'unmapped'."
+     }
+    ],
+    [
+     "status",
+     {
+      "type": "string",
+      "description": "Comma-separated statuses (default: open,in_progress,blocked)."
+     }
+    ],
+    [
+     "priority",
+     {
+      "type": "string",
+      "description": "Comma-separated priorities."
+     }
+    ],
+    [
+     "kind",
+     {
+      "type": "string",
+      "description": "Comma-separated kinds."
+     }
+    ],
+    [
+     "all",
+     {
+      "type": "boolean",
+      "description": "Include done and cancelled."
+     }
+    ],
+    [
+     "list",
+     {
+      "type": "boolean",
+      "description": "Also return the matching tasks."
+     }
+    ]
+   ],
+   "required": [],
+   "mcp_required": [],
+   "mcp": false,
+   "owner_only": false,
+   "roles": [
+    "owner",
+    "system",
+    "web",
+    "desk",
+    "planner",
+    "worker",
+    "reviewer",
+    "anonymous"
+   ],
+   "after": "task_list"
+  }
+ },
+ "groups": {
+  "inbox": {
+   "description": "Agent-to-agent mailbox. action=send or send_agent_only (preferred over typing), count, list, read (add include_tasks=true to include task queues), recover, status, ack, cancel, delete, stats, fetch. No size limit; a send nudges the recipient with one line. The owner's mailbox (FLAT_FLEET.md 7.2) is read with action=conversation, answered with action=reply, which keeps the question's transport and links the answer to it, and fed by a bridge with action=ingest (transport + external_id), drained with action=outbox and confirmed with action=delivered (desk and owner only).",
+   "actions": [
+    [
+     "send",
+     "inbox_send"
+    ],
+    [
+     "send_agent_only",
+     "inbox_send_agent_only"
+    ],
+    [
+     "count",
+     "inbox_count"
+    ],
+    [
+     "list",
+     "inbox_list"
+    ],
+    [
+     "read",
+     "inbox_read"
+    ],
+    [
+     "recover",
+     "inbox_recover"
+    ],
+    [
+     "status",
+     "inbox_status"
+    ],
+    [
+     "ack",
+     "inbox_ack"
+    ],
+    [
+     "cancel",
+     "inbox_cancel"
+    ],
+    [
+     "delete",
+     "inbox_delete"
+    ],
+    [
+     "stats",
+     "inbox_stats"
+    ],
+    [
+     "fetch",
+     "inbox_fetch"
+    ],
+    [
+     "archive",
+     "inbox_archive"
+    ],
+    [
+     "conversation",
+     "owner_conversation"
+    ],
+    [
+     "handoff",
+     "owner_handoff"
+    ],
+    [
+     "reply",
+     "owner_reply"
+    ],
+    [
+     "ingest",
+     "owner_ingest"
+    ],
+    [
+     "outbox",
+     "owner_outbox"
+    ],
+    [
+     "delivered",
+     "owner_delivered"
+    ]
+   ]
+  }
+ },
+ "fixture": [
+  [
+   [
+    "commands",
+    "inbox_read",
+    "properties",
+    "include_tasks",
+    "description"
+   ],
+   "Include the caller's task queues in the result (default false)."
+  ],
+  [
+   [
+    "groups",
+    "inbox",
+    "description"
+   ],
+   "Agent-to-agent mailbox. action=send or send_agent_only (preferred over typing), count, list, read (add include_tasks=true to include task queues), recover, status, ack, cancel, delete, stats, fetch. No size limit; a send nudges the recipient with one line. The owner's mailbox (FLAT_FLEET.md 7.2) is read with action=conversation, answered with action=reply, which keeps the question's transport and links the answer to it, and fed by a bridge with action=ingest (transport + external_id), drained with action=outbox and confirmed with action=delivered (desk and owner only)."
+  ]
+ ]
+}

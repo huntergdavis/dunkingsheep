@@ -48,6 +48,12 @@ jobs:
         with:
           python-version: "3.14"
       - run: python3 tools/gen_cli_rs.py --check
+      # t4823: the command registry (with its Python-fixture) and the guide renderings are
+      # generated too. Everything the Rust daemon adds to the frozen Python sources is data in
+      # tools/registry_rust_overlay.json and tools/guide_rust_overlay.json; a hand edit of a
+      # generated file without the matching overlay entry fails here.
+      - run: python3 tools/gen_registry_rs.py --check
+      - run: python3 tools/gen_help_rs.py --check
 
   build-and-test:
     name: cargo build + test

@@ -39,7 +39,7 @@ pub struct Group {
     pub actions: &'static [(&'static str, &'static str)],
 }
 
-/// Every command the daemon serves (133 at generation time).
+/// Every command the daemon serves (135 at generation time).
 pub static COMMANDS: &[Command] = &[
     Command {
         name: "add_dunk",
