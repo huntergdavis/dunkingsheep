@@ -726,6 +726,35 @@ mod tests {
     }
 
     #[test]
+    fn the_process_tie_is_a_named_window_of_120_seconds() {
+        assert_eq!(LAUNCH_BIND_S, 120.0);
+        let at = NOW - 10_800.0;
+        for (gap, known) in [
+            (119.0, true),
+            (-119.0, true),
+            (121.0, false),
+            (-121.0, false),
+        ] {
+            let cell = model_on(
+                "codex",
+                Some(launched("codex", Some(at))),
+                Some(at + gap),
+                json!({}),
+                None,
+            );
+            assert_eq!(cell["value"].is_string(), known, "gap {gap}: {cell}");
+            if known {
+                assert_eq!(cell["source"], "launch flag");
+            } else {
+                assert_eq!(
+                    cell["reason"],
+                    "the launch record is for an earlier process in this pane"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn a_launch_record_is_used_only_for_the_process_and_agent_kind_it_was_written_for() {
         let reason = |cell: Value| {
             assert_eq!(cell["value"], Value::Null, "{cell}");
