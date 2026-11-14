@@ -8,7 +8,8 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 use ds_core::worktree_disk::{self, PrLink};
 use serde_json::Value;
@@ -24,13 +25,72 @@ pub type BranchPrs = HashMap<String, (i64, String)>;
 /// The pull requests of one repository, or why they could not be read.
 pub type PrLookup = Result<BranchPrs, String>;
 
+/// How long one `git` call may take, and one `gh` call. A call that takes longer is killed
+/// and counts as failed, which leaves the pull request state unknown and keeps the cache.
+const GIT_TIMEOUT: Duration = Duration::from_secs(10);
+const GH_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Run a command to its end, or kill it at `timeout`. Its output is read on two threads while
+/// it runs, so a large answer cannot block it.
+pub fn run_bounded(command: &mut Command, timeout: Duration) -> Result<Output, String> {
+    use std::io::Read;
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("could not be run: {error}"))?;
+    let drain = |pipe: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_end(&mut bytes);
+            }
+            bytes
+        })
+    };
+    let stdout = drain(
+        child
+            .stdout
+            .take()
+            .map(|pipe| Box::new(pipe) as Box<dyn Read + Send>),
+    );
+    let stderr = drain(
+        child
+            .stderr
+            .take()
+            .map(|pipe| Box::new(pipe) as Box<dyn Read + Send>),
+    );
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("timed out after {} s", timeout.as_secs()));
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("could not be waited for: {error}"));
+            }
+        }
+    };
+    Ok(Output {
+        status,
+        stdout: stdout.join().unwrap_or_default(),
+        stderr: stderr.join().unwrap_or_default(),
+    })
+}
+
 fn git(dir: &Path, args: &[&str]) -> Option<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .output()
-        .ok()?;
+    let output = run_bounded(
+        Command::new("git").arg("-C").arg(dir).args(args),
+        GIT_TIMEOUT,
+    )
+    .ok()?;
     output
         .status
         .success()
@@ -94,13 +154,15 @@ pub fn prs_by_branch(listing: &Value) -> BranchPrs {
 }
 
 fn list_prs(repo: &str) -> PrLookup {
-    let output = Command::new("gh")
-        .args([
-            "pr", "list", "--repo", repo, "--state", "all", "--limit", PR_LIMIT,
-        ])
-        .args(["--json", "number,state,headRefName,isCrossRepository"])
-        .output()
-        .map_err(|error| format!("gh could not be run: {error}"))?;
+    let output = run_bounded(
+        Command::new("gh")
+            .args([
+                "pr", "list", "--repo", repo, "--state", "all", "--limit", PR_LIMIT,
+            ])
+            .args(["--json", "number,state,headRefName,isCrossRepository"]),
+        GH_TIMEOUT,
+    )
+    .map_err(|error| format!("gh pr list for {repo} {error}"))?;
     if !output.status.success() {
         let first = String::from_utf8_lossy(&output.stderr)
             .lines()
@@ -158,6 +220,97 @@ pub fn link_for(
     }
 }
 
+/// One repository's pull requests and when they were read.
+type PrCache = RefCell<HashMap<String, (Instant, PrLookup)>>;
+
+/// The pull request of `dir`, from `git` and `gh`. A repository's pull requests are read once
+/// and reused; with `max_age` a reading older than that is taken again, which is what a
+/// delete-time check needs.
+fn live_link(dir: &Path, cache: &PrCache, max_age: Option<Duration>) -> PrLink {
+    if !own_checkout(dir) {
+        return PrLink::unknown("not the top of a git checkout");
+    }
+    let branch = git(dir, &["symbolic-ref", "--short", "-q", "HEAD"]);
+    let repo = git(dir, &["remote", "get-url", "origin"]).and_then(|url| github_repo(&url));
+    link_for(branch, repo, &mut |repo| {
+        let mut cache = cache.borrow_mut();
+        let stale = cache
+            .get(repo)
+            .is_none_or(|(read_at, _)| max_age.is_some_and(|max_age| read_at.elapsed() > max_age));
+        if stale {
+            cache.insert(repo.to_string(), (Instant::now(), list_prs(repo)));
+        }
+        cache[repo].1.clone()
+    })
+}
+
+/// A delete-time check reads a repository's pull requests again when its last reading is
+/// older than this.
+const RECHECK_PR_MAX_AGE: Duration = Duration::from_secs(30);
+
+fn default_root(root: Option<&str>) -> PathBuf {
+    match root.filter(|root| !root.is_empty()) {
+        Some(root) => PathBuf::from(root),
+        None => PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
+            .join("workspace")
+            .join(".dunk-port-work"),
+    }
+}
+
+fn wall_now() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64()
+}
+
+/// `worktrees clean [--root DIR] [--apply] [--max-seconds S] [--max-dirs N]` (t3912): the
+/// guarded cleanup of build caches. Without `--apply` it only lists what looks eligible. With
+/// it, every cache is checked again right before it is deleted, with a fresh reading of its
+/// pull request (at most `RECHECK_PR_MAX_AGE` old) and of the running processes. One line per
+/// deleted cache goes to standard error as it happens. Exit 1 when a delete failed, 2 when
+/// the root cannot be read.
+pub fn clean_command(
+    root: Option<&str>,
+    apply: bool,
+    max_seconds: Option<f64>,
+    max_dirs: Option<i64>,
+    json: bool,
+) -> Outcome {
+    let root = default_root(root);
+    let cache = PrCache::default();
+    let link = |dir: &Path| live_link(dir, &cache, Some(RECHECK_PR_MAX_AGE));
+    let uid = std::fs::metadata("/proc/self")
+        .map(|meta| std::os::unix::fs::MetadataExt::uid(&meta))
+        .unwrap_or(u32::MAX);
+    let busy = || worktree_disk::busy_paths(Path::new("/proc"), &root, uid).map(|scan| scan.paths);
+    let budget = worktree_disk::Budget::new(
+        max_seconds.unwrap_or(DEFAULT_MAX_SECONDS),
+        max_dirs.map_or(DEFAULT_MAX_DIRS, |dirs| dirs.max(0) as usize),
+    );
+    let mut log = |line: &str| eprintln!("worktrees clean: {line}");
+    match ds_core::worktree_clean::clean(&root, &wall_now, &link, &busy, &budget, apply, &mut log) {
+        Ok(result) => Outcome {
+            code: i32::from(
+                result["failed"]
+                    .as_array()
+                    .is_some_and(|failed| !failed.is_empty()),
+            ),
+            stdout: if json {
+                format!("{}\n", sorted_json(&result))
+            } else {
+                ds_core::worktree_clean::render_text(&result)
+            },
+            stderr: String::new(),
+        },
+        Err(error) => Outcome {
+            stdout: String::new(),
+            stderr: format!("worktrees clean: {error}\n"),
+            code: 2,
+        },
+    }
+}
+
 /// The default limits of one run; past either the report is marked partial.
 pub const DEFAULT_MAX_SECONDS: f64 = 300.0;
 pub const DEFAULT_MAX_DIRS: usize = 2000;
@@ -170,31 +323,10 @@ pub fn disk_command(
     max_dirs: Option<i64>,
     json: bool,
 ) -> Outcome {
-    let root = match root.filter(|root| !root.is_empty()) {
-        Some(root) => PathBuf::from(root),
-        None => PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
-            .join("workspace")
-            .join(".dunk-port-work"),
-    };
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs_f64();
-    let cache: RefCell<HashMap<String, PrLookup>> = RefCell::new(HashMap::new());
-    let link = |dir: &Path| {
-        if !own_checkout(dir) {
-            return PrLink::unknown("not the top of a git checkout");
-        }
-        let branch = git(dir, &["symbolic-ref", "--short", "-q", "HEAD"]);
-        let repo = git(dir, &["remote", "get-url", "origin"]).and_then(|url| github_repo(&url));
-        link_for(branch, repo, &mut |repo| {
-            cache
-                .borrow_mut()
-                .entry(repo.to_string())
-                .or_insert_with(|| list_prs(repo))
-                .clone()
-        })
-    };
+    let root = default_root(root);
+    let now = wall_now();
+    let cache = PrCache::default();
+    let link = |dir: &Path| live_link(dir, &cache, None);
     // This process's own /proc entry is owned by the user the scan runs as.
     let uid = std::fs::metadata("/proc/self")
         .map(|meta| std::os::unix::fs::MetadataExt::uid(&meta))
@@ -337,6 +469,48 @@ mod tests {
             "it would answer with the parent's branch"
         );
         assert!(!own_checkout(home.path()), "not in a checkout at all");
+    }
+
+    #[test]
+    fn a_command_that_outlives_its_timeout_is_killed_and_a_fast_one_returns_its_output() {
+        let started = Instant::now();
+        let error =
+            run_bounded(Command::new("sleep").arg("30"), Duration::from_millis(200)).unwrap_err();
+        assert!(error.starts_with("timed out after"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(10));
+        let output = run_bounded(
+            Command::new("sh").args(["-c", "printf out; printf err >&2; exit 3"]),
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        assert_eq!(output.status.code(), Some(3));
+        assert_eq!(
+            (output.stdout.as_slice(), output.stderr.as_slice()),
+            (&b"out"[..], &b"err"[..])
+        );
+        // More output than a pipe holds must not stall the command.
+        let big = run_bounded(
+            Command::new("sh").args(["-c", "head -c 300000 /dev/zero"]),
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        assert_eq!(big.stdout.len(), 300_000);
+        assert!(run_bounded(
+            &mut Command::new("/nonexistent/program"),
+            Duration::from_secs(1)
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn clean_without_apply_on_an_unreadable_root_is_a_usage_error_and_deletes_nothing() {
+        let outcome = clean_command(Some("/nonexistent/worktree/root"), false, None, None, true);
+        assert_eq!(outcome.code, 2);
+        assert!(
+            outcome.stderr.starts_with("worktrees clean: "),
+            "{}",
+            outcome.stderr
+        );
     }
 
     #[test]
