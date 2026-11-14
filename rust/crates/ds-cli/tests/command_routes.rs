@@ -2411,7 +2411,7 @@ fn cli_route_07_inbox_read_b() {
     let read = run_daemon_cli(
         &["inbox", "read", "reviewer", "--limit", "3", "--peek"],
         "inbox_read",
-        json!({"mailbox": "reviewer", "limit": 3, "peek": true}),
+        json!({"mailbox": "reviewer", "limit": 3, "peek": true, "include_tasks": false}),
         json!({
             "mailbox": "reviewer",
             "messages": [{
@@ -2485,6 +2485,18 @@ fn cli_inbox_read_messages_only_forwards_opt_out() {
         "inbox_read",
         json!({"mailbox": "reviewer", "limit": 10, "peek": true, "include_tasks": false}),
         json!({"mailbox": "reviewer", "messages": [], "truncated": false, "omitted": 0, "note": null}),
+    );
+    assert_eq!(0, output.status.code().unwrap());
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn cli_inbox_read_with_tasks_forwards_opt_in() {
+    let output = run_daemon_cli(
+        &["inbox", "read", "reviewer", "--with-tasks", "--peek"],
+        "inbox_read",
+        json!({"mailbox": "reviewer", "limit": 10, "peek": true, "include_tasks": true}),
+        json!({"mailbox": "reviewer", "messages": [], "tasks": {"global": []}}),
     );
     assert_eq!(0, output.status.code().unwrap());
     assert!(output.stderr.is_empty());

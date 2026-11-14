@@ -689,7 +689,7 @@
    "additionalProperties": false,
    "properties": {
     "include_tasks": {
-     "description": "Include the caller's task queues in the result (default true).",
+     "description": "Include the caller's task queues in the result (default false).",
      "type": "boolean"
     },
     "limit": {
