@@ -31,6 +31,9 @@ pub trait RosterEnv {
     /// The newest agent-state sample of every pane sampled at or after `since`, keyed by pane
     /// id: `{at, model, model_reason, thinking, argv}`, or the error text. Read-only.
     fn model_samples(&self, since: f64) -> Result<HashMap<String, Value>, String>;
+    /// The daemon's own launch record of a pane: `{agent, argv, recorded_at, ...}`, None when
+    /// the daemon did not launch it.
+    fn launch(&self, pane_id: &str) -> Option<Value>;
 }
 
 /// A model sample older than this is not shown as the lane's model (t4473).
@@ -38,49 +41,101 @@ pub const MODEL_FRESH_S: f64 = 15.0 * 60.0;
 /// How far back the roster looks for a sample, so a stale one can be told from a missing one.
 const MODEL_LOOKBACK_S: f64 = 24.0 * 3600.0;
 
-/// The roster's `model` cell (t4473): the sampled value WITH where it came from and how old it
-/// is, or null with the reason. A sample older than `MODEL_FRESH_S` is never the value: an old
-/// model shown as current looks like a fact. `as_of` and `age_s` are the sample's, also when
-/// it is too old, so a reader can see how stale it was.
+/// The roster's `model` cell (t4473). It says only what is known and how it is known:
+///
+/// * `launch flag`: the model named on the command the daemon launched the lane with, with
+///   the launch time. `observed` is false: this is what the lane was started as, not a reading.
+/// * `process environment`: the model named in the lane process's environment, from the
+///   newest agent-state sample, when that sample is at most `MODEL_FRESH_S` old. Also what the
+///   lane was started as (`observed` false); `as_of` is when the environment was read.
+/// * otherwise null with the reason.
+///
+/// Nothing today reads the model from the running agent itself, so no cell has `observed`
+/// true; a later source that does may say so. A stale sample's value is never carried.
 fn model_cell(
+    launch: Option<&Value>,
     sample: Option<&Value>,
     read_error: Option<&str>,
     harness: Option<&str>,
     now: f64,
 ) -> Value {
+    let age = |at: Option<f64>| at.map(|at| (now - at).max(0.0).floor() as i64);
     let unknown = |reason: String, at: Option<f64>| {
         json!({
             "value": null,
             "effort": null,
             "source": null,
+            "observed": false,
+            "launched_at": null,
             "as_of": iso_cell(at),
-            "age_s": at.map(|at| (now - at).max(0.0).floor() as i64),
+            "age_s": age(at),
             "reason": reason,
         })
     };
+    let argv_of = |record: &Value| -> Vec<String> {
+        record
+            .get("argv")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    // The launch record counts only when it is for the agent the lane runs now.
+    let launch =
+        launch.filter(
+            |record| match (record.get("agent").and_then(Value::as_str), harness) {
+                (Some(launched), Some(running)) => launched.eq_ignore_ascii_case(running),
+                _ => true,
+            },
+        );
+    if let Some(record) = launch {
+        let argv = argv_of(record);
+        let flagged =
+            crate::state::flag(&argv, &crate::state::MODEL_FLAGS).filter(|model| !model.is_empty());
+        if let Some(model) = flagged {
+            let launched = record
+                .get("recorded_at")
+                .and_then(Value::as_f64)
+                .filter(|at| *at != 0.0);
+            return json!({
+                "value": model,
+                "effort": crate::state::flag(&argv, &crate::state::THINKING_FLAGS)
+                    .filter(|effort| !effort.is_empty()),
+                "source": "launch flag",
+                "observed": false,
+                "launched_at": iso_cell(launched),
+                "as_of": iso_cell(launched),
+                "age_s": age(launched),
+                "reason": null,
+            });
+        }
+    }
     if let Some(error) = read_error {
         return unknown(format!("model samples could not be read: {error}"), None);
     }
     let Some(sample) = sample else {
         return unknown(
             format!(
-                "no agent-state sample for this lane in the last 24 hours ({})",
+                "no model flag on the launch command and no agent-state sample in the last 24 hours ({})",
                 model_reason(harness.unwrap_or(""))
             ),
             None,
         );
     };
     let at = sample.get("at").and_then(Value::as_f64);
-    let age = at.map(|at| (now - at).max(0.0));
-    let Some(age) = age.filter(|age| *age <= MODEL_FRESH_S) else {
+    if !at.is_some_and(|at| (now - at).max(0.0) <= MODEL_FRESH_S) {
         return unknown(
             format!(
-                "the last sample is older than {} minutes",
+                "no model flag on the launch command, and the last sample is older than {} minutes",
                 (MODEL_FRESH_S / 60.0) as i64
             ),
             at,
         );
-    };
+    }
     let text = |key: &str| {
         sample
             .get(key)
@@ -95,27 +150,22 @@ fn model_cell(
             at,
         );
     };
-    let argv: Vec<String> = sample
-        .get("argv")
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| item.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default();
-    let source = if crate::state::flag(&argv, &crate::state::MODEL_FLAGS).is_some() {
-        "launch command"
-    } else {
-        "process environment"
-    };
+    if crate::state::flag(&argv_of(sample), &crate::state::MODEL_FLAGS).is_some() {
+        // The sample copied a launch command the daemon no longer holds a record for: it
+        // cannot say when that launch was, so the value is not reported.
+        return unknown(
+            "the sample repeats a launch flag, and there is no launch record to date it".into(),
+            at,
+        );
+    }
     json!({
         "value": model,
         "effort": text("thinking"),
-        "source": source,
+        "source": "process environment",
+        "observed": false,
+        "launched_at": null,
         "as_of": iso_cell(at),
-        "age_s": age.floor() as i64,
+        "age_s": age(at),
         "reason": null,
     })
 }
@@ -250,6 +300,7 @@ pub fn roster(env: &dyn RosterEnv, now: f64) -> Result<Value, String> {
             "name": name.unwrap_or(pane_id),
             "harness": harness,
             "model": model_cell(
+                env.launch(pane_id).as_ref(),
                 samples.as_ref().ok().and_then(|samples| samples.get(pane_id)),
                 samples.as_ref().err().map(String::as_str),
                 harness,
@@ -290,6 +341,7 @@ mod tests {
         cpu: Option<Result<Option<Value>, String>>,
         samples: HashMap<String, Value>,
         samples_error: Option<String>,
+        launches: HashMap<String, Value>,
     }
 
     impl RosterEnv for Env {
@@ -316,6 +368,9 @@ mod tests {
         }
         fn cpu_sample(&self, _: &Value, _: f64) -> Result<Option<Value>, String> {
             self.cpu.clone().unwrap_or(Ok(None))
+        }
+        fn launch(&self, pane_id: &str) -> Option<Value> {
+            self.launches.get(pane_id).cloned()
         }
         fn model_samples(&self, since: f64) -> Result<HashMap<String, Value>, String> {
             match &self.samples_error {
@@ -385,8 +440,9 @@ mod tests {
         assert_eq!(
             row["model"],
             json!({
-                "value": null, "effort": null, "source": null, "as_of": null, "age_s": null,
-                "reason": "no agent-state sample for this lane in the last 24 hours (pi does not report its model on the pane record)",
+                "value": null, "effort": null, "source": null, "observed": false,
+                "launched_at": null, "as_of": null, "age_s": null,
+                "reason": "no model flag on the launch command and no agent-state sample in the last 24 hours (pi does not report its model on the pane record)",
             })
         );
         assert_eq!(row["state"], "idle");
@@ -519,7 +575,7 @@ mod tests {
         );
         assert_eq!(
             row["model"]["reason"],
-            "no agent-state sample for this lane in the last 24 hours (codex does not report its model on the pane record)"
+            "no model flag on the launch command and no agent-state sample in the last 24 hours (codex does not report its model on the pane record)"
         );
     }
 
@@ -551,7 +607,7 @@ mod tests {
         );
     }
 
-    fn model_of(samples: Value, error: Option<&str>) -> Value {
+    fn model_of(launch: Option<Value>, samples: Value, error: Option<&str>) -> Value {
         let env = Env {
             lanes: vec![lane("%1", "claude", Some("writer"))],
             samples: samples
@@ -561,67 +617,138 @@ mod tests {
                 .map(|(pane, sample)| (pane.clone(), sample.clone()))
                 .collect(),
             samples_error: error.map(str::to_string),
+            launches: launch
+                .into_iter()
+                .map(|record| ("%1".to_string(), record))
+                .collect(),
             ..Env::default()
         };
         roster(&env, NOW).unwrap()["lanes"][0]["model"].clone()
     }
 
     #[test]
-    fn a_fresh_model_sample_is_shown_with_its_source_effort_and_age() {
-        let from_argv = model_of(
-            json!({"%1": {"at": NOW - 180.0, "model": "opus-5.5", "thinking": "medium",
-                          "argv": ["claude", "--model", "opus-5.5"]}}),
+    fn a_launch_flag_is_reported_as_what_the_lane_was_launched_as_with_the_launch_time() {
+        // Launched three hours ago: a launch fact does not go stale, and it is never "seen".
+        let cell = model_of(
+            Some(json!({"agent": "claude", "recorded_at": NOW - 10_800.0,
+                        "argv": ["claude", "--model", "opus-5.5", "--effort", "medium"]})),
+            // A fresh sample that repeats the flag changes nothing.
+            json!({"%1": {"at": NOW - 60.0, "model": "opus-5.5", "argv": ["claude", "--model", "opus-5.5"]}}),
             None,
         );
         assert_eq!(
-            from_argv,
+            cell,
             json!({
-                "value": "opus-5.5", "effort": "medium", "source": "launch command",
-                "as_of": "1970-01-01T23:57:00Z", "age_s": 180, "reason": null,
+                "value": "opus-5.5", "effort": "medium", "source": "launch flag",
+                "observed": false, "launched_at": "1970-01-01T21:00:00Z",
+                "as_of": "1970-01-01T21:00:00Z", "age_s": 10_800, "reason": null,
             })
         );
-        let from_env = model_of(
-            json!({"%1": {"at": NOW - MODEL_FRESH_S, "model": "sol", "thinking": null, "argv": ["pi"]}}),
-            None,
+        // A record without a time still names the source, and says the time is not known.
+        let undated = model_of(
+            Some(json!({"agent": "claude", "argv": ["claude", "--model=opus-5.5"]})),
+            json!({}),
+            Some("database is locked"),
         );
-        assert_eq!(from_env["value"], "sol");
-        assert_eq!(from_env["effort"], Value::Null);
-        assert_eq!(from_env["source"], "process environment");
-        assert_eq!(from_env["age_s"], 900);
+        assert_eq!(undated["value"], "opus-5.5");
+        assert_eq!(undated["launched_at"], Value::Null);
+        assert_eq!(undated["age_s"], Value::Null);
     }
 
     #[test]
-    fn a_stale_model_sample_is_unknown_and_keeps_only_its_age() {
+    fn a_launch_record_for_another_agent_or_without_a_model_flag_is_not_used() {
+        let other_agent = model_of(
+            Some(
+                json!({"agent": "codex", "recorded_at": NOW - 60.0, "argv": ["codex", "--model", "gpt"]}),
+            ),
+            json!({}),
+            None,
+        );
+        assert_eq!(other_agent["value"], Value::Null);
+        assert!(other_agent["reason"]
+            .as_str()
+            .unwrap()
+            .starts_with("no model flag on the launch command and no agent-state sample"));
+        let no_flag = model_of(
+            Some(json!({"agent": "claude", "recorded_at": NOW - 60.0, "argv": ["claude"]})),
+            json!({}),
+            None,
+        );
+        assert_eq!(no_flag["value"], Value::Null);
+    }
+
+    #[test]
+    fn a_fresh_process_environment_sample_is_a_launch_value_with_its_read_time_not_an_observation()
+    {
+        let cell = model_of(
+            None,
+            json!({"%1": {"at": NOW - 180.0, "model": "sol", "thinking": "high", "argv": ["pi"]}}),
+            None,
+        );
+        assert_eq!(
+            cell,
+            json!({
+                "value": "sol", "effort": "high", "source": "process environment",
+                "observed": false, "launched_at": null,
+                "as_of": "1970-01-01T23:57:00Z", "age_s": 180, "reason": null,
+            })
+        );
+        let at_limit = model_of(
+            None,
+            json!({"%1": {"at": NOW - MODEL_FRESH_S, "model": "sol", "argv": ["pi"]}}),
+            None,
+        );
+        assert_eq!(at_limit["value"], "sol");
+    }
+
+    #[test]
+    fn a_stale_sample_is_unknown_and_its_value_is_not_carried() {
         let stale = model_of(
-            json!({"%1": {"at": NOW - MODEL_FRESH_S - 1.0, "model": "opus-5.5", "thinking": "high",
-                          "argv": ["claude", "--model", "opus-5.5"]}}),
+            None,
+            json!({"%1": {"at": NOW - MODEL_FRESH_S - 1.0, "model": "sol", "thinking": "high", "argv": ["pi"]}}),
             None,
         );
         assert_eq!(
             stale,
             json!({
-                "value": null, "effort": null, "source": null,
-                "as_of": "1970-01-01T23:44:59Z", "age_s": 901,
-                "reason": "the last sample is older than 15 minutes",
+                "value": null, "effort": null, "source": null, "observed": false,
+                "launched_at": null, "as_of": "1970-01-01T23:44:59Z", "age_s": 901,
+                "reason": "no model flag on the launch command, and the last sample is older than 15 minutes",
             })
         );
-        assert!(
-            !stale.to_string().contains("opus"),
-            "a stale value is not carried at all"
+        assert!(!stale.to_string().contains("sol"));
+    }
+
+    #[test]
+    fn a_sampled_launch_flag_without_a_launch_record_is_unknown() {
+        // The finding on PR 970: a re-sampled flag is not a reading of the running lane, and
+        // without the launch record nothing dates it.
+        let cell = model_of(
+            None,
+            json!({"%1": {"at": NOW - 60.0, "model": "opus-5.5", "argv": ["claude", "--model", "opus-5.5"]}}),
+            None,
         );
+        assert_eq!(cell["value"], Value::Null);
+        assert_eq!(
+            cell["reason"],
+            "the sample repeats a launch flag, and there is no launch record to date it"
+        );
+        assert!(!cell.to_string().contains("opus"));
     }
 
     #[test]
     fn a_missing_or_modelless_or_unreadable_sample_is_unknown_with_the_reason() {
-        let missing = model_of(json!({"%9": {"at": NOW, "model": "other-lane"}}), None);
+        let missing = model_of(
+            None,
+            json!({"%9": {"at": NOW, "model": "other-lane"}}),
+            None,
+        );
         assert_eq!(missing["value"], Value::Null);
         assert_eq!(missing["age_s"], Value::Null);
-        assert!(missing["reason"]
-            .as_str()
-            .unwrap()
-            .starts_with("no agent-state sample"));
+        assert_eq!(missing["observed"], false);
 
         let modelless = model_of(
+            None,
             json!({"%1": {"at": NOW - 60.0, "model": null, "model_reason": "no --model flag in the argv", "argv": ["claude"]}}),
             None,
         );
@@ -629,7 +756,7 @@ mod tests {
         assert_eq!(modelless["reason"], "no --model flag in the argv");
         assert_eq!(modelless["age_s"], 60);
 
-        let unreadable = model_of(json!({}), Some("database is locked"));
+        let unreadable = model_of(None, json!({}), Some("database is locked"));
         assert_eq!(unreadable["value"], Value::Null);
         assert_eq!(
             unreadable["reason"],

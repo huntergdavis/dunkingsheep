@@ -136,6 +136,9 @@ impl crate::flock::roster::RosterEnv for RequestRuntimeAdapter<'_> {
     fn cpu_sample(&self, caller: &Value, now: f64) -> Result<Option<Value>, String> {
         self.helper_rosterenv_cpu_sample(caller, now)
     }
+    fn launch(&self, pane_id: &str) -> Option<Value> {
+        self.terminal.flock.launch(pane_id).map(Value::Object)
+    }
     fn model_samples(
         &self,
         since: f64,
