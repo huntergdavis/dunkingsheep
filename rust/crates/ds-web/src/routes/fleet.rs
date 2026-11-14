@@ -1,6 +1,7 @@
 //! Isolated fleet routes. Production RPC, direct-message transport, local inventory,
 //! and metrics connection ownership must be bound and verified under t1702 before mounting.
 use super::response_error::WebResponseError;
+mod mailboxes;
 
 use super::{
     auth::{AuthBackend, AuthError, Identity, RequestScheme},
@@ -97,6 +98,7 @@ pub fn router(state: Arc<FleetState>, auth: Arc<dyn AuthBackend>, scheme: Reques
         .route("/api/pane-inbox", post(api_pane_inbox))
         .route("/api/fleet", get(api_fleet))
         .route("/api/projects", get(api_projects))
+        .route("/api/mailboxes", get(mailboxes::api_mailboxes))
         .route("/api/ops-metrics", get(operations_metrics))
         .layer(Extension(state))
         .layer(Extension(auth))
@@ -898,7 +900,7 @@ mod tests {
             })
         }
     }
-    struct Auth(bool);
+    struct Auth(Option<Identity>);
     impl AuthBackend for Auth {
         fn identity<'a>(
             &'a self,
@@ -906,8 +908,8 @@ mod tests {
             _: Option<&'a str>,
         ) -> AuthFuture<'a, Result<Identity, AuthError>> {
             Box::pin(async move {
-                if self.0 {
-                    Ok(Identity::Api)
+                if let Some(identity) = self.0 {
+                    Ok(identity)
                 } else {
                     Err(AuthError::SignInRequired)
                 }
@@ -943,7 +945,7 @@ mod tests {
     fn app(f: Arc<Fake>, auth: bool) -> Router {
         router(
             Arc::new(FleetState::new(f.clone(), f)),
-            Arc::new(Auth(auth)),
+            Arc::new(Auth(auth.then_some(Identity::Api))),
             RequestScheme::Http,
         )
     }
@@ -981,6 +983,115 @@ mod tests {
         assert_eq!(
             http(app(f.clone(), true), "/api/projects", None),
             (200, roster)
+        );
+    }
+
+    fn owner_app(f: Arc<Fake>) -> Router {
+        router(
+            Arc::new(FleetState::new(f.clone(), f)),
+            Arc::new(Auth(Some(Identity::Owner))),
+            RequestScheme::Http,
+        )
+    }
+
+    #[test]
+    fn mailbox_index_requires_owner_and_same_origin_before_any_rpc() {
+        let f = Fake::setup();
+        assert_eq!(http(app(f.clone(), false), "/api/mailboxes", None).0, 401);
+        assert_eq!(http(app(f.clone(), true), "/api/mailboxes", None).0, 403);
+        let req = Request::builder()
+            .uri("/api/mailboxes")
+            .header("host", "desk.test")
+            .header("origin", "https://other.test")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            run(owner_app(f.clone()).oneshot(req)).unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+        assert!(f.calls().is_empty());
+    }
+
+    #[test]
+    fn mailbox_index_pages_counts_and_joins_only_reported_membership() {
+        let f = Fake::setup();
+        f.reply("inbox_stats", json!({"mailboxes":[
+            {"mailbox":"old lane","destination":"old lane","unread":1,"total":4,"body":"secret","subject":"private"},
+            {"mailbox":"alpha (%2)","destination":"Alpha","unread":2,"total":7,"archived":1,"undeliverable":0,"oldest_unread_s":5},
+            {"mailbox":"%3","unread":0,"total":1}
+        ]}));
+        f.reply("roster", json!({"lanes":[
+            {"pane_id":"%2","name":"alpha","harness":"codex","membership":{"scope":"project","project":"arbitrary-project"},"body":"never forward"},
+            {"pane_id":"%3","name":"other","membership":{"scope":"global","project":null}}
+        ]}));
+        let (status, first) = http(owner_app(f.clone()), "/api/mailboxes?limit=2", None);
+        assert_eq!(status, 200);
+        assert_eq!(first["total"], 3);
+        assert_eq!(first["mailboxes"].as_array().unwrap().len(), 2);
+        assert_eq!(first["mailboxes"][0]["mailbox"], "%3");
+        assert_eq!(
+            first["mailboxes"][1]["lanes"][0]["membership"]["project"],
+            "arbitrary-project"
+        );
+        assert_eq!(first["mailboxes"][1]["unread"], 2);
+        assert_eq!(first["next_after"], "alpha (%2)");
+        let (_, last) = http(
+            owner_app(f.clone()),
+            "/api/mailboxes?limit=2&after=alpha%20%28%252%29",
+            None,
+        );
+        assert_eq!(last["mailboxes"].as_array().unwrap().len(), 1);
+        assert_eq!(last["mailboxes"][0]["mailbox"], "old lane");
+        assert_eq!(last["mailboxes"][0]["mapping"], "unmapped");
+        assert!(last["next_after"].is_null());
+        assert!(!last.to_string().contains("secret"));
+        assert!(last["mailboxes"][0].get("body").is_none());
+        assert!(last["mailboxes"][0].get("subject").is_none());
+        assert!(first["mailboxes"][1]["lanes"][0].get("body").is_none());
+        assert_eq!(
+            f.calls(),
+            ["inbox_stats", "roster", "inbox_stats", "roster"]
+        );
+    }
+
+    #[test]
+    fn mailbox_index_handles_invalid_pages_and_unavailable_sources_without_guessing() {
+        let f = Fake::setup();
+        for path in [
+            "/api/mailboxes?limit=0",
+            "/api/mailboxes?limit=101",
+            "/api/mailboxes?limit=x",
+            "/api/mailboxes?after=%0A",
+            "/api/mailboxes?after=",
+        ] {
+            assert_eq!(http(owner_app(f.clone()), path, None).0, 400);
+        }
+        assert!(f.calls().is_empty());
+        assert_eq!(http(owner_app(f.clone()), "/api/mailboxes", None).0, 502);
+        f.reply(
+            "inbox_stats",
+            json!({"mailboxes":[{"mailbox":"owner","unread":3,"total":5}]}),
+        );
+        let (status, result) = http(owner_app(f.clone()), "/api/mailboxes", None);
+        assert_eq!(status, 200);
+        assert_eq!(result["roster_state"], "unavailable");
+        assert_eq!(result["mailboxes"][0]["mapping"], "unavailable");
+        assert_eq!(result["mailboxes"][0]["lanes"], json!([]));
+        assert_eq!(result["mailboxes"][0]["unread"], 3);
+    }
+
+    #[test]
+    fn mailbox_index_is_admitted_by_the_production_decoded_path_layer() {
+        let f = Fake::setup();
+        let service = crate::web_server::decoded_path_routing(owner_app(f), false);
+        let req = Request::builder()
+            .uri("/api/mailboxes")
+            .body(Body::empty())
+            .unwrap();
+        // A mounted directory with no daemon responds 502. A static-path fallback is 404.
+        assert_eq!(
+            run(service.oneshot(req)).unwrap().status(),
+            StatusCode::BAD_GATEWAY
         );
     }
 
