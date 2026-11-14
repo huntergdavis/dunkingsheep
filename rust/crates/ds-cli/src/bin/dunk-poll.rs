@@ -308,10 +308,14 @@ fn render_text(result: &Value) -> String {
     let status = &result["status"];
     let count = &result["inbox_count"];
     let dunks = &result["dunks"];
+    // The running/total counts are the whole fleet's. When the list below is only this
+    // pane's dunks, the count is labelled as the fleet's so the two are not confused.
+    let self_only = dunks.get("scope").and_then(Value::as_str) == Some("self");
     let mut lines = vec![format!(
-        "self {}  v{}  dunks {}/{} running  inbox {} unread / {}",
+        "self {}  v{}  {} {}/{} running  inbox {} unread / {}",
         show(status.get("self_pane_id"), "?"),
         show(status.get("version"), "None"),
+        if self_only { "fleet dunks" } else { "dunks" },
         show(status.get("running"), "0"),
         show(status.get("dunkers"), "0"),
         show(count.get("unread"), "0"),
@@ -333,9 +337,15 @@ fn render_text(result: &Value) -> String {
             ));
         }
     }
-    // The header counts the whole fleet; say so when the list under it is only this pane's.
-    if let Some(note) = dunks.get("note").and_then(Value::as_str) {
-        lines.push(format!("  dunks: {note}"));
+    if self_only {
+        let own = dunks
+            .get("dunks")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        lines.push(format!(
+            "  showing your {own} dunk{}; --all for the fleet",
+            if own == 1 { "" } else { "s" }
+        ));
     }
     if let Some(rows) = dunks.get("dunks").and_then(Value::as_array) {
         for d in rows.iter().take(10) {

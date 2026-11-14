@@ -264,10 +264,10 @@ fn text_output_says_when_the_dunk_list_is_only_this_panes() {
     let mut reply = fleet_reply();
     reply.as_object_mut().unwrap().remove("tasks");
     let (_, text) = poll_with(reply.clone(), &["--text"]);
-    // The header still counts the fleet (12 of 24 running), so the list is labelled.
-    assert!(text.contains("dunks 12/24 running"), "{text}");
+    // The count is the fleet's (12 of 24 running) and is labelled so; the list is this pane's.
+    assert!(text.contains("  fleet dunks 12/24 running  "), "{text}");
     assert!(
-        text.contains("  dunks: 2 of 24 fleet dunks target this pane; --all lists every dunk"),
+        text.contains("\n  showing your 2 dunks; --all for the fleet\n"),
         "{text}"
     );
     assert_eq!(
@@ -279,7 +279,11 @@ fn text_output_says_when_the_dunk_list_is_only_this_panes() {
     );
 
     let (_, all) = poll_with(reply, &["--text", "--all"]);
-    assert!(!all.contains("fleet dunks target this pane"), "{all}");
+    assert!(all.contains("  dunks 12/24 running  "), "{all}");
+    assert!(
+        !all.contains("fleet dunks") && !all.contains("showing your"),
+        "{all}"
+    );
     // --text prints at most ten rows, as before.
     assert_eq!(
         10,
