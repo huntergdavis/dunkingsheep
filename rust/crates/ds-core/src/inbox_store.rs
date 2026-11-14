@@ -799,6 +799,28 @@ impl Store {
         })
     }
 
+    /// The id of a digest row that is still WAITING (unread, not acked, archived or cancelled),
+    /// or `None`. A scheduled dunk stored as an inbox row (t4681) uses it so one unread row per
+    /// dunk is never stacked or re-announced while its reader is busy.
+    pub fn digest_waiting(&self, digest_id: &str) -> Result<Option<String>, DunkError> {
+        let digest_id = digest_id.to_string();
+        self.writer.call(move |connection| {
+            connection
+                .query_row(
+                    "SELECT id FROM messages WHERE digest_id = ? AND read_at IS NULL \
+                     AND acked_at IS NULL AND archived_at IS NULL AND cancelled_at IS NULL",
+                    [&digest_id],
+                    |row| row.get(0),
+                )
+                .map(Some)
+                .or_else(|error| match error {
+                    rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                    other => Err(other),
+                })
+                .map_err(map_sqlite)
+        })
+    }
+
     /// `read(mailbox, limit, peek, mark)`: full messages in queue order. Marks them read
     /// unless `peek` or `!mark`; the select and the update share one writer call, as the
     /// Python shares one lock. `mark = false` lets a caller render first and commit with

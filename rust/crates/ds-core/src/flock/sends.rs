@@ -1674,7 +1674,9 @@ pub(super) fn send_dunk_now(
         SendGuardOptions {
             hold_while_typing: dunk.hold_while_typing,
             allow_modal: false,
-            preserve_draft: false,
+            // t4681: a scheduled dunk never submits or appends to text that is not ours. The
+            // refusal (`human_draft`) is what lets the timer store the dunk as an inbox row.
+            preserve_draft: true,
             inconclusive_fallback: false,
         },
         permission,
@@ -4405,7 +4407,9 @@ impl Flock {
         let options = SendGuardOptions {
             hold_while_typing: message.hold_while_typing,
             allow_modal: message.kind == "keys",
-            preserve_draft: false,
+            // t4681: a one-line inbox notice and a queued dunk wait for an empty box; they are
+            // never typed after, and never submit, a draft a person left there.
+            preserve_draft: message.is_notice || message.dunk_delivery.is_some(),
             inconclusive_fallback: message.holds >= HOLD_ATTEMPT_LIMIT,
         };
         let is_keys = message.kind == "keys";
