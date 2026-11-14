@@ -128,6 +128,32 @@ impl TurnHooks for RequestRuntimeAdapter<'_> {
     fn dispatch_on_turn_end(&self, pane: &str) -> Result<Value, DunkError> {
         self.terminal.flock.dispatch_on_turn_end(pane, self)
     }
+    /// t4692: extend the leases the turn's own process holds on this pane. A failure is logged
+    /// and never fails the turn event: the lease then simply runs to its ordinary expiry.
+    fn renew_leases(&self, pane: &str, caller: Option<&Value>, now: f64) {
+        let Some(tasks) = self.terminal.flock.stores().tasks else {
+            return;
+        };
+        let Some(pid) = caller
+            .and_then(|caller| caller.get("pid"))
+            .and_then(Value::as_i64)
+        else {
+            return;
+        };
+        let Some(start) = caller
+            .and_then(|caller| caller.get("start"))
+            .and_then(Value::as_str)
+        else {
+            return;
+        };
+        let (pane, start) = (pane.to_owned(), start.to_owned());
+        let renewed = self
+            .handler_context()
+            .block_on(async move { tasks.renew_from_turn(&pane, pid, &start, now).await });
+        if let Ok(Err(error)) | Err(error) = renewed.map(|inner| inner.map(|_| ())) {
+            eprintln!("turn lease renewal failed: {error}");
+        }
+    }
 }
 
 #[cfg(test)]

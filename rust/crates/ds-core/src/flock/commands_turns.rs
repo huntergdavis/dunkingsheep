@@ -62,6 +62,10 @@ pub trait TurnHooks {
     fn observe_turn(&self, pane_id: &str, state: &TurnState) -> Result<(), DunkError>;
     /// `self._dispatch_on_turn_end(pane_id)`: the record returned under `dispatch`.
     fn dispatch_on_turn_end(&self, pane_id: &str) -> Result<Value, DunkError>;
+    /// t4692: a turn start or end from `pane_id` was just recorded; `caller` is the process
+    /// that sent it. The runtime extends the leases that process holds on that pane. It never
+    /// fails the turn event; without a task store it does nothing.
+    fn renew_leases(&self, _pane_id: &str, _caller: Option<&Value>, _now: f64) {}
 }
 
 /// Hooks that do nothing: dispatch is a skip.
@@ -194,6 +198,7 @@ impl Flock {
             },
         );
         hooks.record("turn.start", pane_id, source, None, "ok", now, None);
+        hooks.renew_leases(pane_id, state.caller.as_ref(), now);
         hooks.observe_turn(pane_id, &state)?;
         Ok(json!({
             "pane_id": pane_id, "started_at": now, "expires_at": now + ttl, "ttl_s": ttl,
@@ -273,6 +278,7 @@ impl Flock {
             now,
             Some(duration),
         );
+        hooks.renew_leases(pane_id, self.current_caller().as_ref(), now);
         // THE TRIGGER: the turn just ended and the lane is idle.
         let dispatch = if authenticated {
             hooks.dispatch_on_turn_end(pane_id)?

@@ -1685,3 +1685,199 @@ async fn test_repeated_completion_preserves_original_audit_state() {
         assert_eq!(*callbacks.lock().unwrap(), vec![Some("first".to_string())]);
     }
 }
+
+// ---- t4692: a lease renews from the claiming pane's own turn activity ----
+
+/// A lease as a claim writes it: bound to the process that claimed.
+async fn lease_bound(
+    tasks: &Tasks,
+    id: &str,
+    pane: &str,
+    pid: i64,
+    start: Option<&str>,
+    beat: f64,
+    expires: f64,
+) {
+    let (id, pane, start) = (id.to_string(), pane.to_string(), start.map(String::from));
+    tasks
+        .writer
+        .call(move |conn| {
+            conn.execute(
+                "INSERT OR REPLACE INTO task_leases (task_id, pane_id, claimed_at, heartbeat_at, \
+                 expires_at, caller_pid, caller_start) VALUES (?,?,?,?,?,?,?)",
+                params![id, pane, beat, beat, expires, pid, start],
+            )
+            .map_err(db::map_sqlite)?;
+            Ok(())
+        })
+        .await
+        .expect("insert a bound lease");
+}
+
+async fn lease_expiry(tasks: &Tasks, id: &str, pane: &str) -> Option<f64> {
+    let (id, pane) = (id.to_string(), pane.to_string());
+    tasks
+        .writer
+        .call(move |conn| {
+            use rusqlite::OptionalExtension;
+            conn.query_row(
+                "SELECT expires_at FROM task_leases WHERE task_id = ? AND pane_id = ?",
+                params![id, pane],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(db::map_sqlite)
+        })
+        .await
+        .unwrap()
+}
+
+async fn renewed_events(tasks: &Tasks, id: &str) -> i64 {
+    let id = id.to_string();
+    tasks
+        .writer
+        .call(move |conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM task_events WHERE task_id = ? AND event = ?",
+                params![id, LEASE_RENEWED_EVENT],
+                |row| row.get(0),
+            )
+            .map_err(db::map_sqlite)
+        })
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_lane_with_regular_turns_holds_its_task_past_two_lease_periods_with_no_heartbeat() {
+    let tasks = store("turn-renew").await;
+    let task = tasks.add("global", "long work", "").await.unwrap();
+    let t0 = 1_000.0;
+    lease_bound(&tasks, &task.id, "%1", 42, Some("s1"), t0, t0 + 100.0).await;
+
+    // A turn event every 40 s for 300 s: three lease periods of 100 s, no heartbeat call.
+    let mut now = t0;
+    while now < t0 + 300.0 {
+        now += 40.0;
+        assert_eq!(
+            vec![task.id.clone()],
+            tasks.renew_from_turn("%1", 42, "s1", now).await.unwrap(),
+            "at {now}"
+        );
+        assert_eq!(
+            Some(now + 100.0),
+            lease_expiry(&tasks, &task.id, "%1").await
+        );
+    }
+    // The lease is live well past where the original one ended, with its own 100 s period.
+    assert!(lease_expiry(&tasks, &task.id, "%1").await.unwrap() > t0 + 300.0);
+    // The history shows the lane was alive, at most once per lease period: 8 turns, 3 rows.
+    assert_eq!(3, renewed_events(&tasks, &task.id).await);
+}
+
+#[tokio::test]
+async fn a_turn_never_extends_a_lease_for_another_process_or_a_reused_pane() {
+    let tasks = store("turn-renew-identity").await;
+    let task = tasks.add("global", "t", "").await.unwrap();
+    let t0 = 1_000.0;
+    lease_bound(&tasks, &task.id, "%1", 42, Some("s1"), t0, t0 + 100.0).await;
+    let unchanged = Some(t0 + 100.0);
+
+    // The pane id was reused: same pane, another process (other pid, or same pid restarted).
+    for (pid, start) in [(43, "s1"), (42, "s2")] {
+        assert!(tasks
+            .renew_from_turn("%1", pid, start, t0 + 10.0)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+    // The same process, but reporting from another pane.
+    assert!(tasks
+        .renew_from_turn("%2", 42, "s1", t0 + 10.0)
+        .await
+        .unwrap()
+        .is_empty());
+    // An event with no usable process identity.
+    assert!(tasks
+        .renew_from_turn("%1", 0, "s1", t0 + 10.0)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(tasks
+        .renew_from_turn("%1", 42, "", t0 + 10.0)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(tasks
+        .renew_from_turn("", 42, "s1", t0 + 10.0)
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(unchanged, lease_expiry(&tasks, &task.id, "%1").await);
+    assert_eq!(0, renewed_events(&tasks, &task.id).await);
+
+    // A lease that recorded no process (a harness with no identity) is never extended by a
+    // turn: it behaves as before and needs a heartbeat.
+    let other = tasks.add("global", "no identity", "").await.unwrap();
+    tasks
+        .insert_lease(&other.id, "%3", t0, t0, t0 + 100.0)
+        .await;
+    assert!(tasks
+        .renew_from_turn("%3", 42, "s1", t0 + 10.0)
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(unchanged, lease_expiry(&tasks, &other.id, "%3").await);
+}
+
+#[tokio::test]
+async fn a_silent_pane_expires_after_one_lease_period_and_a_late_turn_does_not_revive_it() {
+    let tasks = store("turn-renew-silent").await;
+    let task = tasks.add("global", "t", "").await.unwrap();
+    let t0 = 1_000.0;
+    lease_bound(&tasks, &task.id, "%1", 42, Some("s1"), t0, t0 + 100.0).await;
+
+    // No turn for a whole lease period: the turn that arrives afterwards extends nothing, so
+    // the reaper requeues the task as it always did.
+    assert!(tasks
+        .renew_from_turn("%1", 42, "s1", t0 + 100.0)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(tasks
+        .renew_from_turn("%1", 42, "s1", t0 + 101.0)
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(Some(t0 + 100.0), lease_expiry(&tasks, &task.id, "%1").await);
+}
+
+#[tokio::test]
+async fn a_turn_extends_every_lease_the_pane_holds_and_a_manual_heartbeat_still_works() {
+    let tasks = store("turn-renew-many").await;
+    let a = tasks.add("global", "a", "").await.unwrap();
+    let b = tasks.add("global", "b", "").await.unwrap();
+    let t0 = 1_000.0;
+    lease_bound(&tasks, &a.id, "%1", 42, Some("s1"), t0, t0 + 100.0).await;
+    lease_bound(&tasks, &b.id, "%1", 42, Some("s1"), t0, t0 + 600.0).await;
+
+    let mut renewed = tasks
+        .renew_from_turn("%1", 42, "s1", t0 + 50.0)
+        .await
+        .unwrap();
+    renewed.sort();
+    let mut both = vec![a.id.clone(), b.id.clone()];
+    both.sort();
+    assert_eq!(both, renewed);
+    // Each lease keeps its own period.
+    assert_eq!(Some(t0 + 150.0), lease_expiry(&tasks, &a.id, "%1").await);
+    assert_eq!(Some(t0 + 650.0), lease_expiry(&tasks, &b.id, "%1").await);
+
+    // The manual command is unchanged.
+    let (expires, secs) = tasks
+        .heartbeat(&a.id, "%1", Some(60.0), None)
+        .await
+        .unwrap();
+    assert_eq!(60.0, secs);
+    assert!(expires > crate::clock::now_s());
+}

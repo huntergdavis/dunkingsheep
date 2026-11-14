@@ -256,6 +256,100 @@ impl Tasks {
     }
 }
 
+/// The task event recorded when a lease is renewed by the claiming pane's turn activity (t4692).
+pub const LEASE_RENEWED_EVENT: &str = "lease_renewed";
+
+impl Tasks {
+    /// t4692: a turn start or end from the pane that holds a lease is proof that the claimer is
+    /// alive and working, so every live lease that pane holds is extended by its own period, as
+    /// a manual heartbeat would. No `task heartbeat` call is needed while the lane takes turns.
+    ///
+    /// The turn must come from the SAME process the lease recorded (`caller_pid` and
+    /// `caller_start`): a lease with no recorded process, a pane id reused by another process,
+    /// or an event with no process identity extends nothing. A lease that has already expired
+    /// is not revived here: a pane that was silent for a whole lease period loses the task to
+    /// the reaper as before. A dead process is still requeued by the reaper as before.
+    ///
+    /// The lease keeps its own period (`expires_at - heartbeat_at`). One `lease_renewed` event
+    /// is recorded per task at most once per period, so the history shows the lane was alive
+    /// without one row per turn. Returns the ids of the tasks whose lease was extended.
+    pub async fn renew_from_turn(
+        &self,
+        pane_id: &str,
+        caller_pid: i64,
+        caller_start: &str,
+        now: f64,
+    ) -> Result<Vec<String>, DunkError> {
+        if pane_id.is_empty() || caller_pid <= 0 || caller_start.is_empty() {
+            return Ok(Vec::new());
+        }
+        let (pane, start) = (pane_id.to_string(), caller_start.to_string());
+        self.writer
+            .call(move |conn| {
+                let tx = conn
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .map_err(db::map_sqlite)?;
+                let leases: Vec<(String, f64)> = {
+                    let mut statement = tx
+                        .prepare(
+                            "SELECT task_id, expires_at - heartbeat_at FROM task_leases \
+                             WHERE pane_id = ?1 AND expires_at > ?2 AND caller_pid = ?3 \
+                             AND caller_start = ?4 ORDER BY task_id",
+                        )
+                        .map_err(db::map_sqlite)?;
+                    let rows = statement
+                        .query_map(params![pane, now, caller_pid, start], |row| {
+                            Ok((row.get(0)?, row.get(1)?))
+                        })
+                        .map_err(db::map_sqlite)?;
+                    rows.collect::<Result<Vec<_>, _>>()
+                        .map_err(db::map_sqlite)?
+                };
+                let mut renewed = Vec::with_capacity(leases.len());
+                for (task_id, period) in leases {
+                    // A lease written with a zero or negative period gets the default one.
+                    let period = if period > 0.0 {
+                        period
+                    } else {
+                        default_lease_s()
+                    };
+                    tx.execute(
+                        "UPDATE task_leases SET heartbeat_at = ?1, expires_at = ?2 \
+                         WHERE task_id = ?3 AND pane_id = ?4",
+                        params![now, now + period, task_id, pane],
+                    )
+                    .map_err(db::map_sqlite)?;
+                    let recent: bool = tx
+                        .query_row(
+                            "SELECT EXISTS(SELECT 1 FROM task_events WHERE task_id = ?1 \
+                             AND event = ?2 AND actor = ?3 AND at > ?4)",
+                            params![task_id, LEASE_RENEWED_EVENT, pane, now - period],
+                            |row| row.get(0),
+                        )
+                        .map_err(db::map_sqlite)?;
+                    if !recent {
+                        tx.execute(
+                            "INSERT INTO task_events (task_id, event, at, actor, meta) \
+                             VALUES (?,?,?,?,?)",
+                            params![
+                                task_id,
+                                LEASE_RENEWED_EVENT,
+                                now,
+                                pane,
+                                json!({"source": "turn", "lease_s": period}).to_string()
+                            ],
+                        )
+                        .map_err(db::map_sqlite)?;
+                    }
+                    renewed.push(task_id);
+                }
+                tx.commit().map_err(db::map_sqlite)?;
+                Ok(renewed)
+            })
+            .await
+    }
+}
+
 /// What `claim_next` returned: a claimed task, or a refusal with its reason.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClaimOutcome {
