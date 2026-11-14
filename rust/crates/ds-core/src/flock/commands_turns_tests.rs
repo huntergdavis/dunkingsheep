@@ -1128,3 +1128,84 @@ fn turn_end_commit_metric_advance_wake_and_error_order() {
         assert!(env.sent.lock().unwrap().is_empty(), "no nudge on {case}");
     }
 }
+
+// ---- t4692: turn events ask the runtime to renew the sender's leases ----
+
+/// Records each lease-renewal request: the pane and the identity of the process that sent it.
+#[derive(Default)]
+struct RenewSpy {
+    renewals: Mutex<Vec<(String, Option<Value>)>>,
+}
+
+impl TurnHooks for RenewSpy {
+    fn record(
+        &self,
+        _: &str,
+        _: &str,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: &str,
+        _: f64,
+        _: Option<i64>,
+    ) {
+    }
+    fn observe_turn(&self, _: &str, _: &TurnState) -> Result<(), crate::error::DunkError> {
+        Ok(())
+    }
+    fn dispatch_on_turn_end(&self, _: &str) -> Result<Value, crate::error::DunkError> {
+        Ok(json!({ "trigger": "turn.end", "action": "none" }))
+    }
+    fn renew_leases(&self, pane: &str, caller: Option<&Value>, _: f64) {
+        self.renewals
+            .lock()
+            .unwrap()
+            .push((pane.to_string(), caller.cloned()));
+    }
+}
+
+#[test]
+fn a_turn_start_and_a_valid_turn_end_each_renew_the_senders_leases_and_a_rejected_end_does_not() {
+    let flock = flock();
+    let spy = RenewSpy::default();
+    flock.set_caller(Some(as_caller(41, "100")));
+    let turn_id = flock
+        .turn_start(None, None, Some("test"), Some(PANE), None, &spy)
+        .unwrap()["turn_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        vec![(PANE.to_string(), Some(as_caller(41, "100")))],
+        *spy.renewals.lock().unwrap(),
+        "the start carries the identity of the process that sent it"
+    );
+
+    // An end from another process is rejected: it changes nothing and renews nothing.
+    flock.set_caller(Some(as_caller(42, "101")));
+    let foreign = flock
+        .turn_end(None, "done", Some(PANE), Some(&turn_id), true, &spy)
+        .unwrap();
+    assert_eq!(json!(false), foreign["ended"]);
+    assert_eq!(1, spy.renewals.lock().unwrap().len());
+
+    // The real end renews again, with the ender's identity.
+    flock.set_caller(Some(as_caller(41, "100")));
+    let ended = flock
+        .turn_end(None, "done", Some(PANE), Some(&turn_id), true, &spy)
+        .unwrap();
+    assert_eq!(json!(true), ended["ended"]);
+    assert_eq!(
+        vec![
+            (PANE.to_string(), Some(as_caller(41, "100"))),
+            (PANE.to_string(), Some(as_caller(41, "100")))
+        ],
+        *spy.renewals.lock().unwrap()
+    );
+
+    // A second end has no active turn: nothing more.
+    let again = flock
+        .turn_end(None, "done", Some(PANE), Some(&turn_id), true, &spy)
+        .unwrap();
+    assert_eq!(json!(false), again["ended"]);
+    assert_eq!(2, spy.renewals.lock().unwrap().len());
+}
