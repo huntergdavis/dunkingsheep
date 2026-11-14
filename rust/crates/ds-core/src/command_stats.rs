@@ -116,15 +116,21 @@ impl Cell {
     }
 }
 
-/// The most cells kept after failed writes. Past it the oldest are dropped, so an outage of the
-/// metrics database cannot grow the daemon's memory or the size of the next write without limit.
+/// The most cells kept in memory. Past it the oldest are dropped and counted, so a metrics
+/// database that is slow or failing cannot grow the daemon's memory or the next write without
+/// limit.
 pub const MAX_BACKLOG: usize = 4096;
 
 #[derive(Debug, Default)]
 struct PendingState {
+    /// Cells not handed to a write: the current minute, and earlier ones until the next write.
     cells: BTreeMap<Key, Cell>,
-    /// The minute in which complete cells were last handed out for writing.
-    handed_out: Option<i64>,
+    /// Cells a write is working on. They stay visible to readers until that write commits.
+    in_flight: BTreeMap<Key, Cell>,
+    /// The minute of the latest request.
+    current: i64,
+    /// The minute in which a write was last asked for.
+    asked: Option<i64>,
     /// Cells dropped because the backlog was full.
     dropped: i64,
     /// A write has failed and none has succeeded since.
@@ -133,7 +139,17 @@ struct PendingState {
     dropped_before: i64,
 }
 
-/// The cells not yet written: the current minute, and any earlier one until it is written.
+impl PendingState {
+    fn cap(&mut self) {
+        while self.cells.len() > MAX_BACKLOG {
+            self.cells.pop_first();
+            self.dropped += 1;
+        }
+    }
+}
+
+/// The cells not yet in the database. A request only adds to them under a short lock; it never
+/// waits for the database. Writing is the job of whoever `add` tells to wake up.
 #[derive(Debug, Default)]
 pub struct Pending(Mutex<PendingState>);
 
@@ -144,9 +160,8 @@ impl Pending {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// Count one request, and hand back the cells of every minute before `at`'s: they are
-    /// complete, and the caller writes them. Cells are handed out at most once per minute, so a
-    /// write that keeps failing is retried once a minute and not on every request.
+    /// Count one request. True when cells of an earlier minute are waiting and no write has
+    /// been asked for in this minute yet: at most one write per minute, also while writes fail.
     pub fn add(
         &self,
         at: f64,
@@ -155,44 +170,68 @@ impl Pending {
         duration_ms: i64,
         bytes: i64,
         ok: bool,
-    ) -> Vec<(Key, Cell)> {
+    ) -> bool {
         let minute = minute_of(at);
         let mut state = self.state();
+        state.current = minute;
         state
             .cells
             .entry((minute, command.to_string(), role.to_string()))
             .or_default()
             .add(duration_ms, bytes, ok);
-        if state.handed_out == Some(minute) {
-            return Vec::new();
-        }
-        let open = state
+        state.cap();
+        let waiting = state
             .cells
-            .split_off(&(minute, String::new(), String::new()));
-        let closed: Vec<(Key, Cell)> = std::mem::replace(&mut state.cells, open)
-            .into_iter()
-            .collect();
-        if !closed.is_empty() {
-            state.handed_out = Some(minute);
+            .first_key_value()
+            .is_some_and(|(key, _)| key.0 < minute);
+        if !waiting || state.asked == Some(minute) {
+            return false;
         }
-        closed
+        state.asked = Some(minute);
+        true
     }
 
-    /// A write failed: keep its cells (see `restore`). True when this starts an outage.
-    pub fn write_failed(&self, closed: Vec<(Key, Cell)>) -> bool {
-        self.restore(closed);
+    /// Hand the cells of every minute before the current one to a write. They move to
+    /// `in_flight`, which readers still see.
+    pub fn take_closed(&self) -> Vec<(Key, Cell)> {
+        let mut state = self.state();
+        let current = state.current;
+        let open = state
+            .cells
+            .split_off(&(current, String::new(), String::new()));
+        let closed = std::mem::replace(&mut state.cells, open);
+        for (key, cell) in closed {
+            state.in_flight.entry(key).or_default().merge(&cell);
+        }
+        state
+            .in_flight
+            .iter()
+            .map(|(key, cell)| (key.clone(), cell.clone()))
+            .collect()
+    }
+
+    /// The write failed: its cells go back, bounded by `MAX_BACKLOG`. True when this starts an
+    /// outage. The outage's dropped count starts before the cells go back, so cells this very
+    /// failure drops are part of it.
+    pub fn write_failed(&self) -> bool {
         let mut state = self.state();
         let first = !state.failing;
         if first {
             state.failing = true;
             state.dropped_before = state.dropped;
         }
+        for (key, cell) in std::mem::take(&mut state.in_flight) {
+            state.cells.entry(key).or_default().merge(&cell);
+        }
+        state.cap();
         first
     }
 
-    /// A write succeeded. When that ends an outage: how many cells the outage dropped.
+    /// The write committed: its cells are in the database now. When that ends an outage, the
+    /// number of cells the outage dropped.
     pub fn write_succeeded(&self) -> Option<i64> {
         let mut state = self.state();
+        state.in_flight.clear();
         if !state.failing {
             return None;
         }
@@ -200,30 +239,19 @@ impl Pending {
         Some(state.dropped - state.dropped_before)
     }
 
-    /// Put cells back after a failed write; the next minute tries again. Only `MAX_BACKLOG`
-    /// cells are kept: the oldest go first and are counted in `dropped`.
-    pub fn restore(&self, closed: Vec<(Key, Cell)>) {
-        let mut state = self.state();
-        for (key, cell) in closed {
-            state.cells.entry(key).or_default().merge(&cell);
-        }
-        while state.cells.len() > MAX_BACKLOG {
-            state.cells.pop_first();
-            state.dropped += 1;
-        }
-    }
-
     /// Cells lost to a full backlog since the daemon started.
     pub fn dropped(&self) -> i64 {
         self.state().dropped
     }
 
+    /// Every cell not in the database: waiting and in flight.
     pub fn snapshot(&self) -> Vec<(Key, Cell)> {
-        self.state()
-            .cells
-            .iter()
-            .map(|(key, cell)| (key.clone(), cell.clone()))
-            .collect()
+        let state = self.state();
+        let mut all = state.in_flight.clone();
+        for (key, cell) in &state.cells {
+            all.entry(key.clone()).or_default().merge(cell);
+        }
+        all.into_iter().collect()
     }
 }
 
@@ -304,16 +332,21 @@ mod tests {
         (minute, command.to_string(), role.to_string())
     }
 
+    fn keys(cells: Vec<(Key, Cell)>) -> Vec<Key> {
+        cells.into_iter().map(|(key, _)| key).collect()
+    }
+
     #[test]
     fn a_request_stays_pending_until_its_minute_has_passed() {
         let pending = Pending::default();
-        assert!(pending
-            .add(600.0, "task_list", "worker", 3, 100, true)
-            .is_empty());
-        assert!(pending
-            .add(659.9, "task_list", "worker", 7, 50, false)
-            .is_empty());
-        let closed = pending.add(660.0, "roster", "owner", 1, 10, true);
+        assert!(!pending.add(600.0, "task_list", "worker", 3, 100, true));
+        assert!(!pending.add(659.9, "task_list", "worker", 7, 50, false));
+        assert!(pending.add(660.0, "roster", "owner", 1, 10, true));
+        assert!(
+            !pending.add(661.0, "roster", "owner", 1, 10, true),
+            "one write is asked for per minute"
+        );
+        let closed = pending.take_closed();
         assert_eq!(1, closed.len());
         let (closed_key, cell) = &closed[0];
         assert_eq!(&key(10, "task_list", "worker"), closed_key);
@@ -327,41 +360,55 @@ mod tests {
                 cell.bytes
             )
         );
-        let open = pending.snapshot();
-        assert_eq!(
-            vec![key(11, "roster", "owner")],
-            open.into_iter().map(|(k, _)| k).collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn restored_cells_are_handed_out_again() {
-        let pending = Pending::default();
-        pending.add(600.0, "task_list", "worker", 3, 100, true);
-        let closed = pending.add(660.0, "roster", "owner", 1, 10, true);
-        pending.restore(closed);
-        // Not again within the minute of the failed write: one attempt per minute.
-        assert!(pending
-            .add(661.0, "roster", "owner", 1, 10, true)
-            .is_empty());
-        let again = pending.add(720.0, "roster", "owner", 1, 10, true);
+        // Until the write commits, a reader still sees the cells it is working on.
         assert_eq!(
             vec![key(10, "task_list", "worker"), key(11, "roster", "owner")],
-            again.into_iter().map(|(k, _)| k).collect::<Vec<_>>()
+            keys(pending.snapshot())
         );
+        assert_eq!(None, pending.write_succeeded());
+        assert_eq!(vec![key(11, "roster", "owner")], keys(pending.snapshot()));
     }
 
     #[test]
-    fn a_full_backlog_drops_its_oldest_cells_and_counts_them() {
+    fn a_failed_write_is_asked_for_again_only_in_the_next_minute() {
         let pending = Pending::default();
-        let closed = (0..MAX_BACKLOG as i64 + 3)
-            .map(|minute| (key(minute, "task_list", "worker"), Cell::default()))
-            .collect();
-        pending.restore(closed);
-        let kept = pending.snapshot();
-        assert_eq!(MAX_BACKLOG, kept.len());
-        assert_eq!(3, kept[0].0 .0, "the oldest minutes went first");
+        pending.add(600.0, "task_list", "worker", 3, 100, true);
+        assert!(pending.add(660.0, "roster", "owner", 1, 10, true));
+        pending.take_closed();
+        assert!(pending.write_failed(), "the outage starts");
+        assert!(!pending.add(661.0, "roster", "owner", 1, 10, true));
+        assert!(pending.add(720.0, "roster", "owner", 1, 10, true));
+        assert_eq!(
+            vec![key(10, "task_list", "worker"), key(11, "roster", "owner")],
+            keys(pending.take_closed())
+        );
+        assert!(!pending.write_failed(), "the same outage");
+        pending.take_closed();
+        assert_eq!(Some(0), pending.write_succeeded());
+        assert_eq!(None, pending.write_succeeded());
+    }
+
+    #[test]
+    fn an_outage_counts_the_cells_its_first_failure_drops() {
+        let pending = Pending::default();
+        for index in 1..MAX_BACKLOG {
+            pending.add(0.0, &format!("c{index}"), "worker", 1, 1, true);
+        }
+        pending.add(60.0, "open0", "worker", 1, 1, true);
+        assert_eq!(MAX_BACKLOG - 1, pending.take_closed().len());
+        for index in 1..4 {
+            pending.add(60.0, &format!("open{index}"), "worker", 1, 1, true);
+        }
+        assert_eq!(0, pending.dropped());
+        // The failed batch comes back on top of four waiting cells: three of the oldest go.
+        assert!(pending.write_failed());
         assert_eq!(3, pending.dropped());
+        assert_eq!(MAX_BACKLOG, pending.snapshot().len());
+        assert_eq!(Some(3), pending.write_succeeded());
+        // A request also keeps the backlog bounded while no write runs at all.
+        pending.add(60.0, "open4", "worker", 1, 1, true);
+        assert_eq!(4, pending.dropped());
+        assert_eq!(MAX_BACKLOG, pending.snapshot().len());
     }
 
     #[test]
